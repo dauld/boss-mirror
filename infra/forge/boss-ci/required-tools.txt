@@ -22,3 +22,15 @@ tmux
 # 2026-08-16, which cost a red train; listed so it cannot go missing
 # again without ci-tools-declared.sh noticing.
 bunx
+# THE CHROMIUM BROWSER IS NOT A LINE HERE, AND THAT IS THE CONVENTION
+# WORKING. This file is a list of PATH binaries — locomotive.sh runs
+# `command -v` over it — and a Playwright browser is not on PATH: it
+# sits under PLAYWRIGHT_BROWSERS_PATH (/opt/ms-playwright, baked) in a
+# revision-named directory that only the driver resolves. Writing
+# `chromium` here would red every run rather than check anything.
+#
+# It is checked, just not by this mechanism: locomotive.sh's check 3
+# finds the binary under the effective browsers path and RUNS it
+# (`chrome --version`), which also proves the sixteen shared libraries
+# in the Dockerfile resolve — the failure `command -v` could never see
+# and the one a pod restart used to cause (2026-08-21 runbook note).

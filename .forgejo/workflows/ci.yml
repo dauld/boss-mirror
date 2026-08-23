@@ -130,13 +130,22 @@ jobs:
   # route-smoke drift test sat red and unseen, and the crawl was
   # exercising a legacy alias instead of the twenty canonical paths.
   #
-  # infra/gate.sh deliberately does NOT grow a `test:mocked` check: the
-  # gate runs inside boss-ci and there is no browser in it. The browser
-  # is installed per job instead, which costs ~1 min and keeps the
-  # image free of a 400 MB dependency only one job wants. `playwright`
-  # is absent from required-tools.txt for the same reason — that
-  # manifest lists what must exist in the IMAGE, and this arrives at
-  # run time.
+  # THE BROWSER COMES FROM THE IMAGE NOW. This job used to run
+  # `playwright install --with-deps chromium` as its own step — ~1 min
+  # of every train, re-downloading one build and re-apt-getting sixteen
+  # libraries that are identical on every run. The image bakes both
+  # (PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright), so the step is gone;
+  # what it used to prove is now locomotive's check 3, which runs the
+  # browser before either heavy job starts. `playwright` stays absent
+  # from required-tools.txt: browsers are not PATH binaries, and that
+  # manifest is read with `command -v`.
+  #
+  # infra/gate.sh still does not run `test:mocked`. The reason it gave
+  # — "the gate runs inside boss-ci and there is no browser in it" — is
+  # no longer true, so whether the gate should grow that check is now
+  # an open question rather than a settled no. It is not this car's
+  # question: adding it changes what every local `./infra/gate.sh`
+  # costs.
   #
   # The image DOES now carry Node 20 (nodesource, not bookworm's 18),
   # because Playwright 1.61 refuses to start below 20 and that is not
@@ -170,19 +179,6 @@ jobs:
 
       - name: Build
         run: bun run build
-
-      - name: Install Playwright browser
-        # `bun x`, NOT `bunx`. The image copies a single file from
-        # oven/bun — `COPY --from=bun /usr/local/bin/bun` — and `bunx`
-        # is a separate symlink that does not come with it. Locally
-        # both work, so this passed every check on a developer's box
-        # and exited 127 on train 52's first run. `bun x` is the same
-        # command with no second binary to depend on.
-        #
-        # --with-deps pulls the shared libraries chromium needs on
-        # slim-bookworm; the job container runs as root and the
-        # Dockerfile's own apt-get proves the base can reach a mirror.
-        run: bun x playwright install --with-deps chromium
 
       - name: Frontend smoke (mocked backend)
         # Every /api call is intercepted in-browser, so there is no

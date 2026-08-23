@@ -45,7 +45,62 @@ if [ "$want" != "$have" ]; then
   fail=1
 fi
 
-# 3. Ownership — the invariant is ownership, not uid zero (forge
+# 3. Playwright's browser — present, executable, and the version the
+# app pins. The image bakes chromium at PLAYWRIGHT_BROWSERS_PATH
+# instead of every job installing it; this is the check that keeps that
+# claim honest, and it costs milliseconds.
+#
+# TWO FAILURES, BOTH SEEN, BOTH SILENT UNTIL LATE:
+#
+#   - Missing SYSTEM LIBRARIES. The browser file exists and refuses to
+#     exec, so the suite mass-fails on connect and reads as 60+ broken
+#     specs rather than one broken container. `--version` is the
+#     cheapest thing that actually loads the shared libraries, which is
+#     why this runs the binary instead of stat-ing it (the runbook
+#     learned the same lesson the hard way: `playwright install-deps`
+#     can exit nonzero into a pipe and look fine).
+#   - VERSION SKEW. Playwright resolves a browser by a revision the
+#     DRIVER chooses. Bump `@playwright/test` in apps/web/package.json
+#     without rebuilding the image and the baked browser becomes
+#     invisible — "Executable doesn't exist at …", every spec, no clue
+#     pointing at the image. The Dockerfile cannot read package.json
+#     (kaniko builds it with --context-sub-path), so the version lives
+#     twice; this is CLAUDE.md §9a's equality test for that pair.
+#
+# The override still wins: a job or pod that points
+# PLAYWRIGHT_BROWSERS_PATH at a PVC is checked against THAT path, which
+# is the whole point of the baked value being a default.
+browsers_path="${PLAYWRIGHT_BROWSERS_PATH:-/opt/ms-playwright}"
+chrome="$(ls -d "$browsers_path"/chromium-*/chrome-linux/chrome 2>/dev/null | head -1)"
+if [ -z "$chrome" ]; then
+  say "LOCOMOTIVE RED: no chromium under $browsers_path — the mocked suite would fail every spec on connect."
+  say "  remediation: rebuild the image (infra/forge/boss-ci/build.sh), or unset"
+  say "  PLAYWRIGHT_BROWSERS_PATH to fall back to the image's baked /opt/ms-playwright."
+  fail=1
+elif ! chrome_version="$("$chrome" --version 2>&1)"; then
+  say "LOCOMOTIVE RED: chromium is present at $chrome but will not execute:"
+  say "  $chrome_version"
+  say "  That is a missing shared library, not a broken browser. The image's apt list"
+  say "  (infra/forge/boss-ci/Dockerfile) is what supplies them; rebuild it."
+  fail=1
+fi
+
+pw_pinned="$(sed -n 's/.*"@playwright\/test": *"\([^"]*\)".*/\1/p' apps/web/package.json | head -1)"
+pw_baked="${BOSS_CI_PLAYWRIGHT_VERSION:-absent}"
+if [ -z "$pw_pinned" ]; then
+  say "LOCOMOTIVE RED: could not read @playwright/test from apps/web/package.json."
+  say "  This check compares it to the image's baked browser version; it cannot pass vacuously."
+  fail=1
+elif [ "$pw_pinned" != "$pw_baked" ]; then
+  say "LOCOMOTIVE RED: image baked browsers for playwright $pw_baked, apps/web pins $pw_pinned."
+  say "  The driver resolves browsers by revision, so these must be equal or every spec"
+  say "  fails with \"Executable doesn't exist\"."
+  say "  remediation: set BOSS_CI_PLAYWRIGHT_VERSION=$pw_pinned in"
+  say "    infra/forge/boss-ci/Dockerfile — the build-image job rebuilds from the tree."
+  fail=1
+fi
+
+# 4. Ownership — the invariant is ownership, not uid zero (forge
 # train #1 round 3): the workspace must belong to the uid the gate
 # runs as, whatever that uid is.
 owner="$(stat -c %u . 2>/dev/null || echo '?')"
@@ -54,7 +109,7 @@ if [ "$owner" != "$(id -u)" ]; then
   fail=1
 fi
 
-# 4. Headroom — the gate needs disk, and running out of it does not
+# 5. Headroom — the gate needs disk, and running out of it does not
 # look like running out of it.
 #
 # 2026-08-16: train 48 carried twelve cars and died on four
@@ -135,11 +190,11 @@ else
 fi
 
 
-# 5. Telemetry, not a gate — rounds 4 and 5 were load-induced timing
+# 6. Telemetry, not a gate — rounds 4 and 5 were load-induced timing
 # flakes; load can't be pre-checked away, but it can be on the record
 # next to whatever it breaks. Free space rides along even when green,
 # so the growth that caused 1b63456b is visible in the log of every
 # run before it is a failure in one of them.
-say "locomotive: nproc=$(nproc) loadavg=$(cut -d' ' -f1-3 /proc/loadavg) stamp=$have free=${avail_gb:-?}GB"
+say "locomotive: nproc=$(nproc) loadavg=$(cut -d' ' -f1-3 /proc/loadavg) stamp=$have free=${avail_gb:-?}GB browser=${chrome_version:-none}"
 
 exit "$fail"
