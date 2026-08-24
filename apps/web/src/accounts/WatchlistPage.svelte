@@ -7,21 +7,11 @@
   import SearchInput from '@boss/web-kit/ui/SearchInput.svelte';
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import type { Account } from './types';
-
-  type RiskFactors = {
-    days_since_last_invoice: number | null;
-    open_ticket_count: number;
-    has_active_contract: boolean;
-    days_since_last_note: number | null;
-  };
-
-  type RiskScore = {
-    account_id: string;
-    account_name: string;
-    score: number;
-    top_factor: string;
-    factors: RiskFactors;
-  };
+  import {
+    fetchAccountDirectory,
+    fetchRiskScores,
+    type RiskScoresState,
+  } from './riskScores';
 
   type SortKey =
     | 'score'
@@ -33,13 +23,8 @@
   type Tier = 'all' | 'platinum' | 'gold' | 'silver';
   type Bucket = 'all' | 'high' | 'mid' | 'low';
 
-  type LoadState =
-    | { kind: 'loading' }
-    | { kind: 'error'; message: string }
-    | { kind: 'ready'; scores: ReadonlyArray<RiskScore> };
-
-  let loadState: LoadState = $state<LoadState>({ kind: 'loading' });
-  let accounts = $state<Account[]>([]);
+  let loadState = $state<RiskScoresState>({ kind: 'loading' });
+  let accounts = $state<ReadonlyArray<Account>>([]);
 
   let query = $state('');
   let tier = $state<Tier>('all');
@@ -50,21 +35,18 @@
   $effect(() => {
     let cancelled = false;
     (async () => {
-      try {
-        const [rResp, pResp] = await Promise.all([
-          fetch('/api/people/accounts/risk-scores?limit=200&min_score=0'),
-          fetch('/api/people/accounts'),
-        ]);
-        if (!rResp.ok) throw new Error(`${rResp.status}`);
-        const body = (await rResp.json()) as { accounts: RiskScore[] };
-        if (!cancelled) loadState = { kind: 'ready', scores: body.accounts };
-        if (pResp.ok) {
-          const pBody = await pResp.json();
-          if (!cancelled) accounts = Array.isArray(pBody) ? pBody : (pBody.data ?? []);
-        }
-      } catch (e) {
-        if (!cancelled) loadState = { kind: 'error', message: String(e) };
-      }
+      // Both fetches classify their own answer (riskScores.ts), so a
+      // shape this page cannot read lands in `error` instead of
+      // becoming an undefined array the render trips over — and the
+      // directory, which only decorates rows with tier + city, can no
+      // longer take the risk scores down with it.
+      const [scores, directory] = await Promise.all([
+        fetchRiskScores(),
+        fetchAccountDirectory(),
+      ]);
+      if (cancelled) return;
+      loadState = scores;
+      accounts = directory;
     })();
     return () => {
       cancelled = true;

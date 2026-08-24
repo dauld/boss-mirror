@@ -22,7 +22,8 @@ import { installAuthoringMocks, JOB_ID } from './_mockApi';
 const ROUTES: ReadonlyArray<string> = [
   // User Experiences perspective — bare / is the public home alias; the
   // operator surfaces are re-rooted under /ux/*.
-  '/', '/ux/me', '/ux/inbox', '/ux/views', '/ux/jobs', '/ux/accounts', '/ux/vendors', '/ux/people', '/ux/parts',
+  '/', '/ux/me', '/ux/inbox', '/ux/views', '/ux/jobs', '/ux/accounts', '/ux/watchlist',
+  '/ux/vendors', '/ux/people', '/ux/parts',
   '/ux/products', '/ux/shipping', '/ux/assets', '/ux/catalog',
   '/ux/marketing-assets', '/ux/marketing-assets/ma-1', '/ux/calendar', '/ux/calendar/me',
   '/ux/support', '/ux/service', '/ux/refurb', '/ux/qa', '/ux/hr', '/ux/sales',
@@ -65,7 +66,14 @@ const ROUTES: ReadonlyArray<string> = [
 // can't fake; they need faithful per-endpoint fixtures before they can be
 // gated without false positives:
 //   /ux/finance (statements .reduce) · /ux/warehouse (summary.below_reorder_count)
-//   /ux/exec (.find/.length) · /ux/watchlist (.length) · /system/monitoring (snapshot .length)
+//   /ux/exec (.find/.length) · /system/monitoring (snapshot .length)
+//
+// Resolved: /ux/watchlist was in that group for `.length` — it stored
+// `body.accounts` off an unvalidated json() and rendered
+// `${rows.length}`, so the catch-all `[]` killed it. The page classifies
+// the envelope now (src/accounts/riskScores.ts) and reads the catch-all
+// as "unreadable" → its own error state. Nothing here was faked to get
+// it in: the fixture is still adversarial, and the page survives it.
 //
 // Resolved: the marketing-assets no-shell this harness first caught was a
 // real effect_update_depth_exceeded loop in loadClasses() called from a
