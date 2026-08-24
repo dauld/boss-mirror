@@ -1,6 +1,6 @@
 # Design: the delivery pipeline obeys the doctrine it ships
 
-**Status**: in-review — the diagnosis is measured; the questions are about scope and sequencing.
+**Status**: approved — all three questions resolved in review (packet `080ced71`); carried to a file 2026-08-24.
 
 **Origin**: David, 2026-08-24: *"I am afraid we are just putting in
 place patch fix after patch fix instead of creating efficient,
@@ -92,30 +92,20 @@ correct and stay. The claim is narrower: **their policy content
 belongs in rows, and their mechanism belongs in code**, and we
 currently have both in code.
 
-## Open questions
+## Decision history
 
-### Q1: How much policy moves in the first version?
+Resolved by David in review, 2026-08-24 (packet `080ced71`).
 
-The cheapest honest slice is the numbers already crying out for it
-(hold count, stall hours, consist roster + exclusions, the four
-budgets) — no new concepts, just relocation, and line 120's comment
-becomes true. The larger slice adds the verdict vocabulary (which run
-states mean failing/aborted/pending), which is where this week's
-worst bug lived. Start narrow and prove the loop, or take the
-vocabulary too because that is where the value is?
-
-### Q2: Does the conductor read the registry, or is it handed policy?
-
-Reading it directly matches the dispatcher (hot, no deploy). Being
-handed a resolved policy object at invocation keeps `boss train` a
-pure function of its inputs, which is easier to test and to reason
-about when a run is replayed. The dispatcher precedent argues for
-reading; the conductor's replay story argues for being handed.
-
-### Q3: Is there a `delivery` tenant, or is this platform?
-
-Trains, gates, and cars are how *this* organization ships software —
-which is either a platform capability every BOSS deployment gets, or
-the IT department's own tenant protocol set that happens to live in
-the same repo. The answer decides where the registry rows live and
-whether another deployment inherits our hold policy or writes its own.
+- **Q1: How much policy moves in the first version?** — *"Let's start
+  narrow and show it incrementally working."* The first slice takes
+  the numbers already crying out for relocation (hold count, stall
+  hours, consist roster and exclusions, the budgets) and proves the
+  loop end to end before the verdict vocabulary follows.
+- **Q2: Does the conductor read the registry, or is it handed
+  policy?** — *"Let's have the conductor read the registry."* The
+  dispatcher precedent wins: policy takes effect on the next boarding,
+  with no deploy.
+- **Q3: Is delivery a tenant or platform?** — *"It is part of the
+  platform, but we still want good separation of concerns."* The rows
+  are platform capability; the boundary between deciding and executing
+  has to stay legible, so a reader can see which is which.
