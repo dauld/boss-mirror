@@ -1192,13 +1192,30 @@ fn maintenance_spec(kind: &str, label: &str, description: &str) -> WorkflowSpec 
 ///
 /// Step graph:
 ///  -1. `scheduled` — the twice-daily timer fired
-///   0. `collect`   — what boarded (or `job.metadata.empty` → cancelled)
+///   0. `collect`   — what boarded (or a no-consist marker, below)
 ///   1. `assemble`  — train branch built; conflicts skipped and named
 ///   2. `pr`        — the one batched PR, url recorded
 ///   3. `ci`        — the PR's checks, polled to a verdict
 ///   3. `merged`    — the merge commit, observed on the remote
 ///   4. `deployed`  — the deploys that carried it to the playground
-///   999. `arrived`/`cancelled` — outcomes
+///   999. `arrived` / `idle` / `refused` / `cancelled` — outcomes
+///
+/// FOUR terminals, because a train that opens no PR does so for
+/// reasons that are not each other, and the terminal IS the
+/// measurement (`GET /api/workflows/pr-train/terminal-report`):
+///
+///  - `idle`      (`job.metadata.idle`) — nothing was boardable. No
+///    work was attempted, so no work failed.
+///  - `refused`   (`job.metadata.consist_check.verdict`) — the consist
+///    check disagreed with the assembled tree; cars pushed back
+///    unstruck.
+///  - `cancelled` (`job.metadata.empty`, or the operator's verb) — the
+///    train did not arrive.
+///  - `arrived`   — evidence in hand: converged cluster + CI verdict.
+///
+/// They collapsed into one terminal until 2026-08-20, when 4 of the
+/// day's 8 closed trains turned out to be idle windows recorded as
+/// cancellations.
 fn pr_train_spec() -> WorkflowSpec {
     let admin = Some("platform-admin".to_string());
     let req = |name: &str| boss_core::job::StepField {
@@ -1224,9 +1241,11 @@ fn pr_train_spec() -> WorkflowSpec {
             ready_when: "steps.scheduled.done".into(),
             title_template: "Collect what is ready to board".into(),
             authority_role: admin.clone(),
-            // Which ship-a-change Jobs boarded, by id and branch. An
-            // empty window sets `job.metadata.empty` instead and the
-            // train cancels.
+            // Which ship-a-change Jobs boarded, by id and branch. A
+            // window that boards nothing closes this step with the
+            // reason and stamps the matching no-consist marker
+            // (`idle` / `consist_check.verdict` / `empty`) — one of
+            // the three terminals below then fires.
             fields: vec![req("boarded")],
             ..Default::default()
         },
@@ -1326,13 +1345,67 @@ fn pr_train_spec() -> WorkflowSpec {
             ..Default::default()
         },
         StepSpec {
+            title: "idle".into(),
+            kind: "outcome".into(),
+            // AN IDLE WINDOW IS NOT A FAILURE. The window opened, no
+            // change was ready to board, and it closed — nothing was
+            // attempted, so nothing failed. It used to record
+            // `cancelled`, the same terminal as a train that went red
+            // with nine cars aboard: of 8 trains closed in the 14
+            // hours to 2026-08-20, 4 arrived and 4 "cancelled" with
+            // ZERO cars, which read as a 50% arrival rate for a
+            // department that lost nothing.
+            //
+            // `outcome_kind` is `skipped`, not `aborted`: an aborted
+            // packet is work abandoned, and there was no work.
+            ready_when: "steps.collect.done AND job.metadata.idle = \"true\"".into(),
+            title_template: "Idle window — nothing was boardable".into(),
+            metadata_defaults: serde_json::json!({ "outcome_kind": "skipped" }),
+            terminal: Some(Terminal {
+                outcome: "idle".into(),
+            }),
+            ..Default::default()
+        },
+        StepSpec {
+            title: "refused".into(),
+            kind: "outcome".into(),
+            // The consist check found a failure that exists only in
+            // the COMBINATION: every car was green alone, the
+            // assembled tree was not. No PR, no push, no CI spent, and
+            // every car pushed back boardable and unstruck. A real
+            // finding, and neither an idle window nor a train that
+            // failed — the cars are still coming.
+            //
+            // Gated on the verdict the conductor already records
+            // rather than a second flag beside it: one fact, one
+            // place (CLAUDE.md §9a). `job.metadata.consist_check` is
+            // the refusal report — which lints disagreed, what they
+            // said, which cars stayed boardable.
+            ready_when: "steps.collect.done AND job.metadata.consist_check.verdict = \"refused\""
+                .into(),
+            title_template: "Consist refused — cars stay boardable".into(),
+            metadata_defaults: serde_json::json!({ "outcome_kind": "aborted" }),
+            terminal: Some(Terminal {
+                outcome: "refused".into(),
+            }),
+            ..Default::default()
+        },
+        StepSpec {
             title: "cancelled".into(),
             kind: "outcome".into(),
             // Marker-gated (see `abandoned` on ship-a-change): on
             // collect.done alone the dispatcher would cancel every
             // train the moment it collected.
+            //
+            // `empty` now means what it says on the conductor's side:
+            // cars were ready and NONE of them could be merged into a
+            // consist. The idle window and the refused consist — which
+            // both used to fire this terminal through the same marker
+            // — have their own above. What is left here is a train
+            // that did not arrive: this marker, or the operator's
+            // `boss train cancel` closing the step directly.
             ready_when: "steps.collect.done AND job.metadata.empty = \"true\"".into(),
-            title_template: "Cancelled — nothing to board".into(),
+            title_template: "Cancelled — the train did not arrive".into(),
             metadata_defaults: serde_json::json!({ "outcome_kind": "aborted" }),
             terminal: Some(Terminal {
                 outcome: "cancelled".into(),
@@ -5392,6 +5465,86 @@ mod tests {
             cancelled.ready_when.contains("job.metadata.empty"),
             "cancelled must be marker-gated; ready_when = {:?}",
             cancelled.ready_when
+        );
+    }
+
+    #[test]
+    fn an_idle_window_a_refused_consist_and_a_failure_reach_different_terminals() {
+        // MEASURED, 2026-08-20: of 8 pr-train packets closed in 14
+        // hours, 4 `arrived` (9, 1, 1 and 4 cars) and 4 `cancelled`
+        // with ZERO cars aboard. All four of those were windows that
+        // opened, found nothing boardable, and closed. An idle window
+        // is not a failure — but it recorded the same terminal as a
+        // train whose CI went red with nine cars aboard, so every
+        // arrival-rate reading over the terminals (the
+        // `terminal-report` endpoint included) understated the
+        // department by half.
+        //
+        // Three situations, three terminals, one marker each. The
+        // conductor stamps exactly one of them
+        // (`crates/orchestrators/boss-cli/src/train.rs`, `board`), so
+        // the terminals stay mutually exclusive — proven here by
+        // asserting the WHOLE ready set, not just its membership.
+        let spec = pr_train_spec();
+        let subject = Subject::new("custom", "train/20260820-0600");
+
+        // Which terminals a window with this metadata makes ready,
+        // once the conductor has closed `collect` — which it does on
+        // every path, with what boarded or with the fact that nothing
+        // did.
+        let terminals_ready = |md: serde_json::Value| -> Vec<String> {
+            let mut steps = materialize_steps(&spec, &subject, JobId::new(), &md, StepId::new);
+            let collect = spec
+                .steps
+                .iter()
+                .position(|s| s.title == "collect")
+                .expect("collect present");
+            steps[collect].status = StepStatus::Completed;
+            reevaluate(&spec, &mut steps, &subject, &md);
+            spec.steps
+                .iter()
+                .zip(&steps)
+                .filter(|(sp, st)| sp.terminal.is_some() && st.status == StepStatus::Ready)
+                .map(|(sp, _)| sp.title.clone())
+                .collect()
+        };
+
+        // 1. An idle window — nothing was boardable. Benign, and it
+        //    must not count against the arrival rate.
+        assert_eq!(
+            terminals_ready(serde_json::json!({ "idle": "true" })),
+            vec!["idle".to_string()],
+            "a window that found nothing boardable closes `idle`, not `cancelled`"
+        );
+
+        // 2. A refused consist — cars assembled, the consist check
+        //    disagreed with the combination, every car pushed back
+        //    unstruck. A real finding, and nobody's car is at fault.
+        //    Its marker is the verdict the conductor already records,
+        //    not a second flag that could disagree with it.
+        assert_eq!(
+            terminals_ready(serde_json::json!({
+                "consist_check": { "verdict": "refused", "checks_run": 4 },
+            })),
+            vec!["refused".to_string()],
+            "a refused consist is its own finding, distinct from an idle window"
+        );
+
+        // 3. A train that could assemble nothing — cars WERE ready and
+        //    every one of them conflicted. Not idle: the cars exist and
+        //    were left behind.
+        assert_eq!(
+            terminals_ready(serde_json::json!({ "empty": "true" })),
+            vec!["cancelled".to_string()],
+            "`empty` keeps its meaning: a consist that could not be assembled"
+        );
+
+        // 4. A train with cars aboard fires no terminal of its own —
+        //    arrival waits on evidence, and the operator's `boss train
+        //    cancel` closes `cancelled` directly when it will not come.
+        assert!(
+            terminals_ready(serde_json::json!({ "boarded_jobs": ["c0ffee01"] })).is_empty(),
+            "a boarded train closes on evidence or on the operator's verb, never on its own"
         );
     }
 

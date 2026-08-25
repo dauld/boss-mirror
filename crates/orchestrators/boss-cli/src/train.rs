@@ -33,9 +33,12 @@
 //!     because a per-branch gate cannot see a failure that exists only in
 //!     the combination), push it, open ONE batched PR.
 //!     A branch that does not merge cleanly is skipped, named on the Job,
-//!     and left for the next train. An empty window — or a consist the
-//!     check refused — cancels the train via the `job.metadata.empty`
-//!     marker rather than pretending, and a refusal strikes no car.
+//!     and left for the next train. A window that opens no PR says WHICH
+//!     of the three reasons it was — nothing boardable (`idle`), a consist
+//!     the check refused (`consist_check.verdict`), or nothing mergeable
+//!     out of what was ready (`empty`) — rather than pretending, and a
+//!     refusal strikes no car. See the marker constants above
+//!     `consist_refusal_record`.
 //!
 //! Two trees, deliberately:
 //!   - assembly happens in a dedicated clone (BOSS_TRAIN_HOME/repo) —
@@ -510,6 +513,73 @@ pub(crate) fn files_named_in(output: &str, budget: usize) -> Vec<String> {
         }
     }
     named
+}
+
+// ---------------------------------------------------------------------
+// WHY A WINDOW OPENED NO PR — the three markers, and the three
+// terminals that read them.
+//
+// A train that opens no PR does so for reasons that are not each
+// other, and the terminal it records IS the measurement (`GET
+// /api/workflows/pr-train/terminal-report`). All three used to stamp
+// `empty` and close `cancelled`, which is why 4 of the 8 trains that
+// closed in the 14 hours to 2026-08-20 read as failures while being
+// windows in which nothing was waiting.
+//
+// Exactly ONE of these is stamped per window. The predicates that read
+// them live in the pr-train Workflow row (protocol, not code:
+// `boss_jobs::registry::pr_train_spec`), and
+// `every_marker_the_conductor_stamps_is_one_a_terminal_reads` pins the
+// two halves together.
+// ---------------------------------------------------------------------
+
+/// `job.metadata.idle` — nothing was boardable. Fires the `idle`
+/// terminal. Not a failure: no work was attempted, so no work failed.
+pub(crate) const IDLE_MARKER: &str = "idle";
+
+/// `job.metadata.empty` — cars WERE ready and no consist could be
+/// assembled from any of them. Fires `cancelled`, which is honest: the
+/// cars exist and the train carried none of them.
+pub(crate) const NO_CONSIST_MARKER: &str = "empty";
+
+/// `job.metadata.consist_check` — the refusal report. Its `verdict`
+/// fires the `refused` terminal, so the record needs no second flag
+/// beside the fact it already carries (CLAUDE.md §9a).
+pub(crate) const CONSIST_CHECK_KEY: &str = "consist_check";
+pub(crate) const REFUSED_VERDICT: &str = "refused";
+
+/// What a refused consist RECORDS on the train Job — pure, so what the
+/// train says about a refusal is testable without a tree, a forge or a
+/// jobs API.
+///
+/// NO `empty` MARKER HERE. A refusal is not a train that could not
+/// assemble a consist; it is one that assembled a consist the checks
+/// disagreed with, and every car aboard it is still boardable.
+pub(crate) fn consist_refusal_record(
+    ran: usize,
+    failed: &[LintFailure],
+    cars_left_boardable: &[String],
+    left_behind: &[Value],
+) -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            CONSIST_CHECK_KEY,
+            json!({
+                "verdict": REFUSED_VERDICT,
+                "checks_run": ran,
+                "failed": failed
+                    .iter()
+                    .map(|f| json!({
+                        "lint": f.name,
+                        "files": f.files,
+                        "output": f.output,
+                    }))
+                    .collect::<Vec<_>>(),
+                "cars_left_boardable": cars_left_boardable,
+            }),
+        ),
+        ("left_behind", json!(left_behind)),
+    ]
 }
 
 /// ONE reason string, journal and Job alike — the chip the yard
@@ -3909,7 +3979,10 @@ impl Conductor {
         let collect = find_step(&train, "collect", "Collect what is ready to board");
 
         if cands.is_empty() {
-            self.merge_job_metadata(&train_id, vec![("empty", json!("true"))])
+            // AN IDLE WINDOW IS NOT A FAILURE — see the marker
+            // constants above. Nothing was waiting, so nothing was
+            // attempted; the train closes `idle`, not `cancelled`.
+            self.merge_job_metadata(&train_id, vec![(IDLE_MARKER, json!("true"))])
                 .await?;
             self.complete_step(
                 &train,
@@ -3920,7 +3993,7 @@ impl Conductor {
                 )],
             )
             .await?;
-            log("empty window — train cancels via the marker");
+            log("idle window — nothing was boardable, train closes idle");
             return Ok(());
         }
 
@@ -4032,7 +4105,11 @@ impl Conductor {
             .join(", ");
 
         if boarded.is_empty() {
-            self.merge_job_metadata(&train_id, vec![("empty", json!("true"))])
+            // NOT idle: cars were ready and every one of them
+            // conflicted, so there is something to look at. `empty`
+            // keeps its original meaning — no consist could be
+            // assembled — and fires `cancelled`.
+            self.merge_job_metadata(&train_id, vec![(NO_CONSIST_MARKER, json!("true"))])
                 .await?;
             self.complete_step(
                 &train,
@@ -4101,32 +4178,16 @@ impl Conductor {
                     .await?;
             }
             // The train's own record of what it refused and why. The
-            // `empty` marker is what fires the `cancelled` terminal
-            // (its predicate is collect.done AND metadata.empty) —
-            // the same abandonment path an empty window takes, and
-            // honest here: nothing boarded, because nothing could.
+            // VERDICT is the marker: its predicate fires the `refused`
+            // terminal (collect.done AND consist_check.verdict =
+            // "refused"). This used to stamp `empty` and close
+            // `cancelled` — the same terminal as a train that went red
+            // with nine cars aboard, which flattened a real,
+            // actionable finding into a failure nobody could tell from
+            // an idle window.
             self.merge_job_metadata(
                 &train_id,
-                vec![
-                    ("empty", json!("true")),
-                    (
-                        "consist_check",
-                        json!({
-                            "verdict": "refused",
-                            "checks_run": ran,
-                            "failed": failed
-                                .iter()
-                                .map(|f| json!({
-                                    "lint": f.name,
-                                    "files": f.files,
-                                    "output": f.output,
-                                }))
-                                .collect::<Vec<_>>(),
-                            "cars_left_boardable": left_boardable,
-                        }),
-                    ),
-                    ("left_behind", json!(left_behind)),
-                ],
+                consist_refusal_record(*ran, failed, &left_boardable, &left_behind),
             )
             .await?;
             self.complete_step(
@@ -7015,5 +7076,106 @@ mod tests {
             .all(|f| f == "Cargo.toml"),
             "version numbers are not filenames"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // An idle window is not a failure — what a train that opened no PR
+    // RECORDS about why.
+    //
+    // MEASURED, 2026-08-20: 8 pr-train packets closed in 14 hours — 4
+    // `arrived` (9, 1, 1 and 4 cars) and 4 `cancelled` with ZERO cars
+    // aboard. Every one of those four was a window that opened, found
+    // nothing boardable, and closed. They cost nothing and lost
+    // nothing, and they recorded the same terminal as a train that
+    // went red with nine cars on it.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn a_refused_consist_records_the_verdict_and_never_the_empty_marker() {
+        let failed = vec![LintFailure {
+            name: "migration-numbers-unique".to_string(),
+            output: "153: 153-a.sql 153-b.sql".to_string(),
+            files: vec!["153-a.sql".to_string(), "153-b.sql".to_string()],
+        }];
+        let record = consist_refusal_record(
+            7,
+            &failed,
+            &["c0ffee01".to_string(), "c0ffee02".to_string()],
+            &[json!({"car_id_short": "c0ffee01", "reason": "consist check: …"})],
+        );
+        let keys: Vec<&str> = record.iter().map(|(k, _)| *k).collect();
+        assert!(
+            !keys.contains(&NO_CONSIST_MARKER),
+            "a refused consist must NOT stamp the `{NO_CONSIST_MARKER}` marker — that fires \
+             `cancelled`, and a refusal is its own finding: {keys:?}"
+        );
+
+        let md: std::collections::HashMap<&str, Value> = record.into_iter().collect();
+        let check = md
+            .get(CONSIST_CHECK_KEY)
+            .expect("the refusal report is the marker the `refused` terminal reads");
+        assert_eq!(
+            check["verdict"], REFUSED_VERDICT,
+            "the verdict IS the marker — one fact in one place"
+        );
+        assert_eq!(check["checks_run"], 7);
+        assert_eq!(check["failed"][0]["lint"], "migration-numbers-unique");
+        assert_eq!(
+            check["cars_left_boardable"],
+            json!(["c0ffee01", "c0ffee02"]),
+            "the cars are unstruck and still coming — the record has to say so"
+        );
+        assert!(
+            md.contains_key("left_behind"),
+            "and the yard's per-car reasons stay on the train: {:?}",
+            md.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// The conductor's markers and the protocol's predicates are the
+    /// same fact written in two places, so they get the equality test
+    /// CLAUDE.md §9a asks for. If a marker here drifts from the
+    /// `ready_when` over there, a window stamps a marker no terminal
+    /// reads and the train hangs open forever — silently, because
+    /// nothing else in either crate compares them.
+    #[test]
+    fn every_marker_the_conductor_stamps_is_one_a_terminal_reads() {
+        let kinds = boss_jobs::registry::platform_workflows();
+        let train = kinds
+            .iter()
+            .find(|k| k.kind == "pr-train")
+            .expect("pr-train is a platform-supplied Workflow");
+        let gate = |slug: &str| {
+            train
+                .steps
+                .iter()
+                .find(|s| s.title == slug)
+                .unwrap_or_else(|| panic!("pr-train declares a `{slug}` terminal"))
+                .ready_when
+                .clone()
+        };
+
+        for (slug, path) in [
+            ("idle", format!("job.metadata.{IDLE_MARKER}")),
+            ("cancelled", format!("job.metadata.{NO_CONSIST_MARKER}")),
+            (
+                "refused",
+                format!("job.metadata.{CONSIST_CHECK_KEY}.verdict = \"{REFUSED_VERDICT}\""),
+            ),
+        ] {
+            let ready_when = gate(slug);
+            assert!(
+                ready_when.contains(&path),
+                "the `{slug}` terminal must fire on the marker the conductor stamps \
+                 (`{path}`); ready_when = {ready_when:?}"
+            );
+        }
+
+        // And they must stay THREE different markers: two terminals
+        // sharing one is how an idle window came to be recorded as a
+        // cancellation in the first place.
+        assert_ne!(IDLE_MARKER, NO_CONSIST_MARKER);
+        assert_ne!(IDLE_MARKER, CONSIST_CHECK_KEY);
+        assert_ne!(NO_CONSIST_MARKER, CONSIST_CHECK_KEY);
     }
 }

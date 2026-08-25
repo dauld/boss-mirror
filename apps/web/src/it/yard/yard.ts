@@ -221,16 +221,48 @@ const completed = (s: StepLite | null) => !!s && s.status === 'completed';
 // it stands in.
 // ---------------------------------------------------------------------------
 
-export type TrainOutcome = 'arrived' | 'cancelled' | 'unknown';
+// AN IDLE WINDOW IS NOT A FAILURE. `idle` and `refused` joined
+// `cancelled` on 2026-08-20: of 8 trains closed in 14 hours, 4
+// "cancelled" with zero cars aboard, which is a window that opened
+// with nothing waiting — not a train that failed. A refused consist
+// is the third case: cars assembled, the consist check disagreed with
+// the combination, every car pushed back boardable and unstruck.
+// Trains closed before those terminals existed carry `cancelled`
+// whichever they were.
+export type TrainOutcome = 'arrived' | 'idle' | 'refused' | 'cancelled' | 'unknown';
 
 export function trainOutcome(j: JobLite): TrainOutcome {
   const stamped = (j.metadata as { outcome?: unknown } | null)?.outcome;
   if (stamped === 'arrived') return 'arrived';
+  if (stamped === 'idle') return 'idle';
+  if (stamped === 'refused') return 'refused';
   if (stamped === 'cancelled') return 'cancelled';
   if (completed(step(j, 'arrived', 'Train arrived'))) return 'arrived';
+  if (completed(step(j, 'idle', 'Idle window — nothing was boardable'))) return 'idle';
+  if (completed(step(j, 'refused', 'Consist refused — cars stay boardable'))) return 'refused';
+  // The title fallback is the OLD template on purpose: it exists for
+  // trains whose steps predate `spec_slug`, and those carry the words
+  // the protocol used then.
   if (completed(step(j, 'cancelled', 'Cancelled — nothing to board'))) return 'cancelled';
   if (completed(step(j, 'deployed', 'Deployed to the playground'))) return 'arrived';
   return 'unknown';
+}
+
+/** How a closed train that did not arrive reads on the board — one
+ *  definition, so the words and the terminal cannot drift apart. */
+export function outcomeText(outcome: TrainOutcome): string {
+  switch (outcome) {
+    case 'arrived':
+      return 'arrived';
+    case 'idle':
+      return 'idle window, nothing was boardable';
+    case 'refused':
+      return 'consist refused, cars stay boardable';
+    case 'cancelled':
+      return 'cancelled, the train did not arrive';
+    default:
+      return 'closed, never arrived';
+  }
 }
 
 /** The conductor's RFC3339 stamp on a step, column or metadata. */

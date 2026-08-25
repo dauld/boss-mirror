@@ -7,6 +7,7 @@ import {
   disciplineLabel,
   etaPhase,
   fetchYard,
+  outcomeText,
   trainEta,
   trainOutcome,
   trainStatus,
@@ -428,6 +429,24 @@ describe('trainOutcome', () => {
     );
     // Closed with nothing to show for it: unknown, never an arrival.
     expect(trainOutcome(train({ status: 'closed' }))).toBe('unknown');
+  });
+
+  test('an idle window and a refused consist are not cancellations', () => {
+    // Of the 8 trains that closed in the 14 hours to 2026-08-20, 4
+    // "cancelled" with zero cars aboard — windows that opened with
+    // nothing waiting. The protocol now closes those `idle`, and a
+    // consist the check refused `refused`; the board must not go on
+    // calling either one a train that failed.
+    expect(trainOutcome(train({ status: 'closed', metadata: { outcome: 'idle' } }))).toBe('idle');
+    expect(trainOutcome(train({ status: 'closed', metadata: { outcome: 'refused' } }))).toBe(
+      'refused',
+    );
+    expect(
+      trainOutcome(train({ status: 'closed', steps: [s('arrived', 'skipped'), s('idle', 'completed')] })),
+    ).toBe('idle');
+    expect(outcomeText('idle')).toContain('idle window');
+    expect(outcomeText('refused')).toContain('boardable');
+    expect(outcomeText('cancelled')).toBe('cancelled, the train did not arrive');
   });
 });
 

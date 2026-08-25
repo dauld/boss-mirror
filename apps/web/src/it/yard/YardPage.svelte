@@ -9,6 +9,7 @@
     disciplineLabel,
     dockUpstream,
     fetchYard,
+    outcomeText,
     wipAdvisory,
     type Eta,
     type EtaPhase,
@@ -262,7 +263,7 @@
                 e.preventDefault();
                 openTrain(t);
               }}>{t.title}</a>
-            — {t.outcome === 'cancelled' ? 'cancelled, nothing to board' : 'closed, never arrived'}
+            — {outcomeText(t.outcome)}
           </div>
         {/each}
       </div>
