@@ -303,13 +303,22 @@ impl SchedulingRepository for PgScheduling {
         stamp: &boss_core::publisher::EventStamp,
     ) -> Result<(), SchedulingError> {
         let mut tx = self.pool.begin().await.map_err(storage)?;
+        // updated_at IS BOUND, NOT NOW(). The row used to be stamped
+        // with the Postgres server clock while the event published
+        // `changed_at: now` from boss_clock_client — two different
+        // clocks, so the value that landed in the row was never in the
+        // log and NO rebuild could reproduce it. Under a warped sim
+        // clock the two are not microseconds apart, they are years.
+        // Binding the same `now` the event carries makes the row, the
+        // event and the replay agree (d7b8158e).
         let r = sqlx::query(
             "UPDATE scheduled_assignments
-             SET status = $2, updated_at = NOW()
+             SET status = $2, updated_at = $3
              WHERE id = $1",
         )
         .bind(id)
         .bind(status.as_str())
+        .bind(now)
         .execute(&mut *tx)
         .await
         .map_err(storage)?;

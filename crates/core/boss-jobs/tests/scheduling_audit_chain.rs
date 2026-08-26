@@ -195,3 +195,84 @@ async fn scheduling_writes_survive_rebuild() {
     assert_eq!(post_shift, pre_shift);
     assert_eq!(post_token, pre_token);
 }
+
+/// A REBUILD MUST REPRODUCE THE PROJECTION, NOT RESTAMP IT.
+///
+/// `scheduling.assignment.status-changed` used to be replayed with
+/// `updated_at = NOW()`, which is the clock of the REBUILD rather than
+/// of the event. The row survived a rebuild — the existing test above
+/// would still pass — but it came back with a different `updated_at`
+/// every time, so the projection drifted a little further from the log
+/// on each replay. That is a determinism failure, and it is invisible
+/// to any assertion that only counts rows.
+///
+/// This asserts the value, not the count: `updated_at` after the
+/// rebuild must equal what it was before. Mapped as one of seven
+/// pre-existing divergences in d7b8158e.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_status_change_keeps_its_event_time_through_a_rebuild() {
+    let db = TestDb::new().await;
+    let job_id = "22222222-2222-2222-2222-222222222222";
+    seed_employee_and_target_job(&db.pool, "emp-tech-002", job_id).await;
+    let app = build_app(db.pool.clone());
+
+    TestRequest::post("/api/scheduling/assignments")
+        .json(&json!({
+            "tech_id": "emp-tech-002",
+            "target_job_id": job_id,
+            "kind": "wo",
+            "starts_at": "2026-05-11T09:00:00Z",
+            "ends_at": "2026-05-11T12:00:00Z",
+            "status": "tentative",
+            "notes": null,
+        }))
+        .send(&app)
+        .await
+        .assert_status(StatusCode::CREATED);
+
+    let (assignment_id,): (uuid::Uuid,) =
+        sqlx::query_as("SELECT id FROM scheduled_assignments WHERE tech_id = 'emp-tech-002'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+
+    TestRequest::post(&format!(
+        "/api/scheduling/assignments/{assignment_id}/status"
+    ))
+    .json(&json!({"status": "confirmed"}))
+    .send(&app)
+    .await
+    .assert_status(StatusCode::NO_CONTENT);
+
+    let (status_before, updated_before): (String, chrono::DateTime<chrono::Utc>) =
+        sqlx::query_as("SELECT status, updated_at FROM scheduled_assignments WHERE id = $1")
+            .bind(assignment_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(status_before, "confirmed");
+
+    drain_outbox(&db.pool).await;
+
+    // Wipe and rebuild purely from audit_log.
+    sqlx::query("DELETE FROM scheduled_assignments")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let report = rebuild_scheduling(&db.pool).await.expect("rebuild");
+    assert!(report.assignment_status_changes >= 1, "{report:?}");
+
+    let (status_after, updated_after): (String, chrono::DateTime<chrono::Utc>) =
+        sqlx::query_as("SELECT status, updated_at FROM scheduled_assignments WHERE id = $1")
+            .bind(assignment_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+
+    assert_eq!(status_after, "confirmed", "the status itself must replay");
+    assert_eq!(
+        updated_after, updated_before,
+        "updated_at must come from the event, not from the rebuild's clock — a replay that \
+         restamps it makes the projection drift further from the log on every rebuild"
+    );
+}

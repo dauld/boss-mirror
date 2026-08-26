@@ -125,12 +125,38 @@ pub async fn rebuild_scheduling(pool: &PgPool) -> Result<RebuildReport, RebuildE
                         .and_then(|v| v.as_str())
                         .map(String::from);
                     if let (Some(id), Some(status)) = (id, status) {
+                        // The live write stamped updated_at with the
+                        // clock value it also put in the payload as
+                        // changed_at, so THAT is the reproducing
+                        // value. ev.ts is the audit_log row time, which
+                        // is a different instant — close enough to look
+                        // right and wrong by ~100us, which is exactly
+                        // the kind of drift a row-count assertion never
+                        // sees. Falls back to ev.ts for events written
+                        // before the payload carried it.
+                        let changed_at = ev
+                            .payload
+                            .get("changed_at")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                            .map(|d| d.with_timezone(&chrono::Utc))
+                            .unwrap_or(ev.ts);
+                        // updated_at COMES FROM THE EVENT, NOT THE CLOCK.
+                        // This is a replay path: NOW() here stamps the
+                        // moment of the REBUILD, so a projection rebuilt
+                        // from the log did not match the one built live
+                        // and the divergence grew with every replay.
+                        // ReplayEvent::ts is the recorded event time and
+                        // exists for exactly this (d7b8158e); the
+                        // inventory and campaigns rebuilders already
+                        // thread it the same way.
                         let n = sqlx::query(
-                            "UPDATE scheduled_assignments SET status = $2, updated_at = NOW() \
+                            "UPDATE scheduled_assignments SET status = $2, updated_at = $3 \
                              WHERE id = $1",
                         )
                         .bind(id)
                         .bind(&status)
+                        .bind(changed_at)
                         .execute(&mut *conn)
                         .await
                         .map_err(|e| e.to_string())?
