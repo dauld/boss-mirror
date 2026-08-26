@@ -3899,6 +3899,38 @@ mod tests {
                 "{}: owning_team",
                 want.kind
             );
+
+            // THE STEPS ARE THE PROTOCOL, AND THEY WERE NOT CHECKED.
+            //
+            // Until 2026-08-26 this test compared four scalars and
+            // stopped. The bundle's own header claimed it "asserts each
+            // row equals the spec it replaces, field for field", and
+            // that was simply not true: step titles, `ready_when`
+            // predicates, fields, sign-offs, terminals and metadata
+            // defaults were all unchecked. A conversion could rewrite
+            // the entire flow and still pass, because label and
+            // category matched.
+            //
+            // That gap matters most exactly where the conversion order
+            // says the risk is highest. `ship-a-change` carries 255
+            // packets; a mistranscribed predicate there — `steps.gate
+            // .done` where the spec says something stricter — would
+            // survive this test AND the viability lint, which only asks
+            // whether the flow is reachable, not whether it is the same
+            // flow. Every future car would then run a protocol nobody
+            // chose.
+            //
+            // Compared as JSON rather than by PartialEq so the failure
+            // names the offending step and shows both sides, which is
+            // what a transcription error needs in order to be fixable.
+            let got_steps = serde_json::to_value(&got.steps).expect("bundle steps serialize");
+            let want_steps = serde_json::to_value(&want.steps).expect("spec steps serialize");
+            assert_eq!(
+                got_steps, want_steps,
+                "{}: the bundle's steps differ from the spec they replaced. A conversion must \
+                 change WHERE a protocol lives, never WHAT it says.",
+                want.kind
+            );
         }
     }
     use super::*;
