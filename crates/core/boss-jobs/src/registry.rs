@@ -383,6 +383,12 @@ fn workflow_design_spec() -> WorkflowSpec {
 ///   2. `gate`    — everything green, and observed working
 ///   3. `review`  — opened for review, url recorded
 ///   999. `merged`/`abandoned` — outcomes
+// Kept only as the fidelity test's expected value — see
+// `the_platform_bundle_matches_the_specs_it_replaced`. Out of
+// `platform_workflows()`, so the lib build has no caller: the kind
+// now lives in infra/platform/workflows.toml and an operator edit
+// to it survives a boot, which is the whole point of the move.
+#[cfg(test)]
 fn ship_a_change_spec() -> WorkflowSpec {
     let steps = vec![
         StepSpec {
@@ -1049,6 +1055,35 @@ fn backlog_item_spec() -> WorkflowSpec {
 /// `policy-rule-design` one) land here as additional entries —
 /// never as TOML-loader exceptions, never as direct
 /// `INSERT INTO workflows` SQL.
+/// The path to the platform Workflow bundle, resolved from this crate.
+pub fn platform_bundle_path() -> &'static str {
+    concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../infra/platform/workflows.toml"
+    )
+}
+
+/// EVERY kind a deployment has: the Rust roster PLUS the bundle.
+///
+/// `platform_workflows()` alone stopped being that answer the moment
+/// kinds began moving to infra/platform/workflows.toml, and the gap is
+/// silent in exactly the wrong way — a test that seeds only the roster
+/// still compiles, still runs, and gets `unknown or inactive job kind`
+/// at the first create, so the assertion it was written for never
+/// executes. Four suites failed that way the day `ship-a-change`
+/// converted; each had been passing while testing nothing.
+///
+/// Anything standing up a registry that is meant to resemble a
+/// deployment wants this, not the roster.
+pub fn seedable_platform_workflows() -> Vec<WorkflowSpec> {
+    let mut all = platform_workflows();
+    all.extend(
+        crate::seed_loader::load_workflows(platform_bundle_path())
+            .expect("the platform Workflow bundle parses"),
+    );
+    all
+}
+
 pub fn platform_workflows() -> Vec<WorkflowSpec> {
     vec![
         maintenance_spec(
@@ -1068,7 +1103,6 @@ pub fn platform_workflows() -> Vec<WorkflowSpec> {
         ),
         design_doc_review_spec(),
         user_feedback_spec(),
-        ship_a_change_spec(),
         pr_train_spec(),
         // `workflow-design`, `regenerate-deployment` and `backlog-item`
         // are NOT missing — they moved to infra/platform/workflows.toml
@@ -3846,6 +3880,7 @@ mod tests {
             workflow_design_spec(),
             regenerate_deployment_spec(),
             backlog_item_spec(),
+            ship_a_change_spec(),
         ];
         // Every CONVERTED kind must still be here. This is the
         // load-bearing half and it has earned its keep: it went red
@@ -5438,11 +5473,21 @@ mod tests {
         // so this guard follows it: the chain terminal ← proven ←
         // merge marker must be unbroken, or the dispatcher closes
         // Jobs on review completion again.
-        let kinds = platform_workflows();
+        // READ FROM THE BUNDLE, because that is where the protocol
+        // lives now. Repointed rather than deleted when ship-a-change
+        // converted to data: the guarantee is about the PROTOCOL, not
+        // about which file holds it, and a conversion that quietly
+        // dropped this assertion would have removed the guard while
+        // the flow it guards kept running.
+        let kinds = crate::seed_loader::load_workflows(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../infra/platform/workflows.toml"
+        ))
+        .expect("the platform bundle parses");
         let ship = kinds
             .iter()
             .find(|k| k.kind == "ship-a-change")
-            .expect("ship-a-change present");
+            .expect("ship-a-change present in the bundle");
         let proven = ship
             .steps
             .iter()
@@ -5479,15 +5524,17 @@ mod tests {
         // The roster and the seed change together — that is
         // `a-registry-seed-and-its-roster-test-change-together` in the
         // register, and this assertion is the half that enforces it.
-        // Nine, not ten: `regenerate-deployment` moved to
-        // infra/platform/workflows.toml.
+        // The count only ever goes DOWN now: protocols-as-data.md's
+        // direction of travel is that a kind leaves this roster for
+        // infra/platform/workflows.toml and never comes back, and a
+        // new protocol never touches Rust at all.
         assert_eq!(
             kinds.len(),
-            7,
-            "ships design-doc-review + user-feedback + ship-a-change + pr-train \
-             + the three maintenance kinds (backup / audit-integrity / ledger-replay \
-             — internal-forge Q6). workflow-design, regenerate-deployment and \
-             backlog-item are in the bundle, not here."
+            6,
+            "ships design-doc-review + user-feedback + pr-train + the three \
+             maintenance kinds (backup / audit-integrity / ledger-replay — \
+             internal-forge Q6). workflow-design, regenerate-deployment, \
+             backlog-item and ship-a-change are in the bundle, not here."
         );
         // NO TENANT NOUNS IN CORE. David, 2026-08-16: "We don't want
         // brewery nouns in core no matter what. But most nouns should
@@ -5549,10 +5596,20 @@ mod tests {
         // lint. `excludes` optional would make the step completable
         // without saying what the change leaves out, which is the one
         // sentence that keeps a change small.
-        let ship = kinds
+        // ship-a-change moved to the bundle, so the assertions follow
+        // it there rather than lapsing — the same treatment
+        // regenerate-deployment got below. A guarantee that stops being
+        // checked because its subject changed file is a guarantee that
+        // was never really held.
+        let bundled_kinds = crate::seed_loader::load_workflows(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../infra/platform/workflows.toml"
+        ))
+        .expect("the platform bundle parses");
+        let ship = bundled_kinds
             .iter()
             .find(|k| k.kind == "ship-a-change")
-            .expect("ship-a-change present");
+            .expect("ship-a-change present in the bundle");
         let scope = ship
             .steps
             .iter()

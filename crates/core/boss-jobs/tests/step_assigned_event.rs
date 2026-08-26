@@ -26,7 +26,7 @@ use boss_core::port::EventBus;
 use boss_core::publisher::DomainPublisher;
 use boss_jobs::http::{JobsApiState, router};
 use boss_jobs::owner_resolution::RosterLookup;
-use boss_jobs::registry::platform_workflows;
+use boss_jobs::registry::seedable_platform_workflows;
 use boss_jobs::step_registry::StepRegistry;
 use boss_jobs::{InMemoryJobs, InMemoryWorkflows, WorkflowRegistry};
 use boss_policy_client::{Action, FakePolicyClient, PolicyClient, Resource, Scope};
@@ -52,7 +52,7 @@ impl RosterLookup for AdminRoster {
 
 fn app_with_bus() -> (axum::Router, Arc<InMemoryJobs>) {
     let kinds = Arc::new(InMemoryWorkflows::new());
-    for spec in platform_workflows() {
+    for spec in seedable_platform_workflows() {
         kinds.seed(spec).expect("seed platform kind");
     }
     let jobs = Arc::new(InMemoryJobs::new());

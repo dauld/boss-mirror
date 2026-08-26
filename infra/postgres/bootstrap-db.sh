@@ -205,6 +205,41 @@ else
     echo "  bundle-supplied kinds will be missing from this deployment" >&2
 fi
 
+# THE THREE SILENCES, CLOSED BY ASKING ABOUT THE OUTCOME INSTEAD.
+#
+# Above there are three ways the platform bundle can fail to arrive —
+# missing binary, missing file, failing seed — and each was found the
+# hard way and made loud in turn. All three still only WARN, which was
+# survivable while the bundle carried three idle kinds.
+#
+# It no longer is. `ship-a-change` is in the bundle now, so a skipped
+# seed is a deployment where NO CHANGE CAN SHIP, and the symptom is a
+# 400 on the first car rather than anything resembling a packaging
+# fault — precisely the 2026-08-19 shape, where ten bundle kinds were
+# missing and every timer posting one died on a 400 nobody saw.
+#
+# So this asks the only question that matters, once, in terms of the
+# outcome rather than the mechanism: is the delivery protocol actually
+# in the registry? It catches all three failure paths and any future
+# fourth, and it fails the bootstrap rather than warning into a log
+# nobody reads.
+REQUIRED_KINDS="ship-a-change"
+for kind in $REQUIRED_KINDS; do
+    present=$(psql "$BUILD_URL" -tAc \
+        "SELECT COUNT(*) FROM workflows WHERE kind = '$kind' AND status = 'active'" \
+        2>/dev/null || echo 0)
+    if [ "${present:-0}" -lt 1 ]; then
+        echo "  FATAL: workflow kind '$kind' is not active in the registry after seeding." >&2
+        echo "  It lives in infra/platform/workflows.toml, so one of these is true:" >&2
+        echo "    - boss-platform-workflow-seed was not found (see the warning above)" >&2
+        echo "    - infra/platform/ is missing from the image" >&2
+        echo "    - the seed ran and failed" >&2
+        echo "  A deployment without this kind cannot ship a change, including the fix." >&2
+        exit 1
+    fi
+    echo "  verified: workflow kind '$kind' is active"
+done
+
 if OPERATOR_SEED_BIN="$(find_boss_bin boss-operator-baseline-seed)"; then
     OPERATOR_HIRES_TOML="$(dirname "$0")/../operator-baseline/operator_hires.toml"
     if [ -f "$OPERATOR_HIRES_TOML" ]; then

@@ -828,3 +828,128 @@ ready_when = "steps.run.done"
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# ---------------------------------------------------------------------------
+# ship-a-change — the delivery protocol itself, and the last of the
+# high-traffic trio protocols-as-data.md sequences by blast radius:
+# "get those wrong and nothing else can ship, including the fix."
+#
+# 255 packets ride this kind. It moves LAST for that reason and it moves
+# GENERATED rather than transcribed for the same one: the spec is eight
+# steps of predicates and terminals, and hand-copying it is precisely
+# where a wrong `ready_when` comes from. The row below was rendered from
+# `ship_a_change_spec()` and is verified field-for-field, steps included,
+# by `the_platform_bundle_matches_the_specs_it_replaced` — a check that
+# until 2026-08-26 compared only label and category and would not have
+# caught a rewritten flow.
+#
+# In-flight packets are untouched: the seed binary inserts only what is
+# missing, so the live v14 keeps its pinned spec (protocols-as-data Q4).
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "ship-a-change"
+label = "Ship a change"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "One change, from declaring its boundary to merging it. The Subject is a `custom` Subject whose id is the branch, so \"what shipped here\" is a Subject-history question. The `scope` step is the point of the kind: it asks a person what the change contains and what it deliberately excludes BEFORE the work, which is the only moment that decision keeps a PR small. Counted on /system/flow, so a cadence target needs no second mechanism. Name the feedback packet this change answers in `metadata.backlog_item` \u2014 a declared job edge, ref-checked at the write, and the link the dispatcher follows on merge to complete that packet's open branch and tell its filer. Use `metadata.backlog_text` only when the referent is not a Job on this instance (legacy, or a request that arrived as prose); it is free text and nothing follows it."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+title_template = "Change started"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "operator-starts-a-change" }
+
+[[workflow.step]]
+title = "scope"
+kind = "task"
+ready_when = "steps.opened.done"
+title_template = "Declare the boundary"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "summary"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "excludes"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "build"
+kind = "task"
+ready_when = "steps.scope.done"
+title_template = "Build it"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "test"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "gate"
+kind = "task"
+ready_when = "steps.build.done"
+title_template = "Green, and observed working"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "gates"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "verified"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "receipt"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "rendered"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "review"
+kind = "task"
+ready_when = "steps.gate.done"
+title_template = "Open for review"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "pr_url"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "proven"
+kind = "task"
+ready_when = "steps.review.done AND job.metadata.merged = \"true\""
+title_template = "Proven in prod"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "verified"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "method"
+field_type = "browser|api|log"
+required = false
+
+[[workflow.step]]
+title = "merged"
+kind = "outcome"
+ready_when = "steps.proven.done"
+title_template = "Merged"
+terminal = { outcome = "merged" }
+metadata_defaults = { outcome_kind = "completed" }
+
+[[workflow.step]]
+title = "abandoned"
+kind = "outcome"
+ready_when = "steps.scope.done AND job.metadata.abandoned = \"true\""
+title_template = "Abandoned"
+terminal = { outcome = "abandoned" }
+metadata_defaults = { outcome_kind = "aborted" }
