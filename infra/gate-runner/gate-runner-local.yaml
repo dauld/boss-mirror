@@ -1,4 +1,8 @@
-# gate-runner — a full gate as a self-contained Kubernetes Job.
+# gate-runner-local — a full gate on a PER-POD disk, so gates can
+# run concurrently. The sibling of gate-runner.yaml; everything
+# below is identical except the workspace volume and the pinned
+# build width. Use THIS one unless you need the workspace to
+# outlive the Job.
 #
 # Born 2026-08-23 from a day of gates dying deaths that were not
 # theirs: pod replacements, exec-scope reaping, shared-disk exhaustion,
@@ -36,22 +40,6 @@
 # or template the three env values by hand. Register the gate-run
 # packet FIRST (kind gate-run, due_on a few hours out); the packet is
 # the record, the Job is just the muscle.
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: gate-runner-disk
-  namespace: boss-dev
-spec:
-  accessModes: [ReadWriteOnce]
-  storageClassName: longhorn-dev-disposable
-  resources:
-    requests:
-      # One branch's cold target (~74G) + a shallow clone + logs,
-      # with honest headroom. NOT shared between concurrent jobs:
-      # RWO plus the wipe-per-run in run.sh means one gate at a time,
-      # which is also what the node's disk can afford.
-      storage: 120Gi
 ---
 apiVersion: batch/v1
 kind: Job
@@ -99,6 +87,12 @@ spec:
             - {name: GATE_RUN_JOB_ID, value: "$GATE_RUN_JOB_ID"}
             - {name: GATE_MODE, value: "$GATE_MODE"}
             - {name: PLAYWRIGHT_BROWSERS_PATH, value: /gate-target/ms-playwright}
+            # Pinned, not inferred. Reading the cgroup quota here would
+            # select 20 (the CPU limit below) and a 20-wide build was
+            # measured 16% SLOWER than 4-wide on this very node — the
+            # pipeline is I/O-bound, so extra rustc processes queue
+            # against each other rather than working (db127cb4).
+            - {name: CARGO_BUILD_JOBS, value: "4"}
             - {name: BOSS_TEST_POSTGRES_ADMIN_URL, value: "postgres://boss:boss@127.0.0.1:5432/postgres"}
           securityContext:
             allowPrivilegeEscalation: false
@@ -131,7 +125,26 @@ spec:
             limits: {cpu: "2", memory: 4Gi}
       volumes:
         - name: gate-runner-disk
-          persistentVolumeClaim: {claimName: gate-runner-disk}
+          # LOCAL, NOT CLAIMED — this is the whole difference from
+          # gate-runner.yaml, and it is what makes concurrent gates
+          # possible. Two gates sharing one PVC is not slow, it is
+          # WRONG: each `git checkout -f -B` yanks the tree from under
+          # the other and both write the same receipt path, so on
+          # 2026-08-24 the verdicts came back crossed and all three
+          # results were discarded. An emptyDir is created per pod, so
+          # six gates ran side by side on 2026-08-26 and every receipt
+          # was independent and correct.
+          #
+          # The receipt does not need to outlive the pod: run.sh reports
+          # the verdict onto the gate-run packet before it exits, and
+          # the packet is the record. The Job is just the muscle.
+          #
+          # Concurrency past ~3 is bounded by the NODE, not by
+          # correctness. Measured on w-1 with five concurrent gates:
+          # /proc/pressure/io full avg60=57%, cpu pressure 0.00, and
+          # per-gate wall time ~35min -> ~93min. Still better throughput
+          # than running them one at a time; just not free.
+          emptyDir: {sizeLimit: 200Gi}
         - name: pgdata
           emptyDir: {}
         - name: pg-shm
