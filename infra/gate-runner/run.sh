@@ -90,7 +90,37 @@ git checkout -B "$GATE_BRANCH" "origin/$GATE_BRANCH"
 HEAD_SHA=$(git rev-parse HEAD)
 
 export CARGO_TARGET_DIR=/gate-target/target
-export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
+# Build parallelism follows the CPU the container was actually GIVEN.
+# It was pinned at 4, so raising the gate ceiling from 6 CPU to 20 in
+# the build-node car bought nothing measurable: the gate was never
+# bound at 20, it was bound at 4, and sixteen cores sat idle. A 20-CPU
+# run on w-1 took 47 minutes against 40 on a 6-CPU control plane,
+# which is what sent me looking.
+#
+# Read the CGROUP QUOTA, not nproc: inside a container nproc reports
+# the node's core count (32 on w-1), not the slice the container may
+# use, so it would oversubscribe by 60% here.
+gate_cpus() {
+    local q p
+    if [ -r /sys/fs/cgroup/cpu.max ]; then
+        read -r q p < /sys/fs/cgroup/cpu.max
+        if [ "$q" != "max" ] && [ -n "$p" ] && [ "$p" -gt 0 ] 2>/dev/null; then
+            echo $(( (q + p - 1) / p ))
+            return
+        fi
+    fi
+    nproc 2>/dev/null || echo 4
+}
+CPUS=$(gate_cpus)
+[ "${CPUS:-0}" -ge 1 ] 2>/dev/null || CPUS=4
+
+# RUST_TEST_THREADS stays at 2 ON PURPOSE. The suites share one
+# postgres sidecar, and parallel DB-backed tests are what produced the
+# /dev/shm exhaustion and the schema-load race this rig has already
+# been bitten by. Raising both at once would also make the result
+# unattributable. Widen it as a separate, measured change.
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$CPUS}" RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
+echo "gate-runner: building ${CARGO_BUILD_JOBS}-wide (cgroup quota), tests 2-wide"
 
 # Warm the web toolchain: the mocked suite's webServer boot on a cold
 # container exceeded its timeout three times on 2026-08-23; every spec
