@@ -9,6 +9,7 @@ mod deploy;
 mod docs;
 mod docs_flush;
 mod doctor;
+mod gate;
 mod inspect;
 mod ops;
 mod queue;
@@ -123,6 +124,32 @@ enum Commands {
     /// purpose: taking an item, annotating it, or closing it goes
     /// through the board or the step API, so every state change
     /// carries an actor.
+    /// Launch a gate for a branch — files or reuses the gate-run
+    /// packet, renders the runner Job, and creates it.
+    ///
+    /// Replaces the seven-step by-hand sequence recorded in 51ca3405.
+    /// Refuses to run beside another gate only when the runner manifest
+    /// mounts a SHARED workspace, because two gates on one disk cross
+    /// their receipts; per-pod workspaces run in parallel safely.
+    Gate {
+        /// Branch to gate.
+        branch: String,
+        /// Gate mode passed to the runner (e.g. "auto"). Empty = full.
+        #[arg(long)]
+        mode: Option<String>,
+        /// Runner manifest. Defaults to infra/gate-runner/gate-runner.yaml.
+        #[arg(long)]
+        manifest: Option<std::path::PathBuf>,
+        /// Kubernetes namespace holding the gate Jobs.
+        #[arg(long, default_value = "boss-dev")]
+        namespace: String,
+        /// Poll the gate-run packet until it reports a verdict.
+        #[arg(long)]
+        wait: bool,
+        /// Show what would happen without filing or creating anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     Queue {
         /// Column to show: all | waiting | with-agent |
         /// routed[:disposition] | done
@@ -577,6 +604,14 @@ async fn main() -> Result<()> {
             // — jobs-api does that on the far side of the HTTP calls.
             train::run(phase, dry, chrono::Utc::now()).await
         }
+        Commands::Gate {
+            branch,
+            mode,
+            manifest,
+            namespace,
+            wait,
+            dry_run,
+        } => gate::run(&branch, mode, manifest, &namespace, wait, dry_run).await,
         Commands::Queue { column } => queue::run(&column).await,
         Commands::Packet { action } => match action {
             PacketAction::Census {
