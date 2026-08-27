@@ -90,7 +90,60 @@ git checkout -B "$GATE_BRANCH" "origin/$GATE_BRANCH"
 HEAD_SHA=$(git rev-parse HEAD)
 
 export CARGO_TARGET_DIR=/gate-target/target
-export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}" RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
+# THE CRATE CACHE SURVIVES THE RUN, and it is a correctness fix before
+# it is a speed one. CARGO_HOME was unset, so it defaulted inside the
+# container and died with the pod — meaning every gate re-downloaded
+# every dependency from static.crates.io, and every gate was therefore
+# betting its verdict on several hundred consecutive successful fetches
+# over a link that is measurably not that reliable.
+#
+# That bet lost on 2026-08-27 05:51Z: `clippy` was recorded as FAILED on
+# fix/a-dropped-lookup-does-not-red-a-train when the real log said
+#   error: failed to download from `https://static.crates.io/.../crc32fast`
+#   Caused by: [7] Could not connect to server
+# Every other check on that branch passed. A green branch was called red
+# by the network, which is the same class of fault as the kaniko DNS
+# break that cancelled a six-car train — and it is the likeliest
+# explanation for the unexplainable clippy/fixture reds in backlog
+# 9c7ed804, none of which reproduced by hand.
+#
+# `target/` is still wiped per run on purpose (two branches' targets do
+# not fit on one 120Gi volume). The registry cache is a few GB and is
+# content-addressed by version + checksum, so a stale entry cannot
+# produce a wrong build — only a faster one.
+export CARGO_HOME=/gate-target/cargo
+mkdir -p "$CARGO_HOME"
+# Build parallelism follows the CPU the container was actually GIVEN.
+# It was pinned at 4, so raising the gate ceiling from 6 CPU to 20 in
+# the build-node car bought nothing measurable: the gate was never
+# bound at 20, it was bound at 4, and sixteen cores sat idle. A 20-CPU
+# run on w-1 took 47 minutes against 40 on a 6-CPU control plane,
+# which is what sent me looking.
+#
+# Read the CGROUP QUOTA, not nproc: inside a container nproc reports
+# the node's core count (32 on w-1), not the slice the container may
+# use, so it would oversubscribe by 60% here.
+gate_cpus() {
+    local q p
+    if [ -r /sys/fs/cgroup/cpu.max ]; then
+        read -r q p < /sys/fs/cgroup/cpu.max
+        if [ "$q" != "max" ] && [ -n "$p" ] && [ "$p" -gt 0 ] 2>/dev/null; then
+            echo $(( (q + p - 1) / p ))
+            return
+        fi
+    fi
+    nproc 2>/dev/null || echo 4
+}
+CPUS=$(gate_cpus)
+[ "${CPUS:-0}" -ge 1 ] 2>/dev/null || CPUS=4
+
+# RUST_TEST_THREADS stays at 2 ON PURPOSE. The suites share one
+# postgres sidecar, and parallel DB-backed tests are what produced the
+# /dev/shm exhaustion and the schema-load race this rig has already
+# been bitten by. Raising both at once would also make the result
+# unattributable. Widen it as a separate, measured change.
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$CPUS}" RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
+echo "gate-runner: building ${CARGO_BUILD_JOBS}-wide (cgroup quota), tests 2-wide"
 
 # Warm the web toolchain: the mocked suite's webServer boot on a cold
 # container exceeded its timeout three times on 2026-08-23; every spec
@@ -165,6 +218,86 @@ if ! report "$VERDICT" "$SUMMARY"; then
             ;;
     esac
 fi
+
+# WHY THE FAILING OUTPUT IS REPLAYED TO STDOUT. gate.log is written to
+# /gate-target, which only the gate container mounts — not the postgres
+# sidecar, not any later Job. When this container exits, the last reader
+# of that file is gone. So a failure that cost an hour to produce left a
+# receipt naming WHICH check failed and no way whatsoever to learn WHY.
+#
+# That is not hypothetical: three branches were called red by this rig
+# and then passed every one of those same checks run by hand, and no
+# theory could be tested because the evidence died with the pod
+# (backlog 9c7ed804). A verdict nobody can explain is barely better
+# than no verdict — it teaches the reader to distrust the gate.
+#
+# stdout is the one surface that outlives the container: `kubectl logs`
+# serves a terminated pod for as long as the Job exists. gate.sh already
+# brackets every check with `::group::gate: <name>` / `::endgroup::`, so
+# we can replay exactly the sections that failed and nothing else. That
+# distinction is the whole point — a full gate.log is mostly successful
+# build chatter and dumping it whole would bury the three lines that
+# matter.
+if [ "$VERDICT" != green ]; then
+    echo "=== gate-runner: replaying failed checks from gate.log ==="
+    python3 - "$RECEIPT" /gate-target/gate.log <<'PY' || tail -200 /gate-target/gate.log || true
+import json, sys
+
+receipt_path, log_path = sys.argv[1], sys.argv[2]
+# Per-check cap. A check that fails by producing 200k lines must not
+# push the earlier failures out of the reader's scrollback.
+TAIL = 300
+
+try:
+    receipt = json.load(open(receipt_path))
+    failed = [c["name"] for c in receipt["checks"] if c["result"] != "pass"]
+except Exception as e:
+    # No receipt means gate.sh died before writing one, which is itself
+    # the interesting case. Fall through to the shell's tail.
+    print("gate-runner: receipt unreadable (%s); falling back to raw tail" % e)
+    raise SystemExit(1)
+
+if not failed:
+    print("gate-runner: verdict is not green but no check is marked failed —")
+    print("  the run died outside a check (headroom guard, or a crash before the receipt).")
+    raise SystemExit(1)
+
+wanted = {"::group::gate: %s" % name: name for name in failed}
+sections, current, buf = {}, None, []
+with open(log_path, errors="replace") as fh:
+    for line in fh:
+        stripped = line.rstrip("\n")
+        if current is None:
+            name = wanted.get(stripped)
+            if name is not None:
+                current, buf = name, []
+        elif stripped == "::endgroup::":
+            sections[current] = buf[-TAIL:]
+            current, buf = None, []
+        else:
+            buf.append(stripped)
+# An unterminated group means the check was still running when the log
+# ended — a timeout or a kill. Keep what it managed to say.
+if current is not None:
+    sections[current] = buf[-TAIL:]
+
+for name in failed:
+    body = sections.get(name)
+    print("\n----- FAILED: %s -----" % name)
+    if body is None:
+        print("  (no ::group:: block for this check in gate.log — it failed before it ran,")
+        print("   or gate.sh changed its grouping and this extractor needs updating)")
+        continue
+    if not body:
+        print("  (the check produced no output at all)")
+        continue
+    print("  last %d of %d lines:" % (min(TAIL, len(body)), len(body)))
+    for line in body:
+        print("  " + line)
+PY
+    echo "=== end of failed-check replay ==="
+fi
+
 tail -5 /gate-target/gate.log || true
 echo "gate-runner: $GATE_BRANCH@${HEAD_SHA:0:10} -> $VERDICT"
 [ "$VERDICT" = green ]
