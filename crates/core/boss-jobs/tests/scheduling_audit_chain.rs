@@ -236,7 +236,7 @@ async fn a_status_change_keeps_its_event_time_through_a_rebuild() {
             .await
             .unwrap();
 
-    TestRequest::post(&format!(
+    TestRequest::post(format!(
         "/api/scheduling/assignments/{assignment_id}/status"
     ))
     .json(&json!({"status": "confirmed"}))
