@@ -90,6 +90,29 @@ git checkout -B "$GATE_BRANCH" "origin/$GATE_BRANCH"
 HEAD_SHA=$(git rev-parse HEAD)
 
 export CARGO_TARGET_DIR=/gate-target/target
+# THE CRATE CACHE SURVIVES THE RUN, and it is a correctness fix before
+# it is a speed one. CARGO_HOME was unset, so it defaulted inside the
+# container and died with the pod — meaning every gate re-downloaded
+# every dependency from static.crates.io, and every gate was therefore
+# betting its verdict on several hundred consecutive successful fetches
+# over a link that is measurably not that reliable.
+#
+# That bet lost on 2026-08-27 05:51Z: `clippy` was recorded as FAILED on
+# fix/a-dropped-lookup-does-not-red-a-train when the real log said
+#   error: failed to download from `https://static.crates.io/.../crc32fast`
+#   Caused by: [7] Could not connect to server
+# Every other check on that branch passed. A green branch was called red
+# by the network, which is the same class of fault as the kaniko DNS
+# break that cancelled a six-car train — and it is the likeliest
+# explanation for the unexplainable clippy/fixture reds in backlog
+# 9c7ed804, none of which reproduced by hand.
+#
+# `target/` is still wiped per run on purpose (two branches' targets do
+# not fit on one 120Gi volume). The registry cache is a few GB and is
+# content-addressed by version + checksum, so a stale entry cannot
+# produce a wrong build — only a faster one.
+export CARGO_HOME=/gate-target/cargo
+mkdir -p "$CARGO_HOME"
 # Build parallelism follows the CPU the container was actually GIVEN.
 # It was pinned at 4, so raising the gate ceiling from 6 CPU to 20 in
 # the build-node car bought nothing measurable: the gate was never
