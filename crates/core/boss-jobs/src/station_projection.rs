@@ -169,7 +169,12 @@ pub fn derived_stations(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::platform_workflows;
+    // The full set a deployment has — roster plus bundle. Reading the
+    // roster alone made this suite blind the moment a kind converted:
+    // `q.platform-admin.review-design` vanished from the derived
+    // constraints because design-doc-review had moved, and the
+    // production path reads the LIVE registry, which never lost it.
+    use crate::registry::seedable_platform_workflows;
 
     fn now() -> DateTime<Utc> {
         DateTime::from_timestamp(1_760_000_000, 0).expect("fixed instant")
@@ -184,7 +189,7 @@ mod tests {
     /// those, and this assertion started life as `>= 4` — an overclaim
     /// that measured 2 and had to be corrected. The gap between 2 and
     /// 51 is not a defect; it is the reason the projection reads the
-    /// live registry at runtime and not `platform_workflows()`.
+    /// live registry at runtime and not `seedable_platform_workflows()`.
     ///
     /// One of the two is the interesting case: `review-design` is
     /// declared by BOTH `design-doc-review` and the `design-doc` kind
@@ -193,7 +198,7 @@ mod tests {
     /// `kind = "design-doc-review"` and therefore missed the second.
     #[test]
     fn the_platform_set_declares_exactly_the_constraints_it_declares() {
-        let found = constraints_of(&platform_workflows());
+        let found = constraints_of(&seedable_platform_workflows());
         let names: Vec<String> = found.iter().map(station_name).collect();
         assert_eq!(
             names,
@@ -203,10 +208,12 @@ mod tests {
                 // constraint queue of their own the moment their kind
                 // stopped being generic `task` — which is the docket.
                 "q.platform-admin.answer-question",
+                "q.platform-admin.correction-verdict",
                 "q.platform-admin.review-design",
+                "q.workflow-approver.sign-off",
                 "q.platform-admin.task",
             ],
-            "the code-seeded platform set's constraints changed"
+            "the platform set's constraints changed"
         );
         // Every constraint names both halves — a queue with no role is
         // not a constraint queue, and a role with no step kind cannot
@@ -224,7 +231,7 @@ mod tests {
     /// exists to remove, so the projection yields rather than merging.
     #[test]
     fn an_authored_name_wins_and_the_derived_row_is_dropped() {
-        let wf = platform_workflows();
+        let wf = seedable_platform_workflows();
         let all = derived_stations(&wf, &[], now());
         assert!(!all.is_empty(), "expected some derived stations");
 
@@ -247,7 +254,7 @@ mod tests {
     /// decoration. `capability` is what M and the claim CAS read.
     #[test]
     fn the_constraint_reaches_the_capability_gate() {
-        for s in derived_stations(&platform_workflows(), &[], now()) {
+        for s in derived_stations(&seedable_platform_workflows(), &[], now()) {
             let cap = s.capability.as_ref().unwrap_or_else(|| {
                 panic!(
                     "{} has no capability — its constraint is decorative",
@@ -278,7 +285,7 @@ mod tests {
     /// make a load number useless to M.
     #[test]
     fn only_actionable_steps_are_queued() {
-        for s in derived_stations(&platform_workflows(), &[], now()) {
+        for s in derived_stations(&seedable_platform_workflows(), &[], now()) {
             let step = s
                 .predicate
                 .step
@@ -302,7 +309,7 @@ mod tests {
     /// one job each, which is how a queue layer becomes noise.
     #[test]
     fn the_same_constraint_in_two_protocols_is_one_queue() {
-        let mut a = platform_workflows()
+        let mut a = seedable_platform_workflows()
             .into_iter()
             .find(|w| !w.steps.is_empty())
             .expect("a platform kind with steps");
@@ -329,7 +336,7 @@ mod tests {
     /// station ever required".
     #[test]
     fn a_retired_protocol_declares_nothing() {
-        let mut wf = platform_workflows()
+        let mut wf = seedable_platform_workflows()
             .into_iter()
             .find(|w| w.steps.iter().any(|s| s.authority_role.is_some()))
             .expect("a platform kind with a constrained step");
@@ -352,7 +359,7 @@ mod tests {
     /// unit tests would stay green.
     #[test]
     fn a_derived_name_survives_a_url_path_segment() {
-        for s in derived_stations(&platform_workflows(), &[], now()) {
+        for s in derived_stations(&seedable_platform_workflows(), &[], now()) {
             assert!(
                 !s.name.contains('/'),
                 "`{}` would not match /api/stations/{{name}}/queue",
@@ -379,7 +386,7 @@ mod tests {
     /// across the network, not by reading the code.
     #[test]
     fn a_derived_queue_matches_the_role_not_just_the_kind() {
-        for s in derived_stations(&platform_workflows(), &[], now()) {
+        for s in derived_stations(&seedable_platform_workflows(), &[], now()) {
             let step = s
                 .predicate
                 .step
@@ -403,7 +410,7 @@ mod tests {
     /// nine copies of one list.
     #[test]
     fn two_roles_on_one_step_kind_get_disjoint_predicates() {
-        let mut a = platform_workflows()
+        let mut a = seedable_platform_workflows()
             .into_iter()
             .find(|w| !w.steps.is_empty())
             .expect("a platform kind with steps");

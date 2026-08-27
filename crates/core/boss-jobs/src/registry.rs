@@ -1086,22 +1086,6 @@ pub fn seedable_platform_workflows() -> Vec<WorkflowSpec> {
 
 pub fn platform_workflows() -> Vec<WorkflowSpec> {
     vec![
-        maintenance_spec(
-            "maintenance-backup",
-            "Nightly backup",
-            "The 03:00 backup run — configs, Postgres dump, kanidm state.",
-        ),
-        maintenance_spec(
-            "maintenance-audit-integrity",
-            "Audit-log integrity check",
-            "The 03:00 chain scan + event-kind drift guard.",
-        ),
-        maintenance_spec(
-            "maintenance-ledger-replay",
-            "Ledger replay check",
-            "The 03:30 rooted-at-audit-log replay comparison.",
-        ),
-        design_doc_review_spec(),
         user_feedback_spec(),
         pr_train_spec(),
         // `workflow-design`, `regenerate-deployment` and `backlog-item`
@@ -1149,6 +1133,11 @@ pub fn platform_workflows() -> Vec<WorkflowSpec> {
 /// Deliberately NOT spawned by the dispatcher's schedule runner: it
 /// fires on SIM-day boundaries, and at warp a "daily" rule fires
 /// every couple of wall-minutes — maintenance is wall-clock work.
+// Kept only as the fidelity test's expected value — see
+// `the_platform_bundle_matches_the_specs_it_replaced`. The kind lives
+// in infra/platform/workflows.toml now, so an operator edit to it
+// survives a boot.
+#[cfg(test)]
 fn maintenance_spec(kind: &str, label: &str, description: &str) -> WorkflowSpec {
     let steps = vec![
         StepSpec {
@@ -1415,6 +1404,15 @@ fn pr_train_spec() -> WorkflowSpec {
 ///  -1. `trigger`   — someone submitted it from the chrome bar
 ///   0. `triage`    — an operator reads it and decides
 ///   999. `outcome` — closed
+// STILL IN CODE, AND BLOCKED FROM THE BUNDLE BY A LIVE CALLER.
+// `feedback_branch_for_disposition` reads this spec at RUNTIME to
+// answer which branch a triage disposition opened — deliberately, so
+// the routing table is not restated (CLAUDE.md §9a). The bundle is
+// loaded from a CARGO_MANIFEST_DIR-relative path, which exists in a
+// checkout and not in a deployed binary, so converting this kind
+// would leave that function reading a file that is not there.
+// Converting user-feedback means first teaching that helper to ask
+// the registry instead.
 fn user_feedback_spec() -> WorkflowSpec {
     // Triage is a FORK, not a checkbox. Its output is a decision about
     // what happens next, and the whole point of recording it on the
@@ -1766,6 +1764,11 @@ pub fn feedback_branch_for_disposition(disposition: &str) -> Option<FeedbackBran
 ///                        `/api/design/flush-jobs` extracts them
 ///                        to ADRs.
 ///  999. `outcome`      — review complete; decisions captured
+// Kept only as the fidelity test's expected value — see
+// `the_platform_bundle_matches_the_specs_it_replaced`. The kind lives
+// in infra/platform/workflows.toml now, so an operator edit to it
+// survives a boot.
+#[cfg(test)]
 fn design_doc_review_spec() -> WorkflowSpec {
     let steps = vec![
         StepSpec {
@@ -3881,6 +3884,22 @@ mod tests {
             regenerate_deployment_spec(),
             backlog_item_spec(),
             ship_a_change_spec(),
+            design_doc_review_spec(),
+            maintenance_spec(
+                "maintenance-backup",
+                "Nightly backup",
+                "The 03:00 backup run \u{2014} configs, Postgres dump, kanidm state.",
+            ),
+            maintenance_spec(
+                "maintenance-audit-integrity",
+                "Audit-log integrity check",
+                "The 03:00 chain scan + event-kind drift guard.",
+            ),
+            maintenance_spec(
+                "maintenance-ledger-replay",
+                "Ledger replay check",
+                "The 03:30 rooted-at-audit-log replay comparison.",
+            ),
         ];
         // Every CONVERTED kind must still be here. This is the
         // load-bearing half and it has earned its keep: it went red
@@ -5530,11 +5549,12 @@ mod tests {
         // new protocol never touches Rust at all.
         assert_eq!(
             kinds.len(),
-            6,
-            "ships design-doc-review + user-feedback + pr-train + the three \
-             maintenance kinds (backup / audit-integrity / ledger-replay — \
-             internal-forge Q6). workflow-design, regenerate-deployment, \
-             backlog-item and ship-a-change are in the bundle, not here."
+            2,
+            "`pr-train` (its own car — the conductor rides it) and \
+             `user-feedback` (blocked: feedback_branch_for_disposition reads its \
+             spec at runtime). Everything else moved to \
+             infra/platform/workflows.toml. This roster empties and never \
+             refills, and a new protocol never touches Rust at all."
         );
         // NO TENANT NOUNS IN CORE. David, 2026-08-16: "We don't want
         // brewery nouns in core no matter what. But most nouns should
@@ -5762,10 +5782,12 @@ mod tests {
         assert_eq!(design.subject_kinds, vec!["custom".to_string()]);
         assert_eq!(design.owning_team, "platform");
 
-        let review = kinds
+        // design-doc-review moved to the bundle, so it is asserted
+        // there. `kinds` is the code roster and no longer holds it.
+        let review = bundled_kinds
             .iter()
             .find(|k| k.kind == "design-doc-review")
-            .expect("design-doc-review present");
+            .expect("design-doc-review present in the bundle");
         assert_eq!(review.version, 1);
         assert_eq!(review.status, WorkflowStatus::Active);
 
@@ -5833,7 +5855,7 @@ mod tests {
         // immutability then sealed the empty value forever
         // ("Failed to load doc: step.metadata.doc_path is empty",
         // 2026-07-14).
-        let kinds = platform_workflows();
+        let kinds = seedable_platform_workflows();
         let review = kinds
             .iter()
             .find(|k| k.kind == "design-doc-review")
@@ -5898,13 +5920,15 @@ mod tests {
         assert_eq!(steps[3].kind, "workflow-publish"); // publish
         assert!(steps[3].terminal.is_some(), "publish is the terminal step");
 
-        // design-doc-review is still code-supplied, so it is asserted
-        // against the code — this test now reads both registries, which
-        // is what the split actually looks like.
-        let review = platform_workflows()
+        // design-doc-review is bundle-supplied now, like workflow-design
+        // above it. Both halves of this test read the bundle, which is
+        // what the split looks like once a kind finishes converting —
+        // the comment here said "still code-supplied" and had to move
+        // with the kind rather than be left describing the old world.
+        let review = seedable_platform_workflows()
             .into_iter()
             .find(|k| k.kind == "design-doc-review")
-            .expect("design-doc-review present in platform_workflows");
+            .expect("design-doc-review present");
         assert_eq!(review.steps.len(), 3, "review lifecycle has 3 steps");
     }
 

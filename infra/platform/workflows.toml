@@ -953,3 +953,146 @@ ready_when = "steps.scope.done AND job.metadata.abandoned = \"true\""
 title_template = "Abandoned"
 terminal = { outcome = "abandoned" }
 metadata_defaults = { outcome_kind = "aborted" }
+
+# ---------------------------------------------------------------------------
+# The rest of the platform roster. With ship-a-change converted the loader
+# is proven on the highest-traffic kind there is, so the remaining five move
+# together rather than one car at a time — the residual risk was never the
+# loader, it was transcription, and these rows are GENERATED from the specs
+# they replace and verified field-for-field, steps included.
+#
+# `pr-train` is deliberately NOT here. It is what the conductor runs on, and
+# it gets its own car and its own gate so a bad row cannot take the trains
+# down with everything else.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "design-doc-review"
+label = "Review a design doc"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Meta-kind: every design doc under docs/design/ gets reviewed via a Job of this kind. The `review-design` step uses a custom Step UX plugin that reads the doc's open questions (parsed by boss-docs-api from `### Qn:` headings) and gates completion until each one has a recorded resolution. Resolutions land in `/api/design/pending-decisions`; subsequent `/api/design/flush-jobs` writes them into the source doc's Decision-history section (each release, settled material folds into `docs/architecture-decisions.md` and the source doc is deleted). Replaces the in-app decision-tracker surface retired on 2026-05-03."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "open"
+kind = "trigger"
+ready_when = "true"
+title_template = "Design doc opened for review"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "design-doc-author-opens-review" }
+
+[[workflow.step]]
+title = "review"
+kind = "review-design"
+ready_when = "steps.open.done"
+title_template = "Review design doc \u2014 address open questions"
+authority_role = "platform-admin"
+metadata_defaults = { doc_path = "{subject.id}", resolutions = [] }
+
+[[workflow.step]]
+title = "reviewed"
+kind = "outcome"
+ready_when = "steps.review.done"
+title_template = "Design reviewed \u2014 decisions captured"
+terminal = { outcome = "completed" }
+metadata_defaults = { outcome_kind = "completed" }
+
+[[workflow]]
+kind = "maintenance-backup"
+label = "Nightly backup"
+category = "The 03:00 backup run \u2014 configs, Postgres dump, kanidm state."
+subject_kinds = ["custom"]
+owning_team = "platform"
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "systemd-timer" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Run to completion"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "result"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done"
+title_template = "Maintenance completed"
+terminal = { outcome = "completed" }
+
+[[workflow]]
+kind = "maintenance-audit-integrity"
+label = "Audit-log integrity check"
+category = "The 03:00 chain scan + event-kind drift guard."
+subject_kinds = ["custom"]
+owning_team = "platform"
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "systemd-timer" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Run to completion"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "result"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done"
+title_template = "Maintenance completed"
+terminal = { outcome = "completed" }
+
+[[workflow]]
+kind = "maintenance-ledger-replay"
+label = "Ledger replay check"
+category = "The 03:30 rooted-at-audit-log replay comparison."
+subject_kinds = ["custom"]
+owning_team = "platform"
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "systemd-timer" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Run to completion"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "result"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done"
+title_template = "Maintenance completed"
+terminal = { outcome = "completed" }
