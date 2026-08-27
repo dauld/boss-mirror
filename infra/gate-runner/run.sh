@@ -149,6 +149,86 @@ except Exception as e:
 PY
 )
 report "$VERDICT" "$SUMMARY" || echo "WARN: verdict not reported — packet will go overdue (the alarm still works)"
+
+# WHY THE FAILING OUTPUT IS REPLAYED TO STDOUT. gate.log is written to
+# /gate-target, which only the gate container mounts — not the postgres
+# sidecar, not any later Job. When this container exits, the last reader
+# of that file is gone. So a failure that cost an hour to produce left a
+# receipt naming WHICH check failed and no way whatsoever to learn WHY.
+#
+# That is not hypothetical: three branches were called red by this rig
+# and then passed every one of those same checks run by hand, and no
+# theory could be tested because the evidence died with the pod
+# (backlog 9c7ed804). A verdict nobody can explain is barely better
+# than no verdict — it teaches the reader to distrust the gate.
+#
+# stdout is the one surface that outlives the container: `kubectl logs`
+# serves a terminated pod for as long as the Job exists. gate.sh already
+# brackets every check with `::group::gate: <name>` / `::endgroup::`, so
+# we can replay exactly the sections that failed and nothing else. That
+# distinction is the whole point — a full gate.log is mostly successful
+# build chatter and dumping it whole would bury the three lines that
+# matter.
+if [ "$VERDICT" != green ]; then
+    echo "=== gate-runner: replaying failed checks from gate.log ==="
+    python3 - "$RECEIPT" /gate-target/gate.log <<'PY' || tail -200 /gate-target/gate.log || true
+import json, sys
+
+receipt_path, log_path = sys.argv[1], sys.argv[2]
+# Per-check cap. A check that fails by producing 200k lines must not
+# push the earlier failures out of the reader's scrollback.
+TAIL = 300
+
+try:
+    receipt = json.load(open(receipt_path))
+    failed = [c["name"] for c in receipt["checks"] if c["result"] != "pass"]
+except Exception as e:
+    # No receipt means gate.sh died before writing one, which is itself
+    # the interesting case. Fall through to the shell's tail.
+    print("gate-runner: receipt unreadable (%s); falling back to raw tail" % e)
+    raise SystemExit(1)
+
+if not failed:
+    print("gate-runner: verdict is not green but no check is marked failed —")
+    print("  the run died outside a check (headroom guard, or a crash before the receipt).")
+    raise SystemExit(1)
+
+wanted = {"::group::gate: %s" % name: name for name in failed}
+sections, current, buf = {}, None, []
+with open(log_path, errors="replace") as fh:
+    for line in fh:
+        stripped = line.rstrip("\n")
+        if current is None:
+            name = wanted.get(stripped)
+            if name is not None:
+                current, buf = name, []
+        elif stripped == "::endgroup::":
+            sections[current] = buf[-TAIL:]
+            current, buf = None, []
+        else:
+            buf.append(stripped)
+# An unterminated group means the check was still running when the log
+# ended — a timeout or a kill. Keep what it managed to say.
+if current is not None:
+    sections[current] = buf[-TAIL:]
+
+for name in failed:
+    body = sections.get(name)
+    print("\n----- FAILED: %s -----" % name)
+    if body is None:
+        print("  (no ::group:: block for this check in gate.log — it failed before it ran,")
+        print("   or gate.sh changed its grouping and this extractor needs updating)")
+        continue
+    if not body:
+        print("  (the check produced no output at all)")
+        continue
+    print("  last %d of %d lines:" % (min(TAIL, len(body)), len(body)))
+    for line in body:
+        print("  " + line)
+PY
+    echo "=== end of failed-check replay ==="
+fi
+
 tail -5 /gate-target/gate.log || true
 echo "gate-runner: $GATE_BRANCH@${HEAD_SHA:0:10} -> $VERDICT"
 [ "$VERDICT" = green ]
