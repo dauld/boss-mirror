@@ -1723,9 +1723,35 @@ pub(crate) fn stall_age_hours(
 /// Which boarded cars a cancelled train releases back to the dock:
 /// the still-open ones. A closed or cancelled car's record is history
 /// — merged or abandoned, either way not the cancel path's to touch.
-pub(crate) fn releasable_cars(cars: &[Value]) -> Vec<&Value> {
+/// A CAR IS RELEASED ONLY IF IT STILL SAYS IT IS OURS.
+///
+/// Two facts answer "which cars are on this train": the train's
+/// `boarded_jobs` list and each car's own `metadata.train`. Only the
+/// second is maintained — releasing a car clears the car's marker and
+/// leaves the train's list naming it forever. `parked_ready` and
+/// `receipt_skip_reason` both read the CAR, so the car is authoritative
+/// in practice while this function iterates the copy that drifts.
+///
+/// Cancelling a long-dead train therefore used to strip cars off a
+/// LIVE one. Done on 2026-08-27: finishing the cancel of e1de28a3
+/// released three cars that had since reboarded onto 1597b4a4, the next
+/// board swept them onto a third train, and two trains believed they
+/// carried the same consist. Nothing warned, because from inside the
+/// loop a stale id and a current one look identical.
+///
+/// So the train's list proposes and the car disposes. A car naming a
+/// different train has moved on; a car naming none was already released
+/// and re-stamping it would overwrite a `skip_reason` that already says
+/// where it has been.
+pub(crate) fn releasable_cars<'a>(cars: &'a [Value], train_id: &str) -> Vec<&'a Value> {
     cars.iter()
         .filter(|c| c.get("status").and_then(Value::as_str) == Some("open"))
+        .filter(|c| {
+            c.get("metadata")
+                .and_then(|m| m.get("train"))
+                .and_then(Value::as_str)
+                .is_some_and(|t| t == train_id)
+        })
         .collect()
 }
 
@@ -4413,7 +4439,32 @@ impl Conductor {
         for cid in &boarded {
             cars.push(self.get_job(cid).await?);
         }
-        for car in releasable_cars(&cars) {
+        // Say what is NOT being released, and why. A car that moved on
+        // is the interesting case: silently skipping it would leave the
+        // operator with a cancel that released fewer cars than the train
+        // claims to carry, and no way to tell whether that was correct.
+        for car in &cars {
+            if car.get("status").and_then(Value::as_str) != Some("open") {
+                continue;
+            }
+            let owner = car
+                .get("metadata")
+                .and_then(|m| m.get("train"))
+                .and_then(Value::as_str);
+            match owner {
+                Some(t) if t == tid => {}
+                Some(other) => log(format!(
+                    "car {} now rides {} — not releasing it",
+                    id8(job_id(car)?),
+                    id8(other)
+                )),
+                None => log(format!(
+                    "car {} was already released — leaving its record alone",
+                    id8(job_id(car)?)
+                )),
+            }
+        }
+        for car in releasable_cars(&cars, tid) {
             let cid = job_id(car)?;
             // NOTHING TO REOPEN. Releasing a car is a metadata write and
             // only a metadata write, because boarding no longer completes
@@ -5739,13 +5790,50 @@ mod tests {
         let mut cancelled = landed_car("car-3", "feat/z");
         cancelled["status"] = json!("cancelled");
         let cars = vec![open, landed, cancelled];
-        let released: Vec<&str> = releasable_cars(&cars)
+        let released: Vec<&str> = releasable_cars(&cars, "t-1")
             .iter()
             .map(|c| c.get("id").and_then(Value::as_str).unwrap())
             .collect();
         // Closed cars are history — merged or abandoned, not ours to
         // touch. Only the open car returns to the dock.
         assert_eq!(released, vec!["car-1"]);
+    }
+
+    /// A CANCEL MUST NOT STRIP A CAR OFF A DIFFERENT, LIVE TRAIN.
+    ///
+    /// The train's `boarded_jobs` is written once at boarding and never
+    /// updated when a car is released, so a long-dead train keeps naming
+    /// cars that have since reboarded elsewhere. Cancelling it then
+    /// released them again — off a running consist.
+    ///
+    /// Done on 2026-08-27: cancelling e1de28a3 freed three cars that
+    /// were legitimately aboard 1597b4a4, the next board swept them onto
+    /// a third train, and two trains believed they carried the same
+    /// three cars while the cars named a fourth. The car's own
+    /// `metadata.train` is the field `parked_ready` and
+    /// `receipt_skip_reason` both read, so it is authoritative; the
+    /// train's list is the copy that drifts.
+    #[test]
+    fn cancel_leaves_a_car_that_has_since_boarded_another_train() {
+        let mine = json!({"id": "car-1", "status": "open",
+                          "metadata": {"train": "t-1", "branch": "feat/x"}});
+        let moved_on = json!({"id": "car-2", "status": "open",
+                              "metadata": {"train": "t-2", "branch": "feat/y"}});
+        // A car released earlier carries no train at all. It is not ours
+        // to re-release, and stamping it again would overwrite a
+        // skip_reason that already explains where it has been.
+        let already_free = json!({"id": "car-3", "status": "open",
+                                  "metadata": {"branch": "feat/z"}});
+        let cars = vec![mine, moved_on, already_free];
+        let released: Vec<&str> = releasable_cars(&cars, "t-1")
+            .iter()
+            .map(|c| c.get("id").and_then(Value::as_str).unwrap())
+            .collect();
+        assert_eq!(
+            released,
+            vec!["car-1"],
+            "only the car whose own metadata.train still names this train may be released"
+        );
     }
 
     #[test]
