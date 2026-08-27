@@ -606,14 +606,21 @@ impl SchedulingRepository for PgScheduling {
         stamp: &boss_core::publisher::EventStamp,
     ) -> Result<(), SchedulingError> {
         let mut tx = self.pool.begin().await.map_err(storage)?;
+        // created_at IS BOUND, NOT NOW(). It used to be the Postgres
+        // server clock on both the insert (schema default) and the
+        // conflict-update, while the event published `rotated_at: now`
+        // from the sim clock -- two clocks, so the value in the row was
+        // never in the log and no rebuild could reproduce it (d7b8158e,
+        // same shape as the assignment fix).
         sqlx::query(
-            "INSERT INTO tech_calendar_tokens (employee_id, token) \
-             VALUES ($1, $2) \
+            "INSERT INTO tech_calendar_tokens (employee_id, token, created_at) \
+             VALUES ($1, $2, $3) \
              ON CONFLICT (employee_id) DO UPDATE \
-               SET token = EXCLUDED.token, created_at = NOW()",
+               SET token = EXCLUDED.token, created_at = EXCLUDED.created_at",
         )
         .bind(employee_id)
         .bind(new_token)
+        .bind(now)
         .execute(&mut *tx)
         .await
         .map_err(storage)?;

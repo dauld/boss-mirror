@@ -171,14 +171,24 @@ pub async fn rebuild_scheduling(pool: &PgPool) -> Result<RebuildReport, RebuildE
                         .and_then(|v| v.as_str())
                         .map(String::from);
                     if let (Some(emp_id), Some(token)) = (emp_id, token) {
+                        // created_at from the event (rotated_at), not the
+                        // rebuild clock -- see the live write in postgres.rs.
+                        let rotated_at = ev
+                            .payload
+                            .get("rotated_at")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                            .map(|d| d.with_timezone(&chrono::Utc))
+                            .unwrap_or(ev.ts);
                         sqlx::query(
                             "INSERT INTO tech_calendar_tokens (employee_id, token, created_at) \
-                             VALUES ($1, $2, NOW()) \
+                             VALUES ($1, $2, $3) \
                              ON CONFLICT (employee_id) DO UPDATE SET \
                                 token = EXCLUDED.token, created_at = EXCLUDED.created_at",
                         )
                         .bind(&emp_id)
                         .bind(&token)
+                        .bind(rotated_at)
                         .execute(&mut *conn)
                         .await
                         .map_err(|e| e.to_string())?;

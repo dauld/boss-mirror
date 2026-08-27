@@ -195,3 +195,56 @@ async fn scheduling_writes_survive_rebuild() {
     assert_eq!(post_shift, pre_shift);
     assert_eq!(post_token, pre_token);
 }
+
+/// A calendar-token rotation must replay with the SAME created_at.
+///
+/// The live write stamped created_at with the Postgres clock while the
+/// event published `rotated_at` from the sim clock, and the rebuild used
+/// NOW() again -- three chances to disagree, none of them the value in
+/// the log. A published ICS URL resolves on the token, but the
+/// created_at drifted on every rebuild. Same family as the assignment
+/// fix (d7b8158e); asserts the value, not the row count.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_calendar_token_keeps_its_event_time_through_a_rebuild() {
+    let db = TestDb::new().await;
+    seed_employee_and_target_job(
+        &db.pool,
+        "emp-tech-003",
+        "33333333-3333-3333-3333-333333333333",
+    )
+    .await;
+    let app = build_app(db.pool.clone());
+
+    TestRequest::post("/api/scheduling/techs/emp-tech-003/calendar-token")
+        .json(&json!({}))
+        .send(&app)
+        .await
+        .assert_status(StatusCode::OK);
+
+    let (created_before,): (chrono::DateTime<chrono::Utc>,) = sqlx::query_as(
+        "SELECT created_at FROM tech_calendar_tokens WHERE employee_id = 'emp-tech-003'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+
+    drain_outbox(&db.pool).await;
+    sqlx::query("DELETE FROM tech_calendar_tokens")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let report = rebuild_scheduling(&db.pool).await.expect("rebuild");
+    assert!(report.calendar_tokens_rotated >= 1, "{report:?}");
+
+    let (created_after,): (chrono::DateTime<chrono::Utc>,) = sqlx::query_as(
+        "SELECT created_at FROM tech_calendar_tokens WHERE employee_id = 'emp-tech-003'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        created_after, created_before,
+        "created_at must come from the event's rotated_at, not the rebuild's clock"
+    );
+}
