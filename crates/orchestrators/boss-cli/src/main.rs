@@ -146,6 +146,10 @@ enum Commands {
         /// Poll the gate-run packet until it reports a verdict.
         #[arg(long)]
         wait: bool,
+        /// Launch even if the build resource is at capacity. The
+        /// override for a human who has weighed the contention.
+        #[arg(long)]
+        force: bool,
         /// Show what would happen without filing or creating anything.
         #[arg(long)]
         dry_run: bool,
@@ -610,8 +614,9 @@ async fn main() -> Result<()> {
             manifest,
             namespace,
             wait,
+            force,
             dry_run,
-        } => gate::run(&branch, mode, manifest, &namespace, wait, dry_run).await,
+        } => gate::run(&branch, mode, manifest, &namespace, wait, dry_run, force).await,
         Commands::Queue { column } => queue::run(&column).await,
         Commands::Packet { action } => match action {
             PacketAction::Census {

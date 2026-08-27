@@ -32,8 +32,12 @@
 //!
 //! Concurrency past that is bounded by the node, not by correctness.
 //! Five parallel gates put w-1 at 65% I/O pressure with CPU pressure at
-//! 0.00 and stretched a 35-minute gate to 93 minutes — so a soft warning
-//! at [`CROWDED`] says so, and does not refuse.
+//! 0.00 and stretched a 35-minute gate to 93 minutes; two past the knee
+//! were killed by the Job deadline mid-run and lost their verdicts. So
+//! the build resource has a CAPACITY ([`BUILD_CAPACITY`]) and this verb
+//! REFUSES to exceed it unless forced — the design doc's Layer 1
+//! (capacity as a bandwidth over the build resource) in its simplest
+//! form, enforced at launch.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -47,9 +51,34 @@ use crate::train::{boss_user, env_or};
 /// the constraint. Measured on w-1 (32 cores, one NVMe): at five
 /// concurrent gates I/O pressure sat at 65% while CPU pressure stayed
 /// at 0.00, and per-gate wall time went from ~35 to ~93 minutes.
-/// Throughput was still better than running them one at a time — which
-/// is why this warns rather than refuses.
-const CROWDED: usize = 3;
+/// The build resource's capacity: the most gates that may run at once on
+/// one build node before the node, not the gate, is the constraint.
+///
+/// Three is the measured knee on w-1 (32 cores, one NVMe): beyond it,
+/// per-gate wall time rises faster than throughput, and on 2026-08-26 two
+/// gates past it were killed by the Job's activeDeadlineSeconds mid-run,
+/// destroying their verdicts (488c629e). When the resource model of the
+/// scheduling design doc lands, this reads from a station bandwidth; until
+/// then it is this constant.
+const BUILD_CAPACITY: usize = 3;
+
+/// Whether a launch must be refused because the build resource is full.
+///
+/// Pure so the threshold is testable without a cluster. `force` is the
+/// operator override — a human who has weighed the contention and wants
+/// the gate anyway, which is different from the fire-and-hope this
+/// replaces. Returns the refusal message, or None to proceed.
+fn capacity_refusal(running: usize, capacity: usize, force: bool) -> Option<String> {
+    if force || running < capacity {
+        return None;
+    }
+    Some(format!(
+        "the build resource is at capacity: {running} gate(s) already running, limit \
+         {capacity}. Beyond this the node is the constraint, not the gate — on \
+         2026-08-26 two gates past the limit were killed by the Job deadline mid-run \
+         and lost their verdicts. Wait for a slot, or pass --force to launch anyway."
+    ))
+}
 
 /// The placeholders the runner manifest carries.
 const BRANCH_PLACEHOLDER: &str = "$GATE_BRANCH";
@@ -265,6 +294,7 @@ pub async fn run(
     namespace: &str,
     wait: bool,
     dry: bool,
+    force: bool,
 ) -> Result<()> {
     let manifest_path =
         manifest.unwrap_or_else(|| PathBuf::from("infra/gate-runner/gate-runner.yaml"));
@@ -343,13 +373,8 @@ pub async fn run(
             manifest_path.display()
         );
     }
-    if !shared && running >= CROWDED {
-        eprintln!(
-            "boss gate: {running} gates already running. Each has its own workspace so the \
-             verdicts are safe, but the node becomes the constraint — measured at five \
-             concurrent gates: 65% I/O pressure, 0.00 CPU pressure, per-gate wall time \
-             ~35min -> ~93min. Proceeding."
-        );
+    if !shared && let Some(msg) = capacity_refusal(running, BUILD_CAPACITY, force) {
+        bail!("{msg}");
     }
 
     if dry {
@@ -541,6 +566,32 @@ apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: gate-runner-disk
         })];
         assert_eq!(reusable_packet(&open, "fix/x", "cafebabe"), None);
         assert_eq!(reusable_packet(&open, "fix/y", "deadbeef"), None);
+    }
+
+    /// THE LIMIT THAT REPLACES A FIRE-AND-HOPE WARNING.
+    ///
+    /// Below capacity, launch. At or above it, refuse — because past
+    /// the measured knee the node is the constraint and, on 2026-08-26,
+    /// two gates past it were deadline-killed and lost their verdicts.
+    #[test]
+    fn a_launch_below_capacity_proceeds_and_at_capacity_is_refused() {
+        assert!(capacity_refusal(0, 3, false).is_none());
+        assert!(capacity_refusal(2, 3, false).is_none(), "one slot left");
+        let refused = capacity_refusal(3, 3, false).expect("at capacity refuses");
+        assert!(refused.contains("at capacity"), "{refused}");
+        assert!(
+            capacity_refusal(4, 3, false).is_some(),
+            "over capacity refuses"
+        );
+    }
+
+    /// --force is the operator override, and it must actually override —
+    /// a human who has weighed the contention is different from the
+    /// fire-and-hope this replaced.
+    #[test]
+    fn force_overrides_the_capacity_limit() {
+        assert!(capacity_refusal(3, 3, true).is_none());
+        assert!(capacity_refusal(99, 3, true).is_none());
     }
 
     #[test]
