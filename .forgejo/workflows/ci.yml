@@ -86,18 +86,67 @@ jobs:
           printf '{"auths":{"10.20.0.15:3000":{"auth":"%s"}}}' \
             "$(printf 'david:%s' "$TOKEN" | base64 | tr -d '\n')" \
             > /kaniko/.docker/config.json
-          # No --build-arg for the stamp: the Dockerfile hashes its own
-          # build context. This job has no checkout, so any `cat
-          # Dockerfile` here would have hashed empty input and stamped
-          # the image with a value locomotive could never match.
-          /kaniko/executor \
-            --context "git://david:${TOKEN}@10.20.0.15:3000/david/boss.git#${GITHUB_SHA}" \
-            --context-sub-path infra/forge/boss-ci \
-            --dockerfile Dockerfile \
-            --destination 10.20.0.15:3000/david/boss-ci:rust1.96 \
-            --insecure --skip-tls-verify \
-            --cache=true \
-            --cache-repo 10.20.0.15:3000/david/boss-ci-cache
+          # RETRIED, BECAUSE ONE DROPPED LOOKUP USED TO COST A TRAIN.
+          #
+          # Run 248 (2026-08-26) died here with `lookup
+          # production.cloudfront.docker.com on 127.0.0.11:53: no such
+          # host` while fetching a BLOB — kaniko had already cached the
+          # manifest, so a warm cache does not protect this path. The
+          # other four jobs were skipped, a six-car train went red with
+          # no car at fault, and because the forge has no rerun API the
+          # only recovery was cancel-and-reboard: every car back to the
+          # dock and two hours of gate time queued again.
+          #
+          # Container DNS here has no redundancy at any hop —
+          # 127.0.0.11 to the host's systemd-resolved stub to a single
+          # upstream with no secondary — so a single dropped answer
+          # fails the build outright.
+          #
+          # ONLY TRANSIENT FAILURES ARE RETRIED. Retrying everything
+          # would turn a broken Dockerfile into three identical
+          # failures and triple the time before the real message is
+          # visible. This is the same line boss-testing draws for the
+          # database: a closed socket is weather, a rejected statement
+          # is a defect in the change under test and must fail loudly
+          # on the first try.
+          # Output is captured in a VARIABLE, not a file. The kaniko
+          # executor image is minimal and has no /tmp: redirecting to
+          # /tmp/kaniko.log fails with "nonexistent directory" and takes
+          # the whole build with it (caught on train #121, 2026-08-27 —
+          # a fix for a 2% DNS flake that became a 100% break, because
+          # the gate does not run build-image and could not see it).
+          MAX_ATTEMPTS=3
+          attempt=1
+          while :; do
+            set +e
+            OUT="$(/kaniko/executor \
+                --context "git://david:${TOKEN}@10.20.0.15:3000/david/boss.git#${GITHUB_SHA}" \
+                --context-sub-path infra/forge/boss-ci \
+                --dockerfile Dockerfile \
+                --destination 10.20.0.15:3000/david/boss-ci:rust1.96 \
+                --insecure --skip-tls-verify \
+                --cache=true \
+                --cache-repo 10.20.0.15:3000/david/boss-ci-cache 2>&1)"
+            rc=$?
+            set -e
+            printf '%s\n' "$OUT"
+            [ "$rc" -eq 0 ] && break
+            if ! printf '%s' "$OUT" | grep -qiE 'no such host|i/o timeout|dial tcp|connection refused|TLS handshake timeout|temporary failure in name resolution'; then
+              echo "build-image: failure is not a network fault, not retrying."
+              echo "  The message above is the real one; read it rather than the retry count."
+              exit 1
+            fi
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "build-image: transient network fault persisted across ${MAX_ATTEMPTS} attempts."
+              echo "  This is no longer weather. Check DNS on the runner host:"
+              echo "    resolvectl status        # is there still only one upstream?"
+              echo "    docker run --rm alpine:3 getent hosts production.cloudfront.docker.com"
+              exit 1
+            fi
+            echo "build-image: transient network fault, retrying (${attempt}/${MAX_ATTEMPTS})."
+            attempt=$((attempt + 1))
+            sleep $((attempt * 5))
+          done
 
   # The locomotive goes first. On 2026-08-12 forge train #1 burned five
   # red rounds and every cause was environment, not car code — so the
