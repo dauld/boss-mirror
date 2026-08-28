@@ -535,6 +535,36 @@ well-formed and confident and wrong. Before concluding something *does
 not exist*, run a query on the same connection whose answer you already
 know.
 
+### Three things that each cost a gate
+
+Written down because each was paid for once, and none of them is
+discoverable from the code. A gate is roughly forty minutes of cluster
+time and a pod; these are the ways to spend one for nothing.
+
+- **A branch must not move while its gate is running.** The gate tests
+  the head it resolved at launch, so a commit pushed mid-run leaves a
+  receipt vouching for a commit that is no longer the tip — and
+  `boss park` then refuses the car, correctly. If more work belongs on
+  a gated branch, wait for the verdict or start a second branch. The
+  same rule is why a rebase invalidates a parked car: see
+  `job.metadata.regate_receipt` for the repair.
+
+- **A car edits a contended file at its peril.** Several cars in flight
+  at once routinely touch `gate.rs`, `park.rs`, `train.rs`. Two cars
+  changing the same file merge cleanly and *conflict at assembly* — or
+  worse, resolve by taking one side and silently reverting the other.
+  Before starting a change, check what the parked cars already touch;
+  a trial `git merge-tree` is NOT sufficient, because it under-reports.
+  Do the merge in a scratch branch and read the result.
+
+- **Prose with backticks does not survive argv.** `boss park --summary`
+  and friends take their text through the shell, so a backtick becomes
+  command substitution and the phrase is replaced by nothing —
+  silently, because the shell substitutes rather than fails. The
+  receipt is safe (a machine copies it); what gets eaten is exactly the
+  material a person wrote. Quote with single quotes, or keep backticks
+  out of car prose.
+
 ---
 
 ## What We Don't Do
