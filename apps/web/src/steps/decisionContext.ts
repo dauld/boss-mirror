@@ -20,7 +20,11 @@
 //
 // Pure so it is testable without a DOM; the component owns the fetch.
 
-export type DecisionContextSource = 'step' | 'job-context' | 'job-message';
+export type DecisionContextSource =
+  | 'step'
+  | 'job-context'
+  | 'job-message'
+  | 'prior-steps';
 
 export type DecisionContext = {
   text: string;
@@ -46,4 +50,56 @@ export function contextFromJob(
   const msg = nonEmptyString(jobMetadata['message']);
   if (msg) return { text: msg, source: 'job-message' };
   return null;
+}
+
+/// The fourth source: what the packet's earlier steps recorded.
+///
+/// The three sources above cover a packet whose case is stated ONCE —
+/// a user-feedback packet's `message`, or a briefing someone wrote by
+/// hand. They do not cover a packet whose case ACCUMULATES, which is
+/// what a multi-step protocol produces: a protocol-retro's findings sit
+/// in `collect`, `analyze`, `gaps` and `report`; a rotate-a-credential's
+/// case sits in `scope`. Both reached a human decision with the panel
+/// empty on 2026-08-28, and both were described the same way David
+/// described the original defect — the job was unworkable.
+///
+/// That is the same failure this file was written for, one shape along.
+/// Its own header records the review plugin learning it once already:
+/// "a reviewer answered four questions blind because the prose sat in
+/// the OTHER metadata bag."
+///
+/// Gathers long-form prose from steps that are DONE, in order, labelled
+/// by the step that recorded it. Short values are skipped: a receipt, a
+/// disposition or a sha is a field, not a case, and pasting them under a
+/// decision would bury the prose that matters.
+export type PriorStep = {
+  title?: string;
+  status?: string;
+  metadata?: Record<string, unknown> | null;
+};
+
+/// Values shorter than this are fields, not prose.
+const PROSE_MIN = 120;
+
+/// Keys that are never the case for a decision, however long they run.
+const NOT_PROSE = new Set(['context_md', 'receipt', 'pr_url', 'branch', 'sha']);
+
+export function contextFromPriorSteps(steps: PriorStep[]): DecisionContext | null {
+  const sections: string[] = [];
+  for (const step of steps) {
+    if (step.status !== 'completed') continue;
+    const md = step.metadata ?? {};
+    const parts: string[] = [];
+    for (const [key, value] of Object.entries(md)) {
+      if (NOT_PROSE.has(key)) continue;
+      const text = nonEmptyString(value);
+      if (!text || text.length < PROSE_MIN) continue;
+      parts.push(`**${key}**\n\n${text}`);
+    }
+    if (parts.length) {
+      sections.push(`### ${step.title ?? 'Earlier step'}\n\n${parts.join('\n\n')}`);
+    }
+  }
+  if (!sections.length) return null;
+  return { text: sections.join('\n\n'), source: 'prior-steps' };
 }

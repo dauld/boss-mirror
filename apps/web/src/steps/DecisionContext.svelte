@@ -8,7 +8,11 @@
   // (2244db9e) — safe for {@html} because every character is escaped
   // before any tag the renderer emits.
   import { renderMarkdown } from '@boss/web-kit/markdown';
-  import { contextFromJob, contextFromStep } from './decisionContext';
+  import {
+    contextFromJob,
+    contextFromPriorSteps,
+    contextFromStep,
+  } from './decisionContext';
   import type { DecisionContext } from './decisionContext';
 
   type Props = {
@@ -34,9 +38,18 @@
           headers: { accept: 'application/json' },
         });
         if (!r.ok || cancelled) return;
-        const job = (await r.json()) as { metadata?: Record<string, unknown> };
+        const job = (await r.json()) as {
+          metadata?: Record<string, unknown>;
+          steps?: { title?: string; status?: string; metadata?: Record<string, unknown> }[];
+        };
         if (cancelled) return;
-        resolved = contextFromJob(job.metadata ?? {});
+        // The job's own briefing, then what earlier steps recorded. The
+        // fourth source is what makes a multi-step protocol legible: a
+        // retro's case is spread across four completed steps, and a
+        // rotation's sits in `scope`. Both reached a decision with this
+        // panel empty before it existed.
+        resolved =
+          contextFromJob(job.metadata ?? {}) ?? contextFromPriorSteps(job.steps ?? []);
       } catch {
         // No context is a quiet absence, never a broken surface.
       }
@@ -48,6 +61,7 @@
 
   const sourceLabel: Record<DecisionContext['source'], string> = {
     step: 'written for this step',
+    'prior-steps': 'recorded by earlier steps',
     'job-context': 'the packet’s briefing',
     'job-message': 'the packet as filed',
   };
