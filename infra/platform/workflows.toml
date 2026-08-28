@@ -157,6 +157,11 @@ title = "validate"
 kind = "task"
 ready_when = "steps.author.done"
 title_template = "Validate spec"
+# The next step is a sign-off, and required metadata is checked at
+# COMPLETION — so the constraint that guarantees the approver has
+# something to read lives HERE, not there. Phase 4 of the viability
+# lint refuses the alternative.
+fields = [{ name = "sign_off_context", field_type = "string", required = true }]
 
 [[workflow.step]]
 title = "approve"

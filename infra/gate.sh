@@ -37,12 +37,14 @@ SCOPE=()
 NAMED=()
 AUTO=0
 QUICK=0
+LINT=0
 while [ $# -gt 0 ]; do
     case "$1" in
         -p) shift; SCOPE+=(-p "${1:?-p needs a crate name}"); NAMED+=("$1"); shift ;;
         --auto) AUTO=1; shift ;;
         --quick) QUICK=1; shift ;;
-        *) echo "gate.sh: unknown arg: $1 (accepts -p <crate>, --auto and --quick)" >&2; exit 2 ;;
+        --lint) LINT=1; shift ;;
+        *) echo "gate.sh: unknown arg: $1 (accepts -p <crate>, --auto, --quick and --lint)" >&2; exit 2 ;;
     esac
 done
 # Alternatives, not companions: --auto derives exactly what -p states,
@@ -592,6 +594,55 @@ if [ "$QUICK" -eq 1 ]; then
     fi
     echo "pre-flight: clean — no build ran, so this is NOT a gate."
     echo "pre-flight: clippy, build and the test suites are still unproven."
+    exit 0
+fi
+
+# `--lint` is `--quick` plus the one compiled check that pays for
+# itself. It exists because of a measured waste: on 2026-08-28 a car
+# went red on `clippy` alone, costing a gate and a re-gate — about 22
+# minutes of cluster time — for two unused imports. The pre-flight had
+# passed and was right to: it says in its own output that clippy is
+# still unproven.
+#
+# David, 2026-08-28: "Inherent slowness is fine. That just incentivizes
+# us to squeeze out errors around those steps to ensure they are never
+# wasted." A gate takes ~11 minutes and train CI ~15; a scoped clippy
+# takes seconds on a warm tree. Trading the second for the first is the
+# whole argument.
+#
+# SCOPED, NOT WORKSPACE. It clippies exactly the crates the tree
+# changed, derived by the same `crates_from_paths` the `-p` refusal
+# uses — so there is one definition of "which crates did this touch",
+# not two. A change that maps to no crate (docs, infra, apps) skips
+# clippy and says so, because there is nothing to compile.
+#
+# STILL NOT A GATE. The build and the test suites remain unproven, and
+# a DB-backed test cannot run here at all. This narrows the red-gate
+# classes by one; it does not replace the gate.
+if [ "$LINT" -eq 1 ]; then
+    run_preflight
+    LINT_CRATES=$(crates_from_paths)
+    if [ -n "$LINT_CRATES" ]; then
+        LINT_SCOPE=()
+        for c in $LINT_CRATES; do LINT_SCOPE+=(-p "$c"); done
+        echo ""
+        echo "pre-flight: clippy on ${LINT_CRATES//$'\n'/ }"
+        # The SAME invocation the gate runs in car mode — a second
+        # spelling here would be a check that disagrees with the check
+        # it is meant to predict.
+        check "clippy" cargo clippy "${LINT_SCOPE[@]}" --all-features --tests -- -D warnings
+    else
+        echo ""
+        echo "pre-flight: no crate implied by the tree — skipping clippy (nothing to compile)"
+    fi
+    echo ""
+    if [ "${#FAILED[@]}" -gt 0 ]; then
+        echo "pre-flight: ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
+        echo "pre-flight: fix these before spending a gate on them." >&2
+        exit 1
+    fi
+    echo "pre-flight: clean, and clippy saw the crates this tree changed."
+    echo "pre-flight: the build and the test suites are still unproven — this is NOT a gate."
     exit 0
 fi
 

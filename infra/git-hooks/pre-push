@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Run the pre-flight before a push leaves this machine.
 #
-# WHY A HOOK AND NOT A HABIT. `infra/gate.sh --quick` takes ~11 seconds
+# WHY A HOOK AND NOT A HABIT. `infra/gate.sh --lint` takes ~22 seconds
+# on a warm tree (~11s of free lints, ~11s of scoped clippy)
 # and catches the class of failure that otherwise costs a full gate:
 # roughly 40 minutes of cluster time, a scheduled pod and a clone, to
 # learn that `cargo fmt` was run on one crate and not another. That
@@ -13,9 +14,18 @@
 # stepped over by punctuation, is not a check. This is the same claim
 # CLAUDE.md's Doors section makes about every other door.
 #
-# NOT A GATE. Nothing compiles here. Clippy, the build and the test
-# suites are still unproven after this passes; it only promises that a
-# lint or a formatting slip will not be discovered by a pod.
+# NOT A GATE. The build and the test suites are still unproven after
+# this passes, and a DB-backed test cannot run here at all. It promises
+# that a lint, a formatting slip or a CLIPPY error will not be
+# discovered by a pod.
+#
+# CLIPPY EARNED ITS PLACE HERE on 2026-08-28, when a car went red on
+# clippy alone — two unused imports left behind by a refactor — costing
+# a gate and a re-gate, about 22 minutes of cluster time. --quick had
+# passed and was right to: it never compiled anything. Clippy is scoped
+# to the crates the tree changed, so it is seconds on a warm tree; on a
+# cold one it pays for a build, and the escape hatches below are the
+# answer if that is ever the wrong trade.
 #
 # ESCAPE HATCHES, deliberately two and deliberately loud:
 #   git push --no-verify      # git's own, skips every hook
@@ -46,7 +56,7 @@ if [ ! -x "$root/infra/gate.sh" ]; then
 fi
 
 echo "pre-push: running the pre-flight (~11s; skip with BOSS_SKIP_PREFLIGHT=1)" >&2
-if "$root/infra/gate.sh" --quick; then
+if "$root/infra/gate.sh" --lint; then
     exit 0
 fi
 

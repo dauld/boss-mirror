@@ -500,10 +500,18 @@ a door that stops being true is a defect worth a car.
   as the session's own actor, allowlisted so it never prompts. Invoke it
   **bare**: `boss-api GET … > file` stays inside the allowlist, `boss-api
   GET … | python3` falls out of it and gets adjudicated. Speaks
-  GET/POST/PUT/DELETE — **not PATCH**, so annotating job metadata means a
-  full job PUT. On 2026-08-27 a session made ~28 hand-built calls before
-  finding it, ~14 of them writes carrying a forged `emp-david` actor, so
-  the audit log credits a human with an agent's work.
+  GET/POST/PUT/PATCH/DELETE. **Annotate a packet with `PATCH
+  /api/jobs/{id}/metadata`** — it MERGES top-level keys, and a key set to
+  `null` is deleted (both verified against a live packet, 2026-08-28).
+  Prefer it over a full job PUT: the PUT is safe, but it REPLACES, so
+  every annotation depends on reconstructing the whole job body
+  correctly. The step API refuses metadata writes to a completed step and
+  its 409 names this endpoint as the way to annotate instead — which is
+  how it was found, in the conductor's journal, failing every ten minutes
+  for weeks (`f402a681`). On 2026-08-27 a session made ~28 hand-built
+  calls before finding this door at all, ~14 of them writes carrying a
+  forged `emp-david` actor, so the audit log credits a human with an
+  agent's work.
 
 - **Which deployment.** The system of record is
   **`http://10.20.0.34:7900`**. boss-gcp's `127.0.0.1:7900` is a

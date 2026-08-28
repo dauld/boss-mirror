@@ -14,6 +14,13 @@
 //!   declared terminal.
 //! - **Phase 2 — reachability.** Every step is reachable forward from
 //!   some trigger and backward from some terminal — no dead code.
+//! - **Phase 4 — a sign-off cannot arrive blind.** A `sign-off` step
+//!   asks a PERSON to approve something, and the UI renders the step
+//!   the reader is on — so a sign-off whose context is nowhere is an
+//!   empty screen with an Approve button. Either the step declares its
+//!   own required fields or a procedure, or some step it depends on
+//!   REQUIRES a field, which is what guarantees the context exists
+//!   before the packet can reach a human.
 //! - **Phase 3 — fork coverage.** Where a step is a fork point (≥2
 //!   successors discriminate on its outcome), every value of the
 //!   discriminating enum is handled by some successor, or a wildcard
@@ -65,7 +72,120 @@ pub fn validate_workflow(spec: &WorkflowSpec, registry: &StepRegistry) -> Vec<Wo
     }
     // Phases 1–3 — viability of the predicate graph.
     check_viability(spec, registry, &mut errs);
+    // Phase 4 — a human decision point must arrive with its context.
+    // Platform workflows only; see the function's note.
+    if spec.category == "platform" {
+        check_sign_offs_are_not_blind(spec, registry, &mut errs);
+    }
     errs
+}
+
+/// Phase 4: every `sign-off` step must be guaranteed some context.
+///
+/// WHY THIS IS A HARD ERROR AND NOT ADVICE. On 2026-08-28 the same
+/// protocol-retro packet reached David EMPTY three times running: its
+/// work steps carried 6,654 characters and the `review` sign-off
+/// carried 14 — just `authority_role`. Each time it was hand-patched
+/// and nothing structural changed, which is precisely why it recurred.
+/// An audit that day found the shape everywhere: of 16 active
+/// workflows with a sign-off, 12 had one that could be reached with
+/// nothing on it, including every human decision point in the brewery
+/// tenant — a CFO approving a tax filing, an owner approving a tap
+/// launch.
+///
+/// David, 2026-08-28: *"All the expected info is a constraint on it
+/// reaching that point in the protocol."*
+///
+/// THE CONSTRAINT IS SATISFIED BY THE PREDECESSOR, and that is the
+/// load-bearing part. Required metadata is validated AT COMPLETION, so
+/// a required field on the sign-off itself would refuse only after the
+/// approver had already been shown an empty screen. A required field
+/// on a step the sign-off DEPENDS ON means the packet cannot reach the
+/// human until the context exists.
+///
+/// Deliberately narrow, in two directions.
+///
+/// SCOPED TO `sign-off` STEPS, because those are the ones a person is
+/// blocked on. 69 agent-facing steps were still arriving blind when
+/// this shipped (filed 1671bece), and failing those here would
+/// quarantine most of the system at boot.
+///
+/// SCOPED TO `category = "platform"` WORKFLOWS — the ones this
+/// deployment actually operates. The two worked-example tenants carry
+/// 33 more blind sign-offs between them (brewery 11, used-device-shop
+/// 22), and they are a real gap in the product story rather than an
+/// internal one: `refurb-used/qa-certification` and
+/// `support-rma/approve-rma` ask a person to approve with nothing on
+/// the screen, exactly as `protocol-retro/review` did.
+///
+/// They are excluded on purpose rather than overlooked. Fixing them
+/// means authoring what a QA certifier or an RMA approver needs to see,
+/// which is domain knowledge; a generic placeholder field would satisfy
+/// this lint while teaching a reader nothing, and a lint that can be
+/// satisfied without solving the problem is worse than no lint. David,
+/// 2026-08-28, chose this scope deliberately. Widening it is the right
+/// move once someone who knows those domains fills them in.
+fn check_sign_offs_are_not_blind(
+    spec: &WorkflowSpec,
+    registry: &StepRegistry,
+    errs: &mut Vec<WorkflowLintError>,
+) {
+    let by_title: HashMap<&str, &StepSpec> =
+        spec.steps.iter().map(|s| (s.title.as_str(), s)).collect();
+    // ASK THE REGISTRY FOR THE PROPERTY, never compare a kind name.
+    // `surface = "approval"` is what makes a step a human decision
+    // point, and it is declared in step_types.toml — so a new kind that
+    // renders an approval surface is covered the day it is added, with
+    // no edit here. Comparing the step's kind against a literal kind
+    // name would be exactly what `infra/lint/no-step-kind-match.sh`
+    // refuses and CLAUDE.md §9 explains: step-kind names are data, and
+    // core code dispatches on properties. (That lint greps text, so it
+    // flags the offending shape even inside a comment — which is how
+    // this note came to be phrased the long way round.)
+    //
+    // The obvious alternative — a non-empty `sign_offs_required` — was
+    // measured and REJECTED: 5 of 16 sign-off steps declare none,
+    // including `protocol-retro/review`, the exact packet that reached
+    // David empty three times. A discriminator that misses the
+    // motivating case is the wrong discriminator.
+    let is_approval = |step: &StepSpec| {
+        registry
+            .get(&step.kind)
+            .is_some_and(|t| t.surface == "approval")
+    };
+    for step in spec.steps.iter().filter(|s| is_approval(s)) {
+        let own_required = step.fields.iter().any(|f| f.required);
+        let own_procedure = step
+            .metadata_defaults
+            .get("procedure")
+            .is_some_and(|v| !v.is_null());
+        // A dependency that REQUIRES something cannot complete without
+        // it, and this step cannot become ready until it completes.
+        let dep_required = predicate_step_refs(&step.ready_when)
+            .iter()
+            .filter_map(|slug| by_title.get(slug.as_str()))
+            .any(|dep| dep.fields.iter().any(|f| f.required));
+        if own_required || own_procedure || dep_required {
+            continue;
+        }
+        errs.push(WorkflowLintError {
+            workflow: spec.kind.clone(),
+            step: step.title.clone(),
+            reason: format!(
+                "is a sign-off that can be reached with no context: it declares no required \
+                 fields and no `procedure`, and no step it depends on ({}) requires a field. \
+                 A person opening this sees an empty screen with an Approve button. Add a \
+                 required field to the step it depends on — required metadata is checked at \
+                 COMPLETION, so putting it on the predecessor is what stops the packet \
+                 reaching a human incomplete.",
+                if predicate_step_refs(&step.ready_when).is_empty() {
+                    "none".to_string()
+                } else {
+                    predicate_step_refs(&step.ready_when).join(", ")
+                }
+            ),
+        });
+    }
 }
 
 /// Validate every WorkflowSpec in a list. One call, every error
@@ -1141,6 +1261,149 @@ mod tests {
                 .iter()
                 .any(|e| e.reason.contains("metadata_defaults")),
             "{{subject.id}} is a valid string template"
+        );
+    }
+
+    // ----- Phase 4: a sign-off cannot arrive blind -----
+
+    /// Trigger -> work -> sign-off -> terminal. The sign-off depends on
+    /// `work`, so `work` is where the constraint belongs.
+    fn signoff_spec(kind: &str) -> WorkflowSpec {
+        // category MUST be "platform" — Phase 4 is scoped to the
+        // workflows this deployment operates, so a "test"-category
+        // fixture would silently skip the very check under test.
+        WorkflowSpec::platform_seed(
+            kind,
+            kind,
+            "platform",
+            vec!["asset".into()],
+            vec![
+                StepSpec {
+                    title: "start".into(),
+                    kind: "trigger".into(),
+                    ready_when: "true".into(),
+                    ..Default::default()
+                },
+                StepSpec {
+                    title: "work".into(),
+                    kind: "task".into(),
+                    ready_when: "steps.start.done".into(),
+                    ..Default::default()
+                },
+                StepSpec {
+                    title: "approve".into(),
+                    kind: "sign-off".into(),
+                    ready_when: "steps.work.done".into(),
+                    ..Default::default()
+                },
+                StepSpec {
+                    title: "done".into(),
+                    kind: "task".into(),
+                    ready_when: "steps.approve.done".into(),
+                    terminal: Some(Terminal {
+                        outcome: "done".into(),
+                    }),
+                    ..Default::default()
+                },
+            ],
+        )
+    }
+
+    fn required(name: &str) -> boss_core::job::StepField {
+        boss_core::job::StepField {
+            name: name.into(),
+            field_type: "string".into(),
+            required: true,
+        }
+    }
+
+    /// THE DEFECT: a sign-off reachable with nothing on it. Shipped to
+    /// David three times before this lint existed.
+    #[test]
+    fn a_sign_off_with_no_guaranteed_context_fails() {
+        let reg = StepRegistry::v1();
+        let errs = validate_workflow(&signoff_spec("blind"), &reg);
+        let hit = errs.iter().find(|e| e.step == "approve");
+        let hit = hit.expect("a blind sign-off must be refused");
+        assert!(hit.reason.contains("no context"), "{}", hit.reason);
+        // The refusal must name what to fix and where.
+        assert!(hit.reason.contains("predecessor"), "{}", hit.reason);
+        assert!(
+            hit.reason.contains("work"),
+            "must name the dependency: {}",
+            hit.reason
+        );
+    }
+
+    /// THE FIX DAVID SPECIFIED: the constraint on the step BEFORE.
+    #[test]
+    fn a_required_field_on_the_predecessor_satisfies_it() {
+        let reg = StepRegistry::v1();
+        let mut spec = signoff_spec("guarded");
+        spec.steps[1].fields.push(required("sign_off_context"));
+        assert!(
+            validate_workflow(&spec, &reg)
+                .iter()
+                .all(|e| e.step != "approve"),
+            "a required field on the dependency guarantees the context exists"
+        );
+    }
+
+    /// An OPTIONAL field on the predecessor does NOT satisfy it — it can
+    /// complete without ever being filled, which is the whole failure.
+    #[test]
+    fn an_optional_field_on_the_predecessor_does_not_satisfy_it() {
+        let reg = StepRegistry::v1();
+        let mut spec = signoff_spec("optional");
+        spec.steps[1].fields.push(boss_core::job::StepField {
+            name: "sign_off_context".into(),
+            field_type: "string".into(),
+            required: false,
+        });
+        assert!(
+            validate_workflow(&spec, &reg)
+                .iter()
+                .any(|e| e.step == "approve"),
+            "optional means it can arrive empty, which is the defect"
+        );
+    }
+
+    /// A step that carries its own procedure or its own required field
+    /// is fine too — the rule asks that context be GUARANTEED, not that
+    /// it arrive from any particular direction.
+    #[test]
+    fn a_sign_off_carrying_its_own_context_passes() {
+        let reg = StepRegistry::v1();
+        let mut own_proc = signoff_spec("own-proc");
+        own_proc.steps[2].metadata_defaults = json!({"procedure": "what to check"});
+        assert!(
+            validate_workflow(&own_proc, &reg)
+                .iter()
+                .all(|e| e.step != "approve")
+        );
+
+        let mut own_field = signoff_spec("own-field");
+        own_field.steps[2].fields.push(required("decision"));
+        assert!(
+            validate_workflow(&own_field, &reg)
+                .iter()
+                .all(|e| e.step != "approve")
+        );
+    }
+
+    /// Scoped to sign-offs on purpose: 69 agent-facing steps were still
+    /// arriving blind when this shipped, and failing those here would
+    /// quarantine most of the system at boot.
+    #[test]
+    fn a_blind_task_step_is_not_failed_by_this_phase() {
+        let reg = StepRegistry::v1();
+        let mut spec = signoff_spec("task-blind");
+        spec.steps[2].kind = "task".into();
+        assert!(
+            validate_workflow(&spec, &reg)
+                .iter()
+                .all(|e| e.step != "approve"),
+            "this phase judges human decision points only"
         );
     }
 }

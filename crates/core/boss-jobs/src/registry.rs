@@ -293,6 +293,17 @@ fn workflow_design_spec() -> WorkflowSpec {
             kind: "task".into(),
             ready_when: "steps.author.done".into(),
             title_template: "Validate spec".into(),
+            // The next step is a SIGN-OFF, and required metadata is
+            // checked at COMPLETION — so the constraint that guarantees
+            // the approver has something to read belongs HERE, not
+            // there. On the sign-off it would refuse only after the
+            // human had already opened an empty screen. Phase 4 of the
+            // viability lint refuses the alternative.
+            fields: vec![boss_core::job::StepField {
+                name: "sign_off_context".into(),
+                field_type: "string".into(),
+                required: true,
+            }],
             ..Default::default()
         },
         StepSpec {

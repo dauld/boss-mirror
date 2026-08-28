@@ -953,6 +953,21 @@ fn metadata_map(v: &Value) -> Map<String, Value> {
 /// wholesale — so every update must carry the record's existing keys
 /// forward. A `Value::Null` value REMOVES the key: how a boarding car
 /// sheds a stale `skip_reason` instead of carrying "" forever.
+/// Has this train's arrival report already been filed?
+///
+/// Reads the JOB's metadata, not the `arrived` step's. The report moved
+/// there when terminal steps became immutable (f402a681) — and the
+/// idempotence check has to move with it, or every reconcile re-files a
+/// report it already wrote. That is the failure mode the 2026-08-13
+/// journal records as "re-file its arrival report" making the conductor
+/// look broken while the trains had in fact landed.
+pub(crate) fn arrival_already_filed(train: &Value) -> bool {
+    train
+        .get("metadata")
+        .and_then(|m| m.get("arrival_report"))
+        .is_some_and(|v| !v.is_null())
+}
+
 pub(crate) fn overlay_metadata(container: &Value, kv: Vec<(&str, Value)>) -> Map<String, Value> {
     let mut md = metadata_map(container);
     for (k, v) in kv {
@@ -3647,10 +3662,7 @@ impl Conductor {
         let Some(step) = find_step(train, "arrived", "Train arrived") else {
             return Ok(());
         };
-        let filed = step
-            .get("metadata")
-            .and_then(|m| m.get("arrival_report"))
-            .is_some();
+        let filed = arrival_already_filed(train);
         // Strictly `completed` — never `skipped`: a cancelled train
         // closes with its arrived step SKIPPED, and a landing report
         // on a train that never landed would be fiction.
@@ -3676,18 +3688,32 @@ impl Conductor {
             ));
             return Ok(());
         }
-        let sid = step
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("arrived step without an id on job {tid}"))?;
-        let md = overlay_metadata(
-            step,
-            vec![("arrival_report", report), ("summary", json!(summary))],
-        );
+        // THE REPORT LANDS ON THE JOB, NOT THE STEP (defect f402a681).
+        //
+        // It used to PUT onto the `arrived` step's metadata — and the
+        // guard above requires that step to be `completed`, so the only
+        // write this function could ever attempt was a write to a
+        // TERMINAL step. Once terminal steps became immutable, every
+        // attempt returned 409 "step is terminal — these fields are
+        // immutable", and because this returns Err, it took
+        // `sweep_landed_branches` down with it on the `?` at the call
+        // site: no arrival report AND no branch cleanup, every ten
+        // minutes, for weeks.
+        //
+        // The 409's own hint names the fix: "To correct or annotate it,
+        // write to the parent job's metadata (PATCH /api/jobs/{id}/
+        // metadata) instead." That endpoint MERGES top-level keys, so
+        // no overlay is needed here — the merge is the server's job.
+        //
+        // The report is a fact ABOUT the train, not a field of the
+        // transition that recorded arrival, so the job is where it
+        // belonged anyway. `summary` is written as `arrival_summary`
+        // because a bare `summary` on job metadata is a name anything
+        // could want.
         self.api(
-            Method::PUT,
-            &format!("/api/jobs/{tid}/steps/{sid}"),
-            Some(json!({"metadata": md})),
+            Method::PATCH,
+            &format!("/api/jobs/{tid}/metadata"),
+            Some(json!({"arrival_report": report, "arrival_summary": summary})),
         )
         .await?;
         log(format!(
@@ -4819,12 +4845,12 @@ mod tests {
     }
     use super::{
         ApiFailure, ConvergenceVerdict, Failure, JOBS_API_RETRY, RetryPolicy, SweepGuard,
-        arrival_report, arrival_summary, auto_cancel_reason, boarded_head, branch_moved_line,
-        car_hold_reason, ci_overdue, classify_transport, commits_match, convergence_verdict,
-        deletable_branches, deploy_needed, local_jobs_problem, overlay_metadata, parked_ready,
-        releasable_cars, repo_path, resolve_train, retryable, retrying, short_cause,
-        skip_reason_branch_missing, skip_reason_conflict, stall_age_hours, sweep_guard, sweep_note,
-        sweep_settled, train_branch_to_delete, verdict_drift,
+        arrival_already_filed, arrival_report, arrival_summary, auto_cancel_reason, boarded_head,
+        branch_moved_line, car_hold_reason, ci_overdue, classify_transport, commits_match,
+        convergence_verdict, deletable_branches, deploy_needed, local_jobs_problem,
+        overlay_metadata, parked_ready, releasable_cars, repo_path, resolve_train, retryable,
+        retrying, short_cause, skip_reason_branch_missing, skip_reason_conflict, stall_age_hours,
+        sweep_guard, sweep_note, sweep_settled, train_branch_to_delete, verdict_drift,
     };
     use crate::delivery_policy::DeliveryPolicy;
     use anyhow::{Result, anyhow};
@@ -5480,6 +5506,49 @@ mod tests {
             json!({"id": "car-2-uuid-long", "title": "Add the widget",
                    "metadata": {"branch": "feat/y"}}),
         ]
+    }
+
+    /// f402a681: the report moved to the job when terminal steps became
+    /// immutable, so the "already filed" check has to read the job too.
+    /// Reading the step instead means every reconcile re-files a report
+    /// it already wrote.
+    #[test]
+    fn arrival_filed_is_read_from_the_job_not_the_step() {
+        let unfiled = json!({
+            "metadata": {"boarded_jobs": []},
+            "steps": [{"title": "Train arrived", "status": "completed", "metadata": {}}],
+        });
+        assert!(!arrival_already_filed(&unfiled));
+
+        let filed = json!({
+            "metadata": {"arrival_report": {"consist": []}, "arrival_summary": "2 cars"},
+            "steps": [{"title": "Train arrived", "status": "completed", "metadata": {}}],
+        });
+        assert!(arrival_already_filed(&filed));
+
+        // A report on the STEP is the OLD location. It must not count as
+        // filed, or trains that pre-date the move never get a job-level
+        // report and their branch sweep stays blocked.
+        let old_location = json!({
+            "metadata": {},
+            "steps": [{
+                "title": "Train arrived",
+                "status": "completed",
+                "metadata": {"arrival_report": {"consist": []}},
+            }],
+        });
+        assert!(
+            !arrival_already_filed(&old_location),
+            "a report on the step is not a report on the job"
+        );
+    }
+
+    /// PATCH merges, and a null value DELETES a key — so a null report
+    /// must read as "not filed" rather than as a filed one.
+    #[test]
+    fn a_null_report_is_not_filed() {
+        let nulled = json!({"metadata": {"arrival_report": null}});
+        assert!(!arrival_already_filed(&nulled));
     }
 
     #[test]

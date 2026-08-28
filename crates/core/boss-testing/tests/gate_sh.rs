@@ -533,9 +533,21 @@ fn the_pre_push_hook_runs_the_preflight_and_refuses_on_failure() {
         );
     }
 
+    // Match the INVOCATION, not the prose. This asserted
+    // `hook.contains("--quick")` anywhere in the file until 2026-08-28,
+    // when the hook moved to `--lint` and the assertion kept passing on
+    // the word "--quick" left behind in a comment. A test satisfied by
+    // its own documentation is not testing anything.
+    let invokes_preflight = hook.lines().any(|l| {
+        let l = l.trim();
+        !l.starts_with('#')
+            && l.contains("gate.sh")
+            && (l.contains("--quick") || l.contains("--lint"))
+    });
     assert!(
-        hook.contains("gate.sh") && hook.contains("--quick"),
-        "the hook must invoke the pre-flight, or it is a file that does nothing"
+        invokes_preflight,
+        "no non-comment line invokes gate.sh with --quick or --lint — the hook is \
+         a file that does nothing"
     );
     assert!(
         hook.contains("exit 1"),

@@ -51,18 +51,26 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use boss_clock_client::{ClockClient, ReqwestClockClient};
-use chrono::{DateTime, Duration, NaiveTime, Timelike, Utc};
+use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use serde_json::{Value, json};
 use sqlx::Row;
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
 use tokio::task::JoinHandle;
 
 use crate::train;
+use boss_core::calendar::{BusinessCalendar, Cadence, fires_on_with_calendar};
 
 /// The `boss train` verbs a cadence rule may fire — the same set the
 /// CLI exposes. Pinned here so a hand-edited registry row cannot make
 /// the loop spawn arbitrary arguments.
 const VERBS: &[&str] = &["preflight", "reconcile", "board", "run"];
+
+/// How far a calendar rule looks back for its most recent elapsed
+/// firing day. Comfortably covers a month, so monthly rules resolve;
+/// beyond that a rule that has not fired is simply waiting, and an
+/// unbounded search would walk the calendar on every tick forever for
+/// a rule anchored in the future.
+const MAX_LOOKBACK_DAYS: u32 = 40;
 
 /// What a rule fires. Two BOUNDED shapes, never arbitrary argv.
 ///
@@ -184,6 +192,23 @@ pub(crate) enum Basis {
         min_depth: u32,
         cooldown_minutes: u32,
     },
+    /// Fire on the days a CALENDAR recurrence selects, at `at`.
+    ///
+    /// The recurrence and its business-day handling are
+    /// `boss_core::calendar`'s (design a02b01e0) — this basis owns only
+    /// "which day, and at what time", never a second definition of what
+    /// "weekly" means. Before it existed a week was inexpressible here:
+    /// `Clock` fires every day, and `Wall` re-anchors at midnight so
+    /// 10080 minutes floors to zero and fires daily too.
+    Calendar {
+        cadence: Cadence,
+        anchor: NaiveDate,
+        at: NaiveTime,
+        /// Absent = every day is a business day. Per-schedule and not
+        /// global, because deferring maintenance to the next working
+        /// day is right and deferring a ten-minute reconcile is not.
+        business_calendar: Option<BusinessCalendar>,
+    },
 }
 
 impl Basis {
@@ -192,6 +217,7 @@ impl Basis {
             Basis::Wall { .. } => "wall",
             Basis::Clock { .. } => "clock",
             Basis::QueueDepth { .. } => "queue-depth",
+            Basis::Calendar { .. } => "calendar",
         }
     }
 }
@@ -262,6 +288,39 @@ pub(crate) fn due_window(
                 })
                 .filter(|w| *w <= now)
                 .max()?
+        }
+        Basis::Calendar {
+            cadence,
+            anchor,
+            at,
+            business_calendar,
+        } => {
+            // The most recent elapsed firing day, at `at`. Same shape as
+            // Clock — "today's window if reached, else the previous
+            // one" — except which days qualify is the calendar's
+            // decision, not every day.
+            //
+            // BOUNDED LOOK-BACK, not "search until found". A rule whose
+            // anchor is in the future, or an annual rule ten months
+            // from its day, must not walk the calendar forever on every
+            // tick. MAX_LOOKBACK_DAYS covers a month comfortably; past
+            // that the honest answer is "no elapsed window", and the
+            // rule simply waits. Catch-up is at most one window, which
+            // matches every other basis here.
+            let today = now.date_naive();
+            let mut day = today;
+            let mut found = None;
+            for _ in 0..=MAX_LOOKBACK_DAYS {
+                if fires_on_with_calendar(*cadence, *anchor, business_calendar.as_ref(), day) {
+                    let w = day.and_time(*at).and_utc();
+                    if w <= now {
+                        found = Some(w);
+                        break;
+                    }
+                }
+                day = day.pred_opt()?;
+            }
+            found?
         }
         Basis::QueueDepth {
             min_depth,
@@ -421,6 +480,31 @@ pub(crate) fn next_due(rules: &[CadenceRule], now: DateTime<Utc>) -> Option<Date
                     })
                     .min()
             }
+            Basis::Calendar {
+                cadence,
+                anchor,
+                at,
+                business_calendar,
+            } => {
+                // The NEXT firing day at or after today whose window is
+                // still ahead. Same bounded walk as `due_window`, in
+                // the other direction — the heartbeat's "next due" is a
+                // convenience, so a rule with nothing in range reports
+                // None rather than guessing.
+                let mut day = now.date_naive();
+                for _ in 0..=MAX_LOOKBACK_DAYS {
+                    if fires_on_with_calendar(*cadence, *anchor, business_calendar.as_ref(), day) {
+                        let w = day.and_time(*at).and_utc();
+                        if w > now {
+                            return Some(w);
+                        }
+                    }
+                    day = day.succ_opt()?;
+                }
+                None
+            }
+            // A queue-depth rule has no clock: it fires when the dock
+            // fills, which no schedule can predict.
             Basis::QueueDepth { .. } => None,
         })
         .min()
@@ -483,6 +567,65 @@ fn rule_from_row(row: &PgRow) -> Result<CadenceRule> {
             min_depth: positive("min_dock_depth")?,
             cooldown_minutes: positive("cooldown_minutes")?,
         },
+        "calendar" => {
+            let raw: Option<String> = row.try_get("cadence")?;
+            let raw = raw.ok_or_else(|| anyhow!("cadence is required for basis \"calendar\""))?;
+            // Parsed by boss_core::calendar, not re-implemented here —
+            // the whole point of the move (design a02b01e0) is that
+            // "weekly" has one definition in this tree.
+            let cadence = Cadence::parse(&raw)
+                .ok_or_else(|| anyhow!("unknown cadence {raw:?} — see boss_core::calendar"))?;
+            let anchor: Option<NaiveDate> = row.try_get("anchor_date")?;
+            let anchor =
+                anchor.ok_or_else(|| anyhow!("anchor_date is required for basis \"calendar\""))?;
+            let at: Option<Value> = row.try_get("at_times")?;
+            let at = at.ok_or_else(|| anyhow!("at_times is required for basis \"calendar\""))?;
+            let times = parse_at_times(&at)?;
+            // The DB check pins exactly one, but a reader that trusts a
+            // constraint it cannot see is how a silent wrong-window bug
+            // gets in: a weekly rule with two times is a clock rule
+            // that was mislabelled.
+            let [at] = times[..] else {
+                bail!(
+                    "basis \"calendar\" takes exactly one time-of-day, got {} — the cadence \
+                     chooses the DAYS and at_times chooses WHEN on them",
+                    times.len()
+                );
+            };
+            // BUSINESS CALENDARS ARE NOT RESOLVABLE HERE YET, and this
+            // REFUSES rather than pretending.
+            //
+            // The column exists because design a02b01e0 Q3 decided the
+            // calendar is per-schedule, and the firing math already
+            // takes an Option<&BusinessCalendar>. What is missing is the
+            // resolution from a CODE ("us-banking") to the closed days,
+            // which lives in the calendar service — and this loop must
+            // not acquire a network dependency to decide whether to
+            // fire, or a scheduler stops scheduling when another service
+            // is down.
+            //
+            // Constructing an empty BusinessCalendar from the code would
+            // compile and be WORSE than refusing: a rule naming a
+            // calendar would fire on every holiday while its row claimed
+            // otherwise. A silent half-feature is the failure this same
+            // car found in the verb CHECK an hour earlier.
+            let code: Option<String> = row.try_get("business_calendar")?;
+            if let Some(code) = code {
+                bail!(
+                    "business_calendar {code:?} cannot be resolved by the cadence loop yet — \
+                     the code-to-closed-days lookup lives in the calendar service, and this \
+                     loop deliberately holds no dependency on it. Leave the column NULL until \
+                     that resolution exists; a rule that names a calendar it cannot read would \
+                     fire on holidays while claiming not to."
+                );
+            }
+            Basis::Calendar {
+                cadence,
+                anchor,
+                at,
+                business_calendar: None,
+            }
+        }
         other => bail!("unknown basis {other:?}"),
     };
     Ok(CadenceRule { name, verb, basis })
@@ -1133,6 +1276,110 @@ mod tests {
         let b = packet_body("x-kind", "r", utc(2031, 12, 25, 0, 0, 0));
         assert!(a["title"].as_str().unwrap().contains("2020-01-02"));
         assert!(b["title"].as_str().unwrap().contains("2031-12-25"));
+    }
+
+    // -- the calendar basis: the reason this whole thread exists -------
+
+    fn cal_rule(c: Cadence, anchor: (i32, u32, u32), at_h: u32, at_m: u32) -> CadenceRule {
+        CadenceRule {
+            name: "protocol-retro-daily".into(),
+            verb: "open:protocol-retro".into(),
+            basis: Basis::Calendar {
+                cadence: c,
+                anchor: NaiveDate::from_ymd_opt(anchor.0, anchor.1, anchor.2).unwrap(),
+                at: at(at_h, at_m),
+                business_calendar: None,
+            },
+        }
+    }
+
+    /// WEEKLY IS THE CASE THAT WAS INEXPRESSIBLE. `Clock` fires every
+    /// day and `Wall` re-anchors at midnight, so a week could not be
+    /// written as a row at all.
+    #[test]
+    fn a_weekly_rule_fires_on_the_anchors_weekday_and_not_the_others() {
+        // 2026-08-28 is a Friday.
+        let rule = cal_rule(Cadence::Weekly, (2026, 8, 28), 6, 10);
+        // The following Friday, after the window: due.
+        let friday = utc(2026, 9, 4, 6, 30, 0);
+        assert_eq!(
+            due_window(&rule, friday, None, None),
+            Some(utc(2026, 9, 4, 6, 10, 0)),
+            "a weekly rule must fire on its anchor weekday"
+        );
+        // Thursday: the most recent elapsed window is the PREVIOUS
+        // Friday, not today — and if that already fired, nothing is due.
+        let thursday = utc(2026, 9, 3, 23, 0, 0);
+        assert_eq!(
+            due_window(&rule, thursday, None, None),
+            Some(utc(2026, 8, 28, 6, 10, 0))
+        );
+    }
+
+    /// Before the window on a firing day, the due window is the PREVIOUS
+    /// occurrence — never today's, which has not happened yet.
+    #[test]
+    fn a_window_not_yet_reached_today_does_not_count_as_elapsed() {
+        let rule = cal_rule(Cadence::Weekly, (2026, 8, 28), 6, 10);
+        let early = utc(2026, 9, 4, 5, 59, 0); // Friday, before 06:10
+        assert_eq!(
+            due_window(&rule, early, None, None),
+            Some(utc(2026, 8, 28, 6, 10, 0))
+        );
+    }
+
+    /// Once a window has fired, it is not due again — the same
+    /// exactly-once guard every other basis gets.
+    #[test]
+    fn a_calendar_window_fires_once() {
+        let rule = cal_rule(Cadence::Weekly, (2026, 8, 28), 6, 10);
+        let now = utc(2026, 9, 4, 6, 30, 0);
+        let w = due_window(&rule, now, None, None).unwrap();
+        assert_eq!(due_window(&rule, now, Some(&fired(&rule, w)), None), None);
+    }
+
+    /// A rule anchored in the FUTURE has no elapsed window, and the
+    /// bounded look-back must return None rather than walking the
+    /// calendar forever on every tick.
+    #[test]
+    fn a_future_anchor_is_not_due_and_terminates() {
+        let rule = cal_rule(Cadence::Weekly, (2027, 1, 1), 6, 10);
+        assert_eq!(
+            due_window(&rule, utc(2026, 9, 4, 12, 0, 0), None, None),
+            None
+        );
+    }
+
+    /// Monthly resolves within the look-back; the anchor day is clamped
+    /// into short months by boss_core::calendar, which is why this
+    /// basis borrows that math instead of restating it.
+    #[test]
+    fn a_monthly_rule_resolves_and_clamps_short_months() {
+        let rule = cal_rule(Cadence::Monthly, (2026, 1, 31), 6, 10);
+        // April has 30 days: the fire lands on the 30th.
+        assert_eq!(
+            due_window(&rule, utc(2026, 4, 30, 7, 0, 0), None, None),
+            Some(utc(2026, 4, 30, 6, 10, 0))
+        );
+    }
+
+    /// The heartbeat's "next due" must look FORWARD, and a queue-depth
+    /// rule still has no predictable next.
+    #[test]
+    fn next_due_reports_the_coming_calendar_window() {
+        let rule = cal_rule(Cadence::Weekly, (2026, 8, 28), 6, 10);
+        assert_eq!(
+            next_due(&[rule], utc(2026, 9, 4, 6, 30, 0)),
+            Some(utc(2026, 9, 11, 6, 10, 0)),
+            "after today's window has passed, the next is a week out"
+        );
+    }
+
+    /// A calendar rule names its basis in the journal like any other.
+    #[test]
+    fn the_calendar_basis_names_itself() {
+        let rule = cal_rule(Cadence::Weekly, (2026, 8, 28), 6, 10);
+        assert_eq!(rule.basis.as_str(), "calendar");
     }
 
     fn wall_rule(every: u32) -> CadenceRule {
