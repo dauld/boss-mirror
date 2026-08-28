@@ -61,6 +61,7 @@
 
   const sourceLabel: Record<DecisionContext['source'], string> = {
     step: 'written for this step',
+    'job-body': 'the filed item',
     'prior-steps': 'recorded by earlier steps',
     'job-context': 'the packet’s briefing',
     'job-message': 'the packet as filed',

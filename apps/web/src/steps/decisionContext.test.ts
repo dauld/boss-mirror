@@ -34,6 +34,21 @@ describe('decision context resolution', () => {
     expect(contextFromJob({})).toBeNull();
   });
 
+  // The bug David hit on 2026-08-28: a backlog-item states its case in
+  // `body`, a user-feedback packet in `message`. Covering one and not
+  // the other left every backlog-item decision with an empty panel.
+  test('a backlog-item states its case in body', () => {
+    expect(contextFromJob({ body: 'the jobs API back door is unauthenticated' })).toEqual({
+      text: 'the jobs API back door is unauthenticated',
+      source: 'job-body',
+    });
+    // message still wins when both are present: it is the filed text.
+    expect(contextFromJob({ message: 'filed', body: 'later' })).toEqual({
+      text: 'filed',
+      source: 'job-message',
+    });
+  });
+
   test('every user-feedback packet is self-presenting via its message', () => {
     // The 28 Decide-the-design steps in David's queue carry no
     // context_md anywhere; their case is the filed message. The chain

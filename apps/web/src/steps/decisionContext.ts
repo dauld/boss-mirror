@@ -24,6 +24,7 @@ export type DecisionContextSource =
   | 'step'
   | 'job-context'
   | 'job-message'
+  | 'job-body'
   | 'prior-steps';
 
 export type DecisionContext = {
@@ -49,6 +50,14 @@ export function contextFromJob(
   if (ctx) return { text: ctx, source: 'job-context' };
   const msg = nonEmptyString(jobMetadata['message']);
   if (msg) return { text: msg, source: 'job-message' };
+  // `body` is where a backlog-item states its case, the way a
+  // user-feedback packet uses `message`. Missing it meant EVERY
+  // backlog-item reached its decision step with an empty panel —
+  // 4e0e42b2 carries 5,622 characters of case in `body` and showed
+  // none of it. One kind's field name was covered and the other's
+  // was not, which is why the gap survived being fixed once.
+  const body = nonEmptyString(jobMetadata['body']);
+  if (body) return { text: body, source: 'job-body' };
   return null;
 }
 
