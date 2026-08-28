@@ -67,6 +67,25 @@ rules:
   - apiGroups: [apps]
     resources: [deployments, replicasets]
     verbs: [get, list, watch]
+  # Launching a gate. `boss gate` creates a Job and `--wait` needs to
+  # tell a dead run from a silent one, which is get/list/watch.
+  #
+  # DELETE IS WITHHELD ON PURPOSE. The verb never removes a Job, so
+  # granting it would be scope nobody asked for — and the withholding
+  # has already paid for itself twice: it is why a gate cannot be
+  # killed to manufacture a test (car de2f89ab still awaits a natural
+  # dead Job rather than a forced one), and it keeps a session from
+  # cancelling a run it does not own.
+  #
+  # THIS RULE LIVES HERE BECAUSE IT WAS ONCE APPLIED BY HAND. On
+  # 2026-08-28 it was added with kubectl to close car fd5fc6f4, proven
+  # by launching a real gate — and a converge reapplied this file and
+  # silently reverted it the same afternoon, so `boss gate` began
+  # failing with `jobs.batch is forbidden` again. An imperative grant
+  # is not a grant; it is a grant with an expiry nobody was told about.
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, get, list, watch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

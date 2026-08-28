@@ -14,6 +14,7 @@ mod inspect;
 mod ops;
 mod park;
 mod prove;
+mod publish;
 mod queue;
 mod script;
 mod train;
@@ -213,6 +214,22 @@ enum Commands {
         #[arg(long)]
         recheck: bool,
         /// Run the probe and report, without recording anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Publish a branch to the forge, in one verb, and verify it.
+    ///
+    /// A workstation holds no forge credential, so the branch travels
+    /// via the conductor's clone. Doing that by hand mangled a refspec
+    /// on 2026-08-28 (zsh reads `$B:refs/...` as a `:r` modifier); a
+    /// verb has no argv for a shell to eat.
+    Publish {
+        /// Branch to publish. Pushed from the current HEAD.
+        branch: String,
+        /// Git remote naming the conductor's clone.
+        #[arg(long, default_value = "gcp")]
+        remote: String,
+        /// Show the two hops without pushing anything.
         #[arg(long)]
         dry_run: bool,
     },
@@ -713,6 +730,11 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Commands::Publish {
+            branch,
+            remote,
+            dry_run,
+        } => publish::run(&branch, &remote, dry_run).await,
         Commands::Gate {
             branch,
             mode,

@@ -64,6 +64,96 @@ use crate::train;
 /// the loop spawn arbitrary arguments.
 const VERBS: &[&str] = &["preflight", "reconcile", "board", "run"];
 
+/// What a rule fires. Two BOUNDED shapes, never arbitrary argv.
+///
+/// WHY THIS EXISTS. `cadence_rules` is a live, editable table and the
+/// loader says so — "the registry is editable data". But until
+/// 2026-08-28 every rule could only ever run `boss train <verb>`, so
+/// the schedule was data and the thing being scheduled was not. All
+/// three rules on record drove the conductor, and no other protocol
+/// could be put on a schedule without a deploy.
+///
+/// That is the leak CLAUDE.md names: "a protocol that cannot be
+/// replaced without a deploy has leaked into the substrate, and that
+/// leak is the defect to hunt." The clock belongs in the substrate;
+/// *what to run* is the operating model and belongs in data.
+///
+/// THE ALLOWLIST STAYS, in a different shape. The point of pinning
+/// `VERBS` was that a hand-edited row must not spawn arbitrary
+/// arguments — so `OpenPacket` does not spawn a process at all. It
+/// files a packet through the jobs API, which means policy and the
+/// audit log see it like any other write, and the worst a bad row can
+/// do is name a workflow kind that does not exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Action {
+    /// `boss train <verb>` — the conductor's verbs, allowlisted.
+    Train(String),
+    /// Open a packet of this workflow kind. Written `open:<kind>`.
+    OpenPacket(String),
+}
+
+/// Read a registry row's `verb` column into what it will actually do.
+///
+/// Refuses rather than guesses, and the refusal names both shapes —
+/// a row is edited by a person, and "unknown verb" without the
+/// alternatives is the kind of message that sends someone to the source.
+pub(crate) fn parse_action(verb: &str) -> Result<Action> {
+    if let Some(kind) = verb.strip_prefix("open:") {
+        let kind = kind.trim();
+        if kind.is_empty() {
+            bail!(
+                "verb \"open:\" names no workflow kind — write open:<kind>, e.g. open:protocol-retro"
+            );
+        }
+        // Kinds are kebab-case by convention everywhere in the
+        // registry. Pinning that here keeps the value safe to put in a
+        // URL query and a JSON body without escaping games.
+        if !kind
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            bail!(
+                "workflow kind {kind:?} is not kebab-case (lowercase, digits, hyphens). \
+                 This value goes into a query string and a JSON body; a kind that needs \
+                 escaping is a kind that is wrong."
+            );
+        }
+        return Ok(Action::OpenPacket(kind.to_string()));
+    }
+    if !VERBS.contains(&verb) {
+        bail!(
+            "unknown verb {verb:?}. A rule fires either a conductor verb ({}) or \
+             `open:<kind>` to file a packet.",
+            VERBS.join(" | ")
+        );
+    }
+    Ok(Action::Train(verb.to_string()))
+}
+
+/// The packet a scheduled rule files.
+///
+/// Deliberately the SAME SHAPE `infra/boss-maintenance-wrap.sh` has
+/// filed since the maintenance family existed — subject `infra/<kind>`,
+/// the bootstrap admin as owner, one packet per day. Two mechanisms
+/// filing the same kind with different shapes would be a fact living
+/// twice (CLAUDE.md §9a), and the wrapper's shape is the one with
+/// months of packets behind it.
+pub(crate) fn packet_body(kind: &str, rule: &str, now: DateTime<Utc>) -> Value {
+    json!({
+        "kind": kind,
+        "subject": {"subject_kind": "custom", "id": format!("infra/{kind}")},
+        "title": format!("{kind} — {}", now.format("%Y-%m-%d")),
+        "owner_id": "emp-bootstrap-admin",
+        "priority": "standard",
+        "status": "open",
+        // trigger_kind/trigger_name is the convention the registry
+        // already uses for "who opened this", so a scheduled packet is
+        // attributable to its rule rather than to a mystery actor.
+        "metadata": {"trigger_kind": "cadence", "trigger_name": rule, "chore": kind},
+        "tags": ["cadence"],
+    })
+}
+
 fn log(msg: impl std::fmt::Display) {
     println!("cadence: {msg}");
 }
@@ -367,9 +457,10 @@ pub(crate) fn parse_at_times(v: &Value) -> Result<Vec<NaiveTime>> {
 fn rule_from_row(row: &PgRow) -> Result<CadenceRule> {
     let name: String = row.try_get("name")?;
     let verb: String = row.try_get("verb")?;
-    if !VERBS.contains(&verb.as_str()) {
-        bail!("unknown verb {verb:?}");
-    }
+    // Validate at LOAD, not at fire. A malformed row is skipped loudly
+    // every tick (see `load_rules`); discovering it only when the rule
+    // is due would hide a typo until the moment it matters.
+    parse_action(&verb)?;
     let basis: String = row.try_get("basis")?;
     let positive = |field: &str| -> Result<u32> {
         let v: Option<i32> = row.try_get(field)?;
@@ -573,17 +664,77 @@ async fn probe_dock_depth() -> Result<u32> {
 /// return its exit code. The conductor's own flock makes an overlap
 /// with a manually-started run exit clean, and a preflight exit 3
 /// lands here as data instead of killing the loop.
-async fn run_verb(verb: &str) -> Result<i32> {
-    if !VERBS.contains(&verb) {
-        bail!("refusing to run unknown verb {verb:?}");
+async fn run_verb(verb: &str, rule: &str, now: DateTime<Utc>) -> Result<i32> {
+    match parse_action(verb)? {
+        Action::Train(v) => {
+            let exe = std::env::current_exe().context("resolving the boss binary path")?;
+            let status = tokio::process::Command::new(exe)
+                .args(["train", &v])
+                .status()
+                .await
+                .with_context(|| format!("spawning boss train {v}"))?;
+            Ok(status.code().unwrap_or(-1))
+        }
+        Action::OpenPacket(kind) => open_packet(&kind, rule, now).await,
     }
-    let exe = std::env::current_exe().context("resolving the boss binary path")?;
-    let status = tokio::process::Command::new(exe)
-        .args(["train", verb])
-        .status()
-        .await
-        .with_context(|| format!("spawning boss train {verb}"))?;
-    Ok(status.code().unwrap_or(-1))
+}
+
+/// File one packet of `kind`, or reuse the open one.
+///
+/// SINGLE-OPEN, the same contract `boss-maintenance-wrap.sh` keeps: if
+/// an open packet of this kind already exists, today's firing does not
+/// add a second. A failed run leaves its packet open on purpose — the
+/// timer is the executor, the Job is the visibility — and piling up a
+/// packet per firing would turn one unfinished chore into a wall of
+/// them.
+async fn open_packet(kind: &str, rule: &str, now: DateTime<Utc>) -> Result<i32> {
+    // WHERE THE PACKET GOES IS NOT A DEFAULT, IT IS A DECISION.
+    //
+    // `boss-maintenance-wrap.sh` learned this the expensive way: it
+    // read `${BOSS_JOBS_URL:-http://127.0.0.1:7900}`, and on a box
+    // whose local instance is not the system of record that fallback
+    // is a silent redirect. It ran for weeks — the backup,
+    // audit-integrity and ledger-replay timers each left 7 packets on
+    // boss-gcp's demo instance and ZERO on the cluster, while firing
+    // exactly on schedule and passing every check. So: no fallback
+    // here either. An unset variable is a refusal.
+    let base = std::env::var("BOSS_JOBS_URL").unwrap_or_default();
+    if base.trim().is_empty() {
+        bail!(
+            "BOSS_JOBS_URL is unset, so there is no deployment to file a {kind} packet with. \
+             Refusing rather than defaulting: a default here is a silent redirect to whichever \
+             instance happens to be local, and that has already cost weeks of packets landing \
+             on the wrong one."
+        );
+    }
+
+    let http = reqwest::Client::new();
+    let open = crate::gate::rows(
+        crate::gate::api(
+            &http,
+            reqwest::Method::GET,
+            &format!("/api/jobs?kind={kind}&status=open&limit=2"),
+            None,
+        )
+        .await?,
+    );
+    if !open.is_empty() {
+        log(format!(
+            "{rule}: an open {kind} packet exists — leaving it to be completed rather than \
+             filing a second"
+        ));
+        return Ok(0);
+    }
+
+    crate::gate::api(
+        &http,
+        reqwest::Method::POST,
+        "/api/jobs",
+        Some(packet_body(kind, rule, now)),
+    )
+    .await?;
+    log(format!("{rule}: filed a {kind} packet"));
+    Ok(0)
 }
 
 /// A spawned verb the loop is still tracking.
@@ -649,13 +800,20 @@ impl Runs {
     /// rc + runtime into the claimed row, and journalling the
     /// completion line — so none of it depends on the loop being
     /// free, and the loop is free immediately.
-    fn spawn_verb(&mut self, pool: &PgPool, rule: &CadenceRule, firing_id: String) {
+    fn spawn_verb(
+        &mut self,
+        pool: &PgPool,
+        rule: &CadenceRule,
+        firing_id: String,
+        now: DateTime<Utc>,
+    ) {
         let pool = pool.clone();
         let name = rule.name.clone();
         let verb = rule.verb.clone();
+        let rule_name = rule.name.clone();
         let started = Instant::now();
         let handle = tokio::spawn(async move {
-            let rc = match run_verb(&verb).await {
+            let rc = match run_verb(&verb, &rule_name, now).await {
                 Ok(rc) => rc,
                 Err(e) => {
                     // The verb never started. Say so, then record it
@@ -745,7 +903,7 @@ async fn tick(
         ));
         // Spawn and move on. The tick that fires a 30-minute deploy
         // ends in milliseconds like any other.
-        runs.spawn_verb(pool, rule, id);
+        runs.spawn_verb(pool, rule, id, now);
     }
     Ok(TickSummary {
         rules: rules.len(),
@@ -894,6 +1052,87 @@ mod tests {
 
     fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(y, mo, d, h, mi, s).unwrap()
+    }
+
+    // -- what a rule may fire ------------------------------------------
+
+    #[test]
+    fn a_conductor_verb_still_parses() {
+        for v in VERBS {
+            assert_eq!(parse_action(v).unwrap(), Action::Train((*v).to_string()));
+        }
+    }
+
+    #[test]
+    fn open_names_a_workflow_kind() {
+        assert_eq!(
+            parse_action("open:protocol-retro").unwrap(),
+            Action::OpenPacket("protocol-retro".into())
+        );
+    }
+
+    /// THE SAFETY PROPERTY THE ALLOWLIST EXISTED FOR: a hand-edited row
+    /// must not be able to spawn arbitrary arguments. `OpenPacket`
+    /// keeps it by not spawning a process at all, and the kind is
+    /// pinned to kebab-case so it is safe in a query string and a JSON
+    /// body without escaping.
+    #[test]
+    fn a_kind_that_would_need_escaping_is_refused() {
+        for bad in [
+            "open:foo bar",
+            "open:foo/../bar",
+            "open:foo;rm -rf /",
+            "open:Foo",
+            "open:foo?status=open",
+            "open:foo&x=1",
+            "open:",
+            "open:   ",
+        ] {
+            assert!(parse_action(bad).is_err(), "should refuse {bad:?}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_verb_names_both_shapes_in_its_refusal() {
+        let e = parse_action("deploy").unwrap_err().to_string();
+        assert!(e.contains("unknown verb"), "{e}");
+        assert!(
+            e.contains("open:<kind>") && e.contains("reconcile"),
+            "the refusal must show a person editing a row what IS allowed: {e}"
+        );
+    }
+
+    /// The packet a scheduled rule files must match what
+    /// `boss-maintenance-wrap.sh` has always filed — two mechanisms
+    /// filing one kind with different shapes is a fact living twice.
+    #[test]
+    fn a_scheduled_packet_matches_the_wrappers_shape() {
+        let now = utc(2026, 8, 28, 6, 5, 0);
+        let b = packet_body("protocol-retro", "retro-weekly", now);
+        assert_eq!(b["kind"], "protocol-retro");
+        assert_eq!(b["subject"]["subject_kind"], "custom");
+        assert_eq!(b["subject"]["id"], "infra/protocol-retro");
+        assert_eq!(b["owner_id"], "emp-bootstrap-admin");
+        assert_eq!(b["status"], "open");
+        assert!(
+            b["title"].as_str().unwrap().contains("2026-08-28"),
+            "the title carries the firing day so two packets are distinguishable: {}",
+            b["title"]
+        );
+        // Attributable to its rule, not to a mystery actor.
+        assert_eq!(b["metadata"]["trigger_kind"], "cadence");
+        assert_eq!(b["metadata"]["trigger_name"], "retro-weekly");
+    }
+
+    /// The title must come from the clock that was passed in — the
+    /// no-wallclock invariant. A sim deploy advancing its clock must
+    /// see the sim date here, not the host's.
+    #[test]
+    fn the_packet_title_uses_the_clock_it_was_given() {
+        let a = packet_body("x-kind", "r", utc(2020, 1, 2, 0, 0, 0));
+        let b = packet_body("x-kind", "r", utc(2031, 12, 25, 0, 0, 0));
+        assert!(a["title"].as_str().unwrap().contains("2020-01-02"));
+        assert!(b["title"].as_str().unwrap().contains("2031-12-25"));
     }
 
     fn wall_rule(every: u32) -> CadenceRule {

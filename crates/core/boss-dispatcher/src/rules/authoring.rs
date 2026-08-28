@@ -210,7 +210,7 @@ pub async fn create_draft(pool: &PgPool, raw: &RawRule) -> Result<RuleVersion, A
     .await
     .map_err(store)?;
     // Decompose the schedule into its columns (all NULL for an event rule).
-    let sched_cadence = raw.schedule.as_ref().map(|s| s.cadence.as_str());
+    let sched_cadence = raw.schedule.as_ref().map(|s| s.cadence.token());
     let sched_anchor = raw.schedule.as_ref().map(|s| s.anchor_date);
     let sched_calendar = raw
         .schedule

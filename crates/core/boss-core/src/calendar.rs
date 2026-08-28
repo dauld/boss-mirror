@@ -15,7 +15,7 @@
 
 use std::collections::BTreeSet;
 
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Days, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::define_id;
@@ -242,6 +242,225 @@ impl BusinessCalendar {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Recurrence — when a thing repeats.
+// ---------------------------------------------------------------------------
+
+/// How often something recurs, and whether it fires on a given day.
+///
+/// WHY THIS LIVES BESIDE `BusinessCalendar` (design packet a02b01e0,
+/// decided 2026-08-28). Recurrence was defined TWICE — once in
+/// `boss-dispatcher`, once in `boss-sim` — and the dispatcher's copy
+/// existed only because "the dispatcher is Tier-1 and can't depend on
+/// the sim", a tier constraint rather than a design decision. Both
+/// already reached into this module for `BusinessCalendar` to answer
+/// "is this a working day", so the rule was stranded in its consumers
+/// while the concept it depends on sat here.
+///
+/// A third spelling lived in the cadence loop (`Wall { every_minutes }`
+/// is `EveryNMinutes` under another name), and it could not express
+/// "weekly" at all — which is what surfaced this.
+///
+/// David, 2026-08-28: *"I would be good having our IT workflows
+/// essentially key off the same calendar infrastructure that everyone
+/// uses."* A company has one calendar; a brewery shift, a PTO block, a
+/// maintenance window and a protocol retro are all things that happen
+/// on a schedule.
+///
+/// PURE ON PURPOSE. `fires_on` is a function of two dates: no clock, no
+/// network, no state. That is what lets a scheduler decide whether to
+/// fire without depending on the calendar SERVICE being up — a
+/// scheduler that stops scheduling because another service is down
+/// would be worse than the duplication this replaces.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Cadence {
+    Daily,
+    Weekly,
+    Biweekly,
+    Monthly,
+    Quarterly,
+    Annually,
+    /// Fires once per hour. Day-granularity callers see "every day".
+    Hourly,
+    /// Fires every `n` minutes from midnight. Day-granularity callers
+    /// see "every day"; sub-day resolution belongs to the caller that
+    /// has a tick (see the note on [`Cadence::fires_on`]).
+    EveryNMinutes(u32),
+}
+
+impl Cadence {
+    /// Does this cadence fire on `day`, given its `anchor`?
+    ///
+    /// Pure calendar math — business-calendar postponement is applied
+    /// *outside* this function by [`fires_on_with_calendar`].
+    ///
+    /// SUB-DAY CADENCES RETURN `true` FOR EVERY DAY on or after the
+    /// anchor. Resolving *which tick within the day* needs a tick, and
+    /// a tick is a property of whatever is driving time — the
+    /// simulator has one, the wall-clock cadence loop has a different
+    /// one. So that decision stays with the caller and does not come
+    /// here. Day-anchored callers get the right yes/no directly.
+    pub fn fires_on(&self, anchor: NaiveDate, day: NaiveDate) -> bool {
+        if day < anchor {
+            return false;
+        }
+        match self {
+            Cadence::Daily => true,
+            Cadence::Weekly => day.weekday() == anchor.weekday(),
+            Cadence::Biweekly => {
+                day.weekday() == anchor.weekday() && (day - anchor).num_days() % 14 == 0
+            }
+            Cadence::Monthly => {
+                day.day() == clamp_anchor_day(anchor.day(), day.year(), day.month())
+            }
+            Cadence::Quarterly => {
+                if day.day() != clamp_anchor_day(anchor.day(), day.year(), day.month()) {
+                    return false;
+                }
+                let months_diff = ((day.year() as i64 - anchor.year() as i64) * 12)
+                    + (day.month() as i64 - anchor.month() as i64);
+                months_diff >= 0 && months_diff % 3 == 0
+            }
+            Cadence::Annually => {
+                day.month() == anchor.month()
+                    && day.day() == clamp_anchor_day(anchor.day(), day.year(), day.month())
+            }
+            // Sub-day: every day, resolved finer by the caller.
+            Cadence::Hourly | Cadence::EveryNMinutes(_) => true,
+        }
+    }
+
+    /// Sparse cadences, where a single dropped fire would lose a whole
+    /// period rather than skipping one of many. These are the ones a
+    /// business calendar POSTPONES instead of skipping.
+    pub fn is_coarse(&self) -> bool {
+        matches!(
+            self,
+            Cadence::Monthly | Cadence::Quarterly | Cadence::Annually
+        )
+    }
+
+    /// String form stored in the `schedule_cadence` DB column /
+    /// authored in TOML (kebab-case). Round-trips with [`Cadence::parse`].
+    ///
+    /// Returns `String`, not `&'static str`, because `EveryNMinutes`
+    /// carries a number. The six day-cadence spellings are UNCHANGED —
+    /// existing rows and TOML keep parsing exactly as before.
+    pub fn token(&self) -> String {
+        match self {
+            Cadence::Daily => "daily".into(),
+            Cadence::Weekly => "weekly".into(),
+            Cadence::Biweekly => "biweekly".into(),
+            Cadence::Monthly => "monthly".into(),
+            Cadence::Quarterly => "quarterly".into(),
+            Cadence::Annually => "annually".into(),
+            Cadence::Hourly => "hourly".into(),
+            Cadence::EveryNMinutes(n) => format!("every-{n}-minutes"),
+        }
+    }
+
+    /// Parse the `schedule_cadence` DB value. Case-insensitive; accepts
+    /// the kebab spelling used in TOML.
+    pub fn parse(raw: &str) -> Option<Self> {
+        let raw = raw.trim().to_ascii_lowercase();
+        match raw.as_str() {
+            "daily" => return Some(Cadence::Daily),
+            "weekly" => return Some(Cadence::Weekly),
+            "biweekly" => return Some(Cadence::Biweekly),
+            "monthly" => return Some(Cadence::Monthly),
+            "quarterly" => return Some(Cadence::Quarterly),
+            "annually" => return Some(Cadence::Annually),
+            "hourly" => return Some(Cadence::Hourly),
+            _ => {}
+        }
+        // every-<n>-minutes. Zero is refused: a cadence that fires
+        // every zero minutes is a busy loop, not a schedule.
+        let n = raw.strip_prefix("every-")?.strip_suffix("-minutes")?;
+        let n: u32 = n.parse().ok()?;
+        if n == 0 || n > 1440 {
+            return None;
+        }
+        Some(Cadence::EveryNMinutes(n))
+    }
+}
+
+/// Last calendar day of `(year, month)` — 28–31 (29 in a leap February).
+fn last_day_of_month(year: i32, month: u32) -> u32 {
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    NaiveDate::from_ymd_opt(next_year, next_month, 1)
+        .and_then(|first_of_next| first_of_next.pred_opt())
+        .map(|last| last.day())
+        .unwrap_or(28)
+}
+
+/// Clamp a month-anchored day into a month that may be shorter — a
+/// day-31 anchor fires on the 30th in April and the 28th/29th in
+/// February. Without this a month-end anchor silently never matches the
+/// short months, losing those periods entirely.
+fn clamp_anchor_day(anchor_day: u32, year: i32, month: u32) -> u32 {
+    anchor_day.min(last_day_of_month(year, month))
+}
+
+/// How many days a sparse-cadence fire may be carried forward to reach a
+/// business day. Covers any realistic weekend + holiday closure while
+/// staying well under the ~28-day minimum gap between monthly fires, so
+/// the look-back can never reach the previous period's nominal day.
+pub const MAX_POSTPONE_DAYS: u64 = 10;
+
+/// THE day-firing decision: does a cadence anchored at `anchor` fire on
+/// `day`, given an optional business calendar?
+///
+/// - DENSE cadences (daily/weekly/biweekly, and the sub-day ones) SKIP
+///   non-business days. Losing one of many is the intended behaviour.
+/// - SPARSE cadences (monthly and coarser) POSTPONE onto the next
+///   business day, walking back up to [`MAX_POSTPONE_DAYS`] — a
+///   non-business nominal day is carried forward, not dropped, so a
+///   whole period is never lost.
+/// - With no calendar, a cadence fires exactly on its nominal day.
+///
+/// Pure: no I/O, deterministic in `(cadence, anchor, cal, day)`.
+pub fn fires_on_with_calendar(
+    cadence: Cadence,
+    anchor: NaiveDate,
+    cal: Option<&BusinessCalendar>,
+    day: NaiveDate,
+) -> bool {
+    if cadence.is_coarse() {
+        match cal {
+            None => cadence.fires_on(anchor, day),
+            Some(cal) => {
+                if !cal.is_business_day(day) {
+                    return false;
+                }
+                for back in 0..=MAX_POSTPONE_DAYS {
+                    let Some(nominal) = day.checked_sub_days(Days::new(back)) else {
+                        break;
+                    };
+                    // `business_day_on_or_after` (not `next_business_day`):
+                    // a nominal day that is itself a business day must map
+                    // to itself (back==0 fires on the day); a non-business
+                    // nominal carries forward to the first business day on
+                    // or after it.
+                    if cadence.fires_on(anchor, nominal)
+                        && cal.business_day_on_or_after(nominal) == day
+                    {
+                        return true;
+                    }
+                }
+                false
+            }
+        }
+    } else {
+        // Dense: a non-business day SKIPS — "every Tuesday" means Tuesday.
+        cadence.fires_on(anchor, day) && cal.map(|c| c.is_business_day(day)).unwrap_or(true)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,5 +597,120 @@ mod tests {
         let back: BusinessCalendar = serde_json::from_str(&s).unwrap();
         assert_eq!(back, cal);
         assert!(!back.is_business_day(day(2026, 4, 15)));
+    }
+
+    // ----- recurrence (moved here with the code, design a02b01e0) -----
+
+    fn d(y: i32, m: u32, dd: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, dd).unwrap()
+    }
+
+    #[test]
+    fn clamp_anchor_day_handles_short_months() {
+        assert_eq!(clamp_anchor_day(31, 2025, 4), 30); // April -> 30
+        assert_eq!(clamp_anchor_day(31, 2025, 2), 28); // Feb, non-leap
+        assert_eq!(clamp_anchor_day(31, 2024, 2), 29); // Feb, leap
+        assert_eq!(clamp_anchor_day(31, 2025, 1), 31); // Jan, unchanged
+        assert_eq!(clamp_anchor_day(15, 2025, 2), 15); // below month length
+    }
+
+    /// The six day-cadence tokens are DB values and TOML spellings.
+    /// They must round-trip byte-for-byte after the move, or existing
+    /// dispatcher_rules rows stop parsing.
+    #[test]
+    fn the_six_day_cadence_tokens_are_unchanged() {
+        for (c, want) in [
+            (Cadence::Daily, "daily"),
+            (Cadence::Weekly, "weekly"),
+            (Cadence::Biweekly, "biweekly"),
+            (Cadence::Monthly, "monthly"),
+            (Cadence::Quarterly, "quarterly"),
+            (Cadence::Annually, "annually"),
+        ] {
+            assert_eq!(c.token(), want);
+            assert_eq!(Cadence::parse(want), Some(c));
+        }
+        assert_eq!(Cadence::parse("MONTHLY"), Some(Cadence::Monthly));
+        assert_eq!(Cadence::parse("  weekly "), Some(Cadence::Weekly));
+        assert_eq!(Cadence::parse("never"), None);
+    }
+
+    #[test]
+    fn sub_day_cadences_round_trip_too() {
+        assert_eq!(Cadence::Hourly.token(), "hourly");
+        assert_eq!(Cadence::parse("hourly"), Some(Cadence::Hourly));
+        let every = Cadence::EveryNMinutes(15);
+        assert_eq!(every.token(), "every-15-minutes");
+        assert_eq!(Cadence::parse("every-15-minutes"), Some(every));
+        // A cadence firing every zero minutes is a busy loop, and more
+        // than a day is not a sub-day cadence.
+        assert_eq!(Cadence::parse("every-0-minutes"), None);
+        assert_eq!(Cadence::parse("every-1441-minutes"), None);
+        assert_eq!(Cadence::parse("every-x-minutes"), None);
+    }
+
+    /// Sub-day cadences answer "every day" at day granularity — the
+    /// which-tick decision belongs to whatever drives time.
+    #[test]
+    fn sub_day_cadences_fire_every_day_from_the_anchor() {
+        let anchor = d(2026, 8, 28);
+        for c in [Cadence::Hourly, Cadence::EveryNMinutes(10)] {
+            assert!(c.fires_on(anchor, anchor));
+            assert!(c.fires_on(anchor, d(2026, 8, 29)));
+            assert!(
+                !c.fires_on(anchor, d(2026, 8, 27)),
+                "never before the anchor"
+            );
+        }
+        assert!(
+            !Cadence::Hourly.is_coarse(),
+            "sub-day is dense, so it skips rather than postpones"
+        );
+    }
+
+    /// Weekly is the case that started this: it was inexpressible in
+    /// the cadence loop, which is why protocol-retro could not be
+    /// scheduled.
+    #[test]
+    fn weekly_fires_on_the_anchors_weekday() {
+        let anchor = d(2026, 8, 28); // a Friday
+        assert!(Cadence::Weekly.fires_on(anchor, d(2026, 9, 4)));
+        assert!(!Cadence::Weekly.fires_on(anchor, d(2026, 9, 3)));
+    }
+
+    /// Dense skips a closed day; sparse carries forward onto the next
+    /// business day so a whole period is never lost.
+    #[test]
+    fn a_calendar_skips_dense_fires_and_postpones_sparse_ones() {
+        let cal = BusinessCalendar::new("weekends-off", "Weekends Off")
+            .with_closed([d(2026, 9, 5), d(2026, 9, 6)]);
+        // 2026-09-05 is a Saturday; a Saturday-anchored weekly fire is skipped.
+        let sat_anchor = d(2026, 9, 5);
+        assert!(!fires_on_with_calendar(
+            Cadence::Weekly,
+            sat_anchor,
+            Some(&cal),
+            d(2026, 9, 5)
+        ));
+        // Monthly anchored on the 5th carries forward to Monday the 7th.
+        assert!(fires_on_with_calendar(
+            Cadence::Monthly,
+            sat_anchor,
+            Some(&cal),
+            d(2026, 9, 7)
+        ));
+        assert!(!fires_on_with_calendar(
+            Cadence::Monthly,
+            sat_anchor,
+            Some(&cal),
+            d(2026, 9, 5)
+        ));
+        // With no calendar, both fire on their nominal day.
+        assert!(fires_on_with_calendar(
+            Cadence::Monthly,
+            sat_anchor,
+            None,
+            d(2026, 9, 5)
+        ));
     }
 }
