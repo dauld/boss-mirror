@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Run the pre-flight before a push leaves this machine.
+#
+# WHY A HOOK AND NOT A HABIT. `infra/gate.sh --quick` takes ~11 seconds
+# and catches the class of failure that otherwise costs a full gate:
+# roughly 40 minutes of cluster time, a scheduled pod and a clone, to
+# learn that `cargo fmt` was run on one crate and not another. That
+# happened on 2026-08-28 (gate-p54fw, fails:[fmt]).
+#
+# It happened AGAIN the same day, after --quick existed, because the
+# pre-flight was invoked with `;` instead of `&&` and the commit ran
+# anyway. A step that has to be remembered, and whose failure can be
+# stepped over by punctuation, is not a check. This is the same claim
+# CLAUDE.md's Doors section makes about every other door.
+#
+# NOT A GATE. Nothing compiles here. Clippy, the build and the test
+# suites are still unproven after this passes; it only promises that a
+# lint or a formatting slip will not be discovered by a pod.
+#
+# ESCAPE HATCHES, deliberately two and deliberately loud:
+#   git push --no-verify      # git's own, skips every hook
+#   BOSS_SKIP_PREFLIGHT=1     # skips this hook only, and says so
+set -u
+
+if [ "${BOSS_SKIP_PREFLIGHT:-0}" = "1" ]; then
+    echo "pre-push: pre-flight SKIPPED by BOSS_SKIP_PREFLIGHT=1" >&2
+    exit 0
+fi
+
+# A push that only deletes refs carries no content to check.
+only_deletes=1
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+    [ -z "${local_sha:-}" ] && continue
+    if [ "$local_sha" != "0000000000000000000000000000000000000000" ]; then
+        only_deletes=0
+    fi
+done
+if [ "$only_deletes" = "1" ]; then
+    exit 0
+fi
+
+root="$(git rev-parse --show-toplevel)"
+if [ ! -x "$root/infra/gate.sh" ]; then
+    echo "pre-push: infra/gate.sh not found or not executable — not blocking the push" >&2
+    exit 0
+fi
+
+echo "pre-push: running the pre-flight (~11s; skip with BOSS_SKIP_PREFLIGHT=1)" >&2
+if "$root/infra/gate.sh" --quick; then
+    exit 0
+fi
+
+cat >&2 <<'MSG'
+
+pre-push: REFUSED — the pre-flight failed.
+
+  These are the checks that need no build, and every one of them would
+  otherwise be found by a gate: minutes of cluster time to learn
+  something answerable here in seconds.
+
+  Fix them, or push with BOSS_SKIP_PREFLIGHT=1 if you have a reason.
+MSG
+exit 1

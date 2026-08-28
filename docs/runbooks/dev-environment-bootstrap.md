@@ -104,6 +104,34 @@ export PATH="$HOME/.bun/bin:$PATH"
 Verify: `cargo --version && bun --version && psql --version &&
 pg_isready` should all succeed.
 
+## 0b. The pre-push pre-flight (one command, do not skip)
+
+```bash
+git config core.hooksPath infra/git-hooks
+```
+
+That is the whole install. It points git at the tracked hooks directory,
+so `infra/gate.sh --quick` runs before every push: `cargo fmt --check`
+plus the lints that need no build, about 11 seconds.
+
+WHY IT IS A HOOK AND NOT ADVICE. The same class of failure cost a full
+gate twice on 2026-08-28 — roughly 40 minutes of cluster time, a
+scheduled pod and a clone, to learn that `cargo fmt` had been run on one
+crate and not another. The second time, `--quick` already existed and had
+been invoked; it was chained with `;` instead of `&&`, so the push went
+out regardless. A check that can be stepped over by punctuation is not a
+check.
+
+It is NOT a gate: nothing compiles, so clippy, the build and the test
+suites are still unproven when it passes.
+
+Escape hatches, both loud:
+
+```bash
+BOSS_SKIP_PREFLIGHT=1 git push    # skips this hook, prints that it did
+git push --no-verify              # git's own, skips every hook
+```
+
 ## 1. Postgres role + databases
 
 `bootstrap-boss.sh` and `bootstrap-scratch.sh` (thin wrappers

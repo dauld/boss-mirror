@@ -500,3 +500,63 @@ fn the_full_gate_still_runs_the_preflight_set() {
          BOTH call it, or one of them silently skips fmt and every lint"
     );
 }
+
+/// The pre-push hook exists, is executable, and actually runs the
+/// pre-flight.
+///
+/// A hook that is documented but not installed is advice, and advice is
+/// what failed: `--quick` existed on 2026-08-28 and a push still went out
+/// with a formatting slip, because the pre-flight had been chained with
+/// `;` instead of `&&`. The cost is a full gate — ~40 minutes of cluster
+/// time and a scheduled pod — for something answerable in 11 seconds.
+///
+/// Asserting the file merely exists would pass on an empty one, so this
+/// checks the three properties that make it a check rather than a
+/// gesture: it is executable, it invokes the pre-flight, and it exits
+/// non-zero when the pre-flight fails.
+#[test]
+fn the_pre_push_hook_runs_the_preflight_and_refuses_on_failure() {
+    let path = repo_root().join("infra/git-hooks/pre-push");
+    let hook = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path)
+            .expect("stat the hook")
+            .permissions()
+            .mode();
+        assert!(
+            mode & 0o111 != 0,
+            "infra/git-hooks/pre-push is not executable — git will ignore it silently"
+        );
+    }
+
+    assert!(
+        hook.contains("gate.sh") && hook.contains("--quick"),
+        "the hook must invoke the pre-flight, or it is a file that does nothing"
+    );
+    assert!(
+        hook.contains("exit 1"),
+        "the hook must REFUSE the push when the pre-flight fails; a hook that \
+         only prints is the advice this replaces"
+    );
+    assert!(
+        hook.contains("BOSS_SKIP_PREFLIGHT"),
+        "there must be a deliberate escape hatch — a check with no way out \
+         gets disabled wholesale the first time it is wrong"
+    );
+}
+
+/// The install is one command and it has to be written down somewhere a
+/// new clone will look, or the hook ships switched off.
+#[test]
+fn the_bootstrap_says_how_to_install_the_hook() {
+    let doc = read("docs/runbooks/dev-environment-bootstrap.md");
+    assert!(
+        doc.contains("core.hooksPath") && doc.contains("infra/git-hooks"),
+        "dev-environment-bootstrap.md does not say to set core.hooksPath — \
+         a tracked hooks directory that nobody points git at is inert"
+    );
+}

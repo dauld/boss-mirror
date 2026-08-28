@@ -13,6 +13,7 @@ mod gate;
 mod inspect;
 mod ops;
 mod park;
+mod prove;
 mod queue;
 mod script;
 mod train;
@@ -178,6 +179,40 @@ enum Commands {
         #[arg(long)]
         backlog_item: Option<String>,
         /// Check the receipt and report, without filing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Prove a merged car in production by RUNNING a probe.
+    ///
+    /// The verb executes the command itself and records exit status and
+    /// output verbatim, refusing unless the probe exits zero and prints
+    /// what was claimed. `proven` used to require only prose, which is
+    /// how a change got reported done on an HTTP 204.
+    Prove {
+        /// Car to prove: its branch, or 8+ characters of its id.
+        car: String,
+        /// Command to run against production. Its exit and output are
+        /// the evidence; it is recorded so it can be re-run later.
+        #[arg(long)]
+        probe: Option<String>,
+        /// String the probe must print for the claim to hold.
+        #[arg(long)]
+        expect: Option<String>,
+        /// Assert on the exit code alone, when the command IS the test
+        /// (`grep -q`, `test -f`). Recorded, so a reader sees it.
+        #[arg(long)]
+        exit_only: bool,
+        /// What the probe means, in prose, for a human reader.
+        #[arg(long)]
+        verified: Option<String>,
+        /// How it was checked, if that needs saying.
+        #[arg(long)]
+        method: Option<String>,
+        /// Re-run the proof already recorded and report whether it
+        /// still holds. Read-only: records nothing.
+        #[arg(long)]
+        recheck: bool,
+        /// Run the probe and report, without recording anything.
         #[arg(long)]
         dry_run: bool,
     },
@@ -652,6 +687,29 @@ async fn main() -> Result<()> {
                 &verified,
                 backlog_item,
                 dry_run,
+            )
+            .await
+        }
+        Commands::Prove {
+            car,
+            probe,
+            expect,
+            exit_only,
+            verified,
+            method,
+            recheck,
+            dry_run,
+        } => {
+            prove::run(
+                &car,
+                probe,
+                expect,
+                exit_only,
+                verified,
+                method,
+                recheck,
+                dry_run,
+                chrono::Utc::now(),
             )
             .await
         }
