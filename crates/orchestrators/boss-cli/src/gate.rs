@@ -171,6 +171,41 @@ pub(crate) fn gate_run_body(branch: &str, sha: &str, manifest: &str) -> Value {
     })
 }
 
+/// Normalise `--mode` into what `gate.sh` actually accepts, or refuse.
+///
+/// THE HELP TEXT NAMED A VALUE THE RUNNER REJECTS. It said `e.g.
+/// "auto"`; gate.sh accepts `--auto`; the mode travels through verbatim
+/// as `$GATE_MODE`. So following the documentation produced
+/// `gate.sh: unknown arg: auto` — and not at the command line. It
+/// produced it after a packet was filed, a manifest rendered, a Job
+/// created, a pod scheduled and the repo cloned. On 2026-08-27 that
+/// cost a whole gate slot (job gate-w6x6b, packet 37af315b) for a typo.
+///
+/// Two changes, and the order is the point. The friendly spelling is
+/// ACCEPTED, so `auto` now means what the help always claimed; and
+/// anything unrecognised is refused HERE, before the cluster is
+/// touched. That is the same shape as [`render_job`]'s placeholder
+/// check — validate before acting, because acting destroys the evidence.
+///
+/// `-p <crate>` passes through unexamined, deliberately. gate.sh owns
+/// whether a crate exists, and it already refuses a `-p` set that does
+/// not cover what the tree changed; re-deciding that here would be a
+/// second definition to drift from (CLAUDE.md §9a).
+pub(crate) fn normalize_mode(mode: &str) -> Result<String> {
+    let m = mode.trim();
+    match m {
+        "" => Ok(String::new()),
+        "auto" | "--auto" => Ok("--auto".to_string()),
+        _ if m.starts_with("-p ") && m.len() > 3 => Ok(m.to_string()),
+        _ => bail!(
+            "`--mode {m}` is not a gate mode. gate.sh accepts `--auto` (or plain \
+             `auto`, which means the same here) and `-p <crate>`; omit --mode for a \
+             full gate.\n  Refusing now rather than after a pod is scheduled and the \
+             repo cloned — which is where this used to be discovered."
+        ),
+    }
+}
+
 /// The gate-run packet for this exact branch and sha, if one is already
 /// open.
 ///
@@ -241,7 +276,7 @@ pub(crate) fn rows(v: Option<Value>) -> Vec<Value> {
 /// the packet's record without stopping the gate. It is warned about,
 /// because a receipt is worth much less when nobody can say which tree
 /// it vouched for.
-fn resolve_sha(branch: &str) -> String {
+pub(crate) fn resolve_sha(branch: &str) -> String {
     let out = std::process::Command::new("git")
         .args(["ls-remote", "origin", &format!("refs/heads/{branch}")])
         .output();
@@ -304,7 +339,9 @@ pub async fn run(
     let manifest_text = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("reading runner manifest {}", manifest_path.display()))?;
 
-    let mode = mode.unwrap_or_default();
+    // BEFORE the sha lookup, the packet, the manifest and kubectl —
+    // a bad mode should cost a line of output, not a gate slot.
+    let mode = normalize_mode(&mode.unwrap_or_default())?;
     let sha = resolve_sha(branch);
     let http = reqwest::Client::new();
 
@@ -405,11 +442,56 @@ pub async fn run(
     println!("boss gate: packet {packet}  branch {branch}@{sha}");
 
     if wait {
-        wait_for_verdict(&http, &packet).await?;
+        // `job.batch/gate-xxxxx created` -> `job.batch/gate-xxxxx`
+        let job_name = created
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        wait_for_verdict(&http, &packet, namespace, &job_name).await?;
     } else {
         println!("boss gate: not waiting — `boss gate --wait` follows it, or read the packet.");
     }
     Ok(())
+}
+
+/// What a silent packet means, given what the Job is doing.
+///
+/// `None` = keep waiting. `Some(msg)` = stop, and here is why.
+///
+/// USER FEEDBACK cf0021ae: "A green gate reports Failed when the pod dies
+/// after the receipt is written." A gate ran 30/30 checks green on w-1,
+/// wrote its receipt, and then the node rebooted; `backoffLimit: 0` failed
+/// the Job instantly and `kubectl get job` showed failed=1 for a GREEN
+/// gate. The verdict was on the PVC the whole time and had to be recovered
+/// by mounting the disk in a throwaway pod.
+///
+/// This is that defect seen from the waiter's side, and it was worse:
+/// `--wait` polled the packet in an unbounded loop with no idea the Job
+/// had died, so it waited forever, silently, for a verdict that was never
+/// coming. Forty minutes of gate followed by an indefinite hang.
+///
+/// The Job status is a signal about the RUN and never about the CODE, so
+/// it is not treated as a verdict here — it is only used to decide that
+/// no verdict is coming, and to say where the answer actually lives.
+pub(crate) fn silent_packet_verdict(job_finished: bool, job_failed: bool) -> Option<String> {
+    if !job_finished {
+        return None;
+    }
+    if job_failed {
+        return Some(
+            "the gate Job failed without the packet ever reporting a verdict.\n               That is NOT the same as a red gate: the run died, and the code may well have \
+             passed. The receipt is written to /gate-target/receipt.json before the pod \
+             exits and survives it, so read the receipt rather than re-running 40 minutes \
+             of gate on the assumption this was a failure."
+                .to_string(),
+        );
+    }
+    Some(
+        "the gate Job finished but the packet never reported a verdict.\n           The run completed, so the receipt at /gate-target/receipt.json should hold the \
+         answer; the reporting call is what went missing."
+            .to_string(),
+    )
 }
 
 /// Poll the PACKET, not the pod.
@@ -419,7 +501,12 @@ pub async fn run(
 /// container exited 0 can leave its pod `1/2 NotReady` for hours
 /// because a sidecar never exits, so pod phase is the wrong thing to
 /// watch. Reading the packet is also what any other actor would do.
-async fn wait_for_verdict(http: &reqwest::Client, packet: &str) -> Result<()> {
+async fn wait_for_verdict(
+    http: &reqwest::Client,
+    packet: &str,
+    namespace: &str,
+    job_name: &str,
+) -> Result<()> {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         let Some(job) = api(
@@ -452,7 +539,37 @@ async fn wait_for_verdict(http: &reqwest::Client, packet: &str) -> Result<()> {
             }
             return Ok(());
         }
+        // The packet is silent. Before sleeping again, find out whether
+        // anything is still coming — an unbounded wait on a dead Job is
+        // how this hung forever.
+        let (finished, failed) = job_state(namespace, job_name);
+        if let Some(why) = silent_packet_verdict(finished, failed) {
+            bail!("{why}\n  Job: {job_name} (namespace {namespace}), packet: {packet}");
+        }
     }
+}
+
+/// Is the gate Job finished, and did it fail? `(false, _)` when the state
+/// cannot be read — an unreadable Job is not evidence of anything, and
+/// must not end the wait.
+fn job_state(namespace: &str, job_name: &str) -> (bool, bool) {
+    let out = kubectl(namespace)
+        .args([
+            "get",
+            job_name,
+            "-o",
+            "jsonpath={.status.succeeded} {.status.failed}",
+        ])
+        .output();
+    let Ok(o) = out else { return (false, false) };
+    if !o.status.success() {
+        return (false, false);
+    }
+    let t = String::from_utf8_lossy(&o.stdout);
+    let mut it = t.split_whitespace();
+    let succeeded: i32 = it.next().unwrap_or("0").parse().unwrap_or(0);
+    let failed: i32 = it.next().unwrap_or("0").parse().unwrap_or(0);
+    (succeeded > 0 || failed > 0, failed > 0)
 }
 
 #[cfg(test)]
@@ -534,6 +651,51 @@ mod tests {
     fn the_packet_records_which_runner_manifest_rendered_it() {
         let b = gate_run_body("feat/x", "abc123", "infra/gate-runner/local.yaml");
         assert_eq!(b["metadata"]["runner"], "infra/gate-runner/local.yaml");
+    }
+
+    /// THE SPELLING THE HELP TEXT ALWAYS PROMISED.
+    #[test]
+    fn the_friendly_spelling_of_auto_is_accepted() {
+        assert_eq!(normalize_mode("auto").unwrap(), "--auto");
+        assert_eq!(normalize_mode("--auto").unwrap(), "--auto");
+        // Whitespace is a typo, not a mode.
+        assert_eq!(normalize_mode("  auto  ").unwrap(), "--auto");
+    }
+
+    #[test]
+    fn no_mode_means_a_full_gate() {
+        assert_eq!(normalize_mode("").unwrap(), "");
+        assert_eq!(normalize_mode("   ").unwrap(), "");
+    }
+
+    /// gate.sh owns whether the crate exists; this only checks shape.
+    #[test]
+    fn a_scoped_mode_passes_through_untouched() {
+        assert_eq!(normalize_mode("-p boss-jobs").unwrap(), "-p boss-jobs");
+        assert_eq!(
+            normalize_mode("-p boss-jobs -p boss-cli").unwrap(),
+            "-p boss-jobs -p boss-cli"
+        );
+    }
+
+    /// THE CASE THAT COST A GATE SLOT. `-p` with nothing after it is the
+    /// same class — a mode the runner will reject once it is far too
+    /// late to say so cheaply.
+    #[test]
+    fn an_unknown_mode_is_refused_before_anything_is_scheduled() {
+        for bad in ["autp", "full", "--fast", "-p", "-p ", "auto --auto"] {
+            let err = normalize_mode(bad)
+                .expect_err(&format!("`--mode {bad}` must be refused, not forwarded"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("not a gate mode"),
+                "the refusal must say what is wrong: {msg}"
+            );
+            assert!(
+                msg.contains("--auto") && msg.contains("-p <crate>"),
+                "the refusal must name what IS accepted, or it just says no: {msg}"
+            );
+        }
     }
 
     const MANIFEST: &str = "\
@@ -649,5 +811,38 @@ apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: gate-runner-disk
     fn a_packet_without_metadata_does_not_panic() {
         let open = vec![json!({"id": "no-metadata"})];
         assert_eq!(reusable_packet(&open, "fix/x", "deadbeef"), None);
+    }
+
+    /// A RUNNING JOB MEANS KEEP WAITING — the common case, and the one a
+    /// wrong answer here would break.
+    #[test]
+    fn a_running_job_does_not_end_the_wait() {
+        assert!(silent_packet_verdict(false, false).is_none());
+        assert!(silent_packet_verdict(false, true).is_none());
+    }
+
+    /// THE FEEDBACK'S CASE (cf0021ae): the pod died, the Job says failed,
+    /// and the packet never reported. The waiter must stop — and must NOT
+    /// call it a red gate, because the code may have passed.
+    #[test]
+    fn a_dead_job_with_a_silent_packet_stops_and_refuses_to_call_it_red() {
+        let msg = silent_packet_verdict(true, true).expect("a dead Job must end the wait");
+        assert!(msg.contains("NOT the same as a red gate"), "{msg}");
+        assert!(
+            msg.contains("receipt.json"),
+            "it must say where the answer actually lives: {msg}"
+        );
+    }
+
+    /// A Job that finished cleanly but never reported is a different
+    /// story — the run completed, so the receipt should hold the answer.
+    #[test]
+    fn a_finished_job_with_a_silent_packet_points_at_the_receipt() {
+        let msg = silent_packet_verdict(true, false).expect("a finished Job must end the wait");
+        assert!(msg.contains("receipt.json"), "{msg}");
+        assert!(
+            !msg.contains("NOT the same as a red gate"),
+            "that caveat belongs to the failed case only: {msg}"
+        );
     }
 }

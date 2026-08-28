@@ -135,7 +135,10 @@ enum Commands {
     Gate {
         /// Branch to gate.
         branch: String,
-        /// Gate mode passed to the runner (e.g. "auto"). Empty = full.
+        /// Gate mode: "auto" (or "--auto"), or "-p <crate>". Empty = full.
+        ///
+        /// Checked before the cluster is touched — an unknown mode is a
+        /// refusal here, not a red gate forty minutes from now.
         #[arg(long)]
         mode: Option<String>,
         /// Runner manifest. Defaults to infra/gate-runner/gate-runner.yaml.

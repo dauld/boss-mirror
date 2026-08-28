@@ -49,13 +49,13 @@ pub(crate) struct Receipt {
 /// is refused as loudly as a failed one: it means the environment died
 /// before saying anything, so there is no evidence either way, and
 /// "we don't know" must not read as "fine".
-pub(crate) fn receipt_for(packets: &[Value], branch: &str) -> Result<Receipt> {
+pub(crate) fn receipt_for(packets: &[Value], branch: &str, head_now: &str) -> Result<Receipt> {
+    // Every reported gate for this branch, in the order the API gave them.
+    let mut reported: Vec<(&str, &str)> = Vec::new(); // (verdict, receipt)
     let mut seen_branch = false;
-    let mut newest: Option<(&str, &str)> = None; // (verdict, receipt)
-
     for p in packets {
-        let md = p.get("metadata").and_then(Value::as_object);
-        let b = md
+        let b = p
+            .get("metadata")
             .and_then(|m| m.get("branch"))
             .and_then(Value::as_str)
             .unwrap_or_default();
@@ -69,11 +69,11 @@ pub(crate) fn receipt_for(packets: &[Value], branch: &str) -> Result<Receipt> {
             .into_iter()
             .flatten()
         {
-            let sm = s.get("metadata").and_then(Value::as_object);
+            let sm = s.get("metadata");
             let verdict = sm.and_then(|m| m.get("verdict")).and_then(Value::as_str);
             let raw = sm.and_then(|m| m.get("receipt")).and_then(Value::as_str);
             if let (Some(v), Some(r)) = (verdict, raw) {
-                newest = Some((v, r));
+                reported.push((v, r));
             }
         }
     }
@@ -84,14 +84,50 @@ pub(crate) fn receipt_for(packets: &[Value], branch: &str) -> Result<Receipt> {
              receipt — gate it first (`boss gate {branch}`), then park it."
         );
     }
-    let Some((verdict, raw)) = newest else {
+    if reported.is_empty() {
         bail!(
             "the gate for `{branch}` has not reported yet. Wait for a verdict \
              (`boss gate {branch} --wait`) rather than parking a car whose gate is \
              still running."
         );
+    }
+
+    let head_of = |raw: &str| -> String {
+        serde_json::from_str::<Value>(raw)
+            .ok()
+            .and_then(|v| v.get("head").and_then(Value::as_str).map(str::to_string))
+            .unwrap_or_default()
     };
-    if verdict != "green" {
+
+    // SELECT BY HEAD, NOT BY POSITION. A branch gated more than once has
+    // several packets, and which one the API lists first is not a
+    // contract — depending on it parked a car on a two-rebases-old
+    // receipt on 2026-08-28. The only packet that matters is the one
+    // vouching for the commit that would actually ride the train.
+    let known_head = head_now.len() >= 40;
+    let chosen = if known_head {
+        reported.iter().find(|(_, raw)| head_of(raw) == head_now)
+    } else {
+        reported.last()
+    };
+
+    let Some((verdict, raw)) = chosen else {
+        let heads: Vec<String> = reported
+            .iter()
+            .map(|(v, r)| format!("{}@{}", v, &head_of(r)[..12.min(head_of(r).len())]))
+            .collect();
+        bail!(
+            "no gate for `{branch}` vouches for its current head {} — refusing to park it.\n  \
+             gates on record: {}\n  \
+             A receipt vouches for ONE head. This is what a rebase or a new commit after \
+             gating looks like; re-gate (`boss gate {branch}`) so the car carries a receipt \
+             for the commit it would actually take onto a train.",
+            &head_now[..12.min(head_now.len())],
+            heads.join(", ")
+        );
+    };
+
+    if *verdict != "green" {
         bail!(
             "the gate for `{branch}` is `{verdict}`, not green — refusing to park it.\n  \
              receipt: {raw}\n  \
@@ -260,7 +296,8 @@ pub(crate) async fn run(
         )
         .await?,
     );
-    let receipt = receipt_for(&open, branch)?;
+    let head_now = crate::gate::resolve_sha(branch);
+    let receipt = receipt_for(&open, branch, &head_now)?;
     println!(
         "boss park: {branch} is green at {} ({})",
         &receipt.head[..12.min(receipt.head.len())],
@@ -371,12 +408,13 @@ mod tests {
         })
     }
 
+    const HEAD: &str = "e16708f69bc5b0a0a3f4bd1572f9db6dec76e7c8";
     const GREEN: &str = r#"{"verdict": "green", "head": "e16708f69bc5b0a0a3f4bd1572f9db6dec76e7c8", "mode": "full", "fails": []}"#;
 
     #[test]
     fn a_green_receipt_is_copied_verbatim_not_rebuilt() {
         let ps = vec![packet("feat/x", Some("green"), Some(GREEN))];
-        let r = receipt_for(&ps, "feat/x").unwrap();
+        let r = receipt_for(&ps, "feat/x", HEAD).unwrap();
         assert_eq!(
             r.raw, GREEN,
             "the receipt must survive byte-for-byte — rebuilding it from parts is the \
@@ -389,7 +427,7 @@ mod tests {
     #[test]
     fn a_branch_with_no_gate_is_refused() {
         let ps = vec![packet("other", Some("green"), Some(GREEN))];
-        let e = receipt_for(&ps, "feat/x").unwrap_err().to_string();
+        let e = receipt_for(&ps, "feat/x", HEAD).unwrap_err().to_string();
         assert!(e.contains("no gate-run packet"), "{e}");
         assert!(
             e.contains("boss gate feat/x"),
@@ -400,7 +438,7 @@ mod tests {
     #[test]
     fn a_gate_still_running_is_refused() {
         let ps = vec![packet("feat/x", None, None)];
-        let e = receipt_for(&ps, "feat/x").unwrap_err().to_string();
+        let e = receipt_for(&ps, "feat/x", HEAD).unwrap_err().to_string();
         assert!(e.contains("has not reported yet"), "{e}");
     }
 
@@ -408,9 +446,10 @@ mod tests {
     #[test]
     fn a_red_or_lost_gate_is_refused_and_the_receipt_is_shown() {
         for verdict in ["failed", "lost"] {
-            let raw = format!(r#"{{"verdict": "{verdict}", "head": "abc", "fails": ["clippy"]}}"#);
+            let raw =
+                format!(r#"{{"verdict": "{verdict}", "head": "{HEAD}", "fails": ["clippy"]}}"#);
             let ps = vec![packet("feat/x", Some(verdict), Some(&raw))];
-            let e = receipt_for(&ps, "feat/x").unwrap_err().to_string();
+            let e = receipt_for(&ps, "feat/x", HEAD).unwrap_err().to_string();
             assert!(e.contains(&format!("is `{verdict}`")), "{e}");
             assert!(
                 e.contains("clippy"),
@@ -425,24 +464,26 @@ mod tests {
     fn a_receipt_naming_no_head_is_refused() {
         let raw = r#"{"verdict": "green", "head": "origin/feat/x", "mode": "full"}"#;
         let ps = vec![packet("feat/x", Some("green"), Some(raw))];
-        let e = receipt_for(&ps, "feat/x").unwrap_err().to_string();
+        // head_now empty = the branch head could not be resolved.
+        let e = receipt_for(&ps, "feat/x", "").unwrap_err().to_string();
         assert!(e.contains("names no head"), "{e}");
     }
 
-    /// A re-gate files a second packet for the same branch; the latest
-    /// verdict is the one that counts, so an old green must not rescue a
-    /// branch whose newest gate went red.
+    /// A re-gate files a second packet for the same branch. What decides
+    /// is which packet vouches for the CURRENT head — not which is newer,
+    /// and emphatically not which the API happened to list last.
     #[test]
-    fn the_newest_verdict_wins_over_an_older_one() {
-        let red = r#"{"verdict": "failed", "head": "aaa", "fails": ["fmt"]}"#;
+    fn a_red_gate_on_the_current_head_is_not_rescued_by_an_older_green() {
+        let red = format!(r#"{{"verdict": "failed", "head": "{HEAD}", "fails": ["fmt"]}}"#);
+        let old_green = r#"{"verdict": "green", "head": "1111111111111111111111111111111111111111", "mode": "full"}"#;
         let ps = vec![
-            packet("feat/x", Some("green"), Some(GREEN)),
-            packet("feat/x", Some("failed"), Some(red)),
+            packet("feat/x", Some("green"), Some(old_green)),
+            packet("feat/x", Some("failed"), Some(&red)),
         ];
-        let e = receipt_for(&ps, "feat/x").unwrap_err().to_string();
+        let e = receipt_for(&ps, "feat/x", HEAD).unwrap_err().to_string();
         assert!(
             e.contains("is `failed`"),
-            "an older green must not mask a newer red: {e}"
+            "a green for a DIFFERENT commit must not vouch for this one: {e}"
         );
     }
 
@@ -513,5 +554,43 @@ mod tests {
         let e = resolve_job_id(&js, "20dfcb03").unwrap_err().to_string();
         assert!(e.contains("matches 2 Jobs"), "{e}");
         assert!(e.contains("9999"), "the candidates must be listed: {e}");
+    }
+
+    /// THE BUG THIS VERB SHIPPED WITH, AND THE FIX FOR IT.
+    ///
+    /// On 2026-08-28 `boss park` parked a car on a receipt for a commit
+    /// two rebases old. The cause was ordering: the code took the LAST
+    /// matching packet, the API returns newest-FIRST, and the unit test
+    /// happened to craft a list where those agreed. Comparing the
+    /// receipt to the branch head does not depend on ordering at all.
+    #[test]
+    fn a_receipt_for_a_commit_that_is_no_longer_the_tip_is_refused() {
+        let ps = vec![packet("feat/x", Some("green"), Some(GREEN))];
+        let moved = "7ed20bbf9d4d75c12b6e89569494e22d994b3f4b";
+        let e = receipt_for(&ps, "feat/x", moved).unwrap_err().to_string();
+        assert!(e.contains("vouches for its current head"), "{e}");
+        assert!(
+            e.contains("re-gate"),
+            "the refusal must say how to fix it: {e}"
+        );
+    }
+
+    /// Ordering must not decide the outcome: whichever way round the
+    /// packets arrive, the one matching the branch head is the one used.
+    #[test]
+    fn the_packet_matching_the_head_wins_regardless_of_list_order() {
+        let stale = r#"{"verdict": "green", "head": "1111111111111111111111111111111111111111", "mode": "full"}"#;
+        for order in 0..2 {
+            let mut ps = vec![
+                packet("feat/x", Some("green"), Some(GREEN)),
+                packet("feat/x", Some("green"), Some(stale)),
+            ];
+            if order == 1 {
+                ps.reverse();
+            }
+            let r = receipt_for(&ps, "feat/x", HEAD)
+                .unwrap_or_else(|e| panic!("order {order} failed: {e}"));
+            assert_eq!(r.head, HEAD, "order {order} picked the wrong packet");
+        }
     }
 }

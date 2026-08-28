@@ -1326,10 +1326,48 @@ pub(crate) fn deletable_branches(
 /// else"). A car with NO receipt is unverifiable and stays behind too:
 /// this check exists because claims without receipts already shipped.
 pub(crate) fn receipt_skip_reason(car: &Value, boarding_head: Option<&str>) -> Option<String> {
-    let gate = find_step(car, "gate", "Green, and observed working")?;
+    // A RE-GATE SUPERSEDES THE ORIGINAL GATE, and is read in preference
+    // to it. Filed as user feedback 64cae7e9 after 17 of 34 left-behinds
+    // traced to stale receipts: when a branch legitimately moves — a
+    // migration renumbered off a collision, a rebase onto a main that had
+    // moved into the same file — the receipt correctly stops vouching for
+    // the head, and the car was then UNREPAIRABLE. Completed steps are
+    // immutable, so the only recourse was to abandon the packet and park
+    // a fresh one, losing the car's history and costing a packet every
+    // time. That happened twice more on 2026-08-28, to cars 4e78035e and
+    // 8b831c5c, which is what moved this from a filed opinion to a fix.
+    //
+    // IT LIVES IN JOB METADATA, NOT IN A NEW STEP, and that is a
+    // deliberate retreat from the shape the feedback proposed. A `regate`
+    // STEP was built and validated clean, then abandoned: `blocked_by` is
+    // derived from every step a predicate REFERENCES, and a referenced
+    // step that is merely pending makes the API refuse to complete the
+    // referring step (the defect in feedback 1538e93a). Because a regate
+    // step must key on `job.metadata.skip_reason` to appear only when the
+    // conductor has left the car behind, and a predicate referencing
+    // job.metadata never SKIPS, it would sit pending forever on every
+    // healthy car — and anything referencing it, `review` included, would
+    // be blocked from completing. That is the conductor unable to board
+    // anything. The engine cannot express an optional repair step safely
+    // today; job metadata can, so the repair uses what works and the
+    // step is filed as protocol work behind 1538e93a.
+    let regate = car
+        .get("metadata")
+        .and_then(|m| m.get("regate_receipt"))
+        .filter(|v| !v.is_null());
+    let md_owned;
+    let md: &Value = match regate {
+        Some(r) => {
+            md_owned = json!({ "receipt": r });
+            &md_owned
+        }
+        None => {
+            let gate = find_step(car, "gate", "Green, and observed working")?;
+            gate.get("metadata")?
+        }
+    };
     // Present as a JSON string (how the gate step records it) or as an
     // object (tooling that parses before writing) — both are receipts.
-    let md = gate.get("metadata")?;
     let receipt: Value = match md.get("receipt") {
         Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(Value::Null),
         Some(v @ Value::Object(_)) => v.clone(),
@@ -4830,6 +4868,60 @@ mod tests {
             "metadata": {"receipt": receipt.to_string()},
         }));
         c
+    }
+
+    /// A RE-GATE RECEIPT IS THE ONE THAT COUNTS.
+    ///
+    /// User feedback 64cae7e9: a car whose branch legitimately moved was
+    /// unrepairable, because the gate step is immutable and its receipt
+    /// correctly stops vouching for the new head. Two cars were abandoned
+    /// on 2026-08-28 for exactly this. With `regate_receipt` on the car,
+    /// the fresh receipt is read and the car boards — no new packet, and
+    /// the car keeps its history.
+    #[test]
+    fn a_regate_receipt_supersedes_a_stale_gate_receipt() {
+        let stale = r#"{"verdict":"green","head":"1111111111111111111111111111111111111111"}"#;
+        let fresh = r#"{"verdict":"green","head":"2222222222222222222222222222222222222222"}"#;
+        let car = json!({
+            "metadata": {"regate_receipt": fresh},
+            "steps": [{"spec_slug": "gate", "title": "Green, and observed working",
+                       "status": "completed", "metadata": {"receipt": stale}}],
+        });
+        assert_eq!(
+            receipt_skip_reason(&car, Some("2222222222222222222222222222222222222222")),
+            None,
+            "the re-gate vouches for the head being boarded; the car should board"
+        );
+    }
+
+    /// Without a re-gate the original still rules, so a stale car is
+    /// still refused and the reason still names the mismatch.
+    #[test]
+    fn no_regate_leaves_the_original_receipt_in_force() {
+        let stale = r#"{"verdict":"green","head":"1111111111111111111111111111111111111111"}"#;
+        let car = json!({
+            "metadata": {},
+            "steps": [{"spec_slug": "gate", "title": "Green, and observed working",
+                       "status": "completed", "metadata": {"receipt": stale}}],
+        });
+        let reason = receipt_skip_reason(&car, Some("2222222222222222222222222222222222222222"))
+            .expect("a stale receipt with no re-gate must still be refused");
+        assert!(reason.contains("gated, then changed"), "{reason}");
+    }
+
+    /// A re-gate is not a way to launder a red run.
+    #[test]
+    fn a_regate_that_is_not_green_is_refused_like_any_other() {
+        let stale = r#"{"verdict":"green","head":"1111111111111111111111111111111111111111"}"#;
+        let red = r#"{"verdict":"failed","head":"2222222222222222222222222222222222222222"}"#;
+        let car = json!({
+            "metadata": {"regate_receipt": red},
+            "steps": [{"spec_slug": "gate", "title": "Green, and observed working",
+                       "status": "completed", "metadata": {"receipt": stale}}],
+        });
+        let reason = receipt_skip_reason(&car, Some("2222222222222222222222222222222222222222"))
+            .expect("a failed re-gate must not board");
+        assert!(reason.contains("not green"), "{reason}");
     }
 
     #[test]
