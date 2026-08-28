@@ -22,6 +22,7 @@
 //! and must not promise an alarm in the case where none can fire.
 
 use std::path::PathBuf;
+use std::process::Command;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -111,4 +112,93 @@ fn the_exit_status_still_follows_the_gate_not_the_report() {
         "the reporting-failure branch must not exit non-zero: that would report a green gate \
          as a failed run, which is the confusion cf0021ae is about"
     );
+}
+
+/// The step selector is LIFTED OUT OF run.sh AND RUN, not read.
+///
+/// It used to match `"Record" in title` — a substring of human-facing
+/// prose in a registry row anyone may edit. Zero matches raised an
+/// IndexError forty minutes into a gate, with the work done and nowhere
+/// to report it; two matches reported onto whichever step the API
+/// happened to order first. Filed as 48bed517; the fix keys on
+/// `spec_slug`, which is what train.rs's own find_step prefers.
+///
+/// Asserting the source contains "spec_slug" would pass on a script that
+/// never reaches the branch, so the selector is extracted and executed
+/// against crafted packets.
+fn selector() -> String {
+    let sh = run_sh();
+    let start = sh
+        .find("| python3 -c 'import sys,json\n")
+        .expect("run.sh no longer selects its step with an inline python3 -c");
+    let body = &sh[start + "| python3 -c '".len()..];
+    let end = body
+        .find("') || return 1")
+        .expect("selector is not closed as expected");
+    body[..end].to_string()
+}
+
+fn run_selector(packet: &str) -> std::process::Output {
+    use std::io::Write;
+    let mut child = Command::new("python3")
+        .arg("-c")
+        .arg(selector())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("python3 runs the selector");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(packet.as_bytes())
+        .expect("write packet");
+    child.wait_with_output().expect("selector finishes")
+}
+
+#[test]
+fn the_selector_finds_the_step_by_key_not_by_title() {
+    // Titles deliberately say nothing about "Record" — keying on prose
+    // would find nothing here, which is the point.
+    let packet = r#"{"steps":[
+        {"id":"aaa","spec_slug":"launched","title":"Gate launched"},
+        {"id":"bbb","spec_slug":"record-verdict","title":"Whatever an operator renamed this to"}
+    ]}"#;
+    let out = run_selector(packet);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "bbb");
+}
+
+#[test]
+fn a_packet_without_the_step_fails_loudly_and_names_the_receipt() {
+    let packet = r#"{"steps":[{"id":"aaa","spec_slug":"launched","title":"Gate launched"}]}"#;
+    let out = run_selector(packet);
+    assert!(!out.status.success(), "a missing step must not be silent");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("found 0"), "{err}");
+    assert!(
+        err.contains("receipt.json"),
+        "the gate has already run — say where its result is: {err}"
+    );
+}
+
+/// Two matches must be an error, never a pick. The old selector took
+/// `[0]` and reported onto an arbitrary step.
+#[test]
+fn a_packet_with_two_matching_steps_is_refused() {
+    let packet = r#"{"steps":[
+        {"id":"aaa","spec_slug":"record-verdict","title":"Record the receipt"},
+        {"id":"bbb","spec_slug":"record-verdict","title":"Record the receipt again"}
+    ]}"#;
+    let out = run_selector(packet);
+    assert!(
+        !out.status.success(),
+        "ambiguity must not be resolved silently"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("found 2"));
 }

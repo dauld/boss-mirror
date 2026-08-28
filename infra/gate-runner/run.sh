@@ -28,9 +28,26 @@ ACTOR='{"id":"automation:gate-runner","role":"platform-admin","access_tier":"ope
 
 report() { # verdict, note
     local step_id
+    # SELECT BY KEY, NOT BY PROSE. This used to match `"Record" in title`
+    # against the step's rendered title — a substring of human-facing text
+    # in a registry row that anyone may edit. Zero matches raised an
+    # IndexError forty minutes into a gate, after the work was done and
+    # with nowhere to report it; two matches reported onto whichever the
+    # API happened to order first. `spec_slug` is the step's stable
+    # identifier and is exactly what train.rs's own find_step prefers
+    # (falling back to title only for older packets). Filed as 48bed517.
     step_id=$(curl -sf -H "x-boss-user: $ACTOR" \
         "$JOBS_API/api/jobs/$GATE_RUN_JOB_ID" \
-        | python3 -c 'import sys,json;j=json.load(sys.stdin);print([s["id"] for s in j["steps"] if "Record" in (s.get("title") or "")][0])') || return 1
+        | python3 -c 'import sys,json
+j = json.load(sys.stdin)
+hits = [s["id"] for s in j["steps"] if s.get("spec_slug") == "record-verdict"]
+if len(hits) != 1:
+    sys.stderr.write(
+        "gate-runner: expected exactly one step with spec_slug=record-verdict on packet, "
+        "found %d. The gate-run workflow changed shape; the verdict cannot be reported "
+        "and the receipt on /gate-target/receipt.json is the only record.\n" % len(hits))
+    raise SystemExit(1)
+print(hits[0])') || return 1
     python3 - "$1" "$2" <<'PY' > /tmp/verdict.json
 import json, sys
 print(json.dumps({"status": "completed",
