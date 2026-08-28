@@ -196,7 +196,7 @@ fn jobs_base() -> String {
     env_or("BOSS_JOBS_URL", "http://127.0.0.1:7900")
 }
 
-async fn api(
+pub(crate) async fn api(
     http: &reqwest::Client,
     method: reqwest::Method,
     path: &str,
@@ -224,7 +224,7 @@ async fn api(
     Ok(serde_json::from_str(&body).ok())
 }
 
-fn rows(v: Option<Value>) -> Vec<Value> {
+pub(crate) fn rows(v: Option<Value>) -> Vec<Value> {
     v.and_then(|v| {
         v.get("data")
             .and_then(Value::as_array)

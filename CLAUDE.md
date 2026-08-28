@@ -481,6 +481,62 @@ Resolutions flush into the source doc's Decision-history section via the tracker
 
 ---
 
+## Doors — the supported way in
+
+A door is a path already made safe: correct target, correct actor,
+pre-approved so it does not prompt. **Every expensive mistake this
+pipeline has made was building a path by hand when a door existed**, so
+the doors are listed here, in the one document every session reads.
+
+This list is load-bearing for how much gets delegated. David,
+2026-08-28: *"As we get more confident that the protocol prevents big
+mistakes, we can let you handle more steps. The protocol is our
+constraint."* An agent is trusted with a step because the protocol makes
+that step hard to get wrong — not because it promised to be careful. So
+a door that stops being true is a defect worth a car.
+
+- **The jobs API — `boss-api METHOD /api/path [body.json]`**
+  (`/Users/david/bin/boss-api`). Pinned to the system of record, signs
+  as the session's own actor, allowlisted so it never prompts. Invoke it
+  **bare**: `boss-api GET … > file` stays inside the allowlist, `boss-api
+  GET … | python3` falls out of it and gets adjudicated. Speaks
+  GET/POST/PUT/DELETE — **not PATCH**, so annotating job metadata means a
+  full job PUT. On 2026-08-27 a session made ~28 hand-built calls before
+  finding it, ~14 of them writes carrying a forged `emp-david` actor, so
+  the audit log credits a human with an agent's work.
+
+- **Which deployment.** The system of record is
+  **`http://10.20.0.34:7900`**. boss-gcp's `127.0.0.1:7900` is a
+  *second, older, complete stack* with different data. The conductor's
+  systemd unit sets `BOSS_JOBS_URL` explicitly for this reason; a verb
+  run by hand inherits no unit.
+
+- **Before pushing — `infra/gate.sh --quick`.** fmt plus every
+  build-free lint, ~11s. It is not a gate and says so. Skipping it once
+  cost 17 minutes of cluster time to learn that `cargo fmt` had been run
+  on one crate and not another.
+
+- **Gating a branch — `boss gate <branch> [--wait]`.** Files or reuses
+  the packet, renders the runner, creates the Job. `--wait` polls to a
+  verdict; hand-rolled pollers have been written three times and two
+  were broken.
+
+- **Publishing a branch to the forge.** A workstation has no forge
+  credential. Push to the conductor clone (`gcp` remote) under
+  `refs/tmp/*`, push that to `origin` from there, delete the temp ref.
+  Never push a car branch to a push-mirror target — it force-syncs from
+  the forge and the branch disappears.
+
+**And the rule behind all of them: a wrong target answers instead of
+erroring.** A query against the wrong deployment returns `total: 0`. A
+non-existent systemd unit is `inactive`. A service checked on the wrong
+host is `inactive`. All three happened in one session, all three are
+well-formed and confident and wrong. Before concluding something *does
+not exist*, run a query on the same connection whose answer you already
+know.
+
+---
+
 ## What We Don't Do
 
 - No ORM magic — explicit queries, explicit mapping

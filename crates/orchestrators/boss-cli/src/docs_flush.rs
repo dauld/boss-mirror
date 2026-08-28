@@ -796,15 +796,6 @@ pub fn today() -> NaiveDate {
     chrono::Utc::now().date_naive()
 }
 
-/// Unused placeholder. This module owns only the pure
-/// markdown-surgery logic (so it stays easy to test); the worker
-/// loop that fetches and processes queued flush jobs lives with the
-/// HTTP plumbing in `docs.rs`.
-#[allow(dead_code)]
-pub async fn run_worker(_api_base: &str) -> Result<()> {
-    Ok(())
-}
-
 pub fn locate_file(repo_root: &std::path::Path, rel_path: &str) -> std::path::PathBuf {
     repo_root.join(rel_path)
 }

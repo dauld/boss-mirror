@@ -12,6 +12,7 @@ mod doctor;
 mod gate;
 mod inspect;
 mod ops;
+mod park;
 mod queue;
 mod script;
 mod train;
@@ -147,6 +148,33 @@ enum Commands {
         #[arg(long)]
         wait: bool,
         /// Show what would happen without filing or creating anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Park a gated branch as a car, carrying its receipt.
+    ///
+    /// Refuses unless the branch has a GREEN gate-run packet, and
+    /// copies that packet's receipt verbatim into the car's gate step
+    /// — the transcription step where a wrong head used to get in.
+    Park {
+        /// Branch to park. Must already have a green gate.
+        branch: String,
+        /// What the change does. Its first sentence becomes the title.
+        #[arg(long)]
+        summary: String,
+        /// What it deliberately leaves out.
+        #[arg(long)]
+        excludes: String,
+        /// What was run, and what it proves.
+        #[arg(long)]
+        test: String,
+        /// What was observed working, beyond the gate being green.
+        #[arg(long)]
+        verified: String,
+        /// Backlog item this change answers (a ref-checked job edge).
+        #[arg(long)]
+        backlog_item: Option<String>,
+        /// Check the receipt and report, without filing anything.
         #[arg(long)]
         dry_run: bool,
     },
@@ -603,6 +631,26 @@ async fn main() -> Result<()> {
             // loop fires), and nothing here stamps audit_log directly
             // — jobs-api does that on the far side of the HTTP calls.
             train::run(phase, dry, chrono::Utc::now()).await
+        }
+        Commands::Park {
+            branch,
+            summary,
+            excludes,
+            test,
+            verified,
+            backlog_item,
+            dry_run,
+        } => {
+            park::run(
+                &branch,
+                &summary,
+                &excludes,
+                &test,
+                &verified,
+                backlog_item,
+                dry_run,
+            )
+            .await
         }
         Commands::Gate {
             branch,
