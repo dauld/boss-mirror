@@ -7,6 +7,11 @@
 #
 # Usage:
 #   infra/gate.sh                 # full gate — exactly what CI runs
+#   infra/gate.sh --quick         # PRE-FLIGHT only: fmt + the lints
+#                                 # that need no build, ~17s. Not a
+#                                 # gate — nothing compiles. Run it
+#                                 # before spending 17 minutes of
+#                                 # cluster time on a formatting slip.
 #   infra/gate.sh --auto          # car mode, scope DERIVED from the
 #                                 # tree. Skips cargo entirely when
 #                                 # nothing changed implies a crate —
@@ -31,11 +36,13 @@ cd "$(dirname "$0")/.."
 SCOPE=()
 NAMED=()
 AUTO=0
+QUICK=0
 while [ $# -gt 0 ]; do
     case "$1" in
         -p) shift; SCOPE+=(-p "${1:?-p needs a crate name}"); NAMED+=("$1"); shift ;;
         --auto) AUTO=1; shift ;;
-        *) echo "gate.sh: unknown arg: $1 (accepts -p <crate> and --auto)" >&2; exit 2 ;;
+        --quick) QUICK=1; shift ;;
+        *) echo "gate.sh: unknown arg: $1 (accepts -p <crate>, --auto and --quick)" >&2; exit 2 ;;
     esac
 done
 # Alternatives, not companions: --auto derives exactly what -p states,
@@ -507,6 +514,87 @@ check() {
     fi
 }
 
+# ---------------------------------------------------------------------
+# The pre-flight set: every check that needs no build
+# ---------------------------------------------------------------------
+# `cargo fmt -- --check` and the lint roster are repo-wide greps and
+# audits. Together they take ~17 SECONDS on a cold tree. They used to
+# run near the END of the gate, behind clippy, the full test suite and
+# the bun web suite.
+#
+# That ordering is not a bug — `check()` deliberately runs every check
+# even after one fails, "a red gate should report every failure it can
+# see, not make the author fix serially", and reordering saves a red
+# gate nothing because it runs everything regardless.
+#
+# The cost lands somewhere else: there was no way to run the cheap
+# checks WITHOUT the expensive ones. So the only way to find a
+# formatting slip was to spend a gate. On 2026-08-27 a car did exactly
+# that — 17 minutes of cluster time, a scheduled pod and a clone, to
+# learn that `cargo fmt` had been run on one crate and not another.
+# 17 seconds of local work, discovered 60x more slowly.
+#
+# Hence `--quick`, and hence this list existing ONCE. Two rosters would
+# drift (CLAUDE.md §9a) and would drift in the worst direction: a check
+# quietly missing from the local pre-flight still passes locally and
+# still reds a full gate, which is precisely the failure being fixed.
+#
+# `svelte-check` is NOT here — it installs packages, which is minutes,
+# not seconds. `no-snapshot-arrays` is not here either; it needs a
+# build, and the delivery policy already excludes it for that reason.
+PREFLIGHT_LINTS=(
+    "seed-bypass-smell|infra/lint/seed-bypass-smell.sh"
+    "no-todo-citation|infra/lint/no-todo-citation.sh"
+    "no-step-kind-match|infra/lint/no-step-kind-match.sh"
+    "api-path-bypass-smell|infra/lint/api-path-bypass-smell.sh"
+    "dispatcher-actor-stamp|infra/lint/dispatcher-actor-stamp.sh"
+    "sim-boundary-audit|infra/lint/sim-boundary-audit.sh"
+    "tier-import-audit|infra/lint/tier-import-audit.sh"
+    "layer-order-audit|infra/lint/layer-order-audit.sh"
+    "no-wallclock|infra/lint/no-wallclock.sh"
+    "outbox-migration-ratchet|infra/lint/outbox-migration-ratchet.sh"
+    "idempotence-ratchet|infra/lint/idempotence-ratchet.sh"
+    "dispatcher-rules-ratchet|infra/lint/dispatcher-rules-ratchet.sh"
+    "schema-converge|infra/lint/schema-converge.sh"
+    "migrations-append-only|infra/lint/migrations-append-only.sh"
+    "migration-numbers-unique|infra/lint/migration-numbers-unique.sh"
+    "no-secrets|infra/lint/no-secrets.sh"
+    "no-session-paths|infra/lint/no-session-paths.sh"
+    "session-key-persists|infra/lint/session-key-persists.sh"
+    "invariant-register|infra/lint/invariant-register.sh"
+    "crate-counts-fresh|infra/lint/crate-counts-fresh.sh"
+    "registry-bump-order|infra/lint/registry-bump-retires-first.sh"
+    "ci-tools-declared|infra/lint/ci-tools-declared.sh"
+    "timers-leave-a-packet|infra/lint/timers-leave-a-packet.sh"
+    "step-plugin-bundle|infra/lint/step-plugin-bundle-exists.sh"
+    "one-palette|infra/lint/one-palette.sh"
+)
+
+run_preflight() {
+    check "fmt" cargo fmt -- --check
+    local entry
+    for entry in "${PREFLIGHT_LINTS[@]}"; do
+        check "${entry%%|*}" "${entry#*|}"
+    done
+}
+
+# `--quick` stops here. It is a PRE-FLIGHT, not a gate, and says so:
+# nothing compiles, so it cannot see a clippy error, a failing test or a
+# broken build. Its whole claim is "you will not lose a gate to a lint
+# or a formatting slip", which is the class of red it is answering.
+if [ "$QUICK" -eq 1 ]; then
+    run_preflight
+    echo ""
+    if [ "${#FAILED[@]}" -gt 0 ]; then
+        echo "pre-flight: ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
+        echo "pre-flight: fix these before spending a gate on them." >&2
+        exit 1
+    fi
+    echo "pre-flight: clean — no build ran, so this is NOT a gate."
+    echo "pre-flight: clippy, build and the test suites are still unproven."
+    exit 0
+fi
+
 # The shared fixture, checked in BOTH modes and named before anything
 # else. Measured across the forge's CI history on 2026-08-15 (106 runs,
 # 36 trains): 79% of train reds surfaced only in `test`, the slowest
@@ -563,36 +651,8 @@ if [ "$AUTO" -eq 1 ] && [ "$(web_touched)" = "yes" ]; then
     check "web-suite (unit+build+mocked)" bash -c 'cd apps/web && bun run test:unit && bun run build && bun run test:mocked'
 fi
 
-check "fmt" cargo fmt -- --check
+run_preflight
 
-# The lint roster. These are repo-wide greps and audits — fast in car
-# mode too, and a car's diff can trip any of them (both #226 red runs
-# were exactly this class).
-check "seed-bypass-smell"        infra/lint/seed-bypass-smell.sh
-check "no-todo-citation"         infra/lint/no-todo-citation.sh
-check "no-step-kind-match"       infra/lint/no-step-kind-match.sh
-check "api-path-bypass-smell"    infra/lint/api-path-bypass-smell.sh
-check "dispatcher-actor-stamp"   infra/lint/dispatcher-actor-stamp.sh
-check "sim-boundary-audit"       infra/lint/sim-boundary-audit.sh
-check "tier-import-audit"        infra/lint/tier-import-audit.sh
-check "layer-order-audit"        infra/lint/layer-order-audit.sh
-check "no-wallclock"             infra/lint/no-wallclock.sh
-check "outbox-migration-ratchet" infra/lint/outbox-migration-ratchet.sh
-check "idempotence-ratchet"      infra/lint/idempotence-ratchet.sh
-check "dispatcher-rules-ratchet" infra/lint/dispatcher-rules-ratchet.sh
-check "schema-converge"          infra/lint/schema-converge.sh
-check "migrations-append-only"   infra/lint/migrations-append-only.sh
-check "migration-numbers-unique"  infra/lint/migration-numbers-unique.sh
-check "no-secrets"               infra/lint/no-secrets.sh
-check "no-session-paths"         infra/lint/no-session-paths.sh
-check "session-key-persists"     infra/lint/session-key-persists.sh
-check "invariant-register"       infra/lint/invariant-register.sh
-check "crate-counts-fresh"       infra/lint/crate-counts-fresh.sh
-check "registry-bump-order"      infra/lint/registry-bump-retires-first.sh
-check "ci-tools-declared"        infra/lint/ci-tools-declared.sh
-check "timers-leave-a-packet"    infra/lint/timers-leave-a-packet.sh
-check "step-plugin-bundle"       infra/lint/step-plugin-bundle-exists.sh
-check "one-palette"              infra/lint/one-palette.sh
 
 # The frontend type gate. Last, because it is the only check that
 # installs anything, and a Rust-only car should learn about its Rust

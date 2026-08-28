@@ -138,6 +138,39 @@ pub(crate) fn render_job(
     Ok(job)
 }
 
+/// The body that files a gate-run packet.
+///
+/// PURE, AND TESTED, BECAUSE THE API IS PICKIER THAN IT LOOKS. This
+/// shipped without `tags` and the jobs API refuses that outright —
+/// `422 invalid job body: missing field 'tags'` — so `boss gate` could
+/// never file a packet and therefore never ran a gate. The gate that
+/// merged it was green and its unit tests passed: nothing in the tree
+/// exercised the one call that talks to the API. Found on 2026-08-27 by
+/// running the verb rather than by reading it, which is what a
+/// proven-in-prod step is for.
+///
+/// Every field `Job` declares without a serde default has to be here:
+/// `kind`, `subject`, `title`, `owner_id`, `status`, `priority`,
+/// `metadata`, `tags`. `opened_on` is deliberately **not** — the create
+/// handler stamps it from the authoritative (sim-aware) clock precisely
+/// so operator-initiated creates inherit it rather than guessing.
+pub(crate) fn gate_run_body(branch: &str, sha: &str, manifest: &str) -> Value {
+    json!({
+        "kind": "gate-run",
+        "title": format!("Gate: {branch}"),
+        "subject": {"subject_kind": "custom", "id": "bosspipeline"},
+        "owner_id": "emp-david",
+        "priority": "standard",
+        "status": "open",
+        "tags": [],
+        "metadata": {
+            "branch": branch,
+            "sha": sha,
+            "runner": manifest,
+        },
+    })
+}
+
 /// The gate-run packet for this exact branch and sha, if one is already
 /// open.
 ///
@@ -302,19 +335,11 @@ pub async fn run(
                     &http,
                     reqwest::Method::POST,
                     "/api/jobs",
-                    Some(json!({
-                        "kind": "gate-run",
-                        "title": format!("Gate: {branch}"),
-                        "subject": {"subject_kind": "custom", "id": "bosspipeline"},
-                        "owner_id": "emp-david",
-                        "priority": "standard",
-                        "status": "open",
-                        "metadata": {
-                            "branch": branch,
-                            "sha": sha,
-                            "runner": manifest_path.display().to_string(),
-                        },
-                    })),
+                    Some(gate_run_body(
+                        branch,
+                        &sha,
+                        &manifest_path.display().to_string(),
+                    )),
                 )
                 .await?;
                 created
@@ -433,6 +458,83 @@ async fn wait_for_verdict(http: &reqwest::Client, packet: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// THE FIELD WHOSE ABSENCE MADE THE WHOLE VERB A NO-OP.
+    ///
+    /// `POST /api/jobs` refuses a body without a top-level `tags` with
+    /// `422 invalid job body: missing field 'tags'`. The verb shipped
+    /// without it, so it could never file a packet and therefore never
+    /// launched a gate — through a green gate and a merged car, because
+    /// nothing in the tree exercised the call. Asserting the shape here
+    /// is not a substitute for running it, but it stops this exact
+    /// omission returning.
+    #[test]
+    fn the_packet_body_carries_every_field_the_api_demands() {
+        let b = gate_run_body("feat/x", "abc123", "infra/gate-runner/gate-runner.yaml");
+        // Exactly the `Job` fields with no serde default and no Option.
+        for field in [
+            "kind", "subject", "title", "owner_id", "status", "priority", "metadata", "tags",
+        ] {
+            assert!(
+                b.get(field).is_some(),
+                "gate-run body is missing top-level `{field}` — the jobs API refuses it"
+            );
+        }
+        assert!(
+            b.get("tags").and_then(Value::as_array).is_some(),
+            "`tags` must be an array, not merely present"
+        );
+        assert_eq!(b["kind"], "gate-run");
+        assert_eq!(b["metadata"]["branch"], "feat/x");
+        assert_eq!(b["metadata"]["sha"], "abc123");
+    }
+
+    /// The create handler injects `opened_on` off the authoritative
+    /// clock when the body omits it. Sending our own would substitute a
+    /// caller's idea of the date for the company's.
+    #[test]
+    fn the_packet_lets_the_api_stamp_the_open_date() {
+        let b = gate_run_body("feat/x", "abc123", "infra/gate-runner/gate-runner.yaml");
+        assert!(
+            b.get("opened_on").is_none(),
+            "`opened_on` must be left to the create handler's clock"
+        );
+    }
+
+    /// THE TEST THAT WOULD HAVE CAUGHT THE ORIGINAL BUG.
+    ///
+    /// Listing field names, as the two tests above do, only pins what I
+    /// already know to look for — and what shipped broken was a field I
+    /// did not know to look for. `POST /api/jobs` deserializes the body
+    /// into `boss_core::job::Job` and returns `422 invalid job body: {e}` on
+    /// failure, so running that same deserialization here asks the
+    /// authoritative type what it requires instead of me guessing.
+    ///
+    /// `opened_on` is injected by the handler before it deserializes
+    /// (operator creates omit it), so injecting it here reproduces what
+    /// the type actually sees.
+    #[test]
+    fn the_body_deserializes_into_the_job_type_the_api_parses_it_as() {
+        let mut b = gate_run_body("feat/x", "abc123", "infra/gate-runner/gate-runner.yaml");
+        b.as_object_mut()
+            .expect("body is an object")
+            .insert("opened_on".into(), json!("2026-08-27"));
+
+        let job: boss_core::job::Job = serde_json::from_value(b)
+            .expect("gate-run body must deserialize into Job — this is verbatim what the API does");
+
+        assert_eq!(job.kind, "gate-run");
+        assert_eq!(job.metadata["branch"], "feat/x");
+        assert!(job.tags.is_empty());
+    }
+
+    /// The runner path travels on the packet so a reader can tell which
+    /// rig produced a verdict without guessing from the branch name.
+    #[test]
+    fn the_packet_records_which_runner_manifest_rendered_it() {
+        let b = gate_run_body("feat/x", "abc123", "infra/gate-runner/local.yaml");
+        assert_eq!(b["metadata"]["runner"], "infra/gate-runner/local.yaml");
+    }
 
     const MANIFEST: &str = "\
 apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: gate-runner-disk\n\

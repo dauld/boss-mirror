@@ -1,0 +1,27 @@
+[Unit]
+Description=Forge access-token inventory audit (drift against infra/platform/forge-tokens.toml)
+
+[Service]
+Type=oneshot
+# Runs ON THE FORGE HOST, not on boss-gcp or in the cluster, because the
+# authority it reads is the forge's own SQLite database and reading it
+# needs no credential at all. The alternative - querying
+# /api/v1/users/{u}/tokens - requires a token with `read:user`, which
+# would mean minting a new credential in order to audit credentials, and
+# none of our existing tokens carry that scope (verified 2026-08-27: the
+# conductor's token gets 403 for want of read:user).
+#
+# Exit code 2 -> drift or an unattributed credential -> systemctl
+# is-failed -> the OnFailure hook fires, and the maintenance Job stays
+# open and loud. Exit 0 only when the forge matches the declaration AND
+# every declared consumer is identified.
+Environment=RUST_LOG=info
+ExecStartPre=/opt/boss/infra/boss-maintenance-wrap.sh maintenance-forge-token-audit "Forge token audit"
+ExecStart=/usr/bin/python3 /opt/boss/infra/maintenance/forge-token-audit.py \
+    --declaration /opt/boss/infra/platform/forge-tokens.toml \
+    --db /opt/forgejo/data/gitea/gitea.db \
+    --user david
+ExecStartPost=/opt/boss/infra/boss-step.sh maintenance-forge-token-audit run result=ok
+# The database is 0644 and the check opens it read-only (SQLite URI
+# mode=ro), so this does not need root and does not get it.
+User=david

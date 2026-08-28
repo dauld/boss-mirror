@@ -1,0 +1,8 @@
+[[invariant]]
+id = "a-gate-receipt-vouches-for-one-head"
+claim = "A car does not board unless its gate receipt names the commit the branch is boarding. A receipt is a claim about ONE head, and completing the gate step freezes that claim — so the gate step is completed only when the branch is final."
+source = "crates/orchestrators/boss-cli/src/train.rs (receipt_skip_reason); train 1597b4a4 left_behind, 2026-08-27; packets 09576fab, 64cae7e9"
+enforcement = "enforced"
+mechanism = "crates/orchestrators/boss-cli/src/train.rs"
+last_verified = "2026-08-27"
+note = "The conductor compares the receipt's `head` against the boarding head and leaves the car behind by name: 'gate receipt is for 1cee19b9 but the branch boards 1a2949f4 — gated, then changed'. That guard works and it caught a stale claim on 2026-08-27 that would otherwise have shipped. WHAT IS NOT ENFORCED is the authoring half — nothing stops you completing the gate step and THEN pushing one more commit, which is exactly how that car got stuck. It is worth understanding why the recovery is expensive rather than annoying: receipt_skip_reason reads `metadata.receipt` from the completed gate step, and a completed step's metadata is frozen at the row (both adapters), so the fresh receipt CANNOT be written where the conductor looks. The car is then correct, gated green, and unboardable — with no path back short of parking a fresh packet for the same branch, which loses the original's history and costs a packet every time. That is the gap 64cae7e9 proposes to close with a `regate` step, and it becomes a registry edit rather than a deploy once ship-a-change is registry data. Until then the discipline is the mechanism: push everything, THEN gate, THEN complete."

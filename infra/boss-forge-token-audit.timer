@@ -1,0 +1,22 @@
+[Unit]
+Description=Weekly forge access-token inventory audit
+
+[Timer]
+# Weekly, not daily, and deliberately so. This audit measures a HUMAN
+# process — declaring who holds which credential, and pruning the ones
+# nobody claims — and that process does not move on a daily cadence. A
+# daily red on the same eight unattributed tokens is an alert that
+# teaches people to ignore alerts, which is worse than no alert.
+#
+# Monday 09:15 local: early in the week, so a finding has working days
+# in front of it rather than landing on a Friday evening, and offset
+# from the 03:00-04:00 maintenance band so it is not competing for
+# attention with overnight failures.
+OnCalendar=Mon *-*-* 09:15:00
+# Cover host-down windows. A missed week delays the audit, not the
+# accumulation it is watching for.
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

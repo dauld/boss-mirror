@@ -426,3 +426,77 @@ fn the_receipt_names_what_only_a_database_could_have_judged() {
          stays silent on changes a database has nothing to say about"
     );
 }
+
+/// `--quick` must stop BEFORE anything compiles, or it is not quick.
+///
+/// The mode exists because the cheap checks were unreachable without the
+/// expensive ones: on 2026-08-27 a car spent 17 minutes of cluster time,
+/// a scheduled pod and a clone to discover a `cargo fmt` slip that
+/// `--quick` now finds in 13 seconds. The property that makes it worth
+/// running is that it does not build — so this asserts by POSITION,
+/// which is the only thing that can actually go wrong here: move the
+/// early exit below the cargo phases and `--quick` silently becomes a
+/// full gate that lies about its name.
+#[test]
+fn quick_mode_exits_before_the_first_compile() {
+    let gate = read("infra/gate.sh");
+
+    // BY LINE, AND ONLY REAL INVOCATIONS. gate.sh is more comment than
+    // code, and two earlier drafts of this test compared byte offsets
+    // against `cargo build` and `check "fixture"` as they appear in
+    // PROSE — 25k and 9k bytes above any real call. A needle that can
+    // match a comment tests the comment. A `check` invocation is a line
+    // whose first non-space characters are `check "`; a comment's are `#`.
+    let lines: Vec<&str> = gate.lines().collect();
+    let is_invocation = |l: &str| l.trim_start().starts_with("check \"");
+
+    let quick_at = lines
+        .iter()
+        .position(|l| l.contains("if [ \"$QUICK\" -eq 1 ]; then"))
+        .expect("infra/gate.sh no longer has a --quick early exit");
+
+    // The three that COMPILE, named rather than matched on "cargo ".
+    // `cargo fmt` is a cargo command that builds nothing and is part of
+    // the pre-flight itself, so a broad needle finds it and reports the
+    // mode failing to exit before a check it is supposed to run.
+    let builds = |l: &str| {
+        ["cargo clippy", "cargo build", "cargo test"]
+            .iter()
+            .any(|c| l.contains(c))
+    };
+    let first_compile = lines
+        .iter()
+        .enumerate()
+        .find(|(_, l)| is_invocation(l) && builds(l))
+        .map(|(i, l)| (i, l.trim().to_string()))
+        .expect("gate.sh no longer compiles anything through check()");
+
+    assert!(
+        quick_at < first_compile.0,
+        "`--quick` exits at line {} but the first compiling check is at line {} ({}) — \
+         the early exit must come FIRST or --quick compiles, which is the one thing \
+         it promises not to do",
+        quick_at + 1,
+        first_compile.0 + 1,
+        first_compile.1
+    );
+}
+
+/// The full gate must still run the pre-flight set.
+///
+/// `run_preflight` holds fmt plus the whole lint roster. If it were only
+/// ever called from the `--quick` branch, a normal gate would stop
+/// linting entirely and stay green while doing less — the exact
+/// under-covering shape `gate_script_covers_the_checks` was written for,
+/// one level up. So it has to be invoked somewhere the QUICK branch is
+/// not.
+#[test]
+fn the_full_gate_still_runs_the_preflight_set() {
+    let gate = read("infra/gate.sh");
+    let calls = gate.matches("\nrun_preflight").count();
+    assert!(
+        calls >= 2,
+        "`run_preflight` is invoked {calls} time(s); the full gate and --quick must \
+         BOTH call it, or one of them silently skips fmt and every lint"
+    );
+}

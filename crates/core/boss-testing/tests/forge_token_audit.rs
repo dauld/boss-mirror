@@ -1,0 +1,225 @@
+//! `infra/maintenance/forge-token-audit.py` is RUN, not read.
+//!
+//! The script's whole value is a verdict — exit 0 clean, exit 2 drift — that a
+//! systemd unit turns into an alert. A test that greps the source for the word
+//! "UNDECLARED" would pass on a script that never reaches the branch. So each
+//! case here builds a throwaway Forgejo database and a declaration, executes
+//! the real script against them, and asserts on what it actually decided.
+//!
+//! One of these tests is not about drift at all: the audit reads a table whose
+//! other columns are a credential hash and its salt, and
+//! `no_credential_material_reaches_the_output` pins that neither ever reaches
+//! stdout. That property is the reason this script is allowed to exist.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repo root resolves")
+}
+
+fn script() -> PathBuf {
+    repo_root().join("infra/maintenance/forge-token-audit.py")
+}
+
+/// A scratch directory per case, so cases cannot see each other's fixtures.
+fn scratch(case: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("forge-token-audit-{case}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    dir
+}
+
+/// The secret-shaped values the fixture stores. If either ever appears in the
+/// audit's output, the script is leaking the thing it exists to avoid touching.
+const HASH: &str = "d3adb33fd3adb33fd3adb33fd3adb33fd3adb33fd3adb33fd3adb33fd3adb33f";
+const SALT: &str = "s4ltysaltysalty";
+
+/// Build a Forgejo-shaped SQLite database holding `tokens`, each
+/// `(name, scope, last_used_unix)`.
+fn forge_db(dir: &Path, tokens: &[(&str, &str, i64)]) -> PathBuf {
+    let db = dir.join("gitea.db");
+    let mut py = String::from(
+        "import sqlite3,sys\n\
+         con=sqlite3.connect(sys.argv[1])\n\
+         con.execute('CREATE TABLE user (id INTEGER PRIMARY KEY, lower_name TEXT)')\n\
+         con.execute('CREATE TABLE access_token (id INTEGER PRIMARY KEY, uid INTEGER, \
+             name TEXT, token_hash TEXT, token_salt TEXT, token_last_eight TEXT, \
+             created_unix INTEGER, updated_unix INTEGER, scope TEXT)')\n\
+         con.execute(\"INSERT INTO user VALUES (1,'david')\")\n",
+    );
+    for (i, (name, scope, used)) in tokens.iter().enumerate() {
+        py.push_str(&format!(
+            "con.execute('INSERT INTO access_token VALUES (?,?,?,?,?,?,?,?,?)',\
+             ({id},1,'{name}','{HASH}','{SALT}','ab12cd34',1000000,{used},'{scope}'))\n",
+            id = i + 1,
+        ));
+    }
+    py.push_str("con.commit()\n");
+
+    let out = Command::new("python3")
+        .arg("-c")
+        .arg(&py)
+        .arg(&db)
+        .output()
+        .expect("python3 builds the fixture database");
+    assert!(
+        out.status.success(),
+        "fixture db failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    db
+}
+
+/// Write a declaration holding `tokens`, each `(name, consumer, scope)`.
+fn declaration(dir: &Path, tokens: &[(&str, &str, &str)]) -> PathBuf {
+    let path = dir.join("forge-tokens.toml");
+    let mut toml = String::new();
+    for (name, consumer, scope) in tokens {
+        toml.push_str(&format!(
+            "[[token]]\nname = \"{name}\"\nconsumer = \"{consumer}\"\n\
+             scope = \"{scope}\"\ninstalled_at = \"somewhere\"\n\n"
+        ));
+    }
+    std::fs::write(&path, toml).expect("write declaration");
+    path
+}
+
+/// Run the audit. Returns (exit code, stdout).
+fn run(db: &Path, decl: &Path, now: i64) -> (i32, String) {
+    let out = Command::new("python3")
+        .arg(script())
+        .arg("--db")
+        .arg(db)
+        .arg("--declaration")
+        .arg(decl)
+        .arg("--now")
+        .arg(now.to_string())
+        .output()
+        .expect("the audit script runs");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+    )
+}
+
+const NOW: i64 = 1_800_000_000;
+
+#[test]
+fn a_forge_matching_its_declaration_is_clean() {
+    let dir = scratch("clean");
+    let db = forge_db(&dir, &[("boss-gcp", "write:repository", NOW - 3600)]);
+    let decl = declaration(&dir, &[("boss-gcp", "the conductor", "write:repository")]);
+
+    let (code, out) = run(&db, &decl, NOW);
+    assert_eq!(code, 0, "expected a clean exit, got:\n{out}");
+    assert!(out.contains("clean"), "{out}");
+}
+
+#[test]
+fn a_token_the_declaration_does_not_mention_is_reported_and_fails_the_run() {
+    let dir = scratch("undeclared");
+    let db = forge_db(
+        &dir,
+        &[
+            ("boss-gcp", "write:repository", NOW - 3600),
+            ("push-20260818", "write:repository", NOW - 3600),
+        ],
+    );
+    let decl = declaration(&dir, &[("boss-gcp", "the conductor", "write:repository")]);
+
+    let (code, out) = run(&db, &decl, NOW);
+    assert_eq!(code, 2, "undeclared token must fail the run:\n{out}");
+    assert!(out.contains("UNDECLARED"), "{out}");
+    assert!(
+        out.contains("push-20260818"),
+        "the finding must NAME the token, or it cannot be acted on:\n{out}"
+    );
+}
+
+#[test]
+fn a_declared_token_missing_from_the_forge_is_reported() {
+    // The direction that catches a revocation nobody wrote down - and warns
+    // before the consumer that still holds it discovers the loss itself.
+    let dir = scratch("missing");
+    let db = forge_db(&dir, &[("boss-gcp", "write:repository", NOW - 3600)]);
+    let decl = declaration(
+        &dir,
+        &[
+            ("boss-gcp", "the conductor", "write:repository"),
+            ("boss-dev-read", "the dev pod", "read:repository"),
+        ],
+    );
+
+    let (code, out) = run(&db, &decl, NOW);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("MISSING"), "{out}");
+    assert!(out.contains("boss-dev-read"), "{out}");
+    assert!(
+        out.contains("the dev pod"),
+        "naming the consumer is the point - it says who is about to break:\n{out}"
+    );
+}
+
+#[test]
+fn a_scope_that_widened_behind_our_back_is_reported() {
+    let dir = scratch("scope");
+    let db = forge_db(&dir, &[("boss-dev-read", "write:repository", NOW - 3600)]);
+    let decl = declaration(&dir, &[("boss-dev-read", "the dev pod", "read:repository")]);
+
+    let (code, out) = run(&db, &decl, NOW);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("SCOPE-DRIFT"), "{out}");
+}
+
+#[test]
+fn an_unattributed_consumer_is_counted_even_when_nothing_else_drifts() {
+    // consumer = UNKNOWN is the debt itself, so a forge that matches the
+    // declaration perfectly must still NOT come back clean while one exists.
+    let dir = scratch("unknown");
+    let db = forge_db(&dir, &[("cluster-registry", "write:package", NOW - 3600)]);
+    let decl = declaration(&dir, &[("cluster-registry", "UNKNOWN", "write:package")]);
+
+    let (code, out) = run(&db, &decl, NOW);
+    assert_eq!(
+        code, 2,
+        "an unattributable live credential is not a clean state:\n{out}"
+    );
+    assert!(out.contains("UNATTRIBUTED"), "{out}");
+}
+
+#[test]
+fn no_credential_material_reaches_the_output() {
+    // THE PROPERTY THAT LETS THIS SCRIPT EXIST. It reads a table whose other
+    // columns are a credential hash and its salt. Every case above is run
+    // again here against one output, because a leak in any branch is a leak.
+    let dir = scratch("noleak");
+    let db = forge_db(
+        &dir,
+        &[
+            ("boss-gcp", "write:repository", NOW - 3600),
+            ("stale-one", "write:package", NOW - 90 * 86400),
+            ("undeclared-one", "read:repository", NOW - 3600),
+        ],
+    );
+    let decl = declaration(
+        &dir,
+        &[
+            ("boss-gcp", "the conductor", "write:repository"),
+            ("stale-one", "UNKNOWN", "write:package"),
+            ("gone-one", "somebody", "read:repository"),
+        ],
+    );
+
+    let (_code, out) = run(&db, &decl, NOW);
+    assert!(!out.contains(HASH), "the token hash reached stdout:\n{out}");
+    assert!(!out.contains(SALT), "the token salt reached stdout:\n{out}");
+    // Sanity: this fixture really did exercise the reporting paths.
+    assert!(
+        out.contains("UNDECLARED") && out.contains("MISSING"),
+        "{out}"
+    );
+}
