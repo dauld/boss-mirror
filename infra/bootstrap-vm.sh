@@ -86,18 +86,25 @@ if ! systemctl is-active --quiet nats-server; then
     "$REPO_ROOT/infra/nats/setup.sh"
 fi
 
-log "== 5 — cargo build (pass 1: workspace) =="
-sudo -u "$DEV_USER" -i bash -lc "cd $REPO_ROOT && cargo build --release --workspace"
-
-log "== 5b — cargo build (pass 2: postgres-feature binaries) =="
-sudo -u "$DEV_USER" -i bash -lc "cd $REPO_ROOT && cargo build --release \
-    -p boss-policy        --bin boss-policy-api        --features postgres \
-    -p boss-docs          --bin boss-docs-api          --features postgres \
-    -p boss-classes       --bin boss-classes-api       --features postgres \
-    -p boss-locations     --bin boss-locations-api     --features postgres \
-    -p boss-subject-kinds --bin boss-subject-kinds-api --features postgres \
-    -p boss-events        --bin boss-events-api        --features events-api \
-    -p boss-accounts      --bin boss-accounts-api      --features accounts-api"
+log "== 5 — cargo build (workspace + every bin that declares required-features) =="
+# ONE call to the canonical builder, not a hand-listed second pass.
+#
+# build-release.sh reads each bin's `required-features` straight out of
+# `cargo metadata`, so the set cannot drift from the Cargo.tomls. The
+# list this script used to carry had already drifted, and not by a
+# little: it named SEVEN gated bins while the workspace declares 44
+# (measured 2026-08-29). The 37 it omitted were not merely built
+# without their features — cargo SKIPS a bin whose required-features
+# are not enabled, so a fresh VM never built them at all, and step 6
+# below installed whatever happened to be in target/release.
+#
+# This is the drift build-release.sh's own header predicts, quoting the
+# last instance of it: "Hand-maintaining a list of 'which crates need
+# --features what' drifts instantly (deploy-services.sh's
+# NEEDS_POSTGRES_FEATURE listed 7 of 17)." Same defect, same shape,
+# bigger number — which is what CLAUDE.md §9a means by collapsing a
+# fact that lives twice rather than pinning it with a comment.
+sudo -u "$DEV_USER" -i bash -lc "cd $REPO_ROOT && ./infra/build-release.sh"
 
 log "== 6 — install binaries =="
 cd "$REPO_ROOT/target/release"
@@ -115,6 +122,32 @@ log "== 7 — re-seed registries =="
 
 log "== 8 — deploy services =="
 "$REPO_ROOT/infra/deploy-services.sh" prod
+
+log "== 8b — build + install the browser bundles =="
+# The other half of "this is the from-scratch installer": without this
+# a bootstrapped VM served APIs and no UI. verify-replay.sh:191 already
+# said so out loud — "API stack only" — and nothing acted on it, so the
+# one script that stands a production-shaped box up from nothing
+# produced a box with no dashboard (feedback fca10483).
+#
+# AFTER deploy-services.sh, not before: that stages the generation
+# directory for this checkout's HEAD, and deploy-web.sh rsyncs
+# web-dist/, simulator-dist/ and step-plugins/ INTO that same
+# generation. Run first, it would build into a generation that does not
+# exist yet.
+#
+# Called AS ROOT, like deploy-services.sh above and unlike the cargo
+# build in step 5: it installs into /usr/local/boss/releases/<sha>/,
+# which the dev user cannot write, and it already de-escalates the bun
+# build to BUILD_AS itself (deploy-web.sh:97,150). Wrapping it in
+# `sudo -u "$DEV_USER"` would fail on the install, after doing the
+# expensive part.
+#
+# BUILD_AS is passed so the bun build runs as the same user the cargo
+# build did. Left to its default it would take SUDO_USER — the human
+# who ran this script — and split node_modules ownership in a checkout
+# $DEV_USER owns.
+BUILD_AS="$DEV_USER" "$REPO_ROOT/infra/deploy-web.sh"
 
 log "== 9 — tenant seed =="
 case "$TENANT" in
