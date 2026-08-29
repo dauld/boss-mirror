@@ -1038,6 +1038,45 @@ identity and a consumer of intent, never the host of either: moving
 the company is copying its log and its rules, and everything else
 regenerates.
 
+## Dev workspaces — what one guarantees
+
+Allocation was settled first (`2d43cbcb`, 2026-08-16): a dev node is a
+**`service-instance` Subject**, not a new kind; the pool is a
+StatefulSet whose ordinals give stable identity and a per-replica PVC;
+**the checkout Job is the lease** and its terminal releases it, with a
+maintenance sweep reclaiming what leaks; the credential is read-only
+and never a push credential.
+
+**What a workspace guarantees is separate from who gets one, and it is
+the half that costs time.** Decided in review `775f0b35` (2026-08-29):
+the capability declaration belongs on the **`service-instance`
+Subject**, not on the checkout packet — Postgres is there whether or
+not anyone has leased it, and putting it on the lease copies the same
+facts onto every checkout and lets them drift per-lease. The cost is
+that a workspace whose sidecar has died still *claims* Postgres, so the
+declaration is an assertion the pool must keep true.
+
+**Evidence before enforcement.** The `build` step records which
+workspace the work happened in, the way the `gate` step already records
+a receipt; nothing yet refuses a car whose workspace lacked a
+capability the change needed. Enforcement requires a way to say what a
+change *needs*, which nothing has, and inferring it from touched paths
+would refuse correct work. Recording it first also produces the data
+the enforcement argument would need.
+
+**A laptop is a workspace like any other, with its capabilities
+declared false.** Treating off-pool work as unrecorded makes the
+workstation invisible exactly when it is the thing that explains a
+failure. The measured case: a car adding one `job_edges` row passed 285
+local tests and failed the gate on a roster test that cannot execute on
+a machine without Postgres — 118 database-backed test targets are unrun
+there. `dev-node-checkout.md` had already written down the property
+that would have caught it ("the image is the one CI runs, so 'works on
+the dev box' and 'passes the gate' cannot drift"), and as prose in a
+design doc it protected nobody. The pre-flight now opens by reporting
+what the workspace cannot run, which is that guarantee made legible at
+the point of work.
+
 ## Open findings — where two live decisions disagree
 
 Flattening surfaced three places where a settled decision conflicts
