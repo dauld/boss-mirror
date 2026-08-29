@@ -56,8 +56,15 @@ async fn set_meta(
         .map(|_| ())
 }
 
+/// The roster of declared edges, pinned exactly.
+///
+/// The count is deliberately NOT in the name any more. It read
+/// `registry_seeds_the_four_real_edges`, so adding a fifth edge failed
+/// a test whose name then also had to be corrected — the name was a
+/// second copy of the assertion, and it drifted the moment the
+/// assertion did.
 #[tokio::test]
-async fn registry_seeds_the_four_real_edges() {
+async fn registry_seeds_exactly_the_declared_edges() {
     let db = TestDb::new().await;
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT source_kind, field_path, field_kind FROM job_edges ORDER BY source_kind, field_path",
@@ -70,6 +77,12 @@ async fn registry_seeds_the_four_real_edges() {
         vec![
             // '*' applies to every kind (migration 110, waiting_on).
             ("*".into(), "waiting_on".into(), "job_id".into()),
+            // A design doc's revision chain (87f5bc84 Q5).
+            (
+                "design-doc".into(),
+                "translated_from".into(),
+                "job_id".into()
+            ),
             (
                 "pr-train".into(),
                 "boarded_jobs".into(),

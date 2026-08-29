@@ -10,15 +10,22 @@ design documents whose work has shipped. There is no separate
 history to cross-reference: what this document says is what the
 code does.
 
-**How decisions evolve.** Open questions are authored as
-`### Qn:` anchors in living docs under `docs/design/`; the in-app
-decision tracker (`/system/design`, backed by `boss-docs`) manages
-them; resolutions flush into the source doc's Decision history.
-Each release, settled material folds into this document and the
-source doc is deleted — the baseline is the canonical post-flatten
-record. Docs that survive under `docs/design/` are living
-references (reading frames, contracts, governance rules), not
-decision archives.
+**How decisions evolve.** A design doc **is a packet**, not a file.
+Its prose and its open questions ride on a `design-doc` Job, so it is
+reviewable the moment it exists rather than after it ships, and the
+answers are recorded on the packet — which is the record. A revision
+is a **new packet carrying `translated_from`**, never a mutation, so a
+doc's life is a chain and the chain is its decision history, with an
+actor and a timestamp on every answer. **This document is the fold**:
+current truth per topic, assembled from those packets, with the
+history beside it rather than inlined. It stays hand-maintained
+because merging prose has nuance a generator cannot judge — but the
+`fold` step of the `design-doc` workflow makes updating it an
+obligation the protocol enforces rather than an intention somebody
+holds. Files under `docs/design/` are the legacy corpus, being
+translated into packets; a generated tree at release keeps `git grep`
+and the OSS install honest, and because it is generated nobody
+hand-edits it and it cannot drift.
 
 ---
 
@@ -1037,6 +1044,46 @@ log-copy migration both ride that wire. The cluster is a *client* of
 identity and a consumer of intent, never the host of either: moving
 the company is copying its log and its rules, and everything else
 regenerates.
+
+## Design docs and the decision record
+
+The markdown corpus stopped being the source of truth and kept the
+title, and everything that broke around design review followed from
+that. **The packet is the doc.** Decided in review `87f5bc84`
+(2026-08-29), on evidence: 146 recorded answers had never reached a
+file (11 queued, 135 in failed flush jobs); a terminal step named
+*"Settled — carry it to a file"* completed twice and wrote nothing;
+and a doc's status was a hand-written line nothing updated, so 20 docs
+claimed live discussion while having no open questions. None of those
+were independent bugs — they were the cost of keeping an authored file
+and a projection of it in agreement when the decisions already lived
+somewhere else.
+
+**Generation runs from the packet outward.** Previously a human
+authored `docs/design/x.md`, an indexer parsed it into rows, decisions
+were recorded against those rows, and a flush job tried to write them
+back — the file was the source and the database the projection. Now
+the packet is authored and the file, where one exists, is a generated
+artifact. This is the rule the rest of the system already lives by;
+design docs were the one place it was inverted.
+
+**The legacy corpus is translated once, not indexed forever.** All 52
+markdown docs become packets and the directory stops being read;
+leaving it as a parallel source recreates the two-sources problem the
+change removes. The 49 legacy `design-doc-review` packets are archived
+as they are, and their stranded decisions are **not** flushed — the
+answers are already on the packets, which is where the fold reads
+them, so writing them into files is work in the direction being
+abandoned.
+
+What this deletes, and the deletion is the point: the pending-decision
+table and the whole flush pipeline (including a service that ran `git
+commit` and `git push`), `boss docs flush-pending` and `boss docs
+reindex`, the prose parser and its conventions (`**Status**:` in the
+first thirty lines, `## Open questions`, `### Qn:`, `(resolved)`), the
+corpus lint that enforced them, and the `stale-statuses` and
+`rejections` reports — with them the concept of a "drifted" doc, since
+a packet's status *is* its status.
 
 ## Open findings — where two live decisions disagree
 

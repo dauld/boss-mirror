@@ -38,10 +38,10 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 
-use crate::train::{boss_user, env_or};
+use crate::train::boss_user;
 
 /// Concurrent local-disk gates past which the node, not the gate, is
 /// the constraint. Measured on w-1 (32 cores, one NVMe): at five
@@ -227,8 +227,39 @@ pub(crate) fn reusable_packet(open: &[Value], branch: &str, sha: &str) -> Option
         .map(str::to_string)
 }
 
-fn jobs_base() -> String {
-    env_or("BOSS_JOBS_URL", "http://127.0.0.1:7900")
+/// The message a caller gets when `BOSS_JOBS_URL` is unset. Kept apart
+/// from the lookup so a test can assert what it teaches without
+/// touching process environment.
+pub(crate) fn no_instance_message() -> String {
+    "BOSS_JOBS_URL is not set, and this verb has no default on purpose.\n\
+     The system of record is http://10.20.0.34:7900 (the cluster).\n\
+     boss-gcp's http://127.0.0.1:7900 is a SECOND, older, complete \
+     deployment holding different data — reading it does not error, it \
+     answers, which is worse.\n\
+     Set it explicitly, e.g.:\n    \
+     BOSS_JOBS_URL=http://10.20.0.34:7900 boss gate <branch> --wait"
+        .to_string()
+}
+
+/// The jobs API this verb talks to. **NO DEFAULT, deliberately.**
+///
+/// It used to fall back to `http://127.0.0.1:7900`. On boss-gcp that is
+/// not the system of record — it is a second, older, complete BOSS
+/// stack, and a wrong instance does not fail, it answers. On
+/// 2026-08-27 a `?kind=gate-run` read returned `total: 0` from the local
+/// stack while the cluster held 51 packets; a `gate-run v1` spec was
+/// then authored against that zero, which would have regressed the live
+/// v2 to a worse 3-step v1 on the next bundle reconcile. It was caught
+/// by noticing two packet counts disagreed — luck, not process.
+///
+/// The fix is not a better default. A default that is right on one host
+/// and silently wrong on another IS the defect (packet aa783636), so a
+/// verb that cannot reach the right instance now reaches none.
+fn jobs_base() -> Result<String> {
+    std::env::var("BOSS_JOBS_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| anyhow!("{}", no_instance_message()))
 }
 
 pub(crate) async fn api(
@@ -238,7 +269,7 @@ pub(crate) async fn api(
     payload: Option<Value>,
 ) -> Result<Option<Value>> {
     let mut req = http
-        .request(method.clone(), format!("{}{path}", jobs_base()))
+        .request(method.clone(), format!("{}{path}", jobs_base()?))
         .header("x-boss-user", boss_user())
         .header("content-type", "application/json");
     if let Some(p) = &payload {
@@ -587,6 +618,50 @@ fn job_state(namespace: &str, job_name: &str) -> (bool, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// THE DEFAULT THAT WAS RIGHT ON ONE HOST AND SILENTLY WRONG ON THE
+    /// OTHER (packet aa783636).
+    ///
+    /// A refusal is only useful if it says WHICH instance to reach. The
+    /// old fallback pointed at boss-gcp's second, older stack, and a read
+    /// against it does not fail — it answers `total: 0` while the system
+    /// of record holds 51 packets. So this pins the two things the
+    /// message has to carry: the address of the system of record, and a
+    /// warning that the tempting local one is a different deployment.
+    #[test]
+    fn refusing_without_an_instance_names_the_system_of_record() {
+        let m = no_instance_message();
+        assert!(
+            m.contains("10.20.0.34:7900"),
+            "the refusal must name the system of record, not just complain: {m}"
+        );
+        assert!(
+            m.contains("127.0.0.1:7900"),
+            "it must warn about the second deployment, which is the trap: {m}"
+        );
+        assert!(
+            m.contains("BOSS_JOBS_URL"),
+            "it must name the variable to set: {m}"
+        );
+    }
+
+    /// An empty or whitespace value is not a configured instance. Left
+    /// unguarded it would build request URLs like `/api/jobs`, which
+    /// reqwest rejects as relative — a confusing failure a long way from
+    /// the cause.
+    #[test]
+    fn an_empty_instance_is_treated_as_unset() {
+        // `jobs_base` reads process env, so assert the filter directly on
+        // the same predicate rather than mutating a global under test.
+        for v in ["", "   ", "\t"] {
+            assert!(
+                Some(v.to_string())
+                    .filter(|s| !s.trim().is_empty())
+                    .is_none(),
+                "{v:?} must not count as a configured instance"
+            );
+        }
+    }
 
     /// THE FIELD WHOSE ABSENCE MADE THE WHOLE VERB A NO-OP.
     ///

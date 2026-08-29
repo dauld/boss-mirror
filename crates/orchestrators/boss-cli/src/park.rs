@@ -351,15 +351,32 @@ pub(crate) async fn run(
     let backlog_item = match backlog_item {
         None => None,
         Some(given) => {
-            let all = crate::gate::rows(
-                crate::gate::api(
-                    &http,
-                    reqwest::Method::GET,
-                    "/api/jobs?kind=backlog-item&limit=200",
-                    None,
-                )
-                .await?,
-            );
+            // BOTH KINDS A CAR CAN ANSWER, not just one. This searched
+            // `kind=backlog-item` alone, so linking a car to a piece of
+            // David's own feedback was refused with a message that reads
+            // like the id is wrong — `boss park --backlog-item 898761cb`
+            // said "no Job whose id starts with 898761cb" while 898761cb
+            // was a perfectly real user-feedback packet (filed 381a4872).
+            // The refusal was right about what it searched and wrong
+            // about what exists.
+            //
+            // The two lists are concatenated rather than queried
+            // separately so `resolve_job_id` still sees ONE candidate
+            // set: a prefix matching a packet of each kind is genuinely
+            // ambiguous and must be reported as such, not resolved by
+            // whichever query happened to run first.
+            let mut all = Vec::new();
+            for kind in ["backlog-item", "user-feedback"] {
+                all.extend(crate::gate::rows(
+                    crate::gate::api(
+                        &http,
+                        reqwest::Method::GET,
+                        &format!("/api/jobs?kind={kind}&limit=200"),
+                        None,
+                    )
+                    .await?,
+                ));
+            }
             let full = resolve_job_id(&all, &given)?;
             if full != given {
                 println!("boss park: backlog-item {given} -> {full}");
@@ -554,6 +571,43 @@ mod tests {
     fn a_full_id_passes_through_without_a_lookup() {
         let full = "de6f0c06-a341-4445-9f47-399dc27a60fb";
         assert_eq!(resolve_job_id(&[], full).unwrap(), full);
+    }
+
+    /// THE PACKET THIS COULD NOT NAME (381a4872).
+    ///
+    /// The candidate list used to be `kind=backlog-item` alone, so a car
+    /// answering a piece of David's own feedback was refused — and the
+    /// refusal said the id names no Job, which is the opposite of what
+    /// was wrong. Now both kinds are concatenated before resolving, so a
+    /// user-feedback id resolves like any other.
+    #[test]
+    fn a_user_feedback_id_resolves_like_a_backlog_id() {
+        let candidates = vec![
+            json!({"id": "20dfcb03-1616-4b8d-8a7a-d1e34ff96486", "kind": "backlog-item"}),
+            json!({"id": "898761cb-3e49-4494-a812-d3ab5fa4bd69", "kind": "user-feedback"}),
+        ];
+        assert_eq!(
+            resolve_job_id(&candidates, "898761cb").unwrap(),
+            "898761cb-3e49-4494-a812-d3ab5fa4bd69"
+        );
+    }
+
+    /// Concatenating the two lists means a prefix can now collide ACROSS
+    /// kinds. That has to stay an error: picking one is how the wrong
+    /// packet gets linked, and the whole point of the edge is that it is
+    /// ref-checked.
+    #[test]
+    fn a_prefix_matching_both_kinds_is_ambiguous_not_guessed() {
+        let candidates = vec![
+            json!({"id": "abc12345-1616-4b8d-8a7a-d1e34ff96486", "kind": "backlog-item"}),
+            json!({"id": "abc12345-3e49-4494-a812-d3ab5fa4bd69", "kind": "user-feedback"}),
+        ];
+        let err = resolve_job_id(&candidates, "abc12345")
+            .expect_err("a prefix matching two packets must not resolve");
+        assert!(
+            err.to_string().contains("matches 2 Jobs"),
+            "the error must say how many it matched: {err}"
+        );
     }
 
     /// The failure this exists to prevent: an id typed from memory that
