@@ -214,6 +214,23 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      - name: web-kit unit tests
+        # RUN FIRST, and from libs/web-kit, because the step below does
+        # NOT cover it: this job sets `working-directory: apps/web` and
+        # `test:unit` there is `bun test src/` — apps/web's own src.
+        # web-kit's 7 test files were executed by NO ci job at all, and
+        # `infra/gate.sh` only reaches them on an `--auto` gate, so a
+        # full gate skipped them too (feedback 80be8359). A test nothing
+        # runs is not a test.
+        #
+        # No extra install: `libs/*` is a workspace member, so the root
+        # `bun install` above already resolved it, and these tests need
+        # only `bun:test` — no browser, no Playwright. 56 assertions in
+        # ~130ms, which is why this runs unconditionally rather than
+        # being scoped to web-touching changes like the mocked suite.
+        working-directory: libs/web-kit
+        run: bun run test:unit
+
       - name: Unit tests
         run: bun run test:unit
 
