@@ -4,6 +4,7 @@
 
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import Link from '@boss/web-kit/ui/Link.svelte';
+  import { formatMoney } from '@boss/web-kit/ui/money';
   import { href } from '../router';
   import type { ProductDetail, ProductInventory } from './types';
 
@@ -44,7 +45,7 @@
 
   function fmtMoney(cents: number | null | undefined): string {
     if (cents == null) return '—';
-    return `$${(cents / 100).toFixed(2)}`;
+    return formatMoney({ amount_cents: cents, currency: 'USD' }, { precision: 'cents' });
   }
 
   function metaEntries(d: ProductDetail | null): Array<[string, string]> {

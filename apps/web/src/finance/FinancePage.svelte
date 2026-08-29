@@ -8,6 +8,7 @@
 
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import Link from '@boss/web-kit/ui/Link.svelte';
+  import { formatMoney } from '@boss/web-kit/ui/money';
   import IncomeStatementTab from './IncomeStatementTab.svelte';
   import BalanceSheetTab from './BalanceSheetTab.svelte';
   import CashFlowTab from './CashFlowTab.svelte';
@@ -87,6 +88,10 @@
     };
   });
 
+  function glance(cents: number): string {
+    return formatMoney({ amount_cents: cents, currency: 'USD' }, { precision: 'compact' });
+  }
+
   let headline = $derived.by(() => {
     if (!summary) {
       return {
@@ -99,11 +104,11 @@
         ? (summary.total_gross_margin_ttm_cents / summary.total_revenue_ttm_cents) * 100
         : 0;
     return {
-      title: `$${(summary.total_revenue_ttm_cents / 100_000_000).toFixed(2)}M trailing revenue`,
+      title: `${glance(summary.total_revenue_ttm_cents)} trailing revenue`,
       subtitle:
-        `$${(summary.total_gross_margin_ttm_cents / 100_000_000).toFixed(2)}M gross margin ` +
+        `${glance(summary.total_gross_margin_ttm_cents)} gross margin ` +
         `(${marginPct.toFixed(1)}%) · ` +
-        `$${(summary.total_outstanding_cents / 100_000).toFixed(0)}K receivables outstanding`,
+        `${glance(summary.total_outstanding_cents)} receivables outstanding`,
     };
   });
 </script>

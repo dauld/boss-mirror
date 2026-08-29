@@ -34,7 +34,11 @@ export type MoneyFormatOptions = Readonly<{
   ///   that "small" amounts (employee deductions, fees, etc.) want
   ///   precision while large totals (invoices, balances, salaries)
   ///   don't.
-  precision?: 'cents' | 'whole' | 'auto';
+  /// - `'compact'` — abbreviate by magnitude for stat tiles and
+  ///   at-a-glance surfaces ("$1.3M", "$46K", "$499"). Tiers on
+  ///   MAJOR units, so amounts below a thousand render whole
+  ///   instead of collapsing to "$0K".
+  precision?: 'cents' | 'whole' | 'auto' | 'compact';
 }>;
 
 const CURRENCY_SYMBOL: Readonly<Record<string, string>> = {
@@ -93,11 +97,25 @@ export function formatMoney(
       : Math.round(magnitude / 100);
   const minor = isZeroDecimal || !showMinor ? 0 : magnitude % 100;
 
+  // COMPACT tiers on MAJOR units — dollars, or whole yen for a
+  // zero-decimal currency — never on the raw cents. The two hand-rolled
+  // versions this replaces both tiered on cents, and AccountPage's
+  // divided by 100_000 unconditionally, so every amount under $500
+  // rendered as "$0K" on a glance tile whose whole job is the number.
+  const compact = (): string => {
+    const units = isZeroDecimal ? magnitude : magnitude / 100;
+    if (units >= 1_000_000) return `${(units / 1_000_000).toFixed(1)}M`;
+    if (units >= 1_000) return `${Math.round(units / 1_000).toLocaleString('en-US')}K`;
+    return Math.round(units).toLocaleString('en-US');
+  };
+
   const majorStr = major.toLocaleString('en-US');
   const amountStr =
-    isZeroDecimal || !showMinor
-      ? majorStr
-      : `${majorStr}.${minor.toString().padStart(2, '0')}`;
+    requested === 'compact'
+      ? compact()
+      : isZeroDecimal || !showMinor
+        ? majorStr
+        : `${majorStr}.${minor.toString().padStart(2, '0')}`;
 
   const showCodeFinal = showCode ?? (style === 'accounting' || currency !== 'USD');
   const codeSuffix = showCodeFinal ? ` ${currency}` : '';

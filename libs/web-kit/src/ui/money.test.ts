@@ -73,3 +73,70 @@ describe('formatMoney precision', () => {
     expect(formatMoney({ amount_cents: -4_250, currency: 'USD' })).toBe('-$42.50');
   });
 });
+
+// `'compact'` is the stat-tile precision: the glance surfaces care about
+// the order of magnitude, not the cents. Two hand-rolled versions of it
+// existed before this — ExecPage's tiered `fmtUsd` and AccountPage's
+// `kFmt`, which divided by 100_000 unconditionally and therefore
+// rendered every amount under $500 as the useless "$0K".
+describe('formatMoney compact precision', () => {
+  test('millions carry one decimal', () => {
+    expect(formatMoney(
+      { amount_cents: 1_250_000_00, currency: 'USD' },
+      { precision: 'compact' },
+    )).toBe('$1.3M');
+    expect(formatMoney(
+      { amount_cents: 1_000_000_00, currency: 'USD' },
+      { precision: 'compact' },
+    )).toBe('$1.0M');
+  });
+
+  test('thousands are whole', () => {
+    expect(formatMoney(
+      { amount_cents: 45_600_00, currency: 'USD' },
+      { precision: 'compact' },
+    )).toBe('$46K');
+    expect(formatMoney(
+      { amount_cents: 1_000_00, currency: 'USD' },
+      { precision: 'compact' },
+    )).toBe('$1K');
+  });
+
+  test('below a thousand renders whole units, NOT $0K', () => {
+    // The kFmt bug this replaces: $499 became "$0K".
+    expect(formatMoney(
+      { amount_cents: 499_00, currency: 'USD' },
+      { precision: 'compact' },
+    )).toBe('$499');
+    expect(formatMoney(
+      { amount_cents: 0, currency: 'USD' },
+      { precision: 'compact' },
+    )).toBe('$0');
+  });
+
+  test('negatives keep the sign at every tier', () => {
+    expect(formatMoney(
+      { amount_cents: -1_250_000_00, currency: 'USD' },
+      { precision: 'compact' },
+    )).toBe('-$1.3M');
+    expect(formatMoney(
+      { amount_cents: -45_600_00, currency: 'USD' },
+      { precision: 'compact' },
+    )).toBe('-$46K');
+  });
+
+  test('accounting style parenthesises a compact negative', () => {
+    expect(formatMoney(
+      { amount_cents: -45_600_00, currency: 'USD' },
+      { style: 'accounting', precision: 'compact' },
+    )).toBe('(46K) USD');
+  });
+
+  test('zero-decimal currency compacts on its own units', () => {
+    // JPY stores whole yen, so 1_250_000 IS ¥1.25M — no /100 first.
+    expect(formatMoney(
+      { amount_cents: 1_250_000, currency: 'JPY' },
+      { precision: 'compact' },
+    )).toBe('¥1.3M JPY');
+  });
+});

@@ -126,8 +126,8 @@
     return '→';
   }
 
-  function kFmt(cents: number): string {
-    return `$${(cents / 100_000).toFixed(0)}K`;
+  function glance(cents: number): string {
+    return formatMoney({ amount_cents: cents, currency: 'USD' }, { precision: 'compact' });
   }
 
   function dollars(cents: number): string {
@@ -253,11 +253,11 @@
       </div>
       <div class="pp-glance-stat">
         <div class="pp-glance-label">Paid YTD</div>
-        <div class="pp-glance-value">{kFmt(ytdRevCents)}</div>
+        <div class="pp-glance-value">{glance(ytdRevCents)}</div>
       </div>
       <div class="pp-glance-stat {pastDueCents > 0 ? 'pp-glance-stat-warn' : 'pp-glance-stat-muted'}">
         <div class="pp-glance-label">Past-due</div>
-        <div class="pp-glance-value">{kFmt(pastDueCents)}</div>
+        <div class="pp-glance-value">{glance(pastDueCents)}</div>
       </div>
     </div>
 

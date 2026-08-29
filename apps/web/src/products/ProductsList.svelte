@@ -7,6 +7,7 @@
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import SearchInput from '@boss/web-kit/ui/SearchInput.svelte';
   import Link from '@boss/web-kit/ui/Link.svelte';
+  import { formatMoney } from '@boss/web-kit/ui/money';
   import { href } from '../router';
   import { entityHref } from '@boss/web-kit/ui/entity-href';
   import type { Product, ProductDetail } from './types';
@@ -62,7 +63,7 @@
 
   function fmtMoney(cents: number | null | undefined): string {
     if (cents == null) return '';
-    return `$${(cents / 100).toFixed(2)}`;
+    return formatMoney({ amount_cents: cents, currency: 'USD' }, { precision: 'cents' });
   }
 
   function metaStr(p: Product, key: string): string {
