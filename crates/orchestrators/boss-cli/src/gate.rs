@@ -368,6 +368,40 @@ fn running_gates(namespace: &str) -> Result<usize> {
         .count())
 }
 
+/// What to do when the running-gate count could not be read.
+///
+/// AN ERROR IS NOT ZERO. This was `running_gates(ns).unwrap_or(0)`, and
+/// zero is precisely the value that satisfies the guard below it —
+/// `if shared && running > 0`. So any failure at all (no KUBECONFIG, an
+/// unreachable API server, a service account that may create Jobs but
+/// not list pods) read as "the cluster is healthy and idle" and the
+/// guard passed. The one condition that must never be guessed was
+/// guessed, in the permissive direction: the guard failed OPEN.
+///
+/// What it protects is not hypothetical. Its own message records the
+/// cost: on 2026-08-24 two gates sharing one disk crossed their
+/// receipts, a receipt naming one branch's head was reported under
+/// another, and all three results were discarded.
+///
+/// So: on a SHARED workspace an unreadable count refuses, carrying the
+/// diagnostic `running_gates` already writes ("is KUBECONFIG set and
+/// the cluster reachable?") — which the discard also threw away, so the
+/// operator met a raw kubectl error from the later create instead.
+/// On a private workspace the count only drives an advisory notice, and
+/// there a missing hint is the whole cost, so it degrades to zero.
+///
+/// Pure, so the rule is pinned by tests rather than by this comment.
+fn resolve_running(shared: bool, running: Result<usize>) -> Result<usize> {
+    match running {
+        Ok(n) => Ok(n),
+        Err(e) if shared => Err(e).context(
+            "cannot verify whether another gate is already running, and this runner \
+             mounts a SHARED /gate-target — refusing rather than assuming it is free",
+        ),
+        Err(_) => Ok(0),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     branch: &str,
@@ -436,7 +470,7 @@ pub async fn run(
 
     // The concurrency rule, derived rather than hardcoded.
     let shared = workspace_is_shared(&job);
-    let running = running_gates(namespace).unwrap_or(0);
+    let running = resolve_running(shared, running_gates(namespace))?;
     if shared && running > 0 {
         bail!(
             "{} gate(s) already running and {} mounts a SHARED workspace.\n  \
@@ -618,6 +652,48 @@ fn job_state(namespace: &str, job_name: &str) -> (bool, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A SHARED WORKSPACE REFUSES WHEN IT CANNOT LOOK.
+    ///
+    /// The bug this pins is not "the error message was unhelpful". It is
+    /// that `unwrap_or(0)` produced the exact value that satisfies
+    /// `if shared && running > 0`, so an unreadable cluster passed the
+    /// guard protecting against two gates crossing receipts on one disk.
+    #[test]
+    fn an_unreadable_count_refuses_on_a_shared_workspace() {
+        let err = resolve_running(true, Err(anyhow!("kubectl get pods: no KUBECONFIG")))
+            .expect_err("a shared workspace must not proceed on an unread count");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("SHARED"),
+            "the refusal must say why it refused; got: {msg}"
+        );
+        assert!(
+            msg.contains("KUBECONFIG"),
+            "the underlying diagnostic must survive — discarding it is what sent an \
+             operator to a raw kubectl error from the later create; got: {msg}"
+        );
+    }
+
+    /// ...and a private workspace does not, because there the count only
+    /// drives an advisory crowding notice. Refusing here would convert a
+    /// missing hint into a blocked gate.
+    #[test]
+    fn an_unreadable_count_is_zero_on_a_private_workspace() {
+        assert_eq!(
+            resolve_running(false, Err(anyhow!("unreachable"))).expect("must not refuse"),
+            0
+        );
+    }
+
+    #[test]
+    fn a_readable_count_passes_through_either_way() {
+        assert_eq!(resolve_running(true, Ok(2)).expect("shared, readable"), 2);
+        assert_eq!(resolve_running(false, Ok(3)).expect("private, readable"), 3);
+        // Zero from a SUCCESSFUL read is still zero — the fix must not
+        // turn a genuinely idle cluster into a refusal.
+        assert_eq!(resolve_running(true, Ok(0)).expect("shared, idle"), 0);
+    }
 
     /// THE DEFAULT THAT WAS RIGHT ON ONE HOST AND SILENTLY WRONG ON THE
     /// OTHER (packet aa783636).

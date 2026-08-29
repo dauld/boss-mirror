@@ -1855,3 +1855,53 @@ required_roles = []
   field_type = "string"
   required = true
   description = "The substance: what was decided and why. Required, so an answer cannot evaporate into a completed step."
+
+[[step_type]]
+kind = "scope-declaration"
+# EXPLICIT, because false is exactly what this kind is for.
+#
+# The `scope-declaration` step PLUGIN has existed and been active since
+# schema 156, built for David's "I don't know how to input my decision
+# within this UX / I think the wrong step UX is showing". It renders
+# ship-a-change's `scope` step as the two questions it actually asks
+# instead of two unlabelled textareas. Nothing renders it, because
+# plugins mount by step KIND and ship-a-change still declares
+# `kind = "task"`. Migration 156 says so and calls the follow-up one
+# registry write.
+#
+# It is two writes, and this is the first. The dispatcher reads this
+# same registry to decide DECIDES vs EXECUTES, and an unknown kind
+# defaults to decision-shaped (dispatcher.rs:352-356, `unwrap_or(true)`
+# — right on its own terms: erring toward "decision" costs a human a
+# glance, erring the other way files a verdict under "an agent will get
+# to it"). So pointing `scope` at an UNREGISTERED kind would make every
+# new car's scope step a decision, nominate it to the one human holder
+# of `platform-admin`, and drop a step plus its notification into
+# David's queue on every car filed — moments before `boss park` fills
+# it anyway. Registering it here, with the flag set false, is what
+# makes that second write safe.
+#
+# Declaring the boundary is EXECUTABLE work, not a verdict someone
+# renders: the car's author states what the change contains, and in
+# practice `boss park` fills scope, build and gate together (proven on
+# car edeb691b).
+decision_shaped = false
+label = "Scope declaration"
+category = "coordination"
+ux = "expanded"
+version = 1
+description = """
+The moment a change declares what it contains and what it deliberately
+leaves out. Backs ship-a-change's `scope` step.
+
+NO FIELDS ARE DECLARED HERE ON PURPOSE. The completion contract comes
+from the step row's own authored `fields`, which carry `summary` and
+`excludes` as required — schema 156 says so, and the validator takes
+the UNION of a kind's bundle and the step's own fields. Repeating them
+here would be the same requirement in two places with nothing keeping
+them equal (CLAUDE.md §9a), and the step is the one that has to be
+right: it is what the API validates on completion.
+"""
+typical_duration_hours = 0.25
+typical_duration_jitter = 0.3
+required_roles = []

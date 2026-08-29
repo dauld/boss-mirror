@@ -181,10 +181,101 @@ pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility 
         }
     }
 
+    // ORDER IS PART OF THE CONTRACT, because the runtime does not match
+    // steps the way this function does.
+    //
+    // Everything above compares steps BY TITLE, through a BTreeMap. The
+    // engine pairs them POSITIONALLY: step predicates are not stored on
+    // the step row (there is no `ready_when` column), so readiness is
+    // recomputed by zipping the spec's steps against the job's steps in
+    // order (http/steps.rs, `A JOB'S STEP SET IS FIXED AT ADMISSION`).
+    //
+    // So a version that merely REORDERS the same steps is invisible to
+    // every check above — same titles, same specs, same sets — and this
+    // function would call it Automatic. Re-pinning on that verdict
+    // misaligns every pair, and `registry::reevaluate` then refuses to
+    // advance anything: the packet freezes with its terminal pending,
+    // never closes, and never leaves its owner's queue.
+    //
+    // That is not hypothetical, and it is why this compares sequences
+    // rather than sets. Design review 32a4e70d gained a step on
+    // 2026-08-13 and froze exactly this way, producing feedback
+    // 55c92985 — "I finished the top design review and it still shows
+    // the same metadata and is in the same queue." A conversion path
+    // acting on a wrong Automatic would do that to every in-flight
+    // packet at once, and the divergence is only logged at warn.
+    //
+    // Compares the RELATIVE order of steps present in both specs, so it
+    // stays meaningful when steps were also added or removed (each of
+    // which is reported above on its own terms).
+    let from_common: Vec<&str> = from
+        .steps
+        .iter()
+        .map(|s| s.title.as_str())
+        .filter(|t| to_steps.contains_key(t))
+        .collect();
+    let to_common: Vec<&str> = to
+        .steps
+        .iter()
+        .map(|s| s.title.as_str())
+        .filter(|t| from_steps.contains_key(t))
+        .collect();
+    if from_common != to_common {
+        obstacles.push(Obstacle::workflow(format!(
+            "steps reordered ({} -> {}) — readiness is recomputed by pairing \
+             spec steps to job steps POSITIONALLY, so re-pinning would \
+             misalign every pair and freeze the packet",
+            from_common.join(", "),
+            to_common.join(", ")
+        )));
+    }
+
     for (slug, f) in &from_steps {
         let Some(t) = to_steps.get(slug) else {
             continue;
         };
+
+        // A STEP'S KIND CARRIES A COMPLETION CONTRACT THIS FUNCTION
+        // CANNOT SEE.
+        //
+        // `required_fields` below reads `StepSpec.fields` — the fields
+        // the WORKFLOW author wrote. That is not the whole contract:
+        // the completion validator checks the UNION of those and the
+        // field bundle the step's KIND brings from the StepType
+        // registry (http/steps.rs, "the union of the kind bundle's
+        // fields and the step's own authored fields"). So changing a
+        // step's kind can add a required field without touching
+        // `fields` at all, and every check here would miss it.
+        //
+        // THIS ALMOST SHIPPED A WRONG VERDICT. backlog-item v2,
+        // published 2026-08-29, changed `design-review` from kind
+        // `task` to kind `answer-question` — which requires `verdict`
+        // and `answer`. Nothing else about the step moved, so before
+        // this check the pair read Automatic. A conversion path acting
+        // on it would have re-pinned every in-flight backlog-item onto
+        // a protocol demanding two fields they never collected: the
+        // exact failure this module's header calls the one we cannot
+        // afford.
+        //
+        // REFERRED, NOT RESOLVED. Deciding what the new kind actually
+        // requires means resolving it against the StepType registry,
+        // which this function deliberately does not take — it compares
+        // two specs and nothing else. Referring costs a human one
+        // glance; guessing costs a completed step's honesty. Same
+        // reasoning as `ready_when` below, and a kind change is rare
+        // enough that the referral is cheap.
+        if f.kind != t.kind {
+            obstacles.push(Obstacle::step(
+                slug,
+                format!(
+                    "step kind changed (`{}` -> `{}`) — the kind carries a \
+                     field bundle that is part of the completion contract, \
+                     and this check does not resolve it against the StepType \
+                     registry, so it refers rather than assumes",
+                    f.kind, t.kind
+                ),
+            ));
+        }
 
         // The predicate decides when a step becomes ready. Editing it
         // can un-ready a ready step or re-ready a completed one. A
@@ -337,6 +428,110 @@ mod tests {
         assert!(
             v.is_automatic(),
             "opening a step to more actors cannot invalidate a packet: {:?}",
+            v.obstacles()
+        );
+    }
+
+    /// THE VERDICT THIS FUNCTION ALMOST GAVE ABOUT A REAL PUBLISH.
+    ///
+    /// backlog-item v2 (2026-08-29) changed `design-review` from kind
+    /// `task` to kind `answer-question`, which brings required
+    /// `verdict` and `answer` from the StepType bundle. `fields` on the
+    /// spec did not move, so every other check saw an identical step
+    /// and the pair read Automatic — a conversion acting on it would
+    /// have demanded two fields no in-flight packet had collected.
+    #[test]
+    fn changing_a_steps_kind_needs_review() {
+        let before = step("design-review");
+        let mut after = step("design-review");
+        after.kind = "answer-question".to_string();
+
+        let v = convertibility(&wf(vec![before]), &wf(vec![after]));
+        assert!(
+            !v.is_automatic(),
+            "a kind change can add required fields without touching \
+             StepSpec.fields, which is the only place required_fields looks"
+        );
+        let o = &v.obstacles()[0];
+        assert_eq!(o.step.as_deref(), Some("design-review"));
+        assert!(
+            o.reason.contains("field bundle"),
+            "the reason must say WHY a kind change matters, not just that it \
+             happened: {:?}",
+            o.reason
+        );
+    }
+
+    /// ...and an unchanged kind must stay silent, or every loosening
+    /// would be referred and Automatic would stop meaning anything.
+    #[test]
+    fn keeping_the_kind_stays_automatic() {
+        let mut before = step("review");
+        before.kind = "sign-off".to_string();
+        let mut after = step("review");
+        after.kind = "sign-off".to_string();
+        after.authority_role = None;
+        assert!(convertibility(&wf(vec![before]), &wf(vec![after])).is_automatic());
+    }
+
+    /// THE CASE EVERY OTHER CHECK IS BLIND TO.
+    ///
+    /// Same titles, same specs, same sets — only the sequence moved.
+    /// Every comparison in this function goes through a BTreeMap keyed
+    /// by title, so before this check the verdict was Automatic. The
+    /// engine pairs spec steps to job steps positionally, so acting on
+    /// that verdict would misalign every pair and freeze the packet
+    /// with its terminal pending (the 32a4e70d / 55c92985 failure).
+    #[test]
+    fn reordering_the_same_steps_is_not_automatic() {
+        let forward = wf(vec![step("triage"), step("review"), step("closed")]);
+        let swapped = wf(vec![step("review"), step("triage"), step("closed")]);
+
+        let v = convertibility(&forward, &swapped);
+        assert!(
+            !v.is_automatic(),
+            "a pure reorder changes which spec step each job step is paired \
+             with; nothing else in this function can see it"
+        );
+        let o = &v.obstacles()[0];
+        assert_eq!(o.step, None, "reordering is a workflow-level fact");
+        assert!(
+            o.reason.contains("reordered") && o.reason.contains("POSITIONALLY"),
+            "the reason must name the pairing that breaks: {:?}",
+            o.reason
+        );
+    }
+
+    /// ...and the check must not fire on an unchanged sequence, or every
+    /// ordinary loosening would be referred for review and the
+    /// Automatic verdict would stop meaning anything.
+    #[test]
+    fn keeping_the_order_stays_automatic() {
+        let before = wf(vec![step("triage"), step("review"), step("closed")]);
+        let after = wf(vec![step("triage"), step("review"), step("closed")]);
+        assert!(convertibility(&before, &after).is_automatic());
+    }
+
+    /// A step added or removed is already reported on its own terms.
+    /// The order check compares only the steps present in BOTH specs,
+    /// so it stays quiet about a sequence that did not actually move —
+    /// otherwise every add/remove would carry a second, misleading
+    /// "reordered" obstacle naming steps nobody touched.
+    #[test]
+    fn inserting_a_step_does_not_also_report_a_phantom_reorder() {
+        let before = wf(vec![step("triage"), step("review")]);
+        let after = wf(vec![step("triage"), step("measure"), step("review")]);
+
+        let v = convertibility(&before, &after);
+        assert!(
+            !v.is_automatic(),
+            "an added step is work a packet may have passed"
+        );
+        assert!(
+            v.obstacles()
+                .iter()
+                .all(|o| !o.reason.contains("reordered")),
+            "triage and review kept their relative order: {:?}",
             v.obstacles()
         );
     }
