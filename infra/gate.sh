@@ -545,6 +545,12 @@ check() {
 # not seconds. `no-snapshot-arrays` is not here either; it needs a
 # build, and the delivery policy already excludes it for that reason.
 PREFLIGHT_LINTS=(
+    # FIRST on purpose: it says what this workspace cannot cover, which
+    # frames every result below it. A green pre-flight on a machine with
+    # no Postgres is 118 database-backed test targets unrun, and saying
+    # so before the rest is the difference between confidence and a
+    # gate failure eleven minutes later (design 775f0b35 Q3).
+    "workspace-declares-what-it-runs|infra/lint/workspace-declares-what-it-runs.sh"
     "seed-bypass-smell|infra/lint/seed-bypass-smell.sh"
     "no-todo-citation|infra/lint/no-todo-citation.sh"
     "no-step-kind-match|infra/lint/no-step-kind-match.sh"

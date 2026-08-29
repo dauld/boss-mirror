@@ -99,6 +99,56 @@ docker build -q -f infra/oss-quickstart/Dockerfile \
     -t "$REGISTRY:$HEAD" .
 docker push "$REGISTRY:$HEAD"
 
+# THE CONVERGE CLEANS UP AFTER ITSELF.
+#
+# Every run builds a 1.07 GB image and pushes it, and nothing ever
+# removed the local copy. MEASURED 2026-08-29 on the minipc: 42 boss
+# tags resident, ~45 GB, on a 228 G disk that had reached 93% full —
+# the host that also serves the forge, the OCI registry and the CI
+# runner, so image growth competes with the registry it feeds. The
+# daily disk-headroom and stale-build-cache sweeps had each been
+# opening a packet about it for three days (`0e62f404`, `b99e9627`).
+#
+# AFTER THE PUSH, DELIBERATELY. The push is what makes a local copy
+# redundant, so cleanup that ran before it could delete the only copy
+# of something. `set -e` means a failed push never reaches this.
+#
+# DELETING A LOCAL TAG IS ONLY SAFE IF THE REGISTRY HAS IT, because
+# the registry is the rollback path — the cluster and `boss deploy`
+# both pull from there, never from this daemon's store. So each
+# candidate is VERIFIED PRESENT in the registry before it is removed,
+# and anything unverifiable is kept and named. Checked while writing
+# this: all 42 resident tags were in the registry, so this is hygiene
+# rather than recovery from a divergence. `--insecure` because the
+# forge registry is plain HTTP on the LAN, which is also why the tag
+# is 7 characters — `git rev-parse --short` — and not the full sha.
+keep="${BOSS_RUNNER_KEEP_IMAGES:-5}"
+kept=0 removed=0 unverified=0
+# Newest first (docker's default ordering). `latest` is the quickstart
+# tag, not a build artifact of this loop, so it is never a candidate.
+for tag in $(docker images "$REGISTRY" --format '{{.Tag}}'); do
+    case "$tag" in latest|'<none>') continue ;; esac
+    if [ "$kept" -lt "$keep" ]; then
+        kept=$((kept + 1))
+        continue
+    fi
+    if docker manifest inspect --insecure "$REGISTRY:$tag" >/dev/null 2>&1; then
+        docker rmi "$REGISTRY:$tag" >/dev/null 2>&1 && removed=$((removed + 1))
+    else
+        unverified=$((unverified + 1))
+        echo "cluster-deploy-runner: keeping $tag — not verifiable in the registry"
+    fi
+done
+echo "cluster-deploy-runner: images kept=$kept removed=$removed unverified=$unverified"
+
+# Build cache is regenerable by definition, so the only cost of being
+# wrong here is a slower next build. Age-filtered rather than emptied:
+# a week keeps the layers a rebuild actually reuses and drops the rest.
+# `--keep-storage` is gone in Docker 29; `--filter until=` is the
+# supported spelling.
+docker builder prune -f --filter until=168h >/dev/null 2>&1 || true
+echo "cluster-deploy-runner: build cache pruned (older than 168h)"
+
 K="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
 
 # Cluster config converges with the code: apply the tree's manifests

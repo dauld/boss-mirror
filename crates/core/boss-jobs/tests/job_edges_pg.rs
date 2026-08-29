@@ -56,16 +56,36 @@ async fn set_meta(
         .map(|_| ())
 }
 
-/// The roster of declared edges, pinned exactly.
+/// The roster of declared edges, pinned exactly — INCLUDING the dial.
 ///
 /// The count is deliberately NOT in the name any more. It read
 /// `registry_seeds_the_four_real_edges`, so adding a fifth edge failed
 /// a test whose name then also had to be corrected — the name was a
 /// second copy of the assertion, and it drifted the moment the
 /// assertion did.
+///
+/// `on_missing` is asserted because leaving it out let a real defect
+/// ship the same day: the fifth edge landed as `warn` while every other
+/// row said `abort` and `InMemoryJobEdges` hardcoded `abort` for all of
+/// them. The column DEFAULT is `warn`; 105 was a one-time UPDATE of the
+/// three rows that existed then, so "edges abort" was a property of
+/// those rows and not of the table. This test now fails if a new edge
+/// arrives with the weaker dial, which is the only way that stays true.
 #[tokio::test]
 async fn registry_seeds_exactly_the_declared_edges() {
     let db = TestDb::new().await;
+    let dials: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT source_kind, field_path, on_missing FROM job_edges \
+         WHERE on_missing <> 'abort' ORDER BY source_kind, field_path",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("dial rows");
+    assert!(
+        dials.is_empty(),
+        "every declared edge must abort on an unresolvable ref; these do not: {dials:?}"
+    );
+
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT source_kind, field_path, field_kind FROM job_edges ORDER BY source_kind, field_path",
     )
