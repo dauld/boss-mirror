@@ -62,6 +62,12 @@ const ROUTES: ReadonlyArray<string> = [
   // Fleet renders its no-Workflows empty state under the mock's
   // empty /api/workflows — a real crawl of the page chrome + picker.
   '/it/fleet',
+  // The risk watchlist. Its path is `/watchlist`, NOT `/ux/watchlist`
+  // — it has no nav-catalog entry (it is URL-only), so the drift test
+  // at the bottom of this file cannot notice it is missing: that test
+  // only walks ROUTE_CATALOG. Adding it here is the whole of its
+  // coverage.
+  '/watchlist',
 ];
 
 // DEFERRED, group 1 — aggregation dashboards that read OBJECT-shaped
@@ -71,14 +77,21 @@ const ROUTES: ReadonlyArray<string> = [
 //   /ux/finance (statements .reduce) · /ux/warehouse (summary.below_reorder_count)
 //   /ux/exec (.find/.length) · /system/monitoring (snapshot .length)
 //
-// /ux/watchlist LEFT THIS GROUP on 2026-08-28: its `.length` crash was
+// The watchlist LEFT THIS GROUP on 2026-08-28: its `.length` crash was
 // not a fixture problem but a CAST — the page read
 // `(await r.json()) as { accounts: RiskScore[] }` and a payload without
 // `accounts` made the value undefined. It now parses through
 // RiskScoreListSchema and renders its error state on a wrong shape, so
-// no faithful fixture is needed to gate it (feedback 2fe1c8c1). Note it
-// was never in the DEFERRED map below — only named here — so nothing had
-// to be removed; this comment was the whole deferral.
+// no faithful fixture is needed to gate it (feedback 2fe1c8c1).
+//
+// THAT COMMENT WAS TRUE AND THE PAGE WAS STILL NOT CRAWLED, for a full
+// day, because it named `/ux/watchlist` and the route is `/watchlist`
+// (router.ts:251). It was in neither ROUTES nor DEFERRED, and the drift
+// test could not catch the omission because the page has no
+// nav-catalog entry and that test only walks ROUTE_CATALOG. So the
+// deferral was lifted in prose while the coverage it described never
+// existed — a green suite reporting on a page it never opened. The
+// route is now in ROUTES above, spelled the way the router spells it.
 //
 // Resolved: the marketing-assets no-shell this harness first caught was a
 // real effect_update_depth_exceeded loop in loadClasses() called from a
