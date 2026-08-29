@@ -577,6 +577,7 @@ PREFLIGHT_LINTS=(
     "step-plugin-bundle|infra/lint/step-plugin-bundle-exists.sh"
     "one-palette|infra/lint/one-palette.sh"
     "one-date-format|infra/lint/one-date-format.sh"
+    "kind-bundle-does-not-tighten|infra/lint/a-kind-bundle-does-not-tighten.sh"
 )
 
 run_preflight() {
