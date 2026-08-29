@@ -9,6 +9,7 @@
   //   4. Work (POs + vendor invoices)
 
   import Breadcrumb from '@boss/web-kit/ui/Breadcrumb.svelte';
+  import { formatDate } from '@boss/web-kit/ui/date';
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import Link from '@boss/web-kit/ui/Link.svelte';
   import Meta from '@boss/web-kit/ui/Meta.svelte';
@@ -186,9 +187,6 @@
   let primaryContact = $derived(contacts.find((c) => c.is_primary));
   let activeContracts = $derived(contracts.filter((c) => c.status === 'active'));
 
-  function dateOf(iso: string): string {
-    return new Date(iso).toISOString().slice(0, 10);
-  }
 </script>
 
 {#if loading}
@@ -410,7 +408,7 @@
                   <span style="font-size:11px; padding:1px 6px; border-radius:3px; background:#e7e5e4; color:#44403c; font-weight:500">
                     {INTERACTION_KIND_LABEL[i.kind] ?? i.kind}
                   </span>
-                  <span style="color:#78716c">{dateOf(i.occurred_at)}</span>
+                  <span style="color:#78716c">{formatDate(i.occurred_at)}</span>
                   <span style="color:#44403c">
                     by {formatActor(i.actor_id, empNames)}
                   </span>

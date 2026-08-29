@@ -137,7 +137,13 @@ find_bun() {
 BUN="$(find_bun)" || exit 1
 
 # Build as a user who can write node_modules + dist, not as root.
-BUILD_AS="${SUDO_USER:-$(id -un)}"
+#
+# Overridable because the caller sometimes knows better than SUDO_USER
+# does. bootstrap-vm.sh builds the Rust side as $DEV_USER (default
+# `boss`) while a human runs the script under sudo as themselves — so
+# the default here would bun-build as the human into a checkout the
+# cargo build owns, and leave node_modules split between two users.
+BUILD_AS="${BUILD_AS:-${SUDO_USER:-$(id -un)}}"
 
 # One build path for both SPAs — they are the same shape (a bun
 # workspace member with a `build` script emitting dist/index.html) and

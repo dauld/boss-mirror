@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use boss_core::job::{Job, JobId, JobStatus, Priority, Step, StepId, StepStatus, Subject};
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use crate::port::{
@@ -1583,6 +1584,91 @@ impl JobsRepository for PgJobs {
         });
 
         Ok(())
+    }
+
+    async fn record_step_write_refusal_at(
+        &self,
+        refusal: &crate::refusals::StepWriteRefusal,
+        now: DateTime<Utc>,
+    ) -> Result<(), JobsError> {
+        sqlx::query(
+            "INSERT INTO step_write_refusals \
+             (refused_at, job_id, step_id, actor_id, method, path, status_code, error_class, detail) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(now)
+        .bind(refusal.job_id)
+        .bind(refusal.step_id)
+        .bind(&refusal.actor_id)
+        .bind(&refusal.method)
+        .bind(&refusal.path)
+        .bind(i32::from(refusal.status_code))
+        .bind(refusal.error_class.as_str())
+        .bind(&refusal.detail)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn step_write_refusals(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::refusals::RecordedRefusal>, JobsError> {
+        let rows = sqlx::query_as::<_, RefusalRow>(
+            "SELECT id, refused_at, job_id, step_id, actor_id, method, path, status_code, \
+             error_class, detail FROM step_write_refusals ORDER BY refused_at DESC, id DESC \
+             LIMIT $1",
+        )
+        .bind(limit.max(0))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+        Ok(rows.into_iter().map(RefusalRow::into_domain).collect())
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct RefusalRow {
+    id: i64,
+    refused_at: DateTime<Utc>,
+    job_id: Option<uuid::Uuid>,
+    step_id: Option<uuid::Uuid>,
+    actor_id: String,
+    method: String,
+    path: String,
+    status_code: i32,
+    error_class: String,
+    detail: String,
+}
+
+impl RefusalRow {
+    fn into_domain(self) -> crate::refusals::RecordedRefusal {
+        use crate::refusals::ErrorClass;
+        // The column is CHECK-constrained to this vocabulary, so an
+        // unknown value means the constraint and the enum drifted.
+        // Degrade to `Other` rather than failing the read — a
+        // measurement surface that 500s is worse than one row landing
+        // in a coarser bucket, and the pinning test in `refusals` is
+        // what catches the drift.
+        let error_class = ErrorClass::ALL
+            .into_iter()
+            .find(|c| c.as_str() == self.error_class)
+            .unwrap_or(ErrorClass::Other);
+        crate::refusals::RecordedRefusal {
+            id: self.id,
+            refused_at: self.refused_at,
+            refusal: crate::refusals::StepWriteRefusal {
+                job_id: self.job_id,
+                step_id: self.step_id,
+                actor_id: self.actor_id,
+                method: self.method,
+                path: self.path,
+                status_code: self.status_code as u16,
+                error_class,
+                detail: self.detail,
+            },
+        }
     }
 }
 

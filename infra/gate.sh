@@ -576,6 +576,7 @@ PREFLIGHT_LINTS=(
     "timers-leave-a-packet|infra/lint/timers-leave-a-packet.sh"
     "step-plugin-bundle|infra/lint/step-plugin-bundle-exists.sh"
     "one-palette|infra/lint/one-palette.sh"
+    "one-date-format|infra/lint/one-date-format.sh"
 )
 
 run_preflight() {

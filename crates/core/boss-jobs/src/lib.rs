@@ -25,6 +25,7 @@ pub mod postgres;
 pub mod protocol_conversion;
 #[cfg(feature = "postgres")]
 pub mod rebuild;
+pub mod refusals;
 pub mod registry;
 pub mod scheduling;
 pub mod station_lint;
