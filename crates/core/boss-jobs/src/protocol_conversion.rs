@@ -181,6 +181,55 @@ pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility 
         }
     }
 
+    // ORDER IS PART OF THE CONTRACT, because the runtime does not match
+    // steps the way this function does.
+    //
+    // Everything above compares steps BY TITLE, through a BTreeMap. The
+    // engine pairs them POSITIONALLY: step predicates are not stored on
+    // the step row (there is no `ready_when` column), so readiness is
+    // recomputed by zipping the spec's steps against the job's steps in
+    // order (http/steps.rs, `A JOB'S STEP SET IS FIXED AT ADMISSION`).
+    //
+    // So a version that merely REORDERS the same steps is invisible to
+    // every check above — same titles, same specs, same sets — and this
+    // function would call it Automatic. Re-pinning on that verdict
+    // misaligns every pair, and `registry::reevaluate` then refuses to
+    // advance anything: the packet freezes with its terminal pending,
+    // never closes, and never leaves its owner's queue.
+    //
+    // That is not hypothetical, and it is why this compares sequences
+    // rather than sets. Design review 32a4e70d gained a step on
+    // 2026-08-13 and froze exactly this way, producing feedback
+    // 55c92985 — "I finished the top design review and it still shows
+    // the same metadata and is in the same queue." A conversion path
+    // acting on a wrong Automatic would do that to every in-flight
+    // packet at once, and the divergence is only logged at warn.
+    //
+    // Compares the RELATIVE order of steps present in both specs, so it
+    // stays meaningful when steps were also added or removed (each of
+    // which is reported above on its own terms).
+    let from_common: Vec<&str> = from
+        .steps
+        .iter()
+        .map(|s| s.title.as_str())
+        .filter(|t| to_steps.contains_key(t))
+        .collect();
+    let to_common: Vec<&str> = to
+        .steps
+        .iter()
+        .map(|s| s.title.as_str())
+        .filter(|t| from_steps.contains_key(t))
+        .collect();
+    if from_common != to_common {
+        obstacles.push(Obstacle::workflow(format!(
+            "steps reordered ({} -> {}) — readiness is recomputed by pairing \
+             spec steps to job steps POSITIONALLY, so re-pinning would \
+             misalign every pair and freeze the packet",
+            from_common.join(", "),
+            to_common.join(", ")
+        )));
+    }
+
     for (slug, f) in &from_steps {
         let Some(t) = to_steps.get(slug) else {
             continue;
@@ -337,6 +386,68 @@ mod tests {
         assert!(
             v.is_automatic(),
             "opening a step to more actors cannot invalidate a packet: {:?}",
+            v.obstacles()
+        );
+    }
+
+    /// THE CASE EVERY OTHER CHECK IS BLIND TO.
+    ///
+    /// Same titles, same specs, same sets — only the sequence moved.
+    /// Every comparison in this function goes through a BTreeMap keyed
+    /// by title, so before this check the verdict was Automatic. The
+    /// engine pairs spec steps to job steps positionally, so acting on
+    /// that verdict would misalign every pair and freeze the packet
+    /// with its terminal pending (the 32a4e70d / 55c92985 failure).
+    #[test]
+    fn reordering_the_same_steps_is_not_automatic() {
+        let forward = wf(vec![step("triage"), step("review"), step("closed")]);
+        let swapped = wf(vec![step("review"), step("triage"), step("closed")]);
+
+        let v = convertibility(&forward, &swapped);
+        assert!(
+            !v.is_automatic(),
+            "a pure reorder changes which spec step each job step is paired \
+             with; nothing else in this function can see it"
+        );
+        let o = &v.obstacles()[0];
+        assert_eq!(o.step, None, "reordering is a workflow-level fact");
+        assert!(
+            o.reason.contains("reordered") && o.reason.contains("POSITIONALLY"),
+            "the reason must name the pairing that breaks: {:?}",
+            o.reason
+        );
+    }
+
+    /// ...and the check must not fire on an unchanged sequence, or every
+    /// ordinary loosening would be referred for review and the
+    /// Automatic verdict would stop meaning anything.
+    #[test]
+    fn keeping_the_order_stays_automatic() {
+        let before = wf(vec![step("triage"), step("review"), step("closed")]);
+        let after = wf(vec![step("triage"), step("review"), step("closed")]);
+        assert!(convertibility(&before, &after).is_automatic());
+    }
+
+    /// A step added or removed is already reported on its own terms.
+    /// The order check compares only the steps present in BOTH specs,
+    /// so it stays quiet about a sequence that did not actually move —
+    /// otherwise every add/remove would carry a second, misleading
+    /// "reordered" obstacle naming steps nobody touched.
+    #[test]
+    fn inserting_a_step_does_not_also_report_a_phantom_reorder() {
+        let before = wf(vec![step("triage"), step("review")]);
+        let after = wf(vec![step("triage"), step("measure"), step("review")]);
+
+        let v = convertibility(&before, &after);
+        assert!(
+            !v.is_automatic(),
+            "an added step is work a packet may have passed"
+        );
+        assert!(
+            v.obstacles()
+                .iter()
+                .all(|o| !o.reason.contains("reordered")),
+            "triage and review kept their relative order: {:?}",
             v.obstacles()
         );
     }
