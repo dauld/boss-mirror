@@ -148,6 +148,50 @@
   {:else if !yard}
     <div class="yard-empty">The yard is unreachable right now.</div>
   {:else}
+    <!--
+      THE SCOREBOARD LEADS. David, 2026-08-28: "We should have these
+      stats at the top of the Train Yard if they are what matter." The
+      yard opened with trains and the dock — useful, but they show what
+      is moving right now rather than whether delivery is getting better
+      or worse. A statistic nobody sees cannot discipline a decision.
+
+      Rendered only when a version has actually RESOLVED something, so
+      the panel is absent rather than showing zeros for a version whose
+      packets are all still in flight.
+    -->
+    {#if yard.delivery.length > 0}
+      <div class="yard-section">00 — DELIVERY</div>
+      <div class="yard-scoreboard">
+        {#each yard.delivery as stat (stat.label)}
+          <div class="yard-stat" class:is-provisional={stat.provisional}>
+            <div class="yard-stat-v">{stat.value}</div>
+            <div class="yard-stat-l">{stat.label}</div>
+            <div class="yard-stat-p">
+              {#if stat.previous}prev {stat.previous} · {/if}n={stat.samples}
+              {#if stat.provisional}<span class="yard-stat-warn">small n</span>{/if}
+            </div>
+          </div>
+        {/each}
+      </div>
+    {/if}
+
+    {#if yard.awaitingProof.length > 0}
+      <div class="yard-section">
+        00b — AWAITING PROOF <span class="yard-n">{yard.awaitingProof.length}</span>
+      </div>
+      <!--
+        Merged, deployed, and unverified. These belong to none of the
+        yard's other partitions — open trains, arrivals, the dock — so
+        seven of them sat invisible on 2026-08-28 while being the agreed
+        bottleneck.
+      -->
+      <div class="yard-awaiting">
+        {#each yard.awaitingProof as c (c.id)}
+          <a class="yard-awaiting-car" href="/ux/jobs/{c.id}">{c.title}</a>
+        {/each}
+      </div>
+    {/if}
+
     <div class="yard-section">01 — IN FLIGHT <span class="yard-n">{yard.inFlight.length}</span></div>
     {#if yard.inFlight.length === 0}
       <div class="yard-empty">No departures — nothing ready to board.</div>
@@ -375,6 +419,31 @@
     display: flex; flex-direction: column; gap: 4px; }
   .yard-cancelled a { color: inherit; text-decoration: none; }
   .yard-cancelled a:hover, .yard-cancelled a:focus-visible { color: var(--signal, #5FD4A8); }
+  .yard-scoreboard {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+  .yard-stat {
+    flex: 1 1 140px;
+    padding: 10px 12px;
+    border: 1px solid var(--line, #2a2f3a);
+    border-radius: 6px;
+  }
+  .yard-stat.is-provisional { opacity: 0.75; }
+  .yard-stat-v { font-size: 24px; font-weight: 600; line-height: 1.1; }
+  .yard-stat-l { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.7; }
+  .yard-stat-p { font-size: 11px; opacity: 0.6; margin-top: 4px; }
+  .yard-stat-warn { margin-left: 6px; opacity: 0.9; }
+  .yard-awaiting { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+  .yard-awaiting-car {
+    font-size: 12px;
+    padding: 4px 8px;
+    border: 1px solid var(--line, #2a2f3a);
+    border-radius: 4px;
+    text-decoration: none;
+  }
   .yard-empty { color: var(--static, #78716c); padding: 12px 0; font-size: 14px; }
   .yard-flow { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
     letter-spacing: var(--ls-nav, 0.14em); color: var(--static, #7A838C);

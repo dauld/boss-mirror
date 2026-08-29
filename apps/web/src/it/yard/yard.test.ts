@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
+  awaitingProof,
+  comparableVersions,
+  deliveryStats,
   arrivalMedians,
   arrivalReport,
   arrivalStamp,
@@ -12,6 +15,8 @@ import {
   trainStatus,
   ciLamp,
   isSim,
+  type TerminalReport,
+  type TerminalVersion,
   protocolHue,
   wipAdvisory,
   dockUpstream,
@@ -788,5 +793,116 @@ describe('the yard wires ETAs onto trains in flight', () => {
     });
     // An arrived train is not in flight and gets no estimate.
     expect(y.arrivals[0]?.eta).toEqual({ kind: 'phase', phase: 'arrived' });
+  });
+});
+
+
+// ---------------------------------------------------------------------
+// Delivery stats — the yard's scoreboard (feedback 898761cb).
+// ---------------------------------------------------------------------
+
+function ver(
+  version: number,
+  merged: number,
+  abandoned: number,
+  median: number | null = 0,
+  samples = merged + abandoned,
+): TerminalVersion {
+  const outcomes: Record<string, number> = {};
+  if (merged) outcomes.merged = merged;
+  if (abandoned) outcomes.abandoned = abandoned;
+  return {
+    version,
+    total: merged + abandoned,
+    outcomes,
+    cycle_time_days: { median, p90: null, samples },
+  };
+}
+
+describe('deliveryStats', () => {
+  test('reports abandon rate, cycle time and delivered count for the latest resolved version', () => {
+    const report: TerminalReport = { kind: 'ship-a-change', versions: [ver(18, 8, 2, 0)] };
+    const stats = deliveryStats(report);
+    expect(stats).toHaveLength(3);
+    const [abandon, cycle, delivered] = stats as [
+      (typeof stats)[0],
+      (typeof stats)[0],
+      (typeof stats)[0],
+    ];
+    expect(abandon.label).toBe('abandon rate');
+    expect(abandon.value).toBe('20%'); // 2 of 10 resolved
+    expect(cycle.value).toBe('0d');
+    expect(delivered.value).toBe('8');
+  });
+
+  test('puts the previous version beside it so the direction is visible', () => {
+    const report: TerminalReport = {
+      kind: 'ship-a-change',
+      versions: [ver(14, 20, 5), ver(18, 8, 2)],
+    };
+    const abandon = deliveryStats(report)[0]!;
+    expect(abandon.value).toBe('20%'); // v18: 2/10
+    expect(abandon.previous).toBe('20%'); // v14: 5/25
+  });
+
+  /**
+   * THE TRAP THIS EXISTS FOR. The newest version usually has packets
+   * still in flight and NOTHING resolved — reading it naively prints 0%
+   * and looks like a triumph. On 2026-08-28 v24 and v25 held 8 packets
+   * between them with zero resolved.
+   */
+  test('skips versions that have resolved nothing rather than reporting 0%', () => {
+    const inflight: TerminalVersion = {
+      version: 25,
+      total: 3,
+      by_status: { open: 3 },
+      outcomes: {},
+      cycle_time_days: { median: null, p90: null, samples: 0 },
+    };
+    const report: TerminalReport = { kind: 'ship-a-change', versions: [inflight, ver(18, 8, 2)] };
+    const { current } = comparableVersions(report);
+    expect(current?.version).toBe(18);
+    expect(deliveryStats(report)[0]!.value).toBe('20%');
+  });
+
+  test('marks a small sample provisional so it is not read as a trend', () => {
+    const report: TerminalReport = { kind: 'ship-a-change', versions: [ver(19, 1, 1)] };
+    const abandon = deliveryStats(report)[0]!;
+    expect(abandon.value).toBe('50%');
+    expect(abandon.samples).toBe(2);
+    expect(abandon.provisional).toBe(true);
+  });
+
+  test('has no previous when only one version has resolved anything', () => {
+    const report: TerminalReport = { kind: 'ship-a-change', versions: [ver(18, 8, 2)] };
+    expect(deliveryStats(report)[0]!.previous).toBeNull();
+  });
+
+  test('returns nothing at all rather than fake numbers when the report is empty', () => {
+    expect(deliveryStats(null)).toEqual([]);
+    expect(deliveryStats({ kind: 'ship-a-change', versions: [] })).toEqual([]);
+  });
+});
+
+describe('awaitingProof', () => {
+  const car = (id: string, status: string, slug: string, stepStatus = 'ready') => ({
+    id,
+    kind: 'ship-a-change',
+    title: id,
+    status,
+    steps: [{ spec_slug: slug, status: stepStatus, title: slug }],
+  });
+
+  test('finds merged cars parked at proven — the ones the yard shows nowhere', () => {
+    const cars = [
+      car('a', 'open', 'proven'),
+      car('b', 'open', 'review'),
+      car('c', 'closed', 'proven'),
+    ];
+    expect(awaitingProof(cars as never).map((c) => c.id)).toEqual(['a']);
+  });
+
+  test('ignores a car whose proven step is already completed', () => {
+    expect(awaitingProof([car('a', 'open', 'proven', 'completed')] as never)).toEqual([]);
   });
 });

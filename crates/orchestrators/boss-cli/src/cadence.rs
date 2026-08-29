@@ -633,7 +633,21 @@ fn rule_from_row(row: &PgRow) -> Result<CadenceRule> {
 
 async fn load_rules(pool: &PgPool) -> Result<Vec<CadenceRule>> {
     let rows = sqlx::query(
-        "SELECT name, verb, basis, every_minutes, at_times, min_dock_depth, cooldown_minutes \
+        // EVERY COLUMN rule_from_row READS MUST BE SELECTED HERE. The
+        // calendar basis added `cadence`, `anchor_date` and
+        // `business_calendar` to the table and to the parser, and this
+        // query was not widened — so `row.try_get("cadence")` failed
+        // with "no column found for name: cadence" and the loop skipped
+        // protocol-retro-daily on every tick. The rule was in the table
+        // and visible over the API the whole time; only the loop could
+        // not read it.
+        //
+        // It failed LOUDLY, which is the one thing that went right: the
+        // loader logs a skipped rule every tick rather than dropping it
+        // once at startup, so the journal named the problem in plain
+        // words instead of the schedule silently never firing.
+        "SELECT name, verb, basis, every_minutes, at_times, min_dock_depth, cooldown_minutes, \
+                cadence, anchor_date, business_calendar \
          FROM cadence_rules WHERE status = 'active' ORDER BY name",
     )
     .fetch_all(pool)
@@ -1897,6 +1911,34 @@ mod db_tests {
                 ],
             }
         );
+        // THE CALENDAR RULE, AND THE REASON THIS ASSERTION EXISTS.
+        //
+        // This test passed while the loop could not read a calendar
+        // rule at all. Every seeded rule was wall / clock / queue-depth,
+        // so `rule_from_row`'s new branch was never exercised against a
+        // real row — and `load_rules`' SELECT had not been widened to
+        // fetch `cadence`, `anchor_date` or `business_calendar`. In
+        // production the loader logged, every tick:
+        //
+        //     skipping unreadable rule protocol-retro-daily:
+        //     no column found for name: cadence
+        //
+        // The rule was in the table and served over the API the whole
+        // time; only the loop could not see it. A DB-backed test that
+        // covers three of four bases is a test that covers the three
+        // that already worked.
+        let retro = by_name("protocol-retro-daily");
+        assert_eq!(retro.verb, "open:protocol-retro");
+        assert_eq!(
+            retro.basis,
+            Basis::Calendar {
+                cadence: boss_core::calendar::Cadence::Daily,
+                anchor: chrono::NaiveDate::from_ymd_opt(2026, 8, 28).unwrap(),
+                at: NaiveTime::from_hms_opt(6, 10, 0).unwrap(),
+                business_calendar: None,
+            }
+        );
+
         let depth = by_name("train-board-on-dock-depth");
         assert_eq!(depth.verb, "board");
         // 4 since 147-board-on-four.sql, back where 114 started. The

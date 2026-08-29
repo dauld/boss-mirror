@@ -189,6 +189,13 @@ export type YardState = Readonly<{
   /** Closed without arriving. Kept visible — a train that cancelled is
    *  a fact about the day, it just isn't an arrival. */
   cancelled: readonly TrainRow[];
+  /** The scoreboard. Empty when the report is unavailable or has
+   *  resolved nothing — the yard renders nothing rather than zeros. */
+  delivery: readonly DeliveryStat[];
+  /** Merged, deployed, awaiting an in-production check. These belong to
+   *  none of the yard's other three partitions, which is why seven of
+   *  them were invisible on 2026-08-28. */
+  awaitingProof: readonly CarRow[];
 }>;
 
 function step(j: WithSteps, slug: string, titleFallback: string): StepLite | null {
@@ -578,6 +585,10 @@ export function assembleYard(
   ships: readonly JobLite[],
   dockQueue: StationQueueEnvelope | null = null,
   nowMs: number = Date.now(),
+  // LAST on purpose: 22 call sites pass `nowMs` as the fourth argument,
+  // and inserting ahead of it would silently reinterpret a timestamp as
+  // a report. Additive parameters go on the end.
+  report: TerminalReport | null = null,
 ): YardState {
   const shipById = new Map(ships.map(j => [j.id, j]));
   const open = trains.filter(t => t.status === 'open');
@@ -616,6 +627,8 @@ export function assembleYard(
       .filter(c => c.outcome !== 'arrived')
       .slice(0, CANCELLED_SHOWN)
       .map(c => toTrainRow(c.t, shipById, false, medians, nowMs)),
+    delivery: deliveryStats(report),
+    awaitingProof: awaitingProof(ships).map(carRow),
   };
 }
 
@@ -637,7 +650,7 @@ async function fetchDockQueue(): Promise<StationQueueEnvelope | null> {
 }
 
 export async function fetchYard(): Promise<YardState | null> {
-  const [tr, sr, dockQueue] = await Promise.all([
+  const [tr, sr, dockQueue, report] = await Promise.all([
     // 40, not 20: the window has to hold the open trains, the five
     // arrivals the board shows, AND the arrivals the ETA medians are
     // taken over — cancelled trains sit in the same list and would
@@ -645,9 +658,152 @@ export async function fetchYard(): Promise<YardState | null> {
     fetch('/api/jobs?kind=pr-train&limit=40'),
     fetch('/api/jobs?kind=ship-a-change&limit=200'),
     fetchDockQueue(),
+    // The scoreboard is ADDITIVE: a yard that cannot show its stats is
+    // still a yard, so this resolves to null rather than failing the
+    // whole page. The stats are the thing you read second; the trains
+    // are the thing you came for.
+    fetch('/api/workflows/ship-a-change/terminal-report')
+      .then((r) => (r.ok ? (r.json() as Promise<TerminalReport>) : null))
+      .catch(() => null),
   ]);
   if (!tr.ok || !sr.ok) return null;
   const trains = ((await tr.json()) as { data?: JobLite[] }).data ?? [];
   const ships = ((await sr.json()) as { data?: JobLite[] }).data ?? [];
-  return assembleYard(trains, ships, dockQueue);
+  return assembleYard(trains, ships, dockQueue, Date.now(), report);
+}
+
+// ---------------------------------------------------------------------
+// Delivery stats — the yard's scoreboard.
+// ---------------------------------------------------------------------
+
+/** One version's row from `/api/workflows/{kind}/terminal-report`. */
+export type TerminalVersion = Readonly<{
+  version: number;
+  total: number;
+  by_status?: Readonly<Record<string, number>> | null;
+  outcomes?: Readonly<Record<string, number>> | null;
+  cycle_time_days?: Readonly<{
+    median: number | null;
+    p90: number | null;
+    samples: number;
+  }> | null;
+}>;
+
+export type TerminalReport = Readonly<{
+  kind: string;
+  versions?: readonly TerminalVersion[] | null;
+}>;
+
+/** What the yard shows at the top: a number, and the direction it moved. */
+export type DeliveryStat = Readonly<{
+  label: string;
+  value: string;
+  /** The comparison version's value, or null when there is nothing to compare. */
+  previous: string | null;
+  /** How many packets the CURRENT value is computed from. */
+  samples: number;
+  /** true when `samples` is too small to read as a trend. */
+  provisional: boolean;
+}>;
+
+/** Below this, a rate is noise dressed as a measurement. */
+export const MIN_SAMPLES = 5;
+
+function resolved(v: TerminalVersion): number {
+  const o = v.outcomes ?? {};
+  return Object.values(o).reduce((a, b) => a + b, 0);
+}
+
+function abandonRate(v: TerminalVersion): number | null {
+  const n = resolved(v);
+  if (n === 0) return null;
+  return ((v.outcomes?.abandoned ?? 0) / n) * 100;
+}
+
+/**
+ * The most recent version that has RESOLVED anything, and the most
+ * recent one before it that also has.
+ *
+ * A version with packets still in flight reports no rate at all — which
+ * is the common case for the version published an hour ago, and is
+ * exactly when a naive "latest version" reading would print 0% and look
+ * like a triumph. On 2026-08-28 v24 and v25 held 8 packets between them
+ * with zero resolved.
+ */
+export function comparableVersions(
+  report: TerminalReport | null,
+): { current: TerminalVersion | null; previous: TerminalVersion | null } {
+  const withOutcomes = (report?.versions ?? [])
+    .filter((v) => resolved(v) > 0)
+    .slice()
+    .sort((a, b) => b.version - a.version);
+  return { current: withOutcomes[0] ?? null, previous: withOutcomes[1] ?? null };
+}
+
+function pct(n: number | null): string {
+  return n === null ? '—' : `${Math.round(n)}%`;
+}
+
+function days(v: TerminalVersion): string {
+  const m = v.cycle_time_days?.median;
+  return m === null || m === undefined ? '—' : `${m}d`;
+}
+
+/**
+ * The yard's headline numbers.
+ *
+ * WHY ABANDON RATE LEADS. David, 2026-08-28: "We should have these stats
+ * at the top of the Train Yard if they are what matter." Abandon rate is
+ * the one that moves for protocol reasons rather than luck — a car
+ * abandoned is a change that was written, gated and then thrown away
+ * with its history. Cycle time sits beside it because a rate that
+ * improves by shipping slower is not an improvement.
+ *
+ * EVERY NUMBER CARRIES ITS SAMPLE COUNT, and is marked provisional below
+ * MIN_SAMPLES. A 50% abandon rate over two packets is not a trend, and a
+ * scoreboard that cannot say so invites exactly the wrong reaction.
+ */
+export function deliveryStats(report: TerminalReport | null): readonly DeliveryStat[] {
+  const { current, previous } = comparableVersions(report);
+  if (!current) return [];
+  const n = resolved(current);
+  return [
+    {
+      label: 'abandon rate',
+      value: pct(abandonRate(current)),
+      previous: previous ? pct(abandonRate(previous)) : null,
+      samples: n,
+      provisional: n < MIN_SAMPLES,
+    },
+    {
+      label: 'median cycle',
+      value: days(current),
+      previous: previous ? days(previous) : null,
+      samples: current.cycle_time_days?.samples ?? 0,
+      provisional: (current.cycle_time_days?.samples ?? 0) < MIN_SAMPLES,
+    },
+    {
+      label: 'delivered',
+      value: String(current.outcomes?.merged ?? 0),
+      previous: previous ? String(previous.outcomes?.merged ?? 0) : null,
+      samples: n,
+      provisional: false,
+    },
+  ];
+}
+
+/**
+ * Cars that merged and are waiting on an in-production check.
+ *
+ * These appear NOWHERE in the yard today: it partitions into open
+ * trains, arrived trains and the dock, and a merged-but-unproven car is
+ * none of those. Seven were invisible on 2026-08-28, which is the state
+ * we had agreed was the bottleneck.
+ */
+export function awaitingProof(cars: readonly JobLite[]): readonly JobLite[] {
+  return cars.filter((c) => {
+    if (c.status !== 'open') return false;
+    const step = (c.steps ?? []).find((s) => s.status === 'ready' || s.status === 'active');
+    return step?.spec_slug === 'proven';
+  });
 }

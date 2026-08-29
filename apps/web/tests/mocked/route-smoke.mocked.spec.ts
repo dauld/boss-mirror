@@ -69,7 +69,16 @@ const ROUTES: ReadonlyArray<string> = [
 // can't fake; they need faithful per-endpoint fixtures before they can be
 // gated without false positives:
 //   /ux/finance (statements .reduce) · /ux/warehouse (summary.below_reorder_count)
-//   /ux/exec (.find/.length) · /ux/watchlist (.length) · /system/monitoring (snapshot .length)
+//   /ux/exec (.find/.length) · /system/monitoring (snapshot .length)
+//
+// /ux/watchlist LEFT THIS GROUP on 2026-08-28: its `.length` crash was
+// not a fixture problem but a CAST — the page read
+// `(await r.json()) as { accounts: RiskScore[] }` and a payload without
+// `accounts` made the value undefined. It now parses through
+// RiskScoreListSchema and renders its error state on a wrong shape, so
+// no faithful fixture is needed to gate it (feedback 2fe1c8c1). Note it
+// was never in the DEFERRED map below — only named here — so nothing had
+// to be removed; this comment was the whole deferral.
 //
 // Resolved: the marketing-assets no-shell this harness first caught was a
 // real effect_update_depth_exceeded loop in loadClasses() called from a

@@ -932,7 +932,7 @@ fn workable_assignee<'a>(
 /// derived from the field name.
 fn synth_field_value(field_type: &str, name: &str, step_id: &str, now: DateTime<Utc>) -> Value {
     match field_type {
-        "number" | "integer" => json!(1),
+        "number" | "integer" => json!(small_count(name, step_id)),
         "boolean" => json!(true),
         "array" => json!([]),
         "object" => json!({}),
@@ -968,6 +968,37 @@ fn enum_variant<'a>(field_type: &'a str, name: &str, step_id: &str) -> &'a str {
     // `split` always yields at least one item, so the modulus is safe.
     let idx = ((h ^ (h >> 32)) as usize) % variants.len();
     variants[idx]
+}
+
+/// A small positive count, spread deterministically over `(step, field)`.
+///
+/// Always emitting `1` made every synthesized number a constant — the
+/// same defect the enum faker had before `enum_variant` landed. Measured
+/// over 130 closed keg-return packets: 86 carried `kegs_out = 1`, and 76
+/// carried `kegs_returned = 1` AND `kegs_lost = 1`, so one keg went out
+/// and two came back accounted for. A loss rate over that data measures
+/// nothing (feedback 52f49cc7).
+///
+/// THE RANGE IS ARBITRARY AND SAYS SO. 1..=20 is a plausible small count
+/// and nothing more; the sim has no ground truth about how many kegs an
+/// order ships, and inventing a distribution would dress a guess up as
+/// data — the same reason `enum_variant` is uniform and unweighted.
+/// What this fixes is being a CONSTANT, not being wrong.
+///
+/// IT DOES NOT — AND CANNOT — SATISFY A RELATIONSHIP. No amount of
+/// independent per-field synthesis makes `kegs_returned + kegs_lost`
+/// equal `kegs_out`; three fields faked separately will disagree, and
+/// with a range they will disagree VISIBLY rather than looking tidy at
+/// 1/1/1. That is the honest state of it. Fields bound by an invariant
+/// need an executor that knows the invariant — the keg ledger's
+/// conservation sweep (93f936b9, David's Q1 decision) — with the faker
+/// filling only genuinely free fields.
+fn small_count(name: &str, step_id: &str) -> u64 {
+    let h = fxhash(&format!("{step_id}\u{1f}{name}"));
+    // Fold the high half down before the modulus, for the same reason
+    // enum_variant does: FNV-1a's low bits are weak, and without the
+    // fold two integer fields on one step move together.
+    ((h ^ (h >> 32)) % 20) + 1
 }
 
 /// Small stable string hash (FNV-1a) — NOT `DefaultHasher`, whose seed
@@ -1227,6 +1258,31 @@ mod tests {
         ));
         // scalars are the right JSON shape.
         assert!(synth_field_value("integer", "n", step, now).is_i64());
+
+        // NOT A CONSTANT, and deterministic. Before this, every
+        // synthesized number was 1 — 86 of 130 keg-return packets
+        // carried kegs_out = 1 (feedback 52f49cc7).
+        let a = synth_field_value("integer", "kegs_out", "step-a", now);
+        let b = synth_field_value("integer", "kegs_out", "step-b", now);
+        let c = synth_field_value("integer", "kegs_lost", "step-a", now);
+        assert_ne!(a, b, "the same field on different steps must spread");
+        assert_ne!(
+            a, c,
+            "two integer fields on ONE step must draw independently, or \
+             they move together and a relationship looks satisfied by accident"
+        );
+        assert_eq!(
+            a,
+            synth_field_value("integer", "kegs_out", "step-a", now),
+            "same (step, field) must replay identically — a sim that picks \
+             new numbers on replay is not reproducible"
+        );
+        for step in ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"] {
+            let v = synth_field_value("integer", "n", step, now)
+                .as_i64()
+                .unwrap();
+            assert!((1..=20).contains(&v), "{v} out of the stated range");
+        }
         assert!(synth_field_value("boolean", "b", step, now).is_boolean());
         assert!(synth_field_value("array", "xs", step, now).is_array());
         assert!(synth_field_value("object", "o", step, now).is_object());
