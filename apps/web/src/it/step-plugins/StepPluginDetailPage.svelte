@@ -3,6 +3,7 @@
   // apps/web/src/admin/StepPluginDetailPage.tsx.
 
   import Breadcrumb from '@boss/web-kit/ui/Breadcrumb.svelte';
+  import { formatDate } from '@boss/web-kit/ui/date';
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
@@ -176,7 +177,7 @@
               </tr>
               <tr>
                 <td style="color:#888">Created</td>
-                <td>{new Date(spec.created_at).toISOString().slice(0, 10)}</td>
+                <td>{formatDate(spec.created_at)}</td>
               </tr>
               {#if spec.description}
                 <tr><td style="color:#888">Description</td><td>{spec.description}</td></tr>

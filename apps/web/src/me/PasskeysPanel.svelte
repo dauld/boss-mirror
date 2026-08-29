@@ -7,6 +7,7 @@
   // verify fresh assertions against these credentials, bound to each
   // step's shape hash.
   import { enrollPasskey } from '../steps/presence';
+  import { formatDate } from '@boss/web-kit/ui/date';
 
   type CredentialRow = Readonly<{
     credential_id: string;
@@ -72,9 +73,9 @@
           <li>
             <span class="passkeys-label">{cred.label}</span>
             <span class="passkeys-meta">
-              enrolled {cred.registered_at.slice(0, 10)}
+              enrolled {formatDate(cred.registered_at)}
               {#if cred.last_used_at}
-                · last used {cred.last_used_at.slice(0, 10)}
+                · last used {formatDate(cred.last_used_at)}
               {:else}
                 · never used
               {/if}
