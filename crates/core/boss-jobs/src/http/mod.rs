@@ -33,6 +33,7 @@ mod census;
 mod jobs;
 mod kinds;
 mod plugins;
+mod refusals;
 mod sim_clock;
 mod stations;
 mod steps;
@@ -42,6 +43,7 @@ use census::*;
 use jobs::*;
 use kinds::*;
 use plugins::*;
+use refusals::*;
 use sim_clock::*;
 use stations::*;
 use steps::*;
@@ -129,8 +131,18 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
     state: JobsApiState<R, B>,
 ) -> Router {
     let shared = Arc::new(state);
+    // One layer over the whole router rather than a call at each of
+    // `steps.rs`'s ~15 refusal sites, so a refusal added later cannot
+    // silently go uncounted. It passes everything that is not a step
+    // WRITE straight through without buffering. See http/refusals.rs.
+    let refusals =
+        axum::middleware::from_fn_with_state(shared.clone(), record_step_write_refusals::<R, B>);
     Router::new()
         .route("/api/jobs/health", get(health))
+        .route(
+            "/api/jobs/step-write-refusals",
+            get(list_step_write_refusals::<R, B>),
+        )
         .route("/api/jobs/summary", get(jobs_summary::<R, B>))
         .route("/api/jobs/live", get(jobs_live::<R, B>))
         .route("/api/jobs/sim-clock/pause", post(sim_clock_pause::<R, B>))
@@ -263,6 +275,7 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
             get(in_flight_plugin_count::<R, B>),
         )
         .with_state(shared)
+        .layer(refusals)
 }
 
 // ---------------------------------------------------------------------------

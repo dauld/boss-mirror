@@ -7,6 +7,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use boss_core::job::{Job, JobId, JobStatus, Step, StepId, StepStatus};
+use chrono::{DateTime, Utc};
 
 use crate::port::{JobFilter, JobScope, JobsError, JobsRepository, LaunchCalendarRow};
 
@@ -14,6 +15,7 @@ use crate::port::{JobFilter, JobScope, JobsError, JobsRepository, LaunchCalendar
 pub struct InMemoryJobs {
     inner: Mutex<State>,
     recorded: Mutex<Vec<boss_core::event::Event>>,
+    refusals: Mutex<Vec<crate::refusals::RecordedRefusal>>,
 }
 
 #[derive(Default)]
@@ -576,6 +578,36 @@ impl JobsRepository for InMemoryJobs {
             }
         }
         Ok(results)
+    }
+
+    async fn record_step_write_refusal_at(
+        &self,
+        refusal: &crate::refusals::StepWriteRefusal,
+        now: DateTime<Utc>,
+    ) -> Result<(), JobsError> {
+        let mut refusals = self.refusals.lock().expect("poisoned");
+        // BIGSERIAL starts at 1, so the in-memory ids match what a
+        // caller reading either adapter would see.
+        let id = refusals.len() as i64 + 1;
+        refusals.push(crate::refusals::RecordedRefusal {
+            id,
+            refused_at: now,
+            refusal: refusal.clone(),
+        });
+        Ok(())
+    }
+
+    async fn step_write_refusals(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::refusals::RecordedRefusal>, JobsError> {
+        let refusals = self.refusals.lock().expect("poisoned");
+        Ok(refusals
+            .iter()
+            .rev()
+            .take(limit.max(0) as usize)
+            .cloned()
+            .collect())
     }
 }
 
