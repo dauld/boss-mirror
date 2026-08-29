@@ -12,6 +12,7 @@
   // because that adjacency IS the claim. Three separate lists would
   // render the same data as the federated search this replaced.
   import { onMount } from 'svelte';
+  import { formatDate } from '@boss/web-kit/ui/date';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
 
   let { q } = $props<{ q: string }>();
@@ -132,7 +133,7 @@
               <div class="sr-line sr-line-static">
                 <span class="sr-line-title">{e.title}</span>
                 <span class="sr-line-sub">
-                  {e.occurred_at ? e.occurred_at.slice(0, 10) : ''}
+                  {e.occurred_at ? formatDate(e.occurred_at) : ''}
                 </span>
               </div>
             {:else}

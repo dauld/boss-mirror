@@ -2,6 +2,7 @@
   // Marketing Asset detail.
 
   import Breadcrumb from '@boss/web-kit/ui/Breadcrumb.svelte';
+  import { formatDate } from '@boss/web-kit/ui/date';
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import Meta from '@boss/web-kit/ui/Meta.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
@@ -136,7 +137,7 @@
               {a.linked_device_skus.length + a.linked_account_ids.length + a.linked_campaign_ids.length}
           </Meta>
           <Meta label="Versions">{history.length || 1}</Meta>
-          <Meta label="Updated">{a.updated_at.slice(0, 10)}</Meta>
+          <Meta label="Updated">{formatDate(a.updated_at)}</Meta>
         </div>
       </div>
     </header>
@@ -174,14 +175,14 @@
                 />
                 {#if a.brand_reviewed_at}
                   <span style="color:var(--static); margin-left:8px">
-                    · {a.brand_reviewed_at.slice(0, 10)}
+                    · {formatDate(a.brand_reviewed_at)}
                   </span>
                 {/if}
               {:else}
                 <span style="color:var(--static)">not reviewed</span>
               {/if}
             </dd>
-            <dt>Created</dt><dd>{a.created_at.slice(0, 10)}</dd>
+            <dt>Created</dt><dd>{formatDate(a.created_at)}</dd>
             <dt>Supersedes</dt>
             <dd>
               {#if hasPredecessor && a.supersedes_id}
@@ -299,7 +300,7 @@
                     {/if}
                   </td>
                   <td>{h.title}</td>
-                  <td>{h.created_at.slice(0, 10)}</td>
+                  <td>{formatDate(h.created_at)}</td>
                   <td>
                     {#if h.retired_at}
                       retired

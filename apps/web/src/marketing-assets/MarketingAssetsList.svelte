@@ -2,6 +2,7 @@
   // Marketing Asset KB list.
 
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
+  import { formatDate } from '@boss/web-kit/ui/date';
   import FilterGroup from '@boss/web-kit/ui/FilterGroup.svelte';
   import FilterButton from '@boss/web-kit/ui/FilterButton.svelte';
   import SearchInput from '@boss/web-kit/ui/SearchInput.svelte';
@@ -171,7 +172,7 @@
                     <span style="color:var(--static)">—</span>
                   {/if}
                 </td>
-                <td style="color:var(--static); font-size:12px">{a.updated_at.slice(0, 10)}</td>
+                <td style="color:var(--static); font-size:12px">{formatDate(a.updated_at)}</td>
               </tr>
             {/each}
           </tbody>
