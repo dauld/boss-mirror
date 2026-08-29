@@ -734,6 +734,42 @@ pub trait JobsRepository: Send + Sync {
     async fn restart_sim_clock_epoch(&self) -> Result<(), JobsError> {
         Ok(())
     }
+
+    // ----- Refused writes -----
+    //
+    // The denominator for step reliability. A completed step is the
+    // only thing the record holds today, and required-at-done
+    // validation guarantees every completed step is conformant — so
+    // conformance measures 100% and always will. What it cannot see is
+    // the attempt that never became a completion. See
+    // `crate::refusals` for the classifier and the two readings this
+    // is for (unrecovered refusals; distinct actors per error class).
+
+    /// Record a refused step write.
+    ///
+    /// Recording is a side-channel: it must never turn a refusal the
+    /// caller can act on into a 500 it cannot. Callers log the error
+    /// and continue.
+    async fn record_step_write_refusal(
+        &self,
+        refusal: &crate::refusals::StepWriteRefusal,
+    ) -> Result<(), JobsError> {
+        self.record_step_write_refusal_at(refusal, Utc::now()).await
+    }
+
+    async fn record_step_write_refusal_at(
+        &self,
+        refusal: &crate::refusals::StepWriteRefusal,
+        now: DateTime<Utc>,
+    ) -> Result<(), JobsError>;
+
+    /// Recent refusals, newest first. The read side — without it the
+    /// table is a black hole and "let's try it and see how it goes"
+    /// has nothing to look at.
+    async fn step_write_refusals(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::refusals::RecordedRefusal>, JobsError>;
 }
 
 /// Snapshot of the simulated clock for read-side surfaces. All
