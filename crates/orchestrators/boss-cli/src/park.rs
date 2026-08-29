@@ -274,6 +274,42 @@ fn step_id(job: &Value, title: &str) -> Result<String> {
 
 /// File a car for `branch` and fill it up to `review`.
 #[allow(clippy::too_many_arguments)]
+/// The evidence each of the three steps carries, and when it was filled.
+///
+/// All three stamps are the same instant on purpose: `boss park` is one
+/// act, so scope, build and gate genuinely complete together. What the
+/// stamp separates is the *dock* — gate's stamp is when the car became
+/// ready, and the conductor's stamp on `review` is when it boarded, so
+/// the difference is queue time and nothing else. Coding time is not in
+/// here at all: the packet does not exist until park creates it.
+fn step_fields(
+    summary: &str,
+    excludes: &str,
+    test: &str,
+    verified: &str,
+    receipt: &Receipt,
+    now: chrono::DateTime<chrono::Utc>,
+) -> [(&'static str, Value); 3] {
+    let at = crate::gate::stamp(now);
+    [
+        (
+            SCOPE,
+            json!({"summary": summary, "excludes": excludes, "completed_at": at}),
+        ),
+        (BUILD, json!({"test": test, "completed_at": at})),
+        (
+            GATE,
+            json!({
+                "gates": if receipt.mode.is_empty() { "full" } else { &receipt.mode },
+                // VERBATIM. The whole point of the verb.
+                "receipt": receipt.raw,
+                "verified": verified,
+                "completed_at": at,
+            }),
+        ),
+    ]
+}
+
 pub(crate) async fn run(
     branch: &str,
     summary: &str,
@@ -282,6 +318,8 @@ pub(crate) async fn run(
     verified: &str,
     backlog_item: Option<String>,
     dry: bool,
+    // The operator's now, taken once at the CLI entry point.
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
     let http = reqwest::Client::new();
 
@@ -358,20 +396,7 @@ pub(crate) async fn run(
     .await?
     .ok_or_else(|| anyhow::anyhow!("could not read back car {car}"))?;
 
-    let filled = [
-        (SCOPE, json!({"summary": summary, "excludes": excludes})),
-        (BUILD, json!({"test": test})),
-        (
-            GATE,
-            json!({
-                "gates": if receipt.mode.is_empty() { "full" } else { &receipt.mode },
-                // VERBATIM. The whole point of the verb.
-                "receipt": receipt.raw,
-                "verified": verified,
-            }),
-        ),
-    ];
-    for (title, metadata) in filled {
+    for (title, metadata) in step_fields(summary, excludes, test, verified, &receipt, now) {
         let sid = step_id(&job, title)?;
         crate::gate::api(
             &http,
@@ -592,5 +617,78 @@ mod tests {
                 .unwrap_or_else(|e| panic!("order {order} failed: {e}"));
             assert_eq!(r.head, HEAD, "order {order} picked the wrong packet");
         }
+    }
+
+    fn at(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s).unwrap().into()
+    }
+
+    #[test]
+    fn every_step_park_fills_says_when_it_was_filled() {
+        let receipt = Receipt {
+            raw: GREEN.to_string(),
+            head: HEAD.to_string(),
+            mode: "full".to_string(),
+        };
+        let fields = step_fields("s", "e", "t", "v", &receipt, at("2026-08-29T04:15:09Z"));
+
+        // Every one, not just the last: a car that stamps two of three
+        // still reads as complete and silently loses the arithmetic.
+        assert_eq!(fields.len(), 3);
+        for (title, md) in &fields {
+            assert_eq!(
+                md.get("completed_at").and_then(Value::as_str),
+                Some("2026-08-29T04:15:09Z"),
+                "{title} was filled without saying when — before this, park \
+                 wrote 0 of 40 scope steps with a stamp while the conductor \
+                 wrote 31 of 31, so cycle time had one end and not the other"
+            );
+        }
+    }
+
+    #[test]
+    fn the_stamp_park_writes_matches_the_one_the_conductor_writes() {
+        // Not cosmetic. Dock queue time is `review.completed_at` (the
+        // conductor's) minus `gate.completed_at` (park's), so a format
+        // that differs by writer is wrong only in the subtraction.
+        let receipt = Receipt {
+            raw: GREEN.to_string(),
+            head: HEAD.to_string(),
+            mode: "full".to_string(),
+        };
+        let now = at("2026-08-29T04:15:09.847213Z");
+        let fields = step_fields("s", "e", "t", "v", &receipt, now);
+        let parked = fields[2].1["completed_at"].as_str().unwrap().to_string();
+
+        assert_eq!(parked, crate::gate::stamp(now));
+        assert!(
+            !parked.contains('.') && parked.ends_with('Z'),
+            "sub-second precision and offsets both break string comparison \
+             against the conductor's stamps: {parked}"
+        );
+    }
+
+    #[test]
+    fn parking_does_not_disturb_the_evidence_it_already_carried() {
+        let receipt = Receipt {
+            raw: GREEN.to_string(),
+            head: HEAD.to_string(),
+            mode: String::new(),
+        };
+        let f = step_fields(
+            "sum",
+            "exc",
+            "tst",
+            "ver",
+            &receipt,
+            at("2026-08-29T04:15:09Z"),
+        );
+        assert_eq!(f[0].1["summary"], json!("sum"));
+        assert_eq!(f[0].1["excludes"], json!("exc"));
+        assert_eq!(f[1].1["test"], json!("tst"));
+        assert_eq!(f[2].1["verified"], json!("ver"));
+        // Verbatim, and an empty mode still reads as a full gate.
+        assert_eq!(f[2].1["receipt"], json!(GREEN));
+        assert_eq!(f[2].1["gates"], json!("full"));
     }
 }

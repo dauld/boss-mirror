@@ -29,8 +29,13 @@ export const WORK_BY_ROLE: Record<Role, ReadonlyArray<RouteName>> = {
   // ----- Service & refurb -----
   'service-mgr':       ['jobs', 'service', 'support'],
   'service-tech':      ['service', 'jobs', 'schedule'],
-  'refurb-supervisor': ['refurb', 'jobs', 'qa'],
-  'refurb-tech':       ['refurb', 'jobs'],
+  // The refurb ROLES remain — they are real people on the device-shop
+  // roster — but their surface does not. /ux/refurb was a device-shop
+  // page in the shared shell that every other tenant saw as an empty
+  // list, removed 2026-08-28 (feedback 96c37dbe). They land on jobs and
+  // qa, which is where their work actually is.
+  'refurb-supervisor': ['jobs', 'qa'],
+  'refurb-tech':       ['jobs'],
 
   // ----- QA -----
   'qa-lead': ['qa', 'jobs'],

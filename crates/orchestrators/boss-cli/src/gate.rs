@@ -269,6 +269,18 @@ pub(crate) fn rows(v: Option<Value>) -> Vec<Value> {
     .unwrap_or_default()
 }
 
+/// The instant a step completed, in the one format every verb writes.
+///
+/// RFC3339, whole seconds, `Z`. Three verbs stamp `completed_at` — the
+/// conductor on the steps it completes, `boss park` on scope/build/gate,
+/// `boss prove` on proven — and cycle time is the difference between
+/// stamps written by *different* verbs. A format that varied by writer
+/// would still look right in every packet and only be wrong in the
+/// arithmetic, so it is defined once here rather than three times.
+pub(crate) fn stamp(now: chrono::DateTime<chrono::Utc>) -> String {
+    now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
 /// `git ls-remote` the branch so the packet records a real head.
 ///
 /// Falls back to the symbolic `origin/<branch>` rather than failing:

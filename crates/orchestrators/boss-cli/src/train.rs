@@ -1185,6 +1185,41 @@ pub(crate) fn car_head(clone: &str, branch: &str) -> Result<Option<String>> {
     Ok(None)
 }
 
+/// The head this car will actually board: the fork ref the consist is
+/// assembled from.
+///
+/// `car_head` answers a DIFFERENT question — "is there a newer commit
+/// anywhere that publishing should ship" — and prefers the conductor
+/// clone's own `refs/heads` to answer it. That is right for deciding
+/// whether to publish and wrong as an answer to "what will ride", and
+/// the two come apart whenever a car is rebased and re-pushed. The
+/// clone keeps the pre-rebase commit; `publish_car_branch` cannot
+/// fast-forward the fork past it, so the fork rightly keeps the gated
+/// commit and boards it. `rerail_onto_consist` reads `fork/{branch}`
+/// and the boarded head is stamped from it, so this is the only ref a
+/// gate receipt can honestly be checked against.
+///
+/// Measured on a live dock, 2026-08-29: car c6531868 was left behind
+/// for "gated, then changed" while its receipt (56b817eb) matched the
+/// fork exactly — the mismatch was against a local ref eight hours
+/// older that no train would ever have carried.
+pub(crate) fn fork_head(clone: &str, branch: &str) -> Result<Option<String>> {
+    let out = sh_unchecked(&[
+        "git",
+        "-C",
+        clone,
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        &format!("fork/{branch}"),
+    ])?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok((!sha.is_empty()).then_some(sha))
+}
+
 /// The skip reason for a car parked at review whose branch was never
 /// pushed to the fork.
 pub(crate) fn skip_reason_branch_missing(branch: &str) -> String {
@@ -2983,7 +3018,7 @@ impl Conductor {
         // report's timings derive from these.
         md.insert(
             "completed_at".to_string(),
-            json!(Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            json!(crate::gate::stamp(Utc::now())),
         );
         self.api(
             Method::PUT,
@@ -3920,10 +3955,29 @@ impl Conductor {
             }
             // The receipt spot-check (742d1faa): the head this car will
             // actually board must be the head its gate receipt vouches
-            // for, and the receipt must be green on a clean tree. The
-            // check is against `want` — the branch head as it stands
-            // NOW — because that is what the train would carry.
-            if let Some(reason) = receipt_skip_reason(&j, want.as_deref()) {
+            // for, and the receipt must be green on a clean tree.
+            //
+            // THE HEAD THAT BOARDS IS THE ONE ON THE FORK. The consist is
+            // assembled from `fork/{branch}` (`rerail_onto_consist`) and
+            // the boarded head is stamped from it, so that ref — not the
+            // conductor clone's own `refs/heads` — is what the receipt
+            // has to match. `car_head` prefers the LOCAL branch, which is
+            // the right question for "is there anything newer to publish"
+            // and the wrong answer to "what will ride". The two come
+            // apart when a car is rebased and re-pushed, which is the
+            // normal repair: the clone keeps the pre-rebase commit, the
+            // push cannot fast-forward past it, the fork rightly keeps
+            // the gated commit, and comparing the receipt against the
+            // local head leaves a correctly-gated car behind for "gated,
+            // then changed". Read on 2026-08-29 from a live dock — car
+            // c6531868 was held out with its receipt (56b817eb) matching
+            // the fork exactly, against a local ref eight hours older.
+            //
+            // Read AFTER the publish attempt above, so a branch that was
+            // just published is judged on what actually landed there
+            // rather than on what was offered.
+            let boards = fork_head(&self.cfg.clone, &branch)?;
+            if let Some(reason) = receipt_skip_reason(&j, boards.as_deref()) {
                 log(format!("{}: {reason} — leaving behind", id8(&jid)));
                 left_behind.push(json!({"car_id_short": id8(&jid), "reason": reason.as_str()}));
                 if !self.cfg.dry {
@@ -6930,6 +6984,82 @@ mod tests {
             rev(&clone, "fork/feat/repaired"),
             fixed,
             "the forge must end up holding the repaired commit"
+        );
+    }
+
+    /// THE OTHER HALF OF THE REPAIR PATH — a rebase, not a fast-forward.
+    ///
+    /// The test above covers a car repaired by ADDING a commit, where
+    /// the local head is strictly ahead and publishing fast-forwards
+    /// the fork onto it. The commoner repair is a REBASE: the author
+    /// rebuilds the branch on a newer main and re-pushes it, and the
+    /// conductor's clone — which never checked the branch out again —
+    /// keeps the pre-rebase commit forever.
+    ///
+    /// Now the two refs have DIVERGED, so no push can fast-forward and
+    /// the fork keeps the commit the gate actually ran on. `car_head`
+    /// still reports the local one, and checking a receipt against it
+    /// leaves a correctly-gated car behind for "gated, then changed".
+    /// Live on 2026-08-29: c6531868, receipt 56b817eb matching the fork
+    /// exactly, held out against a local ref eight hours older.
+    #[test]
+    fn a_rebased_car_boards_the_head_the_fork_holds() {
+        let (_g, clone) = clone_fixture("diverged-fork");
+        commit_branch(&clone, "fix/rebased");
+        let path = clone.to_str().expect("utf8");
+        assert!(publish_car_branch(path, "fix/rebased").expect("first publish"));
+        let pre_rebase = rev(&clone, "fix/rebased");
+
+        // The author rebases onto a newer base and re-pushes. Both refs
+        // now descend from main independently — neither is an ancestor
+        // of the other, which is what makes the push unable to help.
+        git_ok(&clone, &["checkout", "-q", "-b", "scratch", "main"]);
+        std::fs::write(clone.join("x"), "rebased work").expect("write");
+        git_ok(&clone, &["add", "-A"]);
+        git_ok(&clone, &["commit", "-qm", "rebased work"]);
+        git_ok(
+            &clone,
+            &["push", "-q", "-f", "fork", "scratch:refs/heads/fix/rebased"],
+        );
+        git_ok(&clone, &["checkout", "-q", "main"]);
+        git_ok(&clone, &["fetch", "-q", "fork"]);
+        let gated = rev(&clone, "fork/fix/rebased");
+        assert_ne!(pre_rebase, gated, "precondition: the refs diverged");
+        assert_eq!(
+            rev(&clone, "refs/heads/fix/rebased"),
+            pre_rebase,
+            "precondition: the clone still holds the pre-rebase commit"
+        );
+
+        assert_eq!(
+            fork_head(path, "fix/rebased").expect("fork_head"),
+            Some(gated.clone()),
+            "the head that boards is the one the consist is assembled from"
+        );
+
+        // The receipt the gate wrote vouches for what is on the fork.
+        let car = json!({
+            "metadata": {},
+            "steps": [{
+                "spec_slug": "gate",
+                "title": "Green, and observed working",
+                "metadata": {"receipt": {"verdict": "green", "head": gated}},
+            }],
+        });
+        assert_eq!(
+            receipt_skip_reason(
+                &car,
+                fork_head(path, "fix/rebased").expect("fork").as_deref()
+            ),
+            None,
+            "a correctly-gated car must board after a rebase"
+        );
+        let stale =
+            receipt_skip_reason(&car, car_head(path, "fix/rebased").expect("car").as_deref())
+                .expect("the local ref is the wrong question and must be seen to be");
+        assert!(
+            stale.contains("gated, then changed"),
+            "documents the regression this test pins: {stale}"
         );
     }
 

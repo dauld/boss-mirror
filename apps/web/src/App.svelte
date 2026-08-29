@@ -2,7 +2,7 @@
   // Root component — parses the URL, dispatches to the matched
   // page inside AppShell.
   //
-  // Phase 1 wires /me, /jobs, /jobs/:id, /service, /sales, /refurb,
+  // Phase 1 wires /me, /jobs, /jobs/:id, /service, /sales,
   // /assets, /assets/:id. Unmatched URLs fall back to My Day
   // (same as the React app's default).
 
@@ -105,7 +105,6 @@
     switch (kind) {
       case 'support':
       case 'service':
-      case 'refurb':          return { id: 'support',   label: 'Support / Service' };
       case 'shipping':
       case 'shipmentDetail':  return { id: 'shipping',  label: 'Shipments' };
       case 'calendar':        return { id: 'calendar',  label: 'Release calendar' };
@@ -266,15 +265,6 @@
         initialKind="sale"
         initialStatus="open"
         pageTitle="Sales pipeline"
-      />
-    {:else if route.kind === 'refurb'}
-      <!-- /refurb is the device-shop tenant's service queue.
-           Page title generalizes — tenants that don't run a
-           refurb pipeline (brewery) just see an empty list. -->
-      <JobsListPage
-        initialKindPrefix="refurb"
-        initialStatus="open"
-        pageTitle="Service queue"
       />
     {:else if route.kind === 'assets'}
       <AssetsList />

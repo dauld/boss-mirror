@@ -704,6 +704,7 @@ async fn main() -> Result<()> {
                 &verified,
                 backlog_item,
                 dry_run,
+                chrono::Utc::now(),
             )
             .await
         }

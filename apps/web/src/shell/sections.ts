@@ -60,7 +60,6 @@ export const SECTION_FOR_ROUTE: Readonly<Record<Route['kind'], string>> = {
   jobDetail: 'jobs',
   service: 'service',
   sales: 'sales',
-  refurb: 'refurb',
   assets: 'assets',
   asset: 'assets',
   accounts: 'accounts',

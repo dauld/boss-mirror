@@ -280,6 +280,30 @@ fn host() -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
+/// The evidence the `proven` step carries, and when it was recorded.
+///
+/// `now` is the instant the probe ran under, not a fresh one taken at
+/// write time: the proof and its stamp describe a single event, and a
+/// slow API call should not drag the timestamp away from the probe.
+fn proven_metadata(
+    verified: &str,
+    proof: &str,
+    method: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Value {
+    let mut md = json!({
+        "verified": verified,
+        // VERBATIM, as a string, exactly like the gate receipt: what the
+        // machine saw, not a summary of it.
+        "proof": proof,
+        "completed_at": crate::gate::stamp(now),
+    });
+    if let Some(m) = method {
+        md["method"] = json!(m);
+    }
+    md
+}
+
 /// Run a probe against production and record it on the car — or refuse.
 pub(crate) async fn run(
     car_ref: &str,
@@ -394,15 +418,12 @@ pub(crate) async fn run(
         .ok_or_else(|| anyhow::anyhow!("the `{PROVEN}` step has no id"))?
         .to_string();
 
-    let mut md = json!({
-        "verified": verified,
-        // VERBATIM, as a string, exactly like the gate receipt: what the
-        // machine saw, not a summary of it.
-        "proof": serde_json::to_string(&proof)?,
-    });
-    if let Some(m) = method {
-        md["method"] = json!(m);
-    }
+    let md = proven_metadata(
+        &verified,
+        &serde_json::to_string(&proof)?,
+        method.as_deref(),
+        now,
+    );
 
     crate::gate::api(
         &http,
@@ -587,5 +608,36 @@ mod tests {
         let clipped = clip(&"x".repeat(MAX_STREAM + 500));
         assert!(clipped.len() < MAX_STREAM + 100);
         assert!(clipped.contains("more bytes"));
+    }
+
+    #[test]
+    fn a_recorded_proof_says_when_it_was_taken() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-29T04:15:09.847213Z")
+            .unwrap()
+            .into();
+        let md = proven_metadata("v", "{\"exit\":0}", Some("api"), now);
+
+        assert_eq!(
+            md["completed_at"], "2026-08-29T04:15:09Z",
+            "proof with no timestamp cannot be aged, so a --recheck cannot \
+             tell a proof taken minutes ago from one taken in June"
+        );
+        // The stamp must match the conductor's format byte for byte —
+        // proof lag is this minus `review.completed_at`.
+        assert_eq!(md["completed_at"], json!(crate::gate::stamp(now)));
+        // And it does not disturb what the step already carried.
+        assert_eq!(md["verified"], json!("v"));
+        assert_eq!(md["proof"], json!("{\"exit\":0}"));
+        assert_eq!(md["method"], json!("api"));
+    }
+
+    #[test]
+    fn an_omitted_method_stays_omitted() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-29T04:15:09Z")
+            .unwrap()
+            .into();
+        let md = proven_metadata("", "{}", None, now);
+        assert!(md.get("method").is_none(), "an absent method is not `null`");
+        assert!(md["completed_at"].is_string());
     }
 }

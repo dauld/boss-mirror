@@ -326,7 +326,14 @@ describe('departments map to apps', () => {
     // reading as covered. These are real departments with real people
     // and no screen built for them yet; they land on Home.
     const bare = [...departmentsWithoutSurfaces()].sort();
-    expect(bare).toEqual(['audit', 'packaging', 'taproom']);
+    // `refurb` joined this list on 2026-08-28 when the /ux/refurb route
+    // was removed from the shared shell (feedback 96c37dbe): it was a
+    // device-shop surface every other tenant saw as an empty list, and
+    // David's reason was that tenants connect at the boundary through
+    // agreed protocols rather than sharing one multi-tenant shell. The
+    // DEPARTMENT still exists and its people still exist — they just
+    // land on Home, which is what this report is for.
+    expect(bare).toEqual(['audit', 'packaging', 'refurb', 'taproom']);
   });
 });
 

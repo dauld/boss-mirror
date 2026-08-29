@@ -20,7 +20,7 @@ export type Role = string;
 
 export type RouteName =
   | 'shop' | 'exec' | 'catalog' | 'accounts' | 'assets' | 'sales' | 'service'
-  | 'refurb' | 'parts' | 'products' | 'finance' | 'people' | 'qa' | 'warehouse' | 'support'
+  | 'parts' | 'products' | 'finance' | 'people' | 'qa' | 'warehouse' | 'support'
   | 'system-monitoring' | 'inbox' | 'shipping' | 'views' | 'system-feedback'
   | 'vendors' | 'marketing-assets' | 'calendar' | 'schedule' | 'jobs'
   // Platform-administration surfaces. Same `permKey: 'it'` gate
@@ -54,7 +54,7 @@ export type RouteName =
   | 'workflows';
 
 const ALL: ReadonlyArray<RouteName> = [
-  'shop', 'exec', 'catalog', 'accounts', 'assets', 'sales', 'service', 'refurb',
+  'shop', 'exec', 'catalog', 'accounts', 'assets', 'sales', 'service',
   'parts', 'products', 'finance', 'people', 'qa', 'warehouse', 'support', 'system-monitoring',
   'shipping', 'vendors', 'marketing-assets', 'calendar',
   'schedule', 'jobs',
@@ -79,15 +79,15 @@ export const ROUTE_ACCESS: Record<Role, ReadonlyArray<RouteName>> = {
   'vp-sales': ['exec', 'catalog', 'accounts', 'assets', 'sales', 'people'],
   'sales-mgr': ['catalog', 'accounts', 'assets', 'sales', 'people'],
   'sales-rep': ['catalog', 'accounts', 'sales'],
-  'service-mgr': ['exec', 'catalog', 'accounts', 'assets', 'service', 'refurb', 'parts', 'products', 'vendors', 'people', 'support', 'shipping', 'schedule'],
+  'service-mgr': ['exec', 'catalog', 'accounts', 'assets', 'service', 'parts', 'products', 'vendors', 'people', 'support', 'shipping', 'schedule'],
   'service-tech': ['catalog', 'accounts', 'assets', 'service', 'parts', 'products', 'schedule'],
-  'refurb-supervisor': ['catalog', 'assets', 'refurb', 'parts', 'products', 'people', 'qa'],
-  'refurb-tech': ['catalog', 'assets', 'refurb', 'parts', 'products'],
-  'qa-lead': ['catalog', 'assets', 'refurb', 'parts', 'products', 'people', 'qa'],
-  'qa-tech': ['catalog', 'assets', 'refurb', 'parts', 'products', 'qa'],
-  'warehouse-mgr': ['parts', 'products', 'refurb', 'people', 'warehouse', 'vendors', 'shipping'],
-  'warehouse-clerk': ['parts', 'products', 'refurb', 'warehouse', 'shipping'],
-  'parts-buyer': ['parts', 'products', 'refurb', 'warehouse', 'vendors', 'shipping'],
+  'refurb-supervisor': ['catalog', 'assets', 'parts', 'products', 'people', 'qa'],
+  'refurb-tech': ['catalog', 'assets', 'parts', 'products'],
+  'qa-lead': ['catalog', 'assets', 'parts', 'products', 'people', 'qa'],
+  'qa-tech': ['catalog', 'assets', 'parts', 'products', 'qa'],
+  'warehouse-mgr': ['parts', 'products', 'people', 'warehouse', 'vendors', 'shipping'],
+  'warehouse-clerk': ['parts', 'products', 'warehouse', 'shipping'],
+  'parts-buyer': ['parts', 'products', 'warehouse', 'vendors', 'shipping'],
   controller: ['exec', 'accounts', 'sales', 'finance', 'parts', 'products', 'vendors'],
   'ap-specialist': ['parts', 'products', 'accounts', 'vendors', 'finance'],
   'hr-generalist': ['people'],

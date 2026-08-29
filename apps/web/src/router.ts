@@ -1,7 +1,7 @@
 // Tiny router — same shape as apps/web/src/router.ts.
 //
 // Phase 1: covers the routes the primitive-touching pages hang off
-// (jobs/service/refurb/sales + assets + asset detail + home).
+// (jobs/service/sales + assets + asset detail + home).
 // Phase 2 expands to every route the React app knows about.
 // URLs stay identical so deep-links work across the flip.
 
@@ -54,7 +54,6 @@ export type Route =
     }
   | { kind: 'service' }
   | { kind: 'sales' }
-  | { kind: 'refurb' }
   | { kind: 'accounts' }
   | { kind: 'account'; accountId: string }
   | { kind: 'vendors' }
@@ -265,10 +264,6 @@ export function parseRoute(pathname: string): Route {
   if (p === '/service') return { kind: 'service' };
   const tm = p.match(/^\/service\/(.+)$/);
   if (tm) return { kind: 'jobDetail', jobId: tm[1]! };
-
-  if (p === '/refurb') return { kind: 'refurb' };
-  const rm = p.match(/^\/refurb\/(.+)$/);
-  if (rm) return { kind: 'jobDetail', jobId: rm[1]! };
 
   if (p === '/sales') return { kind: 'sales' };
   const sm = p.match(/^\/sales\/(.+)$/);

@@ -118,7 +118,6 @@
     marketing: ['marketing-assets'],
     support: ['support'],
     service: ['service'],
-    refurb: ['refurb'],
     qa: ['qa'],
     executive: ['exec'],
     finance: ['finance', 'vendors'],

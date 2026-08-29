@@ -736,10 +736,42 @@
         renderActions();
         return;
       }
+      // A DOC WITH NO OPEN QUESTIONS IS STILL A DOC.
+      //
+      // The self-carried branch above requires a NON-EMPTY questions
+      // array, so a design-doc packet whose prose is carried inline but
+      // which has no open questions — settled, or never had any — fell
+      // through to the error below and reported "nothing to review"
+      // while its markdown sat in the very metadata this plugin had
+      // already read. c4b7c904 is that packet: step metadata carrying
+      // `markdown` and `title`, no questions, no doc_path.
+      //
+      // This is the third time this file has had to learn that the
+      // content may be somewhere it did not look. First the doc pane
+      // was empty because the prose was on the other metadata bag
+      // (2026-08-16, four questions answered blind). Then the questions
+      // had to be allowed to ride the packet at all. Now: having
+      // questions is not what makes a doc reviewable — having the doc
+      // is. Reading it and settling it is a review.
+      const inlineMarkdown = String((step.metadata && step.metadata.markdown) || '');
+      if (!docPath && inlineMarkdown) {
+        selfCarried = true;
+        questions = [];
+        doc = {
+          title: String((step.metadata && step.metadata.title) || 'Design doc'),
+          content_html: null,
+          markdown: inlineMarkdown,
+        };
+        renderHeader();
+        renderBody();
+        renderProgress();
+        renderActions();
+        return;
+      }
       if (!docPath) {
         loadError =
-          'this step carries neither metadata.questions nor metadata.doc_path — ' +
-          'nothing to review';
+          'this step carries neither metadata.questions, metadata.markdown, nor ' +
+          'metadata.doc_path — nothing to review';
         renderBody();
         renderProgress();
         renderActions();
