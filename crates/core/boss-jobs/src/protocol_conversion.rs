@@ -235,6 +235,48 @@ pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility 
             continue;
         };
 
+        // A STEP'S KIND CARRIES A COMPLETION CONTRACT THIS FUNCTION
+        // CANNOT SEE.
+        //
+        // `required_fields` below reads `StepSpec.fields` — the fields
+        // the WORKFLOW author wrote. That is not the whole contract:
+        // the completion validator checks the UNION of those and the
+        // field bundle the step's KIND brings from the StepType
+        // registry (http/steps.rs, "the union of the kind bundle's
+        // fields and the step's own authored fields"). So changing a
+        // step's kind can add a required field without touching
+        // `fields` at all, and every check here would miss it.
+        //
+        // THIS ALMOST SHIPPED A WRONG VERDICT. backlog-item v2,
+        // published 2026-08-29, changed `design-review` from kind
+        // `task` to kind `answer-question` — which requires `verdict`
+        // and `answer`. Nothing else about the step moved, so before
+        // this check the pair read Automatic. A conversion path acting
+        // on it would have re-pinned every in-flight backlog-item onto
+        // a protocol demanding two fields they never collected: the
+        // exact failure this module's header calls the one we cannot
+        // afford.
+        //
+        // REFERRED, NOT RESOLVED. Deciding what the new kind actually
+        // requires means resolving it against the StepType registry,
+        // which this function deliberately does not take — it compares
+        // two specs and nothing else. Referring costs a human one
+        // glance; guessing costs a completed step's honesty. Same
+        // reasoning as `ready_when` below, and a kind change is rare
+        // enough that the referral is cheap.
+        if f.kind != t.kind {
+            obstacles.push(Obstacle::step(
+                slug,
+                format!(
+                    "step kind changed (`{}` -> `{}`) — the kind carries a \
+                     field bundle that is part of the completion contract, \
+                     and this check does not resolve it against the StepType \
+                     registry, so it refers rather than assumes",
+                    f.kind, t.kind
+                ),
+            ));
+        }
+
         // The predicate decides when a step becomes ready. Editing it
         // can un-ready a ready step or re-ready a completed one. A
         // WEAKER predicate is genuinely safe, but proving implication
@@ -388,6 +430,48 @@ mod tests {
             "opening a step to more actors cannot invalidate a packet: {:?}",
             v.obstacles()
         );
+    }
+
+    /// THE VERDICT THIS FUNCTION ALMOST GAVE ABOUT A REAL PUBLISH.
+    ///
+    /// backlog-item v2 (2026-08-29) changed `design-review` from kind
+    /// `task` to kind `answer-question`, which brings required
+    /// `verdict` and `answer` from the StepType bundle. `fields` on the
+    /// spec did not move, so every other check saw an identical step
+    /// and the pair read Automatic — a conversion acting on it would
+    /// have demanded two fields no in-flight packet had collected.
+    #[test]
+    fn changing_a_steps_kind_needs_review() {
+        let before = step("design-review");
+        let mut after = step("design-review");
+        after.kind = "answer-question".to_string();
+
+        let v = convertibility(&wf(vec![before]), &wf(vec![after]));
+        assert!(
+            !v.is_automatic(),
+            "a kind change can add required fields without touching \
+             StepSpec.fields, which is the only place required_fields looks"
+        );
+        let o = &v.obstacles()[0];
+        assert_eq!(o.step.as_deref(), Some("design-review"));
+        assert!(
+            o.reason.contains("field bundle"),
+            "the reason must say WHY a kind change matters, not just that it \
+             happened: {:?}",
+            o.reason
+        );
+    }
+
+    /// ...and an unchanged kind must stay silent, or every loosening
+    /// would be referred and Automatic would stop meaning anything.
+    #[test]
+    fn keeping_the_kind_stays_automatic() {
+        let mut before = step("review");
+        before.kind = "sign-off".to_string();
+        let mut after = step("review");
+        after.kind = "sign-off".to_string();
+        after.authority_role = None;
+        assert!(convertibility(&wf(vec![before]), &wf(vec![after])).is_automatic());
     }
 
     /// THE CASE EVERY OTHER CHECK IS BLIND TO.
