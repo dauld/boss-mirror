@@ -16,10 +16,24 @@
 # but a full dump keeps the restore path dumb, which is what you
 # want at 03:00.
 #
+# SECOND OFFSITE LEG — GCS (David, 2026-08-29, option (c)).
+# One offsite copy on one box means boss-gcp was both the backup
+# basket and a single point of loss: lose it and the dumps go with
+# it. The obvious fix — have boss-gcp push to GCS — is not available,
+# because that VM's access scopes grant devstorage.READ_ONLY and an
+# instance token cannot write to a bucket no matter what IAM says.
+# So the flow is REVERSED: the cluster, which has no such scope
+# ceiling, uploads directly with a service-account key. boss-gcp
+# keeps its copy and stops being the only one.
+#
 # Pins: no LAN door of its own; ships offsite to boss-gcp
 # (david@34.45.110.40, the playground box) with the deposit-only key
-# in secret boss-backup-key. Secrets are referenced by name only —
-# they are created out-of-band and never live in this tree.
+# in secret boss-backup-key, and uploads to the bucket named in
+# secret boss-gcs-offsite (keys: sa.json, bucket). Secrets are
+# referenced by name only — they are created out-of-band and never
+# live in this tree. Until that secret exists the CronJob's upload
+# leg fails loudly, which is the intended state: a backup leg that
+# degrades quietly is the failure this whole file is written against.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -48,7 +62,12 @@ spec:
       template:
         spec:
           restartPolicy: Never
-          containers:
+          # The dump runs as an initContainer so the two legs are
+          # ORDERED. Sibling containers in a Pod start together, so a
+          # second container could upload while pg_dump was still
+          # writing; an initContainer is the only thing that guarantees
+          # the dump finished first.
+          initContainers:
             - name: dump
               image: postgres:16-alpine
               command: ["/bin/sh", "-c"]
@@ -58,8 +77,26 @@ spec:
                   STAMP=$(date -u +%Y%m%d-%H%M%S)
                   OUT=/backup/boss-${STAMP}.sql.gz
                   pg_dump "$DATABASE_URL" | gzip > "$OUT"
+                  # VERIFY THE ARTEFACT, NOT THE EXIT CODE. `set -e` does
+                  # not fire for the LEFT side of a pipe, so a pg_dump that
+                  # died mid-stream left a truncated .gz here and the Job
+                  # reported success — a backup that is worse than none
+                  # because it looks present. gzip -t proves the stream is
+                  # whole and pg_dump's own trailer proves it ran to the
+                  # end; nothing ships or uploads until both hold.
+                  gzip -t "$OUT"
+                  # No leading "--" in the pattern: grep reads a pattern
+                  # that starts with dashes as an OPTION and exits with a
+                  # usage error, which under set -e fails the Job every
+                  # night. Caught by running this check against a real
+                  # gzip before shipping it.
+                  gzip -dc "$OUT" | tail -5 | grep -q 'PostgreSQL database dump complete'
                   SIZE=$(du -h "$OUT" | cut -f1)
-                  echo "dumped $OUT ($SIZE)"
+                  echo "dumped $OUT ($SIZE), verified complete"
+                  # Name the file this run produced, so the upload leg
+                  # cannot quietly ship yesterday's dump if today's is
+                  # missing.
+                  echo "$OUT" > /backup/.latest
                   # Retention: 14 days. Prune loudly, never silently.
                   find /backup -name 'boss-*.sql.gz' -mtime +14 -print -delete
                   # Offsite: ship tonight's dump to the playground box.
@@ -80,8 +117,39 @@ spec:
               volumeMounts:
                 - {name: backups, mountPath: /backup}
                 - {name: ship-key, mountPath: /keys, readOnly: true}
+          containers:
+            - name: offsite-gcs
+              image: google/cloud-sdk:alpine
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  BUCKET=$(cat /gcs/bucket)
+                  gcloud auth activate-service-account --key-file=/gcs/sa.json --quiet
+                  OUT=$(cat /backup/.latest)
+                  test -s "$OUT"
+                  gcloud storage cp "$OUT" "gs://${BUCKET}/$(basename "$OUT")"
+                  echo "uploaded $(basename "$OUT") to gs://${BUCKET}"
+                  # Retention mirrors the playground receiver's keep-21,
+                  # so the two offsite copies age out together. Prune by
+                  # NAME order, which is chronological because the stamp
+                  # is %Y%m%d-%H%M%S — never by listing order.
+                  gcloud storage ls "gs://${BUCKET}/" \
+                    | grep -E 'boss-.*\.sql\.gz$' | sort > /tmp/all
+                  TOTAL=$(wc -l < /tmp/all)
+                  if [ "$TOTAL" -gt 21 ]; then
+                    for obj in $(head -n $((TOTAL - 21)) /tmp/all); do
+                      echo "pruning $obj"; gcloud storage rm "$obj"
+                    done
+                  fi
+                  echo "offsite copies now: $(gcloud storage ls "gs://${BUCKET}/" | grep -cE 'boss-.*\.sql\.gz$')"
+              volumeMounts:
+                - {name: backups, mountPath: /backup, readOnly: true}
+                - {name: gcs-key, mountPath: /gcs, readOnly: true}
           volumes:
             - name: backups
               persistentVolumeClaim: {claimName: boss-backups}
             - name: ship-key
               secret: {secretName: boss-backup-key, defaultMode: 0o256}
+            - name: gcs-key
+              secret: {secretName: boss-gcs-offsite, defaultMode: 0o400}

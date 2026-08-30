@@ -40,6 +40,19 @@ pub enum How {
     /// how a SQUASH merge is detected: the squashed commit is not the
     /// branch's commit, but it applies the same patch.
     PatchesPresent,
+    /// Main already holds the branch's version of every file the branch
+    /// changed. This is the only signal that survives a train, and it is
+    /// the one a human actually uses to answer the question.
+    ContentPresent,
+}
+
+/// How much of what the branch changed is already in main.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContentMatch {
+    /// Files the branch changed against its merge-base.
+    pub total: usize,
+    /// Of those, how many main already matches byte for byte.
+    pub matching: usize,
 }
 
 /// The answer. `Unknown` is a first-class outcome, not an error case —
@@ -70,6 +83,16 @@ pub struct Observations {
     /// by patch-id. `Some(0)` means everything the branch did is in
     /// main. `None` = could not compute.
     pub unmerged_patches: Option<usize>,
+    /// How many of the branch's own files main already matches.
+    ///
+    /// PATCH-ID CANNOT SEE A TRAIN. A train squashes N cars into ONE
+    /// commit, so that commit's patch is the UNION of N cars' changes
+    /// and its patch-id equals no individual car's. `git cherry`
+    /// therefore reports every car of a multi-car train as unmerged —
+    /// which it did, for two cars of train #147 whose files are
+    /// byte-identical in main (0d1310f3). Content survives that,
+    /// because it asks the question a human asks: is my change there?
+    pub content: Option<ContentMatch>,
 }
 
 /// The decision, pure.
@@ -82,12 +105,19 @@ pub struct Observations {
 ///  2. Ancestor -> Merged. The unambiguous case.
 ///  3. Zero unmerged patches -> Merged. The squash case, which
 ///     ancestry alone always gets wrong.
-///  4. No branch anywhere, nothing else conclusive -> Unknown. A
+///  4. Every changed file already matching main -> Merged. The TRAIN
+///     case, which rules 2 and 3 both get wrong: a train squashes N
+///     cars into one commit whose patch-id matches no single car
+///     (0d1310f3).
+///  5. No branch anywhere, nothing else conclusive -> Unknown. A
 ///     deleted branch is what an ARRIVED train leaves behind; reading
 ///     it as "not merged" inverted the truth for 89 cars.
-///  5. Both signals present and negative -> NotMerged. The only path
-///     to a definite no.
-///  6. Anything else -> Unknown, naming what was missing.
+///  6. SOME files matching -> Unknown, with the count. A sibling car
+///     editing one of this branch's files is indistinguishable from a
+///     partial landing, so neither is asserted.
+///  7. All three signals present and negative -> NotMerged. The only
+///     path to a definite no.
+///  8. Anything else -> Unknown, naming what was missing.
 pub fn verdict(o: &Observations) -> Verdict {
     if o.main_sha.is_none() {
         return Verdict::Unknown(
@@ -103,6 +133,15 @@ pub fn verdict(o: &Observations) -> Verdict {
     if o.unmerged_patches == Some(0) {
         return Verdict::Merged(How::PatchesPresent);
     }
+    // CONTENT BEFORE THE NEGATIVE SIGNALS. A car batched into a train
+    // with siblings fails both checks above by construction, so this is
+    // the rule that answers correctly for the ordinary case.
+    if let Some(c) = o.content
+        && c.total > 0
+        && c.matching == c.total
+    {
+        return Verdict::Merged(How::ContentPresent);
+    }
     if o.branch_sha.is_none() {
         return Verdict::Unknown(
             "the branch does not exist on the forge or locally. For a car this \
@@ -112,11 +151,35 @@ pub fn verdict(o: &Observations) -> Verdict {
                 .into(),
         );
     }
-    match (o.is_ancestor, o.unmerged_patches) {
-        (Some(false), Some(n)) if n > 0 => Verdict::NotMerged,
+    // PARTIALLY PRESENT IS NOT A NO. Some of the branch's files match
+    // main and some do not, which has two innocent explanations as well
+    // as a guilty one: the car landed and a LATER car edited one of its
+    // files, or the car landed and was since amended. Calling that
+    // `not merged` is the same overconfidence this verb was built to
+    // retire, so it is reported as what it is.
+    if let Some(c) = o.content
+        && c.matching > 0
+        && c.matching < c.total
+    {
+        return Verdict::Unknown(format!(
+            "main already matches {} of the {} files this branch changed. That is \
+             not a no: a later car editing one of those files looks exactly like \
+             this. Compare the remaining ones by hand, or name the merge commit",
+            c.matching, c.total
+        ));
+    }
+    match (o.is_ancestor, o.unmerged_patches, o.content) {
+        // A definite no now needs the content check to agree: nothing
+        // the branch changed is in main.
+        (Some(false), Some(n), Some(c)) if n > 0 && c.total > 0 && c.matching == 0 => {
+            Verdict::NotMerged
+        }
+        // Content unavailable (a branch that changed nothing, or an
+        // unreadable merge-base) falls back to the original pair.
+        (Some(false), Some(n), None) if n > 0 => Verdict::NotMerged,
         _ => Verdict::Unknown(
-            "not enough was observable to answer: needs both an ancestry check \
-             and a patch comparison against main"
+            "not enough was observable to answer: needs an ancestry check, a patch \
+             comparison, and a content comparison against main"
                 .into(),
         ),
     }
@@ -161,7 +224,7 @@ pub fn observe(clone: &str, remote: &str, branch: &str) -> Observations {
         ])
     });
 
-    let (mut is_ancestor, mut unmerged_patches) = (None, None);
+    let (mut is_ancestor, mut unmerged_patches, mut content) = (None, None, None);
     if let (Some(m), Some(b)) = (&main_sha, &branch_sha) {
         // Both objects have to be present locally to compare them.
         let have = |s: &str| {
@@ -183,6 +246,7 @@ pub fn observe(clone: &str, remote: &str, branch: &str) -> Observations {
             unmerged_patches = sh(&["git", "-C", clone, "cherry", m, b])
                 .map(|s| s.lines().filter(|l| l.starts_with('+')).count())
                 .or(Some(0));
+            content = content_match(clone, m, b);
         }
     }
 
@@ -191,7 +255,50 @@ pub fn observe(clone: &str, remote: &str, branch: &str) -> Observations {
         branch_sha,
         is_ancestor,
         unmerged_patches,
+        content,
     }
+}
+
+/// How many of the files this branch touched does main already match?
+///
+/// Deliberately scoped to the branch's OWN files, taken against its
+/// merge-base — everything else in main is another car's business. That
+/// scoping is what makes the answer survive a train: it does not matter
+/// how many siblings shared the squash commit, only whether this
+/// branch's work is present.
+///
+/// Renames and deletions come out right for free, because `git diff`
+/// between the two trees reports a path as differing precisely when the
+/// two sides disagree about its content — including when one side does
+/// not have it.
+fn content_match(clone: &str, main: &str, branch: &str) -> Option<ContentMatch> {
+    let base = sh(&["git", "-C", clone, "merge-base", main, branch])?;
+    let changed = sh(&["git", "-C", clone, "diff", "--name-only", &base, branch])?;
+    let files: Vec<&str> = changed.lines().filter(|l| !l.is_empty()).collect();
+    if files.is_empty() {
+        return None;
+    }
+    let mut args = vec![
+        "git",
+        "-C",
+        clone,
+        "diff",
+        "--name-only",
+        main,
+        branch,
+        "--",
+    ];
+    args.extend(files.iter().copied());
+    // No differing files at all is a clean landing; `sh` returns None on
+    // empty output, which is exactly that case.
+    let differing = match sh(&args) {
+        Some(s) => s.lines().filter(|l| !l.is_empty()).count(),
+        None => 0,
+    };
+    Some(ContentMatch {
+        total: files.len(),
+        matching: files.len().saturating_sub(differing),
+    })
 }
 
 pub fn run(branch: &str, clone: Option<String>, remote: Option<String>) -> Result<()> {
@@ -219,8 +326,20 @@ pub fn run(branch: &str, clone: Option<String>, remote: Option<String>) -> Resul
                  (squash-merged; ancestry alone would say no)"
             );
         }
+        Verdict::Merged(How::ContentPresent) => {
+            let n = o.content.map_or(0, |c| c.total);
+            println!(
+                "  MERGED — main already holds this branch's version of all {n} file(s) \
+                 it changed.\n\
+                 \x20   Patch comparison says no here and is wrong: a train squashes several \n\
+                 \x20   cars into ONE commit, so no single car's patch-id matches it."
+            );
+        }
         Verdict::NotMerged => {
-            println!("  NOT MERGED — main carries neither the commit nor its patches");
+            println!(
+                "  NOT MERGED — main carries neither the commit, nor its patches, nor \
+                 the content of any file it changed"
+            );
             // THE ONE ANSWER THIS VERB MUST NOT GIVE QUIETLY.
             //
             // A definite "no" is correct only if `remote` is the trunk
@@ -268,7 +387,87 @@ mod tests {
             branch_sha: Some("bbbb".into()),
             is_ancestor: Some(false),
             unmerged_patches: Some(3),
+            content: Some(ContentMatch {
+                total: 4,
+                matching: 0,
+            }),
         }
+    }
+
+    /// THE TRAIN CASE, and the reason this verb needed a third signal.
+    /// A train squashes N cars into ONE commit, so that commit's patch
+    /// is the union of N cars' changes and its patch-id matches no
+    /// individual car. Both older signals therefore say "no" for a car
+    /// that plainly landed: on 2026-08-30 two cars of train #147 were
+    /// reported NOT MERGED while their files were byte-identical in
+    /// main (0d1310f3).
+    #[test]
+    fn a_car_batched_into_a_train_reads_as_merged_by_content() {
+        let batched = Observations {
+            is_ancestor: Some(false),
+            unmerged_patches: Some(1),
+            content: Some(ContentMatch {
+                total: 12,
+                matching: 12,
+            }),
+            ..obs()
+        };
+        assert_eq!(verdict(&batched), Verdict::Merged(How::ContentPresent));
+    }
+
+    /// PARTIAL IS NOT A NO. A sibling car on the same train editing one
+    /// of this branch's files looks exactly like a partial landing —
+    /// which is not hypothetical: feat/steps-pair-by-slug matched 13 of
+    /// 14 files, and the fourteenth was `infra/gate.sh`, which the
+    /// dead-styles car on the SAME train also touched.
+    #[test]
+    fn a_partial_content_match_is_unknown_and_says_how_much() {
+        let partial = Observations {
+            content: Some(ContentMatch {
+                total: 14,
+                matching: 13,
+            }),
+            ..obs()
+        };
+        match verdict(&partial) {
+            Verdict::Unknown(why) => {
+                assert!(why.contains("13 of the 14"), "{why}");
+                assert!(why.contains("not a no"), "{why}");
+            }
+            v => panic!("partial must not be decisive: {v:?}"),
+        }
+    }
+
+    /// A definite no now needs all three to agree.
+    #[test]
+    fn a_definite_no_requires_the_content_check_too() {
+        assert_eq!(verdict(&obs()), Verdict::NotMerged);
+    }
+
+    /// ...and ancestry still short-circuits everything, so a true merge
+    /// is never demoted by a file a later car rewrote.
+    #[test]
+    fn ancestry_still_wins_over_a_stale_content_reading() {
+        let merged = Observations {
+            is_ancestor: Some(true),
+            content: Some(ContentMatch {
+                total: 4,
+                matching: 1,
+            }),
+            ..obs()
+        };
+        assert_eq!(verdict(&merged), Verdict::Merged(How::Ancestor));
+    }
+
+    /// A branch that changed nothing, or an unreadable merge-base,
+    /// leaves content unobservable — the original pair still answers.
+    #[test]
+    fn an_unobservable_content_check_falls_back_to_the_old_pair() {
+        let no_content = Observations {
+            content: None,
+            ..obs()
+        };
+        assert_eq!(verdict(&no_content), Verdict::NotMerged);
     }
 
     /// THE 89-CAR FAILURE, FIRST FORM. An arrived train deletes the
