@@ -402,6 +402,28 @@ pub trait JobsRepository: Send + Sync {
         stamp: &boss_core::publisher::EventStamp,
     ) -> Result<Job, JobsError>;
 
+    /// Re-pin a packet to a different protocol version.
+    ///
+    /// A DELIBERATELY SEPARATE VERB, not a field on `update_job`.
+    /// `workflow_version` is excluded from that UPDATE's SET list
+    /// alongside `simulated`, because the storage enforces pinning
+    /// rather than trusting every caller to respect it — and that
+    /// immutability is what makes "in-flight packets stay on the
+    /// version they were admitted under" true rather than aspirational.
+    ///
+    /// So conversion gets its own door, and the door is narrow: it
+    /// changes exactly one column, and the caller is expected to have
+    /// asked [`crate::protocol_conversion::convertibility_for_packet`]
+    /// first. Widening `update_job` instead would have let any PUT
+    /// re-pin a packet by accident, which is the failure this shape
+    /// exists to prevent (bfc74b3a).
+    async fn repin_workflow_version_at(
+        &self,
+        id: &JobId,
+        to_version: i32,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<Job, JobsError>;
+
     async fn list_jobs(
         &self,
         filter: &JobFilter,

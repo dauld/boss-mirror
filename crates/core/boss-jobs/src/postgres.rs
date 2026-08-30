@@ -519,6 +519,50 @@ impl JobsRepository for PgJobs {
         Ok(job)
     }
 
+    async fn repin_workflow_version_at(
+        &self,
+        id: &JobId,
+        to_version: i32,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<Job, JobsError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| JobsError::Storage(e.to_string()))?;
+        // The one column update_job deliberately cannot reach, in its
+        // own statement, so re-pinning is always an explicit act.
+        let row = sqlx::query_as::<_, JobRow>(
+            r#"
+            UPDATE jobs SET workflow_version = $2, updated_at = $3
+            WHERE id = $1
+            RETURNING id, kind, workflow_version, subject_kind, subject_id, title, owner_id,
+                      status, priority, opened_on, due_on, closed_on, metadata, tags, simulated
+            "#,
+        )
+        .bind(*id.inner().as_uuid())
+        .bind(to_version)
+        .bind(stamp.timestamp)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+        let Some(row) = row else {
+            return Err(JobsError::NotFound(*id));
+        };
+        let job = row_to_job(row);
+        let event = stamp.event(
+            crate::events::JOB_UPDATED,
+            serde_json::to_value(&job).unwrap_or_default(),
+        );
+        boss_events::outbox::record_event_in_tx(&mut tx, &event)
+            .await
+            .map_err(JobsError::Storage)?;
+        tx.commit()
+            .await
+            .map_err(|e| JobsError::Storage(e.to_string()))?;
+        Ok(job)
+    }
+
     async fn list_jobs(
         &self,
         filter: &JobFilter,

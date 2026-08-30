@@ -262,6 +262,13 @@ enum Commands {
         /// still holds. Read-only: records nothing.
         #[arg(long)]
         recheck: bool,
+        /// Put a BETTER probe under a claim that is already proven,
+        /// for a proof that was transient rather than wrong. The
+        /// original stays on the step; the replacement is recorded
+        /// beside it, because a proof that used to hold is evidence
+        /// about the system rather than a mistake to erase (2b30eff4).
+        #[arg(long)]
+        replace: bool,
         /// Run the probe and report, without recording anything.
         #[arg(long)]
         dry_run: bool,
@@ -780,6 +787,7 @@ async fn main() -> Result<()> {
             verified,
             method,
             recheck,
+            replace,
             dry_run,
         } => {
             prove::run(
@@ -790,6 +798,7 @@ async fn main() -> Result<()> {
                 verified,
                 method,
                 recheck,
+                replace,
                 dry_run,
                 chrono::Utc::now(),
             )

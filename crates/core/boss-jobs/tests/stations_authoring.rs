@@ -23,6 +23,7 @@
 //!  5. Authoring is privilege-gated on `workflow`, not `job`: a
 //!     caller who may READ every queue still may not redraw one.
 
+use boss_policy_client::types::{AccessTier, User};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -41,16 +42,22 @@ use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
 
+// SERIALISE THE REAL TYPE, never a copy of its wire shape. A test
+// that hand-builds the header is testing a copy: if a field loses its
+// serde default or a new required one lands, a hand-built payload keeps
+// passing here while production rejects it — the failure surfaces as a
+// live 4xx instead of a red test, which is the wrong way round
+// (7c3649e2).
 fn user_header(id: &str, role: &str) -> String {
-    serde_json::json!({
-        "id": id,
-        "role": role,
-        "access_tier": "operator",
-        "territory_account_ids": [],
-        "direct_report_ids": [],
-        "department": "it",
+    serde_json::to_string(&User {
+        id: id.to_string(),
+        role: role.to_string(),
+        access_tier: AccessTier::Operator,
+        territory_account_ids: Vec::new(),
+        direct_report_ids: Vec::new(),
+        department: Some("it".to_string()),
     })
-    .to_string()
+    .expect("a User always serialises")
 }
 
 fn now() -> chrono::DateTime<chrono::Utc> {

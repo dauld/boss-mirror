@@ -17,6 +17,7 @@
 //!   census is operator machinery, like the cadence surface;
 //! - a non-object body is a 400, not an empty event.
 
+use boss_policy_client::types::{AccessTier, User};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -30,16 +31,28 @@ use boss_policy_client::{FakePolicyClient, PolicyClient};
 use boss_testing::RecordingEventBus;
 use tower::ServiceExt;
 
+// SERIALISE THE REAL TYPE, never a copy of its wire shape. A test
+// that hand-builds the header is testing a copy: if a field loses its
+// serde default or a new required one lands, a hand-built payload keeps
+// passing here while production rejects it — the failure surfaces as a
+// live 4xx instead of a red test, which is the wrong way round
+// (7c3649e2).
 fn user_header(id: &str, tier: &str) -> String {
-    serde_json::json!({
-        "id": id,
-        "role": "platform-admin",
-        "access_tier": tier,
-        "territory_account_ids": [],
-        "direct_report_ids": [],
-        "department": "platform",
+    serde_json::to_string(&User {
+        id: id.to_string(),
+        role: "platform-admin".to_string(),
+        // Round-trip the tier through the real enum too, so an
+        // unknown tier is a test failure rather than a string that
+        // silently means nothing.
+        access_tier: serde_json::from_value::<AccessTier>(serde_json::Value::String(
+            tier.to_string(),
+        ))
+        .expect("unknown access tier"),
+        territory_account_ids: Vec::new(),
+        direct_report_ids: Vec::new(),
+        department: Some("platform".to_string()),
     })
-    .to_string()
+    .expect("a User always serialises")
 }
 
 fn app() -> (axum::Router, Arc<InMemoryJobs>) {

@@ -284,7 +284,7 @@ pub(crate) fn find_car<'a>(cars: &'a [Value], given: &str) -> Result<&'a Value> 
 /// `proven` is gated on `job.metadata.merged = "true"`, so a step still
 /// pending means the change has not merged. Recording proof there would
 /// be recording that unshipped code works in production.
-pub(crate) fn proven_step(car: &Value) -> Result<&Value> {
+pub(crate) fn proven_step(car: &Value, replace: bool) -> Result<&Value> {
     let step = car
         .get("steps")
         .and_then(Value::as_array)
@@ -301,9 +301,20 @@ pub(crate) fn proven_step(car: &Value) -> Result<&Value> {
 
     match step.get("status").and_then(Value::as_str) {
         Some("ready") | Some("active") => Ok(step),
+        // A PROOF THAT STOPPED HOLDING IS EVIDENCE, NOT A MISTAKE.
+        // Car 932aa956's probe observed a real production refusal and
+        // stopped holding within the hour, because the condition it
+        // keyed on was transient. `--recheck` reported NO LONGER HOLDS
+        // correctly and was wrong about the cause, and there was no way
+        // to put a better probe under the same claim short of an
+        // operator editing job metadata by hand (2b30eff4).
+        Some("completed") if replace => Ok(step),
         Some("completed") => bail!(
             "this car is already proven. To check whether the proof STILL holds, \
-             re-run with --recheck; it re-executes the recorded probe and changes nothing."
+             re-run with --recheck; it re-executes the recorded probe and changes \
+             nothing. To put a BETTER probe under the same claim — because the first \
+             one was transient rather than wrong — re-run with --replace, which keeps \
+             the original proof and records the new one beside it."
         ),
         Some("pending") => bail!(
             "the `{PROVEN}` step is still pending, which means the car has not merged \
@@ -325,6 +336,23 @@ pub(crate) struct Recorded {
 }
 
 /// Read back a recorded proof so `--recheck` can re-run it.
+pub(crate) fn recorded_probe_for(car: &Value, step: &Value) -> Result<Recorded> {
+    // A REPLACEMENT SUPERSEDES THE ORIGINAL, and is read in preference
+    // to it — the same precedence `regate_receipt` has over a stale
+    // gate receipt. The original stays on the step; this is which proof
+    // `--recheck` should be re-running, not which one happened.
+    if let Some(last) = car
+        .get("metadata")
+        .and_then(|m| m.get("reproof"))
+        .and_then(Value::as_array)
+        .and_then(|a| a.last())
+        && let Some(p) = last.get("proof")
+    {
+        return read_proof(p);
+    }
+    recorded_probe(step)
+}
+
 pub(crate) fn recorded_probe(step: &Value) -> Result<Recorded> {
     let md = step.get("metadata");
     let raw = md.and_then(|m| m.get("proof")).ok_or_else(|| {
@@ -334,6 +362,11 @@ pub(crate) fn recorded_probe(step: &Value) -> Result<Recorded> {
                  `verified` prose is a claim with no probe under it."
         )
     })?;
+    read_proof(raw)
+}
+
+/// Parse one recorded proof, however it was stored.
+fn read_proof(raw: &Value) -> Result<Recorded> {
     // Stored as a JSON string (verbatim, like the gate receipt) or, if a
     // future writer stores it structurally, as an object. Read both.
     let v: Value = match raw.as_str() {
@@ -398,6 +431,7 @@ pub(crate) async fn run(
     verified: Option<String>,
     method: Option<String>,
     recheck: bool,
+    replace: bool,
     dry: bool,
     // The operator's now, taken once at the CLI entry point and passed
     // in — the same shape `train::run` uses, so nothing down here reads
@@ -433,7 +467,7 @@ pub(crate) async fn run(
             .flatten()
             .find(|s| s.get("title").and_then(Value::as_str) == Some(PROVEN))
             .ok_or_else(|| anyhow::anyhow!("the car has no step titled {PROVEN:?}"))?;
-        let rec = recorded_probe(step)?;
+        let rec = recorded_probe_for(car, step)?;
         let (probe, expect) = (rec.probe, rec.expect);
         let here = host();
         let dir_exists = rec.cwd.as_deref().is_none_or(|d| Path::new(d).is_dir());
@@ -495,7 +529,7 @@ pub(crate) async fn run(
 
     // Refuse before running anything: a car that has not merged should
     // cost a line of output, not a probe against production.
-    proven_step(car)?;
+    proven_step(car, replace)?;
 
     println!("boss prove: {short}  $ {probe}");
     let o = execute(&probe)?;
@@ -523,7 +557,7 @@ pub(crate) async fn run(
     }
 
     // Re-read the step id from the car we already fetched.
-    let sid = proven_step(car)?
+    let sid = proven_step(car, replace)?
         .get("id")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("the `{PROVEN}` step has no id"))?
@@ -535,6 +569,41 @@ pub(crate) async fn run(
         method.as_deref(),
         now,
     );
+
+    if replace {
+        // THE STEP IS FROZEN, SO THE NEW PROOF LANDS BESIDE IT. A
+        // completed step cannot be rewritten — which is right, because
+        // the original proof is evidence about the system and erasing
+        // it would destroy the record of what used to hold. So the
+        // replacement appends to `reproof` in JOB metadata, the same
+        // door `regate_receipt` uses for a receipt whose branch moved,
+        // and `--recheck` reads the newest entry in preference.
+        let mut history: Vec<Value> = car
+            .get("metadata")
+            .and_then(|m| m.get("reproof"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        history.push(json!({
+            "proof": serde_json::to_string(&proof)?,
+            "verified": verified,
+            "recorded_at": crate::gate::stamp(now),
+        }));
+        crate::gate::api(
+            &http,
+            reqwest::Method::PATCH,
+            &format!("/api/jobs/{car_id}/metadata"),
+            Some(json!({"reproof": history})),
+        )
+        .await?;
+        println!(
+            "boss prove: {short} re-proven — recorded as reproof #{}. The original \
+             proof is untouched on the step; a proof that used to hold and no longer \
+             does is evidence, not a mistake to erase.",
+            history.len()
+        );
+        return Ok(());
+    }
 
     crate::gate::api(
         &http,
@@ -758,13 +827,13 @@ mod tests {
     #[test]
     fn a_pending_proven_step_is_refused_because_it_has_not_merged() {
         let c = car("11111111-a", "feat/x", "pending");
-        let e = proven_step(&c).unwrap_err().to_string();
+        let e = proven_step(&c, false).unwrap_err().to_string();
         assert!(e.contains("has not merged"), "{e}");
     }
 
     #[test]
     fn a_ready_proven_step_is_fillable() {
-        assert!(proven_step(&car("11111111-a", "feat/x", "ready")).is_ok());
+        assert!(proven_step(&car("11111111-a", "feat/x", "ready"), false).is_ok());
     }
 
     /// Ambiguity is refused rather than resolved — the failure mode that
@@ -824,5 +893,68 @@ mod tests {
         let md = proven_metadata("", "{}", None, now);
         assert!(md.get("method").is_none(), "an absent method is not `null`");
         assert!(md["completed_at"].is_string());
+    }
+
+    /// A COMPLETED STEP IS CLOSED TO A NEW PROOF, AND OPEN TO A BETTER
+    /// ONE. Car 932aa956's probe observed a real production refusal and
+    /// stopped holding within the hour because the condition was
+    /// transient — `--recheck` said NO LONGER HOLDS, correctly, and was
+    /// wrong about the cause. Without --replace the only route to a
+    /// durable probe was an operator editing job metadata by hand.
+    #[test]
+    fn a_proven_step_reopens_only_for_a_replacement() {
+        let done = car("11111111-a", "feat/x", "completed");
+        assert!(
+            proven_step(&done, false).is_err(),
+            "an ordinary prove must not overwrite a recorded proof"
+        );
+        assert!(
+            proven_step(&done, true).is_ok(),
+            "--replace is how a transient proof gets a better probe"
+        );
+    }
+
+    /// ...and the refusal now says how, rather than only saying no.
+    #[test]
+    fn the_refusal_names_replace_as_the_way_forward() {
+        let e = proven_step(&car("11111111-a", "feat/x", "completed"), false)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("--recheck"), "{e}");
+        assert!(e.contains("--replace"), "{e}");
+    }
+
+    /// A REPLACEMENT SUPERSEDES THE ORIGINAL FOR RE-RUNNING, and the
+    /// original is still on the step — the same precedence
+    /// `regate_receipt` has over a stale gate receipt. Which proof
+    /// `--recheck` should re-run is a different question from which one
+    /// happened, and both answers are kept.
+    #[test]
+    fn recheck_re_runs_the_newest_replacement() {
+        let o = Outcome {
+            exit: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        let first = proof_json("old-probe", None, &o, "h", "2026-08-29T00:00:00Z");
+        let better = proof_json("better-probe", None, &o, "h", "2026-08-30T00:00:00Z");
+        let step = json!({"metadata": {"proof": first.to_string()}});
+        let with_reproof = json!({"metadata": {"reproof": [
+            {"proof": better.to_string(), "recorded_at": "2026-08-30T00:00:00Z"}
+        ]}});
+        let plain = json!({"metadata": {}});
+
+        assert_eq!(
+            recorded_probe_for(&plain, &step).expect("readable").probe,
+            "old-probe",
+            "with no replacement, the step's own proof is what re-runs"
+        );
+        assert_eq!(
+            recorded_probe_for(&with_reproof, &step)
+                .expect("readable")
+                .probe,
+            "better-probe",
+            "a replacement is what --recheck should be re-running"
+        );
     }
 }

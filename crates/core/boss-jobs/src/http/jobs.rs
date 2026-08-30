@@ -1190,6 +1190,153 @@ pub(super) async fn patch_job_metadata<R: JobsRepository + 'static, B: EventBus 
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// `POST /api/jobs/{id}/convert` — pull a packet forward to a newer
+/// protocol version, if where it stands allows it.
+///
+/// THE DOOR IS NARROW ON PURPOSE. `workflow_version` is excluded from
+/// `update_job`'s SET list, so no ordinary PUT can re-pin a packet by
+/// accident; conversion is an explicit act that must first pass
+/// [`crate::protocol_conversion::convertibility_for_packet`]. A refusal
+/// returns the obstacles rather than a bare no, because each one names
+/// the step it concerns and an operator's next question is always
+/// "which step, and what changed".
+pub(super) async fn convert_job<R: JobsRepository + 'static, B: EventBus + 'static>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+    Path(id): Path<String>,
+    CurrentUser(user): CurrentUser,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let Some(job_id) = parse_job_id(&id) else {
+        return (StatusCode::BAD_REQUEST, "invalid job id").into_response();
+    };
+    let existing = match state.jobs.get_job(&job_id).await {
+        Ok(Some(j)) => j,
+        Ok(None) => return (StatusCode::NOT_FOUND, "job not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    // Same gate as any other job write.
+    let decision = match state
+        .policy
+        .check(&user, Action::Update, Resource::job())
+        .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("policy check failed: {e}"),
+            )
+                .into_response();
+        }
+    };
+    let scope = match decision {
+        Decision::Deny { reason } => return (StatusCode::FORBIDDEN, reason).into_response(),
+        Decision::Allow { scope } => scope,
+    };
+    if !scope_matches(&user, &scope, &existing) {
+        return (StatusCode::FORBIDDEN, "job is outside your scope").into_response();
+    }
+
+    let Some(ref reg) = state.kind_registry else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no workflow registry: conversion cannot be judged without both specs",
+        )
+            .into_response();
+    };
+    let from = match reg
+        .get_version(&existing.kind, existing.workflow_version)
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::CONFLICT,
+                format!(
+                    "cannot read the version this packet is pinned to ({} v{}): {e}",
+                    existing.kind, existing.workflow_version
+                ),
+            )
+                .into_response();
+        }
+    };
+    let want = body.get("to_version").and_then(serde_json::Value::as_i64);
+    let to = match want {
+        Some(v) => reg.get_version(&existing.kind, v as i32).await,
+        None => reg.get_active(&existing.kind).await,
+    };
+    let to = match to {
+        Ok(s) => s,
+        Err(e) => {
+            return (StatusCode::CONFLICT, format!("no such target version: {e}")).into_response();
+        }
+    };
+    if to.version == existing.workflow_version {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "converted": false,
+                "reason": "already pinned to that version",
+                "workflow_version": existing.workflow_version,
+            })),
+        )
+            .into_response();
+    }
+
+    // Where the packet actually stands: the slugs it has completed.
+    let steps = match state.jobs.list_steps(&job_id).await {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let done: std::collections::BTreeSet<String> = steps
+        .iter()
+        .filter(|s| s.status == boss_core::job::StepStatus::Completed)
+        .filter_map(|s| s.spec_slug.clone())
+        .collect();
+
+    let verdict = crate::protocol_conversion::convertibility_for_packet(&from, &to, &done);
+    if !verdict.is_automatic() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "converted": false,
+                "from": from.version,
+                "to": to.version,
+                "obstacles": verdict.obstacles().iter().map(|o| serde_json::json!({
+                    "step": o.step, "reason": o.reason,
+                })).collect::<Vec<_>>(),
+            })),
+        )
+            .into_response();
+    }
+
+    let actor = user
+        .ambient_actor()
+        .unwrap_or_else(|| boss_core::actor::ActorId::Automation("platform".into()));
+    let stamp = state
+        .publisher
+        .stamp_with_actor(actor)
+        .await
+        .with_simulated(existing.simulated);
+    match state
+        .jobs
+        .repin_workflow_version_at(&job_id, to.version, &stamp)
+        .await
+    {
+        Ok(job) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "converted": true,
+                "from": from.version,
+                "to": job.workflow_version,
+            })),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::edge_guidance;

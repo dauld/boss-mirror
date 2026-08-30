@@ -53,6 +53,35 @@ pub struct Obstacle {
     pub step: Option<String>,
     /// What got stricter, in words.
     pub reason: String,
+    /// WHEN this obstacle actually bites a real packet. `convertibility`
+    /// answers for every packet at once and must assume the worst, so it
+    /// reports all of them; `convertibility_for_packet` uses this to ask
+    /// whether THIS packet, at ITS position, is actually affected.
+    pub bites: Bites,
+}
+
+/// When an obstacle bites, given where a packet actually stands.
+///
+/// The two questions this splits are the ones that make "back compat"
+/// feel dragon-infested when they are conflated (bfc74b3a):
+/// THE PAST — does the new version retroactively demand evidence this
+/// packet never collected? Only a step already COMPLETED can be a lie.
+/// THE FUTURE — can the engine still walk what is left? Only a step
+/// NOT yet taken can change under the packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bites {
+    /// Retroactive evidence. A completed step would be claiming work
+    /// that was never done; a step still ahead simply collects it.
+    IfDone,
+    /// Only affects work the packet has not reached yet.
+    IfNotDone,
+    /// An inserted step. It bites only if the packet has already moved
+    /// BEYOND that position, where the new step would sit behind the
+    /// packet and never become workable. Appending a terminal to a
+    /// protocol is the common harmless case.
+    IfPacketPast,
+    /// Structural: the packet cannot be walked either way.
+    Always,
 }
 
 impl Obstacle {
@@ -60,12 +89,37 @@ impl Obstacle {
         Self {
             step: None,
             reason: reason.into(),
+            bites: Bites::Always,
         }
     }
+    /// Structural — bites wherever the packet stands.
     fn step(slug: &str, reason: impl Into<String>) -> Self {
         Self {
             step: Some(slug.to_string()),
             reason: reason.into(),
+            bites: Bites::Always,
+        }
+    }
+    /// Retroactive evidence: harmless until the step is completed.
+    fn step_if_done(slug: &str, reason: impl Into<String>) -> Self {
+        Self {
+            bites: Bites::IfDone,
+            ..Self::step(slug, reason)
+        }
+    }
+    /// Changes work the packet has not reached; a step already done is
+    /// past caring.
+    fn step_if_pending(slug: &str, reason: impl Into<String>) -> Self {
+        Self {
+            bites: Bites::IfNotDone,
+            ..Self::step(slug, reason)
+        }
+    }
+    /// An inserted step: harmless unless the packet is already past it.
+    fn step_past(slug: &str, reason: impl Into<String>) -> Self {
+        Self {
+            bites: Bites::IfPacketPast,
+            ..Self::step(slug, reason)
         }
     }
 }
@@ -123,6 +177,62 @@ fn required_fields(s: &StepSpec) -> BTreeSet<&str> {
 ///
 /// Steps are matched by `title`, which is the stable slug within a
 /// workflow (the same identifier `ready_when` predicates reference).
+/// Can THIS packet be re-pinned, given where it actually stands?
+///
+/// THE REFRAME (bfc74b3a). [`convertibility`] answers for a version
+/// PAIR — every in-flight packet at once — so it must assume the worst
+/// about all of them: any step might be completed, any might not.
+/// A real packet has a position, and most obstacles only bite one side
+/// of it. A newly required field is a lie only on a step already
+/// COMPLETED; an authority change only matters for a step still ahead;
+/// an inserted step only strands a packet that has already moved past
+/// it. Deciding per step-state rather than per version pair is what
+/// makes conversion routine instead of dragon-infested.
+///
+/// `done` holds the slugs of steps this packet has already completed.
+/// Structural obstacles and workflow-level ones bite regardless — this
+/// filters, it never overrides.
+pub fn convertibility_for_packet(
+    from: &WorkflowSpec,
+    to: &WorkflowSpec,
+    done: &BTreeSet<String>,
+) -> Convertibility {
+    // Position in `to`, so an inserted step can be compared against how
+    // far the packet has actually walked.
+    let order: BTreeMap<&str, usize> = to
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.title.as_str(), i))
+        .collect();
+    let past = |slug: &str| -> bool {
+        let Some(&at) = order.get(slug) else {
+            return true; // cannot place it — do not claim it is harmless
+        };
+        done.iter()
+            .any(|d| order.get(d.as_str()).is_some_and(|&i| i > at))
+    };
+
+    let biting: Vec<Obstacle> = convertibility(from, to)
+        .obstacles()
+        .iter()
+        .filter(|o| match (&o.step, o.bites) {
+            // Workflow-level, and anything structural, always bites.
+            (None, _) | (_, Bites::Always) => true,
+            (Some(slug), Bites::IfDone) => done.contains(slug),
+            (Some(slug), Bites::IfNotDone) => !done.contains(slug),
+            (Some(slug), Bites::IfPacketPast) => past(slug),
+        })
+        .cloned()
+        .collect();
+
+    if biting.is_empty() {
+        Convertibility::Automatic
+    } else {
+        Convertibility::NeedsReview(biting)
+    }
+}
+
 pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility {
     let mut obstacles = Vec::new();
 
@@ -173,7 +283,7 @@ pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility 
     // terminal — and which of those is true depends on the packet.
     for slug in to_steps.keys() {
         if !from_steps.contains_key(slug) {
-            obstacles.push(Obstacle::step(
+            obstacles.push(Obstacle::step_past(
                 slug,
                 "step added — packets past this point in the flow would \
                  gain work they have already moved beyond",
@@ -265,7 +375,7 @@ pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility 
         // reasoning as `ready_when` below, and a kind change is rare
         // enough that the referral is cheap.
         if f.kind != t.kind {
-            obstacles.push(Obstacle::step(
+            obstacles.push(Obstacle::step_if_done(
                 slug,
                 format!(
                     "step kind changed (`{}` -> `{}`) — the kind carries a \
@@ -297,7 +407,7 @@ pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility 
         // Authority. Widening is the loosening we expect most often:
         // `Some(role)` -> `None` opens a step to any authorized actor.
         match (f.authority_role.as_deref(), t.authority_role.as_deref()) {
-            (Some(a), Some(b)) if a != b => obstacles.push(Obstacle::step(
+            (Some(a), Some(b)) if a != b => obstacles.push(Obstacle::step_if_pending(
                 slug,
                 format!("authority changed `{a}` -> `{b}` — neither contains the other"),
             )),
@@ -315,14 +425,14 @@ pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility 
         let f_signs: BTreeSet<&str> = f.sign_offs_required.iter().map(String::as_str).collect();
         let t_signs: BTreeSet<&str> = t.sign_offs_required.iter().map(String::as_str).collect();
         for added in t_signs.difference(&f_signs) {
-            obstacles.push(Obstacle::step(
+            obstacles.push(Obstacle::step_if_done(
                 slug,
                 format!("sign-off `{added}` added — completed steps would be missing a stamp"),
             ));
         }
 
         if assurance_rank(t.assurance_required) > assurance_rank(f.assurance_required) {
-            obstacles.push(Obstacle::step(
+            obstacles.push(Obstacle::step_if_done(
                 slug,
                 "assurance raised — stamps already collected were produced \
                  under a weaker bar and cannot be upgraded after the fact",
@@ -332,7 +442,7 @@ pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility 
         // Required completion fields. Adding one asks for evidence that
         // a completed step never collected.
         for added in required_fields(t).difference(&required_fields(f)) {
-            obstacles.push(Obstacle::step(
+            obstacles.push(Obstacle::step_if_done(
                 slug,
                 format!("required field `{added}` added — completed steps never collected it"),
             ));
@@ -341,7 +451,7 @@ pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility 
         // Terminals name the outcome stamped on close. Changing or
         // removing one changes what a closed packet means.
         match (&f.terminal, &t.terminal) {
-            (Some(a), Some(b)) if a.outcome != b.outcome => obstacles.push(Obstacle::step(
+            (Some(a), Some(b)) if a.outcome != b.outcome => obstacles.push(Obstacle::step_if_done(
                 slug,
                 format!(
                     "terminal outcome changed `{}` -> `{}` — closed packets \
@@ -349,7 +459,7 @@ pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility 
                     a.outcome, b.outcome
                 ),
             )),
-            (Some(a), None) => obstacles.push(Obstacle::step(
+            (Some(a), None) => obstacles.push(Obstacle::step_if_done(
                 slug,
                 format!("terminal `{}` removed — a packet closed here has an outcome the protocol no longer declares", a.outcome),
             )),
@@ -687,5 +797,93 @@ mod tests {
         tight.fields = vec![field("evidence", true)];
         let v = convertibility(&wf(vec![bare]), &wf(vec![tight]));
         assert_eq!(v.obstacles().len(), 3, "{:?}", v.obstacles());
+    }
+
+    // -----------------------------------------------------------------
+    // Per-packet conversion: decide on where the packet stands.
+    // -----------------------------------------------------------------
+
+    fn done(slugs: &[&str]) -> BTreeSet<String> {
+        slugs.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// THE CASE THIS WAS BUILT FOR. ship-a-change v31 appends a third
+    /// terminal (`settled`) so operational work stops closing as an
+    /// abort. Appending is invisible to every packet that has not
+    /// reached the end — but the PAIR check must still refuse, because
+    /// it speaks for packets that HAVE.
+    #[test]
+    fn appending_a_terminal_converts_a_packet_that_has_not_finished() {
+        let before = wf(vec![step("scope"), step("build"), step("merged")]);
+        let after = wf(vec![
+            step("scope"),
+            step("build"),
+            step("merged"),
+            step("settled"),
+        ]);
+        assert!(
+            !convertibility(&before, &after).is_automatic(),
+            "the version pair must stay cautious — it speaks for every packet"
+        );
+        assert_eq!(
+            convertibility_for_packet(&before, &after, &done(&["scope", "build"])),
+            Convertibility::Automatic,
+            "a packet standing at build is not affected by a terminal appended after it"
+        );
+    }
+
+    /// ...and the same append DOES bite a packet that already walked
+    /// past the insertion point, which is what the obstacle warns about.
+    #[test]
+    fn an_inserted_step_bites_a_packet_already_past_it() {
+        let before = wf(vec![step("scope"), step("build"), step("merged")]);
+        let after = wf(vec![
+            step("scope"),
+            step("inspection"),
+            step("build"),
+            step("merged"),
+        ]);
+        assert!(
+            !convertibility_for_packet(&before, &after, &done(&["scope", "build"])).is_automatic(),
+            "a step inserted behind a packet would never become workable"
+        );
+    }
+
+    /// RETROACTIVE EVIDENCE IS ABOUT THE PAST ONLY. A newly required
+    /// field is a lie on a step already completed, and simply the
+    /// contract on a step still ahead.
+    #[test]
+    fn a_new_required_field_bites_only_a_step_already_completed() {
+        let before = wf(vec![step("scope"), step("build")]);
+        let mut tighter = step("build");
+        tighter.fields = vec![field("test", true)];
+        let after = wf(vec![step("scope"), tighter]);
+
+        assert!(!convertibility(&before, &after).is_automatic());
+        assert_eq!(
+            convertibility_for_packet(&before, &after, &done(&["scope"])),
+            Convertibility::Automatic,
+            "build is still ahead — the field will simply be collected"
+        );
+        assert!(
+            !convertibility_for_packet(&before, &after, &done(&["scope", "build"])).is_automatic(),
+            "build is done — claiming it collected a field it never did is the lie"
+        );
+    }
+
+    /// STRUCTURE IS NOT NEGOTIABLE BY POSITION. A removed step orphans a
+    /// materialized step wherever the packet stands, so no step-state
+    /// makes it automatic. This is the guard against the filter
+    /// becoming a way to wave things through.
+    #[test]
+    fn a_removed_step_is_never_convertible_whatever_the_position() {
+        let before = wf(vec![step("scope"), step("build")]);
+        let after = wf(vec![step("scope")]);
+        for at in [&done(&[]), &done(&["scope"]), &done(&["scope", "build"])] {
+            assert!(
+                !convertibility_for_packet(&before, &after, at).is_automatic(),
+                "removal must bite at every position"
+            );
+        }
     }
 }

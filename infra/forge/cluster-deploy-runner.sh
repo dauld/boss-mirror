@@ -207,6 +207,33 @@ else
     echo "cluster-deploy-runner: no bundles in infra/step-plugins — leaving the ConfigMap alone"
 fi
 
+# THE GATE RUNNER'S SCRIPT IS THE SECOND INSTANCE OF THE BUG ABOVE.
+#
+# infra/gate-runner/run.sh reaches the cluster only as the ConfigMap
+# gate-runner-script, and that ConfigMap was built by a kubectl command
+# written in a COMMENT in gate-runner.yaml and run by hand — so, exactly
+# like step-plugins before it, it converged with nothing. Landing a
+# train that changes run.sh delivered NOTHING, silently: the gate kept
+# running the old script and no error appeared anywhere.
+#
+# Measured 2026-08-30: car e6f55a36 merged, deployed and arrived, and
+# the string it adds appeared twice in the merged run.sh and zero times
+# in the live ConfigMap. It sat at `Proven in prod` unprovable, because
+# the behaviour it claims was not running (2b69220a).
+#
+# Same cure as step-plugins, and deliberately NOT a committed manifest:
+# it is a derived artifact whose source is already in tree, and a
+# committed copy would be the second definition that drifts (§9a).
+KG="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro -v $REPO/infra/gate-runner:/gate:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
+if [ -f "$REPO/infra/gate-runner/run.sh" ]; then
+    echo "cluster-deploy-runner: converging the gate-runner-script ConfigMap"
+    $KG create configmap gate-runner-script -n boss-dev \
+        --from-file=run.sh=/gate/run.sh \
+        --dry-run=client -o yaml | $KAPPLY apply -f -
+else
+    echo "cluster-deploy-runner: infra/gate-runner/run.sh missing — leaving the ConfigMap alone" >&2
+fi
+
 $K set image -n boss deploy/boss "boss=$REGISTRY:$HEAD"
 $K patch deploy boss -n boss --type=json \
     -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/initContainers/0/image\",\"value\":\"$REGISTRY:$HEAD\"}]"

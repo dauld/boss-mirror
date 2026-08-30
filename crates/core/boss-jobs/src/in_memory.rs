@@ -242,6 +242,30 @@ impl JobsRepository for InMemoryJobs {
         Ok(merged)
     }
 
+    async fn repin_workflow_version_at(
+        &self,
+        id: &JobId,
+        to_version: i32,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<Job, JobsError> {
+        // One column, under the lock, and the event carries the row as
+        // it stands afterwards — same shape as the metadata merge above.
+        let repinned = {
+            let mut state = self.inner.lock().expect("poisoned");
+            let Some(job) = state.jobs.get_mut(&job_key(id)) else {
+                return Err(JobsError::NotFound(*id));
+            };
+            job.workflow_version = to_version;
+            job.clone()
+        };
+        let event = stamp.event(
+            crate::events::JOB_UPDATED,
+            serde_json::to_value(&repinned).unwrap_or_default(),
+        );
+        self.record_all(&[event]);
+        Ok(repinned)
+    }
+
     async fn list_jobs(
         &self,
         filter: &JobFilter,
