@@ -235,16 +235,13 @@ pub(crate) fn rerunnable(
     Rerunnable::Here
 }
 
-/// Find the one open car for `given` — a branch name, or an id prefix.
-///
-/// Refuses on ambiguity rather than picking. `boss park` learned this
-/// the expensive way: it took the LAST match from a list the API
-/// returns newest-first, and quietly parked two cars against a stale
-/// receipt. Choosing among candidates is how that happens, so this
-/// does not choose.
-pub(crate) fn find_car<'a>(cars: &'a [Value], given: &str) -> Result<&'a Value> {
-    let matches: Vec<&Value> = cars
-        .iter()
+/// The matching core `find_car` and `boss job` share: a row matches by
+/// exact `metadata.branch`, or by an id prefix of at least 8
+/// characters. Pure and message-free so each verb can refuse in its
+/// own vocabulary — `find_car`'s "no open ship-a-change car" would be
+/// a lie coming from `boss job get`, which sees every kind.
+pub(crate) fn matching_jobs<'a>(rows: &'a [Value], given: &str) -> Vec<&'a Value> {
+    rows.iter()
         .filter(|c| {
             let by_branch = c
                 .get("metadata")
@@ -257,7 +254,18 @@ pub(crate) fn find_car<'a>(cars: &'a [Value], given: &str) -> Result<&'a Value> 
                 .is_some_and(|i| i.starts_with(given) && given.len() >= 8);
             by_branch || by_id
         })
-        .collect();
+        .collect()
+}
+
+/// Find the one open car for `given` — a branch name, or an id prefix.
+///
+/// Refuses on ambiguity rather than picking. `boss park` learned this
+/// the expensive way: it took the LAST match from a list the API
+/// returns newest-first, and quietly parked two cars against a stale
+/// receipt. Choosing among candidates is how that happens, so this
+/// does not choose.
+pub(crate) fn find_car<'a>(cars: &'a [Value], given: &str) -> Result<&'a Value> {
+    let matches = matching_jobs(cars, given);
 
     match matches.len() {
         1 => Ok(matches[0]),

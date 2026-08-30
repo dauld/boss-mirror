@@ -88,6 +88,13 @@ fn row_of_policy(body: Option<Value>) -> Result<Option<DeliveryPolicyRow>> {
     }
 }
 
+/// The identity every verb acts as — for callers that need the bare
+/// id (e.g. `boss job file` stamping `owner_id`) rather than the
+/// serialized header.
+pub(crate) fn actor_id() -> &'static str {
+    ACTOR
+}
+
 pub(crate) fn boss_user() -> String {
     json!({
         "id": ACTOR, "role": "platform-admin", "access_tier": "operator",

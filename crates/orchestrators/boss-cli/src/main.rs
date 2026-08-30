@@ -11,6 +11,7 @@ mod docs_flush;
 mod doctor;
 mod gate;
 mod inspect;
+mod job;
 mod merged;
 mod ops;
 mod park;
@@ -242,6 +243,16 @@ enum Commands {
     Workflow {
         #[command(subcommand)]
         action: WorkflowAction,
+    },
+    /// Read, file, and patch packets — the curl-with-a-header this
+    /// replaces was the most repeated manual act in the pipeline
+    /// (~23/session, 514b39d8).
+    ///
+    /// Grouped like `Workflow`: a new job verb lands inside
+    /// `JobAction`, not as another variant here (84f9fbc0).
+    Job {
+        #[command(subcommand)]
+        action: JobAction,
     },
     /// Prove a merged car in production by RUNNING a probe.
     ///
@@ -614,6 +625,60 @@ enum WorkflowAction {
 }
 
 #[derive(Subcommand)]
+enum JobAction {
+    /// One packet, rendered for a person: envelope, steps with who
+    /// holds them, metadata in full.
+    Get {
+        /// Full uuid, 8+ characters of the id, or the car's branch.
+        job: String,
+        /// Print the raw API body instead.
+        #[arg(long)]
+        json: bool,
+    },
+    /// One line per job: short id, kind, status, title.
+    List {
+        /// Filter by kind, e.g. `backlog-item`.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Job status to list (default open).
+        #[arg(long, default_value = "open")]
+        status: String,
+        /// Max rows (default 50).
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+    /// Create a packet with the whole envelope defaulted — no more
+    /// one-422-per-missing-field guessing. Confirms by reading the
+    /// created packet back; a 201 is not proof.
+    File {
+        /// Workflow kind, e.g. `backlog-item`.
+        #[arg(long)]
+        kind: String,
+        /// The packet's title.
+        #[arg(long)]
+        title: String,
+        /// standard | urgent (default standard).
+        #[arg(long)]
+        priority: Option<String>,
+        /// JSON file for the packet's metadata.
+        #[arg(long)]
+        metadata: Option<std::path::PathBuf>,
+        /// Subject id (default bosspipeline; kind is always custom).
+        #[arg(long)]
+        subject_id: Option<String>,
+    },
+    /// Merge keys into a packet's metadata (null removes a key), then
+    /// read it back and FAIL unless every key actually took — a 204
+    /// here can be a silent no-op, and has been twice.
+    Patch {
+        /// Full uuid, 8+ characters of the id, or the car's branch.
+        job: String,
+        /// JSON object file: key -> value, null to remove.
+        patch: std::path::PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum ScriptAction {
     /// List registered scripts
     List {
@@ -812,6 +877,32 @@ async fn main() -> Result<()> {
                 spec,
                 dry_run,
             } => workflow::publish(&kind, &spec, dry_run).await,
+        },
+        Commands::Job { action } => match action {
+            JobAction::Get { job, json } => job::get(&job, json).await,
+            JobAction::List {
+                kind,
+                status,
+                limit,
+            } => job::list(kind, status, limit).await,
+            JobAction::File {
+                kind,
+                title,
+                priority,
+                metadata,
+                subject_id,
+            } => {
+                job::file(
+                    &kind,
+                    &title,
+                    priority,
+                    metadata,
+                    subject_id,
+                    chrono::Utc::now(),
+                )
+                .await
+            }
+            JobAction::Patch { job, patch } => job::patch(&job, &patch).await,
         },
         Commands::Prove {
             car,
