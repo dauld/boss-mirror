@@ -161,22 +161,50 @@ struct Config {
 
 impl Config {
     fn from_env(dry: bool) -> Self {
+        // THE FORGE IS THE SOURCE; GITHUB IS A PERIODIC BACKUP.
+        //
+        // David, 2026-08-30: "We aren't supposed to have any github
+        // dependency. Our git is a private internal server so that we
+        // can include its operations directly. Github should only be
+        // thought of as a periodic, safety backup." The tree already
+        // said as much at the arrival sweep — "GitHub is the mirror,
+        // never the source (27ab7680)" — but these defaults said the
+        // opposite, and defaults are what an unconfigured run gets.
+        //
+        // All three mattered. `git clone $upstream_url` is how a fresh
+        // conductor bootstraps, so the default made a NEW conductor pull
+        // its source from the backup. The `fork` remote pointed at a
+        // GitHub fork that the forgejo path does not use. And
+        // `forge_kind` defaulting to `github` is what selected the
+        // GitHub adapter over a forge clone whenever the systemd unit's
+        // environment was absent — a bare `boss train cancel` released
+        // every car and then failed on `gh pr close http://10.20.0.15
+        // :3000/...`, leaving two trains half-cancelled (b9801aff).
+        let forge_base = env_or("BOSS_TRAIN_FORGE_URL", "http://10.20.0.15:3000");
+        let forge_repo = env_or("BOSS_TRAIN_FORGE_REPO", "david/boss");
+        // Still read, and only for the BACKUP: it names the public
+        // mirror the GitHub adapter would address. Nothing on the
+        // source path uses it.
         let gh_repo = env_or("BOSS_TRAIN_GH_REPO", "algedonic-dev/boss");
         let home = env_or("BOSS_TRAIN_HOME", "/var/lib/boss-train");
         Config {
             jobs: env_or("BOSS_JOBS_URL", "http://127.0.0.1:7900"),
             head_owner: env_or("BOSS_TRAIN_HEAD_OWNER", "dauld"),
+            // Under the forge there is no separate fork: the conductor
+            // pushes train branches to the same repository it reads,
+            // which is what the running conductor's `fork` remote
+            // already points at.
             fork_url: env_or(
                 "BOSS_TRAIN_FORK_URL",
-                "https://github.com/dauld/boss-fork.git",
+                &format!("{forge_base}/{forge_repo}.git"),
             ),
             upstream_url: env_or(
                 "BOSS_TRAIN_UPSTREAM_URL",
-                &format!("https://github.com/{gh_repo}.git"),
+                &format!("{forge_base}/{forge_repo}.git"),
             ),
             clone: format!("{home}/repo"),
             deploy_tree: env_or("BOSS_TRAIN_DEPLOY_TREE", "/opt/boss"),
-            forge_kind: env_or("BOSS_TRAIN_FORGE", "github"),
+            forge_kind: env_or("BOSS_TRAIN_FORGE", "forgejo"),
             auto_merge: std::env::var("BOSS_TRAIN_AUTO_MERGE").as_deref() == Ok("1"),
             allow_local_jobs: std::env::var("BOSS_TRAIN_ALLOW_LOCAL_JOBS").as_deref() == Ok("1"),
             ci_hours: env_or("BOSS_TRAIN_CI_HOURS", "2").parse().unwrap_or(2),
@@ -371,7 +399,61 @@ fn preflight(cfg: &Config) -> Result<Vec<String>> {
             problems.push(format!("dry fetch of {remote} failed: {detail}"));
         }
     }
+    // THE ADAPTER MUST MATCH THE REMOTE IT WILL BE POINTED AT.
+    //
+    // `BOSS_TRAIN_FORGE` defaults to `github`, so a conductor verb run
+    // without the systemd unit's environment selects the GitHub adapter
+    // over a clone whose remotes are the internal forge. Nothing says
+    // so: the command runs, and `gh pr close http://10.20.0.15:3000/...`
+    // fails at the END with "none of the git remotes ... point to a
+    // known GitHub host" — after `boss train cancel` has already
+    // released every car. Two trains were left half-cancelled that way
+    // on 2026-08-27 (b9801aff), and preflight is where the packet's own
+    // correction says the assertion belongs.
+    let origin = sh_unchecked(&["git", "-C", &cfg.clone, "remote", "get-url", "origin"]);
+    if let Ok(o) = origin
+        && o.status.success()
+        && let Some(p) = forge_mismatch(&cfg.forge_kind, String::from_utf8_lossy(&o.stdout).trim())
+    {
+        problems.push(p);
+    }
     Ok(problems)
+}
+
+/// Does the selected forge adapter match the remote it will act on?
+///
+/// PURE, because the refusal has to be exactly right: a false positive
+/// here stops the conductor entirely. Only a definite contradiction
+/// counts — the GitHub adapter over a non-GitHub origin, or the Forgejo
+/// adapter over github.com. Anything unrecognised is left alone.
+pub(crate) fn forge_mismatch(forge_kind: &str, origin_url: &str) -> Option<String> {
+    // A LOCAL PATH IS NOT A FORGE, so it cannot contradict one. The
+    // first version of this check refused any non-GitHub origin, which
+    // failed `healthy_clone_passes` — that fixture points origin at
+    // /tmp/…/upstream.git with no forge configured, and there is nothing
+    // wrong with it. The gate caught it, which is the outcome this
+    // function's own doc comment asks for: a false positive here stops
+    // every train, so it is worse than the bug.
+    let addressable = origin_url.contains("://") || origin_url.contains('@');
+    if !addressable {
+        return None;
+    }
+    let is_github = origin_url.contains("github.com");
+    match forge_kind {
+        "github" if !is_github && !origin_url.is_empty() => Some(format!(
+            "forge adapter is `github` (BOSS_TRAIN_FORGE unset defaults to it) but origin is \
+             {origin_url}, which is not a GitHub host. Every forge call would fail — and a \
+             cancel fails only AFTER releasing its cars. Set the conductor's environment: \
+             BOSS_TRAIN_FORGE=forgejo BOSS_TRAIN_FORGE_URL=http://10.20.0.15:3000 \
+             BOSS_TRAIN_FORGE_REPO=david/boss \
+             BOSS_TRAIN_FORGE_TOKEN_FILE=/etc/boss-train/forge.token"
+        )),
+        "forgejo" if is_github => Some(format!(
+            "forge adapter is `forgejo` but origin is {origin_url}, a GitHub host — the \
+             adapter would post to a forge that does not hold this repository."
+        )),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4746,6 +4828,66 @@ pub async fn run(phase: Phase, dry: bool, now: DateTime<Utc>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------------------------------------------------------------
+    // The adapter must match the remote (b9801aff).
+    // ---------------------------------------------------------------
+
+    /// THE EXACT MISCONFIGURATION. `BOSS_TRAIN_FORGE` unset defaults to
+    /// `github`, and the conductor clone's origin is the internal forge.
+    /// Two trains were left half-cancelled because this was only
+    /// discovered by `gh` failing AFTER the cars were released.
+    #[test]
+    fn the_github_adapter_over_a_forge_origin_is_refused() {
+        let p =
+            forge_mismatch("github", "http://10.20.0.15:3000/david/boss.git").expect("must refuse");
+        assert!(p.contains("BOSS_TRAIN_FORGE=forgejo"), "{p}");
+        assert!(p.contains("AFTER releasing its cars"), "{p}");
+    }
+
+    /// The mirror image, so the check is not just a github-shaped grep.
+    #[test]
+    fn the_forgejo_adapter_over_github_is_refused() {
+        assert!(forge_mismatch("forgejo", "https://github.com/algedonic-dev/boss.git").is_some());
+    }
+
+    /// AND THE FALSE POSITIVES THAT WOULD STOP THE CONDUCTOR. Each of
+    /// these is a working configuration; refusing any of them would be
+    /// worse than the bug, because preflight gates every train.
+    #[test]
+    fn matching_configurations_are_left_alone() {
+        assert_eq!(
+            forge_mismatch("forgejo", "http://10.20.0.15:3000/david/boss.git"),
+            None
+        );
+        assert_eq!(
+            forge_mismatch("github", "https://github.com/algedonic-dev/boss.git"),
+            None
+        );
+        assert_eq!(
+            forge_mismatch("github", "git@github.com:david/boss.git"),
+            None
+        );
+        // THE FALSE POSITIVE THE GATE CAUGHT. `healthy_clone_passes`
+        // points origin at a local bare repo with no forge configured,
+        // and the first version of this check called that a
+        // misconfiguration — failing a fixture that is entirely healthy.
+        // A filesystem path addresses no host, so it cannot contradict
+        // an adapter.
+        assert_eq!(
+            forge_mismatch("github", "/tmp/boss-preflight-102054-healthy/upstream.git"),
+            None
+        );
+        assert_eq!(forge_mismatch("forgejo", "/srv/git/boss.git"), None);
+        assert_eq!(forge_mismatch("github", "../fixtures/upstream.git"), None);
+        // An unreadable origin is not a contradiction, and an unknown
+        // adapter is make_forge's error to raise, not preflight's.
+        assert_eq!(forge_mismatch("github", ""), None);
+        assert_eq!(
+            forge_mismatch("gitlab", "http://10.20.0.15:3000/x.git"),
+            None
+        );
+    }
 
     // ---------------------------------------------------------------
     // Re-railing — the conductor's answer to a squash-merged base.

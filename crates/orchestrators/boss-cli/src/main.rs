@@ -17,6 +17,8 @@ mod park;
 mod prove;
 mod publish;
 mod queue;
+mod receipt;
+mod running;
 mod script;
 mod train;
 mod upgrade;
@@ -199,6 +201,36 @@ enum Commands {
         /// Remote that receives trains — the authority for main.
         #[arg(long)]
         remote: Option<String>,
+    },
+    /// What does this car's gate receipt actually vouch for?
+    ///
+    /// A receipt names the sha it gated and the MODE it ran in. A
+    /// rebase leaves it green about a tree that is gone, and an auto
+    /// receipt is green about the lints rather than the suites.
+    Receipt {
+        /// Car branch to inspect.
+        branch: String,
+        /// Clone to read refs from. Defaults to the working directory.
+        #[arg(long)]
+        clone: Option<String>,
+        /// Remote holding the car branches.
+        #[arg(long)]
+        remote: Option<String>,
+    },
+    /// Merged, deployed and running are three different facts.
+    ///
+    /// The gap between the last two is where a proof records something
+    /// true about a tree and false about production (26b3d203).
+    Running {
+        /// Clone to read main from. Defaults to the working directory.
+        #[arg(long)]
+        clone: Option<String>,
+        /// Remote that receives trains — the merge authority.
+        #[arg(long)]
+        remote: Option<String>,
+        /// Jobs API to ask what is actually serving.
+        #[arg(long)]
+        jobs_url: Option<String>,
     },
     /// Prove a merged car in production by RUNNING a probe.
     ///
@@ -730,6 +762,16 @@ async fn main() -> Result<()> {
             clone,
             remote,
         } => merged::run(&branch, clone, remote),
+        Commands::Receipt {
+            branch,
+            clone,
+            remote,
+        } => receipt::run(&branch, clone, remote).await,
+        Commands::Running {
+            clone,
+            remote,
+            jobs_url,
+        } => running::run(clone, remote, jobs_url),
         Commands::Prove {
             car,
             probe,

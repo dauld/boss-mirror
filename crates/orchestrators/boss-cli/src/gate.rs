@@ -432,12 +432,14 @@ pub async fn run(
         )
         .await?,
     );
+    let mut reused = false;
     let packet = match reusable_packet(&open, branch, &sha) {
         Some(id) => {
             println!(
                 "boss gate: reusing open gate-run packet {}",
                 &id[..8.min(id.len())]
             );
+            reused = true;
             id
         }
         None => {
@@ -467,6 +469,29 @@ pub async fn run(
     };
 
     let job = render_job(&manifest_text, branch, &packet, &mode)?;
+
+    // A REUSED PACKET MAY ALREADY BE GATING. This verb's own closing
+    // line used to send the operator straight into the failure: run
+    // `boss gate <branch>`, then `boss gate <branch> --wait` as
+    // instructed, and the second invocation reused the open packet and
+    // created a SECOND Job against it. Both raced on one gate-target,
+    // one died, and the survivor's green verdict was recorded as `lost`.
+    // Attaching is what the advice always meant, so do that instead.
+    if reused
+        && !dry
+        && let Some(name) = live_gate_for_packet(namespace, &packet)?
+    {
+        println!("boss gate: packet {packet} is already being gated by {name}");
+        if wait {
+            println!("boss gate: attaching to it — a second Job would race it");
+            return wait_for_verdict(&http, &packet, namespace, &name).await;
+        }
+        println!(
+            "boss gate: not starting a second Job. Follow this one with \
+             `boss gate {branch} --wait`, which attaches."
+        );
+        return Ok(());
+    }
 
     // The concurrency rule, derived rather than hardcoded.
     let shared = workspace_is_shared(&job);
@@ -527,7 +552,10 @@ pub async fn run(
             .to_string();
         wait_for_verdict(&http, &packet, namespace, &job_name).await?;
     } else {
-        println!("boss gate: not waiting — `boss gate --wait` follows it, or read the packet.");
+        println!(
+            "boss gate: not waiting — `boss gate {branch} --wait` ATTACHES to this Job, \
+             or read the packet."
+        );
     }
     Ok(())
 }
@@ -649,9 +677,83 @@ fn job_state(namespace: &str, job_name: &str) -> (bool, bool) {
     (succeeded > 0 || failed > 0, failed > 0)
 }
 
+/// Which of these Jobs, if any, is still running?
+///
+/// Parses `kubectl get jobs -o custom-columns=NAME,SUCCEEDED,FAILED`
+/// rows. A Job is LIVE when it has neither succeeded nor failed —
+/// kubectl prints `<none>` for both while it runs, and `<none>` parses
+/// to zero, which is the honest reading here: nothing has completed.
+fn live_sibling(rows: &str) -> Option<String> {
+    rows.lines().find_map(|line| {
+        let mut f = line.split_whitespace();
+        let name = f.next()?;
+        let count = |s: Option<&str>| s.unwrap_or("0").parse::<i32>().unwrap_or(0);
+        let succeeded = count(f.next());
+        let failed = count(f.next());
+        (succeeded == 0 && failed == 0).then(|| name.to_string())
+    })
+}
+
+/// Is a Job already gating this packet?
+///
+/// FAILS CLOSED, for the same reason [`resolve_running`] does: the
+/// dangerous act is CREATING a second Job, so an unreadable cluster
+/// must not read as "nothing is running". kubectl is needed to create
+/// the Job anyway, so a cluster too sick to answer this was never going
+/// to run the gate.
+fn live_gate_for_packet(namespace: &str, packet: &str) -> Result<Option<String>> {
+    let out = kubectl(namespace)
+        .args([
+            "get",
+            "jobs",
+            "-l",
+            &format!("boss.dev/packet={packet}"),
+            "--no-headers",
+            "-o",
+            "custom-columns=NAME:.metadata.name,S:.status.succeeded,F:.status.failed",
+        ])
+        .output()
+        .context("kubectl get jobs — is KUBECONFIG set and the cluster reachable?")?;
+    if !out.status.success() {
+        bail!(
+            "cannot tell whether packet {} is already being gated: {}",
+            &packet[..8.min(packet.len())],
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(live_sibling(&String::from_utf8_lossy(&out.stdout)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// THE RACE THIS CLOSES. `boss gate` printed "`boss gate --wait`
+    /// follows it", and following that advice created a SECOND Job
+    /// against the same reused packet. Two Jobs then raced on one
+    /// gate-target: one died at 70s, the other went green, and the
+    /// `--wait` guard recorded the packet as `lost` while the gate that
+    /// actually ran was passing (5703c784).
+    #[test]
+    fn a_running_job_is_found_so_a_second_is_never_created() {
+        let running = "gate-2cn2l   <none>   <none>";
+        assert_eq!(live_sibling(running).as_deref(), Some("gate-2cn2l"));
+    }
+
+    #[test]
+    fn a_finished_job_is_not_a_live_sibling() {
+        assert_eq!(live_sibling("gate-abc12   1   <none>"), None);
+        assert_eq!(live_sibling("gate-abc12   <none>   1"), None);
+        assert_eq!(live_sibling(""), None);
+    }
+
+    /// A packet that was gated before and is being gated again has both
+    /// a finished Job and a live one. The live one is the answer.
+    #[test]
+    fn a_finished_job_does_not_hide_a_live_one() {
+        let rows = "gate-old11   1   <none>\ngate-new22   <none>   <none>";
+        assert_eq!(live_sibling(rows).as_deref(), Some("gate-new22"));
+    }
 
     /// A SHARED WORKSPACE REFUSES WHEN IT CANNOT LOOK.
     ///

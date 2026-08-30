@@ -212,9 +212,44 @@ if ! report "$VERDICT" "$SUMMARY"; then
             ;;
         *)
             echo "  THE PACKET IS ALREADY $state, SO NOTHING WILL GO OVERDUE AND NO ALARM"
-            echo "  WILL FIRE. The verdict above is the only surviving record of this run."
-            echo "  A terminal packet cannot accept a verdict — file a fresh gate-run packet"
-            echo "  rather than reusing one across relaunches (see 64cae7e9)."
+            echo "  WILL FIRE."
+            echo "  A terminal packet cannot accept a verdict on a STEP — file a fresh"
+            echo "  gate-run packet rather than reusing one across relaunches (64cae7e9)."
+            # BUT IT STILL ACCEPTS METADATA, so the verdict does not have
+            # to die with this pod.
+            #
+            # The lines above have existed since 2026-08-27 and a green
+            # run still evaporated on 2026-08-29 (1826ec9f), because a
+            # pod log is not a record: the Job is reaped, `kubectl logs`
+            # goes with it, and the packet says `lost` for a branch that
+            # gated green. The step API refuses a frozen step and names
+            # the job-metadata PATCH as the way to annotate instead —
+            # verified 2026-08-30 that a CLOSED packet accepts it and
+            # that other keys survive the merge.
+            #
+            # This records; it does not reopen. Reviving a terminal
+            # packet would fight the freeze that makes receipts
+            # trustworthy, which is why the packet asked for the verdict
+            # to be RECOVERABLE rather than automatically re-applied.
+            ORPHAN=$(python3 - "$SUMMARY" "$RECEIPT" "$(hostname)" <<'PY'
+import json, sys
+print(json.dumps({"orphaned_verdict": {
+    "receipt": json.loads(sys.argv[1]),
+    "receipt_path": sys.argv[2],
+    "pod": sys.argv[3],
+    "note": "the gate ran to a verdict, but its packet was already terminal "
+            "so no step could take it. Recorded here rather than lost with "
+            "the pod. The packet's own status is NOT evidence about this run.",
+}}))
+PY
+            )
+            if curl -sf -X PATCH -H "x-boss-user: $ACTOR" \
+                 -H 'content-type: application/json' -d "$ORPHAN" \
+                 "$JOBS_API/api/jobs/$GATE_RUN_JOB_ID/metadata" >/dev/null 2>&1; then
+                echo "  RECOVERED: verdict written to the packet as metadata.orphaned_verdict."
+            else
+                echo "  AND THE METADATA WRITE FAILED TOO — this log is the only record."
+            fi
             ;;
     esac
 fi

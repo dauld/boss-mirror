@@ -58,7 +58,12 @@ kind: Job
 metadata:
   generateName: gate-
   namespace: boss-dev
-  labels: {app: gate-runner}
+  # The packet label is what lets a second `boss gate` SEE the Job the
+  # first one launched. Without it a Job carried no link back to its
+  # gate-run packet, so a re-invocation could not tell "this packet is
+  # already being gated" from "this packet is idle" — and created a
+  # second Job that raced the first on the same disk.
+  labels: {app: gate-runner, boss.dev/packet: $GATE_RUN_JOB_ID}
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: 10800

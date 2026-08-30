@@ -42,6 +42,8 @@
 //! in `verified` stays human, because what a change MEANS is judgement.
 //! Only the evidence under it is mechanised.
 
+use std::path::Path;
+
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
@@ -78,7 +80,17 @@ pub(crate) struct Outcome {
 
 /// Run `probe` through a shell and capture everything it did.
 pub(crate) fn execute(probe: &str) -> Result<Outcome> {
-    let out = std::process::Command::new("sh")
+    execute_in(probe, None)
+}
+
+/// As [`execute`], but in a stated directory — what `--recheck` uses to
+/// put the probe back where it was recorded.
+pub(crate) fn execute_in(probe: &str, cwd: Option<&Path>) -> Result<Outcome> {
+    let mut cmd = std::process::Command::new("sh");
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    let out = cmd
         .arg("-c")
         .arg(probe)
         .output()
@@ -162,8 +174,65 @@ pub(crate) fn proof_json(
         "stdout": clip(&o.stdout),
         "stderr": clip(&o.stderr),
         "host": host,
+        // WHERE IT RAN, not just what ran. A command means the same
+        // thing twice only if the host and the directory are the same
+        // both times, and 3 of 10 rechecks false-failed for exactly
+        // this: probes opening `git rev-parse HEAD` re-run outside a
+        // repository, and probes authored on the workstation as
+        // `ssh boss-gcp ...` re-run ON boss-gcp, where that name does
+        // not resolve. Both are free to record — the verb already
+        // knows them (66fd64c6).
+        "cwd": std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
         "at": at,
     })
+}
+
+/// Can the recorded probe be re-run HERE, meaning the same thing?
+///
+/// The distinction this draws is the whole point of the packet: a probe
+/// that cannot be re-run is not the same fact as a claim that stopped
+/// being true, and `--recheck` used to render them identically — as
+/// NO LONGER HOLDS. An instrument that cries wolf 30% of the time gets
+/// ignored, and then decay stops being detected at all.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Rerunnable {
+    /// Same host, and the directory is available.
+    Here,
+    /// Recorded somewhere else. Re-running here tests a different thing.
+    WrongHost { recorded: String, here: String },
+    /// The directory the probe assumed is gone.
+    MissingDir { cwd: String },
+}
+
+/// ABSENT CONTEXT IS NOT A MISMATCH. Proofs recorded before this change
+/// carry no `cwd`, and the oldest carry no `host`. Refusing on missing
+/// data would break every proof already on the board, so an unrecorded
+/// field means "cannot check", and the recheck proceeds exactly as it
+/// did before.
+pub(crate) fn rerunnable(
+    recorded_host: Option<&str>,
+    here: &str,
+    cwd: Option<&str>,
+    dir_exists: bool,
+) -> Rerunnable {
+    if let Some(rec) = recorded_host.filter(|h| !h.is_empty() && *h != "unknown")
+        && rec != here
+    {
+        return Rerunnable::WrongHost {
+            recorded: rec.to_string(),
+            here: here.to_string(),
+        };
+    }
+    if let Some(dir) = cwd.filter(|c| !c.is_empty())
+        && !dir_exists
+    {
+        return Rerunnable::MissingDir {
+            cwd: dir.to_string(),
+        };
+    }
+    Rerunnable::Here
 }
 
 /// Find the one open car for `given` — a branch name, or an id prefix.
@@ -245,8 +314,18 @@ pub(crate) fn proven_step(car: &Value) -> Result<&Value> {
     }
 }
 
+/// A recorded proof, as much of it as the writer stored.
+#[derive(Debug)]
+pub(crate) struct Recorded {
+    pub probe: String,
+    pub expect: Option<String>,
+    /// `None` on proofs written before the context was recorded.
+    pub host: Option<String>,
+    pub cwd: Option<String>,
+}
+
 /// Read back a recorded proof so `--recheck` can re-run it.
-pub(crate) fn recorded_probe(step: &Value) -> Result<(String, Option<String>)> {
+pub(crate) fn recorded_probe(step: &Value) -> Result<Recorded> {
     let md = step.get("metadata");
     let raw = md.and_then(|m| m.get("proof")).ok_or_else(|| {
         anyhow::anyhow!(
@@ -268,7 +347,13 @@ pub(crate) fn recorded_probe(step: &Value) -> Result<(String, Option<String>)> {
         .ok_or_else(|| anyhow::anyhow!("the recorded proof has no `probe` to re-run"))?
         .to_string();
     let expect = v.get("expect").and_then(Value::as_str).map(str::to_string);
-    Ok((probe, expect))
+    let text = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+    Ok(Recorded {
+        probe,
+        expect,
+        host: text("host"),
+        cwd: text("cwd"),
+    })
 }
 
 fn host() -> String {
@@ -348,9 +433,35 @@ pub(crate) async fn run(
             .flatten()
             .find(|s| s.get("title").and_then(Value::as_str) == Some(PROVEN))
             .ok_or_else(|| anyhow::anyhow!("the car has no step titled {PROVEN:?}"))?;
-        let (probe, expect) = recorded_probe(step)?;
+        let rec = recorded_probe(step)?;
+        let (probe, expect) = (rec.probe, rec.expect);
+        let here = host();
+        let dir_exists = rec.cwd.as_deref().is_none_or(|d| Path::new(d).is_dir());
+        match rerunnable(rec.host.as_deref(), &here, rec.cwd.as_deref(), dir_exists) {
+            Rerunnable::WrongHost { recorded, here } => bail!(
+                "CANNOT RE-RUN HERE — this proof was recorded on {recorded}, and you are on \
+                 {here}.\n  $ {probe}\n\n\
+                 The claim has NOT been tested either way, which is a different fact from it \
+                 having decayed. Reporting the two identically is how this instrument \
+                 false-failed 3 times in 10 (66fd64c6) — probes reference paths, hostnames and \
+                 services that exist on the host they were written for, so re-running one \
+                 elsewhere tests something else and usually fails.\n  \
+                 Re-run it on {recorded}, or re-prove the car here to record a probe that \
+                 belongs to this host."
+            ),
+            Rerunnable::MissingDir { cwd } => bail!(
+                "CANNOT RE-RUN HERE — this proof was recorded in {cwd}, which does not exist \
+                 on this machine.\n  $ {probe}\n\n\
+                 A probe that opens `git rev-parse HEAD` means nothing outside a repository. \
+                 The claim has not been tested either way."
+            ),
+            Rerunnable::Here => {}
+        }
         println!("boss prove: re-running the recorded probe for {short}\n  $ {probe}");
-        let o = execute(&probe)?;
+        let o = match rec.cwd.as_deref() {
+            Some(dir) if !dir.is_empty() => execute_in(&probe, Some(Path::new(dir)))?,
+            _ => execute(&probe)?,
+        };
         return match judge(&o, expect.as_deref()) {
             Ok(()) => {
                 println!("boss prove: HOLDS — {short} is still true in production");
@@ -548,9 +659,83 @@ mod tests {
             "2026-08-28T00:00:00Z",
         );
         let step = json!({"metadata": {"proof": serde_json::to_string(&p).unwrap()}});
-        let (probe, expect) = recorded_probe(&step).unwrap();
-        assert_eq!(probe, "grep -q MARKER f");
-        assert_eq!(expect.as_deref(), Some("MARKER"));
+        let rec = recorded_probe(&step).unwrap();
+        assert_eq!(rec.probe, "grep -q MARKER f");
+        assert_eq!(rec.expect.as_deref(), Some("MARKER"));
+    }
+
+    /// THE 932aa956 / 3f846cc5 CASE. A probe authored on the workstation
+    /// as `ssh boss-gcp ...` re-runs ON boss-gcp, where that name does
+    /// not resolve. The claim still held; the instrument was wrong.
+    #[test]
+    fn a_proof_recorded_elsewhere_cannot_be_rechecked_here() {
+        assert_eq!(
+            rerunnable(Some("mac-studio"), "boss-gcp", None, true),
+            Rerunnable::WrongHost {
+                recorded: "mac-studio".into(),
+                here: "boss-gcp".into()
+            }
+        );
+    }
+
+    /// THE 64d5e3c7 CASE. The probe opened `git rev-parse --short HEAD`
+    /// and was re-run outside any repository.
+    #[test]
+    fn a_proof_whose_directory_is_gone_cannot_be_rechecked() {
+        assert_eq!(
+            rerunnable(Some("h"), "h", Some("/var/lib/boss-train/repo"), false),
+            Rerunnable::MissingDir {
+                cwd: "/var/lib/boss-train/repo".into()
+            }
+        );
+    }
+
+    /// AND THE ONE THAT MUST NOT BREAK. Every proof already on the board
+    /// was recorded without a `cwd`, and the oldest without a `host`.
+    /// Refusing on absent context would turn a 30% false-alarm rate into
+    /// a 100% one.
+    #[test]
+    fn absent_context_is_not_a_mismatch() {
+        assert_eq!(rerunnable(None, "anywhere", None, true), Rerunnable::Here);
+        assert_eq!(
+            rerunnable(Some(""), "anywhere", None, true),
+            Rerunnable::Here
+        );
+        assert_eq!(
+            rerunnable(Some("unknown"), "anywhere", None, true),
+            Rerunnable::Here
+        );
+        assert_eq!(
+            rerunnable(Some("h"), "h", Some(""), false),
+            Rerunnable::Here
+        );
+    }
+
+    #[test]
+    fn the_same_host_and_a_live_directory_re_runs() {
+        assert_eq!(
+            rerunnable(Some("h"), "h", Some("/tmp"), true),
+            Rerunnable::Here
+        );
+    }
+
+    /// The context is recorded so it can be read back — a field that is
+    /// written but not recoverable is not a contract.
+    #[test]
+    fn the_recorded_context_round_trips() {
+        let o = Outcome {
+            exit: 0,
+            stdout: "ok".into(),
+            stderr: String::new(),
+        };
+        let proof = proof_json("echo ok", None, &o, "somehost", "2026-08-29T00:00:00Z");
+        let step = json!({"metadata": {"proof": proof.to_string()}});
+        let rec = recorded_probe(&step).expect("readable");
+        assert_eq!(rec.host.as_deref(), Some("somehost"));
+        assert!(
+            rec.cwd.is_some_and(|c| !c.is_empty()),
+            "cwd must be recorded"
+        );
     }
 
     #[test]
