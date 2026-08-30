@@ -1,29 +1,34 @@
-//! Adding a step to a live Job is refused, because it would freeze it.
+//! Adding a step to a live Job is refused, because a step is protocol.
 //!
-//! Step predicates are not stored on steps — the `steps` table has no
-//! `ready_when` column — so readiness is recomputed by pairing spec
-//! steps with job steps POSITIONALLY. One appended step misaligns every
-//! pair after it, `registry::reevaluate` correctly refuses to evaluate
-//! anything, and from that moment the Job is frozen: no step advances
-//! again, including its terminal, so it never closes and never leaves
-//! its owner's queue.
+//! THE REASON HAS CHANGED, AND THE REFUSAL HAS NOT. This guard was
+//! written because an appended step FROZE the job: readiness was
+//! recomputed by pairing spec steps with job steps POSITIONALLY, so one
+//! insertion misaligned every pair after it and `registry::reevaluate`
+//! refused to evaluate anything. Design review 32a4e70d is the worked
+//! example — it gained a per-question step on 2026-08-13 and sat in
+//! David's queue with its review COMPLETED and its terminal pending,
+//! producing feedback 55c92985: "I finished the top design review in
+//! the table and it still shows the same metadata and is in the same
+//! queue."
 //!
-//! Design review 32a4e70d is the worked example. It gained a
-//! per-question step on 2026-08-13 and sat in David's queue with its
-//! review step COMPLETED and its terminal pending, producing feedback
-//! 55c92985: "I finished the top design review in the table and it
-//! still shows the same metadata and is in the same queue."
+//! Steps now pair by `spec_slug` (`registry::pair_steps`), so an extra
+//! row no longer misaligns anything and a diverged job keeps moving.
+//! That removes the CONSEQUENCE this test was named for; it does not
+//! remove the reason to refuse.
 //!
-//! The divergence WAS logged the whole time — `reevaluate_and_persist`
-//! warns with the job id and both counts. That is the lesson worth
-//! keeping: a warn in a log nobody reads is not a signal. The fix is
-//! refusing at the door, where the caller is told, rather than
-//! recording the damage after it is done.
+//! WHY IT IS STILL REFUSED. A new step is a change to the WORKFLOW, and
+//! the registry is where that belongs: publish a new version and admit
+//! new packets under it. In-flight packets stay pinned to the version
+//! they were admitted under, which is the entire point of the
+//! versioning. A step appended to one live job is a protocol edit that
+//! exists on exactly one packet, describable by no version, and
+//! invisible to every consumer that reads the spec — including
+//! `protocol_conversion`, which compares two WorkflowSpecs.
 //!
-//! A new step is a change to the WORKFLOW. The registry is where that
-//! belongs: publish a new version and admit new packets under it.
-//! In-flight packets stay pinned to the version they were admitted
-//! under, which is the entire point of the versioning.
+//! The lesson that outlived its own mechanism: the divergence WAS
+//! logged the whole time, and a warn in a log nobody reads is not a
+//! signal. Refusing at the door tells the caller; recording the damage
+//! afterwards does not.
 
 use std::sync::Arc;
 

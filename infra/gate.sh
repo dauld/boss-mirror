@@ -578,6 +578,7 @@ PREFLIGHT_LINTS=(
     "one-palette|infra/lint/one-palette.sh"
     "one-date-format|infra/lint/one-date-format.sh"
     "kind-bundle-does-not-tighten|infra/lint/a-kind-bundle-does-not-tighten.sh"
+    "new-style-has-a-caller|infra/lint/a-new-style-has-a-caller.sh"
 )
 
 run_preflight() {

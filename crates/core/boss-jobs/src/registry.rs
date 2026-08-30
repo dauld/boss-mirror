@@ -2306,18 +2306,79 @@ pub fn predicate_refs_job_metadata(ready_when: &str) -> bool {
         .any(|path| path.first().map(|s| s == "job").unwrap_or(false))
 }
 
+/// Pair each SPEC step with the JOB step that carries its slug.
+/// `pairing[i]` is the index into `steps` for `spec.steps[i]`, or
+/// `None` when the packet has no step for that spec step.
+///
+/// WHY THIS EXISTS. Predicates are not stored on the step row (there is
+/// no `ready_when` column), so advancement has to re-associate spec
+/// steps with job steps on every pass. That association used to be the
+/// INDEX, which made the step list's shape load-bearing: one step
+/// appended to a live job — and `POST /api/jobs/{id}/steps` is a public
+/// route — misaligned every pair after it. The old guard called that
+/// FROZEN and evaluated nothing, correctly, because the alternative was
+/// worse: `build_context` keys the context by spec slug while reading
+/// the positionally-paired step, so a misaligned job answers
+/// `steps.triage.done` with a DIFFERENT step's status. Design review
+/// 32a4e70d froze exactly this way on 2026-08-13 and surfaced only as
+/// "I finished it and it is still there".
+///
+/// The step row has carried `spec_slug` since; this is the durable fix
+/// the old guard named and deferred — pairing by name, extra steps
+/// simply ignored.
+///
+/// IDENTITY WHEN SLUGS ARE ABSENT. A step materialized before the
+/// column exists has `spec_slug: None`, and for those packets the index
+/// is the only association there is. Falling back wholesale (rather than
+/// per step) keeps such a packet behaving exactly as it does today
+/// instead of half-pairing it, which would be a new failure mode.
+///
+/// SAFETY PROPERTY, AND THE FIRST TEST: when every slug is present and
+/// matches the spec in order, this returns the identity — so every
+/// healthy packet is paired precisely as before.
+fn pair_steps(spec: &WorkflowSpec, steps: &[Step]) -> Vec<Option<usize>> {
+    let all_slugged = !steps.is_empty() && steps.iter().all(|s| s.spec_slug.is_some());
+    if !all_slugged {
+        return (0..spec.steps.len())
+            .map(|i| (i < steps.len()).then_some(i))
+            .collect();
+    }
+    let mut by_slug: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (j, s) in steps.iter().enumerate() {
+        if let Some(slug) = s.spec_slug.as_deref() {
+            // First occurrence wins, so a duplicated slug is resolved
+            // deterministically rather than by iteration order.
+            by_slug.entry(slug).or_insert(j);
+        }
+    }
+    spec.steps
+        .iter()
+        .map(|ss| by_slug.get(ss.title.as_str()).copied())
+        .collect()
+}
+
 /// Build the predicate-evaluation payload for a Job's current state:
 /// `{ subject, job: { metadata }, steps: { <slug>: { done, metadata } } }`.
-/// `steps` is keyed by each `StepSpec.title` slug, paired to the live
-/// `Step` by index (== `sort_order`).
+/// `steps` is keyed by each `StepSpec.title` slug and read through
+/// `pairing`, so the value under a slug is that slug's step — see
+/// [`pair_steps`] for why reading it positionally was a defect.
+///
+/// A spec step the packet does not have is OMITTED rather than faked.
+/// `eval_ready_when` already treats a missing reference as unknown,
+/// which is the honest answer; inserting `done: false` would assert
+/// that a step nobody materialized is incomplete.
 fn build_context(
     spec: &WorkflowSpec,
     steps: &[Step],
+    pairing: &[Option<usize>],
     subject: &Subject,
     job_metadata: &serde_json::Value,
 ) -> serde_json::Value {
     let mut steps_obj = serde_json::Map::new();
-    for (spec_step, step) in spec.steps.iter().zip(steps) {
+    for (i, spec_step) in spec.steps.iter().enumerate() {
+        let Some(step) = pairing.get(i).copied().flatten().and_then(|j| steps.get(j)) else {
+            continue;
+        };
         steps_obj.insert(
             spec_step.title.clone(),
             serde_json::json!({
@@ -2352,16 +2413,26 @@ fn eval_ready_when(ready_when: &str, payload: &serde_json::Value) -> Option<bool
 /// future change can flip its `ready_when`. Unknown refs (which the
 /// lint forbids) count as terminal so a stray reference can't wedge a
 /// step `Pending` forever.
-fn refs_all_terminal(spec: &WorkflowSpec, steps: &[Step], idx: usize) -> bool {
+fn refs_all_terminal(
+    spec: &WorkflowSpec,
+    steps: &[Step],
+    pairing: &[Option<usize>],
+    idx: usize,
+) -> bool {
     let Some(spec_step) = spec.steps.get(idx) else {
         return true;
     };
     predicate_step_refs(&spec_step.ready_when)
         .iter()
         .all(|slug| {
+            // Resolve the slug to its SPEC position, then through the
+            // pairing to the job step. Going straight from spec index to
+            // `steps[index]` was the same positional assumption
+            // `build_context` made — see [`pair_steps`].
             spec.steps
                 .iter()
                 .position(|s| &s.title == slug)
+                .and_then(|i| pairing.get(i).copied().flatten())
                 .and_then(|j| steps.get(j))
                 .map(|s| matches!(s.status, StepStatus::Completed | StepStatus::Skipped))
                 .unwrap_or(true)
@@ -2384,11 +2455,21 @@ fn refs_all_terminal(spec: &WorkflowSpec, steps: &[Step], idx: usize) -> bool {
 /// possible if a Workflow was republished mid-flight with a different
 /// step count) is treated as "leave everything as-is."
 /// Has this job's step list diverged from the spec it was admitted
-/// under? A `true` here means [`reevaluate`] cannot run and the job is
-/// frozen — no step will ever advance again. Exposed so a caller with
-/// the job id in hand can report WHICH job, which `reevaluate` cannot.
+/// under? Exposed so a caller with the job id in hand can report WHICH
+/// job, which [`reevaluate`] cannot.
+///
+/// THIS NO LONGER MEANS FROZEN. It used to: pairing was positional, so
+/// any length mismatch stopped advancement permanently. Since steps
+/// pair by slug ([`pair_steps`]) a diverged job keeps moving, and this
+/// reports a shape worth looking at rather than a death certificate.
+///
+/// Divergence is now "a spec step has no row on this job" — the case
+/// that genuinely cannot advance — OR a plain count mismatch, which
+/// catches extra rows the spec does not describe. A packet with extra
+/// steps still advances; it is simply carrying something unexplained.
 pub fn steps_diverged_from_spec(spec: &WorkflowSpec, steps: &[Step]) -> bool {
-    spec.steps.len() != steps.len()
+    let pairing = pair_steps(spec, steps);
+    pairing.iter().any(Option::is_none) || spec.steps.len() != steps.len()
 }
 
 pub fn reevaluate(
@@ -2398,50 +2479,62 @@ pub fn reevaluate(
     job_metadata: &serde_json::Value,
 ) -> Vec<usize> {
     let mut changed = Vec::new();
-    if spec.steps.len() != steps.len() {
-        // A JOB WHOSE STEP COUNT DIVERGED FROM ITS SPEC CAN NEVER
-        // ADVANCE AGAIN. Predicates are not stored on steps (the table
-        // has no ready_when column) — advancement is recomputed by
-        // pairing spec steps with job steps POSITIONALLY, so one
-        // inserted step misaligns every pair after it and the honest
-        // move is to evaluate nothing.
-        //
-        // Bailing was always right. Bailing SILENTLY was not: on
-        // 2026-08-14 design review 32a4e70d sat in David's queue with
-        // its review step completed and its terminal pending, and the
-        // only symptom was "I finished it and it is still there". The
-        // job could not notice it was finished, and nothing said so.
-        //
-        // `POST /api/jobs/{id}/steps` is a public route, so any
-        // protocol that adds a step to a live job freezes it this way.
-        // Until steps carry their spec slug (the durable fix — then
-        // pairing is by name and extra steps are simply ignored), this
-        // log is what turns an invisible dead job into a visible one.
-        tracing::error!(
+    let pairing = pair_steps(spec, steps);
+
+    // A DIVERGED SHAPE IS NO LONGER FATAL — it is reported.
+    //
+    // This used to bail outright, freezing the job forever, because
+    // pairing was positional and one appended step misaligned every
+    // pair after it. `POST /api/jobs/{id}/steps` is a public route, so
+    // any protocol that added a step to a live job froze it that way,
+    // and it did: design review 32a4e70d, 2026-08-14, sat with its
+    // review completed and its terminal pending, and the only symptom
+    // was "I finished it and it is still there".
+    //
+    // Pairing by slug removes the misalignment, so extra job steps are
+    // simply ignored and the job keeps moving. It stays LOUD because a
+    // shape that does not match its protocol is still worth knowing
+    // about: a spec step with no job step can never advance, and this
+    // is the only place that can see it.
+    let unpaired: Vec<&str> = spec
+        .steps
+        .iter()
+        .zip(&pairing)
+        .filter(|(_, p)| p.is_none())
+        .map(|(s, _)| s.title.as_str())
+        .collect();
+    if !unpaired.is_empty() || steps.len() != spec.steps.len() {
+        tracing::warn!(
             spec_steps = spec.steps.len(),
             job_steps = steps.len(),
-            "job steps diverged from its workflow spec — this job is FROZEN \
-             and no step will advance again; a step was almost certainly \
-             added to a live job"
+            unpaired = ?unpaired,
+            "job steps diverged from its workflow spec — pairing by slug and \
+             continuing; steps listed as unpaired have no row on this job and \
+             cannot advance"
         );
-        return changed;
     }
+
     loop {
-        let ctx = build_context(spec, steps, subject, job_metadata);
+        let ctx = build_context(spec, steps, &pairing, subject, job_metadata);
         let mut moved = false;
-        for idx in 0..steps.len() {
-            if steps[idx].status != StepStatus::Pending {
+        for (i, spec_step) in spec.steps.iter().enumerate() {
+            let Some(j) = pairing.get(i).copied().flatten() else {
+                continue;
+            };
+            if steps[j].status != StepStatus::Pending {
                 continue;
             }
-            let next = match eval_ready_when(&spec.steps[idx].ready_when, &ctx) {
+            let next = match eval_ready_when(&spec_step.ready_when, &ctx) {
                 Some(true) => Some(StepStatus::Ready),
-                Some(false) | None => (refs_all_terminal(spec, steps, idx)
-                    && !predicate_refs_job_metadata(&spec.steps[idx].ready_when))
+                Some(false) | None => (refs_all_terminal(spec, steps, &pairing, i)
+                    && !predicate_refs_job_metadata(&spec_step.ready_when))
                 .then_some(StepStatus::Skipped),
             };
             if let Some(status) = next {
-                steps[idx].status = status;
-                changed.push(idx);
+                steps[j].status = status;
+                // JOB indices, not spec indices: callers persist
+                // `steps[i]` and emit its `step.updated`.
+                changed.push(j);
                 moved = true;
             }
         }
@@ -4933,6 +5026,139 @@ mod tests {
         steps[0].status = StepStatus::Completed;
         let changed = reevaluate(&spec, &mut steps, &subject, &job_metadata);
         assert_eq!(changed, vec![1]);
+        assert_eq!(steps[1].status, StepStatus::Ready);
+    }
+
+    /// A two-step chain used by the pairing tests below.
+    fn pairing_spec() -> WorkflowSpec {
+        WorkflowSpec::platform_seed(
+            "chain",
+            "Chain",
+            "test",
+            vec!["account".into()],
+            vec![
+                StepSpec {
+                    title: "trigger".into(),
+                    kind: "task".into(),
+                    ready_when: "true".into(),
+                    ..Default::default()
+                },
+                StepSpec {
+                    title: "work".into(),
+                    kind: "task".into(),
+                    ready_when: "steps.trigger.done".into(),
+                    ..Default::default()
+                },
+            ],
+        )
+    }
+
+    /// THE SAFETY PROPERTY, AND THE REASON THIS CHANGE IS SHIPPABLE.
+    ///
+    /// Every healthy packet — slugs present, matching the spec, in
+    /// order — must pair EXACTLY as index-pairing did. If this holds,
+    /// the change is inert for all existing work and only alters the
+    /// packets that were previously frozen.
+    #[test]
+    fn a_healthy_packet_pairs_to_the_identity() {
+        let spec = pairing_spec();
+        let subject = Subject::new("account", "a-1");
+        let md = serde_json::Value::Object(Default::default());
+        let steps = materialize_steps(&spec, &subject, JobId::new(), &md, StepId::new);
+
+        assert_eq!(
+            pair_steps(&spec, &steps),
+            vec![Some(0), Some(1)],
+            "a materialized packet must pair positionally, or this change is \
+             not inert for existing work"
+        );
+        assert!(!steps_diverged_from_spec(&spec, &steps));
+    }
+
+    /// THE DEFECT THIS FIXES. A step appended to a live job used to
+    /// misalign every pair after it, so `reevaluate` bailed and the job
+    /// never advanced again — design review 32a4e70d, which surfaced
+    /// only as "I finished it and it is still there".
+    #[test]
+    fn an_extra_step_no_longer_freezes_the_job() {
+        let spec = pairing_spec();
+        let subject = Subject::new("account", "a-1");
+        let md = serde_json::Value::Object(Default::default());
+        let mut steps = materialize_steps(&spec, &subject, JobId::new(), &md, StepId::new);
+
+        // Someone POSTs a step onto the live job, between the two.
+        let mut extra = steps[1].clone();
+        extra.id = StepId::new();
+        extra.spec_slug = Some("an-appended-step".into());
+        extra.status = StepStatus::Pending;
+        steps.insert(1, extra);
+
+        steps[0].status = StepStatus::Completed;
+        let changed = reevaluate(&spec, &mut steps, &subject, &md);
+
+        assert_eq!(
+            steps[2].status,
+            StepStatus::Ready,
+            "the real `work` step must still promote; before slug pairing this \
+             job was frozen forever"
+        );
+        assert_eq!(
+            changed,
+            vec![2],
+            "the returned indices must be JOB indices — callers persist steps[i]"
+        );
+    }
+
+    /// AND THE WORSE HALF: misalignment did not only stall a job, it
+    /// made the predicate context answer about the wrong step, because
+    /// `build_context` keys by spec slug and used to read positionally.
+    #[test]
+    fn a_reordered_packet_answers_about_the_right_step() {
+        let spec = pairing_spec();
+        let subject = Subject::new("account", "a-1");
+        let md = serde_json::Value::Object(Default::default());
+        let mut steps = materialize_steps(&spec, &subject, JobId::new(), &md, StepId::new);
+        steps.swap(0, 1);
+
+        // `trigger` is complete; `work` is not. Positionally these are
+        // now the other way round, so an index-paired context would
+        // report steps.trigger.done from the `work` row.
+        for s in steps.iter_mut() {
+            if s.spec_slug.as_deref() == Some("trigger") {
+                s.status = StepStatus::Completed;
+            }
+        }
+        reevaluate(&spec, &mut steps, &subject, &md);
+
+        let work = steps
+            .iter()
+            .find(|s| s.spec_slug.as_deref() == Some("work"))
+            .expect("work step");
+        assert_eq!(
+            work.status,
+            StepStatus::Ready,
+            "steps.trigger.done must read the trigger row, whatever position \
+             it occupies"
+        );
+    }
+
+    /// A packet materialized before `spec_slug` existed has only its
+    /// index. Falling back wholesale keeps those behaving exactly as
+    /// they do today rather than half-pairing them, which would be a
+    /// new failure mode rather than a fix.
+    #[test]
+    fn a_packet_without_slugs_still_pairs_by_index() {
+        let spec = pairing_spec();
+        let subject = Subject::new("account", "a-1");
+        let md = serde_json::Value::Object(Default::default());
+        let mut steps = materialize_steps(&spec, &subject, JobId::new(), &md, StepId::new);
+        for s in steps.iter_mut() {
+            s.spec_slug = None;
+        }
+        assert_eq!(pair_steps(&spec, &steps), vec![Some(0), Some(1)]);
+
+        steps[0].status = StepStatus::Completed;
+        reevaluate(&spec, &mut steps, &subject, &md);
         assert_eq!(steps[1].status, StepStatus::Ready);
     }
 

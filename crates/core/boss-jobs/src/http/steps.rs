@@ -45,22 +45,22 @@ pub(super) async fn add_step<R: JobsRepository + 'static, B: EventBus + 'static>
         None => return (StatusCode::BAD_REQUEST, "invalid job id").into_response(),
     };
 
-    // A JOB'S STEP SET IS FIXED AT ADMISSION. Step predicates are not
-    // stored on steps (the table has no ready_when column) — readiness
-    // is recomputed by pairing spec steps with job steps positionally,
-    // so one appended step misaligns every pair after it and
-    // `registry::reevaluate` refuses to advance anything. The job is
-    // then frozen: no step moves again, including its terminal, so it
-    // never closes and never leaves its owner's queue.
+    // A JOB'S STEP SET IS FIXED AT ADMISSION, because a step is
+    // PROTOCOL — not because appending one breaks the engine. It used
+    // to do both. Readiness was recomputed by pairing spec steps with
+    // job steps positionally, so one appended step misaligned every
+    // pair after it and `registry::reevaluate` refused to advance
+    // anything; the job froze with its terminal pending and never left
+    // its owner's queue. Design review 32a4e70d did exactly that on
+    // 2026-08-13, producing feedback 55c92985: "I finished the top
+    // design review and it still shows the same metadata and is in the
+    // same queue." The divergence was logged at warn the whole time,
+    // and a warn in a log nobody reads is not a signal.
     //
-    // That is not hypothetical. Design review 32a4e70d gained a
-    // per-question step on 2026-08-13, sat in David's queue with its
-    // review COMPLETED and its terminal pending, and produced feedback
-    // 55c92985: "I finished the top design review and it still shows
-    // the same metadata and is in the same queue." The divergence was
-    // logged at warn by `reevaluate_and_persist` the whole time; a warn
-    // in a log nobody is reading is not a signal, so the job looked
-    // exactly like one waiting on its owner.
+    // Steps now pair by `spec_slug` (`registry::pair_steps`), so an
+    // extra row is ignored and the job keeps moving. The freezing
+    // consequence is gone; the refusal below is not, and the paragraph
+    // after this one is now its whole justification.
     //
     // Refusing here is the honest boundary: a new step is a change to
     // the WORKFLOW, and the registry is where that belongs — publish a
