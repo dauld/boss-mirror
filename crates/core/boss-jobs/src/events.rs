@@ -85,6 +85,11 @@ pub const STATION_QUARANTINED: &str = "jobs.station.quarantined";
 /// projects nothing; the payload IS the datum, and lenses read the
 /// series from the log instead of recomputing it. Rebuild ignores it.
 pub const NETWORK_CENSUS: &str = "jobs.network.census";
+/// One observation of the estate: what machines were actually there
+/// when someone looked. Paired with the `nodes` registry, which says
+/// what we MEANT to have — the difference between the two is the
+/// finding (59ef456a).
+pub const ESTATE_OBSERVED: &str = "jobs.estate.observed";
 
 /// The state-event payload for a Step: the serialized struct plus a
 /// top-level `step_id` — the same key every marker event uses.
@@ -195,6 +200,24 @@ pub fn network_census_event(
     boss_core::event::Event::new(
         "jobs",
         NETWORK_CENSUS,
+        payload,
+        boss_clock_client::wall_now(),
+    )
+}
+
+/// One estate observation, recorded verbatim.
+///
+/// DUMB ON PURPOSE, exactly like the census: the honesty lives in the
+/// thing that looked, and a door that second-guesses its instrument is
+/// a second instrument.
+pub fn estate_observed_event(
+    actor: &boss_core::actor::ActorId,
+    observation: serde_json::Value,
+) -> boss_core::event::Event {
+    let payload = boss_core::publisher::inject_actor(observation, actor);
+    boss_core::event::Event::new(
+        "jobs",
+        ESTATE_OBSERVED,
         payload,
         boss_clock_client::wall_now(),
     )

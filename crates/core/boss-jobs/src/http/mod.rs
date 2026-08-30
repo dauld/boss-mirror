@@ -167,6 +167,10 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
         .route("/api/jobs/{id}/metadata", patch(patch_job_metadata::<R, B>))
         .route("/api/jobs/{id}/convert", post(convert_job::<R, B>))
         .route("/api/estate/nodes", get(list_estate_nodes::<R, B>))
+        .route(
+            "/api/estate/observation",
+            post(record_estate_observation::<R, B>),
+        )
         .route("/api/jobs/{id}/stream", get(job_stream::<R, B>))
         .route("/api/jobs/step-types", get(list_step_types::<R, B>))
         // Station registry — data-defined priority queues over
