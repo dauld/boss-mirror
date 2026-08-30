@@ -605,6 +605,28 @@ pub(crate) fn silent_packet_verdict(job_finished: bool, job_failed: bool) -> Opt
 /// the packet is the record that outlives the pod — a gate whose
 /// container exited 0 can leave its pod `1/2 NotReady` for hours
 /// because a sidecar never exits, so pod phase is the wrong thing to
+/// How long the system of record may be absent before the absence is
+/// the answer. A deploy rolls it for tens of seconds; three minutes is
+/// far past that and still far short of a gate's runtime.
+const ABSENCE_TOLERANCE: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Is this the shape of error a restart produces, or a real one?
+///
+/// Deliberately takes the rendered message rather than the error, so
+/// the rule is a pure string decision a test can state outright — the
+/// alternative is matching on reqwest internals, which is both harder
+/// to read and harder to pin.
+pub(crate) fn is_transient(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("connection refused")
+        || m.contains("tcp connect error")
+        || m.contains("error sending request")
+        || m.contains("connection reset")
+        || m.contains("broken pipe")
+        || m.contains("timed out")
+        || m.contains("dns error")
+}
+
 /// watch. Reading the packet is also what any other actor would do.
 async fn wait_for_verdict(
     http: &reqwest::Client,
@@ -612,16 +634,57 @@ async fn wait_for_verdict(
     namespace: &str,
     job_name: &str,
 ) -> Result<()> {
+    // A MOMENTARY ABSENCE IS NOT A FAILURE.
+    //
+    // Every train deploy rolls the boss Deployment, and the jobs API
+    // goes with it — so the system of record disappears for tens of
+    // seconds on a schedule this verb cannot see. This loop used to
+    // treat that as fatal: `Connection refused` ended the wait and
+    // returned non-zero, which to a caller is indistinguishable from a
+    // red gate. Nothing was actually lost — the gate JOB is unaffected
+    // and keeps running — but an agent reading that as a failure
+    // re-gates, spending another ~11 minutes of cluster time on a run
+    // that was already healthy. Same reasoning as car 28662b18 one
+    // level up: a dropped lookup does not red a train (de5f22b6).
+    //
+    // Observed on 2026-08-30: the SoR dropped mid-gate, this poller
+    // died, and the gate it was watching went green on its own.
+    let mut absent_since: Option<std::time::Instant> = None;
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        let Some(job) = api(
+        let fetched = match api(
             http,
             reqwest::Method::GET,
             &format!("/api/jobs/{packet}"),
             None,
         )
-        .await?
-        else {
+        .await
+        {
+            Ok(v) => {
+                absent_since = None;
+                v
+            }
+            Err(e) if is_transient(&format!("{e:#}")) => {
+                let since = *absent_since.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() > ABSENCE_TOLERANCE {
+                    bail!(
+                        "the system of record has been unreachable for over {}s, which is \
+                         longer than a deploy takes — giving up on the WAIT, not on the \
+                         gate.\n  The Job {job_name} may still be running; read the packet \
+                         {packet} when the API is back.\n  Last error: {e:#}",
+                        ABSENCE_TOLERANCE.as_secs()
+                    );
+                }
+                eprintln!(
+                    "boss gate: system of record unreachable ({}s) — a deploy rolls it \
+                     briefly; the gate Job is unaffected, still waiting",
+                    since.elapsed().as_secs()
+                );
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        let Some(job) = fetched else {
             continue;
         };
         let job = job.get("data").unwrap_or(&job).clone();
@@ -1108,6 +1171,52 @@ apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: gate-runner-disk
         assert!(
             !msg.contains("NOT the same as a red gate"),
             "that caveat belongs to the failed case only: {msg}"
+        );
+    }
+
+    /// THE ERROR THAT KILLED A HEALTHY WAIT. The system of record went
+    /// down mid-gate on 2026-08-30 while the boss Deployment rolled;
+    /// the poller died with this, and the gate it was watching went
+    /// green on its own (de5f22b6).
+    #[test]
+    fn a_restart_looks_transient() {
+        for msg in [
+            "jobs api GET /api/jobs/156bf036: error sending request for url              (http://10.20.0.34:7900/api/jobs/156bf036): client error (Connect):              tcp connect error: Connection refused (os error 111)",
+            "operation timed out",
+            "connection reset by peer",
+            "dns error: failed to lookup address",
+        ] {
+            assert!(is_transient(msg), "should ride this out: {msg}");
+        }
+    }
+
+    /// ...and a real refusal is NOT transient, or the wait would hang
+    /// for three minutes on something that will never resolve. This is
+    /// the half that stops the tolerance becoming a blindfold.
+    #[test]
+    fn a_real_answer_is_not_transient() {
+        for msg in [
+            "jobs api GET /api/jobs/x: 403 forbidden: job is outside your scope",
+            "jobs api GET /api/jobs/x: 404 job not found",
+            "invalid job id",
+            "the gate receipt names no head",
+        ] {
+            assert!(!is_transient(msg), "should fail fast: {msg}");
+        }
+    }
+
+    /// The tolerance is far past a deploy and far short of a gate, so
+    /// riding out a restart can never be mistaken for waiting out a
+    /// real outage.
+    #[test]
+    fn the_absence_tolerance_sits_between_a_deploy_and_a_gate() {
+        assert!(
+            ABSENCE_TOLERANCE.as_secs() >= 120,
+            "a deploy takes tens of seconds"
+        );
+        assert!(
+            ABSENCE_TOLERANCE.as_secs() <= 600,
+            "a gate takes ~11 minutes"
         );
     }
 }

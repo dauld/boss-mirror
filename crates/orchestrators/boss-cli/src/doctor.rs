@@ -269,20 +269,128 @@ async fn check_install_services() -> Check {
     }
 }
 
+/// Does every registered step plugin have a step it can mount on?
+///
+/// FOUND THE HARD WAY (77e8609a). David reported "I don't know how to
+/// input my decision within this UX / I think the wrong step UX is
+/// showing" against a car's `scope` step. He was right, and it was
+/// worse than one packet: EIGHT of twelve active plugins were
+/// registered, active, with a bundle on disk, and no active workflow
+/// declared a step of their kind — so they could never mount. The
+/// purpose-built `scope-declaration` surface had never rendered for any
+/// car, ever, and every scope step fell back to the generic task
+/// surface. Nothing was broken; the good surface was simply unreachable.
+///
+/// WHY NO LINT CAUGHT IT. `step-plugin-bundle-exists.sh` checks one
+/// direction — every active row points at a bundle that exists — and
+/// deliberately allows the reverse, because a bundle may be committed
+/// before the migration that activates it. Both are right. The
+/// unchecked relationship is the third one: a registered row whose kind
+/// NO ACTIVE WORKFLOW USES.
+///
+/// It lives here rather than in a gate lint because it cannot be
+/// answered from the tree. Protocols are registry data now, so which
+/// step kinds are in play is a question only a running deployment can
+/// answer — the same reason `check-manifests-applied.sh` talks to a
+/// cluster instead of grepping.
+async fn check_step_plugins_mount() -> Check {
+    let label = "step plugins";
+    let base =
+        std::env::var("BOSS_JOBS_URL").unwrap_or_else(|_| "http://10.20.0.34:7900".to_string());
+    let get = |path: String| {
+        let url = format!("{base}{path}");
+        async move {
+            reqwest::Client::new()
+                .get(url)
+                .header("x-boss-user", crate::train::boss_user())
+                .send()
+                .await
+                .ok()?
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+        }
+    };
+    let (plugins, workflows) = tokio::join!(
+        get("/api/jobs/step-plugins".into()),
+        get("/api/workflows?limit=500".into())
+    );
+    let (Some(plugins), Some(workflows)) = (plugins, workflows) else {
+        return Check {
+            label,
+            passed: false,
+            detail: "could not read the registries — unknown, not clean".into(),
+        };
+    };
+    let orphans = orphaned_plugin_kinds(&plugins, &workflows);
+    Check {
+        passed: orphans.is_empty(),
+        label,
+        detail: if orphans.is_empty() {
+            "every active plugin has a step to mount on".into()
+        } else {
+            format!(
+                "{} active plugin(s) mount on NO active workflow step, so their \
+                 surface can never render and the step falls back to the generic \
+                 one: {}",
+                orphans.len(),
+                orphans.join(", ")
+            )
+        },
+    }
+}
+
+/// The comparison, pure — which registered plugin kinds no active
+/// workflow declares a step of.
+pub(crate) fn orphaned_plugin_kinds(
+    plugins: &serde_json::Value,
+    workflows: &serde_json::Value,
+) -> Vec<String> {
+    let rows = |v: &serde_json::Value| -> Vec<serde_json::Value> {
+        v.get("data")
+            .and_then(|d| d.as_array())
+            .or_else(|| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
+    let active = |v: &serde_json::Value| v.get("status").and_then(|s| s.as_str()) == Some("active");
+    let used: std::collections::BTreeSet<String> = rows(workflows)
+        .iter()
+        .filter(|w| active(w))
+        .flat_map(|w| {
+            w.get("steps")
+                .and_then(|s| s.as_array())
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|s| s.get("kind").and_then(|k| k.as_str()).map(str::to_string))
+        .collect();
+    let mut orphans: Vec<String> = rows(plugins)
+        .iter()
+        .filter(|p| active(p))
+        .filter_map(|p| p.get("kind").and_then(|k| k.as_str()).map(str::to_string))
+        .filter(|k| !used.contains(k))
+        .collect();
+    orphans.sort();
+    orphans.dedup();
+    orphans
+}
+
 pub async fn run_install() -> Result<()> {
     println!("Boss Install Health");
     println!("───────────────────────");
 
-    let (pg, nats, gw, manifest, services) = tokio::join!(
+    let (pg, nats, gw, manifest, services, plugins) = tokio::join!(
         check_install_postgres(),
         check_install_nats(),
         check_install_gateway(),
         check_install_tenant_manifest(),
         check_install_services(),
+        check_step_plugins_mount(),
     );
     let spa = check_install_spa();
 
-    let checks = [pg, nats, gw, manifest, spa, services];
+    let checks = [pg, nats, gw, manifest, spa, services, plugins];
 
     println!();
     for check in &checks {
@@ -302,4 +410,66 @@ pub async fn run_install() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// THE EIGHT. Reproduces the measured shape: a plugin registered
+    /// and active against a kind no active workflow declares can never
+    /// mount, and the step silently falls back to the generic surface —
+    /// which is what David saw and reported as the wrong UX (77e8609a).
+    #[test]
+    fn a_plugin_whose_kind_no_workflow_uses_is_orphaned() {
+        let plugins = json!([
+            {"kind": "scope-declaration", "status": "active"},
+            {"kind": "review-design", "status": "active"},
+        ]);
+        let workflows = json!([
+            {"status": "active", "steps": [{"kind": "task"}, {"kind": "review-design"}]}
+        ]);
+        assert_eq!(
+            orphaned_plugin_kinds(&plugins, &workflows),
+            vec!["scope-declaration".to_string()]
+        );
+    }
+
+    /// A RETIRED WORKFLOW DOES NOT KEEP A PLUGIN ALIVE. This is the
+    /// subtle half: `design-doc-review` has 49 closed packets and its
+    /// kind still appears in old versions, so counting every workflow
+    /// row rather than the ACTIVE ones would report the orphan as
+    /// mounted and hide it.
+    #[test]
+    fn only_active_workflows_count_as_a_mount_point() {
+        let plugins = json!([{"kind": "incident-review", "status": "active"}]);
+        let workflows = json!([
+            {"status": "retired", "steps": [{"kind": "incident-review"}]}
+        ]);
+        assert_eq!(
+            orphaned_plugin_kinds(&plugins, &workflows),
+            vec!["incident-review".to_string()]
+        );
+    }
+
+    /// ...and a retired PLUGIN is not a finding. Deactivating a row is
+    /// the intended way to take a surface out of service, so reporting
+    /// it would train the reader to ignore this check.
+    #[test]
+    fn a_retired_plugin_is_not_reported() {
+        let plugins = json!([{"kind": "marketing-brief", "status": "retired"}]);
+        let workflows = json!([{"status": "active", "steps": [{"kind": "task"}]}]);
+        assert!(orphaned_plugin_kinds(&plugins, &workflows).is_empty());
+    }
+
+    /// Both list shapes the API uses — a bare array, or wrapped in
+    /// `data` — because reading the wrong one reports every plugin as
+    /// orphaned, which is a false alarm that would get the check muted.
+    #[test]
+    fn both_envelope_shapes_are_read() {
+        let bare = json!([{"kind": "checklist", "status": "active"}]);
+        let wrapped = json!({"data": [{"status": "active", "steps": [{"kind": "checklist"}]}]});
+        assert!(orphaned_plugin_kinds(&bare, &wrapped).is_empty());
+    }
 }

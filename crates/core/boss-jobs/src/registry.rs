@@ -1110,9 +1110,8 @@ pub fn platform_workflows() -> Vec<WorkflowSpec> {
             "The 03:30 rooted-at-audit-log replay comparison.",
         ),
         design_doc_review_spec(),
-        user_feedback_spec(),
-        pr_train_spec(),
-        // `workflow-design`, `regenerate-deployment` and `backlog-item`
+        // `workflow-design`, `regenerate-deployment`, `backlog-item`,
+        // `ship-a-change`, `user-feedback` and `pr-train`
         // are NOT missing — they moved to infra/platform/workflows.toml
         // and are supplied by `boss-platform-workflow-seed`
         // (protocols-as-data, step 1: the kinds with no traffic first,
@@ -1206,516 +1205,6 @@ fn maintenance_spec(kind: &str, label: &str, description: &str) -> WorkflowSpec 
     spec
 }
 
-/// Build the canonical `pr-train` WorkflowSpec.
-///
-/// Changes do not open their own PRs. They accumulate on branches —
-/// each with its ship-a-change Job parked at `review` — and twice a
-/// day a train Job collects what is ready, assembles one batched
-/// branch, and opens ONE PR. The cadence is the system's, not the
-/// author's judgement: the ~2-PRs-a-day discipline stopped being a
-/// rule someone remembers and became a schedule something runs.
-///
-/// The Subject is a `custom` Subject whose id is the train branch
-/// (`train/2026-08-08-am`), the same shape ship-a-change uses — so
-/// "what shipped on this train" is Subject history.
-///
-/// Every step is closed by `infra/train/conductor.sh` with the
-/// evidence in hand — the branch it pushed, the PR it opened, the CI
-/// verdict it polled, the merge commit it observed, the deploys it
-/// ran. Two consequences shape the spec:
-///
-///  - every task carries `authority_role`: an ungated ready task gets
-///    role-matched and completed by the simulated workforce, and a
-///    train whose steps the sim closes records fiction;
-///  - `merged` is a task, not an outcome, and `cancelled` is
-///    marker-gated: the dispatcher completes any ready terminal, and
-///    this Workflow exists precisely because "merged" must mean the
-///    merge happened, not that review finished.
-///
-/// Step graph:
-///  -1. `scheduled` — the twice-daily timer fired
-///   0. `collect`   — what boarded (or `job.metadata.empty` → cancelled)
-///   1. `assemble`  — train branch built; conflicts skipped and named
-///   2. `pr`        — the one batched PR, url recorded
-///   3. `ci`        — the PR's checks, polled to a verdict
-///   3. `merged`    — the merge commit, observed on the remote
-///   4. `deployed`  — the deploys that carried it to the playground
-///   999. `arrived`/`cancelled` — outcomes
-fn pr_train_spec() -> WorkflowSpec {
-    let admin = Some("platform-admin".to_string());
-    let req = |name: &str| boss_core::job::StepField {
-        name: name.into(),
-        field_type: "string".into(),
-        required: true,
-    };
-    let steps = vec![
-        StepSpec {
-            title: "scheduled".into(),
-            kind: "trigger".into(),
-            ready_when: "true".into(),
-            title_template: "Train window opened".into(),
-            metadata_defaults: serde_json::json!({
-                "trigger_kind": "periodic",
-                "trigger_name": "pr-train-window",
-            }),
-            ..Default::default()
-        },
-        StepSpec {
-            title: "collect".into(),
-            kind: "task".into(),
-            ready_when: "steps.scheduled.done".into(),
-            title_template: "Collect what is ready to board".into(),
-            authority_role: admin.clone(),
-            // Which ship-a-change Jobs boarded, by id and branch. An
-            // empty window sets `job.metadata.empty` instead and the
-            // train cancels.
-            fields: vec![req("boarded")],
-            ..Default::default()
-        },
-        StepSpec {
-            title: "assemble".into(),
-            kind: "task".into(),
-            ready_when: "steps.collect.done".into(),
-            title_template: "Assemble the train branch".into(),
-            authority_role: admin.clone(),
-            // The pushed ref, plus any branch that failed to merge
-            // cleanly and was left for the next train.
-            fields: vec![req("train_ref")],
-            ..Default::default()
-        },
-        StepSpec {
-            title: "pr".into(),
-            kind: "task".into(),
-            ready_when: "steps.assemble.done".into(),
-            title_template: "Open the batched PR".into(),
-            authority_role: admin.clone(),
-            fields: vec![req("pr_url")],
-            ..Default::default()
-        },
-        StepSpec {
-            title: "ci".into(),
-            kind: "task".into(),
-            ready_when: "steps.pr.done".into(),
-            title_template: "CI verdict".into(),
-            authority_role: admin.clone(),
-            fields: vec![req("result")],
-            // The wait-over signal (rule notify-on-step-done-marked):
-            // CI landing is the "we can keep going" moment David asked
-            // BOSS itself to deliver.
-            metadata_defaults: serde_json::json!({ "notify_on_done": true }),
-            ..Default::default()
-        },
-        StepSpec {
-            title: "merged".into(),
-            kind: "task".into(),
-            // Gated on `pr`, not `ci`: the human can merge whenever
-            // they judge right, and the evidence of the merge does not
-            // depend on the conductor having polled the checks first.
-            ready_when: "steps.pr.done".into(),
-            title_template: "Merged into main".into(),
-            authority_role: admin.clone(),
-            fields: vec![req("merge_ref")],
-            metadata_defaults: serde_json::json!({ "notify_on_done": true }),
-            ..Default::default()
-        },
-        StepSpec {
-            title: "deployed".into(),
-            kind: "task".into(),
-            ready_when: "steps.merged.done".into(),
-            title_template: "Deployed to the playground".into(),
-            authority_role: admin.clone(),
-            // What actually went out: migrations applied, services
-            // restarted, web bundle — as reported by the scripts that
-            // did it.
-            fields: vec![req("deployed")],
-            metadata_defaults: serde_json::json!({ "notify_on_done": true }),
-            ..Default::default()
-        },
-        StepSpec {
-            title: "converged".into(),
-            kind: "task".into(),
-            ready_when: "steps.deployed.done".into(),
-            title_template: "Cluster converged".into(),
-            authority_role: admin.clone(),
-            // Merging installs nothing (fdff316c), and the cluster
-            // converge was fire-and-forget with no packet and no alarm
-            // (7e5ee013) — measured at six silent hours on 2026-08-19,
-            // which armed a dedup guard late and minted a duplicate
-            // packet. David, 2026-08-19: fix it at the TRAIN layer.
-            // The conductor completes this step only when the RUNNING
-            // cluster binary self-reports the merge commit (the health
-            // endpoint's build commit — proof the pod restarted onto
-            // it, where an image tag would only prove a push), and
-            // files a loud packet when convergence lags past the
-            // threshold instead of waiting silently.
-            fields: vec![req("cluster_commit"), req("verified")],
-            ..Default::default()
-        },
-        StepSpec {
-            title: "arrived".into(),
-            kind: "outcome".into(),
-            // Three evidence trails must be on the record: the deploys
-            // that carried it out, the CLUSTER actually serving the
-            // merge, AND the CI verdict — without the ci edge the
-            // verdict step is a leaf no terminal depends on, which the
-            // viability lint rightly rejects.
-            ready_when: "steps.converged.done AND steps.ci.done".into(),
-            title_template: "Train arrived".into(),
-            metadata_defaults: serde_json::json!({ "outcome_kind": "completed" }),
-            terminal: Some(Terminal {
-                outcome: "arrived".into(),
-            }),
-            ..Default::default()
-        },
-        StepSpec {
-            title: "cancelled".into(),
-            kind: "outcome".into(),
-            // Marker-gated (see `abandoned` on ship-a-change): on
-            // collect.done alone the dispatcher would cancel every
-            // train the moment it collected.
-            ready_when: "steps.collect.done AND job.metadata.empty = \"true\"".into(),
-            title_template: "Cancelled — nothing to board".into(),
-            metadata_defaults: serde_json::json!({ "outcome_kind": "aborted" }),
-            terminal: Some(Terminal {
-                outcome: "cancelled".into(),
-            }),
-            ..Default::default()
-        },
-    ];
-
-    let mut spec = WorkflowSpec::platform_seed(
-        "pr-train",
-        "PR train",
-        "platform",
-        vec!["custom".into()],
-        steps,
-    );
-    // owner_role puts trains on /system/flow with the other platform
-    // meta-kinds — the visibility half of the ask.
-    spec.metadata = serde_json::json!({ "owner_role": "platform-admin" });
-    spec.description = Some(
-        "The twice-daily release train: collects branches whose ship-a-change Jobs \
-         are ready for review, assembles them into one batched PR, and closes each \
-         step on evidence — the CI verdict, the observed merge, the deploys that \
-         carried it out. Driven by infra/train/conductor.sh from a systemd timer."
-            .to_string(),
-    );
-    spec
-}
-
-/// Build the canonical `user-feedback` WorkflowSpec.
-///
-/// Feedback is work, so it is a Job — not a table with its own
-/// surface. That choice is what makes it inherit everything the
-/// platform already does with work: an owner, a policy-gated
-/// transition, an audit trail of who triaged it and when, and a place
-/// in the same queues operators already read. A separate feedback
-/// store would have needed all of that rebuilt, and would have been
-/// the one kind of work the system could not see.
-///
-/// The Subject is the surface the feedback is ABOUT — a `custom`
-/// Subject whose id is the route path (`/ux/jobs`, `/system/design`).
-/// Same shape design-doc-review uses for a doc path. That makes "what
-/// have people said about this page" a Subject-history question, which
-/// the event linkage work already answers.
-///
-/// Step graph:
-///  -1. `trigger`   — someone submitted it from the chrome bar
-///   0. `triage`    — an operator reads it and decides
-///   999. `outcome` — closed
-fn user_feedback_spec() -> WorkflowSpec {
-    // Triage is a FORK, not a checkbox. Its output is a decision about
-    // what happens next, and the whole point of recording it on the
-    // step is that the successors gate on it — so "triaged" stops
-    // meaning "someone closed it" and starts meaning "someone chose a
-    // route". The first cut of this spec had a single successor, which
-    // made triage a step whose only possible outcome was closure; the
-    // board built on it was a to-do list wearing a Kanban.
-    //
-    // The vocabulary is an INLINE field on the step rather than a new
-    // StepType. `task`'s bundle stays generic and this Workflow carries
-    // its own completion contract, which is what inline authoring is
-    // for. The viability lint reads the pipe-shaped `field_type` as an
-    // enum domain and proves every value has a successor, so a
-    // disposition with nowhere to go fails at authoring time instead
-    // of stranding a Job at runtime.
-    const DISPOSITIONS: &str = "reproduce|design|build|duplicate|needs-info|decline";
-
-    // ROUTING IS NOT A ONE-SHOT GUESS (a001c78a, found by exercising
-    // the protocol rather than reading it).
-    //
-    // Every branch predicate used to read `steps.triage.metadata
-    // .disposition` and nothing else, so the packet was routed exactly
-    // once — before the investigation that produces the evidence. An
-    // investigator who discovered the item needed a design decision had
-    // no move: recording that on the investigate step was decorative,
-    // and `closed` fired on `steps.investigate.done`, so FINISHING the
-    // investigation ended the packet whatever it concluded. Observed
-    // live on 3f5f7f63, whose recommendation is stranded on a closed
-    // packet.
-    //
-    // So `investigate` carries the same vocabulary triage does, minus
-    // `reproduce` (it IS the reproduction) and plus `resolved` (the
-    // investigation settled it, which is v9's only behaviour). A branch
-    // is reachable from whichever step reached that conclusion.
-    //
-    // This is what the network framing predicts: routing decided once,
-    // by the actor with the least information, is exactly the property
-    // stations-as-queues exists to replace.
-    const INVESTIGATION_OUTCOMES: &str = "resolved|design|build|needs-info|duplicate|decline";
-
-    /// Reachable from triage's decision OR from the investigation's.
-    ///
-    /// Both halves must be evaluable at once: `boss-expr` errors on a
-    /// missing identifier and OR does not short-circuit past the error,
-    /// so ONE unreadable clause takes down a predicate that is
-    /// otherwise true. That is why `investigate` declares a
-    /// `metadata_defaults` disposition below — materialization stamps
-    /// it, so the key exists from the moment the step does. Registered
-    /// as `a-predicate-reading-another-steps-field-needs-that-key-to-exist`.
-    fn routed_to(disposition: &str) -> String {
-        format!(
-            "(steps.triage.done AND steps.triage.metadata.disposition = \"{disposition}\") \
-             OR (steps.investigate.done \
-             AND steps.investigate.metadata.disposition = \"{disposition}\")"
-        )
-    }
-
-    /// A branch that leaves the Job open for someone to do the work.
-    /// Authority-gated for the same reason triage is: `task` has no
-    /// required roles, so without a gate the simulated workforce
-    /// role-matches it and "investigates" real feedback on its own.
-    fn branch(title: &str, label: &str, disposition: &str) -> StepSpec {
-        StepSpec {
-            title: title.into(),
-            kind: "task".into(),
-            ready_when: routed_to(disposition),
-            title_template: label.into(),
-            authority_role: Some("platform-admin".into()),
-            ..Default::default()
-        }
-    }
-
-    /// A branch that ends the Job immediately. `outcome_kind` is a
-    /// closed enum on the StepType (`completed|skipped|aborted|
-    /// withdrawn`), so the domain-specific label rides on `terminal`,
-    /// which is free-form — a Job that ended as a duplicate reads that
-    /// way in its outcome without inventing a new outcome_kind.
-    fn closing_branch(
-        title: &str,
-        label: &str,
-        disposition: &str,
-        outcome_kind: &str,
-        outcome: &str,
-    ) -> StepSpec {
-        StepSpec {
-            title: title.into(),
-            kind: "outcome".into(),
-            ready_when: routed_to(disposition),
-            title_template: label.into(),
-            metadata_defaults: serde_json::json!({ "outcome_kind": outcome_kind }),
-            terminal: Some(Terminal {
-                outcome: outcome.into(),
-            }),
-            ..Default::default()
-        }
-    }
-
-    let steps = vec![
-        StepSpec {
-            title: "submitted".into(),
-            kind: "trigger".into(),
-            ready_when: "true".into(),
-            title_template: "Feedback submitted".into(),
-            metadata_defaults: serde_json::json!({
-                "trigger_kind": "operator",
-                "trigger_name": "user-submits-feedback",
-            }),
-            ..Default::default()
-        },
-        StepSpec {
-            title: "triage".into(),
-            // `task` — "simple assigned task for HR, IT, admin", which
-            // is what triaging is, and it requires no metadata of its
-            // own. This was `acknowledgment` and could never be closed:
-            // that kind means "confirm receipt of a policy or document"
-            // and requires `document_title`. Validators run at
-            // `completed`, so the step materialized fine and every
-            // attempt to triage failed. Pick the kind whose field
-            // schema describes the work, not the one whose label
-            // sounds close.
-            kind: "task".into(),
-            ready_when: "steps.submitted.done".into(),
-            title_template: "Triage feedback".into(),
-            // Authority is what keeps this waiting for a person.
-            // Without it the dispatcher role-matches the ready step to
-            // whichever employee fits and the simulated workforce
-            // completes it — observed on the live box, where a
-            // feedback Job went from submitted to closed in one tick
-            // with `emp-aa-286` recorded as the actor. Feedback nobody
-            // read is worse than no feedback mechanism, because the
-            // audit trail says it was handled.
-            authority_role: Some("platform-admin".into()),
-            fields: vec![
-                boss_core::job::StepField {
-                    name: "disposition".into(),
-                    field_type: DISPOSITIONS.into(),
-                    // Required at done: there is no such thing as
-                    // completing triage without deciding where it goes.
-                    required: true,
-                },
-                // What triage FOUND, as opposed to where it routed.
-                //
-                // The board recorded that an agent had been asked and
-                // never what it came back with, so a diagnosed item and
-                // an untouched one looked identical — three items sat
-                // in "waiting" for a whole session with their causes
-                // known and their fixes shipped.
-                //
-                // Free text, because that is what eight hand-processed
-                // items actually produced: a root cause (a claim about
-                // the code the feedback text never mentions) and what
-                // was done about it. Never a structured verdict. A
-                // schema here would have been invented rather than
-                // observed.
-                //
-                // Optional: a finding is evidence, and triage can
-                // legitimately route something obvious without one.
-                // Declared on the step rather than kept as loose
-                // metadata so it is self-describing — the generic step
-                // surface renders it from the contract, with no second
-                // place teaching a UI about feedback.
-                boss_core::job::StepField {
-                    name: "finding".into(),
-                    field_type: "string".into(),
-                    required: false,
-                },
-            ],
-            ..Default::default()
-        },
-        StepSpec {
-            // Reached from triage only — an investigation cannot route
-            // to another investigation, and `reproduce` is not in
-            // INVESTIGATION_OUTCOMES for that reason.
-            ready_when: "steps.triage.done AND steps.triage.metadata.disposition = \"reproduce\""
-                .into(),
-            fields: vec![
-                boss_core::job::StepField {
-                    name: "disposition".into(),
-                    field_type: INVESTIGATION_OUTCOMES.into(),
-                    // Required at done, like triage's: an investigation
-                    // that does not say where the item goes next is the
-                    // v9 behaviour this replaces.
-                    required: true,
-                },
-                boss_core::job::StepField {
-                    name: "finding".into(),
-                    field_type: "string".into(),
-                    required: false,
-                },
-            ],
-            // `resolved` — the investigation settled it — is v9's only
-            // outcome, so an investigator who says nothing gets exactly
-            // the old behaviour.
-            //
-            // The default is LOAD-BEARING twice over, and neither
-            // reason is cosmetic. (1) Materialization stamps it, so
-            // every branch predicate above can read
-            // `steps.investigate.metadata.disposition` from the moment
-            // the packet exists — without it the key is absent, the
-            // clause errors, and OR takes the whole predicate down with
-            // it. (2) The `complete-feedback-branch-on-car-merged`
-            // obligation completes `investigate` when a car names the
-            // packet; a required field with no default would 422 that
-            // write and break the feedback loop.
-            metadata_defaults: serde_json::json!({ "disposition": "resolved" }),
-            ..branch("investigate", "Reproduce and investigate", "reproduce")
-        },
-        // v11 (David, 0ab5fa3a, accepted 2026-08-19): the design
-        // decision is kind `answer-question`, not `task`. Browser-
-        // measured on v10: a task with no declared fields renders the
-        // generic surface, whose whole decision affordance was one
-        // Start button — no verdict, no response, nowhere to record
-        // WHAT was decided. `answer-question` is the platform's
-        // question-and-response contract (verdict + answer required at
-        // done), it lands in My Day's "Yours to decide" queue, and its
-        // plugin renders the brief + buttons + proposed answer. The
-        // slug stays `design-review`, so the `closed` terminal and the
-        // car-merge obligation keep matching; that obligation carries
-        // the required fields via its rule row's `done_metadata` arg.
-        StepSpec {
-            kind: "answer-question".into(),
-            ..branch("design-review", "Decide the design", "design")
-        },
-        branch("build", "Build the change", "build"),
-        branch("needs-info", "Waiting on the reporter", "needs-info"),
-        closing_branch(
-            "duplicate",
-            "Closed as a duplicate",
-            "duplicate",
-            "withdrawn",
-            "duplicate",
-        ),
-        closing_branch(
-            "declined",
-            "Closed without action",
-            "decline",
-            "aborted",
-            "declined",
-        ),
-        StepSpec {
-            title: "closed".into(),
-            kind: "outcome".into(),
-            // Any branch that did real work lands here. The two
-            // closing branches terminate on their own and never reach
-            // this one.
-            //
-            // `investigate` is the exception, and the narrowing is the
-            // other half of the re-routing fix: finishing an
-            // investigation ends the packet ONLY when the investigation
-            // said there was nothing further. An investigation that
-            // routed onward leaves this predicate false and the packet
-            // open, waiting at the branch it named — which is the
-            // behaviour a001c78a reported missing.
-            ready_when: "(steps.investigate.done \
-                         AND steps.investigate.metadata.disposition = \"resolved\") \
-                         OR steps.design-review.done \
-                         OR steps.build.done OR steps.needs-info.done"
-                .into(),
-            title_template: "Feedback closed".into(),
-            metadata_defaults: serde_json::json!({ "outcome_kind": "completed" }),
-            terminal: Some(Terminal {
-                outcome: "completed".into(),
-            }),
-            ..Default::default()
-        },
-    ];
-
-    let mut spec = WorkflowSpec::platform_seed(
-        "user-feedback",
-        "User feedback",
-        "platform",
-        vec!["custom".into()],
-        steps,
-    );
-    // Platform meta-work is owned by the operator baseline, same as
-    // the other two meta-kinds. Without this the Job materializes with
-    // no resolvable human owner and sits unassignable — the
-    // human_owner_gate test exists for exactly that, and caught this
-    // spec missing it.
-    spec.metadata = serde_json::json!({ "owner_role": "platform-admin" });
-    spec.description = Some(
-        "Feedback a user sent from the chrome bar. The Subject is the surface it is about \
-         (a `custom` Subject whose id is the route path), so \"what have people said about \
-         this page\" is a Subject-history question rather than a report someone has to build. \
-         Modelled as a Job deliberately: feedback is work, and work that lives outside the \
-         Job model is work the system cannot route, own, or audit. Triage forks on a \
-         disposition, so routing an item is a recorded decision that opens the next step."
-            .to_string(),
-    );
-    spec
-}
-
 /// Which `user-feedback` step a triage disposition opens, and whether
 /// reaching it ends the Job on its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1746,12 +1235,25 @@ pub struct FeedbackBranch {
 /// one the viability lint has yet to catch.
 pub fn feedback_branch_for_disposition(disposition: &str) -> Option<FeedbackBranch> {
     let needle = format!("steps.triage.metadata.disposition = \"{disposition}\"");
-    user_feedback_spec()
+    // READS THE BUNDLE, because that is where the protocol lives now.
+    // The §9a point is unchanged — this still derives the mapping from
+    // the protocol rather than restating it — but the source moved from
+    // a Rust function to `infra/platform/workflows.toml` (e332a320).
+    // Parsed once: the bundle is a build-time artefact of the tree, not
+    // something that changes under a running process.
+    static SPEC: std::sync::OnceLock<Option<WorkflowSpec>> = std::sync::OnceLock::new();
+    let spec = SPEC.get_or_init(|| {
+        crate::seed_loader::load_workflows(platform_bundle_path())
+            .ok()?
+            .into_iter()
+            .find(|w| w.kind == "user-feedback")
+    });
+    spec.as_ref()?
         .steps
-        .into_iter()
+        .iter()
         .find(|s| s.ready_when.contains(&needle))
         .map(|s| FeedbackBranch {
-            slug: s.title,
+            slug: s.title.clone(),
             terminal: s.terminal.is_some(),
         })
 }
@@ -4578,6 +4080,19 @@ mod tests {
     /// Regression this came from: triage shipped as `acknowledgment`,
     /// which requires `document_title`. Validators run at `completed`,
     /// so the Job materialized cleanly and looked healthy in the
+    /// The `user-feedback` protocol, read from the bundle it now lives
+    /// in (e332a320). These tests used to call a Rust `user_feedback_spec()`;
+    /// reading the bundle is strictly stronger, because the bundle is
+    /// what a deployment actually seeds — a test against the Rust copy
+    /// could pass while the shipped protocol differed.
+    fn user_feedback_spec() -> WorkflowSpec {
+        crate::seed_loader::load_workflows(platform_bundle_path())
+            .expect("the platform Workflow bundle parses")
+            .into_iter()
+            .find(|w| w.kind == "user-feedback")
+            .expect("the bundle carries user-feedback")
+    }
+
     /// waiting column; the only symptom was a 400 the first time a
     /// human tried to triage real feedback.
     #[test]
@@ -5627,11 +5142,13 @@ mod tests {
 
     #[test]
     fn pr_train_steps_close_on_evidence_not_on_readiness() {
-        let kinds = platform_workflows();
+        // pr-train moved to the bundle (e332a320), so read it from
+        // where it now lives — which is also what a deployment seeds.
+        let kinds = seedable_platform_workflows();
         let train = kinds
             .iter()
             .find(|k| k.kind == "pr-train")
-            .expect("pr-train present");
+            .expect("pr-train present in the platform bundle");
 
         // Every evidence step — one that carries required fields for
         // the conductor to fill — is authority-gated: an ungated ready
@@ -5764,11 +5281,12 @@ mod tests {
         // new protocol never touches Rust at all.
         assert_eq!(
             kinds.len(),
-            6,
-            "ships design-doc-review + user-feedback + pr-train + the three \
-             maintenance kinds (backup / audit-integrity / ledger-replay — \
-             internal-forge Q6). workflow-design, regenerate-deployment, \
-             backlog-item and ship-a-change are in the bundle, not here."
+            4,
+            "ships design-doc-review + the three maintenance kinds (backup / \
+             audit-integrity / ledger-replay — internal-forge Q6). \
+             workflow-design, regenerate-deployment, backlog-item, \
+             ship-a-change, and now user-feedback and pr-train (e332a320) \
+             are in the bundle, not here."
         );
         // NO TENANT NOUNS IN CORE. David, 2026-08-16: "We don't want
         // brewery nouns in core no matter what. But most nouns should
@@ -6006,10 +5524,13 @@ mod tests {
         // Feedback is a Job like any other work: its Subject is the
         // surface it is about, which is what makes "what have people
         // said about this page" answerable from Subject history.
-        let feedback = kinds
+        // From the bundle now (e332a320) — the roster no longer carries
+        // it, and the bundle is what a deployment seeds.
+        let seeded = seedable_platform_workflows();
+        let feedback = seeded
             .iter()
             .find(|k| k.kind == "user-feedback")
-            .expect("user-feedback present");
+            .expect("user-feedback present in the platform bundle");
         assert_eq!(feedback.version, 1);
         assert_eq!(feedback.status, WorkflowStatus::Active);
         assert_eq!(feedback.subject_kinds, vec!["custom".to_string()]);
