@@ -11,6 +11,7 @@ mod docs_flush;
 mod doctor;
 mod gate;
 mod inspect;
+mod merged;
 mod ops;
 mod park;
 mod prove;
@@ -182,6 +183,22 @@ enum Commands {
         /// Check the receipt and report, without filing anything.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Did this branch actually land on main?
+    ///
+    /// The question three separate shell pipelines answered wrongly in
+    /// one session (26b3d203): a deleted branch, a squash merge and a
+    /// stale local ref each produced a confident "not merged". The
+    /// rules live in one tested function here instead.
+    Merged {
+        /// Branch to ask about.
+        branch: String,
+        /// Clone to ask in. Defaults to the working directory.
+        #[arg(long)]
+        clone: Option<String>,
+        /// Remote that receives trains — the authority for main.
+        #[arg(long)]
+        remote: Option<String>,
     },
     /// Prove a merged car in production by RUNNING a probe.
     ///
@@ -708,6 +725,11 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Commands::Merged {
+            branch,
+            clone,
+            remote,
+        } => merged::run(&branch, clone, remote),
         Commands::Prove {
             car,
             probe,
