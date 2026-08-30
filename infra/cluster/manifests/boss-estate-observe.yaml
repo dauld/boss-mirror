@@ -1,0 +1,134 @@
+# Look at the estate, and write down what was there.
+#
+# `nodes` (144-estate-subjects.sql) says what machines we MEANT to
+# have. Nothing has ever recorded what is ACTUALLY there, so the two
+# could not be compared — and on 2026-08-30 three separate accounts of
+# the estate were wrong in the same direction, because none of them was
+# connected to the machines. w-1, the 32-core node that compiles this
+# repository, was missing from the registry for five days (59ef456a).
+#
+# WHY A CRONJOB AND NOT A DISPATCHER HANDLER. Handlers speak HTTP to
+# the jobs API and own no private view — that is a deliberate property,
+# and it means a handler can COMPARE but cannot OBSERVE. Only something
+# inside the cluster can list nodes without a credential being placed
+# somewhere it does not belong. So the split is: this observes and
+# posts, the API records, and a handler on cadence compares the
+# observation against the registry and opens a packet on the difference.
+#
+# IT DOES NOT WRITE THE REGISTRY, and must not. If the observer updated
+# `nodes` directly, the cluster would become the source of truth for its
+# own declaration and nothing could ever be found MISSING — only
+# silently added. Declared and observed stay apart; the difference is
+# the finding.
+#
+# Pins: reads nodes cluster-wide (read-only), posts to the jobs API by
+# service DNS. Secrets are referenced by name only.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: estate-observer
+  namespace: boss
+---
+# Node listing is cluster-scoped, so this is the one ClusterRole in the
+# tree — and it is `get,list` on nodes and nothing else. An observer
+# that could change anything would be a different kind of thing.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: estate-observer
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: estate-observer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: estate-observer
+subjects:
+  - kind: ServiceAccount
+    name: estate-observer
+    namespace: boss
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: boss-estate-observe
+  namespace: boss
+spec:
+  # Daily, an hour after the backup, so a quiet window stays quiet.
+  schedule: "20 10 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: estate-observer
+          containers:
+            - name: observe
+              image: alpine/k8s:1.33.3
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  # In-cluster credentials: the ServiceAccount token is
+                  # mounted, so kubectl needs no kubeconfig.
+                  kubectl get nodes -o json > /tmp/nodes.json
+                  python3 - <<'PY' > /tmp/observation.json
+                  import json, datetime
+                  raw = json.load(open("/tmp/nodes.json"))
+                  def gib(v):
+                      # Kubernetes reports Ki/Mi; the registry declares GiB.
+                      if not v: return None
+                      if v.endswith("Ki"): return round(int(v[:-2]) / 1024 / 1024)
+                      if v.endswith("Mi"): return round(int(v[:-2]) / 1024)
+                      return None
+                  nodes = []
+                  for n in raw.get("items", []):
+                      md, st = n.get("metadata", {}), n.get("status", {})
+                      cap = st.get("capacity", {})
+                      addrs = [a["address"] for a in st.get("addresses", [])
+                               if a.get("type") == "InternalIP"]
+                      ready = next((c["status"] for c in st.get("conditions", [])
+                                    if c.get("type") == "Ready"), "Unknown")
+                      nodes.append({
+                          "id": md.get("name"),
+                          "address": addrs[0] if addrs else None,
+                          "cpu": int(cap.get("cpu", 0)) or None,
+                          "memory_gb": gib(cap.get("memory")),
+                          "disk_gb": gib(cap.get("ephemeral-storage")),
+                          "purpose": (md.get("labels") or {}).get("boss.dev/purpose"),
+                          "control_plane": "node-role.kubernetes.io/control-plane"
+                                           in (md.get("labels") or {}),
+                          "ready": ready == "True",
+                      })
+                  print(json.dumps({
+                      "observed_at": datetime.datetime.now(datetime.UTC).isoformat(),
+                      "observer": "boss-estate-observe",
+                      "scope": "kubernetes-nodes",
+                      "nodes": sorted(nodes, key=lambda x: x["id"] or ""),
+                  }))
+                  PY
+                  echo "observed $(python3 -c 'import json;print(len(json.load(open("/tmp/observation.json"))["nodes"]))') node(s)"
+                  # The door refuses an observation that saw nothing, so a
+                  # denied or broken probe fails loudly here rather than
+                  # recording an empty estate.
+                  code=$(curl -s -o /tmp/resp -w '%{http_code}' -X POST \
+                    -H "content-type: application/json" \
+                    -H "x-boss-user: {\"id\":\"automation:estate-observer\",\"role\":\"platform-admin\",\"access_tier\":\"operator\"}" \
+                    --data-binary @/tmp/observation.json \
+                    "$JOBS_API/api/estate/observation")
+                  echo "jobs api: $code $(cat /tmp/resp)"
+                  test "$code" = "202"
+              env:
+                - name: JOBS_API
+                  value: "http://boss.boss.svc.cluster.local:7900"
