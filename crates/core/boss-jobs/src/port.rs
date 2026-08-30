@@ -321,6 +321,22 @@ pub struct AssignmentRow {
     pub step: Step,
 }
 
+/// A machine BOSS runs on, as the estate registry declares it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EstateNode {
+    pub id: String,
+    pub label: String,
+    pub address: String,
+    pub role: String,
+    pub cpu: Option<i32>,
+    pub memory_gb: Option<i32>,
+    pub disk_gb: Option<i32>,
+    pub notes: Option<String>,
+    /// Retired machines stay readable so history resolves, exactly as
+    /// retired subject kinds do.
+    pub retired: bool,
+}
+
 /// Persistence port for jobs and steps.
 ///
 /// **Timestamp threading.** The four mutation methods come in two
@@ -401,6 +417,22 @@ pub trait JobsRepository: Send + Sync {
         patch: &serde_json::Map<String, serde_json::Value>,
         stamp: &boss_core::publisher::EventStamp,
     ) -> Result<Job, JobsError>;
+
+    /// Every machine the estate declares.
+    ///
+    /// READ ONLY, AND DELIBERATELY SO. `nodes` is seeded by schema
+    /// migration — declaring a machine is a change to the tree that
+    /// converges, not an API write — so there is no create/update here
+    /// and there should not be. What is missing today is any way to
+    /// READ it: the tables have existed since 144-estate-subjects.sql
+    /// and no service has ever served them, so "what hardware is
+    /// running" was unanswerable from inside BOSS and had to be
+    /// re-derived by shelling into machines (59ef456a).
+    ///
+    /// DECLARED capacity, not observed. Free space now is a
+    /// measurement with a timestamp and belongs on the log, which is
+    /// what the `node` subject kind's own description says.
+    async fn list_estate_nodes(&self) -> Result<Vec<EstateNode>, JobsError>;
 
     /// Re-pin a packet to a different protocol version.
     ///

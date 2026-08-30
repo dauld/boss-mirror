@@ -86,6 +86,32 @@ rules:
   - apiGroups: [batch]
     resources: [jobs]
     verbs: [create, get, list, watch]
+  # READ WHAT THIS CREDENTIAL IS RESPONSIBLE FOR VERIFYING.
+  #
+  # The gate runner's script reaches the cluster as ConfigMap
+  # `gate-runner-script`, and a session that launches gates could not
+  # read it — so "is the runner running the script the tree says?" was
+  # unanswerable from the machine that runs the gates. The only way to
+  # check was an admin kubeconfig on a workstation, which makes what an
+  # operator can VERIFY depend on which machine they came in from
+  # rather than on their credential. David, 2026-08-30: "We should have
+  # the policy approval regardless of how we come in... assuming our
+  # credentials are properly validated with no special backdoors."
+  #
+  # WORSE, THE ABSENCE READ AS DATA. A forbidden `kubectl get` prints
+  # nothing on stdout, so `... | grep -c` returns 0 and a check for
+  # "does the live ConfigMap carry this string" answered ZERO for the
+  # wrong reason. I made exactly that measurement on 2026-08-30 and
+  # only caught it by re-reading with a credential that could actually
+  # see (boss-empty-api-reads-mean-wrong-actor, again).
+  #
+  # READ ONLY, and only here. `create`/`update` stay withheld for the
+  # same reason `delete` is withheld on jobs above: the session never
+  # writes a ConfigMap — the converge runner owns that — so granting it
+  # would be scope nobody asked for.
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

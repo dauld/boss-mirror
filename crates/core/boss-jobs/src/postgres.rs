@@ -52,6 +52,19 @@ impl PgJobs {
 // ---------------------------------------------------------------------------
 
 #[derive(sqlx::FromRow)]
+struct EstateNodeRow {
+    id: String,
+    label: String,
+    address: String,
+    role: String,
+    cpu: Option<i32>,
+    memory_gb: Option<i32>,
+    disk_gb: Option<i32>,
+    notes: Option<String>,
+    retired: bool,
+}
+
+#[derive(sqlx::FromRow)]
 struct JobRow {
     id: uuid::Uuid,
     kind: String,
@@ -517,6 +530,34 @@ impl JobsRepository for PgJobs {
             .await
             .map_err(|e| JobsError::Storage(e.to_string()))?;
         Ok(job)
+    }
+
+    async fn list_estate_nodes(&self) -> Result<Vec<crate::port::EstateNode>, JobsError> {
+        let rows = sqlx::query_as::<_, EstateNodeRow>(
+            r#"
+            SELECT id, label, address, role, cpu, memory_gb, disk_gb, notes,
+                   (retired_at IS NOT NULL) AS retired
+            FROM nodes
+            ORDER BY role, id
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::port::EstateNode {
+                id: r.id,
+                label: r.label,
+                address: r.address,
+                role: r.role,
+                cpu: r.cpu,
+                memory_gb: r.memory_gb,
+                disk_gb: r.disk_gb,
+                notes: r.notes,
+                retired: r.retired,
+            })
+            .collect())
     }
 
     async fn repin_workflow_version_at(

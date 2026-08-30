@@ -242,6 +242,13 @@ impl JobsRepository for InMemoryJobs {
         Ok(merged)
     }
 
+    async fn list_estate_nodes(&self) -> Result<Vec<crate::port::EstateNode>, JobsError> {
+        // The estate is seeded by schema migration, so an in-memory
+        // registry genuinely has none — and saying so is better than
+        // inventing fixtures a test would then assert against.
+        Ok(Vec::new())
+    }
+
     async fn repin_workflow_version_at(
         &self,
         id: &JobId,

@@ -22,6 +22,7 @@ mod running;
 mod script;
 mod train;
 mod upgrade;
+mod workflow;
 
 #[derive(Parser)]
 #[command(name = "boss", about = "Boss operator + developer CLI", version)]
@@ -231,6 +232,16 @@ enum Commands {
         /// Jobs API to ask what is actually serving.
         #[arg(long)]
         jobs_url: Option<String>,
+    },
+    /// Protocol registry operations.
+    ///
+    /// Grouped deliberately: a new workflow verb lands inside
+    /// `WorkflowAction` rather than adding another variant to this
+    /// enum, which is the line every subcommand car contends on
+    /// (84f9fbc0).
+    Workflow {
+        #[command(subcommand)]
+        action: WorkflowAction,
     },
     /// Prove a merged car in production by RUNNING a probe.
     ///
@@ -587,6 +598,22 @@ enum InspectAction {
 }
 
 #[derive(Subcommand)]
+enum WorkflowAction {
+    /// Publish a protocol version through the whole safe sequence:
+    /// lint, refuse a dirty registry, create the draft and read it
+    /// back, publish, then confirm what actually went live.
+    Publish {
+        /// Workflow kind, e.g. `ship-a-change`.
+        kind: String,
+        /// JSON spec to publish.
+        spec: std::path::PathBuf,
+        /// Lint and report without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum ScriptAction {
     /// List registered scripts
     List {
@@ -779,6 +806,13 @@ async fn main() -> Result<()> {
             remote,
             jobs_url,
         } => running::run(clone, remote, jobs_url),
+        Commands::Workflow { action } => match action {
+            WorkflowAction::Publish {
+                kind,
+                spec,
+                dry_run,
+            } => workflow::publish(&kind, &spec, dry_run).await,
+        },
         Commands::Prove {
             car,
             probe,

@@ -1337,6 +1337,28 @@ pub(super) async fn convert_job<R: JobsRepository + 'static, B: EventBus + 'stat
     }
 }
 
+/// `GET /api/estate/nodes` — the machines BOSS declares it runs on.
+///
+/// The estate tables have existed since `144-estate-subjects.sql` and
+/// nothing has ever served them, so "what hardware is running" was
+/// unanswerable from inside BOSS. Every answer had to be re-derived by
+/// shelling into machines, and on 2026-08-30 three separate accounts of
+/// the estate — the registry, a prose inventory, and an operator's
+/// recollection — were wrong in the same direction because none was
+/// connected to the machines (59ef456a).
+///
+/// Read-only on purpose: declaring a machine is a schema migration that
+/// converges, not an API write.
+pub(super) async fn list_estate_nodes<R: JobsRepository + 'static, B: EventBus + 'static>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+    CurrentUser(_user): CurrentUser,
+) -> Response {
+    match state.jobs.list_estate_nodes().await {
+        Ok(nodes) => Json(serde_json::json!({ "data": nodes })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::edge_guidance;
