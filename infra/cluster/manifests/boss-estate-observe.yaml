@@ -122,13 +122,23 @@ spec:
                   # The door refuses an observation that saw nothing, so a
                   # denied or broken probe fails loudly here rather than
                   # recording an empty estate.
+                  # `set -e` + a bare command substitution swallowed the
+                  # first real failure without a word: curl exited 6 on a
+                  # dead DNS name and the script died before its own
+                  # report line (3ddd8333). Failing is fine; failing
+                  # SILENTLY in a script that promises to fail loudly is
+                  # not — so curl's own exit is caught and spoken.
                   code=$(curl -s -o /tmp/resp -w '%{http_code}' -X POST \
                     -H "content-type: application/json" \
                     -H "x-boss-user: {\"id\":\"automation:estate-observer\",\"role\":\"platform-admin\",\"access_tier\":\"operator\"}" \
                     --data-binary @/tmp/observation.json \
-                    "$JOBS_API/api/estate/observation")
+                    "$JOBS_API/api/estate/observation") \
+                    || { rc=$?; echo "jobs api: UNREACHABLE (curl exit $rc, target $JOBS_API)"; exit 1; }
                   echo "jobs api: $code $(cat /tmp/resp)"
                   test "$code" = "202"
               env:
                 - name: JOBS_API
-                  value: "http://boss.boss.svc.cluster.local:7900"
+                  # boss-jobs-internal is the in-cluster door; ns boss has
+                  # no Service named `boss` — the original value resolved
+                  # to nothing and no observation could ever land.
+                  value: "http://boss-jobs-internal.boss.svc.cluster.local:7900"

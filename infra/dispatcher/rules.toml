@@ -791,3 +791,24 @@ name = "network-census-daily"
 schedule = { cadence = "daily", anchor_date = "2026-08-21" }
 [[rule.do]]
 handler = "network.census"
+
+# The estate comparison (59ef456a): the compare half of the
+# declared/observed split. Fires on each `jobs.estate.observed` event
+# — the observation rides in the payload, so there is no tail read and
+# no second clock; the comparison inherits the observer's own daily
+# cadence. The handler reads GET /api/estate/nodes, applies the scope
+# rule (only `talos-*` declared rows participate — the forge host and
+# boss-gcp can never appear in a kubernetes-nodes observation), and
+# lands one `jobs.estate.compared` event via the comparison door.
+# Report first: no rule listens on that topic; the raiser comes later,
+# calibrated on this series. Details in the handler's module doc
+# (boss-dispatcher-handlers handlers/estate_compare.rs).
+#
+# Seeded by 202608302200-the-estate-is-compared.sql; present here
+# because `dispatcher_rules_seed_matches_toml` compares in BOTH
+# directions.
+[[rule]]
+name = "estate-compare-on-observation"
+on_event = "jobs.estate.observed"
+[[rule.do]]
+handler = "estate.compare"

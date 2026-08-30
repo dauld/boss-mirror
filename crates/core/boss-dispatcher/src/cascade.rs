@@ -105,6 +105,13 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // not for the cascade — so the loop terminates here by design
         // (packet-loss.md Q2: report first, raise later).
         ("network.census", vec!["jobs.network.census"]),
+        // The estate comparison (59ef456a): fires on each
+        // `jobs.estate.observed`, reads the registry through the jobs
+        // API, and lands one `jobs.estate.compared` event via the
+        // comparison door. No rule listens on that topic — the series
+        // is for lenses and for calibrating the eventual raiser, so
+        // the loop terminates here by design, same as the census.
+        ("estate.compare", vec!["jobs.estate.compared"]),
         ("messages.notify", vec![]),
         // Tells the filer how their packet ended. A sink, like every
         // other notifier — the message is the end of the cascade, not

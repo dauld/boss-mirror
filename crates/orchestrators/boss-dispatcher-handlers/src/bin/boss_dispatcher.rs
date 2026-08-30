@@ -21,7 +21,8 @@ use boss_dispatcher::rules::schedule_runner::{DEFAULT_CATCHUP_CAP, ScheduleRunne
 use boss_dispatcher_handlers::handlers::{
     bill_payment_batch::BillPaymentBatch, commerce_invoice_issue::CommerceInvoiceIssue,
     docs_design_sweep::DocsDesignSweep, docs_flush_queue::DocsFlushQueue,
-    gate_resolve::GateResolve, inventory_bill_approve::InventoryBillApprove,
+    estate_compare::EstateCompare, gate_resolve::GateResolve,
+    inventory_bill_approve::InventoryBillApprove,
     inventory_overhead_absorb::InventoryOverheadAbsorb,
     inventory_parts_consume::InventoryPartsConsume, inventory_parts_produce::InventoryPartsProduce,
     inventory_po_place::InventoryPoPlace, inventory_receive::InventoryReceive,
@@ -254,6 +255,11 @@ async fn main() -> Result<()> {
             // Report first — no raiser, no threshold; the series this
             // accumulates is what calibrates one later.
             handlers.register(NetworkCensus::new(cfg.jobs_api_url.clone()));
+            // The estate comparison (59ef456a): declared vs observed,
+            // fired by each jobs.estate.observed event, recorded as one
+            // jobs.estate.compared event per observation. Report first
+            // — the raiser comes later, calibrated on this series.
+            handlers.register(EstateCompare::new(cfg.jobs_api_url.clone()));
             handlers.register(MessagesNotify::new(
                 cfg.people_api_url.clone(),
                 cfg.messages_api_url.clone(),

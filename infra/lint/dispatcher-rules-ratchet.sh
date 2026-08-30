@@ -120,7 +120,15 @@ set -euo pipefail
 # is a standing state of the network — what is NOT moving — which no
 # Workflow definition can declare, because no packet causes it; a
 # census's whole point is to run when no event fired.
-BASELINE=51
+# 51 -> 52 (2026-08-30, migration 202608302200).
+# `estate-compare-on-observation`. EXTERNAL INGRESS under the
+# exemption above: `jobs.estate.observed` is posted by a CronJob
+# looking at the cluster — no packet causes an observation, so no
+# Workflow definition can declare the reaction to one. It adds no
+# routing: one firing reads the estate registry and writes one
+# `jobs.estate.compared` event, the compare half of the
+# declared/observed split (59ef456a).
+BASELINE=52
 RULES_FILE="infra/dispatcher/rules.toml"
 
 count=$(grep -c '^\[\[rule\]\]' "$RULES_FILE")

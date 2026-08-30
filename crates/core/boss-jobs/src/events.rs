@@ -90,6 +90,11 @@ pub const NETWORK_CENSUS: &str = "jobs.network.census";
 /// what we MEANT to have — the difference between the two is the
 /// finding (59ef456a).
 pub const ESTATE_OBSERVED: &str = "jobs.estate.observed";
+/// One estate comparison: declared vs observed for one observation.
+/// The compare handler computes it, the comparison door records it,
+/// and neither writes the registry — the difference stays a finding,
+/// never a silent correction (59ef456a).
+pub const ESTATE_COMPARED: &str = "jobs.estate.compared";
 
 /// The state-event payload for a Step: the serialized struct plus a
 /// top-level `step_id` — the same key every marker event uses.
@@ -218,6 +223,22 @@ pub fn estate_observed_event(
     boss_core::event::Event::new(
         "jobs",
         ESTATE_OBSERVED,
+        payload,
+        boss_clock_client::wall_now(),
+    )
+}
+
+/// One estate comparison, recorded verbatim — the same dumb-door
+/// contract as the observation above: the handler computed it, this
+/// only records what it was handed.
+pub fn estate_compared_event(
+    actor: &boss_core::actor::ActorId,
+    comparison: serde_json::Value,
+) -> boss_core::event::Event {
+    let payload = boss_core::publisher::inject_actor(comparison, actor);
+    boss_core::event::Event::new(
+        "jobs",
+        ESTATE_COMPARED,
         payload,
         boss_clock_client::wall_now(),
     )
