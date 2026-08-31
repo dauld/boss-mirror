@@ -38,6 +38,8 @@ export type RouteName =
   // The fleet overlay — every in-flight Job of a kind on its
   // Workflow's DAG; per-step depth is the queue-visibility signal.
   | 'system-fleet'
+  // The hardware registry page (59ef456a).
+  | 'system-estate'
   // The model-vocabulary surface — SubjectKind taxonomy + Class registry
   // (read-only). Same `it-*` audience as the dispatcher cascade it sits beside.
   | 'system-subjects'
@@ -59,7 +61,7 @@ const ALL: ReadonlyArray<RouteName> = [
   'shipping', 'vendors', 'marketing-assets', 'calendar',
   'schedule', 'jobs',
   'policy', 'workflows', 'system-step-plugins', 'system-dispatcher',
-  'system-dispatcher-rules', 'system-dispatcher-rule', 'system-design', 'system-yard', 'system-map', 'system-flow', 'system-fleet', 'system-subjects', 'system-model', 'system-kb', 'auth-admin',
+  'system-dispatcher-rules', 'system-dispatcher-rule', 'system-design', 'system-yard', 'system-map', 'system-flow', 'system-fleet', 'system-estate', 'system-subjects', 'system-model', 'system-kb', 'auth-admin',
   'system-experiments',
   'workflows',
 ];
@@ -101,7 +103,7 @@ export const ROUTE_ACCESS: Record<Role, ReadonlyArray<RouteName>> = {
   // "modeling-not-building" frame).
   'it-manager': ['exec', 'system-monitoring', 'system-kb',
     'system-step-plugins', 'system-dispatcher', 'system-dispatcher-rules', 'system-dispatcher-rule', 'system-subjects', 'system-model',
-    'system-design', 'jobs'],
+    'system-design', 'system-estate', 'jobs'],
   auditor: ['finance', 'accounts', 'assets'],
   // Audit-readonly is the system audit account — Read on every
   // resource via the policy gate, so the sidebar surfaces every

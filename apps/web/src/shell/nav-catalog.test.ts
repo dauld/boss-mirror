@@ -94,6 +94,9 @@ describe('nav catalog — app assignment', () => {
     // "both where we respond to active incidents and document post
     // mortems for posterity").
     'system-incidents',
+    // The hardware registry page — declared beside observed, plus the
+    // dev-workspace ssh door (59ef456a).
+    'system-estate',
   ];
 
   it('the IT app contains the System Model set plus what we added deliberately', () => {

@@ -180,6 +180,9 @@
         // here alongside the map's addition.
         ROUTE_CATALOG['system-yard'],
         ROUTE_CATALOG['system-map'],
+        // The estate: the hardware the rest of this sidebar runs on —
+        // declared beside observed, and the dev-workspace door.
+        ROUTE_CATALOG['system-estate'],
       ],
     },
     {

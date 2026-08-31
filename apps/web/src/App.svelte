@@ -61,6 +61,7 @@
   import SystemModelPage from './it/system/SystemModelPage.svelte';
   import FlowPage from './it/flow/FlowPage.svelte';
   import YardPage from './it/yard/YardPage.svelte';
+  import EstatePage from './it/estate/EstatePage.svelte';
   import StationMapPage from './it/map/StationMapPage.svelte';
   import FleetPage from './it/fleet/FleetPage.svelte';
   import DesignReviewPage from './it/design/DesignReviewPage.svelte';
@@ -328,6 +329,8 @@
       <DesignReviewPage />
     {:else if route.kind === 'systemYard'}
       <YardPage />
+    {:else if route.kind === 'systemEstate'}
+      <EstatePage />
     {:else if route.kind === 'systemMap'}
       <StationMapPage />
     {:else if route.kind === 'systemFlow'}

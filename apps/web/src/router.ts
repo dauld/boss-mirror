@@ -94,6 +94,8 @@ export type Route =
   | { kind: 'systemMap' }
   | { kind: 'systemFlow' }
   | { kind: 'systemFleet' }
+  /// The hardware registry, declared beside observed (59ef456a).
+  | { kind: 'systemEstate' }
   /// The IT incidents surface — active incident-post-mortem packets +
   /// the closed ones rendered as a durable archive.
   | { kind: 'incidents' }
@@ -157,6 +159,7 @@ export function parseRoute(pathname: string): Route {
     if (p === '/map') return { kind: 'systemMap' };
     if (p === '/flow') return { kind: 'systemFlow' };
     if (p === '/fleet') return { kind: 'systemFleet' };
+    if (p === '/estate') return { kind: 'systemEstate' };
     if (p === '/incidents') return { kind: 'incidents' };
     if (p === '/feedback') return { kind: 'systemFeedback' };
     if (p === '/experiments') return { kind: 'experiments' };

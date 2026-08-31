@@ -118,6 +118,10 @@ export const ROUTE_CATALOG: Readonly<Record<RouteName | UngatedSurfaceId, NavIte
   'system-design':           { id: 'system-design',           label: 'Design review',       path: '/it/design',       permKey: 'system-design',           app: 'it' },
   'system-flow':             { id: 'system-flow',             label: 'Flow',                path: '/it/flow',         permKey: 'system-flow',             app: 'it' },
   'system-fleet':            { id: 'system-fleet',            label: 'Bottlenecks',               path: '/it/fleet',        permKey: 'system-fleet',            app: 'it' },
+  // The hardware registry — declared beside observed beside the
+  // difference, plus the dev-workspace door (59ef456a; the page
+  // exists so nobody hand-writes a machine inventory again).
+  'system-estate':           { id: 'system-estate',           label: 'Estate',                    path: '/it/estate',       permKey: 'system-estate',           app: 'it' },
   'system-feedback':         { id: 'system-feedback',         label: 'Feedback triage',     path: '/it/feedback',     permKey: 'system-feedback',         app: 'it' },
   // The incidents surface — active incident-post-mortem packets plus
   // the closed ones as a durable archive (David: "both where we

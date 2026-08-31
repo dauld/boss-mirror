@@ -68,6 +68,13 @@ const ROUTES: ReadonlyArray<string> = [
   // only walks ROUTE_CATALOG. Adding it here is the whole of its
   // coverage.
   '/watchlist',
+  // The estate page under the mock's catch-all: every /api/estate/*
+  // fetch fails or reads empty, and the page's whole design is that
+  // absence renders as bordered failure notices, never an empty
+  // estate - chrome + three honest failure states, no crash. Its own
+  // unit suite pins the failed-never-empty arms; this crawl pins that
+  // the route actually mounts.
+  '/it/estate',
 ];
 
 // DEFERRED, group 1 — aggregation dashboards that read OBJECT-shaped
