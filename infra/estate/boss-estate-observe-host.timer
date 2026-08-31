@@ -1,0 +1,11 @@
+# Daily, five minutes after the cluster observer's 10:20Z — the estate
+# series land adjacent, and a quiet window stays quiet.
+[Unit]
+Description=Daily estate host observation
+
+[Timer]
+OnCalendar=*-*-* 10:25:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

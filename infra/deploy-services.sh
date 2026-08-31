@@ -242,6 +242,10 @@ fi
 # (audit-integrity, ml-inference-batch, ledger-recognize,
 # conservation-invariants — all caught by hand).
 TIMERS=(
+    # The estate's host observer (a5d14977): the cluster CronJob covers
+    # kubernetes-nodes; this covers the machine it runs on — the
+    # conductor VM whose registry note said "nothing watches it".
+    "boss-estate-observe-host:estate"
     "boss-messages-events-purge:."
     "boss-audit-integrity-check:."
     "boss-ledger-recognize:."

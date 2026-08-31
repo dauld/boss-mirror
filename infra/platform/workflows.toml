@@ -166,6 +166,7 @@ fields = [{ name = "sign_off_context", field_type = "string", required = true }]
 [[workflow.step]]
 title = "approve"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.validate.done"
 title_template = "Approve spec"
 authority_role = "workflow-approver"
@@ -645,6 +646,39 @@ title_template = "Run to completion"
 # Gated so the simulated workforce cannot role-match and "complete"
 # real maintenance; the timer's boss-step call presents the automation
 # actor with this role.
+authority_role = "platform-admin"
+fields = [{ name = "result", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done"
+title_template = "Maintenance completed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
+# boss-estate-observe-host.service
+[[workflow]]
+kind = "maintenance-estate-observe-host"
+label = "estate host observation"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "The 10:25Z host half of the estate observation loop (boss-estate-observe-host): the hosts the cluster observer cannot see, recorded so 'nothing watches it' stops being true (a5d14977)."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "systemd-timer" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Run to completion"
 authority_role = "platform-admin"
 fields = [{ name = "result", field_type = "string", required = true }]
 

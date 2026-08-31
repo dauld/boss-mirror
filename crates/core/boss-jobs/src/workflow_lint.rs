@@ -77,7 +77,76 @@ pub fn validate_workflow(spec: &WorkflowSpec, registry: &StepRegistry) -> Vec<Wo
     if spec.category == "platform" {
         check_sign_offs_are_not_blind(spec, registry, &mut errs);
     }
+    // Phase 5 — a human decision point must leave a record.
+    check_decisions_leave_a_record(spec, registry, &mut errs);
     errs
+}
+
+/// Phase 5: a decision must leave a record.
+///
+/// Phase 4 guarantees a human decision point ARRIVES with context;
+/// this guarantees it LEAVES with one. They bind different moments:
+/// context is a readiness concern and lives on a predecessor, but
+/// required metadata is validated at COMPLETION — so the record
+/// constraint belongs on the step itself (or its kind's bundle), and
+/// a predecessor requirement satisfies Phase 4 while recording
+/// nothing of the judgement.
+///
+/// WHY THIS IS A HARD ERROR. David, 2026-08-29: "Let's try to make
+/// sure we can't lose my decisions again in the future. Data loss is
+/// a real concern." Measured that day (cdfe2e1a): 62 of 100 completed
+/// sign-off steps across every active workflow carried NOTHING — no
+/// authored metadata, no notes. Not rare; the majority case, and
+/// silent for nine days at a stretch. The remedy was settled by
+/// experiment rather than escalation: among keys completers actually
+/// write, `decision` (already the sign-off bundle's enum) dominates.
+///
+/// THE ORDER WAS FIX, THEN GATE. The fifteen affected workflows were
+/// moved to require `decision` first (new versions, 2026-08-29/30,
+/// registry writes), the seed bundles in the same change as this
+/// rule — because a lint the seed corpus fails breaks startup rather
+/// than preventing a defect.
+///
+/// UNSCOPED to category, unlike Phase 4, deliberately: Phase 4's
+/// remedy (authoring real context) needs domain knowledge and so
+/// left tenant workflows to someone who has it, but this phase's
+/// remedy is one field the bundle already declares. The live corpus
+/// carries it in every category and the seed bundles were brought
+/// along in the same change.
+fn check_decisions_leave_a_record(
+    spec: &WorkflowSpec,
+    registry: &StepRegistry,
+    errs: &mut Vec<WorkflowLintError>,
+) {
+    // The same property Phase 4 keys on, for the same reason: ask the
+    // registry, never compare a kind name (CLAUDE.md §9,
+    // infra/lint/no-step-kind-match.sh).
+    let is_approval = |step: &StepSpec| {
+        registry
+            .get(&step.kind)
+            .is_some_and(|t| t.surface == "approval")
+    };
+    for step in spec.steps.iter().filter(|s| is_approval(s)) {
+        let own_required = step.fields.iter().any(|f| f.required);
+        let bundle_required = registry
+            .get(&step.kind)
+            .is_some_and(|t| t.fields.iter().any(|f| f.required));
+        if own_required || bundle_required {
+            continue;
+        }
+        errs.push(WorkflowLintError {
+            workflow: spec.kind.clone(),
+            step: step.title.clone(),
+            reason: "is a decision point that can complete EMPTY: neither the step nor its \
+                     kind's bundle requires any field, so what was decided is recorded only \
+                     if the approver volunteers it — measured at 62 of 100 completed \
+                     sign-offs carrying nothing (cdfe2e1a). Require `decision` on the step \
+                     (the corpus' own shape, a new workflow version) so completion cannot \
+                     lose the judgement. Context arriving is Phase 4's concern; the record \
+                     leaving is this one's."
+                .into(),
+        });
+    }
 }
 
 /// Phase 4: every `sign-off` step must be guaranteed some context.
@@ -1341,10 +1410,13 @@ mod tests {
         let reg = StepRegistry::v1();
         let mut spec = signoff_spec("guarded");
         spec.steps[1].fields.push(required("sign_off_context"));
+        // Phase 5 still (correctly) wants a record on the step itself,
+        // so filter to THIS phase's concern rather than any error on
+        // the step.
         assert!(
             validate_workflow(&spec, &reg)
                 .iter()
-                .all(|e| e.step != "approve"),
+                .all(|e| e.step != "approve" || !e.reason.contains("no context")),
             "a required field on the dependency guarantees the context exists"
         );
     }
@@ -1376,10 +1448,12 @@ mod tests {
         let reg = StepRegistry::v1();
         let mut own_proc = signoff_spec("own-proc");
         own_proc.steps[2].metadata_defaults = json!({"procedure": "what to check"});
+        // A procedure satisfies Phase 4 (context) but not Phase 5 (a
+        // record) — filter to this phase's reason.
         assert!(
             validate_workflow(&own_proc, &reg)
                 .iter()
-                .all(|e| e.step != "approve")
+                .all(|e| e.step != "approve" || !e.reason.contains("no context"))
         );
 
         let mut own_field = signoff_spec("own-field");
@@ -1388,6 +1462,69 @@ mod tests {
             validate_workflow(&own_field, &reg)
                 .iter()
                 .all(|e| e.step != "approve")
+        );
+    }
+
+    // ----- Phase 5: a decision must leave a record -----
+
+    /// THE DEFECT (cdfe2e1a): 62 of 100 completed sign-offs recorded
+    /// nothing, because nothing required anything at completion.
+    #[test]
+    fn a_decision_that_can_complete_empty_fails() {
+        let reg = StepRegistry::v1();
+        let errs = validate_workflow(&signoff_spec("empty-ok"), &reg);
+        let hit = errs
+            .iter()
+            .find(|e| e.step == "approve" && e.reason.contains("complete EMPTY"))
+            .expect("a recordless decision point must be refused");
+        // The refusal must name the remedy the corpus settled on.
+        assert!(hit.reason.contains("`decision`"), "{}", hit.reason);
+    }
+
+    /// A required field on the step itself is the fix — completion
+    /// validates required metadata, so the record cannot be lost.
+    #[test]
+    fn a_decision_with_its_own_required_field_passes_phase_five() {
+        let reg = StepRegistry::v1();
+        let mut spec = signoff_spec("records");
+        spec.steps[2].fields.push(required("decision"));
+        assert!(
+            validate_workflow(&spec, &reg)
+                .iter()
+                .all(|e| !e.reason.contains("complete EMPTY")),
+        );
+    }
+
+    /// THE DISTINGUISHING CASE: a predecessor requirement satisfies
+    /// Phase 4 and does nothing for Phase 5 — the packet still reaches
+    /// the approver with context and leaves with no judgement recorded.
+    /// This is precisely how 4e0e42b2 arrived full and 188d79ea left
+    /// empty on the same day.
+    #[test]
+    fn a_predecessor_requirement_does_not_make_a_decision_recorded() {
+        let reg = StepRegistry::v1();
+        let mut spec = signoff_spec("dep-only");
+        spec.steps[1].fields.push(required("sign_off_context"));
+        assert!(
+            validate_workflow(&spec, &reg)
+                .iter()
+                .any(|e| e.step == "approve" && e.reason.contains("complete EMPTY")),
+            "context arriving is not the same as a record leaving"
+        );
+    }
+
+    /// Unscoped to category, unlike Phase 4: a tenant CFO's empty
+    /// sign-off loses a judgement exactly as a platform one does, and
+    /// the remedy needs no domain knowledge.
+    #[test]
+    fn phase_five_judges_tenant_workflows_too() {
+        let reg = StepRegistry::v1();
+        let mut spec = signoff_spec("tenant");
+        spec.category = "operations".into();
+        assert!(
+            validate_workflow(&spec, &reg)
+                .iter()
+                .any(|e| e.step == "approve" && e.reason.contains("complete EMPTY")),
         );
     }
 

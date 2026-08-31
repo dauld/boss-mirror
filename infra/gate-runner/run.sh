@@ -28,9 +28,30 @@ ACTOR='{"id":"automation:gate-runner","role":"platform-admin","access_tier":"ope
 
 report() { # verdict, note
     local step_id
+    # The reporting step is selected by its spec KEY, never its
+    # rendered title: the title is prose a registry edit may change
+    # on purpose, and matching it kept one fact in two places with
+    # nothing holding them together (48bed517 — the old selector
+    # grepped for "Record"). `spec_slug` is the same key advancement
+    # pairs steps by, exposed on every materialized step row.
+    # Exactly one match or refuse LOUDLY: zero means the protocol and
+    # this runner disagree, two means the report would land somewhere
+    # arbitrary — either way the disagreement goes to the Job log and
+    # the packet goes overdue, which is the alarm this rig already
+    # defines; silence is the only wrong answer.
     step_id=$(curl -sf -H "x-boss-user: $ACTOR" \
         "$JOBS_API/api/jobs/$GATE_RUN_JOB_ID" \
-        | python3 -c 'import sys,json;j=json.load(sys.stdin);print([s["id"] for s in j["steps"] if "Record" in (s.get("title") or "")][0])') || return 1
+        | python3 -c '
+import sys, json
+j = json.load(sys.stdin)
+hits = [s["id"] for s in j["steps"] if s.get("spec_slug") == "record-verdict"]
+if len(hits) != 1:
+    sys.stderr.write(
+        "gate-runner: expected exactly one record-verdict step, found %d"
+        " (slugs: %s) - the gate-run protocol and this runner disagree\n"
+        % (len(hits), [s.get("spec_slug") for s in j["steps"]]))
+    sys.exit(1)
+print(hits[0])') || return 1
     python3 - "$1" "$2" <<'PY' > /tmp/verdict.json
 import json, sys
 print(json.dumps({"status": "completed",

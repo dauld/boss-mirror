@@ -650,6 +650,21 @@ schedule = { cadence = "daily", anchor_date = "2026-08-17" }
 handler = "jobs.spawn"
 args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"cluster-conformance\"", title = "\"Cluster conformance sweep\"", "metadata.target" = "\"cluster-conformance\"", "metadata.area" = "\"cluster\"" }
 
+# EMPTY DECISIONS. A completed decision that recorded nothing is a
+# human judgement lost silently — 62 of 100 completed sign-offs carried
+# neither authored metadata nor notes when first measured (cdfe2e1a),
+# and three sat unnoticed for nine days. The lint (workflow_lint
+# Phase 5) stops NEW versions from shipping the gap; this sweep is for
+# packets already in flight on old pinned versions, whose completion
+# contract is frozen. Detector first, per the packet: it is what makes
+# the fix verifiable — the count staying zero is how we know it worked.
+[[rule]]
+name = "maintenance-sweep-empty-decisions-daily"
+schedule = { cadence = "daily", anchor_date = "2026-09-01" }
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"empty-decisions\"", title = "\"Empty decision sweep\"", "metadata.target" = "\"empty-decisions\"", "metadata.area" = "\"protocols\"", "metadata.procedure" = "\"Count completed steps of approval-surface kinds (ask the step registry for surface, never a kind name) that carry neither authored metadata content nor notes, completed since the previous sweep. Materialization keys (authority_role, context_md, procedure, outcome_kind, started_at, completed_at, sign_off_context) are not content. Zero new: clear, record the count. Any new: action_needed - each one is a human judgement that was recorded nowhere, and the packet it belongs to may still be warm enough to ask. Baseline at first firing: 62 of 100 historical sign-offs are empty (cdfe2e1a); count NEW ones only.\"" }
+
 # 6. DOC STATUS DRIFT. A design doc's `**Status**:` line is
 # hand-written and nothing ever updates it. Answering a question is a
 # flush, and the flush rewrites the Decision-history section without

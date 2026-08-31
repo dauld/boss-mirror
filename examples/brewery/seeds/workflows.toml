@@ -400,6 +400,7 @@ metadata_defaults = { line_items = [
 [[workflow.step]]
 title = "ops-signoff"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.pricing-proposal.done"
 title_template = "Ops sign-off — add to weekly route"
 authority_role = "head-of-distribution"
@@ -674,6 +675,7 @@ authority_role = "lab-tech"
 [[workflow.step]]
 title = "tasting-signoff"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.test-batch.done"
 title_template = "Tasting sign-off"
 authority_role = "head-brewer"
@@ -1015,6 +1017,7 @@ metadata_defaults = { parts_consumed = [
 [[workflow.step]]
 title = "verify-back-in-service"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.service-parts.done"
 title_template = "Verify back in service"
 authority_role = "head-brewer"
@@ -1147,6 +1150,7 @@ authority_role = "owner"
 [[workflow.step]]
 title = "owner-approval"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.cost-price.done"
 title_template = "Owner approval"
 authority_role = "owner"
@@ -1214,6 +1218,7 @@ title_template = "Interviews"
 [[workflow.step]]
 title = "make-offer"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.interviews.done"
 title_template = "Make offer"
 authority_role = "owner"
@@ -1366,6 +1371,7 @@ title_template = "Run payroll calculation"
 [[workflow.step]]
 title = "bookkeeper-review"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.run-calculation.done"
 title_template = "Bookkeeper review"
 authority_role = "bookkeeper"
@@ -1424,6 +1430,7 @@ authority_role = "bookkeeper"
 [[workflow.step]]
 title = "review-sign"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.prepare-filing.done"
 title_template = "Review + sign filing"
 authority_role = "bookkeeper"
@@ -1489,6 +1496,7 @@ authority_role = "bookkeeper"
 [[workflow.step]]
 title = "bookkeeper-review"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.aggregate-accruals.done"
 title_template = "Bookkeeper review"
 authority_role = "bookkeeper"
@@ -1543,6 +1551,7 @@ authority_role = "bookkeeper"
 [[workflow.step]]
 title = "cfo-review"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.compute-estimate.done"
 title_template = "CFO review"
 authority_role = "cfo"
@@ -1605,6 +1614,7 @@ authority_role = "bookkeeper"
 [[workflow.step]]
 title = "bookkeeper-review"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.aggregate-accruals.done"
 title_template = "Bookkeeper review"
 authority_role = "bookkeeper"
@@ -2625,6 +2635,7 @@ metadata_defaults = { findings = "", anomaly_confirmed = false }
 [[workflow.step]]
 title = "triage-decision"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.document-findings.done"
 authority_role = "qa-supervisor"
 title_template = "Triage decision — re-test, re-blend, or discard"

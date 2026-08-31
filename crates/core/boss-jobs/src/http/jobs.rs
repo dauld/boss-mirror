@@ -518,6 +518,74 @@ fn edge_guidance(msg: String) -> String {
     }
 }
 
+/// The envelope fields `POST /api/jobs` requires on the wire, with a
+/// hint per field a filer can act on. Serde's derive reports the FIRST
+/// missing field and stops, so filing a packet was a guessing loop —
+/// measured at three rejected rounds for one packet, twice in one
+/// session (f5dd5167). One 422 now names every missing field at once.
+///
+/// This list is NOT a second contract to keep in sync by diligence:
+/// `required_wire_fields_are_derived_from_the_job_struct` below
+/// re-derives the required set from `Job` itself on every test run and
+/// fails if this list drifts. (`opened_on` is required by the struct
+/// but injected by the handler, which the test accounts for.)
+const REQUIRED_WIRE_FIELDS: &[(&str, &str)] = &[
+    ("kind", "the workflow kind this packet is admitted under"),
+    (
+        "subject",
+        r#"what the packet is about: {"id": ..., "subject_kind": ...}"#,
+    ),
+    ("title", "one line; every lens leads with it"),
+    (
+        "owner_id",
+        "who answers for this packet, e.g. `agent` or an employee id",
+    ),
+    ("status", "`open` on filing"),
+    ("priority", "`standard` unless it genuinely is not"),
+    (
+        "opened_on",
+        "omit it — the server stamps the authoritative clock",
+    ),
+    ("tags", "`[]` is fine, but the key must be present"),
+    ("metadata", "`{}` is fine, but the key must be present"),
+];
+
+/// Every required envelope key absent from the body, each with its
+/// hint — the whole answer in one 422 instead of one field per round.
+fn envelope_problems(raw: &serde_json::Value) -> Vec<String> {
+    REQUIRED_WIRE_FIELDS
+        .iter()
+        // The handler injects `opened_on` before deserializing, so its
+        // absence is never a problem — the hint exists for the case a
+        // caller sends an explicit null and reads this list.
+        .filter(|(f, _)| *f != "opened_on")
+        .filter(|(f, _)| raw.get(f).is_none_or(serde_json::Value::is_null))
+        .map(|(f, why)| format!("missing `{f}` ({why})"))
+        .collect()
+}
+
+/// One 422 body carrying everything wrong with the envelope: every
+/// missing field, plus serde's own message when it complains about
+/// something the missing-field scan cannot see (a type mismatch).
+fn job_body_rejection(raw: &serde_json::Value, serde_err: &str) -> String {
+    let mut problems = envelope_problems(raw);
+    let already_named = serde_err.starts_with("missing field")
+        && problems.iter().any(|p| {
+            serde_err
+                .strip_prefix("missing field `")
+                .and_then(|r| r.split('`').next())
+                .is_some_and(|f| p.contains(&format!("`{f}`")))
+        });
+    if !already_named {
+        problems.push(serde_err.to_string());
+    }
+    format!(
+        "invalid job body: {} problem(s): {}",
+        problems.len(),
+        problems.join("; ")
+    )
+}
+
 pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
     CurrentUser(user): CurrentUser,
@@ -535,12 +603,12 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
     {
         obj.insert("opened_on".to_string(), serde_json::json!(now.date_naive()));
     }
-    let mut job: Job = match serde_json::from_value(raw) {
+    let mut job: Job = match serde_json::from_value(raw.clone()) {
         Ok(j) => j,
         Err(e) => {
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
-                format!("invalid job body: {e}"),
+                job_body_rejection(&raw, &e.to_string()),
             )
                 .into_response();
         }
@@ -1410,7 +1478,132 @@ async fn estate_events<R: JobsRepository + 'static, B: EventBus + 'static>(
 
 #[cfg(test)]
 mod tests {
-    use super::edge_guidance;
+    use super::{REQUIRED_WIRE_FIELDS, edge_guidance, envelope_problems, job_body_rejection};
+    use serde_json::json;
+
+    fn full_body() -> serde_json::Value {
+        json!({
+            "kind": "backlog-item",
+            "subject": {"id": "bosspipeline", "subject_kind": "custom"},
+            "title": "a complete envelope",
+            "owner_id": "agent",
+            "status": "open",
+            "priority": "standard",
+            "opened_on": "2026-08-31",
+            "tags": [],
+            "metadata": {}
+        })
+    }
+
+    /// THE DRIFT KILLER. The required-field list is only honest while
+    /// it matches what serde actually demands of `Job`, so this test
+    /// re-derives the demanded set: take a body that deserializes,
+    /// remove one key at a time, and record which removals fail with
+    /// `missing field`. That set — no more, no less — must be the
+    /// const. A field gaining `#[serde(default)]`, or a new required
+    /// field, fails HERE instead of resurrecting the guessing loop.
+    #[test]
+    fn required_wire_fields_are_derived_from_the_job_struct() {
+        let body = full_body();
+        serde_json::from_value::<boss_core::job::Job>(body.clone())
+            .expect("the fixture body must deserialize, or every assertion below is vacuous");
+
+        let mut demanded: Vec<String> = body
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|k| {
+                let mut probe = body.clone();
+                probe.as_object_mut().unwrap().remove(*k);
+                match serde_json::from_value::<boss_core::job::Job>(probe) {
+                    Err(e) => e.to_string().starts_with("missing field"),
+                    Ok(_) => false,
+                }
+            })
+            .cloned()
+            .collect();
+        demanded.sort();
+
+        let mut declared: Vec<String> = REQUIRED_WIRE_FIELDS
+            .iter()
+            .map(|(f, _)| f.to_string())
+            .collect();
+        declared.sort();
+
+        assert_eq!(
+            declared, demanded,
+            "REQUIRED_WIRE_FIELDS drifted from what Job's deserialization demands"
+        );
+    }
+
+    /// The packet's measured failure: three missing fields cost three
+    /// rejected rounds. One 422 must now name all three.
+    #[test]
+    fn a_body_missing_three_fields_gets_all_three_in_one_422() {
+        let mut body = full_body();
+        let obj = body.as_object_mut().unwrap();
+        obj.remove("owner_id");
+        obj.remove("status");
+        obj.remove("tags");
+
+        let msg = job_body_rejection(&body, "missing field `owner_id`");
+        for f in ["`owner_id`", "`status`", "`tags`"] {
+            assert!(msg.contains(f), "422 must name {f}: {msg}");
+        }
+        assert!(
+            msg.contains("3 problem(s)"),
+            "serde's duplicate first-field message must not inflate the count: {msg}"
+        );
+    }
+
+    /// A type mismatch is invisible to the missing-key scan, so
+    /// serde's own complaint rides alongside the missing fields
+    /// rather than being swallowed.
+    #[test]
+    fn a_type_error_rides_alongside_missing_fields() {
+        let mut body = full_body();
+        let obj = body.as_object_mut().unwrap();
+        obj.remove("owner_id");
+        obj.insert("tags".into(), json!("not-a-list"));
+
+        let serde_msg = "invalid type: string \"not-a-list\", expected a sequence";
+        let msg = job_body_rejection(&body, serde_msg);
+        assert!(
+            msg.contains("`owner_id`"),
+            "missing field still named: {msg}"
+        );
+        assert!(
+            msg.contains(serde_msg),
+            "the type complaint must survive: {msg}"
+        );
+        assert!(
+            msg.contains("2 problem(s)"),
+            "one missing + one type = 2: {msg}"
+        );
+    }
+
+    /// A complete envelope has nothing to complain about — the happy
+    /// path's behavior (201, create) is covered by every HTTP create
+    /// test in this crate and is deliberately untouched here.
+    #[test]
+    fn a_complete_envelope_raises_no_problems() {
+        assert!(envelope_problems(&full_body()).is_empty());
+    }
+
+    /// An explicit null is as useless to the reader as an absent key,
+    /// and is reported the same way.
+    #[test]
+    fn an_explicit_null_counts_as_missing() {
+        let mut body = full_body();
+        body.as_object_mut()
+            .unwrap()
+            .insert("owner_id".into(), json!(null));
+        let problems = envelope_problems(&body);
+        assert!(
+            problems.iter().any(|p| p.contains("`owner_id`")),
+            "null owner_id must be reported: {problems:?}"
+        );
+    }
 
     /// The guard's own text is the valuable part and must survive
     /// verbatim — an author reads WHICH edge and WHICH id was refused

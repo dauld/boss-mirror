@@ -190,6 +190,7 @@ metadata_defaults = { asset_id = "{subject.id}", overall_result = "pass" }
 [[workflow.step]]
 title = "qa-certification"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.qa-inspection.done"
 title_template = "QA certification — {subject.id}"
 authority_role = "qa-lead"
@@ -277,6 +278,7 @@ metadata_defaults = { items = [
 [[workflow.step]]
 title = "customer-signoff"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.post-repair-verification.done"
 title_template = "Customer sign-off"
 authority_role = "service-mgr"
@@ -335,6 +337,7 @@ metadata_defaults = { account_id = "{subject.id}", line_items = [], total_cents 
 [[workflow.step]]
 title = "close-deal"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.demo.done AND steps.send-quote.done"
 title_template = "Close deal — {subject.id}"
 authority_role = "sales-mgr"
@@ -467,6 +470,7 @@ metadata_defaults = { channel = "email", recipient_id = "{subject.id}", recipien
 [[workflow.step]]
 title = "approve-rma"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.rma-request.done"
 title_template = "Approve RMA"
 authority_role = "service-mgr"
@@ -492,6 +496,7 @@ metadata_defaults = { overall_result = "conditional", inspector_notes = "", meas
 [[workflow.step]]
 title = "refund-replace-decision"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.assess-unit.done"
 title_template = "Refund / replace decision"
 authority_role = "service-mgr"
@@ -557,6 +562,7 @@ metadata_defaults = { account_id = "{subject.id}", line_items = [], total_cents 
 [[workflow.step]]
 title = "customer-signature"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.renewal-quote.done"
 title_template = "Customer signature — {subject.id}"
 authority_role = "sales-mgr"
@@ -615,6 +621,7 @@ metadata_defaults = { category = "coverage-scope", instructions = "Pick agreemen
 [[workflow.step]]
 title = "customer-signature"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.define-coverage.done"
 title_template = "Customer signature — {subject.id}"
 authority_role = "sales-mgr"
@@ -723,6 +730,7 @@ metadata_defaults = { asset_id = "{subject.id}", overall_result = "pass" }
 [[workflow.step]]
 title = "qa-certification"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.qa-inspection.done"
 title_template = "QA certification — {subject.id}"
 authority_role = "qa-lead"
@@ -889,6 +897,7 @@ metadata_defaults = { items = [
 [[workflow.step]]
 title = "customer-signoff"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.pm-checklist.done"
 title_template = "Customer sign-off"
 authority_role = "service-mgr"
@@ -914,6 +923,7 @@ anniversary cadence.
 [[workflow.step]]
 title = "annual-certification"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "true"
 title_template = "Annual certification"
 authority_role = "qa-lead"
@@ -1019,6 +1029,7 @@ metadata_defaults = { channel = "email", recipient_id = "{subject.id}", recipien
 [[workflow.step]]
 title = "account-approval"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.renewal-outreach.done"
 title_template = "Account approval"
 authority_role = "sales-mgr"
@@ -1065,6 +1076,7 @@ metadata_defaults = { channel = "phone", recipient_id = "{subject.id}", recipien
 [[workflow.step]]
 title = "writeoff-review"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.escalation.done"
 title_template = "Write-off review"
 authority_role = "controller"
@@ -1095,6 +1107,7 @@ metadata_defaults = { category = "ap-3way-match" }
 [[workflow.step]]
 title = "approve-payment"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.three-way-match.done"
 title_template = "Approve for payment"
 authority_role = "controller"
@@ -1149,6 +1162,7 @@ metadata_defaults = { po_id = "" }
 [[workflow.step]]
 title = "three-way-match"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.receive-goods.done"
 title_template = "Three-way match"
 authority_role = "controller"
@@ -1413,6 +1427,7 @@ metadata_defaults = { course_name = "New hire orientation", provider = "in-house
 [[workflow.step]]
 title = "manager-signoff"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.first-week-training.done"
 title_template = "Manager sign-off"
 authority_role = "hr-generalist"
@@ -1450,6 +1465,7 @@ metadata_defaults = { category = "access-revocation" }
 [[workflow.step]]
 title = "final-paperwork"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.deactivate-access.done"
 title_template = "Final paperwork"
 authority_role = "hr-generalist"
@@ -1496,6 +1512,7 @@ metadata_defaults = { location = "", scheduled_at = "" }
 [[workflow.step]]
 title = "extend-offer"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.interview.done"
 title_template = "Extend offer"
 authority_role = "hr-generalist"
@@ -1572,6 +1589,7 @@ metadata_defaults = { items = [
 [[workflow.step]]
 title = "procurement-approval"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.credit-check.done AND steps.category-tier.done"
 title_template = "Procurement manager approval"
 authority_role = "warehouse-mgr"
@@ -1631,6 +1649,7 @@ metadata_defaults = { round_number = 1, our_ask_md = "", vendor_position_md = ""
 [[workflow.step]]
 title = "internal-approval"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.record-round.done"
 title_template = "Internal approval (over threshold)"
 authority_role = "warehouse-mgr"
@@ -1640,6 +1659,7 @@ metadata_defaults = { decision = "pending", threshold_cents = 0 }
 [[workflow.step]]
 title = "close-out"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.internal-approval.done"
 title_template = "Close-out (accept / reject / drop)"
 authority_role = "warehouse-mgr"
@@ -1699,6 +1719,7 @@ metadata_defaults = { vendor_ids = [], rationale_md = "" }
 [[workflow.step]]
 title = "pick-winner"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.compare-quotes.done"
 title_template = "Pick winner"
 authority_role = "warehouse-mgr"
@@ -1796,6 +1817,7 @@ metadata_defaults = { linked_workflow = "vendor-negotiation", auto_create = true
 [[workflow.step]]
 title = "terms-signoff"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.spawn-negotiation.done"
 title_template = "Renewal terms sign-off"
 authority_role = "warehouse-mgr"

@@ -321,6 +321,22 @@ fn workflow_design_spec() -> WorkflowSpec {
             assurance_required: None,
             authority_role: Some("workflow-approver".into()),
             metadata_defaults: serde_json::json!({ "authority_role": "workflow-approver" }),
+            // 2026-08-31, cdfe2e1a: the decision must LEAVE a record
+            // (workflow_lint Phase 5) — required at completion, on the
+            // step itself, unlike `sign_off_context` above which
+            // guards arrival on the predecessor. This function is the
+            // frozen conversion reference for the bundle-faithfulness
+            // test, so a deliberate post-conversion evolution rides
+            // through BOTH — the double edit is the price of keeping
+            // the transcription guard byte-exact, and it is also load-
+            // bearing: bootstrap republishes bundle drift, so a bundle
+            // left behind would have regressed the live v3 back to
+            // field-less on the next boot.
+            fields: vec![boss_core::job::StepField {
+                name: "decision".into(),
+                field_type: "pending|approved|rejected|changes-requested".into(),
+                required: true,
+            }],
             ..Default::default()
         },
         StepSpec {

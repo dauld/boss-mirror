@@ -128,7 +128,14 @@ set -euo pipefail
 # routing: one firing reads the estate registry and writes one
 # `jobs.estate.compared` event, the compare half of the
 # declared/observed split (59ef456a).
-BASELINE=52
+#
+# 52 -> 53 (2026-08-31): maintenance-sweep-empty-decisions-daily — a
+# TIMER, the ratchet's own first carve-out. No protocol can declare
+# "notice that a completed decision recorded nothing" because the
+# packets it watches are pinned to OLD versions whose contracts are
+# frozen; a clock has to look. One firing spawns one maintenance-sweep
+# packet, no routing (cdfe2e1a).
+BASELINE=53
 RULES_FILE="infra/dispatcher/rules.toml"
 
 count=$(grep -c '^\[\[rule\]\]' "$RULES_FILE")
