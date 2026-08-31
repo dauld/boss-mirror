@@ -88,6 +88,57 @@ spec:
       # is NOT here — see the emptyDir below.
       storage: 40Gi
 ---
+# The gate credential (0b1b32f9, greenlit 2026-08-31). The dev session
+# earns exactly the verbs `boss gate` uses and nothing else: gate
+# runner Jobs live in THIS namespace (infra/gate-runner), so the Role
+# is namespace-scoped and the blast radius is "can run and watch gate
+# Jobs here" — not the cluster. Reads of other namespaces, secrets,
+# or RBAC objects are deliberately absent; widening this Role is a
+# David-reviewed change like any credential (token admin is his).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dev-session
+  namespace: boss-dev
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dev-session-gates
+  namespace: boss-dev
+rules:
+  # The runner Job: created per gate, previous one deleted first
+  # (gate.rs), watched to a verdict.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # The runner's pod, for status + logs while the gate runs.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # gate-runner.yaml's PVC document rides `kubectl apply`, which
+  # needs read-modify-write on the one object it manages.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "create", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dev-session-gates
+  namespace: boss-dev
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dev-session-gates
+subjects:
+  - kind: ServiceAccount
+    name: dev-session
+    namespace: boss-dev
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -135,10 +186,14 @@ spec:
                   - {key: boss.dev/purpose, operator: In, values: ["build"]}
       imagePullSecrets:
         - {name: forgejo-registry}
-      # No ServiceAccount token: nothing in here talks to the Kubernetes
-      # API, and a dev shell with cluster credentials is a bigger blast
-      # radius than a dev shell without them.
-      automountServiceAccountToken: false
+      # The dev session holds ONE cluster credential: the dev-session
+      # ServiceAccount, bound to the gates Role above — create/watch
+      # gate Jobs in this namespace, nothing else. The blast-radius
+      # argument that kept this false still governs the ROLE's size;
+      # the greenlit trade (0b1b32f9) is that pod-launched gates beat
+      # a hand-carried gate verb on another machine.
+      serviceAccountName: dev-session
+      automountServiceAccountToken: true
       # PID 1 must reap. The dev container's entrypoint is `sleep`,
       # which never wait()s, so daemonized children became unkillable
       # zombies during the ssh door's first bring-up (2026-08-30).
@@ -248,6 +303,17 @@ spec:
                     exec tmux new-session -A -s dev
                     LS
                     chmod +x /work/dev-session.sh
+                    # kubectl for `boss gate`, pinned by sha so CDN
+                    # weather cannot ship a different binary (the
+                    # a700d3a4 lesson). Best-effort: a failed download
+                    # leaves gating impossible, never the pod broken.
+                    # Lands on the PVC, so it downloads once, not per
+                    # restart. Version matches the cluster line (1.33).
+                    if [ ! -x /work/tools/bin/kubectl ]; then
+                      curl -sfL -o /tmp/kubectl https://dl.k8s.io/release/v1.33.3/bin/linux/amd64/kubectl \
+                        && echo "2fcf65c64f352742dc253a25a7c95617c2aba79843d1b74e585c69fe4884afb0  /tmp/kubectl" | sha256sum -c - \
+                        && install -m 0755 /tmp/kubectl /work/tools/bin/kubectl || true
+                    fi
                     dropbear -r /work/ssh/dropbear_ed25519_host_key -p 22 -s
                     } > /work/ssh/postStart.log 2>&1 || true
           workingDir: /work
