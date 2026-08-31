@@ -220,8 +220,9 @@ async fn appending_a_step_to_a_live_job_is_refused() {
     );
     let msg = body.as_str().unwrap_or_default();
     assert!(
-        msg.contains("freeze") || msg.contains("diverge"),
-        "the refusal must say WHY, so the caller does not just retry: {msg}"
+        msg.contains("fixed at admission") && msg.contains("/system/workflows"),
+        "the refusal must give the protocol-boundary reason and name the door, \
+         so the caller does not just retry: {msg}"
     );
 
     // The decisive assertion: the job is untouched. A guard that
