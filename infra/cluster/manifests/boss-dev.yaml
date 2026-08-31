@@ -139,6 +139,13 @@ spec:
       # API, and a dev shell with cluster credentials is a bigger blast
       # radius than a dev shell without them.
       automountServiceAccountToken: false
+      # PID 1 must reap. The dev container's entrypoint is `sleep`,
+      # which never wait()s, so daemonized children became unkillable
+      # zombies during the ssh door's first bring-up (2026-08-30).
+      # Sharing the process namespace makes pause PID 1, and pause
+      # reaps. Costs process visibility between dev and postgres,
+      # which nothing here minds.
+      shareProcessNamespace: true
       securityContext:
         # The workspace volume is group-owned so a non-root build can
         # write to it, matching boss.yaml's posture for boss-auth.
@@ -171,7 +178,69 @@ spec:
           command: ["sleep", "infinity"]
           securityContext:
             allowPrivilegeEscalation: false
-            capabilities: {drop: ["ALL"]}
+            # SETGID/SETUID and nothing else: the ssh door (02f4a2ee,
+            # David 2026-08-30: "I just want to do the ssh link") needs
+            # to spawn a session as the connecting user. Dropbear over
+            # OpenSSH precisely because sshd's mandatory preauth chroot
+            # would ALSO need SYS_CHROOT — measured on the live pod:
+            # sshd failed chroot(), dropbear failed only setgid, and
+            # this pair is the whole difference.
+            capabilities:
+              drop: ["ALL"]
+              add: ["SETGID", "SETUID"]
+          ports:
+            - {name: ssh, containerPort: 22}
+          # The ssh door + session env, declared. Everything in here
+          # was first done by hand on 2026-08-30 and then transcribed,
+          # not invented: the systemd postinst neuter (its postinst
+          # cannot run in a container and a dependency drags it in),
+          # the apt cache redirect (the image's /var cache refuses
+          # writes), and the .bashrc (the very first attach failed
+          # because a plain exec shell had no PATH to the tools).
+          # BEST-EFFORT by design: a bootstrap failure leaves the door
+          # closed and the pod healthy — kubectl exec still works and
+          # /work/ssh/postStart.log holds the evidence. Accepted debt:
+          # apt runs on every pod start (network dependency); the
+          # upgrade is baking dropbear into boss-ci, worth doing only
+          # if boot flakiness is ever actually observed.
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - bash
+                  - -c
+                  - |
+                    {
+                    set -x
+                    export DEBIAN_FRONTEND=noninteractive
+                    printf '#!/bin/sh\nexit 0\n' > /var/lib/dpkg/info/systemd.postinst 2>/dev/null || true
+                    printf 'APT::Sandbox::User "root";\n' > /etc/apt/apt.conf.d/99-pod-no-sandbox
+                    mkdir -p /tmp/apt /work/ssh /root/.ssh /work/home
+                    apt-get -o Dir::Cache::archives=/tmp/apt update -qq || true
+                    apt-get -o Dir::Cache::archives=/tmp/apt install -y --no-install-recommends dropbear-bin openssh-sftp-server || true
+                    [ -f /work/ssh/dropbear_ed25519_host_key ] || dropbearkey -t ed25519 -f /work/ssh/dropbear_ed25519_host_key
+                    cp /etc/ssh-authorized/authorized_keys /root/.ssh/authorized_keys || true
+                    chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys || true
+                    cat > /root/.bashrc <<'RC'
+                    export HOME=/work/home
+                    export PATH=/work/tools/bin:/usr/local/cargo/bin:$PATH
+                    export RUSTUP_HOME=/usr/local/rustup
+                    export CARGO_TARGET_DIR=/scratch/target
+                    cd /work/boss 2>/dev/null || true
+                    RC
+                    printf '[ -f ~/.bashrc ] && . ~/.bashrc\n' > /root/.profile
+                    cat > /work/dev-session.sh <<'LS'
+                    #!/usr/bin/env bash
+                    export HOME=/work/home
+                    export PATH=/work/tools/bin:/usr/local/cargo/bin:$PATH
+                    export RUSTUP_HOME=/usr/local/rustup
+                    export CARGO_TARGET_DIR=/scratch/target
+                    cd /work/boss
+                    exec tmux new-session -A -s dev
+                    LS
+                    chmod +x /work/dev-session.sh
+                    dropbear -r /work/ssh/dropbear_ed25519_host_key -p 22 -s
+                    } > /work/ssh/postStart.log 2>&1 || true
           workingDir: /work
           env:
             # The sidecar, by name rather than by luck. TestDb would
@@ -219,6 +288,7 @@ spec:
             - {name: work, mountPath: /work}
             - {name: scratch, mountPath: /scratch}
             - {name: forge-token, mountPath: /etc/forge, readOnly: true}
+            - {name: ssh-authorized, mountPath: /etc/ssh-authorized, readOnly: true}
         - name: postgres
           # Matches production's major (the `boss` StatefulSet runs
           # postgres:16). A dev database on a different major is a test
@@ -292,3 +362,34 @@ spec:
           emptyDir: {}
         - name: pg-shm
           emptyDir: {medium: Memory, sizeLimit: 1Gi}
+        # David's PUBLIC key, by name only (same posture as forge-read:
+        # values never live in the tree). Public key material, so any
+        # operator can load it:
+        #   kubectl create secret generic boss-dev-ssh-authorized-keys \
+        #     -n boss-dev --from-file=authorized_keys=<his id_ed25519.pub>
+        # `optional: true` for the same reason as forge-read — an
+        # absent Secret means a closed door, not a stuck pod.
+        - name: ssh-authorized
+          secret: {secretName: boss-dev-ssh-authorized-keys, optional: true, defaultMode: 0400}
+---
+# The ssh door's address: ssh://root@10.20.0.35 — macOS opens Terminal
+# on that URL natively, which is the "launch my terminal from the
+# website" answer (02f4a2ee) without any browser-terminal machinery.
+# Reachable on the LAN directly; off-LAN via the boss-gcp WireGuard
+# jump. Auth is David's ed25519 key only: no passwords, root key login.
+apiVersion: v1
+kind: Service
+metadata:
+  name: boss-dev-ssh
+  namespace: boss-dev
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: "10.20.0.35"
+spec:
+  type: LoadBalancer
+  loadBalancerIP: 10.20.0.35
+  selector:
+    app: boss-dev
+  ports:
+    - name: ssh
+      port: 22
+      targetPort: 22
