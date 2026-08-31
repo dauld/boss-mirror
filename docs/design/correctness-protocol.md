@@ -1,6 +1,6 @@
 # The BOSS correctness protocol
 
-**Status:** load-bearing thesis. Treat this as the design north
+**Status**: load-bearing thesis. Treat this as the design north
 star for every Workflow, every projection, every adapter.
 
 ## The claim

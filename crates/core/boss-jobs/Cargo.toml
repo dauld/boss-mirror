@@ -92,6 +92,10 @@ name = "job_metadata_patch_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "step_fields_survive_an_update"
+required-features = ["postgres"]
+
+[[test]]
 name = "platform_seed_loader"
 required-features = ["postgres"]
 

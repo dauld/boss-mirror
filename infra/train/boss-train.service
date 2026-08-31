@@ -1,7 +1,9 @@
 [Unit]
 Description=BOSS train conductor — cadence loop (rules fire the verbs; systemd keeps the process alive)
 Documentation=file:/opt/boss/docs/design/protocol-cadence.md
-After=network-online.target postgresql.service boss-clock-api.service boss-jobs-api.service
+# No postgresql.service here: the loop holds no database connection
+# of its own — everything rides the jobs API (see BOSS_JOBS_URL below).
+After=network-online.target boss-clock-api.service boss-jobs-api.service
 Wants=network-online.target
 
 # HOST ENV CONTRACT — this unit is not complete on its own. The env
@@ -19,10 +21,15 @@ Wants=network-online.target
 #   BOSS_TRAIN_FORGE_TOKEN_FILE — where the forge lives, which repo,
 #       and the repo-scoped token file (default
 #       /etc/boss-train/forge.token).
-#   BOSS_JOBS_URL — the jobs SYSTEM OF RECORD. Unset, the loop books
-#       trains on 127.0.0.1:7900, which on a cutover box is the
-#       legacy instance (split-brain incident c4b4a6b0). Preflight
-#       now goes red on any loopback jobs URL unless
+#   BOSS_JOBS_URL — the jobs SYSTEM OF RECORD, and REQUIRED: the
+#       cadence loop refuses to start without it (backlog a516f1f1).
+#       It is the loop's one door — rules, last-firings, firing
+#       claims, outcomes and the dock probe all ride /api/cadence/*
+#       and /api/jobs on this address. The loop's old private
+#       Postgres pool recorded firings in a DIFFERENT database than
+#       the one operators read, so last-firing answered "never
+#       fired" for every rule while the loop fired on schedule.
+#       Preflight still goes red on any loopback jobs URL unless
 #       BOSS_TRAIN_ALLOW_LOCAL_JOBS=1 is set — the deliberate
 #       test/demo-box escape hatch; never set it on a box whose
 #       system of record lives elsewhere.

@@ -196,7 +196,131 @@ export type YardState = Readonly<{
    *  none of the yard's other three partitions, which is why seven of
    *  them were invisible on 2026-08-28. */
   awaitingProof: readonly CarRow[];
+  /** The car lifecycle upstream of the dock (f930cda2): publish-requests
+   *  waiting, gates in flight, fresh verdicts whose branch no car has
+   *  claimed. Empty when the approach is clear — or when the cluster
+   *  cannot serve the feeds, which must read the same way: additive,
+   *  never a reason the yard fails to render. */
+  approach: readonly ApproachRow[];
 }>;
+
+/** Where an inbound branch stands, ordered by distance from the dock. */
+export type ApproachState = 'publishing' | 'gating' | 'gated-red' | 'gated-green';
+
+export type ApproachRow = Readonly<{
+  /** The packet behind the row — a publish-request or gate-run Job. */
+  id: string;
+  branch: string;
+  /** The head the packet named, when it named one. */
+  sha: string | null;
+  state: ApproachState;
+  opened_on: string;
+  /** Requester on publish rows; nothing yet on gate rows. */
+  note: string | null;
+}>;
+
+/** A closed gate older than this is archaeology, not approach. An OPEN
+ *  gate-run stays visible at any age — a live gate is live activity. */
+const APPROACH_FRESH_DAYS = 2;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** The approach to the dock — everything inbound that the dock's own
+ *  queue cannot see yet. Pure; the fetches live in fetchYard.
+ *
+ *  Latest-gate-per-branch trusts the server's newest-first order, the
+ *  same authority contract the dock envelope already leans on: a
+ *  client re-sort would need an instant the day-granular `opened_on`
+ *  cannot give. */
+export function approach(
+  gateRuns: readonly JobLite[],
+  publishQueue: StationQueueEnvelope | null,
+  ships: readonly JobLite[],
+  nowMs: number = Date.now(),
+): readonly ApproachRow[] {
+  const branchOf = (j: JobLite): string =>
+    String((j.metadata as { branch?: unknown } | null)?.branch ?? '');
+  // A branch any car names has entered the yard proper (parked, riding,
+  // or landed) — green rows about it would double-report the dock. A
+  // MERGED car buries every verdict; a still-open car does not bury a
+  // red one, because that red is exactly the work outstanding.
+  const carClaimed = new Set(ships.map(branchOf).filter(Boolean));
+  const mergedCarClaimed = new Set(
+    ships
+      .filter(
+        j =>
+          j.status === 'closed' &&
+          (j.metadata as { outcome?: unknown } | null)?.outcome === 'merged',
+      )
+      .map(branchOf)
+      .filter(Boolean),
+  );
+
+  const publishing: ApproachRow[] = (publishQueue?.data ?? [])
+    .filter(j => j.status === 'open')
+    .map(j => {
+      const md = (j.metadata ?? {}) as {
+        branch?: string;
+        head_sha?: string;
+        requested_by?: string;
+      };
+      return {
+        id: j.id,
+        branch: md.branch ?? j.title,
+        sha: md.head_sha ?? null,
+        state: 'publishing' as const,
+        opened_on: j.opened_on,
+        note: md.requested_by ?? null,
+      };
+    });
+
+  const gating: ApproachRow[] = [];
+  const red: ApproachRow[] = [];
+  const green: ApproachRow[] = [];
+  // A live gate outranks every same-day verdict for its branch: server
+  // order within a day is NOT insertion order (measured 2026-08-31 —
+  // two refused-launch packets sorted above the gates that ran), and
+  // the verdict steps carry no instant to order by. An open packet is
+  // deterministic; among closed ones the lens shows *a* same-day
+  // verdict and `boss park` stays the enforcement layer.
+  const liveBranches = new Set(
+    gateRuns.filter(g => g.status === 'open').map(branchOf).filter(Boolean),
+  );
+  const seen = new Set<string>();
+  for (const g of gateRuns) {
+    const branch = branchOf(g);
+    if (!branch || seen.has(branch)) continue;
+    if (g.status !== 'open' && liveBranches.has(branch)) continue;
+    seen.add(branch);
+    const md = (g.metadata ?? {}) as { sha?: string };
+    const row = {
+      id: g.id,
+      branch,
+      sha: md.sha ?? null,
+      opened_on: g.opened_on,
+      note: null,
+    };
+    if (g.status === 'open') {
+      gating.push({ ...row, state: 'gating' });
+      continue;
+    }
+    if (nowMs - Date.parse(g.opened_on) > APPROACH_FRESH_DAYS * DAY_MS) continue;
+    if (mergedCarClaimed.has(branch)) continue;
+    // The verdict is data on whichever step recorded it, not a slug
+    // this lens hardcodes (CLAUDE.md §9: data-keyed, not kind-keyed).
+    const verdict = (g.steps ?? [])
+      .map(s => (s.metadata as { verdict?: unknown } | null)?.verdict)
+      .find(v => typeof v === 'string');
+    if (verdict === 'green') {
+      if (!carClaimed.has(branch)) green.push({ ...row, state: 'gated-green' });
+    } else if (verdict === 'failed' || verdict === 'lost') {
+      // `lost` reads as red on purpose: the environment died before
+      // saying anything, and "we don't know" must not read as fine.
+      red.push({ ...row, state: 'gated-red' });
+    }
+  }
+  return [...publishing, ...gating, ...red, ...green];
+}
 
 function step(j: WithSteps, slug: string, titleFallback: string): StepLite | null {
   return (
@@ -589,6 +713,8 @@ export function assembleYard(
   // and inserting ahead of it would silently reinterpret a timestamp as
   // a report. Additive parameters go on the end.
   report: TerminalReport | null = null,
+  gateRuns: readonly JobLite[] = [],
+  publishQueue: StationQueueEnvelope | null = null,
 ): YardState {
   const shipById = new Map(ships.map(j => [j.id, j]));
   const open = trains.filter(t => t.status === 'open');
@@ -629,6 +755,7 @@ export function assembleYard(
       .map(c => toTrainRow(c.t, shipById, false, medians, nowMs)),
     delivery: deliveryStats(report),
     awaitingProof: awaitingProof(ships).map(carRow),
+    approach: approach(gateRuns, publishQueue, ships, nowMs),
   };
 }
 
@@ -638,9 +765,9 @@ export function assembleYard(
 // fall back to deriving the dock locally. Never an error the yard
 // surfaces; the fallback costs nothing because the ships list is
 // fetched anyway for the consist join.
-async function fetchDockQueue(): Promise<StationQueueEnvelope | null> {
+async function fetchStationQueue(name: string): Promise<StationQueueEnvelope | null> {
   try {
-    const r = await fetch('/api/stations/loading-dock/queue');
+    const r = await fetch(`/api/stations/${name}/queue`);
     if (!r.ok) return null;
     const env = (await r.json()) as StationQueueEnvelope;
     return Array.isArray(env?.data) && Array.isArray(env?.discipline) ? env : null;
@@ -650,14 +777,14 @@ async function fetchDockQueue(): Promise<StationQueueEnvelope | null> {
 }
 
 export async function fetchYard(): Promise<YardState | null> {
-  const [tr, sr, dockQueue, report] = await Promise.all([
+  const [tr, sr, dockQueue, report, gateRuns, publishQueue] = await Promise.all([
     // 40, not 20: the window has to hold the open trains, the five
     // arrivals the board shows, AND the arrivals the ETA medians are
     // taken over — cancelled trains sit in the same list and would
     // otherwise crowd the samples out.
     fetch('/api/jobs?kind=pr-train&limit=40'),
     fetch('/api/jobs?kind=ship-a-change&limit=200'),
-    fetchDockQueue(),
+    fetchStationQueue('loading-dock'),
     // The scoreboard is ADDITIVE: a yard that cannot show its stats is
     // still a yard, so this resolves to null rather than failing the
     // whole page. The stats are the thing you read second; the trains
@@ -665,11 +792,19 @@ export async function fetchYard(): Promise<YardState | null> {
     fetch('/api/workflows/ship-a-change/terminal-report')
       .then((r) => (r.ok ? (r.json() as Promise<TerminalReport>) : null))
       .catch(() => null),
+    // The approach feeds are additive the same way: 60 gate-runs is
+    // two days of heavy gating, and the freshness bound in approach()
+    // drops the tail anyway.
+    fetch('/api/jobs?kind=gate-run&limit=60')
+      .then((r) => (r.ok ? (r.json() as Promise<{ data?: JobLite[] }>) : null))
+      .then((b) => b?.data ?? [])
+      .catch(() => [] as JobLite[]),
+    fetchStationQueue('publish-dock'),
   ]);
   if (!tr.ok || !sr.ok) return null;
   const trains = ((await tr.json()) as { data?: JobLite[] }).data ?? [];
   const ships = ((await sr.json()) as { data?: JobLite[] }).data ?? [];
-  return assembleYard(trains, ships, dockQueue, Date.now(), report);
+  return assembleYard(trains, ships, dockQueue, Date.now(), report, gateRuns, publishQueue);
 }
 
 // ---------------------------------------------------------------------

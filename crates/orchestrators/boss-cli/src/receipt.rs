@@ -328,3 +328,34 @@ mod tests {
         assert_eq!(standing(&short), Standing::Current);
     }
 }
+
+/// Top-level registration for `boss receipt` — see `merged::Cmd` for
+/// why the variant lives in its verb's module (84f9fbc0).
+#[derive(clap::Subcommand)]
+pub enum Cmd {
+    /// What does this car's gate receipt actually vouch for?
+    ///
+    /// A receipt names the sha it gated and the MODE it ran in. A
+    /// rebase leaves it green about a tree that is gone, and an auto
+    /// receipt is green about the lints rather than the suites.
+    Receipt {
+        /// Car branch to inspect.
+        branch: String,
+        /// Clone to read refs from. Defaults to the working directory.
+        #[arg(long)]
+        clone: Option<String>,
+        /// Remote holding the car branches.
+        #[arg(long)]
+        remote: Option<String>,
+    },
+}
+
+pub async fn dispatch(cmd: Cmd) -> Result<()> {
+    match cmd {
+        Cmd::Receipt {
+            branch,
+            clone,
+            remote,
+        } => run(&branch, clone, remote).await,
+    }
+}

@@ -1,6 +1,6 @@
 # Schema migrations — expand/contract
 
-**Status:** living — the contract of `infra/postgres/migrate.sh` and
+**Status**: living — the contract of `infra/postgres/migrate.sh` and
 the convention for changing schema. Pinned by
 `crates/core/boss-testing/tests/migrate_sh.rs`.
 

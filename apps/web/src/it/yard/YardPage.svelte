@@ -264,6 +264,36 @@
       </div>
     {/if}
 
+    <!-- The approach (f930cda2): the car lifecycle upstream of the
+         dock, which used to render as silence — 8 publish-requests,
+         8 gates and an arrival in one hour once drew an empty yard.
+         Ordered by distance from the dock: publishing, gating, red,
+         green-unparked. Renders nothing when the approach is clear;
+         each row opens its own packet. -->
+    {#if yard.approach.length > 0}
+      <div class="yard-section">03 — THE APPROACH <span class="yard-n">{yard.approach.length}</span></div>
+      <table class="yard-board">
+        <tbody>
+          {#each yard.approach as a (a.id)}
+            <tr class="yard-approach" ondblclick={() => openPacket(a.id)}>
+              <td class="yard-appr-state" data-state={a.state}>{a.state.replace('-', ' ')}</td>
+              <td>
+                <a
+                  href={`/jobs/${a.id}`}
+                  title="open the packet behind this row"
+                  onclick={e => {
+                    e.preventDefault();
+                    openPacket(a.id);
+                  }}>{a.branch}</a>
+              </td>
+              <td class="yard-stamp">{a.sha ? a.sha.slice(0, 8) : '—'}</td>
+              <td class="yard-stamp">{a.note ?? a.opened_on}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
+
     <!-- Arrivals are trains that ARRIVED — a cancelled train never
          did, and it keeps its own muted line below rather than
          disappearing. Ordered by the best arrival instant each train
@@ -271,7 +301,7 @@
          `opened_on` is day-granular and tied every train opened on the
          same day. Each row opens the train's Job, where the landing
          report is. -->
-    <div class="yard-section">03 — RECENT ARRIVALS</div>
+    <div class="yard-section">04 — RECENT ARRIVALS</div>
     <table class="yard-board">
       <thead><tr><th>Train</th><th>Consist</th><th>Arrival</th></tr></thead>
       <tbody>
@@ -312,7 +342,7 @@
       </div>
     {/if}
 
-    <div class="yard-flow">PARKED → BOARDED → <em>DEPARTED</em> → ARRIVED</div>
+    <div class="yard-flow">GATED → PARKED → BOARDED → <em>DEPARTED</em> → ARRIVED</div>
   {/if}
 </div>
 
@@ -393,6 +423,15 @@
   .yard-lamp.ok  { color: var(--ok, #4fb98a); border-color: var(--ok, #4fb98a); }
   .yard-lamp.err { color: var(--err, #e2685c); border-color: var(--err, #e2685c); }
   .yard-lamp.run { color: var(--warn, #d9a441); border-color: var(--warn, #d9a441); }
+  /* Approach states borrow the lamp palette: a red gate IS an error
+     lamp, a live gate a running one; green-unparked and publishing
+     stay muted — inbound, not yet the dock's business. */
+  .yard-appr-state { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
+    letter-spacing: 0.1em; white-space: nowrap; }
+  .yard-appr-state[data-state='gating'] { color: var(--warn, #d9a441); }
+  .yard-appr-state[data-state='gated-red'] { color: var(--err, #e2685c); }
+  .yard-appr-state[data-state='gated-green'] { color: var(--ok, #4fb98a); }
+  .yard-appr-state[data-state='publishing'] { color: var(--static, #7A838C); }
   .yard-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
     background: var(--signal, #5FD4A8); margin-right: 8px;
     animation: yard-pulse 1.4s ease-in-out infinite; }

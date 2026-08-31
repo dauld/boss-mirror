@@ -379,6 +379,15 @@ pub trait JobsRepository: Send + Sync {
 
     async fn get_job(&self, id: &JobId) -> Result<Option<Job>, JobsError>;
 
+    /// Resolve a lowercase hex id prefix to the ids it matches, capped
+    /// at two — enough for the caller to tell none from one from many
+    /// without scanning the whole table. The prefix is the canonical
+    /// text form (`id::text`): lowercase, hyphenated, so a bare 8-char
+    /// prefix and a hyphen-bearing longer one both match. The read
+    /// handler owns the none→404 / one→200 / many→409 decision; the
+    /// store only reports what matched.
+    async fn resolve_job_id_prefix(&self, prefix: &str) -> Result<Vec<JobId>, JobsError>;
+
     async fn update_job(&self, job: &Job) -> Result<(), JobsError> {
         self.update_job_at(job, Utc::now(), &[]).await
     }

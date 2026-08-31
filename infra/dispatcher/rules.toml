@@ -540,7 +540,12 @@ args = { recipient_key = "\"submitted_by\"" }
 # "disk full") and put three machines at 100% on 2026-08-13.
 [[rule]]
 name = "maintenance-sweep-disk-daily"
+version = 2
 schedule = { cadence = "daily", anchor_date = "2026-08-14" }
+# One outstanding packet per target (0517387b): yesterday's sweep
+# still open means today has nothing new to say - spawning a twin
+# duplicates the obligation, it does not discharge it.
+when = 'NOT open_job_exists("maintenance-sweep", "disk-headroom")'
 [[rule.do]]
 handler = "jobs.spawn"
 args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"disk-headroom\"", title = "\"Disk headroom sweep\"", "metadata.target" = "\"disk-headroom\"", "metadata.area" = "\"infra\"" }
@@ -594,7 +599,12 @@ args = { kind = "\"ship-a-change\"", subject_kind = "\"custom\"", subject = "id"
 # invisible the first time.
 [[rule]]
 name = "maintenance-sweep-build-caches-daily"
+version = 2
 schedule = { cadence = "daily", anchor_date = "2026-08-14" }
+# One outstanding packet per target (0517387b): yesterday's sweep
+# still open means today has nothing new to say - spawning a twin
+# duplicates the obligation, it does not discharge it.
+when = 'NOT open_job_exists("maintenance-sweep", "stale-build-caches")'
 [[rule.do]]
 handler = "jobs.spawn"
 args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"stale-build-caches\"", title = "\"Stale build cache sweep\"", "metadata.target" = "\"stale-build-caches\"", "metadata.area" = "\"infra\"" }
@@ -608,7 +618,12 @@ args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = 
 # green or red against an image nobody is looking at.
 [[rule]]
 name = "maintenance-sweep-image-freshness-daily"
+version = 2
 schedule = { cadence = "daily", anchor_date = "2026-08-14" }
+# One outstanding packet per target (0517387b): yesterday's sweep
+# still open means today has nothing new to say - spawning a twin
+# duplicates the obligation, it does not discharge it.
+when = 'NOT open_job_exists("maintenance-sweep", "image-freshness")'
 [[rule.do]]
 handler = "jobs.spawn"
 args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"image-freshness\"", title = "\"CI image freshness sweep\"", "metadata.target" = "\"image-freshness\"", "metadata.area" = "\"ci\"" }
@@ -621,7 +636,12 @@ args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = 
 # of record telling you about a commit that is no longer true.
 [[rule]]
 name = "maintenance-sweep-converge-lag-daily"
+version = 2
 schedule = { cadence = "daily", anchor_date = "2026-08-14" }
+# One outstanding packet per target (0517387b): yesterday's sweep
+# still open means today has nothing new to say - spawning a twin
+# duplicates the obligation, it does not discharge it.
+when = 'NOT open_job_exists("maintenance-sweep", "deploy-convergence")'
 [[rule.do]]
 handler = "jobs.spawn"
 args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"deploy-convergence\"", title = "\"Deploy convergence sweep\"", "metadata.target" = "\"deploy-convergence\"", "metadata.area" = "\"deploy\"" }
@@ -645,7 +665,12 @@ args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = 
 # around scripts or system timers elsewhere."
 [[rule]]
 name = "maintenance-sweep-cluster-conformance-daily"
+version = 2
 schedule = { cadence = "daily", anchor_date = "2026-08-17" }
+# One outstanding packet per target (0517387b): yesterday's sweep
+# still open means today has nothing new to say - spawning a twin
+# duplicates the obligation, it does not discharge it.
+when = 'NOT open_job_exists("maintenance-sweep", "cluster-conformance")'
 [[rule.do]]
 handler = "jobs.spawn"
 args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"cluster-conformance\"", title = "\"Cluster conformance sweep\"", "metadata.target" = "\"cluster-conformance\"", "metadata.area" = "\"cluster\"" }
@@ -660,7 +685,12 @@ args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = 
 # the fix verifiable — the count staying zero is how we know it worked.
 [[rule]]
 name = "maintenance-sweep-empty-decisions-daily"
+version = 2
 schedule = { cadence = "daily", anchor_date = "2026-09-01" }
+# One outstanding packet per target (0517387b): yesterday's sweep
+# still open means today has nothing new to say - spawning a twin
+# duplicates the obligation, it does not discharge it.
+when = 'NOT open_job_exists("maintenance-sweep", "empty-decisions")'
 [[rule.do]]
 handler = "jobs.spawn"
 args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"empty-decisions\"", title = "\"Empty decision sweep\"", "metadata.target" = "\"empty-decisions\"", "metadata.area" = "\"protocols\"", "metadata.procedure" = "\"Count completed steps of approval-surface kinds (ask the step registry for surface, never a kind name) that carry neither authored metadata content nor notes, completed since the previous sweep. Materialization keys (authority_role, context_md, procedure, outcome_kind, started_at, completed_at, sign_off_context) are not content. Zero new: clear, record the count. Any new: action_needed - each one is a human judgement that was recorded nowhere, and the packet it belongs to may still be warm enough to ask. Baseline at first firing: 62 of 100 historical sign-offs are empty (cdfe2e1a); count NEW ones only.\"" }
@@ -686,7 +716,12 @@ args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = 
 # A sweep puts it in front of someone who can tell the difference.
 [[rule]]
 name = "maintenance-sweep-doc-status-daily"
+version = 2
 schedule = { cadence = "daily", anchor_date = "2026-08-17" }
+# One outstanding packet per target (0517387b): yesterday's sweep
+# still open means today has nothing new to say - spawning a twin
+# duplicates the obligation, it does not discharge it.
+when = 'NOT open_job_exists("maintenance-sweep", "doc-status")'
 [[rule.do]]
 handler = "jobs.spawn"
 args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"doc-status\"", title = "\"Design doc status sweep\"", "metadata.target" = "\"doc-status\"", "metadata.area" = "\"docs\"" }

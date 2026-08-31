@@ -1,6 +1,6 @@
 # Design: Kanidm IDM — the front door for real people (and agents)
 
-**Status:** draft — open questions tracked at `/system/design`
+**Status**: decided — all 5 questions resolved 2026-08-16 via the in-app tracker; see Decisions.
 **Origin:** David's direction (2026-08-10): Kanidm provides IDM to
 the Playground; originally planned for the GCP box, deployed
 in-cluster (see Topology and the Q5 amendment). Item `98816e6a`.

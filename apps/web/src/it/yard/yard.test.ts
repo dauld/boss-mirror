@@ -906,3 +906,135 @@ describe('awaitingProof', () => {
     expect(awaitingProof([car('a', 'open', 'proven', 'completed')] as never)).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------
+// The approach — the car lifecycle upstream of the dock (f930cda2).
+// ---------------------------------------------------------------------
+
+import { approach } from './yard';
+
+const NOW = Date.parse('2026-08-31T21:00:00Z');
+
+function gateRun(over: Partial<JobLite>): JobLite {
+  return {
+    id: 'g1', kind: 'gate-run', title: 'Gate: x', status: 'open',
+    opened_on: '2026-08-31', metadata: { branch: 'fix/x', sha: 'a'.repeat(40) },
+    steps: [], ...over,
+  };
+}
+
+const verdictStep = (verdict: string, head = 'a'.repeat(40)) =>
+  ({ title: 'Record the receipt', status: 'completed',
+     metadata: { verdict, receipt: JSON.stringify({ verdict, head, mode: 'full' }) } });
+
+function ship(branch: string, over: Partial<JobLite> = {}): JobLite {
+  return {
+    id: `car-${branch}`, kind: 'ship-a-change', title: branch, status: 'open',
+    opened_on: '2026-08-31', metadata: { branch }, steps: [], ...over,
+  };
+}
+
+const publishEnv = (jobs: readonly JobLite[]): StationQueueEnvelope => ({
+  station: 'publish-dock', kind: 'batch', discipline: ['priority', 'age'],
+  over_limit: false, total: jobs.length, data: jobs,
+});
+
+describe('approach', () => {
+  test('an open gate-run is gating, whatever else the branch has', () => {
+    const rows = approach([gateRun({})], null, [ship('fix/x')], NOW);
+    expect(rows.map(r => r.state)).toEqual(['gating']);
+    expect(rows[0]?.branch).toBe('fix/x');
+  });
+
+  test('a green gate with no car anywhere is the gap the dock cannot see', () => {
+    const rows = approach(
+      [gateRun({ status: 'closed', steps: [verdictStep('green')] })], null, [], NOW,
+    );
+    expect(rows.map(r => r.state)).toEqual(['gated-green']);
+  });
+
+  test('a green gate whose branch any car names has entered the yard — no row', () => {
+    const rows = approach(
+      [gateRun({ status: 'closed', steps: [verdictStep('green')] })],
+      null, [ship('fix/x')], NOW,
+    );
+    expect(rows).toEqual([]);
+  });
+
+  test('a red gate stays visible until a merged car buries it', () => {
+    const red = gateRun({ status: 'closed', steps: [verdictStep('failed')] });
+    expect(approach([red], null, [ship('fix/x')], NOW).map(r => r.state))
+      .toEqual(['gated-red']);
+    const merged = ship('fix/x', { status: 'closed', metadata: { branch: 'fix/x', outcome: 'merged' } });
+    expect(approach([red], null, [merged], NOW)).toEqual([]);
+  });
+
+  test('a lost verdict reads as red — no evidence must not read as fine', () => {
+    const rows = approach(
+      [gateRun({ status: 'closed', steps: [verdictStep('lost')] })], null, [], NOW,
+    );
+    expect(rows.map(r => r.state)).toEqual(['gated-red']);
+  });
+
+  test('first packet per branch wins: the API serves newest first', () => {
+    const newer = gateRun({ id: 'g2', status: 'closed', steps: [verdictStep('failed')] });
+    const older = gateRun({ id: 'g1', status: 'closed', steps: [verdictStep('green')] });
+    const rows = approach([newer, older], null, [], NOW);
+    expect(rows.map(r => ({ id: r.id, state: r.state }))).toEqual([
+      { id: 'g2', state: 'gated-red' },
+    ]);
+  });
+
+  test('a stale closed gate is archaeology, not approach', () => {
+    const old = gateRun({
+      status: 'closed', opened_on: '2026-08-27', steps: [verdictStep('green')],
+    });
+    expect(approach([old], null, [], NOW)).toEqual([]);
+    // An OPEN gate-run is live activity at any age.
+    expect(approach([gateRun({ opened_on: '2026-08-27' })], null, [], NOW).length).toBe(1);
+  });
+
+  test('open publish-requests ride in front, with the requester on the row', () => {
+    const pr = gateRun({
+      id: 'p1', kind: 'publish-request', title: 'Publish fix/y',
+      metadata: { branch: 'fix/y', head_sha: 'b'.repeat(40), requested_by: 'pod' },
+    });
+    const rows = approach([], publishEnv([pr]), [], NOW);
+    expect(rows.map(r => ({ state: r.state, note: r.note }))).toEqual([
+      { state: 'publishing', note: 'pod' },
+    ]);
+  });
+
+  test('rows group by distance from the dock: publishing, gating, red, green', () => {
+    const rows = approach(
+      [
+        gateRun({ id: 'g1', metadata: { branch: 'fix/a' } }),
+        gateRun({ id: 'g2', status: 'closed', metadata: { branch: 'fix/b' }, steps: [verdictStep('green')] }),
+        gateRun({ id: 'g3', status: 'closed', metadata: { branch: 'fix/c' }, steps: [verdictStep('failed')] }),
+      ],
+      publishEnv([gateRun({ id: 'p1', kind: 'publish-request', metadata: { branch: 'fix/d' } })]),
+      [], NOW,
+    );
+    expect(rows.map(r => r.state)).toEqual(['publishing', 'gating', 'gated-red', 'gated-green']);
+  });
+
+  test('assembleYard without the new feeds still assembles, approach empty', () => {
+    const y = assembleYard([], [], null, NOW, null);
+    expect(y.approach).toEqual([]);
+  });
+});
+
+describe('approach — a live gate outranks any same-day verdict', () => {
+  test('an open packet wins for its branch wherever the server put it', () => {
+    // Server order within a day is not insertion order (measured
+    // 2026-08-31: two refused-launch packets sorted above the gates
+    // that ran). A closed green served FIRST must not shadow the
+    // branch's live re-gate.
+    const closedGreen = gateRun({ id: 'g-old', status: 'closed', steps: [verdictStep('green')] });
+    const liveRegate = gateRun({ id: 'g-live' });
+    const rows = approach([closedGreen, liveRegate], null, [], NOW);
+    expect(rows.map(r => ({ id: r.id, state: r.state }))).toEqual([
+      { id: 'g-live', state: 'gating' },
+    ]);
+  });
+});

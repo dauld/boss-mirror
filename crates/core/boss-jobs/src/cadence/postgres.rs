@@ -31,8 +31,17 @@ fn storage(e: sqlx::Error) -> CadenceError {
 #[async_trait]
 impl CadenceRepository for PgCadence {
     async fn active_rules(&self) -> Result<Vec<CadenceRuleRow>, CadenceError> {
+        // EVERY COLUMN A BASIS NEEDS MUST BE SELECTED HERE. The
+        // calendar basis (202608282135) added `cadence`, `anchor_date`
+        // and `business_calendar`; the conductor's own SELECT was not
+        // widened when they landed, and the loop skipped
+        // protocol-retro-daily on every tick — the rule was in the
+        // table and visible over the API the whole time. Now that this
+        // adapter is what serves the loop, an unserved column is a
+        // rule the loop cannot read.
         let rows = sqlx::query(
-            "SELECT name, verb, basis, every_minutes, at_times, min_dock_depth, cooldown_minutes \
+            "SELECT name, verb, basis, every_minutes, at_times, min_dock_depth, cooldown_minutes, \
+                    cadence, anchor_date, business_calendar \
              FROM cadence_rules WHERE status = 'active' ORDER BY name",
         )
         .fetch_all(&self.pool)
@@ -49,6 +58,9 @@ impl CadenceRepository for PgCadence {
                     at_times: row.try_get("at_times").map_err(storage)?,
                     min_dock_depth: row.try_get("min_dock_depth").map_err(storage)?,
                     cooldown_minutes: row.try_get("cooldown_minutes").map_err(storage)?,
+                    cadence: row.try_get("cadence").map_err(storage)?,
+                    anchor_date: row.try_get("anchor_date").map_err(storage)?,
+                    business_calendar: row.try_get("business_calendar").map_err(storage)?,
                 })
             })
             .collect()

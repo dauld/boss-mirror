@@ -1,6 +1,6 @@
 # Subject identity & relationships — the identity and edge contracts
 
-**Status:** living contract (the workstream that established it —
+**Status**: living contract (the workstream that established it —
 R1–R4 + Q1–Q7, approved 2026-07-15 — completed 2026-07-29; decision
 history folded into
 [docs/architecture-decisions.md](../architecture-decisions.md)

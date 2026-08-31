@@ -1,6 +1,6 @@
 # Design: the departure board — watching the information trains
 
-**Status:** in-review — open questions tracked at `/system/design`
+**Status**: decided — all 5 questions resolved 2026-08-14 via the in-app tracker; see Decisions.
 **Origin:** David, 2026-08-12 (feedback `2e98b211`): "It is exciting
 to see job packets moving more dynamically across the network as we
 work them. We are still missing good visuals for the IT department

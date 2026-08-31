@@ -129,10 +129,6 @@ enum Commands {
         #[command(subcommand)]
         action: TrainAction,
     },
-    /// Read the feedback triage board from a terminal. Read-only on
-    /// purpose: taking an item, annotating it, or closing it goes
-    /// through the board or the step API, so every state change
-    /// carries an actor.
     /// Launch a gate for a branch — files or reuses the gate-run
     /// packet, renders the runner Job, and creates it.
     ///
@@ -188,52 +184,6 @@ enum Commands {
         /// Check the receipt and report, without filing anything.
         #[arg(long)]
         dry_run: bool,
-    },
-    /// Did this branch actually land on main?
-    ///
-    /// The question three separate shell pipelines answered wrongly in
-    /// one session (26b3d203): a deleted branch, a squash merge and a
-    /// stale local ref each produced a confident "not merged". The
-    /// rules live in one tested function here instead.
-    Merged {
-        /// Branch to ask about.
-        branch: String,
-        /// Clone to ask in. Defaults to the working directory.
-        #[arg(long)]
-        clone: Option<String>,
-        /// Remote that receives trains — the authority for main.
-        #[arg(long)]
-        remote: Option<String>,
-    },
-    /// What does this car's gate receipt actually vouch for?
-    ///
-    /// A receipt names the sha it gated and the MODE it ran in. A
-    /// rebase leaves it green about a tree that is gone, and an auto
-    /// receipt is green about the lints rather than the suites.
-    Receipt {
-        /// Car branch to inspect.
-        branch: String,
-        /// Clone to read refs from. Defaults to the working directory.
-        #[arg(long)]
-        clone: Option<String>,
-        /// Remote holding the car branches.
-        #[arg(long)]
-        remote: Option<String>,
-    },
-    /// Merged, deployed and running are three different facts.
-    ///
-    /// The gap between the last two is where a proof records something
-    /// true about a tree and false about production (26b3d203).
-    Running {
-        /// Clone to read main from. Defaults to the working directory.
-        #[arg(long)]
-        clone: Option<String>,
-        /// Remote that receives trains — the merge authority.
-        #[arg(long)]
-        remote: Option<String>,
-        /// Jobs API to ask what is actually serving.
-        #[arg(long)]
-        jobs_url: Option<String>,
     },
     /// Protocol registry operations.
     ///
@@ -335,6 +285,16 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Read the feedback triage board from a terminal. Read-only on
+    /// purpose: taking an item, annotating it, or closing it goes
+    /// through the board or the step API, so every state change
+    /// carries an actor.
+    ///
+    /// (This doc comment was once orphaned onto `Gate` by a car
+    /// resolving a conflict at this enum's contended anchor — the
+    /// 84f9fbc0 collision class — and `--help` described `gate` as
+    /// the triage board. `tests::about_text_stays_with_its_verb`
+    /// pins it in place now.)
     Queue {
         /// Column to show: all | waiting | with-agent |
         /// routed[:disposition] | done
@@ -361,6 +321,27 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    // ------------------------------------------------------------------
+    // Per-module verbs — one `#[command(flatten)]` pair per verb, kept
+    // ALPHABETIZED. A new top-level verb registers its own `Cmd` enum
+    // (which carries the verb's doc comment and arguments) plus a
+    // `dispatch` fn in its own module, and lands here as two lines at
+    // its alphabetical position — one `mod` line, this pair, one match
+    // arm in `main`. It does NOT add an inline variant above: inline
+    // variants all insert at this enum's tail, so any two in-flight
+    // subcommand cars conflict there and only one boards each train
+    // (84f9fbc0). Single lines at distinct alphabetical positions merge
+    // clean — the same measured behavior as the `mod` list. A verb that
+    // belongs to an existing group still goes inside that group's
+    // action enum (`WorkflowAction`, `JobAction`, ...), which touches
+    // no shared line at all.
+    // ------------------------------------------------------------------
+    #[command(flatten)]
+    Merged(merged::Cmd),
+    #[command(flatten)]
+    Receipt(receipt::Cmd),
+    #[command(flatten)]
+    Running(running::Cmd),
 }
 
 #[derive(Subcommand)]
@@ -412,11 +393,12 @@ enum TrainAction {
         #[arg(long)]
         dry_run: bool,
     },
-    /// The cadence loop: evaluate the `cadence_rules` registry
-    /// against boss-clock time and fire the verbs the rules name,
-    /// recording every firing in `cadence_firings`. The supervised
-    /// entry (infra/train/boss-train.service) — the schedule itself
-    /// is protocol data (docs/design/protocol-cadence.md).
+    /// The cadence loop: evaluate the cadence registry (read over
+    /// the jobs API's `/api/cadence/*` door) against boss-clock time
+    /// and fire the verbs the rules name, recording every firing
+    /// through the same door. The supervised entry
+    /// (infra/train/boss-train.service) — the schedule itself is
+    /// protocol data (docs/design/protocol-cadence.md).
     Cadence {
         /// Evaluate one tick and exit (operator / test entry)
         #[arg(long)]
@@ -880,21 +862,6 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Commands::Merged {
-            branch,
-            clone,
-            remote,
-        } => merged::run(&branch, clone, remote),
-        Commands::Receipt {
-            branch,
-            clone,
-            remote,
-        } => receipt::run(&branch, clone, remote).await,
-        Commands::Running {
-            clone,
-            remote,
-            jobs_url,
-        } => running::run(clone, remote, jobs_url),
         Commands::Workflow { action } => match action {
             WorkflowAction::Publish {
                 kind,
@@ -1014,6 +981,11 @@ async fn main() -> Result<()> {
                 live,
             } => cmd_sim_replay(&config, catalog.as_deref(), &api_url, live).await,
         },
+        // Per-module verbs, one arm each, ALPHABETIZED — the note on
+        // `Commands` says why (84f9fbc0).
+        Commands::Merged(cmd) => merged::dispatch(cmd),
+        Commands::Receipt(cmd) => receipt::dispatch(cmd).await,
+        Commands::Running(cmd) => running::dispatch(cmd),
     }
 }
 
@@ -1209,4 +1181,80 @@ async fn cmd_emit(kind: String, payload: String) -> Result<()> {
     let event = boss_core::event::Event::new("cli", kind, payload, chrono::Utc::now());
     println!("{}", serde_json::to_string_pretty(&event)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// clap's own structural validation of the whole command tree —
+    /// catches a misconfigured `#[command(flatten)]`, a duplicate verb
+    /// name, or a broken arg definition at test time instead of at
+    /// first invocation.
+    #[test]
+    fn command_tree_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    /// Every top-level verb resolves. This is the smoke contract for
+    /// the per-module registration pattern (84f9fbc0): moving a
+    /// variant out of `Commands` into its module's `Cmd` enum must not
+    /// change what `boss --help` offers.
+    #[test]
+    fn every_verb_still_resolves() {
+        let cmd = Cli::command();
+        let names: Vec<&str> = cmd.get_subcommands().map(|c| c.get_name()).collect();
+        for expected in [
+            "doctor", "emit", "upgrade", "script", "deploy", "status", "restart", "logs", "backup",
+            "assets", "docs", "sim", "ledger", "inspect", "train", "gate", "park", "merged",
+            "receipt", "running", "workflow", "job", "prove", "publish", "queue", "packet",
+            "audit",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "subcommand `{expected}` missing from the CLI; present: {names:?}"
+            );
+        }
+    }
+
+    /// Each verb owns its own about-text. Pinned because a car
+    /// inserting `Gate` at the contended enum anchor (2158ec9 →
+    /// 2026-08-27 window) orphaned `Queue`'s doc comment on top of
+    /// `Gate`'s — clap concatenated them, `boss --help` described
+    /// `gate` as the feedback triage board, and `queue` had no
+    /// about-text at all. The scar is exactly the collision class
+    /// 84f9fbc0 measures; this test fails if it re-forms.
+    #[test]
+    fn about_text_stays_with_its_verb() {
+        let cmd = Cli::command();
+        let about = |name: &str| -> String {
+            cmd.get_subcommands()
+                .find(|c| c.get_name() == name)
+                .unwrap_or_else(|| panic!("no `{name}` subcommand"))
+                .get_about()
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+        };
+        let cases = [
+            ("gate", "Launch a gate for a branch"),
+            ("queue", "Read the feedback triage board"),
+            ("merged", "Did this branch actually land on main?"),
+            (
+                "receipt",
+                "What does this car's gate receipt actually vouch for?",
+            ),
+            (
+                "running",
+                "Merged, deployed and running are three different facts",
+            ),
+        ];
+        for (name, prefix) in cases {
+            let got = about(name);
+            assert!(
+                got.starts_with(prefix),
+                "`{name}` about-text drifted: expected it to start with {prefix:?}, got {got:?}"
+            );
+        }
+    }
 }

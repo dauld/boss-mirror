@@ -48,6 +48,11 @@ boss-testing = { path = "../../core/boss-testing", features = ["postgres"] }
 # hand-copied column list. Test-only: the shipped `boss` binary reads
 # the policy over HTTP and needs no database.
 boss-jobs = { path = "../../core/boss-jobs", features = ["postgres"] }
+# The cadence door tests serve the REAL /api/cadence/* router over a
+# TestDb and point the loop's I/O at it — the same wire, handler and
+# adapter production runs, not a lookalike. axum is test-only: the
+# shipped binary is an HTTP client of that surface, never a server.
+axum = { workspace = true }
 
 [lints]
 workspace = true

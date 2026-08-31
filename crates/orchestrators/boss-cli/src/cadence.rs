@@ -16,6 +16,16 @@
 //! as a child of this same binary. systemd is demoted to what an OS
 //! is for: keeping this process alive (infra/train/boss-train.service).
 //!
+//! ALL OF THAT RIDES `/api/cadence/*` — the jobs API is the loop's
+//! one door for rules, last-firings, claims and outcomes
+//! (protocol-cadence.md, sequencing step 3; backlog a516f1f1). The
+//! loop used to open its own sqlx pool, and BOSS_POSTGRES_URL on the
+//! conductor's host named a DIFFERENT database than the system of
+//! record — so `/api/cadence/rules/{name}/last-firing` answered
+//! `null` ("never fired") for every rule while the loop fired on
+//! schedule. One door, one database: the firings the loop records are
+//! the firings the operator reads.
+//!
 //! Exactly-once, restated as data: the firing id is a pure function
 //! of (rule, window), so a re-evaluated tick, a restarted loop, or a
 //! second cadence instance all compute the same id and the
@@ -51,10 +61,9 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use boss_clock_client::{ClockClient, ReqwestClockClient};
+use boss_jobs::cadence::{CadenceRuleRow, ClaimResult, LastFiring, NewFiring};
 use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use serde_json::{Value, json};
-use sqlx::Row;
-use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
 use tokio::task::JoinHandle;
 
 use crate::train;
@@ -222,13 +231,10 @@ impl Basis {
     }
 }
 
-/// The most recent recorded firing of a rule — what evaluation
-/// compares the candidate window against.
-#[derive(Debug, Clone)]
-pub(crate) struct LastFiring {
-    pub firing_id: String,
-    pub fired_at: DateTime<Utc>,
-}
+// What evaluation compares a candidate window against is
+// `boss_jobs::cadence::LastFiring` — the WIRE type, imported rather
+// than restated. The loop reads it from the same surface an operator
+// does, so a second local definition would be a fact living twice.
 
 // ---------------------------------------------------------------------------
 // Evaluation — pure functions of (rule, boss-clock now, last firing,
@@ -533,54 +539,90 @@ pub(crate) fn parse_at_times(v: &Value) -> Result<Vec<NaiveTime>> {
 }
 
 // ---------------------------------------------------------------------------
-// Registry + measurement I/O — thin adapters over cadence_rules /
-// cadence_firings. Timestamps are always bound from boss-clock time,
-// never SQL NOW().
+// Registry + measurement I/O — the four cadence calls, over the jobs
+// API's /api/cadence/* door (protocol-cadence.md, sequencing step 3).
+//
+// The loop used to open its own sqlx pool here, and that pool was a
+// recorded defect: BOSS_POSTGRES_URL on the conductor's host is NOT
+// the database behind the system of record, so every firing the loop
+// recorded was invisible to /api/cadence/rules/{name}/last-firing —
+// the surface answered "never fired" for every rule while the loop
+// fired on schedule (backlog a516f1f1; 123-cadence-registry-
+// reconcile.sql measured the same split for rules: 244 firing rows
+// local, 0 on the cluster). One door, one database: what the loop
+// obeys is what the operator reads. Timestamps are still bound from
+// boss-clock time — the API stores the caller's fired_at, never NOW().
 // ---------------------------------------------------------------------------
 
-fn rule_from_row(row: &PgRow) -> Result<CadenceRule> {
-    let name: String = row.try_get("name")?;
-    let verb: String = row.try_get("verb")?;
+/// The jobs API base the whole loop talks to — rules, firings and the
+/// dock probe alike. **Unset is a refusal, not a default.** A default
+/// that is right on one host and silently wrong on another is exactly
+/// how the old pool's firings spent weeks invisible to the last-firing
+/// surface; a loop that cannot reach the right instance must reach
+/// none. The box that really does schedule against its local stack
+/// says so explicitly in its unit drop-in.
+fn jobs_base() -> Result<String> {
+    let raw = std::env::var("BOSS_JOBS_URL").unwrap_or_default();
+    let base = raw.trim().trim_end_matches('/');
+    if base.is_empty() {
+        bail!(
+            "BOSS_JOBS_URL is unset, so there is no system of record to schedule against. \
+             Refusing rather than defaulting: the loop's rules and firings must live in the \
+             database operators read, and a local fallback is how every cadence firing spent \
+             weeks answering `null` from /api/cadence/rules/{{name}}/last-firing. Set it in \
+             the boss-train unit drop-in (jobs-sor.conf), e.g. \
+             BOSS_JOBS_URL=http://10.20.0.34:7900."
+        );
+    }
+    Ok(base.to_string())
+}
+
+fn rule_from_row(row: &CadenceRuleRow) -> Result<CadenceRule> {
     // Validate at LOAD, not at fire. A malformed row is skipped loudly
     // every tick (see `load_rules`); discovering it only when the rule
     // is due would hide a typo until the moment it matters.
-    parse_action(&verb)?;
-    let basis: String = row.try_get("basis")?;
-    let positive = |field: &str| -> Result<u32> {
-        let v: Option<i32> = row.try_get(field)?;
+    parse_action(&row.verb)?;
+    let basis = &row.basis;
+    let positive = |field: &str, v: Option<i32>| -> Result<u32> {
         v.ok_or_else(|| anyhow!("{field} is required for basis {basis:?}"))?
             .try_into()
             .with_context(|| format!("{field} must be positive"))
     };
-    let basis = match basis.as_str() {
+    let basis = match row.basis.as_str() {
         "wall" => Basis::Wall {
-            every_minutes: positive("every_minutes")?,
+            every_minutes: positive("every_minutes", row.every_minutes)?,
         },
         "clock" => {
-            let at: Option<Value> = row.try_get("at_times")?;
-            let at = at.ok_or_else(|| anyhow!("at_times is required for basis \"clock\""))?;
+            let at = row
+                .at_times
+                .as_ref()
+                .ok_or_else(|| anyhow!("at_times is required for basis \"clock\""))?;
             Basis::Clock {
-                at: parse_at_times(&at)?,
+                at: parse_at_times(at)?,
             }
         }
         "queue-depth" => Basis::QueueDepth {
-            min_depth: positive("min_dock_depth")?,
-            cooldown_minutes: positive("cooldown_minutes")?,
+            min_depth: positive("min_dock_depth", row.min_dock_depth)?,
+            cooldown_minutes: positive("cooldown_minutes", row.cooldown_minutes)?,
         },
         "calendar" => {
-            let raw: Option<String> = row.try_get("cadence")?;
-            let raw = raw.ok_or_else(|| anyhow!("cadence is required for basis \"calendar\""))?;
+            let raw = row
+                .cadence
+                .as_deref()
+                .ok_or_else(|| anyhow!("cadence is required for basis \"calendar\""))?;
             // Parsed by boss_core::calendar, not re-implemented here —
             // the whole point of the move (design a02b01e0) is that
             // "weekly" has one definition in this tree.
-            let cadence = Cadence::parse(&raw)
+            let cadence = Cadence::parse(raw)
                 .ok_or_else(|| anyhow!("unknown cadence {raw:?} — see boss_core::calendar"))?;
-            let anchor: Option<NaiveDate> = row.try_get("anchor_date")?;
-            let anchor =
-                anchor.ok_or_else(|| anyhow!("anchor_date is required for basis \"calendar\""))?;
-            let at: Option<Value> = row.try_get("at_times")?;
-            let at = at.ok_or_else(|| anyhow!("at_times is required for basis \"calendar\""))?;
-            let times = parse_at_times(&at)?;
+            let anchor = row
+                .anchor_date
+                .ok_or_else(|| anyhow!("anchor_date is required for basis \"calendar\""))?;
+            let at = row
+                .at_times
+                .as_ref()
+                .ok_or_else(|| anyhow!("at_times is required for basis \"calendar\""))?;
+            let times = parse_at_times(at)?;
             // The DB check pins exactly one, but a reader that trusts a
             // constraint it cannot see is how a silent wrong-window bug
             // gets in: a weekly rule with two times is a clock rule
@@ -609,8 +651,7 @@ fn rule_from_row(row: &PgRow) -> Result<CadenceRule> {
             // calendar would fire on every holiday while its row claimed
             // otherwise. A silent half-feature is the failure this same
             // car found in the verb CHECK an hour earlier.
-            let code: Option<String> = row.try_get("business_calendar")?;
-            if let Some(code) = code {
+            if let Some(code) = &row.business_calendar {
                 bail!(
                     "business_calendar {code:?} cannot be resolved by the cadence loop yet — \
                      the code-to-closed-days lookup lives in the calendar service, and this \
@@ -628,67 +669,65 @@ fn rule_from_row(row: &PgRow) -> Result<CadenceRule> {
         }
         other => bail!("unknown basis {other:?}"),
     };
-    Ok(CadenceRule { name, verb, basis })
+    Ok(CadenceRule {
+        name: row.name.clone(),
+        verb: row.verb.clone(),
+        basis,
+    })
 }
 
-async fn load_rules(pool: &PgPool) -> Result<Vec<CadenceRule>> {
-    let rows = sqlx::query(
-        // EVERY COLUMN rule_from_row READS MUST BE SELECTED HERE. The
-        // calendar basis added `cadence`, `anchor_date` and
-        // `business_calendar` to the table and to the parser, and this
-        // query was not widened — so `row.try_get("cadence")` failed
-        // with "no column found for name: cadence" and the loop skipped
-        // protocol-retro-daily on every tick. The rule was in the table
-        // and visible over the API the whole time; only the loop could
-        // not read it.
-        //
-        // It failed LOUDLY, which is the one thing that went right: the
-        // loader logs a skipped rule every tick rather than dropping it
-        // once at startup, so the journal named the problem in plain
-        // words instead of the schedule silently never firing.
-        "SELECT name, verb, basis, every_minutes, at_times, min_dock_depth, cooldown_minutes, \
-                cadence, anchor_date, business_calendar \
-         FROM cadence_rules WHERE status = 'active' ORDER BY name",
-    )
-    .fetch_all(pool)
-    .await
-    .context("loading cadence_rules")?;
+async fn load_rules(http: &reqwest::Client, base: &str) -> Result<Vec<CadenceRule>> {
+    // EVERY COLUMN rule_from_row READS MUST BE SERVED. The columns
+    // live behind the API now (PgCadence::active_rules carries the
+    // widening scar: the calendar basis landed without its columns
+    // being selected, and the loop skipped protocol-retro-daily on
+    // every tick — the rule was in the table the whole time).
+    let v = api(http, reqwest::Method::GET, base, "/api/cadence/rules", None)
+        .await
+        .context("loading cadence rules")?
+        .unwrap_or(Value::Null);
+    let rows: Vec<CadenceRuleRow> =
+        serde_json::from_value(v).context("parsing /api/cadence/rules")?;
     let mut out = Vec::new();
     for row in &rows {
-        let name: String = row.try_get("name")?;
         match rule_from_row(row) {
             Ok(rule) => out.push(rule),
             // A malformed row is skipped LOUDLY every tick, not
             // dropped once at startup: the registry is editable data.
-            Err(e) => log(format!("skipping unreadable rule {name}: {e:#}")),
+            Err(e) => log(format!("skipping unreadable rule {}: {e:#}", row.name)),
         }
     }
     Ok(out)
 }
 
-async fn last_firing(pool: &PgPool, rule: &str) -> Result<Option<LastFiring>> {
-    let row = sqlx::query(
-        "SELECT firing_id, fired_at FROM cadence_firings WHERE rule_name = $1 \
-         ORDER BY fired_at DESC LIMIT 1",
+async fn last_firing(http: &reqwest::Client, base: &str, rule: &str) -> Result<Option<LastFiring>> {
+    // The endpoint answers `null` for "never fired" — an ANSWER, not
+    // an absence: it means every window is a candidate.
+    let v = api(
+        http,
+        reqwest::Method::GET,
+        base,
+        &format!("/api/cadence/rules/{rule}/last-firing"),
+        None,
     )
-    .bind(rule)
-    .fetch_optional(pool)
     .await
     .context("reading the last cadence firing")?;
-    match row {
-        None => Ok(None),
-        Some(r) => Ok(Some(LastFiring {
-            firing_id: r.try_get("firing_id")?,
-            fired_at: r.try_get("fired_at")?,
-        })),
+    match v {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => Ok(Some(
+            serde_json::from_value(v).context("parsing the last cadence firing")?,
+        )),
     }
 }
 
 /// Claim a firing id. `false` = the window was already claimed (a
 /// concurrent instance, or a re-run after a crash mid-verb) — the
-/// caller must not run the verb.
+/// caller must not run the verb. Exactly-once still rests on the
+/// firing_id primary key; the API reports a losing claim as 200 +
+/// `{"claimed": false}` so a race never looks like a failure.
 async fn claim_firing(
-    pool: &PgPool,
+    http: &reqwest::Client,
+    base: &str,
     id: &str,
     rule: &CadenceRule,
     now: DateTime<Utc>,
@@ -698,47 +737,72 @@ async fn claim_firing(
         (Basis::QueueDepth { .. }, Some(d)) => json!({"dock_depth": d}),
         _ => json!({}),
     };
-    let res = sqlx::query(
-        "INSERT INTO cadence_firings (firing_id, rule_name, verb, basis, fired_at, detail) \
-         VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (firing_id) DO NOTHING",
+    let new = NewFiring {
+        firing_id: id.to_string(),
+        rule_name: rule.name.clone(),
+        verb: rule.verb.clone(),
+        basis: rule.basis.as_str().to_string(),
+        fired_at: now, // boss-clock time, bound — never the DB's wallclock
+        detail,
+    };
+    let v = api(
+        http,
+        reqwest::Method::POST,
+        base,
+        "/api/cadence/firings",
+        Some(&serde_json::to_value(&new)?),
     )
-    .bind(id)
-    .bind(&rule.name)
-    .bind(&rule.verb)
-    .bind(rule.basis.as_str())
-    .bind(now) // boss-clock time, bound — never the DB's wallclock
-    .bind(detail)
-    .execute(pool)
     .await
-    .context("claiming the cadence firing")?;
-    Ok(res.rows_affected() == 1)
+    .context("claiming the cadence firing")?
+    .ok_or_else(|| anyhow!("POST /api/cadence/firings returned no body"))?;
+    let res: ClaimResult = serde_json::from_value(v).context("parsing the claim result")?;
+    Ok(res.claimed)
 }
 
 /// Merge the verb's outcome into the firing row — the runtime and
 /// exit code are what make "what did the cadence cost" a query.
-async fn record_outcome(pool: &PgPool, id: &str, rc: i32, runtime_secs: u64) -> Result<()> {
-    sqlx::query("UPDATE cadence_firings SET detail = detail || $2 WHERE firing_id = $1")
-        .bind(id)
-        .bind(json!({"rc": rc, "runtime_secs": runtime_secs}))
-        .execute(pool)
-        .await
-        .context("recording the cadence outcome")?;
+async fn record_outcome(
+    http: &reqwest::Client,
+    base: &str,
+    id: &str,
+    rc: i32,
+    runtime_secs: u64,
+) -> Result<()> {
+    api(
+        http,
+        reqwest::Method::POST,
+        base,
+        &format!("/api/cadence/firings/{id}/outcome"),
+        Some(&json!({"rc": rc, "runtime_secs": runtime_secs})),
+    )
+    .await
+    .context("recording the cadence outcome")?;
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// The dock probe — parked ready cars, counted from the jobs API with
-// the same predicate boarding itself collects by (train::parked_ready).
+// The jobs-API door itself, and the dock probe — parked ready cars,
+// counted with the same predicate boarding itself collects by
+// (train::parked_ready).
 // ---------------------------------------------------------------------------
 
-/// The probe reads the same system of record the conductor does, and
-/// the same pod roll hits it: on 2026-08-13 a `Connection refused`
-/// here held the queue-depth rules for a tick. Same blip guard, same
-/// classifier — journalled in this loop's idiom (`cadence: `).
-async fn get_json(http: &reqwest::Client, base: &str, path: &str) -> Result<Option<Value>> {
+/// Every call the loop makes reads the same system of record the
+/// conductor does, and the same pod roll hits it: on 2026-08-13 a
+/// `Connection refused` here held the queue-depth rules for a tick.
+/// Same blip guard, same classifier — journalled in this loop's idiom
+/// (`cadence: `). A POST re-sends only on a refused connection
+/// (nothing was received); an ambiguous claim is settled by the next
+/// tick re-evaluating the window, never by re-sending blind.
+async fn api(
+    http: &reqwest::Client,
+    method: reqwest::Method,
+    base: &str,
+    path: &str,
+    body: Option<&Value>,
+) -> Result<Option<Value>> {
     train::retrying(
         &train::JOBS_API_RETRY,
-        &reqwest::Method::GET,
+        &method,
         // The cadence loop is not a train and resolves no delivery
         // policy — it decides only WHEN to spawn a verb. Its journal
         // keeps the compiled cause budget, which is the same number the
@@ -746,55 +810,58 @@ async fn get_json(http: &reqwest::Client, base: &str, path: &str) -> Result<Opti
         // the line that changes.
         crate::delivery_policy::COMPILED_BLIP_CAUSE_BUDGET,
         &|m| log(m),
-        || get_json_once(http, base, path),
+        || api_once(http, &method, base, path, body),
     )
     .await
 }
 
-async fn get_json_once(
+async fn api_once(
     http: &reqwest::Client,
+    method: &reqwest::Method,
     base: &str,
     path: &str,
+    body: Option<&Value>,
 ) -> std::result::Result<Option<Value>, train::ApiFailure> {
-    let resp = http
-        .get(format!("{base}{path}"))
+    let mut req = http
+        .request(method.clone(), format!("{base}{path}"))
         .header("content-type", "application/json")
-        .header("x-boss-user", train::boss_user())
+        .header("x-boss-user", train::boss_user());
+    if let Some(b) = body {
+        req = req.json(b);
+    }
+    let resp = req
         .send()
         .await
-        .map_err(|e| train::ApiFailure::transport(e, format!("GET {path}")))?;
+        .map_err(|e| train::ApiFailure::transport(e, format!("{method} {path}")))?;
     let status = resp.status();
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| train::ApiFailure::transport(e, format!("reading GET {path} response")))?;
+    let text = resp.text().await.map_err(|e| {
+        train::ApiFailure::transport(e, format!("reading {method} {path} response"))
+    })?;
     if !status.is_success() {
         return Err(train::ApiFailure {
             kind: train::Failure::Http(status.as_u16()),
-            cause: anyhow!("GET {path}: HTTP {status}: {}", body.trim()),
+            cause: anyhow!("{method} {path}: HTTP {status}: {}", text.trim()),
         });
     }
-    if body.trim().is_empty() {
+    if text.trim().is_empty() {
         return Ok(None);
     }
-    serde_json::from_str(&body)
+    serde_json::from_str(&text)
         .map(Some)
         .map_err(|e| train::ApiFailure {
             kind: train::Failure::Malformed,
-            cause: anyhow::Error::new(e).context(format!("parsing GET {path} response")),
+            cause: anyhow::Error::new(e).context(format!("parsing {method} {path} response")),
         })
 }
 
-async fn probe_dock_depth() -> Result<u32> {
-    let jobs = train::env_or("BOSS_JOBS_URL", "http://127.0.0.1:7900");
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
+async fn probe_dock_depth(http: &reqwest::Client, base: &str) -> Result<u32> {
     let listed = train::rows(
-        get_json(
-            &http,
-            &jobs,
+        api(
+            http,
+            reqwest::Method::GET,
+            base,
             "/api/jobs?kind=ship-a-change&status=open&limit=100",
+            None,
         )
         .await?,
     )?;
@@ -803,9 +870,15 @@ async fn probe_dock_depth() -> Result<u32> {
         let Some(id) = j.get("id").and_then(Value::as_str) else {
             continue;
         };
-        let job = get_json(&http, &jobs, &format!("/api/jobs/{id}"))
-            .await?
-            .ok_or_else(|| anyhow!("job {id} came back empty"))?;
+        let job = api(
+            http,
+            reqwest::Method::GET,
+            base,
+            &format!("/api/jobs/{id}"),
+            None,
+        )
+        .await?
+        .ok_or_else(|| anyhow!("job {id} came back empty"))?;
         if train::parked_ready(&job) {
             depth += 1;
         }
@@ -959,12 +1032,14 @@ impl Runs {
     /// free, and the loop is free immediately.
     fn spawn_verb(
         &mut self,
-        pool: &PgPool,
+        http: &reqwest::Client,
+        base: &str,
         rule: &CadenceRule,
         firing_id: String,
         now: DateTime<Utc>,
     ) {
-        let pool = pool.clone();
+        let http = http.clone();
+        let base = base.to_string();
         let name = rule.name.clone();
         let verb = rule.verb.clone();
         let rule_name = rule.name.clone();
@@ -981,7 +1056,7 @@ impl Runs {
                 }
             };
             let secs = runtime_secs(started.elapsed());
-            if let Err(e) = record_outcome(&pool, &firing_id, rc, secs).await {
+            if let Err(e) = record_outcome(&http, &base, &firing_id, rc, secs).await {
                 log(format!(
                     "{name}: recording the firing outcome failed: {e:#}"
                 ));
@@ -1000,7 +1075,8 @@ struct TickSummary {
 }
 
 async fn tick(
-    pool: &PgPool,
+    http: &reqwest::Client,
+    base: &str,
     clock: &dyn ClockClient,
     dry: bool,
     runs: &mut Runs,
@@ -1009,7 +1085,7 @@ async fn tick(
     // the no-wallclock invariant). In the wall-mode production deploy
     // it IS wall time — served by the one authoritative clock.
     let now = clock.now().await.now;
-    let rules = load_rules(pool).await?;
+    let rules = load_rules(http, base).await?;
     // Release the guards of runs that finished since the last tick,
     // then read the survivors once — every rule this tick is judged
     // against the same picture of what is in flight.
@@ -1022,13 +1098,13 @@ async fn tick(
         .iter()
         .any(|r| matches!(r.basis, Basis::QueueDepth { .. }))
     {
-        match probe_dock_depth().await {
+        match probe_dock_depth(http, base).await {
             Ok(d) => dock_depth = Some(d),
             Err(e) => log(format!("dock probe failed — queue-depth rules hold: {e:#}")),
         }
     }
     for rule in &rules {
-        let last = last_firing(pool, &rule.name).await?;
+        let last = last_firing(http, base, &rule.name).await?;
         let window = match decide(rule, now, last.as_ref(), dock_depth, &running) {
             Decision::Hold => continue,
             Decision::StillRunning(elapsed) => {
@@ -1045,7 +1121,7 @@ async fn tick(
             ));
             continue;
         }
-        if !claim_firing(pool, &id, rule, now, dock_depth).await? {
+        if !claim_firing(http, base, &id, rule, now, dock_depth).await? {
             continue; // someone else holds this window
         }
         let depth_note = match (&rule.basis, dock_depth) {
@@ -1060,7 +1136,7 @@ async fn tick(
         ));
         // Spawn and move on. The tick that fires a 30-minute deploy
         // ends in milliseconds like any other.
-        runs.spawn_verb(pool, rule, id, now);
+        runs.spawn_verb(http, base, rule, id, now);
     }
     Ok(TickSummary {
         rules: rules.len(),
@@ -1102,15 +1178,17 @@ async fn shut_down(runs: &mut Runs, signal: &str, budget: std::time::Duration) {
 /// (infra/train/boss-train.service) or, with `once`, a single
 /// evaluated tick for an operator or a test.
 pub async fn run(once: bool, dry: bool) -> Result<()> {
-    let pg_url = train::env_or("BOSS_POSTGRES_URL", "postgres://boss:boss@127.0.0.1/boss");
-    let pool = PgPoolOptions::new()
-        // The loop's own queries plus a connection for each spawned
-        // verb's closing `record_outcome` — with verbs beside the
-        // loop rather than inside it, those can now coincide.
-        .max_connections(4)
-        .connect(&pg_url)
-        .await
-        .context("connecting to Postgres for cadence_rules")?;
+    // One address does the loop's whole job — rules, last-firings,
+    // claims, outcomes and the dock probe all ride the jobs API
+    // (protocol-cadence.md, sequencing step 3). The private sqlx pool
+    // that used to live here is gone WITH the split-brain it carried:
+    // it wrote firings to whatever database BOSS_POSTGRES_URL named,
+    // which on the conductor's host was not the system of record.
+    let base = jobs_base()?;
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("building the jobs API client")?;
     let clock_url = train::env_or("BOSS_CLOCK_URL", &boss_ports::url("clock"));
     let clock: Arc<dyn ClockClient> = Arc::new(ReqwestClockClient::new(clock_url.clone()));
     let tick_secs: u64 = train::env_or("BOSS_TRAIN_CADENCE_TICK_SECONDS", "60")
@@ -1135,7 +1213,7 @@ pub async fn run(once: bool, dry: bool) -> Result<()> {
             .unwrap_or(30),
     );
     log(format!(
-        "loop starting — rules from cadence_rules, clock at {clock_url}, tick {tick_secs}s{}",
+        "loop starting — rules from {base}/api/cadence/rules, clock at {clock_url}, tick {tick_secs}s{}",
         if dry { ", DRY" } else { "" }
     ));
     let mut runs = Runs::default();
@@ -1144,7 +1222,7 @@ pub async fn run(once: bool, dry: bool) -> Result<()> {
         // it wants the verb's result, and a detached child would die
         // with this process. Wait it out; only the supervised loop
         // gets to move on while a verb runs.
-        let outcome = tick(&pool, clock.as_ref(), dry, &mut runs).await;
+        let outcome = tick(&http, &base, clock.as_ref(), dry, &mut runs).await;
         runs.drain(None).await;
         return outcome.map(|_| ());
     }
@@ -1159,7 +1237,7 @@ pub async fn run(once: bool, dry: bool) -> Result<()> {
     let mut seen = TickSummary::default();
     loop {
         tick_n += 1;
-        match tick(&pool, clock.as_ref(), dry, &mut runs).await {
+        match tick(&http, &base, clock.as_ref(), dry, &mut runs).await {
             // The loop survives a bad tick — supervision is systemd's
             // job, coordination is this loop's; a transient jobs-api
             // or Postgres outage must not kill the schedule.
@@ -1882,10 +1960,18 @@ mod db_tests {
     /// confident wrong answer about why a train had not boarded. The
     /// assertion below is now the same number in both places, and it
     /// fails if they diverge again.
+    ///
+    /// Loading rides the real `/api/cadence/*` router here, so this
+    /// test is also the cross-crate pin that the API serves every
+    /// column the parser reads: an unserved calendar column makes
+    /// `by_name("protocol-retro-daily")` panic "seed rule missing",
+    /// which is the skipping-unreadable-rule scar made loud in CI.
     #[tokio::test(flavor = "multi_thread")]
     async fn seeded_rules_load_and_parse() {
         let db = boss_testing::TestDb::new().await;
-        let rules = load_rules(&db.pool).await.unwrap();
+        let base = serve_cadence_api(db.pool.clone()).await;
+        let http = reqwest::Client::new();
+        let rules = load_rules(&http, &base).await.unwrap();
         let by_name = |n: &str| {
             rules
                 .iter()
@@ -1969,10 +2055,13 @@ mod db_tests {
 
     /// One window, one firing: the second claim of the same id loses,
     /// and the recorded firing holds the window on re-evaluation —
-    /// the restart / second-instance idempotence contract end to end.
+    /// the restart / second-instance idempotence contract end to end,
+    /// through the same door the deployed loop uses.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_window_claims_exactly_once() {
         let db = boss_testing::TestDb::new().await;
+        let base = serve_cadence_api(db.pool.clone()).await;
+        let http = reqwest::Client::new();
         let rule = CadenceRule {
             name: "train-window".into(),
             verb: "run".into(),
@@ -1984,19 +2073,30 @@ mod db_tests {
         let window = due_window(&rule, now, None, None).expect("window due");
         let id = firing_id(&rule.name, window);
 
-        assert!(claim_firing(&db.pool, &id, &rule, now, None).await.unwrap());
+        assert!(
+            claim_firing(&http, &base, &id, &rule, now, None)
+                .await
+                .unwrap()
+        );
         // A concurrent instance (or a restart mid-verb) computes the
         // same id and must lose the claim.
-        assert!(!claim_firing(&db.pool, &id, &rule, now, None).await.unwrap());
+        assert!(
+            !claim_firing(&http, &base, &id, &rule, now, None)
+                .await
+                .unwrap()
+        );
 
         // The recorded firing is what evaluation sees next tick.
-        let last = last_firing(&db.pool, &rule.name).await.unwrap().unwrap();
+        let last = last_firing(&http, &base, &rule.name)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(last.firing_id, id);
         assert_eq!(last.fired_at, now);
         assert_eq!(due_window(&rule, now, Some(&last), None), None);
 
         // The outcome merges into the claim's detail row.
-        record_outcome(&db.pool, &id, 0, 42).await.unwrap();
+        record_outcome(&http, &base, &id, 0, 42).await.unwrap();
         let detail: Value =
             sqlx::query_scalar("SELECT detail FROM cadence_firings WHERE firing_id = $1")
                 .bind(&id)
@@ -2020,5 +2120,98 @@ mod db_tests {
         .execute(&db.pool)
         .await;
         assert!(dup.is_err(), "second active train-reconcile row accepted");
+    }
+
+    /// Serve the REAL `/api/cadence/*` router over a TestDb — the same
+    /// wire, handlers and Pg adapter production mounts, on an
+    /// ephemeral port. What these tests call "the surface" is not a
+    /// lookalike.
+    async fn serve_cadence_api(pool: sqlx::PgPool) -> String {
+        let repo: std::sync::Arc<dyn boss_jobs::cadence::CadenceRepository> =
+            std::sync::Arc::new(boss_jobs::cadence::PgCadence::new(pool));
+        let app =
+            boss_jobs::cadence::http::router(boss_jobs::cadence::http::CadenceApiState { repo });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    /// THE PACKET'S CLAIM, AS A TEST (backlog a516f1f1): the loop
+    /// fires on schedule, and `/api/cadence/rules/{name}/last-firing`
+    /// on the system of record must report that firing — not `null`.
+    ///
+    /// `null` from that surface means "never fired", and the conductor,
+    /// an operator, and every "why has the train not boarded" question
+    /// read it exactly that way. A firing the surface cannot see is a
+    /// firing recorded somewhere the system of record is not.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_observability_surface_reports_what_the_loop_records() {
+        // The system of record: the database behind /api/cadence/*.
+        let sor = boss_testing::TestDb::new().await;
+        let base = serve_cadence_api(sor.pool.clone()).await;
+        let http = reqwest::Client::new();
+
+        // The loop fires a wall rule on schedule and records the
+        // firing THE WAY THE LOOP RECORDS IT.
+        let rule = CadenceRule {
+            name: "train-reconcile".into(),
+            verb: "reconcile".into(),
+            basis: Basis::Wall { every_minutes: 10 },
+        };
+        let now = Utc.with_ymd_and_hms(2026, 8, 31, 6, 7, 0).unwrap();
+        let window = due_window(&rule, now, None, None).expect("window due");
+        let id = firing_id(&rule.name, window);
+        // The RED run of this test recorded the firing the way the
+        // loop did at origin/main — through its own BOSS_POSTGRES_URL
+        // pool, a DIFFERENT database than the one behind the surface
+        // (123-cadence-registry-reconcile.sql measured it: 244 firing
+        // rows local, 0 on the system of record) — and the surface
+        // answered null. The loop now has exactly one way to record a
+        // firing: the same door the surface serves.
+        assert!(
+            claim_firing(&http, &base, &id, &rule, now, None)
+                .await
+                .unwrap()
+        );
+
+        // The operator's read: the public observability surface.
+        let body: Value = http
+            .get(format!(
+                "{base}/api/cadence/rules/{}/last-firing",
+                rule.name
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            body.get("firing_id").and_then(Value::as_str),
+            Some(id.as_str()),
+            "the surface answered {body} for a rule that just fired — null here \
+             reads as 'never fired' while the loop fires on schedule"
+        );
+    }
+
+    /// The other half of honesty: a rule that truly never fired stays
+    /// `null`. The fix must make the surface see real firings, never
+    /// invent one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rule_that_never_fired_stays_null() {
+        let sor = boss_testing::TestDb::new().await;
+        let base = serve_cadence_api(sor.pool.clone()).await;
+        let body = reqwest::Client::new()
+            .get(format!("{base}/api/cadence/rules/train-window/last-firing"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "null", "never-fired must stay null");
     }
 }

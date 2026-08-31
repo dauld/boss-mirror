@@ -1,6 +1,6 @@
 # Design: BOSS Testing Strategy
 
-**Status:** living guidance — describes how the codebase actually
+**Status**: living guidance — describes how the codebase actually
 verifies itself plus the principles that govern where new tests
 land.
 

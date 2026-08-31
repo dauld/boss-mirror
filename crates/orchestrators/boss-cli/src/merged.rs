@@ -544,3 +544,38 @@ mod tests {
         );
     }
 }
+
+/// Top-level registration for `boss merged`. The variant lives here, in
+/// the module that owns the verb, and `main.rs` flattens it into
+/// `Commands` — so adding a verb edits this file plus three one-line,
+/// alphabetized anchors, never the shared enum body two in-flight cars
+/// collide on (84f9fbc0).
+#[derive(clap::Subcommand)]
+pub enum Cmd {
+    /// Did this branch actually land on main?
+    ///
+    /// The question three separate shell pipelines answered wrongly in
+    /// one session (26b3d203): a deleted branch, a squash merge and a
+    /// stale local ref each produced a confident "not merged". The
+    /// rules live in one tested function here instead.
+    Merged {
+        /// Branch to ask about.
+        branch: String,
+        /// Clone to ask in. Defaults to the working directory.
+        #[arg(long)]
+        clone: Option<String>,
+        /// Remote that receives trains — the authority for main.
+        #[arg(long)]
+        remote: Option<String>,
+    },
+}
+
+pub fn dispatch(cmd: Cmd) -> Result<()> {
+    match cmd {
+        Cmd::Merged {
+            branch,
+            clone,
+            remote,
+        } => run(&branch, clone, remote),
+    }
+}

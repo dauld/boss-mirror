@@ -291,7 +291,16 @@ spec:
                     export CARGO_TARGET_DIR=/scratch/target
                     cd /work/boss 2>/dev/null || true
                     RC
-                    printf '[ -f ~/.bashrc ] && . ~/.bashrc\n' > $H/.profile
+                    cat > $H/.profile <<'PR'
+                    [ -f ~/.bashrc ] && . ~/.bashrc
+                    # Interactive logins exec into the durable tmux session
+                    # (dev-session.sh): without this, ssh lands in a bare
+                    # login shell and a dropped connection HUPs whatever it
+                    # was running - the exact outage this pod exists to
+                    # prevent. Non-interactive shells (scp, ssh -T, harness
+                    # subshells) skip it.
+                    case $- in *i*) [ -t 0 ] && [ -z "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1 && exec /work/dev-session.sh;; esac
+                    PR
                     done
                     cat > /work/dev-session.sh <<'LS'
                     #!/usr/bin/env bash

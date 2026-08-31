@@ -296,3 +296,34 @@ mod tests {
         }
     }
 }
+
+/// Top-level registration for `boss running` — see `merged::Cmd` for
+/// why the variant lives in its verb's module (84f9fbc0).
+#[derive(clap::Subcommand)]
+pub enum Cmd {
+    /// Merged, deployed and running are three different facts.
+    ///
+    /// The gap between the last two is where a proof records something
+    /// true about a tree and false about production (26b3d203).
+    Running {
+        /// Clone to read main from. Defaults to the working directory.
+        #[arg(long)]
+        clone: Option<String>,
+        /// Remote that receives trains — the merge authority.
+        #[arg(long)]
+        remote: Option<String>,
+        /// Jobs API to ask what is actually serving.
+        #[arg(long)]
+        jobs_url: Option<String>,
+    },
+}
+
+pub fn dispatch(cmd: Cmd) -> Result<()> {
+    match cmd {
+        Cmd::Running {
+            clone,
+            remote,
+            jobs_url,
+        } => run(clone, remote, jobs_url),
+    }
+}

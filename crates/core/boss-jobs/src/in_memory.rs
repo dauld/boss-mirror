@@ -182,6 +182,20 @@ impl JobsRepository for InMemoryJobs {
         Ok(state.jobs.get(&job_key(id)).cloned())
     }
 
+    async fn resolve_job_id_prefix(&self, prefix: &str) -> Result<Vec<JobId>, JobsError> {
+        // The map is keyed by the canonical id string (`job_key`), so a
+        // prefix match on the key is the same match the Pg adapter makes
+        // on `id::text`. Capped at two, like the SQL's LIMIT 2.
+        let state = self.inner.lock().expect("poisoned");
+        Ok(state
+            .jobs
+            .values()
+            .filter(|j| j.id.to_string().starts_with(prefix))
+            .take(2)
+            .map(|j| j.id)
+            .collect())
+    }
+
     async fn update_job_at(
         &self,
         job: &Job,

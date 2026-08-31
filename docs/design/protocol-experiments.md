@@ -1,6 +1,6 @@
 # Design: protocol experiments — variants as data, verdicts from the log
 
-**Status:** in-review — open questions tracked at `/system/design`
+**Status**: decided — all 4 questions resolved 2026-08-14 via the in-app tracker; see Decisions.
 **Origin:** David, 2026-08-12 (verbatim): "We can definitely take
 empirical data from our train deployment protocol and use that to
 propose changes. We haven't really exercised our capabilities for

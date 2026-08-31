@@ -403,6 +403,22 @@ impl JobsRepository for PgJobs {
         Ok(row.map(row_to_job))
     }
 
+    async fn resolve_job_id_prefix(&self, prefix: &str) -> Result<Vec<JobId>, JobsError> {
+        // LIKE on the canonical text form; LIMIT 2 is all the caller
+        // needs to tell one match from many, and keeps a short prefix
+        // from scanning the table. `%` and `_` cannot appear in the
+        // hex-and-hyphen prefix the handler admits, so no escaping is
+        // needed — but the prefix is still bound, never interpolated.
+        let ids = sqlx::query_scalar::<_, uuid::Uuid>(
+            "SELECT id FROM jobs WHERE id::text LIKE $1 || '%' LIMIT 2",
+        )
+        .bind(prefix)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+        Ok(ids.into_iter().map(JobId::from_uuid).collect())
+    }
+
     async fn update_job_at(
         &self,
         job: &Job,
@@ -903,7 +919,17 @@ impl JobsRepository for PgJobs {
                     WHEN status IN ('completed', 'skipped') THEN metadata
                     ELSE $9
                 END,
-                notes = $10, embedded_job = $11, updated_at = $12
+                notes = $10, embedded_job = $11, updated_at = $12,
+                -- The authored completion contract (`fields`) takes
+                -- the same freeze as metadata: live rows accept the
+                -- write, terminal rows keep theirs. This column was
+                -- absent from the list entirely, so a 204'd update
+                -- silently dropped it and every step's contract was
+                -- write-once at materialization (a07cfddd).
+                fields = CASE
+                    WHEN status IN ('completed', 'skipped') THEN fields
+                    ELSE $13
+                END
             WHERE id = $1
             "#,
         )
@@ -919,6 +945,7 @@ impl JobsRepository for PgJobs {
         .bind(&step.notes)
         .bind(step.embedded_job.map(|j| *j.inner().as_uuid()))
         .bind(now)
+        .bind(serde_json::to_value(&step.fields).unwrap_or_default())
         .execute(&mut *tx)
         .await
         .map_err(|e| JobsError::Storage(e.to_string()))?;

@@ -930,12 +930,14 @@ pub(crate) fn short_cause(err: &anyhow::Error, budget: usize) -> String {
 /// rather than a blip, or the attempt budget runs out. Every retry
 /// journals one line through `journal` — the caller's idiom, so the
 /// conductor's blips read `conductor: ` and the cadence loop's read
-/// `cadence: `.
+/// `cadence: `. (`+ Sync` because the cadence loop's spawned verb
+/// tasks record their outcome through this door, and a future that
+/// crosses `tokio::spawn` must be `Send`.)
 pub(crate) async fn retrying<T, F, Fut>(
     policy: &RetryPolicy,
     method: &Method,
     cause_budget: usize,
-    journal: &dyn Fn(&str),
+    journal: &(dyn Fn(&str) + Sync),
     mut op: F,
 ) -> Result<T>
 where
@@ -5076,8 +5078,8 @@ mod tests {
     use chrono::{DateTime, Utc};
     use reqwest::Method;
     use serde_json::{Value, json};
-    use std::cell::Cell;
     use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
 
     /// THE POLICY EVERY TEST BELOW DECIDES BY, unless it is deliberately
@@ -6756,14 +6758,19 @@ mod tests {
     }
 
     /// A journal that counts its lines instead of printing them.
-    fn counting_journal(lines: &Cell<u32>) -> impl Fn(&str) {
-        move |_| lines.set(lines.get() + 1)
+    /// Atomic rather than `Cell` because `retrying` now takes a
+    /// `Sync` journal (the cadence loop's spawned verb tasks report
+    /// through it).
+    fn counting_journal(lines: &AtomicU32) -> impl Fn(&str) + Sync {
+        move |_| {
+            lines.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     #[tokio::test]
     async fn a_blip_retries_to_the_attempt_budget_then_surfaces() {
         let mut calls = 0u32;
-        let lines = Cell::new(0u32);
+        let lines = AtomicU32::new(0);
         let out: Result<()> = retrying(
             &RetryPolicy::immediate(3),
             &Method::GET,
@@ -6777,13 +6784,17 @@ mod tests {
         .await;
         assert!(out.is_err(), "the verb still surfaces a real outage");
         assert_eq!(calls, 3, "three attempts, not more");
-        assert_eq!(lines.get(), 2, "one line per retry — blips stay countable");
+        assert_eq!(
+            lines.load(Ordering::Relaxed),
+            2,
+            "one line per retry — blips stay countable"
+        );
     }
 
     #[tokio::test]
     async fn a_recovered_blip_costs_nothing_but_a_line() {
         let mut calls = 0u32;
-        let lines = Cell::new(0u32);
+        let lines = AtomicU32::new(0);
         let out: Result<u8> = retrying(
             &RetryPolicy::immediate(3),
             &Method::PUT,
@@ -6804,13 +6815,13 @@ mod tests {
         .await;
         assert_eq!(out.unwrap(), 7);
         assert_eq!(calls, 2, "stops the moment the SoR answers");
-        assert_eq!(lines.get(), 1);
+        assert_eq!(lines.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
     async fn an_answer_is_surfaced_on_the_first_attempt() {
         let mut calls = 0u32;
-        let lines = Cell::new(0u32);
+        let lines = AtomicU32::new(0);
         let out: Result<()> = retrying(
             &RetryPolicy::immediate(3),
             &Method::PUT,
@@ -6832,7 +6843,11 @@ mod tests {
             "the answer reaches the operator unchanged"
         );
         assert_eq!(calls, 1, "a 422 is an answer — asked once");
-        assert_eq!(lines.get(), 0, "an answer is not a blip and journals none");
+        assert_eq!(
+            lines.load(Ordering::Relaxed),
+            0,
+            "an answer is not a blip and journals none"
+        );
     }
 
     // ---- publish_car_branch -------------------------------------

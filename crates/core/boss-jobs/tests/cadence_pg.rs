@@ -94,6 +94,41 @@ async fn seeded_rules_serve_the_thresholds_the_schema_declares() {
     assert_eq!(depth.cooldown_minutes, Some(120));
 }
 
+/// A calendar rule must be served WHOLE — cadence, anchor_date and
+/// business_calendar included.
+///
+/// The conductor's cutover onto `/api/cadence/*` (protocol-cadence.md
+/// sequencing step 3, backlog a516f1f1) makes this adapter the loop's
+/// only source of rules. The loop already lived through the shape of
+/// this failure once on the SQL side: `load_rules`' SELECT was not
+/// widened when the calendar basis landed, and protocol-retro-daily
+/// was skipped loudly on every tick while the registry showed it
+/// active. Serving the row without its calendar columns would replay
+/// that scar one door over.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_calendar_rule_is_served_whole() {
+    let db = TestDb::new().await;
+    let repo = PgCadence::new(db.pool.clone());
+    let rules = repo.active_rules().await.unwrap();
+
+    let retro = rules
+        .iter()
+        .find(|r| r.name == "protocol-retro-daily")
+        .expect("seed rule protocol-retro-daily missing");
+    assert_eq!(retro.basis, "calendar");
+    assert_eq!(
+        retro.cadence.as_deref(),
+        Some("daily"),
+        "a calendar rule served without its cadence is unreadable to the loop"
+    );
+    assert_eq!(
+        retro.anchor_date,
+        chrono::NaiveDate::from_ymd_opt(2026, 8, 28),
+        "the anchor is the recurrence's whole identity"
+    );
+    assert_eq!(retro.business_calendar, None);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn active_rules_excludes_retired_ones() {
     let db = TestDb::new().await;

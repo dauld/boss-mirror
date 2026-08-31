@@ -871,21 +871,57 @@ pub(super) struct JobDetail {
     steps: Vec<Step>,
 }
 
+/// An 8..=36-char run of hex and hyphens — the canonical id text minus
+/// its tail. Below 8 is too little to resolve safely; anything with a
+/// non-hex, non-hyphen character is not an id at all. A full uuid also
+/// satisfies this, but the caller tries `parse_job_id` first, so this
+/// only ever judges genuine prefixes.
+fn is_id_prefix(s: &str) -> bool {
+    (8..=36).contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+}
+
+async fn job_detail_response<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &JobsApiState<R, B>,
+    job_id: &boss_core::job::JobId,
+) -> Response {
+    match state.jobs.get_job(job_id).await {
+        Ok(Some(job)) => {
+            let steps = state.jobs.list_steps(job_id).await.unwrap_or_default();
+            Json(JobDetail { job, steps }).into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, "job not found").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 pub(super) async fn get_job<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
     Path(id): Path<String>,
 ) -> Response {
-    let job_id = match parse_job_id(&id) {
-        Some(id) => id,
-        None => return (StatusCode::BAD_REQUEST, "invalid job id").into_response(),
-    };
-
-    match state.jobs.get_job(&job_id).await {
-        Ok(Some(job)) => {
-            let steps = state.jobs.list_steps(&job_id).await.unwrap_or_default();
-            Json(JobDetail { job, steps }).into_response()
-        }
-        Ok(None) => (StatusCode::NOT_FOUND, "job not found").into_response(),
+    // The fast path: a full uuid, the id the whole system stores and
+    // every write holds. Untouched.
+    if let Some(job_id) = parse_job_id(&id) {
+        return job_detail_response(&state, &job_id).await;
+    }
+    // Otherwise, resolve the id everyone actually holds — the 8-char
+    // prefix printed in journals, arrival reports and messages. Nothing
+    // matches → 404 (genuinely absent); more than one → 409 (the caller
+    // asked a two-answer question, and guessing is the wrong move on a
+    // lookup that precedes a write). True garbage stays 400.
+    let prefix = id.to_ascii_lowercase();
+    if !is_id_prefix(&prefix) {
+        return (StatusCode::BAD_REQUEST, "invalid job id").into_response();
+    }
+    match state.jobs.resolve_job_id_prefix(&prefix).await {
+        Ok(matches) => match matches.as_slice() {
+            [] => (StatusCode::NOT_FOUND, "job not found").into_response(),
+            [one] => job_detail_response(&state, one).await,
+            _ => (
+                StatusCode::CONFLICT,
+                "ambiguous id prefix: more than one job matches",
+            )
+                .into_response(),
+        },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
