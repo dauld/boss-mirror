@@ -60,12 +60,21 @@ observation=$(jq -n \
 
 echo "observing $HOST_ID: cpu=$cpu mem=${mem_gb}G disk=${disk_gb}G free=${free_gb}G"
 
-code=$(printf '%s' "$observation" | curl -s -o /tmp/estate-observe-resp -w '%{http_code}' \
+# No temp file: the first scheduled firing failed curl exit 23 (a WRITE
+# error) under the unit while the POST itself had succeeded server-side,
+# and the old message called that UNREACHABLE - two lies from one -o.
+# Body and status ride one capture instead; the label states only what
+# curl's exit actually says.
+resp=$(printf '%s' "$observation" | curl -s -w '\n%{http_code}' \
   -X POST -H 'content-type: application/json' \
   -H 'x-boss-user: {"id":"automation:estate-observer-host","role":"platform-admin","access_tier":"operator"}' \
   --data-binary @- \
   "$JOBS_API/api/estate/observation") \
-  || { rc=$?; echo "jobs api: UNREACHABLE (curl exit $rc, target $JOBS_API)"; exit 1; }
+  || { rc=$?; echo "jobs api: curl failed (exit $rc, target $JOBS_API)"; exit 1; }
+code=${resp##*
+}
+body=${resp%
+*}
 
-echo "jobs api: $code $(cat /tmp/estate-observe-resp)"
+echo "jobs api: $code $body"
 test "$code" = "202"
