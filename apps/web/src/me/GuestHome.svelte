@@ -89,7 +89,7 @@
         two.
       </span>
     </button>
-    <button type="button" class="guest-tour-card" onclick={() => go('/system/yard')}>
+    <button type="button" class="guest-tour-card" onclick={() => go('/it')}>
       <span class="guest-tour-h">Watch the work move →</span>
       <span class="guest-tour-p">
         Every order becomes a job packet that walks the same brewhouse,

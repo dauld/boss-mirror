@@ -32,19 +32,16 @@ export type RouteName =
   // Sits beside the dispatcher cascade: same IT audience, different
   // question (job traffic, not rule wiring).
   | 'system-yard'
-  // The network map — every registry station as a node (stations.md).
-  | 'system-map'
-  | 'system-flow'
-  // The fleet overlay — every in-flight Job of a kind on its
-  // Workflow's DAG; per-step depth is the queue-visibility signal.
-  | 'system-fleet'
+  // system-map / system-flow / system-fleet / system-model retired by
+  // the 2026-08-31 IT consolidation (packet 1f6d55e0): map and flow's
+  // renderings folded into the Atlas tab, fleet lives on as the
+  // Bottlenecks tab under Operate (gated by system-monitoring), and
+  // the System Model wrapper page died with the /system prefix.
   // The hardware registry page (59ef456a).
   | 'system-estate'
   // The model-vocabulary surface — SubjectKind taxonomy + Class registry
   // (read-only). Same `it-*` audience as the dispatcher cascade it sits beside.
   | 'system-subjects'
-  // The IT landing — a live-stats hub linking the model-reading surfaces.
-  | 'system-model'
   // Dispatcher rule-authoring surfaces — same `it-dispatcher` audience as
   // the cascade viz they hang off (reached via links from it, not their
   // own sidebar entries).
@@ -61,7 +58,7 @@ const ALL: ReadonlyArray<RouteName> = [
   'shipping', 'vendors', 'marketing-assets', 'calendar',
   'schedule', 'jobs',
   'policy', 'workflows', 'system-step-plugins', 'system-dispatcher',
-  'system-dispatcher-rules', 'system-dispatcher-rule', 'system-design', 'system-yard', 'system-map', 'system-flow', 'system-fleet', 'system-estate', 'system-subjects', 'system-model', 'system-kb', 'auth-admin',
+  'system-dispatcher-rules', 'system-dispatcher-rule', 'system-design', 'system-yard', 'system-estate', 'system-subjects', 'system-kb', 'auth-admin',
   'system-experiments',
   'workflows',
 ];
@@ -102,7 +99,7 @@ export const ROUTE_ACCESS: Record<Role, ReadonlyArray<RouteName>> = {
   // model what their dept's work looks like (per the
   // "modeling-not-building" frame).
   'it-manager': ['exec', 'system-monitoring', 'system-kb',
-    'system-step-plugins', 'system-dispatcher', 'system-dispatcher-rules', 'system-dispatcher-rule', 'system-subjects', 'system-model',
+    'system-step-plugins', 'system-dispatcher', 'system-dispatcher-rules', 'system-dispatcher-rule', 'system-subjects',
     'system-design', 'system-estate', 'jobs'],
   auditor: ['finance', 'accounts', 'assets'],
   // Audit-readonly is the system audit account — Read on every
@@ -180,10 +177,10 @@ export const ROUTE_ACCESS: Record<Role, ReadonlyArray<RouteName>> = {
   // + COO (the people whose work the Workflow models) per the
   // "engineers are operators like anyone else" framing.
   'it-director': ['exec', 'system-monitoring', 'system-kb',
-    'system-step-plugins', 'system-dispatcher', 'system-dispatcher-rules', 'system-dispatcher-rule', 'system-subjects', 'system-model',
+    'system-step-plugins', 'system-dispatcher', 'system-dispatcher-rules', 'system-dispatcher-rule', 'system-subjects',
     'system-design', 'jobs'],
   sysadmin:      ['system-monitoring', 'system-kb',
-    'system-step-plugins', 'system-dispatcher', 'system-dispatcher-rules', 'system-dispatcher-rule', 'system-subjects', 'system-model',
+    'system-step-plugins', 'system-dispatcher', 'system-dispatcher-rules', 'system-dispatcher-rule', 'system-subjects',
     'system-design', 'jobs'],
   helpdesk:      ['system-monitoring', 'system-kb', 'jobs'],
 

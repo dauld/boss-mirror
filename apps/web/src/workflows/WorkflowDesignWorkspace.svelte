@@ -1,5 +1,5 @@
 <script lang="ts">
-  // /system/workflows/authoring/:jobId — the graphical authoring surface
+  // /it/registry/authoring/:jobId — the graphical authoring surface
   // for a `workflow-design` Job (decision D6). The working spec lives in
   // the design Job's publish-step `metadata.workflow_spec`; edits persist
   // there (debounced) as ordinary STEP_UPDATED events — no `workflows`
@@ -216,7 +216,7 @@
         );
       }
       await completeStep(jobId, publishStep.id);
-      navigate(href(`/system/workflows/${encodeURIComponent(slug)}`));
+      navigate(href(`/it/registry/${encodeURIComponent(slug)}`));
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
       acting = null;
@@ -240,7 +240,7 @@
 </script>
 
 <div class="catalog theme-exec">
-  <Breadcrumb to={href('/system/workflows')}>← All job kinds</Breadcrumb>
+  <Breadcrumb to={href('/it/registry')}>← All job kinds</Breadcrumb>
 
   {#if loadState.kind === 'loading'}
     <p class="empty">Loading…</p>

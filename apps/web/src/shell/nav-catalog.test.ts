@@ -38,7 +38,7 @@ import { readFileSync } from 'node:fs';
 /// surface into or out of the set, this list is the thing to update,
 /// deliberately.
 const LEGACY_MODEL_ROUTES: ReadonlyArray<string> = [
-  'system-model', 'system-monitoring', 'system-step-plugins', 'system-dispatcher',
+  'system-monitoring', 'system-step-plugins', 'system-dispatcher',
   'system-subjects', 'system-dispatcher-rules', 'system-dispatcher-rule',
   'system-kb', 'system-design', 'system-experiments', 'policy',
   // One entry, not two. `workflows` (the authoring row, already
@@ -76,7 +76,6 @@ describe('nav catalog — app assignment', () => {
     // Flow — the team's own throughput, in wall-clock time. Distinct
     // from System Monitoring on purpose: monitoring answers what the
     // machine is doing, Flow answers what the people got through.
-    'system-flow',
     // Fleet — every in-flight Job of a kind on its Workflow's DAG.
     // Beside Flow deliberately: Flow is throughput, Fleet is where
     // the work is piling up (queue-visibility Q4's depth signal).
@@ -88,7 +87,6 @@ describe('nav catalog — app assignment', () => {
     // The network map — every registry station as a node
     // (stations.md: priority queues, stations, and network nodes are
     // one concept). No edges until motion is evented.
-    'system-map',
     // Incidents — active incident-post-mortem packets to respond to,
     // plus the closed ones rendered as a durable archive (David:
     // "both where we respond to active incidents and document post
@@ -117,7 +115,13 @@ describe('nav catalog — app assignment', () => {
   // Source-level because the groups live inside a component. Crude,
   // but it fails when someone adds an IT surface and forgets the
   // sidebar, which is exactly the mistake it exists for.
-  it('every IT surface is reachable from the IT sidebar', () => {
+  it('the IT sidebar holds exactly the six consolidated rows, and every other IT surface is a tab or a documented door', () => {
+    // The 2026-08-31 consolidation (packet 1f6d55e0): David — "we do
+    // have too many IT pages though. We should consolidate." The
+    // sidebar is EXACTLY six rows; every remaining IT catalog entry
+    // must be reachable as a tab on one of them (ItTabs.svelte) or be
+    // on the short documented list of parent-reached doors. This test
+    // is also the executable "17 pages became 6" claim.
     const shell = readFileSync(
       new URL('./AppShell.svelte', import.meta.url),
       'utf8',
@@ -126,29 +130,44 @@ describe('nav catalog — app assignment', () => {
       shell.indexOf('const IT_GROUPS'),
       shell.indexOf('// Home —'),
     );
-    // Surfaces deliberately reached FROM another page rather than
-    // from the sidebar. Each needs a parent that links to it.
-    const REACHED_FROM_A_PARENT: ReadonlyArray<string> = [
-      // Authoring is reached from Workflows, by design — see the
-      // comment on the Define group.
-      'workflows',
-      // Sub-pages of the dispatcher cascade.
-      'system-dispatcher-rules',
-      'system-dispatcher-rule',
+    const SIDEBAR_SIX: ReadonlyArray<string> = [
+      'system-yard',      // /it — the landing
+      'system-incidents', // Operate
+      'workflows',        // Registry
+      'system-design',    // Design
+      'system-estate',    // Estate
+      'system-kb',        // Knowledge Base
     ];
+    for (const k of SIDEBAR_SIX) {
+      expect(
+        groups.includes(`'${k}'`) || groups.includes(`ROUTE_CATALOG.${k}`),
+        `sidebar row missing: ${k}`,
+      ).toBe(true);
+    }
+    // No seventh row: count the catalog references inside IT_GROUPS.
+    const rowRefs = (groups.match(/ROUTE_CATALOG(\.\w[\w-]*|\['[^']+'\])/g) ?? []).length;
+    expect(rowRefs, 'the IT sidebar must hold exactly six rows').toBe(6);
 
+    const tabs = readFileSync(
+      new URL('../it/ItTabs.svelte', import.meta.url),
+      'utf8',
+    );
+    // Doors reached from a parent page rather than sidebar or tabs.
+    const DOCUMENTED_DOORS: ReadonlyArray<string> = [
+      'system-dispatcher-rules', // reached from the cascade
+      'system-dispatcher-rule',
+      'auth-admin',              // unlisted by design (1f6d55e0)
+      'system-monitoring',       // the permKey behind Operate's gated tabs
+    ];
     const unreachable = entries
       .filter(([, v]) => v.app === 'it')
-      .map(([k]) => k)
-      .filter((k) => !REACHED_FROM_A_PARENT.includes(k))
-      // The shell references entries BOTH ways — `ROUTE_CATALOG.policy`
-      // and `ROUTE_CATALOG['system-design']` — so check both spellings.
-      // Matching only the bracket form is how this test first reported
-      // five false positives.
-      .filter((k) => !groups.includes(`'${k}'`) && !groups.includes(`ROUTE_CATALOG.${k}`));
-    expect(unreachable, `IT routes with no sidebar entry: ${unreachable.join(', ')}`).toEqual(
-      [],
-    );
+      .map(([k, v]) => [k, v.path] as const)
+      .filter(([k]) => !SIDEBAR_SIX.includes(k) && !DOCUMENTED_DOORS.includes(k))
+      .filter(([, path]) => !tabs.includes(`'${path}'`));
+    expect(
+      unreachable.map(([k]) => k),
+      `IT surfaces neither sidebar, tab, nor documented door: ${unreachable.map(([k]) => k).join(', ')}`,
+    ).toEqual([]);
   });
 
   it('nothing from the original System Model set has left the IT app', () => {
@@ -213,7 +232,7 @@ describe('nav catalog — app assignment', () => {
 
 describe('appForSection — the App.svelte tab derivation', () => {
   it('resolves surfaces to their app', () => {
-    expect(appForSection('system-model')).toBe('it');
+    expect(appForSection('system-yard')).toBe('it');
     expect(appForSection('accounts')).toBe('sales');
     expect(appForSection('finance')).toBe('finance');
     // 'All jobs' stays on Home deliberately. It is the cross-cutting

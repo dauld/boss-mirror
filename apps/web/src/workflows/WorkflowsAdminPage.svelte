@@ -1,5 +1,5 @@
 <script lang="ts">
-  // /system/workflows — port of apps/web/src/admin/WorkflowsPage.tsx.
+  // /it/registry — port of apps/web/src/admin/WorkflowsPage.tsx.
 
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
@@ -55,7 +55,7 @@
   {/if}
 
   <div style="padding:0 24px 16px">
-    <Link to={href('/system/workflows/new')} className="wb-btn wb-btn-primary">
+    <Link to={href('/it/registry/new')} className="wb-btn wb-btn-primary">
       + Create new kind
     </Link>
   </div>
@@ -78,7 +78,7 @@
               {#each byCategory.get(cat) ?? [] as k (k.kind)}
                 <tr>
                   <td>
-                    <Link to={href(`/system/workflows/${encodeURIComponent(k.kind)}`)}>
+                    <Link to={href(`/it/registry/${encodeURIComponent(k.kind)}`)}>
                       <span class="mono">{k.kind}</span>
                     </Link>
                   </td>

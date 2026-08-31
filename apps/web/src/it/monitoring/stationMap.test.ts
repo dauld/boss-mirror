@@ -167,11 +167,11 @@ describe('queueViewFromBody', () => {
   test('a declared upstream rides the envelope into the queue view', () => {
     const v = queueViewFromBody({
       ...envelope,
-      upstream: { label: 'FEEDBACK', href: '/system/feedback' },
+      upstream: { label: 'FEEDBACK', href: '/it/design/feedback' },
     });
     expect(v!.upstream).toEqual({
       label: '↑ UPSTREAM: FEEDBACK',
-      href: '/system/feedback',
+      href: '/it/design/feedback',
       title: 'Walk upstream to FEEDBACK — the queue that feeds this station',
     });
   });

@@ -111,7 +111,7 @@ describe('reviewHref', () => {
   test('goes to the full-page step surface when the step is known', () => {
     const href = reviewHref('job-1', 'step-9');
     expect(href).toStartWith('/jobs/job-1/steps/step-9?');
-    expect(href).toContain('from=%2Fsystem%2Fdesign');
+    expect(href).toContain('from=%2Fit%2Fdesign');
     expect(href).toContain('from_label=Design%20Review');
   });
 

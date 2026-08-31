@@ -229,12 +229,12 @@ describe('the upstream button', () => {
     const y = assembleYard(
       [],
       [],
-      envelope({ upstream: { label: 'FEEDBACK', href: '/system/feedback' } }),
+      envelope({ upstream: { label: 'FEEDBACK', href: '/it/design/feedback' } }),
     );
     const b = dockUpstream(y.dockStation);
     expect(b).not.toBeNull();
     expect(b!.label).toBe('↑ UPSTREAM: FEEDBACK');
-    expect(b!.href).toBe('/system/feedback');
+    expect(b!.href).toBe('/it/design/feedback');
     // The tooltip says what the button does, not what it is.
     expect(b!.title).toContain('feeds this station');
   });
@@ -243,7 +243,7 @@ describe('the upstream button', () => {
     const y = assembleYard(
       [],
       [],
-      envelope({ upstream: { label: 'design docs', href: '/system/design' } }),
+      envelope({ upstream: { label: 'design docs', href: '/it/design' } }),
     );
     expect(dockUpstream(y.dockStation)?.label).toBe('↑ UPSTREAM: DESIGN DOCS');
   });
@@ -262,7 +262,7 @@ describe('the upstream button', () => {
     const noLabel = assembleYard(
       [],
       [],
-      envelope({ upstream: { label: '', href: '/system/feedback' } }),
+      envelope({ upstream: { label: '', href: '/it/design/feedback' } }),
     );
     expect(dockUpstream(noLabel.dockStation)).toBeNull();
   });

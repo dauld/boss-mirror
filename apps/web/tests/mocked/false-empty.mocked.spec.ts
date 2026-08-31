@@ -71,7 +71,7 @@ test('a failed workflows read fails the board — routed cards do not print unde
     json(r, { data: [ROUTED_JOB], total: 1 }));
   await page.route(/\/api\/workflows$/, (r) => json(r, 'registry down', 500));
 
-  await page.goto('/system/feedback');
+  await page.goto('/it/design/feedback');
   await expect(page.locator('.tb-err')).toBeVisible();
   await expect(page.locator('.tb-err')).toContainText('workflows');
   // The false-empty this replaces: the routed card misfiled as
@@ -85,7 +85,7 @@ test('a truly empty queue still reads as empty, not as a failure', async ({ page
   await page.route(/\/api\/jobs\?kind=user-feedback/, (r) => json(r, { data: [], total: 0 }));
   await page.route(/\/api\/workflows$/, (r) => json(r, [KIND]));
 
-  await page.goto('/system/feedback');
+  await page.goto('/it/design/feedback');
   await expect(page.locator('.tb-msg')).toBeVisible();
   await expect(page.locator('.tb-err')).toHaveCount(0);
 });

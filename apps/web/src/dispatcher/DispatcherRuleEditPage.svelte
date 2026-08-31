@@ -1,5 +1,5 @@
 <script lang="ts">
-  // /system/dispatcher/rules/{name} (and {name}==='new' for create mode) —
+  // /it/registry/rules/{name} (and {name}==='new' for create mode) —
   // edit a dispatcher rule: a draft form seeded from the active/latest
   // version, a version-history table, and the draft → publish/retire
   // lifecycle actions. Models the step-plugin detail page (LoadState
@@ -163,7 +163,7 @@
       const created = await createDraft(spec);
       if (isNew) {
         // Land on the now-existing rule's editor.
-        navigate(href(`/system/dispatcher/rules/${encodeURIComponent(created.name)}`));
+        navigate(href(`/it/registry/rules/${encodeURIComponent(created.name)}`));
         return;
       }
       await load();
@@ -216,7 +216,7 @@
   </div>
 {:else if loadState.kind === 'error'}
   <div class="catalog theme-exec">
-    <Breadcrumb to={href('/system/dispatcher/rules')}>← All dispatcher rules</Breadcrumb>
+    <Breadcrumb to={href('/it/registry/rules')}>← All dispatcher rules</Breadcrumb>
     <PageHeader eyebrow="Platform · Dispatcher rule" title={ruleName} subtitle={loadState.message} />
   </div>
 {:else}
@@ -225,7 +225,7 @@
   {@const hasActive = versions.some((v) => v.status === 'active')}
   {@const active = versions.find((v) => v.status === 'active')}
   <div class="catalog theme-exec">
-    <Breadcrumb to={href('/system/dispatcher/rules')}>← All dispatcher rules</Breadcrumb>
+    <Breadcrumb to={href('/it/registry/rules')}>← All dispatcher rules</Breadcrumb>
     <PageHeader
       eyebrow="Platform · Dispatcher rule"
       title={isNew ? 'New dispatcher rule' : ruleName}

@@ -26,10 +26,10 @@ const STEPS = [
 ].map((s, i) => ({ ...s, sort_order: i }));
 
 const JOB = {
-  id: JOB_ID, kind: 'user-feedback', title: 'Feedback on /system/yard',
+  id: JOB_ID, kind: 'user-feedback', title: 'Feedback on /it',
   status: 'open', opened_on: '2026-08-15', due_on: null, closed_on: null,
   owner_id: 'emp-david', priority: 'standard', simulated: false, tags: [],
-  subject: { subject_kind: 'custom', id: '/system/yard' }, metadata: {}, steps: STEPS,
+  subject: { subject_kind: 'custom', id: '/it' }, metadata: {}, steps: STEPS,
 };
 
 const EMP = { id: 'emp-001', name: 'David', email: 'd@a', role: 'platform-admin',

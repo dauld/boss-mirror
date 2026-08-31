@@ -1,4 +1,4 @@
-// /it/incidents — the IT incidents surface.
+// /it/operate — the IT incidents surface.
 //
 // David: "Do we have a good surface for IT to view post mortems more
 // durably? I think we probably need a new 'Incidents' page that is
@@ -107,7 +107,7 @@ test('active packets and the archive both render, archive newest first', async (
   await page.route(LIST, (r) =>
     json(r, { data: [OPEN_JOB, CLOSED_OLD, CLOSED_NEW], total: 3 }));
 
-  await page.goto('/it/incidents');
+  await page.goto('/it/operate');
 
   // --- Active panel: the open packet, with its step strip. ---
   const active = page.locator('.inc-active');
@@ -152,7 +152,7 @@ test('a failed fetch renders as a failure with Retry — never as an empty page'
   await page.route(LIST, (r) =>
     up ? json(r, { data: [OPEN_JOB], total: 1 }) : json(r, 'jobs api down', 500));
 
-  await page.goto('/it/incidents');
+  await page.goto('/it/operate');
 
   await expect(page.locator('.inc-failed')).toBeVisible();
   await expect(page.locator('.inc-failed')).toContainText('HTTP 500');
@@ -173,7 +173,7 @@ test('a truly empty queue reads as empty — each panel says so distinctly', asy
   await mocks(page);
   await page.route(LIST, (r) => json(r, { data: [], total: 0 }));
 
-  await page.goto('/it/incidents');
+  await page.goto('/it/operate');
 
   await expect(page.getByText(/No active incidents/)).toBeVisible();
   await expect(page.getByText(/No post-mortems archived yet/)).toBeVisible();

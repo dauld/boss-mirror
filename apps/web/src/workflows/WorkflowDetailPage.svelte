@@ -1,5 +1,5 @@
 <script lang="ts">
-  // /system/workflows/:slug — port of
+  // /it/registry/:slug — port of
   // apps/web/src/admin/WorkflowDetailPage.tsx.
 
   import Breadcrumb from '@boss/web-kit/ui/Breadcrumb.svelte';
@@ -47,7 +47,7 @@
         appToday(),
         { title: `Edit ${spec.kind}`, previousVersion: spec.version },
       );
-      navigate(href(`/system/workflows/authoring/${encodeURIComponent(jobId)}`));
+      navigate(href(`/it/registry/authoring/${encodeURIComponent(jobId)}`));
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
       action = null;
@@ -203,7 +203,7 @@
     : null}
 
   <div class="catalog theme-exec">
-    <Breadcrumb to={href('/system/workflows')}>
+    <Breadcrumb to={href('/it/registry')}>
       ← All job kinds
     </Breadcrumb>
     <PageHeader
@@ -234,7 +234,7 @@
       <button
         type="button"
         class="wb-btn"
-        onclick={() => navigate(href(`/system/workflows/new?fork=${encodeURIComponent(spec.kind)}`))}
+        onclick={() => navigate(href(`/it/registry/new?fork=${encodeURIComponent(spec.kind)}`))}
         title="Create a new kind pre-populated from this one"
       >
         Fork…

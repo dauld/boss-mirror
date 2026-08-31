@@ -1,5 +1,5 @@
 <script lang="ts">
-  // /system/fleet — every in-flight Job of one Workflow kind,
+  // /it/operate/bottlenecks — every in-flight Job of one Workflow kind,
   // projected onto the Workflow's DAG.
   //
   // The Job page answers "where is THIS Job"; this page answers
@@ -80,7 +80,7 @@
     kinds = Array.isArray(rows)
       ? [...new Set(rows.map((r) => r?.kind).filter((k) => typeof k === 'string'))].sort()
       : [];
-    // Deep-linkable: /system/fleet?kind=wholesale-keg-order.
+    // Deep-linkable: /it/operate/bottlenecks?kind=wholesale-keg-order.
     const asked = new URLSearchParams(window.location.search).get('kind');
     kind = asked && kinds.includes(asked) ? asked : (kinds[0] ?? null);
   }

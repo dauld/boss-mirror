@@ -58,12 +58,10 @@
   import DispatcherRulesPage from './dispatcher/DispatcherRulesPage.svelte';
   import DispatcherRuleEditPage from './dispatcher/DispatcherRuleEditPage.svelte';
   import SubjectsClassesPage from './it/subjects/SubjectsClassesPage.svelte';
-  import SystemModelPage from './it/system/SystemModelPage.svelte';
-  import FlowPage from './it/flow/FlowPage.svelte';
   import YardPage from './it/yard/YardPage.svelte';
   import EstatePage from './it/estate/EstatePage.svelte';
-  import StationMapPage from './it/map/StationMapPage.svelte';
-  import FleetPage from './it/fleet/FleetPage.svelte';
+  import FleetPage from './it/monitoring/FleetPage.svelte';
+  import ItTabs from './it/ItTabs.svelte';
   import DesignReviewPage from './it/design/DesignReviewPage.svelte';
   import ExperimentsPage from './it/experiments/ExperimentsPage.svelte';
   import InboxPage from './inbox/InboxPage.svelte';
@@ -78,7 +76,6 @@
   import AssetPage from './assets/AssetPage.svelte';
   import ManualPage from './content/ManualPage.svelte';
   import WorkflowsPage from './kb/WorkflowsPage.svelte';
-  import MonitoringPage from './it/monitoring/MonitoringPage.svelte';
   import PerfPage from './it/monitoring/PerfPage.svelte';
   import EventsPage from './it/monitoring/EventsPage.svelte';
   import PoPage from './po/PoPage.svelte';
@@ -236,6 +233,7 @@
     {:else if route.kind === 'views'}
       <ViewsPage />
     {:else if route.kind === 'systemFeedback'}
+      <ItTabs group="design" active="/it/design/feedback" />
       <FeedbackTriagePage />
     {:else if route.kind === 'authAdmin'}
       <AuthAdminPage />
@@ -312,6 +310,7 @@
     {:else if route.kind === 'systemKb'}
       <ItKnowledgeBasePage />
     {:else if route.kind === 'policy'}
+      <ItTabs group="registry" active="/it/registry/policy" />
       <PolicyPage />
     {:else if route.kind === 'workflowsAdmin'}
       <WorkflowsAdminPage />
@@ -322,33 +321,33 @@
     {:else if route.kind === 'workflowDetail'}
       <WorkflowDetailPage kindSlug={route.kindSlug} />
     {:else if route.kind === 'systemStepPlugins'}
+      <ItTabs group="registry" active="/it/registry/step-plugins" />
       <StepPluginsPage />
     {:else if route.kind === 'systemStepPluginDetail'}
       <StepPluginDetailPage pluginSlug={route.pluginSlug} />
     {:else if route.kind === 'systemDesign'}
+      <ItTabs group="design" active="/it/design" />
       <DesignReviewPage />
     {:else if route.kind === 'systemYard'}
       <YardPage />
     {:else if route.kind === 'systemEstate'}
       <EstatePage />
-    {:else if route.kind === 'systemMap'}
-      <StationMapPage />
-    {:else if route.kind === 'systemFlow'}
-      <FlowPage />
     {:else if route.kind === 'systemFleet'}
+      <ItTabs group="operate" active="/it/operate/bottlenecks" />
       <FleetPage />
     {:else if route.kind === 'experiments'}
+      <ItTabs group="design" active="/it/design/experiments" />
       <ExperimentsPage />
     {:else if route.kind === 'dispatcherRules'}
+      <ItTabs group="registry" active="/it/registry/dispatcher" />
       <DispatcherCascadePage />
     {:else if route.kind === 'dispatcherRulesList'}
       <DispatcherRulesPage />
     {:else if route.kind === 'dispatcherRuleEdit'}
       <DispatcherRuleEditPage ruleName={route.ruleName} />
     {:else if route.kind === 'systemSubjects'}
+      <ItTabs group="registry" active="/it/registry/subjects" />
       <SubjectsClassesPage />
-    {:else if route.kind === 'systemModel'}
-      <SystemModelPage />
     {:else if route.kind === 'inbox'}
       <InboxPage />
     {:else if route.kind === 'calendar'}
@@ -374,14 +373,16 @@
     {:else if route.kind === 'manualSection'}
       <ManualPage slug={route.slug} />
     {:else if route.kind === 'workflows'}
+      <ItTabs group="registry" active="/it/registry" />
       <WorkflowsPage />
-    {:else if route.kind === 'systemMonitoring'}
-      <MonitoringPage />
     {:else if route.kind === 'systemMonitoringPerf'}
+      <ItTabs group="operate" active="/it/operate/perf" />
       <PerfPage />
     {:else if route.kind === 'systemMonitoringEvents'}
+      <ItTabs group="operate" active="/it/operate/audit" />
       <EventsPage />
     {:else if route.kind === 'systemMonitoringAtlas'}
+      <ItTabs group="operate" active="/it/operate/atlas" />
       <AtlasPage />
     {:else if route.kind === 'po'}
       <PoPage poId={route.poId} />
@@ -390,6 +391,7 @@
     {:else if route.kind === 'watchlist'}
       <WatchlistPage />
     {:else if route.kind === 'incidents'}
+      <ItTabs group="operate" active="/it/operate" />
       <IncidentsPage />
     {:else if route.kind === 'shop'}
       <ShopHome />

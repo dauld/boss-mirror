@@ -133,7 +133,7 @@
     <span style="color:#d6d3d1">·</span>
     <a href="#it-deployment"  style="color:#1c1917">4 · Deployment</a>
     <span style="color:#d6d3d1">·</span>
-    <a href={href('/system/workflows')} style="color:#1c1917">Workflows ↗</a>
+    <a href={href('/it/registry')} style="color:#1c1917">Workflows ↗</a>
   </nav>
 
   <div class="tab-content" style="display:flex; flex-direction:column; gap:24px; padding:16px 0">

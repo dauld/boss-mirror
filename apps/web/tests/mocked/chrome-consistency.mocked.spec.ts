@@ -17,7 +17,7 @@ import { AA_FLOOR, describeUnreadable, measureContrast } from './_contrast';
 /// Surfaces that render the chrome through different code paths:
 /// a normal AppShell route, the full-page step route (rendered
 /// OUTSIDE AppShell), and an IT surface.
-const SURFACES = ['/ux/jobs', '/system', '/ux/views'] as const;
+const SURFACES = ['/ux/jobs', '/it', '/ux/views'] as const;
 
 const MANIFEST = {
   display_name: 'Algedonic Ales',

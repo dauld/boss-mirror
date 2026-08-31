@@ -11,9 +11,9 @@
   // chrome (hero, CTA) — the host page supplies that.
 
   import { onMount } from 'svelte';
-  import StepDag from '../../jobs/StepDag.svelte';
-  import { workflowToDag } from '../../jobs/workflowToDag';
-  import { navigate } from '../../router';
+  import StepDag from '../jobs/StepDag.svelte';
+  import { workflowToDag } from '../jobs/workflowToDag';
+  import { navigate } from '../router';
   import { entityHref } from '@boss/web-kit/ui/entity-href';
   import type {
     WorkflowSpec,
@@ -21,13 +21,13 @@
     WorkflowSummary,
     JobLiveSummary,
     JobLiveRow,
-  } from '../../landing/types';
+  } from './types';
   import {
     atlasLayout as computeAtlasLayout,
     atlasColorFor,
     NODE_W,
     NODE_H,
-  } from '../../jobs/atlas-layout';
+  } from '../jobs/atlas-layout';
 
   let kinds = $state<WorkflowSummary[]>([]);
   // Empty until /api/workflows loads, then defaulted to the first

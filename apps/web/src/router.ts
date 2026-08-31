@@ -75,8 +75,11 @@ export type Route =
   | { kind: 'hr' }
   | { kind: 'qa' }
   // 'itSim' retired 2026-05-03 with boss-sim-api (HumanWorker step 9b).
+  // 'systemMonitoring' (the index page), 'systemModel', 'systemMap' and
+  // 'systemFlow' retired 2026-08-31 with the IT consolidation
+  // (1f6d55e0): the monitoring index became the Operate tab strip, and
+  // the map/flow renderings folded into Atlas.
   | { kind: 'systemKb' }
-  | { kind: 'systemMonitoring' }
   | { kind: 'systemMonitoringPerf' }
   | { kind: 'systemMonitoringEvents' }
   | { kind: 'systemMonitoringAtlas' }
@@ -90,9 +93,8 @@ export type Route =
   | { kind: 'systemStepPluginDetail'; pluginSlug: string }
   | { kind: 'systemDesign' }
   | { kind: 'systemYard' }
-  /// The network map — every registry station as a node (stations.md).
-  | { kind: 'systemMap' }
-  | { kind: 'systemFlow' }
+  /// Fleet lives on as Operate's Bottlenecks tab (1f6d55e0 Q3: the
+  /// per-kind dashboard is unique, not a duplicate rendering).
   | { kind: 'systemFleet' }
   /// The hardware registry, declared beside observed (59ef456a).
   | { kind: 'systemEstate' }
@@ -100,7 +102,6 @@ export type Route =
   /// the closed ones rendered as a durable archive.
   | { kind: 'incidents' }
   | { kind: 'systemSubjects' }
-  | { kind: 'systemModel' }
   | { kind: 'experiments' }
   | { kind: 'dispatcherRules' }
   | { kind: 'dispatcherRulesList' }
@@ -128,62 +129,55 @@ export function parseRoute(pathname: string): Route {
   let raw = pathname.replace(/^\/dashboard/, '').replace(/\/$/, '') || '/';
   if (raw === '/login') return { kind: 'login' };
 
-  // IT surfaces answer on /it/* as well as /system/*.
+  // ===== The IT department — /it/* =====
   //
-  // Feedback 0fc8b216: "We should not be under /system route because I
-  // am working on a Job in the context of the IT department. So I
-  // should be in the /it route IT app." He is right — nav-catalog
-  // already assigns every one of these to `app: 'it'`, so the URL was
-  // the last place still calling them System surfaces.
-  //
-  // /system/* is kept, permanently and deliberately. Those paths are in
-  // bookmarks, in the station registry's `upstream` hrefs, and in docs;
-  // an alias costs one line and a redirect that breaks a saved link
-  // costs an operator their place. Canonical moves, old paths keep
-  // answering.
+  // Six surfaces (the 2026-08-31 consolidation, packet 1f6d55e0):
+  // the yard IS the landing, Operate / Registry / Design carry their
+  // families as tabs, Estate and the KB stand alone. /system is GONE
+  // — David's Q1/Q4 verdicts: department-first, and "we don't need to
+  // worry about legacy users. It is just me" — which reverses the
+  // "kept permanently" promise the old alias comment made (feedback
+  // 0fc8b216 got the /it half; this finishes it). A /system path now
+  // falls through to the catch-all like any other unknown route.
   if (raw === '/it' || raw.startsWith('/it/')) {
-    raw = `/system${raw.slice('/it'.length)}`;
-  }
-
-  // ===== System Model perspective — /system/* =====
-  if (raw === '/system' || raw.startsWith('/system/')) {
-    const p = raw.slice('/system'.length) || '/';
-    if (p === '/') return { kind: 'systemModel' };
-    if (p === '/monitoring') return { kind: 'systemMonitoring' };
-    if (p === '/monitoring/perf') return { kind: 'systemMonitoringPerf' };
-    if (p === '/monitoring/events') return { kind: 'systemMonitoringEvents' };
-    if (p === '/monitoring/atlas') return { kind: 'systemMonitoringAtlas' };
-    if (p === '/kb') return { kind: 'systemKb' };
-    if (p === '/design') return { kind: 'systemDesign' };
-    if (p === '/yard') return { kind: 'systemYard' };
-    if (p === '/map') return { kind: 'systemMap' };
-    if (p === '/flow') return { kind: 'systemFlow' };
-    if (p === '/fleet') return { kind: 'systemFleet' };
-    if (p === '/estate') return { kind: 'systemEstate' };
-    if (p === '/incidents') return { kind: 'incidents' };
-    if (p === '/feedback') return { kind: 'systemFeedback' };
-    if (p === '/experiments') return { kind: 'experiments' };
-    if (p === '/subjects') return { kind: 'systemSubjects' };
-    if (p === '/policy') return { kind: 'policy' };
-    if (p === '/workflows') return { kind: 'workflows' };
-    if (p === '/auth-admin') return { kind: 'authAdmin' };
-    if (p === '/workflows/new') return { kind: 'workflowNew' };
-    // The admin index. Was `/system/workflows` before the rename;
-    // it and the catalog collapsed onto one path when `workflows`
-    // became `workflows`, and they are two different surfaces.
-    if (p === '/workflows/authoring') return { kind: 'workflowsAdmin' };
-    const jkDesignM = p.match(/^\/workflows\/authoring\/(.+)$/);
+    const p = raw.slice('/it'.length) || '/';
+    // 1. The landing is the yard — delivery truth first.
+    if (p === '/') return { kind: 'systemYard' };
+    // 2. Operate — incidents lead; audit/perf/atlas/bottlenecks tabs.
+    if (p === '/operate') return { kind: 'incidents' };
+    if (p === '/operate/audit') return { kind: 'systemMonitoringEvents' };
+    if (p === '/operate/perf') return { kind: 'systemMonitoringPerf' };
+    if (p === '/operate/atlas') return { kind: 'systemMonitoringAtlas' };
+    if (p === '/operate/bottlenecks') return { kind: 'systemFleet' };
+    // 3. Registry — one surface over the registry family.
+    if (p === '/registry') return { kind: 'workflows' };
+    if (p === '/registry/new') return { kind: 'workflowNew' };
+    if (p === '/registry/authoring') return { kind: 'workflowsAdmin' };
+    const jkDesignM = p.match(/^\/registry\/authoring\/(.+)$/);
     if (jkDesignM) return { kind: 'workflowDesign', jobId: decodeURIComponent(jkDesignM[1]!) };
-    const jkM = p.match(/^\/workflows\/(.+)$/);
-    if (jkM) return { kind: 'workflowDetail', kindSlug: decodeURIComponent(jkM[1]!) };
-    if (p === '/step-plugins') return { kind: 'systemStepPlugins' };
-    const spM = p.match(/^\/step-plugins\/(.+)$/);
+    if (p === '/registry/step-plugins') return { kind: 'systemStepPlugins' };
+    const spM = p.match(/^\/registry\/step-plugins\/(.+)$/);
     if (spM) return { kind: 'systemStepPluginDetail', pluginSlug: decodeURIComponent(spM[1]!) };
-    if (p === '/dispatcher/rules') return { kind: 'dispatcherRulesList' };
-    const drM = p.match(/^\/dispatcher\/rules\/(.+)$/);
+    if (p === '/registry/rules') return { kind: 'dispatcherRulesList' };
+    const drM = p.match(/^\/registry\/rules\/(.+)$/);
     if (drM) return { kind: 'dispatcherRuleEdit', ruleName: decodeURIComponent(drM[1]!) };
-    if (p === '/dispatcher') return { kind: 'dispatcherRules' };
-    return { kind: 'systemModel' };
+    if (p === '/registry/dispatcher') return { kind: 'dispatcherRules' };
+    if (p === '/registry/policy') return { kind: 'policy' };
+    if (p === '/registry/subjects') return { kind: 'systemSubjects' };
+    // 4. Design — reviews lead; experiments and feedback tabs.
+    if (p === '/design') return { kind: 'systemDesign' };
+    if (p === '/design/experiments') return { kind: 'experiments' };
+    if (p === '/design/feedback') return { kind: 'systemFeedback' };
+    // 5. Estate. 6. KB. Plus the unlisted auth door.
+    if (p === '/estate') return { kind: 'systemEstate' };
+    if (p === '/kb') return { kind: 'systemKb' };
+    if (p === '/auth-admin') return { kind: 'authAdmin' };
+    // Workflow detail LAST — its wildcard would eclipse the
+    // specific /registry/* cases above.
+    const jkM = p.match(/^\/registry\/(.+)$/);
+    if (jkM) return { kind: 'workflowDetail', kindSlug: decodeURIComponent(jkM[1]!) };
+    // Unknown /it path: the department's own landing, not Home.
+    return { kind: 'systemYard' };
   }
 
   // ===== User Experiences perspective — /ux/* (canonical); bare / is the public alias for the UX home.

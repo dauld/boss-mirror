@@ -58,30 +58,32 @@ describe('parseRoute — every specific path matches its specific case', () => {
     // Exec (User Experiences)
     ['/ux/exec', { kind: 'exec' }],
     // System Model perspective — IT surfaces re-rooted under /system/*.
-    ['/system/monitoring', { kind: 'systemMonitoring' }],
-    ['/system/monitoring/perf', { kind: 'systemMonitoringPerf' }],
-    ['/system/monitoring/events', { kind: 'systemMonitoringEvents' }],
-    ['/system/monitoring/atlas', { kind: 'systemMonitoringAtlas' }],
-    ['/system/kb', { kind: 'systemKb' }],
-    ['/system', { kind: 'systemModel' }],
-    ['/system/subjects', { kind: 'systemSubjects' }],
-    ['/system/design', { kind: 'systemDesign' }],
+    // The consolidated IT department (1f6d55e0): six surfaces,
+    // families as tabs, /system gone.
+    ['/it/operate/perf', { kind: 'systemMonitoringPerf' }],
+    ['/it/operate/audit', { kind: 'systemMonitoringEvents' }],
+    ['/it/operate/atlas', { kind: 'systemMonitoringAtlas' }],
+    ['/it/operate/bottlenecks', { kind: 'systemFleet' }],
+    ['/it/kb', { kind: 'systemKb' }],
+    ['/it/registry/subjects', { kind: 'systemSubjects' }],
     // /it/* is the canonical spelling for IT surfaces (0fc8b216); the
     // /system/* rows above stay because bookmarks, the station
     // registry's upstream hrefs and the docs all still use them.
     ['/it/design', { kind: 'systemDesign' }],
-    ['/it/yard', { kind: 'systemYard' }],
+    ['/it/design/experiments', { kind: 'experiments' }],
+    ['/it/design/feedback', { kind: 'systemFeedback' }],
+    ['/it', { kind: 'systemYard' }],
     ['/it/estate', { kind: 'systemEstate' }],
-    ['/system/estate', { kind: 'systemEstate' }],
-    ['/it/incidents', { kind: 'incidents' }],
-    ['/system/incidents', { kind: 'incidents' }],
-    ['/it/monitoring/events', { kind: 'systemMonitoringEvents' }],
-    ['/it', { kind: 'systemModel' }],
-    ['/system/step-plugins', { kind: 'systemStepPlugins' }],
-    ['/system/step-plugins/pour-quality-check', { kind: 'systemStepPluginDetail', pluginSlug: 'pour-quality-check' }],
-    ['/system/dispatcher', { kind: 'dispatcherRules' }],
-    ['/system/dispatcher/rules', { kind: 'dispatcherRulesList' }],
-    ['/system/dispatcher/rules/restock-on-low', { kind: 'dispatcherRuleEdit', ruleName: 'restock-on-low' }],
+    
+    ['/it/operate', { kind: 'incidents' }],
+    
+    
+    
+    ['/it/registry/step-plugins', { kind: 'systemStepPlugins' }],
+    ['/it/registry/step-plugins/pour-quality-check', { kind: 'systemStepPluginDetail', pluginSlug: 'pour-quality-check' }],
+    ['/it/registry/dispatcher', { kind: 'dispatcherRules' }],
+    ['/it/registry/rules', { kind: 'dispatcherRulesList' }],
+    ['/it/registry/rules/restock-on-low', { kind: 'dispatcherRuleEdit', ruleName: 'restock-on-low' }],
     // Warehouse / catalog / assets
     ['/ux/warehouse', { kind: 'warehouse' }],
     ['/ux/catalog', { kind: 'catalog' }],
@@ -92,7 +94,7 @@ describe('parseRoute — every specific path matches its specific case', () => {
     ['/ux/marketing-assets/mkt-1', { kind: 'marketingAsset', assetId: 'mkt-1' }],
     // Manual + workflows + watchlist + shop
     ['/ux/manual', { kind: 'manual' }],
-    ['/system/workflows', { kind: 'workflows' }],
+    ['/it/registry', { kind: 'workflows' }],
     ['/ux/manual/intro', { kind: 'manualSection', slug: 'intro' }],
     ['/ux/watchlist', { kind: 'watchlist' }],
     ['/ux/shop', { kind: 'shop' }],
@@ -106,12 +108,12 @@ describe('parseRoute — every specific path matches its specific case', () => {
     // Policy + Workflow authoring (System Model). The workflows
     // `/authoring/<jobId>` route is the wildcard-precedence trap: it MUST
     // resolve before the catch-all `/workflows/(.+)` detail route.
-    ['/system/policy', { kind: 'policy' }],
-    ['/system/auth-admin', { kind: 'authAdmin' }],
-    ['/system/workflows', { kind: 'workflows' }],
-    ['/system/workflows/new', { kind: 'workflowNew' }],
-    ['/system/workflows/authoring/job-abc-123', { kind: 'workflowDesign', jobId: 'job-abc-123' }],
-    ['/system/workflows/seasonal-release', { kind: 'workflowDetail', kindSlug: 'seasonal-release' }],
+    ['/it/registry/policy', { kind: 'policy' }],
+    ['/it/auth-admin', { kind: 'authAdmin' }],
+    
+    ['/it/registry/new', { kind: 'workflowNew' }],
+    ['/it/registry/authoring/job-abc-123', { kind: 'workflowDesign', jobId: 'job-abc-123' }],
+    ['/it/registry/seasonal-release', { kind: 'workflowDetail', kindSlug: 'seasonal-release' }],
   ];
 
   for (const [path, expected] of cases) {
@@ -138,8 +140,8 @@ describe('parseRoute — wildcard does not shadow specific cases', () => {
     const r = parseRoute('/ux/finance/journal-entries/new');
     expect(r.kind).toBe('newJournalEntry');
   });
-  test('/system/workflows/authoring/X → workflowDesign, NOT workflowDetail', () => {
-    const r = parseRoute('/system/workflows/authoring/job-abc-123');
+  test('/it/registry/authoring/X → workflowDesign, NOT workflowDetail', () => {
+    const r = parseRoute('/it/registry/authoring/job-abc-123');
     expect(r.kind).toBe('workflowDesign');
   });
 });
@@ -189,11 +191,11 @@ describe('full-page step route', () => {
     // page instead of the queue he came from. Only the lens knows
     // where back is, so it says so on the URL.
     (globalThis as { window?: { location: { search: string } } }).window = {
-      location: { search: '?from=%2Fsystem%2Fdesign&from_label=Design%20Review' },
+      location: { search: '?from=%2Fit%2Fdesign&from_label=Design%20Review' },
     };
     const r = parseRoute('/ux/jobs/job-123/steps/step-456');
     expect(r.kind).toBe('stepFocus');
-    expect((r as { from?: string }).from).toBe('/system/design');
+    expect((r as { from?: string }).from).toBe('/it/design');
     expect((r as { fromLabel?: string }).fromLabel).toBe('Design Review');
     (globalThis as { window: { location: { search: string } } }).window = {
       location: { search: '' },

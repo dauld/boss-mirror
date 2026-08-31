@@ -15,7 +15,7 @@
 //     highlight and for `appForSection` to find the owning app. That
 //     agreement was unpinned, and it drifted: 'systemMonitoring' and
 //     'systemStepPlugins' (camelCase route kinds used as section ids)
-//     miss their kebab-case catalog keys, so /system/monitoring — the
+//     miss their kebab-case catalog keys, so /it/operate/audit — the
 //     IT tab's own landing page — rendered under Home chrome.
 //     `sections.test.ts` pins every value now (CLAUDE.md §9a).
 
@@ -98,19 +98,19 @@ export const SECTION_FOR_ROUTE: Readonly<Record<Route['kind'], string>> = {
   shopProduct: 'shop',
   views: 'views',
 
-  systemModel: 'system-model',
-  systemMonitoring: 'system-monitoring',
-  systemMonitoringPerf: 'system-monitoring',
-  systemMonitoringEvents: 'system-monitoring',
-  systemMonitoringAtlas: 'system-monitoring',
+  // Operate-family kinds highlight the Operate row (2026-08-31
+  // consolidation); registry- and design-family kinds highlight
+  // theirs the same way, via their own catalog ids whose paths now
+  // live under the family surface.
+  systemMonitoringPerf: 'system-incidents',
+  systemMonitoringEvents: 'system-incidents',
+  systemMonitoringAtlas: 'system-incidents',
+  systemFleet: 'system-incidents',
   systemStepPlugins: 'system-step-plugins',
   systemStepPluginDetail: 'system-step-plugins',
   systemSubjects: 'system-subjects',
   systemFeedback: 'system-feedback',
   systemYard: 'system-yard',
-  systemMap: 'system-map',
-  systemFlow: 'system-flow',
-  systemFleet: 'system-fleet',
   systemEstate: 'system-estate',
   incidents: 'system-incidents',
   systemKb: 'system-kb',

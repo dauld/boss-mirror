@@ -143,74 +143,22 @@
     items: workForRole(role).map((r) => ROUTE_CATALOG[r]),
   });
 
-  // System Model perspective — surfaces grouped by the aspects of
-  // operating the model: Run (observe the live machine), Define
-  // (configure the model), Evolve (controlled change + experiments),
-  // Platform (reference + admin). The User Experiences perspective
-  // keeps Work / Surfaces / Knowledge Bases (below). Selected via the
-  // `perspective` prop.
+  // The IT department — exactly six rows (the 2026-08-31
+  // consolidation, packet 1f6d55e0). Families live as tabs on their
+  // surface, not as sidebar rows; auth-admin stays reachable but
+  // unlisted. The old Run / Define / Evolve / Platform grouping died
+  // with the /system prefix.
   const IT_GROUPS: ReadonlyArray<NavGroup> = [
     {
-      label: 'Run',
+      label: 'IT',
       items: [
-        // Flow first: the team's own dashboard. System Monitoring
-        // below it answers the other question — what the machine is
-        // doing, rather than what the people are getting through.
-        ROUTE_CATALOG['system-flow'],
-        // Fleet beside Flow: Flow is the team's throughput, Fleet is
-        // where a kind's work is piling up on its Workflow.
-        ROUTE_CATALOG['system-fleet'],
-        ROUTE_CATALOG['system-model'],
-        ROUTE_CATALOG['system-monitoring'],
-        // Incidents beside Monitoring: monitoring is what the machine
-        // is doing, incidents are what went wrong and what we learned.
-        // Active packets to respond to + the post-mortem archive.
-        ROUTE_CATALOG['system-incidents'],
-        // Audit Log + Atlas are sub-pages of monitoring with no
-        // distinct permKey — plain NavItems (permKey-less ⇒ always
-        // visible + always in-perspective; see visible()/inPerspective()).
-        { id: 'system-audit', label: 'Audit Log', path: '/system/monitoring/events' },
-        { id: 'system-atlas', label: 'Atlas', path: '/system/monitoring/atlas' },
-        // The executor network — who moves work and where it goes.
-        // Belongs with the other live instruments rather than under
-        // Define: it shows the system RUNNING, not how it is authored.
-        // The yard is one batch station rendered deep (the pipeline's
-        // queues); the map is every registry station rendered wide.
-        // The yard row was missing since its car landed — repaired
-        // here alongside the map's addition.
         ROUTE_CATALOG['system-yard'],
-        ROUTE_CATALOG['system-map'],
-        // The estate: the hardware the rest of this sidebar runs on —
-        // declared beside observed, and the dev-workspace door.
-        ROUTE_CATALOG['system-estate'],
-      ],
-    },
-    {
-      label: 'Define',
-      items: [
-        // Workflows is the single UI surface for Workflows: the
-        // read-only catalog that also links into the authoring
-        // routes (/system/workflows*). The separate "Job kinds"
-        // sidebar entry was dropped — authoring is reached FROM
-        // Workflows, not its own sidebar row.
+        ROUTE_CATALOG['system-incidents'],
         ROUTE_CATALOG.workflows,
-        ROUTE_CATALOG['system-subjects'],
-        ROUTE_CATALOG['system-step-plugins'],
-        ROUTE_CATALOG['system-dispatcher'],
-        ROUTE_CATALOG.policy,
-      ],
-    },
-    {
-      label: 'Evolve',
-      items: [
-        ROUTE_CATALOG['system-experiments'],
         ROUTE_CATALOG['system-design'],
-        ROUTE_CATALOG['system-feedback'],
+        ROUTE_CATALOG['system-estate'],
+        ROUTE_CATALOG['system-kb'],
       ],
-    },
-    {
-      label: 'Platform',
-      items: [ROUTE_CATALOG['system-kb'], ROUTE_CATALOG['auth-admin']],
     },
   ];
 
