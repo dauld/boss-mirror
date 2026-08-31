@@ -560,6 +560,23 @@ impl JobsRepository for PgJobs {
             .collect())
     }
 
+    async fn recent_events_by_kind(
+        &self,
+        kind: &str,
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>, JobsError> {
+        // The SQL lives in boss-events, which owns audit_log — this
+        // crate already writes through its `record_event_in_tx`, and
+        // reading through its helper keeps the table's ownership in
+        // one place rather than growing a second copy of the query.
+        let rows = boss_events::tail_http::recent_by_kind(&self.pool, kind, limit)
+            .await
+            .map_err(JobsError::Storage)?;
+        rows.into_iter()
+            .map(|r| serde_json::to_value(r).map_err(|e| JobsError::Storage(e.to_string())))
+            .collect()
+    }
+
     async fn repin_workflow_version_at(
         &self,
         id: &JobId,

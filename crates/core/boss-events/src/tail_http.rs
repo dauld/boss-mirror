@@ -77,6 +77,33 @@ async fn events_health() -> Response {
     Json(serde_json::json!({"status": "ok"})).into_response()
 }
 
+/// Recent rows of ONE exact kind, newest first — the crate-level read
+/// other services call so the SQL against `audit_log` stays in the
+/// crate that owns the table (this router's own header names that
+/// ownership). First consumer: boss-jobs' estate readers (d471a8ce) —
+/// the estate loop's events were observable only through an in-pod
+/// port-forward, which left two satisfied proven arbiters with no
+/// surface a recorded probe could re-run against.
+///
+/// EXACT kind, deliberately not the tail's ILIKE substring: a reader
+/// serving one declared kind must not grow neighbours when a new kind
+/// shares a prefix.
+pub async fn recent_by_kind(
+    pool: &PgPool,
+    kind: &str,
+    limit: i64,
+) -> Result<Vec<AuditEntry>, String> {
+    sqlx::query_as::<_, AuditEntry>(
+        "SELECT event_id, timestamp, source, kind, payload FROM audit_log \
+         WHERE kind = $1 ORDER BY timestamp DESC LIMIT $2",
+    )
+    .bind(kind)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct TailQuery {
     /// Exact-match filter on the `source` column (e.g. "jobs").

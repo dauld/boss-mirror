@@ -434,6 +434,23 @@ pub trait JobsRepository: Send + Sync {
     /// what the `node` subject kind's own description says.
     async fn list_estate_nodes(&self) -> Result<Vec<EstateNode>, JobsError>;
 
+    /// Recent recorded events of ONE exact kind, newest first, as the
+    /// raw rows `{event_id, timestamp, source, kind, payload}`.
+    ///
+    /// The read half of `record_events`: the estate doors record
+    /// observations and comparisons as events, and until this method
+    /// existed those series were readable only through an in-pod
+    /// port-forward to the events service — two proven arbiters were
+    /// SATISFIED and unprobeable for exactly that reason (d471a8ce).
+    /// Raw `Value` rows on purpose: the readers serve their instrument
+    /// verbatim, and a port type per payload shape would be a second
+    /// instrument.
+    async fn recent_events_by_kind(
+        &self,
+        kind: &str,
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>, JobsError>;
+
     /// Re-pin a packet to a different protocol version.
     ///
     /// A DELIBERATELY SEPARATE VERB, not a field on `update_job`.

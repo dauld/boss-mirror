@@ -249,6 +249,33 @@ impl JobsRepository for InMemoryJobs {
         Ok(Vec::new())
     }
 
+    async fn recent_events_by_kind(
+        &self,
+        kind: &str,
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>, JobsError> {
+        // `recorded` is append-order, so newest-first is a reverse —
+        // the same ordering contract the Pg impl gets from
+        // `ORDER BY timestamp DESC`.
+        let rows = self
+            .recorded_events()
+            .into_iter()
+            .rev()
+            .filter(|e| e.kind == kind)
+            .take(limit.max(0) as usize)
+            .map(|e| {
+                serde_json::json!({
+                    "event_id": e.id,
+                    "timestamp": e.timestamp,
+                    "source": e.source,
+                    "kind": e.kind,
+                    "payload": e.payload,
+                })
+            })
+            .collect();
+        Ok(rows)
+    }
+
     async fn repin_workflow_version_at(
         &self,
         id: &JobId,

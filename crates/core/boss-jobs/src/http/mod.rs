@@ -168,6 +168,14 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
         .route("/api/jobs/{id}/convert", post(convert_job::<R, B>))
         .route("/api/estate/nodes", get(list_estate_nodes::<R, B>))
         .route(
+            "/api/estate/observations",
+            get(list_estate_observations::<R, B>),
+        )
+        .route(
+            "/api/estate/comparisons",
+            get(list_estate_comparisons::<R, B>),
+        )
+        .route(
             "/api/estate/observation",
             post(record_estate_observation::<R, B>),
         )

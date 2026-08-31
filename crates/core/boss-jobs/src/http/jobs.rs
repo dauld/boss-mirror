@@ -1359,6 +1359,55 @@ pub(super) async fn list_estate_nodes<R: JobsRepository + 'static, B: EventBus +
     }
 }
 
+#[derive(Debug, serde::Deserialize, Default)]
+pub(super) struct EstateEventsQuery {
+    limit: Option<i64>,
+}
+
+/// `GET /api/estate/observations` and `/api/estate/comparisons` — the
+/// read half of the estate loop's event series (d471a8ce).
+///
+/// The observe and compare doors above record these as events, and
+/// until this pair existed the series was readable only through an
+/// in-pod port-forward to the events service: the loop went live on
+/// 2026-08-30 with its first observation and comparison recorded, and
+/// the two cars that built it had proven arbiters that were SATISFIED
+/// yet unprobeable from any exposed surface. These are also the IT
+/// page's data source — David has asked repeatedly for the running
+/// hardware rendered from the registry, declared beside observed.
+///
+/// Guest-readable like `/api/estate/nodes`, and rows verbatim as
+/// recorded: a reader that reshapes its instrument is a second
+/// instrument. Small default, hard cap — this is a status surface,
+/// not an export (the events service's export door owns bulk).
+pub(super) async fn list_estate_observations<R: JobsRepository + 'static, B: EventBus + 'static>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+    CurrentUser(_user): CurrentUser,
+    Query(q): Query<EstateEventsQuery>,
+) -> Response {
+    estate_events(&state, crate::events::ESTATE_OBSERVED, q.limit).await
+}
+
+pub(super) async fn list_estate_comparisons<R: JobsRepository + 'static, B: EventBus + 'static>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+    CurrentUser(_user): CurrentUser,
+    Query(q): Query<EstateEventsQuery>,
+) -> Response {
+    estate_events(&state, crate::events::ESTATE_COMPARED, q.limit).await
+}
+
+async fn estate_events<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &Arc<JobsApiState<R, B>>,
+    kind: &str,
+    limit: Option<i64>,
+) -> Response {
+    let limit = limit.unwrap_or(5).clamp(1, 50);
+    match state.jobs.recent_events_by_kind(kind, limit).await {
+        Ok(rows) => Json(serde_json::json!({ "data": rows })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::edge_guidance;
