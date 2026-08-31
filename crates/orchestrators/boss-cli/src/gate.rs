@@ -206,6 +206,57 @@ pub(crate) fn normalize_mode(mode: &str) -> Result<String> {
     }
 }
 
+/// The head the runner actually gated, read off the receipt it reported
+/// onto the packet's record-verdict step.
+///
+/// THE PACKET'S OWN `sha` CAN LIE (410bf724). This verb resolves the
+/// branch with `ls-remote` and files that sha; the RUNNER then clones
+/// from the forge and gates whatever head it finds. Move the branch in
+/// between and the two differ — and only the receipt, written by the
+/// process that ran the checks, says which tree the verdict is about.
+///
+/// The receipt travels as a JSON STRING inside the step metadata (the
+/// same encoding `boss receipt` parses), so it needs a second parse. A
+/// runner that died before a receipt reports prose in this field
+/// ("runner died before a receipt: …"), which fails that parse and
+/// correctly reads as "no gated head".
+pub(crate) fn receipt_head(packet: &Value) -> Option<String> {
+    let raw = packet
+        .get("steps")?
+        .as_array()?
+        .iter()
+        .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some("record-verdict"))?
+        .pointer("/metadata/receipt")?
+        .as_str()?;
+    serde_json::from_str::<Value>(raw)
+        .ok()?
+        .get("head")?
+        .as_str()
+        .filter(|h| !h.is_empty())
+        .map(str::to_string)
+}
+
+/// The metadata correction a packet is owed once its receipt lands.
+///
+/// `recorded` is the `sha` the packet carries (what this verb resolved
+/// before launching); `gated` is the receipt's head (what the runner
+/// checked out and ran the gate against). When they differ the packet
+/// is lying about which tree its verdict covers, so the truthful head
+/// takes over the `sha` field and the request survives as
+/// `requested_head` — provenance, not a key. `None` means the packet
+/// already tells the truth, or there is no receipt to correct it with.
+pub(crate) fn truth_patch(recorded: &str, gated: Option<&str>) -> Option<Value> {
+    let gated = gated?;
+    (!gated.is_empty() && gated != recorded).then(|| {
+        let mut patch = serde_json::Map::new();
+        patch.insert("sha".into(), json!(gated));
+        if !recorded.is_empty() {
+            patch.insert("requested_head".into(), json!(recorded));
+        }
+        Value::Object(patch)
+    })
+}
+
 /// The gate-run packet for this exact branch and sha, if one is already
 /// open.
 ///
@@ -221,7 +272,20 @@ pub(crate) fn reusable_packet(open: &[Value], branch: &str, sha: &str) -> Option
                     .and_then(Value::as_str)
                     .unwrap_or_default()
             };
-            m("branch") == branch && m("sha") == sha
+            // KEY ON THE TRUTHFUL HEAD. A packet with a receipt is
+            // about the tree the RUNNER gated, so the candidate is
+            // compared against the receipt's head — the requested sha
+            // stops being a key the moment a receipt exists, because
+            // the two differ exactly when the branch moved between this
+            // verb's resolve and the runner's clone (410bf724). A
+            // still-running gate has no receipt yet, so the requested
+            // sha remains the only available key and keeps the job it
+            // has always done.
+            m("branch") == branch
+                && match receipt_head(j) {
+                    Some(gated) => gated == sha,
+                    None => m("sha") == sha,
+                }
         })
         .and_then(|j| j.get("id").and_then(Value::as_str))
         .map(str::to_string)
@@ -701,6 +765,7 @@ async fn wait_for_verdict(
             .and_then(Value::as_str)
             .map(str::to_string);
         if let Some(v) = verdict {
+            record_gated_head(http, packet, &job).await;
             println!("boss gate: {v}");
             if v != "green" {
                 bail!("gate verdict: {v}");
@@ -714,6 +779,53 @@ async fn wait_for_verdict(
         if let Some(why) = silent_packet_verdict(finished, failed) {
             bail!("{why}\n  Job: {job_name} (namespace {namespace}), packet: {packet}");
         }
+    }
+}
+
+/// Once the runner has reported, make the packet tell the runner's
+/// truth (410bf724).
+///
+/// The packet's `sha` was resolved by this verb BEFORE the runner
+/// cloned; the receipt's head is what the runner actually gated. When
+/// the branch moved in between, the packet lies about which tree its
+/// verdict covers — and [`reusable_packet`] used to key the next
+/// relaunch on that lie. The correction goes through `PATCH
+/// /api/jobs/{id}/metadata`, which MERGES top-level keys, so `sha`
+/// takes the receipt's head and the request survives as
+/// `requested_head`.
+///
+/// BEST-EFFORT, LOUDLY. The verdict is already known by the time this
+/// runs, and failing the wait over an annotation would report a green
+/// gate as red — the exact confusion cf0021ae exists about. But a
+/// silent failure leaves the lie in place, so it warns with what the
+/// packet still wrongly records.
+async fn record_gated_head(http: &reqwest::Client, packet: &str, job: &Value) {
+    let recorded = job
+        .pointer("/metadata/sha")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let Some(patch) = truth_patch(recorded, receipt_head(job).as_deref()) else {
+        return;
+    };
+    let gated = patch["sha"].as_str().unwrap_or_default().to_string();
+    match api(
+        http,
+        reqwest::Method::PATCH,
+        &format!("/api/jobs/{packet}/metadata"),
+        Some(patch),
+    )
+    .await
+    {
+        Ok(_) => println!(
+            "boss gate: the branch moved between resolve and clone — packet {packet} \
+             now records the head the runner gated ({gated}); the requested \
+             {recorded} is kept as requested_head"
+        ),
+        Err(e) => eprintln!(
+            "boss gate: could not correct packet {packet}'s head to the receipt's \
+             {gated} — it still records {recorded}, which the runner did NOT gate. \
+             The receipt on the record-verdict step is the truthful record.\n  {e:#}"
+        ),
     }
 }
 
@@ -1111,6 +1223,24 @@ apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: gate-runner-disk
         );
     }
 
+    /// A packet whose gate resolved X, whose runner then cloned and
+    /// gated Y because the branch moved in between (410bf724). The
+    /// runner's receipt on the record-verdict step is the truthful
+    /// record; the packet's `sha` is only what this verb asked for.
+    fn moved_packet() -> Vec<Value> {
+        vec![json!({
+            "id": "bbbbbbbb-2222",
+            "metadata": {"branch": "fix/x", "sha": "deadbeef"},
+            "steps": [{
+                "spec_slug": "record-verdict",
+                "metadata": {
+                    "verdict": "green",
+                    "receipt": "{\"verdict\":\"green\",\"head\":\"cafebabe\",\"mode\":\"full\",\"fails\":[]}"
+                }
+            }]
+        })]
+    }
+
     #[test]
     fn an_open_packet_for_the_same_branch_and_sha_is_reused() {
         let open = vec![json!({
@@ -1120,6 +1250,16 @@ apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: gate-runner-disk
         assert_eq!(
             reusable_packet(&open, "fix/x", "deadbeef").as_deref(),
             Some("aaaaaaaa-1111")
+        );
+
+        // THE BRANCH MOVED BETWEEN RESOLVE AND CLONE (410bf724). The
+        // packet requested deadbeef but its receipt gated cafebabe, and
+        // a candidate at cafebabe IS the tree that receipt vouches for
+        // — reuse it, or every relaunch files an orphan against a
+        // perfectly good verdict.
+        assert_eq!(
+            reusable_packet(&moved_packet(), "fix/x", "cafebabe").as_deref(),
+            Some("bbbbbbbb-2222")
         );
     }
 
@@ -1133,12 +1273,83 @@ apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: gate-runner-disk
         })];
         assert_eq!(reusable_packet(&open, "fix/x", "cafebabe"), None);
         assert_eq!(reusable_packet(&open, "fix/y", "deadbeef"), None);
+
+        // Once a receipt exists, the REQUESTED sha stops being a key at
+        // all. The packet asked for deadbeef but the runner gated
+        // cafebabe — so a candidate at deadbeef must NOT reuse it (that
+        // tree was never gated), and neither may an unrelated head.
+        assert_eq!(reusable_packet(&moved_packet(), "fix/x", "deadbeef"), None);
+        assert_eq!(reusable_packet(&moved_packet(), "fix/x", "0123abcd"), None);
     }
 
     #[test]
     fn a_packet_without_metadata_does_not_panic() {
         let open = vec![json!({"id": "no-metadata"})];
         assert_eq!(reusable_packet(&open, "fix/x", "deadbeef"), None);
+    }
+
+    /// The receipt is a JSON string on the record-verdict step — the
+    /// encoding run.sh writes and `boss receipt` reads.
+    #[test]
+    fn the_gated_head_is_read_off_the_receipt() {
+        assert_eq!(
+            receipt_head(&moved_packet()[0]).as_deref(),
+            Some("cafebabe")
+        );
+    }
+
+    /// A runner that died before a receipt reports PROSE in the receipt
+    /// field ("runner died before a receipt: line 103"). That must read
+    /// as "no gated head", not as a parse panic or a bogus key — the
+    /// requested sha stays the reuse key for such a packet.
+    #[test]
+    fn a_lost_run_and_a_bare_packet_have_no_gated_head() {
+        let lost = json!({
+            "id": "cccccccc-3333",
+            "metadata": {"branch": "fix/x", "sha": "deadbeef"},
+            "steps": [{
+                "spec_slug": "record-verdict",
+                "metadata": {"verdict": "lost",
+                             "receipt": "runner died before a receipt: line 103"}
+            }]
+        });
+        assert_eq!(receipt_head(&lost), None);
+        // …so the requested sha still keys reuse for it.
+        assert_eq!(
+            reusable_packet(&[lost], "fix/x", "deadbeef").as_deref(),
+            Some("cccccccc-3333")
+        );
+        // No steps at all: a gate still running, or a list endpoint
+        // that omitted them — either way, no receipt, no gated head.
+        assert_eq!(receipt_head(&json!({"id": "x"})), None);
+    }
+
+    /// THE CORRECTION THE PACKET IS OWED (410bf724): requested X, gated
+    /// Y — `sha` takes the truth, the request survives as provenance.
+    #[test]
+    fn a_moved_head_produces_a_truth_patch() {
+        let p = truth_patch("deadbeef", Some("cafebabe")).expect("the packet lies; correct it");
+        assert_eq!(p["sha"], "cafebabe");
+        assert_eq!(p["requested_head"], "deadbeef");
+    }
+
+    /// The ls-remote fallback records the SYMBOLIC ref instead of a
+    /// head. The receipt upgrades that degraded record to a real sha.
+    #[test]
+    fn a_symbolic_fallback_is_upgraded_to_the_gated_head() {
+        let p = truth_patch("origin/fix/x", Some("cafebabe")).expect("upgrade the symbolic ref");
+        assert_eq!(p["sha"], "cafebabe");
+        assert_eq!(p["requested_head"], "origin/fix/x");
+    }
+
+    /// A truthful packet needs no correction, and a silent runner has
+    /// no truth to correct WITH — neither may produce a PATCH, or every
+    /// wait would write a no-op annotation onto every packet.
+    #[test]
+    fn a_truthful_packet_gets_no_patch() {
+        assert_eq!(truth_patch("deadbeef", Some("deadbeef")), None);
+        assert_eq!(truth_patch("deadbeef", None), None);
+        assert_eq!(truth_patch("deadbeef", Some("")), None);
     }
 
     /// A RUNNING JOB MEANS KEEP WAITING — the common case, and the one a

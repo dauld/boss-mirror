@@ -979,7 +979,7 @@ pub(crate) fn rows(resp: Option<Value>) -> Result<Vec<Value>> {
     }
 }
 
-fn find_step<'a>(job: &'a Value, slug: &str, title: &str) -> Option<&'a Value> {
+pub(crate) fn find_step<'a>(job: &'a Value, slug: &str, title: &str) -> Option<&'a Value> {
     let steps = job.get("steps").and_then(Value::as_array)?;
     steps
         .iter()
@@ -991,7 +991,7 @@ fn find_step<'a>(job: &'a Value, slug: &str, title: &str) -> Option<&'a Value> {
         })
 }
 
-fn step_done(step: Option<&Value>) -> bool {
+pub(crate) fn step_done(step: Option<&Value>) -> bool {
     step.and_then(|s| s.get("status"))
         .and_then(Value::as_str)
         .is_some_and(|s| s == "completed" || s == "skipped")
@@ -1007,7 +1007,7 @@ fn step_label(step: &Value) -> String {
         .to_string()
 }
 
-fn id8(id: &str) -> String {
+pub(crate) fn id8(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
@@ -1030,7 +1030,7 @@ pub(crate) fn truthy(v: Option<&Value>) -> bool {
     }
 }
 
-fn metadata_map(v: &Value) -> Map<String, Value> {
+pub(crate) fn metadata_map(v: &Value) -> Map<String, Value> {
     match v.get("metadata") {
         Some(Value::Object(m)) => m.clone(),
         _ => Map::new(),
@@ -4824,6 +4824,22 @@ pub async fn run(phase: Phase, dry: bool, now: DateTime<Utc>) -> Result<()> {
         Phase::Reconcile => conductor.reconcile(now).await?,
         Phase::Board => conductor.board(now).await?,
         Phase::Run => {
+            // Drain publish-request packets FIRST, so a branch a
+            // credential-less workspace filed this cycle is on the
+            // forge before reconcile/board look — gateable in the same
+            // window instead of the next one. Same clone the conductor
+            // assembles in; same `fork` remote `publish_car_branch`
+            // pushes car branches to.
+            //
+            // Same failure posture as the branch sweep above: the
+            // drain is a feeder, not the train. A packet that will not
+            // drain (or a jobs API that is away) is journaled and
+            // retried next cycle; reconcile and board still run.
+            if let Err(e) =
+                crate::publish_requests::run(&conductor.cfg.clone, "fork", dry, now).await
+            {
+                log(format!("publish-request drain failed (run stands): {e:#}"));
+            }
             conductor.reconcile(now).await?;
             conductor.board(now).await?;
         }

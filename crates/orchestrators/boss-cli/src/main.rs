@@ -17,6 +17,7 @@ mod ops;
 mod park;
 mod prove;
 mod publish;
+mod publish_requests;
 mod queue;
 mod receipt;
 mod running;
@@ -308,6 +309,29 @@ enum Commands {
         #[arg(long, default_value = "gcp")]
         remote: String,
         /// Show the two hops without pushing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Drain publish-request packets (workflow publish-request v1,
+    /// filed 0b1b32f9): a workspace with no forge credential ships its
+    /// branch as a bundle on a packet; this verb — run where the forge
+    /// credential lives — verifies the bundle against the declared
+    /// shas and pushes, or refuses with the reason on the packet.
+    /// Never force-pushes. Also runs inside every `boss train run`,
+    /// before reconcile/board, so a fresh branch can be gated the same
+    /// cycle.
+    PublishRequests {
+        /// Clone to fetch and push in. Defaults to the working
+        /// directory.
+        #[arg(long, default_value = ".")]
+        clone: String,
+        /// Remote naming the forge in that clone. Remote names are
+        /// per-clone: the conductor's branch-push remote is `fork`, a
+        /// fresh clone's is `origin`.
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        /// List what would be drained without pushing or completing
+        /// anything.
         #[arg(long)]
         dry_run: bool,
     },
@@ -934,6 +958,15 @@ async fn main() -> Result<()> {
             remote,
             dry_run,
         } => publish::run(&branch, &remote, dry_run).await,
+        Commands::PublishRequests {
+            clone,
+            remote,
+            dry_run,
+        } => {
+            // Wall-clock at the CLI boundary: the completion stamp this
+            // verb writes derives from the operator's now.
+            publish_requests::run(&clone, &remote, dry_run, chrono::Utc::now()).await
+        }
         Commands::Gate {
             branch,
             mode,
