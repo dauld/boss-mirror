@@ -219,9 +219,18 @@ async fn appending_a_step_to_a_live_job_is_refused() {
         "appending must be refused, not accepted: {body}"
     );
     let msg = body.as_str().unwrap_or_default();
+    // The refusal must say WHY, so the caller does not just retry — and
+    // the WHY is the protocol boundary, not the freeze the slug-pairing
+    // change deleted (7c9e376d): a new step is a WORKFLOW change, so
+    // publish a new version. The stale message named the vanished freeze.
     assert!(
-        msg.contains("freeze") || msg.contains("diverge"),
-        "the refusal must say WHY, so the caller does not just retry: {msg}"
+        msg.contains("workflow") && msg.contains("version"),
+        "the refusal must name the protocol boundary — a new step is a workflow \
+         change, publish a new version — not a consequence that no longer happens: {msg}"
+    );
+    assert!(
+        !msg.contains("freeze"),
+        "the refusal still names the freeze that slug-pairing removed (7c9e376d): {msg}"
     );
 
     // The decisive assertion: the job is untouched. A guard that

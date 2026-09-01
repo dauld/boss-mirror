@@ -80,11 +80,11 @@ pub(super) async fn add_step<R: JobsRepository + 'static, B: EventBus + 'static>
             StatusCode::CONFLICT,
             format!(
                 "refusing to add a step to job {job_id}: it already has {} step(s), \
-                 matching workflow {} v{}. Appending would diverge the job from its \
-                 spec, and readiness is computed by pairing the two positionally — \
-                 the job would freeze and never reach a terminal. Add the step to the \
-                 workflow and publish a new version instead; in-flight jobs stay \
-                 pinned to the version they were admitted under.",
+                 matching workflow {} v{}. A step is PROTOCOL, so adding one is a \
+                 change to the WORKFLOW, not to a single in-flight job: add it to the \
+                 workflow and publish a new version, and new packets are admitted \
+                 under it. In-flight jobs stay pinned to the version they were \
+                 admitted under, which is the whole point of the versioning.",
                 existing.len(),
                 job.kind,
                 job.workflow_version

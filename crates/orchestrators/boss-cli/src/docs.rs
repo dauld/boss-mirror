@@ -16,8 +16,34 @@ use std::process::Command;
 
 use crate::docs_flush::{self, DecisionKind, FlushDecision};
 
-fn api_base() -> String {
-    std::env::var("BOSS_DOCS_API").unwrap_or_else(|_| boss_ports::url("docs"))
+/// The message a caller gets when `BOSS_DOCS_API` is unset. Kept apart
+/// from the lookup so a test can assert what it teaches without touching
+/// process environment — the same split as `gate::no_instance_message`.
+pub(crate) fn no_docs_api_message() -> String {
+    "BOSS_DOCS_API is not set, and this verb has no default on purpose.\n\
+     It used to fall back to http://127.0.0.1:7050. On boss-gcp that is \
+     not the docs API of record — it is a SECOND, older docs stack \
+     holding different data (measured: the local stack showed 0 queued \
+     flush jobs while the cluster held 3 holding 11 decisions), and a \
+     wrong instance does not fail, it answers, which is worse — the same \
+     defect class as `boss gate` before aa783636.\n\
+     Set it explicitly to the docs API of record for your vantage; from \
+     inside the cluster:\n    \
+     BOSS_DOCS_API=http://boss-docs-internal.boss.svc.cluster.local:7050 boss docs flush-pending"
+        .to_string()
+}
+
+/// The docs API this verb talks to. **NO DEFAULT, deliberately** (packet
+/// 7e10d3be). A default that is right on one host and silently wrong on
+/// another IS the defect: `boss_ports::url("docs")` is `127.0.0.1:7050`,
+/// which on boss-gcp is a legacy stack, so `flush-pending` reported
+/// success while the cluster's queued decisions went unprocessed. A verb
+/// that cannot reach the right instance now reaches none.
+fn api_base() -> Result<String> {
+    std::env::var("BOSS_DOCS_API")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| anyhow!("{}", no_docs_api_message()))
 }
 
 fn repo_root() -> PathBuf {
@@ -61,7 +87,7 @@ struct StatusUpdate<'a> {
 }
 
 pub async fn reindex() -> Result<()> {
-    let url = format!("{}/api/design/reindex", api_base());
+    let url = format!("{}/api/design/reindex", api_base()?);
     let client = reqwest::Client::new();
     let resp = client
         .post(&url)
@@ -83,7 +109,7 @@ pub async fn reindex() -> Result<()> {
 
 pub async fn flush_pending() -> Result<()> {
     let client = reqwest::Client::new();
-    let base = api_base();
+    let base = api_base()?;
     let root = repo_root();
 
     // 1. Pull queued jobs.
@@ -312,7 +338,21 @@ fn run_git_capture(cwd: &Path, args: &[&str]) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_push_remote;
+    use super::{no_docs_api_message, resolve_push_remote};
+
+    // The verb must refuse a silent default, and the refusal must TEACH:
+    // name the variable, say there is no default, and warn that the old
+    // 127.0.0.1:7050 fallback is a second stack that answers wrongly
+    // (packet 7e10d3be). Asserted on the message, not the env lookup, so
+    // the test is parallel-safe.
+    #[test]
+    fn the_missing_api_message_names_the_variable_and_the_trap() {
+        let m = no_docs_api_message();
+        assert!(m.contains("BOSS_DOCS_API"), "{m}");
+        assert!(m.contains("no default"), "{m}");
+        assert!(m.contains("127.0.0.1:7050"), "{m}");
+        assert!(m.contains("boss-docs-internal"), "{m}");
+    }
 
     fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
         move |k| {

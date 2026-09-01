@@ -216,29 +216,57 @@ fn facts_from(
             if !is_ours {
                 continue;
             }
-            for step in job
-                .get("steps")
-                .and_then(|s| s.as_array())
-                .into_iter()
-                .flatten()
-            {
-                // The receipt is stored as a JSON STRING on the gate
-                // step, so it needs a second parse.
-                let Some(raw) = step.pointer("/metadata/receipt").and_then(|r| r.as_str()) else {
-                    continue;
-                };
-                if let Ok(r) = serde_json::from_str::<serde_json::Value>(raw) {
-                    out.gated_head = r.get("head").and_then(|x| x.as_str()).map(str::to_string);
-                    out.verdict = r
-                        .get("verdict")
-                        .and_then(|x| x.as_str())
-                        .map(str::to_string);
-                    out.mode = r.get("mode").and_then(|x| x.as_str()).map(str::to_string);
-                }
+            if let Some(r) = select_receipt(&job) {
+                out.gated_head = r.get("head").and_then(|x| x.as_str()).map(str::to_string);
+                out.verdict = r
+                    .get("verdict")
+                    .and_then(|x| x.as_str())
+                    .map(str::to_string);
+                out.mode = r.get("mode").and_then(|x| x.as_str()).map(str::to_string);
             }
         }
     }
     out
+}
+
+/// The one receipt that describes the head this car would board, chosen
+/// from a `ship-a-change` job the same way the boarding logic chooses it
+/// (train.rs `receipt_skip_reason`) — split out so the JSON walk is
+/// testable without a live API.
+///
+/// PREFER `regate_receipt` over the gate STEP receipt. A re-rail rebases
+/// the car onto a moved main and writes the fresh receipt to
+/// `job.metadata.regate_receipt`, leaving the gate step's receipt
+/// describing the OLD head. Reading only the step made `boss receipt`
+/// call a correctly re-gated car STALE and disagree with the head the
+/// conductor would board (7f20fb19 — the mirror of 64cae7e9's repair).
+fn select_receipt(job: &serde_json::Value) -> Option<serde_json::Value> {
+    job.pointer("/metadata/regate_receipt")
+        .filter(|v| !v.is_null())
+        .and_then(parse_receipt)
+        .or_else(|| {
+            // Field order is not a contract, so parse the gate step's
+            // receipt rather than scanning for it.
+            job.get("steps")
+                .and_then(|s| s.as_array())
+                .into_iter()
+                .flatten()
+                .find_map(|step| step.pointer("/metadata/receipt").and_then(parse_receipt))
+        })
+}
+
+/// A receipt is stored two ways: as a JSON STRING (the gate step, and a
+/// re-rail that copied that string verbatim into `regate_receipt`) or as
+/// an OBJECT (tooling that parsed before writing). Both are receipts —
+/// the same pair the boarding logic accepts (train.rs). Returns the
+/// receipt object, or None if the value is neither an object nor a string
+/// that parses to one.
+fn parse_receipt(v: &serde_json::Value) -> Option<serde_json::Value> {
+    match v {
+        serde_json::Value::String(s) => serde_json::from_str(s).ok(),
+        obj @ serde_json::Value::Object(_) => Some(obj.clone()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -326,6 +354,57 @@ mod tests {
             ..f()
         };
         assert_eq!(standing(&short), Standing::Current);
+    }
+
+    /// A car with only a gate-step receipt reads it — the common case.
+    #[test]
+    fn the_gate_step_receipt_is_used_when_there_is_no_regate() {
+        let job = serde_json::json!({
+            "steps": [{ "title": "Green, and observed working",
+                        "metadata": { "receipt": "{\"head\":\"oldhead\",\"verdict\":\"green\",\"mode\":\"full\"}" } }]
+        });
+        let r = select_receipt(&job).expect("gate step receipt");
+        assert_eq!(r.get("head").and_then(|h| h.as_str()), Some("oldhead"));
+    }
+
+    /// THE 7f20fb19 CASE. After a re-rail the gate step still holds the
+    /// OLD head's receipt while `regate_receipt` holds the fresh one; the
+    /// boarding logic prefers regate, so `boss receipt` must too or it
+    /// calls a correctly re-gated car STALE. Preferred as an OBJECT...
+    #[test]
+    fn a_regate_receipt_object_is_preferred_over_the_stale_gate_step() {
+        let job = serde_json::json!({
+            "metadata": { "regate_receipt": { "head": "freshhead", "verdict": "green", "mode": "full" } },
+            "steps": [{ "title": "Green, and observed working",
+                        "metadata": { "receipt": "{\"head\":\"oldhead\",\"verdict\":\"green\",\"mode\":\"full\"}" } }]
+        });
+        let r = select_receipt(&job).expect("regate receipt");
+        assert_eq!(r.get("head").and_then(|h| h.as_str()), Some("freshhead"));
+    }
+
+    /// ...and as a JSON STRING, the shape a re-rail copies verbatim.
+    #[test]
+    fn a_regate_receipt_string_is_parsed_and_preferred() {
+        let job = serde_json::json!({
+            "metadata": { "regate_receipt": "{\"head\":\"freshhead\",\"verdict\":\"green\",\"mode\":\"auto\"}" },
+            "steps": [{ "title": "Green, and observed working",
+                        "metadata": { "receipt": "{\"head\":\"oldhead\",\"verdict\":\"green\",\"mode\":\"full\"}" } }]
+        });
+        let r = select_receipt(&job).expect("regate receipt");
+        assert_eq!(r.get("head").and_then(|h| h.as_str()), Some("freshhead"));
+        assert_eq!(r.get("mode").and_then(|m| m.as_str()), Some("auto"));
+    }
+
+    /// A null regate_receipt is not a receipt — fall back to the step.
+    #[test]
+    fn a_null_regate_receipt_falls_back_to_the_gate_step() {
+        let job = serde_json::json!({
+            "metadata": { "regate_receipt": null },
+            "steps": [{ "title": "Green, and observed working",
+                        "metadata": { "receipt": "{\"head\":\"oldhead\",\"verdict\":\"green\",\"mode\":\"full\"}" } }]
+        });
+        let r = select_receipt(&job).expect("gate step receipt");
+        assert_eq!(r.get("head").and_then(|h| h.as_str()), Some("oldhead"));
     }
 }
 
