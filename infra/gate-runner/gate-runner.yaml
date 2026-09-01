@@ -126,12 +126,26 @@ spec:
       containers:
         - name: gate
           image: 10.20.0.15:3000/david/boss-ci:rust1.96
+          # Always, not the default IfNotPresent: :rust1.96 is a mutable
+          # tag, and a node that cached an older build keeps serving it —
+          # the stale-runner-cache split that redded the browser-bake
+          # keystone (6aa603ef), here for the gate-runner. Always makes
+          # the gate pull the current baked image (chromium + system deps
+          # at /opt/ms-playwright); layers are cached, so only changed
+          # ones transfer.
+          imagePullPolicy: Always
           command: ["bash", "/repo-script/run.sh"]
           env:
             - {name: GATE_BRANCH, value: "$GATE_BRANCH"}
             - {name: GATE_RUN_JOB_ID, value: "$GATE_RUN_JOB_ID"}
             - {name: GATE_MODE, value: "$GATE_MODE"}
-            - {name: PLAYWRIGHT_BROWSERS_PATH, value: /gate-target/ms-playwright}
+            # The BAKED browser, not a per-run PVC download. The keystone
+            # bakes chromium + its libs into boss-ci at /opt/ms-playwright;
+            # pointing here lets gate.sh's web suite run the mocked
+            # Playwright specs with no run-time download. The old
+            # /gate-target/ms-playwright value was never seeded by run.sh,
+            # so the suite could not have run at all (ade5d82b).
+            - {name: PLAYWRIGHT_BROWSERS_PATH, value: /opt/ms-playwright}
             - {name: BOSS_TEST_POSTGRES_ADMIN_URL, value: "postgres://boss:boss@127.0.0.1:5432/postgres"}
           securityContext:
             allowPrivilegeEscalation: false

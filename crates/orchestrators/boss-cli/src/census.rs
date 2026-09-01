@@ -769,6 +769,35 @@ async fn collect(opts: Options, now: DateTime<Utc>) -> Result<Census> {
         }
     }
 
+    // --- stranded gate-runs: green verdicts no car ever claimed -------
+    // A change that gated green but was never parked never reaches the
+    // dock, so it cannot board — the "why did a green gate never load"
+    // question, as a number. Reads closed gate-runs and cars, which the
+    // open-packet slice above never sees. BEST-EFFORT: it is one hygiene
+    // note, not a hard dependency, so a failed read skips it rather than
+    // failing the whole census.
+    let gate_run_read = api.get("/api/jobs?kind=gate-run&limit=60").await;
+    let car_read = api.get("/api/jobs?kind=ship-a-change&limit=800").await;
+    if let (Ok(gate_run_body), Ok(car_body)) = (gate_run_read, car_read) {
+        let car_branches: BTreeSet<String> = rows(&car_body)
+            .iter()
+            .filter_map(|c| {
+                c.get("metadata")
+                    .and_then(|m| m.get("branch"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect();
+        let stranded = stranded_gate_runs(&rows(&gate_run_body), &car_branches);
+        if !stranded.is_empty() {
+            notes.push(format!(
+                "{} stranded gate-run(s) — gated green, never parked, so never on the dock: {}",
+                stranded.len(),
+                stranded.join(", ")
+            ));
+        }
+    }
+
     let summary = summary_line(
         packets.len(),
         stale_packets.len(),
@@ -1177,6 +1206,48 @@ fn render(c: &Census) -> String {
     o.join("\n")
 }
 
+/// Green gate-runs whose branch has no ship-a-change car: a change that
+/// gated but was never parked, so it never reached the dock and could
+/// not board. The hygiene number behind "a green gate that never
+/// loaded" — nothing turned the verdict into a car, which is the gap
+/// gate-green auto-park closes. Read-only: it names the branches so an
+/// operator can park the good ones or drop the obsolete.
+pub(crate) fn stranded_gate_runs(
+    gate_runs: &[Value],
+    car_branches: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for g in gate_runs {
+        let green = g
+            .get("steps")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|s| {
+                s.get("metadata")
+                    .and_then(|m| m.get("verdict"))
+                    .and_then(Value::as_str)
+                    == Some("green")
+            });
+        if !green {
+            continue;
+        }
+        let branch = g
+            .get("metadata")
+            .and_then(|m| m.get("branch"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if branch.is_empty() || car_branches.contains(branch) {
+            continue;
+        }
+        if !out.iter().any(|b| b == branch) {
+            out.push(branch.to_string());
+        }
+    }
+    out.sort();
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1237,6 +1308,36 @@ mod tests {
     }
 
     // -----------------------------------------------------------
+    // Stranded gate-runs — green verdicts no car claimed
+    // -----------------------------------------------------------
+
+    #[test]
+    fn a_green_gate_run_with_no_car_is_stranded() {
+        let gate_runs = vec![
+            json!({"metadata": {"branch": "fix/parked"},   "steps": [{"metadata": {"verdict": "green"}}]}),
+            json!({"metadata": {"branch": "fix/stranded"}, "steps": [{"metadata": {"verdict": "green"}}]}),
+            json!({"metadata": {"branch": "fix/redded"},   "steps": [{"metadata": {"verdict": "failed"}}]}),
+        ];
+        let mut cars = BTreeSet::new();
+        cars.insert("fix/parked".to_string());
+        // Only the green gate-run whose branch never became a car is
+        // stranded: the parked one has a car, the red one never vouched.
+        assert_eq!(
+            stranded_gate_runs(&gate_runs, &cars),
+            vec!["fix/stranded".to_string()]
+        );
+    }
+
+    #[test]
+    fn nothing_is_stranded_when_every_green_branch_has_a_car() {
+        let gate_runs = vec![
+            json!({"metadata": {"branch": "fix/a"}, "steps": [{"metadata": {"verdict": "green"}}]}),
+        ];
+        let mut cars = BTreeSet::new();
+        cars.insert("fix/a".to_string());
+        assert!(stranded_gate_runs(&gate_runs, &cars).is_empty());
+    }
+
     // Orphan detection — a packet against a station set
     // -----------------------------------------------------------
 

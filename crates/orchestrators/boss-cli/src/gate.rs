@@ -366,14 +366,15 @@ pub(crate) fn rows(v: Option<Value>) -> Vec<Value> {
 
 /// The instant a step completed, in the one format every verb writes.
 ///
-/// RFC3339, whole seconds, `Z`. Three verbs stamp `completed_at` — the
+/// RFC3339, whole seconds, `Z`. Several verbs stamp `completed_at` — the
 /// conductor on the steps it completes, `boss park` on scope/build/gate,
-/// `boss prove` on proven — and cycle time is the difference between
-/// stamps written by *different* verbs. A format that varied by writer
-/// would still look right in every packet and only be wrong in the
-/// arithmetic, so it is defined once here rather than three times.
+/// `boss prove` on proven, and now the dispatcher's auto-park handler —
+/// and cycle time is the difference between stamps written by
+/// *different* verbs. A format that varied by writer would still look
+/// right in every packet and only be wrong in the arithmetic, so it is
+/// defined ONCE, in `boss_jobs::car`, and everyone delegates here.
 pub(crate) fn stamp(now: chrono::DateTime<chrono::Utc>) -> String {
-    now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    boss_jobs::car::stamp(now)
 }
 
 /// `git ls-remote` the branch so the packet records a real head.

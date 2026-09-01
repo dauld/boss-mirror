@@ -689,19 +689,36 @@ else
     check "test"    cargo test "${SCOPE[@]}" --all-features
 fi
 
-# THE WEB SUITE, when the web moved. Train #86 went red on three
-# mocked Playwright specs this gate never ran: its web coverage was
-# svelte-check alone, while CI's web job runs typecheck + unit + build
-# + the mocked suite — a car could pass here and red the train on a
-# check it never saw (§9a: this block and ci.yml's web job are two
-# copies of one definition; this one now matches it). Scoped to
-# web-touching changes because the suite needs Playwright's browser
-# and ~a minute — a docs car should not pay that, and CI still runs it
-# unconditionally.
+# THE WEB SUITE. CI's web job runs typecheck + unit + build + the
+# mocked Playwright suite; before this gate ran svelte-check alone, so
+# a car could pass here and red the train on a check it never saw
+# (§9a: this block and ci.yml's web job are two copies of one
+# definition, kept in sync).
+#
+# FULL MODE RUNS IT UNCONDITIONALLY, matching CI — the full gate is the
+# authoritative one and must not be narrower than the train it feeds.
+# It used to be gated to `--auto` as well (`AUTO -eq 1 && web_touched`),
+# which is exactly why `boss gate` runs full mode, skipped the suite,
+# and let mocked-spec reds through: trains #160 (route crawl missed the
+# estate page) and #161 (~35 specs after the IT consolidation moved
+# surfaces) both died that way — ade5d82b. --auto keeps the old
+# scoping, because a docs or Rust car iterating locally should not pay
+# the suite unless it touched the web; CI and the full gate are the
+# unconditional backstops. The browser is baked into boss-ci at
+# /opt/ms-playwright (the keystone), so this needs no run-time download
+# — the gate-runner points PLAYWRIGHT_BROWSERS_PATH there.
 web_touched() {
     if changed_paths | grep -qE '^(apps/web|apps/simulator|libs/web-kit)/'; then echo yes; else echo no; fi
 }
-if [ "$AUTO" -eq 1 ] && [ "$(web_touched)" = "yes" ]; then
+if [ "$AUTO" -eq 0 ] || [ "$(web_touched)" = "yes" ]; then
+    # A clean install FIRST, with puppeteer's postinstall skipped. bun
+    # aborts the WHOLE install on a failed postinstall, and puppeteer's
+    # browser download is the flaky one — the exact reason ci.yml's web
+    # job and svelte-check.sh both set PUPPETEER_SKIP_DOWNLOAD. The
+    # gate-runner's run.sh does a best-effort warm-up install (|| true),
+    # so the suite cannot trust node_modules to be complete and does its
+    # own. Cached after the warm-up, so this is seconds, not minutes.
+    check "web install" bash -c 'cd apps/web && PUPPETEER_SKIP_DOWNLOAD=1 bun install --frozen-lockfile'
     # web-kit FIRST: its 7 test files existed for weeks and ran in no
     # job at all - not here, not in ci.yml. One of them could not even
     # load, because it imported a module whose top-level `$state` made

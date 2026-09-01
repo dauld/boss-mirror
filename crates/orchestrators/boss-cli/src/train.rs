@@ -68,7 +68,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use boss_jobs::delivery::DeliveryPolicyRow;
-use chrono::{DateTime, Timelike, Utc};
+use chrono::{DateTime, Utc};
 use reqwest::Method;
 use serde_json::{Map, Value, json};
 
@@ -4152,11 +4152,13 @@ impl Conductor {
     async fn board(&self, now: DateTime<Utc>) -> Result<()> {
         self.ensure_clone()?;
         let (cands, mut left_behind) = self.candidates().await?;
-        let window = format!(
-            "{}{}",
-            now.format("%Y-%m-%d "),
-            if now.hour() < 12 { "AM" } else { "PM" }
-        );
+        // Minute precision, not an AM/PM half-day. Boardings fire on
+        // dock depth (min 4, 120m cooldown), not a twice-daily clock, so
+        // the old "{date} AM/PM" label both COLLIDED — two trains carried
+        // an identical "PM" the night of 2026-08-31 — and implied a
+        // schedule the system does not run (21d4f433). Mirrors the
+        // train_branch stamp on the next line.
+        let window = now.format("%Y-%m-%d %H:%M").to_string();
         let train_branch = format!("train/{}", now.format("%Y%m%d-%H%M"));
         let Some(train) = self.open_train_job(&train_branch, &window).await? else {
             // dry run

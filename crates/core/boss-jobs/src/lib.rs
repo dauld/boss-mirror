@@ -11,6 +11,7 @@
 
 pub mod cadence;
 pub mod calendar_hook;
+pub mod car;
 pub mod delivery;
 pub mod escalation;
 pub mod events;
