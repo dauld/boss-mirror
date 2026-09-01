@@ -1240,10 +1240,13 @@ impl JobsRepository for PgJobs {
         // fan-out. Contract pinned against the port's pure
         // `terminal_report_from_jobs` by tests/terminal_report_pg.rs:
         // outcomes read `metadata->>'outcome'` over closed rows only,
-        // cycle days are `(closed_on - opened_on)` — the dates the
-        // row carries and the rebuilder reproduces — and the
-        // percentiles are `percentile_cont`, which the port helper
-        // mirrors formula-for-formula.
+        // cycle days prefer the precise `opened_at` / `closed_at`
+        // metadata stamps (RFC3339 instants written at admission and
+        // at the close hooks — the dates have one-day resolution by
+        // construction), COALESCEd to `(closed_on - opened_on)` for
+        // packets that predate the stamps, and the percentiles are
+        // `percentile_cont`, which the port helper mirrors
+        // formula-for-formula.
         let rows: Vec<(
             i32,
             i64,
@@ -1259,7 +1262,12 @@ impl JobsRepository for PgJobs {
               SELECT workflow_version,
                      status,
                      metadata->>'outcome' AS outcome,
-                     (closed_on - opened_on)::float8 AS cycle_days
+                     COALESCE(
+                       (EXTRACT(EPOCH FROM ((metadata->>'closed_at')::timestamptz
+                                          - (metadata->>'opened_at')::timestamptz))
+                          / 86400.0)::float8,
+                       (closed_on - opened_on)::float8
+                     ) AS cycle_days
               FROM jobs
               WHERE kind = $1
                 AND ($2::date IS NULL OR opened_on >= $2)

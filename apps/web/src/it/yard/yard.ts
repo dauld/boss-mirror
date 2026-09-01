@@ -879,9 +879,19 @@ function pct(n: number | null): string {
   return n === null ? '—' : `${Math.round(n)}%`;
 }
 
+/**
+ * Cycle medians carry sub-day precision now that packets are stamped
+ * with precise open/close instants: under a day reads in hours, a day
+ * or longer in days, both to one decimal. A same-day close used to
+ * render `0d`, which hid exactly the improvement the scoreboard
+ * exists to show.
+ */
 function days(v: TerminalVersion): string {
   const m = v.cycle_time_days?.median;
-  return m === null || m === undefined ? '—' : `${m}d`;
+  if (m === null || m === undefined) return '—';
+  const round1 = (n: number) => Math.round(n * 10) / 10;
+  const hours = round1(m * 24);
+  return hours < 24 ? `${hours}h` : `${round1(m)}d`;
 }
 
 /**

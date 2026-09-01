@@ -55,6 +55,123 @@ fn approx(v: Option<f64>, want: f64) -> bool {
     v.is_some_and(|x| (x - want).abs() < 1e-9)
 }
 
+fn with_metadata(mut job: Job, metadata: serde_json::Value) -> Job {
+    job.metadata = metadata;
+    job
+}
+
+/// The stamped-instant preference, formula-for-formula with the
+/// in-memory HTTP test's `precise_stamps_beat_the_one_day_date_resolution`:
+/// `EXTRACT(EPOCH FROM closed_at - opened_at) / 86400.0` when both
+/// RFC3339 metadata stamps are present, COALESCEd to the
+/// `(closed_on - opened_on)` date arithmetic when they are not.
+#[tokio::test(flavor = "multi_thread")]
+async fn stamped_instants_override_the_date_arithmetic() {
+    let db = TestDb::new().await;
+    let repo = boss_jobs::PgJobs::new(db.pool.clone());
+
+    let fixture = vec![
+        // v2: one stamped packet, closed 30 minutes after opening.
+        // Date math reads it as 0 days.
+        with_metadata(
+            packet(
+                "cold-crash",
+                2,
+                JobStatus::Closed,
+                d(2026, 8, 20),
+                Some(d(2026, 8, 20)),
+                None,
+                false,
+            ),
+            serde_json::json!({
+                "outcome": "done",
+                "opened_at": "2026-08-20T09:00:00+00:00",
+                "closed_at": "2026-08-20T09:30:00+00:00",
+            }),
+        ),
+        // v1, pre-stamp: keeps `closed_on - opened_on` = 2.
+        packet(
+            "cold-crash",
+            1,
+            JobStatus::Closed,
+            d(2026, 8, 20),
+            Some(d(2026, 8, 22)),
+            Some("done"),
+            false,
+        ),
+        // v1, half a stamp: no `opened_at`, so the dates answer = 1.
+        with_metadata(
+            packet(
+                "cold-crash",
+                1,
+                JobStatus::Closed,
+                d(2026, 8, 20),
+                Some(d(2026, 8, 21)),
+                None,
+                false,
+            ),
+            serde_json::json!({
+                "outcome": "done",
+                "closed_at": "2026-08-21T09:00:00+00:00",
+            }),
+        ),
+        // v1, stamped but never dated: the stamps alone make it a
+        // sample (12 hours = 0.5), where an undated close was none.
+        with_metadata(
+            packet(
+                "cold-crash",
+                1,
+                JobStatus::Closed,
+                d(2026, 8, 20),
+                None,
+                None,
+                false,
+            ),
+            serde_json::json!({
+                "outcome": "done",
+                "opened_at": "2026-08-20T10:00:00+00:00",
+                "closed_at": "2026-08-20T22:00:00+00:00",
+            }),
+        ),
+    ];
+    for p in &fixture {
+        repo.create_job(p).await.unwrap();
+    }
+
+    let report = repo
+        .workflow_terminal_report("cold-crash", None, None)
+        .await
+        .unwrap();
+    assert_eq!(report.len(), 2);
+
+    let v2 = &report[0];
+    assert_eq!(v2.version, 2);
+    assert_eq!(v2.cycle_time_days.samples, 1);
+    assert!(
+        approx(v2.cycle_time_days.median, 1800.0 / 86400.0),
+        "30 stamped minutes is ~0.0208 days, not 0: {:?}",
+        v2.cycle_time_days
+    );
+
+    let v1 = &report[1];
+    assert_eq!(v1.version, 1);
+    assert_eq!(
+        v1.cycle_time_days.samples, 3,
+        "the stamped-but-undated close is a sample: {:?}",
+        v1.cycle_time_days
+    );
+    assert!(
+        approx(v1.cycle_time_days.median, 1.0),
+        "median of [0.5, 1, 2]: {:?}",
+        v1.cycle_time_days
+    );
+    assert!(
+        approx(v1.cycle_time_days.p90, 1.8),
+        "percentile_cont(0.9) of [0.5, 1, 2]: {:?}",
+        v1.cycle_time_days
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_sql_report_matches_the_port_contract() {
     let db = TestDb::new().await;

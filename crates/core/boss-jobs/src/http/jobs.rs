@@ -598,9 +598,8 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
     // historical sim-dates. Inject the default before deser since the
     // shared `Job` type requires the field.
     let now = boss_clock_client::now_from(&state.clock).await;
-    if raw.get("opened_on").is_none_or(|v| v.is_null())
-        && let Some(obj) = raw.as_object_mut()
-    {
+    let opened_by_clock = raw.get("opened_on").is_none_or(|v| v.is_null());
+    if opened_by_clock && let Some(obj) = raw.as_object_mut() {
         obj.insert("opened_on".to_string(), serde_json::json!(now.date_naive()));
     }
     let mut job: Job = match serde_json::from_value(raw.clone()) {
@@ -613,6 +612,25 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
                 .into_response();
         }
     };
+
+    // The precise instant behind the defaulted date. `opened_on` has
+    // one-day resolution by construction; the metadata stamp is what
+    // lets the terminal report measure a same-day close in hours
+    // (`cycle_days_sample`, port.rs — paired with `closed_at` from the
+    // close hooks). Only written when the clock owns the date: an
+    // explicit (backdated, sim-historical) `opened_on` names a
+    // different instant than `now`, and a stamp that disagreed with
+    // the date beside it would override that date in the cycle-time
+    // preference. Merges into the caller's metadata; an existing
+    // `opened_at` key wins.
+    if opened_by_clock {
+        if let serde_json::Value::Object(map) = &mut job.metadata {
+            map.entry("opened_at")
+                .or_insert_with(|| serde_json::json!(now.to_rfc3339()));
+        } else if job.metadata.is_null() {
+            job.metadata = serde_json::json!({ "opened_at": now.to_rfc3339() });
+        }
+    }
 
     // Admission decides sim-vs-real ONCE, here, and the flag never
     // moves again (03-jobs.sql: the epoch trim leans on a Job's rows

@@ -164,15 +164,17 @@ pub struct VersionTerminalReport {
     /// Counted separately rather than under a sentinel key so a
     /// machine reading `outcomes` only ever sees real outcome values.
     pub closed_without_outcome: i64,
-    /// Open→close cycle time over closed packets, in days, from the
-    /// dates the jobs row itself carries (`opened_on` / `closed_on` —
-    /// both reproduced by the rebuilder).
+    /// Open→close cycle time over closed packets, in days. Fractional
+    /// when the packet carries the precise `opened_at` / `closed_at`
+    /// metadata stamps; otherwise whole days from the row's dates
+    /// (`opened_on` / `closed_on` — both reproduced by the rebuilder).
     pub cycle_time_days: CycleTimeDays,
 }
 
 /// Median + p90 with the sample count they were computed over. A
-/// closed packet without a `closed_on` date is not a sample, which is
-/// why `samples` can undercut `by_status["closed"]`.
+/// closed packet without a `closed_on` date (or a pair of precise
+/// metadata stamps) is not a sample, which is why `samples` can
+/// undercut `by_status["closed"]`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CycleTimeDays {
     pub samples: i64,
@@ -220,6 +222,28 @@ fn outcome_key(metadata: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// The packet's cycle-time sample, in fractional days. The precise
+/// `opened_at` / `closed_at` metadata stamps (RFC3339 instants,
+/// written at admission and at the close hooks) win when both parse —
+/// the row's dates have one-day resolution by construction, so a
+/// same-day close measured 0 days no matter how long it really took.
+/// Packets that predate the stamps, or carry only one, keep the
+/// `closed_on - opened_on` date arithmetic. Mirrors the SQL override's
+/// `EXTRACT(EPOCH ...) / 86400.0` COALESCEd to the date form
+/// (postgres.rs), pinned by tests/terminal_report_pg.rs.
+fn cycle_days_sample(job: &Job) -> Option<f64> {
+    let stamp = |key: &str| -> Option<chrono::DateTime<chrono::FixedOffset>> {
+        chrono::DateTime::parse_from_rfc3339(job.metadata.get(key)?.as_str()?).ok()
+    };
+    if let (Some(opened), Some(closed)) = (stamp("opened_at"), stamp("closed_at"))
+        && let Some(us) = (closed - opened).num_microseconds()
+    {
+        return Some(us as f64 / 86_400_000_000.0);
+    }
+    job.closed_on
+        .map(|closed| (closed - job.opened_on).num_days() as f64)
+}
+
 /// Pure aggregation behind [`JobsRepository::workflow_terminal_report`]
 /// — a function of the packets, so any adapter's answer is checkable
 /// against it. Versions sort newest first.
@@ -258,9 +282,8 @@ pub fn terminal_report_from_jobs(
                 Some(outcome) => *acc.outcomes.entry(outcome).or_insert(0) += 1,
                 None => acc.closed_without_outcome += 1,
             }
-            if let Some(closed_on) = job.closed_on {
-                acc.cycle_days
-                    .push((closed_on - job.opened_on).num_days() as f64);
+            if let Some(days) = cycle_days_sample(job) {
+                acc.cycle_days.push(days);
             }
         }
     }

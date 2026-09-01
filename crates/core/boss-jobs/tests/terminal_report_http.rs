@@ -245,6 +245,125 @@ fn approx(v: &serde_json::Value, want: f64) -> bool {
     v.as_f64().is_some_and(|x| (x - want).abs() < 1e-9)
 }
 
+fn with_metadata(mut job: Job, metadata: serde_json::Value) -> Job {
+    job.metadata = metadata;
+    job
+}
+
+/// A packet closed 30 minutes after opening spent 30 minutes in
+/// flight, not 0 days — the dates have one-day resolution by
+/// construction. The precise `opened_at` / `closed_at` metadata
+/// stamps (RFC3339 instants, written at admission and at the close
+/// hooks) win when both parse; a packet that predates the stamps, or
+/// carries only one, keeps the date arithmetic.
+#[tokio::test]
+async fn precise_stamps_beat_the_one_day_date_resolution() {
+    let (app, jobs) = app();
+    seed(
+        &jobs,
+        vec![
+            // v2: one stamped packet, closed 30 minutes after opening.
+            // Date math reads it as 0 days.
+            with_metadata(
+                packet(
+                    "cold-crash",
+                    2,
+                    JobStatus::Closed,
+                    d(2026, 8, 20),
+                    Some(d(2026, 8, 20)),
+                    None,
+                    false,
+                ),
+                serde_json::json!({
+                    "outcome": "done",
+                    "opened_at": "2026-08-20T09:00:00+00:00",
+                    "closed_at": "2026-08-20T09:30:00+00:00",
+                }),
+            ),
+            // v1, pre-stamp: keeps `closed_on - opened_on` = 2.
+            packet(
+                "cold-crash",
+                1,
+                JobStatus::Closed,
+                d(2026, 8, 20),
+                Some(d(2026, 8, 22)),
+                Some("done"),
+                false,
+            ),
+            // v1, half a stamp: no `opened_at`, so the dates answer = 1.
+            with_metadata(
+                packet(
+                    "cold-crash",
+                    1,
+                    JobStatus::Closed,
+                    d(2026, 8, 20),
+                    Some(d(2026, 8, 21)),
+                    None,
+                    false,
+                ),
+                serde_json::json!({
+                    "outcome": "done",
+                    "closed_at": "2026-08-21T09:00:00+00:00",
+                }),
+            ),
+            // v1, stamped but never dated: the stamps alone make it a
+            // sample (12 hours = 0.5), where an undated close was none.
+            with_metadata(
+                packet(
+                    "cold-crash",
+                    1,
+                    JobStatus::Closed,
+                    d(2026, 8, 20),
+                    None,
+                    None,
+                    false,
+                ),
+                serde_json::json!({
+                    "outcome": "done",
+                    "opened_at": "2026-08-20T10:00:00+00:00",
+                    "closed_at": "2026-08-20T22:00:00+00:00",
+                }),
+            ),
+        ],
+    )
+    .await;
+
+    let (status, body) = get_report(
+        &app,
+        "/api/workflows/cold-crash/terminal-report",
+        "emp-1",
+        "reporter",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body:#}");
+    let versions = body["versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 2);
+
+    let v2 = &versions[0];
+    assert_eq!(v2["cycle_time_days"]["samples"], 1);
+    assert!(
+        approx(&v2["cycle_time_days"]["median"], 1800.0 / 86400.0),
+        "30 stamped minutes is ~0.0208 days, not 0: {:#}",
+        v2["cycle_time_days"]
+    );
+
+    let v1 = &versions[1];
+    assert_eq!(
+        v1["cycle_time_days"]["samples"], 3,
+        "the stamped-but-undated close is a sample: {v1:#}"
+    );
+    assert!(
+        approx(&v1["cycle_time_days"]["median"], 1.0),
+        "median of [0.5, 1, 2]: {:#}",
+        v1["cycle_time_days"]
+    );
+    assert!(
+        approx(&v1["cycle_time_days"]["p90"], 1.8),
+        "percentile_cont(0.9) of [0.5, 1, 2]: {:#}",
+        v1["cycle_time_days"]
+    );
+}
+
 #[tokio::test]
 async fn two_versions_report_their_outcome_mixes_newest_first() {
     let (app, jobs) = app();

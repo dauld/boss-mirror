@@ -327,6 +327,14 @@ spec:
             - {name: BOSS_DISPATCH_EXECUTOR_ID, value: "claude@algedonic.dev"}
             - {name: BOSS_DISPATCH_EXECUTOR_ROLES, value: "platform-admin"}
             - {name: BOSS_DISPATCHER_RULES, value: /opt/boss/infra/dispatcher/rules.toml}
+            # Widen the dispatcher off loopback so its machine door
+            # (boss-dispatcher-internal.yaml, backlog a757b72a) can serve
+            # reads to in-cluster automation — the sanctioned knob named in
+            # crates/core/boss-dispatcher/src/config.rs. In-cluster only;
+            # the gateway stays the human trust boundary. docs and jobs
+            # already bind 0.0.0.0 (generate-configs.sh), so only the
+            # dispatcher needs this.
+            - {name: BOSS_DISPATCHER_BIND, value: "0.0.0.0:7950"}
             # Bind all interfaces so the Service can reach the gateway;
             # the default 127.0.0.1 is right for systemd+Caddy, wrong here.
             - {name: BOSS_LISTEN, value: "0.0.0.0:4443"}

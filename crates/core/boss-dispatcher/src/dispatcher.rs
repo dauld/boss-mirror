@@ -369,6 +369,36 @@ async fn handle_event(ctx: &DispatcherCtx, subject: &str, payload: &Value) -> Re
         );
         return Ok(());
     }
+    // A DECISION-SHAPED step prefers the packet OWNER when the owner
+    // holds the authority (be264fa2). The owner is fetched here rather
+    // than carried on the event — the step payload has no owner_id — and
+    // this is the rare human path, not the hot per-step assign. Every
+    // failure to learn the owner or their eligibility falls through to
+    // the role pick below: a decision that reaches a role holder is
+    // exactly the prior behavior, never worse.
+    if decision_shaped {
+        let owner = match fetch_job_owner(ctx, job_id).await {
+            Ok(o) => o,
+            Err(e) => {
+                debug!(job_id, step_id, error = %e, "owner lookup failed; using the role pick");
+                None
+            }
+        };
+        let owner_holds = match owner.as_deref() {
+            Some(o) => owner_is_active_holder(ctx, o, &role_candidates)
+                .await
+                .unwrap_or(false),
+            None => false,
+        };
+        if let Some(owner_id) = owner_assignee(decision_shaped, owner.as_deref(), owner_holds) {
+            assign(ctx, job_id, step_id, &owner_id).await?;
+            debug!(
+                job_id,
+                step_id, owner_id, "decision-shaped step assigned to its packet owner"
+            );
+            return Ok(());
+        }
+    }
     let chosen = pick_employee_with_role_fallback(ctx, &role_candidates, step_id).await?;
     let Some((emp_id, role_used)) = chosen else {
         // A role IS required (role_candidates is non-empty) but no active
@@ -436,6 +466,42 @@ fn executor_for(
     if eligible { Some(id.to_string()) } else { None }
 }
 
+/// A decision-shaped step routes to the packet OWNER when the owner is
+/// an active holder of one of its authority roles — the owner is who the
+/// work is *for*. Pure so the routing rule is testable without a roster
+/// or a live packet, exactly like `executor_for`.
+///
+/// WHY (be264fa2). A decision step declares an `authority_role` and no
+/// assignee, so the dispatcher picked a role holder by
+/// `stable_hash(step_id) % holders`. When a role has more than one
+/// holder — `platform-admin` is held by both David and the agent — the
+/// hash lands on the agent for ~half the steps, and the packet's
+/// `owner_id` was never consulted. Nine design decisions filed 08-28/29
+/// routed to the agent, who cannot answer them, and never reached the
+/// owner's queue. Triaging an item to a decision is an explicit
+/// statement that *someone else* must choose; handing it back to a hash
+/// pick is exactly backwards. The owner is on every packet and is the
+/// right default when they hold the authority.
+///
+/// `None` = fall through to the role pick (no owner, owner holds no
+/// candidate role, or the step is not a decision): today's behavior
+/// unchanged. Only fires for a decision-shaped step — the caller gates
+/// on that, and passes it here so the rule reads in one place.
+fn owner_assignee(
+    decision_shaped: bool,
+    owner_id: Option<&str>,
+    owner_holds_candidate_role: bool,
+) -> Option<String> {
+    if !decision_shaped || !owner_holds_candidate_role {
+        return None;
+    }
+    let id = owner_id?.trim();
+    if id.is_empty() {
+        return None;
+    }
+    Some(id.to_string())
+}
+
 async fn pick_employee_with_role_fallback(
     ctx: &DispatcherCtx,
     role_candidates: &[&str],
@@ -458,6 +524,101 @@ struct Employee {
     id: String,
     role: String,
     status: String,
+}
+
+/// Roster cache TTL: short enough that a new hire becomes assignable
+/// within ~one sim-day at warp; long enough to keep the roster off the
+/// hot per-assignment path. One definition, shared by every reader.
+const ROSTER_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn roster_is_stale(cache: &RosterCache) -> bool {
+    cache
+        .fetched_at
+        .map(|t| t.elapsed() >= ROSTER_TTL)
+        .unwrap_or(true)
+}
+
+/// The active roster, fetched from the people API. The one HTTP call
+/// every roster reader shares; the TTL cache in `ctx.roster` is what
+/// keeps it off the hot path.
+async fn fetch_active_roster(ctx: &DispatcherCtx) -> Result<Vec<Employee>> {
+    let url = format!("{}/api/people", ctx.people_api_url.trim_end_matches('/'));
+    let resp = ctx
+        .client
+        .get(&url)
+        .header("x-sim-origin", sim_origin_value())
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?
+        .error_for_status()
+        .with_context(|| format!("GET {url}"))?;
+    resp.json().await.context("decode /api/people response")
+}
+
+/// Is `owner_id` an active holder of any of `roles`? Reads the SAME
+/// TTL-cached roster `pick_employee` uses (same `roster_is_stale` +
+/// `fetch_active_roster`), so the owner check and the role pick can
+/// never see a different roster.
+async fn owner_is_active_holder(
+    ctx: &DispatcherCtx,
+    owner_id: &str,
+    roles: &[&str],
+) -> Result<bool> {
+    let mut cache = ctx.roster.lock().await;
+    if roster_is_stale(&cache) {
+        cache.employees = fetch_active_roster(ctx).await?;
+        cache.fetched_at = Some(std::time::Instant::now());
+    }
+    Ok(is_active_holder(&cache.employees, owner_id, roles))
+}
+
+/// The membership question, pure: is `owner_id` an ACTIVE employee whose
+/// role is one of `roles`? An inactive holder, a wrong role, or a
+/// different id all read false — the same eligibility `pick_employee`'s
+/// candidate filter uses, so the owner is preferred only when they could
+/// have been picked anyway.
+fn is_active_holder(employees: &[Employee], owner_id: &str, roles: &[&str]) -> bool {
+    employees
+        .iter()
+        .any(|e| e.status == "active" && e.id == owner_id && roles.contains(&e.role.as_str()))
+}
+
+/// The packet's `owner_id`, read from the jobs API. `None` for any shape
+/// the owner-routing must not act on — missing job, absent/empty owner —
+/// so the decision falls through to a role holder, never to nobody.
+async fn fetch_job_owner(ctx: &DispatcherCtx, job_id: &str) -> Result<Option<String>> {
+    let url = format!(
+        "{}/api/jobs/{}",
+        ctx.jobs_api_url.trim_end_matches('/'),
+        job_id
+    );
+    let body: serde_json::Value = ctx
+        .client
+        .get(&url)
+        .header("x-sim-origin", sim_origin_value())
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?
+        .error_for_status()
+        .with_context(|| format!("GET {url}"))?
+        .json()
+        .await
+        .context("decode job response")?;
+    Ok(owner_id_from_job_body(&body))
+}
+
+/// Read `owner_id` out of a job response, pure. Tolerates the two shapes
+/// the jobs API returns a job in — bare, or wrapped in `{data: ...}` —
+/// and treats an absent or blank owner as `None` so the routing falls
+/// through rather than assigning to an empty id.
+fn owner_id_from_job_body(body: &serde_json::Value) -> Option<String> {
+    body.get("data")
+        .unwrap_or(body)
+        .get("owner_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// FNV-1a hash of a byte slice (64-bit). A fixed, dependency-free, fully
@@ -536,26 +697,9 @@ async fn pick_employee(
     role: Option<&str>,
     step_id: &str,
 ) -> Result<Option<String>> {
-    // Short enough that a new hire becomes assignable within ~one sim-day
-    // at warp; long enough to remove the per-assignment fetch entirely.
-    const ROSTER_TTL: std::time::Duration = std::time::Duration::from_secs(10);
     let mut cache = ctx.roster.lock().await;
-    let fresh = cache
-        .fetched_at
-        .map(|t| t.elapsed() < ROSTER_TTL)
-        .unwrap_or(false);
-    if !fresh {
-        let url = format!("{}/api/people", ctx.people_api_url.trim_end_matches('/'));
-        let resp = ctx
-            .client
-            .get(&url)
-            .header("x-sim-origin", sim_origin_value())
-            .send()
-            .await
-            .with_context(|| format!("GET {url}"))?
-            .error_for_status()
-            .with_context(|| format!("GET {url}"))?;
-        cache.employees = resp.json().await.context("decode /api/people response")?;
+    if roster_is_stale(&cache) {
+        cache.employees = fetch_active_roster(ctx).await?;
         cache.fetched_at = Some(std::time::Instant::now());
     }
     let mut candidates: Vec<&Employee> = cache
@@ -631,7 +775,10 @@ async fn assign(ctx: &DispatcherCtx, job_id: &str, step_id: &str, emp_id: &str) 
 
 #[cfg(test)]
 mod tests {
-    use super::{executor_for, pick_index, pick_index_for, stable_hash};
+    use super::{
+        executor_for, is_active_holder, owner_assignee, owner_id_from_job_body, pick_index,
+        pick_index_for, stable_hash,
+    };
     use crate::config::AssignmentStrategy;
     use boss_jobs::step_registry::StepRegistry;
     use std::collections::HashMap;
@@ -711,6 +858,72 @@ mod tests {
             None
         );
         assert_eq!(executor_for(false, Some("x"), None, &platform), None);
+    }
+
+    /// The owner-routing pick (be264fa2), in every direction it must and
+    /// must not fire.
+    #[test]
+    fn a_decision_routes_to_its_owner_only_when_the_owner_holds_the_role() {
+        // The case the rule exists for: a decision, owner holds the role.
+        assert_eq!(
+            owner_assignee(true, Some("emp-david"), true),
+            Some("emp-david".to_string())
+        );
+        // The owner does NOT hold a candidate role — they cannot decide
+        // it, so fall through to the role pick (a car owned by someone
+        // without finance authority must not park a finance verdict on
+        // them, unclaimable).
+        assert_eq!(owner_assignee(true, Some("emp-david"), false), None);
+        // NOT a decision — executable work uses the executor / role pick,
+        // never the owner. This is what keeps `build` inheritance intact.
+        assert_eq!(owner_assignee(false, Some("emp-david"), true), None);
+        // No owner, or an empty owner id: fall through, unchanged.
+        assert_eq!(owner_assignee(true, None, true), None);
+        assert_eq!(owner_assignee(true, Some(""), true), None);
+        assert_eq!(owner_assignee(true, Some("  "), true), None);
+    }
+
+    /// The job-body parse, over the two shapes the API returns and the
+    /// blanks that must read as no-owner.
+    #[test]
+    fn owner_id_reads_bare_and_wrapped_job_bodies() {
+        use serde_json::json;
+        assert_eq!(
+            owner_id_from_job_body(&json!({"owner_id": "emp-david"})),
+            Some("emp-david".to_string())
+        );
+        assert_eq!(
+            owner_id_from_job_body(&json!({"data": {"owner_id": "emp-david"}})),
+            Some("emp-david".to_string())
+        );
+        assert_eq!(
+            owner_id_from_job_body(&json!({"kind": "backlog-item"})),
+            None
+        );
+        assert_eq!(owner_id_from_job_body(&json!({"owner_id": null})), None);
+        assert_eq!(owner_id_from_job_body(&json!({"owner_id": "   "})), None);
+    }
+
+    /// Owner eligibility is the SAME filter pick_employee uses: active,
+    /// id-matched, role-matched.
+    #[test]
+    fn is_active_holder_matches_id_role_and_active_status() {
+        let emp = |id: &str, role: &str, status: &str| super::Employee {
+            id: id.into(),
+            role: role.into(),
+            status: status.into(),
+        };
+        let roster = vec![
+            emp("emp-david", "platform-admin", "active"),
+            emp("emp-gone", "platform-admin", "inactive"),
+            emp("emp-brewer", "brewer", "active"),
+        ];
+        let admin = ["platform-admin"];
+        assert!(is_active_holder(&roster, "emp-david", &admin));
+        assert!(!is_active_holder(&roster, "emp-gone", &admin)); // inactive
+        assert!(!is_active_holder(&roster, "emp-brewer", &admin)); // wrong role
+        assert!(!is_active_holder(&roster, "emp-ghost", &admin)); // not on roster
+        assert!(!is_active_holder(&roster, "emp-david", &[])); // no candidate roles
     }
 
     /// An UNKNOWN kind counts as a decision: the registry lookup that
