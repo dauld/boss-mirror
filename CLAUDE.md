@@ -481,6 +481,54 @@ Resolutions flush into the source doc's Decision-history section via the tracker
 
 ---
 
+## Engineering Session Startup — orient before you build
+
+A new session starts blind, and the queue does not un-blind it. **This
+protocol exists because the durable pod session — the one meant to make
+work smoother — was clunky for hours on 2026-09-01 for want of it:** it
+built from a local `main` seven commits behind `origin/main` and so
+rebuilt a fix that had already landed; it closed five "open" packets
+whose fixes were already on main; and it duplicated a branch that was
+sitting green-gated and unparked, because it never read the approach.
+Every one of those was visible at startup. Run these first, before
+picking up any work:
+
+1. **Vantage.** cwd `/work/boss` = the cluster dev pod (builder,
+   gatekeeper, publisher — see §Doors for what that can and cannot do).
+
+2. **Sync to the source of truth.** `git fetch origin`. Branch, edit,
+   and diff against **`origin/main`** — never a stale local `main`. A
+   fix built on an old base rebuilds landed work, and once parked it
+   reverts the trains: a branch on an old base merges clean and wrong.
+
+3. **Read the approach — the whole car pipeline, not just the queue.**
+   The Train Yard shows only the last third of a car's life; read the
+   rest from the API:
+   - In-flight trains — `boss-api GET /api/jobs?kind=pr-train&status=open`
+     — and where each sits (CI / merge / deploy).
+   - Gate-runs INCLUDING closed ones (`kind=gate-run&limit=40`; a
+     gate-run closes on its verdict, so green/red ones are *closed* and a
+     `status=open` query misses them). A **green gate-run whose branch
+     has no car is stranded** — rescue it (rebase onto current main +
+     re-gate, since its base has likely moved) or note it, but never
+     rebuild it blind. A **red** may be a superseded earlier attempt, not
+     a live failure.
+   - Parked cars — `GET /api/stations/loading-dock/queue`.
+
+4. **Before building any packet's fix, verify the claim still holds on
+   `origin/main`.** The queue's "open" count is inflated by
+   landed-but-unclosed residue. Ask: is this already fixed on main? Is
+   there already a branch — stranded green, or in flight — for it? If so,
+   close the packet `stale`/`duplicate`; do not rebuild.
+
+5. **The queue is a worklist, not the truth.** Measure current reality,
+   not the reality a packet was filed against — the discipline the
+   correctness protocol asks of the system, asked of the operator.
+
+The automation behind this — a `boss orient` verb that runs steps 2–4
+for you, plus residue auto-detection — is designed in packet acedf981;
+this section is the checklist that holds until that lands.
+
 ## Doors — the supported way in
 
 A door is a path already made safe: correct target, correct actor,

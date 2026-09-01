@@ -18,9 +18,12 @@
 
   import {
     getStepPluginMount,
+    pluginLoadFailure,
     type StepPluginProps,
     type PluginCleanup,
   } from './pluginHost';
+  import GenericSurface from './GenericSurface.svelte';
+  import type { StepStatus } from '../jobs/types';
 
   type Props = StepPluginProps & { kind: string };
   let { kind, step, jobId, onUpdate, currentUser }: Props = $props();
@@ -28,13 +31,21 @@
   type LoadState =
     | { kind: 'loading' }
     | { kind: 'missing' }
+    | { kind: 'failed'; reason: string }
     | { kind: 'ready' };
 
   let loadState: LoadState = $state<LoadState>({ kind: 'loading' });
   let container: HTMLDivElement | null = $state(null);
+  // Bumped by the Retry affordance; failed loads are not cached, so
+  // re-running the effect genuinely retries.
+  let retryNonce = $state(0);
+  // The plugin contract keeps status as a plain string (bundles are
+  // framework-agnostic); the platform surface wants the union.
+  let genericStep = $derived({ ...step, status: step.status as StepStatus });
 
   $effect(() => {
     if (!container) return;
+    void retryNonce;
     const k = kind;
     const currentContainer = container;
     let cancelled = false;
@@ -46,7 +57,12 @@
       const mount = await getStepPluginMount(k);
       if (cancelled) return;
       if (!mount) {
-        loadState = { kind: 'missing' };
+        // Two different facts, two different messages (ff87f782):
+        // the registry has no plugin, or it HAS one whose bundle
+        // failed to load — the second wore the first's message and
+        // a decision surface degraded with no trace.
+        const reason = pluginLoadFailure(k);
+        loadState = reason ? { kind: 'failed', reason } : { kind: 'missing' };
         return;
       }
       currentContainer.replaceChildren();
@@ -85,5 +101,14 @@
     <div class="step-plugin-missing">
       No plugin registered for <code class="mono">{kind}</code>.
     </div>
+  {:else if loadState.kind === 'failed'}
+    <div class="step-plugin-failed" role="alert">
+      <span>
+        The <code class="mono">{kind}</code> surface failed to load
+        ({loadState.reason}) — using the generic form below.
+      </span>
+      <button class="step-btn" onclick={() => (retryNonce += 1)}>Retry</button>
+    </div>
+    <GenericSurface step={genericStep} {jobId} {onUpdate} />
   {/if}
 </div>

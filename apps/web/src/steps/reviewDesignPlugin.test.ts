@@ -144,4 +144,41 @@ describe('the review-design bundle against a docs API that is not there', () => 
 
     expect(allText(container)).toContain('docs ride');
   });
+
+  // A design-doc packet filed with its questions/prose on the JOB
+  // metadata rather than the step reaches review as an empty step.
+  // acedf981 and the `[sim] decision-routing probe` packets did exactly
+  // this and dead-ended at "nothing to review" while their content sat
+  // one fetch away. The job is the last place the bundle looks.
+  test('content on the job renders instead of dead-ending at nothing-to-review', async () => {
+    const emptyStep = {
+      id: 'step-1',
+      kind: 'review-design',
+      status: 'ready',
+      metadata: { resolutions: [] },
+    };
+    const { mount } = loadBundle((url: string) => {
+      if (url.includes('/api/jobs/job-1')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            metadata: {
+              title: 'Agent orientation',
+              markdown: '# Orientation\n\nbody',
+              questions: [{ anchor: 'Q1', title: 'First brick?' }],
+            },
+          }),
+        });
+      }
+      return Promise.reject(new Error(`unexpected fetch: ${url}`));
+    });
+    const container = new FakeNode();
+    mount(container, { step: emptyStep, jobId: 'job-1', onUpdate() {} });
+    await settled();
+
+    const text = allText(container);
+    expect(text).toContain('First brick?');
+    expect(text).not.toContain('nothing to review');
+  });
 });

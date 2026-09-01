@@ -157,6 +157,24 @@ enum Commands {
         /// Show what would happen without filing or creating anything.
         #[arg(long)]
         dry_run: bool,
+        /// Auto-park on green: what the change does (first sentence =
+        /// title). Stamped onto the gate-run so the dispatcher files the
+        /// car when the gate goes green — no hand-park. Requires the
+        /// other three --park-* below (a car needs a full receipt).
+        #[arg(long)]
+        park_summary: Option<String>,
+        /// Auto-park: what the change deliberately leaves out.
+        #[arg(long)]
+        park_excludes: Option<String>,
+        /// Auto-park: what was run, and what it proves.
+        #[arg(long)]
+        park_test: Option<String>,
+        /// Auto-park: what was observed working beyond the gate.
+        #[arg(long)]
+        park_verified: Option<String>,
+        /// Auto-park: the backlog item this change answers (optional).
+        #[arg(long)]
+        park_backlog_item: Option<String>,
     },
     /// Park a gated branch as a car, carrying its receipt.
     ///
@@ -941,7 +959,21 @@ async fn main() -> Result<()> {
             namespace,
             wait,
             dry_run,
-        } => gate::run(&branch, mode, manifest, &namespace, wait, dry_run).await,
+            park_summary,
+            park_excludes,
+            park_test,
+            park_verified,
+            park_backlog_item,
+        } => {
+            let park = gate::ParkIntent {
+                summary: park_summary,
+                excludes: park_excludes,
+                test: park_test,
+                verified: park_verified,
+                backlog_item: park_backlog_item,
+            };
+            gate::run(&branch, mode, manifest, &namespace, wait, dry_run, park).await
+        }
         Commands::Queue { column } => queue::run(&column).await,
         Commands::Packet { action } => match action {
             PacketAction::Census {

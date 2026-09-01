@@ -171,6 +171,79 @@ pub(crate) fn gate_run_body(branch: &str, sha: &str, manifest: &str) -> Value {
     })
 }
 
+/// The park prose a gate carries so the auto-park handler can file the
+/// car VERBATIM on green — the input half of the auto-park loop. Stamped
+/// as `park_*` keys on the gate-run metadata by the `--park-*` flags;
+/// absent means a plain gate that will not auto-park. The four fields a
+/// receipt needs (summary/excludes/test/verified) are required together,
+/// so a stamped intent is always enough to file a valid car; a
+/// `backlog_item` edge is optional.
+#[derive(Debug, Clone, Default)]
+pub struct ParkIntent {
+    pub summary: Option<String>,
+    pub excludes: Option<String>,
+    pub test: Option<String>,
+    pub verified: Option<String>,
+    pub backlog_item: Option<String>,
+}
+
+impl ParkIntent {
+    /// True when no `--park-*` flag was given: a plain gate.
+    pub fn is_empty(&self) -> bool {
+        self.summary.is_none()
+            && self.excludes.is_none()
+            && self.test.is_none()
+            && self.verified.is_none()
+            && self.backlog_item.is_none()
+    }
+
+    /// Refuse a PARTIAL intent. Auto-park files a car with a full
+    /// receipt, so if any park flag is given the four a receipt needs
+    /// must all be given — better a refusal here than a car filed with an
+    /// empty boundary or an unproven `verified` line.
+    pub fn require_complete(&self) -> Result<()> {
+        if self.is_empty() {
+            return Ok(());
+        }
+        let missing: Vec<&str> = [
+            ("--park-summary", self.summary.is_none()),
+            ("--park-excludes", self.excludes.is_none()),
+            ("--park-test", self.test.is_none()),
+            ("--park-verified", self.verified.is_none()),
+        ]
+        .into_iter()
+        .filter(|(_, m)| *m)
+        .map(|(f, _)| f)
+        .collect();
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "auto-park needs a full receipt: {} not set. Pass all of \
+                 --park-summary / --park-excludes / --park-test / --park-verified, or none.",
+                missing.join(", ")
+            )
+        }
+    }
+
+    /// The metadata patch to MERGE onto the gate-run — only the fields
+    /// set, keyed `park_*` so the auto-park handler reads them on green.
+    pub fn metadata_patch(&self) -> Value {
+        let mut m = serde_json::Map::new();
+        let mut put = |k: &str, v: &Option<String>| {
+            if let Some(v) = v {
+                m.insert(k.to_string(), json!(v));
+            }
+        };
+        put("park_summary", &self.summary);
+        put("park_excludes", &self.excludes);
+        put("park_test", &self.test);
+        put("park_verified", &self.verified);
+        put("park_backlog_item", &self.backlog_item);
+        Value::Object(m)
+    }
+}
+
 /// Normalise `--mode` into what `gate.sh` actually accepts, or refuse.
 ///
 /// THE HELP TEXT NAMED A VALUE THE RUNNER REJECTS. It said `e.g.
@@ -475,6 +548,7 @@ pub async fn run(
     namespace: &str,
     wait: bool,
     dry: bool,
+    park: ParkIntent,
 ) -> Result<()> {
     let manifest_path =
         manifest.unwrap_or_else(|| PathBuf::from("infra/gate-runner/gate-runner.yaml"));
@@ -482,8 +556,10 @@ pub async fn run(
         .with_context(|| format!("reading runner manifest {}", manifest_path.display()))?;
 
     // BEFORE the sha lookup, the packet, the manifest and kubectl —
-    // a bad mode should cost a line of output, not a gate slot.
+    // a bad mode, or a half-filled park intent, should cost a line of
+    // output, not a gate slot.
     let mode = normalize_mode(&mode.unwrap_or_default())?;
+    park.require_complete()?;
     let sha = resolve_sha(branch);
     let http = reqwest::Client::new();
 
@@ -532,6 +608,21 @@ pub async fn run(
             }
         }
     };
+
+    // Stamp the park intent onto the gate-run so the auto-park handler
+    // can file the car verbatim on green. A PATCH so it works whether the
+    // packet was just created or reused, and merges rather than replaces.
+    if !park.is_empty() && !dry {
+        api(
+            &http,
+            reqwest::Method::PATCH,
+            &format!("/api/jobs/{packet}/metadata"),
+            Some(park.metadata_patch()),
+        )
+        .await
+        .context("stamping park intent onto the gate-run")?;
+        println!("boss gate: park intent stamped — this branch auto-parks on green");
+    }
 
     let job = render_job(&manifest_text, branch, &packet, &mode)?;
 
@@ -903,6 +994,66 @@ fn live_gate_for_packet(namespace: &str, packet: &str) -> Result<Option<String>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn park_full() -> ParkIntent {
+        ParkIntent {
+            summary: Some("does a thing. and more.".into()),
+            excludes: Some("not that".into()),
+            test: Some("ran the suite".into()),
+            verified: Some("observed working".into()),
+            backlog_item: None,
+        }
+    }
+
+    #[test]
+    fn a_plain_gate_carries_no_park_intent() {
+        let p = ParkIntent::default();
+        assert!(p.is_empty());
+        assert!(p.require_complete().is_ok());
+        assert_eq!(p.metadata_patch(), serde_json::json!({}));
+    }
+
+    #[test]
+    fn a_complete_intent_stamps_only_park_keys() {
+        let p = park_full();
+        assert!(!p.is_empty());
+        assert!(p.require_complete().is_ok());
+        assert_eq!(
+            p.metadata_patch(),
+            serde_json::json!({
+                "park_summary": "does a thing. and more.",
+                "park_excludes": "not that",
+                "park_test": "ran the suite",
+                "park_verified": "observed working",
+            })
+        );
+    }
+
+    #[test]
+    fn a_partial_intent_is_refused_naming_the_missing_flags() {
+        // Opting into auto-park with only a summary would file a car with
+        // an empty boundary and an unproven `verified` line.
+        let p = ParkIntent {
+            summary: Some("does a thing".into()),
+            ..Default::default()
+        };
+        let err = p.require_complete().unwrap_err().to_string();
+        // Check the MISSING clause (before "not set"); the guidance after
+        // it names all four flags on purpose.
+        let missing = err.split("not set").next().unwrap_or("");
+        assert!(missing.contains("--park-excludes"), "{err}");
+        assert!(missing.contains("--park-test"), "{err}");
+        assert!(missing.contains("--park-verified"), "{err}");
+        assert!(!missing.contains("--park-summary"), "{err}");
+    }
+
+    #[test]
+    fn a_backlog_item_rides_along_when_the_four_are_present() {
+        let mut p = park_full();
+        p.backlog_item = Some("7c9e376d".into());
+        assert!(p.require_complete().is_ok());
+        assert_eq!(p.metadata_patch()["park_backlog_item"], "7c9e376d");
+    }
 
     /// THE RACE THIS CLOSES. `boss gate` printed "`boss gate --wait`
     /// follows it", and following that advice created a SECOND Job

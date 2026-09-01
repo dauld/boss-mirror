@@ -769,9 +769,49 @@
         return;
       }
       if (!docPath) {
+        // LAST RESORT: the questions and prose may be on the JOB
+        // metadata rather than the step. That is the natural place an
+        // author puts them, and the same guess the markdown fallback
+        // above already forgives — "the cost of guessing wrong should be
+        // nothing rather than a silently unreadable review". acedf981
+        // and the `[sim] decision-routing probe` packets hit exactly
+        // this: a design-doc filed with its content on the job reached
+        // review as an empty step and dead-ended here. Answers still
+        // write to the step, so the review stays self-carried.
+        try {
+          const jr = await fetch(`/api/jobs/${jobId}`, {
+            headers: { accept: 'application/json' },
+          });
+          if (jr.ok) {
+            const jm = ((await jr.json()) || {}).metadata || {};
+            const jq = Array.isArray(jm.questions) ? jm.questions : [];
+            const jmd = String(jm.markdown || '');
+            if (jq.length > 0 || jmd) {
+              selfCarried = true;
+              questions = jq.map((q, i) => ({
+                anchor: String(q.anchor || `Q${i + 1}`),
+                title: String(q.title || q.question || ''),
+                proposal: typeof q.proposal === 'string' ? q.proposal : '',
+                body: typeof q.body === 'string' ? q.body : '',
+              }));
+              doc = {
+                title: String(jm.title || 'Design doc'),
+                content_html: null,
+                markdown: jmd,
+              };
+              renderHeader();
+              renderBody();
+              renderProgress();
+              renderActions();
+              return;
+            }
+          }
+        } catch (_) {
+          // Fall through to the honest error below.
+        }
         loadError =
           'this step carries neither metadata.questions, metadata.markdown, nor ' +
-          'metadata.doc_path — nothing to review';
+          'metadata.doc_path, and the job carries none either — nothing to review';
         renderBody();
         renderProgress();
         renderActions();

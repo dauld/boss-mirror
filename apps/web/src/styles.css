@@ -2969,6 +2969,22 @@ button.manual-tree-node {
   padding: 8px; background: rgba(217, 164, 65, 0.12); border-radius: var(--radius);
   font-size: 12px;
 }
+
+/* A registered bundle that failed to load is NOT "no plugin" — the
+   banner names the reason and the generic form renders below it
+   (ff87f782). */
+.step-plugin-failed {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  border: 1px solid #f59e0b;
+  border-radius: 6px;
+  background: #fffbeb;
+  font-size: 13px;
+}
 @keyframes step-plugin-shimmer {
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }
