@@ -68,6 +68,31 @@ RUN ln -sf /usr/local/bin/bun /usr/local/bin/bunx
 
 RUN rustup component add rustfmt clippy
 
+# BAKE THE BROWSER. The mocked Playwright suite (apps/web test:mocked)
+# needs chromium and its system libraries. Today the release CI's `web`
+# job downloads them at run time — which redded train #162 when
+# cdn.playwright.dev resolved to an IPv6 address the runner could not
+# route (a700d3a4) — and the gate cannot run the suite at all because
+# the deps are absent (ade5d82b). Baking both here removes the run-time
+# download entirely and is the prerequisite that lets the gate mirror
+# CI's web job.
+#
+# PINNED to the workspace's @playwright/test (apps/web/package.json:
+# 1.61.0) so the baked browser is the exact build test:mocked drives; a
+# floating version would bake a chromium the suite does not ask for.
+# Validated by running `bunx playwright@1.61.0 install chromium` inside
+# this very image in the dev pod before writing this line. `--with-deps`
+# runs apt as root (this build is root; the pod is uid 1500, which is
+# why the pod validation covered the browser and this covers the libs).
+# PLAYWRIGHT_BROWSERS_PATH names an in-image location so the browser
+# ships with the image; the gate-runner still overrides it to
+# /gate-target today, so this is inert for gates until ade5d82b points
+# the gate at the baked path — CI's web job, which sets no override,
+# picks it up immediately and stops downloading.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN bunx playwright@1.61.0 install --with-deps chromium \
+ && rm -rf /var/lib/apt/lists/*
+
 # Provenance stamp: sha256(Dockerfile + required-tools.txt). The
 # locomotive CI job recomputes the same hash from its checkout and goes
 # red on a mismatch — the equality test (CLAUDE.md 9a) between the image

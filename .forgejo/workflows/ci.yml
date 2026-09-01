@@ -59,6 +59,17 @@ jobs:
   # read:repository + write:package. The conductor's
   # /etc/boss-train/forge.token is NOT it — that one is repo-scoped and
   # the package registry rejects it (verified: 401 on a blob upload).
+  #
+  # TAGGED BY COMMIT, NOT JUST :rust1.96. The downstream jobs pin
+  # boss-ci:${{ github.sha }} — the exact image THIS run produced —
+  # because a floating :rust1.96 is served from the runner's local
+  # cache, and that cache lagged the registry: build-image pushed a
+  # fresh image but locomotive ran the runner's stale one, whose stamp
+  # no longer matched the tree, redding the browser-bake keystone with
+  # build-image green and locomotive red (6aa603ef). A per-commit tag
+  # cannot be served stale — the runner has never seen it, so it pulls
+  # the one build-image just pushed. Layers dedupe in the registry, so
+  # this is a manifest ref, not a second copy of the image.
   build-image:
     runs-on: docker
     container:
@@ -124,6 +135,7 @@ jobs:
                 --context-sub-path infra/forge/boss-ci \
                 --dockerfile Dockerfile \
                 --destination 10.20.0.15:3000/david/boss-ci:rust1.96 \
+                --destination "10.20.0.15:3000/david/boss-ci:${GITHUB_SHA}" \
                 --insecure --skip-tls-verify \
                 --cache=true \
                 --cache-repo 10.20.0.15:3000/david/boss-ci-cache 2>&1)"
@@ -161,7 +173,7 @@ jobs:
     runs-on: docker
     needs: [build-image]
     container:
-      image: 10.20.0.15:3000/david/boss-ci:rust1.96
+      image: 10.20.0.15:3000/david/boss-ci:${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
 
@@ -196,7 +208,7 @@ jobs:
     runs-on: docker
     needs: [locomotive]
     container:
-      image: 10.20.0.15:3000/david/boss-ci:rust1.96
+      image: 10.20.0.15:3000/david/boss-ci:${{ github.sha }}
     defaults:
       run:
         working-directory: apps/web
@@ -259,7 +271,7 @@ jobs:
     runs-on: docker
     needs: [locomotive]
     container:
-      image: 10.20.0.15:3000/david/boss-ci:rust1.96
+      image: 10.20.0.15:3000/david/boss-ci:${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
 
@@ -274,7 +286,7 @@ jobs:
     runs-on: docker
     needs: [locomotive]
     container:
-      image: 10.20.0.15:3000/david/boss-ci:rust1.96
+      image: 10.20.0.15:3000/david/boss-ci:${{ github.sha }}
     services:
       postgres:
         image: postgres:16
