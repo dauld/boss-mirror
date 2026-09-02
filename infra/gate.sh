@@ -563,6 +563,7 @@ PREFLIGHT_LINTS=(
     "outbox-migration-ratchet|infra/lint/outbox-migration-ratchet.sh"
     "idempotence-ratchet|infra/lint/idempotence-ratchet.sh"
     "dispatcher-rules-ratchet|infra/lint/dispatcher-rules-ratchet.sh"
+    "steptype-bundle-ratchet|infra/lint/steptype-bundle-ratchet.sh"
     "schema-converge|infra/lint/schema-converge.sh"
     "migrations-append-only|infra/lint/migrations-append-only.sh"
     "migration-numbers-unique|infra/lint/migration-numbers-unique.sh"

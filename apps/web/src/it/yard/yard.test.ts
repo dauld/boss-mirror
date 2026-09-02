@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
   awaitingProof,
+  splitAtDeparture,
   comparableVersions,
   deliveryStats,
   arrivalMedians,
@@ -1004,13 +1005,47 @@ describe('approach', () => {
     expect(rows.map(r => r.state)).toEqual(['gated-red']);
   });
 
-  test('first packet per branch wins: the API serves newest first', () => {
-    const newer = gateRun({ id: 'g2', status: 'closed', steps: [verdictStep('failed')] });
-    const older = gateRun({ id: 'g1', status: 'closed', steps: [verdictStep('green')] });
-    const rows = approach([newer, older], null, [], NOW);
-    expect(rows.map(r => ({ id: r.id, state: r.state }))).toEqual([
-      { id: 'g2', state: 'gated-red' },
-    ]);
+  test('a same-day green answers a red — the green gets the row (754b01b5)', () => {
+    // Same-day server order is NOT insertion order, so the red may sort
+    // above the very green that answered it; an alarm that stays on
+    // after the condition clears teaches the operator to ignore alarms
+    // (misread twice on 2026-08-31). The green claims the branch's row.
+    const red = gateRun({ id: 'g2', status: 'closed', steps: [verdictStep('failed')] });
+    const green = gateRun({ id: 'g1', status: 'closed', steps: [verdictStep('green')] });
+    expect(approach([red, green], null, [], NOW).map(r => ({ id: r.id, state: r.state })))
+      .toEqual([{ id: 'g1', state: 'gated-green' }]);
+    // ...and a merged car buries the whole branch, red included.
+    const merged = ship('fix/x', { status: 'closed', metadata: { branch: 'fix/x', outcome: 'merged' } });
+    expect(approach([red, green], null, [merged], NOW)).toEqual([]);
+  });
+
+  test('a red strictly newer by day than every green is a REGRESSION — stays red', () => {
+    const red = gateRun({
+      id: 'g2', status: 'closed', opened_on: '2026-08-31', steps: [verdictStep('failed')],
+    });
+    const green = gateRun({
+      id: 'g1', status: 'closed', opened_on: '2026-08-30', steps: [verdictStep('green')],
+    });
+    expect(approach([red, green], null, [], NOW).map(r => r.state))
+      .toEqual(['gated-red']);
+  });
+
+  test('an operator-annotated superseded red is folded from the view', () => {
+    // The git-only cases — branch deleted, change landed via another
+    // branch — arrive as an annotation; the record keeps the packet.
+    const red = gateRun({
+      status: 'closed',
+      metadata: { branch: 'fix/x', sha: 'a'.repeat(40), superseded: true },
+      steps: [verdictStep('failed')],
+    });
+    expect(approach([red], null, [], NOW)).toEqual([]);
+    // Explicit false is not an annotation.
+    const kept = gateRun({
+      status: 'closed',
+      metadata: { branch: 'fix/x', sha: 'a'.repeat(40), superseded: false },
+      steps: [verdictStep('failed')],
+    });
+    expect(approach([kept], null, [], NOW).map(r => r.state)).toEqual(['gated-red']);
   });
 
   test('a stale closed gate is archaeology, not approach', () => {
@@ -1064,5 +1099,27 @@ describe('approach — a live gate outranks any same-day verdict', () => {
     expect(rows.map(r => ({ id: r.id, state: r.state }))).toEqual([
       { id: 'g-live', state: 'gating' },
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------
+// The departure line is the merge (0bba59f7, ratified 2026-08-31).
+// ---------------------------------------------------------------------
+
+describe('splitAtDeparture', () => {
+  const row = (id: string, status: string) =>
+    ({ id, status }) as unknown as Parameters<typeof splitAtDeparture>[0][number];
+  test('pre-merge trains are yard work; post-merge is transit', () => {
+    const { inYard, inTransit } = splitAtDeparture([
+      row('a', 'BOARDING'), row('b', 'BOARDED'), row('c', 'DEPARTED'), row('d', 'ARRIVED'),
+    ]);
+    expect(inYard.map(t => t.id)).toEqual(['a', 'b']);
+    expect(inTransit.map(t => t.id)).toEqual(['c', 'd']);
+  });
+  test('a red-CI train still assembling is YARD — red is status, not a wreck', () => {
+    // Placement only: nothing about the lamp changes, only which
+    // section holds the train (the honesty note on 0bba59f7).
+    const { inYard } = splitAtDeparture([row('r', 'BOARDED')]);
+    expect(inYard.length).toBe(1);
   });
 });

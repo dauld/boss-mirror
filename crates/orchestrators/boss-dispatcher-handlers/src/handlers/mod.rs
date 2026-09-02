@@ -18,6 +18,7 @@ pub mod commerce_invoice_issue;
 pub mod common;
 pub mod docs_design_sweep;
 pub mod docs_flush_queue;
+pub mod estate_alarm;
 pub mod estate_compare;
 pub mod gate_resolve;
 pub mod inventory_bill_approve;

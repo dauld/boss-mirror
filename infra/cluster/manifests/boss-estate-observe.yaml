@@ -62,7 +62,11 @@ metadata:
   namespace: boss
 spec:
   # Daily, an hour after the backup, so a quiet window stays quiet.
-  schedule: "20 10 * * *"
+  # Every 15 minutes, not daily: this series feeds the estate ALARM
+  # (estate.alarm raises after 3 consecutive findings), and a daily
+  # reading makes that a 3-DAY alarm — the 2026-08-27 outage lasted 25
+  # minutes. 15min x 3 = a condition raises in ~30-45min (a5adfb99).
+  schedule: "*/15 * * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3

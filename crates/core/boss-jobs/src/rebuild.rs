@@ -218,8 +218,9 @@ async fn upsert_step(
         INSERT INTO steps (id, job_id, kind, title, spec_slug, assignee_id, status, sort_order,
                            blocked_by, sign_offs_required, sign_offs, fields,
                            completed_on, metadata, notes, step_plugin_version,
-                           embedded_job, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $18)
+                           embedded_job, created_at, updated_at, became_ready_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $18,
+                CASE WHEN $7 = 'ready' THEN $18 END)
         ON CONFLICT (id) DO UPDATE SET
             job_id = EXCLUDED.job_id,
             kind = EXCLUDED.kind,
@@ -237,7 +238,15 @@ async fn upsert_step(
             notes = EXCLUDED.notes,
             step_plugin_version = EXCLUDED.step_plugin_version,
             embedded_job = EXCLUDED.embedded_job,
-            updated_at = EXCLUDED.updated_at
+            updated_at = EXCLUDED.updated_at,
+            -- First event that shows the row in `ready` wins, exactly
+            -- as the live UPDATE's COALESCE writes the stamp once at
+            -- the flip — replay reproduces `became_ready_at` from the
+            -- event-time the log carried all along (2a0b034e). Rows
+            -- that PREDATE the column even get it backfilled here,
+            -- which is the rebuilder doing its one job: reproducing
+            -- truth from the log.
+            became_ready_at = COALESCE(steps.became_ready_at, EXCLUDED.became_ready_at)
         RETURNING (xmax = 0) AS inserted
         "#,
     )

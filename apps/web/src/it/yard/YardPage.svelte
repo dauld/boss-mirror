@@ -9,6 +9,7 @@
     disciplineLabel,
     dockUpstream,
     fetchYard,
+    splitAtDeparture,
     wipAdvisory,
     type Eta,
     type EtaPhase,
@@ -68,6 +69,12 @@
   // is, so a station that names a different queue tomorrow moves this
   // button with it, and one that names none renders nothing.
   const upstream = $derived(yard ? dockUpstream(yard.dockStation) : null);
+  // The departure line is the merge (0bba59f7): pre-merge trains are
+  // yard work where red is status, post-merge is transit where green
+  // holds by construction.
+  const split = $derived(
+    yard ? splitAtDeparture(yard.inFlight) : { inYard: [], inTransit: [] },
+  );
 
   onMount(() => {
     let cancelled = false;
@@ -192,37 +199,57 @@
       </div>
     {/if}
 
-    <div class="yard-section">01 — IN FLIGHT <span class="yard-n">{yard.inFlight.length}</span></div>
-    {#if yard.inFlight.length === 0}
-      <div class="yard-empty">No departures — nothing ready to board.</div>
-    {:else}
-      {#each yard.inFlight as t (t.id)}
-        <div class="yard-trainblock">
-          <div class="yard-trainhead">
-            {#if t.live}<span class="yard-dot" title="in motion"></span>{/if}
-            <span class="yard-trainname">{t.title}</span>
-            <span class="yard-lamp" class:ok={t.lamp === 'green'} class:err={t.lamp === 'failing'} class:run={t.lamp === 'pending'}>
-              {t.lamp === 'green' ? 'CI ✓' : t.lamp === 'failing' ? 'CI ✗' : 'CI …'}
+    {#snippet trainBlock(t: TrainRow)}
+      <div class="yard-trainblock">
+        <div class="yard-trainhead">
+          {#if t.live}<span class="yard-dot" title="in motion"></span>{/if}
+          <span class="yard-trainname">{t.title}</span>
+          <span class="yard-lamp" class:ok={t.lamp === 'green'} class:err={t.lamp === 'failing'} class:run={t.lamp === 'pending'}>
+            {t.lamp === 'green' ? 'CI ✓' : t.lamp === 'failing' ? 'CI ✗' : 'CI …'}
+          </span>
+          <span class="yard-chip">{t.status}</span>
+          {#if t.eta.phase !== 'arrived'}
+            <span class="yard-eta" class:est={t.eta.kind === 'eta'} title={etaTitle(t.eta)}>
+              {etaText(t.eta)}
             </span>
-            <span class="yard-chip">{t.status}</span>
-            {#if t.eta.phase !== 'arrived'}
-              <span class="yard-eta" class:est={t.eta.kind === 'eta'} title={etaTitle(t.eta)}>
-                {etaText(t.eta)}
-              </span>
-            {/if}
-            <span class="yard-stamp">{stampOf(t)}</span>
-          </div>
-          <div class="yard-consist">
-            {#if t.cars.length === 0}
-              <span class="yard-empty">consist forming…</span>
-            {:else}
-              {#each t.cars as c (c.id)}
-                <PacketCard card={c} size="consist" onOpen={openPacket} />
-              {/each}
-            {/if}
-          </div>
+          {/if}
+          <span class="yard-stamp">{stampOf(t)}</span>
         </div>
-      {/each}
+        <div class="yard-consist">
+          {#if t.cars.length === 0}
+            <span class="yard-empty">consist forming…</span>
+          {:else}
+            {#each t.cars as c (c.id)}
+              <PacketCard card={c} size="consist" onOpen={openPacket} />
+            {/each}
+          {/if}
+        </div>
+      </div>
+    {/snippet}
+
+    <!-- The departure line is the MERGE (0bba59f7). Pre-merge is yard
+         work — assembling, inspecting (CI), under repair — where a red
+         lamp is status, not alarm; red is deliberately NOT softened,
+         it just lives here. Post-merge is transit, green by
+         construction, and short. -->
+    <div class="yard-section">
+      01 — IN THE YARD <span class="yard-n">{split.inYard.length}</span>
+      <span class="yard-hint">assembling · inspecting · under repair — red is work, not a wreck</span>
+    </div>
+    {#if split.inYard.length === 0}
+      <div class="yard-empty">Yard clear — nothing assembling.</div>
+    {:else}
+      {#each split.inYard as t (t.id)}{@render trainBlock(t)}{/each}
+    {/if}
+
+    <div class="yard-section">
+      02 — DEPARTED · IN TRANSIT <span class="yard-n">{split.inTransit.length}</span>
+      <span class="yard-hint">past the merge — irreversible, green by construction</span>
+    </div>
+    {#if split.inTransit.length === 0}
+      <div class="yard-empty">Nothing in transit.</div>
+    {:else}
+      {#each split.inTransit as t (t.id)}{@render trainBlock(t)}{/each}
     {/if}
 
     <!-- The dock is a station rendered (stations.md): when the
@@ -244,7 +271,7 @@
           title={upstream.title}
           onclick={() => navigate(upstream.href)}>{upstream.label}</button>
       {/if}
-      02 — LOADING DOCK <span class="yard-n">{yard.dock.length}</span>
+      03 — LOADING DOCK <span class="yard-n">{yard.dock.length}</span>
       {#if yard.dockStation.source === 'station'}
         <span class="yard-discipline" title="queue discipline"
           >{disciplineLabel(yard.dockStation.discipline)}</span>
@@ -271,7 +298,7 @@
          green-unparked. Renders nothing when the approach is clear;
          each row opens its own packet. -->
     {#if yard.approach.length > 0}
-      <div class="yard-section">03 — THE APPROACH <span class="yard-n">{yard.approach.length}</span></div>
+      <div class="yard-section">04 — THE APPROACH <span class="yard-n">{yard.approach.length}</span></div>
       <table class="yard-board">
         <tbody>
           {#each yard.approach as a (a.id)}
@@ -301,7 +328,7 @@
          `opened_on` is day-granular and tied every train opened on the
          same day. Each row opens the train's Job, where the landing
          report is. -->
-    <div class="yard-section">04 — RECENT ARRIVALS</div>
+    <div class="yard-section">05 — RECENT ARRIVALS</div>
     <table class="yard-board">
       <thead><tr><th>Train</th><th>Consist</th><th>Arrival</th></tr></thead>
       <tbody>
@@ -359,6 +386,10 @@
 
 <style>
   .yard-root { padding: 0 32px 32px; }
+  .yard-hint {
+    font-size: 11px; font-weight: 400; letter-spacing: 0;
+    text-transform: none; color: var(--text-dim, #78716c); margin-left: 10px;
+  }
   .yard-section {
     font-family: var(--font-mono, ui-monospace, monospace);
     font-size: 12px; letter-spacing: var(--ls-eyebrow, 0.3em);

@@ -344,6 +344,50 @@ pub struct AssignmentRow {
     pub step: Step,
 }
 
+/// One outstanding obligation — a `ready` or `active` step on an
+/// `open` packet — and the instant it has been waiting since. The row
+/// type of the queue-age lens (`GET /api/jobs/queue-age`, packet
+/// 2a0b034e).
+///
+/// A LENS, NOT A FIELD. The wait instant lives one layer below the
+/// domain types (`steps.became_ready_at` / `steps.updated_at` in
+/// Postgres; the write-instant maps in the in-memory adapter), and
+/// hoisting timestamps onto `Job` / `Step` was measured at a
+/// 97-struct-literal-site mechanical change to Tier-1 core — so the
+/// lens returns its own shape and the domain types stay untouched,
+/// the same trade [`VersionTerminalReport`] made.
+///
+/// `since` semantics, stated rather than implied: when the projection
+/// recorded the ready flip (`became_ready_at`, written once, never
+/// moved by later writes) `exact` is `true` and `since` IS the moment
+/// the step became an obligation. For rows that predate the stamp,
+/// `since` falls back to `updated_at` and `exact` is `false`: any
+/// write bumps `updated_at` — annotating a packet is enough
+/// (2a77e5fc) — so `now - since` is then a LOWER BOUND on the wait.
+/// A lower bound still sorts a queue by staleness; it just may
+/// under-report, never over-report, a labelled direction.
+#[derive(Debug, Clone, Serialize)]
+pub struct QueueAgeRow {
+    pub job_id: JobId,
+    /// Protocol + title, so a reader can name the packet without a
+    /// second fetch — a bare UUID is not an answer.
+    pub job_kind: String,
+    pub job_title: String,
+    pub step_id: StepId,
+    pub spec_slug: Option<String>,
+    pub step_title: String,
+    pub status: StepStatus,
+    pub assignee_id: Option<String>,
+    /// Rides along for the same reason it rides on [`AssignmentRow`]:
+    /// a simulated packet has to look simulated in every lens.
+    pub simulated: bool,
+    /// The instant this obligation has been waiting since.
+    pub since: DateTime<Utc>,
+    /// `true` when `since` is the recorded ready-flip instant;
+    /// `false` when it is the `updated_at` lower bound.
+    pub exact: bool,
+}
+
 /// A machine BOSS runs on, as the estate registry declares it.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EstateNode {
@@ -730,6 +774,19 @@ pub trait JobsRepository: Send + Sync {
         let (jobs, _total) = self.list_jobs(&filter, i64::MAX, 0).await?;
         Ok(terminal_report_from_jobs(&jobs, since))
     }
+
+    /// Every outstanding obligation in `scope` — `ready` / `active`
+    /// steps on `open` packets — longest-waiting first. The read
+    /// surface behind the queue-age lens (`GET /api/jobs/queue-age`,
+    /// packet 2a0b034e); [`QueueAgeRow`] documents what `since` /
+    /// `exact` honestly mean.
+    ///
+    /// Deliberately NO default impl: the wait instant is adapter
+    /// storage (`became_ready_at` / `updated_at` columns, the
+    /// in-memory write-instant maps), invisible to `Job` / `Step` —
+    /// so there is no honest way to derive it from `list_jobs` +
+    /// `list_steps`, and a default would have to invent one.
+    async fn queue_age(&self, scope: &JobScope) -> Result<Vec<QueueAgeRow>, JobsError>;
 
     /// Count steps whose kind matches `step_kind` and whose status is
     /// still non-terminal (pending, ready, active). Used by the Step

@@ -21,7 +21,7 @@ use boss_dispatcher::rules::schedule_runner::{DEFAULT_CATCHUP_CAP, ScheduleRunne
 use boss_dispatcher_handlers::handlers::{
     bill_payment_batch::BillPaymentBatch, commerce_invoice_issue::CommerceInvoiceIssue,
     docs_design_sweep::DocsDesignSweep, docs_flush_queue::DocsFlushQueue,
-    estate_compare::EstateCompare, gate_resolve::GateResolve,
+    estate_alarm::EstateAlarm, estate_compare::EstateCompare, gate_resolve::GateResolve,
     inventory_bill_approve::InventoryBillApprove,
     inventory_overhead_absorb::InventoryOverheadAbsorb,
     inventory_parts_consume::InventoryPartsConsume, inventory_parts_produce::InventoryPartsProduce,
@@ -136,6 +136,11 @@ async fn main() -> Result<()> {
             // branch never strands unparked. Needs the clock for a
             // precise gate-step stamp (dock-queue-time). Inert until a
             // rule on `step.done.gate-verdict` is published.
+            // The raiser the estate series was recorded for: a HARD
+            // finding persisting N consecutive comparisons becomes an
+            // urgent packet (a5adfb99). Inert until a rule on
+            // jobs.estate.compared is published.
+            handlers.register(EstateAlarm::new(cfg.jobs_api_url.clone()));
             handlers.register(JobsAutoPark::new(
                 cfg.jobs_api_url.clone(),
                 cfg.clock_api_url.clone(),

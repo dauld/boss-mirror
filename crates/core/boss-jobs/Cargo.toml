@@ -104,6 +104,10 @@ name = "postgres_filter"
 required-features = ["postgres"]
 
 [[test]]
+name = "queue_age_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "rebuild_e2e"
 required-features = ["postgres"]
 

@@ -828,8 +828,13 @@ impl JobsRepository for PgJobs {
             INSERT INTO steps (id, job_id, kind, title, spec_slug, assignee_id, status, sort_order,
                                blocked_by, sign_offs_required, assurance_required, sign_offs, fields,
                                completed_on, metadata, notes, step_plugin_version,
-                               embedded_job, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19)
+                               embedded_job, created_at, updated_at, became_ready_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19,
+                    -- Born ready IS the ready flip: a step materialized
+                    -- straight into `ready` (the open-time readiness
+                    -- pass) became an obligation at this INSERT. The
+                    -- queue-age lens (2a0b034e) reads this stamp.
+                    CASE WHEN $7 = 'ready' THEN $19 END)
             ON CONFLICT (id) DO NOTHING
             "#,
         )
@@ -920,6 +925,18 @@ impl JobsRepository for PgJobs {
                     ELSE $9
                 END,
                 notes = $10, embedded_job = $11, updated_at = $12,
+                -- The ready stamp is written ONCE, at the write that
+                -- lands the step in `ready` (a pending → ready
+                -- promotion arrives here), and no later write moves it
+                -- — the property `updated_at` cannot have, and the one
+                -- the queue-age lens (2a0b034e) exists to read. The
+                -- inner CASE reads the OLD `status`: a terminal row
+                -- keeps its status above, so it must not gain a stamp
+                -- here either.
+                became_ready_at = COALESCE(became_ready_at, CASE
+                    WHEN status NOT IN ('completed', 'skipped')
+                         AND $5 = 'ready' THEN $12
+                END),
                 -- The authored completion contract (`fields`) takes
                 -- the same freeze as metadata: live rows accept the
                 -- write, terminal rows keep theirs. This column was
@@ -1367,6 +1384,106 @@ impl JobsRepository for PgJobs {
                             median,
                             p90,
                         },
+                    })
+                },
+            )
+            .collect()
+    }
+
+    async fn queue_age(
+        &self,
+        scope: &JobScope,
+    ) -> Result<Vec<crate::port::QueueAgeRow>, JobsError> {
+        // Same short-circuit as `list_jobs`: policy said "nothing",
+        // so no round trip.
+        if matches!(scope, JobScope::None) {
+            return Ok(Vec::new());
+        }
+        // The three scope binds are `list_jobs`'s $7..$9, verbatim —
+        // the lens must not grow a second definition of whose packets
+        // these are. Membership is the packet 2a0b034e query:
+        // ready/active steps of open packets. `since` is the recorded
+        // ready flip when the projection has it, else `updated_at` —
+        // an honest lower bound, labelled by `exact`.
+        let (scope_owner, scope_owners, scope_accounts): (
+            Option<&str>,
+            Option<Vec<String>>,
+            Option<Vec<String>>,
+        ) = match scope {
+            JobScope::All => (None, None, None),
+            JobScope::None => unreachable!("short-circuited above"),
+            JobScope::OwnerIs(u) => (Some(u.as_str()), None, None),
+            JobScope::OwnerIn(us) => (None, Some(us.clone()), None),
+            JobScope::AccountIn(ps) => (None, None, Some(ps.clone())),
+        };
+        type Row = (
+            uuid::Uuid,
+            String,
+            String,
+            bool,
+            uuid::Uuid,
+            Option<String>,
+            String,
+            String,
+            Option<String>,
+            chrono::DateTime<chrono::Utc>,
+            bool,
+        );
+        let rows: Vec<Row> = sqlx::query_as(
+            r#"
+            SELECT j.id, j.kind, j.title, j.simulated,
+                   s.id, s.spec_slug, s.title, s.status, s.assignee_id,
+                   COALESCE(s.became_ready_at, s.updated_at) AS since,
+                   (s.became_ready_at IS NOT NULL) AS exact
+            FROM steps s
+            JOIN jobs j ON j.id = s.job_id
+            WHERE s.status IN ('ready', 'active')
+              AND j.status = 'open'
+              AND ($1::text IS NULL OR j.owner_id = $1)
+              AND ($2::text[] IS NULL OR j.owner_id = ANY($2))
+              AND (
+                $3::text[] IS NULL
+                OR (j.subject_kind IN ('account', 'employee')
+                    AND j.subject_id = ANY($3))
+              )
+            ORDER BY since ASC, s.id ASC
+            "#,
+        )
+        .bind(scope_owner)
+        .bind(scope_owners.as_deref())
+        .bind(scope_accounts.as_deref())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+
+        rows.into_iter()
+            .map(
+                |(
+                    job_id,
+                    job_kind,
+                    job_title,
+                    simulated,
+                    step_id,
+                    spec_slug,
+                    step_title,
+                    status,
+                    assignee_id,
+                    since,
+                    exact,
+                )| {
+                    Ok(crate::port::QueueAgeRow {
+                        job_id: JobId::from_uuid(job_id),
+                        job_kind,
+                        job_title,
+                        step_id: StepId::from_uuid(step_id),
+                        spec_slug,
+                        step_title,
+                        status: parse_step_status(&status)
+                            .ok_or_else(|| step_status_err(&status))?,
+                        assignee_id,
+                        simulated,
+                        since,
+                        exact,
                     })
                 },
             )

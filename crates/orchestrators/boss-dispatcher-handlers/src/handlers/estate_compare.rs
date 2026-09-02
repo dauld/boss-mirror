@@ -57,9 +57,104 @@ use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext};
 
 use super::common::{api_client, get_json, post_json};
 
-/// The one scope this comparator understands. The observer stamps it;
-/// anything else is recorded as unknown rather than compared wrongly.
+/// The cluster scope this comparator understands. The observer stamps
+/// it; anything else known is routed below, and the rest is recorded
+/// as unknown rather than compared wrongly.
 const KNOWN_SCOPE: &str = "kubernetes-nodes";
+
+/// The per-host scope (`observe-host.sh`). A host observation carries
+/// ONE machine — the script reads its own /proc — so its comparison is
+/// SELF-SCOPED: declared-vs-observed for exactly the ids in the
+/// observation, never an absence sweep (comparing one host's POST
+/// against every declared host would find all the others "missing" on
+/// every firing). A host that stops posting entirely is a missing
+/// datapoint in the series, which is the signal, same as the census —
+/// staleness alarming is a follow-up, stated rather than smuggled.
+const HOST_SCOPE: &str = "host";
+
+/// The disk floor that turns a host reading into a HARD finding
+/// (49a8d842: the forge host — 228G, 83% full, "THE TIGHT ONE" — could
+/// fill and the comparison would keep answering unknown_scope). Free
+/// below 16 GiB or below 8% of capacity is `disk_tight`: past that a
+/// full gate cannot run and postgres-shaped failures start wearing
+/// unrelated crates' names (the locomotive's own 70G lesson, scaled to
+/// hosts that do less). Deliberately alarm-tight, not sweep-tight —
+/// the 08-30 sweep flagged 83% as worth WATCHING; the alarm fires when
+/// it is worth WAKING someone.
+const DISK_TIGHT_FLOOR_GB: i64 = 16;
+const DISK_TIGHT_FLOOR_PCT: i64 = 8;
+
+/// The self-scoped host comparison, pure: for each observed host that
+/// is also declared, drift on the identity fields + the disk floor;
+/// `not_ready` passes through; an observed host nobody declared is the
+/// same w-1 class as the cluster scope.
+pub(crate) fn compare_host(declared: &[Json], observation: &Json) -> Json {
+    let observed: Vec<&Json> = observation
+        .get("nodes")
+        .and_then(Json::as_array)
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
+
+    let mut observed_not_declared: Vec<Json> = Vec::new();
+    let mut drift: Vec<Json> = Vec::new();
+    let mut disk_tight: Vec<Json> = Vec::new();
+    let mut not_ready: Vec<Json> = Vec::new();
+
+    for node in &observed {
+        let Some(id) = node.get("id").and_then(Json::as_str) else {
+            continue;
+        };
+        if node.get("ready").and_then(Json::as_bool) == Some(false) {
+            not_ready.push(json!(id));
+        }
+        if let (Some(free), Some(total)) = (
+            node.get("disk_free_gb").and_then(Json::as_i64),
+            node.get("disk_gb").and_then(Json::as_i64),
+        ) && total > 0
+            && (free < DISK_TIGHT_FLOOR_GB || free * 100 < total * DISK_TIGHT_FLOOR_PCT)
+        {
+            disk_tight.push(json!({ "id": id, "free_gb": free, "disk_gb": total }));
+        }
+        let dec = declared
+            .iter()
+            .find(|d| d.get("id").and_then(Json::as_str) == Some(id));
+        let Some(dec) = dec else {
+            observed_not_declared.push(json!({
+                "id": id,
+                "address": node.get("address"),
+                "cpu": node.get("cpu"),
+                "memory_gb": node.get("memory_gb"),
+            }));
+            continue;
+        };
+        let mut fields = serde_json::Map::new();
+        for key in ["cpu", "memory_gb"] {
+            let d = dec.get(key).cloned().unwrap_or(Json::Null);
+            let o = node.get(key).cloned().unwrap_or(Json::Null);
+            if !d.is_null() && d != o {
+                fields.insert(key.into(), json!({ "declared": d, "observed": o }));
+            }
+        }
+        if !fields.is_empty() {
+            drift.push(json!({ "id": id, "fields": fields }));
+        }
+    }
+
+    json!({
+        "counts": {
+            "observed": observed.len(),
+            "observed_not_declared": observed_not_declared.len(),
+            "drift": drift.len(),
+            "disk_tight": disk_tight.len(),
+        },
+        "findings": {
+            "observed_not_declared": observed_not_declared,
+            "drift": drift,
+            "disk_tight": disk_tight,
+            "not_ready": not_ready,
+        },
+    })
+}
 
 /// A declared row participates in the kubernetes-nodes comparison iff
 /// its role names a cluster node. conductor/forge roles never
@@ -252,6 +347,27 @@ impl Handler for EstateCompare {
                     )
                 })?;
             envelope(compare(&declared, observation))
+        } else if scope == HOST_SCOPE {
+            // Self-scoped: one host posting its own /proc (49a8d842 —
+            // until this branch, every host observation dead-ended as
+            // unknown_scope and boss-gcp's 48G disk could fill with the
+            // comparison still answering shrug).
+            let nodes = get_json(
+                &self.client,
+                &format!("{}/api/estate/nodes", self.base()),
+                rule,
+            )
+            .await?;
+            let declared: Vec<Json> = nodes
+                .get("data")
+                .and_then(Json::as_array)
+                .cloned()
+                .ok_or_else(|| {
+                    HandlerError::Downstream(
+                        "GET /api/estate/nodes: response carries no data array".into(),
+                    )
+                })?;
+            envelope(compare_host(&declared, observation))
         } else {
             // An observation from an instrument this comparator does
             // not understand. Guessing which declared rows it should
@@ -404,5 +520,56 @@ mod tests {
         );
         assert_eq!(out["counts"]["participating_declared"], 0);
         assert_eq!(out["counts"]["observed_not_declared"], 1);
+    }
+
+    // ----- the self-scoped host comparison (49a8d842) -----
+
+    fn host_obs(id: &str, free: i64, total: i64) -> Json {
+        json!({ "scope": "host", "nodes": [{
+            "id": id, "cpu": 8, "memory_gb": 32,
+            "disk_gb": total, "disk_free_gb": free, "ready": true }] })
+    }
+
+    #[test]
+    fn a_host_below_the_floor_is_disk_tight_and_above_is_not() {
+        let declared =
+            vec![json!({"id": "boss-gcp-1", "role": "conductor", "cpu": 8, "memory_gb": 32})];
+        // 12G free of 47: below the 16G floor.
+        let tight = compare_host(&declared, &host_obs("boss-gcp-1", 12, 47));
+        assert_eq!(tight["findings"]["disk_tight"][0]["id"], "boss-gcp-1");
+        // 38G free of 228: above both floors (16G and 8%).
+        let fine = compare_host(&declared, &host_obs("forge-host", 38, 228));
+        assert_eq!(fine["findings"]["disk_tight"].as_array().unwrap().len(), 0);
+        // 17G free of 228 is above the GB floor but under 8% — tight.
+        let pct = compare_host(&declared, &host_obs("forge-host", 17, 228));
+        assert_eq!(pct["findings"]["disk_tight"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_single_host_post_never_reports_other_declared_hosts_missing() {
+        // The false-fire this scope exists to avoid: one host's POST
+        // must not find every OTHER declared machine absent.
+        let declared = vec![
+            json!({"id": "boss-gcp-1", "role": "conductor"}),
+            json!({"id": "forge-host", "role": "forge"}),
+        ];
+        let body = compare_host(&declared, &host_obs("boss-gcp-1", 30, 47));
+        assert!(body["findings"].get("declared_not_observed").is_none());
+        assert_eq!(
+            body["findings"]["observed_not_declared"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn an_undeclared_host_is_the_w1_class() {
+        let body = compare_host(&[], &host_obs("mystery-box", 30, 47));
+        assert_eq!(
+            body["findings"]["observed_not_declared"][0]["id"],
+            "mystery-box"
+        );
     }
 }

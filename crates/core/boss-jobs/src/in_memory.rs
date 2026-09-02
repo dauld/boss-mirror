@@ -22,6 +22,15 @@ pub struct InMemoryJobs {
 struct State {
     jobs: HashMap<String, Job>,
     steps: HashMap<String, Step>,
+    /// The in-memory mirror of `steps.became_ready_at`: the instant a
+    /// step FIRST landed in `Ready`, written once and never moved by a
+    /// later write — which is exactly the property the queue-age lens
+    /// needs and `updated_at` cannot have (packet 2a0b034e).
+    step_ready_at: HashMap<String, DateTime<Utc>>,
+    /// The in-memory mirror of `steps.updated_at`: the last write
+    /// instant per step. The lens's labelled lower-bound fallback for
+    /// steps that never passed through `Ready`.
+    step_touched_at: HashMap<String, DateTime<Utc>>,
 }
 
 impl InMemoryJobs {
@@ -340,20 +349,30 @@ impl JobsRepository for InMemoryJobs {
     async fn add_step_at(
         &self,
         step: &Step,
-        _now: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
         // Mirror the Pg replay guard: an existing id is a no-op that
         // records nothing.
         let inserted = {
             let mut state = self.inner.lock().expect("poisoned");
-            match state.steps.entry(step_key(&step.id)) {
+            let key = step_key(&step.id);
+            let inserted = match state.steps.entry(key.clone()) {
                 std::collections::hash_map::Entry::Occupied(_) => false,
                 std::collections::hash_map::Entry::Vacant(v) => {
                     v.insert(step.clone());
                     true
                 }
+            };
+            if inserted {
+                // Born ready IS the ready flip — same rule as the
+                // INSERT's CASE in the Pg adapter.
+                if step.status == StepStatus::Ready {
+                    state.step_ready_at.insert(key.clone(), now);
+                }
+                state.step_touched_at.insert(key, now);
             }
+            inserted
         };
         if inserted {
             self.record_all(events);
@@ -369,7 +388,7 @@ impl JobsRepository for InMemoryJobs {
     async fn update_step_at(
         &self,
         step: &Step,
-        _now: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
         let mut state = self.inner.lock().expect("poisoned");
@@ -391,6 +410,13 @@ impl JobsRepository for InMemoryJobs {
             next.completed_on = existing.completed_on;
             next.metadata = existing.metadata.clone();
         }
+        // The ready stamp is written once, at the write that lands the
+        // step in Ready, and no later write moves it — the COALESCE in
+        // the Pg adapter's UPDATE.
+        if next.status == StepStatus::Ready {
+            state.step_ready_at.entry(key.clone()).or_insert(now);
+        }
+        state.step_touched_at.insert(key.clone(), now);
         state.steps.insert(key, next);
         drop(state);
         self.record_all(events);
@@ -401,7 +427,7 @@ impl JobsRepository for InMemoryJobs {
         &self,
         step_id: &StepId,
         actor: &str,
-        _now: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<Step, JobsError> {
         let claimed = {
@@ -422,7 +448,11 @@ impl JobsRepository for InMemoryJobs {
             }
             existing.assignee_id = Some(actor.to_string());
             existing.status = StepStatus::Active;
-            existing.clone()
+            let claimed = existing.clone();
+            // A claim bumps `updated_at` in the Pg adapter; the ready
+            // stamp, already written at the flip, stays put.
+            state.step_touched_at.insert(key, now);
+            claimed
         };
         self.record_all(events);
         Ok(claimed)
@@ -432,7 +462,7 @@ impl JobsRepository for InMemoryJobs {
         &self,
         step_id: &StepId,
         stamp: &boss_core::job::SignOffStamp,
-        _now: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
         {
@@ -442,6 +472,8 @@ impl JobsRepository for InMemoryJobs {
                 return Err(JobsError::StepNotFound(*step_id));
             };
             existing.sign_offs.push(stamp.clone());
+            // Mirrors the sign-off UPDATE's `updated_at = $3`.
+            state.step_touched_at.insert(key, now);
         }
         self.record_all(events);
         Ok(())
@@ -463,6 +495,67 @@ impl JobsRepository for InMemoryJobs {
             .collect();
         steps.sort_by_key(|s| s.sort_order);
         Ok(steps)
+    }
+
+    async fn queue_age(
+        &self,
+        scope: &crate::port::JobScope,
+    ) -> Result<Vec<crate::port::QueueAgeRow>, JobsError> {
+        // Scope + open-status through `matches_filter`, so the lens
+        // and `list_jobs` cannot disagree about whose packets these
+        // are (CLAUDE.md §9a — one definition of the scope rule).
+        let filter = JobFilter {
+            status: Some(JobStatus::Open),
+            scope: scope.clone(),
+            ..Default::default()
+        };
+        let state = self.inner.lock().expect("poisoned");
+        let mut rows: Vec<crate::port::QueueAgeRow> = state
+            .steps
+            .values()
+            .filter(|s| matches!(s.status, StepStatus::Ready | StepStatus::Active))
+            .filter_map(|s| {
+                let job = state.jobs.get(&job_key(&s.job_id))?;
+                if !matches_filter(job, &filter) {
+                    return None;
+                }
+                let key = step_key(&s.id);
+                // Ready flip when recorded; last-write lower bound
+                // otherwise — COALESCE(became_ready_at, updated_at).
+                let (since, exact) = match (
+                    state.step_ready_at.get(&key),
+                    state.step_touched_at.get(&key),
+                ) {
+                    (Some(at), _) => (*at, true),
+                    (None, Some(at)) => (*at, false),
+                    // Unreachable through the port: every step write
+                    // stamps `step_touched_at`. A step with neither
+                    // stamp has no honest age, so it has no row.
+                    (None, None) => return None,
+                };
+                Some(crate::port::QueueAgeRow {
+                    job_id: s.job_id,
+                    job_kind: job.kind.clone(),
+                    job_title: job.title.clone(),
+                    step_id: s.id,
+                    spec_slug: s.spec_slug.clone(),
+                    step_title: s.title.clone(),
+                    status: s.status,
+                    assignee_id: s.assignee_id.clone(),
+                    simulated: job.simulated,
+                    since,
+                    exact,
+                })
+            })
+            .collect();
+        // Longest-waiting first; step id as the deterministic
+        // tiebreak, matching the SQL's `ORDER BY since, s.id`.
+        rows.sort_by(|a, b| {
+            a.since
+                .cmp(&b.since)
+                .then_with(|| a.step_id.to_string().cmp(&b.step_id.to_string()))
+        });
+        Ok(rows)
     }
 
     async fn count_in_flight_steps_by_kind(&self, step_kind: &str) -> Result<i64, JobsError> {

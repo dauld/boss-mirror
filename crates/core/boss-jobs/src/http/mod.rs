@@ -33,6 +33,7 @@ mod census;
 mod jobs;
 mod kinds;
 mod plugins;
+mod queue_age;
 mod refusals;
 mod sim_clock;
 mod stations;
@@ -43,6 +44,7 @@ use census::*;
 use jobs::*;
 use kinds::*;
 use plugins::*;
+use queue_age::*;
 use refusals::*;
 use sim_clock::*;
 use stations::*;
@@ -158,6 +160,10 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
         )
         .route("/api/jobs/launch-calendar", get(launch_calendar::<R, B>))
         .route("/api/jobs/assignments", get(list_assignments::<R, B>))
+        // The queue-age lens (2a0b034e): how long every outstanding
+        // obligation — ready/active step on an open packet — has
+        // waited. Read-only, own row shape; Job and Step untouched.
+        .route("/api/jobs/queue-age", get(list_queue_age::<R, B>))
         .route("/api/jobs", get(list_jobs::<R, B>))
         .route("/api/jobs", post(create_job::<R, B>))
         .route("/api/jobs/{id}", get(get_job::<R, B>))

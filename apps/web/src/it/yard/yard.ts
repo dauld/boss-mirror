@@ -286,12 +286,42 @@ export function approach(
   const liveBranches = new Set(
     gateRuns.filter(g => g.status === 'open').map(branchOf).filter(Boolean),
   );
+  const verdictOf = (g: JobLite): string | undefined =>
+    (g.steps ?? [])
+      .map(s => (s.metadata as { verdict?: unknown } | null)?.verdict)
+      .find((v): v is string => typeof v === 'string');
+  // A red with a green answer is SUPERSEDED — the question it raised is
+  // closed, and an alarm that stays on after the condition clears
+  // teaches the operator to ignore alarms (David misread the yard twice
+  // on 2026-08-31 for exactly this). Two forms, view-folded only — the
+  // packet keeps the record:
+  //   - DERIVED: a closed green exists for the same branch dated the
+  //     same day or later. Day-granular `opened_on` cannot order
+  //     same-day runs (server order within a day is not insertion
+  //     order), so a same-day green is read as the answer — the gate +
+  //     park layer, not this lens, is what enforces a current receipt.
+  //     A red strictly NEWER by day than every green stays red: that is
+  //     a regression, not an answered question.
+  //   - ANNOTATED: `metadata.superseded` on the gate-run, for the
+  //     git-only facts (branch deleted; change landed via another
+  //     branch) an operator records because no API row shows them.
+  const latestGreenDay = new Map<string, string>();
+  for (const g of gateRuns) {
+    if (g.status === 'open' || verdictOf(g) !== 'green') continue;
+    const b = branchOf(g);
+    if (!b) continue;
+    const prev = latestGreenDay.get(b);
+    if (!prev || g.opened_on > prev) latestGreenDay.set(b, g.opened_on);
+  }
+  const annotatedSuperseded = (g: JobLite): boolean => {
+    const v = (g.metadata as { superseded?: unknown } | null)?.superseded;
+    return v != null && v !== false;
+  };
   const seen = new Set<string>();
   for (const g of gateRuns) {
     const branch = branchOf(g);
     if (!branch || seen.has(branch)) continue;
     if (g.status !== 'open' && liveBranches.has(branch)) continue;
-    seen.add(branch);
     const md = (g.metadata ?? {}) as { sha?: string };
     const row = {
       id: g.id,
@@ -301,16 +331,26 @@ export function approach(
       note: null,
     };
     if (g.status === 'open') {
+      seen.add(branch);
       gating.push({ ...row, state: 'gating' });
       continue;
     }
+    // A superseded run does NOT claim its branch's row: same-day server
+    // order is not insertion order, so the red may sort above the very
+    // green that answered it — the green (or nothing) must get the row.
+    if (annotatedSuperseded(g)) continue;
+    const verdict = verdictOf(g);
+    if (
+      (verdict === 'failed' || verdict === 'lost') &&
+      (latestGreenDay.get(branch) ?? '') >= g.opened_on
+    ) {
+      continue;
+    }
+    seen.add(branch);
     if (nowMs - Date.parse(g.opened_on) > APPROACH_FRESH_DAYS * DAY_MS) continue;
     if (mergedCarClaimed.has(branch)) continue;
     // The verdict is data on whichever step recorded it, not a slug
     // this lens hardcodes (CLAUDE.md §9: data-keyed, not kind-keyed).
-    const verdict = (g.steps ?? [])
-      .map(s => (s.metadata as { verdict?: unknown } | null)?.verdict)
-      .find(v => typeof v === 'string');
     if (verdict === 'green') {
       if (!carClaimed.has(branch)) green.push({ ...row, state: 'gated-green' });
     } else if (verdict === 'failed' || verdict === 'lost') {
@@ -614,6 +654,26 @@ export function trainStatus(j: JobLite): TrainStatus {
   if (done(step(j, 'merged', 'Merged into main'))) return 'DEPARTED';
   if (done(step(j, 'pr', 'Open the batched PR'))) return 'BOARDED';
   return 'BOARDING';
+}
+
+/** The departure line is the MERGE (0bba59f7, ratified 2026-08-31):
+ *  everything before it is revisable — repair pushes, re-signals,
+ *  stall-cancel returning cars to the dock — so red there is work in
+ *  progress, not a breakdown en route. Everything after it is
+ *  irreversible and green by construction. This splits the open trains
+ *  on that line so the page can render IN THE YARD (red = status)
+ *  apart from DEPARTED / IN TRANSIT (boring, as transit should be).
+ *  Red is NOT softened anywhere — the change is where red lives, not
+ *  whether it shows. */
+export function splitAtDeparture(trains: readonly TrainRow[]): Readonly<{
+  inYard: readonly TrainRow[];
+  inTransit: readonly TrainRow[];
+}> {
+  const departed = (t: TrainRow) => t.status === 'DEPARTED' || t.status === 'ARRIVED';
+  return {
+    inYard: trains.filter(t => !departed(t)),
+    inTransit: trains.filter(departed),
+  };
 }
 
 export function ciLamp(j: JobLite): Lamp {
