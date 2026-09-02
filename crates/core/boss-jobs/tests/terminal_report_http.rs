@@ -608,3 +608,91 @@ async fn the_report_wears_the_workflow_read_gate() {
         "same gate as every sibling GET under /api/workflows — nothing weaker"
     );
 }
+
+/// Tier 2 (packet 6ea5a12a): the report grows an ARM dimension. A
+/// version-vs-version experiment stamps `experiment_arm` on every
+/// packet it admits, and the report groups by (version, arm) — so the
+/// candidate cohort, the control cohort, and the bystanders (same
+/// version, admitted outside the window) are three separate rows
+/// rather than one blended number. Rows sort version-desc, then arm
+/// desc with the unstamped row last.
+#[tokio::test]
+async fn arm_stamped_packets_report_as_their_own_cohorts() {
+    let (app, jobs) = app();
+    let arm = |a: &str, outcome: &str| serde_json::json!({ "outcome": outcome, "experiment_arm": a, "experiment_id": "e-1" });
+    seed(
+        &jobs,
+        vec![
+            // Candidate cohort: pinned v3, closed in 1 day.
+            with_metadata(
+                packet(
+                    "keg-return",
+                    3,
+                    JobStatus::Closed,
+                    d(2026, 8, 20),
+                    Some(d(2026, 8, 21)),
+                    None,
+                    false,
+                ),
+                arm("candidate", "returned"),
+            ),
+            // Control cohort: pinned v2, closed in 5 days.
+            with_metadata(
+                packet(
+                    "keg-return",
+                    2,
+                    JobStatus::Closed,
+                    d(2026, 8, 20),
+                    Some(d(2026, 8, 25)),
+                    None,
+                    false,
+                ),
+                arm("control", "returned"),
+            ),
+            // A bystander on the control version — admitted before the
+            // window, no stamp. It must NOT blend into the control arm.
+            packet(
+                "keg-return",
+                2,
+                JobStatus::Open,
+                d(2026, 8, 1),
+                None,
+                None,
+                false,
+            ),
+        ],
+    )
+    .await;
+
+    let (status, body) = get_report(
+        &app,
+        "/api/workflows/keg-return/terminal-report",
+        "emp-1",
+        "reporter",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let versions = body["versions"].as_array().expect("versions array");
+    assert_eq!(
+        versions.len(),
+        3,
+        "three cohorts: (v3, candidate), (v2, control), (v2, unstamped) — got {versions:?}"
+    );
+
+    assert_eq!(versions[0]["version"], 3);
+    assert_eq!(versions[0]["arm"], "candidate");
+    assert_eq!(versions[0]["outcomes"]["returned"], 1);
+    assert!(approx(&versions[0]["cycle_time_days"]["median"], 1.0));
+
+    assert_eq!(versions[1]["version"], 2);
+    assert_eq!(versions[1]["arm"], "control");
+    assert!(approx(&versions[1]["cycle_time_days"]["median"], 5.0));
+
+    assert_eq!(versions[2]["version"], 2);
+    assert_eq!(
+        versions[2]["arm"],
+        serde_json::Value::Null,
+        "bystanders report under a null arm, apart from both cohorts"
+    );
+    assert_eq!(versions[2]["by_status"]["open"], 1);
+}

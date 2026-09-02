@@ -174,3 +174,24 @@ member_attribute = "account_team_role"
 code = "executive-sponsor"
 display_name = "Executive Sponsor"
 sort_order = 304
+
+# ---------------------------------------------------------------------------
+# Employee roles this tenant adds on top of the platform registry.
+#
+# The platform seed (infra/postgres/schema/01-registries.sql) already
+# carries every other role + department the roster in
+# data/employees.json references — measured 2026-09-02: 22 of the 23
+# roles and all 9 departments are platform rows. `auditor` is the one
+# role only this tenant uses, so it ships here. boss-people-api
+# validates every employee write against
+# (subject_kind='employee', member_attribute='role'); without this
+# row emp-201's seed POST is refused and the tenant prepare aborts.
+# ---------------------------------------------------------------------------
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "auditor"
+display_name = "Auditor"
+metadata = { department = "finance", is_management = false }
+sort_order = 400

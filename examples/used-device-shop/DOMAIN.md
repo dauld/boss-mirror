@@ -17,6 +17,38 @@ customers. Used-system refurbishment is the cornerstone margin
 line; new sales, service contracts, parts, and repair round it
 out.
 
+## Install
+
+One command on a fresh Ubuntu 24.04 VM:
+
+```sh
+sudo TENANT=device-shop /opt/boss/infra/bootstrap-vm.sh
+```
+
+That stands up the same service stack the brewery uses, then runs
+`boss-used-device-shop-engine prepare` — the tenant's converged
+seed step (sister of `boss-brewery-sim prepare`), which publishes
+the whole model from this directory through the public API, in
+dependency order: Class rows (`seeds/classes.toml`), the company
+identity Subject, policy grants (`seeds/policy_rules.toml`), the
+76-person roster (`data/employees.json`), the device catalog
+(`data/catalog.json`), and finally every Workflow in
+`seeds/workflows.toml` via the shared `workflow-design`
+publish path. Idempotent — re-run it freely.
+
+To re-seed an already-running stack by hand:
+
+```sh
+BOSS_SIM_SEEDS_DIR=/opt/boss/examples/used-device-shop/seeds \
+    boss-used-device-shop-engine prepare
+```
+
+Unlike the brewery there is no live sim daemon: once prepared, work
+on this tenant is opened and driven by human and agent actors
+through the normal surfaces. The `boss-used-device-shop-engine`
+*library* drives the same seed bundle as a deterministic day-loop
+in tests and offline runs (`tests/shape_driven_smoke.rs`).
+
 ## How to read this doc
 
 BOSS frames the business as a **human-powered state machine**:

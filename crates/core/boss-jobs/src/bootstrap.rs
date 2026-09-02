@@ -1,41 +1,44 @@
-//! Workflow-publish logic, shared by the
-//! `boss-brewery-bootstrap` binary and the unified
-//! [`crate::prepare`] step (we're converging the brewery's
-//! bootstrap/data-seed/engine/sim binaries into one tool).
+//! Tenant Workflow-publish bootstrap, shared by tenant `prepare`
+//! steps (the brewery's converged prepare and the used-device-shop's
+//! prepare both call this) — the Workflow-registry sibling of
+//! `boss_policy::bootstrap::publish_policy_rules`: one impl seeds a
+//! tenant's `workflows.toml` through the public API so the offline
+//! regen, the live demo, and a fresh-VM install cannot drift.
 //!
 //! [`publish_workflows`] opens one `workflow-design` Job per
-//! brewery Workflow, walks it to closure, and lets the
-//! `workflow-publish` dispatch path land the spec in the
-//! registry.
+//! Workflow in the seed file, walks it to closure, and lets the
+//! `workflow-publish` dispatch path land the spec in the registry.
 //!
 //! Tenant kinds arrive with full provenance this way: audit_log
 //! captures the meta-Job that authored each, including author /
 //! approver / published-at. See
-//! `crates/boss-jobs/src/registry.rs::platform_workflows()` for the
-//! meta-kind itself.
+//! [`crate::registry::platform_workflows`] for the meta-kind itself.
 //!
 //! Idempotent: if a `workflow-design` Job has already published a
-//! given target kind (the registry has an active row whose
-//! `created_by` starts with `job-`), the publish skips it. Re-
-//! running after a partial failure resumes from where it left off.
+//! given target kind (the registry has an active row with an
+//! `authoring_job_id`), the publish skips it. Re-running after a
+//! partial failure resumes from where it left off.
 //!
-//! Hard-fails on any non-2xx response. The 12-month seed regen
-//! that consumes this output expects every kind to actually
-//! land in the registry.
+//! Hard-fails on any non-2xx response. The seed regens that consume
+//! this output expect every kind to actually land in the registry.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use boss_jobs::registry::WorkflowSpec;
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
 use tracing::{info, warn};
 
-/// Open one `workflow-design` Job per brewery Workflow in `seeds`,
-/// walk each to closure, and let the `workflow-publish` dispatch
-/// path land the spec in the registry.
+use crate::registry::WorkflowSpec;
+
+/// Open one `workflow-design` Job per Workflow in `seeds`, walk each
+/// to closure, and let the `workflow-publish` dispatch path land the
+/// spec in the registry.
 ///
-/// `api_base` is the jobs-api (or gateway) base URL; `dev`
+/// `api_base` is the jobs-api (or gateway) base URL; `owning_team`
+/// is stamped on every loaded spec (convention: the tenant id or
+/// `"<tenant>-bootstrap"` — see
+/// [`crate::seed_loader::load_workflows_with_owning_team`]); `dev`
 /// auto-walks the sign-off step (development only);
 /// `force_republish` re-publishes even already-operator-published
 /// kinds (each lands as a new version); `x_boss_user` overrides the
@@ -47,6 +50,7 @@ use tracing::{info, warn};
 pub fn publish_workflows(
     api_base: &str,
     seeds: &Path,
+    owning_team: &str,
     dev: bool,
     force_republish: bool,
     x_boss_user: Option<&str>,
@@ -77,15 +81,16 @@ pub fn publish_workflows(
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let specs = boss_jobs::seed_loader::load_workflows_with_owning_team(seeds, "brewery-bootstrap")
-        .context("loading brewery workflows.toml")?;
+    let specs = crate::seed_loader::load_workflows_with_owning_team(seeds, owning_team)
+        .with_context(|| format!("loading workflows.toml for `{owning_team}`"))?;
 
     info!(
         seeds = %seeds.display(),
         api_base = %api_base,
+        owning_team = %owning_team,
         kind_count = specs.len(),
         dev = dev,
-        "starting brewery bootstrap"
+        "starting workflow bootstrap"
     );
 
     let mut published = 0usize;
@@ -116,7 +121,8 @@ pub fn publish_workflows(
         published,
         skipped,
         total = specs.len(),
-        "brewery bootstrap complete"
+        owning_team = %owning_team,
+        "workflow bootstrap complete"
     );
     Ok(())
 }
@@ -128,10 +134,27 @@ fn jobs_url(api_base: &str, path: &str) -> String {
 /// Where the active row for `kind` came from. `Missing` means no
 /// row exists; `BootstrapOwned` is from `platform_workflows()`;
 /// `OperatorPublished` is from a real Job (or an admin PUT).
+#[derive(Debug, PartialEq, Eq)]
 enum Provenance {
     Missing,
     BootstrapOwned,
     OperatorPublished,
+}
+
+/// Classify an active-kind response body. The wire shape doesn't
+/// expose `created_by`; the next-best signal we have without a schema
+/// change is `authoring_job_id`, which is set iff the row came from
+/// `publish_authored`. A `bootstrap`-owned row never has it.
+fn provenance_of(body: &Value) -> Provenance {
+    if body
+        .get("authoring_job_id")
+        .and_then(|v| v.as_str())
+        .is_some()
+    {
+        Provenance::OperatorPublished
+    } else {
+        Provenance::BootstrapOwned
+    }
 }
 
 fn active_kind_provenance(
@@ -153,19 +176,7 @@ fn active_kind_provenance(
         );
     }
     let body: Value = resp.json()?;
-    // The wire shape doesn't expose `created_by`; the next-best
-    // signal we have without a schema change is `authoring_job_id`,
-    // which is set iff the row came from `publish_authored`. A
-    // `bootstrap`-owned row never has it.
-    if body
-        .get("authoring_job_id")
-        .and_then(|v| v.as_str())
-        .is_some()
-    {
-        Ok(Provenance::OperatorPublished)
-    } else {
-        Ok(Provenance::BootstrapOwned)
-    }
+    Ok(provenance_of(&body))
 }
 
 fn bootstrap_kind(
@@ -378,4 +389,31 @@ fn walk_step(
     }
     info!(step_kind, "step done");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authoring_job_id_marks_operator_published() {
+        let body = json!({ "kind": "device-intake", "authoring_job_id": "job-abc" });
+        assert_eq!(provenance_of(&body), Provenance::OperatorPublished);
+    }
+
+    #[test]
+    fn missing_authoring_job_id_is_bootstrap_owned() {
+        let body = json!({ "kind": "device-intake" });
+        assert_eq!(provenance_of(&body), Provenance::BootstrapOwned);
+        let null_id = json!({ "kind": "device-intake", "authoring_job_id": null });
+        assert_eq!(provenance_of(&null_id), Provenance::BootstrapOwned);
+    }
+
+    #[test]
+    fn jobs_url_trims_trailing_slash() {
+        assert_eq!(
+            jobs_url("http://localhost:7900/", "/api/jobs"),
+            "http://localhost:7900/api/jobs"
+        );
+    }
 }

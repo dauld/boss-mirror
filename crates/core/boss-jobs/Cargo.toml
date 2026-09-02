@@ -58,7 +58,7 @@ tracing-subscriber = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true }
 async-nats = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 sqlx = { version = "0.8", default-features = false, features = ["macros", "runtime-tokio", "postgres", "chrono", "json", "uuid"], optional = true }
 
 [dev-dependencies]

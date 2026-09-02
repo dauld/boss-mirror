@@ -143,7 +143,7 @@ pub struct LaunchCalendarRow {
     pub launch_channel: Option<String>,
 }
 
-/// One version's block in the per-kind terminal report — Tier 1 of
+/// One cohort's block in the per-kind terminal report — Tier 1 of
 /// the experiments program (docs/design/network-experiments.md):
 /// measure what version pinning already records. The version
 /// dimension is the packet's PINNED `workflow_version`, so the report
@@ -151,6 +151,12 @@ pub struct LaunchCalendarRow {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct VersionTerminalReport {
     pub version: i32,
+    /// The arm dimension (Tier 2, packet 6ea5a12a): the
+    /// `experiment_arm` stamp split admission writes on every packet
+    /// it admits (`control` / `candidate`), `None` for packets that
+    /// ran outside any experiment window. Grouped alongside the
+    /// version so a cohort never blends with same-version bystanders.
+    pub arm: Option<String>,
     /// Every packet pinned to this version (any status).
     pub total: i64,
     /// Packet count per status — the six job statuses, zero-count
@@ -261,20 +267,33 @@ pub fn terminal_report_from_jobs(
         cycle_days: Vec<f64>,
     }
 
-    let mut per_version: BTreeMap<i32, Acc> = BTreeMap::new();
+    // Cohort key: (pinned version, experiment_arm stamp). The arm is
+    // the second axis so a BTreeMap's reverse iteration yields
+    // version-desc, and within a version the stamped cohorts before
+    // the unstamped bystanders (`None` sorts below `Some` and last
+    // after `.rev()`) — matching the Postgres override's
+    // `ORDER BY workflow_version DESC, arm DESC NULLS LAST`.
+    let mut per_version: BTreeMap<(i32, Option<String>), Acc> = BTreeMap::new();
     for job in jobs {
         if let Some(since) = since
             && job.opened_on < since
         {
             continue;
         }
-        let acc = per_version.entry(job.workflow_version).or_insert(Acc {
-            total: 0,
-            by_status: BTreeMap::new(),
-            outcomes: BTreeMap::new(),
-            closed_without_outcome: 0,
-            cycle_days: Vec::new(),
-        });
+        let arm = job
+            .metadata
+            .get(crate::experiments::ARM_KEY)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let acc = per_version
+            .entry((job.workflow_version, arm))
+            .or_insert(Acc {
+                total: 0,
+                by_status: BTreeMap::new(),
+                outcomes: BTreeMap::new(),
+                closed_without_outcome: 0,
+                cycle_days: Vec::new(),
+            });
         acc.total += 1;
         *acc.by_status.entry(job_status_key(job.status)).or_insert(0) += 1;
         if job.status == JobStatus::Closed {
@@ -291,11 +310,12 @@ pub fn terminal_report_from_jobs(
     per_version
         .into_iter()
         .rev()
-        .map(|(version, mut acc)| {
+        .map(|((version, arm), mut acc)| {
             acc.cycle_days
                 .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             VersionTerminalReport {
                 version,
+                arm,
                 total: acc.total,
                 by_status: acc.by_status,
                 outcomes: acc.outcomes,

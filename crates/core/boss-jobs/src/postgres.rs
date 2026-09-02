@@ -1264,8 +1264,14 @@ impl JobsRepository for PgJobs {
         // packets that predate the stamps, and the percentiles are
         // `percentile_cont`, which the port helper mirrors
         // formula-for-formula.
+        // The arm axis (Tier 2, 6ea5a12a) rides in every GROUP BY, and
+        // the joins compare it with IS NOT DISTINCT FROM because the
+        // unstamped cohort's arm is NULL and `NULL = NULL` would drop
+        // its rows. Ordering matches the port helper's BTreeMap
+        // reverse-iteration: version desc, then arm desc, NULLS LAST.
         let rows: Vec<(
             i32,
+            Option<String>,
             i64,
             serde_json::Value,
             serde_json::Value,
@@ -1277,6 +1283,7 @@ impl JobsRepository for PgJobs {
             r#"
             WITH base AS (
               SELECT workflow_version,
+                     metadata->>'experiment_arm' AS arm,
                      status,
                      metadata->>'outcome' AS outcome,
                      COALESCE(
@@ -1291,38 +1298,39 @@ impl JobsRepository for PgJobs {
                 AND ($3::bool IS NULL OR simulated = $3)
             ),
             statuses AS (
-              SELECT workflow_version,
+              SELECT workflow_version, arm,
                      jsonb_object_agg(status, n) AS by_status,
                      SUM(n)::BIGINT AS total
               FROM (
-                SELECT workflow_version, status, COUNT(*) AS n
-                FROM base GROUP BY workflow_version, status
+                SELECT workflow_version, arm, status, COUNT(*) AS n
+                FROM base GROUP BY workflow_version, arm, status
               ) t
-              GROUP BY workflow_version
+              GROUP BY workflow_version, arm
             ),
             outcomes AS (
-              SELECT workflow_version,
+              SELECT workflow_version, arm,
                      jsonb_object_agg(outcome, n)
                        FILTER (WHERE outcome IS NOT NULL) AS outcomes,
                      COALESCE(SUM(n) FILTER (WHERE outcome IS NULL), 0)::BIGINT
                        AS closed_without_outcome
               FROM (
-                SELECT workflow_version, outcome, COUNT(*) AS n
+                SELECT workflow_version, arm, outcome, COUNT(*) AS n
                 FROM base WHERE status = 'closed'
-                GROUP BY workflow_version, outcome
+                GROUP BY workflow_version, arm, outcome
               ) t
-              GROUP BY workflow_version
+              GROUP BY workflow_version, arm
             ),
             cycles AS (
-              SELECT workflow_version,
+              SELECT workflow_version, arm,
                      COUNT(*)::BIGINT AS samples,
                      percentile_cont(0.5) WITHIN GROUP (ORDER BY cycle_days) AS median,
                      percentile_cont(0.9) WITHIN GROUP (ORDER BY cycle_days) AS p90
               FROM base
               WHERE status = 'closed' AND cycle_days IS NOT NULL
-              GROUP BY workflow_version
+              GROUP BY workflow_version, arm
             )
             SELECT s.workflow_version,
+                   s.arm,
                    s.total,
                    s.by_status,
                    COALESCE(o.outcomes, '{}'::jsonb) AS outcomes,
@@ -1331,9 +1339,13 @@ impl JobsRepository for PgJobs {
                    c.median,
                    c.p90
             FROM statuses s
-            LEFT JOIN outcomes o USING (workflow_version)
-            LEFT JOIN cycles c USING (workflow_version)
-            ORDER BY s.workflow_version DESC
+            LEFT JOIN outcomes o
+              ON o.workflow_version = s.workflow_version
+             AND o.arm IS NOT DISTINCT FROM s.arm
+            LEFT JOIN cycles c
+              ON c.workflow_version = s.workflow_version
+             AND c.arm IS NOT DISTINCT FROM s.arm
+            ORDER BY s.workflow_version DESC, s.arm DESC NULLS LAST
             "#,
         )
         .bind(kind)
@@ -1365,6 +1377,7 @@ impl JobsRepository for PgJobs {
             .map(
                 |(
                     version,
+                    arm,
                     total,
                     by_status,
                     outcomes,
@@ -1375,6 +1388,7 @@ impl JobsRepository for PgJobs {
                 )| {
                     Ok(crate::port::VersionTerminalReport {
                         version,
+                        arm,
                         total,
                         by_status: counts_map(by_status)?,
                         outcomes: counts_map(outcomes)?,

@@ -79,8 +79,14 @@ StateDirectory=boss-train
 WorkingDirectory=-/var/lib/boss-train/repo
 ExecStart=/usr/local/bin/boss train cadence
 Environment=RUST_LOG=info
-Restart=on-failure
+# Restart=ALWAYS, not on-failure: this is a supervisor loop, and a
+# loop that exits CLEANLY still leaves the yard unconducted — measured
+# 2026-09-02: a clean exit at ~08:15Z stopped deploys, converges,
+# boardings and alarms for six hours, and systemd's on-failure saw
+# nothing to heal. Any exit is a failure of supervision.
+Restart=always
 RestartSec=10
+StartLimitIntervalSec=0
 
 [Install]
 WantedBy=multi-user.target

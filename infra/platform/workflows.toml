@@ -1265,3 +1265,207 @@ title_template = "Cancelled"
 terminal = { outcome = "cancelled" }
 metadata_defaults = { outcome_kind = "aborted" }
 
+
+# ---------------------------------------------------------------------
+# protocol-experiment — the experiment IS a packet (6ea5a12a).
+#
+# Q3 of network-experiments.md, as David answered it (574c2adf,
+# 2026-08-22): "let's make experiments packets with promoted / retired
+# terminal states" — so there is no experiments table and no
+# experiments registry; the network's own machinery carries its own
+# A/Bs. The protocol below was authored and iterated LIVE (v1→v5,
+# 2026-08-26) through the registry, and real experiments have run
+# through it; this entry is the residue, carried here so a fresh
+# deployment ships the protocol at all. The seed binary inserts only
+# when the kind is absent, so live registries that have already moved
+# past this body are never touched. The body is the live v5 row,
+# verbatim.
+#
+# Q4 (same review): experimenting is limited to the IT department +
+# platform-admins for now — enforced the way every platform protocol
+# is gated, `authority_role = "platform-admin"` on each acting step.
+#
+# SPLIT ADMISSION (Tier 2) reads an OPEN packet of this kind whose JOB
+# metadata declares, on top of the steps below:
+#
+#   kind_under_test    — the workflow kind whose admission splits
+#   control_version    — version pinned to the control arm
+#   candidate_version  — version pinned to the candidate arm (a draft,
+#                        until a promote publishes it)
+#   split              — candidate share in percent, 0-100 (default 50)
+#
+# While the packet is open, every new packet of that kind hash-splits
+# by its own job id into an arm, pins to that arm's version, and is
+# stamped `experiment_arm` / `experiment_id` — the window is the
+# packet's open interval, and the per-kind terminal report groups by
+# (version, arm). The keys live in job metadata rather than step
+# fields because v5 deliberately widened the STEP fields (`control` /
+# `candidate`) to free text for non-workflow experiments; a
+# workflow-version A/B declares the machine-readable half up here.
+# boss-jobs/src/experiments.rs owns the contract.
+
+[[workflow]]
+kind = "protocol-experiment"
+label = "Experiment"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = """
+An A/B between two things, with the hypothesis stated BEFORE the result is known.
+
+THE ORDERING IS THE POINT. `state` cannot be skipped and `measure` cannot open until it closes, so the prediction, the metric and the decision rule are on the record with an audit timestamp that precedes the numbers. That is what makes the prediction falsifiable rather than a story told afterwards. Three changes on 2026-08-26 were predicted confidently and all three were wrong - more cores would speed the gate (it was bound at 4, not 20), the cgroup fix would help (16% slower), the node resets were thermal (a boot-stage timer, at 40C and idle). None needed statistics to catch; they needed the claim written down first.
+
+v5 WIDENS THE ARMS FROM PROTOCOL VERSIONS TO ANYTHING. Until now `control_version` and `candidate_version` were workflow versions and the measurement source was fixed as the per-version terminal report. That made the protocol unable to hold the experiments actually worth running: gate concurrency, build width, a test-harness change, a scheduling policy. Every one of those is a control, a candidate, a metric and a rule stated in advance - the same discipline over a different subject. The fields are now `control` and `candidate`, free text naming whatever the two arms are, and `source` on `measure` says where the numbers came from. A workflow-version A/B still fits: name the versions in the arms and the terminal report as the source.
+
+v5 ALSO MAKES CHEAPNESS A MEASUREMENT RATHER THAN A CLAIM. `decide` now requires `elapsed` - the wall clock from starting the run to writing the verdict. If the argument for empirical testing is that it is cheap, every experiment should carry its own price tag, and the distribution of that field should settle the argument one way or the other without anybody having to be persuaded. An experiment that took ten minutes and overturned a confident belief is the case for the practice; one that took three days to return inconclusive is evidence against, and should be just as visible.
+
+ACCEPTANCE IS DELIBERATELY WEAK FOR NOW. `decision_rule` is free text, so 'candidate is not worse on cycle time' is a legitimate rule at current volume. The machinery does not change when the threshold tightens to a real significance test - only the sentence in that field does. `sample_floor` is where you say how little data you are willing to decide on, in advance, so that stopping when you like the answer is visible as a departure from your own rule rather than as a judgement call.
+
+n IS OFTEN 1 HERE, AND THAT IS NOT AUTOMATICALLY A FLAW. Much of what gets tested is a deterministic build-and-test workload, not a stochastic process; the threat to validity is systematic - contention, caching, a stale artefact - rather than sampling noise. Which is why `confounds` is required on `decide` and is usually the field that matters most. A confidently-stated n of 1 with the confounds named beats n of 5 with them ignored.
+
+v2 made the terminals EXCLUSIVE. In v1 `promoted` and `retired` shared `ready_when: steps.decide.done`, so closing `decide` made both ready and an actor could complete both - which happened on the first real experiment (cf832288): a confirmed hypothesis recorded with both terminals complete, job outcome landing on whichever was written last. A fork needs a discriminator, not two doors with the same lock.
+
+The publish gate then refused THAT: a fork over a free-text field needs a fallback successor, or a typo in `verdict` strands the packet with no reachable terminal. The fallback is `inconclusive` - not a workaround, but the honest outcome for most experiments at this volume. A protocol offering only promote or retire quietly pressures every result into one. v4 closed the verdict set for the same reason the learning protocol did: a free-text fork needs a catch-all, and a catch-all whose predicate is merely 'the deciding step closed' fires alongside the specific branch and steals the outcome."""
+
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+title_template = "Experiment: {metadata.protocol}"
+authority_role = "platform-admin"
+
+[[workflow.step]]
+title = "state"
+kind = "task"
+ready_when = "steps.opened.done"
+title_template = "Hypothesis for {metadata.protocol}"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "hypothesis"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "metric"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "control"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "candidate"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "decision_rule"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "sample_floor"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.state.done"
+title_template = "Running: {metadata.protocol}"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "started_at"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "method"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "measure"
+kind = "task"
+ready_when = "steps.run.done"
+title_template = "Measure {metadata.protocol}"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "control_result"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "candidate_result"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "samples"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "source"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "decide"
+kind = "task"
+ready_when = "steps.measure.done"
+title_template = "Decide {metadata.protocol}"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "verdict"
+field_type = "promote|retire|inconclusive"
+required = true
+[[workflow.step.fields]]
+name = "decision"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "against_stated_rule"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "confounds"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "elapsed"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "promoted"
+kind = "outcome"
+ready_when = "steps.decide.done AND steps.decide.metadata.verdict = \"promote\""
+title_template = "Promoted: {metadata.protocol}"
+authority_role = "platform-admin"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "promoted" }
+
+[[workflow.step]]
+title = "retired"
+kind = "outcome"
+ready_when = "steps.decide.done AND steps.decide.metadata.verdict = \"retire\""
+title_template = "Retired: {metadata.protocol}"
+authority_role = "platform-admin"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "retired" }
+
+[[workflow.step]]
+title = "inconclusive"
+kind = "outcome"
+ready_when = "steps.decide.done AND steps.decide.metadata.verdict = \"inconclusive\""
+title_template = "Inconclusive: {metadata.protocol}"
+authority_role = "platform-admin"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "inconclusive" }
+
+[[workflow.step]]
+title = "abandoned"
+kind = "outcome"
+ready_when = "steps.state.done AND job.metadata.abandoned = \"true\""
+title_template = "Abandoned: {metadata.protocol}"
+authority_role = "platform-admin"
+metadata_defaults = { outcome_kind = "withdrawn" }
+terminal = { outcome = "abandoned" }
+[[workflow.step.fields]]
+name = "reason"
+field_type = "string"
+required = true

@@ -1839,12 +1839,24 @@ pub(crate) enum ConvergenceVerdict {
 pub(crate) fn convergence_verdict(
     merge_ref: &str,
     cluster_commit: Option<&str>,
+    merge_is_ancestor_of_cluster: Option<bool>,
     mins_since_merge: i64,
     alarm_after_mins: i64,
 ) -> ConvergenceVerdict {
     if let Some(c) = cluster_commit
         && commits_match(merge_ref, c)
     {
+        return ConvergenceVerdict::Converged;
+    }
+    // Equality cannot see "the cluster rolled PAST this train". With
+    // two trains in flight, the second's deploy overwrites the first's
+    // evidence window: on 2026-09-02 train #176 wedged at converge
+    // forever because the cluster self-reported #177's commit — which
+    // CONTAINS #176's merge. Ancestry is the honest question ("does
+    // the running commit include my merge"), answered by git at the
+    // call site; None means git could not answer (no clone, unknown
+    // commit) and converges nothing — absence of evidence, as ever.
+    if merge_is_ancestor_of_cluster == Some(true) {
         return ConvergenceVerdict::Converged;
     }
     if mins_since_merge >= alarm_after_mins {
@@ -3303,9 +3315,32 @@ impl Conductor {
         let mins_since_merge = merged_at
             .map(|m| (now.fixed_offset() - m).num_minutes())
             .unwrap_or(0);
+        // Equality misses "rolled past" (see convergence_verdict); ask
+        // git the ancestry question only when equality already failed,
+        // against the conductor clone — which reconcile keeps fetched.
+        // Any git failure (no clone yet, commit unknown to the forge)
+        // reads None: converges nothing, never guesses.
+        let ancestor = match cluster_commit.as_deref() {
+            Some(c) if !commits_match(&merge_ref, c) => {
+                let clone = self.cfg.clone.clone();
+                sh_unchecked(&[
+                    "git",
+                    "-C",
+                    &clone,
+                    "merge-base",
+                    "--is-ancestor",
+                    &merge_ref,
+                    c,
+                ])
+                .ok()
+                .map(|o| o.status.success())
+            }
+            _ => None,
+        };
         match convergence_verdict(
             &merge_ref,
             cluster_commit.as_deref(),
+            ancestor,
             mins_since_merge,
             self.cfg.converge_alarm_mins,
         ) {
@@ -5734,7 +5769,13 @@ mod tests {
     fn a_matching_self_report_converges_regardless_of_elapsed_time() {
         for mins in [0, 29, 500] {
             assert_eq!(
-                convergence_verdict("4ee5bba7a17a", Some("4ee5bba7a17a0123456789ab"), mins, 30),
+                convergence_verdict(
+                    "4ee5bba7a17a",
+                    Some("4ee5bba7a17a0123456789ab"),
+                    None,
+                    mins,
+                    30
+                ),
                 ConvergenceVerdict::Converged,
             );
         }
@@ -5745,21 +5786,40 @@ mod tests {
         // None: unreachable, or a binary predating the commit field —
         // absence never converges and times out like any other lag.
         assert_eq!(
-            convergence_verdict("4ee5bba7a17a", None, 29, 30),
+            convergence_verdict("4ee5bba7a17a", None, None, 29, 30),
             ConvergenceVerdict::Waiting,
         );
         assert_eq!(
-            convergence_verdict("4ee5bba7a17a", None, 30, 30),
+            convergence_verdict("4ee5bba7a17a", None, None, 30, 30),
             ConvergenceVerdict::Overdue,
         );
         // The previous release still running: same shape.
         assert_eq!(
-            convergence_verdict("4ee5bba7a17a", Some("d92230071234"), 10, 30),
+            convergence_verdict("4ee5bba7a17a", Some("d92230071234"), None, 10, 30),
             ConvergenceVerdict::Waiting,
         );
         assert_eq!(
-            convergence_verdict("4ee5bba7a17a", Some("d92230071234"), 31, 30),
+            convergence_verdict("4ee5bba7a17a", Some("d92230071234"), None, 31, 30),
             ConvergenceVerdict::Overdue,
+        );
+    }
+    /// The rolled-past case (2026-09-02, train #176): the cluster
+    /// self-reports a LATER commit that contains this train's merge.
+    /// Equality misses; ancestry converges. And git's inability to
+    /// answer (None) must never converge — absence of evidence.
+    #[test]
+    fn a_cluster_rolled_past_the_merge_still_converges_by_ancestry() {
+        assert_eq!(
+            convergence_verdict("4ee5bba7a17a", Some("d92230071234"), Some(true), 500, 30),
+            ConvergenceVerdict::Converged
+        );
+        assert_eq!(
+            convergence_verdict("4ee5bba7a17a", Some("d92230071234"), Some(false), 31, 30),
+            ConvergenceVerdict::Overdue
+        );
+        assert_eq!(
+            convergence_verdict("4ee5bba7a17a", None, None, 10, 30),
+            ConvergenceVerdict::Waiting
         );
     }
 

@@ -1467,6 +1467,34 @@ mod tests {
             jk("payroll-941-filing", "Payroll 941 Filing", &["location"]),
             jk("income-tax-filing", "Income Tax Filing", &["location"]),
             jk("sales-tax-filing", "Sales Tax Filing", &["location"]),
+            // The-roster-acts operating rhythms (1533872f) — the
+            // department shifts that wake the formerly dormant roles.
+            jk(
+                "taproom-service-shift",
+                "Taproom Service Shift",
+                &["location"],
+            ),
+            jk("route-delivery-run", "Route Delivery Run", &["location"]),
+            jk("cellar-daily-round", "Cellar Daily Round", &["location"]),
+            jk(
+                "facility-maintenance-round",
+                "Facility Maintenance Round",
+                &["location"],
+            ),
+            jk("it-support-shift", "IT Support Shift", &["location"]),
+            jk("account-checkin", "Account Check-in", &["account"]),
+            jk("taproom-event", "Taproom Event", &["location"]),
+            jk(
+                "ar-collections-run",
+                "Weekly A/R Collections Run",
+                &["location"],
+            ),
+            jk(
+                "weekly-leadership-review",
+                "Weekly Leadership Review",
+                &["location"],
+            ),
+            jk("people-ops-cycle", "Weekly People-Ops Cycle", &["location"]),
         ];
 
         let mut state = ShapeDrivenState::new();
@@ -1549,6 +1577,34 @@ mod tests {
         assert_eq!(
             bh, 0,
             "brewery-hire is rate=0 today; tenant.toml regression if non-zero, got {bh}"
+        );
+
+        // The-roster-acts rhythms (1533872f) are deterministic like
+        // morning-brew, so their counts are exact. The taproom is open
+        // weekends AND holidays (weekend_multiplier 1.0): 3 shift
+        // sections × all 30 days. Distribution routes run business
+        // days only: 2 × 21 working days (MLK Day excluded).
+        let ts = state
+            .counters
+            .jobs_created_by_kind
+            .get("taproom-service-shift")
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(
+            ts, 90,
+            "taproom-service-shift is a deterministic 3-section shift, \
+             7 days a week: 3 × 30 days, got {ts}"
+        );
+        let rd = state
+            .counters
+            .jobs_created_by_kind
+            .get("route-delivery-run")
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(
+            rd, 42,
+            "route-delivery-run is a deterministic 2-route dock day: \
+             2 × 21 working days in 2024-01-02..01-31, got {rd}"
         );
 
         // No skips — every Workflow has a Subject pool seeded.
@@ -1821,7 +1877,7 @@ mod tests {
         let mut rng = Rng::new(0x0a1a_10a1); // "anomalies"
 
         let mut day = date(2024, 1, 6);
-        for _ in 0..180 {
+        for _ in 0..365 {
             simulate_day(
                 &kinds,
                 &registry,
@@ -1837,17 +1893,20 @@ mod tests {
 
         // seasonal-release has recipe_revision_probability = 0.20
         // + cancel_probability = 0.05. Rate is 0.15/day modulated by
-        // month_multipliers (Jan 0.5, Feb 0.7, …); over 180 days
-        // expect ~25-30 Jobs and several anomaly rolls. Exact counts
+        // month_multipliers (Jan 0.5, Feb 0.7, …); over a year
+        // expect ~50 Jobs and several anomaly rolls. Exact counts
         // depend on RNG; the assertion is "the path produces non-
         // zero hits". 180 days (was 60) was needed after the 2026-
         // 05-02 federal-holiday-as-non-business-day change in
         // sampler.rs — that shifts every other Workflow's RNG draws
         // on holidays, so the seasonal-release seed lands a longer
-        // run of 0s within a 60-day window for some seeds.
+        // run of 0s within a 60-day window for some seeds. 365 days
+        // (was 180) for the same reason after the-roster-acts
+        // (1533872f) added two Poisson kinds (account-checkin,
+        // taproom-event) whose daily draws shift the stream again.
         assert!(
             state.counters.anomalies_fired > 0,
-            "expected some anomalies to fire over 180 days, got 0"
+            "expected some anomalies to fire over 365 days, got 0"
         );
         // Per-anomaly counters use "<jobkind>:<name>" keys.
         let revisions = state

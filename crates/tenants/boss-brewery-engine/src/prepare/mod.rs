@@ -14,9 +14,10 @@
 //! pure public-API client (no DB credentials, no privileged internal
 //! state — every write goes through a service behind its port):
 //!
-//! - [`publish_workflows`] ([`workflows`]) — open one
-//!   `workflow-design` Job per brewery Workflow and walk it to
-//!   closure so the spec lands in the registry with full provenance.
+//! - [`publish_workflows`] (`boss_jobs::bootstrap`, shared with the
+//!   used-device-shop tenant) — open one `workflow-design` Job per
+//!   brewery Workflow and walk it to closure so the spec lands in
+//!   the registry with full provenance.
 //! - [`seed_tenant_data`] ([`tenant_data`]) — POST the brewery's
 //!   operators, accounts, vendors, employees, catalog, assets, and
 //!   opening balances, and prime the clock to the sim epoch first.
@@ -30,8 +31,7 @@
 
 pub mod model;
 pub mod tenant_data;
-pub mod workflows;
 
+pub use boss_jobs::bootstrap::publish_workflows;
 pub use model::prepare_model;
 pub use tenant_data::{SeedBases, seed_tenant_data};
-pub use workflows::publish_workflows;

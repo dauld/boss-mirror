@@ -166,10 +166,18 @@ case "$TENANT" in
         fi
         ;;
     device-shop)
+        # Converged tenant prepare, mirroring the brewery branch:
+        # classes + company identity + policy + roster + device
+        # catalog + Workflows in one idempotent call
+        # (boss_used_device_shop_engine::prepare::prepare_model).
+        # Unlike the brewery there is no sim daemon to start
+        # afterwards — once seeded, work on this tenant is driven by
+        # human/agent actors through the normal surfaces.
         if command -v boss-used-device-shop-engine >/dev/null; then
-            log "device-shop tenant — engine binary present"
+            BOSS_SIM_SEEDS_DIR="$REPO_ROOT/examples/used-device-shop/seeds" \
+                boss-used-device-shop-engine prepare || log "WARN: device-shop prepare exit non-zero"
         else
-            log "WARN: boss-used-device-shop-engine not on PATH"
+            log "WARN: boss-used-device-shop-engine not on PATH — device-shop tenant not seeded"
         fi
         ;;
 esac

@@ -9,12 +9,14 @@
 //! Hexagonal: the domain defines a `JobsRepository` port (trait).
 //! Postgres, in-memory, and other adapters implement the same trait.
 
+pub mod bootstrap;
 pub mod cadence;
 pub mod calendar_hook;
 pub mod car;
 pub mod delivery;
 pub mod escalation;
 pub mod events;
+pub mod experiments;
 pub mod http;
 pub mod in_memory;
 pub mod job_edges;

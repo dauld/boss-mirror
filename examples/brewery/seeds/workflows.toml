@@ -520,6 +520,12 @@ title = "deliver"
 kind = "shipment"
 ready_when = "steps.pull-and-stage.done"
 title_template = "Deliver"
+# 1533872f — kegs are delivered by DRIVERS. With no authority_role
+# this fell back to the shipment StepType's required_roles and
+# landed on shipping-clerks (9 heads) while all 24
+# distribution-drivers idled. The live registry was fixed first;
+# this is the seed catching up so a rebuild doesn't regress it.
+authority_role = "distribution-driver"
 # Logistics step — driver confirms delivery via the courier
 # counterparty's scan chain, not via exec sign-off. Real
 # brewery ops don't gate Job closure on a manager signing
@@ -758,6 +764,8 @@ metadata_defaults = { batch_id = "", excise_bbl = 4, produces_products = [
 title = "launch-announcement"
 kind = "outreach"
 ready_when = "steps.package.done"
+# 1533872f — same routing rationale as tap-launch/announce.
+authority_role = "brand-manager"
 title_template = "Launch announcement"
 
 [[workflow.step]]
@@ -1160,6 +1168,9 @@ sign_offs_required = ["owner"]
 title = "announce"
 kind = "outreach"
 ready_when = "steps.owner-approval.done"
+# 1533872f — launch comms are brand work; unrouted, this fell to the
+# outreach StepType's sales-rep fallback while brand-managers idled.
+authority_role = "brand-manager"
 title_template = "Announce to taproom + accounts"
 
 [[workflow.step]]
@@ -1196,10 +1207,14 @@ ready_when = "true"
 title_template = "Manager requests new headcount"
 metadata_defaults = { trigger_kind = "operator", trigger_name = "headcount-request" }
 
+# 1533872f — the recruiting tier is PEOPLE-department work. Unrouted,
+# these fell to no one (bare tasks are left "for an operator" the sim
+# never plays) or to the outreach StepType's sales-rep fallback.
 [[workflow.step]]
 title = "open-requisition"
 kind = "task"
 ready_when = "steps.trigger.done"
+authority_role = "hr-generalist"
 title_template = "Open requisition"
 metadata_defaults = { role_target = "", department = "" }
 
@@ -1207,12 +1222,14 @@ metadata_defaults = { role_target = "", department = "" }
 title = "source-candidates"
 kind = "outreach"
 ready_when = "steps.open-requisition.done"
+authority_role = "recruiter"
 title_template = "Source candidates"
 
 [[workflow.step]]
 title = "interviews"
 kind = "task"
 ready_when = "steps.source-candidates.done"
+authority_role = "hr-generalist"
 title_template = "Interviews"
 
 [[workflow.step]]
@@ -1228,12 +1245,23 @@ sign_offs_required = ["owner"]
 title = "onboarding-day-1"
 kind = "task"
 ready_when = "steps.make-offer.done"
+authority_role = "hr-generalist"
 title_template = "Onboarding day 1"
+
+# 1533872f — benefits enrollment is the benefits coordinator's slice
+# of onboarding: plan election, payroll deductions, dependents.
+[[workflow.step]]
+title = "benefits-enrollment"
+kind = "task"
+ready_when = "steps.onboarding-day-1.done"
+authority_role = "benefits-coord"
+title_template = "Benefits enrollment"
+duration_hours = 2.0
 
 [[workflow.step]]
 title = "onboarding-week-1"
 kind = "hr-hire"
-ready_when = "steps.onboarding-day-1.done"
+ready_when = "steps.benefits-enrollment.done"
 title_template = "Onboarding week 1 sign-off"
 authority_role = "head-brewer"
 sign_offs_required = ["head-brewer"]
@@ -1278,10 +1306,14 @@ ready_when = "true"
 title_template = "Resignation notice or termination decision"
 metadata_defaults = { trigger_kind = "event", trigger_name = "employee-separation" }
 
+# 1533872f — offboarding administration is hr-generalist work; the
+# unrouted steps stranded (bare tasks) or fell to the checklist
+# StepType's shift-lead fallback.
 [[workflow.step]]
 title = "notify-last-day"
 kind = "task"
 ready_when = "steps.trigger.done"
+authority_role = "hr-generalist"
 title_template = "Notify + last-day plan"
 metadata_defaults = { reason = "voluntary", last_day = "" }
 
@@ -1289,12 +1321,14 @@ metadata_defaults = { reason = "voluntary", last_day = "" }
 title = "exit-interview"
 kind = "task"
 ready_when = "steps.notify-last-day.done"
+authority_role = "hr-generalist"
 title_template = "Exit interview"
 
 [[workflow.step]]
 title = "offboarding-checklist"
 kind = "checklist"
 ready_when = "steps.exit-interview.done"
+authority_role = "hr-generalist"
 title_template = "Offboarding checklist"
 metadata_defaults = { items = [
     { label = "return equipment", checked = false },
@@ -2696,7 +2730,11 @@ paid via a side-effect that drains 2100 AP back into 1000 Cash.
 title = "pull-aging-report"
 kind = "task"
 ready_when = "true"
-authority_role = "bookkeeper"
+# 1533872f — AP clerking is the ap-clerk's job (the Workflow's own
+# owner_role has said so all along); the 2 bookkeepers were doing it
+# while all 6 ap-clerks idled. Bookkeeper keeps the provenance
+# record below — clerk cuts, bookkeeper records.
+authority_role = "ap-clerk"
 title_template = "Pull due-bills aging report"
 # At step.done the engine will populate `invoices_to_pay` with
 # the IDs of vendor_invoices where status=approved + due_on
@@ -2708,7 +2746,7 @@ metadata_defaults = { window_days = 30, invoices_to_pay = [] }
 title = "cut-checks"
 kind = "bill-payment-batch"
 ready_when = "steps.pull-aging-report.done"
-authority_role = "bookkeeper"
+authority_role = "ap-clerk"
 title_template = "Cut checks + ACH for due bills"
 # This step's side-effect handler (inventory.bill.payment_batch)
 # emits a single inventory.bill.payment_batch topic. The route
@@ -2809,3 +2847,713 @@ metadata_defaults = { account_id = "acc-bigseed-0000", amount_cents = 610000, cu
     { sku = "FP-PALE-1-6-BBL", qty = 50, amount_cents = 250000, revenue_category = "distribution", description = "Pale Ale sixtels — bulk distribution (50 × $50)" },
     { sku = "FP-LAGER-1-2-BBL", qty = 30, amount_cents = 360000, revenue_category = "distribution", description = "Lager half-BBLs — bulk distribution (30 × $120)" },
 ] }
+
+# ===========================================================================
+# THE ROSTER ACTS (1533872f) — recurring operating rhythms for the
+# departments whose roles appeared in no live workflow step. Measured
+# 2026-08-22 (and re-verified against this seed 2026-09-02): 32 of 51
+# roster roles had no step routed to them — the entire taproom (36),
+# distribution floor (69), cellar (24), and every staff department. The
+# workforce drives ASSIGNED steps and assignment flows from
+# authority_role, so a role in no step never acts.
+#
+# The BOSS answer is protocol data: ten new Workflow kinds below, each
+# modeling a real recurring rhythm of an industrial brewer + taproom and
+# each waking a bloc of dormant roles. Opened by `[job_rates.*]` /
+# `[periodic.*]` rows in tenant.toml — zero engine code.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Taproom service shift — the daily operating shift behind the
+# taproom-shift-close financial reconciliation (which stays separate:
+# that kind rings the register at agent speed; this one is the human
+# labor that poured the beer). Wakes taproom-shift-lead (6),
+# bartender (12), taproom-server (18) — the largest dormant bloc.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "taproom-service-shift"
+metadata = { owner_role = "taproom-shift-lead" }
+label = "Taproom Service Shift"
+category = "operations"
+subject_kinds = ["company"]
+description = """
+One taproom service shift: the shift lead opens the room, a bartender
+preps the tap lines and bar stock, servers work the floor through the
+day, the bar breaks down at last call, and the lead files the shift
+recap. The register close + revenue posting stay in
+taproom-shift-close; this Job is the labor that earns it.
+"""
+
+[[workflow.step]]
+title = "trigger"
+kind = "trigger"
+ready_when = "true"
+title_template = "Taproom opens — service shift starts"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "taproom-open" }
+
+[[workflow.step]]
+title = "open-checklist"
+kind = "checklist"
+ready_when = "steps.trigger.done"
+authority_role = "taproom-shift-lead"
+title_template = "Open the room — shift checklist"
+metadata_defaults = { items = [
+    { label = "count tills", checked = false },
+    { label = "POS online", checked = false },
+    { label = "menu boards current", checked = false },
+    { label = "patio + floor set", checked = false },
+] }
+
+[[workflow.step]]
+title = "line-prep"
+kind = "task"
+ready_when = "steps.open-checklist.done"
+authority_role = "bartender"
+title_template = "Tap line check + bar stock"
+duration_hours = 2.0
+
+# The shift itself. labor_hours = wall_clock_hours = 8: a server's
+# floor shift consumes a full person-day of capacity AND a full
+# calendar shift — the case where the two legs agree, authored
+# explicitly so the capacity meter engages.
+[[workflow.step]]
+title = "floor-service"
+kind = "task"
+ready_when = "steps.line-prep.done"
+authority_role = "taproom-server"
+title_template = "Floor service"
+labor_hours = 8.0
+wall_clock_hours = 8.0
+
+[[workflow.step]]
+title = "last-call-close"
+kind = "task"
+ready_when = "steps.floor-service.done"
+authority_role = "bartender"
+title_template = "Last call — break down + clean bar and lines"
+duration_hours = 3.0
+
+[[workflow.step]]
+title = "shift-recap"
+kind = "task"
+ready_when = "steps.last-call-close.done"
+authority_role = "taproom-shift-lead"
+title_template = "Shift recap filed"
+duration_hours = 0.5
+terminal = { outcome = "completed" }
+
+# ---------------------------------------------------------------------------
+# Route delivery run — the distribution floor's daily rhythm. The
+# wholesale-keg-order `deliver` step (now routed to
+# distribution-driver) covers per-order last-mile; this Job is the
+# yard work that stages a route: lead plans it, palletizers wrap it,
+# forklifts load it, the warehouse manager releases it, a driver runs
+# it. Wakes distribution-lead (6), palletizer (15), forklift-operator
+# (24), warehouse-mgr (1) + more driver volume.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "route-delivery-run"
+metadata = { owner_role = "distribution-lead" }
+label = "Route Delivery Run"
+category = "operations"
+subject_kinds = ["company"]
+description = """
+One outbound distribution route, dock to dock: route plan → palletize
+→ forklift load → manifest release → drive the route → reconcile
+empties and paperwork on return.
+"""
+
+[[workflow.step]]
+title = "trigger"
+kind = "trigger"
+ready_when = "true"
+title_template = "Route dispatch — daily delivery run"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "route-dispatch" }
+
+[[workflow.step]]
+title = "build-route-plan"
+kind = "task"
+ready_when = "steps.trigger.done"
+authority_role = "distribution-lead"
+title_template = "Build route plan — sequence stops, assign truck"
+duration_hours = 1.0
+
+[[workflow.step]]
+title = "palletize-orders"
+kind = "task"
+ready_when = "steps.build-route-plan.done"
+authority_role = "palletizer"
+title_template = "Palletize + shrink-wrap staged orders"
+duration_hours = 3.0
+
+[[workflow.step]]
+title = "load-trucks"
+kind = "task"
+ready_when = "steps.palletize-orders.done"
+authority_role = "forklift-operator"
+title_template = "Forklift pallets onto the truck"
+duration_hours = 2.0
+
+[[workflow.step]]
+title = "release-routes"
+kind = "handoff"
+ready_when = "steps.load-trucks.done"
+authority_role = "warehouse-mgr"
+title_template = "Release the route — sign the outbound manifest"
+metadata_defaults = { from_id = "warehouse", to_id = "distribution" }
+
+# Driving the route is the other full-person-day step: both legs 8h.
+[[workflow.step]]
+title = "run-route"
+kind = "task"
+ready_when = "steps.release-routes.done"
+authority_role = "distribution-driver"
+title_template = "Run the route — deliver + collect empties"
+labor_hours = 8.0
+wall_clock_hours = 8.0
+
+[[workflow.step]]
+title = "reconcile-returns"
+kind = "task"
+ready_when = "steps.run-route.done"
+authority_role = "distribution-lead"
+title_template = "Reconcile returns — empties, refusals, paperwork"
+duration_hours = 1.0
+terminal = { outcome = "completed" }
+
+# ---------------------------------------------------------------------------
+# Cellar daily round — the conditioning side of the brewery, which the
+# morning-brew family hands off to and which had NO step at all: 24
+# cellar-techs were dormant while `brewer` did every brewhouse step.
+# Two legs after the fermenter checks: the lab leg (samples → panel)
+# and the tank leg (transfers → keg wash/CIP → line sanitation),
+# joining at the daily production log. Wakes cellar-tech (24), gives
+# lab-tech (9) daily volume (was: seasonal test batches only), and
+# wakes packaging-lead (6) + packaging-mgr (1).
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "cellar-daily-round"
+metadata = { owner_role = "cellar-tech" }
+label = "Cellar Daily Round"
+category = "production"
+subject_kinds = ["company"]
+description = """
+Daily cellar + packaging-hall round: check every active fermenter
+(temps, gravity, pressure), pull QC samples for the lab panel, run
+tank transfers and dry-hop additions, cycle the keg washer + CIP
+loop, sanitize the packaging line, file the day's production log.
+"""
+
+[[workflow.step]]
+title = "trigger"
+kind = "trigger"
+ready_when = "true"
+title_template = "Cellar shift starts — daily round"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "cellar-round" }
+
+# The production shift-lead's daily human step. Every other
+# shift-lead touchpoint is either owner_role metadata (morning-brew)
+# or the agent-completed ring-sales intake — measured under
+# 1533872f, shift-leads never completed a step.
+[[workflow.step]]
+title = "shift-brief"
+kind = "task"
+ready_when = "steps.trigger.done"
+authority_role = "shift-lead"
+title_template = "Floor shift brief — priorities + assignments"
+duration_hours = 0.5
+
+[[workflow.step]]
+title = "fermentation-checks"
+kind = "inspection"
+ready_when = "steps.shift-brief.done"
+authority_role = "cellar-tech"
+title_template = "Fermenter checks — temps, gravity, pressure"
+
+# Lab leg.
+[[workflow.step]]
+title = "pull-samples"
+kind = "task"
+ready_when = "steps.fermentation-checks.done"
+authority_role = "lab-tech"
+title_template = "Pull QC samples from active tanks"
+duration_hours = 1.0
+
+[[workflow.step]]
+title = "run-lab-panel"
+kind = "task"
+ready_when = "steps.pull-samples.done"
+authority_role = "lab-tech"
+title_template = "Run lab panel — pH, gravity, micro plating"
+duration_hours = 2.0
+
+# Tank leg (parallel with the lab leg).
+[[workflow.step]]
+title = "tank-transfers"
+kind = "task"
+ready_when = "steps.fermentation-checks.done"
+authority_role = "cellar-tech"
+title_template = "Tank transfers + dry-hop additions"
+duration_hours = 3.0
+
+[[workflow.step]]
+title = "keg-wash-cip"
+kind = "task"
+ready_when = "steps.tank-transfers.done"
+authority_role = "cellar-tech"
+title_template = "Keg washer + CIP loop on emptied tanks"
+duration_hours = 3.0
+
+[[workflow.step]]
+title = "line-sanitation"
+kind = "task"
+ready_when = "steps.keg-wash-cip.done"
+authority_role = "packaging-lead"
+title_template = "Packaging line changeover + sanitation"
+duration_hours = 2.0
+
+[[workflow.step]]
+title = "production-log"
+kind = "task"
+ready_when = "steps.run-lab-panel.done AND steps.line-sanitation.done"
+authority_role = "packaging-mgr"
+title_template = "File the day's cellar + packaging log"
+duration_hours = 0.5
+terminal = { outcome = "completed" }
+
+# ---------------------------------------------------------------------------
+# Account check-in — the recurring relationship work on EXISTING
+# wholesale accounts. `sale` covers acquisition (sales-rep);
+# account-manager (12) and sales-lead (6) had nothing. Subject is any
+# active account (no distribution → uniform draw).
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "account-checkin"
+metadata = { owner_role = "account-manager" }
+label = "Wholesale Account Check-in"
+category = "sales"
+subject_kinds = ["account"]
+description = """
+Recurring account-management touch on an existing wholesale account:
+review order history + aging + tap performance, make the check-in
+call, log the growth plan with the sales lead.
+"""
+
+[[workflow.step]]
+title = "trigger"
+kind = "trigger"
+ready_when = "true"
+title_template = "Account cadence fires — check in on {subject.id}"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "account-checkin-cadence" }
+
+[[workflow.step]]
+title = "review-account-history"
+kind = "task"
+ready_when = "steps.trigger.done"
+authority_role = "account-manager"
+title_template = "Review account history — {subject.id}"
+duration_hours = 1.0
+
+# labor vs wall clock split: the call itself is ~an hour of a
+# person's day, but phone tag with a bar buyer spans a day of
+# calendar. Pacing reads the wall leg; capacity meters the labor leg.
+[[workflow.step]]
+title = "checkin-call"
+kind = "outreach"
+ready_when = "steps.review-account-history.done"
+authority_role = "account-manager"
+title_template = "Check-in call — {subject.id}"
+labor_hours = 1.0
+wall_clock_hours = 24.0
+metadata_defaults = { channel = "phone", recipient_id = "{subject.id}", purpose = "Standing check-in: reorder cadence, tap rotation, service issues" }
+
+[[workflow.step]]
+title = "growth-review"
+kind = "task"
+ready_when = "steps.checkin-call.done"
+authority_role = "sales-lead"
+title_template = "Log growth plan + next actions — {subject.id}"
+duration_hours = 1.0
+terminal = { outcome = "completed" }
+
+# ---------------------------------------------------------------------------
+# Taproom event — tours, trivia nights, release parties: the marketing
+# floor's recurring work. Wakes events-coord (6), social-media-coord
+# (1), brand-manager (6, also newly routed on the launch
+# announcements). Subject is the company: the brewery hosts its own
+# events; campaign Subjects stay for tap-launch arcs.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "taproom-event"
+metadata = { owner_role = "events-coord" }
+label = "Taproom Event"
+category = "marketing"
+subject_kinds = ["company"]
+description = """
+One taproom event, planned through recap: brewery tours, trivia
+nights, release parties, private bookings. Events coordinator plans
+and hosts; social posts the promo; brand supplies the collateral.
+"""
+
+[[workflow.step]]
+title = "trigger"
+kind = "trigger"
+ready_when = "true"
+title_template = "Event booked on the taproom calendar"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "events-calendar" }
+
+[[workflow.step]]
+title = "plan-event"
+kind = "scheduling"
+ready_when = "steps.trigger.done"
+authority_role = "events-coord"
+title_template = "Plan the event — date, space, staffing"
+
+# Promo + collateral run in parallel once the plan is set.
+[[workflow.step]]
+title = "promote-event"
+kind = "task"
+ready_when = "steps.plan-event.done"
+authority_role = "social-media-coord"
+title_template = "Promote — socials + email blast"
+labor_hours = 1.0
+wall_clock_hours = 24.0
+
+[[workflow.step]]
+title = "brand-collateral"
+kind = "task"
+ready_when = "steps.plan-event.done"
+authority_role = "brand-manager"
+title_template = "Collateral — posters, tap cards, merch table"
+duration_hours = 2.0
+
+[[workflow.step]]
+title = "host-event"
+kind = "task"
+ready_when = "steps.promote-event.done AND steps.brand-collateral.done"
+authority_role = "events-coord"
+title_template = "Host the event"
+labor_hours = 4.0
+wall_clock_hours = 6.0
+
+[[workflow.step]]
+title = "event-recap"
+kind = "task"
+ready_when = "steps.host-event.done"
+authority_role = "events-coord"
+title_template = "Event recap — attendance + takeaways"
+duration_hours = 0.5
+terminal = { outcome = "completed" }
+
+# ---------------------------------------------------------------------------
+# Facility maintenance round — the daily walkround between the monthly
+# equipment-preventive-maintenance cycles. Wakes electrician (6) and
+# maintenance-mgr (1); gives mechanic small daily fix-forward volume.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "facility-maintenance-round"
+metadata = { owner_role = "maintenance-mgr" }
+label = "Facility Maintenance Round"
+category = "operations"
+subject_kinds = ["company"]
+description = """
+Daily facilities walkround: glycol loop, compressors, boiler,
+electrical panels. Small fixes happen on the spot; findings are
+logged and prioritized into the monthly preventive cycle.
+"""
+
+[[workflow.step]]
+title = "trigger"
+kind = "trigger"
+ready_when = "true"
+title_template = "Daily maintenance walkround fires"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "maintenance-round" }
+
+[[workflow.step]]
+title = "walkthrough"
+kind = "inspection"
+ready_when = "steps.trigger.done"
+authority_role = "electrician"
+title_template = "Walkround — glycol, compressors, boiler, panels"
+
+[[workflow.step]]
+title = "fix-forward"
+kind = "task"
+ready_when = "steps.walkthrough.done"
+authority_role = "mechanic"
+title_template = "Fix-forward — small repairs on the round"
+duration_hours = 2.0
+
+[[workflow.step]]
+title = "log-and-prioritize"
+kind = "task"
+ready_when = "steps.fix-forward.done"
+authority_role = "maintenance-mgr"
+title_template = "Log findings + prioritize work orders"
+duration_hours = 1.0
+terminal = { outcome = "completed" }
+
+# ---------------------------------------------------------------------------
+# IT support shift — the IT department's daily rhythm. Wakes helpdesk
+# (6), sysadmin (6), it-director (1).
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "it-support-shift"
+metadata = { owner_role = "it-director" }
+label = "IT Support Shift"
+category = "operations"
+subject_kinds = ["company"]
+description = """
+Daily IT operations: helpdesk triages the ticket queue, sysadmins
+work escalations + patching + backup checks, the IT director files
+the daily ops log.
+"""
+
+[[workflow.step]]
+title = "trigger"
+kind = "trigger"
+ready_when = "true"
+title_template = "IT day shift starts"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "it-day-shift" }
+
+[[workflow.step]]
+title = "triage-tickets"
+kind = "task"
+ready_when = "steps.trigger.done"
+authority_role = "helpdesk"
+title_template = "Triage the ticket queue"
+duration_hours = 2.0
+
+[[workflow.step]]
+title = "resolve-escalations"
+kind = "task"
+ready_when = "steps.triage-tickets.done"
+authority_role = "sysadmin"
+title_template = "Work escalations — patching, backups, infra checks"
+duration_hours = 4.0
+
+[[workflow.step]]
+title = "daily-it-log"
+kind = "task"
+ready_when = "steps.resolve-escalations.done"
+authority_role = "it-director"
+title_template = "File the daily IT ops log"
+duration_hours = 0.5
+terminal = { outcome = "completed" }
+
+# ---------------------------------------------------------------------------
+# A/R collections run — the receivables chase. Invoicing itself is
+# agent-executed (billing steps complete at dispatcher speed), so the
+# 6 ar-clerks never touched a step; collections is the human half of
+# A/R. Weekly, opened by `[periodic.weekly-ar-collections]`. Wakes
+# ar-clerk (6) and controller (1).
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "ar-collections-run"
+metadata = { owner_role = "ar-clerk" }
+label = "Weekly A/R Collections Run"
+category = "finance"
+subject_kinds = ["company"]
+description = """
+Weekly receivables chase: pull the A/R aging, dun the past-due
+accounts, log escalations (write-off / credit-hold candidates) for
+the controller's review.
+"""
+
+[[workflow.step]]
+title = "trigger"
+kind = "trigger"
+ready_when = "true"
+title_template = "Weekly A/R collections cycle fires"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "weekly-ar-collections" }
+
+[[workflow.step]]
+title = "pull-ar-aging"
+kind = "task"
+ready_when = "steps.trigger.done"
+authority_role = "ar-clerk"
+title_template = "Pull the A/R aging report"
+duration_hours = 2.0
+
+[[workflow.step]]
+title = "dunning-outreach"
+kind = "outreach"
+ready_when = "steps.pull-ar-aging.done"
+authority_role = "ar-clerk"
+title_template = "Dun past-due accounts"
+labor_hours = 2.0
+wall_clock_hours = 24.0
+metadata_defaults = { channel = "email", purpose = "Past-due reminders on open invoices; payment-plan offers past 60 days" }
+
+[[workflow.step]]
+title = "escalation-review"
+kind = "task"
+ready_when = "steps.dunning-outreach.done"
+authority_role = "controller"
+title_template = "Controller review — write-offs + credit holds"
+duration_hours = 1.0
+terminal = { outcome = "completed" }
+
+# ---------------------------------------------------------------------------
+# Weekly leadership review — the executive operating cadence. One kind
+# wakes the whole leadership bloc: fp-analyst (6) compiles, controller
+# + head-of-sales + head-of-marketing + cto read out in parallel, coo
+# runs the decisions, ceo signs the week. Opened by
+# `[periodic.weekly-leadership-review]`.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "weekly-leadership-review"
+metadata = { owner_role = "ceo" }
+label = "Weekly Leadership Review"
+category = "operations"
+subject_kinds = ["company"]
+description = """
+The weekly operating review: FP&A compiles the KPI pack, each
+function reads out (finance, sales, marketing, systems), the COO
+turns readouts into decisions, the CEO signs the week.
+"""
+
+[[workflow.step]]
+title = "trigger"
+kind = "trigger"
+ready_when = "true"
+title_template = "Weekly leadership review fires"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "weekly-leadership-review" }
+
+[[workflow.step]]
+title = "compile-kpis"
+kind = "task"
+ready_when = "steps.trigger.done"
+authority_role = "fp-analyst"
+title_template = "Compile the weekly KPI pack"
+duration_hours = 4.0
+
+[[workflow.step]]
+title = "finance-readout"
+kind = "task"
+ready_when = "steps.compile-kpis.done"
+authority_role = "controller"
+title_template = "Finance readout — cash, margin, aging"
+duration_hours = 1.0
+
+[[workflow.step]]
+title = "sales-readout"
+kind = "task"
+ready_when = "steps.compile-kpis.done"
+authority_role = "head-of-sales"
+title_template = "Sales readout — pipeline, orders, accounts"
+duration_hours = 1.0
+
+[[workflow.step]]
+title = "marketing-readout"
+kind = "task"
+ready_when = "steps.compile-kpis.done"
+authority_role = "head-of-marketing"
+title_template = "Marketing readout — events, launches, brand"
+duration_hours = 1.0
+
+[[workflow.step]]
+title = "systems-readout"
+kind = "task"
+ready_when = "steps.compile-kpis.done"
+authority_role = "cto"
+title_template = "Systems readout — infrastructure + data"
+duration_hours = 1.0
+
+[[workflow.step]]
+title = "ops-decisions"
+kind = "task"
+ready_when = "steps.finance-readout.done AND steps.sales-readout.done AND steps.marketing-readout.done AND steps.systems-readout.done"
+authority_role = "coo"
+title_template = "Operating decisions — actions from the readouts"
+duration_hours = 1.0
+
+[[workflow.step]]
+title = "ceo-review"
+kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
+ready_when = "steps.ops-decisions.done"
+authority_role = "ceo"
+title_template = "CEO sign-off on the week"
+sign_offs_required = ["ceo"]
+
+[[workflow.step]]
+title = "review-closed"
+kind = "outcome"
+ready_when = "steps.ceo-review.done"
+title_template = "Leadership review closed"
+terminal = { outcome = "completed" }
+metadata_defaults = { outcome_kind = "completed" }
+
+# ---------------------------------------------------------------------------
+# People-ops cycle — HR's recurring administration. The hire/terminate
+# Workflows exist but their sim rates are 0 (the duplicate-executive-
+# hire defect keeps them registry-only), so hr-generalist (6),
+# benefits-coord (1), and recruiter (1) need a rhythm that actually
+# opens: the weekly people-ops cycle. Opened by
+# `[periodic.weekly-people-ops]`.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "people-ops-cycle"
+metadata = { owner_role = "hr-generalist" }
+label = "Weekly People-Ops Cycle"
+category = "hr"
+subject_kinds = ["company"]
+description = """
+Weekly people-department administration: timekeeping audit ahead of
+the biweekly payroll run, benefits reconciliation (enrollments,
+deductions, carrier invoices), and the requisition-pipeline review.
+"""
+
+[[workflow.step]]
+title = "trigger"
+kind = "trigger"
+ready_when = "true"
+title_template = "Weekly people-ops cycle fires"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "weekly-people-ops" }
+
+[[workflow.step]]
+title = "timekeeping-audit"
+kind = "task"
+ready_when = "steps.trigger.done"
+authority_role = "hr-generalist"
+title_template = "Timekeeping audit — hours vs schedules"
+duration_hours = 3.0
+
+[[workflow.step]]
+title = "benefits-reconciliation"
+kind = "task"
+ready_when = "steps.timekeeping-audit.done"
+authority_role = "benefits-coord"
+title_template = "Benefits reconciliation — enrollments + carrier invoices"
+duration_hours = 3.0
+
+[[workflow.step]]
+title = "pipeline-review"
+kind = "task"
+ready_when = "steps.benefits-reconciliation.done"
+authority_role = "recruiter"
+title_template = "Requisition pipeline review"
+duration_hours = 2.0
+
+# head-of-people's ONLY other step lives in brewery-terminate, whose
+# sim rate is 0 — without this weekly review the department head
+# never acts.
+[[workflow.step]]
+title = "people-review"
+kind = "task"
+ready_when = "steps.pipeline-review.done"
+authority_role = "head-of-people"
+title_template = "Head-of-people weekly review"
+duration_hours = 1.0
+terminal = { outcome = "completed" }

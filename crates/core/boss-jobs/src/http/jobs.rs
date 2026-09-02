@@ -645,7 +645,7 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
     // is plumbed (older tests) we accept any kind string. We capture
     // the active spec here so the step-materialization pass below
     // doesn't need a second registry lookup.
-    let kind_spec = if let Some(ref reg) = state.kind_registry {
+    let mut kind_spec = if let Some(ref reg) = state.kind_registry {
         match reg.get_active(&job.kind).await {
             Ok(spec) => Some(spec),
             Err(crate::registry::WorkflowError::NotFound(_)) => {
@@ -663,12 +663,88 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
         None
     };
 
+    // Split admission — Tier 2 of the experiments program
+    // (docs/design/network-experiments.md Q1+Q3; packet 6ea5a12a). An
+    // OPEN `protocol-experiment` packet whose metadata declares a
+    // split over this kind governs its admission: the new packet's
+    // own id hash-splits it into an arm, the arm's version becomes
+    // the spec the packet pins to AND materializes steps from, and
+    // the `experiment_arm` / `experiment_id` stamps land in job
+    // metadata BEFORE the JOB_CREATED event below is built — so the
+    // rebuilder replays the recorded choice, never the coin, and the
+    // terminal report's arm dimension reads cohorts off the log.
+    //
+    // Fail-safe is the contract: no governing experiment, a malformed
+    // declaration, an unreadable experiment list, or an arm version
+    // the registry cannot produce (someone discarded the candidate
+    // draft mid-window) all leave admission exactly as it stood —
+    // active version, no stamp. An experiment must never break the
+    // kind it measures.
+    // (Gating on the registry alone is enough: when it is plumbed,
+    // `kind_spec` is Some or the handler already returned above.)
+    if let Some(reg) = state.kind_registry.as_ref() {
+        let experiments_filter = crate::port::JobFilter {
+            kind: Some(crate::experiments::EXPERIMENT_KIND.to_string()),
+            status: Some(JobStatus::Open),
+            ..Default::default()
+        };
+        match state.jobs.list_jobs(&experiments_filter, 200, 0).await {
+            Ok((experiments, _)) => {
+                if let Some(split) =
+                    crate::experiments::governing_experiment(&experiments, &job.kind)
+                {
+                    let arm = crate::experiments::arm_for(&job.id, split.split);
+                    let version = split.version_for(arm);
+                    // The candidate is usually a DRAFT (it stays draft
+                    // history if the experiment retires), so this is
+                    // get_version, not get_active — the experiment is
+                    // exactly the sanctioned way a draft meets traffic.
+                    match reg.get_version(&job.kind, version).await {
+                        Ok(arm_spec) => {
+                            if let serde_json::Value::Object(map) = &mut job.metadata {
+                                // Server-assigned, like the version pin
+                                // below: a client-supplied arm is a
+                                // forged cohort and is overwritten.
+                                map.insert(
+                                    crate::experiments::ARM_KEY.to_string(),
+                                    serde_json::json!(arm),
+                                );
+                                map.insert(
+                                    crate::experiments::EXPERIMENT_ID_KEY.to_string(),
+                                    serde_json::json!(split.experiment_id.to_string()),
+                                );
+                            }
+                            kind_spec = Some(arm_spec);
+                        }
+                        Err(e) => tracing::warn!(
+                            kind = %job.kind,
+                            experiment = %split.experiment_id,
+                            arm,
+                            version,
+                            error = %e,
+                            "experiment names a version the registry cannot produce; \
+                             admitting under the active version, unstamped",
+                        ),
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(
+                kind = %job.kind,
+                error = %e,
+                "cannot consult open experiments; admitting under the active version",
+            ),
+        }
+    }
+
     // Pin the Job to the kind's active version — the version it opens
     // under. Per docs/architecture-decisions.md §Jobs, Workflows, Steps:
     // in-flight Jobs pin to the version they opened under, and creation
     // is blocked against draft/retired kinds (enforced by get_active
     // above, which 400s on an inactive kind). Server-assigned —
-    // overrides any value a client put on the wire.
+    // overrides any value a client put on the wire. Under a governing
+    // experiment `kind_spec` is the ARM's spec by this point, so the
+    // pin is the arm's version — cohort membership fixed at admission,
+    // per the packet model.
     if let Some(ref spec) = kind_spec {
         job.workflow_version = spec.version;
     }

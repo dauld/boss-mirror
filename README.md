@@ -169,9 +169,19 @@ The workspace splits into four tiers (see CLAUDE.md):
   - **Used-device-shop** (`boss-used-device-shop-engine`) — sells,
     services, and resells used physical devices needing
     sophisticated diagnostics + repair. Data lives at
-    `examples/used-device-shop/`.
+    `examples/used-device-shop/`; install it on a fresh VM with
+    `sudo TENANT=device-shop infra/bootstrap-vm.sh` (same service
+    stack as the brewery, no sim daemon — after
+    `boss-used-device-shop-engine prepare` seeds the model, work is
+    driven by human and agent actors).
 
-Adding a third tenant takes two TOML files and a JSON seed — no new Rust, no new web code.
+A tenant is seed data — Workflows, policy grants, Class rows, a
+roster — published through shared bootstrap doors
+(`boss_jobs::bootstrap`, `boss_policy::bootstrap`, the classes batch
+API). The only tenant-specific Rust a third tenant needs is a thin
+`prepare` shell naming its seed files (see
+`crates/tenants/boss-used-device-shop-engine/src/prepare.rs`); no new
+core code, no new web code.
 
 The full crate-by-crate map and service topology live in
 [docs/architecture-diagram.md](docs/architecture-diagram.md).

@@ -1724,12 +1724,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "boss-jobs",
+ "boss-policy",
+ "boss-ports",
  "boss-sim",
  "chrono",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

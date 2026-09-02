@@ -416,3 +416,102 @@ async fn since_and_simulated_push_into_the_sql() {
         .unwrap();
     assert!(none.is_empty());
 }
+
+/// The arm dimension (Tier 2, packet 6ea5a12a) in SQL: cohorts group
+/// by (version, `metadata->>'experiment_arm'`), the unstamped
+/// bystander rides a NULL arm — which is why the CTE joins compare
+/// with IS NOT DISTINCT FROM — and the whole answer must equal the
+/// port's pure function over the same fixture, row for row.
+#[tokio::test(flavor = "multi_thread")]
+async fn arm_cohorts_group_apart_and_match_the_port_contract() {
+    let db = TestDb::new().await;
+    let repo = boss_jobs::PgJobs::new(db.pool.clone());
+
+    let arm = |a: &str, outcome: &str| serde_json::json!({ "outcome": outcome, "experiment_arm": a, "experiment_id": "e-1" });
+    let fixture = vec![
+        // Candidate cohort on v3: closes in 1 and 2 days.
+        with_metadata(
+            packet(
+                "keg-return",
+                3,
+                JobStatus::Closed,
+                d(2026, 8, 20),
+                Some(d(2026, 8, 21)),
+                None,
+                false,
+            ),
+            arm("candidate", "returned"),
+        ),
+        with_metadata(
+            packet(
+                "keg-return",
+                3,
+                JobStatus::Closed,
+                d(2026, 8, 20),
+                Some(d(2026, 8, 22)),
+                None,
+                false,
+            ),
+            arm("candidate", "lost"),
+        ),
+        // Control cohort on v2: closes in 5 days.
+        with_metadata(
+            packet(
+                "keg-return",
+                2,
+                JobStatus::Closed,
+                d(2026, 8, 20),
+                Some(d(2026, 8, 25)),
+                None,
+                false,
+            ),
+            arm("control", "returned"),
+        ),
+        // Bystander on the control version — no stamp, still open.
+        packet(
+            "keg-return",
+            2,
+            JobStatus::Open,
+            d(2026, 8, 1),
+            None,
+            None,
+            false,
+        ),
+    ];
+    for p in &fixture {
+        repo.create_job(p).await.unwrap();
+    }
+
+    let sql = repo
+        .workflow_terminal_report("keg-return", None, None)
+        .await
+        .unwrap();
+    let pure = boss_jobs::port::terminal_report_from_jobs(&fixture, None);
+    assert_eq!(
+        sql, pure,
+        "two implementations of one rule — the SQL and the port helper \
+         must produce identical cohort rows"
+    );
+
+    assert_eq!(sql.len(), 3, "(v3, candidate), (v2, control), (v2, none)");
+    assert_eq!(
+        (sql[0].version, sql[0].arm.as_deref()),
+        (3, Some("candidate"))
+    );
+    assert_eq!(sql[0].total, 2);
+    assert!(approx(sql[0].cycle_time_days.median, 1.5));
+    assert_eq!(
+        (sql[1].version, sql[1].arm.as_deref()),
+        (2, Some("control"))
+    );
+    assert!(approx(sql[1].cycle_time_days.median, 5.0));
+    assert_eq!(
+        (sql[2].version, sql[2].arm.as_deref()),
+        (2, None),
+        "bystanders stay out of both cohorts"
+    );
+    assert_eq!(
+        sql[2].by_status,
+        [("open".to_string(), 1)].into_iter().collect()
+    );
+}
