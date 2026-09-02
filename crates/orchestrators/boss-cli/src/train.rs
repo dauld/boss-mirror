@@ -68,7 +68,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use boss_jobs::delivery::DeliveryPolicyRow;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, Utc};
 use reqwest::Method;
 use serde_json::{Map, Value, json};
 
@@ -1816,6 +1816,45 @@ pub(crate) fn commits_match(a: &str, b: &str) -> bool {
     a.len() >= 7 && b.len() >= 7 && (a.starts_with(b) || b.starts_with(a))
 }
 
+/// What a BLOCKED deploy tree should do this reconcile pass.
+///
+/// WHY THIS EXISTS. `deploy` refuses to build from a dirty or
+/// off-main tree — correctly; deploying an unknown working state is
+/// worse than waiting. But it only logged "deploy tree busy — will
+/// retry" and stamped the step, so on 2026-09-02 the tree sat dirty
+/// with a regenerated `Cargo.lock` and the conductor retried in
+/// silence every ten minutes for SIX HOURS while two merged trains
+/// waited to deploy. Nothing in the system of record said the
+/// pipeline had stopped; it was found by reading a journal by hand.
+///
+/// This is the `ConvergenceVerdict::Overdue` idea one step upstream:
+/// a quiet wait is fine, an INDEFINITE quiet wait is the defect.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DeployBlockVerdict {
+    /// Blocked, but inside the patience window — retry quietly.
+    Waiting,
+    /// Blocked past the window and nothing filed yet — file the packet.
+    Overdue,
+}
+
+/// Pure so the rule is pinned by tests rather than by this comment.
+/// `blocked_since` is the stamp the first blocked pass wrote; None
+/// means this pass is the first, which is never overdue.
+pub(crate) fn deploy_block_verdict(
+    blocked_since: Option<DateTime<FixedOffset>>,
+    now: DateTime<Utc>,
+    alarm_after_mins: i64,
+) -> DeployBlockVerdict {
+    let Some(since) = blocked_since else {
+        return DeployBlockVerdict::Waiting;
+    };
+    if (now.fixed_offset() - since).num_minutes() >= alarm_after_mins {
+        DeployBlockVerdict::Overdue
+    } else {
+        DeployBlockVerdict::Waiting
+    }
+}
+
 /// What the `converged` step should do this reconcile pass.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ConvergenceVerdict {
@@ -3186,7 +3225,7 @@ impl Conductor {
 
     /// Carry a merged train out to the playground — only from a clean
     /// main tree; anything else is recorded and retried next run.
-    async fn deploy(&self, train: &Value, deployed_step: &Value) -> Result<()> {
+    async fn deploy(&self, train: &Value, deployed_step: &Value, now: DateTime<Utc>) -> Result<()> {
         let tree = self.cfg.deploy_tree.clone();
         let tree_path = Path::new(&tree);
         // Deploy only when needed. The skip decision comes before the
@@ -3241,12 +3280,79 @@ impl Conductor {
                     .ok_or_else(|| anyhow!("deployed step without an id on job {tid}"))?;
                 let mut md = metadata_map(deployed_step);
                 md.insert("deploy_blocked".to_string(), json!(reason));
+                // WHEN the block started, stamped once and left alone
+                // while it persists — the elapsed time is the whole
+                // signal, so a stamp that refreshed every pass would
+                // make an indefinite block look permanently fresh.
+                let blocked_since = md
+                    .get("deploy_blocked_since")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| now.to_rfc3339());
+                md.insert("deploy_blocked_since".to_string(), json!(blocked_since));
                 self.api(
                     Method::PUT,
                     &format!("/api/jobs/{tid}/steps/{sid}"),
                     Some(json!({"metadata": md})),
                 )
                 .await?;
+
+                let since = parse_stamp(Some(blocked_since.as_str()));
+                if deploy_block_verdict(since, now, self.cfg.converge_alarm_mins)
+                    == DeployBlockVerdict::Overdue
+                    && !truthy(
+                        train
+                            .get("metadata")
+                            .and_then(|m| m.get("deploy_alarm_filed")),
+                    )
+                {
+                    let mins = since
+                        .map(|s| (now.fixed_offset() - s).num_minutes())
+                        .unwrap_or_default();
+                    log(format!(
+                        "train {}: deploy tree BLOCKED {mins} min — filing packet",
+                        id8(tid)
+                    ));
+                    self.api(
+                        Method::POST,
+                        "/api/jobs",
+                        Some(json!({
+                            "kind": "user-feedback",
+                            "status": "open",
+                            "title": format!(
+                                "Deploy blocked {mins} min: the playground tree is not clean"
+                            ),
+                            "subject": {"subject_kind": "custom", "id": "cluster-convergence"},
+                            "tags": ["deploy", "pipeline"],
+                            "owner_id": "emp-david",
+                            "priority": "urgent",
+                            "opened_on": now.date_naive().to_string(),
+                            "metadata": {
+                                "message": format!(
+                                    "The conductor has refused to deploy for {mins} minutes: \
+                                     {reason}. Refusing is correct — building from an unknown \
+                                     working state is worse than waiting — but waiting SILENTLY \
+                                     is the defect this packet exists to end (2026-09-02: a \
+                                     regenerated Cargo.lock left the tree dirty and two merged \
+                                     trains waited six hours while the retry logged to nobody). \
+                                     Inspect with `git -C <deploy tree> status --short`; a \
+                                     regenerable artifact is `git checkout --` and the next tick \
+                                     deploys. Threshold is BOSS_TRAIN_CONVERGE_ALARM_MINS ({}).",
+                                    self.cfg.converge_alarm_mins
+                                ),
+                                "train": tid,
+                                "blocked_since": blocked_since,
+                            },
+                        })),
+                    )
+                    .await?;
+                    self.api(
+                        Method::PATCH,
+                        &format!("/api/jobs/{tid}/metadata"),
+                        Some(json!({"deploy_alarm_filed": true})),
+                    )
+                    .await?;
+                }
             }
             return Ok(());
         }
@@ -3645,7 +3751,7 @@ impl Conductor {
             if step_done(merged_step) && !step_done(deployed_step) {
                 let deployed_step = deployed_step
                     .ok_or_else(|| anyhow!("deployed step missing on job {}", id8(&tid)))?;
-                self.deploy(&t, deployed_step).await?;
+                self.deploy(&t, deployed_step, now).await?;
                 t = self.get_job(&tid).await?;
             }
             // Installation is not the finish line either — the cluster
@@ -5840,6 +5946,37 @@ mod tests {
             "the failing check must be named, got: {summary}"
         );
         assert!(!summary.contains("?:"), "no anonymous checks: {summary}");
+    }
+
+    /// A blocked deploy tree is quiet inside the window and LOUD past
+    /// it — the six-hour silent retry of 2026-09-02, pinned. The first
+    /// blocked pass (no stamp yet) is never overdue: elapsed time is
+    /// the signal and it has not started elapsing.
+    #[test]
+    fn a_blocked_deploy_tree_goes_loud_past_the_window() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-02T15:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let since = |mins: i64| Some((now - chrono::Duration::minutes(mins)).fixed_offset());
+        assert_eq!(
+            deploy_block_verdict(None, now, 30),
+            DeployBlockVerdict::Waiting,
+            "first blocked pass has not started elapsing"
+        );
+        assert_eq!(
+            deploy_block_verdict(since(29), now, 30),
+            DeployBlockVerdict::Waiting
+        );
+        assert_eq!(
+            deploy_block_verdict(since(30), now, 30),
+            DeployBlockVerdict::Overdue,
+            "the boundary is inclusive, like the convergence alarm"
+        );
+        // The incident's own duration, six hours, must be loud.
+        assert_eq!(
+            deploy_block_verdict(since(360), now, 30),
+            DeployBlockVerdict::Overdue
+        );
     }
 
     /// The rolled-past case (2026-09-02, train #176): the cluster
