@@ -82,6 +82,8 @@ export type TrainRow = Readonly<{
   arrivedAt: ArrivalStamp;
   /** An estimate, or the phase alone when there is nothing honest to say. */
   eta: Eta;
+  /** Non-null when the train is in trouble the board must show. */
+  trouble: TrainTrouble | null;
 }>;
 
 // The `GET /api/stations/{name}/queue` envelope (stations.md; the
@@ -648,6 +650,63 @@ export function trainEta(j: JobLite, medians: ArrivalMedians, nowMs: number): Et
   return phaseOnly;
 }
 
+/** Why a train is in trouble, or `null` when it is simply moving.
+ *
+ * TROUBLE IS ORTHOGONAL TO PHASE, deliberately. `TrainStatus` answers
+ * "how far along" and its four values have no way to say "and it has
+ * been stuck there for six hours" — the comment on `splitAtDeparture`
+ * even calls transit "boring, as transit should be". On 2026-09-02
+ * that assumption broke in the open: a train sat at `converged` for
+ * four hours with an urgent overdue packet already filed against it,
+ * and rendered exactly like a healthy two-minute transit. Two more sat
+ * at a step they could never complete, because a red PR does not
+ * merge. David, seeing the board: *"1 stuck in transit still that is
+ * pretending to be green when it should be in some sort of error
+ * state."*
+ *
+ * Every signal here is one the conductor already wrote down. This
+ * function invents no thresholds of its own — it surfaces alarms that
+ * were raised elsewhere and were only ever visible in a packet nobody
+ * had reason to open. An arrived or closed train is never troubled:
+ * its history is not a live problem.
+ */
+export type TrainTrouble =
+  | { readonly kind: 'ci-red' }
+  | { readonly kind: 'converge-overdue' }
+  | { readonly kind: 'stalled' };
+
+export function trainTrouble(j: JobLite): TrainTrouble | null {
+  const status = trainStatus(j);
+  if (status === 'ARRIVED' || j.status === 'closed') return null;
+  const md = (j.metadata ?? {}) as {
+    converge_alarm_filed?: unknown;
+    stalled_since?: unknown;
+  };
+  // The conductor filed an urgent packet about this train's
+  // convergence and then had nowhere to show it.
+  if (md.converge_alarm_filed === true || md.converge_alarm_filed === 'true')
+    return { kind: 'converge-overdue' };
+  // `note_stall` stamped it past the delivery policy's threshold.
+  if (typeof md.stalled_since === 'string' && md.stalled_since !== '')
+    return { kind: 'stalled' };
+  // A returned red verdict is trouble until the train leaves — after
+  // the merge the content has landed and the lamp is history.
+  if (ciLamp(j) === 'failing' && status !== 'DEPARTED') return { kind: 'ci-red' };
+  return null;
+}
+
+/** The badge text — short, because it sits beside the phase chip. */
+export function troubleLabel(t: TrainTrouble): string {
+  switch (t.kind) {
+    case 'ci-red':
+      return 'CI RED';
+    case 'converge-overdue':
+      return 'CONVERGE OVERDUE';
+    case 'stalled':
+      return 'STALLED';
+  }
+}
+
 export function trainStatus(j: JobLite): TrainStatus {
   if (done(step(j, 'deployed', 'Deployed to the playground')) || j.status === 'closed')
     return 'ARRIVED';
@@ -726,6 +785,7 @@ export function toTrainRow(
     outcome: trainOutcome(j),
     arrivedAt: arrivalStamp(j),
     eta: trainEta(j, medians, nowMs),
+    trouble: trainTrouble(j),
   };
 }
 

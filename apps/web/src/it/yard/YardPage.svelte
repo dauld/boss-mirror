@@ -14,8 +14,7 @@
     type Eta,
     type EtaPhase,
     type YardState,
-    type TrainRow,
-  } from './yard';
+    type TrainRow, troubleLabel } from './yard';
   import PacketCard from '@boss/web-kit/ui/PacketCard.svelte';
   import PacketModal, { type PacketJob } from '@boss/web-kit/ui/PacketModal.svelte';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
@@ -208,6 +207,11 @@
             {t.lamp === 'green' ? 'CI ✓' : t.lamp === 'failing' ? 'CI ✗' : 'CI …'}
           </span>
           <span class="yard-chip">{t.status}</span>
+          {#if t.trouble}
+            <span class="yard-trouble" title="an alarm was already raised for this train">
+              {troubleLabel(t.trouble)}
+            </span>
+          {/if}
           {#if t.eta.phase !== 'arrived'}
             <span class="yard-eta" class:est={t.eta.kind === 'eta'} title={etaTitle(t.eta)}>
               {etaText(t.eta)}
@@ -447,6 +451,18 @@
     background: var(--bg, var(--void, #0D1014)); }
   .yard-dock { display: grid; gap: 10px;
     grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
+  /* Trouble reads LOUDER than the phase chip beside it: the whole
+     defect this fixes was a wedged train looking like a moving one. */
+  .yard-trouble {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    padding: 1px 6px;
+    border: 1px solid var(--err, #b91c1c);
+    color: var(--err, #b91c1c);
+    border-radius: 2px;
+    text-transform: uppercase;
+  }
   .yard-chip { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
     letter-spacing: 0.1em; border: 1px solid var(--hairline, #2A3138); padding: 2px 8px; }
   .yard-lamp { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
