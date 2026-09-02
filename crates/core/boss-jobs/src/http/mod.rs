@@ -256,7 +256,7 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
         )
         .route(
             "/api/workflows/{kind}/versions/{version}",
-            get(get_kind_version::<R, B>),
+            get(get_kind_version::<R, B>).delete(discard_kind_version::<R, B>),
         )
         // Experiments Tier 1 (docs/design/network-experiments.md):
         // the per-version terminal report — measurement of what

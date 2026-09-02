@@ -195,3 +195,116 @@ async fn scheduling_writes_survive_rebuild() {
     assert_eq!(post_shift, pre_shift);
     assert_eq!(post_token, pre_token);
 }
+
+/// Row shape for the byte-identity check: every column of
+/// `scheduled_assignments`, timestamps included. A rebuild that
+/// stamps replay-time NOW() instead of the event's recorded time
+/// fails here (packet d7b8158e).
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+struct AssignmentRow {
+    id: uuid::Uuid,
+    tech_id: String,
+    target_job_id: uuid::Uuid,
+    kind: String,
+    starts_at: chrono::DateTime<chrono::Utc>,
+    ends_at: chrono::DateTime<chrono::Utc>,
+    status: String,
+    notes: Option<String>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+struct TokenRow {
+    employee_id: String,
+    token: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+async fn snapshot_assignments(pool: &PgPool) -> Vec<AssignmentRow> {
+    sqlx::query_as(
+        "SELECT id, tech_id, target_job_id, kind, starts_at, ends_at, status, notes, \
+                created_at, updated_at \
+         FROM scheduled_assignments ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn snapshot_tokens(pool: &PgPool) -> Vec<TokenRow> {
+    sqlx::query_as(
+        "SELECT employee_id, token, created_at FROM tech_calendar_tokens ORDER BY employee_id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// Determinism: replaying the log must reproduce the projections
+/// byte-for-byte — including `scheduled_assignments.updated_at` after
+/// a status change and `tech_calendar_tokens.created_at` after a
+/// rotation. Both used to stamp NOW() (live at apply, and again at
+/// replay), so live and rebuilt rows disagreed by wall-clock drift.
+#[tokio::test(flavor = "multi_thread")]
+async fn scheduling_rebuild_is_byte_identical() {
+    let db = TestDb::new().await;
+    let job_id = "22222222-2222-2222-2222-222222222222";
+    seed_employee_and_target_job(&db.pool, "emp-tech-002", job_id).await;
+    let app = build_app(db.pool.clone());
+
+    // Assignment created, then its status advanced (the advance is
+    // the path that used to stamp NOW() into updated_at).
+    let created = TestRequest::post("/api/scheduling/assignments")
+        .json(&json!({
+            "tech_id": "emp-tech-002",
+            "target_job_id": job_id,
+            "kind": "wo",
+            "starts_at": "2026-05-11T09:00:00Z",
+            "ends_at": "2026-05-11T12:00:00Z",
+            "status": "tentative",
+            "notes": null,
+        }))
+        .send(&app)
+        .await;
+    created.assert_status(StatusCode::CREATED);
+    let assign_id = created.assert_json::<serde_json::Value>()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    TestRequest::post(format!("/api/scheduling/assignments/{assign_id}/status"))
+        .json(&json!({"status": "confirmed"}))
+        .send(&app)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    // Calendar token minted (the mint used to stamp NOW() into
+    // created_at on both the live insert and the replay).
+    TestRequest::post("/api/scheduling/techs/emp-tech-002/calendar-token")
+        .json(&json!({}))
+        .send(&app)
+        .await
+        .assert_status(StatusCode::OK);
+
+    drain_outbox(&db.pool).await;
+    let assignments_before = snapshot_assignments(&db.pool).await;
+    let tokens_before = snapshot_tokens(&db.pool).await;
+    assert_eq!(assignments_before.len(), 1);
+    assert_eq!(assignments_before[0].status, "confirmed");
+    assert_eq!(tokens_before.len(), 1);
+
+    // Rebuild wipes the projections and replays audit_log.
+    rebuild_scheduling(&db.pool).await.expect("rebuild");
+
+    let assignments_after = snapshot_assignments(&db.pool).await;
+    let tokens_after = snapshot_tokens(&db.pool).await;
+    assert_eq!(
+        assignments_before, assignments_after,
+        "scheduled_assignments must replay byte-identical (updated_at included)"
+    );
+    assert_eq!(
+        tokens_before, tokens_after,
+        "tech_calendar_tokens must replay byte-identical (created_at included)"
+    );
+}

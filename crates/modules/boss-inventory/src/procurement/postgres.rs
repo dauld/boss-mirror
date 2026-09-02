@@ -222,13 +222,18 @@ impl PgProcurement {
         stamp: &boss_core::publisher::EventStamp,
     ) -> Result<(), InventoryError> {
         let mut tx = begin(&self.pool).await?;
+        // deleted_at binds the SAME instant the event payload carries
+        // (stamp.timestamp) — NOW() minted a second wall reading, so
+        // the replayed row (which binds the payload's deleted_at)
+        // never matched the live one (packet d7b8158e).
         let result = sqlx::query(
             "UPDATE vendor_interactions \
-                SET deleted_at = NOW(), deleted_by = $2 \
+                SET deleted_at = $3, deleted_by = $2 \
               WHERE id = $1 AND deleted_at IS NULL",
         )
         .bind(id)
         .bind(by_employee_id)
+        .bind(stamp.timestamp)
         .execute(&mut *tx)
         .await
         .map_err(store)?;

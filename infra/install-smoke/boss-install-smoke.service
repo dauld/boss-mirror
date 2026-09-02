@@ -1,0 +1,23 @@
+# Nightly install-smoke on boss-gcp — the host that is NOT the CI
+# runner (17b2ef50; the workflow header's own re-enable condition).
+# Compose network churn here rewrites boss-gcp's iptables, which cuts
+# nothing: the conductor and every boss service are host-network
+# systemd units, not routed containers.
+#
+# Install (conductor hands, same pair-idiom as observe-host):
+#   sudo install -m644 infra/install-smoke/boss-install-smoke.{service,timer} /etc/systemd/system/
+#   sudo install -m755 infra/install-smoke/nightly.sh /usr/local/lib/boss/install-smoke-nightly.sh
+#   sudo systemctl daemon-reload && sudo systemctl enable --now boss-install-smoke.timer
+[Unit]
+Description=BOSS install-smoke: does a fresh install still boot?
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+Environment=JOBS_API=http://10.20.0.34:7900
+# A RED files an urgent packet through the jobs API (the estate-alarm
+# idiom): install breakage surfaces in the queue within hours, not in
+# a journal nobody reads. ~35-45 min on a cold docker cache.
+TimeoutStartSec=3600
+ExecStart=/usr/local/lib/boss/install-smoke-nightly.sh

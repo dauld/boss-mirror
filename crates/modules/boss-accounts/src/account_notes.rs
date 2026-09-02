@@ -251,17 +251,24 @@ async fn check_note_kind(
 /// Single canonical INSERT for `account_notes`. Used by every
 /// write path including the rebuilder. ON CONFLICT DO NOTHING so
 /// a re-replay of the same `id` is idempotent.
+///
+/// `created_at` is the event's recorded instant — the live caller
+/// passes `stamp.timestamp`, the rebuilder passes `ev.ts` (the same
+/// value read back from audit_log). Leaving the column to its
+/// DEFAULT NOW() stamped write-time live and replay-time on rebuild
+/// (packet d7b8158e).
 pub(crate) async fn upsert_note<'e, E>(
     executor: E,
     evt: &AccountNotePostedEvent,
+    created_at: DateTime<Utc>,
 ) -> sqlx::Result<u64>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     sqlx::query(
         "INSERT INTO account_notes \
-            (id, account_id, actor_id, kind, body, occurred_at) \
-         VALUES ($1, $2, $3, $4, $5, $6) \
+            (id, account_id, actor_id, kind, body, occurred_at, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) \
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(&evt.id)
@@ -270,6 +277,7 @@ where
     .bind(evt.kind.as_str())
     .bind(&evt.body)
     .bind(evt.occurred_at)
+    .bind(created_at)
     .execute(executor)
     .await
     .map(|r| r.rows_affected())
@@ -326,7 +334,10 @@ async fn create_note(
         Ok(tx) => tx,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    let inserted = match upsert_note(&mut *tx, &evt).await {
+    // Stamp minted before the row write: the row's created_at and
+    // the event's timestamp must be ONE instant or replay diverges.
+    let stamp = crate::events::event_stamp(&state.publisher).await;
+    let inserted = match upsert_note(&mut *tx, &evt, stamp.timestamp).await {
         Ok(n) => n > 0,
         Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response(),
     };
@@ -335,7 +346,6 @@ async fn create_note(
     // DO NOTHING guard doubles as the event gate, so a replayed
     // create records nothing).
     if inserted {
-        let stamp = crate::events::event_stamp(&state.publisher).await;
         let event = stamp.event(
             ACCOUNT_NOTE_POSTED,
             serde_json::to_value(&evt).unwrap_or_default(),

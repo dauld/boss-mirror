@@ -93,9 +93,18 @@ pub(crate) fn receipt_for(packets: &[Value], branch: &str, head_now: &str) -> Re
     // contract — depending on it parked a car on a two-rebases-old
     // receipt on 2026-08-28. The only packet that matters is the one
     // vouching for the commit that would actually ride the train.
+    // ...and among packets vouching for the SAME head, prefer a green
+    // one: a dead `lost` packet (a refused launch, a killed runner) must
+    // not shadow the real verdict that followed it — on 2026-08-30 that
+    // shadow forced editing a closed packet's metadata to unblock a true
+    // green (ed7f1355). When no green exists the first match stands, so
+    // the honest lost/failed refusal below still names what happened.
     let known_head = head_now.len() >= 40;
     let chosen = if known_head {
-        reported.iter().find(|(_, raw)| head_of(raw) == head_now)
+        reported
+            .iter()
+            .find(|(v, raw)| *v == "green" && head_of(raw) == head_now)
+            .or_else(|| reported.iter().find(|(_, raw)| head_of(raw) == head_now))
     } else {
         reported.last()
     };
@@ -551,5 +560,33 @@ mod tests {
                 .unwrap_or_else(|e| panic!("order {order} failed: {e}"));
             assert_eq!(r.head, HEAD, "order {order} picked the wrong packet");
         }
+    }
+
+    /// A dead `lost` packet naming the branch head must not shadow the
+    /// real green that followed it (ed7f1355: a refused launch left an
+    /// orphan whose hand-closed receipt matched first in API order, and
+    /// unblocking the true verdict meant editing a closed packet).
+    #[test]
+    fn a_lost_packet_on_the_same_head_does_not_shadow_the_green() {
+        let lost = format!(
+            r#"{{"verdict": "lost", "head": "{HEAD}", "mode": "", "fails": ["launch refused"]}}"#
+        );
+        for order in 0..2 {
+            let mut ps = vec![
+                packet("feat/x", Some("lost"), Some(&lost)),
+                packet("feat/x", Some("green"), Some(GREEN)),
+            ];
+            if order == 1 {
+                ps.reverse();
+            }
+            let r = receipt_for(&ps, "feat/x", HEAD)
+                .unwrap_or_else(|e| panic!("order {order} failed: {e}"));
+            assert_eq!(r.head, HEAD, "order {order}");
+        }
+        // ...and with NO green on record, the lost verdict still refuses
+        // with its honest no-evidence message.
+        let ps = vec![packet("feat/x", Some("lost"), Some(&lost))];
+        let e = receipt_for(&ps, "feat/x", HEAD).unwrap_err().to_string();
+        assert!(e.contains("`lost`"), "{e}");
     }
 }

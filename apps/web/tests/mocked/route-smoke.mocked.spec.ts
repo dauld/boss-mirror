@@ -43,6 +43,7 @@ const ROUTES: ReadonlyArray<string> = [
   // drift test at the bottom of this file for why that can no longer
   // happen quietly.
   '/it/design/feedback',
+  '/it/design/backlog',
   // Incidents (the Operate landing) renders both panels' empty states
   // under the mock's `[]` catch-all — chrome + empty states, no crash.
   '/it/operate',

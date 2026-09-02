@@ -270,12 +270,17 @@ async fn rebuild_reproduces_jobs_and_steps_after_drop() {
         1,
         "intake",
     );
-    let step2 = fixture_step(
+    // step2 requires presence assurance — the column landed with the
+    // WebAuthn work but the rebuilder never reproduced it, so a
+    // replay silently downgraded the step to session assurance
+    // (packet d7b8158e). The snapshot equality below pins it.
+    let mut step2 = fixture_step(
         "22222222-0000-4000-8000-000000000002",
         "aaaaaaaa-0000-4000-8000-000000000001",
         2,
         "diagnose",
     );
+    step2.assurance_required = Some(boss_core::job::Assurance::Presence);
     let step3 = fixture_step(
         "33333333-0000-4000-8000-000000000003",
         "aaaaaaaa-0000-4000-8000-000000000001",

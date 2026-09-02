@@ -17,7 +17,8 @@ use boss_testing::{RecordingEventBus, TestDb, TestRequest};
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
-#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+// Not Eq: `behavior` is JSONB (serde_json::Value is PartialEq only).
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 struct VendorRow {
     id: String,
     name: Option<String>,
@@ -28,6 +29,10 @@ struct VendorRow {
     lead_time_days: i16,
     payment_terms: Option<String>,
     category: Option<String>,
+    // Reproduced from the event payload — the rebuilder used to drop
+    // this column entirely, so a replay silently wiped every vendor's
+    // behavior profile (packet d7b8158e).
+    behavior: Option<serde_json::Value>,
     created_at: DateTime<Utc>,
 }
 
@@ -82,7 +87,7 @@ struct ItemRow {
 }
 
 async fn snapshot_vendors(pool: &PgPool) -> Vec<VendorRow> {
-    sqlx::query_as("SELECT id, name, contact_name, contact_email, city, state, lead_time_days, payment_terms, category, created_at FROM vendors ORDER BY id")
+    sqlx::query_as("SELECT id, name, contact_name, contact_email, city, state, lead_time_days, payment_terms, category, behavior, created_at FROM vendors ORDER BY id")
         .fetch_all(pool).await.unwrap()
 }
 async fn snapshot_pos(pool: &PgPool) -> Vec<PoRow> {
@@ -133,10 +138,24 @@ async fn rebuild_reproduces_all_four_inventory_projections() {
     let db = TestDb::new().await;
     let app = build_app(db.pool.clone());
 
-    // 1. Create two vendors.
-    for (id, name, cat) in [
-        ("VND-001", "Hopswell", "hops-supplier"),
-        ("VND-002", "Maltworks", "malt-supplier"),
+    // 1. Create two vendors — one carrying a behavior profile, so
+    //    the rebuild-omission of `vendors.behavior` (packet
+    //    d7b8158e) is exercised, not just NULL-vs-NULL.
+    for (id, name, cat, behavior) in [
+        (
+            "VND-001",
+            "Hopswell",
+            "hops-supplier",
+            Some(serde_json::json!({
+                "lead_time_days": 12.0,
+                "lead_spread_days": 2.0,
+                "fulfilment_rate": 0.97,
+                "ap_payment_days": 28.0,
+                "ap_spread_days": 3.0,
+                "provenance": {"source": "hand_set", "template": "hops-supplier"},
+            })),
+        ),
+        ("VND-002", "Maltworks", "malt-supplier", None),
     ] {
         TestRequest::post("/api/inventory/vendors")
             .json(&serde_json::json!({
@@ -149,13 +168,15 @@ async fn rebuild_reproduces_all_four_inventory_projections() {
                 "lead_time_days": 14,
                 "payment_terms": "net-30",
                 "category": cat,
+                "behavior": behavior,
             }))
             .send(&app)
             .await
             .assert_status(StatusCode::CREATED);
     }
 
-    // 2. Update one of the vendors.
+    // 2. Update one of the vendors (behavior included — the update
+    //    event must carry it through the replay too).
     TestRequest::put("/api/inventory/vendors/VND-001")
         .json(&serde_json::json!({
             "name": "Hopswell (Renamed)",
@@ -166,6 +187,14 @@ async fn rebuild_reproduces_all_four_inventory_projections() {
             "lead_time_days": 21,
             "payment_terms": "net-45",
             "category": "hops-supplier",
+            "behavior": {
+                "lead_time_days": 15.0,
+                "lead_spread_days": 2.0,
+                "fulfilment_rate": 0.95,
+                "ap_payment_days": 30.0,
+                "ap_spread_days": 3.0,
+                "provenance": {"source": "hand_set", "template": "hops-supplier"},
+            },
         }))
         .send(&app)
         .await

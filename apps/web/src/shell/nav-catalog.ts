@@ -66,7 +66,7 @@ export type NavGroup = Readonly<{ label: string; items: ReadonlyArray<NavItem> }
 // 'system-fleet' left the permission vocabulary with the 2026-08-31
 // consolidation (its tab gates under system-monitoring), but the
 // catalog still answers "which app / which row" for its route kind.
-export type UngatedSurfaceId = 'system-incidents' | 'system-fleet';
+export type UngatedSurfaceId = 'system-incidents' | 'system-fleet' | 'system-backlog';
 
 export const ROUTE_CATALOG: Readonly<Record<RouteName | UngatedSurfaceId, NavItem>> = {
   jobs:      { id: 'jobs',      label: 'All jobs',         path: '/ux/jobs',      permKey: 'jobs',      app: 'home' },
@@ -117,6 +117,7 @@ export const ROUTE_CATALOG: Readonly<Record<RouteName | UngatedSurfaceId, NavIte
   'system-design':           { id: 'system-design',           label: 'Design',              path: '/it/design',       permKey: 'system-design',           app: 'it' },
   'system-experiments':      { id: 'system-experiments',      label: 'Experiments',         path: '/it/design/experiments', permKey: 'system-experiments', app: 'it' },
   'system-feedback':         { id: 'system-feedback',         label: 'Feedback triage',     path: '/it/design/feedback', permKey: 'system-feedback',      app: 'it' },
+  'system-backlog':          { id: 'system-backlog',          label: 'IT backlog',          path: '/it/design/backlog', permKey: 'system-feedback',      app: 'it' },
   // The hardware registry — declared beside observed beside the
   // difference, plus the dev-workspace door (59ef456a).
   'system-estate':           { id: 'system-estate',           label: 'Estate',              path: '/it/estate',       permKey: 'system-estate',           app: 'it' },

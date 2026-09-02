@@ -244,6 +244,69 @@ impl ParkIntent {
     }
 }
 
+/// Close a just-registered gate-run whose launch was REFUSED before any
+/// Job existed, so the refusal leaves no orphan (ed7f1355: the shared-
+/// workspace guard fired after the packet was filed, the packet sat
+/// open with no runner to ever complete it, closing it honestly meant
+/// hand-writing a receipt, and that hand-written head then shadowed the
+/// real green in `boss park`). Machine-written `lost` with an empty
+/// head — the launch never resolved one, and an empty head is exactly
+/// what keeps this receipt from ever matching a real one.
+///
+/// Best-effort by design: the refusal is the primary fact and must
+/// surface either way; a failed close is reported beside it rather than
+/// replacing it.
+async fn close_refused(http: &reqwest::Client, packet: &str, reason: &str) {
+    let result = async {
+        let job = api(
+            http,
+            reqwest::Method::GET,
+            &format!("/api/jobs/{packet}"),
+            None,
+        )
+        .await?
+        .ok_or_else(|| anyhow!("gate-run {packet} vanished"))?;
+        let step_id = job
+            .get("steps")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|s| s.get("title").and_then(Value::as_str) == Some("Record the receipt"))
+            .and_then(|s| s.get("id"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("gate-run {packet} has no verdict step"))?
+            .to_string();
+        let receipt = serde_json::to_string(&json!({
+            "verdict": "lost",
+            "head": "",
+            "mode": "",
+            "fails": [format!("launch refused before any Job was created: {reason}")],
+        }))?;
+        api(
+            http,
+            reqwest::Method::PUT,
+            &format!("/api/jobs/{packet}/steps/{step_id}"),
+            Some(json!({
+                "status": "completed",
+                "metadata": { "verdict": "lost", "receipt": receipt },
+            })),
+        )
+        .await?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    match result {
+        Ok(()) => println!(
+            "boss gate: refused launch closed its own packet ({} lost)",
+            &packet[..8.min(packet.len())]
+        ),
+        Err(e) => eprintln!(
+            "boss gate: could not close the refused packet {packet}: {e:#}\n  \
+             close it by hand or the overdue alarm will find it."
+        ),
+    }
+}
+
 /// Normalise `--mode` into what `gate.sh` actually accepts, or refuse.
 ///
 /// THE HELP TEXT NAMED A VALUE THE RUNNER REJECTS. It said `e.g.
@@ -649,10 +712,29 @@ pub async fn run(
         return Ok(());
     }
 
-    // The concurrency rule, derived rather than hardcoded.
+    // The concurrency rule, derived rather than hardcoded. A refusal
+    // from here on happens AFTER the packet was filed — close what we
+    // just opened so the refusal leaves no orphan (ed7f1355), then
+    // surface it.
     let shared = workspace_is_shared(&job);
-    let running = resolve_running(shared, running_gates(namespace))?;
+    let running = match resolve_running(shared, running_gates(namespace)) {
+        Ok(n) => n,
+        Err(e) => {
+            if !reused && !dry {
+                close_refused(&http, &packet, &format!("{e:#}")).await;
+            }
+            return Err(e);
+        }
+    };
     if shared && running > 0 {
+        if !reused && !dry {
+            close_refused(
+                &http,
+                &packet,
+                &format!("{running} gate(s) already running on the shared workspace"),
+            )
+            .await;
+        }
         bail!(
             "{} gate(s) already running and {} mounts a SHARED workspace.\n  \
              Two gates on one disk cross their receipts — on 2026-08-24 a receipt naming \

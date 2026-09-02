@@ -3625,6 +3625,121 @@ impl Conductor {
                 "branch sweep failed (housekeeping, run stands): {e}"
             ));
         }
+        // The dock's merge preview rides the same tick (12a25f3e):
+        // best-effort like the sweep — a failed preview journals and
+        // the reconcile stands, because a projection that sometimes
+        // lags is stale-not-wrong by design.
+        if let Err(e) = self.preview_dock(now).await {
+            log(format!("dock preview failed (projection, run stands): {e}"));
+        }
+        Ok(())
+    }
+
+    /// The dock's SHA-anchored merge preview (12a25f3e): every
+    /// parked-ready car gets `metadata.merge_preview` — clean-or-
+    /// conflicted vs current main, pairwise conflicts across the
+    /// parked set, anchored to main@sha + a parked-set hash so a moved
+    /// input reads STALE rather than wrong. Written only on CHANGE
+    /// (`dock_preview::changed`): the 10-minute tick is a heartbeat,
+    /// not an event source.
+    async fn preview_dock(&self, now: DateTime<Utc>) -> Result<()> {
+        use crate::dock_preview as dp;
+        let clone = &self.cfg.clone;
+        let listed = rows(
+            self.api(
+                Method::GET,
+                "/api/jobs?kind=ship-a-change&status=open&limit=100",
+                None,
+            )
+            .await?,
+        )?;
+        let mut cars: Vec<(String, Value, String)> = Vec::new(); // (id, job, branch)
+        for j0 in listed {
+            let jid = job_id(&j0)?.to_string();
+            if !parked_ready(&j0) {
+                continue;
+            }
+            let Some(branch) = j0
+                .pointer("/metadata/branch")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            cars.push((jid, j0, branch));
+        }
+        if cars.is_empty() {
+            return Ok(());
+        }
+        // One fetch brings main + every parked branch into temp refs the
+        // trial merges can address; refs/preview/* is cleaned each tick
+        // so a deleted branch does not linger as a phantom.
+        let dir = Some(Path::new(clone.as_str()));
+        let mut args_owned: Vec<String> = vec![
+            "git".into(),
+            "fetch".into(),
+            "--quiet".into(),
+            "origin".into(),
+            "+refs/heads/main:refs/preview/main".into(),
+        ];
+        for (_, _, b) in &cars {
+            args_owned.push(format!("+refs/heads/{b}:refs/preview/{b}"));
+        }
+        let args: Vec<&str> = args_owned.iter().map(String::as_str).collect();
+        sh_in(dir, true, &args)?;
+        let rev = |r: &str| -> Result<String> {
+            let out = sh_in(dir, true, &["git", "rev-parse", r])?;
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        };
+        let main_sha = rev("refs/preview/main")?;
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for (_, _, b) in &cars {
+            pairs.push((b.clone(), rev(&format!("refs/preview/{b}"))?));
+        }
+        let set = dp::set_hash(clone, &pairs)?;
+        let stamp = boss_jobs::car::stamp(now);
+
+        // vs main, then pairwise. n is dock-sized (<=24 by WIP limit);
+        // n^2 in-memory merges is cheap next to one real boarding.
+        let mut vs_main: Vec<dp::Verdict> = Vec::new();
+        for (_, _, b) in &cars {
+            vs_main.push(dp::trial_merge(
+                clone,
+                "refs/preview/main",
+                &format!("refs/preview/{b}"),
+            )?);
+        }
+        for (i, (jid, job, b)) in cars.iter().enumerate() {
+            let mut co: Vec<(String, Vec<String>)> = Vec::new();
+            for (k, (_, _, other)) in cars.iter().enumerate() {
+                if i == k {
+                    continue;
+                }
+                if let dp::Verdict::Conflicts(files) = dp::trial_merge(
+                    clone,
+                    &format!("refs/preview/{b}"),
+                    &format!("refs/preview/{other}"),
+                )? {
+                    co.push((other.clone(), files));
+                }
+            }
+            let fresh = dp::preview_payload(&vs_main[i], &co, &main_sha, &set, &stamp);
+            let stored = job.pointer("/metadata/merge_preview");
+            if dp::changed(stored, &fresh) && !self.cfg.dry {
+                self.merge_job_metadata(jid, vec![("merge_preview", fresh)])
+                    .await?;
+                log(format!(
+                    "{}: merge preview updated (vs-main {}, {} co-boarder conflict(s))",
+                    id8(jid),
+                    if matches!(vs_main[i], dp::Verdict::Clean) {
+                        "clean"
+                    } else {
+                        "CONFLICT"
+                    },
+                    co.len(),
+                ));
+            }
+        }
         Ok(())
     }
 

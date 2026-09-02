@@ -32,6 +32,9 @@ pub const WORKFLOW_PUBLISHED: &str = "jobs.kind.published";
 pub const WORKFLOW_DRAFT_SAVED: &str = "jobs.kind.draft_saved";
 /// The active row of a kind was retired with no successor.
 pub const WORKFLOW_RETIRED: &str = "jobs.kind.retired";
+/// A draft row deleted before it ever went live (ebd7bb70): the
+/// armed-draft hazard removed, with the discard on the record.
+pub const WORKFLOW_DRAFT_DISCARDED: &str = "jobs.kind.draft_discarded";
 /// A draft StepPlugin row was appended to the registry (author
 /// saved, not live). Recorded by the registry adapter atomically
 /// with the step_plugins row; payload is the full `StepPluginSpec`.

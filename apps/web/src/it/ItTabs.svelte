@@ -27,6 +27,7 @@
       { label: 'Reviews', path: '/it/design' },
       { label: 'Experiments', path: '/it/design/experiments' },
       { label: 'Feedback', path: '/it/design/feedback' },
+      { label: 'Backlog', path: '/it/design/backlog' },
     ],
   };
 

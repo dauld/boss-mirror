@@ -217,6 +217,7 @@ async fn mirror_territory_rep(
     account_id: &str,
     employee_id: &str,
     customer_since: NaiveDate,
+    created_at: chrono::DateTime<chrono::Utc>,
 ) -> sqlx::Result<crate::account_team_members::AccountTeamAssignmentEvent> {
     let evt = crate::account_team_members::AccountTeamAssignmentEvent {
         id: format!("pat-tr-{account_id}"),
@@ -226,7 +227,7 @@ async fn mirror_territory_rep(
         assigned_on: customer_since,
         notes: None,
     };
-    crate::account_team_members::upsert_team_member(&mut **tx, &evt).await?;
+    crate::account_team_members::upsert_team_member(&mut **tx, &evt, created_at).await?;
     Ok(evt)
 }
 
@@ -335,6 +336,11 @@ async fn create_account(
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
 
+    // Stamp minted before the child-row writes: their created_at and
+    // the events' timestamps must be ONE instant or replay diverges
+    // (packet d7b8158e).
+    let stamp = crate::events::event_stamp(&state.publisher).await;
+
     // Identity-first: mirror the territory rep into account_team_members
     // only when one is actually assigned (and we have a date to stamp
     // the assignment). An id-only account has no rep yet — nothing to
@@ -343,7 +349,7 @@ async fn create_account(
         body.account.territory_rep_id.as_deref(),
         body.account.customer_since,
     ) {
-        match mirror_territory_rep(&mut tx, &body.account.id, rep, since).await {
+        match mirror_territory_rep(&mut tx, &body.account.id, rep, since, stamp.timestamp).await {
             Ok(evt) => Some(evt),
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         }
@@ -353,7 +359,7 @@ async fn create_account(
 
     for contact in &body.contacts {
         let res = sqlx::query(
-            "INSERT INTO account_contacts (id, account_id, name, role, email, phone, is_primary) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO account_contacts (id, account_id, name, role, email, phone, is_primary, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(&contact.id)
         .bind(&body.account.id)
@@ -362,6 +368,7 @@ async fn create_account(
         .bind(&contact.email)
         .bind(&contact.phone)
         .bind(contact.is_primary)
+        .bind(stamp.timestamp)
         .execute(&mut *tx)
         .await;
 
@@ -375,7 +382,6 @@ async fn create_account(
     // plus the territory-rep mirror so rebuild_accounts can
     // repopulate `account_team_members` — only when a rep was
     // actually assigned at create.
-    let stamp = crate::events::event_stamp(&state.publisher).await;
     let event = stamp.event(
         crate::events::ACCOUNT_CREATED,
         serde_json::to_value(&body).unwrap_or_default(),
@@ -489,11 +495,16 @@ async fn update_account(
     }
 
     // Identity-first: mirror only when a rep is assigned and dated.
+    // Stamp minted before the child-row writes: their created_at and
+    // the events' timestamps must be ONE instant or replay diverges
+    // (packet d7b8158e).
+    let stamp = crate::events::event_stamp(&state.publisher).await;
+
     let territory_evt = if let (Some(rep), Some(since)) = (
         body.account.territory_rep_id.as_deref(),
         body.account.customer_since,
     ) {
-        match mirror_territory_rep(&mut tx, &id, rep, since).await {
+        match mirror_territory_rep(&mut tx, &id, rep, since, stamp.timestamp).await {
             Ok(evt) => Some(evt),
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         }
@@ -503,7 +514,7 @@ async fn update_account(
 
     for contact in &body.contacts {
         let res = sqlx::query(
-            "INSERT INTO account_contacts (id, account_id, name, role, email, phone, is_primary) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO account_contacts (id, account_id, name, role, email, phone, is_primary, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(&contact.id)
         .bind(&id)
@@ -512,6 +523,7 @@ async fn update_account(
         .bind(&contact.email)
         .bind(&contact.phone)
         .bind(contact.is_primary)
+        .bind(stamp.timestamp)
         .execute(&mut *tx)
         .await;
 
@@ -524,7 +536,6 @@ async fn update_account(
     // treats UPDATED the same as CREATED — UPSERT both projections),
     // plus the territory-rep mirror when assigned. Records with the
     // rows.
-    let stamp = crate::events::event_stamp(&state.publisher).await;
     let event = stamp.event(
         crate::events::ACCOUNT_UPDATED,
         serde_json::to_value(&body).unwrap_or_default(),
@@ -584,9 +595,14 @@ async fn replace_contacts(
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
 
+    // Stamp minted before the contact inserts: created_at and the
+    // event's timestamp must be ONE instant or replay diverges
+    // (packet d7b8158e).
+    let stamp = crate::events::event_stamp(&state.publisher).await;
+
     for contact in &contacts {
         let res = sqlx::query(
-            "INSERT INTO account_contacts (id, account_id, name, role, email, phone, is_primary) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO account_contacts (id, account_id, name, role, email, phone, is_primary, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(&contact.id)
         .bind(&id)
@@ -595,6 +611,7 @@ async fn replace_contacts(
         .bind(&contact.email)
         .bind(&contact.phone)
         .bind(contact.is_primary)
+        .bind(stamp.timestamp)
         .execute(&mut *tx)
         .await;
 
@@ -621,7 +638,6 @@ async fn replace_contacts(
         Ok(a) => a,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    let stamp = crate::events::event_stamp(&state.publisher).await;
     let payload = AccountWithContacts { account, contacts };
     let event = stamp.event(
         crate::events::ACCOUNT_UPDATED,

@@ -832,7 +832,7 @@ describe('deliveryStats', () => {
     ];
     expect(abandon.label).toBe('abandon rate');
     expect(abandon.value).toBe('20%'); // 2 of 10 resolved
-    expect(cycle.value).toBe('0h');
+    expect(cycle.value).toBe('0m');
     expect(delivered.value).toBe('8');
   });
 
@@ -841,12 +841,15 @@ describe('deliveryStats', () => {
    * stamps — a same-day close used to be `0d`, which hid exactly the
    * improvement this scoreboard exists to show.
    */
-  test('renders a sub-day median in hours', () => {
+  test('renders a sub-hour median in minutes, sub-day in hours', () => {
+    // Sub-hour reads in MINUTES (feedback b4c1b53a): at a 2-hour train
+    // cadence, cycles land under an hour and `0.5h` makes the reader
+    // do the arithmetic the scoreboard exists to have done.
     const halfHour: TerminalReport = {
       kind: 'ship-a-change',
       versions: [ver(18, 8, 2, 1800 / 86400)],
     };
-    expect(deliveryStats(halfHour)[1]!.value).toBe('0.5h');
+    expect(deliveryStats(halfHour)[1]!.value).toBe('30m');
 
     const halfDay: TerminalReport = { kind: 'ship-a-change', versions: [ver(18, 8, 2, 0.5)] };
     expect(deliveryStats(halfDay)[1]!.value).toBe('12h');

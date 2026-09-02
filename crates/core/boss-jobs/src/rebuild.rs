@@ -216,11 +216,11 @@ async fn upsert_step(
     let result = sqlx::query(
         r#"
         INSERT INTO steps (id, job_id, kind, title, spec_slug, assignee_id, status, sort_order,
-                           blocked_by, sign_offs_required, sign_offs, fields,
+                           blocked_by, sign_offs_required, assurance_required, sign_offs, fields,
                            completed_on, metadata, notes, step_plugin_version,
                            embedded_job, created_at, updated_at, became_ready_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $18,
-                CASE WHEN $7 = 'ready' THEN $18 END)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19,
+                CASE WHEN $7 = 'ready' THEN $19 END)
         ON CONFLICT (id) DO UPDATE SET
             job_id = EXCLUDED.job_id,
             kind = EXCLUDED.kind,
@@ -231,6 +231,7 @@ async fn upsert_step(
             sort_order = EXCLUDED.sort_order,
             blocked_by = EXCLUDED.blocked_by,
             sign_offs_required = EXCLUDED.sign_offs_required,
+            assurance_required = EXCLUDED.assurance_required,
             sign_offs = EXCLUDED.sign_offs,
             fields = EXCLUDED.fields,
             completed_on = EXCLUDED.completed_on,
@@ -260,6 +261,14 @@ async fn upsert_step(
     .bind(step.sort_order)
     .bind(blocked_by_uuids(&step.blocked_by))
     .bind(serde_json::to_value(&step.sign_offs_required).unwrap_or_default())
+    // Same TEXT encoding as the live save path — the omission of
+    // this column silently downgraded replayed steps to session
+    // assurance (packet d7b8158e).
+    .bind(
+        step.assurance_required
+            .and_then(|a| serde_json::to_value(a).ok())
+            .and_then(|v| v.as_str().map(str::to_string)),
+    )
     .bind(serde_json::to_value(&step.sign_offs).unwrap_or_default())
     .bind(serde_json::to_value(&step.fields).unwrap_or_default())
     .bind(step.completed_on)

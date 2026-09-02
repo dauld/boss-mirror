@@ -353,16 +353,20 @@ impl ShippingRepository for PgShipping {
         // gives us idempotency on (shipment_id, status,
         // occurred_on) for free; the FK to shipments(id) is what
         // surfaces NotFound on out-of-order scans.
+        // created_at binds the stamp's instant (= the event's
+        // audit_log.timestamp) instead of falling to the column
+        // DEFAULT NOW(), so the replayed row matches byte-for-byte.
         let result = sqlx::query(
             "INSERT INTO shipment_tracking_events \
-                (shipment_id, status, occurred_on, stage_index) \
-             VALUES ($1, $2, $3, $4) \
+                (shipment_id, status, occurred_on, stage_index, created_at) \
+             VALUES ($1, $2, $3, $4, $5) \
              ON CONFLICT (shipment_id, status, occurred_on) DO NOTHING",
         )
         .bind(shipment_id)
         .bind(status)
         .bind(occurred_on)
         .bind(stage_index)
+        .bind(stamp.timestamp)
         .execute(&mut *tx)
         .await
         .map_err(|e| {
@@ -411,12 +415,13 @@ impl ShippingRepository for PgShipping {
                      shipped_on = COALESCE(shipped_on, $2::date), \
                      delivered_on = COALESCE(delivered_on, \
                          CASE WHEN $1 = 'delivered' THEN $2::date ELSE NULL END), \
-                     updated_at = NOW() \
+                     updated_at = $4 \
                  WHERE id = $3",
             )
             .bind(s)
             .bind(occurred_on)
             .bind(shipment_id)
+            .bind(stamp.timestamp)
             .execute(&mut *tx)
             .await
             .map_err(|e| ShippingError::Storage(e.to_string()))?;

@@ -6,6 +6,7 @@ mod cadence;
 mod census;
 mod delivery_policy;
 mod deploy;
+mod dock_preview;
 mod docs;
 mod docs_flush;
 mod doctor;
@@ -21,6 +22,7 @@ mod publish;
 mod publish_requests;
 mod queue;
 mod receipt;
+mod rerail;
 mod running;
 mod script;
 mod train;
@@ -229,6 +231,21 @@ enum Commands {
     /// one read, with the startup checklist at the end (CLAUDE.md
     /// §Engineering Session Startup; automation of acedf981's L1).
     Orient,
+    /// A conflict-skipped car back aboard, with the traps encoded:
+    /// new branch from current main (never a force-push), rebase with
+    /// ONE human stop on a real conflict, gate, receipt machine-copied
+    /// to regate_receipt, packet repointed and skip cleared (e7c86455).
+    Rerail {
+        /// The car: its branch, or 8+ characters of its id.
+        car: String,
+        /// Skip straight to transcription + repoint — the branch is
+        /// already pushed and gated (the post-conflict path).
+        #[arg(long)]
+        finish: bool,
+        /// Report what would happen without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Prove a merged car in production by RUNNING a probe.
     ///
     /// The verb executes the command itself and records exit status and
@@ -652,6 +669,15 @@ enum WorkflowAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Discard a DRAFT version outright — the resolution the publish
+    /// guard's "resolve that draft first" refusal names (ebd7bb70).
+    /// Draft-only: an active or retired version is history and refuses.
+    Discard {
+        /// Workflow kind, e.g. `ship-a-change`.
+        kind: String,
+        /// The draft version to remove.
+        version: i32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -892,6 +918,7 @@ async fn main() -> Result<()> {
                 spec,
                 dry_run,
             } => workflow::publish(&kind, &spec, dry_run).await,
+            WorkflowAction::Discard { kind, version } => workflow::discard(&kind, version).await,
         },
         Commands::Job { action } => match action {
             JobAction::Get { job, json } => job::get(&job, json).await,
@@ -920,6 +947,11 @@ async fn main() -> Result<()> {
             JobAction::Patch { job, patch } => job::patch(&job, &patch).await,
         },
         Commands::Orient => orient::run().await,
+        Commands::Rerail {
+            car,
+            finish,
+            dry_run,
+        } => rerail::run(&car, finish, dry_run).await,
         Commands::Prove {
             car,
             probe,

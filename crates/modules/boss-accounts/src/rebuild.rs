@@ -101,7 +101,7 @@ pub async fn rebuild_accounts(pool: &PgPool) -> Result<RebuildReport, RebuildErr
                             return Ok(Applied::Skipped);
                         }
                     };
-                    upsert_account(&mut *conn, &p.account, &p.contacts)
+                    upsert_account(&mut *conn, &p.account, &p.contacts, ev.ts)
                         .await
                         .map_err(|e| e.to_string())?;
                     report.accounts_upserted += 1;
@@ -120,7 +120,7 @@ pub async fn rebuild_accounts(pool: &PgPool) -> Result<RebuildReport, RebuildErr
                                 return Ok(Applied::Skipped);
                             }
                         };
-                    crate::account_team_members::upsert_team_member(&mut *conn, &evt)
+                    crate::account_team_members::upsert_team_member(&mut *conn, &evt, ev.ts)
                         .await
                         .map_err(|e| e.to_string())?;
                     report.team_members_upserted += 1;
@@ -169,7 +169,7 @@ pub async fn rebuild_accounts(pool: &PgPool) -> Result<RebuildReport, RebuildErr
                                 return Ok(Applied::Skipped);
                             }
                         };
-                    crate::account_notes::upsert_note(&mut *conn, &evt)
+                    crate::account_notes::upsert_note(&mut *conn, &evt, ev.ts)
                         .await
                         .map_err(|e| e.to_string())?;
                     report.notes_posted += 1;
@@ -211,7 +211,7 @@ pub async fn rebuild_accounts(pool: &PgPool) -> Result<RebuildReport, RebuildErr
                                 return Ok(Applied::Skipped);
                             }
                         };
-                    crate::support_cases::upsert_case(&mut *conn, &case)
+                    crate::support_cases::upsert_case(&mut *conn, &case, ev.ts)
                         .await
                         .map_err(|e| e.to_string())?;
                     report.support_cases_opened += 1;
@@ -279,6 +279,7 @@ async fn upsert_account(
     tx: &mut sqlx::PgConnection,
     account: &Account,
     contacts: &[AccountContact],
+    ts: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), RebuildError> {
     sqlx::query(
         "INSERT INTO accounts (id, name, director, city, state, tier, customer_since, \
@@ -314,9 +315,12 @@ async fn upsert_account(
         .await
         .map_err(|e| RebuildError::Storage(e.to_string()))?;
     for c in contacts {
+        // created_at = ev.ts, mirroring the live insert's
+        // stamp.timestamp bind — leaving it to DEFAULT NOW() re-dated
+        // every contact to rebuild time (packet d7b8158e).
         sqlx::query(
-            "INSERT INTO account_contacts (id, account_id, name, role, email, phone, is_primary) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO account_contacts (id, account_id, name, role, email, phone, is_primary, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(&c.id)
         .bind(&account.id)
@@ -325,6 +329,7 @@ async fn upsert_account(
         .bind(&c.email)
         .bind(&c.phone)
         .bind(c.is_primary)
+        .bind(ts)
         .execute(&mut *tx)
         .await
         .map_err(|e| RebuildError::Storage(e.to_string()))?;

@@ -87,6 +87,7 @@
   import SearchResultsPage from './search/SearchResultsPage.svelte';
   import ViewsPage from './views/ViewsPage.svelte';
   import FeedbackTriagePage from './it/feedback/FeedbackTriagePage.svelte';
+  import BacklogBoardPage from './it/backlog/BacklogBoardPage.svelte';
   import IncidentsPage from './it/incidents/IncidentsPage.svelte';
   import LoginPage from './auth/LoginPage.svelte';
   import AuthAdminPage from './auth/AuthAdminPage.svelte';
@@ -235,6 +236,9 @@
     {:else if route.kind === 'systemFeedback'}
       <ItTabs group="design" active="/it/design/feedback" />
       <FeedbackTriagePage />
+    {:else if route.kind === 'systemBacklog'}
+      <ItTabs group="design" active="/it/design/backlog" />
+      <BacklogBoardPage />
     {:else if route.kind === 'authAdmin'}
       <AuthAdminPage />
     {:else if route.kind === 'me'}

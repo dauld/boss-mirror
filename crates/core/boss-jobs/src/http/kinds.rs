@@ -271,6 +271,37 @@ pub(super) async fn publish_kind<R: JobsRepository + 'static, B: EventBus + 'sta
     }
 }
 
+/// `DELETE /api/workflows/{kind}/versions/{version}` — discard a DRAFT
+/// (ebd7bb70). The publish guard refuses a dirty registry and used to
+/// demand "resolve that draft first" while no verb or route could;
+/// this is that route. Draft-only: 409 for active/retired (history),
+/// 404 for a version that never existed (a typo must not read as
+/// success). Same policy gate as every registry write.
+pub(super) async fn discard_kind_version<R: JobsRepository + 'static, B: EventBus + 'static>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+    CurrentUser(user): CurrentUser,
+    Path((kind, version)): Path<(String, i32)>,
+) -> Response {
+    let reg = match kind_registry_or_503(&state) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    if let Err(r) = policy_check(&state, &user, Action::Update).await {
+        return r;
+    }
+    let (actor, now) = write_stamp(&state, &user).await;
+    match reg.discard_draft(&kind, version, &actor, now).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(crate::registry::WorkflowError::NotFound(m)) => {
+            (StatusCode::NOT_FOUND, m).into_response()
+        }
+        Err(crate::registry::WorkflowError::Conflict(m)) => {
+            (StatusCode::CONFLICT, m).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 pub(super) async fn retire_kind<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
     CurrentUser(user): CurrentUser,

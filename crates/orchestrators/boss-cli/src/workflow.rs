@@ -114,6 +114,39 @@ fn titles(spec: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Discard a draft version, then confirm it is GONE by reading the
+/// version list back — a 204 is a claim; the read-back is the fact.
+pub async fn discard(kind: &str, version: i32) -> Result<()> {
+    let http = reqwest::Client::new();
+    crate::gate::api(
+        &http,
+        reqwest::Method::DELETE,
+        &format!("/api/workflows/{kind}/versions/{version}"),
+        None,
+    )
+    .await?;
+    let versions = crate::gate::rows(
+        crate::gate::api(
+            &http,
+            reqwest::Method::GET,
+            &format!("/api/workflows/{kind}/versions"),
+            None,
+        )
+        .await?,
+    );
+    let still_there = versions
+        .iter()
+        .any(|v| v.get("version").and_then(serde_json::Value::as_i64) == Some(i64::from(version)));
+    if still_there {
+        anyhow::bail!(
+            "the DELETE answered but {kind} v{version} is still in the version list — \
+             refusing to call that discarded"
+        );
+    }
+    println!("boss workflow: {kind} v{version} draft discarded — confirmed gone");
+    Ok(())
+}
+
 pub async fn publish(kind: &str, path: &std::path::Path, dry: bool) -> Result<()> {
     let http = reqwest::Client::new();
     let raw = std::fs::read_to_string(path)
@@ -162,7 +195,7 @@ pub async fn publish(kind: &str, path: &std::path::Path, dry: bool) -> Result<()
              promotes WHATEVER DRAFT EXISTS — it takes no body and cannot be told which \
              one.\n  Publishing now would put v{stale} live instead of your spec. That is \
              exactly how ship-a-change went from v19 to v16 in production for four \
-             minutes.\n  Resolve that draft first."
+             minutes.\n  Discard it first: `boss workflow discard {kind} {stale}`."
         );
     }
 

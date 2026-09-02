@@ -950,8 +950,16 @@ function days(v: TerminalVersion): string {
   const m = v.cycle_time_days?.median;
   if (m === null || m === undefined) return '—';
   const round1 = (n: number) => Math.round(n * 10) / 10;
-  const hours = round1(m * 24);
-  return hours < 24 ? `${hours}h` : `${round1(m)}d`;
+  const hours = m * 24;
+  // Sub-hour medians in MINUTES (b4c1b53a): at today's cadence a cycle
+  // is often under an hour, and `0.8h` makes the reader do arithmetic
+  // the scoreboard exists to have already done.
+  if (hours < 1) return `${Math.round(hours * 60)}m`;
+  // The day boundary compares the ROUNDED hours: 23.98h displays as
+  // 24h, and "24h" reads as a day, not as hours (the pin this line
+  // briefly broke on the way in).
+  const h1 = round1(hours);
+  return h1 < 24 ? `${h1}h` : `${round1(m)}d`;
 }
 
 /**

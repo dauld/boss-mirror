@@ -2171,6 +2171,22 @@ pub trait WorkflowRegistry: Send + Sync {
         now: DateTime<Utc>,
     ) -> Result<(), WorkflowError>;
 
+    /// Delete a DRAFT row outright. A draft admitted nothing, so it is
+    /// pre-history and may be removed; an active or retired version IS
+    /// history and refuses with `Conflict` (ebd7bb70 — the publish
+    /// guard demanded "resolve that draft first" while no verb or
+    /// route could, and the actual resolution was a raw psql DELETE
+    /// the classifier rightly blocks). Records
+    /// `jobs.kind.draft_discarded` iff a row was removed; a missing
+    /// row is `NotFound` so a typo cannot read as success.
+    async fn discard_draft(
+        &self,
+        kind: &str,
+        version: i32,
+        actor: &boss_core::actor::ActorId,
+        now: DateTime<Utc>,
+    ) -> Result<(), WorkflowError>;
+
     /// Look up the active spec and materialize its step DAG against
     /// the given subject. Default impl fetches + delegates to the
     /// pure `materialize_steps` helper; adapters can override if a
@@ -2516,6 +2532,33 @@ impl WorkflowRegistry for InMemoryWorkflows {
                 &spec,
             ));
         }
+        Ok(())
+    }
+
+    async fn discard_draft(
+        &self,
+        kind: &str,
+        version: i32,
+        actor: &boss_core::actor::ActorId,
+        _now: DateTime<Utc>,
+    ) -> Result<(), WorkflowError> {
+        let mut rows = self.rows.lock().unwrap();
+        let Some(row) = rows.get(&(kind.to_string(), version)) else {
+            return Err(WorkflowError::NotFound(format!("{kind} v{version}")));
+        };
+        if row.status != WorkflowStatus::Draft {
+            return Err(WorkflowError::Conflict(format!(
+                "{kind} v{version} is {:?}, not a draft — an active or retired                  version is history; only a draft (which admitted nothing) can                  be discarded",
+                row.status
+            )));
+        }
+        let spec = rows.remove(&(kind.to_string(), version)).expect("checked");
+        drop(rows);
+        self.record(crate::events::workflow_registry_event(
+            crate::events::WORKFLOW_DRAFT_DISCARDED,
+            actor,
+            &spec,
+        ));
         Ok(())
     }
 
@@ -3058,6 +3101,77 @@ mod pg {
 
             let event = crate::events::workflow_registry_event(
                 crate::events::WORKFLOW_RETIRED,
+                actor,
+                &spec,
+            );
+            boss_events::outbox::record_event_in_tx(&mut tx, &event)
+                .await
+                .map_err(WorkflowError::Storage)?;
+
+            tx.commit()
+                .await
+                .map_err(|e| WorkflowError::Storage(e.to_string()))?;
+            Ok(())
+        }
+
+        async fn discard_draft(
+            &self,
+            kind: &str,
+            version: i32,
+            actor: &boss_core::actor::ActorId,
+            _now: DateTime<Utc>,
+        ) -> Result<(), WorkflowError> {
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|e| WorkflowError::Storage(e.to_string()))?;
+
+            // Read first: the refusal must say what the row IS (a typo
+            // must read as NotFound, history as Conflict — never as a
+            // silent no-op), and the discard event's payload is the
+            // spec being removed.
+            let found: Option<Row> = sqlx::query_as(
+                "SELECT kind, version, status, label, description, category,
+                        subject_kinds, steps, metadata_schema, entitlements, metadata,
+                        on_complete_create, owning_team, authoring_job_id, created_at
+                 FROM workflows
+                 WHERE kind = $1 AND version = $2",
+            )
+            .bind(kind)
+            .bind(version)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| WorkflowError::Storage(e.to_string()))?;
+
+            let Some(row) = found else {
+                return Err(WorkflowError::NotFound(format!("{kind} v{version}")));
+            };
+            let spec = row_to_spec(row)?;
+            if spec.status != WorkflowStatus::Draft {
+                return Err(WorkflowError::Conflict(format!(
+                    "{kind} v{version} is {:?}, not a draft — an active or retired \
+                     version is history; only a draft (which admitted nothing) can \
+                     be discarded",
+                    spec.status
+                )));
+            }
+
+            // The one DELETE the append-only registry permits: a draft
+            // admitted nothing, so removing it rewrites no packet's
+            // history — and the discard itself goes on the record in
+            // the same transaction.
+            sqlx::query(
+                "DELETE FROM workflows WHERE kind = $1 AND version = $2 AND status = 'draft'",
+            )
+            .bind(kind)
+            .bind(version)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| WorkflowError::Storage(e.to_string()))?;
+
+            let event = crate::events::workflow_registry_event(
+                crate::events::WORKFLOW_DRAFT_DISCARDED,
                 actor,
                 &spec,
             );
@@ -3947,6 +4061,56 @@ mod tests {
         let err = reg.get_active("repair").await.unwrap_err();
         match err {
             WorkflowError::NotFound(_) => {}
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    /// ebd7bb70: the publish guard's "resolve that draft first" now has
+    /// a resolution. A draft admitted nothing and may be removed; the
+    /// removal goes on the record; history refuses; a typo is NotFound.
+    #[tokio::test]
+    async fn a_draft_can_be_discarded_and_history_cannot() {
+        let reg = InMemoryWorkflows::new();
+        let d = reg
+            .create_draft(seed_spec("repair"), &test_actor(), Utc::now())
+            .await
+            .unwrap();
+        reg.discard_draft("repair", d.version, &test_actor(), Utc::now())
+            .await
+            .unwrap();
+        // Gone: publishing now finds no draft.
+        match reg.publish("repair", &test_actor(), Utc::now()).await {
+            Err(WorkflowError::NotFound(_)) => {}
+            other => panic!("draft should be gone, got {other:?}"),
+        }
+        // The discard is on the record.
+        assert!(
+            reg.recorded_events()
+                .iter()
+                .any(|e| e.kind == crate::events::WORKFLOW_DRAFT_DISCARDED),
+            "discard must record jobs.kind.draft_discarded"
+        );
+        // History refuses: publish a fresh draft, then try to discard it.
+        let d2 = reg
+            .create_draft(seed_spec("repair"), &test_actor(), Utc::now())
+            .await
+            .unwrap();
+        reg.publish("repair", &test_actor(), Utc::now())
+            .await
+            .unwrap();
+        match reg
+            .discard_draft("repair", d2.version, &test_actor(), Utc::now())
+            .await
+        {
+            Err(WorkflowError::Conflict(m)) => assert!(m.contains("history"), "{m}"),
+            other => panic!("active must refuse discard, got {other:?}"),
+        }
+        // A version that never existed is NotFound, not a silent success.
+        match reg
+            .discard_draft("repair", 99, &test_actor(), Utc::now())
+            .await
+        {
+            Err(WorkflowError::NotFound(_)) => {}
             other => panic!("expected NotFound, got {other:?}"),
         }
     }

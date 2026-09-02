@@ -39,6 +39,9 @@ base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 [dev-dependencies]
+# dock_preview's tests prove trial_merge against REAL git in a scratch
+# repo (fixtures of what we hope merge-tree prints would pin nothing).
+tempfile = "3"
 # DB-backed cadence tests (the firing claim's exactly-once contract
 # rides the cadence_firings primary key, which only Postgres can pin).
 boss-testing = { path = "../../core/boss-testing", features = ["postgres"] }

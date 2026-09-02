@@ -303,13 +303,18 @@ impl SchedulingRepository for PgScheduling {
         stamp: &boss_core::publisher::EventStamp,
     ) -> Result<(), SchedulingError> {
         let mut tx = self.pool.begin().await.map_err(storage)?;
+        // The row bind and the record share ONE instant
+        // (stamp.timestamp = the event's audit_log.timestamp), so a
+        // replay reproduces this row byte-identically. NOW() here
+        // minted a second wall reading the log never saw.
         let r = sqlx::query(
             "UPDATE scheduled_assignments
-             SET status = $2, updated_at = NOW()
+             SET status = $2, updated_at = $3
              WHERE id = $1",
         )
         .bind(id)
         .bind(status.as_str())
+        .bind(stamp.timestamp)
         .execute(&mut *tx)
         .await
         .map_err(storage)?;
@@ -606,14 +611,18 @@ impl SchedulingRepository for PgScheduling {
         stamp: &boss_core::publisher::EventStamp,
     ) -> Result<(), SchedulingError> {
         let mut tx = self.pool.begin().await.map_err(storage)?;
+        // created_at binds the stamp's instant (= the event's
+        // audit_log.timestamp) so the replayed row matches this one
+        // byte-for-byte. NOW() minted a second wall reading.
         sqlx::query(
-            "INSERT INTO tech_calendar_tokens (employee_id, token) \
-             VALUES ($1, $2) \
+            "INSERT INTO tech_calendar_tokens (employee_id, token, created_at) \
+             VALUES ($1, $2, $3) \
              ON CONFLICT (employee_id) DO UPDATE \
-               SET token = EXCLUDED.token, created_at = NOW()",
+               SET token = EXCLUDED.token, created_at = EXCLUDED.created_at",
         )
         .bind(employee_id)
         .bind(new_token)
+        .bind(stamp.timestamp)
         .execute(&mut *tx)
         .await
         .map_err(storage)?;

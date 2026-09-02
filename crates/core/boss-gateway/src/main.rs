@@ -247,6 +247,19 @@ fn build_router(local_auth_state: Option<Arc<LocalAuthState>>) -> axum::Router<A
         // — same dual registration as /api/jobs + /api/people/accounts.
         // Without the bare route, `/api/assets?…` misses the proxy and
         // falls through to the SPA static handler (HTML, not JSON).
+        // The estate registry + observation series (8a622ab7: the
+        // /it/estate page 404'd on BOTH its sections — these endpoints
+        // live on the jobs upstream and the gateway never grew the
+        // prefix, so the fetches fell through to the SPA static handler).
+        // Bare + sub-path, per the /api/assets rationale below.
+        .route(
+            "/api/estate",
+            axum::routing::any(|s, r| proxy::handle(s, r, &proxy::JOBS)),
+        )
+        .route(
+            "/api/estate/{*rest}",
+            axum::routing::any(|s, r| proxy::handle(s, r, &proxy::JOBS)),
+        )
         .route(
             "/api/assets",
             axum::routing::any(|s, r| proxy::handle(s, r, &proxy::ASSETS)),

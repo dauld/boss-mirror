@@ -70,6 +70,10 @@ describe('nav catalog — app assignment', () => {
     // The feedback triage board — user-feedback Jobs, worked Kanban
     // style. New surface, not a moved one.
     'system-feedback',
+    // The IT backlog board — the same TriageBoard pointed at
+    // backlog-item Jobs (c1624b94: the backlog lost its page in the
+    // consolidation). A route and a filter, not another board.
+    'system-backlog',
     // The Operating System map — the executor network. Sits beside
     // the dispatcher cascade: same IT audience, different question
     // (job traffic, not rule wiring).

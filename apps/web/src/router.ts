@@ -39,6 +39,7 @@ export type Route =
   | { kind: 'views' }
   /// IT feedback triage board.
   | { kind: 'systemFeedback' }
+  | { kind: 'systemBacklog' }
   /// Full-page step surface. A step whose UX is a plugin gets the
   /// whole viewport instead of a panel inside the job page — review
   /// and authoring steps are reading tasks, and reading competes
@@ -168,6 +169,7 @@ export function parseRoute(pathname: string): Route {
     if (p === '/design') return { kind: 'systemDesign' };
     if (p === '/design/experiments') return { kind: 'experiments' };
     if (p === '/design/feedback') return { kind: 'systemFeedback' };
+    if (p === '/design/backlog') return { kind: 'systemBacklog' };
     // 5. Estate. 6. KB. Plus the unlisted auth door.
     if (p === '/estate') return { kind: 'systemEstate' };
     if (p === '/kb') return { kind: 'systemKb' };

@@ -64,5 +64,9 @@ name = "idempotency_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "rebuild_e2e"
+required-features = ["postgres"]
+
+[[test]]
 name = "value_conservation_pg"
 required-features = ["postgres"]
