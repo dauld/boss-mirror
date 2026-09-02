@@ -1,0 +1,16 @@
+# The codebase as an estate scope (0a5df32d): nightly size/breakdown
+# series so incidental complexity shows as a trend, not a surprise.
+# Install on boss-gcp (same conductor op as observe-host):
+#   sudo install -m644 infra/codebase-observe/boss-observe-codebase.{service,timer} /etc/systemd/system/
+#   sudo install -m755 infra/codebase-observe/observe-codebase.sh /usr/local/lib/boss/observe-codebase.sh
+#   sudo systemctl daemon-reload && sudo systemctl enable --now boss-observe-codebase.timer
+[Unit]
+Description=BOSS codebase observation: size and per-unit breakdown, nightly
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=JOBS_API=http://10.20.0.34:7900
+Environment=CLONE_DIR=/var/lib/boss-train/repo
+ExecStart=/usr/local/lib/boss/observe-codebase.sh

@@ -37,6 +37,7 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
@@ -92,6 +93,77 @@ fn gate_tokens(manifest: &str) -> Vec<String> {
 /// reported under branch B. All three results had to be thrown away.
 pub(crate) fn workspace_is_shared(job_yaml: &str) -> bool {
     job_yaml.contains("persistentVolumeClaim")
+}
+
+/// The workspace PVC the rendered Job mounts, in either yaml spelling —
+/// the shipped manifest writes `persistentVolumeClaim: {claimName: x}`
+/// inline, so a block-style-only parser would return None against
+/// production and the detach guard below would silently never engage.
+pub(crate) fn workspace_claim(job_yaml: &str) -> Option<String> {
+    job_yaml.lines().find_map(|l| {
+        let (_, rest) = l.split_once("claimName:")?;
+        let name = rest.trim().trim_end_matches('}').trim();
+        (!name.is_empty()).then(|| name.to_string())
+    })
+}
+
+/// Does any volumeattachment row (kubectl --no-headers table:
+/// NAME ATTACHER PV NODE ATTACHED AGE) name this PV in column 3?
+pub(crate) fn any_attachment_for(table: &str, volume: &str) -> bool {
+    table
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(2))
+        .any(|pv| pv == volume)
+}
+
+/// How a wait for workspace release ended.
+///
+/// WHY THIS EXISTS (da260655). `running_gates` reads pod PHASE, and a
+/// finishing gate's pod leaves Running before the node lets go of the
+/// workspace volume — so a gate launched right behind a finishing one
+/// passes the pods guard and then stalls on attach. The guard that
+/// checks pods cannot see the disk; this one watches the
+/// volumeattachment itself.
+#[derive(Debug)]
+pub(crate) enum ReleaseWait {
+    /// No attachment held the volume — the common path, zero polls.
+    Free,
+    /// Detach lag resolved after this many polls.
+    Released { polls: usize },
+    /// Still attached after every allowed poll; the caller proceeds.
+    TimedOut,
+    /// The probe itself errored; the caller proceeds with a notice.
+    Unwatchable(String),
+}
+
+/// Poll `attached` until it clears, erroring, or `max_polls` sleeps.
+///
+/// FAIL-OPEN, unlike `resolve_running` — the asymmetry is deliberate.
+/// The pods guard protects verdict CORRECTNESS (two gates on one disk
+/// cross their receipts), so an unreadable count refuses. This guard
+/// protects launch LIVENESS: the worst case of proceeding is a pod
+/// briefly Pending on attach, strictly better than refusing to gate on
+/// RBAC that can list pods but not cluster-scoped volumeattachments.
+/// Pure — polls are counted, not clocked, so the rule pins in tests.
+pub(crate) fn await_release<F, S>(mut attached: F, mut sleep: S, max_polls: usize) -> ReleaseWait
+where
+    F: FnMut() -> Result<bool>,
+    S: FnMut(),
+{
+    match attached() {
+        Ok(false) => return ReleaseWait::Free,
+        Err(e) => return ReleaseWait::Unwatchable(format!("{e:#}")),
+        Ok(true) => {}
+    }
+    for polls in 1..=max_polls {
+        sleep();
+        match attached() {
+            Ok(false) => return ReleaseWait::Released { polls },
+            Err(e) => return ReleaseWait::Unwatchable(format!("{e:#}")),
+            Ok(true) => {}
+        }
+    }
+    ReleaseWait::TimedOut
 }
 
 /// Substitute the runner manifest's placeholders and return the single
@@ -603,6 +675,99 @@ fn resolve_running(shared: bool, running: Result<usize>) -> Result<usize> {
     }
 }
 
+/// The PV behind a PVC, or None while unbound. kubectl's jsonpath
+/// prints the empty string for a missing field rather than erroring —
+/// mapped to None here so absence stays distinguishable from a name.
+fn pvc_volume_name(namespace: &str, claim: &str) -> Result<Option<String>> {
+    let out = kubectl(namespace)
+        .args(["get", "pvc", claim, "-o", "jsonpath={.spec.volumeName}"])
+        .output()
+        .context("kubectl get pvc — is KUBECONFIG set and the cluster reachable?")?;
+    if !out.status.success() {
+        bail!(
+            "kubectl get pvc {claim} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok((!name.is_empty()).then_some(name))
+}
+
+/// Is this PV named by any volumeattachment? Cluster-scoped, so no -n.
+fn volume_attached(volume: &str) -> Result<bool> {
+    let out = std::process::Command::new("kubectl")
+        .args(["get", "volumeattachments", "--no-headers"])
+        .output()
+        .context("kubectl get volumeattachments")?;
+    if !out.status.success() {
+        bail!(
+            "kubectl get volumeattachments failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(any_attachment_for(
+        &String::from_utf8_lossy(&out.stdout),
+        volume,
+    ))
+}
+
+/// One poll every five seconds, twenty-four polls: a two-minute bound.
+/// Detach lag measures in seconds; a volume still held after two
+/// minutes is not lag, and holding the verb longer buys nothing the
+/// scheduler would not do anyway.
+const RELEASE_POLL: Duration = Duration::from_secs(5);
+const RELEASE_MAX_POLLS: usize = 24;
+
+/// The detach guard, wired: resolve the PVC's volume, then wait out
+/// any lingering attachment. Every branch proceeds — this guard's only
+/// powers are to sleep and to say what it saw.
+fn wait_for_workspace_release(namespace: &str, job_yaml: &str) {
+    let Some(claim) = workspace_claim(job_yaml) else {
+        return;
+    };
+    let volume = match pvc_volume_name(namespace, &claim) {
+        Ok(Some(v)) => v,
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!(
+                "boss gate: cannot watch workspace volume ({e:#}) — proceeding as before this guard existed"
+            );
+            return;
+        }
+    };
+    let mut announced = false;
+    let outcome = await_release(
+        || volume_attached(&volume),
+        || {
+            if !announced {
+                println!(
+                    "boss gate: workspace volume still attached (detach lag, da260655) — \
+                     waiting up to {}s for the node to let go",
+                    RELEASE_POLL.as_secs() * RELEASE_MAX_POLLS as u64
+                );
+                announced = true;
+            }
+            std::thread::sleep(RELEASE_POLL);
+        },
+        RELEASE_MAX_POLLS,
+    );
+    match outcome {
+        ReleaseWait::Free => {}
+        ReleaseWait::Released { polls } => println!(
+            "boss gate: workspace volume released after ~{}s — clear to launch",
+            polls as u64 * RELEASE_POLL.as_secs()
+        ),
+        ReleaseWait::TimedOut => println!(
+            "boss gate: workspace volume still attached after ~{}s — proceeding; \
+             the pod may briefly wait on attach",
+            RELEASE_POLL.as_secs() * RELEASE_MAX_POLLS as u64
+        ),
+        ReleaseWait::Unwatchable(msg) => eprintln!(
+            "boss gate: cannot watch workspace volume ({msg}) — proceeding as before this guard existed"
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     branch: &str,
@@ -757,6 +922,15 @@ pub async fn run(
     if dry {
         println!("boss gate: DRY would create a Job for {branch} (packet {packet})");
         return Ok(());
+    }
+
+    // The pods guard above answers "is another gate RUNNING"; it cannot
+    // see that a just-finished gate's volume is still detaching from
+    // the node (da260655). On a shared workspace, wait that lag out
+    // before creating the Job — a liveness guard, so every branch of it
+    // proceeds; it only sleeps and reports.
+    if shared {
+        wait_for_workspace_release(namespace, &job);
     }
 
     let mut child = kubectl(namespace)
@@ -1662,6 +1836,94 @@ apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: gate-runner-disk
         assert!(
             ABSENCE_TOLERANCE.as_secs() <= 600,
             "a gate takes ~11 minutes"
+        );
+    }
+
+    /// The claim parser must read BOTH yaml spellings, because the real
+    /// manifest uses the inline one — a parser proven only against the
+    /// block style would return None against production and the guard
+    /// would silently never engage (da260655's failure shape: a check
+    /// that answers instead of erroring).
+    #[test]
+    fn workspace_claim_reads_both_yaml_styles() {
+        let inline = "      volumes:\n        - name: gate-target\n          persistentVolumeClaim: {claimName: gate-runner-disk}\n";
+        assert_eq!(
+            workspace_claim(inline).as_deref(),
+            Some("gate-runner-disk"),
+            "inline map — the style the shipped manifest actually uses"
+        );
+        let block = "      volumes:\n        - name: gate-target\n          persistentVolumeClaim:\n            claimName: gate-runner-disk\n";
+        assert_eq!(workspace_claim(block).as_deref(), Some("gate-runner-disk"));
+        assert_eq!(workspace_claim("volumes:\n - emptyDir: {}\n"), None);
+    }
+
+    /// Already-free workspace: no sleeps, straight through. The common
+    /// path must cost nothing, or the wait becomes a tax on every gate.
+    #[test]
+    fn a_free_workspace_waits_zero_polls() {
+        let mut sleeps = 0;
+        let outcome = await_release(|| Ok(false), || sleeps += 1, 24);
+        assert!(matches!(outcome, ReleaseWait::Free));
+        assert_eq!(sleeps, 0);
+    }
+
+    /// Detach lag resolving mid-wait: the guard sleeps until the volume
+    /// lets go, then reports how long it held.
+    #[test]
+    fn a_detaching_volume_is_waited_out() {
+        let mut reads = vec![Ok(true), Ok(true), Ok(false)].into_iter();
+        let mut sleeps = 0;
+        let outcome = await_release(move || reads.next().unwrap(), || sleeps += 1, 24);
+        assert!(matches!(outcome, ReleaseWait::Released { polls: 2 }));
+        assert_eq!(sleeps, 2);
+    }
+
+    /// A volume that never releases must not hold the verb forever —
+    /// bounded polls, then TimedOut, and the CALLER proceeds. This is a
+    /// liveness guard, not the crossed-receipts wrongness guard: the
+    /// worst case of proceeding is a pod briefly Pending on attach,
+    /// which is strictly better than a verb that hangs.
+    #[test]
+    fn a_stuck_attachment_times_out_after_bounded_polls() {
+        let mut sleeps = 0;
+        let outcome = await_release(|| Ok(true), || sleeps += 1, 3);
+        assert!(matches!(outcome, ReleaseWait::TimedOut));
+        assert_eq!(sleeps, 3);
+    }
+
+    /// An unreadable attachment state degrades to Unwatchable — fail
+    /// OPEN, unlike resolve_running. That asymmetry is deliberate and
+    /// this test is where it is pinned: the pods guard protects verdict
+    /// CORRECTNESS (crossed receipts), so an error there refuses; this
+    /// guard protects launch LIVENESS, so an error here proceeds with a
+    /// notice. RBAC that can list pods but not cluster-scoped
+    /// volumeattachments must not lose the ability to gate at all.
+    #[test]
+    fn an_unreadable_attachment_fails_open_immediately() {
+        let mut sleeps = 0;
+        let outcome = await_release(
+            || anyhow::bail!("volumeattachments is forbidden"),
+            || sleeps += 1,
+            24,
+        );
+        match outcome {
+            ReleaseWait::Unwatchable(msg) => assert!(msg.contains("forbidden")),
+            other => panic!("expected Unwatchable, got {other:?}"),
+        }
+        assert_eq!(sleeps, 0, "no point polling a probe that cannot answer");
+    }
+
+    /// The attachment parser: kubectl's --no-headers table has the PV
+    /// name in column 3; only a row naming OUR volume means attached.
+    #[test]
+    fn attachment_rows_match_on_the_pv_column() {
+        let table = "csi-abc  driver.example  pvc-1111  w-1  true  20d\n\
+                     csi-def  driver.example  pvc-2222  w-2  true  3m\n";
+        assert!(any_attachment_for(table, "pvc-2222"));
+        assert!(!any_attachment_for(table, "pvc-9999"));
+        assert!(
+            !any_attachment_for("", "pvc-2222"),
+            "no rows, no attachment"
         );
     }
 }

@@ -1261,6 +1261,23 @@ pub(crate) fn stranded_gate_runs(
     out
 }
 
+/// Forge heads no packet claims — work that cannot board, and until
+/// this cross-ref nothing reported it (281f9842: measured at 60 of 80
+/// heads the day it was built). Input is `git ls-remote --heads`
+/// verbatim; `claimed` is every branch any packet names, so stranded
+/// greens and in-flight gates keep their own categories and never
+/// appear twice. A lingering merged train branch lands here too —
+/// honest, because it is exactly unclaimed residue to delete.
+pub(crate) fn orphan_branches(ls_remote: &str, claimed: &BTreeSet<String>) -> Vec<String> {
+    ls_remote
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(1))
+        .filter_map(|r| r.strip_prefix("refs/heads/"))
+        .filter(|b| *b != "main" && !claimed.contains(*b))
+        .map(str::to_string)
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1272,6 +1289,24 @@ mod tests {
     use boss_jobs::station_queue::{StationPredicate, StepMatch};
     use boss_jobs::stations::StationKind;
     use serde_json::json;
+
+    /// Orphans are forge heads no packet claims — main is not work, and
+    /// a claimed branch belongs to whichever category claimed it
+    /// (car / gate-run), never here. Parses `git ls-remote --heads`
+    /// verbatim: sha, tab, refs/heads/name.
+    #[test]
+    fn orphans_are_unclaimed_heads_minus_main() {
+        let ls = "aaa\trefs/heads/main\n\
+                  bbb\trefs/heads/feat/claimed\n\
+                  ccc\trefs/heads/docs/lost-work\n\
+                  ddd\trefs/heads/feat/also-lost\n";
+        let claimed: BTreeSet<String> = ["feat/claimed".to_string()].into();
+        assert_eq!(
+            orphan_branches(ls, &claimed),
+            vec!["docs/lost-work".to_string(), "feat/also-lost".to_string()]
+        );
+        assert!(orphan_branches("", &claimed).is_empty());
+    }
 
     fn day(d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 8, d).unwrap()

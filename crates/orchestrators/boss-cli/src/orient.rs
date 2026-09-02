@@ -128,6 +128,54 @@ pub async fn run() -> Result<()> {
         }
     }
 
+    // Orphans: forge heads no packet claims (281f9842 — 60 of 80 the
+    // day this was measured). The claimed set is every branch any
+    // fetched packet names: cars, gate-runs open and closed. Reading
+    // the forge needs git rather than the jobs api, and a workstation
+    // without the remote must still orient — so a failed read prints
+    // WHY and skips, it never fails the verb.
+    let mut claimed = car_branches.clone();
+    claimed.extend(
+        gate_runs
+            .iter()
+            .chain(gating.iter())
+            .map(|g| md_str(g, "branch").to_string())
+            .filter(|b| !b.is_empty()),
+    );
+    match std::process::Command::new("git")
+        .args(["ls-remote", "--heads", "origin"])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            let orphans =
+                crate::census::orphan_branches(&String::from_utf8_lossy(&out.stdout), &claimed);
+            if orphans.is_empty() {
+                println!("\n  ORPHANS — none: every forge head is claimed by a packet");
+            } else {
+                println!(
+                    "\n  ORPHANS — {} forge head(s) no packet claims (cannot board; \
+                     file a packet or delete the branch):",
+                    orphans.len()
+                );
+                const SHOWN: usize = 12;
+                for b in orphans.iter().take(SHOWN) {
+                    println!("    {b}");
+                }
+                if orphans.len() > SHOWN {
+                    println!("    …and {} more", orphans.len() - SHOWN);
+                }
+            }
+        }
+        Ok(out) => println!(
+            "\n  ORPHANS — skipped: git ls-remote failed ({})",
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .next()
+                .unwrap_or("no stderr")
+        ),
+        Err(e) => println!("\n  ORPHANS — skipped: could not run git ({e})"),
+    }
+
     // The dock.
     let dock = api(
         &http,
