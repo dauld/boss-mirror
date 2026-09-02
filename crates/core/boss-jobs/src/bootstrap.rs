@@ -327,6 +327,43 @@ fn synthesized_completion_metadata(step: &Value) -> serde_json::Map<String, Valu
     out
 }
 
+/// The metadata the sign-off walk lands before stamping: the step's
+/// existing keys, every live-required field synthesized (the same
+/// a-registry-row-must-never-brick-boot rule as the `task` arm — the
+/// 2026-09-02 evening crash-loop was this arm's bare status flip
+/// meeting the `decision` field cdfe2e1a made required at
+/// completion), the attestation keys, and — because the walk IS the
+/// approval — a truthful `decision` wherever the step declares one
+/// unauthored. `synthesized_completion_metadata` alone would fill it
+/// with the enum's first variant, recording "pending" on a step the
+/// walk is about to approve and complete.
+fn sign_off_walk_metadata(step: &Value) -> serde_json::Map<String, Value> {
+    let authored = step
+        .get("metadata")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut out = synthesized_completion_metadata(step);
+    if out.is_empty() {
+        // Empty is the helper's "nothing required was missing" signal;
+        // the sign-off write still replaces metadata wholesale, so the
+        // authored keys must ride along regardless.
+        out = authored.clone();
+    }
+    let declares_decision = step
+        .get("fields")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|f| f.get("name").and_then(Value::as_str) == Some("decision"));
+    if declares_decision && !authored.contains_key("decision") {
+        out.insert("decision".into(), json!("approved"));
+    }
+    out.insert("authority_role".into(), json!("workflow-approver"));
+    out.insert("signed_by".into(), json!("emp-cto"));
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 fn walk_step(
     client: &Client,
@@ -386,12 +423,7 @@ fn walk_step(
             let md_resp = client
                 .put(&md_url)
                 .headers(headers.clone())
-                .json(&json!({
-                    "metadata": {
-                        "authority_role": "workflow-approver",
-                        "signed_by": "emp-cto",
-                    },
-                }))
+                .json(&json!({ "metadata": sign_off_walk_metadata(step) }))
                 .send()
                 .with_context(|| format!("PUT {md_url}"))?;
             if !md_resp.status().is_success() {
@@ -552,5 +584,71 @@ mod walker_tests {
         assert_eq!(md.get("verdict"), Some(&json!("pass")));
         assert_eq!(md.get("count"), Some(&json!(1)));
         assert_eq!(md.get("when"), Some(&json!("2026-01-01")));
+    }
+
+    /// The 2026-09-02 EVENING crash-loop shape verbatim: the
+    /// workflow-design `approve` step requires `decision` (cdfe2e1a)
+    /// and the sign-off arm's bare completion missed it. The walk IS
+    /// the approval, so the record must say `approved` — not the
+    /// enum's first variant, which is `pending`.
+    #[test]
+    fn the_sign_off_walk_records_a_truthful_decision() {
+        let step = json!({
+            "metadata": { "authority_role": "workflow-approver" },
+            "fields": [{
+                "name": "decision",
+                "field_type": "pending|approved|rejected|changes-requested",
+                "required": true
+            }]
+        });
+        let md = sign_off_walk_metadata(&step);
+        assert_eq!(md.get("decision"), Some(&json!("approved")));
+        assert_eq!(md.get("authority_role"), Some(&json!("workflow-approver")));
+        assert_eq!(md.get("signed_by"), Some(&json!("emp-cto")));
+    }
+
+    /// An authored decision is a record already made; the walk must
+    /// not overwrite it.
+    #[test]
+    fn an_authored_decision_survives_the_walk() {
+        let step = json!({
+            "metadata": { "decision": "changes-requested" },
+            "fields": [{
+                "name": "decision",
+                "field_type": "pending|approved|rejected|changes-requested",
+                "required": true
+            }]
+        });
+        let md = sign_off_walk_metadata(&step);
+        assert_eq!(md.get("decision"), Some(&json!("changes-requested")));
+    }
+
+    /// A sign-off with no declared fields still carries the
+    /// attestation keys AND the step's existing metadata — the PUT
+    /// replaces wholesale, so dropping existing keys here is data
+    /// loss. No stray `decision` on a step that never declared one.
+    #[test]
+    fn a_fieldless_sign_off_keeps_existing_keys_and_adds_no_decision() {
+        let step = json!({ "metadata": { "already": "here" } });
+        let md = sign_off_walk_metadata(&step);
+        assert_eq!(md.get("already"), Some(&json!("here")));
+        assert_eq!(md.get("signed_by"), Some(&json!("emp-cto")));
+        assert!(!md.contains_key("decision"));
+    }
+
+    /// Other live-required fields on a sign-off step synthesize the
+    /// same way the task arm fills them — a registry row must never
+    /// be able to brick boot through EITHER arm.
+    #[test]
+    fn the_sign_off_walk_fills_other_required_fields() {
+        let step = json!({
+            "fields": [
+                {"name": "decision", "field_type": "pending|approved", "required": true},
+                {"name": "review_notes", "field_type": "string", "required": true}
+            ]
+        });
+        let md = sign_off_walk_metadata(&step);
+        assert_eq!(md.get("decision"), Some(&json!("approved")));
+        assert!(md.get("review_notes").and_then(|v| v.as_str()).is_some());
     }
 }
