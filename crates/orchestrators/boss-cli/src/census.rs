@@ -1218,6 +1218,19 @@ pub(crate) fn stranded_gate_runs(
 ) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for g in gate_runs {
+        // A gate-run an operator has marked SUPERSEDED is not stranded —
+        // its green is dead, not waiting: the branch was deleted, or the
+        // same change landed via another branch (facts only git can see,
+        // so they arrive as an annotation on the packet, not a derivation
+        // here). Two such corpses sat in this list for a day reading as
+        // rescuable work (754b01b5); rescue guidance pointing at a
+        // deleted branch is worse than none.
+        if g.get("metadata")
+            .and_then(|m| m.get("superseded"))
+            .is_some_and(|v| !v.is_null() && v.as_bool() != Some(false))
+        {
+            continue;
+        }
         let green = g
             .get("steps")
             .and_then(Value::as_array)
@@ -1336,6 +1349,27 @@ mod tests {
         let mut cars = BTreeSet::new();
         cars.insert("fix/a".to_string());
         assert!(stranded_gate_runs(&gate_runs, &cars).is_empty());
+    }
+
+    /// A green marked `superseded` is dead, not waiting (754b01b5): the
+    /// branch was deleted, or the change landed via another branch —
+    /// facts only git can see, recorded as an annotation. Listing it as
+    /// stranded hands the operator rescue guidance for a corpse.
+    #[test]
+    fn a_superseded_green_is_not_stranded() {
+        let gate_runs = vec![
+            json!({"metadata": {"branch": "fix/corpse", "superseded": true},
+                   "steps": [{"metadata": {"verdict": "green"}}]}),
+            json!({"metadata": {"branch": "fix/live"},
+                   "steps": [{"metadata": {"verdict": "green"}}]}),
+            // Explicit false = not superseded; still stranded.
+            json!({"metadata": {"branch": "fix/kept", "superseded": false},
+                   "steps": [{"metadata": {"verdict": "green"}}]}),
+        ];
+        assert_eq!(
+            stranded_gate_runs(&gate_runs, &BTreeSet::new()),
+            vec!["fix/kept".to_string(), "fix/live".to_string()]
+        );
     }
 
     // Orphan detection — a packet against a station set

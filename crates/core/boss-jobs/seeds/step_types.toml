@@ -1325,6 +1325,37 @@ required_roles = []
   description = "Due date"
 
 [[step_type]]
+kind = "gate-verdict"
+label = "Gate verdict"
+category = "operations"
+ux = "inline"
+version = 1
+description = "The gate runner's verdict on a gate-run — green, failed, or lost — with its machine receipt. A DEDICATED kind (not `task`) so a dispatcher rule can target `step.done.gate-verdict` for auto-park without firing on every task in the system. Completed by the runner via the API; it carries no authority_role, so it is never assigned to a person."
+# `typical_duration_hours` is deliberately UNSET (None), the same escape
+# `task` uses: the dispatcher's jobs.complete_step classifies a marker by
+# PROPERTIES — roles empty AND duration Some(<=0) — and auto-completes
+# markers the moment they go Ready. A gate-verdict with 0.0 here would be
+# system-completed EMPTY before the runner records the verdict, freezing
+# the step against the runner's real write and breaking every gate. The
+# duration genuinely is "however long the gate takes", which no constant
+# describes. Pinned by jobs_complete_step's
+# a_gate_verdict_is_never_auto_completed test.
+typical_duration_jitter = 0.0
+required_roles = []
+
+  [[step_type.fields]]
+  name = "verdict"
+  field_type = "green|failed|lost"
+  required = false
+  description = "The gate outcome the runner recorded. Optional-at-done, matching the `task` contract this replaces: the gate-run's own outcome steps already gate on it, so nothing tightens or loosens by declaring it here."
+
+  [[step_type.fields]]
+  name = "receipt"
+  field_type = "string"
+  required = false
+  description = "The machine receipt as a JSON string (head, verdict, mode, fails). Absent on `lost`, where the environment died before one was written."
+
+[[step_type]]
 kind = "acknowledgment"
 label = "Acknowledgment"
 category = "admin"

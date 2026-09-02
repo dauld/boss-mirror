@@ -26,13 +26,13 @@ use boss_dispatcher_handlers::handlers::{
     inventory_overhead_absorb::InventoryOverheadAbsorb,
     inventory_parts_consume::InventoryPartsConsume, inventory_parts_produce::InventoryPartsProduce,
     inventory_po_place::InventoryPoPlace, inventory_receive::InventoryReceive,
-    jobs_clear_waiting::JobsClearWaiting, jobs_complete_linked_step::JobsCompleteLinkedStep,
-    jobs_complete_step::JobsCompleteStep, jobs_subjob_resolve::JobsSubjobResolve,
-    ledger_bill_approve::LedgerBillApprove, ledger_payroll_run_submit::LedgerPayrollRunSubmit,
-    ledger_tax_accrue::LedgerTaxAccrue, ledger_tax_remit::LedgerTaxRemit,
-    messages_expire_for_job::MessagesExpireForJob, messages_notify::MessagesNotify,
-    messages_notify_job_terminal::MessagesNotifyJobTerminal, network_census::NetworkCensus,
-    packaging_allocate::PackagingAllocate, people_hire::PeopleHire,
+    jobs_auto_park::JobsAutoPark, jobs_clear_waiting::JobsClearWaiting,
+    jobs_complete_linked_step::JobsCompleteLinkedStep, jobs_complete_step::JobsCompleteStep,
+    jobs_subjob_resolve::JobsSubjobResolve, ledger_bill_approve::LedgerBillApprove,
+    ledger_payroll_run_submit::LedgerPayrollRunSubmit, ledger_tax_accrue::LedgerTaxAccrue,
+    ledger_tax_remit::LedgerTaxRemit, messages_expire_for_job::MessagesExpireForJob,
+    messages_notify::MessagesNotify, messages_notify_job_terminal::MessagesNotifyJobTerminal,
+    network_census::NetworkCensus, packaging_allocate::PackagingAllocate, people_hire::PeopleHire,
     people_terminate::PeopleTerminate, products_consume::ProductsConsume,
     products_consume_from_invoice::ProductsConsumeFromInvoice, products_produce::ProductsProduce,
     shipping_create::ShippingCreate, webhook_notify::WebhookNotify,
@@ -131,6 +131,15 @@ async fn main() -> Result<()> {
             );
             let mut handlers = HandlerRegistry::new();
             handlers.register(JobsSpawn::new(cfg.jobs_api_url.clone()));
+            // Auto-park: on a gate-run's green `gate-verdict` step, file
+            // the car the `--park-*` intent describes, so a gate-green
+            // branch never strands unparked. Needs the clock for a
+            // precise gate-step stamp (dock-queue-time). Inert until a
+            // rule on `step.done.gate-verdict` is published.
+            handlers.register(JobsAutoPark::new(
+                cfg.jobs_api_url.clone(),
+                cfg.clock_api_url.clone(),
+            ));
             // D7 delegate-subjob write-back: on a child Job's
             // close, resolve the parent delegate-subjob step.
             handlers.register(JobsSubjobResolve::new(cfg.jobs_api_url.clone()));

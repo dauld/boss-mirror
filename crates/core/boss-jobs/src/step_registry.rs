@@ -560,11 +560,12 @@ mod tests {
     fn registry_has_43_types() {
         // Test name predates the count bumps; leaving the name alone
         // keeps blame-diff churn down. Count is just "length of
-        // seeded types", not any load-bearing invariant. 46 since
-        // `scope-declaration` (ship-a-change's boundary step, so the
-        // dispatcher stops reading an unregistered kind as a decision).
+        // seeded types", not any load-bearing invariant. 47 since
+        // `gate-verdict` (the gate-run's dedicated verdict kind, so an
+        // auto-park rule can target `step.done.gate-verdict` instead of
+        // firing on every `task`).
         let reg = StepRegistry::v1();
-        assert_eq!(reg.all().len(), 46);
+        assert_eq!(reg.all().len(), 47);
     }
 
     /// The reason `scope-declaration` is registered at all.
@@ -787,8 +788,8 @@ mod tests {
         let v = all_v1_types();
         assert_eq!(
             v.len(),
-            46,
-            "step_types.toml should have 46 [[step_type]] blocks"
+            47,
+            "step_types.toml should have 47 [[step_type]] blocks"
         );
     }
 

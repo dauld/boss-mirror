@@ -99,6 +99,7 @@ pub fn validate_station(spec: &StationSpec) -> Vec<StationLintError> {
     check_self_binding(spec, &mut errs);
     check_bandwidth(spec, &mut errs);
     check_rollup(spec, &mut errs);
+    check_derived_namespace(spec, &mut errs);
     errs
 }
 
@@ -233,6 +234,58 @@ fn check_bandwidth(spec: &StationSpec, errs: &mut Vec<StationLintError>) {
                 "a wip_limit of {limit} is exceeded by an empty queue, so the station \
                  reports over_limit forever. Leave it unset for no limit, or retire \
                  the station to close it."
+            ),
+        ));
+    }
+}
+
+/// An authored station in the DERIVED namespace must cover the
+/// constraint its name claims.
+///
+/// `q.<role>.<step-kind>` is the projection's namespace
+/// ([`crate::station_projection::station_name`]), and the merge rule is
+/// "authored wins": a projected row whose name is already authored is
+/// DROPPED ([`crate::station_projection::derived_stations`]). That is
+/// the right rule for a deliberate override — and a silent hole for an
+/// accidental one: an authored row squatting on `q.bookkeeper.task`
+/// with an unrelated predicate SHADOWS the constraint queue without
+/// serving it, so steps for that (kind, role) pair reach no queue while
+/// the station list still shows the name (a6306207's one residual —
+/// the projection covers every declared pair by construction EXCEPT
+/// through this shadow).
+///
+/// The check is on the station's own terms, like every rule here: a
+/// name in the reserved namespace must carry the step clause the name
+/// promises — `kind = <step-kind>` and `metadata_equals.authority_role
+/// = <role>`, the exact predicate the projection would have written.
+fn check_derived_namespace(spec: &StationSpec, errs: &mut Vec<StationLintError>) {
+    let Some(rest) = spec.name.strip_prefix("q.") else {
+        return;
+    };
+    // Roles and step kinds are kebab-case, so the dot split is
+    // unambiguous (station_projection's own naming argument). A
+    // `q.`-name that does not split is not the derived shape.
+    let Some((role, kind)) = rest.split_once('.') else {
+        return;
+    };
+    if role.is_empty() || kind.is_empty() {
+        return;
+    }
+    let covers = spec.predicate.step.as_ref().is_some_and(|s| {
+        s.kind.as_deref() == Some(kind)
+            && s.metadata_equals.get("authority_role").map(String::as_str) == Some(role)
+    });
+    if !covers {
+        errs.push(err(
+            spec,
+            "name",
+            format!(
+                "occupies the derived namespace `q.{role}.{kind}` — the projection \
+                 yields to an authored name, so this station SHADOWS that constraint \
+                 queue without serving it: steps for (`{kind}`, `{role}`) would reach \
+                 no queue while the list still shows the name. Declare the covering \
+                 step clause (kind = `{kind}`, metadata_equals authority_role = \
+                 `{role}`), or name the station outside `q.`."
             ),
         ));
     }
@@ -446,5 +499,63 @@ mod tests {
         let errs = validate_all(&[viable(), bad]);
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0].station, "broken");
+    }
+
+    /// A `q.<role>.<kind>` name shadows the projection (authored wins),
+    /// so an authored row there without the covering step clause is a
+    /// constraint queue that exists in name only — steps for that pair
+    /// reach no queue while the list still shows the name (a6306207).
+    #[test]
+    fn squatting_on_the_derived_namespace_without_covering_it_is_refused() {
+        let mut spec = viable();
+        spec.name = "q.bookkeeper.bill-approval".into();
+        // viable()'s predicate matches ship-a-change jobs — nothing
+        // about bookkeeper bill-approval steps.
+        let errs = validate_station(&spec);
+        assert_eq!(reasons(&errs), vec!["name"]);
+        assert!(errs[0].reason.contains("shadows") || errs[0].reason.contains("SHADOWS"));
+        assert!(
+            errs[0].reason.contains("bill-approval"),
+            "{}",
+            errs[0].reason
+        );
+        assert!(errs[0].reason.contains("bookkeeper"), "{}", errs[0].reason);
+    }
+
+    /// ...and WITH the covering clause it is a legitimate override —
+    /// the documented reason authored-wins exists at all (an operator
+    /// wanting a custom wip_limit or discipline on a derived queue).
+    #[test]
+    fn a_deliberate_override_carrying_the_covering_clause_is_viable() {
+        let mut spec = viable();
+        spec.name = "q.bookkeeper.bill-approval".into();
+        spec.predicate.step = Some(StepMatch {
+            kind: Some("bill-approval".into()),
+            metadata_equals: BTreeMap::from([("authority_role".into(), "bookkeeper".into())]),
+            ..Default::default()
+        });
+        assert_eq!(validate_station(&spec), Vec::new());
+    }
+
+    /// A `q.`-prefixed name that is not the two-segment derived shape is
+    /// not the namespace this guards.
+    #[test]
+    fn a_q_name_that_is_not_the_derived_shape_is_left_alone() {
+        let mut spec = viable();
+        spec.name = "q.holding".into();
+        assert_eq!(validate_station(&spec), Vec::new());
+    }
+
+    /// THE EQUALITY TEST (§9a): every station the projection itself
+    /// emits must pass this lint — the guard describes the projection's
+    /// own shape, and if the two drift this catches which.
+    #[test]
+    fn every_projected_station_passes_its_own_lint() {
+        use crate::registry::platform_workflows;
+        let now = chrono::Utc.with_ymd_and_hms(2026, 8, 13, 12, 0, 0).unwrap();
+        let derived = crate::station_projection::derived_stations(&platform_workflows(), &[], now);
+        assert!(!derived.is_empty(), "expected derived stations to test");
+        let errs = validate_all(&derived);
+        assert_eq!(errs, Vec::new(), "a projected station failed the lint");
     }
 }

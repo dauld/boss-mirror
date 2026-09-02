@@ -237,6 +237,15 @@ mod tests {
         assert!(h.is_marker("milestone"));
         // `task`: no role but real work (unset duration) — NOT a marker.
         assert!(!h.is_marker("task"));
+        // `gate-verdict`: no role AND the runner completes it via the
+        // API — it must stay off the marker shape (duration None, the
+        // same escape `task` uses), or this handler would complete every
+        // gate's verdict EMPTY the moment it goes Ready, freezing the
+        // step against the runner's real write and breaking every gate.
+        // The §9a equality test between this property-classification and
+        // the StepType declaration in step_types.toml.
+        assert!(!h.is_marker("gate-verdict"));
+        assert!(!h.should_auto_complete("gate-verdict"));
         // Role-bearing / nonzero-duration work — NOT markers.
         assert!(!h.is_marker("demand-gate"));
         assert!(!h.is_marker("bill-approval"));

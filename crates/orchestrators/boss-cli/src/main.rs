@@ -14,6 +14,7 @@ mod inspect;
 mod job;
 mod merged;
 mod ops;
+mod orient;
 mod park;
 mod prove;
 mod publish;
@@ -223,6 +224,11 @@ enum Commands {
         #[command(subcommand)]
         action: JobAction,
     },
+    /// A session's first verb: trains in transit, gates running,
+    /// stranded greens, the dock, and the task queue — the approach in
+    /// one read, with the startup checklist at the end (CLAUDE.md
+    /// §Engineering Session Startup; automation of acedf981's L1).
+    Orient,
     /// Prove a merged car in production by RUNNING a probe.
     ///
     /// The verb executes the command itself and records exit status and
@@ -913,6 +919,7 @@ async fn main() -> Result<()> {
             }
             JobAction::Patch { job, patch } => job::patch(&job, &patch).await,
         },
+        Commands::Orient => orient::run().await,
         Commands::Prove {
             car,
             probe,

@@ -83,42 +83,43 @@ spec:
                   # In-cluster credentials: the ServiceAccount token is
                   # mounted, so kubectl needs no kubeconfig.
                   kubectl get nodes -o json > /tmp/nodes.json
-                  python3 - <<'PY' > /tmp/observation.json
-                  import json, datetime
-                  raw = json.load(open("/tmp/nodes.json"))
-                  def gib(v):
-                      # Kubernetes reports Ki/Mi; the registry declares GiB.
-                      if not v: return None
-                      if v.endswith("Ki"): return round(int(v[:-2]) / 1024 / 1024)
-                      if v.endswith("Mi"): return round(int(v[:-2]) / 1024)
-                      return None
-                  nodes = []
-                  for n in raw.get("items", []):
-                      md, st = n.get("metadata", {}), n.get("status", {})
-                      cap = st.get("capacity", {})
-                      addrs = [a["address"] for a in st.get("addresses", [])
-                               if a.get("type") == "InternalIP"]
-                      ready = next((c["status"] for c in st.get("conditions", [])
-                                    if c.get("type") == "Ready"), "Unknown")
-                      nodes.append({
-                          "id": md.get("name"),
-                          "address": addrs[0] if addrs else None,
-                          "cpu": int(cap.get("cpu", 0)) or None,
-                          "memory_gb": gib(cap.get("memory")),
-                          "disk_gb": gib(cap.get("ephemeral-storage")),
-                          "purpose": (md.get("labels") or {}).get("boss.dev/purpose"),
-                          "control_plane": "node-role.kubernetes.io/control-plane"
-                                           in (md.get("labels") or {}),
-                          "ready": ready == "True",
-                      })
-                  print(json.dumps({
-                      "observed_at": datetime.datetime.now(datetime.UTC).isoformat(),
-                      "observer": "boss-estate-observe",
-                      "scope": "kubernetes-nodes",
-                      "nodes": sorted(nodes, key=lambda x: x["id"] or ""),
-                  }))
-                  PY
-                  echo "observed $(python3 -c 'import json;print(len(json.load(open("/tmp/observation.json"))["nodes"]))') node(s)"
+                  # jq, not python: directive 26d61c97 retired python
+                  # from the estate's shell, and infra/estate/observe-host.sh
+                  # (the host-scope sibling) is the shape to match.
+                  # Kubernetes reports Ki/Mi; the registry declares GiB.
+                  # Capacity rounds to the NEAREST GiB, ties half-UP
+                  # (add half a GiB, then floor) — THE one stated
+                  # rounding rule, shared with observe-host.sh. The
+                  # python this replaces used round-half-even, so an
+                  # exact .5-GiB tie now rounds up instead of to the
+                  # nearest even integer.
+                  jq '
+                    def gib:
+                      if . == null then null
+                      elif endswith("Ki") then (((rtrimstr("Ki") | tonumber) + 524288) / 1048576 | floor)
+                      elif endswith("Mi") then (((rtrimstr("Mi") | tonumber) + 512) / 1024 | floor)
+                      else null end;
+                    {
+                      observed_at: (now | todate),
+                      observer: "boss-estate-observe",
+                      scope: "kubernetes-nodes",
+                      nodes: ([ (.items // [])[]
+                        | (.metadata // {}) as $md
+                        | (.status // {}) as $st
+                        | ($md.labels // {}) as $labels
+                        | {
+                            id: $md.name,
+                            address: ([($st.addresses // [])[] | select(.type == "InternalIP") | .address] | .[0]),
+                            cpu: (($st.capacity.cpu // "0" | tonumber) | if . == 0 then null else . end),
+                            memory_gb: ($st.capacity.memory | gib),
+                            disk_gb: ($st.capacity["ephemeral-storage"] | gib),
+                            purpose: $labels["boss.dev/purpose"],
+                            control_plane: ($labels | has("node-role.kubernetes.io/control-plane")),
+                            ready: (([($st.conditions // [])[] | select(.type == "Ready") | .status] | (.[0] // "Unknown")) == "True")
+                          }
+                      ] | sort_by(.id // ""))
+                    }' /tmp/nodes.json > /tmp/observation.json
+                  echo "observed $(jq -r '.nodes | length' /tmp/observation.json) node(s)"
                   # The door refuses an observation that saw nothing, so a
                   # denied or broken probe fails loudly here rather than
                   # recording an empty estate.
@@ -127,14 +128,20 @@ spec:
                   # dead DNS name and the script died before its own
                   # report line (3ddd8333). Failing is fine; failing
                   # SILENTLY in a script that promises to fail loudly is
-                  # not — so curl's own exit is caught and spoken.
-                  code=$(curl -s -o /tmp/resp -w '%{http_code}' -X POST \
+                  # not — so curl's own exit is caught and spoken, with
+                  # the real exit code and the real target in the
+                  # message. The response body rides the same capture as
+                  # the status code (body, newline, code) instead of a
+                  # tempfile.
+                  resp=$(curl -s -w '\n%{http_code}' -X POST \
                     -H "content-type: application/json" \
                     -H "x-boss-user: {\"id\":\"automation:estate-observer\",\"role\":\"platform-admin\",\"access_tier\":\"operator\"}" \
                     --data-binary @/tmp/observation.json \
                     "$JOBS_API/api/estate/observation") \
-                    || { rc=$?; echo "jobs api: UNREACHABLE (curl exit $rc, target $JOBS_API)"; exit 1; }
-                  echo "jobs api: $code $(cat /tmp/resp)"
+                    || { rc=$?; echo "curl failed (exit $rc, target $JOBS_API/api/estate/observation)"; exit 1; }
+                  code=$(printf '%s\n' "$resp" | tail -n 1)
+                  body=$(printf '%s\n' "$resp" | sed '$d')
+                  echo "jobs api: $code $body"
                   test "$code" = "202"
               env:
                 - name: JOBS_API
