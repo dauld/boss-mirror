@@ -16,6 +16,8 @@
 pub mod bill_payment_batch;
 pub mod commerce_invoice_issue;
 pub mod common;
+pub mod credential_issuer;
+pub mod credential_rotate_forgejo;
 pub mod docs_design_sweep;
 pub mod docs_flush_queue;
 pub mod estate_alarm;

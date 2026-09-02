@@ -1559,6 +1559,9 @@ pub(super) async fn list_estate_nodes<R: JobsRepository + 'static, B: EventBus +
 
 #[derive(Debug, serde::Deserialize, Default)]
 pub(super) struct EstateEventsQuery {
+    /// Exact-match filter on the payload's top-level `scope`, e.g.
+    /// `codebase` or `kubernetes-nodes`. Absent reads every series.
+    scope: Option<String>,
     limit: Option<i64>,
 }
 
@@ -1578,12 +1581,21 @@ pub(super) struct EstateEventsQuery {
 /// recorded: a reader that reshapes its instrument is a second
 /// instrument. Small default, hard cap — this is a status surface,
 /// not an export (the events service's export door owns bulk).
+///
+/// `?scope=` is what makes that small cap honest. One kind carries
+/// many series at different cadences, and a page taken across all of
+/// them is spent by whichever ticks fastest: measured 2026-09-02, the
+/// 50-row ceiling held 49 `kubernetes-nodes` rows and 1 `host` and
+/// covered only 04:30Z–17:30Z, so the nightly `codebase` observation
+/// could not be read through the one door that serves it. Asking for
+/// a scope answers about THAT scope — 50 rows of a nightly series is
+/// fifty nights, not half a day.
 pub(super) async fn list_estate_observations<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
     CurrentUser(_user): CurrentUser,
     Query(q): Query<EstateEventsQuery>,
 ) -> Response {
-    estate_events(&state, crate::events::ESTATE_OBSERVED, q.limit).await
+    estate_events(&state, crate::events::ESTATE_OBSERVED, &q).await
 }
 
 pub(super) async fn list_estate_comparisons<R: JobsRepository + 'static, B: EventBus + 'static>(
@@ -1591,16 +1603,23 @@ pub(super) async fn list_estate_comparisons<R: JobsRepository + 'static, B: Even
     CurrentUser(_user): CurrentUser,
     Query(q): Query<EstateEventsQuery>,
 ) -> Response {
-    estate_events(&state, crate::events::ESTATE_COMPARED, q.limit).await
+    estate_events(&state, crate::events::ESTATE_COMPARED, &q).await
 }
 
 async fn estate_events<R: JobsRepository + 'static, B: EventBus + 'static>(
     state: &Arc<JobsApiState<R, B>>,
     kind: &str,
-    limit: Option<i64>,
+    q: &EstateEventsQuery,
 ) -> Response {
-    let limit = limit.unwrap_or(5).clamp(1, 50);
-    match state.jobs.recent_events_by_kind(kind, limit).await {
+    let limit = q.limit.unwrap_or(5).clamp(1, 50);
+    // The scope reaches the repository, which pushes it to the WHERE
+    // clause. Narrowing the page after it comes back would leave the
+    // slow series exactly as unreadable as it was.
+    match state
+        .jobs
+        .recent_events_by_kind(kind, q.scope.as_deref(), limit)
+        .await
+    {
         Ok(rows) => Json(serde_json::json!({ "data": rows })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }

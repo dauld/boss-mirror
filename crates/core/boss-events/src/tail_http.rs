@@ -88,16 +88,32 @@ async fn events_health() -> Response {
 /// EXACT kind, deliberately not the tail's ILIKE substring: a reader
 /// serving one declared kind must not grow neighbours when a new kind
 /// shares a prefix.
+///
+/// `scope` narrows to one series within that kind, and does it IN THE
+/// WHERE CLAUSE — the rule [`TailQuery::simulated`] states for the
+/// same reason. One kind carries series at wildly different cadences
+/// (the estate observer records `kubernetes-nodes` every 15 minutes,
+/// `codebase` once a night), so a LIMIT taken across all of them is
+/// spent entirely by the fastest and the slow series is unreadable
+/// through its own reader. Filtering the returned page in Rust would
+/// not fix that: by then the slow rows are already gone.
+///
+/// One statement with a nullable bind rather than the tail's dynamic
+/// composition — there is exactly one optional filter here, and
+/// `$2::text IS NULL` says "no filter" without building SQL by hand.
 pub async fn recent_by_kind(
     pool: &PgPool,
     kind: &str,
+    scope: Option<&str>,
     limit: i64,
 ) -> Result<Vec<AuditEntry>, String> {
     sqlx::query_as::<_, AuditEntry>(
         "SELECT event_id, timestamp, source, kind, payload FROM audit_log \
-         WHERE kind = $1 ORDER BY timestamp DESC LIMIT $2",
+         WHERE kind = $1 AND ($2::text IS NULL OR payload->>'scope' = $2) \
+         ORDER BY timestamp DESC LIMIT $3",
     )
     .bind(kind)
+    .bind(scope)
     .bind(limit)
     .fetch_all(pool)
     .await

@@ -25,10 +25,19 @@
 # namespace boundary even if someone asks it to.
 #
 # WHAT IT DELIBERATELY CANNOT DO:
-#   - touch the `boss` namespace, where the system of record lives
+#   - WRITE to the `boss` namespace, where the system of record lives.
+#     (Amended 2026-09-02: the dev-session-ops-read Role at the bottom
+#     of this file grants READ visibility there plus rollout-undo on
+#     the one deployment — the #178 boot-brick incident routed every
+#     diagnostic read through a human terminal. The boundary this
+#     header was written for — exec, workload writes, and any path to
+#     the production Postgres — stands exactly as before.)
 #   - read Secrets, here or anywhere (the forge token mounts into the
 #     pod; a shell in the pod reads it from the filesystem, and this
-#     credential has no business fetching it over the API)
+#     credential has no business fetching it over the API) — with ONE
+#     name-scoped exception, `boss-dev-forge-token`, granted below so
+#     `boss credential pull forge` can land a broker-rotated write
+#     token without a hand-paste ceremony (7ee101aa)
 #   - create, patch or delete workloads — applying manifests stays a
 #     human action with the admin config until there is a check that
 #     verifies what it applied (design Q5)
@@ -112,6 +121,21 @@ rules:
   - apiGroups: [""]
     resources: [configmaps]
     verbs: [get, list]
+  # THE ONE SECRET THIS SESSION MAY READ, BY NAME (7ee101aa). The
+  # header's "cannot read Secrets, here or anywhere" stays the rule;
+  # this is its single, deliberate exception. When the credential
+  # broker rotates the pod's forge write token into
+  # `boss-dev-forge-token`, `boss credential pull forge` reads it via
+  # kubectl and lands it in the pod's consumer paths (the token file +
+  # the git credential helper) — replacing the hand-paste ceremony
+  # that exposed the token in a transcript on 2026-09-02. `get` on
+  # exactly this name: no `list` (enumeration is how one named grant
+  # quietly becomes a browse), and the read token (`forge-read`) stays
+  # unreadable because the pod already has it as a file mount.
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [boss-dev-forge-token]
+    verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -149,3 +173,50 @@ metadata:
   annotations:
     kubernetes.io/service-account.name: dev-session
 type: kubernetes.io/service-account-token
+---
+# Operational visibility into the boss namespace — the on-duty agent
+# reads what any operator would read, without a human relaying kubectl
+# output by hand.
+#
+# WHY (2026-09-02): during the #178 boot-brick incident every
+# diagnostic read — the crash-looping pod, its log naming the failing
+# line, the rollout history — had to route through David's terminal,
+# with outputs pasted back. His words on the record: "I don't want to
+# be a weird command-pasting go-between, when this is pure operational
+# work." READ-ONLY except one deliberately name-scoped write: `patch`
+# on the `boss` deployment alone, which is `kubectl rollout undo` —
+# the incident-response verb this same incident needed twice. No
+# secrets access; the credential boundary stays exactly where it was.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dev-session-ops-read
+  namespace: boss
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, events, services]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets, statefulsets]
+    verbs: [get, list, watch]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [boss]
+    verbs: [patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dev-session-ops-read
+  namespace: boss
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dev-session-ops-read
+subjects:
+  - kind: ServiceAccount
+    name: dev-session
+    namespace: boss-dev

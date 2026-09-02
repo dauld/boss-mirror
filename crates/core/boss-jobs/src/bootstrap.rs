@@ -260,13 +260,71 @@ fn bootstrap_kind(
             .ok_or_else(|| anyhow::anyhow!("step missing id"))?;
         let step_kind = step.get("kind").and_then(|v| v.as_str()).unwrap_or("");
         walk_step(
-            client, api_base, headers, &job_id, step_id, step_kind, target, dev,
+            client, api_base, headers, &job_id, step_id, step_kind, step, target, dev,
         )
         .with_context(|| format!("walk_step `{step_kind}` ({step_id})"))?;
     }
 
     info!(kind = %target.kind, "publish complete");
     Ok(())
+}
+
+/// The completion metadata a walked step needs: every `fields[]` entry
+/// the materialized step declares `required` that neither the step's
+/// existing metadata nor the Workflow's defaults already carry, filled
+/// with a type-appropriate value. Sibling of the sim workforce's
+/// `synth_field_value` (boss-sim), kept local because core cannot
+/// depend on an orchestrator; the value policy is deliberately simpler
+/// — a publish walk is a dev-mode artifact, not a population.
+fn synthesized_completion_metadata(step: &Value) -> serde_json::Map<String, Value> {
+    let existing = step
+        .get("metadata")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut out = existing.clone();
+    let mut added = false;
+    for f in step
+        .get("fields")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if !f.get("required").and_then(Value::as_bool).unwrap_or(false) {
+            continue;
+        }
+        let Some(name) = f.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        if existing.contains_key(name) {
+            continue;
+        }
+        let ftype = f.get("field_type").and_then(Value::as_str).unwrap_or("");
+        let value = match ftype {
+            "number" | "integer" => json!(1),
+            "boolean" => json!(true),
+            "array" => json!([]),
+            "object" => json!({}),
+            // Fixed sentinels, not wall-clock: the walker runs at seed
+            // time and must stay deterministic (no-wallclock).
+            "date" => json!("2026-01-01"),
+            "date-time" => json!("2026-01-01T00:00:00Z"),
+            "uri" => json!("https://docs.example.internal/sop"),
+            s if s.contains('|') => {
+                json!(s.split('|').next().unwrap_or("").trim())
+            }
+            _ => json!(format!(
+                "{} (walked at publish)",
+                name.replace(['-', '_'], " ")
+            )),
+        };
+        out.insert(name.to_string(), value);
+        added = true;
+    }
+    if !added {
+        return serde_json::Map::new();
+    }
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -277,6 +335,7 @@ fn walk_step(
     job_id: &str,
     step_id: &str,
     step_kind: &str,
+    step: &Value,
     target: &WorkflowSpec,
     dev: bool,
 ) -> Result<()> {
@@ -286,9 +345,24 @@ fn walk_step(
     // overlay semantics. Fields we omit get preserved.
     let body = match step_kind {
         "task" => {
-            // Author + Validate steps don't need typed metadata
-            // beyond what's already in the materialized step.
-            json!({ "status":"completed" })
+            // The materialized step may REQUIRE fields at completion —
+            // and the live registry's workflow-design version can carry
+            // required fields the tree's fixtures never saw. On
+            // 2026-09-02 a bare {"status":"completed"} met a live
+            // `sign_off_context` requirement, the 400 aborted the
+            // brewery prepare, and the container crash-looped: a
+            // registry ROW bricked production boot. Data must never be
+            // able to do that, so the walker now fills whatever the
+            // step declares as required, the way the sim workforce
+            // fills a form before marking it done. Existing metadata
+            // keys always win; the merge is top-level because the step
+            // PUT replaces metadata wholesale.
+            let synthesized = synthesized_completion_metadata(step);
+            if synthesized.is_empty() {
+                json!({ "status":"completed" })
+            } else {
+                json!({ "status":"completed", "metadata": synthesized })
+            }
         }
         "sign-off" => {
             if !dev {
@@ -415,5 +489,68 @@ mod tests {
             jobs_url("http://localhost:7900/", "/api/jobs"),
             "http://localhost:7900/api/jobs"
         );
+    }
+}
+
+#[cfg(test)]
+mod walker_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The 2026-09-02 crash-loop shape verbatim: a live-registry task
+    /// step requiring `sign_off_context` that the walker's bare
+    /// completion missed. The synthesized metadata must carry it, and
+    /// must MERGE (not replace) the step's existing keys, because the
+    /// step PUT replaces metadata wholesale.
+    #[test]
+    fn the_walker_fills_a_live_required_field_and_merges() {
+        let step = json!({
+            "metadata": { "already": "here" },
+            "fields": [
+                {"name": "sign_off_context", "field_type": "string", "required": true},
+                {"name": "optional_note", "field_type": "string", "required": false}
+            ]
+        });
+        let md = synthesized_completion_metadata(&step);
+        assert!(
+            md.get("sign_off_context")
+                .and_then(|v| v.as_str())
+                .is_some()
+        );
+        assert_eq!(
+            md.get("already"),
+            Some(&json!("here")),
+            "existing keys ride along"
+        );
+        assert!(!md.contains_key("optional_note"), "optional stays unfilled");
+    }
+
+    /// Nothing required, or everything already present -> EMPTY map,
+    /// so the completion body stays the bare status flip and omitted
+    /// metadata is preserved server-side (overlay semantics).
+    #[test]
+    fn a_satisfied_step_synthesizes_nothing() {
+        assert!(synthesized_completion_metadata(&json!({})).is_empty());
+        let satisfied = json!({
+            "metadata": { "sign_off_context": "authored" },
+            "fields": [{"name": "sign_off_context", "field_type": "string", "required": true}]
+        });
+        assert!(synthesized_completion_metadata(&satisfied).is_empty());
+    }
+
+    /// Type-appropriateness for the shapes the registry declares —
+    /// enums take their first variant, numbers count, dates are fixed
+    /// sentinels (the walker is seed-time and must be deterministic).
+    #[test]
+    fn synthesized_values_are_type_appropriate() {
+        let step = json!({ "fields": [
+            {"name": "verdict", "field_type": "pass|fail", "required": true},
+            {"name": "count", "field_type": "number", "required": true},
+            {"name": "when", "field_type": "date", "required": true}
+        ]});
+        let md = synthesized_completion_metadata(&step);
+        assert_eq!(md.get("verdict"), Some(&json!("pass")));
+        assert_eq!(md.get("count"), Some(&json!(1)));
+        assert_eq!(md.get("when"), Some(&json!("2026-01-01")));
     }
 }

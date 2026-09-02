@@ -361,6 +361,47 @@ pub(crate) fn recorded_probe_for(car: &Value, step: &Value) -> Result<Recorded> 
     recorded_probe(step)
 }
 
+/// Is `value` one of the variants `field_type` declares, for the field
+/// named `name` on this step?
+///
+/// Reads the step's OWN field spec — the one that arrived with the car
+/// we already fetched, from the workflow version this packet is pinned
+/// to. Deliberately not a constant in this file: the vocabulary already
+/// lives in `infra/platform/workflows.toml` and in the registry
+/// default, and a third copy here would be the drift CLAUDE.md 9a is
+/// about. Validating against the packet's own spec also means a
+/// workflow version that adds a variant needs no CLI release.
+///
+/// `Ok(())` when the field is absent or free-text: this verb is not the
+/// place to invent a contract the protocol did not state.
+pub(crate) fn check_enum_field(step: &Value, name: &str, value: &str) -> Result<()> {
+    let Some(ft) = step
+        .get("fields")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|f| f.get("name").and_then(Value::as_str) == Some(name))
+        .and_then(|f| f.get("field_type"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(());
+    };
+    if !ft.contains('|') {
+        return Ok(());
+    }
+    let allowed: Vec<&str> = ft.split('|').map(str::trim).collect();
+    if allowed.contains(&value) {
+        return Ok(());
+    }
+    bail!(
+        "--{name} {value:?} is not one of {}. This is checked BEFORE the probe runs: \
+         the probe would have executed against production, passed, and then been \
+         thrown away when the API refused the record — which is how two proofs were \
+         silently lost on 2026-09-02.",
+        allowed.join(" | ")
+    )
+}
+
 pub(crate) fn recorded_probe(step: &Value) -> Result<Recorded> {
     let md = step.get("metadata");
     let raw = md.and_then(|m| m.get("proof")).ok_or_else(|| {
@@ -537,7 +578,14 @@ pub(crate) async fn run(
 
     // Refuse before running anything: a car that has not merged should
     // cost a line of output, not a probe against production.
-    proven_step(car, replace)?;
+    let target = proven_step(car, replace)?;
+    // ...and a --method the protocol does not accept is the same class
+    // of refusal, for the same reason. It used to be caught only by the
+    // API when the finished proof was recorded, so the probe ran, the
+    // evidence was good, and it was discarded on a 400.
+    if let Some(m) = method.as_deref() {
+        check_enum_field(target, "method", m)?;
+    }
 
     println!("boss prove: {short}  $ {probe}");
     let o = execute(&probe)?;
@@ -891,6 +939,41 @@ mod tests {
         assert_eq!(md["verified"], json!("v"));
         assert_eq!(md["proof"], json!("{\"exit\":0}"));
         assert_eq!(md["method"], json!("api"));
+    }
+
+    /// The refusal happens BEFORE the probe runs, and it reads the
+    /// step's own declared vocabulary rather than a copy in this file
+    /// (9a: it already lives in workflows.toml and the registry
+    /// default). 2026-09-02: two proof probes ran green against
+    /// production and were thrown away when the API refused a
+    /// free-prose --method, because nothing checked it locally.
+    #[test]
+    fn a_bad_method_is_refused_against_the_steps_own_vocabulary() {
+        let step = json!({"fields": [
+            {"name": "method", "field_type": "browser|api|log", "required": false}
+        ]});
+        assert!(check_enum_field(&step, "method", "api").is_ok());
+        let e = check_enum_field(&step, "method", "ran it live")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("browser | api | log"),
+            "names the vocabulary: {e}"
+        );
+        assert!(
+            e.contains("BEFORE the probe runs"),
+            "says why it refuses early: {e}"
+        );
+    }
+
+    /// A field the step does not declare, or one that is free text, is
+    /// not this verb's business to constrain — it must not invent a
+    /// contract the protocol never stated.
+    #[test]
+    fn an_undeclared_or_free_text_field_is_not_constrained() {
+        let free = json!({"fields": [{"name": "note", "field_type": "string"}]});
+        assert!(check_enum_field(&free, "note", "anything at all").is_ok());
+        assert!(check_enum_field(&json!({}), "method", "whatever").is_ok());
     }
 
     #[test]

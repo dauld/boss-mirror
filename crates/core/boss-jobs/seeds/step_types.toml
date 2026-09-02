@@ -1356,6 +1356,53 @@ required_roles = []
   description = "The machine receipt as a JSON string (head, verdict, mode, fails). Absent on `lost`, where the environment died before one was written."
 
 [[step_type]]
+kind = "credential-rotation"
+label = "Credential rotation scope"
+category = "admin"
+ux = "inline"
+version = 1
+description = "The scope step of a rotate-a-credential packet: why the credential must change, where it lives, and what reads it. A DEDICATED kind (the `gate-verdict` precedent, packet 7ee101aa) so the credential-broker rule can target `step.done.credential-rotation` without firing on every `task` in the system — the dispatcher's expr layer dead-letters on absent metadata keys, so kind-precision here is what keeps the rule safe. Completing this step is what hands the rotation to the machine: the broker mints the replacement via the issuer's API, installs it into the declared k8s Secret, verifies by effect, revokes the old token, and records each phase on the packet's own issue/install/verify/revoke steps. NO FIELD EVER CARRIES A CREDENTIAL VALUE — identifiers (a token name or id) and observed effects only, per the workflow's own contract."
+typical_duration_hours = 0.5
+typical_duration_jitter = 0.3
+required_roles = ["platform-admin"]
+
+  [[step_type.fields]]
+  name = "credential"
+  field_type = "string"
+  required = true
+  description = "Which credential this rotation is about — the packet Subject's id, e.g. boss-dev-forge-token. Names a registry declaration (the broker rule row that knows its Secret, scopes, and consumers), never a value."
+
+  [[step_type.fields]]
+  name = "reason"
+  field_type = "string"
+  required = true
+  description = "Why now: exposure, age, scope change."
+
+  [[step_type.fields]]
+  name = "locations"
+  field_type = "string"
+  required = true
+  description = "Where the credential value lives (e.g. the k8s Secret and the mounts it feeds)."
+
+  [[step_type.fields]]
+  name = "consumers"
+  field_type = "string"
+  required = true
+  description = "What reads it — every path/unit/helper that would fail if rotation missed it."
+
+  [[step_type.fields]]
+  name = "exposure"
+  field_type = "string"
+  required = false
+  description = "If exposed: where the value leaked, so the log answers why the rotation was urgent."
+
+  [[step_type.fields]]
+  name = "old_token"
+  field_type = "string"
+  required = false
+  description = "The OLD token's name or numeric id at the issuer — the identifier the broker revokes after the replacement verifies. Absent = the broker leaves the revoke step to its assignee. Never the value."
+
+[[step_type]]
 kind = "acknowledgment"
 label = "Acknowledgment"
 category = "admin"

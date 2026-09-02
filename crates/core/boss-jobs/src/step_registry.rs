@@ -560,12 +560,13 @@ mod tests {
     fn registry_has_43_types() {
         // Test name predates the count bumps; leaving the name alone
         // keeps blame-diff churn down. Count is just "length of
-        // seeded types", not any load-bearing invariant. 47 since
-        // `gate-verdict` (the gate-run's dedicated verdict kind, so an
-        // auto-park rule can target `step.done.gate-verdict` instead of
-        // firing on every `task`).
+        // seeded types", not any load-bearing invariant. 48 since
+        // `credential-rotation` (the rotation packet's dedicated scope
+        // kind, so the credential broker's rule can target
+        // `step.done.credential-rotation` instead of firing on every
+        // `task` — the same reasoning as `gate-verdict` before it).
         let reg = StepRegistry::v1();
-        assert_eq!(reg.all().len(), 47);
+        assert_eq!(reg.all().len(), 48);
     }
 
     /// The reason `scope-declaration` is registered at all.
@@ -788,8 +789,8 @@ mod tests {
         let v = all_v1_types();
         assert_eq!(
             v.len(),
-            47,
-            "step_types.toml should have 47 [[step_type]] blocks"
+            48,
+            "step_types.toml should have 48 [[step_type]] blocks"
         );
     }
 

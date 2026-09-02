@@ -119,6 +119,15 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // is for lenses and for calibrating the eventual raiser, so
         // the loop terminates here by design, same as the census.
         ("estate.compare", vec!["jobs.estate.compared"]),
+        // The credential broker (7ee101aa): fires on a rotation
+        // packet's scope step, speaks to the forge admin API + the
+        // k8s Secret store, and records issue/install/verify/revoke
+        // by completing that same packet's steps — so its only
+        // in-system emission is `jobs.step.completed`, same as the
+        // other step-completing executors above. Deliberately NOT
+        // `step.done.credential-rotation`: the steps it completes are
+        // `task` kind, so the loop cannot re-enter its own trigger.
+        ("credential.rotate.forgejo", vec!["jobs.step.completed"]),
         ("messages.notify", vec![]),
         // Tells the filer how their packet ended. A sink, like every
         // other notifier — the message is the end of the cascade, not

@@ -372,6 +372,7 @@ spec:
             - {name: work, mountPath: /work}
             - {name: scratch, mountPath: /scratch}
             - {name: forge-token, mountPath: /etc/forge, readOnly: true}
+            - {name: forge-write-token, mountPath: /etc/boss-train, readOnly: true}
             - {name: ssh-authorized, mountPath: /etc/ssh-authorized, readOnly: true}
         - name: postgres
           # Matches production's major (the `boss` StatefulSet runs
@@ -438,6 +439,36 @@ spec:
         #     --from-literal=token=<a read:repository token>
         - name: forge-token
           secret: {secretName: forge-read, optional: true, defaultMode: 0400}
+        # THE WRITE TOKEN, mounted rather than hand-placed (7ee101aa).
+        #
+        # The pod became publisher on 2026-08-31 and its push
+        # credential was placed BY HAND: a file at
+        # /etc/boss-train/forge.token on the container's ephemeral
+        # overlay (dies with the pod) and the token INLINE in the
+        # repo-local git credential helper (where `git config -l`
+        # prints it — the transcript exposure that opened 7ee101aa).
+        # This mount replaces both: `boss train` verbs read the file
+        # directly (BOSS_TRAIN_FORGE_TOKEN_FILE's default), the git
+        # helper points at the file after `boss credential pull
+        # forge`, and when the credential broker rotates the Secret
+        # (credential.rotate.forgejo, name-scoped RBAC in
+        # boss-credential-broker.yaml) the kubelet re-syncs this mount
+        # with NO pod-side action — distribution by pull, not paste.
+        #
+        # `items` maps the Secret's `token` key onto the filename the
+        # train verbs already expect. `optional: true`, same posture
+        # as forge-read: an absent Secret is a closed door, not a
+        # stuck pod. The Secret is pre-created empty out-of-band
+        # (boss-credential-broker.yaml documents why create is not
+        # the broker's to do) and filled by the broker's first
+        # rotation.
+        - name: forge-write-token
+          secret:
+            secretName: boss-dev-forge-token
+            optional: true
+            defaultMode: 0400
+            items:
+              - {key: token, path: forge.token}
         - name: work
           persistentVolumeClaim: {claimName: boss-dev-work}
         - name: scratch

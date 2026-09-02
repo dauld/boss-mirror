@@ -4,6 +4,7 @@ use tracing_subscriber::EnvFilter;
 
 mod cadence;
 mod census;
+mod credential;
 mod delivery_policy;
 mod deploy;
 mod dock_preview;
@@ -377,6 +378,8 @@ enum Commands {
     // action enum (`WorkflowAction`, `JobAction`, ...), which touches
     // no shared line at all.
     // ------------------------------------------------------------------
+    #[command(flatten)]
+    Credential(credential::Cmd),
     #[command(flatten)]
     Merged(merged::Cmd),
     #[command(flatten)]
@@ -1054,6 +1057,7 @@ async fn main() -> Result<()> {
         },
         // Per-module verbs, one arm each, ALPHABETIZED — the note on
         // `Commands` says why (84f9fbc0).
+        Commands::Credential(cmd) => credential::dispatch(cmd).await,
         Commands::Merged(cmd) => merged::dispatch(cmd),
         Commands::Receipt(cmd) => receipt::dispatch(cmd).await,
         Commands::Running(cmd) => running::dispatch(cmd),

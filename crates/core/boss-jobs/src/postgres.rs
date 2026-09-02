@@ -579,13 +579,17 @@ impl JobsRepository for PgJobs {
     async fn recent_events_by_kind(
         &self,
         kind: &str,
+        scope: Option<&str>,
         limit: i64,
     ) -> Result<Vec<serde_json::Value>, JobsError> {
         // The SQL lives in boss-events, which owns audit_log — this
         // crate already writes through its `record_event_in_tx`, and
         // reading through its helper keeps the table's ownership in
         // one place rather than growing a second copy of the query.
-        let rows = boss_events::tail_http::recent_by_kind(&self.pool, kind, limit)
+        // `scope` travels down WITH the limit rather than being applied
+        // to the page that comes back: filtering here would leave a
+        // slow series exactly as unreadable as it was before.
+        let rows = boss_events::tail_http::recent_by_kind(&self.pool, kind, scope, limit)
             .await
             .map_err(JobsError::Storage)?;
         rows.into_iter()

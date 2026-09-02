@@ -20,6 +20,7 @@ use boss_dispatcher::rules::runner::RulesRunner;
 use boss_dispatcher::rules::schedule_runner::{DEFAULT_CATCHUP_CAP, ScheduleRunner};
 use boss_dispatcher_handlers::handlers::{
     bill_payment_batch::BillPaymentBatch, commerce_invoice_issue::CommerceInvoiceIssue,
+    credential_issuer, credential_rotate_forgejo::CredentialRotateForgejo,
     docs_design_sweep::DocsDesignSweep, docs_flush_queue::DocsFlushQueue,
     estate_alarm::EstateAlarm, estate_compare::EstateCompare, gate_resolve::GateResolve,
     inventory_bill_approve::InventoryBillApprove,
@@ -177,6 +178,39 @@ async fn main() -> Result<()> {
                 cfg.products_api_url.clone(),
                 ctx.registry.clone(),
             ));
+            // The credential broker's Forgejo rotation (7ee101aa first
+            // leg): on a rotation packet's scope step
+            // (step.done.credential-rotation), mint→install→verify→
+            // revoke via the issuer's admin API + a name-scoped k8s
+            // Secret write, recording each phase on the packet itself.
+            // Both dependencies degrade to Unconfigured — the handler
+            // stays registered (an UnknownHandler aborts EVERY co-fired
+            // rule's dispatch) and a firing rule dead-letters naming
+            // the missing knob instead.
+            {
+                use credential_issuer::{
+                    ForgeTokenIssuer, ForgejoAdmin, KubeSecretStore, SecretStore, Unconfigured,
+                };
+                let issuer: Arc<dyn ForgeTokenIssuer> = match &cfg.broker_forgejo_token {
+                    Some(root) => ForgejoAdmin::new(cfg.broker_forge_url.clone(), root.clone()),
+                    None => Arc::new(Unconfigured(
+                        "credential broker unconfigured: BOSS_BROKER_FORGEJO_TOKEN unset \
+                         (secret boss-credential-broker-root, key forgejo-token)"
+                            .to_string(),
+                    )),
+                };
+                let secrets: Arc<dyn SecretStore> = match KubeSecretStore::in_cluster() {
+                    Ok(s) => s,
+                    Err(e) => Arc::new(Unconfigured(format!(
+                        "credential broker has no in-cluster k8s credential: {e}"
+                    ))),
+                };
+                handlers.register(CredentialRotateForgejo::new(
+                    cfg.jobs_api_url.clone(),
+                    issuer,
+                    secrets,
+                ));
+            }
             // Packaging allocation — splits a brewed batch across formats by
             // demand and writes the packaged quantities, so the whole batch
             // always packages (WIP → FG, never dumped).

@@ -2621,6 +2621,23 @@ impl Forge for ForgejoForge {
                     _ => "",
                 };
                 rollup.push(json!({
+                    // The check's NAME. `ci_check_summary` has always
+                    // rendered `context:STATE` and the completing step
+                    // has always been commented "WHICH check, not just
+                    // that one failed" — but this adapter dropped the
+                    // field, so every red train in the SoR read
+                    // `?:FAILURE`. On 2026-09-02 that cost a trip to
+                    // the forge API to learn the answer was `test`, and
+                    // another to learn `test` had died on a disk floor,
+                    // not on any code. A verdict that cannot name what
+                    // failed is a verdict someone has to go re-derive.
+                    "context": st.get("context").and_then(Value::as_str).unwrap_or_default(),
+                    // The forge's own one-line reason, when it gives
+                    // one — free provenance for the same price.
+                    "description": st
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
                     "conclusion": conclusion,
                     "status": if verdict == "pending" { "PENDING" } else { "COMPLETED" },
                 }));
@@ -5803,6 +5820,28 @@ mod tests {
             ConvergenceVerdict::Overdue,
         );
     }
+    /// The red-train forensics pin (2026-09-02): a verdict must NAME
+    /// what failed. The forge adapter builds this rollup shape and
+    /// `ci_check_summary` renders it — the two live apart, so the
+    /// contract between them is pinned here (CLAUDE.md 9a). Before the
+    /// adapter carried `context`, every red train recorded `?:FAILURE`
+    /// and finding the answer cost three calls to the forge API — and
+    /// the answer that time was that `test` had died on a disk floor,
+    /// not on any code at all.
+    #[test]
+    fn a_red_check_is_named_in_the_recorded_verdict() {
+        let rollup = json!([
+            {"context": "build-image", "conclusion": "SUCCESS", "status": "COMPLETED"},
+            {"context": "test", "conclusion": "FAILURE", "status": "COMPLETED"},
+        ]);
+        let summary = ci_check_summary(Some(&rollup));
+        assert!(
+            summary.contains("test:FAILURE"),
+            "the failing check must be named, got: {summary}"
+        );
+        assert!(!summary.contains("?:"), "no anonymous checks: {summary}");
+    }
+
     /// The rolled-past case (2026-09-02, train #176): the cluster
     /// self-reports a LATER commit that contains this train's merge.
     /// Equality misses; ancestry converges. And git's inability to

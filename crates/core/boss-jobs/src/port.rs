@@ -541,9 +541,24 @@ pub trait JobsRepository: Send + Sync {
     /// Raw `Value` rows on purpose: the readers serve their instrument
     /// verbatim, and a port type per payload shape would be a second
     /// instrument.
+    ///
+    /// `scope`, when given, keeps only rows whose payload carries that
+    /// exact top-level `scope` — and it is applied BEFORE `limit`, not
+    /// after. One kind carries many series at different cadences: the
+    /// estate observer records `kubernetes-nodes` every 15 minutes
+    /// while `codebase` is recorded once a night. A limit taken across
+    /// all of them is spent by whichever series ticks fastest, so the
+    /// slow one is unreadable through the reader that is supposed to
+    /// serve it — invisible by construction rather than by outage
+    /// (measured 2026-09-02: the 50-row ceiling held 49
+    /// `kubernetes-nodes` rows and 1 `host`, spanning half a day).
+    /// This is the same rule `TailQuery::simulated` states in
+    /// boss-events: a filter has to be where the LIMIT is applied, or
+    /// it does not really filter.
     async fn recent_events_by_kind(
         &self,
         kind: &str,
+        scope: Option<&str>,
         limit: i64,
     ) -> Result<Vec<serde_json::Value>, JobsError>;
 

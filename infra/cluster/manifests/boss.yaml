@@ -335,6 +335,18 @@ spec:
             # already bind 0.0.0.0 (generate-configs.sh), so only the
             # dispatcher needs this.
             - {name: BOSS_DISPATCHER_BIND, value: "0.0.0.0:7950"}
+            # The credential broker's root credential + issuer endpoint
+            # (7ee101aa; RBAC + the credential's declaration live in
+            # boss-credential-broker.yaml). The Secret is minted ONCE by
+            # David with a passkey-authorized ceremony and referenced by
+            # name only. `optional: true` deliberately: a deployment
+            # without the Secret still boots, and a rotation rule firing
+            # there dead-letters naming this variable instead of taking
+            # the pod down. A VALUE, not a path — the handler reads env
+            # directly (contrast the BOSS_SESSION_KEY trap above).
+            - name: BOSS_BROKER_FORGEJO_TOKEN
+              valueFrom: {secretKeyRef: {name: boss-credential-broker-root, key: forgejo-token, optional: true}}
+            - {name: BOSS_BROKER_FORGE_URL, value: "http://10.20.0.15:3000"}
             # Bind all interfaces so the Service can reach the gateway;
             # the default 127.0.0.1 is right for systemd+Caddy, wrong here.
             - {name: BOSS_LISTEN, value: "0.0.0.0:4443"}

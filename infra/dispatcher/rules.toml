@@ -885,3 +885,39 @@ name = "estate-compare-on-observation"
 on_event = "jobs.estate.observed"
 [[rule.do]]
 handler = "estate.compare"
+
+# ---------------------------------------------------------------------
+# The credential broker rotates the boss-dev forge write token
+# (7ee101aa, first leg). THIS RULE ROW IS THE CREDENTIAL'S REGISTRY
+# DECLARATION: one credential = one rule row whose args say which
+# issuer account mints it, which k8s Secret its consumers mount, what
+# scopes it carries, and which repo proves it works — data, not code.
+# The Subject id (`boss-dev-forge-token`) is the credential's identity,
+# same convention as 5fc9310a's `forge-read`, so "when was this last
+# rotated and why" stays a Subject-history question.
+#
+# Fires when the SCOPE step of a rotate-a-credential packet whose
+# Subject is this credential completes — `credential-rotation` is a
+# dedicated StepType (the gate-verdict precedent) so this never wakes
+# on an ordinary task, and the `when` gates on `subject_id`, a field
+# every step.done payload carries (an absent identifier would
+# dead-letter). The handler then executes issue → install → verify →
+# revoke as machine steps of that same packet: mint via
+# POST /api/v1/admin/users/david/tokens with the broker root
+# credential, PATCH the value into Secret boss-dev/boss-dev-forge-token
+# (name-scoped RBAC, boss-credential-broker.yaml), verify by effect
+# (the new token reads david/boss), revoke the old token the scope
+# step named in `old_token`, and complete each packet step with
+# identifier-only evidence. Consumers pick the new value up from the
+# Secret's mounts (boss-dev.yaml) or `boss credential pull forge`.
+#
+# Seeded by 202609021500-the-broker-rotates-the-forge-token.sql;
+# present here because `dispatcher_rules_seed_matches_toml` compares
+# in BOTH directions.
+[[rule]]
+name = "broker-rotates-the-boss-dev-forge-token"
+on_event = "step.done.credential-rotation"
+when = 'subject_id = "boss-dev-forge-token"'
+[[rule.do]]
+handler = "credential.rotate.forgejo"
+args = { forge_user = "\"david\"", secret_namespace = "\"boss-dev\"", secret_name = "\"boss-dev-forge-token\"", secret_key = "\"token\"", scopes = "\"write:repository\"", verify_repo = "\"david/boss\"" }

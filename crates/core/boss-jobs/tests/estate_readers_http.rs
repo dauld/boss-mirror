@@ -14,7 +14,9 @@
 //! - each reader serves ONLY its own kind — an observation never
 //!   appears among comparisons and vice versa;
 //! - `?limit=` is respected and rows come newest-first, verbatim as
-//!   recorded.
+//!   recorded;
+//! - `?scope=` selects one series, and selects it BEFORE the limit —
+//!   the property that makes a slow-cadence scope readable at all.
 
 use boss_policy_client::types::{AccessTier, User};
 use std::sync::Arc;
@@ -88,10 +90,14 @@ async fn get_as_guest(app: &axum::Router, uri: &str) -> (StatusCode, serde_json:
 }
 
 async fn post_observation(app: &axum::Router, marker: &str) {
+    post_observation_in(app, "kubernetes-nodes", marker).await
+}
+
+async fn post_observation_in(app: &axum::Router, scope: &str, marker: &str) {
     let body = serde_json::json!({
         "observed_at": "2026-08-30T23:32:14Z",
         "observer": "boss-estate-observe",
-        "scope": "kubernetes-nodes",
+        "scope": scope,
         "marker": marker,
         "nodes": [{"id": "w-1", "cpu": 32}],
     });
@@ -179,5 +185,95 @@ async fn limit_is_respected_and_rows_come_newest_first() {
         markers(&body),
         vec!["obs-3", "obs-2"],
         "two newest, newest first"
+    );
+}
+
+#[tokio::test]
+async fn scope_selects_one_series_out_of_a_mixed_log() {
+    let (app, _) = app();
+    post_observation_in(&app, "codebase", "code-1").await;
+    post_observation_in(&app, "kubernetes-nodes", "k8s-1").await;
+    post_observation_in(&app, "host", "host-1").await;
+
+    let (status, body) = get_as_guest(&app, "/api/estate/observations?scope=codebase").await;
+    assert_eq!(status, StatusCode::OK, "scope= is guest-readable too");
+    assert_eq!(markers(&body), vec!["code-1"], "only the codebase series");
+
+    let (_, body) = get_as_guest(&app, "/api/estate/observations?scope=host").await;
+    assert_eq!(markers(&body), vec!["host-1"], "only the host series");
+
+    // A scope nobody has recorded is empty, not an error and not
+    // everything — a typo in a URL must never silently widen the read.
+    let (status, body) = get_as_guest(&app, "/api/estate/observations?scope=nonesuch").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["data"],
+        serde_json::json!([]),
+        "unknown scope is empty"
+    );
+}
+
+/// THE DEFECT, REPRODUCED (measured live 2026-09-02).
+///
+/// `/api/estate/observations` caps at 50 rows newest-first across ALL
+/// scopes. The estate observer runs every 15 minutes, so it fills all
+/// 50 within ~12.5 hours; the nightly codebase observation is pushed
+/// out of the window by fast-cadence neighbours and becomes
+/// unreadable through the only exposed reader — invisible by
+/// construction, not by outage. On the day this was measured the
+/// ceiling held 49 `kubernetes-nodes` rows + 1 `host`, spanning
+/// 04:30Z–17:30Z, and no `codebase` row could have survived there.
+///
+/// So the filter has to be applied where the LIMIT is — the same rule
+/// `TailQuery::simulated` states in boss-events. Post one slow-cadence
+/// observation, bury it under a full ceiling of fast ones, and it must
+/// still be readable BY SCOPE.
+#[tokio::test]
+async fn a_slow_scope_survives_a_full_ceiling_of_a_fast_one() {
+    let (app, _) = app();
+    post_observation_in(&app, "codebase", "nightly").await;
+    for i in 0..50 {
+        post_observation_in(&app, "kubernetes-nodes", &format!("k8s-{i}")).await;
+    }
+
+    // Unfiltered, even at the hard ceiling, the nightly row is gone.
+    let (_, unfiltered) = get_as_guest(&app, "/api/estate/observations?limit=50").await;
+    assert!(
+        !markers(&unfiltered).contains(&"nightly".to_string()),
+        "precondition: the fast scope fills the whole ceiling"
+    );
+
+    // By scope it is reachable — and reachable at the DEFAULT limit,
+    // because the filter runs before the limit rather than after it.
+    let (_, scoped) = get_as_guest(&app, "/api/estate/observations?scope=codebase").await;
+    assert_eq!(
+        markers(&scoped),
+        vec!["nightly"],
+        "the slow scope is readable regardless of its neighbours' cadence"
+    );
+}
+
+#[tokio::test]
+async fn scope_and_limit_compose_on_the_comparisons_reader_too() {
+    let (app, _) = app();
+    post_comparison(&app, "cmp-1").await;
+    post_comparison(&app, "cmp-2").await;
+
+    let (_, body) = get_as_guest(
+        &app,
+        "/api/estate/comparisons?scope=kubernetes-nodes&limit=1",
+    )
+    .await;
+    assert_eq!(
+        markers(&body),
+        vec!["cmp-2"],
+        "newest of the scope, limited"
+    );
+
+    let (_, body) = get_as_guest(&app, "/api/estate/comparisons?scope=codebase").await;
+    assert_eq!(
+        body["data"],
+        serde_json::json!([]),
+        "comparisons filter by scope on the same key"
     );
 }

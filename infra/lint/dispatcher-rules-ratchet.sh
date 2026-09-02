@@ -145,7 +145,21 @@ set -euo pipefail
 # cannot declare it: its field-bearing steps are plain `task` kind
 # (no per-kind topic), and a protocol row cannot POST a double-entry
 # settlement. It adds no routing — one firing books one settlement.
-BASELINE=54
+#
+# 54 -> 55 (2026-09-02, migration 202609021500).
+# `broker-rotates-the-boss-dev-forge-token` — EXTERNAL GLUE under the
+# exemption above, the same class the census kept for "reactions
+# whose effect lives outside the system": the credential broker
+# (7ee101aa) speaks to the FORGE's admin API and the k8s Secret
+# store, neither of which a Workflow definition can address. The
+# rotate-a-credential protocol row declares the ORDER (issue →
+# install → verify → revoke); this rule is the machine executor for
+# one credential, and its args are that credential's registry
+# declaration (issuer account, Secret, scopes, proving repo). It adds
+# no routing: it advances the very packet that fired it, spawns
+# nothing, and every write it makes lands back on that packet's own
+# steps.
+BASELINE=55
 RULES_FILE="infra/dispatcher/rules.toml"
 
 count=$(grep -c '^\[\[rule\]\]' "$RULES_FILE")

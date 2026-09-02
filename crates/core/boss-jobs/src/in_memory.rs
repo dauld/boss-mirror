@@ -275,16 +275,28 @@ impl JobsRepository for InMemoryJobs {
     async fn recent_events_by_kind(
         &self,
         kind: &str,
+        scope: Option<&str>,
         limit: i64,
     ) -> Result<Vec<serde_json::Value>, JobsError> {
         // `recorded` is append-order, so newest-first is a reverse —
         // the same ordering contract the Pg impl gets from
         // `ORDER BY timestamp DESC`.
+        //
+        // ORDER MATTERS: both filters run BEFORE `take`, mirroring a
+        // WHERE clause preceding its LIMIT. Taking first and filtering
+        // after would reproduce the very defect this argument exists to
+        // fix, and would do it only in this adapter — a divergence the
+        // Pg pairing test in estate_readers_pg.rs is there to catch.
         let rows = self
             .recorded_events()
             .into_iter()
             .rev()
             .filter(|e| e.kind == kind)
+            .filter(|e| {
+                scope.is_none_or(|want| {
+                    e.payload.get("scope").and_then(|s| s.as_str()) == Some(want)
+                })
+            })
             .take(limit.max(0) as usize)
             .map(|e| {
                 serde_json::json!({
