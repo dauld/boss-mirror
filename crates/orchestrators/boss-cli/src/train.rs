@@ -2014,8 +2014,45 @@ pub(crate) fn auto_cancel_reason(
 /// the cars are released with the stall named in their `skip_reason`, so
 /// the record says which question to ask without inventing a strike
 /// nothing reads.
-pub(crate) fn verdict_strikes_cars(verdict: &str) -> bool {
-    verdict == "failing"
+pub(crate) fn verdict_strikes_cars(verdict: &str, rollup: Option<&Value>) -> bool {
+    if verdict != "failing" {
+        return false;
+    }
+    // ...unless the red was the infrastructure REFUSING TO RUN, which
+    // says nothing about the consist. `infra/gate.sh` distinguishes the
+    // two in its own exit code and receipt — exit 1 with
+    // `verdict: failed` is a judgement on the branch, exit 2 with
+    // `verdict: refused` is "I declined to start" (a disk floor, an
+    // unreadable free-space read). A check that reports the refusal
+    // must not be read as a verdict.
+    //
+    // 2026-09-02: the gate refused at 10GB free against a 12GB floor,
+    // before a single check ran. Two trains recorded plain failures and
+    // their cars came within one auto-cancel of taking strikes for a
+    // full host. Two strikes hold a car out of the queue until a human
+    // looks; the same shape cost four clean cars five departures on
+    // 2026-08-22.
+    !any_failing_check_refused(rollup)
+}
+
+/// Did any FAILING check report an infrastructure refusal rather than a
+/// verdict? Matches on the word the gate writes into its receipt, so
+/// the vocabulary lives in one place and this is the reader of it.
+///
+/// Deliberately narrow: only a check that BOTH failed and says it
+/// refused counts. A green check mentioning the word, or a failing
+/// check with no description, is not evidence of anything.
+pub(crate) fn any_failing_check_refused(rollup: Option<&Value>) -> bool {
+    rollup
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|c| c.get("conclusion").and_then(Value::as_str) == Some("FAILURE"))
+        .any(|c| {
+            c.get("description")
+                .and_then(Value::as_str)
+                .is_some_and(|d| d.to_lowercase().contains("refused"))
+        })
 }
 
 /// The metadata a released car carries away from a cancelled train.
@@ -3543,8 +3580,12 @@ impl Conductor {
                 if self.cfg.dry {
                     log(format!("DRY: would cancel {} ({reason})", id8(&tid)));
                 } else {
-                    self.cancel_train(&tid, &reason, verdict_strikes_cars(verdict))
-                        .await?;
+                    self.cancel_train(
+                        &tid,
+                        &reason,
+                        verdict_strikes_cars(verdict, info.get("statusCheckRollup")),
+                    )
+                    .await?;
                 }
                 continue;
             }
@@ -5803,6 +5844,37 @@ mod tests {
             ConvergenceVerdict::Overdue,
         );
     }
+    /// A red that was the infrastructure declining to run strikes no
+    /// car (2026-09-02). Narrow on purpose: only a check that BOTH
+    /// failed and says it refused counts.
+    #[test]
+    fn an_infrastructure_refusal_strikes_no_car() {
+        let refused = json!([
+            {"context": "fast", "conclusion": "SUCCESS", "description": ""},
+            {"context": "test", "conclusion": "FAILURE",
+             "description": "refused: 10GB free, need 12GB (to continue before 'fmt')"},
+        ]);
+        assert!(!verdict_strikes_cars("failing", Some(&refused)));
+        let real_red = json!([
+            {"context": "test", "conclusion": "FAILURE", "description": "3 checks failed"},
+        ]);
+        assert!(verdict_strikes_cars("failing", Some(&real_red)));
+        let bare = json!([{"context": "test", "conclusion": "FAILURE"}]);
+        assert!(
+            verdict_strikes_cars("failing", Some(&bare)),
+            "no description is not a refusal claim"
+        );
+        let green_mentions = json!([
+            {"context": "test", "conclusion": "SUCCESS", "description": "refused nothing"},
+            {"context": "web", "conclusion": "FAILURE", "description": "svelte-check"},
+        ]);
+        assert!(
+            verdict_strikes_cars("failing", Some(&green_mentions)),
+            "the word on a PASSING check proves nothing"
+        );
+        assert!(!verdict_strikes_cars("aborted", Some(&refused)));
+    }
+
     /// The rolled-past case (2026-09-02, train #176): the cluster
     /// self-reports a LATER commit that contains this train's merge.
     /// Equality misses; ancestry converges. And git's inability to
@@ -6190,7 +6262,7 @@ mod tests {
     #[test]
     fn an_aborted_train_leaves_its_cars_unstruck() {
         // The strike is what was wrong. Nothing judged these cars.
-        assert!(!verdict_strikes_cars("aborted"));
+        assert!(!verdict_strikes_cars("aborted", None));
         let car = json!({"id": "car-1", "metadata": {"red_trains": 1}});
         let stamps = release_stamps(&car, "CI aborted without a verdict", false);
         assert!(
@@ -6208,7 +6280,7 @@ mod tests {
     fn a_genuinely_red_train_still_strikes_its_cars() {
         // The two-strike hold has to keep working — without it the
         // auto-cancel is a loop that burns CI all night.
-        assert!(verdict_strikes_cars("failing"));
+        assert!(verdict_strikes_cars("failing", None));
         let car = json!({"id": "car-1", "metadata": {"red_trains": 1}});
         let stamps = release_stamps(&car, "CI red", true);
         assert_eq!(
@@ -6224,8 +6296,8 @@ mod tests {
     #[test]
     fn only_a_failing_verdict_strikes() {
         // Neither silence nor success is a strike.
-        assert!(!verdict_strikes_cars("pending"));
-        assert!(!verdict_strikes_cars("green"));
+        assert!(!verdict_strikes_cars("pending", None));
+        assert!(!verdict_strikes_cars("green", None));
     }
 
     // -- the CI verdict blind spot -----------------------------------------
