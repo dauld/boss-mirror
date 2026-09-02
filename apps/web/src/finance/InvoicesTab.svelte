@@ -7,6 +7,8 @@
   import SearchInput from '@boss/web-kit/ui/SearchInput.svelte';
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import OverflowBanner from '@boss/web-kit/ui/OverflowBanner.svelte';
+  import SortHeader from '@boss/web-kit/ui/SortHeader.svelte';
+  import { createSortState } from '@boss/web-kit/ui/sort-state.svelte';
   import InvoiceStatusChip from './InvoiceStatusChip.svelte';
   import {
     PAYMENT_METHOD_LABEL,
@@ -113,6 +115,39 @@
       return true;
     }),
   );
+
+  // 3,491 seeded wholesale orders made fixed-order lists useless
+  // (CAR-4). Issued-newest-first is the landing order; every column
+  // is clickable. Money/date/count columns default descending.
+  type SortKey =
+    | 'id'
+    | 'status'
+    | 'account'
+    | 'lines'
+    | 'amount'
+    | 'tax'
+    | 'method'
+    | 'issued'
+    | 'due'
+    | 'paid';
+  const DESC_FIRST: ReadonlyArray<SortKey> = ['lines', 'amount', 'tax', 'issued', 'due', 'paid'];
+  const sort = createSortState<SortKey>({ key: 'issued', dir: 'desc' }, (k) =>
+    DESC_FIRST.includes(k) ? 'desc' : 'asc',
+  );
+  let visibleSorted = $derived(
+    sort.sorted(visible, {
+      id: (i) => i.id,
+      status: (i) => i.status,
+      account: (i) => accountById.get(i.account_id)?.name ?? i.account_id,
+      lines: (i) => i.line_items.length,
+      amount: (i) => i.amount_cents,
+      tax: (i) => i.tax_cents ?? 0,
+      method: (i) => i.payment_method,
+      issued: (i) => i.issued_on,
+      due: (i) => i.due_on,
+      paid: (i) => i.paid_on,
+    }),
+  );
 </script>
 
 <div class="catalog-layout">
@@ -170,20 +205,20 @@
       <table class="data-table data-table-striped">
         <thead>
           <tr>
-            <th>Invoice</th>
-            <th>Status</th>
-            <th>Account</th>
-            <th class="num">Lines</th>
-            <th class="num">Amount</th>
-            <th class="num">Tax</th>
-            <th>Method</th>
-            <th>Issued</th>
-            <th>Due</th>
-            <th>Paid</th>
+            <SortHeader {sort} key="id">Invoice</SortHeader>
+            <SortHeader {sort} key="status">Status</SortHeader>
+            <SortHeader {sort} key="account">Account</SortHeader>
+            <SortHeader {sort} key="lines" num={true}>Lines</SortHeader>
+            <SortHeader {sort} key="amount" num={true}>Amount</SortHeader>
+            <SortHeader {sort} key="tax" num={true}>Tax</SortHeader>
+            <SortHeader {sort} key="method">Method</SortHeader>
+            <SortHeader {sort} key="issued">Issued</SortHeader>
+            <SortHeader {sort} key="due">Due</SortHeader>
+            <SortHeader {sort} key="paid">Paid</SortHeader>
           </tr>
         </thead>
         <tbody>
-          {#each visible as i (i.id)}
+          {#each visibleSorted as i (i.id)}
             {@const account = accountById.get(i.account_id)}
             {@const taxCents = i.tax_cents ?? 0}
             <tr>

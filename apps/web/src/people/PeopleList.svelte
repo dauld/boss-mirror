@@ -7,9 +7,12 @@
   import FilterButton from '@boss/web-kit/ui/FilterButton.svelte';
   import SearchInput from '@boss/web-kit/ui/SearchInput.svelte';
   import Link from '@boss/web-kit/ui/Link.svelte';
-  import StatusChip from './StatusChip.svelte';
+  import StatusChip from '@boss/web-kit/ui/StatusChip.svelte';
+  import SortHeader from '@boss/web-kit/ui/SortHeader.svelte';
+  import { createSortState } from '@boss/web-kit/ui/sort-state.svelte';
   import OrgTreeNode from './OrgTreeNode.svelte';
   import {
+    employmentTone,
     humanizeClassCode,
     type Department,
     type Employee,
@@ -80,11 +83,34 @@
     }),
   );
 
+  // Every column clickable (CAR-4). The department accessor keeps the
+  // page's historic compound order — department, then name within it —
+  // so the landing view is unchanged and the Department column sorts
+  // the way a roster reads.
+  type SortKey =
+    | 'id'
+    | 'name'
+    | 'role'
+    | 'dept'
+    | 'tenure'
+    | 'skills'
+    | 'location'
+    | 'status';
+  const DESC_FIRST: ReadonlyArray<SortKey> = ['tenure', 'skills'];
+  const sort = createSortState<SortKey>({ key: 'dept', dir: 'asc' }, (k) =>
+    DESC_FIRST.includes(k) ? 'desc' : 'asc',
+  );
   let sortedVisible = $derived(
-    [...visible].sort(
-      (a, b) =>
-        (a.department ?? "").localeCompare(b.department ?? "") || (a.name ?? "").localeCompare(b.name ?? ""),
-    ),
+    sort.sorted(visible, {
+      id: (e) => e.id,
+      name: (e) => e.name,
+      role: (e) => humanizeClassCode(e.role),
+      dept: (e) => `${e.department ?? ''} ${e.name ?? ''}`,
+      tenure: (e) => tenureYears(e),
+      skills: (e) => e.skills.length,
+      location: (e) => e.location,
+      status: (e) => e.status,
+    }),
   );
 
   let DEPTS = $derived(
@@ -200,14 +226,14 @@
         <table class="data-table data-table-striped">
           <thead>
             <tr>
-              <th>BOSS ID</th>
-              <th>Name</th>
-              <th>Role</th>
-              <th>Department</th>
-              <th class="num">Tenure</th>
-              <th class="num">Skills</th>
-              <th>Location</th>
-              <th>Status</th>
+              <SortHeader {sort} key="id">BOSS ID</SortHeader>
+              <SortHeader {sort} key="name">Name</SortHeader>
+              <SortHeader {sort} key="role">Role</SortHeader>
+              <SortHeader {sort} key="dept">Department</SortHeader>
+              <SortHeader {sort} key="tenure" num={true}>Tenure</SortHeader>
+              <SortHeader {sort} key="skills" num={true}>Skills</SortHeader>
+              <SortHeader {sort} key="location">Location</SortHeader>
+              <SortHeader {sort} key="status">Status</SortHeader>
             </tr>
           </thead>
           <tbody>
@@ -224,7 +250,7 @@
                 <td class="num">{tenureYears(e).toFixed(1)}y</td>
                 <td class="num">{e.skills.length}</td>
                 <td>{e.location}</td>
-                <td><StatusChip status={e.status} /></td>
+                <td><StatusChip value={e.status ?? 'unknown'} tone={employmentTone(e.status)} /></td>
               </tr>
             {/each}
           </tbody>

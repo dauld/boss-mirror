@@ -1106,12 +1106,6 @@ a:hover { color: #8ce4c2; }
 }
 .kanban-aged { color: var(--warn); }
 
-/* Employee status chips */
-.chip-emp { text-transform: capitalize; font-weight: 500; }
-.chip-emp-active { background: var(--wash); color: var(--ok); border-color: var(--ok); }
-.chip-emp-on-leave { background: var(--wash); color: var(--warn); border-color: var(--warn); }
-.chip-emp-terminated { background: var(--wash); color: var(--static); border-color: var(--hairline); }
-
 /* Certification expiry chips */
 .chip-cert { text-transform: capitalize; font-weight: 500; }
 .chip-cert-ok { background: var(--wash); color: var(--ok); border-color: var(--ok); }
@@ -1131,21 +1125,6 @@ a:hover { color: #8ce4c2; }
 .kanban-col[data-sales-stage="quoted"] { --stage-color: var(--fog); }
 .kanban-col[data-sales-stage="won"] { --stage-color: var(--ok); }
 .kanban-col[data-sales-stage="lost"] { --stage-color: var(--err); }
-
-/* Stock status chips */
-.chip-stock { text-transform: capitalize; font-weight: 500; }
-.chip-stock-out { background: var(--wash); color: var(--err); border-color: var(--err); }
-.chip-stock-critical { background: var(--wash); color: var(--warn); border-color: var(--warn); }
-.chip-stock-low { background: var(--wash); color: var(--warn); border-color: var(--warn); }
-.chip-stock-healthy { background: var(--wash); color: var(--ok); border-color: var(--ok); }
-
-/* Refurb stage chips */
-.chip-stage { text-transform: capitalize; font-weight: 500; }
-.chip-stage-intake { background: var(--wash); color: var(--static); border-color: var(--hairline); }
-.chip-stage-triage { background: var(--wash); color: var(--signal); border-color: var(--signal); }
-.chip-stage-refurb { background: var(--wash); color: var(--fog); border-color: var(--hairline); }
-.chip-stage-qa { background: var(--wash); color: var(--warn); border-color: var(--warn); }
-.chip-stage-ready { background: var(--wash); color: var(--ok); border-color: var(--ok); }
 
 /* Ticket status chips */
 .chip-status { text-transform: capitalize; font-weight: 500; }
@@ -3321,8 +3300,9 @@ button.manual-tree-node {
 
 /* --- StatusChip tones (@boss/web-kit/ui/StatusChip.svelte) --- */
 /* The closed five-tone set for the generic chip; pairs with the
-   base .chip rule above. Domain chips (chip-stock-*, chip-cert-*,
-   …) predate this and migrate here as their pages get touched. */
+   base .chip rule above. Domain chips (chip-cert-*, chip-opp-*,
+   …) predate this and migrate here as their pages get touched
+   (chip-stock-*, chip-emp-* and chip-stage-* already have). */
 .chip-tone-ok     { background: var(--wash); color: var(--ok); border-color: var(--ok); }
 .chip-tone-warn   { background: var(--wash); color: var(--warn); border-color: var(--warn); }
 .chip-tone-err    { background: var(--wash); color: var(--err); border-color: var(--err); }

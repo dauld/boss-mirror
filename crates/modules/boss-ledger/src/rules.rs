@@ -31,6 +31,14 @@
 //!   Cash when a filing's due date arrives. Payload carries the
 //!   filing id + jurisdiction + liability account so the memo and
 //!   entry stay traceable.
+//! - `finance.keg_deposit.charged` — a keg fleet ships with a
+//!   refundable deposit: DR 1000 Cash / CR 2400 Keg Deposits Payable.
+//!   The liability stands while the fleet is in the field.
+//! - `finance.keg_deposit.released` — the fleet reconciles: DR 2400
+//!   drains the FULL deposit; the returned share refunds (CR 1000) and
+//!   the lost share forfeits to income (CR 4150). Requires
+//!   `kegs_returned + kegs_lost == kegs_out` — the fleet conservation
+//!   invariant — so a malformed count can never book a partial drain.
 //! - `finance.manual.entry` — pass-through: admin-authored adjusting or
 //!   reversing entries carry their own lines in the payload
 //!
@@ -121,6 +129,8 @@ impl RuleSet for BossRuleSet {
             "finance.payroll.run" => payroll_run(fact),
             "finance.tax.accrued" => tax_accrued(fact),
             "finance.tax.remitted" => tax_remitted(fact),
+            "finance.keg_deposit.charged" => keg_deposit_charged(fact),
+            "finance.keg_deposit.released" => keg_deposit_released(fact),
             "finance.revenue.recognized" => revenue_recognized(fact),
             "finance.manual.entry" => manual_entry(fact),
             "finance.period.closed" => period_closed(fact),
@@ -558,6 +568,171 @@ fn tax_memo(fact: &FactRef<'_>) -> Option<String> {
         .and_then(|v| v.as_str())
         .unwrap_or("tax");
     Some(format!("Tax remitted ({kind} {jurisdiction}): {filing_id}"))
+}
+
+/// 2400 Keg Deposits Payable — refundable container deposits held
+/// while a keg fleet is in the field (93f936b9, David's Q1 decision
+/// 2026-08-22: "Let's go for the full balance-sheet model").
+const KEG_DEPOSIT_LIABILITY_ACCOUNT: &str = "2400";
+/// 4150 Keg Deposit Forfeitures — the lost-keg share of a released
+/// deposit, recognized as income rather than left rotting in 2400 as
+/// a liability owed to nobody.
+const KEG_DEPOSIT_FORFEITURE_ACCOUNT: &str = "4150";
+
+/// Read a required non-negative integer count from the payload.
+fn keg_count(fact: &FactRef<'_>, key: &str) -> Result<i64, LedgerError> {
+    let n = fact
+        .payload
+        .get(key)
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| payload_err(fact.kind, &format!("{key} missing")))?;
+    if n < 0 {
+        return Err(payload_err(fact.kind, &format!("{key} must be >= 0")));
+    }
+    Ok(n)
+}
+
+fn keg_deposit_charged(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
+    // A keg fleet ships with a refundable deposit. Payload:
+    //   {
+    //     "charge_id":     "keg-charge-<job_id>",   -- idempotency/provenance
+    //     "job_id":        "<keg-return job id>",
+    //     "account_id":    "account-00042",
+    //     "kegs_out":      12,
+    //     "deposit_cents": 36000,
+    //     "shipped_on":    "YYYY-MM-DD",
+    //   }
+    //
+    // Entry:
+    //   DR 1000 Cash                   deposit_cents
+    //   CR 2400 Keg Deposits Payable   deposit_cents
+    //
+    // The deposit settles in cash alongside the shipment, deliberately
+    // OUTSIDE the A/R subledger — same documented shortcut as
+    // `finance.invoice.paid`'s "we don't model bank float": a bare CR
+    // to 1100 with no invoice row would drift the A/R control account
+    // from the invoices projection, and no payment would ever clear a
+    // bare deposit debit. `finance.keg_deposit.released` is the only
+    // drain, so 2400's standing balance IS the deposits of fleets
+    // still in the field.
+    let deposit = cents_from_payload(fact.payload.get("deposit_cents"))
+        .ok_or_else(|| payload_err(fact.kind, "deposit_cents missing"))?;
+    if deposit <= 0 {
+        return Err(payload_err(fact.kind, "deposit_cents must be positive"));
+    }
+    let kegs_out = keg_count(fact, "kegs_out")?;
+    if kegs_out == 0 {
+        return Err(payload_err(fact.kind, "kegs_out must be positive"));
+    }
+
+    Ok(JournalEntryDraft {
+        posted_on: fact.happened_on,
+        memo: keg_deposit_memo(fact, "charged", &format!("{kegs_out} kegs out")),
+        lines: vec![
+            JournalLineDraft::debit("1000", deposit, 0),
+            JournalLineDraft::credit(KEG_DEPOSIT_LIABILITY_ACCOUNT, deposit, 1),
+        ],
+    })
+}
+
+fn keg_deposit_released(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
+    // The fleet reconciled: kegs came back or are declared lost.
+    // Payload:
+    //   {
+    //     "release_id":    "keg-release-<job_id>",
+    //     "job_id":        "<keg-return job id>",
+    //     "account_id":    "account-00042",
+    //     "kegs_out":      10,
+    //     "kegs_returned": 7,
+    //     "kegs_lost":     3,
+    //     "deposit_cents": 30000,        -- the fleet's FULL deposit
+    //     "returned_on":   "YYYY-MM-DD",
+    //   }
+    //
+    // Entry (zero-amount lines omitted):
+    //   DR 2400 Keg Deposits Payable      deposit_cents
+    //   CR 1000 Cash                      deposit × returned / out
+    //   CR 4150 Keg Deposit Forfeitures   the remainder
+    //
+    // Conservation is a precondition, not a hope: the rule REQUIRES
+    // `kegs_returned + kegs_lost == kegs_out`. A payload that violates
+    // it is a wrong input event (correctness-protocol.md) — booking it
+    // anyway would either strand liability in 2400 forever or over-
+    // drain it negative, both silently. The refund share floors on
+    // integer division and forfeiture absorbs the remainder, so the
+    // entry balances to the cent and the liability drains exactly.
+    let deposit = cents_from_payload(fact.payload.get("deposit_cents"))
+        .ok_or_else(|| payload_err(fact.kind, "deposit_cents missing"))?;
+    if deposit <= 0 {
+        return Err(payload_err(fact.kind, "deposit_cents must be positive"));
+    }
+    let kegs_out = keg_count(fact, "kegs_out")?;
+    let kegs_returned = keg_count(fact, "kegs_returned")?;
+    let kegs_lost = keg_count(fact, "kegs_lost")?;
+    if kegs_out == 0 {
+        return Err(payload_err(fact.kind, "kegs_out must be positive"));
+    }
+    if kegs_returned + kegs_lost != kegs_out {
+        return Err(payload_err(
+            fact.kind,
+            &format!(
+                "conservation violated: kegs_returned ({kegs_returned}) + kegs_lost \
+                 ({kegs_lost}) != kegs_out ({kegs_out})"
+            ),
+        ));
+    }
+
+    // i128 intermediate so deposit × returned can't overflow i64; the
+    // quotient is <= deposit by construction (returned <= out).
+    let refund = ((deposit as i128 * kegs_returned as i128) / kegs_out as i128) as i64;
+    let forfeited = deposit - refund;
+
+    let mut lines = Vec::with_capacity(3);
+    lines.push(JournalLineDraft::debit(
+        KEG_DEPOSIT_LIABILITY_ACCOUNT,
+        deposit,
+        0,
+    ));
+    let mut sort: i16 = 1;
+    if refund > 0 {
+        lines.push(JournalLineDraft::credit("1000", refund, sort));
+        sort += 1;
+    }
+    if forfeited > 0 {
+        lines.push(JournalLineDraft {
+            account_code: KEG_DEPOSIT_FORFEITURE_ACCOUNT.into(),
+            debit_cents: 0,
+            credit_cents: forfeited,
+            memo: Some(format!("Forfeited: {kegs_lost} keg(s) lost")),
+            sort_order: sort,
+        });
+    }
+
+    Ok(JournalEntryDraft {
+        posted_on: fact.happened_on,
+        memo: keg_deposit_memo(
+            fact,
+            "released",
+            &format!("{kegs_returned} returned / {kegs_lost} lost of {kegs_out}"),
+        ),
+        lines,
+    })
+}
+
+fn keg_deposit_memo(fact: &FactRef<'_>, verb: &str, detail: &str) -> Option<String> {
+    let job_id = fact
+        .payload
+        .get("job_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let account_id = fact
+        .payload
+        .get("account_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    Some(format!(
+        "Keg deposit {verb} ({detail}, {account_id}): {job_id}"
+    ))
 }
 
 fn bill_approved(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {

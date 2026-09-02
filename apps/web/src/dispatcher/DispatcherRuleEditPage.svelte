@@ -9,6 +9,7 @@
   import Breadcrumb from '@boss/web-kit/ui/Breadcrumb.svelte';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
+  import StatusChip from '@boss/web-kit/ui/StatusChip.svelte';
   import {
     listVersions,
     createDraft,
@@ -128,7 +129,10 @@
     });
   }
 
-  function statusChipClass(status: RuleStatus): string {
+  // active = the published, live version → ok; retired → muted;
+  // draft → warn (an unpublished draft is attention, and must read
+  // differently from both the live and the retired rows).
+  function statusTone(status: RuleStatus): 'ok' | 'warn' | 'muted' {
     return status === 'active' ? 'ok' : status === 'retired' ? 'muted' : 'warn';
   }
 
@@ -424,9 +428,7 @@
                 <tr>
                   <td class="num">{v.version}</td>
                   <td>
-                    <span class="chip chip-stage chip-stage-{statusChipClass(v.status)}">
-                      {v.status}
-                    </span>
+                    <StatusChip value={v.status} tone={statusTone(v.status)} />
                   </td>
                   <td>{new Date(v.created_at).toISOString().slice(0, 19).replace('T', ' ')}</td>
                 </tr>

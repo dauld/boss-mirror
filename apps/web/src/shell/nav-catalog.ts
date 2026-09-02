@@ -66,7 +66,19 @@ export type NavGroup = Readonly<{ label: string; items: ReadonlyArray<NavItem> }
 // 'system-fleet' left the permission vocabulary with the 2026-08-31
 // consolidation (its tab gates under system-monitoring), but the
 // catalog still answers "which app / which row" for its route kind.
-export type UngatedSurfaceId = 'system-incidents' | 'system-fleet' | 'system-backlog';
+// 'hr', 'watchlist', 'manual' (CAR-6, 6edb1b77): routable since their
+// pages shipped but never listed here, so a 574-line HR page and the
+// app's best list were typed-URL-only. Like system-fleet they borrow
+// gate parity from the surface they sit beside (hr → 'people',
+// watchlist → 'accounts') rather than widening the vocabulary; the
+// manual is permKey-less like the docs it renders.
+export type UngatedSurfaceId =
+  | 'system-incidents'
+  | 'system-fleet'
+  | 'system-backlog'
+  | 'hr'
+  | 'watchlist'
+  | 'manual';
 
 export const ROUTE_CATALOG: Readonly<Record<RouteName | UngatedSurfaceId, NavItem>> = {
   jobs:      { id: 'jobs',      label: 'All jobs',         path: '/ux/jobs',      permKey: 'jobs',      app: 'home' },
@@ -91,6 +103,9 @@ export const ROUTE_CATALOG: Readonly<Record<RouteName | UngatedSurfaceId, NavIte
   views:     { id: 'views',     label: 'Views',            path: '/ux/views',     permKey: 'views',     app: 'home' },
   'marketing-assets': { id: 'marketing-assets', label: 'Marketing assets', path: '/ux/marketing-assets', permKey: 'marketing-assets', module: 'marketing-assets', app: 'marketing' },
   calendar:  { id: 'calendar',  label: 'Release calendar', path: '/ux/calendar',  permKey: 'calendar',  module: 'calendar', app: 'production' },
+  hr:        { id: 'hr',        label: 'HR',               path: '/hr',           permKey: 'people',    app: 'people' },
+  watchlist: { id: 'watchlist', label: 'Churn watchlist',  path: '/watchlist',    permKey: 'accounts',  app: 'sales' },
+  manual:    { id: 'manual',    label: 'Manual',           path: '/manual',       app: 'home' },
 
   // The IT department — SIX surfaces (the 2026-08-31 consolidation,
   // packet 1f6d55e0; was 17 pages, four of them dual-routed). The

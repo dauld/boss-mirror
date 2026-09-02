@@ -12,6 +12,7 @@
   import Breadcrumb from '@boss/web-kit/ui/Breadcrumb.svelte';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
+  import StatusChip from '@boss/web-kit/ui/StatusChip.svelte';
   import StepAuthoringSurface from './StepAuthoringSurface.svelte';
   import type { WorkflowSpec } from './workflowTypes';
   import type { Job, Step, StepStatus } from '../jobs/types';
@@ -223,11 +224,14 @@
     }
   }
 
-  function chipClass(status: StepStatus): string {
+  // completed → ok; ready/active = the rail position being worked
+  // right now → active (the tone that exists for in-progress);
+  // pending/skipped → muted.
+  function stepTone(status: StepStatus): 'ok' | 'active' | 'muted' {
     return status === 'completed'
       ? 'ok'
       : status === 'ready' || status === 'active'
-        ? 'warn'
+        ? 'active'
         : 'muted';
   }
 
@@ -258,9 +262,10 @@
         {#each RAIL as r (r.title)}
           {@const step = steps.find((s) => s.title === r.title)}
           <div class="wf-step">
-            <span class="chip chip-stage chip-stage-{step ? chipClass(step.status) : 'muted'}">
-              {r.label}{step ? ` · ${step.status}` : ''}
-            </span>
+            <StatusChip
+              value={step ? `${r.label} · ${step.status}` : r.label}
+              tone={step ? stepTone(step.status) : 'muted'}
+            />
           </div>
         {/each}
       </div>

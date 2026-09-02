@@ -29,6 +29,7 @@ use boss_dispatcher_handlers::handlers::{
     jobs_auto_park::JobsAutoPark, jobs_clear_waiting::JobsClearWaiting,
     jobs_complete_linked_step::JobsCompleteLinkedStep, jobs_complete_step::JobsCompleteStep,
     jobs_subjob_resolve::JobsSubjobResolve, ledger_bill_approve::LedgerBillApprove,
+    ledger_keg_deposit_settle::LedgerKegDepositSettle,
     ledger_payroll_run_submit::LedgerPayrollRunSubmit, ledger_tax_accrue::LedgerTaxAccrue,
     ledger_tax_remit::LedgerTaxRemit, messages_expire_for_job::MessagesExpireForJob,
     messages_notify::MessagesNotify, messages_notify_job_terminal::MessagesNotifyJobTerminal,
@@ -239,6 +240,14 @@ async fn main() -> Result<()> {
             // federal beer excise liability accrues at packaging time,
             // drained quarterly by the excise-tax-filing Workflow.
             handlers.register(LedgerTaxAccrue::new(cfg.ledger_api_url.clone()));
+            // A reconciled keg-return packet settles its deposit:
+            // DR 1000 / CR 2400 at the fleet-out date, DR 2400 /
+            // CR 1000 refund + CR 4150 forfeiture at the return date
+            // (93f936b9, the full balance-sheet keg model).
+            handlers.register(LedgerKegDepositSettle::new(
+                cfg.jobs_api_url.clone(),
+                cfg.ledger_api_url.clone(),
+            ));
             handlers.register(LedgerPayrollRunSubmit::new(cfg.ledger_api_url.clone()));
             // General AP bills (rent/utilities/…) → ledger subledger.
             handlers.register(LedgerBillApprove::new(cfg.ledger_api_url.clone()));

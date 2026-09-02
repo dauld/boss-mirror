@@ -33,6 +33,7 @@ pub mod jobs_complete_linked_step;
 pub mod jobs_complete_step;
 pub mod jobs_subjob_resolve;
 pub mod ledger_bill_approve;
+pub mod ledger_keg_deposit_settle;
 pub mod ledger_payroll_run_submit;
 pub mod ledger_tax_accrue;
 pub mod ledger_tax_remit;

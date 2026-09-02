@@ -8,10 +8,10 @@
   import Meta from '@boss/web-kit/ui/Meta.svelte';
   import { appNow } from '@boss/web-kit/sim-clock';
   import Section from '@boss/web-kit/ui/Section.svelte';
-  import StatusChip from './StatusChip.svelte';
+  import StatusChip from '@boss/web-kit/ui/StatusChip.svelte';
   import FileAttachments from '../content/FileAttachments.svelte';
   import CalendarFeedSection from './CalendarFeedSection.svelte';
-  import { humanizeClassCode, type Employee } from './types';
+  import { employmentTone, humanizeClassCode, type Employee } from './types';
   import { directReports, tenureYears } from './utils';
   import { href } from '../router';
 
@@ -133,7 +133,7 @@
       <div>
         <div class="detail-eyebrow">
           <EntityLink kind="employee" id={e.id} /> · {humanizeClassCode(e.department)} ·
-          <StatusChip status={e.status} />
+          <StatusChip value={e.status ?? 'unknown'} tone={employmentTone(e.status)} />
         </div>
         <h1 class="detail-title">{e.name}</h1>
         <div class="detail-tagline">{humanizeClassCode(e.role)} · {e.email}</div>
@@ -165,7 +165,7 @@
             <dt>Hire date</dt><dd>{e.hire_date}</dd>
             <dt>Employment type</dt><dd>{e.employment_type ? e.employment_type.replace(/-/g, ' ') : '—'}</dd>
             <dt>Location</dt><dd>{e.location}</dd>
-            <dt>Status</dt><dd><StatusChip status={e.status} /></dd>
+            <dt>Status</dt><dd><StatusChip value={e.status ?? 'unknown'} tone={employmentTone(e.status)} /></dd>
           </dl>
       </Section>
 

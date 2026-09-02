@@ -51,12 +51,17 @@ const ROUTES: ReadonlyArray<string> = [
   // the mock's empty /api/workflows — page chrome + picker. The map
   // and flow pages died into the Atlas tab (already crawled above).
   '/it/operate/bottlenecks',
-  // The risk watchlist. Its path is `/watchlist`, NOT `/ux/watchlist`
-  // — it has no nav-catalog entry (it is URL-only), so the drift test
-  // at the bottom of this file cannot notice it is missing: that test
-  // only walks ROUTE_CATALOG. Adding it here is the whole of its
-  // coverage.
+  // The risk watchlist. Since CAR-6 it HAS a catalog entry, so the
+  // drift test at the bottom of this file now enforces its presence
+  // here instead of this line being the whole of its coverage.
   '/watchlist',
+  // HR and the operator manual joined the catalog with the watchlist
+  // (CAR-6): HR renders its empty-roster states under the mock's `[]`
+  // catch-all; the manual renders its docs chrome with the fetch
+  // failing honestly. Both pin chrome + no-crash, same bar as every
+  // other row.
+  '/hr',
+  '/manual',
   // The estate page under the mock's catch-all: every /api/estate/*
   // fetch fails or reads empty, and the page's whole design is that
   // absence renders as bordered failure notices, never an empty

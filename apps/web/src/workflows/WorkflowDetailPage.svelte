@@ -7,6 +7,7 @@
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
+  import StatusChip from '@boss/web-kit/ui/StatusChip.svelte';
   import type { WorkflowSpec, StepSpec } from './workflowTypes';
   import { href, navigate } from '../router';
   import StepDag from '../jobs/StepDag.svelte';
@@ -124,7 +125,10 @@
     }
   }
 
-  function statusChipClass(status: WorkflowSpec['status']): string {
+  // active = the published, live version → ok; retired → muted;
+  // draft → warn (an unpublished draft is attention, and must read
+  // differently from both the live and the retired rows).
+  function statusTone(status: WorkflowSpec['status']): 'ok' | 'warn' | 'muted' {
     return status === 'active' ? 'ok' : status === 'retired' ? 'muted' : 'warn';
   }
 
@@ -257,9 +261,7 @@
               <tr>
                 <td style="color:#888">Status</td>
                 <td>
-                  <span class="chip chip-stage chip-stage-{statusChipClass(spec.status)}">
-                    {spec.status}
-                  </span>
+                  <StatusChip value={spec.status} tone={statusTone(spec.status)} />
                 </td>
               </tr>
               <tr><td style="color:#888">Version</td><td>{spec.version}</td></tr>
@@ -267,7 +269,7 @@
                 <td style="color:#888">Subject kinds</td>
                 <td>
                   {#each spec.subject_kinds as s (s)}
-                    <span class="chip chip-stage chip-stage-muted" style="margin-right:4px">{s}</span>
+                    <span style="margin-right:4px"><StatusChip value={s} tone="muted" /></span>
                   {/each}
                 </td>
               </tr>
@@ -422,9 +424,7 @@
                 <tr>
                   <td class="num">{v.version}</td>
                   <td>
-                    <span class="chip chip-stage chip-stage-{statusChipClass(v.status)}">
-                      {v.status}
-                    </span>
+                    <StatusChip value={v.status} tone={statusTone(v.status)} />
                   </td>
                   <td>{v.owning_team}</td>
                   <td>{new Date(v.created_at).toISOString().slice(0, 19).replace('T', ' ')}</td>

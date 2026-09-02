@@ -68,6 +68,13 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         ),
         ("ledger.bill.payment_batch", vec!["ledger.bill.paid"]),
         ("ledger.tax.accrue", vec!["ledger.tax.accrued"]),
+        // One POST, two facts: the settlement endpoint records the
+        // charge and release legs in one transaction, each with its
+        // own audit event for the rebuild bridge (93f936b9).
+        (
+            "ledger.keg_deposit.settle",
+            vec!["ledger.keg_deposit.charged", "ledger.keg_deposit.released"],
+        ),
         // Two emits: the handler POSTs the filing (which records
         // `ledger.tax.filing.created` — the event `tax_filings` is
         // projected from) and then, when `remit=true`, follows with the

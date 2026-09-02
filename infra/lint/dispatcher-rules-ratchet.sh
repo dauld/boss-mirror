@@ -135,7 +135,17 @@ set -euo pipefail
 # packets it watches are pinned to OLD versions whose contracts are
 # frozen; a clock has to look. One firing spawns one maintenance-sweep
 # packet, no routing (cdfe2e1a).
-BASELINE=53
+#
+# 53 -> 54 (2026-09-02, migration 202609021400).
+# `keg-deposit-settle-on-keg-return-closed` — a CROSS-PROTOCOL
+# REACTOR under the exemption above: it advances the LEDGER from a
+# `keg-return` packet's close (93f936b9, the full balance-sheet keg
+# model), the same protocol→ledger shape as the step-done ledger
+# rules (invoice-issue, excise-accrue). The keg-return Workflow
+# cannot declare it: its field-bearing steps are plain `task` kind
+# (no per-kind topic), and a protocol row cannot POST a double-entry
+# settlement. It adds no routing — one firing books one settlement.
+BASELINE=54
 RULES_FILE="infra/dispatcher/rules.toml"
 
 count=$(grep -c '^\[\[rule\]\]' "$RULES_FILE")

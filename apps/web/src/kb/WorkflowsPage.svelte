@@ -25,6 +25,7 @@
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
   import Link from '@boss/web-kit/ui/Link.svelte';
+  import StatusChip from '@boss/web-kit/ui/StatusChip.svelte';
   import type { WorkflowSpec } from '../workflows/workflowTypes';
   import { href } from '../router';
 
@@ -151,7 +152,7 @@
                 <div class="kb-workflow-meta">
                   Subject:
                   {#each k.subject_kinds as s (s)}
-                    <span class="chip chip-stage chip-stage-muted" style="margin-right:4px">{s}</span>
+                    <span style="margin-right:4px"><StatusChip value={s} tone="muted" /></span>
                   {/each}
                   {#if k.owning_team !== 'platform'}
                     · owning team: <span class="mono">{k.owning_team}</span>

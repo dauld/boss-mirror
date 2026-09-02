@@ -11,9 +11,12 @@
   import FilterButton from '@boss/web-kit/ui/FilterButton.svelte';
   import Link from '@boss/web-kit/ui/Link.svelte';
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
-  import StatusChip from '../parts/StatusChip.svelte';
+  import StatusChip from '@boss/web-kit/ui/StatusChip.svelte';
+  import SortHeader from '@boss/web-kit/ui/SortHeader.svelte';
+  import { createSortState } from '@boss/web-kit/ui/sort-state.svelte';
   import {
     stockStatus,
+    stockTone,
     type InventoryItem,
     type PoStatus,
     type PurchaseOrder,
@@ -105,15 +108,39 @@
   type InvFilter = 'all' | 'critical' | 'low';
   let invFilter = $state<InvFilter>('all');
 
-  let invVisible = $derived.by(() => {
-    const filtered = inventoryRows.filter((r) => {
+  let invVisible = $derived(
+    inventoryRows.filter((r) => {
       if (invFilter === 'critical') return r.status === 'critical' || r.status === 'out';
       if (invFilter === 'low') return r.status === 'low';
       return true;
-    });
-    const rank: Record<StockStatus, number> = { out: 0, critical: 1, low: 2, healthy: 3 };
-    return [...filtered].sort((a, b) => rank[a.status] - rank[b.status]);
-  });
+    }),
+  );
+
+  // The status column sorts by SEVERITY rank, not alphabet — and
+  // severity-first stays the landing order it always was (CAR-4:
+  // sorting became clickable, the default did not move).
+  const STOCK_RANK: Record<StockStatus, number> = { out: 0, critical: 1, low: 2, healthy: 3 };
+  type InvSortKey = 'sku' | 'bin' | 'on_hand' | 'allocated' | 'available' | 'reorder' | 'status';
+  const INV_DESC_FIRST: ReadonlyArray<InvSortKey> = [
+    'on_hand',
+    'allocated',
+    'available',
+    'reorder',
+  ];
+  const invSort = createSortState<InvSortKey>({ key: 'status', dir: 'asc' }, (k) =>
+    INV_DESC_FIRST.includes(k) ? 'desc' : 'asc',
+  );
+  let invSorted = $derived(
+    invSort.sorted(invVisible, {
+      sku: (r) => r.item.part_sku,
+      bin: (r) => r.item.bin,
+      on_hand: (r) => r.item.on_hand,
+      allocated: (r) => r.item.allocated,
+      available: (r) => r.available,
+      reorder: (r) => r.item.reorder_point,
+      status: (r) => STOCK_RANK[r.status],
+    }),
+  );
 
   let invCritical = $derived(
     inventoryRows.filter((r) => r.status === 'critical' || r.status === 'out').length,
@@ -366,17 +393,17 @@
           <table class="data-table data-table-striped">
             <thead>
               <tr>
-                <th>Part SKU</th>
-                <th>Bin</th>
-                <th class="num">On hand</th>
-                <th class="num">Allocated</th>
-                <th class="num">Available</th>
-                <th class="num">Reorder pt</th>
-                <th>Status</th>
+                <SortHeader sort={invSort} key="sku">Part SKU</SortHeader>
+                <SortHeader sort={invSort} key="bin">Bin</SortHeader>
+                <SortHeader sort={invSort} key="on_hand" num={true}>On hand</SortHeader>
+                <SortHeader sort={invSort} key="allocated" num={true}>Allocated</SortHeader>
+                <SortHeader sort={invSort} key="available" num={true}>Available</SortHeader>
+                <SortHeader sort={invSort} key="reorder" num={true}>Reorder pt</SortHeader>
+                <SortHeader sort={invSort} key="status">Status</SortHeader>
               </tr>
             </thead>
             <tbody>
-              {#each invVisible as r (r.item.part_sku)}
+              {#each invSorted as r (r.item.part_sku)}
                 <tr class="data-table-row-link">
                   <td class="mono">
                     <Link to={entityHref('part', r.item.part_sku)}>
@@ -388,7 +415,7 @@
                   <td class="num">{r.item.allocated}</td>
                   <td class="num">{r.available}</td>
                   <td class="num">{r.item.reorder_point}</td>
-                  <td><StatusChip status={r.status} /></td>
+                  <td><StatusChip value={r.status} tone={stockTone(r.status)} /></td>
                 </tr>
               {/each}
             </tbody>

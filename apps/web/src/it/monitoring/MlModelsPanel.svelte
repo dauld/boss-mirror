@@ -3,6 +3,7 @@
   // apps/web/src/cto/MlModelsPanel.tsx.
 
   import Section from '@boss/web-kit/ui/Section.svelte';
+  import StatusChip from '@boss/web-kit/ui/StatusChip.svelte';
 
   type ModelStatus = 'draft' | 'active' | 'shadow' | 'retired';
   type ModelKind =
@@ -56,7 +57,10 @@
     };
   });
 
-  function statusClass(status: ModelStatus): string {
+  // active = serving → ok; retired → muted; draft and shadow → warn
+  // (both are versions that exist but are not the one answering, which
+  // is what an operator scanning the panel needs to notice).
+  function statusTone(status: ModelStatus): 'ok' | 'warn' | 'muted' {
     if (status === 'active') return 'ok';
     if (status === 'retired') return 'muted';
     return 'warn';
@@ -99,9 +103,7 @@
             >
               <div style="display:flex; justify-content:space-between; margin-bottom:6px">
                 <strong style="color:#e5e7eb">{m.name}</strong>
-                <span class="chip chip-stage chip-stage-{statusClass(m.status)}">
-                  {m.status}
-                </span>
+                <StatusChip value={m.status} tone={statusTone(m.status)} />
               </div>
               <dl
                 class="kv"

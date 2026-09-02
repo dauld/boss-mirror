@@ -31,16 +31,10 @@ export const HOME_CHROME_SECTIONS: ReadonlyMap<string, string> = new Map([
     'the personal fallback: login/stepFocus/home render outside AppShell ' +
       'entirely, and search is cross-cutting with no sidebar row',
   ],
-  [
-    'hr',
-    'HrPage has no catalog entry or sidebar row; it renders under Home ' +
-      'chrome until a department claims it',
-  ],
-  [
-    'manual',
-    'the operator manual has no catalog entry or sidebar row; it renders ' +
-      'under Home chrome until a department claims it',
-  ],
+  // 'hr' and 'manual' graduated out of this map on 2026-09-02 (CAR-6):
+  // People claimed HR and Home claimed the manual, so both are real
+  // catalog entries now — exactly the departure their rows here said
+  // they were waiting for.
 ]);
 
 export const SECTION_FOR_ROUTE: Readonly<Record<Route['kind'], string>> = {

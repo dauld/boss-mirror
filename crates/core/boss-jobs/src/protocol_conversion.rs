@@ -493,6 +493,8 @@ mod tests {
             sign_offs_required: Vec::new(),
             assurance_required: None,
             duration_hours: None,
+            labor_hours: None,
+            wall_clock_hours: None,
             fields: Vec::new(),
             authority_role: None,
             claimable: None,

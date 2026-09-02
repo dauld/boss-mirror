@@ -128,6 +128,11 @@ struct StepToml {
     /// "the kind's typical duration". See `StepSpec::duration_hours`.
     #[serde(default)]
     duration_hours: Option<f64>,
+    /// The labor / wall-clock split — see `StepSpec::labor_hours`.
+    #[serde(default)]
+    labor_hours: Option<f64>,
+    #[serde(default)]
+    wall_clock_hours: Option<f64>,
     #[serde(default)]
     fields: Vec<boss_core::job::StepField>,
     #[serde(default)]
@@ -210,6 +215,8 @@ fn workflow_toml_to_spec(toml: WorkflowToml, default_owner: &str) -> WorkflowSpe
             kind: s.kind,
             assurance_required: s.assurance_required,
             duration_hours: s.duration_hours,
+            labor_hours: s.labor_hours,
+            wall_clock_hours: s.wall_clock_hours,
             ready_when: s.ready_when,
             terminal: s.terminal.map(|t| Terminal { outcome: t.outcome }),
             title_template: s.title_template,

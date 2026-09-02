@@ -842,6 +842,29 @@ schedule = { cadence = "daily", anchor_date = "2026-08-21" }
 [[rule.do]]
 handler = "network.census"
 
+# A reconciled keg fleet settles its deposit (93f936b9, David's Q1
+# decision: the full balance-sheet keg model). The keg-return
+# protocol's field-bearing steps (log-fleet-out, receive-returns) are
+# plain `task` kind, so the honest trigger is the packet's terminal
+# close — `step.done.task` would wake on every task step in every
+# workflow and lean on a `when` to discard almost all of them (the
+# spawn-car-on-sweep-remediated reasoning). The handler reads
+# kegs_out + deposit_cents and kegs_returned + kegs_lost from the
+# closed job's own steps and POSTs one settlement to the ledger,
+# which books DR 1000 / CR 2400 at the fleet-out date and
+# DR 2400 / CR 1000 refund + CR 4150 forfeiture at the return date.
+# `outcome = "completed"` keeps aborted/withdrawn packets off the
+# books; both keys are always present on the close marker (null when
+# unanswered), so the predicate can't dead-letter on an absent
+# identifier. Seeded live by
+# 202609021400-a-keg-deposit-is-a-liability.sql.
+[[rule]]
+name = "keg-deposit-settle-on-keg-return-closed"
+on_event = "jobs.job.closed"
+when = "kind = \"keg-return\" AND outcome = \"completed\""
+[[rule.do]]
+handler = "ledger.keg_deposit.settle"
+
 # The estate comparison (59ef456a): the compare half of the
 # declared/observed split. Fires on each `jobs.estate.observed` event
 # — the observation rides in the payload, so there is no tail read and

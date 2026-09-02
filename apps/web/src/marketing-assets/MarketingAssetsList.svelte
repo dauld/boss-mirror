@@ -7,6 +7,8 @@
   import FilterButton from '@boss/web-kit/ui/FilterButton.svelte';
   import SearchInput from '@boss/web-kit/ui/SearchInput.svelte';
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
+  import SortHeader from '@boss/web-kit/ui/SortHeader.svelte';
+  import { createSortState } from '@boss/web-kit/ui/sort-state.svelte';
   import { type MarketingAsset } from './types';
   import { loadClasses, classesFor } from '@boss/web-kit/session/classes.svelte';
   import { href, navigate } from '../router';
@@ -84,6 +86,26 @@
       return hay.includes(q);
     });
   });
+
+  // CAR-4: previously rendered in API arrival order. Freshest-updated
+  // first is the new landing order; the count columns default
+  // descending.
+  type SortKey = 'title' | 'kind' | 'tags' | 'linked' | 'owner' | 'updated';
+  const DESC_FIRST: ReadonlyArray<SortKey> = ['tags', 'linked', 'updated'];
+  const sort = createSortState<SortKey>({ key: 'updated', dir: 'desc' }, (k) =>
+    DESC_FIRST.includes(k) ? 'desc' : 'asc',
+  );
+  let visibleSorted = $derived(
+    sort.sorted(visible, {
+      title: (a) => a.title,
+      kind: (a) => a.kind,
+      tags: (a) => a.tags.length,
+      linked: (a) =>
+        a.linked_device_skus.length + a.linked_account_ids.length + a.linked_campaign_ids.length,
+      owner: (a) => a.owner_id,
+      updated: (a) => a.updated_at,
+    }),
+  );
 </script>
 
 <div class="catalog theme-exec">
@@ -130,16 +152,16 @@
         <table class="data-table data-table-striped">
           <thead>
             <tr>
-              <th>Asset</th>
-              <th>Kind</th>
-              <th>Tags</th>
-              <th>Linked</th>
-              <th>Owner</th>
-              <th>Updated</th>
+              <SortHeader {sort} key="title">Asset</SortHeader>
+              <SortHeader {sort} key="kind">Kind</SortHeader>
+              <SortHeader {sort} key="tags">Tags</SortHeader>
+              <SortHeader {sort} key="linked">Linked</SortHeader>
+              <SortHeader {sort} key="owner">Owner</SortHeader>
+              <SortHeader {sort} key="updated">Updated</SortHeader>
             </tr>
           </thead>
           <tbody>
-            {#each visible as a (a.id)}
+            {#each visibleSorted as a (a.id)}
               {@const retired = Boolean(a.retired_at)}
               {@const linkedCount = a.linked_device_skus.length + a.linked_account_ids.length + a.linked_campaign_ids.length}
               <tr

@@ -13,6 +13,8 @@
   import { shortId } from '../data/ids';
   import { href } from '../router';
   import { entityHref } from '@boss/web-kit/ui/entity-href';
+  import SortHeader from '@boss/web-kit/ui/SortHeader.svelte';
+  import { createSortState } from '@boss/web-kit/ui/sort-state.svelte';
   import { fetchPaged, isCapped, type Paged } from '../data/paginated';
 
   type Account = {
@@ -128,8 +130,24 @@
           device: devices.find((d) => d.asset_id === assetId),
         };
       })
-      .sort((a, b) => b.daysOpen - a.daysOpen);
   });
+
+  // CAR-4: oldest-open-first stays the landing order; both support
+  // tables get clickable columns via the web-kit sort primitive.
+  type CaseSortKey = 'job' | 'account' | 'subject' | 'days' | 'status' | 'title';
+  const caseSort = createSortState<CaseSortKey>({ key: 'days', dir: 'desc' }, (k) =>
+    k === 'days' ? 'desc' : 'asc',
+  );
+  let activeSorted = $derived(
+    caseSort.sorted(activeRows, {
+      job: (r) => r.job.id,
+      account: (r) => r.account?.name,
+      subject: (r) => r.device?.asset_id,
+      days: (r) => r.daysOpen,
+      status: (r) => r.job.status,
+      title: (r) => r.job.title,
+    }),
+  );
 
   let accountHealthRows = $derived.by(() => {
     type Row = {
@@ -155,10 +173,23 @@
       if (isOpen(j)) e.openCount++;
       if (!e.lastDate || j.opened_on > e.lastDate) e.lastDate = j.opened_on;
     }
-    return [...map.values()]
-      .filter((e) => e.openCount > 0)
-      .sort((a, b) => b.openCount - a.openCount);
+    return [...map.values()].filter((e) => e.openCount > 0);
   });
+
+  type HealthSortKey = 'account' | 'tier' | 'open' | 'equipment' | 'last';
+  const HEALTH_DESC_FIRST: ReadonlyArray<HealthSortKey> = ['open', 'equipment', 'last'];
+  const healthSort = createSortState<HealthSortKey>({ key: 'open', dir: 'desc' }, (k) =>
+    HEALTH_DESC_FIRST.includes(k) ? 'desc' : 'asc',
+  );
+  let healthSorted = $derived(
+    healthSort.sorted(accountHealthRows, {
+      account: (r) => r.account.name,
+      tier: (r) => r.account.tier,
+      open: (r) => r.openCount,
+      equipment: (r) => r.deviceCount,
+      last: (r) => r.lastDate,
+    }),
+  );
 </script>
 
 <div class="catalog theme-exec">
@@ -236,16 +267,16 @@
         <table class="data-table data-table-striped">
           <thead>
             <tr>
-              <th>Job</th>
-              <th>Account</th>
-              <th>Subject</th>
-              <th class="num">Days open</th>
-              <th>Status</th>
-              <th>Title</th>
+              <SortHeader sort={caseSort} key="job">Job</SortHeader>
+              <SortHeader sort={caseSort} key="account">Account</SortHeader>
+              <SortHeader sort={caseSort} key="subject">Subject</SortHeader>
+              <SortHeader sort={caseSort} key="days" num={true}>Days open</SortHeader>
+              <SortHeader sort={caseSort} key="status">Status</SortHeader>
+              <SortHeader sort={caseSort} key="title">Title</SortHeader>
             </tr>
           </thead>
           <tbody>
-            {#each activeRows as r (r.job.id)}
+            {#each activeSorted as r (r.job.id)}
               <tr class="data-table-row-link">
                 <td class="mono">
                   <Link to={entityHref('job', r.job.id)}>
@@ -299,15 +330,15 @@
         <table class="data-table data-table-striped">
           <thead>
             <tr>
-              <th>Account</th>
-              <th>Tier</th>
-              <th class="num">Open jobs</th>
-              <th class="num">Equipment</th>
-              <th>Last job</th>
+              <SortHeader sort={healthSort} key="account">Account</SortHeader>
+              <SortHeader sort={healthSort} key="tier">Tier</SortHeader>
+              <SortHeader sort={healthSort} key="open" num={true}>Open jobs</SortHeader>
+              <SortHeader sort={healthSort} key="equipment" num={true}>Equipment</SortHeader>
+              <SortHeader sort={healthSort} key="last">Last job</SortHeader>
             </tr>
           </thead>
           <tbody>
-            {#each accountHealthRows as r (r.account.id)}
+            {#each healthSorted as r (r.account.id)}
               <tr class="data-table-row-link">
                 <td>
                   <Link to={entityHref('account', r.account.id)}>

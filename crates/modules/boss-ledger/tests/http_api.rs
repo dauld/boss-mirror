@@ -123,10 +123,12 @@ async fn list_accounts_returns_seeded_chart() {
     //   5200 COGS — Packaging,
     //   6700 Bad Debt Expense,
     //   6900 Depreciation Expense,
-    //   2110 Goods Received Not Invoiced (GR-IR capitalize-at-receive).
+    //   2110 Goods Received Not Invoiced (GR-IR capitalize-at-receive),
+    //   2400 Keg Deposits Payable + 4150 Keg Deposit Forfeitures
+    //     (93f936b9: full balance-sheet keg model).
     // When adding a new account, bump this count + add a presence
     // check below.
-    assert_eq!(accounts.len(), 31);
+    assert_eq!(accounts.len(), 33);
     assert!(
         accounts
             .iter()
@@ -180,6 +182,18 @@ async fn list_accounts_returns_seeded_chart() {
             .iter()
             .any(|a| a["code"] == "1100" && a["name"] == "Accounts Receivable"),
         "1100 A/R should be in the chart",
+    );
+    assert!(
+        accounts
+            .iter()
+            .any(|a| a["code"] == "2400" && a["name"] == "Keg Deposits Payable"),
+        "2400 Keg Deposits Payable should be in the chart for the keg-deposit flow",
+    );
+    assert!(
+        accounts
+            .iter()
+            .any(|a| a["code"] == "4150" && a["name"] == "Keg Deposit Forfeitures"),
+        "4150 Keg Deposit Forfeitures should be in the chart for the keg-deposit flow",
     );
 }
 
@@ -2565,4 +2579,217 @@ async fn bills_reject_auditor_writes() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+// --- keg deposit settlements (93f936b9: full balance-sheet keg model) ------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn keg_deposit_settlement_books_both_legs_and_drains_the_liability() {
+    let db = TestDb::new().await;
+    let state = || LedgerApiState {
+        pool: db.pool.clone(),
+        publisher: None,
+        clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
+        // No read gate in tests; production wires one.
+        policy: None,
+    };
+    let body = json!({
+        "job_id": "job-keg-1",
+        "account_id": "account-00042",
+        "kegs_out": 10,
+        "kegs_returned": 7,
+        "kegs_lost": 3,
+        "deposit_cents": 30_000,
+        "shipped_on": "2026-03-01",
+        "returned_on": "2026-03-15",
+    });
+    let (status, resp) = post_json(
+        router(state()),
+        "/api/ledger/keg-deposit-settlements",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {resp}");
+
+    // Charge leg: DR 1000 / CR 2400 at the fleet-out date.
+    let charge_lines: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT a.code, l.debit_cents, l.credit_cents \
+         FROM gl_journal_lines l \
+         JOIN gl_journal_entries e ON e.id = l.journal_entry_id \
+         JOIN gl_accounts a ON a.id = l.account_id \
+         WHERE e.fact_id = $1::uuid ORDER BY l.sort_order",
+    )
+    .bind(resp["charge_fact_id"].as_str().unwrap())
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        charge_lines,
+        vec![
+            ("1000".to_string(), 30_000i64, 0i64),
+            ("2400".to_string(), 0i64, 30_000i64),
+        ]
+    );
+    let charge_date: chrono::NaiveDate =
+        sqlx::query_scalar("SELECT posted_on FROM gl_journal_entries WHERE fact_id = $1::uuid")
+            .bind(resp["charge_fact_id"].as_str().unwrap())
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(charge_date, NaiveDate::from_ymd_opt(2026, 3, 1).unwrap());
+
+    // Release leg: DR 2400 full deposit / CR 1000 refund + CR 4150
+    // forfeiture, at the return date.
+    let release_lines: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT a.code, l.debit_cents, l.credit_cents \
+         FROM gl_journal_lines l \
+         JOIN gl_journal_entries e ON e.id = l.journal_entry_id \
+         JOIN gl_accounts a ON a.id = l.account_id \
+         WHERE e.fact_id = $1::uuid ORDER BY l.sort_order",
+    )
+    .bind(resp["release_fact_id"].as_str().unwrap())
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        release_lines,
+        vec![
+            ("2400".to_string(), 30_000i64, 0i64),
+            ("1000".to_string(), 0i64, 21_000i64),
+            ("4150".to_string(), 0i64, 9_000i64),
+        ]
+    );
+
+    // The liability drained exactly: 2400 nets to zero for this fleet.
+    let (tb_status, tb) = get(router(state()), "/api/ledger/trial-balance").await;
+    assert_eq!(tb_status, StatusCode::OK);
+    let rows = tb["rows"].as_array().unwrap();
+    let keg = rows.iter().find(|r| r["account_code"] == "2400").unwrap();
+    assert_eq!(keg["debit_total_cents"], 30_000);
+    assert_eq!(keg["credit_total_cents"], 30_000);
+
+    // Redelivery: the same settlement re-POSTs as a no-op 200 — the
+    // facts key on the job id, so nothing double-books.
+    let (status2, resp2) =
+        post_json(router(state()), "/api/ledger/keg-deposit-settlements", body).await;
+    assert_eq!(status2, StatusCode::OK, "body: {resp2}");
+    let fact_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM financial_facts WHERE kind LIKE 'finance.keg_deposit.%'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(fact_count, 2, "redelivery must not mint new facts");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn keg_deposit_settlement_rejects_non_conserving_counts_as_422() {
+    let db = TestDb::new().await;
+    let r = router(LedgerApiState {
+        pool: db.pool.clone(),
+        publisher: None,
+        clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
+        // No read gate in tests; production wires one.
+        policy: None,
+    });
+    // 1 out, 1 returned AND 1 lost — the shape the free-field faker
+    // used to produce (feedback 52f49cc7). Deterministic data error →
+    // 422 so the dispatcher Terms instead of NAK-retrying.
+    let (status, body) = post_json(
+        r,
+        "/api/ledger/keg-deposit-settlements",
+        json!({
+            "job_id": "job-keg-bad",
+            "kegs_out": 1,
+            "kegs_returned": 1,
+            "kegs_lost": 1,
+            "deposit_cents": 3_000,
+            "shipped_on": "2026-03-01",
+            "returned_on": "2026-03-15",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body: {body}");
+    let nothing: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM financial_facts WHERE kind LIKE 'finance.keg_deposit.%'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(nothing, 0, "a rejected settlement must book nothing");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn keg_deposit_settlement_rejects_auditor_writes() {
+    let db = TestDb::new().await;
+    let r = router(LedgerApiState {
+        pool: db.pool.clone(),
+        publisher: None,
+        clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
+        // No read gate in tests; production wires one.
+        policy: None,
+    });
+    let (status, _) = post_as_auditor(
+        r,
+        "/api/ledger/keg-deposit-settlements",
+        json!({
+            "job_id": "job-keg-aud",
+            "kegs_out": 2,
+            "kegs_returned": 2,
+            "kegs_lost": 0,
+            "deposit_cents": 6_000,
+            "shipped_on": "2026-03-01",
+            "returned_on": "2026-03-15",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn keg_deposit_same_day_settlement_survives_a_rebuild() {
+    // The nasty edge: a fleet reconciled the same day it shipped means
+    // charge and release share `happened_on`, and both facts were
+    // written in ONE transaction. The `clock_timestamp()` stamp on
+    // `recorded_at` (keg_deposits.rs) is what pins the replay order —
+    // without it the release could re-post before the charge it
+    // drains, and the "1000 Cash must not go negative" guard would
+    // abort the rebuild on an empty ledger.
+    let db = TestDb::new().await;
+    let r = router(LedgerApiState {
+        pool: db.pool.clone(),
+        publisher: None,
+        clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
+        // No read gate in tests; production wires one.
+        policy: None,
+    });
+    let (status, resp) = post_json(
+        r,
+        "/api/ledger/keg-deposit-settlements",
+        json!({
+            "job_id": "job-keg-sameday",
+            "kegs_out": 4,
+            "kegs_returned": 3,
+            "kegs_lost": 1,
+            "deposit_cents": 12_000,
+            "shipped_on": "2026-03-10",
+            "returned_on": "2026-03-10",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {resp}");
+
+    // Replay from facts alone: drop the projected entries and rebuild.
+    let report = boss_ledger::rebuild(&db.pool).await.unwrap();
+    assert!(report.is_balanced(), "{report:?}");
+    let (debits, credits): (i64, i64) = sqlx::query_as(
+        "SELECT COALESCE(SUM(l.debit_cents), 0)::bigint, COALESCE(SUM(l.credit_cents), 0)::bigint \
+         FROM gl_journal_lines l JOIN gl_accounts a ON a.id = l.account_id \
+         WHERE a.code = '2400'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(debits, 12_000, "liability drains on rebuild too");
+    assert_eq!(credits, 12_000);
 }

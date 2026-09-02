@@ -45,12 +45,13 @@ export function stockStatus(item: InventoryItem): StockStatus {
   return 'healthy';
 }
 
-export const STATUS_LABEL: Record<StockStatus, string> = {
-  healthy: 'Healthy',
-  low: 'Low',
-  critical: 'Critical',
-  out: 'Out of stock',
-};
+/// Tone for the web-kit StatusChip; mirrors the retired chip-stock-*
+/// CSS colors (out was --err, critical/low --warn, healthy --ok).
+export function stockTone(status: StockStatus): 'ok' | 'warn' | 'err' {
+  if (status === 'out') return 'err';
+  if (status === 'healthy') return 'ok';
+  return 'warn';
+}
 
 /// Flat row from `GET /api/catalog/parts`. The brewery's
 /// PartsList reads this directly — no need to walk system_models

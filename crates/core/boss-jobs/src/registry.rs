@@ -107,6 +107,26 @@ pub struct StepSpec {
     /// Workflow edit, not a deploy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_hours: Option<f64>,
+    /// The split of `duration_hours` into its two real meanings
+    /// (d64fe2d2, David's Q2: "we can split those two times").
+    ///
+    /// `labor_hours` is what a PERSON spends — the input to per-person
+    /// capacity, where the Q3 norm caps one person at 8 labor-hours a
+    /// day. `wall_clock_hours` is what the CALENDAR spends —
+    /// fermentation holds 168h of wall clock and ~0 of labor; an ACH
+    /// window is days of calendar and minutes of attention.
+    ///
+    /// Executors pace by the wall-clock leg (`wall_clock_hours`, then
+    /// `duration_hours`, then the kind's typical) and meter capacity
+    /// by `labor_hours` ONLY where it is authored — an unauthored spec
+    /// meters nothing, so every existing Workflow is unchanged (the
+    /// Q3 rider: realism is a configuration expectation reviewed at
+    /// protocol-authoring time, not a sweep invariant). Protocol data,
+    /// not a code path (§9): correcting either is a Workflow edit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labor_hours: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_hours: Option<f64>,
     /// Step-authored completion-contract fields (inline
     /// authoring) — validated in union with the kind bundle's fields,
     /// so vocabulary that isn't shared needs no registry row.

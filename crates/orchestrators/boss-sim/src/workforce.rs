@@ -125,6 +125,11 @@ pub struct WorkforceStats {
     /// sim deliberately left Ready for the human — see
     /// `workable_assignee`.
     pub operator_skipped: u64,
+    /// Steps left Ready because the assignee's labor-hour day was
+    /// full (d64fe2d2). Only specs that author `labor_hours` can
+    /// produce these; the count existing is what makes the capacity
+    /// model observable rather than a silent cap.
+    pub labor_deferred: u64,
 }
 
 /// How many steps the workforce drives in parallel per check-in.
@@ -151,6 +156,45 @@ struct StepDelta {
     errors: u64,
     /// Assigned to an operator identity — left for the human.
     operator_skipped: u64,
+    /// Left Ready because the assignee's labor-hour day is full.
+    labor_deferred: u64,
+}
+
+/// A spec's authored hours, all three legs (d64fe2d2). `duration` is
+/// the pre-split field and feeds ONLY the wall-clock leg — a legacy
+/// fermentation's 168h is calendar, and reading it as labor would eat
+/// 21 days of one person's budget on a step nobody attends.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct SpecHours {
+    pub labor: Option<f64>,
+    pub wall: Option<f64>,
+    pub duration: Option<f64>,
+}
+
+/// The wall-clock pacing leg: `wall_clock_hours`, then the pre-split
+/// `duration_hours`, then the kind's typical. This is what gates
+/// Active → complete on elapsed sim-time.
+pub(crate) fn pacing_hours(spec: Option<SpecHours>, kind_typical: f64) -> f64 {
+    spec.and_then(|s| s.wall.or(s.duration))
+        .unwrap_or(kind_typical)
+}
+
+/// The labor leg: Some only where the spec AUTHORS `labor_hours`.
+/// Unauthored meters nothing — the Q3 rider makes realism a
+/// protocol-authoring expectation, not a sweep invariant, so every
+/// existing Workflow keeps today's unmetered behaviour.
+pub(crate) fn labor_commitment(spec: Option<SpecHours>) -> Option<f64> {
+    spec.and_then(|s| s.labor)
+}
+
+/// One person contributes at most this many labor-hours per sim day
+/// (David's Q3 norm). The boundary is inclusive: a commitment that
+/// lands exactly on the cap still fits the day.
+pub(crate) const LABOR_DAY_CAP: f64 = 8.0;
+
+/// May `commitment` more labor-hours join `spent` today?
+pub(crate) fn labor_fits(spent: f64, commitment: f64, cap: f64) -> bool {
+    spent + commitment <= cap
 }
 
 #[derive(Debug, Deserialize)]
@@ -178,7 +222,11 @@ pub struct Workforce {
     /// can never go stale. Mutex, not RwLock: the critical sections
     /// are a lookup or an insert, and the worker threads spend their
     /// time in HTTP round-trips, not here.
-    spec_durations: std::sync::Mutex<HashMap<(String, i32), HashMap<String, f64>>>,
+    spec_durations: std::sync::Mutex<HashMap<(String, i32), HashMap<String, SpecHours>>>,
+    /// (employee, sim day) → labor-hours committed. Grows one key per
+    /// worker per day and resets by keying on the day, not by sweeping.
+    /// Only steps whose spec authors `labor_hours` write here.
+    labor_spent: std::sync::Mutex<HashMap<(String, chrono::NaiveDate), f64>>,
     /// StepType kind → its required-at-done fields, sourced from the
     /// StepRegistry. On completion the workforce supplies any the Workflow
     /// didn't default — the executor filling the step's form.
@@ -246,6 +294,7 @@ impl Workforce {
             api_base: api_base.to_string(),
             durations,
             spec_durations: std::sync::Mutex::new(HashMap::new()),
+            labor_spent: std::sync::Mutex::new(HashMap::new()),
             required_fields,
             api_activity: api_activity::new_handle(),
             emp_roles: HashMap::new(),
@@ -330,24 +379,13 @@ impl Workforce {
             .unwrap_or(DEFAULT_STEP_HOURS)
     }
 
-    /// A step's pacing duration. Resolution order: the step's own
-    /// spec `duration_hours` — read from the Job's PINNED workflow
-    /// version — wins; the StepType kind's typical duration is the
-    /// fallback. This is what lets a `task`-kind fermentation hold
-    /// for the 168h its Workflow says instead of "completing" in the
-    /// kind's one-workday default.
-    fn step_duration_hours(&self, row: &Value, step: &Value, kind: &str) -> f64 {
-        self.spec_duration_hours(row, step)
-            .unwrap_or_else(|| self.duration_hours(kind))
-    }
-
-    /// The spec-authored duration for this row's step, if its pinned
-    /// Workflow version authors one. First sight of a (workflow,
+    /// The spec-authored hours for this row's step, if its pinned
+    /// Workflow version authors any. First sight of a (workflow,
     /// version) pair fetches the version row and caches its slug →
     /// hours map. A failed fetch resolves to `None` (kind-default
-    /// pacing for this pass) and is NOT cached, so a transient
-    /// registry error heals on the next check-in.
-    fn spec_duration_hours(&self, row: &Value, step: &Value) -> Option<f64> {
+    /// pacing, no labor metering, for this pass) and is NOT cached,
+    /// so a transient registry error heals on the next check-in.
+    fn spec_hours(&self, row: &Value, step: &Value) -> Option<SpecHours> {
         let workflow = row.get("workflow")?.as_str()?;
         let version = i32::try_from(row.get("workflow_version")?.as_i64()?).ok()?;
         let slug = step.get("spec_slug")?.as_str()?;
@@ -376,11 +414,16 @@ impl Workforce {
     }
 
     /// GET the pinned Workflow version row and index each step's
-    /// spec-authored `duration_hours` by its slug (`title`). 404 is
+    /// spec-authored hours (all three legs — labor, wall-clock, and
+    /// the pre-split duration) by its slug (`title`). 404 is
     /// definitive — no such version row — and comes back as an empty
     /// map so it caches; transport / 5xx errors bubble up so the
     /// caller retries next pass.
-    fn fetch_spec_durations(&self, workflow: &str, version: i32) -> Result<HashMap<String, f64>> {
+    fn fetch_spec_durations(
+        &self,
+        workflow: &str,
+        version: i32,
+    ) -> Result<HashMap<String, SpecHours>> {
         let url = service_url(
             &self.api_base,
             &format!("/api/workflows/{workflow}/versions/{version}"),
@@ -398,6 +441,7 @@ impl Workforce {
             anyhow::bail!("GET {url} -> {status}");
         }
         let spec: Value = resp.json().with_context(|| format!("decode {url}"))?;
+        let leg = |s: &Value, key: &str| s.get(key).and_then(Value::as_f64);
         Ok(spec
             .get("steps")
             .and_then(|v| v.as_array())
@@ -407,7 +451,11 @@ impl Workforce {
                     .filter_map(|s| {
                         Some((
                             s.get("title")?.as_str()?.to_string(),
-                            s.get("duration_hours")?.as_f64()?,
+                            SpecHours {
+                                labor: leg(s, "labor_hours"),
+                                wall: leg(s, "wall_clock_hours"),
+                                duration: leg(s, "duration_hours"),
+                            },
                         ))
                     })
                     .collect()
@@ -531,6 +579,7 @@ impl Workforce {
                                     d.deferred += sd.deferred;
                                     d.in_progress += sd.in_progress;
                                     d.operator_skipped += sd.operator_skipped;
+                                    d.labor_deferred += sd.labor_deferred;
                                 }
                                 Err(e) => {
                                     d.errors += 1;
@@ -554,6 +603,7 @@ impl Workforce {
             self.stats.in_progress += d.in_progress;
             self.stats.errors += d.errors;
             self.stats.operator_skipped += d.operator_skipped;
+            self.stats.labor_deferred += d.labor_deferred;
         }
         Ok(())
     }
@@ -612,9 +662,10 @@ impl Workforce {
             }
         };
 
-        // Spec-authored duration (via the Job's pinned workflow
-        // version) wins; StepType kind default is the fallback.
-        let step_hours = self.step_duration_hours(row, step, kind);
+        // Spec-authored hours (via the Job's pinned workflow version):
+        // the wall-clock leg paces, the labor leg meters capacity.
+        let spec = self.spec_hours(row, step);
+        let step_hours = pacing_hours(spec, self.duration_hours(kind));
 
         match status {
             "ready" => {
@@ -624,6 +675,25 @@ impl Workforce {
                 if kind == "production-consume" && self.short_on_ingredients(&metadata)? {
                     delta.deferred += 1;
                     return Ok(delta);
+                }
+                // The labor budget (d64fe2d2, Q3 norm): a person holds
+                // at most LABOR_DAY_CAP labor-hours per sim day, and a
+                // step meters against it only where its spec authors
+                // `labor_hours`. Committed at CLAIM — that is when the
+                // person's day is spoken for — and left Ready when the
+                // day is full; the role queue re-surfaces it tomorrow.
+                if let Some(commitment) = labor_commitment(spec) {
+                    let day = now.date_naive();
+                    let mut spent = self
+                        .labor_spent
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("labor_spent lock poisoned"))?;
+                    let so_far = spent.get(&(emp.clone(), day)).copied().unwrap_or(0.0);
+                    if !labor_fits(so_far, commitment, LABOR_DAY_CAP) {
+                        delta.labor_deferred += 1;
+                        return Ok(delta);
+                    }
+                    spent.insert((emp.clone(), day), so_far + commitment);
                 }
                 self.claim(job_id, step_id, &emp, &metadata, now)?;
                 delta.claimed += 1;
@@ -738,6 +808,10 @@ impl Workforce {
                 );
             }
         }
+        // Invariant-bound keg-fleet fields (93f936b9): where the fields
+        // above were synthesized free, overwrite them with values that
+        // satisfy the fleet's own conservation contract.
+        self.reconcile_keg_fleet_fields(&mut md, metadata, job_id, step_id);
         // Gates (demand-gate / availability-gate) are agent-executed: the
         // dispatcher reads real stock and stamps the outcome on step.ready.
         // The workforce only drives assigned steps and agent steps are never
@@ -799,6 +873,84 @@ impl Workforce {
                 synth_field_value(&f.field_type, &f.name, step_id, now),
             );
         }
+    }
+
+    /// The keg ledger's conservation contract, honored at the source
+    /// (93f936b9, David's Q1 decision — the full balance-sheet keg
+    /// model). Two fixups, both gated on the field having been
+    /// SYNTHESIZED this pass (absent from the incoming metadata):
+    /// an operator- or Workflow-authored value is never overwritten.
+    ///
+    /// - Fleet-out leg (`kegs_out` + `deposit_cents` together): the
+    ///   deposit derives from the count at $30/keg — the one keg field
+    ///   with real-world ground truth — instead of a free-form fake.
+    /// - Returns leg (`kegs_returned` + `kegs_lost` together): the
+    ///   pair becomes a conserved partition of the fleet's own
+    ///   `kegs_out` (read off the job's earlier log-fleet-out step),
+    ///   because `/api/ledger/keg-deposit-settlements` 422s any fleet
+    ///   whose counts don't satisfy `returned + lost == out`. A job
+    ///   with no `kegs_out` leg keeps the free fakes — there is no
+    ///   invariant to satisfy.
+    fn reconcile_keg_fleet_fields(
+        &self,
+        md: &mut serde_json::Map<String, Value>,
+        incoming: &Value,
+        job_id: &str,
+        step_id: &str,
+    ) {
+        let synthesized = |md: &serde_json::Map<String, Value>, key: &str| -> bool {
+            incoming.get(key).is_none() && md.contains_key(key)
+        };
+        if synthesized(md, "kegs_out")
+            && synthesized(md, "deposit_cents")
+            && let Some(out) = md.get("kegs_out").and_then(|v| v.as_i64())
+            && out > 0
+        {
+            md.insert(
+                "deposit_cents".to_string(),
+                json!(out * KEG_DEPOSIT_CENTS_PER_KEG),
+            );
+        }
+        if synthesized(md, "kegs_returned") && synthesized(md, "kegs_lost") {
+            match self.job_kegs_out(job_id) {
+                Ok(Some(out)) if out > 0 => {
+                    let (returned, lost) = keg_return_split(out as u64, step_id);
+                    md.insert("kegs_returned".to_string(), json!(returned));
+                    md.insert("kegs_lost".to_string(), json!(lost));
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    debug!(%job_id, error = %e, "keg conservation: job fetch failed; leaving synthesized counts");
+                }
+            }
+        }
+    }
+
+    /// The fleet's `kegs_out`, read off the job's own earlier step
+    /// (the keg-return protocol's log-fleet-out leg). `None` when no
+    /// step on the job carries a positive `kegs_out`.
+    fn job_kegs_out(&self, job_id: &str) -> Result<Option<i64>> {
+        let url = service_url(&self.api_base, &format!("/api/jobs/{job_id}"));
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .with_context(|| format!("GET {url}"))?;
+        if !resp.status().is_success() {
+            anyhow::bail!("GET {url} -> {}", resp.status());
+        }
+        let job: Value = resp.json().context("decode job")?;
+        Ok(job
+            .get("steps")
+            .and_then(|s| s.as_array())
+            .and_then(|steps| {
+                steps.iter().find_map(|s| {
+                    s.get("metadata")
+                        .and_then(|m| m.get("kegs_out"))
+                        .and_then(|v| v.as_i64())
+                        .filter(|n| *n > 0)
+                })
+            }))
     }
 
     /// Stamp a step (POST .../sign-offs) as the executing employee in
@@ -989,16 +1141,39 @@ fn enum_variant<'a>(field_type: &'a str, name: &str, step_id: &str) -> &'a str {
 /// independent per-field synthesis makes `kegs_returned + kegs_lost`
 /// equal `kegs_out`; three fields faked separately will disagree, and
 /// with a range they will disagree VISIBLY rather than looking tidy at
-/// 1/1/1. That is the honest state of it. Fields bound by an invariant
-/// need an executor that knows the invariant — the keg ledger's
-/// conservation sweep (93f936b9, David's Q1 decision) — with the faker
-/// filling only genuinely free fields.
+/// 1/1/1. Fields bound by an invariant need an executor that knows the
+/// invariant — which the keg-fleet fields now have:
+/// `reconcile_keg_fleet_fields` (93f936b9, David's Q1 decision)
+/// overwrites the free-field fakes with a conserved partition of the
+/// fleet's own `kegs_out`, and the faker fills only genuinely free
+/// fields.
 fn small_count(name: &str, step_id: &str) -> u64 {
     let h = fxhash(&format!("{step_id}\u{1f}{name}"));
     // Fold the high half down before the modulus, for the same reason
     // enum_variant does: FNV-1a's low bits are weak, and without the
     // fold two integer fields on one step move together.
     ((h ^ (h >> 32)) % 20) + 1
+}
+
+/// A real-world half-barrel keg deposit, in cents per keg ($30 — the
+/// industry's standard order of magnitude). Unlike the counts, the
+/// deposit HAS ground truth, so the fleet-out leg derives
+/// `deposit_cents = kegs_out × this` instead of faking it free-form.
+const KEG_DEPOSIT_CENTS_PER_KEG: i64 = 3_000;
+
+/// Partition a fleet's `kegs_out` into `(kegs_returned, kegs_lost)` —
+/// the invariant-aware executor the keg ledger's conservation contract
+/// requires (93f936b9): the two counts are one draw, not two, so
+/// `returned + lost == out` by construction. The loss draw spreads
+/// uniformly over `0..=ceil(out/10)` — the industry's own order of
+/// magnitude for per-cycle keg loss, stated as a band rather than an
+/// invented distribution. Keyed on `(step_id, "kegs_lost")` so a
+/// replayed run partitions identically.
+fn keg_return_split(kegs_out: u64, step_id: &str) -> (u64, u64) {
+    let h = fxhash(&format!("{step_id}\u{1f}kegs_lost"));
+    // Fold the high half down before the modulus (see small_count).
+    let lost = ((h ^ (h >> 32)) % (kegs_out.div_ceil(10) + 1)).min(kegs_out);
+    (kegs_out - lost, lost)
 }
 
 /// Small stable string hash (FNV-1a) — NOT `DefaultHasher`, whose seed
@@ -1042,7 +1217,7 @@ mod tests {
     /// A Workforce whose kind-default map says `task` takes 8h, with a
     /// primed spec-duration cache (no HTTP in tests — a cached
     /// (workflow, version) entry short-circuits the registry fetch).
-    fn workforce_with_cache(cache: HashMap<String, f64>) -> super::Workforce {
+    fn workforce_with_cache(cache: HashMap<String, super::SpecHours>) -> super::Workforce {
         let wf = super::Workforce::new(
             "http://127.0.0.1:9", // never dialed: the cache is primed
             HashMap::from([("task".to_string(), 8.0)]),
@@ -1053,6 +1228,14 @@ mod tests {
             .unwrap()
             .insert(("morning-brew".to_string(), 3), cache);
         wf
+    }
+
+    fn hours(labor: Option<f64>, wall: Option<f64>, duration: Option<f64>) -> super::SpecHours {
+        super::SpecHours {
+            labor,
+            wall,
+            duration,
+        }
     }
 
     fn row_and_step() -> (serde_json::Value, serde_json::Value) {
@@ -1071,9 +1254,13 @@ mod tests {
         // says fermentation takes 168h; the `task` kind default is 8h.
         // The spec wins — this is the fidelity fix that stops a 7-day
         // fermentation "completing" in one workday.
-        let wf = workforce_with_cache(HashMap::from([("fermentation-start".to_string(), 168.0)]));
+        let wf = workforce_with_cache(HashMap::from([(
+            "fermentation-start".to_string(),
+            hours(None, None, Some(168.0)),
+        )]));
         let (row, step) = row_and_step();
-        assert_eq!(wf.step_duration_hours(&row, &step, "task"), 168.0);
+        let pace = super::pacing_hours(wf.spec_hours(&row, &step), wf.duration_hours("task"));
+        assert_eq!(pace, 168.0);
     }
 
     #[test]
@@ -1083,13 +1270,42 @@ mod tests {
         // before this field existed.
         let wf = workforce_with_cache(HashMap::new());
         let (row, step) = row_and_step();
-        assert_eq!(wf.step_duration_hours(&row, &step, "task"), 8.0);
+        let spec = wf.spec_hours(&row, &step);
+        assert_eq!(super::pacing_hours(spec, wf.duration_hours("task")), 8.0);
         // And a kind the durations map doesn't know falls to the
         // DEFAULT_STEP_HOURS floor.
         assert_eq!(
-            wf.step_duration_hours(&row, &step, "some-unknown-kind"),
+            super::pacing_hours(spec, wf.duration_hours("some-unknown-kind")),
             super::DEFAULT_STEP_HOURS
         );
+    }
+
+    /// The split (d64fe2d2): wall-clock beats the pre-split duration
+    /// for PACING; labor never paces. A spec authoring all three legs
+    /// paces by wall, and its labor commitment is the labor leg alone.
+    #[test]
+    fn wall_clock_beats_duration_and_labor_never_paces() {
+        let spec = Some(hours(Some(0.5), Some(168.0), Some(24.0)));
+        assert_eq!(super::pacing_hours(spec, 8.0), 168.0, "wall wins");
+        assert_eq!(super::labor_commitment(spec), Some(0.5));
+        // Wall absent → the pre-split duration is the wall-clock leg.
+        let legacy = Some(hours(None, None, Some(24.0)));
+        assert_eq!(super::pacing_hours(legacy, 8.0), 24.0);
+        // And CRITICALLY the pre-split duration never reads as labor:
+        // a legacy 168h fermentation must not eat 21 days of one
+        // person's budget.
+        assert_eq!(super::labor_commitment(legacy), None);
+        assert_eq!(super::labor_commitment(None), None);
+    }
+
+    /// The Q3 norm's boundary is inclusive: a commitment landing
+    /// exactly on the cap still fits; a hair over does not.
+    #[test]
+    fn the_labor_day_boundary_is_inclusive() {
+        assert!(super::labor_fits(0.0, 8.0, super::LABOR_DAY_CAP));
+        assert!(super::labor_fits(7.5, 0.5, super::LABOR_DAY_CAP));
+        assert!(!super::labor_fits(7.5, 0.6, super::LABOR_DAY_CAP));
+        assert!(super::labor_fits(0.0, 0.0, super::LABOR_DAY_CAP));
     }
 
     #[test]
@@ -1365,6 +1581,32 @@ mod tests {
                 != synth_field_value("release|hold", "route", &step_id, now)
         });
         assert!(differ, "every step drew the same value for both fields");
+    }
+
+    /// The invariant-aware half of keg-fleet synthesis (93f936b9): a
+    /// fleet's returned + lost must equal what went out — the faker
+    /// fills only genuinely free fields, and the partition is derived.
+    #[test]
+    fn keg_return_split_conserves_and_replays() {
+        for out in 1u64..=40 {
+            for i in 0..8 {
+                let step_id = format!("step-{i}");
+                let (returned, lost) = keg_return_split(out, &step_id);
+                assert_eq!(
+                    returned + lost,
+                    out,
+                    "out={out} step={step_id}: partition must conserve"
+                );
+                // The loss band is 0..=ceil(out/10) — the industry's own
+                // order of magnitude, not a precise claim.
+                assert!(lost <= out.div_ceil(10), "out={out} lost={lost}");
+                // Same (step, out) replays identically.
+                assert_eq!((returned, lost), keg_return_split(out, &step_id));
+            }
+        }
+        // Not a constant: across a population, losses actually occur.
+        let some_loss = (0..64).any(|i| keg_return_split(20, &format!("s-{i}")).1 > 0);
+        assert!(some_loss, "no fleet ever lost a keg across 64 draws");
     }
 
     #[test]
