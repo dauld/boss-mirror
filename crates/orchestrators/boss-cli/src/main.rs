@@ -13,6 +13,7 @@ mod docs;
 mod docs_flush;
 mod doctor;
 mod gate;
+mod host_readiness;
 mod inspect;
 mod job;
 mod merged;

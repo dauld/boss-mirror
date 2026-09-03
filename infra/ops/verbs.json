@@ -2,7 +2,13 @@
   "_about": [
     "BOSS ops-request verb allowlist — THE authority for what a host runner will execute.",
     "In-tree, reviewed, versioned: changing what a host runs for a packet is a PR, never a packet.",
-    "Phase 1 is READ-ONLY. Mutating verbs are phase 2, behind per-verb policy, and do not belong here.",
+    "Phase 1 was READ-ONLY. reclaim-disk (below) is the FIRST MUTATING verb — authorized by",
+    "David, 2026-09-03, after the forge disk filled and blocked CI for every train. Its bound is",
+    "by construction of the ONE script it calls (infra/forge/disk-floor-sweep.sh, the same",
+    "definition the hourly timer runs — §9a): regenerable docker caches only, in a fixed order,",
+    "stopping at the floor, never volumes or non-docker paths, loud non-zero exit when the floor",
+    "stays unmet rather than deleting harder. Any further mutating verb needs the same explicit",
+    "authorization — this entry is a precedent for the PROCESS, not a loosened default.",
     "",
     "Shape: verbs.<name>.argv is the exact command, literal words plus {N} placeholders; {N} takes",
     "param N (1-based) AFTER pattern validation. A param without `default` is required; `max` is a",
@@ -48,6 +54,13 @@
       "about": "systemd timers and when they fire next",
       "argv": ["systemctl", "list-timers", "--no-pager"],
       "params": []
+    },
+    "reclaim-disk": {
+      "about": "MUTATING — the first, and the only one (David, 2026-09-03; see _about). Runs the forge host's disk-floor-sweep.sh: reclaims regenerable docker caches (builder cache, dangling images, registry-verified old tags) until floor_gb free on the root volume, stopping at the floor; never volumes or non-docker paths, by construction of the script. floor_gb defaults to 25, mirroring BOSS_DISK_FLOOR_GB's default in the script. Path is the forge checkout (/home/david/boss, where install.sh's units point); on any other host the exec fails and the packet records it. A run killed at OPS_TIMEOUT is safe: every remediation already applied stays applied, and the hourly disk-floor-sweep.timer finishes the job.",
+      "argv": ["/home/david/boss/infra/forge/disk-floor-sweep.sh", "{1}"],
+      "params": [
+        { "name": "floor_gb", "pattern": "^[0-9]{1,3}$", "default": "25" }
+      ]
     }
   }
 }

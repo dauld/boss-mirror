@@ -91,6 +91,19 @@ pub(crate) const COMPILED_SKIP_REASON_FILE_BUDGET: usize = 96;
 /// Character budget for a jobs-API blip's cause in the journal.
 pub(crate) const COMPILED_BLIP_CAUSE_BUDGET: usize = 80;
 
+/// GB of free disk the CI host's latest host-scope estate observation
+/// must show before boarding assembles a consist (2026-09-03: two
+/// consists boarded onto a full CI host and each burned a whole CI
+/// cycle discovering it). Unlike its siblings this constant has no
+/// pre-registry ancestor in `train.rs` — the check is new — so the
+/// number is derived rather than carried over: gate.sh's disk-floor
+/// note measured a COLD workspace build at ~74GB on the forge host,
+/// and the locomotive's run-START floor of 70 passed that night while
+/// the run still died mid-flight, because a start floor cannot see the
+/// consist's mid-run consumption. 90 is the measured cold build plus
+/// headroom for exactly that growth.
+pub(crate) const COMPILED_CI_HOST_FLOOR_GB: i64 = 90;
+
 /// The lints the consist check does not run, each with its reason. All
 /// four need something the assembled TREE does not contain — a cargo
 /// build, a package manager, or a live database — and a question the
@@ -148,6 +161,7 @@ pub(crate) struct DeliveryPolicy {
     pub(crate) consist_files_named: usize,
     pub(crate) skip_reason_file_budget: usize,
     pub(crate) blip_cause_budget: usize,
+    pub(crate) ci_host_floor_gb: i64,
 }
 
 impl DeliveryPolicy {
@@ -169,6 +183,7 @@ impl DeliveryPolicy {
             consist_files_named: COMPILED_CONSIST_FILES_NAMED,
             skip_reason_file_budget: COMPILED_SKIP_REASON_FILE_BUDGET,
             blip_cause_budget: COMPILED_BLIP_CAUSE_BUDGET,
+            ci_host_floor_gb: COMPILED_CI_HOST_FLOOR_GB,
         }
     }
 
@@ -244,6 +259,7 @@ pub(crate) fn parse(row: DeliveryPolicyRow) -> Result<DeliveryPolicy> {
             row.skip_reason_file_budget,
         )?,
         blip_cause_budget: positive_usize("blip_cause_budget", row.blip_cause_budget)?,
+        ci_host_floor_gb: positive_i64("ci_host_floor_gb", row.ci_host_floor_gb)?,
     })
 }
 
@@ -334,6 +350,10 @@ mod tests {
         assert_eq!(p.skip_reason_file_budget, 96);
         assert_eq!(p.blip_cause_budget, 80);
         assert_eq!(
+            p.ci_host_floor_gb, 90,
+            "the measured ~74GB cold build plus headroom (gate.sh's disk-floor note)"
+        );
+        assert_eq!(
             scripts(&p),
             vec![
                 "audit-ordering.sh".to_string(),
@@ -366,6 +386,7 @@ mod tests {
             consist_files_named: 2,
             skip_reason_file_budget: 50,
             blip_cause_budget: 40,
+            ci_host_floor_gb: 120,
         }
     }
 
@@ -380,6 +401,7 @@ mod tests {
         assert_eq!(p.consist_files_named, 2);
         assert_eq!(p.skip_reason_file_budget, 50);
         assert_eq!(p.blip_cause_budget, 40);
+        assert_eq!(p.ci_host_floor_gb, 120);
         assert_eq!(scripts(&p), vec!["svelte-check.sh".to_string()]);
         assert!(p.excludes("svelte-check.sh"));
         assert!(!p.excludes("migration-numbers-unique.sh"));
@@ -428,6 +450,19 @@ mod tests {
         assert!(
             format!("{e}").contains("consist_files_named"),
             "the complaint names the field so the fix is obvious: {e}"
+        );
+    }
+
+    #[test]
+    fn a_non_positive_ci_host_floor_is_refused() {
+        // A zero floor would wave every boarding through and read as
+        // "the check ran"; that is worse than no check at all.
+        let mut r = row();
+        r.ci_host_floor_gb = 0;
+        let e = parse(r).expect_err("zero is not a floor");
+        assert!(
+            format!("{e}").contains("ci_host_floor_gb"),
+            "the complaint names the field: {e}"
         );
     }
 

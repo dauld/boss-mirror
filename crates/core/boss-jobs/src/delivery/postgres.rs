@@ -16,7 +16,7 @@ use super::types::DeliveryPolicyRow;
 
 const COLUMNS: &str = "name, version, max_red_trains, stall_hours, consist_excluded_lints, \
                        consist_budget_secs, consist_output_budget, consist_files_named, \
-                       skip_reason_file_budget, blip_cause_budget";
+                       skip_reason_file_budget, blip_cause_budget, ci_host_floor_gb";
 
 pub struct PgDeliveryPolicy {
     pool: PgPool,
@@ -44,6 +44,7 @@ fn row_of(row: &sqlx::postgres::PgRow) -> Result<DeliveryPolicyRow, DeliveryPoli
         consist_files_named: row.try_get("consist_files_named").map_err(storage)?,
         skip_reason_file_budget: row.try_get("skip_reason_file_budget").map_err(storage)?,
         blip_cause_budget: row.try_get("blip_cause_budget").map_err(storage)?,
+        ci_host_floor_gb: row.try_get("ci_host_floor_gb").map_err(storage)?,
     })
 }
 

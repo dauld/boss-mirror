@@ -39,4 +39,7 @@ pub struct DeliveryPolicyRow {
     pub skip_reason_file_budget: i32,
     /// Characters of a jobs-API blip's cause in the journal.
     pub blip_cause_budget: i32,
+    /// GB of free disk the CI host's latest host-scope estate
+    /// observation must show before boarding assembles a consist.
+    pub ci_host_floor_gb: i32,
 }

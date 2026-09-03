@@ -69,6 +69,7 @@ mod tests {
             consist_files_named: 6,
             skip_reason_file_budget: 96,
             blip_cause_budget: 80,
+            ci_host_floor_gb: 90,
         }
     }
 

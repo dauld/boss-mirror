@@ -68,11 +68,12 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use boss_jobs::delivery::DeliveryPolicyRow;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, Utc};
 use reqwest::Method;
 use serde_json::{Map, Value, json};
 
 use crate::delivery_policy::{self, DeliveryPolicy};
+use crate::host_readiness;
 
 const ACTOR: &str = "automation:train-conductor";
 
@@ -163,6 +164,13 @@ struct Config {
     /// the kill switch exists so an operator debugging a consist can
     /// keep it on the rails without editing code.
     auto_cancel: bool,
+    /// The estate node id of the host CI runs on (BOSS_TRAIN_CI_HOST,
+    /// deliberately no default — a wrong guess would gate boardings on
+    /// the wrong box's disk, and a wrong id answers "never observed"
+    /// instead of erroring). Absent means the pre-boarding host check
+    /// is skipped, with one journal line, so a deployment that has not
+    /// configured it behaves exactly as before.
+    ci_host: Option<String>,
     dry: bool,
 }
 
@@ -219,6 +227,9 @@ impl Config {
                 .parse()
                 .unwrap_or(30),
             auto_cancel: std::env::var("BOSS_TRAIN_AUTO_CANCEL").as_deref() != Ok("0"),
+            ci_host: std::env::var("BOSS_TRAIN_CI_HOST")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
             gh_repo,
             home,
             dry,
@@ -1816,6 +1827,45 @@ pub(crate) fn commits_match(a: &str, b: &str) -> bool {
     a.len() >= 7 && b.len() >= 7 && (a.starts_with(b) || b.starts_with(a))
 }
 
+/// What a BLOCKED deploy tree should do this reconcile pass.
+///
+/// WHY THIS EXISTS. `deploy` refuses to build from a dirty or
+/// off-main tree — correctly; deploying an unknown working state is
+/// worse than waiting. But it only logged "deploy tree busy — will
+/// retry" and stamped the step, so on 2026-09-02 the tree sat dirty
+/// with a regenerated `Cargo.lock` and the conductor retried in
+/// silence every ten minutes for SIX HOURS while two merged trains
+/// waited to deploy. Nothing in the system of record said the
+/// pipeline had stopped; it was found by reading a journal by hand.
+///
+/// This is the `ConvergenceVerdict::Overdue` idea one step upstream:
+/// a quiet wait is fine, an INDEFINITE quiet wait is the defect.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DeployBlockVerdict {
+    /// Blocked, but inside the patience window — retry quietly.
+    Waiting,
+    /// Blocked past the window and nothing filed yet — file the packet.
+    Overdue,
+}
+
+/// Pure so the rule is pinned by tests rather than by this comment.
+/// `blocked_since` is the stamp the first blocked pass wrote; None
+/// means this pass is the first, which is never overdue.
+pub(crate) fn deploy_block_verdict(
+    blocked_since: Option<DateTime<FixedOffset>>,
+    now: DateTime<Utc>,
+    alarm_after_mins: i64,
+) -> DeployBlockVerdict {
+    let Some(since) = blocked_since else {
+        return DeployBlockVerdict::Waiting;
+    };
+    if (now.fixed_offset() - since).num_minutes() >= alarm_after_mins {
+        DeployBlockVerdict::Overdue
+    } else {
+        DeployBlockVerdict::Waiting
+    }
+}
+
 /// What the `converged` step should do this reconcile pass.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ConvergenceVerdict {
@@ -3186,7 +3236,7 @@ impl Conductor {
 
     /// Carry a merged train out to the playground — only from a clean
     /// main tree; anything else is recorded and retried next run.
-    async fn deploy(&self, train: &Value, deployed_step: &Value) -> Result<()> {
+    async fn deploy(&self, train: &Value, deployed_step: &Value, now: DateTime<Utc>) -> Result<()> {
         let tree = self.cfg.deploy_tree.clone();
         let tree_path = Path::new(&tree);
         // Deploy only when needed. The skip decision comes before the
@@ -3241,12 +3291,79 @@ impl Conductor {
                     .ok_or_else(|| anyhow!("deployed step without an id on job {tid}"))?;
                 let mut md = metadata_map(deployed_step);
                 md.insert("deploy_blocked".to_string(), json!(reason));
+                // WHEN the block started, stamped once and left alone
+                // while it persists — the elapsed time is the whole
+                // signal, so a stamp that refreshed every pass would
+                // make an indefinite block look permanently fresh.
+                let blocked_since = md
+                    .get("deploy_blocked_since")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| now.to_rfc3339());
+                md.insert("deploy_blocked_since".to_string(), json!(blocked_since));
                 self.api(
                     Method::PUT,
                     &format!("/api/jobs/{tid}/steps/{sid}"),
                     Some(json!({"metadata": md})),
                 )
                 .await?;
+
+                let since = parse_stamp(Some(blocked_since.as_str()));
+                if deploy_block_verdict(since, now, self.cfg.converge_alarm_mins)
+                    == DeployBlockVerdict::Overdue
+                    && !truthy(
+                        train
+                            .get("metadata")
+                            .and_then(|m| m.get("deploy_alarm_filed")),
+                    )
+                {
+                    let mins = since
+                        .map(|s| (now.fixed_offset() - s).num_minutes())
+                        .unwrap_or_default();
+                    log(format!(
+                        "train {}: deploy tree BLOCKED {mins} min — filing packet",
+                        id8(tid)
+                    ));
+                    self.api(
+                        Method::POST,
+                        "/api/jobs",
+                        Some(json!({
+                            "kind": "user-feedback",
+                            "status": "open",
+                            "title": format!(
+                                "Deploy blocked {mins} min: the playground tree is not clean"
+                            ),
+                            "subject": {"subject_kind": "custom", "id": "cluster-convergence"},
+                            "tags": ["deploy", "pipeline"],
+                            "owner_id": "emp-david",
+                            "priority": "urgent",
+                            "opened_on": now.date_naive().to_string(),
+                            "metadata": {
+                                "message": format!(
+                                    "The conductor has refused to deploy for {mins} minutes: \
+                                     {reason}. Refusing is correct — building from an unknown \
+                                     working state is worse than waiting — but waiting SILENTLY \
+                                     is the defect this packet exists to end (2026-09-02: a \
+                                     regenerated Cargo.lock left the tree dirty and two merged \
+                                     trains waited six hours while the retry logged to nobody). \
+                                     Inspect with `git -C <deploy tree> status --short`; a \
+                                     regenerable artifact is `git checkout --` and the next tick \
+                                     deploys. Threshold is BOSS_TRAIN_CONVERGE_ALARM_MINS ({}).",
+                                    self.cfg.converge_alarm_mins
+                                ),
+                                "train": tid,
+                                "blocked_since": blocked_since,
+                            },
+                        })),
+                    )
+                    .await?;
+                    self.api(
+                        Method::PATCH,
+                        &format!("/api/jobs/{tid}/metadata"),
+                        Some(json!({"deploy_alarm_filed": true})),
+                    )
+                    .await?;
+                }
             }
             return Ok(());
         }
@@ -3645,7 +3762,7 @@ impl Conductor {
             if step_done(merged_step) && !step_done(deployed_step) {
                 let deployed_step = deployed_step
                     .ok_or_else(|| anyhow!("deployed step missing on job {}", id8(&tid)))?;
-                self.deploy(&t, deployed_step).await?;
+                self.deploy(&t, deployed_step, now).await?;
                 t = self.get_job(&tid).await?;
             }
             // Installation is not the finish line either — the cluster
@@ -4316,9 +4433,46 @@ impl Conductor {
         Ok(Some(self.get_job(&jid).await?))
     }
 
+    /// The CI host's boarding verdict, from the estate's host-scope
+    /// observation series. `BOSS_TRAIN_CI_HOST` names the estate node
+    /// id of the box CI runs on; a deployment that has not configured
+    /// it gets exactly the old behaviour, minus silence — one journal
+    /// line says the check did not run.
+    async fn ci_host_readiness(&self, now: DateTime<Utc>) -> host_readiness::Readiness {
+        use crate::host_readiness::Readiness;
+        let Some(host) = self.cfg.ci_host.as_deref() else {
+            log("ci host check skipped — BOSS_TRAIN_CI_HOST unset");
+            return Readiness::Proceed;
+        };
+        // `scope=host` so the page is not spent by the faster cluster
+        // series (the reader's own lesson, 2026-09-02); `limit=50` is
+        // its hard cap, depth enough to find this host among the other
+        // host-scope observers.
+        let fetched = self
+            .api(
+                Method::GET,
+                "/api/estate/observations?scope=host&limit=50",
+                None,
+            )
+            .await;
+        match fetched {
+            Ok(Some(body)) => host_readiness::host_readiness(
+                &body,
+                host,
+                self.policy.ci_host_floor_gb,
+                host_readiness::max_observation_age(),
+                now,
+            ),
+            Ok(None) => Readiness::Unverifiable {
+                reason: "the observations reader answered nothing".to_string(),
+            },
+            Err(e) => Readiness::Unverifiable {
+                reason: format!("the observations reader is unreachable ({e})"),
+            },
+        }
+    }
+
     async fn board(&self, now: DateTime<Utc>) -> Result<()> {
-        self.ensure_clone()?;
-        let (cands, mut left_behind) = self.candidates().await?;
         // Minute precision, not an AM/PM half-day. Boardings fire on
         // dock depth (min 4, 120m cooldown), not a twice-daily clock, so
         // the old "{date} AM/PM" label both COLLIDED — two trains carried
@@ -4327,6 +4481,59 @@ impl Conductor {
         // train_branch stamp on the next line.
         let window = now.format("%Y-%m-%d %H:%M").to_string();
         let train_branch = format!("train/{}", now.format("%Y%m%d-%H%M"));
+
+        // THE HOST CHECK — before anything is assembled. On 2026-09-03
+        // the conductor boarded two consists onto a CI host whose disk
+        // was full, and each burned a full CI cycle discovering it; the
+        // locomotive's run-start floor had even PASSED at 01:26,
+        // because a start-of-run check cannot see a consist's
+        // mid-flight consumption. So the question is asked here, from
+        // the estate's observed series, before the first merge is
+        // attempted (David, 2026-09-03: "protocol should actually
+        // verify before anyone bothers to even start").
+        //
+        // Only a POSITIVE "the host is short" refuses. Unverifiable —
+        // an absent, stale, or unreadable series — proceeds with one
+        // loud line, deliberately FAIL-OPEN: the host-scope observer
+        // (infra/estate/observe-host.sh) is not yet installed anywhere,
+        // and landing this check must not stop all boarding on the day
+        // the series does not exist yet. Once the series is live,
+        // tightening stale-to-refuse is a policy question, not a
+        // rebuild.
+        match self.ci_host_readiness(now).await {
+            host_readiness::Readiness::Refuse { reason } => {
+                log(format!("BOARDING REFUSED — {reason}"));
+                // Recorded the way an empty window records itself: the
+                // train Job opens, carries the reason on its collect
+                // step, and cancels via the `empty` marker — so the
+                // yard shows WHY no train ran instead of showing
+                // nothing at all.
+                let Some(train) = self.open_train_job(&train_branch, &window).await? else {
+                    return Ok(()); // dry run — the refusal is on the journal
+                };
+                let train_id = job_id(&train)?.to_string();
+                let collect = find_step(&train, "collect", "Collect what is ready to board");
+                self.merge_job_metadata(&train_id, vec![("empty", json!("true"))])
+                    .await?;
+                self.complete_step(
+                    &train,
+                    collect,
+                    &[("boarded", Some(format!("nothing boarded — {reason}")))],
+                )
+                .await?;
+                return Ok(());
+            }
+            host_readiness::Readiness::Unverifiable { reason } => {
+                log(format!(
+                    "ci host unverifiable — {reason} — boarding anyway (fail-open until \
+                     the host observation series exists)"
+                ));
+            }
+            host_readiness::Readiness::Proceed => {}
+        }
+
+        self.ensure_clone()?;
+        let (cands, mut left_behind) = self.candidates().await?;
         let Some(train) = self.open_train_job(&train_branch, &window).await? else {
             // dry run
             log(format!("DRY: candidates: {}", py_pairs(&cands)));
@@ -5842,6 +6049,37 @@ mod tests {
         assert!(!summary.contains("?:"), "no anonymous checks: {summary}");
     }
 
+    /// A blocked deploy tree is quiet inside the window and LOUD past
+    /// it — the six-hour silent retry of 2026-09-02, pinned. The first
+    /// blocked pass (no stamp yet) is never overdue: elapsed time is
+    /// the signal and it has not started elapsing.
+    #[test]
+    fn a_blocked_deploy_tree_goes_loud_past_the_window() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-02T15:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let since = |mins: i64| Some((now - chrono::Duration::minutes(mins)).fixed_offset());
+        assert_eq!(
+            deploy_block_verdict(None, now, 30),
+            DeployBlockVerdict::Waiting,
+            "first blocked pass has not started elapsing"
+        );
+        assert_eq!(
+            deploy_block_verdict(since(29), now, 30),
+            DeployBlockVerdict::Waiting
+        );
+        assert_eq!(
+            deploy_block_verdict(since(30), now, 30),
+            DeployBlockVerdict::Overdue,
+            "the boundary is inclusive, like the convergence alarm"
+        );
+        // The incident's own duration, six hours, must be loud.
+        assert_eq!(
+            deploy_block_verdict(since(360), now, 30),
+            DeployBlockVerdict::Overdue
+        );
+    }
+
     /// The rolled-past case (2026-09-02, train #176): the cluster
     /// self-reports a LATER commit that contains this train's merge.
     /// Equality misses; ancestry converges. And git's inability to
@@ -6527,6 +6765,7 @@ mod tests {
                 ci_hours: 2,
                 converge_alarm_mins: 30,
                 auto_cancel: false,
+                ci_host: None,
                 dry: false,
             },
             http: reqwest::Client::new(),
