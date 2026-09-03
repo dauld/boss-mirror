@@ -11,16 +11,25 @@ Type=oneshot
 # none of our existing tokens carry that scope (verified 2026-08-27: the
 # conductor's token gets 403 for want of read:user).
 #
+# --registry-url adds the credentials-registry direction (packet
+# 7ee101aa second leg): live forge tokens vs registry rows of kind
+# forgejo-access-token, both ways. That read also needs no credential -
+# the jobs API's internal address trusts header-less callers for this
+# read-only, values-free surface - and when the registry is unreachable
+# the run reports exactly what it could not check and exits 1 rather
+# than passing as complete.
+#
 # Exit code 2 -> drift or an unattributed credential -> systemctl
 # is-failed -> the OnFailure hook fires, and the maintenance Job stays
 # open and loud. Exit 0 only when the forge matches the declaration AND
-# every declared consumer is identified.
+# the credentials registry AND every declared consumer is identified.
 Environment=RUST_LOG=info
 ExecStartPre=/opt/boss/infra/boss-maintenance-wrap.sh maintenance-forge-token-audit "Forge token audit"
 ExecStart=/usr/bin/python3 /opt/boss/infra/maintenance/forge-token-audit.py \
     --declaration /opt/boss/infra/platform/forge-tokens.toml \
     --db /opt/forgejo/data/gitea/gitea.db \
-    --user david
+    --user david \
+    --registry-url http://10.20.0.34:7900
 ExecStartPost=/opt/boss/infra/boss-step.sh maintenance-forge-token-audit run result=ok
 # The database is 0644 and the check opens it read-only (SQLite URI
 # mode=ro), so this does not need root and does not get it.

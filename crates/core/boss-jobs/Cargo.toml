@@ -76,6 +76,10 @@ name = "cadence_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "credentials_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "delivery_policy_pg"
 required-features = ["postgres"]
 

@@ -1,5 +1,13 @@
-//! `boss credential pull <target>` — the pull half of the credential
-//! broker (packet 7ee101aa, first leg).
+//! `boss credential` — the credential verbs (packet 7ee101aa).
+//!
+//! `pull <target>` distributes a broker-rotated value into this
+//! host's consumer paths; `list` renders the credentials REGISTRY —
+//! the knowledge half (second leg): id, kind, scopes, storage,
+//! rotation. The registry carries locations, never values, so `list`
+//! cannot print a secret no matter what the API answers.
+//!
+//! # `boss credential pull <target>` — the pull half of the
+//! credential broker (first leg).
 //!
 //! The broker (dispatcher handler `credential.rotate.forgejo`) mints
 //! a replacement token and installs it into a named k8s Secret. Most
@@ -198,6 +206,102 @@ pub async fn pull(target: &str) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// `boss credential list` — render the registry
+// ---------------------------------------------------------------------------
+
+/// The jobs API base. **Unset is a refusal, not a default** — the
+/// registry must be read from the system of record, and a local
+/// fallback answering `[]` would read as "no credentials exist"
+/// (boss-two-jobs-apis: a wrong target answers instead of erroring).
+fn jobs_base() -> Result<String> {
+    let raw = std::env::var("BOSS_JOBS_URL").unwrap_or_default();
+    let base = raw.trim().trim_end_matches('/').to_string();
+    if base.is_empty() {
+        bail!(
+            "BOSS_JOBS_URL is unset, so there is no system of record to read the \
+             credentials registry from. Refusing rather than defaulting: an empty \
+             answer from the wrong instance reads as \"no credentials exist\". \
+             Set it explicitly, e.g. BOSS_JOBS_URL=http://10.20.0.34:7900."
+        );
+    }
+    Ok(base)
+}
+
+/// One rendered credential: the facts an operator scans for, with the
+/// long storage location on its own indented line. Pure, so the
+/// render is testable without a registry.
+pub fn render_credentials(rows: &[boss_jobs::credentials::CredentialRow]) -> String {
+    if rows.is_empty() {
+        return "credentials registry is empty\n".to_string();
+    }
+    let scopes_of = |row: &boss_jobs::credentials::CredentialRow| -> String {
+        let scopes: Vec<String> = row
+            .scopes
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s.as_str().map(str::to_string))
+            .collect();
+        if scopes.is_empty() {
+            // An empty array is the seeded "scope unverified" gap —
+            // render it as the gap it is, never as "no scopes".
+            "(unverified)".to_string()
+        } else {
+            scopes.join(",")
+        }
+    };
+    let id_w = rows.iter().map(|r| r.id.len()).max().unwrap_or(0).max(2);
+    let kind_w = rows.iter().map(|r| r.kind.len()).max().unwrap_or(0).max(4);
+    let scope_w = rows
+        .iter()
+        .map(|r| scopes_of(r).len())
+        .max()
+        .unwrap_or(0)
+        .max(6);
+    let mut out = format!(
+        "{:id_w$}  {:kind_w$}  {:scope_w$}  ROTATED\n",
+        "ID", "KIND", "SCOPES"
+    );
+    for row in rows {
+        let rotated = row
+            .rotated_at
+            .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+            .unwrap_or_else(|| "never recorded".to_string());
+        out.push_str(&format!(
+            "{:id_w$}  {:kind_w$}  {:scope_w$}  {rotated}\n",
+            row.id,
+            row.kind,
+            scopes_of(row),
+        ));
+        out.push_str(&format!(
+            "{:id_w$}  storage: {}\n",
+            "", row.storage_location
+        ));
+    }
+    out
+}
+
+async fn list() -> Result<()> {
+    let base = jobs_base()?;
+    let url = format!("{base}/api/credentials");
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("x-boss-user", crate::train::boss_user())
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    if !resp.status().is_success() {
+        bail!("GET {url} returned {}", resp.status());
+    }
+    let rows: Vec<boss_jobs::credentials::CredentialRow> = resp
+        .json()
+        .await
+        .with_context(|| format!("decoding {url}"))?;
+    print!("{}", render_credentials(&rows));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -222,6 +326,10 @@ pub enum Action {
         /// Which credential (today: `forge`).
         target: String,
     },
+    /// Render the credentials registry — id, kind, scopes, storage
+    /// location, last rotation. Knowledge about credentials; the
+    /// registry holds no values, so this cannot print one.
+    List,
 }
 
 pub async fn dispatch(cmd: Cmd) -> Result<()> {
@@ -229,6 +337,9 @@ pub async fn dispatch(cmd: Cmd) -> Result<()> {
         Cmd::Credential {
             action: Action::Pull { target },
         } => pull(&target).await,
+        Cmd::Credential {
+            action: Action::List,
+        } => list().await,
     }
 }
 
@@ -279,6 +390,66 @@ mod tests {
             !is_inline_password_helper(&h),
             "the file-reading helper is not inline"
         );
+    }
+
+    // ----- `credential list` render -----
+
+    fn registry_row(
+        id: &str,
+        scopes: serde_json::Value,
+        rotated_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> boss_jobs::credentials::CredentialRow {
+        boss_jobs::credentials::CredentialRow {
+            id: id.into(),
+            kind: "forgejo-access-token".into(),
+            issuer: "forgejo (10.20.0.15)".into(),
+            principal: "user david".into(),
+            scopes,
+            storage_location: "k8s Secret boss-dev/boss-dev-forge-token key token".into(),
+            consumers: serde_json::json!([]),
+            rotation_policy: "on-demand".into(),
+            rotated_at,
+            notes: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_render_names_every_fact_the_verb_promises() {
+        let rotated = chrono::DateTime::parse_from_rfc3339("2026-09-02T15:00:00Z")
+            .unwrap()
+            .to_utc();
+        let out = render_credentials(&[registry_row(
+            "boss-dev-forge-token",
+            serde_json::json!(["write:repository"]),
+            Some(rotated),
+        )]);
+        assert!(out.contains("boss-dev-forge-token"), "{out}");
+        assert!(out.contains("forgejo-access-token"), "{out}");
+        assert!(out.contains("write:repository"), "{out}");
+        assert!(
+            out.contains("storage: k8s Secret boss-dev/boss-dev-forge-token key token"),
+            "{out}"
+        );
+        assert!(out.contains("2026-09-02 15:00 UTC"), "{out}");
+    }
+
+    #[test]
+    fn an_unverified_scope_renders_as_the_gap_it_is() {
+        let out = render_credentials(&[registry_row(
+            "boss-credential-broker-root",
+            serde_json::json!([]),
+            None,
+        )]);
+        assert!(
+            out.contains("(unverified)"),
+            "an empty scopes array must not read as \"no scopes\":\n{out}"
+        );
+        assert!(out.contains("never recorded"), "{out}");
+    }
+
+    #[test]
+    fn an_empty_registry_says_so_rather_than_printing_a_bare_header() {
+        assert_eq!(render_credentials(&[]), "credentials registry is empty\n");
     }
 
     #[test]

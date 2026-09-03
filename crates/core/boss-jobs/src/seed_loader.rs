@@ -370,6 +370,54 @@ terminal = { outcome = "brewed" }
     }
 
     #[test]
+    fn carries_field_filled_by_through_and_defaults_it_to_executor() {
+        // The filer-field TOML shape: `filled_by = "filer"` on a
+        // `[[workflow.step.fields]]` row marks a field admission
+        // validates against the FILER. Absent, the field keeps the
+        // executor's required-at-done contract — every seed authored
+        // before the key existed parses unchanged.
+        let text = r#"
+[[workflow]]
+kind = "with-filer-field"
+label = "With Filer Field"
+category = "platform"
+subject_kinds = ["custom"]
+
+[[workflow.step]]
+title = "start"
+kind = "task"
+ready_when = "true"
+title_template = "Open"
+
+[[workflow.step]]
+title = "review"
+kind = "task"
+ready_when = "steps.start.done"
+title_template = "Review it"
+terminal = { outcome = "done" }
+
+[[workflow.step.fields]]
+name = "markdown"
+field_type = "string"
+required = true
+filled_by = "filer"
+
+[[workflow.step.fields]]
+name = "decision"
+field_type = "string"
+required = true
+"#;
+        let specs = parse_workflows(text, "platform", "<test>").unwrap();
+        let fields = &specs[0].steps[1].fields;
+        assert_eq!(fields[0].filled_by, boss_core::job::FilledBy::Filer);
+        assert_eq!(
+            fields[1].filled_by,
+            boss_core::job::FilledBy::Executor,
+            "an unmarked field stays executor-filled — required-at-done, unchanged"
+        );
+    }
+
+    #[test]
     fn carries_step_duration_hours_through() {
         // A step may author its own duration (`duration_hours`) —
         // preferred by executors over the StepType kind's

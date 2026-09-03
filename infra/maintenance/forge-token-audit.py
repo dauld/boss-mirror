@@ -1,28 +1,49 @@
 #!/usr/bin/env python3
 """Report drift between the declared forge-token inventory and the forge.
 
-Reads `infra/platform/forge-tokens.toml` and the Forgejo SQLite database, and
-prints what disagrees. NEVER deletes a token and never reads one: the hash and
-salt columns are excluded by name, and the only credential-shaped value printed
-is `token_last_eight`, which is what Forgejo's own UI shows.
+Reads `infra/platform/forge-tokens.toml`, the Forgejo SQLite database, and —
+when configured — the credentials registry (`GET /api/credentials` on the jobs
+API), and prints what disagrees. NEVER deletes a token and never reads one:
+the hash and salt columns are excluded by name, and the only credential-shaped
+value printed is `token_last_eight`, which is what Forgejo's own UI shows. The
+registry side is values-free by construction — its rows carry storage
+locations, never contents.
 
 Exit codes follow the maintenance-check convention (see
 infra/boss-audit-integrity-check.service): 0 clean, 2 drift found, 1 could not
-run. Exit 2 makes the unit fail, which is what fires the alert and leaves the
-maintenance Job open and loud.
+run (including: a configured registry that could not be read — the run is
+honest about being partial). Exit 2 makes the unit fail, which is what fires
+the alert and leaves the maintenance Job open and loud.
 
 WHY DRIFT AND NOT HEURISTICS. "Warn on tokens unused for 90 days" answers a
 question nobody asked. The question that actually blocked a revocation on
 2026-08-27 was "which of these may I delete", and no measurement of age can
 answer it — only a statement of what SHOULD exist can. So the declaration is
 the authority and this reports the difference, in both directions.
+
+TWO DECLARATIONS, ONE COMPARISON EACH (CLAUDE.md 9a: this run is the equality
+test that keeps them from silently disagreeing). forge-tokens.toml is the
+forge-host inventory — per-token, hand-maintained, including the UNKNOWNs it
+exists to name. The credentials registry is the platform's knowledge base —
+per-credential, where a rotation-minted instance carries a packet-derived name
+(`{id}-{first 8 of packet id}`), so registry matching is by id-prefix rather
+than exact name. Both are compared against the live forge; a live token in
+neither is doubly loud.
+
+CAPABILITY, HONESTLY BOUNDED. The live-token side is readable credential-free
+only on the forge host (the SQLite database). Reading it remotely would need
+an admin-scoped forge token, which lives dispatcher-side as
+BOSS_BROKER_FORGEJO_TOKEN and deliberately nowhere else — so run elsewhere,
+this script says exactly what it cannot check rather than guessing.
 """
 
 import argparse
 import datetime
+import json
 import os
 import sqlite3
 import sys
+import urllib.request
 
 try:
     import tomllib  # 3.11+
@@ -169,6 +190,97 @@ def audit(declared, live, stale_days, now):
     return findings, unknown
 
 
+def load_registry(registry_json, registry_url):
+    """Return (rows, limit_message). rows is None when the registry was not
+    read; limit_message says why when a configured source failed. Neither
+    source needs a credential: the fixture is a file, and the jobs API's
+    internal address trusts header-less callers for this read-only surface.
+    """
+    if registry_json:
+        try:
+            with open(registry_json) as fh:
+                return json.load(fh), None
+        except (OSError, ValueError) as e:
+            return None, "cannot read registry fixture %s: %s" % (registry_json, e)
+    if registry_url:
+        url = registry_url.rstrip("/") + "/api/credentials"
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                return json.loads(resp.read().decode("utf-8")), None
+        except (OSError, ValueError) as e:
+            # URLError (and its HTTPError subclass) are OSErrors; a
+            # non-JSON body is a ValueError. Either way the direction
+            # did not run, and saying so beats a silent skip.
+            return None, "credentials registry at %s unreachable: %s" % (url, e)
+    return None, None
+
+
+def audit_registry(registry, live, user):
+    """The registry direction, both ways. Returns (findings, skipped_rows).
+
+    A live forge token belongs to a registry row when its name IS the row id
+    or starts with `{id}-` — rotation-minted instances carry packet-derived
+    names (`boss-dev-forge-token-7ee101aa`), and the row id is the durable
+    identity they derive from. Rows whose principal does not mention the
+    audited user are skipped (their tokens live under another account and
+    this run cannot see them); the count is reported so the skip is visible.
+    """
+    findings = []
+
+    def owns(row_id, name):
+        return name == row_id or name.startswith(row_id + "-")
+
+    forge_rows = [r for r in registry if r.get("kind") == "forgejo-access-token"]
+    mine = [r for r in forge_rows if user in (r.get("principal") or "")]
+    skipped = len(forge_rows) - len(mine)
+
+    matched_ids = set()
+    for t in live:
+        name = t["name"]
+        owners = [r for r in mine if owns(r["id"], name)]
+        if not owners:
+            findings.append((
+                "REG-UNDECLARED",
+                "token %r (%s, ends %s) exists on the forge and matches no "
+                "credentials-registry row. Scope questions about it are "
+                "experiments, not lookups — register it (GET /api/credentials "
+                "is the reader) or delete it."
+                % (name, t.get("scope") or "no scope", t.get("token_last_eight")),
+            ))
+            continue
+        # Longest id wins: `boss-dev-forge-token-x` must credit the row
+        # `boss-dev-forge-token`, not a hypothetical shorter prefix row.
+        row = max(owners, key=lambda r: len(r["id"]))
+        matched_ids.add(row["id"])
+        declared_scopes = row.get("scopes") or []
+        live_scopes = {s.strip() for s in (t.get("scope") or "").split(",") if s.strip()}
+        if not declared_scopes:
+            findings.append((
+                "REG-SCOPE-UNVERIFIED",
+                "registry row %r declares no scopes; the forge says its token %r "
+                "carries %r — record that in the row, so the next scope question "
+                "is a lookup." % (row["id"], name, t.get("scope") or ""),
+            ))
+        elif set(declared_scopes) != live_scopes:
+            findings.append((
+                "REG-SCOPE-DRIFT",
+                "registry row %r declares scopes %s but forge token %r carries %r"
+                % (row["id"], ",".join(sorted(declared_scopes)), name,
+                   t.get("scope") or ""),
+            ))
+
+    for r in mine:
+        if r["id"] not in matched_ids:
+            findings.append((
+                "REG-MISSING",
+                "registry row %r (storage: %s) matches no live forge token for "
+                "user %r — either the token was revoked without updating the "
+                "registry, or the row does not record its forge-side token name "
+                "yet." % (r["id"], r.get("storage_location"), user),
+            ))
+    return findings, skipped
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--declaration", default="/opt/boss/infra/platform/forge-tokens.toml")
@@ -177,6 +289,12 @@ def main(argv=None):
     p.add_argument("--stale-days", type=int, default=30)
     p.add_argument("--now", type=int, default=None,
                    help="unix seconds; for tests, so the run is deterministic")
+    p.add_argument("--registry-url", default=None,
+                   help="jobs API base (e.g. http://10.20.0.34:7900); enables the "
+                        "forge-vs-credentials-registry direction")
+    p.add_argument("--registry-json", default=None,
+                   help="a file holding the GET /api/credentials response; for "
+                        "tests, and for a host that cannot reach the jobs API")
     args = p.parse_args(argv)
 
     now = args.now if args.now is not None else int(
@@ -190,7 +308,11 @@ def main(argv=None):
     try:
         live = load_live(args.db, args.user)
     except FileNotFoundError as e:
-        print("forge-token-audit: no forge database at %s" % e)
+        print("forge-token-audit: no forge database at %s — the live-token side is "
+              "readable credential-free only on the forge host. Reading it remotely "
+              "needs an admin-scoped forge token, which lives dispatcher-side as "
+              "BOSS_BROKER_FORGEJO_TOKEN and deliberately not here; nothing was "
+              "checked." % e)
         return 1
     except LookupError as e:
         print("forge-token-audit: no user %r in the forge database" % str(e))
@@ -207,6 +329,27 @@ def main(argv=None):
 
     findings, unknown = audit(declared, live, args.stale_days, now)
 
+    registry, registry_limit = load_registry(args.registry_json, args.registry_url)
+    limited = False
+    if registry is not None:
+        reg_findings, reg_skipped = audit_registry(registry, live, args.user)
+        forgejo_rows = sum(1 for r in registry if r.get("kind") == "forgejo-access-token")
+        print("forge-token-audit: credentials registry holds %d row(s), %d of kind "
+              "forgejo-access-token" % (len(registry), forgejo_rows))
+        if reg_skipped:
+            print("  %-12s %d registry row(s) belong to other principals and were "
+                  "not checked against user %r's tokens"
+                  % ("REG-SKIPPED", reg_skipped, args.user))
+        findings += reg_findings
+    elif registry_limit:
+        # A configured registry that could not be read: the run is
+        # partial and must say so rather than passing as complete.
+        print("  %-12s forge-vs-registry NOT checked: %s" % ("LIMIT", registry_limit))
+        limited = True
+    else:
+        print("forge-token-audit: no --registry-url/--registry-json; "
+              "forge-vs-credentials-registry direction not checked")
+
     for sev, text in sorted(findings):
         print("  %-12s %s" % (sev, text))
 
@@ -221,11 +364,15 @@ def main(argv=None):
               "credential; the fewer that exist, the smaller a disclosure is."
               % ("BREADTH", len(write_repo), ", ".join(sorted(t["name"] for t in write_repo))))
 
-    if not findings and not unknown:
-        print("forge-token-audit: clean — the forge matches the declaration")
-        return 0
-    print("forge-token-audit: %d finding(s), %d unattributed" % (len(findings), unknown))
-    return 2
+    if findings or unknown:
+        print("forge-token-audit: %d finding(s), %d unattributed" % (len(findings), unknown))
+        return 2
+    if limited:
+        print("forge-token-audit: no drift found, but the run was PARTIAL (see LIMIT above)")
+        return 1
+    print("forge-token-audit: clean — the forge matches the declaration%s"
+          % (" and the credentials registry" if registry is not None else ""))
+    return 0
 
 
 if __name__ == "__main__":

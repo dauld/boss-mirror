@@ -821,6 +821,80 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
 
     let job_id = job.id;
 
+    // Materialize the Workflow's steps BEFORE anything persists. Job
+    // kinds with no steps (`ad-hoc`, where the user defines work as
+    // they go) materialize into zero steps.
+    //
+    // The brewery engine sets ?materialize_steps=false because it
+    // emits its own deterministic-UUID step creates via
+    // POST /api/jobs/{id}/steps; without the opt-out, every Job
+    // would carry 2× the spec's step count.
+    //
+    // Materialization is pure, so running it ahead of the job insert
+    // costs nothing — and it is what lets the filer-field gate below
+    // refuse a packet while NOTHING has been written yet: a refused
+    // admission leaves no half-created Job behind (conservation).
+    let materialized_steps: Option<Vec<Step>> = if q.materialize_steps {
+        kind_spec.as_ref().map(|spec| {
+            // Live-API path stamps `{day}` tokens against the
+            // clock-api's current day so payroll / period-end
+            // metadata derives from the system clock (sim or wall
+            // depending on the deploy's clock mode), matching what
+            // the sim engine does with its own day cursor.
+            crate::registry::materialize_steps_at(
+                spec,
+                &job.subject,
+                job_id,
+                &job.metadata,
+                boss_core::job::StepId::new,
+                Some(now.date_naive()),
+                // Resolve trigger provenance at materialization: the firing
+                // trigger (named by `metadata.trigger_name`) is born
+                // `Completed`, its alternatives `Skipped`. Every production
+                // Job — dispatcher-spawned, sim, operator — flows through
+                // here, so this is the single point that makes triggers
+                // honest.
+                Some(state.step_registry.as_ref()),
+            )
+        })
+    } else {
+        None
+    };
+
+    // Filer fields validate at ADMISSION — the flip side of
+    // required-at-done. A field the Workflow declares
+    // `filled_by = "filer"` (registry data, §9 — never a kind match
+    // here) is one the work is not doable without; deferring its
+    // absence to completion detonates the refusal on the executor
+    // mid-work, the party least able to fix it (packet 27de796e: a
+    // reviewer hit that 400 twice on one hand-filed design doc). The
+    // fields stay required-at-done as well; admission just catches
+    // them first, against the party who can supply them.
+    if let Some(ref steps) = materialized_steps {
+        let missing = crate::registry::missing_filer_fields(steps);
+        if !missing.is_empty() {
+            let problems: Vec<String> = missing
+                .iter()
+                .map(|(step, field)| {
+                    format!(
+                        "filer field '{field}' missing on step '{step}' — \
+                         supplied at filing, not by the executor"
+                    )
+                })
+                .collect();
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "cannot admit this `{}` job: {} problem(s): {}",
+                    job.kind,
+                    problems.len(),
+                    problems.join("; ")
+                ),
+            )
+                .into_response();
+        }
+    }
+
     // OUTBOX (phase 2): JOB_CREATED records on the transactional
     // outbox INSIDE the job-insert transaction — the log and the
     // projection commit or fail together, which subsumes the old
@@ -855,37 +929,9 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
         return persist_error_response(e);
     }
 
-    // Materialize the Workflow's steps into actual `steps` rows. Job
-    // kinds with no steps (`ad-hoc`, where the user defines work as
-    // they go) materialize into zero steps.
-    //
-    // The brewery engine sets ?materialize_steps=false because it
-    // emits its own deterministic-UUID step creates via
-    // POST /api/jobs/{id}/steps; without the opt-out, every Job
-    // would carry 2× the spec's step count.
-    if q.materialize_steps
-        && let Some(spec) = kind_spec
-    {
-        // Live-API path stamps `{day}` tokens against the
-        // clock-api's current day so payroll / period-end
-        // metadata derives from the system clock (sim or wall
-        // depending on the deploy's clock mode), matching what
-        // the sim engine does with its own day cursor.
-        let steps = crate::registry::materialize_steps_at(
-            &spec,
-            &job.subject,
-            job_id,
-            &job.metadata,
-            boss_core::job::StepId::new,
-            Some(now.date_naive()),
-            // Resolve trigger provenance at materialization: the firing
-            // trigger (named by `metadata.trigger_name`) is born
-            // `Completed`, its alternatives `Skipped`. Every production
-            // Job — dispatcher-spawned, sim, operator — flows through
-            // here, so this is the single point that makes triggers
-            // honest.
-            Some(state.step_registry.as_ref()),
-        );
+    // Persist the steps materialized above (pre-insert, so the
+    // filer-field gate could refuse before the Job existed).
+    if let Some(steps) = materialized_steps {
         // Materialization is ATOMIC from an observer's view. A consumer
         // that reacts to a `step.ready` event — the dispatcher's marker
         // auto-complete, a delegate-subjob fork — must see the COMPLETE

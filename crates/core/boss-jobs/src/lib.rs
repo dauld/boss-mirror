@@ -13,6 +13,7 @@ pub mod bootstrap;
 pub mod cadence;
 pub mod calendar_hook;
 pub mod car;
+pub mod credentials;
 pub mod delivery;
 pub mod escalation;
 pub mod events;

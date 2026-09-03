@@ -323,6 +323,7 @@ fn workflow_design_spec() -> WorkflowSpec {
                 name: "sign_off_context".into(),
                 field_type: "string".into(),
                 required: true,
+                filled_by: boss_core::job::FilledBy::Executor,
             }],
             ..Default::default()
         },
@@ -356,6 +357,7 @@ fn workflow_design_spec() -> WorkflowSpec {
                 name: "decision".into(),
                 field_type: "pending|approved|rejected|changes-requested".into(),
                 required: true,
+                filled_by: boss_core::job::FilledBy::Executor,
             }],
             ..Default::default()
         },
@@ -464,6 +466,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     name: "summary".into(),
                     field_type: "string".into(),
                     required: true,
+                    filled_by: boss_core::job::FilledBy::Executor,
                 },
                 // Required, deliberately. See the doc comment: the
                 // sentence that keeps a change small is the one about
@@ -474,6 +477,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     name: "excludes".into(),
                     field_type: "string".into(),
                     required: true,
+                    filled_by: boss_core::job::FilledBy::Executor,
                 },
             ],
             ..Default::default()
@@ -493,6 +497,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     name: "test".into(),
                     field_type: "string".into(),
                     required: true,
+                    filled_by: boss_core::job::FilledBy::Executor,
                 },
             ],
             ..Default::default()
@@ -508,6 +513,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     name: "gates".into(),
                     field_type: "string".into(),
                     required: true,
+                    filled_by: boss_core::job::FilledBy::Executor,
                 },
                 // How the change was seen working on a running system
                 // — or why there is nothing to observe. Required
@@ -519,6 +525,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     name: "verified".into(),
                     field_type: "string".into(),
                     required: true,
+                    filled_by: boss_core::job::FilledBy::Executor,
                 },
                 // The gate's OWN account of the run, not the author's.
                 //
@@ -553,6 +560,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     name: "receipt".into(),
                     field_type: "string".into(),
                     required: true,
+                    filled_by: boss_core::job::FilledBy::Executor,
                 },
                 // What the change LOOKS like, for a car that changes a
                 // rendered surface — a screenshot path, or what was
@@ -575,6 +583,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     name: "rendered".into(),
                     field_type: "string".into(),
                     required: false,
+                    filled_by: boss_core::job::FilledBy::Executor,
                 },
             ],
             ..Default::default()
@@ -589,6 +598,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                 name: "pr_url".into(),
                 field_type: "string".into(),
                 required: true,
+                filled_by: boss_core::job::FilledBy::Executor,
             }],
             ..Default::default()
         },
@@ -617,11 +627,13 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     name: "verified".into(),
                     field_type: "string".into(),
                     required: true,
+                    filled_by: boss_core::job::FilledBy::Executor,
                 },
                 boss_core::job::StepField {
                     name: "method".into(),
                     field_type: "browser|api|log".into(),
                     required: false,
+                    filled_by: boss_core::job::FilledBy::Executor,
                 },
             ],
             ..Default::default()
@@ -772,6 +784,7 @@ fn regenerate_deployment_spec() -> WorkflowSpec {
                 name: field.into(),
                 field_type: "string".into(),
                 required: true,
+                filled_by: boss_core::job::FilledBy::Executor,
             }],
             ..Default::default()
         }
@@ -802,11 +815,13 @@ fn regenerate_deployment_spec() -> WorkflowSpec {
                     name: "reason".into(),
                     field_type: "string".into(),
                     required: true,
+                    filled_by: boss_core::job::FilledBy::Executor,
                 },
                 boss_core::job::StepField {
                     name: "destroying".into(),
                     field_type: "string".into(),
                     required: true,
+                    filled_by: boss_core::job::FilledBy::Executor,
                 },
             ],
             ..Default::default()
@@ -1011,6 +1026,7 @@ fn backlog_item_spec() -> WorkflowSpec {
                     name: "disposition".into(),
                     field_type: DISPOSITIONS.into(),
                     required: true,
+                    filled_by: boss_core::job::FilledBy::Executor,
                 },
                 // What was checked, and what it showed. Required: see
                 // the doc comment. An item routed without a
@@ -1020,6 +1036,7 @@ fn backlog_item_spec() -> WorkflowSpec {
                     name: "evidence".into(),
                     field_type: "string".into(),
                     required: true,
+                    filled_by: boss_core::job::FilledBy::Executor,
                 },
             ],
             ..Default::default()
@@ -1219,6 +1236,7 @@ fn maintenance_spec(kind: &str, label: &str, description: &str) -> WorkflowSpec 
                 name: "result".into(),
                 field_type: "string".into(),
                 required: true,
+                filled_by: boss_core::job::FilledBy::Executor,
             }],
             ..Default::default()
         },
@@ -1723,6 +1741,67 @@ where
     // (or provably-N/A steps to Skipped).
     reevaluate(spec, &mut steps, subject, job_metadata);
     steps
+}
+
+/// The admission half of the completion contract: every `(step, field)`
+/// a filer still owes on a freshly materialized step graph.
+///
+/// A field declared `filled_by = "filer"` (registry data on the
+/// Workflow row) is one the work is not doable without — a design
+/// review's `markdown`, the thing under review. Required-at-done would
+/// detonate its absence on the EXECUTOR mid-work, the party least able
+/// to fix it; this check moves the refusal to admission, where the
+/// filer is still on the line. Completion validation is unchanged —
+/// the field stays required-at-done too, this just catches it first.
+///
+/// "Missing" is: no key, an explicit `null`, or a whole-string
+/// unexpanded `{metadata.<key>}` token. The third is the binding
+/// idiom's honest failure — a spec binds a filer field with
+/// `metadata_defaults = { markdown = "{metadata.markdown}" }`, and
+/// [`expand_metadata`] deliberately leaves an unmatched token literal
+/// as a visible bug report. Admission is where that report becomes a
+/// refusal instead of riding to the reviewer as prose. Prose that
+/// merely contains a token is a value; only an exact single-token
+/// string reads as unexpanded.
+///
+/// Steps are named by `spec_slug` (the stable machine-facing id the
+/// filer authored against), falling back to `title` for steps born
+/// outside a spec.
+pub fn missing_filer_fields(steps: &[Step]) -> Vec<(String, String)> {
+    steps
+        .iter()
+        .flat_map(|step| {
+            step.fields
+                .iter()
+                .filter(|f| f.required && f.filled_by == boss_core::job::FilledBy::Filer)
+                .filter(|f| filer_value_missing(step.metadata.get(&f.name)))
+                .map(|f| {
+                    (
+                        step.spec_slug.clone().unwrap_or_else(|| step.title.clone()),
+                        f.name.clone(),
+                    )
+                })
+        })
+        .collect()
+}
+
+fn filer_value_missing(value: Option<&serde_json::Value>) -> bool {
+    match value {
+        None | Some(serde_json::Value::Null) => true,
+        Some(v) => is_unexpanded_metadata_token(v),
+    }
+}
+
+/// True iff the value is a string that is EXACTLY one `{metadata.<key>}`
+/// token — the literal a `metadata_defaults` binding leaves behind when
+/// the Job's metadata had nothing to bind. Mirrors `whole_value`'s key
+/// extraction: one token, nothing else, no nested braces.
+fn is_unexpanded_metadata_token(v: &serde_json::Value) -> bool {
+    v.as_str().is_some_and(|s| {
+        s.strip_prefix("{metadata.")
+            .and_then(|rest| rest.strip_suffix('}'))
+            .is_some_and(|key| !key.is_empty() && !key.contains(['{', '}']))
+    })
 }
 
 /// Resolve `auto-on-materialize` (trigger) steps to their terminal
@@ -3760,6 +3839,97 @@ mod tests {
         assert_eq!(
             lines[0].get("description").and_then(|v| v.as_str()),
             Some("Pale Ale")
+        );
+    }
+
+    #[test]
+    fn missing_filer_fields_names_the_step_and_field() {
+        use boss_core::job::{FilledBy, StepField};
+        // A review-shaped step: two filer fields, one executor field.
+        // The filer supplied `title`, forgot `markdown`, and the
+        // executor's `resolutions` is legitimately absent at create.
+        let mut step = Step::new(JobId::new(), "review-design", "Answer the questions", 0);
+        step.spec_slug = Some("review".into());
+        step.fields = vec![
+            StepField {
+                name: "title".into(),
+                field_type: "string".into(),
+                required: true,
+                filled_by: FilledBy::Filer,
+            },
+            StepField {
+                name: "markdown".into(),
+                field_type: "string".into(),
+                required: true,
+                filled_by: FilledBy::Filer,
+            },
+            StepField {
+                name: "resolutions".into(),
+                field_type: "array".into(),
+                required: true,
+                filled_by: FilledBy::Executor,
+            },
+        ];
+        step.metadata = serde_json::json!({ "title": "Packet loss" });
+
+        let missing = missing_filer_fields(std::slice::from_ref(&step));
+        assert_eq!(
+            missing,
+            vec![("review".to_string(), "markdown".to_string())],
+            "only the absent FILER field is named; executor fields stay create-legal"
+        );
+
+        // Supplied → clean.
+        step.metadata = serde_json::json!({ "title": "Packet loss", "markdown": "# doc" });
+        assert!(missing_filer_fields(std::slice::from_ref(&step)).is_empty());
+    }
+
+    #[test]
+    fn missing_filer_fields_reads_null_and_unexpanded_tokens_as_missing() {
+        use boss_core::job::{FilledBy, StepField};
+        let mut step = Step::new(JobId::new(), "review-design", "Answer the questions", 0);
+        step.spec_slug = Some("review".into());
+        step.fields = vec![StepField {
+            name: "markdown".into(),
+            field_type: "string".into(),
+            required: true,
+            filled_by: FilledBy::Filer,
+        }];
+
+        // An explicit null is not a value.
+        step.metadata = serde_json::json!({ "markdown": null });
+        assert_eq!(missing_filer_fields(std::slice::from_ref(&step)).len(), 1);
+
+        // The binding idiom is `metadata_defaults = { markdown =
+        // "{metadata.markdown}" }`, and expand_metadata leaves an
+        // unmatched token LITERAL (its "visible bug report" contract).
+        // At admission that literal is the report: the filer never
+        // supplied the value, so it reads as missing rather than
+        // riding to the reviewer as prose.
+        step.metadata = serde_json::json!({ "markdown": "{metadata.markdown}" });
+        assert_eq!(missing_filer_fields(std::slice::from_ref(&step)).len(), 1);
+
+        // Real prose that merely CONTAINS a token is a value, not a
+        // leftover binding — only a whole-string single token reads
+        // as unexpanded.
+        step.metadata =
+            serde_json::json!({ "markdown": "Tokens like {metadata.x} expand at open." });
+        assert!(missing_filer_fields(std::slice::from_ref(&step)).is_empty());
+    }
+
+    #[test]
+    fn missing_filer_fields_ignores_optional_filer_fields() {
+        use boss_core::job::{FilledBy, StepField};
+        let mut step = Step::new(JobId::new(), "review-design", "Answer the questions", 0);
+        step.fields = vec![StepField {
+            name: "doc_path".into(),
+            field_type: "string".into(),
+            required: false,
+            filled_by: FilledBy::Filer,
+        }];
+        assert!(
+            missing_filer_fields(std::slice::from_ref(&step)).is_empty(),
+            "an optional filer field is advisory; only required ones gate admission"
         );
     }
 

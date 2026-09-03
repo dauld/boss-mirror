@@ -184,6 +184,11 @@ async fn main() -> Result<()> {
         // (docs/design/delivery-as-protocol.md).
         let delivery: Arc<dyn boss_jobs::delivery::DeliveryPolicyRepository> =
             Arc::new(boss_jobs::delivery::PgDeliveryPolicy::new(pool.clone()));
+        // The credentials registry: knowledge about credentials —
+        // scopes, storage locations, consumers — never values
+        // (packet 7ee101aa, second leg).
+        let credentials: Arc<dyn boss_jobs::credentials::CredentialsRegistry> =
+            Arc::new(boss_jobs::credentials::PgCredentials::new(pool.clone()));
         // Q7: human job-owner resolution over the people roster.
         let people_url =
             std::env::var("BOSS_PEOPLE_URL").unwrap_or_else(|_| boss_ports::url("people"));
@@ -208,6 +213,7 @@ async fn main() -> Result<()> {
             Some(scheduling),
             Some(cadence),
             Some(delivery),
+            Some(credentials),
             calendar,
             subject_kinds,
             subject_existence,
@@ -244,6 +250,7 @@ async fn main() -> Result<()> {
         None,
         None,
         None,
+        None,
         calendar,
         subject_kinds,
         subject_existence,
@@ -269,6 +276,7 @@ async fn run_server<R: JobsRepository + 'static>(
     scheduling: Option<Arc<dyn boss_jobs::scheduling::SchedulingRepository>>,
     cadence: Option<Arc<dyn boss_jobs::cadence::CadenceRepository>>,
     delivery: Option<Arc<dyn boss_jobs::delivery::DeliveryPolicyRepository>>,
+    credentials: Option<Arc<dyn boss_jobs::credentials::CredentialsRegistry>>,
     calendar: Option<Arc<dyn boss_calendar_client::CalendarClient>>,
     subject_kinds: Option<Arc<dyn boss_subject_kinds_client::SubjectKindsClient>>,
     subject_existence: Option<Arc<dyn boss_jobs::subject_existence::SubjectExistenceCheck>>,
@@ -351,6 +359,12 @@ async fn run_server<R: JobsRepository + 'static>(
         info!("delivery policy routes mounted at /api/delivery/policy/*");
         app = app.merge(boss_jobs::delivery::http::router(
             boss_jobs::delivery::http::DeliveryPolicyApiState { repo },
+        ));
+    }
+    if let Some(registry) = credentials {
+        info!("credentials registry routes mounted at /api/credentials (locations, never values)");
+        app = app.merge(boss_jobs::credentials::http::router(
+            boss_jobs::credentials::http::CredentialsApiState { registry },
         ));
     }
     // Sim-origin middleware: extract x-sim-origin header and set the

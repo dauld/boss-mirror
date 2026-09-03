@@ -517,6 +517,7 @@ mod tests {
             name: name.to_string(),
             field_type: "string".to_string(),
             required,
+            filled_by: boss_core::job::FilledBy::Executor,
         }
     }
 

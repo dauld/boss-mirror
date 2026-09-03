@@ -1078,6 +1078,7 @@ mod tests {
                         name: "route".into(),
                         field_type: "ship|scrap|investigate".into(),
                         required: true,
+                        filled_by: boss_core::job::FilledBy::Executor,
                     }],
                     ..Default::default()
                 },
@@ -1089,6 +1090,7 @@ mod tests {
                         name: "route".into(),
                         field_type: "ship|scrap".into(),
                         required: true,
+                        filled_by: boss_core::job::FilledBy::Executor,
                     }],
                     // Stamped at materialization, so the step carries the
                     // key from the moment it exists — which is why the
@@ -1154,6 +1156,7 @@ mod tests {
                         name: "route".into(),
                         field_type: "ship|scrap".into(),
                         required: true,
+                        filled_by: boss_core::job::FilledBy::Executor,
                     }],
                     ..Default::default()
                 },
@@ -1165,6 +1168,7 @@ mod tests {
                         name: "flag".into(),
                         field_type: "string".into(),
                         required: false,
+                        filled_by: boss_core::job::FilledBy::Executor,
                     }],
                     ..Default::default()
                 },
@@ -1221,6 +1225,7 @@ mod tests {
                         name: "outcome".into(),
                         field_type: "package|skip".into(),
                         required: false,
+                        filled_by: boss_core::job::FilledBy::Executor,
                     }],
                     ..Default::default()
                 },
@@ -1271,6 +1276,7 @@ mod tests {
                         name: "outcome".into(),
                         field_type: "package|skip".into(),
                         required: false,
+                        filled_by: boss_core::job::FilledBy::Executor,
                     }],
                     ..Default::default()
                 },
@@ -1383,6 +1389,7 @@ mod tests {
             name: name.into(),
             field_type: "string".into(),
             required: true,
+            filled_by: boss_core::job::FilledBy::Executor,
         }
     }
 
@@ -1431,6 +1438,7 @@ mod tests {
             name: "sign_off_context".into(),
             field_type: "string".into(),
             required: false,
+            filled_by: boss_core::job::FilledBy::Executor,
         });
         assert!(
             validate_workflow(&spec, &reg)

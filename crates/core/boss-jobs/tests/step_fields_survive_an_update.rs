@@ -43,6 +43,7 @@ fn field(name: &str, required: bool) -> StepField {
         name: name.into(),
         field_type: "string".into(),
         required,
+        filled_by: boss_core::job::FilledBy::Executor,
     }
 }
 

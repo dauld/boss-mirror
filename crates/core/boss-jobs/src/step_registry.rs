@@ -802,11 +802,13 @@ mod tests {
                 name: "counter_offer_cents".into(),
                 field_type: "integer".into(),
                 required: true,
+                filled_by: boss_core::job::FilledBy::Executor,
             },
             StepField {
                 name: "notes".into(),
                 field_type: "string".into(),
                 required: false,
+                filled_by: boss_core::job::FilledBy::Executor,
             },
         ];
         // Missing required authored field → error naming it.

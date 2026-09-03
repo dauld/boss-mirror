@@ -88,8 +88,38 @@ fn declaration(dir: &Path, tokens: &[(&str, &str, &str)]) -> PathBuf {
     path
 }
 
+/// Write a credentials-registry fixture — the `GET /api/credentials`
+/// response shape — holding forgejo rows, each `(id, scopes)`.
+fn registry(dir: &Path, rows: &[(&str, &[&str])]) -> PathBuf {
+    let path = dir.join("credentials.json");
+    let rows: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|(id, scopes)| {
+            serde_json::json!({
+                "id": id,
+                "kind": "forgejo-access-token",
+                "issuer": "forgejo (10.20.0.15)",
+                "principal": "user david",
+                "scopes": scopes,
+                "storage_location": format!("k8s Secret somewhere/{id}"),
+                "consumers": [],
+                "rotation_policy": "on-demand",
+                "rotated_at": null,
+                "notes": "",
+            })
+        })
+        .collect();
+    std::fs::write(&path, serde_json::to_string(&rows).unwrap()).expect("write registry");
+    path
+}
+
 /// Run the audit. Returns (exit code, stdout).
 fn run(db: &Path, decl: &Path, now: i64) -> (i32, String) {
+    run_args(db, decl, now, &[])
+}
+
+/// Run the audit with extra flags (the registry direction).
+fn run_args(db: &Path, decl: &Path, now: i64, extra: &[&std::ffi::OsStr]) -> (i32, String) {
     let out = Command::new("python3")
         .arg(script())
         .arg("--db")
@@ -98,6 +128,7 @@ fn run(db: &Path, decl: &Path, now: i64) -> (i32, String) {
         .arg(decl)
         .arg("--now")
         .arg(now.to_string())
+        .args(extra)
         .output()
         .expect("the audit script runs");
     (
@@ -189,6 +220,176 @@ fn an_unattributed_consumer_is_counted_even_when_nothing_else_drifts() {
         "an unattributable live credential is not a clean state:\n{out}"
     );
     assert!(out.contains("UNATTRIBUTED"), "{out}");
+}
+
+// ---------------------------------------------------------------------------
+// The credentials-registry direction (packet 7ee101aa, second leg):
+// live forge tokens vs registry rows of kind forgejo-access-token,
+// both ways. The registry fixture is the GET /api/credentials shape.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_forge_matching_the_registry_is_clean_and_prefix_matching_covers_rotation_names() {
+    // The rotation-minted instance carries a packet-derived name
+    // (`{id}-{packet8}`); the registry row holds the durable id. If
+    // matching were exact-name, every rotated token would false-alarm.
+    let dir = scratch("reg-clean");
+    let db = forge_db(
+        &dir,
+        &[(
+            "boss-dev-forge-token-7ee101aa",
+            "write:repository",
+            NOW - 3600,
+        )],
+    );
+    let decl = declaration(
+        &dir,
+        &[(
+            "boss-dev-forge-token-7ee101aa",
+            "the dev pod",
+            "write:repository",
+        )],
+    );
+    let reg = registry(&dir, &[("boss-dev-forge-token", &["write:repository"])]);
+
+    let (code, out) = run_args(&db, &decl, NOW, &["--registry-json".as_ref(), reg.as_ref()]);
+    assert_eq!(code, 0, "expected clean:\n{out}");
+    assert!(out.contains("credentials registry"), "{out}");
+    assert!(
+        !out.contains("REG-"),
+        "no registry finding expected:\n{out}"
+    );
+}
+
+#[test]
+fn a_live_token_absent_from_the_registry_names_itself() {
+    let dir = scratch("reg-undeclared");
+    let db = forge_db(
+        &dir,
+        &[
+            (
+                "boss-dev-forge-token-7ee101aa",
+                "write:repository",
+                NOW - 3600,
+            ),
+            ("rogue-token", "write:package", NOW - 3600),
+        ],
+    );
+    // The TOML declares both, so every finding here is the registry's.
+    let decl = declaration(
+        &dir,
+        &[
+            (
+                "boss-dev-forge-token-7ee101aa",
+                "the dev pod",
+                "write:repository",
+            ),
+            ("rogue-token", "somebody", "write:package"),
+        ],
+    );
+    let reg = registry(&dir, &[("boss-dev-forge-token", &["write:repository"])]);
+
+    let (code, out) = run_args(&db, &decl, NOW, &["--registry-json".as_ref(), reg.as_ref()]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("REG-UNDECLARED"), "{out}");
+    assert!(
+        out.contains("'rogue-token'"),
+        "the finding must NAME the token:\n{out}"
+    );
+    assert_eq!(
+        out.matches("REG-UNDECLARED").count(),
+        1,
+        "exactly one — the rotation-named instance belongs to its row:\n{out}"
+    );
+}
+
+#[test]
+fn a_registry_row_the_forge_does_not_know_is_reported() {
+    // The broker-root seed ships exactly this way — storage known,
+    // forge-side token name unrecorded — so the message must offer
+    // both readings: revoked-without-updating, or name-not-recorded.
+    let dir = scratch("reg-missing");
+    let db = forge_db(&dir, &[("boss-gcp", "write:repository", NOW - 3600)]);
+    let decl = declaration(&dir, &[("boss-gcp", "the conductor", "write:repository")]);
+    let reg = registry(
+        &dir,
+        &[
+            ("boss-gcp", &["write:repository"]),
+            ("boss-credential-broker-root", &[]),
+        ],
+    );
+
+    let (code, out) = run_args(&db, &decl, NOW, &["--registry-json".as_ref(), reg.as_ref()]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("REG-MISSING"), "{out}");
+    assert!(out.contains("boss-credential-broker-root"), "{out}");
+    assert!(
+        out.contains("does not record its forge-side token name"),
+        "the honest second reading must be offered:\n{out}"
+    );
+}
+
+#[test]
+fn registry_scope_drift_and_unverified_scopes_are_reported() {
+    let dir = scratch("reg-scope");
+    let db = forge_db(
+        &dir,
+        &[
+            ("drifted-token", "write:repository", NOW - 3600),
+            ("unverified-token", "read:user", NOW - 3600),
+        ],
+    );
+    let decl = declaration(
+        &dir,
+        &[
+            ("drifted-token", "somebody", "write:repository"),
+            ("unverified-token", "somebody", "read:user"),
+        ],
+    );
+    let reg = registry(
+        &dir,
+        &[
+            // The registry believes read-only; the forge says write.
+            ("drifted-token", &["read:repository"]),
+            // The seeded honest-gap shape: scopes empty, audit fills.
+            ("unverified-token", &[]),
+        ],
+    );
+
+    let (code, out) = run_args(&db, &decl, NOW, &["--registry-json".as_ref(), reg.as_ref()]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("REG-SCOPE-DRIFT"), "{out}");
+    assert!(
+        out.contains("REG-SCOPE-UNVERIFIED"),
+        "an empty scopes array is a gap to fill, not a pass:\n{out}"
+    );
+    assert!(
+        out.contains("'read:user'"),
+        "the fill-me finding must SAY what the forge says, so recording it \
+         is a copy rather than a re-derivation:\n{out}"
+    );
+}
+
+#[test]
+fn an_unreachable_registry_makes_the_run_honestly_partial() {
+    // Port 1 refuses fast on any host. An otherwise-clean run that
+    // could not check a configured direction must not exit 0.
+    let dir = scratch("reg-unreachable");
+    let db = forge_db(&dir, &[("boss-gcp", "write:repository", NOW - 3600)]);
+    let decl = declaration(&dir, &[("boss-gcp", "the conductor", "write:repository")]);
+
+    let (code, out) = run_args(
+        &db,
+        &decl,
+        NOW,
+        &["--registry-url".as_ref(), "http://127.0.0.1:1".as_ref()],
+    );
+    assert_eq!(code, 1, "partial is not clean:\n{out}");
+    assert!(out.contains("LIMIT"), "{out}");
+    assert!(
+        out.contains("NOT checked"),
+        "the run must say exactly what it could not do:\n{out}"
+    );
 }
 
 #[test]

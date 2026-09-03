@@ -314,12 +314,34 @@ ready_when = "true"
 title_template = "Draft written"
 metadata_defaults = { trigger_kind = "operator", trigger_name = "author-drafts-a-design-doc" }
 
+# `title` and `markdown` are FILER fields: the review is not doable
+# without the doc under review, so their absence is refused at
+# admission — where the filer is still on the line — rather than
+# detonating required-at-done on the reviewer mid-review (packet
+# 27de796e; it happened twice on one hand-filed packet, 2026-09-03).
+# The metadata_defaults bind them from the Job's own metadata, which
+# is where `boss design` (and any hand filing worth admitting) puts
+# them; an unbound `{metadata.…}` token stays literal and admission
+# reads that literal as missing.
 [[workflow.step]]
 title = "review"
 kind = "review-design"
 ready_when = "steps.drafted.done"
 title_template = "Answer the open questions"
 authority_role = "platform-admin"
+metadata_defaults = { title = "{metadata.title}", markdown = "{metadata.markdown}" }
+
+[[workflow.step.fields]]
+name = "title"
+field_type = "string"
+required = true
+filled_by = "filer"
+
+[[workflow.step.fields]]
+name = "markdown"
+field_type = "string"
+required = true
+filled_by = "filer"
 
 [[workflow.step]]
 title = "published"
