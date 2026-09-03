@@ -86,7 +86,13 @@ BASE="${BOSS_JOBS_URL}"
 ACTOR="${BOSS_STEP_ACTOR:-automation:boss-step}"
 BOSS_USER="{\"id\":\"$ACTOR\",\"role\":\"platform-admin\",\"access_tier\":\"operator\",\"territory_account_ids\":[],\"direct_report_ids\":[],\"department\":\"platform\"}"
 
-if ! jobs_json=$(curl -fsS -H "x-boss-user: $BOSS_USER" \
+# Transport-retry curl (25e518c0) — same resolution as
+# boss-maintenance-wrap.sh: next-to-self (repo checkout and image
+# both keep the pair together), PATH as the fallback.
+API_CURL="$(dirname "$0")/boss-api-curl.sh"
+[ -x "$API_CURL" ] || API_CURL=boss-api-curl.sh
+
+if ! jobs_json=$("$API_CURL" -fsS -H "x-boss-user: $BOSS_USER" \
         "$BASE/api/jobs?kind=$WORKFLOW&status=open&limit=50" 2>/dev/null); then
     echo "boss-step: jobs-api unreachable at $BASE — '$STEP_TITLE' not recorded" >&2
     exit 1
@@ -149,7 +155,7 @@ done
 payload=$(printf '%s' "$merged" | jq -c '{status: "completed", metadata: .}')
 step_id=$(printf '%s' "$step" | jq -r '.id')
 url="$BASE/api/jobs/$job_id/steps/$step_id"
-if ! put_err=$(curl -fsS -X PUT -H "content-type: application/json" \
+if ! put_err=$("$API_CURL" -fsS -X PUT -H "content-type: application/json" \
         -H "x-boss-user: $BOSS_USER" \
         ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
         -d "$payload" "$url" 2>&1 >/dev/null); then

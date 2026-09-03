@@ -23,6 +23,15 @@ pub enum JobsError {
         holder: Option<String>,
         status: String,
     },
+    /// A metadata merge targeted a terminal (completed/skipped) step.
+    /// `update_step_at` freezes those fields SILENTLY — its callers
+    /// re-send whole rows and must stay idempotent — but a merge's
+    /// entire purpose is changing metadata, so a freeze here would be
+    /// the 204-that-wrote-nothing defect (job 903e6b90) reborn. The
+    /// adapters refuse instead, atomically with the row check, and the
+    /// handler turns this into the 409 the caller can act on.
+    #[error("step {id} is {status} — a terminal step's metadata is frozen")]
+    TerminalStep { id: StepId, status: String },
 }
 
 /// Optional filters for listing jobs.
@@ -616,6 +625,30 @@ pub trait JobsRepository: Send + Sync {
         now: DateTime<Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError>;
+
+    /// Merge `patch`'s top-level keys into the Step's `metadata`,
+    /// atomically, touching no other field. Same contract as
+    /// [`JobsRepository::merge_job_metadata_at`]: a `null` value
+    /// REMOVES the key, any other value replaces that key wholesale,
+    /// and the returned Step is the post-merge row. Takes the
+    /// [`boss_core::publisher::EventStamp`] rather than pre-built
+    /// events for the same reason the job merge does: the
+    /// STEP_UPDATED payload is full row state, so it must be built
+    /// from the POST-merge row, which only the adapter's transaction
+    /// knows.
+    ///
+    /// A terminal (Completed/Skipped) step's metadata is frozen —
+    /// `update_step_at`'s invariant — and the merge refuses with
+    /// [`JobsError::TerminalStep`] rather than silently keeping the
+    /// row: the check rides the same statement as the write, so a
+    /// step completing between the caller's read and this write is
+    /// still refused, never half-honored.
+    async fn merge_step_metadata_at(
+        &self,
+        id: &StepId,
+        patch: &serde_json::Map<String, serde_json::Value>,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<Step, JobsError>;
 
     /// Claim a ready step for an actor — the Ready→Active
     /// compare-and-set (queue-visibility Q2). Succeeds only while

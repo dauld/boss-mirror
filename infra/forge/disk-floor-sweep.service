@@ -1,0 +1,32 @@
+# Keeps the forge host's root volume above BOSS_DISK_FLOOR_GB
+# (default 25) by reclaiming regenerable docker caches — see
+# disk-floor-sweep.sh for the exact order and the hard bounds. Above
+# the floor a run is one log line; an unmet floor after every bounded
+# remediation is a FAILED unit, deliberately.
+#
+# Install (forge host): in install.sh's UNITS list, so —
+#   ssh 10.20.0.15 'cd /home/david/boss && git pull && sudo infra/forge/install.sh'
+# or by hand, once:
+#   sudo cp /home/david/boss/infra/forge/disk-floor-sweep.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now disk-floor-sweep.timer
+[Unit]
+Description=BOSS forge: keep the root volume above the disk floor (regenerable caches only)
+
+[Service]
+Type=oneshot
+# Rootless docker, same as cluster-deploy-runner; the script defaults
+# DOCKER_HOST itself.
+User=david
+# A cold builder-cache prune can take minutes; nowhere near the
+# converge's build times, but not seconds either.
+TimeoutStartSec=30min
+# The wrap pair: the timer is the EXECUTOR, the Job is the VISIBILITY
+# (timers-leave-a-packet). A failed sweep — floor unmet after every
+# bounded remediation — completes nothing, so the packet stays open on
+# the fleet view until a later run succeeds or a human decides.
+# BOSS_JOBS_URL pinned INLINE, the boss-estate-observe-host idiom: the
+# helpers refuse without one, and inheriting a per-unit drop-in from a
+# sibling is not a thing systemd does.
+ExecStartPre=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /home/david/boss/infra/boss-maintenance-wrap.sh maintenance-disk-floor-sweep "Forge disk floor sweep"
+ExecStart=/home/david/boss/infra/forge/disk-floor-sweep.sh
+ExecStartPost=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /home/david/boss/infra/boss-step.sh maintenance-disk-floor-sweep run result=ok

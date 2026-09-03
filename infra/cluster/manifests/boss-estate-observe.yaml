@@ -137,7 +137,14 @@ spec:
                   # message. The response body rides the same capture as
                   # the status code (body, newline, code) instead of a
                   # tempfile.
-                  resp=$(curl -s -w '\n%{http_code}' -X POST \
+                  # boss-api-curl.sh retries TRANSPORT errors for up
+                  # to 150s (25e518c0): a deploy roll takes the API
+                  # away for ~45s and must read as a wait, not an
+                  # Error pod. The capture-and-speak contract below is
+                  # unchanged — the helper owns only connection-level
+                  # exits; stdout still carries body+code exactly as
+                  # curl wrote them.
+                  resp=$(/usr/local/bin/boss-api-curl.sh -s -w '\n%{http_code}' -X POST \
                     -H "content-type: application/json" \
                     -H "x-boss-user: {\"id\":\"automation:estate-observer\",\"role\":\"platform-admin\",\"access_tier\":\"operator\"}" \
                     --data-binary @/tmp/observation.json \

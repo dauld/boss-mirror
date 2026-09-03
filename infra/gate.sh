@@ -132,6 +132,32 @@ require_headroom() {
     echo "    du -sh */target | sort -hr        # the usual culprits" >&2
     echo "    rm -rf <landed-worktree>/target" >&2
     echo "  Better: build in the dev pod, which has 188GB of scratch." >&2
+    # A REFUSAL IS NOT A FAILURE, and the receipt has to say which.
+    #
+    # The distinction already lived in the exit code — `exit 1` after
+    # `write_receipt "failed"` means "I ran the checks and the branch is
+    # bad"; `exit 2` means "I declined to run" — but a refusal wrote no
+    # receipt at all, so every reader downstream saw only a dead run and
+    # guessed. On 2026-09-02 that guess cost two trains: CI reported a
+    # plain failure, the conductor recorded it as a verdict on the
+    # consist, and the cars aboard were one auto-cancel away from taking
+    # strikes for a full disk on the host. Two strikes hold a car out of
+    # the queue until a human looks.
+    #
+    # `refused` is deliberately its own word, not a flavour of failed: a
+    # reader that only knows green/failed must not silently round this
+    # to either. Written before exiting so the reason survives the
+    # process.
+    GATE_REFUSAL="${avail}GB free, need ${gate_min_free_gb}GB (${when})"
+    # The startup call happens before `write_receipt` and GATE_RECEIPT
+    # exist — nothing has run yet, so there is no receipt to write and
+    # the exit code is the whole signal. The mid-run calls (one before
+    # every phase) are the ones a reader needs, and by then both are
+    # defined. Guarding on the function keeps that honest instead of
+    # emitting a half-built receipt.
+    if declare -F write_receipt >/dev/null 2>&1; then
+        write_receipt "refused"
+    fi
     exit 2
 }
 
@@ -476,8 +502,16 @@ write_receipt() {
             unver_count=$((unver_count + 1))
         done
     fi
+    # Only a refusal sets this; it names WHY the gate declined, which is
+    # the fact a reader needs to tell "the host was unfit" from "the
+    # branch was bad".
+    local refusal_json=""
+    if [ -n "${GATE_REFUSAL:-}" ]; then
+        refusal_json="\"refused_because\": \"${GATE_REFUSAL}\","
+    fi
     cat > "${GATE_RECEIPT}" <<RECEIPT
 {
+  ${refusal_json}
   "verdict": "${verdict}",
   "mode": "${mode}",
   "scope": "${NAMED[*]:-}",
@@ -560,6 +594,7 @@ PREFLIGHT_LINTS=(
     "tier-import-audit|infra/lint/tier-import-audit.sh"
     "layer-order-audit|infra/lint/layer-order-audit.sh"
     "no-wallclock|infra/lint/no-wallclock.sh"
+    "one-stamp-per-transaction|infra/lint/one-stamp-per-transaction.sh"
     "outbox-migration-ratchet|infra/lint/outbox-migration-ratchet.sh"
     "idempotence-ratchet|infra/lint/idempotence-ratchet.sh"
     "dispatcher-rules-ratchet|infra/lint/dispatcher-rules-ratchet.sh"
@@ -576,6 +611,7 @@ PREFLIGHT_LINTS=(
     "ci-tools-declared|infra/lint/ci-tools-declared.sh"
     "timers-leave-a-packet|infra/lint/timers-leave-a-packet.sh"
     "step-plugin-bundle|infra/lint/step-plugin-bundle-exists.sh"
+    "step-plugins-own-their-keys|infra/lint/step-plugins-own-their-keys.sh"
     "one-palette|infra/lint/one-palette.sh"
     "one-date-format|infra/lint/one-date-format.sh"
     "kind-bundle-does-not-tighten|infra/lint/a-kind-bundle-does-not-tighten.sh"

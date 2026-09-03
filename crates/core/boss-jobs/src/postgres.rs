@@ -987,6 +987,87 @@ impl JobsRepository for PgJobs {
         Ok(())
     }
 
+    async fn merge_step_metadata_at(
+        &self,
+        id: &StepId,
+        patch: &serde_json::Map<String, serde_json::Value>,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<Step, JobsError> {
+        // Same split as merge_job_metadata_at: null values are
+        // removals, everything else upserts. Top-level only.
+        let removals: Vec<String> = patch
+            .iter()
+            .filter(|(_, v)| v.is_null())
+            .map(|(k, _)| k.clone())
+            .collect();
+        let upserts: serde_json::Map<String, serde_json::Value> = patch
+            .iter()
+            .filter(|(_, v)| !v.is_null())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| JobsError::Storage(e.to_string()))?;
+        // ONE statement is the atomicity, and the terminal freeze
+        // rides its WHERE clause: a step that completed between the
+        // caller's read and this write matches no row, instead of
+        // being silently frozen by a CASE the way `update_step_at`'s
+        // full-row re-sends are. The 0-row case is disambiguated
+        // below inside the same transaction.
+        let row = sqlx::query_as::<_, StepRow>(
+            r#"
+            UPDATE steps SET
+                metadata = (CASE WHEN jsonb_typeof(metadata) = 'object'
+                                 THEN metadata ELSE '{}'::jsonb END
+                            || $2::jsonb) - $3::text[],
+                updated_at = $4
+            WHERE id = $1 AND status NOT IN ('completed', 'skipped')
+            RETURNING id, job_id, kind, title, spec_slug, assignee_id, status, sort_order,
+                      blocked_by, sign_offs_required, assurance_required, sign_offs, fields,
+                      completed_on, metadata, notes, step_plugin_version, embedded_job
+            "#,
+        )
+        .bind(*id.inner().as_uuid())
+        .bind(serde_json::Value::Object(upserts))
+        .bind(&removals)
+        .bind(stamp.timestamp)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+        let Some(row) = row else {
+            // Missing, or terminal? The refusal must say which — a
+            // false "not found" for a frozen row is the confident
+            // wrong answer this crate keeps relearning to avoid.
+            let status: Option<String> =
+                sqlx::query_scalar("SELECT status FROM steps WHERE id = $1")
+                    .bind(*id.inner().as_uuid())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| JobsError::Storage(e.to_string()))?;
+            return Err(match status {
+                Some(status) => JobsError::TerminalStep { id: *id, status },
+                None => JobsError::StepNotFound(*id),
+            });
+        };
+        let step = row_to_step(row)?;
+        // OUTBOX (phase 2): the STEP_UPDATED state event is built from
+        // the POST-merge row this transaction just produced and
+        // records with it — same rule as the job merge.
+        let event = stamp.event(
+            crate::events::STEP_UPDATED,
+            crate::events::step_state_payload(&step),
+        );
+        boss_events::outbox::record_event_in_tx(&mut tx, &event)
+            .await
+            .map_err(JobsError::Storage)?;
+        tx.commit()
+            .await
+            .map_err(|e| JobsError::Storage(e.to_string()))?;
+        Ok(step)
+    }
+
     async fn claim_step_at(
         &self,
         step_id: &StepId,

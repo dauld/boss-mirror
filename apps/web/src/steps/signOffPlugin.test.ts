@@ -182,13 +182,29 @@ describe('sign-off v2', () => {
     buttonNamed(c, 'Approve')!.fire('click');
     await settled();
 
+    // The decision travels through the step metadata PATCH: a bare
+    // object of ONLY the keys this surface owns, merged server-side —
+    // no snapshot spread, so a concurrent writer's keys survive (the
+    // lost update that reverted a review's title/markdown on
+    // 2026-09-02).
+    const patches = calls.filter((x) => x.method === 'PATCH');
+    expect(patches.length).toBe(1);
+    expect(patches[0]!.url).toBe('/api/jobs/job-1/steps/step-1/metadata');
+    const merged = patches[0]!.body as Record<string, unknown>;
+    expect(merged.decision).toBe('approved');
+    expect(merged.approved).toBe('true');
+    expect(typeof merged.decided_at).toBe('string');
+
+    // Then completion — recorded first, completed second.
+    expect(calls.findIndex((x) => x.method === 'PATCH')).toBeLessThan(
+      calls.findIndex((x) => x.method === 'PUT'),
+    );
     const puts = calls.filter((x) => x.method === 'PUT');
-    expect(puts.length).toBe(2);
-    const meta = (puts[0]!.body as { metadata: Record<string, unknown> }).metadata;
-    expect(meta.decision).toBe('approved');
-    expect(meta.approved).toBe('true');
-    expect(typeof meta.decided_at).toBe('string');
-    expect((puts[1]!.body as { status: string }).status).toBe('completed');
+    expect(puts.length).toBe(1);
+    expect((puts[0]!.body as { status: string }).status).toBe('completed');
+    // Status-only: a completion that carried metadata would replace
+    // the row's metadata wholesale with whatever the client held.
+    expect((puts[0]!.body as Record<string, unknown>).metadata).toBeUndefined();
   });
 
   test('an outstanding counter-signature blocks completion, not the decision', async () => {
@@ -202,11 +218,12 @@ describe('sign-off v2', () => {
     buttonNamed(c, 'Approve')!.fire('click');
     await settled();
 
-    const puts = calls.filter((x) => x.method === 'PUT');
-    expect(puts.length).toBe(1);
-    expect((puts[0]!.body as { metadata: Record<string, unknown> }).metadata.decision).toBe(
-      'approved',
-    );
+    // The decision lands through the metadata PATCH; completion (a
+    // status PUT) is what the outstanding counter-signature blocks.
+    const patches = calls.filter((x) => x.method === 'PATCH');
+    expect(patches.length).toBe(1);
+    expect((patches[0]!.body as Record<string, unknown>).decision).toBe('approved');
+    expect(calls.filter((x) => x.method === 'PUT').length).toBe(0);
   });
 
   test('a completion refusal is shown, never swallowed', async () => {
@@ -232,10 +249,11 @@ describe('sign-off v2', () => {
     mount(c, { step, jobId: 'job-1', onUpdate() {} });
     buttonNamed(c, 'Request changes')!.fire('click');
     await settled();
-    const puts = calls.filter((x) => x.method === 'PUT');
-    expect(puts.length).toBe(1);
-    expect((puts[0]!.body as { metadata: Record<string, unknown> }).metadata.decision).toBe(
-      'changes-requested',
-    );
+    // Recorded through the metadata PATCH, and nothing completes: no
+    // status write at all.
+    const patches = calls.filter((x) => x.method === 'PATCH');
+    expect(patches.length).toBe(1);
+    expect((patches[0]!.body as Record<string, unknown>).decision).toBe('changes-requested');
+    expect(calls.filter((x) => x.method === 'PUT').length).toBe(0);
   });
 });

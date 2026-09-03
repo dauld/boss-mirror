@@ -608,11 +608,48 @@
       }
     }
 
-    async function putStep(status, metadata) {
+    async function mergeOwnedKeys() {
+      // Merge ONLY the keys this surface owns, server-side. The old
+      // idiom PUT `{ ...step.metadata, doc_path, resolutions }` — the
+      // page-load snapshot plus our keys — and PUT metadata is
+      // replaced WHOLESALE, so any key another writer added after this
+      // page loaded (the carried title, the markdown) rode the stale
+      // snapshot back out of existence: the lost update that reverted
+      // a review's title/markdown and 400'd the reviewer twice on
+      // 2026-09-02. The metadata PATCH merges top-level keys against
+      // the row as it stands and preserves every key it does not name
+      // (a null value would DELETE its key — never send one to keep).
+      const r = await fetch(`/api/jobs/${jobId}/steps/${step.id}/metadata`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ doc_path: docPath, resolutions }),
+      });
+      if (!r.ok) throw new Error(`step metadata merge HTTP ${r.status}: ${await r.text()}`);
+    }
+
+    async function freshStep() {
+      // The metadata PATCH answers 204 with no body, so the post-merge
+      // row must be read back before completing: the completion PUT
+      // still replaces metadata wholesale, and completing with this
+      // page's snapshot would re-introduce the exact lost update the
+      // PATCH just avoided. There is no single-step GET; the job's
+      // steps list is the read the API offers.
+      const r = await fetch(`/api/jobs/${jobId}/steps`);
+      if (!r.ok) throw new Error(`step read-back HTTP ${r.status}: ${await r.text()}`);
+      const steps = await r.json();
+      const fresh = Array.isArray(steps) ? steps.find((s) => s.id === step.id) : null;
+      if (!fresh) throw new Error('step read-back: step missing from its own job');
+      return fresh;
+    }
+
+    async function putStep(base, status) {
+      // The step PUT overlays: any field the body omits keeps its
+      // current value, so a status-only body (base = {}) moves the
+      // status and touches nothing else — metadata included.
       const r = await fetch(`/api/jobs/${jobId}/steps/${step.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...step, job_id: jobId, status, metadata }),
+        body: JSON.stringify({ ...base, job_id: jobId, status }),
       });
       if (!r.ok) throw new Error(`step save HTTP ${r.status}: ${await r.text()}`);
     }
@@ -624,16 +661,23 @@
       try {
         if (!selfCarried) await persistPendingDecisions();
         const completing = autoComplete && (allAnswered() || questions.length === 0);
-        const workingStatus = step.status === 'pending' ? 'active' : step.status;
-        const finalMeta = { ...step.metadata, doc_path: docPath, resolutions };
 
-        // 1. Persist the FINAL shape first (title + metadata are what
+        // 1. Land ALL metadata writes first (title + metadata are what
         //    sign-off stamps attest — a stamp taken before the last
         //    metadata write goes stale and the completion 409s).
-        await putStep(workingStatus, finalMeta);
+        await mergeOwnedKeys();
+
+        // 2. A save has always flipped a pending step active before
+        //    any stamp lands. Status cannot travel through the
+        //    metadata PATCH, so it rides a status-only PUT.
+        if (step.status === 'pending') await putStep({}, 'active');
 
         if (completing) {
-          // 2. Stamp every required sign-off role in the step's now-
+          // 3. Read the post-merge row back — the stamps and the
+          //    completion must attest the step's true final shape,
+          //    not this page's snapshot.
+          const fresh = await freshStep();
+          // 4. Stamp every required sign-off role in the step's now-
           //    final shape. Policy gates each on `step-signoff:<role>`
           //    — a 403 here means the signed-in user lacks that
           //    authority, and we SAY so instead of silently dropping
@@ -654,8 +698,9 @@
               );
             }
           }
-          // 3. Complete with the identical metadata the stamps attest.
-          await putStep('completed', finalMeta);
+          // 5. Complete with the identical metadata the stamps attest
+          //    — the fresh row verbatim.
+          await putStep(fresh, 'completed');
         }
         onUpdate();
       } catch (e) {

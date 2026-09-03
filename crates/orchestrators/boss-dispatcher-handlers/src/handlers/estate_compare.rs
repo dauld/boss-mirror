@@ -72,6 +72,15 @@ const KNOWN_SCOPE: &str = "kubernetes-nodes";
 /// staleness alarming is a follow-up, stated rather than smuggled.
 const HOST_SCOPE: &str = "host";
 
+/// The per-host unit scope (`observe-units.sh`, packet 729329c6). Like
+/// HOST_SCOPE it is SELF-SCOPED — the observation names the units it
+/// watched and their health; there is no declared-units registry to
+/// sweep, so the comparison passes the observer's own verdicts through
+/// as findings. Without this branch every five-minute unit observation
+/// would dead-end as unknown_scope — the exact class the HOST_SCOPE
+/// comment above records fixing (49a8d842).
+const UNITS_SCOPE: &str = "host-units";
+
 /// The disk floor that turns a host reading into a HARD finding
 /// (49a8d842: the forge host — 228G, 83% full, "THE TIGHT ONE" — could
 /// fill and the comparison would keep answering unknown_scope). Free
@@ -275,6 +284,65 @@ pub(crate) fn compare(declared: &[Json], observation: &Json) -> Json {
     })
 }
 
+/// The self-scoped unit comparison, pure: every observed unit whose
+/// observer did not stamp `healthy: true` is a finding. Deliberately
+/// no recomputation from the raw states — the observer derived health
+/// with the journal in hand, and a comparator that second-guesses its
+/// instrument is a second instrument. A row without a healthy flag
+/// counts as unhealthy: a malformed instrument must surface, not pass.
+///
+/// The journal excerpt is NOT copied into the finding — it rides the
+/// observation row this comparison was computed from, and the
+/// comparisons series is what the eventual raiser gets calibrated on
+/// (report first, raise later), so it carries names and counts, not
+/// twenty lines of log per unit per five minutes.
+pub(crate) fn compare_units(observation: &Json) -> Json {
+    let nodes: Vec<&Json> = observation
+        .get("nodes")
+        .and_then(Json::as_array)
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
+
+    let mut units = 0usize;
+    let mut units_unhealthy: Vec<Json> = Vec::new();
+
+    for node in &nodes {
+        let host = node.get("id").and_then(Json::as_str).unwrap_or("");
+        for unit in node
+            .get("units")
+            .and_then(Json::as_array)
+            .map(|a| a.iter())
+            .into_iter()
+            .flatten()
+        {
+            units += 1;
+            if unit.get("healthy").and_then(Json::as_bool) == Some(true) {
+                continue;
+            }
+            units_unhealthy.push(json!({
+                "host": host,
+                "unit": unit.get("unit"),
+                "load_state": unit.get("load_state"),
+                "active_state": unit.get("active_state"),
+                "sub_state": unit.get("sub_state"),
+                "result": unit.get("result"),
+                "exec_main_status": unit.get("exec_main_status"),
+            }));
+        }
+    }
+
+    json!({
+        "counts": {
+            "hosts": nodes.len(),
+            "units": units,
+            "units_unhealthy": units_unhealthy.len(),
+        },
+        "findings": {
+            "units_unhealthy": units_unhealthy,
+        },
+    })
+}
+
 pub struct EstateCompare {
     client: reqwest::Client,
     jobs_base: String,
@@ -368,6 +436,11 @@ impl Handler for EstateCompare {
                     )
                 })?;
             envelope(compare_host(&declared, observation))
+        } else if scope == UNITS_SCOPE {
+            // Self-scoped like HOST_SCOPE, and simpler: no registry
+            // read — the observation itself carries both what was
+            // watched and what the observer concluded about it.
+            envelope(compare_units(observation))
         } else {
             // An observation from an instrument this comparator does
             // not understand. Guessing which declared rows it should
@@ -570,6 +643,67 @@ mod tests {
         assert_eq!(
             body["findings"]["observed_not_declared"][0]["id"],
             "mystery-box"
+        );
+    }
+
+    // ----- the self-scoped unit comparison (729329c6) -----
+
+    fn units_obs(units: Json) -> Json {
+        json!({ "scope": "host-units", "observer": "boss-estate-observe-units",
+                "nodes": [{ "id": "boss-gcp", "healthy": true, "units": units }] })
+    }
+
+    #[test]
+    fn an_unhealthy_unit_is_the_finding() {
+        // The quiet-conductor class: boss-train.service dead while a
+        // CI-green train sat unmerged for two hours with no signal.
+        let body = compare_units(&units_obs(json!([
+            {"unit":"boss-train.service","load_state":"loaded","active_state":"inactive",
+             "sub_state":"dead","result":"success","exec_main_status":0,"healthy":false,
+             "journal":"Sep 02 08:15:00 boss-gcp systemd[1]: Stopped boss-train."},
+            {"unit":"forgejo.service","load_state":"loaded","active_state":"active",
+             "sub_state":"running","result":"success","exec_main_status":0,"healthy":true},
+        ])));
+        assert_eq!(body["counts"]["units"], 2);
+        assert_eq!(body["counts"]["units_unhealthy"], 1);
+        let finding = &body["findings"]["units_unhealthy"][0];
+        assert_eq!(finding["host"], "boss-gcp");
+        assert_eq!(finding["unit"], "boss-train.service");
+        assert_eq!(finding["active_state"], "inactive");
+        // The journal excerpt stays on the OBSERVATION row — copying
+        // ~20 lines into every comparison would double the evidence's
+        // storage without doubling the evidence.
+        assert!(finding.get("journal").is_none());
+    }
+
+    #[test]
+    fn an_all_healthy_post_reports_no_findings() {
+        let body = compare_units(&units_obs(json!([
+            {"unit":"boss-train.service","load_state":"loaded","active_state":"active",
+             "sub_state":"running","result":"success","exec_main_status":0,"healthy":true},
+        ])));
+        assert_eq!(body["counts"]["units"], 1);
+        assert_eq!(body["counts"]["units_unhealthy"], 0);
+        assert_eq!(
+            body["findings"]["units_unhealthy"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_unit_row_without_a_healthy_flag_is_unhealthy_not_invisible() {
+        // A malformed row is a broken instrument, and a broken
+        // instrument must surface as a finding, not pass as health.
+        let body = compare_units(&units_obs(json!([
+            {"unit":"forgejo.service","active_state":"active"},
+        ])));
+        assert_eq!(body["counts"]["units_unhealthy"], 1);
+        assert_eq!(
+            body["findings"]["units_unhealthy"][0]["unit"],
+            "forgejo.service"
         );
     }
 }

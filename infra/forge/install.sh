@@ -47,9 +47,16 @@ fi
 #   it every ten minutes. This is the SECOND deploy path — the
 #   conductor deploys boss-gcp — and the reason "the train deployed"
 #   and "the cluster is current" can differ by ten minutes.
+# disk-floor-sweep: below BOSS_DISK_FLOOR_GB free on the root volume,
+#   reclaims regenerable docker caches in a fixed order and stops at
+#   the floor; an unmet floor is a failed unit, which is the alarm.
+#   Exists because cluster-deploy-runner's cleanup only runs when main
+#   moves — which needs CI — which needs disk. Circular exactly when
+#   the disk fills, which it did on 2026-09-02, blocking every train.
 UNITS=(
     reap-dead-ci-jobs
     cluster-deploy-runner
+    disk-floor-sweep
 )
 
 installed=0

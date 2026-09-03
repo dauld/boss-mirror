@@ -281,7 +281,7 @@ COPY infra/oss-quickstart/services-launcher.sh /usr/local/bin/boss-launch
 # (boss-search-reindex first) open and complete their packets the same
 # way the boss-gcp timers do — one script pair, both hosts (jq above
 # is theirs).
-COPY infra/boss-maintenance-wrap.sh infra/boss-step.sh /usr/local/bin/
+COPY infra/boss-maintenance-wrap.sh infra/boss-step.sh infra/boss-api-curl.sh /usr/local/bin/
 COPY infra/oss-quickstart/generate-configs.sh /usr/local/bin/boss-generate-configs
 RUN chmod +x /usr/local/bin/boss-init /usr/local/bin/boss-launch \
     /usr/local/bin/boss-generate-configs \

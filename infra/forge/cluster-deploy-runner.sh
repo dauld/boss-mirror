@@ -56,6 +56,10 @@ REPO="${BOSS_FORGE_REPO_DIR:-$HOME/boss}"
 REGISTRY="${BOSS_FORGE_REGISTRY:-10.20.0.15:3000/david/boss}"
 KUBECONFIG_PATH="${BOSS_FORGE_KUBECONFIG:-$HOME/kc.yaml}"
 STAMP_FILE="${BOSS_FORGE_LAST_BUILT:-$HOME/.boss-last-built}"
+# The quarantine stamp for a head whose BOOT failed (rollout never went
+# Ready and was rolled back). Distinct from STAMP_FILE — that one means
+# "converged", this one means "proven unbootable; do not re-roll it".
+FAILED_FILE="${BOSS_FORGE_LAST_FAILED:-$HOME/.boss-last-failed}"
 export DOCKER_HOST="${DOCKER_HOST:-unix:///run/user/1000/docker.sock}"
 
 cd "$REPO"
@@ -66,6 +70,17 @@ LAST=$(cat "$STAMP_FILE" 2>/dev/null || echo none)
 if [ "$HEAD" = "$LAST" ]; then
     echo "cluster-deploy-runner: forge main unchanged ($HEAD)"
     exit 0
+fi
+
+# A head that bricked its boot stays quarantined until main moves.
+# Without this, the 2026-09-02 shape loops forever: rollout fails,
+# set -e kills the run before the stamp, and the next tick rebuilds
+# and re-rolls the SAME brick every ten minutes — which is exactly
+# what the runner spent the 20:15-21:10 outage doing. Exit NONZERO:
+# a held converge is a failed unit somebody can see, not a quiet pass.
+if [ "$HEAD" = "$(cat "$FAILED_FILE" 2>/dev/null || echo none)" ]; then
+    echo "cluster-deploy-runner: $HEAD bricked its boot on a previous converge — holding until main moves (rm $FAILED_FILE to retry it)" >&2
+    exit 1
 fi
 
 echo "cluster-deploy-runner: forge main moved $LAST -> $HEAD; building"
@@ -113,33 +128,17 @@ docker push "$REGISTRY:$HEAD"
 # redundant, so cleanup that ran before it could delete the only copy
 # of something. `set -e` means a failed push never reaches this.
 #
-# DELETING A LOCAL TAG IS ONLY SAFE IF THE REGISTRY HAS IT, because
-# the registry is the rollback path — the cluster and `boss deploy`
-# both pull from there, never from this daemon's store. So each
-# candidate is VERIFIED PRESENT in the registry before it is removed,
-# and anything unverifiable is kept and named. Checked while writing
-# this: all 42 resident tags were in the registry, so this is hygiene
-# rather than recovery from a divergence. `--insecure` because the
-# forge registry is plain HTTP on the LAN, which is also why the tag
-# is 7 characters — `git rev-parse --short` — and not the full sha.
-keep="${BOSS_RUNNER_KEEP_IMAGES:-5}"
-kept=0 removed=0 unverified=0
-# Newest first (docker's default ordering). `latest` is the quickstart
-# tag, not a build artifact of this loop, so it is never a candidate.
-for tag in $(docker images "$REGISTRY" --format '{{.Tag}}'); do
-    case "$tag" in latest|'<none>') continue ;; esac
-    if [ "$kept" -lt "$keep" ]; then
-        kept=$((kept + 1))
-        continue
-    fi
-    if docker manifest inspect --insecure "$REGISTRY:$tag" >/dev/null 2>&1; then
-        docker rmi "$REGISTRY:$tag" >/dev/null 2>&1 && removed=$((removed + 1))
-    else
-        unverified=$((unverified + 1))
-        echo "cluster-deploy-runner: keeping $tag — not verifiable in the registry"
-    fi
-done
-echo "cluster-deploy-runner: images kept=$kept removed=$removed unverified=$unverified"
+# The deletion loop itself — keep the N newest, VERIFY a candidate is
+# present in the registry before rmi, never touch `latest` — is the
+# SHARED definition in prune-registry-tags.lib.sh, sourced from the
+# checked-out HEAD (we cd'd to $REPO above). disk-floor-sweep.sh runs
+# the identical loop below the disk floor; two copies of a loop that
+# deletes images is the drifting pair §9a bans, so the rationale for
+# why verification is load-bearing lives in the lib's header now.
+# Checked while extracting this: all 42 resident tags were in the
+# registry, so this is hygiene rather than recovery from a divergence.
+. "$REPO/infra/forge/prune-registry-tags.lib.sh"
+prune_registry_verified_tags "$REGISTRY" "${BOSS_RUNNER_KEEP_IMAGES:-5}" cluster-deploy-runner
 
 # Build cache is regenerable by definition, so the only cost of being
 # wrong here is a slower next build. Age-filtered rather than emptied:
@@ -234,18 +233,51 @@ else
     echo "cluster-deploy-runner: infra/gate-runner/run.sh missing — leaving the ConfigMap alone" >&2
 fi
 
-$K set image -n boss deploy/boss "boss=$REGISTRY:$HEAD"
+# ONE patch, ONE revision. This used to be `set image` (main container)
+# followed by a separate init-container patch — kubectl's `set image`
+# cannot reach initContainers — which minted TWO revisions per roll,
+# the first carrying a MIXED template (new main, old init). A
+# rollback that steps back one revision lands on exactly that
+# intermediate; the 2026-09-02 RS table shows the same mixed-template
+# class minted by hand during the firefight. Both images move in one
+# json patch so every revision in history is a coherent template and
+# every rollback target is real.
+PRE_REV=$($K get deploy boss -n boss -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')
 $K patch deploy boss -n boss --type=json \
-    -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/initContainers/0/image\",\"value\":\"$REGISTRY:$HEAD\"}]"
-# CronJob chores run the same build as the deployment. `set image` on
-# a deploy does not touch CronJobs, so the whole labeled set is pinned
-# here — a chore running a stale image is exactly the split this repo
-# keeps paying for. The chore contract (boss-chore=true label +
-# container named `chore`) is what makes this one selector instead of
-# a per-chore list that drifts. `|| true`: a cluster with no chores
-# applied yet must not fail the whole converge.
+    -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/image\",\"value\":\"$REGISTRY:$HEAD\"},{\"op\":\"replace\",\"path\":\"/spec/template/spec/initContainers/0/image\",\"value\":\"$REGISTRY:$HEAD\"}]"
+
+# THE ROLL PROVES ITSELF OR IT REVERTS (packet ec50db46, post-mortem
+# chain 4). strategy=Recreate means the old pod is already gone; a
+# build that cannot boot is an OUTAGE with no floor unless something
+# reverts it. On 2026-09-02 this line's predecessor timed out, set -e
+# killed the run, and the crash-loop ran unattended for 55 minutes
+# while the previous revision — a working image — sat one undo away.
+# The undo targets the revision READ BEFORE the roll, never "back
+# one": history can hold templates this run did not make.
+if ! $K rollout status deploy/boss -n boss --timeout=420s; then
+    echo "cluster-deploy-runner: $HEAD never went Ready — rolling back to revision $PRE_REV" >&2
+    echo "$HEAD" > "$FAILED_FILE"
+    if $K rollout undo deploy/boss -n boss --to-revision="$PRE_REV" \
+        && $K rollout status deploy/boss -n boss --timeout=300s; then
+        echo "cluster-deploy-runner: rolled back — cluster serves the pre-$HEAD build; $HEAD is quarantined (rm $FAILED_FILE to retry it)" >&2
+    else
+        echo "cluster-deploy-runner: ROLLBACK ALSO FAILED — the cluster needs hands NOW" >&2
+    fi
+    exit 1
+fi
+
+# CronJob chores run the same build as the deployment — but they
+# advance only AFTER the deploy proves bootable, so a bricked build
+# never takes the chore fleet down with it (before this ordering, the
+# chores were pinned pre-watch and a failed roll left every chore on
+# the broken image). `set image` on a deploy does not touch CronJobs,
+# so the whole labeled set is pinned here — the chore contract
+# (boss-chore=true label + container named `chore`) is what makes
+# this one selector instead of a per-chore list that drifts.
+# `|| true`: a cluster with no chores applied yet must not fail the
+# whole converge.
 $K set image -n boss cronjobs -l boss-chore=true "chore=$REGISTRY:$HEAD" || true
-$K rollout status deploy/boss -n boss --timeout=420s
 
 echo "$HEAD" > "$STAMP_FILE"
+rm -f "$FAILED_FILE"
 echo "cluster-deploy-runner: cluster on $REGISTRY:$HEAD"

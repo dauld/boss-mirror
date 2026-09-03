@@ -1,0 +1,14 @@
+# ~1-minute poll: an ops-request is an operator waiting on an answer,
+# so the loop is minutes, not the estate observers' daily cadence.
+# systemd will not start the oneshot while a previous run is still
+# active, so overlapping polls cannot double-answer a packet.
+[Unit]
+Description=BOSS ops-request runner poll (about every minute)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

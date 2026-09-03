@@ -227,6 +227,13 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
         .route("/api/jobs/{id}/steps", get(list_steps::<R, B>))
         .route("/api/jobs/{id}/steps", post(add_step::<R, B>))
         .route("/api/jobs/{id}/steps/{step_id}", put(update_step::<R, B>))
+        // Top-level metadata merge — the step-side twin of the job
+        // route above, and the same contract: `null` removes; status
+        // and assignee are untouchable through it.
+        .route(
+            "/api/jobs/{id}/steps/{step_id}/metadata",
+            patch(patch_step_metadata::<R, B>),
+        )
         .route(
             "/api/jobs/{id}/steps/{step_id}/claim",
             post(claim_step::<R, B>),

@@ -57,10 +57,17 @@ fi
 BASE="${BOSS_JOBS_URL}"
 BOSS_USER='{"id":"automation:maintenance-timer","role":"platform-admin","access_tier":"operator","territory_account_ids":[],"direct_report_ids":[],"department":"platform"}'
 
+# Transport-retry curl (25e518c0): a deploy roll takes the API away
+# for ~45s and that must not kill the chore. Resolved next-to-self so
+# the same line works from the repo checkout (boss-gcp timers) and
+# /usr/local/bin (the image).
+API_CURL="$(dirname "$0")/boss-api-curl.sh"
+[ -x "$API_CURL" ] || API_CURL=boss-api-curl.sh
+
 # `.data` missing from the reply means the jobs API changed shape —
 # error out (aborting the timer run) rather than reading it as zero
 # open Jobs and spawning a duplicate.
-open_count=$(curl -fsS -H "x-boss-user: $BOSS_USER" \
+open_count=$("$API_CURL" -fsS -H "x-boss-user: $BOSS_USER" \
     "$BASE/api/jobs?kind=$KIND&status=open&limit=2" \
     | jq '.data | if . == null then error("jobs reply has no .data") else length end')
 
@@ -69,7 +76,7 @@ if [ "$open_count" != "0" ]; then
     exit 0
 fi
 
-curl -fsS -X POST "$BASE/api/jobs" \
+"$API_CURL" -fsS -X POST "$BASE/api/jobs" \
     -H "x-boss-user: $BOSS_USER" -H "content-type: application/json" \
     ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
     -d "$(jq -n --arg kind "$KIND" --arg title "$LABEL — $(date +%F)" '{

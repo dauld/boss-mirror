@@ -327,17 +327,36 @@ fn synthesized_completion_metadata(step: &Value) -> serde_json::Map<String, Valu
     out
 }
 
-/// The metadata the sign-off walk lands before stamping: the step's
-/// existing keys, every live-required field synthesized (the same
-/// a-registry-row-must-never-brick-boot rule as the `task` arm — the
-/// 2026-09-02 evening crash-loop was this arm's bare status flip
-/// meeting the `decision` field cdfe2e1a made required at
-/// completion), the attestation keys, and — because the walk IS the
-/// approval — a truthful `decision` wherever the step declares one
-/// unauthored. `synthesized_completion_metadata` alone would fill it
-/// with the enum's first variant, recording "pending" on a step the
-/// walk is about to approve and complete.
-fn sign_off_walk_metadata(step: &Value) -> serde_json::Map<String, Value> {
+/// The metadata the walk leaves on a step at completion — ONE
+/// definition across every arm of `walk_step`, pinned by the
+/// platform-bundle closure test below. Both 2026-09-02 boot-bricks
+/// (`sign_off_context` through the task arm in the morning,
+/// `decision` through the sign-off arm in the evening) were the same
+/// defect reached through different arms: an arm-local completion
+/// body that didn't fill the step's live-required fields. A registry
+/// row must never be able to brick boot through an arm the last
+/// incident didn't happen to exercise.
+///
+/// Every arm starts from the step's existing keys plus every
+/// live-required field synthesized. On top of that:
+/// - `sign-off` — the attestation keys, and a truthful
+///   `decision: "approved"` wherever the step declares one unauthored
+///   (the walk IS the approval; `synthesized_completion_metadata`
+///   alone would record the enum's first variant, "pending", on a
+///   step the walk is about to approve and complete). The hardcoded
+///   approver identity is fine because the walk only ever walks
+///   `workflow-design` Jobs.
+/// - `workflow-publish` — the full WorkflowSpec the dispatch handler
+///   publishes from.
+///
+/// An EMPTY return means "send no metadata at all": the step PUT
+/// replaces metadata wholesale, so writing `{}` would wipe keys that
+/// omitting preserves.
+fn walk_completion_metadata(
+    step_kind: &str,
+    step: &Value,
+    publish_spec: Option<&Value>,
+) -> serde_json::Map<String, Value> {
     let authored = step
         .get("metadata")
         .and_then(Value::as_object)
@@ -345,22 +364,29 @@ fn sign_off_walk_metadata(step: &Value) -> serde_json::Map<String, Value> {
         .unwrap_or_default();
     let mut out = synthesized_completion_metadata(step);
     if out.is_empty() {
-        // Empty is the helper's "nothing required was missing" signal;
-        // the sign-off write still replaces metadata wholesale, so the
-        // authored keys must ride along regardless.
         out = authored.clone();
     }
-    let declares_decision = step
-        .get("fields")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .any(|f| f.get("name").and_then(Value::as_str) == Some("decision"));
-    if declares_decision && !authored.contains_key("decision") {
-        out.insert("decision".into(), json!("approved"));
+    match step_kind {
+        "sign-off" => {
+            let declares_decision = step
+                .get("fields")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|f| f.get("name").and_then(Value::as_str) == Some("decision"));
+            if declares_decision && !authored.contains_key("decision") {
+                out.insert("decision".into(), json!("approved"));
+            }
+            out.insert("authority_role".into(), json!("workflow-approver"));
+            out.insert("signed_by".into(), json!("emp-cto"));
+        }
+        "workflow-publish" => {
+            if let Some(spec) = publish_spec {
+                out.insert("workflow_spec".into(), spec.clone());
+            }
+        }
+        _ => {}
     }
-    out.insert("authority_role".into(), json!("workflow-approver"));
-    out.insert("signed_by".into(), json!("emp-cto"));
     out
 }
 
@@ -381,26 +407,6 @@ fn walk_step(
     // PATCH-shape body — the boss-jobs HTTP handler uses PUT with
     // overlay semantics. Fields we omit get preserved.
     let body = match step_kind {
-        "task" => {
-            // The materialized step may REQUIRE fields at completion —
-            // and the live registry's workflow-design version can carry
-            // required fields the tree's fixtures never saw. On
-            // 2026-09-02 a bare {"status":"completed"} met a live
-            // `sign_off_context` requirement, the 400 aborted the
-            // brewery prepare, and the container crash-looped: a
-            // registry ROW bricked production boot. Data must never be
-            // able to do that, so the walker now fills whatever the
-            // step declares as required, the way the sim workforce
-            // fills a form before marking it done. Existing metadata
-            // keys always win; the merge is top-level because the step
-            // PUT replaces metadata wholesale.
-            let synthesized = synthesized_completion_metadata(step);
-            if synthesized.is_empty() {
-                json!({ "status":"completed" })
-            } else {
-                json!({ "status":"completed", "metadata": synthesized })
-            }
-        }
         "sign-off" => {
             if !dev {
                 anyhow::bail!(
@@ -423,7 +429,7 @@ fn walk_step(
             let md_resp = client
                 .put(&md_url)
                 .headers(headers.clone())
-                .json(&json!({ "metadata": sign_off_walk_metadata(step) }))
+                .json(&json!({ "metadata": walk_completion_metadata(step_kind, step, None) }))
                 .send()
                 .with_context(|| format!("PUT {md_url}"))?;
             if !md_resp.status().is_success() {
@@ -470,14 +476,19 @@ fn walk_step(
                 .context("serializing WorkflowSpec for publish step")?;
             json!({
                 "status":"completed",
-                "metadata": {
-                    "workflow_spec": spec_value,
-                },
+                "metadata": walk_completion_metadata(step_kind, step, Some(&spec_value)),
             })
         }
         other => {
-            warn!(step_kind = %other, "unrecognized step kind on workflow-design; flipping to done");
-            json!({ "status":"completed" })
+            if !matches!(other, "task") {
+                warn!(step_kind = %other, "unrecognized step kind on workflow-design; flipping to done");
+            }
+            let md = walk_completion_metadata(other, step, None);
+            if md.is_empty() {
+                json!({ "status":"completed" })
+            } else {
+                json!({ "status":"completed", "metadata": md })
+            }
         }
     };
 
@@ -601,7 +612,7 @@ mod walker_tests {
                 "required": true
             }]
         });
-        let md = sign_off_walk_metadata(&step);
+        let md = walk_completion_metadata("sign-off", &step, None);
         assert_eq!(md.get("decision"), Some(&json!("approved")));
         assert_eq!(md.get("authority_role"), Some(&json!("workflow-approver")));
         assert_eq!(md.get("signed_by"), Some(&json!("emp-cto")));
@@ -619,7 +630,7 @@ mod walker_tests {
                 "required": true
             }]
         });
-        let md = sign_off_walk_metadata(&step);
+        let md = walk_completion_metadata("sign-off", &step, None);
         assert_eq!(md.get("decision"), Some(&json!("changes-requested")));
     }
 
@@ -630,7 +641,7 @@ mod walker_tests {
     #[test]
     fn a_fieldless_sign_off_keeps_existing_keys_and_adds_no_decision() {
         let step = json!({ "metadata": { "already": "here" } });
-        let md = sign_off_walk_metadata(&step);
+        let md = walk_completion_metadata("sign-off", &step, None);
         assert_eq!(md.get("already"), Some(&json!("here")));
         assert_eq!(md.get("signed_by"), Some(&json!("emp-cto")));
         assert!(!md.contains_key("decision"));
@@ -647,8 +658,69 @@ mod walker_tests {
                 {"name": "review_notes", "field_type": "string", "required": true}
             ]
         });
-        let md = sign_off_walk_metadata(&step);
+        let md = walk_completion_metadata("sign-off", &step, None);
         assert_eq!(md.get("decision"), Some(&json!("approved")));
         assert!(md.get("review_notes").and_then(|v| v.as_str()).is_some());
+    }
+
+    /// The publish arm rides the spec along WITH existing keys and
+    /// required fields, not instead of them — the metadata replace is
+    /// wholesale, so "instead" is the same brick-boot defect the
+    /// other two arms already had.
+    #[test]
+    fn the_publish_walk_keeps_existing_keys_alongside_the_spec() {
+        let step = json!({
+            "metadata": { "already": "here" },
+            "fields": [{"name": "release_note", "field_type": "string", "required": true}]
+        });
+        let spec = json!({"kind": "x"});
+        let md = walk_completion_metadata("workflow-publish", &step, Some(&spec));
+        assert_eq!(md.get("workflow_spec"), Some(&spec));
+        assert_eq!(md.get("already"), Some(&json!("here")));
+        assert!(md.get("release_note").is_some());
+    }
+
+    /// CLOSURE over the platform bundle: every step of the one kind
+    /// the walk creates (`workflow-design`) must be completable by
+    /// the walk — the completion metadata each arm produces must
+    /// satisfy both the kind bundle's fields and the step's authored
+    /// fields, exactly the union the completion handler validates.
+    ///
+    /// Both 2026-09-02 boot-bricks (`sign_off_context` through the
+    /// task arm in the morning, `decision` through the sign-off arm
+    /// in the evening) fail HERE first. Production boot must never
+    /// again be the first place a bundle's required field meets the
+    /// walker.
+    #[test]
+    fn every_workflow_design_step_is_completable_by_the_walk() {
+        let specs = crate::seed_loader::load_workflows(crate::registry::platform_bundle_path())
+            .expect("platform bundle loads");
+        let registry = crate::step_registry::StepRegistry::v1();
+        let design = specs
+            .iter()
+            .find(|s| s.kind == "workflow-design")
+            .expect("workflow-design present in the bundle");
+        let dummy_spec = json!({"kind": "closure-test-target"});
+        for step in &design.steps {
+            let step_value = json!({
+                "metadata": step.metadata_defaults,
+                "fields": serde_json::to_value(&step.fields).unwrap(),
+            });
+            let md = Value::Object(walk_completion_metadata(
+                &step.kind,
+                &step_value,
+                Some(&dummy_spec),
+            ));
+            if let Err(errors) = registry.validate_metadata(&step.kind, &md).and_then(|()| {
+                crate::step_registry::StepRegistry::validate_authored_fields(&step.fields, &md)
+            }) {
+                panic!(
+                    "workflow-design step `{}` (kind `{}`) is not completable by the walk \
+                     ({errors:?}) — a boot walking an unpublished kind would 400 here and \
+                     crash-loop the stack",
+                    step.title, step.kind,
+                );
+            }
+        }
     }
 }

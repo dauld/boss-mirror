@@ -533,6 +533,71 @@ line exists. On its first live run it named three stranded greens —
 one of which was rescued onto the next train instead of rebuilt blind.
 Residue auto-detection (the L3 half) is still design work on acedf981.
 
+## Diagnosis — what a stopped pipeline owes you
+
+On 2026-09-02 delivery stopped for most of a day, and much of that time
+went to questions the system already held the answers to. The lessons
+below are not about the individual faults (a bad boot, a full disk);
+they are about **how much re-derivation a failure is allowed to cost.**
+Each is now a defect class with a fix, and each is worth checking any
+new surface against.
+
+- **A verdict must name what failed.** A red train recorded
+  `?:SUCCESS, ?:SUCCESS, ?:FAILURE`. Learning that the failing job was
+  `test`, and that `test` had died on a disk floor rather than on any
+  code, took three calls to the forge API — the adapter had been
+  dropping the check's name one layer below the code that wanted it.
+  A verdict someone must go re-derive is not a verdict.
+
+- **An infrastructure refusal is not a consist failure.** The gate's
+  disk floor refuses *before any check runs* — a correct refusal that
+  says nothing about the branch. Recorded as a plain CI failure it
+  strikes every car aboard, and two strikes hold a car out of the
+  queue until a human looks. The same thing happened on 2026-08-22 and
+  cost four clean cars five departures.
+
+- **A troubled packet must look troubled.** A train wedged four hours,
+  with an urgent overdue alarm already filed, still rendered in the
+  yard exactly like a healthy two-minute transit; two more sat at a
+  step they could never complete. If a state has crossed its own alarm
+  threshold, the surface showing it must say so — an alarm packet
+  existing elsewhere is not the same as the thing looking wrong.
+
+- **An alarm that reports through its subject dies with it.** The
+  estate chain observes, compares and files, all through the jobs API.
+  During the outage it was silent about an outage. A monitor needs a
+  path to a reader that does not depend on what it watches, or at
+  minimum must retain and replay so the gap is visible afterwards.
+
+- **A check nobody reads is a check that is not running.** The audit
+  integrity alarm exited nonzero nightly over benign sequence gaps
+  until it was correctly demoted to a warning. Then a real finding — an
+  emitted-but-undeclared event kind — rode inside a *passing* run for
+  days, unread. Permanently-red and green-with-warnings fail the same
+  way: decide where a warning is read, or do not emit it.
+
+- **"Roll back" is a target, not a verb.** `rollout undo` moved between
+  two revisions carrying the *same* broken image, so the first rollback
+  was a no-op that read as a rollback. Roll to the last known-good
+  artifact, named and verified — never to "the previous one".
+
+- **Mechanical operations belong to the machine.** Five times in one day
+  an operator was the transport for a command whose output the system
+  could have read itself. The foothold already exists — the cadence loop
+  runs supervised on each host and takes its schedule from registry
+  data — and the only gap is that its verb vocabulary is closed
+  (`ee8ec68a`). Reads and bounded reclaims are mechanical;
+  destructive-by-policy actions are not, and keeping that line sharp is
+  what makes handing over the first kind safe.
+
+**What held, and is worth protecting:** the seed's baseline guard
+refused to stamp over a failed prepare and saved the tenant model; the
+trains refused to claim convergence they could not evidence and filed
+loud packets instead; the disk floor refused rather than wedging a
+host. Each is a component choosing to stop rather than guess. The
+failures above are the same shape in reverse — a component that
+answered instead of erroring, or waited instead of speaking.
+
 ## Doors — the supported way in
 
 A door is a path already made safe: correct target, correct actor,

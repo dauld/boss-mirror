@@ -435,6 +435,53 @@ impl JobsRepository for InMemoryJobs {
         Ok(())
     }
 
+    async fn merge_step_metadata_at(
+        &self,
+        id: &StepId,
+        patch: &serde_json::Map<String, serde_json::Value>,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<Step, JobsError> {
+        // Mirror the Pg adapter: merge under the lock against the row
+        // as it stands, null removes, no other field moves, a terminal
+        // row refuses rather than silently freezing, and the
+        // STEP_UPDATED event is built from the post-merge row.
+        let merged = {
+            let mut state = self.inner.lock().expect("poisoned");
+            let key = step_key(id);
+            let Some(step) = state.steps.get_mut(&key) else {
+                return Err(JobsError::StepNotFound(*id));
+            };
+            if matches!(step.status, StepStatus::Completed | StepStatus::Skipped) {
+                return Err(JobsError::TerminalStep {
+                    id: *id,
+                    status: format!("{:?}", step.status).to_lowercase(),
+                });
+            }
+            let mut md = match &step.metadata {
+                serde_json::Value::Object(m) => m.clone(),
+                _ => serde_json::Map::new(),
+            };
+            for (k, v) in patch {
+                if v.is_null() {
+                    md.remove(k);
+                } else {
+                    md.insert(k.clone(), v.clone());
+                }
+            }
+            step.metadata = serde_json::Value::Object(md);
+            let merged = step.clone();
+            // Mirrors the SQL's `updated_at = stamp.timestamp`.
+            state.step_touched_at.insert(key, stamp.timestamp);
+            merged
+        };
+        let event = stamp.event(
+            crate::events::STEP_UPDATED,
+            crate::events::step_state_payload(&merged),
+        );
+        self.record_all(&[event]);
+        Ok(merged)
+    }
+
     async fn claim_step_at(
         &self,
         step_id: &StepId,

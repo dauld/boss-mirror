@@ -144,6 +144,10 @@ name = "step_plugin_registry_events_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "step_metadata_patch_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "step_terminal_refusal"
 required-features = ["postgres"]
 

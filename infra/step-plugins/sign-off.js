@@ -398,24 +398,33 @@
       try {
         // 1. The decision and the declared fields land in metadata
         //    FIRST — a stamp attests the step's shape, so the content
-        //    being signed must already be in it.
-        const metadata = { ...(step.metadata || {}) };
+        //    being signed must already be in it. They travel through
+        //    the step metadata PATCH, which merges ONLY the keys this
+        //    surface owns against the row as it stands. The old idiom
+        //    spread the page-load snapshot into a metadata PUT, which
+        //    replaces wholesale — so any key another writer added
+        //    after this page loaded was silently erased (the lost
+        //    update that reverted a review's title/markdown on
+        //    2026-09-02).
+        const patch = {};
         declared.forEach((f) => {
-          if (nonEmptyString(fieldValues[f.name])) metadata[f.name] = fieldValues[f.name];
+          if (nonEmptyString(fieldValues[f.name])) patch[f.name] = fieldValues[f.name];
         });
-        metadata.decision = d;
-        metadata.decided_at = new Date().toISOString();
-        if (commentTa.value.trim()) metadata.comment = commentTa.value.trim();
-        const saved = await fetch(`/api/jobs/${jobId}/steps/${step.id}`, {
-          method: 'PUT',
+        patch.decision = d;
+        patch.decided_at = new Date().toISOString();
+        if (commentTa.value.trim()) patch.comment = commentTa.value.trim();
+        const saved = await fetch(`/api/jobs/${jobId}/steps/${step.id}/metadata`, {
+          method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ metadata }),
+          body: JSON.stringify(patch),
         });
         if (!saved.ok) {
           error = `Could not record the decision (${saved.status}): ${await saved.text()}`;
           return;
         }
-        step.metadata = metadata;
+        // Fold the merged keys into the local cache the same way the
+        // server just did; keys other writers own stay as loaded.
+        step.metadata = Object.assign(step.metadata || {}, patch);
         if (d === 'changes-requested') {
           if (typeof onUpdate === 'function') onUpdate();
           return;

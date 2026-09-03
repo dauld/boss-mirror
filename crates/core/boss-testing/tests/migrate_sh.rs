@@ -439,3 +439,72 @@ async fn a_db_that_predates_the_runner_is_refused_until_baselined() {
     drop(conn);
     drop_db(&name).await;
 }
+
+/// Two pods booting together race the schema converge — named as
+/// RollingUpdate blocker #2 in boss.yaml's strategy comment. The whole
+/// run now holds `pg_advisory_lock` on a dedicated connection and
+/// computes its pending set AFTER acquisition, so the loser sees the
+/// winner's committed bookkeeping and applies nothing. The lock tag
+/// includes the database OID, so TestDb's per-test scratch databases
+/// never serialize on each other — only real contenders for one
+/// schema do.
+///
+/// Without the lock this fails loudly: both runs read an empty
+/// ledger, race the same non-idempotent CREATE TABLE, and the loser
+/// exits nonzero on duplicate DDL or the bookkeeping PK conflict.
+#[tokio::test]
+async fn two_concurrent_runs_apply_each_migration_exactly_once() {
+    let synth = Synthetic::new(&[
+        ("001-a.sql", "CREATE TABLE mig_race_a (id INT PRIMARY KEY);"),
+        ("002-b.sql", "CREATE TABLE mig_race_b (id INT PRIMARY KEY);"),
+        ("003-c.sql", "CREATE TABLE mig_race_c (id INT PRIMARY KEY);"),
+    ]);
+    let (name, url) = scratch_db().await;
+
+    let script = synth.script();
+    let (u1, u2) = (url.clone(), url.clone());
+    let s1 = script.clone();
+    let t1 = std::thread::spawn(move || run(&s1, &[], &u1));
+    let t2 = std::thread::spawn(move || run(&script, &[], &u2));
+    let o1 = t1.join().expect("run 1 thread");
+    let o2 = t2.join().expect("run 2 thread");
+
+    assert_ok(&o1, "concurrent run 1");
+    assert_ok(&o2, "concurrent run 2");
+
+    // "migrate.sh: applied A, already recorded R, of K migrations" —
+    // totals across the pair prove nothing ran twice and nothing was
+    // skipped: one run applied all three, the other recorded all
+    // three as already done.
+    let counts = |out: &Output| -> (u32, u32) {
+        let text = String::from_utf8_lossy(&out.stdout);
+        let line = text
+            .lines()
+            .rev()
+            .find(|l| l.contains("of 3 migrations"))
+            .expect("summary line");
+        let nums: Vec<u32> = line
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.parse().unwrap())
+            .collect();
+        (nums[0], nums[1])
+    };
+    let (a1, r1) = counts(&o1);
+    let (a2, r2) = counts(&o2);
+    assert_eq!(a1 + a2, 3, "each migration applied exactly once");
+    assert_eq!(r1 + r2, 3, "the loser saw the winner's bookkeeping");
+
+    let opts = PgConnectOptions::from_str(&url).expect("parsing scratch url");
+    let mut conn = PgConnection::connect_with(&opts)
+        .await
+        .expect("connecting to scratch db");
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM schema_migrations")
+        .fetch_one(&mut conn)
+        .await
+        .expect("counting bookkeeping rows");
+    assert_eq!(rows, 3, "exactly one bookkeeping row per migration");
+
+    drop(conn);
+    drop_db(&name).await;
+}

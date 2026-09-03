@@ -961,6 +961,171 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// `PATCH /api/jobs/{id}/steps/{step_id}/metadata` — merge top-level
+/// metadata keys into the Step, atomically, server-side. The step-side
+/// twin of `PATCH /api/jobs/{id}/metadata`, and the same contract: the
+/// body is a JSON object of top-level keys, a `null` value REMOVES the
+/// key, every other value replaces that key wholesale. Status,
+/// assignee, and every other step field are untouchable through this
+/// route — a `status` key in the body is just a metadata key named
+/// "status", exactly as it is on the job merge.
+///
+/// WHY IT EXISTS: the same lost-update race the job merge retired.
+/// With only the overlay PUT, every caller that wanted to set one
+/// metadata key ran GET → spread → PUT client-side, and PUT metadata
+/// is replaced wholesale — so a concurrent writer's keys were erased
+/// by whichever write landed second. The merge now happens inside one
+/// adapter transaction against the row as it stands.
+///
+/// A terminal step is refused with the PUT's own 409 shape (job
+/// 903e6b90: the caller is TOLD, never 204'd into believing a frozen
+/// write landed), and the hint points at the job metadata merge — the
+/// door that works, because a completed step is a record of what
+/// happened. Unlike the PUT there is no idempotent-re-send carve-out:
+/// nothing redelivers through this route, and a no-op "change" to a
+/// terminal step still has a better answer the message names.
+///
+/// Policy: the same coarse `(Update, step)` gate as the step PUT.
+pub(super) async fn patch_step_metadata<R: JobsRepository + 'static, B: EventBus + 'static>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+    Path((id, step_id_str)): Path<(String, String)>,
+    CurrentUser(user): CurrentUser,
+    Json(patch): Json<serde_json::Value>,
+) -> Response {
+    let job_id = match parse_job_id(&id) {
+        Some(id) => id,
+        None => return (StatusCode::BAD_REQUEST, "invalid job id").into_response(),
+    };
+    let step_id = match parse_step_id(&step_id_str) {
+        Some(id) => id,
+        None => return (StatusCode::BAD_REQUEST, "invalid step id").into_response(),
+    };
+    let serde_json::Value::Object(mut patch) = patch else {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "metadata patch must be a JSON object of top-level keys",
+        )
+            .into_response();
+    };
+
+    match state
+        .policy
+        .check(&user, Action::Update, Resource::step())
+        .await
+    {
+        Ok(Decision::Deny { reason }) => {
+            return (StatusCode::FORBIDDEN, reason).into_response();
+        }
+        Ok(_) => {}
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("policy check failed: {e}"),
+            )
+                .into_response();
+        }
+    }
+
+    let old = match state.jobs.get_step(&step_id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return (StatusCode::NOT_FOUND, "step not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    // Same containment rule as the claim route: a step addressed
+    // through a job it does not belong to is not found THERE.
+    if old.job_id != job_id {
+        return (StatusCode::NOT_FOUND, "step not on this job").into_response();
+    }
+
+    // `authority_role` is immutable across writes, same rule as the
+    // PUT: the persisted value wins, so a body can neither raise nor
+    // lower the required sign-off authority — nor shed it with null.
+    patch.remove("authority_role");
+
+    // The parent packet: the event stamp inherits its admission-fixed
+    // `simulated` flag, and the re-evaluator runs against it.
+    let parent_job = state.jobs.get_job(&job_id).await.ok().flatten();
+
+    let actor = user
+        .ambient_actor()
+        .unwrap_or_else(|| boss_core::actor::ActorId::Automation("platform".into()));
+    let mut stamp = state.publisher.stamp_with_actor(actor.clone()).await;
+    if let Some(j) = &parent_job {
+        stamp = stamp.with_simulated(j.simulated);
+    }
+    let stamp = stamp;
+
+    let merged = match state
+        .jobs
+        .merge_step_metadata_at(&step_id, &patch, &stamp)
+        .await
+    {
+        Ok(step) => step,
+        // The adapter's row-riding check wins over our `old` fetch —
+        // it saw the step at write time — so both the pre-known and
+        // the raced terminal case land here, in the PUT's 409 shape.
+        Err(crate::port::JobsError::TerminalStep { status, .. }) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "step is terminal — these fields are immutable",
+                    "step_id": step_id.to_string(),
+                    "step_status": status,
+                    "refused_fields": ["metadata"],
+                    "hint": "a completed step is a record of what happened. To correct or \
+                             annotate it, write to the parent job's metadata \
+                             (PATCH /api/jobs/{id}/metadata) instead.",
+                })),
+            )
+                .into_response();
+        }
+        Err(crate::port::JobsError::StepNotFound(_)) => {
+            return (StatusCode::NOT_FOUND, "step not found").into_response();
+        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    // Loud invalidation, same contract as the PUT: a merge that
+    // changed the step's completion-relevant shape makes existing
+    // stamps stale. Computed from the ACTUAL post-merge row and
+    // recorded through the outbox's standalone path (the marker is
+    // informational — the rebuild ignores it — so it rides its own
+    // small transaction, like the post-materialization ready pass).
+    if !old.sign_offs.is_empty()
+        && boss_core::job::step_shape_hash(&old.title, &old.metadata)
+            != boss_core::job::step_shape_hash(&merged.title, &merged.metadata)
+    {
+        let stale_roles: Vec<String> = merged.sign_offs.iter().map(|st| st.role.clone()).collect();
+        let event = stamp.event(
+            events::STEP_STAMPS_INVALIDATED,
+            serde_json::json!({
+                "job_id": job_id.to_string(),
+                "step_id": step_id.to_string(),
+                "stale_roles": stale_roles,
+                "required_roles": merged.sign_offs_required,
+            }),
+        );
+        if let Err(e) = state.jobs.record_events(std::slice::from_ref(&event)).await {
+            tracing::warn!(step_id = %step_id, error = %e, "metadata merge: failed to record stamps-invalidated marker");
+        }
+    }
+
+    // Same wake as the job metadata patch: a step-metadata write can
+    // flip a metadata-gated `ready_when` (`steps.<slug>.metadata.<field>`
+    // is in the predicate language — the backlog-item disposition
+    // terminals are built on it). Without this, a fact recorded
+    // through the merge would sit invisible to readiness until some
+    // unrelated status write happened by. Closed/cancelled Jobs stay
+    // untouched.
+    if let Some(job) = &parent_job
+        && job.status == JobStatus::Open
+    {
+        reevaluate_and_persist(&state, job, &actor).await;
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
 #[derive(Deserialize)]
 pub(super) struct SignOffBody {
     /// Which required role this stamp satisfies.

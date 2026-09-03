@@ -25,6 +25,8 @@ import {
   PROTOCOL_PALETTE,
   type JobLite,
   type StationQueueEnvelope,
+  trainTrouble,
+  troubleLabel,
 } from './yard';
 
 function train(over: Partial<JobLite>): JobLite {
@@ -1124,5 +1126,45 @@ describe('splitAtDeparture', () => {
     // section holds the train (the honesty note on 0bba59f7).
     const { inYard } = splitAtDeparture([row('r', 'BOARDED')]);
     expect(inYard.length).toBe(1);
+  });
+});
+
+describe('a troubled train looks troubled', () => {
+  const train = (over: Record<string, unknown> = {}) => ({
+    id: 't1',
+    kind: 'pr-train',
+    title: 'PR train',
+    status: 'open',
+    steps: [{ title: 'Open the batched PR', status: 'completed', metadata: {} }],
+    ...over,
+  }) as never;
+
+  test('surfaces a converge alarm the conductor already filed', () => {
+    const t = train({ metadata: { converge_alarm_filed: true } });
+    expect(trainTrouble(t)?.kind).toBe('converge-overdue');
+    expect(troubleLabel(trainTrouble(t)!)).toBe('CONVERGE OVERDUE');
+  });
+
+  test('surfaces a stall stamp', () => {
+    const t = train({ metadata: { stalled_since: '2026-09-02T17:00:00Z' } });
+    expect(trainTrouble(t)?.kind).toBe('stalled');
+  });
+
+  test('an arrived or closed train is never troubled', () => {
+    // Its history is not a live problem.
+    const closed = train({ status: 'closed', metadata: { converge_alarm_filed: true } });
+    expect(trainTrouble(closed)).toBeNull();
+    const arrived = train({
+      status: 'open',
+      metadata: { converge_alarm_filed: true },
+      steps: [{ title: 'Deployed to the playground', status: 'completed', metadata: {} }],
+    });
+    expect(trainTrouble(arrived)).toBeNull();
+  });
+
+  test('a healthy in-flight train is not troubled', () => {
+    expect(trainTrouble(train({ metadata: {} }))).toBeNull();
+    // An empty stall stamp is not a stall.
+    expect(trainTrouble(train({ metadata: { stalled_since: '' } }))).toBeNull();
   });
 });

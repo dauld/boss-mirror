@@ -246,6 +246,11 @@ TIMERS=(
     # kubernetes-nodes; this covers the machine it runs on — the
     # conductor VM whose registry note said "nothing watches it".
     "boss-estate-observe-host:estate"
+    # The unit half (729329c6): the host observer answers what the
+    # machine is; this answers what its units are doing, so "is
+    # boss-train.service alive" is a SoR read instead of a human on
+    # the host.
+    "boss-estate-observe-units:estate"
     "boss-messages-events-purge:."
     "boss-audit-integrity-check:."
     "boss-ledger-recognize:."

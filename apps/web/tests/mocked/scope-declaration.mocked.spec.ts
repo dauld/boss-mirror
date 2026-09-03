@@ -132,6 +132,7 @@ test('the boundary cannot be declared with half of it missing', async ({ page })
 });
 
 test('declaring the boundary writes both fields and completes the step', async ({ page }) => {
+  let patch: Record<string, unknown> | null = null;
   let put: Record<string, unknown> | null = null;
 
   await installSmokeMocks(page);
@@ -139,6 +140,18 @@ test('declaring the boundary writes both fields and completes the step', async (
   await page.route('**/api/jobs/step-plugins', (r) => r.fulfill({ json: SPEC }));
   await page.route('**/plugins/scope-declaration.js', (r) =>
     r.fulfill({ contentType: 'application/javascript', body: PLUGIN }),
+  );
+  // The declaration rides the metadata PATCH (only the keys this
+  // surface owns; the server merges and answers 204 with no body)…
+  await page.route('**/api/jobs/job-car-1/steps/step-scope/metadata', (r) => {
+    patch = r.request().postDataJSON() as Record<string, unknown>;
+    return r.fulfill({ status: 204, body: '' });
+  });
+  // …then the plugin reads the row back and completes with THAT — so
+  // this mock serves back exactly what the PATCH landed, and the
+  // completion assertions below attest the true merged shape.
+  await page.route('**/api/jobs/job-car-1/steps', (r) =>
+    r.fulfill({ json: [{ ...SCOPE_STEP, metadata: patch ?? {} }] }),
   );
   await page.route('**/api/jobs/job-car-1/steps/step-scope', (r) => {
     put = r.request().postDataJSON() as Record<string, unknown>;
@@ -153,11 +166,16 @@ test('declaring the boundary writes both fields and completes the step', async (
   await page.getByRole('button', { name: 'Declare the boundary' }).click();
   await expect.poll(() => put).not.toBeNull();
 
-  const body = put as unknown as { status: string; metadata: Record<string, string> };
-  expect(body.status).toBe('completed');
-  expect(body.metadata['summary']).toBe('Fix the marketing-asset tag chips.');
+  const merged = patch as unknown as Record<string, string>;
+  expect(merged['summary']).toBe('Fix the marketing-asset tag chips.');
   // Trimmed: the stored declaration is the sentence, not the whitespace
   // around it.
+  expect(merged['excludes']).toBe('Not the other pages — a sibling car owns them.');
+
+  const body = put as unknown as { status: string; metadata: Record<string, string> };
+  expect(body.status).toBe('completed');
+  // The completion carried the read-back row, not the snapshot.
+  expect(body.metadata['summary']).toBe('Fix the marketing-asset tag chips.');
   expect(body.metadata['excludes']).toBe('Not the other pages — a sibling car owns them.');
 });
 

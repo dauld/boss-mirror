@@ -7,6 +7,7 @@ mod census;
 mod credential;
 mod delivery_policy;
 mod deploy;
+mod design;
 mod dock_preview;
 mod docs;
 mod docs_flush;
@@ -246,6 +247,30 @@ enum Commands {
         /// Report what would happen without writing anything.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// File a design-doc packet in the shape the protocol can process.
+    ///
+    /// The `design-doc` workflow declares no metadata schema and its
+    /// review step never mentions `questions` — the one field the
+    /// protocol exists to process — so a malformed draft is admitted
+    /// silently and reaches the reviewer with nothing to answer. This
+    /// verb writes the working shape so nobody has to know it.
+    Design {
+        /// The doc's title.
+        title: String,
+        /// The doc body, markdown.
+        #[arg(long, default_value = "")]
+        markdown: String,
+        /// An open question as `anchor|title|proposal`. Repeatable.
+        #[arg(long = "question")]
+        questions: Vec<String>,
+        /// Record it without queuing a review — for a doc that states
+        /// a decision already made.
+        #[arg(long)]
+        no_questions: bool,
+        /// The docs/design path this packet mirrors, when there is one.
+        #[arg(long)]
+        doc_path: Option<String>,
     },
     /// Prove a merged car in production by RUNNING a probe.
     ///
@@ -950,6 +975,24 @@ async fn main() -> Result<()> {
             JobAction::Patch { job, patch } => job::patch(&job, &patch).await,
         },
         Commands::Orient => orient::run().await,
+        Commands::Design {
+            title,
+            markdown,
+            questions,
+            no_questions,
+            doc_path,
+        } => {
+            design::run(
+                title,
+                markdown,
+                questions,
+                no_questions,
+                doc_path,
+                chrono::Utc::now(),
+            )
+            .await
+        }
+
         Commands::Rerail {
             car,
             finish,

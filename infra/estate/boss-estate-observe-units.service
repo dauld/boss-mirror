@@ -1,0 +1,35 @@
+# The unit half of the host observation loop (729329c6): observe-host
+# records what the machine IS, this records what its units are DOING —
+# so "is boss-train.service alive" is a SoR read, not a human with ssh.
+# Installed on boss-gcp by deploy-services.sh (TIMERS row). The forge
+# host runs the SAME pair with drop-in overrides, installed by hand
+# until its config-not-in-repo debt is paid:
+#   sudo install -m644 infra/estate/boss-estate-observe-units.{service,timer} /etc/systemd/system/
+#   sudo mkdir -p /etc/systemd/system/boss-estate-observe-units.service.d
+#   printf '[Service]\nEnvironment=HOST_ID=forge\nEnvironment="UNITS=forgejo.service cluster-deploy-runner.timer cluster-deploy-runner.service"\n' | sudo tee /etc/systemd/system/boss-estate-observe-units.service.d/host.conf
+#   sudo systemctl daemon-reload && sudo systemctl enable --now boss-estate-observe-units.timer
+[Unit]
+Description=BOSS estate: observe this host's units and record what they were doing
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HOST_ID=boss-gcp
+Environment=JOBS_API=http://10.20.0.34:7900
+# What THIS host runs of the watched set; the script's default is the
+# union across hosts, and each host's unit file or drop-in names its
+# own share. boss-gcp's is the conductor — the unit whose quiet cost
+# 2+ hours of an unmerged CI-green train.
+Environment=UNITS=boss-train.service
+# The timers-leave-a-packet pair: a timer with no Job trail fails
+# silently, which is the exact class this observer exists to end.
+# BOSS_JOBS_URL pinned INLINE: deploy-services' shared jobs-url.conf
+# drop-in points the timer fleet at the legacy 127.0.0.1 instance
+# (91ddebfb) and drop-in env wins over unit env — observe-host's first
+# scheduled firing died 400 registering its packet against a registry
+# that has never heard of this kind. env(1) on the Exec line outranks
+# both.
+ExecStartPre=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-maintenance-wrap.sh maintenance-estate-observe-units "estate unit observation"
+ExecStart=/opt/boss/infra/estate/observe-units.sh
+ExecStartPost=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-step.sh maintenance-estate-observe-units run result=ok
