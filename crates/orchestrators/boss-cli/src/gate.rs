@@ -17,45 +17,53 @@
 //! avoid that, which is why this reuses an open packet for the same
 //! branch and sha instead of filing a duplicate.
 //!
-//! ON CONCURRENCY, WHERE THE FILED PROPOSAL IS NOW OUT OF DATE. It
-//! asked for a flat refusal to start a second gate, "because there is
-//! one gate disk and two concurrent gates crossed verdicts on
-//! 2026-08-24". That was true of the manifest that mounts the shared
-//! `gate-runner-disk` PVC, and it is not true of the local-disk
-//! variant: on 2026-08-26 six gates ran side by side, each with its own
-//! `emptyDir` workspace, and all six produced correct independent
-//! receipts. So the rule is not "one gate" — it is "one gate PER SHARED
-//! WORKSPACE". The refusal is derived from the rendered manifest rather
-//! than hardcoded, so pointing `--manifest` at a local-disk runner
-//! lifts it automatically and pointing it at the PVC runner restores
-//! it.
+//! ON CONCURRENCY. Gates run in PARALLEL since packet 28de3845: the
+//! runner's workspace is a per-run emptyDir (seeded warm from the old
+//! PVC, which survives as the seed + crate cache), so two gates cannot
+//! see each other's tree and the 2026-08-24 crossed-receipts incident
+//! is structurally impossible — proven shape: on 2026-08-26 six
+//! emptyDir gates ran side by side and produced six correct
+//! independent receipts. The old one-gate-per-shared-workspace refusal
+//! (and the volumeattachment detach guard that served it) died in the
+//! same car that made dying safe; the isolation contract is pinned by
+//! boss-testing's gate_runner_parallel_workspace tests rather than
+//! re-derived from the rendered manifest here.
 //!
-//! Concurrency past that is bounded by the node, not by correctness.
-//! Five parallel gates put w-1 at 65% I/O pressure with CPU pressure at
-//! 0.00 and stretched a 35-minute gate to 93 minutes — so a soft warning
-//! at [`CROWDED`] says so, and does not refuse.
+//! What remains bounded is the NODE, not correctness. Five parallel
+//! gates put w-1 at 65% I/O pressure with CPU pressure at 0.00 and
+//! stretched a 35-minute gate to 93 minutes — so this verb counts live
+//! gate Jobs and refuses politely at [`DEFAULT_MAX_CONCURRENT`]
+//! (override: BOSS_GATE_MAX_CONCURRENT), naming the running gates. The
+//! count is best-effort against a race (two verbs counting at once can
+//! both see N-1), which is acceptable now that over-admission costs
+//! minutes, not verdicts; the scheduler's ephemeral-storage accounting
+//! is the hard backstop on the disk.
 
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use crate::train::boss_user;
 
-/// Concurrent local-disk gates past which the node, not the gate, is
-/// the constraint. Measured on w-1 (32 cores, one NVMe): at five
-/// concurrent gates I/O pressure sat at 65% while CPU pressure stayed
-/// at 0.00, and per-gate wall time went from ~35 to ~93 minutes.
-/// Throughput was still better than running them one at a time — which
-/// is why this warns rather than refuses.
-const CROWDED: usize = 3;
+/// Concurrent gates admitted by default. Three is inside the measured
+/// comfort zone on w-1 (32 cores, one NVMe): at FIVE concurrent gates
+/// I/O pressure sat at 65% while CPU pressure stayed at 0.00, and
+/// per-gate wall time went from ~35 to ~93 minutes — total throughput
+/// still beat serial, but each verdict arrived slower than two gates'
+/// worth of queueing. Override with BOSS_GATE_MAX_CONCURRENT when the
+/// node grows (or shrinks).
+const DEFAULT_MAX_CONCURRENT: usize = 3;
 
 /// The placeholders the runner manifest carries.
 const BRANCH_PLACEHOLDER: &str = "$GATE_BRANCH";
 const PACKET_PLACEHOLDER: &str = "$GATE_RUN_JOB_ID";
 const MODE_PLACEHOLDER: &str = "$GATE_MODE";
+/// The branch, sanitized to DNS-label characters, so concurrent Jobs
+/// are tellable apart: `gate-$GATE_NAME_HINT-<rand>`. Derived from the
+/// branch by [`name_hint`] — never passed in.
+const HINT_PLACEHOLDER: &str = "$GATE_NAME_HINT";
 
 /// Every `$GATE_*` token the manifest mentions, longest form intact.
 ///
@@ -81,89 +89,153 @@ fn gate_tokens(manifest: &str) -> Vec<String> {
     out
 }
 
-/// Does this rendered Job take a workspace that another gate could be
-/// using at the same time?
+/// Does this rendered Job mount a PersistentVolumeClaim at
+/// /gate-target — the PRE-PARALLEL manifest shape?
 ///
-/// The question is only about the gate's WORKSPACE volume. A
-/// `persistentVolumeClaim` is shared across pods; an `emptyDir` is
-/// created per pod and cannot be. Two gates on one PVC is not slow, it
-/// is WRONG: each `git checkout -f -B` yanks the tree from under the
-/// other and both write the same receipt path, so on 2026-08-24 the
-/// verdicts came back crossed — a receipt naming branch A's head
-/// reported under branch B. All three results had to be thrown away.
-pub(crate) fn workspace_is_shared(job_yaml: &str) -> bool {
-    job_yaml.contains("persistentVolumeClaim")
-}
-
-/// The workspace PVC the rendered Job mounts, in either yaml spelling —
-/// the shipped manifest writes `persistentVolumeClaim: {claimName: x}`
-/// inline, so a block-style-only parser would return None against
-/// production and the detach guard below would silently never engage.
-pub(crate) fn workspace_claim(job_yaml: &str) -> Option<String> {
-    job_yaml.lines().find_map(|l| {
-        let (_, rest) = l.split_once("claimName:")?;
-        let name = rest.trim().trim_end_matches('}').trim();
-        (!name.is_empty()).then(|| name.to_string())
-    })
-}
-
-/// Does any volumeattachment row (kubectl --no-headers table:
-/// NAME ATTACHER PV NODE ATTACHED AGE) name this PV in column 3?
-pub(crate) fn any_attachment_for(table: &str, volume: &str) -> bool {
-    table
-        .lines()
-        .filter_map(|l| l.split_whitespace().nth(2))
-        .any(|pv| pv == volume)
-}
-
-/// How a wait for workspace release ended.
+/// The shipped manifest's workspace is a per-run emptyDir (the seed
+/// PVC mounts at /gate-seed), so a bare `contains("persistentVolumeClaim")`
+/// stopped meaning "shared workspace" the day the seed shipped. But a
+/// stale checkout, or `--manifest`, can still render the OLD shape
+/// whose /gate-target IS the shared PVC — and for that shape the old
+/// law still holds absolutely: two gates on one workspace disk cross
+/// their receipts (2026-08-24; all three results discarded). So the
+/// discriminator is the MOUNT, not the volume list: which volume backs
+/// /gate-target, and is that volume a claim.
 ///
-/// WHY THIS EXISTS (da260655). `running_gates` reads pod PHASE, and a
-/// finishing gate's pod leaves Running before the node lets go of the
-/// workspace volume — so a gate launched right behind a finishing one
-/// passes the pods guard and then stalls on attach. The guard that
-/// checks pods cannot see the disk; this one watches the
-/// volumeattachment itself.
-#[derive(Debug)]
-pub(crate) enum ReleaseWait {
-    /// No attachment held the volume — the common path, zero polls.
-    Free,
-    /// Detach lag resolved after this many polls.
-    Released { polls: usize },
-    /// Still attached after every allowed poll; the caller proceeds.
-    TimedOut,
-    /// The probe itself errored; the caller proceeds with a notice.
-    Unwatchable(String),
-}
-
-/// Poll `attached` until it clears, erroring, or `max_polls` sleeps.
-///
-/// FAIL-OPEN, unlike `resolve_running` — the asymmetry is deliberate.
-/// The pods guard protects verdict CORRECTNESS (two gates on one disk
-/// cross their receipts), so an unreadable count refuses. This guard
-/// protects launch LIVENESS: the worst case of proceeding is a pod
-/// briefly Pending on attach, strictly better than refusing to gate on
-/// RBAC that can list pods but not cluster-scoped volumeattachments.
-/// Pure — polls are counted, not clocked, so the rule pins in tests.
-pub(crate) fn await_release<F, S>(mut attached: F, mut sleep: S, max_polls: usize) -> ReleaseWait
-where
-    F: FnMut() -> Result<bool>,
-    S: FnMut(),
-{
-    match attached() {
-        Ok(false) => return ReleaseWait::Free,
-        Err(e) => return ReleaseWait::Unwatchable(format!("{e:#}")),
-        Ok(true) => {}
-    }
-    for polls in 1..=max_polls {
-        sleep();
-        match attached() {
-            Ok(false) => return ReleaseWait::Released { polls },
-            Err(e) => return ReleaseWait::Unwatchable(format!("{e:#}")),
-            Ok(true) => {}
+/// Reads both the inline mount style the manifests actually use
+/// (`- {name: x, mountPath: /gate-target}`) and block-style entries —
+/// a parser proven only against one spelling answers None against the
+/// other and the guard silently never engages (da260655's shape).
+pub(crate) fn pvc_backed_workspace(job_yaml: &str) -> bool {
+    let mount_is_gate_target = |line: &str| {
+        line.split("mountPath:").nth(1).is_some_and(|rest| {
+            rest.trim_start()
+                .trim_end_matches('}')
+                .split([',', ' '])
+                .next()
+                == Some("/gate-target")
+        })
+    };
+    // Which volume is mounted at /gate-target?
+    let mut current_entry: Option<String> = None;
+    let mut workspace: Option<String> = None;
+    for line in job_yaml.lines() {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("- name:") {
+            current_entry = Some(rest.trim().to_string());
+        }
+        if t.contains("mountPath:") && mount_is_gate_target(t) {
+            workspace = if t.contains("name:") {
+                // Inline `- {name: x, mountPath: /gate-target}`.
+                t.split("name:")
+                    .nth(1)
+                    .and_then(|a| a.trim_start().split([',', '}']).next())
+                    .map(|s| s.trim().to_string())
+            } else {
+                // Block style: the entry opened by the last `- name:`.
+                current_entry.clone()
+            };
         }
     }
-    ReleaseWait::TimedOut
+    let Some(ws) = workspace else {
+        return false;
+    };
+    // Is that volume claim-backed?
+    let mut in_entry = false;
+    for line in job_yaml.lines() {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("- name:") {
+            in_entry = rest.trim() == ws;
+            continue;
+        }
+        if in_entry && t.starts_with("persistentVolumeClaim") {
+            return true;
+        }
+    }
+    false
+}
+
+/// The branch, ground down to what a Kubernetes name/label value may
+/// carry: lowercase alphanumerics and single dashes, at most 20 chars,
+/// never starting or ending on a dash. `feat/gates-run-in-parallel`
+/// becomes `feat-gates-run-in-pa`; a branch with no usable characters
+/// falls back to `branch` rather than rendering an invalid manifest.
+///
+/// WHY: concurrent Jobs used to be `gate-8kx2p`, `gate-w6x6b` — a
+/// refusal or a status line naming three of those names nothing. The
+/// hint rides in `generateName: gate-<hint>-` (the API server still
+/// appends its random suffix, which keeps names fresh) and in the
+/// `boss.dev/branch` label.
+pub(crate) fn name_hint(branch: &str) -> String {
+    let mut out = String::new();
+    for c in branch.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.truncate(20);
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "branch".to_string()
+    } else {
+        out
+    }
+}
+
+/// The concurrency bound, from its env override or the default.
+///
+/// Pure over the raw env value so the parsing rules pin in tests.
+/// An unparseable value REFUSES rather than silently meaning 3 — a
+/// typo'd bound that quietly becomes the default is the same defect
+/// class as the wrong-instance default this file already refuses
+/// (packet aa783636): right sometimes, silently wrong when it matters.
+/// Zero refuses too: it would deny every gate forever, which is a
+/// misconfiguration, not a policy — set 1 to serialize.
+pub(crate) fn max_concurrent_from(raw: Option<&str>) -> Result<usize> {
+    let Some(v) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(DEFAULT_MAX_CONCURRENT);
+    };
+    let n: usize = v.parse().map_err(|_| {
+        anyhow!(
+            "BOSS_GATE_MAX_CONCURRENT={v} is not a count. Set a positive integer \
+             (default {DEFAULT_MAX_CONCURRENT}), or unset it."
+        )
+    })?;
+    if n == 0 {
+        bail!(
+            "BOSS_GATE_MAX_CONCURRENT=0 would refuse every gate. Set 1 to \
+             serialize, or unset it for the default {DEFAULT_MAX_CONCURRENT}."
+        );
+    }
+    Ok(n)
+}
+
+fn max_concurrent() -> Result<usize> {
+    max_concurrent_from(std::env::var("BOSS_GATE_MAX_CONCURRENT").ok().as_deref())
+}
+
+/// The polite refusal at the concurrency bound, or None below it.
+///
+/// Pure, and it NAMES the running gates — the operator's next move is
+/// to wait for or watch one of them, and a bound that says only "3
+/// running" sends them off to run the kubectl this verb already ran.
+pub(crate) fn crowd_refusal(live: &[String], max: usize) -> Option<String> {
+    if live.len() < max {
+        return None;
+    }
+    Some(format!(
+        "{n} gate(s) already running ({names}) — at the concurrency bound of {max}.\n  \
+         Every workspace is per-run so the verdicts stay independent, but the gates \
+         share one build node and one seed disk: at five concurrent, I/O pressure hit \
+         65% and a ~35-minute gate took ~93 (measured 2026-08-26). Wait for one to \
+         finish, or raise BOSS_GATE_MAX_CONCURRENT if the node has grown.",
+        n = live.len(),
+        names = live.join(", "),
+    ))
 }
 
 /// Substitute the runner manifest's placeholders and return the single
@@ -186,7 +258,12 @@ pub(crate) fn render_job(
     // placeholder and leave something that no longer looks wrong —
     // the manifest would render "cleanly" and the Job would run with a
     // mangled value. Checking first is the only order that can catch it.
-    let known = [BRANCH_PLACEHOLDER, PACKET_PLACEHOLDER, MODE_PLACEHOLDER];
+    let known = [
+        BRANCH_PLACEHOLDER,
+        PACKET_PLACEHOLDER,
+        MODE_PLACEHOLDER,
+        HINT_PLACEHOLDER,
+    ];
     for token in gate_tokens(manifest) {
         if !known.contains(&token.as_str()) {
             bail!(
@@ -200,6 +277,7 @@ pub(crate) fn render_job(
     let filled = manifest
         .replace(BRANCH_PLACEHOLDER, branch)
         .replace(PACKET_PLACEHOLDER, packet_id)
+        .replace(HINT_PLACEHOLDER, &name_hint(branch))
         .replace(MODE_PLACEHOLDER, mode);
 
     let job = filled
@@ -618,154 +696,49 @@ fn kubectl(namespace: &str) -> std::process::Command {
     c
 }
 
-/// Gate Jobs whose pods are still running.
-fn running_gates(namespace: &str) -> Result<usize> {
+/// The gate Jobs matching a label selector, as a NAME/SUCCEEDED/FAILED
+/// table — one kubectl shape shared by the per-packet attach check and
+/// the concurrency count, so the two cannot drift in how they read a
+/// Job's liveness.
+///
+/// FAILS CLOSED (bails on any kubectl failure), and the callers keep
+/// it that way on purpose. The old pods-based count once degraded an
+/// error to zero, and zero was exactly the value that satisfied the
+/// guard it fed — an unreadable cluster read as "healthy and idle".
+/// The stake today is smaller (over-admission wastes node-minutes, not
+/// verdicts — workspaces are per-run) but kubectl is needed to CREATE
+/// the Job anyway, so a cluster too sick to answer this was never
+/// going to run the gate either.
+fn gate_jobs_table(namespace: &str, selector: &str) -> Result<String> {
     let out = kubectl(namespace)
         .args([
             "get",
-            "pods",
+            "jobs",
+            "-l",
+            selector,
             "--no-headers",
-            "--field-selector=status.phase=Running",
+            "-o",
+            "custom-columns=NAME:.metadata.name,S:.status.succeeded,F:.status.failed",
         ])
         .output()
-        .context("kubectl get pods — is KUBECONFIG set and the cluster reachable?")?;
+        .context("kubectl get jobs — is KUBECONFIG set and the cluster reachable?")?;
     if !out.status.success() {
         bail!(
-            "kubectl get pods failed: {}",
+            "kubectl get jobs -l {selector} failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|l| l.starts_with("gate-"))
-        .count())
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// What to do when the running-gate count could not be read.
-///
-/// AN ERROR IS NOT ZERO. This was `running_gates(ns).unwrap_or(0)`, and
-/// zero is precisely the value that satisfies the guard below it —
-/// `if shared && running > 0`. So any failure at all (no KUBECONFIG, an
-/// unreachable API server, a service account that may create Jobs but
-/// not list pods) read as "the cluster is healthy and idle" and the
-/// guard passed. The one condition that must never be guessed was
-/// guessed, in the permissive direction: the guard failed OPEN.
-///
-/// What it protects is not hypothetical. Its own message records the
-/// cost: on 2026-08-24 two gates sharing one disk crossed their
-/// receipts, a receipt naming one branch's head was reported under
-/// another, and all three results were discarded.
-///
-/// So: on a SHARED workspace an unreadable count refuses, carrying the
-/// diagnostic `running_gates` already writes ("is KUBECONFIG set and
-/// the cluster reachable?") — which the discard also threw away, so the
-/// operator met a raw kubectl error from the later create instead.
-/// On a private workspace the count only drives an advisory notice, and
-/// there a missing hint is the whole cost, so it degrades to zero.
-///
-/// Pure, so the rule is pinned by tests rather than by this comment.
-fn resolve_running(shared: bool, running: Result<usize>) -> Result<usize> {
-    match running {
-        Ok(n) => Ok(n),
-        Err(e) if shared => Err(e).context(
-            "cannot verify whether another gate is already running, and this runner \
-             mounts a SHARED /gate-target — refusing rather than assuming it is free",
-        ),
-        Err(_) => Ok(0),
-    }
-}
-
-/// The PV behind a PVC, or None while unbound. kubectl's jsonpath
-/// prints the empty string for a missing field rather than erroring —
-/// mapped to None here so absence stays distinguishable from a name.
-fn pvc_volume_name(namespace: &str, claim: &str) -> Result<Option<String>> {
-    let out = kubectl(namespace)
-        .args(["get", "pvc", claim, "-o", "jsonpath={.spec.volumeName}"])
-        .output()
-        .context("kubectl get pvc — is KUBECONFIG set and the cluster reachable?")?;
-    if !out.status.success() {
-        bail!(
-            "kubectl get pvc {claim} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    Ok((!name.is_empty()).then_some(name))
-}
-
-/// Is this PV named by any volumeattachment? Cluster-scoped, so no -n.
-fn volume_attached(volume: &str) -> Result<bool> {
-    let out = std::process::Command::new("kubectl")
-        .args(["get", "volumeattachments", "--no-headers"])
-        .output()
-        .context("kubectl get volumeattachments")?;
-    if !out.status.success() {
-        bail!(
-            "kubectl get volumeattachments failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(any_attachment_for(
-        &String::from_utf8_lossy(&out.stdout),
-        volume,
-    ))
-}
-
-/// One poll every five seconds, twenty-four polls: a two-minute bound.
-/// Detach lag measures in seconds; a volume still held after two
-/// minutes is not lag, and holding the verb longer buys nothing the
-/// scheduler would not do anyway.
-const RELEASE_POLL: Duration = Duration::from_secs(5);
-const RELEASE_MAX_POLLS: usize = 24;
-
-/// The detach guard, wired: resolve the PVC's volume, then wait out
-/// any lingering attachment. Every branch proceeds — this guard's only
-/// powers are to sleep and to say what it saw.
-fn wait_for_workspace_release(namespace: &str, job_yaml: &str) {
-    let Some(claim) = workspace_claim(job_yaml) else {
-        return;
-    };
-    let volume = match pvc_volume_name(namespace, &claim) {
-        Ok(Some(v)) => v,
-        Ok(None) => return,
-        Err(e) => {
-            eprintln!(
-                "boss gate: cannot watch workspace volume ({e:#}) — proceeding as before this guard existed"
-            );
-            return;
-        }
-    };
-    let mut announced = false;
-    let outcome = await_release(
-        || volume_attached(&volume),
-        || {
-            if !announced {
-                println!(
-                    "boss gate: workspace volume still attached (detach lag, da260655) — \
-                     waiting up to {}s for the node to let go",
-                    RELEASE_POLL.as_secs() * RELEASE_MAX_POLLS as u64
-                );
-                announced = true;
-            }
-            std::thread::sleep(RELEASE_POLL);
-        },
-        RELEASE_MAX_POLLS,
-    );
-    match outcome {
-        ReleaseWait::Free => {}
-        ReleaseWait::Released { polls } => println!(
-            "boss gate: workspace volume released after ~{}s — clear to launch",
-            polls as u64 * RELEASE_POLL.as_secs()
-        ),
-        ReleaseWait::TimedOut => println!(
-            "boss gate: workspace volume still attached after ~{}s — proceeding; \
-             the pod may briefly wait on attach",
-            RELEASE_POLL.as_secs() * RELEASE_MAX_POLLS as u64
-        ),
-        ReleaseWait::Unwatchable(msg) => eprintln!(
-            "boss gate: cannot watch workspace volume ({msg}) — proceeding as before this guard existed"
-        ),
-    }
+/// Every gate Job still live, by name. Jobs, not pods, deliberately:
+/// a just-launched gate's pod sits Pending (scheduling, image pull,
+/// volume attach) where a `status.phase=Running` field selector cannot
+/// see it — two quick `boss gate` calls would each count zero and
+/// together over-fill the node. A Job with neither `succeeded` nor
+/// `failed` set is live from the moment `kubectl create` returns.
+fn running_gates(namespace: &str) -> Result<Vec<String>> {
+    Ok(live_gates(&gate_jobs_table(namespace, "app=gate-runner")?))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -784,10 +757,11 @@ pub async fn run(
         .with_context(|| format!("reading runner manifest {}", manifest_path.display()))?;
 
     // BEFORE the sha lookup, the packet, the manifest and kubectl —
-    // a bad mode, or a half-filled park intent, should cost a line of
-    // output, not a gate slot.
+    // a bad mode, a half-filled park intent, or a typo'd concurrency
+    // bound should cost a line of output, not a gate slot.
     let mode = normalize_mode(&mode.unwrap_or_default())?;
     park.require_complete()?;
+    let max = max_concurrent()?;
     let sha = resolve_sha(branch);
     let http = reqwest::Client::new();
 
@@ -877,60 +851,66 @@ pub async fn run(
         return Ok(());
     }
 
-    // The concurrency rule, derived rather than hardcoded. A refusal
-    // from here on happens AFTER the packet was filed — close what we
-    // just opened so the refusal leaves no orphan (ed7f1355), then
-    // surface it.
-    let shared = workspace_is_shared(&job);
-    let running = match resolve_running(shared, running_gates(namespace)) {
-        Ok(n) => n,
+    // The concurrency bound. Workspaces are per-run (pinned by
+    // boss-testing's gate_runner_parallel_workspace tests), so a
+    // second gate is SAFE — the bound protects the build node's disk
+    // and I/O, not any verdict. A refusal from here on happens AFTER
+    // the packet was filed — close what we just opened so the refusal
+    // leaves no orphan (ed7f1355), then surface it.
+    let live = match running_gates(namespace) {
+        Ok(l) => l,
         Err(e) => {
+            let e = e.context(
+                "cannot count running gates, so the concurrency bound cannot be \
+                 enforced — refusing rather than assuming the build node is free",
+            );
             if !reused && !dry {
                 close_refused(&http, &packet, &format!("{e:#}")).await;
             }
             return Err(e);
         }
     };
-    if shared && running > 0 {
-        if !reused && !dry {
-            close_refused(
-                &http,
-                &packet,
-                &format!("{running} gate(s) already running on the shared workspace"),
-            )
-            .await;
-        }
-        bail!(
-            "{} gate(s) already running and {} mounts a SHARED workspace.\n  \
-             Two gates on one disk cross their receipts — on 2026-08-24 a receipt naming \
-             one branch's head was reported under another, and all three results were \
-             discarded.\n  Wait for the running gate, or use a runner manifest whose \
-             /gate-target is an emptyDir.",
-            running,
-            manifest_path.display()
+    // LEGACY-MANIFEST GUARD. If the rendered Job's /gate-target is
+    // still a PVC (a stale checkout, or --manifest at the pre-parallel
+    // runner), the old law holds absolutely: one gate per shared
+    // workspace, because two on one disk cross their receipts
+    // (2026-08-24). The bounded rule below only applies to per-run
+    // workspaces.
+    if pvc_backed_workspace(&job) && !live.is_empty() {
+        let why = format!(
+            "{n} gate(s) already running ({names}) and {manifest} mounts a SHARED \
+             workspace at /gate-target — the pre-parallel runner shape.\n  Two gates \
+             on one disk cross their receipts (2026-08-24: a receipt naming one \
+             branch's head reported under another; all three results discarded).\n  \
+             Wait for the running gate, or update the checkout so the manifest's \
+             workspace is a per-run emptyDir seeded from /gate-seed.",
+            n = live.len(),
+            names = live.join(", "),
+            manifest = manifest_path.display(),
         );
+        if !reused && !dry {
+            close_refused(&http, &packet, &why).await;
+        }
+        bail!("{why}");
     }
-    if !shared && running >= CROWDED {
-        eprintln!(
-            "boss gate: {running} gates already running. Each has its own workspace so the \
-             verdicts are safe, but the node becomes the constraint — measured at five \
-             concurrent gates: 65% I/O pressure, 0.00 CPU pressure, per-gate wall time \
-             ~35min -> ~93min. Proceeding."
+    if let Some(why) = crowd_refusal(&live, max) {
+        if !reused && !dry {
+            close_refused(&http, &packet, &why).await;
+        }
+        bail!("{why}");
+    }
+    if !live.is_empty() {
+        println!(
+            "boss gate: {} gate(s) already running ({}) — workspaces are per-run, \
+             verdicts stay independent; launching alongside",
+            live.len(),
+            live.join(", ")
         );
     }
 
     if dry {
         println!("boss gate: DRY would create a Job for {branch} (packet {packet})");
         return Ok(());
-    }
-
-    // The pods guard above answers "is another gate RUNNING"; it cannot
-    // see that a just-finished gate's volume is still detaching from
-    // the node (da260655). On a shared workspace, wait that lag out
-    // before creating the Job — a liveness guard, so every branch of it
-    // proceeds; it only sleeps and reports.
-    if shared {
-        wait_for_workspace_release(namespace, &job);
     }
 
     let mut child = kubectl(namespace)
@@ -998,15 +978,17 @@ pub(crate) fn silent_packet_verdict(job_finished: bool, job_failed: bool) -> Opt
     if job_failed {
         return Some(
             "the gate Job failed without the packet ever reporting a verdict.\n               That is NOT the same as a red gate: the run died, and the code may well have \
-             passed. The receipt is written to /gate-target/receipt.json before the pod \
-             exits and survives it, so read the receipt rather than re-running 40 minutes \
-             of gate on the assumption this was a failure."
+             passed. The workspace was per-run and died with the pod, so the surviving copy \
+             of the receipt is the pod log — `kubectl logs job/<job>` (the `gate-runner: \
+             receipt` line), kept for a day after the Job ends. Read it rather than \
+             re-running 40 minutes of gate on the assumption this was a failure."
                 .to_string(),
         );
     }
     Some(
-        "the gate Job finished but the packet never reported a verdict.\n           The run completed, so the receipt at /gate-target/receipt.json should hold the \
-         answer; the reporting call is what went missing."
+        "the gate Job finished but the packet never reported a verdict.\n           The run completed and echoed its receipt to stdout before reporting, so \
+         `kubectl logs job/<job>` (the `gate-runner: receipt` line) holds the answer; \
+         the reporting call is what went missing."
             .to_string(),
     )
 }
@@ -1200,51 +1182,40 @@ fn job_state(namespace: &str, job_name: &str) -> (bool, bool) {
     (succeeded > 0 || failed > 0, failed > 0)
 }
 
-/// Which of these Jobs, if any, is still running?
+/// Which of these Jobs are still running?
 ///
 /// Parses `kubectl get jobs -o custom-columns=NAME,SUCCEEDED,FAILED`
 /// rows. A Job is LIVE when it has neither succeeded nor failed —
 /// kubectl prints `<none>` for both while it runs, and `<none>` parses
 /// to zero, which is the honest reading here: nothing has completed.
-fn live_sibling(rows: &str) -> Option<String> {
-    rows.lines().find_map(|line| {
-        let mut f = line.split_whitespace();
-        let name = f.next()?;
-        let count = |s: Option<&str>| s.unwrap_or("0").parse::<i32>().unwrap_or(0);
-        let succeeded = count(f.next());
-        let failed = count(f.next());
-        (succeeded == 0 && failed == 0).then(|| name.to_string())
-    })
+pub(crate) fn live_gates(rows: &str) -> Vec<String> {
+    rows.lines()
+        .filter_map(|line| {
+            let mut f = line.split_whitespace();
+            let name = f.next()?;
+            let count = |s: Option<&str>| s.unwrap_or("0").parse::<i32>().unwrap_or(0);
+            let succeeded = count(f.next());
+            let failed = count(f.next());
+            (succeeded == 0 && failed == 0).then(|| name.to_string())
+        })
+        .collect()
 }
 
 /// Is a Job already gating this packet?
 ///
-/// FAILS CLOSED, for the same reason [`resolve_running`] does: the
-/// dangerous act is CREATING a second Job, so an unreadable cluster
-/// must not read as "nothing is running". kubectl is needed to create
-/// the Job anyway, so a cluster too sick to answer this was never going
-/// to run the gate.
+/// FAILS CLOSED (via [`gate_jobs_table`]): the dangerous act is
+/// CREATING a second Job against the same packet — two Jobs racing to
+/// report one verdict — so an unreadable cluster must not read as
+/// "nothing is running".
 fn live_gate_for_packet(namespace: &str, packet: &str) -> Result<Option<String>> {
-    let out = kubectl(namespace)
-        .args([
-            "get",
-            "jobs",
-            "-l",
-            &format!("boss.dev/packet={packet}"),
-            "--no-headers",
-            "-o",
-            "custom-columns=NAME:.metadata.name,S:.status.succeeded,F:.status.failed",
-        ])
-        .output()
-        .context("kubectl get jobs — is KUBECONFIG set and the cluster reachable?")?;
-    if !out.status.success() {
-        bail!(
-            "cannot tell whether packet {} is already being gated: {}",
-            &packet[..8.min(packet.len())],
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(live_sibling(&String::from_utf8_lossy(&out.stdout)))
+    let table =
+        gate_jobs_table(namespace, &format!("boss.dev/packet={packet}")).with_context(|| {
+            format!(
+                "cannot tell whether packet {} is already being gated",
+                &packet[..8.min(packet.len())]
+            )
+        })?;
+    Ok(live_gates(&table).into_iter().next())
 }
 
 #[cfg(test)]
@@ -1313,21 +1284,21 @@ mod tests {
 
     /// THE RACE THIS CLOSES. `boss gate` printed "`boss gate --wait`
     /// follows it", and following that advice created a SECOND Job
-    /// against the same reused packet. Two Jobs then raced on one
-    /// gate-target: one died at 70s, the other went green, and the
+    /// against the same reused packet. Two Jobs then raced to report
+    /// one verdict: one died at 70s, the other went green, and the
     /// `--wait` guard recorded the packet as `lost` while the gate that
     /// actually ran was passing (5703c784).
     #[test]
     fn a_running_job_is_found_so_a_second_is_never_created() {
         let running = "gate-2cn2l   <none>   <none>";
-        assert_eq!(live_sibling(running).as_deref(), Some("gate-2cn2l"));
+        assert_eq!(live_gates(running), vec!["gate-2cn2l".to_string()]);
     }
 
     #[test]
-    fn a_finished_job_is_not_a_live_sibling() {
-        assert_eq!(live_sibling("gate-abc12   1   <none>"), None);
-        assert_eq!(live_sibling("gate-abc12   <none>   1"), None);
-        assert_eq!(live_sibling(""), None);
+    fn a_finished_job_is_not_live() {
+        assert!(live_gates("gate-abc12   1   <none>").is_empty());
+        assert!(live_gates("gate-abc12   <none>   1").is_empty());
+        assert!(live_gates("").is_empty());
     }
 
     /// A packet that was gated before and is being gated again has both
@@ -1335,49 +1306,109 @@ mod tests {
     #[test]
     fn a_finished_job_does_not_hide_a_live_one() {
         let rows = "gate-old11   1   <none>\ngate-new22   <none>   <none>";
-        assert_eq!(live_sibling(rows).as_deref(), Some("gate-new22"));
+        assert_eq!(live_gates(rows), vec!["gate-new22".to_string()]);
     }
 
-    /// A SHARED WORKSPACE REFUSES WHEN IT CANNOT LOOK.
-    ///
-    /// The bug this pins is not "the error message was unhelpful". It is
-    /// that `unwrap_or(0)` produced the exact value that satisfies
-    /// `if shared && running > 0`, so an unreadable cluster passed the
-    /// guard protecting against two gates crossing receipts on one disk.
+    /// Concurrent gates are ALL reported, in order — the crowd refusal
+    /// names them, and a bound that miscounts admits past the node.
     #[test]
-    fn an_unreadable_count_refuses_on_a_shared_workspace() {
-        let err = resolve_running(true, Err(anyhow!("kubectl get pods: no KUBECONFIG")))
-            .expect_err("a shared workspace must not proceed on an unread count");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("SHARED"),
-            "the refusal must say why it refused; got: {msg}"
-        );
-        assert!(
-            msg.contains("KUBECONFIG"),
-            "the underlying diagnostic must survive — discarding it is what sent an \
-             operator to a raw kubectl error from the later create; got: {msg}"
-        );
-    }
-
-    /// ...and a private workspace does not, because there the count only
-    /// drives an advisory crowding notice. Refusing here would convert a
-    /// missing hint into a blocked gate.
-    #[test]
-    fn an_unreadable_count_is_zero_on_a_private_workspace() {
+    fn every_live_gate_is_counted_not_just_the_first() {
+        let rows = "gate-feat-x-ab1   <none>   <none>\n\
+                    gate-done-cd2     1        <none>\n\
+                    gate-fix-y-ef3    <none>   <none>";
         assert_eq!(
-            resolve_running(false, Err(anyhow!("unreachable"))).expect("must not refuse"),
-            0
+            live_gates(rows),
+            vec!["gate-feat-x-ab1".to_string(), "gate-fix-y-ef3".to_string()]
+        );
+    }
+
+    /// THE BOUND, below and at. Below: silence (None), because gates in
+    /// parallel is now the designed state, not an anomaly to warn about.
+    /// At: a refusal that NAMES the running gates — the operator's next
+    /// verb targets one of them.
+    #[test]
+    fn the_crowd_refusal_fires_at_the_bound_and_names_the_gates() {
+        let live: Vec<String> = vec!["gate-feat-x-ab1".into(), "gate-fix-y-ef3".into()];
+        assert_eq!(crowd_refusal(&live, 3), None, "below the bound is silence");
+
+        let msg = crowd_refusal(&live, 2).expect("at the bound refuses");
+        assert!(msg.contains("gate-feat-x-ab1"), "{msg}");
+        assert!(msg.contains("gate-fix-y-ef3"), "{msg}");
+        assert!(
+            msg.contains("BOSS_GATE_MAX_CONCURRENT"),
+            "the refusal must name the override, or the bound reads as a wall: {msg}"
+        );
+        assert!(
+            crowd_refusal(&live, 1).is_some(),
+            "past the bound refuses too (gates launched before a lower bound was set)"
         );
     }
 
     #[test]
-    fn a_readable_count_passes_through_either_way() {
-        assert_eq!(resolve_running(true, Ok(2)).expect("shared, readable"), 2);
-        assert_eq!(resolve_running(false, Ok(3)).expect("private, readable"), 3);
-        // Zero from a SUCCESSFUL read is still zero — the fix must not
-        // turn a genuinely idle cluster into a refusal.
-        assert_eq!(resolve_running(true, Ok(0)).expect("shared, idle"), 0);
+    fn an_idle_cluster_admits_even_at_bound_one() {
+        assert_eq!(crowd_refusal(&[], 1), None);
+    }
+
+    /// The env override: absent means the default, a count means that
+    /// count, and GARBAGE REFUSES rather than silently meaning 3 — a
+    /// typo that becomes the default is the aa783636 defect shape
+    /// (right sometimes, silently wrong when it matters).
+    #[test]
+    fn the_concurrency_bound_parses_or_refuses() {
+        assert_eq!(max_concurrent_from(None).unwrap(), DEFAULT_MAX_CONCURRENT);
+        assert_eq!(
+            max_concurrent_from(Some("")).unwrap(),
+            DEFAULT_MAX_CONCURRENT
+        );
+        assert_eq!(
+            max_concurrent_from(Some("  ")).unwrap(),
+            DEFAULT_MAX_CONCURRENT
+        );
+        assert_eq!(max_concurrent_from(Some("5")).unwrap(), 5);
+        assert_eq!(max_concurrent_from(Some(" 1 ")).unwrap(), 1);
+
+        for bad in ["three", "-1", "2.5"] {
+            let err = max_concurrent_from(Some(bad)).expect_err("garbage must refuse");
+            assert!(
+                err.to_string().contains("BOSS_GATE_MAX_CONCURRENT"),
+                "the refusal must name the variable: {err}"
+            );
+        }
+        // Zero would refuse every gate forever — a misconfiguration,
+        // not a policy. The message teaches `1` for serialize.
+        let err = max_concurrent_from(Some("0")).expect_err("zero must refuse");
+        assert!(err.to_string().contains("Set 1 to serialize"), "{err}");
+    }
+
+    /// The name hint: branch characters a Job name/label can carry,
+    /// bounded, never edge-dashed, never empty.
+    #[test]
+    fn the_name_hint_is_label_safe_and_recognizable() {
+        assert_eq!(name_hint("fix/a-thing"), "fix-a-thing");
+        assert_eq!(
+            name_hint("feat/gates-run-in-parallel"),
+            "feat-gates-run-in-pa"
+        );
+        // A truncation that lands on a dash must trim it — a label
+        // value may not end on '-'. Sanitized this is
+        // `abcde-abcde-abcde-a-x` (21); cut at 20 it ends on the dash.
+        assert_eq!(name_hint("abcde/abcde/abcde/a/x"), "abcde-abcde-abcde-a");
+        // Case folds, symbol runs collapse to one dash, edges stay
+        // alphanumeric.
+        assert_eq!(name_hint("Fix//Weird__Branch"), "fix-weird-branch");
+        assert_eq!(
+            name_hint("///"),
+            "branch",
+            "no usable characters still renders"
+        );
+        for hint in [name_hint("feat/x"), name_hint("///"), name_hint("A--B")] {
+            assert!(hint.len() <= 20);
+            assert!(
+                hint.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            );
+            assert!(!hint.starts_with('-') && !hint.ends_with('-'), "{hint}");
+        }
     }
 
     /// THE DEFAULT THAT WAS RIGHT ON ONE HOST AND SILENTLY WRONG ON THE
@@ -1548,12 +1579,13 @@ mod tests {
 
     const MANIFEST: &str = "\
 apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: gate-runner-disk\n\
----\napiVersion: batch/v1\nkind: Job\nmetadata:\n  generateName: gate-\nspec:\n  template:\n\
+---\napiVersion: batch/v1\nkind: Job\nmetadata:\n  generateName: gate-$GATE_NAME_HINT-\n\
+  labels: {boss.dev/branch: $GATE_NAME_HINT}\nspec:\n  template:\n\
     spec:\n      containers:\n        - name: gate\n          env:\n\
             - {name: GATE_BRANCH, value: $GATE_BRANCH}\n\
             - {name: GATE_RUN_JOB_ID, value: $GATE_RUN_JOB_ID}\n\
             - {name: GATE_MODE, value: $GATE_MODE}\n\
-      volumes:\n        - name: gate-runner-disk\n          emptyDir: {}\n";
+      volumes:\n        - name: gate-workspace\n          emptyDir: {}\n";
 
     #[test]
     fn rendering_fills_every_placeholder_and_keeps_only_the_job() {
@@ -1566,6 +1598,17 @@ apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: gate-runner-disk
         assert!(job.contains("fix/a-thing"));
         assert!(job.contains("pkt-1"));
         assert!(job.contains("full"));
+        // The name hint is DERIVED from the branch, never passed in —
+        // concurrent Jobs must be tellable apart in `kubectl get jobs`.
+        assert!(
+            job.contains("generateName: gate-fix-a-thing-"),
+            "the Job name must carry the sanitized branch: {job}"
+        );
+        assert!(
+            job.contains("boss.dev/branch: fix-a-thing"),
+            "the branch label must carry the same hint: {job}"
+        );
+        assert!(!job.contains("$GATE_NAME_HINT"), "no placeholder survives");
     }
 
     /// A manifest that grows a placeholder this verb does not know
@@ -1612,22 +1655,78 @@ apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: gate-runner-disk
         assert!(format!("{err}").contains("kind: Job"), "{err}");
     }
 
-    /// THE ONE THAT PROTECTS A RECEIPT. An emptyDir workspace is
-    /// per-pod and safe to run beside another; a claim is not.
+    /// THE LEGACY-MANIFEST DISCRIMINATOR. A PVC in the Job stopped
+    /// meaning "shared workspace" when the seed shipped — every
+    /// rendered Job now carries the seed claim. What still means it is
+    /// a claim-backed volume MOUNTED at /gate-target, which is exactly
+    /// the pre-parallel manifest a stale checkout renders. Miss it and
+    /// the new bounded rule admits three gates onto one disk — the
+    /// 2026-08-24 crossed receipts, reintroduced through skew.
     #[test]
-    fn a_claim_is_shared_and_an_emptydir_is_not() {
-        let local = render_job(MANIFEST, "b", "p", "").expect("renders");
-        assert!(!workspace_is_shared(&local));
+    fn the_pre_parallel_workspace_shape_is_still_recognized() {
+        // The old shipped shape: inline mount, PVC-backed workspace.
+        let legacy = "\
+kind: Job\n\
+          volumeMounts:\n\
+            - {name: gate-runner-disk, mountPath: /gate-target}\n\
+      volumes:\n\
+        - name: gate-runner-disk\n\
+          persistentVolumeClaim: {claimName: gate-runner-disk}\n";
+        assert!(pvc_backed_workspace(legacy));
 
-        let pvc_manifest = MANIFEST.replace(
-            "          emptyDir: {}",
-            "          persistentVolumeClaim: {claimName: gate-runner-disk}",
-        );
-        let shared = render_job(&pvc_manifest, "b", "p", "").expect("renders");
+        // The parallel shape: emptyDir workspace, the PVC only a seed.
+        let parallel = "\
+kind: Job\n\
+          volumeMounts:\n\
+            - {name: gate-workspace, mountPath: /gate-target}\n\
+            - {name: gate-seed, mountPath: /gate-seed}\n\
+      volumes:\n\
+        - name: gate-workspace\n\
+          emptyDir: {sizeLimit: 100Gi}\n\
+        - name: gate-seed\n\
+          persistentVolumeClaim: {claimName: gate-runner-disk}\n";
         assert!(
-            workspace_is_shared(&shared),
-            "a claimed workspace must be recognised as shared, or two gates will cross \
-             their receipts as they did on 2026-08-24"
+            !pvc_backed_workspace(parallel),
+            "the seed claim must not read as a shared workspace — that heuristic \
+             would re-serialize every gate"
+        );
+    }
+
+    /// Both yaml spellings, because a parser proven against one style
+    /// answers false against the other and the guard silently never
+    /// engages (da260655's failure shape).
+    #[test]
+    fn the_workspace_discriminator_reads_block_style_mounts_too() {
+        let block = "\
+kind: Job\n\
+          volumeMounts:\n\
+            - name: gate-runner-disk\n\
+              mountPath: /gate-target\n\
+      volumes:\n\
+        - name: gate-runner-disk\n\
+          persistentVolumeClaim:\n\
+            claimName: gate-runner-disk\n";
+        assert!(pvc_backed_workspace(block));
+        assert!(
+            !pvc_backed_workspace("kind: Job\nvolumes:\n  - name: x\n    emptyDir: {}\n"),
+            "no /gate-target mount at all is not a shared workspace"
+        );
+    }
+
+    /// The SHIPPED manifest renders as parallel-safe — the guard must
+    /// not re-serialize production (checked against the real file, so
+    /// a manifest edit that regresses the shape fails here by name).
+    #[test]
+    fn the_shipped_manifest_is_not_the_legacy_shape() {
+        let manifest = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../infra/gate-runner/gate-runner.yaml"),
+        )
+        .expect("shipped runner manifest readable");
+        let job = render_job(&manifest, "feat/x", "pkt", "").expect("renders");
+        assert!(
+            !pvc_backed_workspace(&job),
+            "the shipped manifest's /gate-target must stay a per-run emptyDir"
         );
     }
 
@@ -1771,22 +1870,35 @@ apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: gate-runner-disk
     /// THE FEEDBACK'S CASE (cf0021ae): the pod died, the Job says failed,
     /// and the packet never reported. The waiter must stop — and must NOT
     /// call it a red gate, because the code may have passed.
+    ///
+    /// Where the answer lives CHANGED with per-run workspaces: the
+    /// receipt file dies with the pod's emptyDir, so pointing the
+    /// operator at /gate-target/receipt.json would point at a disk that
+    /// no longer exists. The surviving copy is the pod log — run.sh
+    /// echoes the receipt to stdout before reporting, for exactly this
+    /// moment (pinned by run_sh_verdict.rs).
     #[test]
     fn a_dead_job_with_a_silent_packet_stops_and_refuses_to_call_it_red() {
         let msg = silent_packet_verdict(true, true).expect("a dead Job must end the wait");
         assert!(msg.contains("NOT the same as a red gate"), "{msg}");
         assert!(
-            msg.contains("receipt.json"),
-            "it must say where the answer actually lives: {msg}"
+            msg.contains("kubectl logs"),
+            "it must say where the answer actually lives — the pod log, not a \
+             workspace that died with the pod: {msg}"
+        );
+        assert!(
+            !msg.contains("receipt.json"),
+            "the receipt FILE is per-run now and gone with the pod; naming it \
+             sends the operator to mount a disk that does not exist: {msg}"
         );
     }
 
     /// A Job that finished cleanly but never reported is a different
-    /// story — the run completed, so the receipt should hold the answer.
+    /// story — the run completed, so the pod log holds the answer.
     #[test]
-    fn a_finished_job_with_a_silent_packet_points_at_the_receipt() {
+    fn a_finished_job_with_a_silent_packet_points_at_the_pod_log() {
         let msg = silent_packet_verdict(true, false).expect("a finished Job must end the wait");
-        assert!(msg.contains("receipt.json"), "{msg}");
+        assert!(msg.contains("kubectl logs"), "{msg}");
         assert!(
             !msg.contains("NOT the same as a red gate"),
             "that caveat belongs to the failed case only: {msg}"
@@ -1836,94 +1948,6 @@ apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: gate-runner-disk
         assert!(
             ABSENCE_TOLERANCE.as_secs() <= 600,
             "a gate takes ~11 minutes"
-        );
-    }
-
-    /// The claim parser must read BOTH yaml spellings, because the real
-    /// manifest uses the inline one — a parser proven only against the
-    /// block style would return None against production and the guard
-    /// would silently never engage (da260655's failure shape: a check
-    /// that answers instead of erroring).
-    #[test]
-    fn workspace_claim_reads_both_yaml_styles() {
-        let inline = "      volumes:\n        - name: gate-target\n          persistentVolumeClaim: {claimName: gate-runner-disk}\n";
-        assert_eq!(
-            workspace_claim(inline).as_deref(),
-            Some("gate-runner-disk"),
-            "inline map — the style the shipped manifest actually uses"
-        );
-        let block = "      volumes:\n        - name: gate-target\n          persistentVolumeClaim:\n            claimName: gate-runner-disk\n";
-        assert_eq!(workspace_claim(block).as_deref(), Some("gate-runner-disk"));
-        assert_eq!(workspace_claim("volumes:\n - emptyDir: {}\n"), None);
-    }
-
-    /// Already-free workspace: no sleeps, straight through. The common
-    /// path must cost nothing, or the wait becomes a tax on every gate.
-    #[test]
-    fn a_free_workspace_waits_zero_polls() {
-        let mut sleeps = 0;
-        let outcome = await_release(|| Ok(false), || sleeps += 1, 24);
-        assert!(matches!(outcome, ReleaseWait::Free));
-        assert_eq!(sleeps, 0);
-    }
-
-    /// Detach lag resolving mid-wait: the guard sleeps until the volume
-    /// lets go, then reports how long it held.
-    #[test]
-    fn a_detaching_volume_is_waited_out() {
-        let mut reads = vec![Ok(true), Ok(true), Ok(false)].into_iter();
-        let mut sleeps = 0;
-        let outcome = await_release(move || reads.next().unwrap(), || sleeps += 1, 24);
-        assert!(matches!(outcome, ReleaseWait::Released { polls: 2 }));
-        assert_eq!(sleeps, 2);
-    }
-
-    /// A volume that never releases must not hold the verb forever —
-    /// bounded polls, then TimedOut, and the CALLER proceeds. This is a
-    /// liveness guard, not the crossed-receipts wrongness guard: the
-    /// worst case of proceeding is a pod briefly Pending on attach,
-    /// which is strictly better than a verb that hangs.
-    #[test]
-    fn a_stuck_attachment_times_out_after_bounded_polls() {
-        let mut sleeps = 0;
-        let outcome = await_release(|| Ok(true), || sleeps += 1, 3);
-        assert!(matches!(outcome, ReleaseWait::TimedOut));
-        assert_eq!(sleeps, 3);
-    }
-
-    /// An unreadable attachment state degrades to Unwatchable — fail
-    /// OPEN, unlike resolve_running. That asymmetry is deliberate and
-    /// this test is where it is pinned: the pods guard protects verdict
-    /// CORRECTNESS (crossed receipts), so an error there refuses; this
-    /// guard protects launch LIVENESS, so an error here proceeds with a
-    /// notice. RBAC that can list pods but not cluster-scoped
-    /// volumeattachments must not lose the ability to gate at all.
-    #[test]
-    fn an_unreadable_attachment_fails_open_immediately() {
-        let mut sleeps = 0;
-        let outcome = await_release(
-            || anyhow::bail!("volumeattachments is forbidden"),
-            || sleeps += 1,
-            24,
-        );
-        match outcome {
-            ReleaseWait::Unwatchable(msg) => assert!(msg.contains("forbidden")),
-            other => panic!("expected Unwatchable, got {other:?}"),
-        }
-        assert_eq!(sleeps, 0, "no point polling a probe that cannot answer");
-    }
-
-    /// The attachment parser: kubectl's --no-headers table has the PV
-    /// name in column 3; only a row naming OUR volume means attached.
-    #[test]
-    fn attachment_rows_match_on_the_pv_column() {
-        let table = "csi-abc  driver.example  pvc-1111  w-1  true  20d\n\
-                     csi-def  driver.example  pvc-2222  w-2  true  3m\n";
-        assert!(any_attachment_for(table, "pvc-2222"));
-        assert!(!any_attachment_for(table, "pvc-9999"));
-        assert!(
-            !any_attachment_for("", "pvc-2222"),
-            "no rows, no attachment"
         );
     }
 }

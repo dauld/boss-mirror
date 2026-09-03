@@ -8,9 +8,34 @@
 //! exists for), revoke the old token, and record each phase as the
 //! completion of the packet's own `issue` / `install` / `verify` /
 //! `revoke` steps — so the audit trail IS the packet, with the rule
-//! as actor. THE SECRET VALUE NEVER ENTERS A PACKET: every evidence
-//! field records an identifier (token name/id, secret path, value
-//! length) or an observed effect, never the value.
+//! as actor. THE SECRET VALUE NEVER ENTERS A PACKET — OR AN EVENT:
+//! every evidence field records an identifier (token name/id, secret
+//! path, value length) or an observed effect, never the value.
+//!
+//! ## The four rotation events
+//!
+//! Each phase also lands a domain event at the moment it becomes
+//! true — `credential.minted` / `.installed` / `.verified` /
+//! `.revoked` — via the registry's rotation door
+//! (`POST /api/credentials/{id}/rotation/{phase}`, the census-door
+//! precedent: handlers own no database). The maiden rotation left NO
+//! events; its provenance existed only as step metadata, findable by
+//! archaeology rather than by kind, and a never-emitted kind is
+//! invisible to the audit-integrity checker — only design review
+//! caught it. The install phase is also what stamps the registry
+//! row's `rotated_at`, in the door's own transaction.
+//!
+//! Emission is guarded so a redelivery after a FINISHED rotation
+//! emits nothing (see Idempotence below): `minted` and `installed`
+//! fire when the mint/install ran in THIS invocation; the converge
+//! path re-emits only `installed` (marked `converged: true`) and only
+//! while the packet's `install` step is still unrecorded — a death
+//! before the mint event forces a re-mint (the Secret cannot match),
+//! so a lost `minted` is structurally impossible. `verified` and
+//! `revoked` are gated on their steps the same way. The one residue:
+//! a run that died between recording an event and completing its step
+//! may re-emit that phase on replay, marked as convergence — an
+//! at-least-once trace, never a lost one.
 //!
 //! Fired by a rule on `step.done.credential-rotation` — a dedicated
 //! StepType (the `gate-verdict` precedent) so the rule targets
@@ -42,6 +67,7 @@
 use async_trait::async_trait;
 use boss_dispatcher::rules::expr::Value;
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext, arg_string};
+use boss_jobs::credentials::RotationPhase;
 use serde_json::{Value as JsonValue, json};
 use std::sync::Arc;
 
@@ -243,6 +269,26 @@ impl CredentialRotateForgejo {
         }
         Ok(())
     }
+
+    /// Land one rotation phase on the log through the registry's
+    /// rotation door. The door injects `credential_id` from the path,
+    /// records the `credential.<phase>` event, and on the install
+    /// phase stamps the row's `rotated_at`. Evidence is identifiers
+    /// and observed effects only — never a value.
+    async fn record_phase(
+        &self,
+        rule_name: &str,
+        credential_id: &str,
+        phase: RotationPhase,
+        evidence: JsonValue,
+    ) -> Result<(), HandlerError> {
+        let url = format!(
+            "{}/api/credentials/{credential_id}/rotation/{}",
+            self.jobs(),
+            phase.as_str()
+        );
+        super::common::post_json(&self.client, &url, &evidence, rule_name).await
+    }
 }
 
 #[async_trait]
@@ -279,7 +325,36 @@ impl Handler for CredentialRotateForgejo {
             .map(str::trim)
             .filter(|s| !s.is_empty());
 
+        // The registry id the rotation events annotate — the scope
+        // step's `credential` field (required at its completion), with
+        // the packet Subject as the fallback (the rule's own `when`
+        // matches on it). Resolved BEFORE any side effect: a rotation
+        // that cannot name its credential cannot record what it did,
+        // and that is an authoring fault, not a retryable one.
+        let credential_id = ev
+            .metadata
+            .get("credential")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(ev.subject_id);
+        if credential_id.is_empty() {
+            return Err(HandlerError::Permanent(
+                "rotation packet names no credential: neither scope metadata \
+                 `credential` nor subject_id is set"
+                    .into(),
+            ));
+        }
+
         let token_name = rotation_token_name(secret_name, ev.job_id);
+
+        // One read serves the event-emission guards here AND the step
+        // completions at the end. A slug's `completed` status is the
+        // recording ledger both share: a phase whose step is recorded
+        // had its event recorded first (events land before steps), so
+        // a completed step means "already on the log — do not re-emit".
+        let steps = self.fetch_steps(ev.job_id).await?;
+        let step_done = |slug: &str| steps.get(slug).is_some_and(|s| s.status == "completed");
 
         // Plan against the issuer's ledger + the installed value.
         let existing = self
@@ -294,15 +369,40 @@ impl Handler for CredentialRotateForgejo {
             .map_err(HandlerError::Downstream)?;
         let plan = plan_rotation(&existing, installed.as_deref().map(last_eight), &token_name);
 
-        // issue + install (or converge if a prior run already did).
+        // issue + install (or converge if a prior run already did),
+        // each phase's event recorded at the moment it becomes true.
         let (token_id, token_value) = match plan {
             RotationPlan::AlreadyInstalled { token_id } => {
                 // The Secret provably holds this packet's token; it
-                // is the only remaining copy of the value.
-                (token_id, installed.unwrap_or_default())
+                // is the only remaining copy of the value. The mint
+                // event cannot be missing (a death before it leaves
+                // the Secret unmatched, which re-mints instead of
+                // landing here), but a death between the Secret write
+                // and the install event loses that record — the step
+                // ledger says whether the recording tail ever ran.
+                let value = installed.unwrap_or_default();
+                if !step_done("install") {
+                    self.record_phase(
+                        &ctx.rule_name,
+                        credential_id,
+                        RotationPhase::Installed,
+                        json!({
+                            "job_id": ev.job_id,
+                            "token_name": token_name,
+                            "secret_namespace": secret_namespace,
+                            "secret_name": secret_name,
+                            "secret_key": secret_key,
+                            "value_length": value.len(),
+                            "converged": true,
+                        }),
+                    )
+                    .await?;
+                }
+                (token_id, value)
             }
             RotationPlan::ReplaceStale | RotationPlan::MintFresh => {
-                if plan == RotationPlan::ReplaceStale {
+                let replaced_orphan = plan == RotationPlan::ReplaceStale;
+                if replaced_orphan {
                     // Orphan from a died attempt; its value is gone
                     // for good, so retire it before re-minting.
                     self.issuer
@@ -315,10 +415,38 @@ impl Handler for CredentialRotateForgejo {
                     .create_token(forge_user, &token_name, &scopes)
                     .await
                     .map_err(HandlerError::Downstream)?;
+                self.record_phase(
+                    &ctx.rule_name,
+                    credential_id,
+                    RotationPhase::Minted,
+                    json!({
+                        "job_id": ev.job_id,
+                        "token_name": token_name,
+                        "token_id": minted.id,
+                        "forge_user": forge_user,
+                        "scopes": scopes.clone(),
+                        "replaced_orphan": replaced_orphan,
+                    }),
+                )
+                .await?;
                 self.secrets
                     .write_key(secret_namespace, secret_name, secret_key, &minted.sha1)
                     .await
                     .map_err(HandlerError::Downstream)?;
+                self.record_phase(
+                    &ctx.rule_name,
+                    credential_id,
+                    RotationPhase::Installed,
+                    json!({
+                        "job_id": ev.job_id,
+                        "token_name": token_name,
+                        "secret_namespace": secret_namespace,
+                        "secret_name": secret_name,
+                        "secret_key": secret_key,
+                        "value_length": minted.sha1.len(),
+                    }),
+                )
+                .await?;
                 (minted.id, minted.sha1)
             }
         };
@@ -335,6 +463,20 @@ impl Handler for CredentialRotateForgejo {
                 "verify-by-effect failed: token {token_name} cannot read {verify_repo}; \
                  old token NOT revoked"
             )));
+        }
+        if !step_done("verify") {
+            self.record_phase(
+                &ctx.rule_name,
+                credential_id,
+                RotationPhase::Verified,
+                json!({
+                    "job_id": ev.job_id,
+                    "token_name": token_name,
+                    "verify_repo": verify_repo,
+                    "method": "api",
+                }),
+            )
+            .await?;
         }
 
         // Revoke the old token — last, and only what the scoper
@@ -364,6 +506,24 @@ impl Handler for CredentialRotateForgejo {
                     "old token {old} still present after delete"
                 )));
             }
+            // The event records the confirmed absence, whichever run
+            // performed the deletion — `deleted_now` says which kind
+            // of observation this record is.
+            if !step_done("revoke") {
+                self.record_phase(
+                    &ctx.rule_name,
+                    credential_id,
+                    RotationPhase::Revoked,
+                    json!({
+                        "job_id": ev.job_id,
+                        "old_token": old,
+                        "deleted_now": deleted,
+                        "confirmed_dead":
+                            format!("issuer token list for {forge_user} no longer contains {old}"),
+                    }),
+                )
+                .await?;
+            }
             revoke_evidence = Some((
                 if deleted {
                     format!("forgejo token {old} deleted via admin API")
@@ -374,10 +534,10 @@ impl Handler for CredentialRotateForgejo {
             ));
         }
 
-        // Record each phase as the packet's own steps. The step PUTs
-        // are the audit events: actor = this rule, evidence =
+        // Record each phase as the packet's own steps (fetched once,
+        // above — the same read the emission guards used). The step
+        // PUTs carry the human-facing evidence: actor = this rule,
         // identifiers and observed effects, never a value.
-        let steps = self.fetch_steps(ev.job_id).await?;
         self.complete_step(
             &ctx.rule_name,
             ev.job_id,
@@ -633,15 +793,18 @@ mod tests {
     type Captured = std::sync::Arc<Mutex<Vec<(String, JsonValue)>>>;
 
     /// A rotation packet with the machine phases pending. Returns the
-    /// stub's base URL + captured step PUTs as (step_id, body).
+    /// stub's base URL + captured step PUTs as (step_id, body) +
+    /// captured rotation-door POSTs as ("{credential_id}/{phase}", body).
     async fn stub_jobs_api(
         step_statuses: &'static [(&'static str, &'static str)],
-    ) -> (String, Captured) {
+    ) -> (String, Captured, Captured) {
         use axum::extract::Path;
-        use axum::{Json, Router, routing::get, routing::put};
+        use axum::{Json, Router, routing::get, routing::post, routing::put};
 
         let captured: Captured = Default::default();
         let cap = captured.clone();
+        let rotations: Captured = Default::default();
+        let rot = rotations.clone();
         let jobs = Router::new()
             .route(
                 "/api/jobs/{id}",
@@ -671,11 +834,24 @@ mod tests {
                         }
                     },
                 ),
+            )
+            .route(
+                "/api/credentials/{id}/rotation/{phase}",
+                post(
+                    move |Path((id, phase)): Path<(String, String)>,
+                          Json(body): Json<JsonValue>| {
+                        let rot = rot.clone();
+                        async move {
+                            rot.lock().unwrap().push((format!("{id}/{phase}"), body));
+                            Json(json!({ "recorded": true }))
+                        }
+                    },
+                ),
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, jobs).await.unwrap() });
-        (format!("http://{addr}"), captured)
+        (format!("http://{addr}"), captured, rotations)
     }
 
     fn rotation_args() -> Vec<(String, Value)> {
@@ -736,7 +912,7 @@ mod tests {
             .unwrap()
             .insert("the-old-write-token".into(), "old-value".into());
         let secrets = Arc::new(FakeSecrets::default());
-        let (jobs_url, captured) = stub_jobs_api(PENDING_PHASES).await;
+        let (jobs_url, captured, rotations) = stub_jobs_api(PENDING_PHASES).await;
 
         let h = CredentialRotateForgejo::new(jobs_url, issuer.clone(), secrets.clone());
         h.invoke(
@@ -808,6 +984,60 @@ mod tests {
                 .unwrap()
                 .contains("no longer contains")
         );
+
+        // Evented: one credential.* event per phase, in protocol
+        // order, through the registry's rotation door, addressed to
+        // the credential the scope step named — and no secret value
+        // in any of them.
+        let events = rotations.lock().unwrap().clone();
+        let order: Vec<&str> = events.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(
+            order,
+            vec![
+                "boss-dev-forge-token/minted",
+                "boss-dev-forge-token/installed",
+                "boss-dev-forge-token/verified",
+                "boss-dev-forge-token/revoked",
+            ]
+        );
+        let value = issuer.values.lock().unwrap()["boss-dev-forge-token-7ee101aa"].clone();
+        for (path, body) in &events {
+            let flat = body.to_string();
+            assert!(
+                !flat.contains(&value),
+                "secret value leaked into a rotation event ({path}): {flat}"
+            );
+            assert_eq!(
+                body["job_id"], "7ee101aa-3267-4745-8096-06d07df7e144",
+                "every phase event chains back to its rotation packet"
+            );
+        }
+        let minted = &events[0].1;
+        assert_eq!(minted["token_name"], "boss-dev-forge-token-7ee101aa");
+        assert!(minted["token_id"].is_i64());
+        assert_eq!(minted["scopes"], json!(["write:repository"]));
+        assert_eq!(minted["replaced_orphan"], false);
+        let installed_ev = &events[1].1;
+        assert_eq!(installed_ev["secret_namespace"], "boss-dev");
+        assert_eq!(installed_ev["secret_name"], "boss-dev-forge-token");
+        assert_eq!(installed_ev["secret_key"], "token");
+        assert_eq!(
+            installed_ev["value_length"].as_u64().unwrap(),
+            value.len() as u64,
+            "the event carries the value's LENGTH, never the value"
+        );
+        let verified_ev = &events[2].1;
+        assert_eq!(verified_ev["verify_repo"], "david/boss");
+        assert_eq!(verified_ev["method"], "api");
+        let revoked_ev = &events[3].1;
+        assert_eq!(revoked_ev["old_token"], "the-old-write-token");
+        assert_eq!(revoked_ev["deleted_now"], true);
+        assert!(
+            revoked_ev["confirmed_dead"]
+                .as_str()
+                .unwrap()
+                .contains("no longer contains")
+        );
     }
 
     #[tokio::test]
@@ -833,7 +1063,7 @@ mod tests {
             ("verify", "completed"),
             ("revoke", "completed"),
         ];
-        let (jobs_url, captured) = stub_jobs_api(ALL_DONE).await;
+        let (jobs_url, captured, rotations) = stub_jobs_api(ALL_DONE).await;
 
         let h = CredentialRotateForgejo::new(jobs_url, issuer.clone(), secrets);
         h.invoke(&rotation_args(), &scope_done_ctx(None))
@@ -842,6 +1072,11 @@ mod tests {
 
         assert!(issuer.minted.lock().unwrap().is_empty(), "no second mint");
         assert!(captured.lock().unwrap().is_empty(), "no step rewrites");
+        assert!(
+            rotations.lock().unwrap().is_empty(),
+            "a finished rotation redelivered emits NOTHING — every phase's step \
+             is recorded, so every phase's event already is too"
+        );
     }
 
     #[tokio::test]
@@ -852,7 +1087,7 @@ mod tests {
             FakeIssuer::with_tokens(vec![tok(55, "boss-dev-forge-token-7ee101aa", "51gone55")]);
         *issuer.next_id.lock().unwrap() = 100;
         let secrets = Arc::new(FakeSecrets::default());
-        let (jobs_url, _captured) = stub_jobs_api(PENDING_PHASES).await;
+        let (jobs_url, _captured, rotations) = stub_jobs_api(PENDING_PHASES).await;
 
         let h = CredentialRotateForgejo::new(jobs_url, issuer.clone(), secrets.clone());
         h.invoke(&rotation_args(), &scope_done_ctx(None))
@@ -871,6 +1106,20 @@ mod tests {
                 .get("boss-dev", "boss-dev-forge-token", "token")
                 .is_some()
         );
+
+        // The replacement mint is evented and says it retired an
+        // orphan; no old_token was named, so nothing claims a revoke.
+        let events = rotations.lock().unwrap().clone();
+        let order: Vec<&str> = events.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(
+            order,
+            vec![
+                "boss-dev-forge-token/minted",
+                "boss-dev-forge-token/installed",
+                "boss-dev-forge-token/verified",
+            ]
+        );
+        assert_eq!(events[0].1["replaced_orphan"], true);
     }
 
     #[tokio::test]
@@ -898,7 +1147,7 @@ mod tests {
         }
         let inner = FakeIssuer::with_tokens(vec![tok(7, "the-old-write-token", "deadbeef")]);
         let secrets = Arc::new(FakeSecrets::default());
-        let (jobs_url, captured) = stub_jobs_api(PENDING_PHASES).await;
+        let (jobs_url, captured, rotations) = stub_jobs_api(PENDING_PHASES).await;
 
         let h = CredentialRotateForgejo::new(
             jobs_url,
@@ -924,13 +1173,29 @@ mod tests {
                 .any(|t| t.name == "the-old-write-token")
         );
         assert!(captured.lock().unwrap().is_empty());
+        // The mint and install DID happen and are on the record; the
+        // verification never became true, so no `verified` — and
+        // nothing destructive ran, so no `revoked`.
+        let order: Vec<String> = rotations
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                "boss-dev-forge-token/minted",
+                "boss-dev-forge-token/installed",
+            ]
+        );
     }
 
     #[tokio::test]
     async fn naming_the_new_token_as_old_is_refused_permanently() {
         let issuer = FakeIssuer::with_tokens(vec![]);
         let secrets = Arc::new(FakeSecrets::default());
-        let (jobs_url, _c) = stub_jobs_api(PENDING_PHASES).await;
+        let (jobs_url, _c, _r) = stub_jobs_api(PENDING_PHASES).await;
         let h = CredentialRotateForgejo::new(jobs_url, issuer, secrets);
         let err = h
             .invoke(
@@ -940,6 +1205,31 @@ mod tests {
             .await
             .expect_err("self-revocation is refused");
         assert!(err.is_permanent(), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_rotation_that_cannot_name_its_credential_fails_before_any_mint() {
+        let issuer = FakeIssuer::with_tokens(vec![]);
+        let secrets = Arc::new(FakeSecrets::default());
+        let (jobs_url, _c, rotations) = stub_jobs_api(PENDING_PHASES).await;
+        let h = CredentialRotateForgejo::new(jobs_url, issuer.clone(), secrets);
+        let mut ctx = scope_done_ctx(None);
+        // Neither the scope step's `credential` field nor a Subject.
+        ctx.event_payload["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove("credential");
+        ctx.event_payload["subject_id"] = json!("");
+        let err = h
+            .invoke(&rotation_args(), &ctx)
+            .await
+            .expect_err("an unnameable rotation is an authoring fault");
+        assert!(err.is_permanent(), "got {err:?}");
+        assert!(
+            issuer.minted.lock().unwrap().is_empty(),
+            "the refusal comes BEFORE any side effect"
+        );
+        assert!(rotations.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

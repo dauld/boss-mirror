@@ -142,7 +142,10 @@ async fn main() -> Result<()> {
             // finding persisting N consecutive comparisons becomes an
             // urgent packet (a5adfb99). Inert until a rule on
             // jobs.estate.compared is published.
-            handlers.register(EstateAlarm::new(cfg.jobs_api_url.clone()));
+            handlers.register(EstateAlarm::new(
+                cfg.jobs_api_url.clone(),
+                cfg.clock_api_url.clone(),
+            ));
             handlers.register(JobsAutoPark::new(
                 cfg.jobs_api_url.clone(),
                 cfg.clock_api_url.clone(),

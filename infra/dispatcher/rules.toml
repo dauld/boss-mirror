@@ -873,9 +873,12 @@ handler = "ledger.keg_deposit.settle"
 # rule (only `talos-*` declared rows participate — the forge host and
 # boss-gcp can never appear in a kubernetes-nodes observation), and
 # lands one `jobs.estate.compared` event via the comparison door.
-# Report first: no rule listens on that topic; the raiser comes later,
-# calibrated on this series. Details in the handler's module doc
-# (boss-dispatcher-handlers handlers/estate_compare.rs).
+# The raiser (`estate.alarm`, calibrated on this series) listens on
+# that topic: hard findings that persist across consecutive same-series
+# comparisons become urgent packets, and its silence sweep raises when
+# an expected observation series stops arriving. Details in the module
+# docs (boss-dispatcher-handlers handlers/estate_compare.rs and
+# estate_alarm.rs).
 #
 # Seeded by 202608302200-the-estate-is-compared.sql; present here
 # because `dispatcher_rules_seed_matches_toml` compares in BOTH

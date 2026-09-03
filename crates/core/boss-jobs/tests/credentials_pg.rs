@@ -7,8 +7,19 @@
 //! tonight could not verify are seeded as marked-unverified, not as
 //! guesses.
 
-use boss_jobs::credentials::{CredentialsRegistry, PgCredentials};
+use boss_core::publisher::EventStamp;
+use boss_jobs::credentials::types::RotationPhase;
+use boss_jobs::credentials::{CredentialsError, CredentialsRegistry, PgCredentials};
 use boss_testing::TestDb;
+
+fn stamp() -> EventStamp {
+    EventStamp::new(
+        "jobs",
+        boss_core::actor::ActorId::Automation(
+            "rule:broker-rotates-the-boss-dev-forge-token".into(),
+        ),
+    )
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_seeded_credentials_are_readable_through_the_port() {
@@ -107,6 +118,139 @@ async fn non_array_scopes_and_consumers_are_refused_by_the_schema() {
              every reader that iterates it"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recorded_install_stamps_rotated_at_and_lands_one_event() {
+    // The rotation door's write, end to end at the adapter: the
+    // `credential.installed` event and the `rotated_at` stamp are one
+    // transaction, sharing one instant.
+    let db = TestDb::new().await;
+    let repo = PgCredentials::new(db.pool.clone());
+    let s = stamp();
+    repo.record_rotation(
+        "boss-dev-forge-token",
+        RotationPhase::Installed,
+        serde_json::json!({
+            "credential_id": "boss-dev-forge-token",
+            "job_id": "7ee101aa-3267-4745-8096-06d07df7e144",
+            "value_length": 40,
+        }),
+        &s,
+    )
+    .await
+    .unwrap();
+
+    let row = repo.get("boss-dev-forge-token").await.unwrap().unwrap();
+    // Postgres keeps microseconds; chrono keeps nanoseconds — compare
+    // at the storage's own precision.
+    assert_eq!(
+        row.rotated_at.map(|t| t.timestamp_micros()),
+        Some(s.timestamp.timestamp_micros()),
+        "the row bind and the event share ONE instant (stamp.timestamp)"
+    );
+
+    let (kind, source, payload): (String, String, serde_json::Value) = sqlx::query_as(
+        "SELECT kind, source, payload FROM event_outbox WHERE kind LIKE 'credential.%'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("exactly one credential.* outbox row");
+    assert_eq!(kind, "credential.installed");
+    assert_eq!(
+        source, "jobs",
+        "the emission path is the jobs service's rotation door — the \
+         event_kinds rows declare the source the stamp actually writes"
+    );
+    assert_eq!(payload["value_length"], 40);
+    assert_eq!(
+        payload["_actor"],
+        "automation:rule:broker-rotates-the-boss-dev-forge-token"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recorded_mint_leaves_rotated_at_alone() {
+    let db = TestDb::new().await;
+    let repo = PgCredentials::new(db.pool.clone());
+    repo.record_rotation(
+        "boss-dev-forge-token",
+        RotationPhase::Minted,
+        serde_json::json!({ "token_name": "boss-dev-forge-token-7ee101aa" }),
+        &stamp(),
+    )
+    .await
+    .unwrap();
+    let row = repo.get("boss-dev-forge-token").await.unwrap().unwrap();
+    assert!(
+        row.rotated_at.is_none(),
+        "rotated_at records when the VALUE last changed — the install moment, \
+         not the mint"
+    );
+    let n: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM event_outbox WHERE kind = 'credential.minted'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(n, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rotation_against_an_unknown_credential_records_nothing() {
+    let db = TestDb::new().await;
+    let repo = PgCredentials::new(db.pool.clone());
+    let err = repo
+        .record_rotation(
+            "ghost-credential",
+            RotationPhase::Installed,
+            serde_json::json!({}),
+            &stamp(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, CredentialsError::UnknownCredential(id) if id == "ghost-credential"));
+    let n: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM event_outbox WHERE kind LIKE 'credential.%'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(n, 0, "no event may detach from the row it annotates");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_rotation_phase_kind_is_declared_in_event_kinds() {
+    // §9a: the phase → kind mapping lives in Rust
+    // (`RotationPhase::event_kind`) and the declarations live in
+    // migration 202609031830 — this is the equality test that names
+    // the offending entry when the two drift. A kind emitted but
+    // undeclared re-arms the audit-integrity warning; a kind declared
+    // but never emitted is the maiden rotation's hole in reverse.
+    let db = TestDb::new().await;
+    let declared: Vec<String> = sqlx::query_scalar(
+        "SELECT kind_pattern FROM event_kinds \
+         WHERE kind_pattern LIKE 'credential.%' ORDER BY kind_pattern",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read event_kinds");
+    let mut expected: Vec<String> = RotationPhase::ALL
+        .iter()
+        .map(|p| p.event_kind().to_string())
+        .collect();
+    expected.sort();
+    assert_eq!(declared, expected);
+
+    let sources: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT source FROM event_kinds WHERE kind_pattern LIKE 'credential.%'",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        sources,
+        vec!["jobs".to_string()],
+        "declared source must be the one the rotation door's stamp writes"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

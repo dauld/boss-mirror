@@ -67,22 +67,41 @@ PY
 fail_lost() { report lost "runner died before a receipt: $1" || true; exit 1; }
 trap 'fail_lost "line $LINENO"' ERR
 
-# One job, one branch, one clean disk. A cold workspace build needs
-# ~74G; sharing a warm target between branches is what filled the
-# disk mid-run and manufactured failures.
-rm -rf /gate-target/target
-mkdir -p /gate-target/target
-# The disk is a PVC and outlives the Job. The clone below refuses a
-# non-empty destination, so a second run on the same disk died with
-# "destination path already exists" - the third reason this rig had
-# never completed a run. "Wiped per run" has to include the clone.
-rm -rf /gate-target/repo
-# And the previous run's receipt. It is written only at the END of a
-# run, so if this one dies partway the old verdict is still sitting
-# there - with a different head - looking exactly like this run's
-# result. That nearly credited one branch with another branch's pass
-# on 2026-08-25 when w-1 reset mid-gate.
-rm -f /gate-target/receipt.json
+# One job, one branch, one PRIVATE disk. /gate-target is a per-run
+# emptyDir now: born empty with the pod, dead with it. The wipe
+# discipline that used to live here as three rm -rf lines — stale
+# target (disk-filling, manufactured failures), stale clone
+# ("destination path already exists"), stale receipt (nearly credited
+# one branch with another's pass on 2026-08-25) — is structural: there
+# is nothing from a previous run to wipe, and no other run can ever
+# see this workspace. That structural isolation is what makes
+# CONCURRENT gates safe (packet 28de3845); the 2026-08-24 crossed
+# receipts needed a shared disk to happen on.
+#
+# The receipt now dies with the pod, deliberately. Its surviving
+# copies are the packet (the record) and this pod's stdout — the
+# `gate-runner: receipt` line below, which `kubectl logs` serves for
+# ttlSecondsAfterFinished after the Job ends.
+#
+# /gate-seed is the one shared surface left: the warm target snapshot
+# + the crate cache, on the PVC that used to BE the workspace. Reads
+# and writes of it are flock-disciplined below.
+SEED=/gate-seed
+SEED_LOCK="$SEED/.seed.lock"
+mkdir -p /gate-target
+
+# SKEW GUARD, the other direction: under an OLD manifest (no /gate-seed
+# mount) this pod's /gate-target is still the shared PVC, which
+# persists between runs. For exactly that case the old wipe-per-run
+# discipline comes back — without it the clone refuses a non-empty
+# destination and cross-branch targets overfill the 120Gi volume (the
+# three incidents the old rm lines were written for). /gate-target/cargo
+# is deliberately NOT wiped: on the old shape it is the persistent
+# crate cache, and wiping it would resurrect the crc32fast class.
+if [ ! -d "$SEED" ]; then
+    rm -rf /gate-target/target /gate-target/repo
+    rm -f /gate-target/receipt.json
+fi
 
 # Forge auth. The repo is not anonymously clonable: a bare clone dies
 # with "could not read Username for http://...", which is the error
@@ -112,8 +131,8 @@ HEAD_SHA=$(git rev-parse HEAD)
 
 export CARGO_TARGET_DIR=/gate-target/target
 # THE CRATE CACHE SURVIVES THE RUN, and it is a correctness fix before
-# it is a speed one. CARGO_HOME was unset, so it defaulted inside the
-# container and died with the pod — meaning every gate re-downloaded
+# it is a speed one. CARGO_HOME was unset once, so it defaulted inside
+# the container and died with the pod — meaning every gate re-downloaded
 # every dependency from static.crates.io, and every gate was therefore
 # betting its verdict on several hundred consecutive successful fetches
 # over a link that is measurably not that reliable.
@@ -128,12 +147,52 @@ export CARGO_TARGET_DIR=/gate-target/target
 # explanation for the unexplainable clippy/fixture reds in backlog
 # 9c7ed804, none of which reproduced by hand.
 #
-# `target/` is still wiped per run on purpose (two branches' targets do
-# not fit on one 120Gi volume). The registry cache is a few GB and is
-# content-addressed by version + checksum, so a stale entry cannot
-# produce a wrong build — only a faster one.
-export CARGO_HOME=/gate-target/cargo
+# So CARGO_HOME lives on the seed volume, which outlives every pod.
+# Concurrent gates share it SAFELY without our lock: cargo has locked
+# its package cache against concurrent processes since forever — this
+# is the same arrangement as N developer builds sharing one ~/.cargo.
+# The registry cache is content-addressed by version + checksum, so a
+# stale entry cannot produce a wrong build — only a faster one.
+#
+# The [ -d ] probe is a SKEW guard: a session gating from a stale
+# checkout renders the old manifest, which mounts no /gate-seed. That
+# run must cost speed, not the gate — cold and loud beats dead.
+if [ -d "$SEED" ]; then
+    export CARGO_HOME="$SEED/cargo"
+else
+    echo "gate-runner: /gate-seed is not mounted (manifest older than this script?) — running cold"
+    export CARGO_HOME=/gate-target/cargo
+fi
 mkdir -p "$CARGO_HOME"
+
+# SEED THE TARGET from the warm snapshot. The math this replaces: a
+# cold workspace build writes ~74G of target/ and costs 20+ minutes of
+# compile (measured; boss-dev.yaml Q1). The seed copy moves the same
+# bytes at disk speed — minutes, not tens of minutes — and cargo then
+# rebuilds only the workspace crates, which is the ~14-minute warm
+# gate this rig is known for. The copy runs under a SHARED flock:
+# many seeding readers may overlap freely, but none may overlap the
+# refresher rewriting the snapshot (exclusive lock, end of this
+# script) — a half-rewritten seed under a reader is how you get
+# corrupt rlibs beneath fresh-looking fingerprints, a red that is
+# nobody's code. On any failure or a 15-minute lock timeout, fall
+# back to a cold build: slow and correct.
+mkdir -p /gate-target/target
+seed_target() {
+    if [ ! -d "$SEED/target" ]; then
+        echo "gate-runner: no warm seed at $SEED/target — cold build (~20+ min extra)"
+        return 0
+    fi
+    local t0=$SECONDS
+    if ( flock -s -w 900 9 && cp -a "$SEED/target/." /gate-target/target/ ) 9>>"$SEED_LOCK"; then
+        echo "gate-runner: target seeded from head $(cat "$SEED/.seed-head" 2>/dev/null || echo '<unrecorded>') in $((SECONDS - t0))s"
+    else
+        echo "gate-runner: seed copy failed or lock timed out after $((SECONDS - t0))s — cold build instead"
+        rm -rf /gate-target/target
+        mkdir -p /gate-target/target
+    fi
+}
+if [ -d "$SEED" ]; then seed_target; fi
 # Build parallelism follows the CPU the container was actually GIVEN.
 # It was pinned at 4, so raising the gate ceiling from 6 CPU to 20 in
 # the build-node car bought nothing measurable: the gate was never
@@ -353,6 +412,61 @@ for name in failed:
 PY
     echo "=== end of failed-check replay ==="
 fi
+
+# REFRESH THE SEED — the housekeeping that keeps parallel gates warm.
+# Runs AFTER the verdict is reported (a refresh must never delay a
+# `--wait`), and only from a run whose target is worth inheriting:
+#
+#   - GREEN only. A red run's target is usually fine (test failures
+#     still compile), but a compile-error red would seed broken
+#     workspace artifacts, and telling the cases apart buys nothing:
+#     green near-tip runs happen many times a day.
+#   - AT/NEAR main's tip, measured not felt: every car gates as
+#     main + one change, so `rev-list --count HEAD..origin/main` is 0
+#     in the common case and small when a train merged mid-gate. Past
+#     2 the branch is stale-based and its target would seed the
+#     distance to main into every later gate.
+#   - EXCLUSIVE, NON-BLOCKING lock. Readers hold the lock shared while
+#     copying; a second refresher just skips (-n) — best-effort
+#     housekeeping does not queue.
+#   - STAGE THEN RENAME. The copy lands in target.partial and is
+#     mv-ed into place; a pod that dies mid-refresh (w-1 has reset
+#     mid-gate before) leaves a MISSING seed — next gate cold, slow,
+#     correct — never a torn one under a fresh-looking marker. The
+#     old seed is removed first because two targets (~74G each) do
+#     not fit the 120Gi volume; the cold window is the price of
+#     fitting, and it only opens on a mid-refresh death.
+refresh_seed() {
+    if [ ! -d "$SEED" ]; then return 0; fi
+    if ! [ "$VERDICT" = "green" ]; then return 0; fi
+    git fetch --depth 50 origin "+main:refs/remotes/origin/main" >/dev/null 2>&1 || {
+        echo "gate-runner: seed not refreshed — could not re-fetch origin/main"; return 0; }
+    local behind
+    # rev-list prints a count or fails (shallow clone, no merge base
+    # within depth) — 999 makes "cannot measure" read as "too far".
+    behind=$(git rev-list --count HEAD..origin/main 2>/dev/null || echo 999)
+    if [ "$behind" -gt 2 ]; then
+        echo "gate-runner: seed not refreshed — HEAD is $behind commit(s) behind origin/main"
+        return 0
+    fi
+    if [ "$(cat "$SEED/.seed-head" 2>/dev/null || true)" = "$HEAD_SHA" ]; then
+        echo "gate-runner: seed already at $HEAD_SHA — not refreshed"
+        return 0
+    fi
+    local t0=$SECONDS
+    if ( flock -x -n 9 &&
+         rm -f "$SEED/.seed-head" &&
+         rm -rf "$SEED/target" "$SEED/target.partial" &&
+         cp -a /gate-target/target "$SEED/target.partial" &&
+         mv "$SEED/target.partial" "$SEED/target" &&
+         echo "$HEAD_SHA" > "$SEED/.seed-head"
+       ) 9>>"$SEED_LOCK"; then
+        echo "gate-runner: seed refreshed to $HEAD_SHA in $((SECONDS - t0))s"
+    else
+        echo "gate-runner: seed refresh skipped (another writer holds the lock) or failed after $((SECONDS - t0))s — the previous seed stands"
+    fi
+}
+refresh_seed || true
 
 tail -5 /gate-target/gate.log || true
 echo "gate-runner: $GATE_BRANCH@${HEAD_SHA:0:10} -> $VERDICT"

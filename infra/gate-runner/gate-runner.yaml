@@ -3,7 +3,9 @@
 # Born 2026-08-23 from a day of gates dying deaths that were not
 # theirs: pod replacements, exec-scope reaping, shared-disk exhaustion,
 # cold-start timeouts (the history is in run.sh's header and
-# post-mortem #2). The shape that ended it:
+# post-mortem #2). The shape that ended it, amended 2026-09-03 when the
+# one-gate-at-a-time serialization became the pipeline's bottleneck
+# (packet 28de3845: nine cars through one runner at ~14 min each):
 #
 #   - OWN CLONE from the forge — no dependency on the boss-dev
 #     workspace PVC, and therefore no requirement to run on cp-2,
@@ -15,9 +17,20 @@
 #     planes together, and not a control plane at all, so a gate
 #     cannot starve etcd however hard it runs. The ceiling below is
 #     sized for that box.
-#   - OWN DISK, wiped per run. One job gates one branch; a cold
-#     workspace build needs ~74G and two branches' targets do not
-#     fit in one 100Gi volume (measured the hard way, twice).
+#   - OWN DISK, per run. /gate-target is an emptyDir: born with the
+#     pod, dead with it. Two concurrent gates cannot see each other's
+#     workspace AT ALL — the 2026-08-24 crossed-receipts incident is
+#     structurally impossible, not merely guarded against, which is
+#     what lets gates run in parallel (bounded by `boss gate`,
+#     BOSS_GATE_MAX_CONCURRENT, default 3).
+#   - WARM SEED on the surviving PVC. run.sh copies a warm target/
+#     (snapshotted at main's tip by the previous green near-tip run)
+#     into the workspace before building, and CARGO_HOME lives on the
+#     same volume. The math: a cold workspace build is ~74G of target
+#     and 20+ minutes of compile; the seed copy is the same bytes at
+#     disk speed, a few minutes, and it parallelizes. Without the
+#     seed, "parallel" gates would each pay the cold build — slower
+#     than the serial rig they replace.
 #   - DATABASE SIDECAR with the 1Gi /dev/shm the dev pod's sidecar
 #     earned on 2026-08-22.
 #   - SELF-REPORTING: run.sh completes the gate-run packet with the
@@ -30,12 +43,15 @@
 #   kubectl -n boss-dev create -f - <<EOF
 #   $(sed -e 's/\$GATE_BRANCH/fix\/my-branch/' \
 #         -e 's/\$GATE_RUN_JOB_ID/<packet-uuid>/' \
+#         -e 's/\$GATE_NAME_HINT/my-branch/g' \
 #         -e 's/\$GATE_MODE//' gate-runner.yaml)
 #   EOF
 #
-# or template the three env values by hand. Register the gate-run
-# packet FIRST (kind gate-run, due_on a few hours out); the packet is
-# the record, the Job is just the muscle.
+# ($GATE_NAME_HINT is the branch sanitized to label/name characters —
+# `boss gate` derives it; by hand, keep it short, lowercase, and
+# alphanumeric-with-dashes.) Register the gate-run packet FIRST (kind
+# gate-run, due_on a few hours out); the packet is the record, the Job
+# is just the muscle.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -47,25 +63,50 @@ spec:
   storageClassName: longhorn-dev-disposable
   resources:
     requests:
-      # One branch's cold target (~74G) + a shallow clone + logs,
-      # with honest headroom. NOT shared between concurrent jobs:
-      # RWO plus the wipe-per-run in run.sh means one gate at a time,
-      # which is also what the node's disk can afford.
+      # No longer the workspace — the WARM SEED (target/ snapshot,
+      # ~74G measured cold; a warm one is comparable) + CARGO_HOME's
+      # registry cache (a few G) + the refresh's staging copy is
+      # rm-first so peak stays near one target's worth. The claim
+      # KEEPS ITS OLD NAME on purpose: the volume already holds the
+      # warm target and crate cache from the serial era, and renaming
+      # the claim would orphan that warmth and make the first
+      # parallel gates cold for no reason.
+      #
+      # RWO is now a placement rule, not a serialization rule: every
+      # concurrent gate co-mounts this volume, which Kubernetes allows
+      # only on ONE node — so all gates land together on the build
+      # node (the affinity below already prefers it). A gate scheduled
+      # to a different node waits on attach (Multi-Attach error in
+      # `kubectl describe pod`) rather than corrupting anything; if
+      # the build node is cordoned, gating degrades toward serial on
+      # whichever node takes the volume, honestly and visibly.
       storage: 120Gi
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  generateName: gate-
+  # The branch rides in the NAME (gate-<branch-hint>-<rand>) so three
+  # concurrent gates are tellable apart in `kubectl get jobs` — a
+  # refusal or a status line that names `gate-8kx2p` three times names
+  # nothing. `boss gate` fills the hint from the branch.
+  generateName: gate-$GATE_NAME_HINT-
   namespace: boss-dev
   # The packet label is what lets a second `boss gate` SEE the Job the
   # first one launched. Without it a Job carried no link back to its
   # gate-run packet, so a re-invocation could not tell "this packet is
   # already being gated" from "this packet is idle" — and created a
-  # second Job that raced the first on the same disk.
-  labels: {app: gate-runner, boss.dev/packet: $GATE_RUN_JOB_ID}
+  # second Job that raced the first on the same packet. The branch
+  # label is the same fact for humans and selectors.
+  labels:
+    app: gate-runner
+    boss.dev/packet: $GATE_RUN_JOB_ID
+    boss.dev/branch: $GATE_NAME_HINT
 spec:
   backoffLimit: 0
+  # 3h. Room for a lock-wait on the seed (bounded at 15 min), the
+  # gate itself (measured ~35 -> ~93 min under five-way concurrency),
+  # and the post-verdict seed refresh — the verdict is reported before
+  # the refresh starts, so a refresh never delays a `--wait`.
   activeDeadlineSeconds: 10800
   ttlSecondsAfterFinished: 86400
   template:
@@ -81,7 +122,9 @@ spec:
       # w-1 was cordoned for an NVMe thermal fault, a hard pin would
       # have left this with no schedulable node and stopped gating
       # entirely. Preferred affinity degrades to a slower build on a
-      # control plane instead of no build at all.
+      # control plane instead of no build at all. (The seed PVC's RWO
+      # attach is what actually herds concurrent gates onto one node —
+      # see the claim's comment.)
       affinity:
         nodeAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -103,6 +146,7 @@ spec:
         # be deleted by hand - `kubectl get job` lied about a gate that
         # had passed. A native sidecar starts before the gate, runs
         # beside it, and the kubelet tears it down when the gate exits.
+        # Per-pod, so every concurrent gate gets its own database.
         - name: postgres
           image: postgres:16
           restartPolicy: Always
@@ -151,14 +195,36 @@ spec:
             allowPrivilegeEscalation: false
             capabilities: {drop: ["ALL"]}
           resources:
-            requests: {cpu: "4", memory: 8Gi}
+            # CPU/memory: three concurrent gates request 12 CPU / 24Gi
+            # against w-1's 32 / 64Gi; the 20-CPU limit lets a lone
+            # gate use the box. ephemeral-storage is the DISK half of
+            # the concurrency bound: each workspace is seed (~74G) +
+            # rebuild delta + clone, and the request makes the
+            # SCHEDULER refuse a gate the node's disk cannot hold —
+            # the containerd store (39G measured) and other tenants
+            # share that disk, and 2026-08-23 proved what silent
+            # exhaustion does (fake code failures for everyone).
+            requests: {cpu: "4", memory: 8Gi, ephemeral-storage: 90Gi}
             limits: {cpu: "20", memory: 32Gi}
           volumeMounts:
-            - {name: gate-runner-disk, mountPath: /gate-target}
+            - {name: gate-workspace, mountPath: /gate-target}
+            - {name: gate-seed, mountPath: /gate-seed}
             - {name: run-script, mountPath: /repo-script}
             - {name: forge-token, mountPath: /etc/forge, readOnly: true}
       volumes:
-        - name: gate-runner-disk
+        # The per-run workspace: clone + CARGO_TARGET_DIR + logs +
+        # receipt. Nothing here outlives the pod, and nothing here is
+        # visible to any other gate. The sizeLimit is the eviction
+        # backstop behind the scheduler-level request above: a runaway
+        # run is evicted alone instead of taking the node's disk down
+        # with it.
+        - name: gate-workspace
+          emptyDir: {sizeLimit: 100Gi}
+        # The warm seed + crate cache (see the PVC's comment). Mounted
+        # read-write because run.sh's post-verdict refresh writes the
+        # next snapshot here; reads and writes coordinate through
+        # flock on the volume, never by luck.
+        - name: gate-seed
           persistentVolumeClaim: {claimName: gate-runner-disk}
         - name: pgdata
           emptyDir: {}

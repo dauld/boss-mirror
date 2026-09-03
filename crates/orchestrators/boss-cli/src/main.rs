@@ -139,9 +139,11 @@ enum Commands {
     /// packet, renders the runner Job, and creates it.
     ///
     /// Replaces the seven-step by-hand sequence recorded in 51ca3405.
-    /// Refuses to run beside another gate only when the runner manifest
-    /// mounts a SHARED workspace, because two gates on one disk cross
-    /// their receipts; per-pod workspaces run in parallel safely.
+    /// Gates run in PARALLEL: every workspace is a per-run emptyDir
+    /// seeded from a warm target, so verdicts are independent by
+    /// construction. Refuses politely at the concurrency bound
+    /// (BOSS_GATE_MAX_CONCURRENT, default 3), naming the running
+    /// gates — the build node, not correctness, is the constraint.
     Gate {
         /// Branch to gate.
         branch: String,

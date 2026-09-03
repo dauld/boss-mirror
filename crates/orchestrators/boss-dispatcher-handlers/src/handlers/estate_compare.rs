@@ -60,7 +60,7 @@ use super::common::{api_client, get_json, post_json};
 /// The cluster scope this comparator understands. The observer stamps
 /// it; anything else known is routed below, and the rest is recorded
 /// as unknown rather than compared wrongly.
-const KNOWN_SCOPE: &str = "kubernetes-nodes";
+pub(crate) const KNOWN_SCOPE: &str = "kubernetes-nodes";
 
 /// The per-host scope (`observe-host.sh`). A host observation carries
 /// ONE machine — the script reads its own /proc — so its comparison is
@@ -68,9 +68,9 @@ const KNOWN_SCOPE: &str = "kubernetes-nodes";
 /// observation, never an absence sweep (comparing one host's POST
 /// against every declared host would find all the others "missing" on
 /// every firing). A host that stops posting entirely is a missing
-/// datapoint in the series, which is the signal, same as the census —
-/// staleness alarming is a follow-up, stated rather than smuggled.
-const HOST_SCOPE: &str = "host";
+/// datapoint in the series — `estate.alarm`'s silence sweep is what
+/// notices it (a7a19a1a; it was a stated follow-up here until then).
+pub(crate) const HOST_SCOPE: &str = "host";
 
 /// The per-host unit scope (`observe-units.sh`, packet 729329c6). Like
 /// HOST_SCOPE it is SELF-SCOPED — the observation names the units it
@@ -79,7 +79,7 @@ const HOST_SCOPE: &str = "host";
 /// as findings. Without this branch every five-minute unit observation
 /// would dead-end as unknown_scope — the exact class the HOST_SCOPE
 /// comment above records fixing (49a8d842).
-const UNITS_SCOPE: &str = "host-units";
+pub(crate) const UNITS_SCOPE: &str = "host-units";
 
 /// The disk floor that turns a host reading into a HARD finding
 /// (49a8d842: the forge host — 228G, 83% full, "THE TIGHT ONE" — could
@@ -150,6 +150,11 @@ pub(crate) fn compare_host(declared: &[Json], observation: &Json) -> Json {
     }
 
     json!({
+        // The series identity: a self-scoped comparison is one host's
+        // reading, and the raiser keys persistence per (scope, host).
+        // Without this stamp a CLEAN comparison is anonymous, so two
+        // hosts interleaving one scope erase each other's persistence.
+        "host": observed.first().and_then(|n| n.get("id")).cloned().unwrap_or(Json::Null),
         "counts": {
             "observed": observed.len(),
             "observed_not_declared": observed_not_declared.len(),
@@ -332,6 +337,9 @@ pub(crate) fn compare_units(observation: &Json) -> Json {
     }
 
     json!({
+        // Same series stamp as compare_host, same reason: the raiser
+        // must tell this host's five-minute series from its neighbor's.
+        "host": nodes.first().and_then(|n| n.get("id")).cloned().unwrap_or(Json::Null),
         "counts": {
             "hosts": nodes.len(),
             "units": units,
@@ -616,6 +624,18 @@ mod tests {
         // 17G free of 228 is above the GB floor but under 8% — tight.
         let pct = compare_host(&declared, &host_obs("forge-host", 17, 228));
         assert_eq!(pct["findings"]["disk_tight"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_self_scoped_comparison_names_its_host() {
+        // The raiser keys persistence per (scope, host). Without this
+        // stamp a CLEAN comparison carries no identity at all, so two
+        // hosts interleaving one scope erase each other's persistence
+        // and a host finding can never survive N consecutive rows.
+        let body = compare_host(&[], &host_obs("boss-gcp-1", 30, 47));
+        assert_eq!(body["host"], "boss-gcp-1");
+        let units = compare_units(&units_obs(json!([])));
+        assert_eq!(units["host"], "boss-gcp");
     }
 
     #[test]
