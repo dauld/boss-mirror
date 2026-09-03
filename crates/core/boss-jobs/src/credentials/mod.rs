@@ -19,6 +19,12 @@
 //! scope question. Writes are migrations and the rotation path
 //! (`rotated_at`/`notes`); the mutability decision is written down in
 //! `infra/postgres/schema/202609031700-credentials-are-registry-rows.sql`.
+//! The rotation path's write is the one HTTP write on this surface —
+//! `POST /api/credentials/{id}/rotation/{phase}` — because the broker
+//! is a dispatcher handler and handlers own no database: each phase
+//! records a `credential.minted` / `.installed` / `.verified` /
+//! `.revoked` event (declared in `event_kinds`, source `jobs`), and
+//! the install phase stamps `rotated_at` in the same transaction.
 //!
 //! Hexagonal: port trait + Pg adapter + in-memory adapter + HTTP
 //! door, the same shape as `delivery` and `cadence`.
@@ -34,4 +40,4 @@ pub use in_memory::InMemoryCredentials;
 pub use port::{CredentialsError, CredentialsRegistry};
 #[cfg(feature = "postgres")]
 pub use postgres::PgCredentials;
-pub use types::CredentialRow;
+pub use types::{CredentialRow, RotationPhase};

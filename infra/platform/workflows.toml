@@ -1082,6 +1082,143 @@ terminal = { outcome = "abandoned" }
 metadata_defaults = { outcome_kind = "aborted" }
 
 # ---------------------------------------------------------------------
+# rotate-a-credential — one credential rotation, scope to revoke.
+#
+# The in-tree source of the protocol the credential broker executes
+# (packet 7ee101aa). v1 and v2 were authored live via the workflow
+# API and had NO in-tree source; this row is the spec as of v3, so a
+# fresh deployment seeds the same protocol the live one runs and the
+# protocol is reviewable in a diff. LIVE PUBLISH IS SEPARATE: on the
+# system of record, registry rows publish via the API (a new version
+# superseding v2) — the bundle seeds fresh deployments only and never
+# overwrites a live registry.
+#
+# The Subject is the credential's REGISTRY id (the `credentials`
+# table row, e.g. boss-dev-forge-token) — the durable identity that
+# survives rotation. Completing `scope` (the dedicated
+# `credential-rotation` StepType) hands the rotation to the machine:
+# the broker rule fires on `step.done.credential-rotation`, mints,
+# installs, verifies by effect, revokes what the scoper named, and
+# records each phase twice — as the packet's own machine steps below
+# AND as `credential.minted` / `.installed` / `.verified` /
+# `.revoked` events on the audit log (the maiden rotation recorded
+# only step metadata, findable by archaeology, not by kind).
+#
+# v3 changes, from David's review of the maiden rotation:
+#   - `old_token` surfaced inline on the scope step (optional): the
+#     scoper names the kill target so the machine can revoke
+#     end-to-end. Absent, the broker leaves `revoke` to its assignee.
+#   - `revoke` carries its human runbook as a `procedure`, for the
+#     packet where no old_token was named.
+#
+# NO FIELD EVER CARRIES A CREDENTIAL VALUE — identifiers (a token
+# name or numeric id) and observed effects only, on steps and events
+# alike.
+[[workflow]]
+kind = "rotate-a-credential"
+label = "Rotate a credential"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Replace one credential's value end-to-end: scope why and where, mint the replacement, install it where its consumers read it, verify it by effect, then — and only then — revoke the old one. The Subject is the credential's registry id (see /api/credentials), so \"when was this last rotated, and why\" is a Subject-history question. A human completes `scope`; the credential broker executes the four machine phases and records each as the packet's own steps plus a credential.* event on the audit log. The destructive step runs LAST, after the new credential is proven working — order is the protocol. No field ever carries a credential value: identifiers and observed effects only."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "requested"
+kind = "trigger"
+ready_when = "true"
+title_template = "Rotation requested"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "operator-requests-a-rotation" }
+
+[[workflow.step]]
+title = "scope"
+kind = "credential-rotation"
+ready_when = "steps.requested.done"
+title_template = "Scope the rotation"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+# Inline on the workflow (v3) as well as on the kind bundle: the
+# scoper names the OLD token's identifier at the issuer so the broker
+# can revoke end-to-end. Optional — absent means the revoke step
+# waits for its assignee. NEVER the value.
+name = "old_token"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "issue"
+kind = "task"
+ready_when = "steps.scope.done"
+title_template = "Mint the replacement"
+[[workflow.step.fields]]
+name = "issued"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "issuer"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "install"
+kind = "task"
+ready_when = "steps.issue.done"
+title_template = "Install into the declared storage"
+[[workflow.step.fields]]
+name = "installed"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "permissions"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "verify"
+kind = "task"
+ready_when = "steps.install.done"
+title_template = "Verify by effect"
+[[workflow.step.fields]]
+name = "verified"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "method"
+field_type = "browser|api|log"
+required = false
+
+[[workflow.step]]
+title = "revoke"
+kind = "task"
+ready_when = "steps.verify.done"
+title_template = "Revoke the old credential"
+metadata_defaults = { procedure = "If the broker revoked automatically (the scope step named old_token), this step is already completed with evidence — nothing to do. Otherwise: identify the OLD token in the forge UI by name — the issue step's recorded evidence names the NEW token (secret-name plus the packet id's first eight), so the old one is the same credential's instance WITHOUT this packet's suffix; confirm nothing still consumes it (the registry row's consumers list), delete it in the forge UI or via the admin API, and record the identifier you deleted. NEVER touch boss-credential-broker-root — it is the root credential the broker mints WITH, not a rotation product." }
+[[workflow.step.fields]]
+name = "revoked"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "confirmed_dead"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "rotated"
+kind = "outcome"
+ready_when = "steps.revoke.done"
+title_template = "Rotated"
+terminal = { outcome = "rotated" }
+metadata_defaults = { outcome_kind = "completed" }
+
+[[workflow.step]]
+title = "abandoned"
+kind = "outcome"
+ready_when = "steps.scope.done AND job.metadata.abandoned = \"true\""
+title_template = "Abandoned"
+terminal = { outcome = "abandoned" }
+metadata_defaults = { outcome_kind = "aborted" }
+
+# ---------------------------------------------------------------------
 # maintenance-forge-token-audit — the recurring half of the credential
 # hygiene David asked for on 2026-08-27, after a disclosed forge token
 # took a database query to identify because nothing recorded which
