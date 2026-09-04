@@ -3635,7 +3635,15 @@ impl Conductor {
         // comment claimed reconcile kept the clone fetched; it did not until
         // this line. A fetch failure is non-fatal — ancestry falls to None,
         // which converges nothing and retries next pass, the safe direction.
-        self.ensure_clone().ok();
+        // Log a failure rather than swallow it: a silent ensure_clone
+        // error (the .ok() this replaces) is exactly how a broken clone
+        // stayed invisible while trains wedged.
+        if let Err(e) = self.ensure_clone() {
+            log(format!(
+                "reconcile: ensure_clone failed — ancestry-based convergence \
+                 reads None this pass (converges nothing, retries): {e}"
+            ));
+        }
         let trains = rows(
             self.api(
                 Method::GET,
@@ -4257,6 +4265,17 @@ impl Conductor {
     fn ensure_clone(&self) -> Result<()> {
         let clone = &self.cfg.clone;
         if !Path::new(clone).join(".git").is_dir() {
+            // A dir left from a partial/interrupted clone — present but
+            // with no .git — makes `git clone` refuse ("destination
+            // exists and is not empty"). Swallowed by a caller's .ok(),
+            // that leaves reconcile with no clone and every superseded
+            // train wedged at `converged` (2026-09-04: three trains, and
+            // the reconcile ran in 0s because the clone fast-failed).
+            // Clear the stale dir so the clone can proceed; a valid clone
+            // has .git and never reaches here.
+            if Path::new(clone).exists() {
+                let _ = fs::remove_dir_all(clone);
+            }
             fs::create_dir_all(&self.cfg.home)?;
             sh(&["git", "clone", &self.cfg.upstream_url, clone])?;
             sh(&[
