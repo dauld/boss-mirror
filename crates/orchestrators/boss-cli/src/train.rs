@@ -3622,6 +3622,20 @@ impl Conductor {
     }
 
     async fn reconcile(&self, now: DateTime<Utc>) -> Result<()> {
+        // Keep the clone fetched before the convergence check below asks git
+        // "is the cluster's running commit a descendant of this train's
+        // merge?" — a question answered AGAINST THIS CLONE. reconcile does
+        // not board (only boarding called ensure_clone), so without this the
+        // clone stays frozen at the last board and lacks the cluster's newer
+        // commit; merge-base then exits non-zero (object unknown), is read as
+        // "not an ancestor", and every train whose commit was superseded
+        // between boards wedges at `converged` forever. On 2026-09-04 three
+        // trains wedged exactly this way after the cutover boarded once and
+        // then reconciled repeatedly against a stale clone. convergence_verdict's
+        // comment claimed reconcile kept the clone fetched; it did not until
+        // this line. A fetch failure is non-fatal — ancestry falls to None,
+        // which converges nothing and retries next pass, the safe direction.
+        self.ensure_clone().ok();
         let trains = rows(
             self.api(
                 Method::GET,
