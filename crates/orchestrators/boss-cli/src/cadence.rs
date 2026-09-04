@@ -340,7 +340,22 @@ pub(crate) fn due_window(
             // The cooldown is the re-fire guard: a dock that stays
             // deep (cars skipped on conflicts) re-fires at most once
             // per cooldown instead of every tick.
+            //
+            // It guards a firing that RAN. A firing that failed boarded
+            // nothing, so there is nothing to re-fire against and holding
+            // the window only postpones the retry: on 2026-09-04 a board
+            // fired against a conductor whose clone was broken, exited
+            // rc=1 in 0s, and left a threshold-met dock parked for the
+            // full two hours behind a conductor that was healthy again
+            // within minutes.
+            //
+            // `rc == None` is deliberately held, not released: no outcome
+            // recorded means the run is still in flight or was cut off
+            // mid-verb, and re-firing under it would double-board. Only a
+            // KNOWN failure opens the window early.
+            let last_failed = last.is_some_and(|l| l.rc.is_some_and(|rc| rc != 0));
             if let Some(last) = last
+                && !last_failed
                 && now - last.fired_at < Duration::minutes(i64::from(*cooldown_minutes))
             {
                 return None;
@@ -1506,9 +1521,14 @@ mod tests {
     }
 
     fn fired(rule: &CadenceRule, window: DateTime<Utc>) -> LastFiring {
+        fired_rc(rule, window, Some(0))
+    }
+
+    fn fired_rc(rule: &CadenceRule, window: DateTime<Utc>, rc: Option<i32>) -> LastFiring {
         LastFiring {
             firing_id: firing_id(&rule.name, window),
             fired_at: window,
+            rc,
         }
     }
 
@@ -1652,6 +1672,44 @@ mod tests {
         assert_eq!(
             due_window(&rule, utc(2026, 8, 12, 13, 0, 0), Some(&last), Some(8)),
             Some(utc(2026, 8, 12, 13, 0, 0))
+        );
+    }
+
+    /// 2026-09-04: the 15:28 board fired while the conductor's clone was
+    /// broken, boarded nothing, and exited rc=1 in 0s — and still burned
+    /// the whole 120-minute window. The dock sat at its threshold for two
+    /// hours behind a healthy conductor. The cooldown guards against
+    /// re-firing when a board SUCCEEDED but skipped its cars on conflicts;
+    /// a board that never ran is not that case.
+    #[test]
+    fn a_failed_firing_does_not_hold_the_cooldown() {
+        let rule = depth_rule(4, 120);
+        let failed = fired_rc(&rule, utc(2026, 8, 12, 11, 0, 0), Some(1));
+        // 30 minutes after a FAILED firing, a deep dock fires again.
+        assert_eq!(
+            due_window(&rule, utc(2026, 8, 12, 11, 30, 0), Some(&failed), Some(8)),
+            Some(utc(2026, 8, 12, 11, 30, 0)),
+            "a firing that failed must not hold the window it never used"
+        );
+    }
+
+    /// The other half, and the reason this is not simply "ignore the
+    /// cooldown on any non-success": a firing with NO recorded outcome is
+    /// either still running or was cut off mid-verb. Re-firing under it
+    /// would double-board. Only a KNOWN failure releases the window.
+    #[test]
+    fn a_firing_still_in_flight_holds_the_cooldown() {
+        let rule = depth_rule(4, 120);
+        let in_flight = fired_rc(&rule, utc(2026, 8, 12, 11, 0, 0), None);
+        assert_eq!(
+            due_window(
+                &rule,
+                utc(2026, 8, 12, 11, 30, 0),
+                Some(&in_flight),
+                Some(8)
+            ),
+            None,
+            "no recorded rc means unfinished, not failed — hold"
         );
     }
 
