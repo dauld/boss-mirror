@@ -4264,6 +4264,31 @@ impl Conductor {
 
     fn ensure_clone(&self) -> Result<()> {
         let clone = &self.cfg.clone;
+        // Authenticate git to the PRIVATE forge before any remote op. The
+        // conductor moved into the cluster with only the forge token
+        // mounted (BOSS_TRAIN_FORGE_TOKEN_FILE); its clone/fetch were
+        // anonymous, so every remote op failed rc=128 on the private repo
+        // (2026-09-04 — the layer under "no git in the image"). Set the
+        // token as an http.extraHeader, NOT in the URL: the clone command
+        // and its URL get printed in error logs, and a token embedded in
+        // the URL would leak there. --global so clone, fetch and push all
+        // carry it. Best-effort — an unreadable token leaves git anonymous,
+        // which fails loudly and visibly, exactly as it did before this.
+        if let Ok(token) = fs::read_to_string(env_or(
+            "BOSS_TRAIN_FORGE_TOKEN_FILE",
+            "/etc/boss-train/forge.token",
+        )) {
+            let token = token.trim();
+            if !token.is_empty() {
+                let _ = sh(&[
+                    "git",
+                    "config",
+                    "--global",
+                    "http.extraHeader",
+                    &format!("Authorization: token {token}"),
+                ]);
+            }
+        }
         if !Path::new(clone).join(".git").is_dir() {
             // A dir left from a partial/interrupted clone — present but
             // with no .git — makes `git clone` refuse ("destination
