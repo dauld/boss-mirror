@@ -227,7 +227,12 @@ fn phase_of(steps: &[Step]) -> TrainPhase {
 /// conductor wrote it to. Order matters: a deploy block is the most
 /// specific and most-recently-buried, so it wins over the coarser
 /// stall/converge latches when both are present.
-fn block_of(job: &Job, steps: &[Step], phase: TrainPhase) -> Option<TrainBlock> {
+fn block_of(
+    job: &Job,
+    steps: &[Step],
+    phase: TrainPhase,
+    stall_before: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<TrainBlock> {
     // A deploy block lives on the `deployed` step and is meaningful only
     // while that step has not completed — a completed deploy cleared it
     // by advancing, even though the keys are not erased.
@@ -268,7 +273,41 @@ fn block_of(job: &Job, steps: &[Step], phase: TrainPhase) -> Option<TrainBlock> 
             since: since.to_string(),
         });
     }
+    // DERIVED STALL — every check above reads a flag the CONDUCTOR
+    // writes, so a conductor that cannot run makes every train it is
+    // failing to move look healthy. On 2026-09-04 train #198 sat at
+    // `converged` for 2h21m against a 2h policy with block: None,
+    // because the reconcile that would have stamped `stalled_since` was
+    // itself the thing that was down. CLAUDE.md: "an alarm that reports
+    // through its subject dies with it".
+    //
+    // The read-model can answer this without the conductor: it holds
+    // the step stamps and the policy already. `stall_before` is
+    // `now - stall_hours`, computed once by the caller so this stays a
+    // pure comparison. An arrived train is never stalled; a train with
+    // no completion stamps yields nothing rather than a guess.
+    if phase != TrainPhase::Arrived
+        && let Some(deadline) = stall_before
+        && let Some(newest) = newest_completion(steps)
+        && newest < deadline
+    {
+        return Some(TrainBlock::Stalled {
+            since: newest.to_rfc3339(),
+        });
+    }
     None
+}
+
+/// The most recent `completed_at` across a train's steps — how long the
+/// train has been standing still. Steps without the stamp are skipped
+/// rather than treated as ancient.
+fn newest_completion(steps: &[Step]) -> Option<chrono::DateTime<chrono::Utc>> {
+    steps
+        .iter()
+        .filter_map(|s| s.metadata.get("completed_at").and_then(Value::as_str))
+        .filter_map(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&chrono::Utc))
+        .max()
 }
 
 /// A metadata flag written as either `true` or the string `"true"`
@@ -279,7 +318,11 @@ fn truthy(v: &Value) -> bool {
 }
 
 /// Build one train row from its Job and steps.
-pub fn train_status(job: &Job, steps: &[Step]) -> TrainStatus {
+pub fn train_status(
+    job: &Job,
+    steps: &[Step],
+    stall_before: Option<chrono::DateTime<chrono::Utc>>,
+) -> TrainStatus {
     let phase = phase_of(steps);
     let car_count = job
         .metadata
@@ -291,7 +334,7 @@ pub fn train_status(job: &Job, steps: &[Step]) -> TrainStatus {
         title: job.title.clone(),
         phase,
         at_step: at_step(steps),
-        block: block_of(job, steps, phase),
+        block: block_of(job, steps, phase, stall_before),
         ci_result: find_step(steps, &CI)
             .and_then(|s| meta_str(&s.metadata, "result"))
             .map(str::to_string),
@@ -738,10 +781,18 @@ pub fn build_status(
     gate_runs: &[(Job, Vec<Step>)],
     car_branches: &[String],
     settled_car_branches: &[String],
+    now: chrono::DateTime<chrono::Utc>,
 ) -> YardStatus {
+    // The instant a train must have completed SOMETHING after, or it is
+    // standing still. Computed once here so train_status stays a pure
+    // comparison, and only when the policy declares a window.
+    let stall_before = policy
+        .map(|p| p.stall_hours)
+        .filter(|h| *h > 0)
+        .map(|h| now - chrono::Duration::hours(i64::from(h)));
     let trains = open_trains
         .iter()
-        .map(|(j, s)| train_status(j, s))
+        .map(|(j, s)| train_status(j, s, stall_before))
         .collect();
     let dock: Vec<DockCar> = dock_cars.iter().map(dock_car).collect();
     let boarding = boarding_predicate(rules, dock.len());
@@ -961,7 +1012,7 @@ mod tests {
             ),
         ];
         let job = train(vec![], json!({}));
-        let ts = train_status(&job, &steps);
+        let ts = train_status(&job, &steps, None);
         assert_eq!(ts.phase, TrainPhase::Deploying);
         assert_eq!(
             ts.block,
@@ -987,7 +1038,7 @@ mod tests {
             }),
         )];
         let job = train(vec![], json!({}));
-        assert_eq!(block_of(&job, &steps, TrainPhase::Converging), None);
+        assert_eq!(block_of(&job, &steps, TrainPhase::Converging, None), None);
     }
 
     #[test]
@@ -1007,7 +1058,7 @@ mod tests {
             step("merged", "Merged into main", StepStatus::Ready, json!({})),
         ];
         let job = train(vec![], json!({}));
-        let ts = train_status(&job, &steps);
+        let ts = train_status(&job, &steps, None);
         assert_eq!(
             ts.block,
             Some(TrainBlock::CiRed {
@@ -1037,7 +1088,7 @@ mod tests {
             ),
         ];
         let job = train(vec![], json!({}));
-        assert_eq!(block_of(&job, &steps, TrainPhase::Deploying), None);
+        assert_eq!(block_of(&job, &steps, TrainPhase::Deploying, None), None);
     }
 
     #[test]
@@ -1057,13 +1108,13 @@ mod tests {
         ];
         let job = train(vec![], json!({ "converge_alarm_filed": true }));
         assert_eq!(
-            block_of(&job, &steps, TrainPhase::Converging),
+            block_of(&job, &steps, TrainPhase::Converging, None),
             Some(TrainBlock::ConvergeOverdue)
         );
         // Also accepts the string form older writes used.
         let job2 = train(vec![], json!({ "converge_alarm_filed": "true" }));
         assert_eq!(
-            block_of(&job2, &steps, TrainPhase::Converging),
+            block_of(&job2, &steps, TrainPhase::Converging, None),
             Some(TrainBlock::ConvergeOverdue)
         );
     }
@@ -1078,7 +1129,7 @@ mod tests {
         )];
         let job = train(vec![], json!({ "stalled_since": "2026-09-03T00:00:00Z" }));
         assert_eq!(
-            block_of(&job, &steps, TrainPhase::Boarding),
+            block_of(&job, &steps, TrainPhase::Boarding, None),
             Some(TrainBlock::Stalled {
                 since: "2026-09-03T00:00:00Z".into()
             })
@@ -1100,7 +1151,7 @@ mod tests {
         ];
         let job = train(vec![], json!({ "stalled_since": "2026-09-03T00:00:00Z" }));
         assert!(matches!(
-            block_of(&job, &steps, TrainPhase::Deploying),
+            block_of(&job, &steps, TrainPhase::Deploying, None),
             Some(TrainBlock::DeployBlocked { .. })
         ));
     }
@@ -1117,7 +1168,7 @@ mod tests {
             ),
         ];
         let job = train(vec![], json!({}));
-        assert_eq!(train_status(&job, &steps).block, None);
+        assert_eq!(train_status(&job, &steps, None).block, None);
     }
 
     // ---- boarding predicate, from live rules ----
@@ -1402,6 +1453,43 @@ mod tests {
     /// merged and its branch deleted, never re-gates under the old name —
     /// so its last red run sits there forever and the rework queue fills
     /// with ghosts nobody can act on.
+    /// Train #198, 2026-09-04: merged and deployed at 17:10, still at
+    /// `converged` at 19:31 — 2h21m against a 2h policy — and the yard
+    /// rendered it healthy, because `stalled_since` is stamped by the
+    /// conductor's reconcile and the conductor was the thing that was
+    /// down. The read-model holds the step stamps and the policy, so it
+    /// can answer this without asking the component that is failing.
+    #[test]
+    fn a_train_standing_still_past_the_window_is_stalled_without_the_conductor() {
+        let done_at = "2026-09-04T17:10:17Z";
+        let steps = vec![done(DEPLOYED.slug, DEPLOYED.title, done_at)];
+        // No stalled_since, no converge_alarm_filed — the conductor never
+        // got to write either.
+        let job = train(vec![], json!({}));
+        let deadline = chrono::DateTime::parse_from_rfc3339("2026-09-04T17:31:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        match block_of(&job, &steps, TrainPhase::Converging, Some(deadline)) {
+            Some(TrainBlock::Stalled { since }) => assert!(since.starts_with("2026-09-04T17:10")),
+            other => panic!("a train past its stall window must look troubled, got {other:?}"),
+        }
+        // Inside the window it is simply in transit, not trouble: the
+        // deadline sits BEFORE the last completion, so the train has
+        // moved recently enough.
+        let fresh = chrono::DateTime::parse_from_rfc3339("2026-09-04T17:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            block_of(&job, &steps, TrainPhase::Converging, Some(fresh)),
+            None
+        );
+        // An arrived train is never stalled, however long ago it landed.
+        assert_eq!(
+            block_of(&job, &steps, TrainPhase::Arrived, Some(deadline)),
+            None
+        );
+    }
+
     #[test]
     fn a_branch_whose_car_settled_leaves_the_garage() {
         let runs = vec![(
@@ -1593,6 +1681,7 @@ mod tests {
             &[stranded_run],
             &["feat/a".into(), "feat/b".into()],
             &[],
+            chrono::Utc::now(),
         );
 
         // The block is named, prominently, on the train row.
@@ -1642,7 +1731,7 @@ mod tests {
         // With no delivery policy the page shows the same bound a gate
         // obeys against an unreachable registry — never a fabricated
         // number.
-        let status = build_status(&[], &[], &[], &[], None, &[], &[], &[]);
+        let status = build_status(&[], &[], &[], &[], None, &[], &[], &[], chrono::Utc::now());
         assert_eq!(status.gates.capacity, COMPILED_GATE_MAX_CONCURRENT);
     }
 
@@ -1681,6 +1770,7 @@ mod tests {
             &[in_flight, red],
             &[],
             &[],
+            chrono::Utc::now(),
         );
         assert_eq!(status.gates.capacity, 4);
         assert_eq!(status.gates.active.len(), 1);
@@ -1695,7 +1785,17 @@ mod tests {
         let many: Vec<(Job, Vec<Step>)> = (0..RECENT_LIMIT + 5)
             .map(|_| (train(vec![], json!({ "outcome": "arrived" })), vec![]))
             .collect();
-        let status = build_status(&[], &many, &[], &[], None, &[], &[], &[]);
+        let status = build_status(
+            &[],
+            &many,
+            &[],
+            &[],
+            None,
+            &[],
+            &[],
+            &[],
+            chrono::Utc::now(),
+        );
         assert_eq!(status.recent.len(), RECENT_LIMIT);
     }
 }
