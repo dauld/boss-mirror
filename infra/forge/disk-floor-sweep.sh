@@ -20,10 +20,11 @@
 #
 # WHAT IT DOES, IN ORDER, stopping as soon as the floor is met and
 # logging each action with the space it freed:
-#   a. docker builder prune -f --filter until=24h
+#   a. docker builder prune -af  (ALL build cache, no age filter)
 #      (build cache is regenerable by definition; the converge runner
-#      uses a gentler 168h because it runs above the floor — below it,
-#      a slower next build is the cheapest thing on the menu)
+#      uses a gentler filter because it runs above the floor — below it,
+#      a slower next build is the cheapest thing on the menu, so take
+#      all of it. A 24h filter here left the floor unmet on 2026-09-04.)
 #   b. docker image prune -f            (dangling images only, no -a)
 #   c. registry-verified old-tag removal — the SAME loop as its
 #      sibling cluster-deploy-runner.sh, via the shared
@@ -104,11 +105,17 @@ done_at() { # step-name
     exit 0
 }
 
-# (a) Build cache, 24h age filter. `|| true`: a docker hiccup here
-# must not stop the remaining remediations — the unmet floor at the
-# end is what fails loudly.
-docker builder prune -f --filter until=24h || true
-if floor_met_after "builder cache prune (until=24h)"; then
+# (a) Build cache — ALL of it, no age filter. We only reach here when
+# already BELOW the floor (the early return above handles the healthy
+# case), and below the floor a slower next cold build is the cheapest
+# thing on the menu — the whole point of the sweep. The old
+# `--filter until=24h` kept recent cache and so left the floor unmet in
+# the exact band where CI blocks (2026-09-04: 65GB, needed 70, cache all
+# <24h, sweep freed nothing — it took a hand `docker builder prune -af`).
+# `|| true`: a docker hiccup here must not stop the remaining
+# remediations — the unmet floor at the end is what fails loudly.
+docker builder prune -af || true
+if floor_met_after "builder cache prune (all)"; then
     done_at "builder cache prune"
 fi
 

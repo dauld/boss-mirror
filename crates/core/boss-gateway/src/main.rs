@@ -363,6 +363,18 @@ fn build_router(local_auth_state: Option<Arc<LocalAuthState>>) -> axum::Router<A
             "/api/stations/{*rest}",
             axum::routing::any(|s, r| proxy::handle(s, r, &proxy::JOBS)),
         )
+        // The yard's read-model — gate slots + capacity, the garage,
+        // the boarding summary — computed on the jobs upstream, so it
+        // proxies there beside stations. The Approach renders its
+        // slots and garage ONLY from this response; a 404 here leaves
+        // both `{#if}` sections unrendered while the client-derived
+        // approach rows still paint, so the page looks shipped and
+        // silently isn't. Exactly the stations failure above, one
+        // endpoint later — which is why both live in the route test.
+        .route(
+            "/api/yard/status",
+            axum::routing::any(|s, r| proxy::handle(s, r, &proxy::JOBS)),
+        )
         // Scheduling routes live alongside jobs on the same upstream.
         // Auth-gated like the rest of /api/*.
         .route(
@@ -1021,6 +1033,14 @@ mod routing_tests {
             // the door until train #12 — the reason this list exists.
             "/api/stations",
             "/api/stations/loading-dock/queue",
+            // The yard's server-computed read-model: gate slots,
+            // capacity and the garage. Same failure as the stations
+            // pair one endpoint later — it shipped in train #192 and
+            // 404'd at the door, so the Approach rendered its
+            // client-derived line items and silently dropped the
+            // slots and the garage entirely (the sections are
+            // `{#if}`-gated on a status that never became ready).
+            "/api/yard/status",
         ];
         for path in REAL {
             let (_, body) = get(app(), path).await;

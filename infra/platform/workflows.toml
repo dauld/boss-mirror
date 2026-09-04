@@ -956,6 +956,39 @@ title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
 
+# forge-converge.service (forge host)
+[[workflow]]
+kind = "maintenance-forge-converge"
+label = "Forge host self-converge"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Runs infra/forge/install.sh from forge main on a timer, so a unit that lands on main installs itself on the next tick instead of waiting for a hand-run over ssh. The fix for the 'landed but never installed' class - disk-floor-sweep sat uninstalled through the 2026-09-03 fill because nothing ran install.sh."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "systemd-timer" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Run to completion"
+authority_role = "platform-admin"
+fields = [{ name = "result", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done"
+title_template = "Maintenance completed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
 # ---------------------------------------------------------------------------
 # ship-a-change — the delivery protocol itself, and the last of the
 # high-traffic trio protocols-as-data.md sequences by blast radius:

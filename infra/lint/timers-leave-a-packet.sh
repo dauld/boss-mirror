@@ -135,6 +135,23 @@ if ! grep -q 'BOSS_JOBS_URL=' "$DEPLOY" || ! grep -q 'jobs-url.conf' "$DEPLOY"; 
     problems=$((problems + 1))
 fi
 
+# 5b. THE FORGE INSTALLER MUST DO THE SAME FOR ITS OWN UNITS.
+#
+# The check above reads deploy-services.sh (boss-gcp). The forge host is
+# installed by install.sh, which had NO jobs-url drop-in — a blind spot
+# that let reap-dead-ci-jobs run without BOSS_JOBS_URL and FAIL every
+# time on 2026-09-03, with this lint green throughout. Same bug as the
+# split-brain above, one installer over: a check that reads only one
+# deploy manifest calls itself complete while the other host's units are
+# uncovered — the exact shape the FORGE_INSTALL rows were added to close.
+if [ -f "$FORGE_INSTALL" ] && ! grep -q 'BOSS_JOBS_URL=' "$FORGE_INSTALL"; then
+    echo "timers-leave-a-packet: install.sh installs forge timers but writes no" >&2
+    echo "    BOSS_JOBS_URL for them, so boss-maintenance-wrap.sh REFUSES (it has no" >&2
+    echo "    localhost default) and every forge maintenance packet fails to open —" >&2
+    echo "    which is how reap-dead-ci-jobs failed on 2026-09-03." >&2
+    problems=$((problems + 1))
+fi
+
 # 6. AND NEITHER HELPER MAY CARRY A LOCALHOST DEFAULT.
 #
 # The drop-in above is the belt; this is the braces. A default of
