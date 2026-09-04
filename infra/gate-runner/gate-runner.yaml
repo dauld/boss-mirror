@@ -218,8 +218,30 @@ spec:
         # backstop behind the scheduler-level request above: a runaway
         # run is evicted alone instead of taking the node's disk down
         # with it.
+        #
+        # 160Gi, not 100Gi. At 100 the backstop was firing on ORDINARY
+        # full runs rather than runaway ones: a cold workspace needs
+        # ~74GB of target/ before the clone, the test binaries and the
+        # logs, and 2026-09-04 evicted four full gates in a day
+        # (`Usage of EmptyDir volume "gate-workspace" exceeds the limit
+        # "100Gi"`, exit 137). Every SCOPED gate that day passed and
+        # every UNSCOPED one died, which is the signature of a cap set
+        # below the real cost of the work rather than of a leak.
+        #
+        # An eviction here is worse than a slow build, because the pod
+        # dies without recording a verdict: the gate-run packet stays
+        # open forever, holding a slot and reading as "still gating"
+        # (three such ghosts accumulated that day, one of which silently
+        # ate a car). A backstop that fires on normal work does not
+        # protect the node, it just loses runs.
+        #
+        # w-1 carries 929GB and gate concurrency is 3, so the worst case
+        # is ~480GB of workspace — comfortable. The scheduler request
+        # below stays at 90Gi deliberately: it reflects the typical run
+        # for placement, while this limit reflects the worst one.
+        # TODO: measure a full run's actual peak and set both from it.
         - name: gate-workspace
-          emptyDir: {sizeLimit: 100Gi}
+          emptyDir: {sizeLimit: 160Gi}
         # The warm seed + crate cache (see the PVC's comment). Mounted
         # read-write because run.sh's post-verdict refresh writes the
         # next snapshot here; reads and writes coordinate through

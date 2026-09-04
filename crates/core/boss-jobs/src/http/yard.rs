@@ -104,14 +104,21 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
             .map(|(rows, _)| rows)
             .unwrap_or_default()
     };
-    let car_branches: Vec<String> = cars
+    let branch_of = |c: &Job| {
+        c.metadata
+            .get("branch")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    let car_branches: Vec<String> = cars.iter().filter_map(branch_of).collect();
+    // Branches whose car reached a terminal. The garage drops these: work
+    // that settled is not work awaiting rework, and its last gate-run
+    // under that branch name stays red forever. Derived from the read we
+    // already did rather than a second query.
+    let settled_car_branches: Vec<String> = cars
         .iter()
-        .filter_map(|c| {
-            c.metadata
-                .get("branch")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
+        .filter(|c| c.status == JobStatus::Closed)
+        .filter_map(branch_of)
         .collect();
 
     // The dock, via the station registry when it serves — the same
@@ -164,6 +171,7 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
         policy.as_ref(),
         &gate_runs,
         &car_branches,
+        &settled_car_branches,
     );
     Json(with_now(status, now)).into_response()
 }
@@ -225,6 +233,6 @@ fn with_now(status: yard::YardStatus, now: chrono::DateTime<chrono::Utc>) -> ser
 /// The empty yard a denied caller gets — well-formed, so the page renders
 /// "nothing to show" rather than an error or a false-empty.
 fn empty_status() -> serde_json::Value {
-    let status = yard::build_status(&[], &[], &[], &[], None, &[], &[]);
+    let status = yard::build_status(&[], &[], &[], &[], None, &[], &[], &[]);
     serde_json::to_value(status).unwrap_or_else(|_| serde_json::json!({}))
 }

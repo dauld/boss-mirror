@@ -638,7 +638,7 @@ pub fn gates(gate_runs: &[(Job, Vec<Step>)], capacity: i32) -> Gates {
 /// state: a branch being re-gated right now is in the SLOTS, not the
 /// garage, so a still-running retry is only kept as latest when it is the
 /// sole run. Sorted by branch for a stable render.
-pub fn garage(gate_runs: &[(Job, Vec<Step>)]) -> Vec<GaragedCar> {
+pub fn garage(gate_runs: &[(Job, Vec<Step>)], settled_branches: &[String]) -> Vec<GaragedCar> {
     use std::collections::HashMap;
     // branch -> the latest (job, steps) seen for it.
     let mut latest: HashMap<&str, (&Job, &[Step])> = HashMap::new();
@@ -657,6 +657,19 @@ pub fn garage(gate_runs: &[(Job, Vec<Step>)]) -> Vec<GaragedCar> {
     let mut out: Vec<GaragedCar> = latest
         .into_iter()
         .filter_map(|(branch, (g, steps))| {
+            // A branch whose car has SETTLED is not awaiting rework — the
+            // work finished, by landing or by being dropped. Its last
+            // gate-run under that name stays red forever, because a car
+            // fixed by re-railing onto a fresh branch, or squash-merged
+            // and deleted, never re-gates under the old name to clear it.
+            // Without this the garage accumulates ghosts: on 2026-09-04 all
+            // three entries were landed work (branches deleted from the
+            // forge, packets closed), which makes a rework queue nobody can
+            // trust. A red branch with NO car at all is kept — red never
+            // parks, so that is the ordinary case the garage exists for.
+            if settled_branches.iter().any(|b| b == branch) {
+                return None;
+            }
             let verdict = gate_run_verdict(steps)?;
             // A terminal non-green verdict = red: awaiting rework. Green
             // is fixed; an in-flight run has no verdict and was filtered
@@ -713,6 +726,8 @@ pub const RECENT_LIMIT: usize = 8;
 /// - `rules` — the active cadence rows.
 /// - `policy` — the active delivery policy, if any.
 /// - `gate_runs` / `car_branches` — for the stranded cross-ref.
+/// - `settled_car_branches` — branches whose car reached a terminal; the
+///   garage drops these, since settled work is not awaiting rework.
 #[allow(clippy::too_many_arguments)]
 pub fn build_status(
     open_trains: &[(Job, Vec<Step>)],
@@ -722,6 +737,7 @@ pub fn build_status(
     policy: Option<&DeliveryPolicyRow>,
     gate_runs: &[(Job, Vec<Step>)],
     car_branches: &[String],
+    settled_car_branches: &[String],
 ) -> YardStatus {
     let trains = open_trains
         .iter()
@@ -746,7 +762,7 @@ pub fn build_status(
         recent,
         stranded: stranded_greens(gate_runs, car_branches),
         gates: gates(gate_runs, capacity),
-        garage: garage(gate_runs),
+        garage: garage(gate_runs, settled_car_branches),
         policy: policy_thresholds(policy),
     }
 }
@@ -1374,11 +1390,35 @@ mod tests {
                 ]),
             )],
         )];
-        let g = garage(&runs);
+        let g = garage(&runs, &[]);
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].branch, "feat/x");
         assert_eq!(g[0].failed_check.as_deref(), Some("test"));
         assert_eq!(g[0].since, "2026-09-03");
+    }
+
+    /// 2026-09-04: every one of the garage's three entries was landed
+    /// work. A car fixed by re-railing onto a fresh branch, or squash-
+    /// merged and its branch deleted, never re-gates under the old name —
+    /// so its last red run sits there forever and the rework queue fills
+    /// with ghosts nobody can act on.
+    #[test]
+    fn a_branch_whose_car_settled_leaves_the_garage() {
+        let runs = vec![(
+            gate_run_on("feat/x", 3),
+            vec![verdict_step(
+                "failed",
+                json!([{"name": "test", "result": "fail"}]),
+            )],
+        )];
+        assert!(
+            garage(&runs, &["feat/x".to_string()]).is_empty(),
+            "a settled car is finished work, not work awaiting rework"
+        );
+        // ... and the same red WITHOUT a settled car still garages: red
+        // never parks, so a red branch with no car is the ordinary case
+        // the garage exists to show.
+        assert_eq!(garage(&runs, &[]).len(), 1);
     }
 
     #[test]
@@ -1398,7 +1438,7 @@ mod tests {
             ),
         ];
         assert!(
-            garage(&runs).is_empty(),
+            garage(&runs, &[]).is_empty(),
             "a later green for the same branch clears the red"
         );
     }
@@ -1419,7 +1459,7 @@ mod tests {
                 )],
             ),
         ];
-        let g = garage(&runs);
+        let g = garage(&runs, &[]);
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].failed_check.as_deref(), Some("fmt"));
     }
@@ -1432,7 +1472,7 @@ mod tests {
             gate_run_on("feat/x", 3),
             vec![verdict_step("lost", json!([]))],
         )];
-        let g = garage(&runs);
+        let g = garage(&runs, &[]);
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].failed_check, None);
     }
@@ -1453,7 +1493,7 @@ mod tests {
             (gate_run_on("feat/x", 3), vec![in_flight_step()]),
         ];
         assert!(
-            garage(&runs).is_empty(),
+            garage(&runs, &[]).is_empty(),
             "an in-flight retry is not garaged"
         );
         assert_eq!(gates(&runs, 3).active.len(), 1, "it occupies a slot");
@@ -1477,7 +1517,10 @@ mod tests {
                 )],
             ),
         ];
-        let branches: Vec<String> = garage(&runs).iter().map(|c| c.branch.clone()).collect();
+        let branches: Vec<String> = garage(&runs, &[])
+            .iter()
+            .map(|c| c.branch.clone())
+            .collect();
         assert_eq!(branches, vec!["feat/a".to_string(), "feat/z".to_string()]);
     }
 
@@ -1549,6 +1592,7 @@ mod tests {
             Some(&policy),
             &[stranded_run],
             &["feat/a".into(), "feat/b".into()],
+            &[],
         );
 
         // The block is named, prominently, on the train row.
@@ -1598,7 +1642,7 @@ mod tests {
         // With no delivery policy the page shows the same bound a gate
         // obeys against an unreachable registry — never a fabricated
         // number.
-        let status = build_status(&[], &[], &[], &[], None, &[], &[]);
+        let status = build_status(&[], &[], &[], &[], None, &[], &[], &[]);
         assert_eq!(status.gates.capacity, COMPILED_GATE_MAX_CONCURRENT);
     }
 
@@ -1628,7 +1672,16 @@ mod tests {
             ci_host_floor_gb: 10,
             gate_max_concurrent: 4,
         };
-        let status = build_status(&[], &[], &[], &[], Some(&policy), &[in_flight, red], &[]);
+        let status = build_status(
+            &[],
+            &[],
+            &[],
+            &[],
+            Some(&policy),
+            &[in_flight, red],
+            &[],
+            &[],
+        );
         assert_eq!(status.gates.capacity, 4);
         assert_eq!(status.gates.active.len(), 1);
         assert_eq!(status.gates.active[0].branch, "feat/gating");
@@ -1642,7 +1695,7 @@ mod tests {
         let many: Vec<(Job, Vec<Step>)> = (0..RECENT_LIMIT + 5)
             .map(|_| (train(vec![], json!({ "outcome": "arrived" })), vec![]))
             .collect();
-        let status = build_status(&[], &many, &[], &[], None, &[], &[]);
+        let status = build_status(&[], &many, &[], &[], None, &[], &[], &[]);
         assert_eq!(status.recent.len(), RECENT_LIMIT);
     }
 }

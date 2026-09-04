@@ -67,9 +67,14 @@ impl CadenceRepository for PgCadence {
     }
 
     async fn last_firing(&self, rule: &str) -> Result<Option<LastFiring>, CadenceError> {
+        // `rc` is merged into `detail` by record_outcome rather than held in
+        // a column of its own, so it is read back out of the JSON here. A
+        // firing with no outcome yet has no `rc` key and reads as NULL —
+        // which is the "still in flight" case evaluation must distinguish
+        // from a failure.
         let row = sqlx::query(
-            "SELECT firing_id, fired_at FROM cadence_firings WHERE rule_name = $1 \
-             ORDER BY fired_at DESC LIMIT 1",
+            "SELECT firing_id, fired_at, (detail->>'rc')::int AS rc FROM cadence_firings \
+             WHERE rule_name = $1 ORDER BY fired_at DESC LIMIT 1",
         )
         .bind(rule)
         .fetch_optional(&self.pool)
@@ -81,6 +86,7 @@ impl CadenceRepository for PgCadence {
             Some(r) => Ok(Some(LastFiring {
                 firing_id: r.try_get("firing_id").map_err(storage)?,
                 fired_at: r.try_get("fired_at").map_err(storage)?,
+                rc: r.try_get("rc").map_err(storage)?,
             })),
         }
     }

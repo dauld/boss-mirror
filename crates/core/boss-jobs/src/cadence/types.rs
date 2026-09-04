@@ -44,6 +44,15 @@ pub struct CadenceRuleRow {
 pub struct LastFiring {
     pub firing_id: String,
     pub fired_at: DateTime<Utc>,
+    /// The verb's exit code, once `record_outcome` has merged it into the
+    /// firing's `detail`. `None` means no outcome is recorded yet — the run
+    /// is still in flight, or it was cut off without one — which is NOT the
+    /// same as a failure and must not be read as one. Evaluation needs this
+    /// to tell a firing that did its work from one that died on its first
+    /// syscall: without it, a board that boarded nothing still consumed its
+    /// whole cooldown (2026-09-04, two hours of a threshold-met dock).
+    #[serde(default)]
+    pub rc: Option<i32>,
 }
 
 /// A claim request. `fired_at` is supplied BY THE CALLER and bound as
