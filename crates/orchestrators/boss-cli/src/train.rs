@@ -2251,6 +2251,40 @@ pub(crate) fn ci_overdue(
     })
 }
 
+/// Why a train that is READY to merge is not being merged.
+///
+/// THE SILENT DECLINE THIS CLOSES. On 2026-09-04 a `boss train reconcile`
+/// run by hand sat on a train with green CI and an OPEN PR and did
+/// nothing — the merge arm requires `auto_merge`, which reads
+/// `BOSS_TRAIN_AUTO_MERGE` from the environment, and a verb run by hand
+/// inherits no unit (the conductor's ConfigMap is what sets it; see
+/// §Doors). The else-branch was silence, so two reconciles reported a
+/// clean pass while achieving nothing they were run for, and the
+/// operator spent hours looking for a deeper fault that did not exist.
+/// A conductor that declines to do the one thing it was run for owes an
+/// answer, and the answer must name the reason: a verdict someone must
+/// go re-derive is not a verdict.
+///
+/// ONLY THE GENUINELY-DECLINED CASE. Not-green and already-merged/closed
+/// are the ordinary states of nearly every reconcile pass and are
+/// reported elsewhere (`verdict_drift`, `ci_overdue`, the `merged` step);
+/// naming them here would put a line on every train every ten minutes
+/// and the signal would be furniture inside a day. Green + OPEN +
+/// declined is the one state that looks like progress and is not.
+pub(crate) fn merge_declined_reason(
+    auto_merge: bool,
+    verdict: &str,
+    pr_state: Option<&str>,
+) -> Option<&'static str> {
+    if auto_merge || verdict != "green" || pr_state != Some("OPEN") {
+        return None;
+    }
+    Some(
+        "BOSS_TRAIN_AUTO_MERGE is not \"1\" (a verb run by hand inherits \
+         no unit environment; the conductor's ConfigMap sets it)",
+    )
+}
+
 /// The boarding hold, pure: a car released from that many red trains
 /// stops boarding until someone looks at it. Without this the auto
 /// cancel above is a loop — the same consist re-boards, goes red, and
@@ -3807,10 +3841,8 @@ impl Conductor {
                 continue;
             }
 
-            if self.cfg.auto_merge
-                && verdict == "green"
-                && info.get("state").and_then(Value::as_str) == Some("OPEN")
-            {
+            let pr_state = info.get("state").and_then(Value::as_str);
+            if self.cfg.auto_merge && verdict == "green" && pr_state == Some("OPEN") {
                 log(format!(
                     "CI green — merging {pr_url} (train protocol 27ab7680)"
                 ));
@@ -3818,6 +3850,14 @@ impl Conductor {
                     self.forge.merge(&pr_url).await?;
                     info = self.forge.pr_info(&pr_url).await?;
                 }
+            } else if let Some(why) = merge_declined_reason(self.cfg.auto_merge, verdict, pr_state)
+            {
+                // A decline says so. Silence here cost 2026-09-04 hours —
+                // see `merge_declined_reason`. Not stamped-once like the
+                // overdue sentinel: green-and-unmerged is a train stopped
+                // one step from landing, and it should read as stopped on
+                // every pass until the switch is on or the operator merges.
+                log(format!("CI green on {pr_url} but NOT merging — {why}"));
             }
 
             let merged_step = find_step(&t, "merged", "Merged into main");
@@ -5581,10 +5621,10 @@ mod tests {
         RetryPolicy, SweepGuard, arrival_already_filed, arrival_report, arrival_summary,
         auto_cancel_reason, boarded_head, branch_moved_line, car_hold_reason, ci_overdue,
         classify_transport, commits_match, convergence_verdict, deletable_branches, deploy_needed,
-        local_jobs_problem, overlay_metadata, parked_ready, playground_deploy_disabled,
-        releasable_cars, repo_path, resolve_train, retryable, retrying, short_cause,
-        skip_reason_branch_missing, skip_reason_conflict, stall_age_hours, sweep_guard, sweep_note,
-        sweep_settled, train_branch_to_delete, verdict_drift,
+        local_jobs_problem, merge_declined_reason, overlay_metadata, parked_ready,
+        playground_deploy_disabled, releasable_cars, repo_path, resolve_train, retryable, retrying,
+        short_cause, skip_reason_branch_missing, skip_reason_conflict, stall_age_hours,
+        sweep_guard, sweep_note, sweep_settled, train_branch_to_delete, verdict_drift,
     };
     use crate::delivery_policy::DeliveryPolicy;
     use anyhow::{Result, anyhow};
@@ -6711,6 +6751,45 @@ mod tests {
             {"spec_slug":"ci","title":"CI verdict","status":"pending","metadata":{}}
         ]});
         assert_eq!(ci_overdue(&t, ts("2026-08-16T00:00:00Z"), 2), None);
+    }
+
+    // -- the silent decline ------------------------------------------------
+
+    #[test]
+    fn a_mergeable_train_the_conductor_declines_to_merge_says_so() {
+        // The 2026-09-04 case: green CI, an OPEN PR, and a reconcile run
+        // by hand — so BOSS_TRAIN_AUTO_MERGE, which only the conductor's
+        // unit sets, was absent. The train was not merged and nothing was
+        // logged; two passes read as successful.
+        let why = merge_declined_reason(false, "green", Some("OPEN"))
+            .expect("green + OPEN + auto-merge off is a decline, not a no-op");
+        assert!(
+            why.contains("BOSS_TRAIN_AUTO_MERGE"),
+            "the reason names the switch that is off: {why}"
+        );
+        assert!(
+            why.contains("unit"),
+            "and why a hand-run verb does not have it: {why}"
+        );
+    }
+
+    #[test]
+    fn a_train_the_conductor_does_merge_is_not_a_decline() {
+        // The configured conductor merges; the merge itself is the line.
+        assert_eq!(merge_declined_reason(true, "green", Some("OPEN")), None);
+    }
+
+    #[test]
+    fn ordinary_states_are_not_declines() {
+        // Reconcile runs every ten minutes over every open train. A train
+        // whose CI has not answered, or that is red, or that already
+        // landed, is not being declined anything — reporting those here
+        // would be a line per train per pass.
+        assert_eq!(merge_declined_reason(false, "pending", Some("OPEN")), None);
+        assert_eq!(merge_declined_reason(false, "failing", Some("OPEN")), None);
+        assert_eq!(merge_declined_reason(false, "green", Some("MERGED")), None);
+        assert_eq!(merge_declined_reason(false, "green", Some("CLOSED")), None);
+        assert_eq!(merge_declined_reason(false, "green", None), None);
     }
 
     // -- the two-strike hold -----------------------------------------------
