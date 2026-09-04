@@ -22,6 +22,18 @@
 //! `review-design` step alongside `doc_path` and an empty
 //! `resolutions`. Nobody has to know that, which is the point.
 //!
+//! AND THE DOOR WAS SHUT UNTIL 2026-09-04. The body it built set the
+//! doc title in `metadata.title` only, and the filer requires the
+//! ENVELOPE's `title` at admission — so every invocation of this verb
+//! returned `422 invalid job body: missing title`, and design docs kept
+//! going in as hand-built JSON POSTed straight at `/api/jobs`, which is
+//! the exact failure mode the verb exists to retire. Nothing in the
+//! tree exercised the call, so the omission shipped and survived; the
+//! test that now closes it deserializes the body into the same
+//! `boss_core::job::Job` the handler does, which asks the authoritative
+//! type what it demands instead of listing the fields someone
+//! remembered. `gate.rs` learned this the same way, for `tags`.
+//!
 //! `--no-questions` is the flag David asked for: a doc that records a
 //! decision already made belongs in the system of record without
 //! queuing a review. It writes `no_open_questions = "true"`, which the
@@ -74,6 +86,15 @@ pub(crate) fn design_job_body(
 ) -> Value {
     json!({
         "kind": "design-doc",
+        // THE ENVELOPE'S OWN TITLE, not merely metadata's. The filer
+        // requires it at admission ("one line; every lens leads with
+        // it") and this verb shipped without it, so `boss design`
+        // answered every invocation with `422 invalid job body: missing
+        // title` and design docs went in as hand-built JSON POSTed
+        // straight at /api/jobs instead — repeatedly, through
+        // 2026-09-04. Same string as metadata's copy, from the one
+        // argument, so the card and the doc cannot disagree.
+        "title": title,
         "status": "open",
         "owner_id": "emp-david",
         "priority": "standard",
@@ -222,6 +243,61 @@ mod tests {
         assert_eq!(step["markdown"], json!("# doc"));
         assert_eq!(step["doc_path"], json!("docs/design/x.md"));
         assert!(step["resolutions"].as_array().is_some_and(Vec::is_empty));
+    }
+
+    /// THE TEST THAT WOULD HAVE CAUGHT THE BUG THAT MADE THE VERB
+    /// UNUSABLE.
+    ///
+    /// `boss design` 422'd on every invocation — `invalid job body:
+    /// missing 'title' (one line; every lens leads with it)` — because
+    /// the body carried the doc title in `metadata.title` and nowhere
+    /// else, while the filer requires the ENVELOPE's `title` at
+    /// admission. So the sanctioned door for filing a design doc could
+    /// not file one, and docs went in as hand-built JSON POSTed
+    /// straight at `/api/jobs` instead — repeatedly, through
+    /// 2026-09-04. A door that 422s is not a door.
+    ///
+    /// The two tests above pin the fields I already knew to look for,
+    /// which is exactly the blind spot that shipped: `title` was not
+    /// one of them. `POST /api/jobs` deserializes the body into
+    /// `boss_core::job::Job` and rejects what will not, so running that
+    /// same deserialization here asks the authoritative type what it
+    /// demands rather than asking my memory. `gate.rs` carries the same
+    /// pin for the same reason (its verb shipped unable to file too,
+    /// for want of `tags`); this crate now has it on both bodies.
+    #[test]
+    fn the_body_deserializes_into_the_job_type_the_api_parses_it_as() {
+        let body = design_job_body("the doc", "# body", &[], true, "2026-09-04");
+        let job: boss_core::job::Job = serde_json::from_value(body).expect(
+            "design body must deserialize into Job — this is verbatim what the API does before \
+             it admits the packet",
+        );
+        assert_eq!(job.kind, "design-doc");
+        assert_eq!(job.title, "the doc");
+        assert_eq!(job.owner_id, "emp-david");
+    }
+
+    /// The title is written TWICE by design — once on the envelope
+    /// (what every lens leads with) and once in metadata, which is
+    /// where the tracker and the review step read it. Two copies of one
+    /// fact, so they are pinned equal here and written from the single
+    /// argument: a doc whose card says one thing and whose body says
+    /// another is the drift this costs nothing to prevent.
+    #[test]
+    fn the_envelope_title_and_the_tracker_title_are_the_same_string() {
+        let body = design_job_body(
+            "stations hold, they do not drop",
+            "# doc",
+            &[],
+            true,
+            "2026-09-04",
+        );
+        assert_eq!(body["title"], json!("stations hold, they do not drop"));
+        assert_eq!(body["title"], body["metadata"]["title"]);
+        assert_eq!(
+            review_step_metadata(&body, "docs/design/x.md")["title"],
+            body["title"]
+        );
     }
 
     /// `anchor|title|proposal`, and a partial one is refused rather than
