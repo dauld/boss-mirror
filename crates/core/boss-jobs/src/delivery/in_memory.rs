@@ -70,6 +70,7 @@ mod tests {
             skip_reason_file_budget: 96,
             blip_cause_budget: 80,
             ci_host_floor_gb: 90,
+            gate_max_concurrent: 3,
         }
     }
 

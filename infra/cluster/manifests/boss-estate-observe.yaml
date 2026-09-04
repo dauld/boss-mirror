@@ -84,6 +84,38 @@ spec:
               args:
                 - |
                   set -e
+                  # Transport-retry curl, INLINE. This pod runs the
+                  # alpine/k8s image, which does NOT carry
+                  # /usr/local/bin/boss-api-curl.sh (that script is baked
+                  # only into the all-in-one boss image). Wiring the
+                  # shared script in here (25e518c0) therefore broke the
+                  # observer with exit 127 — no kubernetes-nodes
+                  # observation landed, and the estate ALARM correctly
+                  # raised on the silence. A container that cannot source
+                  # the shared helper inlines its contract instead: retry
+                  # only transport-level curl exits (6/7/28/35/52/55/56 —
+                  # DNS/refused/timeout/TLS/empty/send/recv) under a 150s
+                  # deadline (well under the 15-min schedule), so a deploy
+                  # roll reads as a wait, not an Error pod. An HTTP answer
+                  # is a real result and returns as curl wrote it. Kept
+                  # byte-faithful to infra/boss-api-curl.sh.
+                  api_curl() {
+                    local deadline=150 start delay=5 rc out now left sleep_for
+                    start=$(date +%s)
+                    while :; do
+                      rc=0; out=$(curl "$@") || rc=$?
+                      case "$rc" in
+                        0) printf '%s' "$out"; return 0 ;;
+                        6|7|28|35|52|55|56) ;;
+                        *) return "$rc" ;;
+                      esac
+                      now=$(date +%s); left=$((deadline - (now - start)))
+                      [ "$left" -le 0 ] && { echo "api_curl: transport failure past ${deadline}s (curl $rc)" >&2; return "$rc"; }
+                      sleep_for=$((delay < left ? delay : left))
+                      echo "api_curl: transport error (curl $rc) — retry in ${sleep_for}s" >&2
+                      sleep "$sleep_for"; delay=$((delay * 2))
+                    done
+                  }
                   # In-cluster credentials: the ServiceAccount token is
                   # mounted, so kubectl needs no kubeconfig.
                   kubectl get nodes -o json > /tmp/nodes.json
@@ -137,14 +169,14 @@ spec:
                   # message. The response body rides the same capture as
                   # the status code (body, newline, code) instead of a
                   # tempfile.
-                  # boss-api-curl.sh retries TRANSPORT errors for up
-                  # to 150s (25e518c0): a deploy roll takes the API
-                  # away for ~45s and must read as a wait, not an
+                  # api_curl (inlined above) retries transport errors
+                  # for up to 150s (25e518c0): a deploy roll takes the
+                  # API away for ~45s and must read as a wait, not an
                   # Error pod. The capture-and-speak contract below is
-                  # unchanged — the helper owns only connection-level
+                  # unchanged — api_curl owns only connection-level
                   # exits; stdout still carries body+code exactly as
                   # curl wrote them.
-                  resp=$(/usr/local/bin/boss-api-curl.sh -s -w '\n%{http_code}' -X POST \
+                  resp=$(api_curl -s -w '\n%{http_code}' -X POST \
                     -H "content-type: application/json" \
                     -H "x-boss-user: {\"id\":\"automation:estate-observer\",\"role\":\"platform-admin\",\"access_tier\":\"operator\"}" \
                     --data-binary @/tmp/observation.json \

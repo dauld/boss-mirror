@@ -99,6 +99,8 @@ fn app() -> (axum::Router, Arc<InMemoryJobs>) {
                 warp_factor: None,
             },
         )),
+        cadence: None,
+        delivery: None,
     };
     (router(state), jobs)
 }

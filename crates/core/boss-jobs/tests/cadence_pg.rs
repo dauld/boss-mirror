@@ -87,7 +87,17 @@ async fn seeded_rules_serve_the_thresholds_the_schema_declares() {
     assert_eq!(depth.basis, "queue-depth");
     assert_eq!(
         depth.min_dock_depth,
-        Some(4),
+        // 3 since 202609032030-cadence-supersede-by-name.sql. It was 4;
+        // board-on-three (202609031515) tried 3 and SILENTLY NO-OP'd —
+        // its version-keyed retire missed the real active row against a
+        // diverged version history, so the live value stayed 4 and both
+        // this pin and its boss-cli sibling kept asserting 4, documenting
+        // the breakage. The supersede-by-name migration retires the
+        // active row BY NAME (correct from any version history) so 3
+        // actually takes; both pins now assert 3. This one is the FOURTH
+        // place the number lives — the gate found it after the sibling
+        // was moved, exactly as this comment warned.
+        Some(3),
         "boarding threshold drifted from the schema — this is the \
          2026-08-13 split-brain, and it made the operator's answer wrong"
     );

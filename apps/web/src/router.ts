@@ -94,6 +94,10 @@ export type Route =
   | { kind: 'systemStepPluginDetail'; pluginSlug: string }
   | { kind: 'systemDesign' }
   | { kind: 'systemYard' }
+  /// Yard status — where each train sits and why, computed from the SoR
+  /// (the-cluster-is-the-system.md Phase 0). An Operate tab, beside the
+  /// live-pipeline dashboards it belongs with.
+  | { kind: 'systemYardStatus' }
   /// Fleet lives on as Operate's Bottlenecks tab (1f6d55e0 Q3: the
   /// per-kind dashboard is unique, not a duplicate rendering).
   | { kind: 'systemFleet' }
@@ -150,6 +154,7 @@ export function parseRoute(pathname: string): Route {
     if (p === '/operate/perf') return { kind: 'systemMonitoringPerf' };
     if (p === '/operate/atlas') return { kind: 'systemMonitoringAtlas' };
     if (p === '/operate/bottlenecks') return { kind: 'systemFleet' };
+    if (p === '/operate/yard-status') return { kind: 'systemYardStatus' };
     // 3. Registry — one surface over the registry family.
     if (p === '/registry') return { kind: 'workflows' };
     if (p === '/registry/new') return { kind: 'workflowNew' };

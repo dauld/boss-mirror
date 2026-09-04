@@ -95,6 +95,8 @@ async fn smoke_tester_can_read_workflows_through_real_policy_api() {
         subject_existence: None,
         roster: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
+        cadence: None,
+        delivery: None,
     };
 
     let app = router(state);

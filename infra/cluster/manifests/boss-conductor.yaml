@@ -1,0 +1,271 @@
+# boss-conductor — the train conductor, resident in the cluster.
+#
+# ============================================================================
+# SHIPPED DORMANT. replicas: 0. Landing this car changes NOTHING at
+# runtime.
+# ============================================================================
+#
+# This Deployment IS the cluster-resident conductor, but it starts with
+# ZERO replicas on purpose: the conductor that actually drives the yard
+# today is the systemd unit `boss-train.service` on boss-gcp
+# (infra/train/boss-train.service). Two conductors both firing would be
+# safe (see CONCURRENCY below) but the migration is a deliberate cutover,
+# not a race — so this pod exists, converges its config from the tree,
+# and sits at 0 replicas until an operator scales it up. Applying this
+# manifest is shipping the machine; the CUTOVER (below) is turning it on.
+#
+# WHY MOVE THE CONDUCTOR INTO THE CLUSTER (car 2 of the migration;
+# docs/design/the-cluster-is-the-system.md, David-decided). The forge
+# host already converges the cluster on every merge to forge main
+# (infra/forge/cluster-deploy-runner.sh): it builds the image, applies
+# these manifests, and rolls the deployment. That converge IS the deploy.
+# So the cluster conductor runs `boss train cadence` with an EMPTY deploy
+# tree — it drives boarding, reconcile and merge, but it does NOT deploy a
+# playground. The old boss-gcp conductor's `BOSS_TRAIN_DEPLOY_TREE=/opt/boss`
+# bounced a local vestigial stack; playground.algedonic.dev now routes to
+# the cluster gateway, so there is no local tree to bounce. The empty
+# deploy tree is made a clean no-op by CAR 1
+# (feat/conductor-deploy-hop-is-optional): the cadence deploy phase skips
+# when BOSS_TRAIN_DEPLOY_TREE is empty. This car depends on car 1 having
+# landed before CUTOVER — until then this pod is dormant, so the ordering
+# is only a cutover precondition, not a landing one.
+#
+# ----------------------------------------------------------------------------
+# CUTOVER PROCEDURE (performed by an operator, NOT by landing this car):
+# ----------------------------------------------------------------------------
+#   Precondition: car 1 (feat/conductor-deploy-hop-is-optional) is on
+#   forge main and converged, so an empty deploy tree is a clean skip.
+#
+#   1. Scale the cluster conductor up:
+#        kubectl scale deploy/boss-conductor -n boss-dev --replicas=1
+#   2. Disable the old boss-gcp conductor — the ONE remaining boss-gcp
+#      action this whole migration leaves:
+#        (on boss-gcp)  sudo systemctl disable --now boss-train.service
+#
+#   Do them in that order. If both run for a window between step 1 and
+#   step 2, nothing double-fires (CONCURRENCY, below), so a slow hand
+#   between the two commands is harmless — that safety is the whole
+#   reason the cutover can be two commands on two boxes instead of an
+#   orchestrated swap.
+#
+#   To roll back: scale this to 0 and re-enable the boss-gcp unit. Same
+#   safety applies in reverse.
+#
+# ----------------------------------------------------------------------------
+# CONCURRENCY IS SAFE — even a botched cutover with both conductors
+# running will not double-fire a cadence window.
+# ----------------------------------------------------------------------------
+#   Each cadence window is claimed by a single deterministic firing row.
+#   `claim_firing` is `INSERT INTO cadence_firings (...) ON CONFLICT
+#   (firing_id) DO NOTHING` and returns true only when rows_affected == 1
+#   (crates/orchestrators/boss-cli/src/cadence/postgres.rs). Two
+#   conductors evaluating the same rule in the same window race to INSERT
+#   the same firing_id; exactly one wins the row and fires, the other
+#   sees the conflict and stands down. Both write their bookkeeping to
+#   the SAME system of record (BOSS_JOBS_URL below points every conductor
+#   at the one SoR), so the dedup is real, not per-instance. This is what
+#   makes the cutover ordering a preference, not a correctness
+#   requirement.
+#
+# ----------------------------------------------------------------------------
+# NAMESPACE: boss-dev (not boss). This pod lives in boss-dev so it can
+# MOUNT the forge write token.
+# ----------------------------------------------------------------------------
+#   The conductor's forge push/merge credential is the Secret
+#   `boss-dev-forge-token` — a broker-managed write:repository token
+#   (boss-credential-broker.yaml) that lives in namespace boss-dev.
+#   Kubernetes cannot mount a Secret across namespaces, so a conductor in
+#   `boss` could not read it; putting the conductor in boss-dev is the
+#   only placement where the mount works without duplicating the token
+#   into a second namespace-scoped Secret (which would be a second copy
+#   of a credential, free to drift — CLAUDE.md §9a). The conductor
+#   reaches the system of record CROSS-namespace by DNS
+#   (boss-jobs-internal.boss.svc.cluster.local) — that is plain HTTP, not
+#   a mount, so cross-namespace is fine there. This is exactly what the
+#   boss-dev pod already does with the same Secret (boss-dev.yaml mounts
+#   boss-dev-forge-token at /etc/boss-train).
+#
+# ----------------------------------------------------------------------------
+# IMAGE + TAG: the all-in-one boss image, tag rewritten on every converge.
+# ----------------------------------------------------------------------------
+#   The image is 10.20.0.15:3000/david/boss — the same all-in-one image
+#   the SoR pod runs. It carries the `boss` CLI at /usr/local/bin/boss
+#   (the Dockerfile's runtime stage copies every `boss`/`boss-*` workspace
+#   binary into /usr/local/bin), so `command: [boss, train, cadence]`
+#   resolves. The tag committed here (:latest) is a PLACEHOLDER: on every
+#   converge cluster-deploy-runner.sh rewrites this Deployment's image to
+#   the freshly-built :$HEAD (a `kubectl set image` on this single-
+#   container Deployment — simpler than the boss deployment's json patch,
+#   which needs one only because it also has an initContainer). See the
+#   boss-conductor `set image` line added to that runner. The committed
+#   tag is never what actually runs after a converge; it only needs to be
+#   a valid pullable reference for a hand-apply before the first converge,
+#   which :latest is.
+#
+# ----------------------------------------------------------------------------
+# RBAC: NONE. The conductor holds no Kubernetes credential.
+# ----------------------------------------------------------------------------
+#   `boss train cadence` speaks HTTP to the jobs API and git/HTTP to the
+#   forge, and nothing to the Kubernetes API (grep train.rs / cadence.rs:
+#   zero kube/k8s references). So there is no ServiceAccount to grant and
+#   nothing to bind — automountServiceAccountToken is off to make the
+#   absence explicit. This is the opposite of the estate observer, which
+#   needs a ClusterRole to list nodes; the conductor observes nothing in
+#   the cluster.
+---
+# The conductor's train-assembly clone lives here (BOSS_TRAIN_HOME below).
+# RWO + durable `longhorn` (NOT the disposable dev class): the clone is a
+# working tree the conductor fetches into and assembles merges in, and
+# rebuilding it from scratch on every restart would be slow churn for no
+# gain. Small — a single clone plus its object store.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: boss-conductor-home
+  namespace: boss-dev
+  labels: {app.kubernetes.io/part-of: boss, boss.dev/purpose: conductor}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 10Gi
+---
+# The conductor's environment contract, converged from the tree. The
+# VALUES here are box-independent (urls, the in-cluster SoR DNS name, the
+# cadence knobs); the one SECRET (the forge token) is mounted from
+# boss-dev-forge-token, never a literal here (README: secrets never live
+# in this tree). This ConfigMap is the cluster analogue of the boss-gcp
+# unit's drop-ins (infra/train/boss-train.service.d/*.conf).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: boss-conductor-env
+  namespace: boss-dev
+  labels: {app.kubernetes.io/part-of: boss, boss.dev/purpose: conductor}
+data:
+  # The system of record, and the conductor's one door — rules,
+  # last-firings, firing claims, outcomes and the dock probe all ride
+  # /api/cadence/* and /api/jobs here. The in-cluster machine door for
+  # the SoR jobs API; cross-namespace DNS, plain HTTP. NOT a loopback
+  # address, so BOSS_TRAIN_ALLOW_LOCAL_JOBS stays unset and preflight's
+  # loopback guard stays armed.
+  BOSS_JOBS_URL: "http://boss-jobs-internal.boss.svc.cluster.local:7900"
+  # The forge is the source (train.rs: "THE FORGE IS THE SOURCE; GITHUB
+  # IS A PERIODIC BACKUP"). Select the forgejo adapter explicitly — unset,
+  # the conductor falls back to the `gh` GitHub adapter and points a whole
+  # window at GitHub instead of the forge.
+  BOSS_TRAIN_FORGE: "forgejo"
+  BOSS_TRAIN_FORGE_URL: "http://10.20.0.15:3000"
+  BOSS_TRAIN_FORGE_REPO: "david/boss"
+  # The conductor's clone + lock live under here (clone = $HOME/repo). The
+  # PVC above is mounted at this path.
+  BOSS_TRAIN_HOME: "/var/lib/boss-train"
+  # THE POINT OF CAR 2: no playground deploy. Empty deploy tree, made a
+  # clean skip by car 1 (feat/conductor-deploy-hop-is-optional). The
+  # cluster-deploy-runner on the forge host converges the cluster on merge
+  # to forge main — that converge IS the deploy — so the conductor drives
+  # boarding/reconcile/merge and hands off deployment to the runner.
+  BOSS_TRAIN_DEPLOY_TREE: ""
+  # The conductor drives merges. Off by default; the boss-gcp unit turns
+  # it on via a drop-in, and so must this.
+  BOSS_TRAIN_AUTO_MERGE: "1"
+  # Cadence knobs, set to their defaults explicitly so the contract is
+  # visible here rather than implied (train.rs / cadence.rs defaults).
+  BOSS_TRAIN_CADENCE_TICK_SECONDS: "60"
+  BOSS_TRAIN_CADENCE_DRAIN_SECONDS: "30"
+  RUST_LOG: "info"
+  # BOSS_TRAIN_CI_HOST is DELIBERATELY UNSET. It gates boarding on a
+  # specific box's free disk, and it has no default because a wrong node
+  # id gates boardings on the wrong box ("never observed"). Absent, the
+  # pre-boarding host check is skipped with one journal line and boarding
+  # behaves as before. At CUTOVER, set it to the estate node id that runs
+  # the gate/CI build (the `boss.dev/purpose: build` node) by adding it
+  # here — a one-line ConfigMap edit shipped as a car, then a converge.
+  #
+  # BOSS_TRAIN_ALLOW_LOCAL_JOBS is DELIBERATELY UNSET: the SoR above is a
+  # real cross-cluster address, not loopback, so the loopback preflight
+  # guard must stay armed. Setting it here would be the exact footgun the
+  # unit warns against — never on a box whose SoR lives elsewhere.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: boss-conductor
+  namespace: boss-dev
+  labels: {app.kubernetes.io/part-of: boss, boss.dev/purpose: conductor}
+spec:
+  # DORMANT. See the header. The cutover is `kubectl scale ... --replicas=1`.
+  replicas: 0
+  selector:
+    matchLabels: {app: boss-conductor}
+  # Recreate, not RollingUpdate: the conductor is a singleton loop holding
+  # a ReadWriteOnce clone volume and an in-process flock. A surge pod would
+  # block on multi-attach of the RWO PVC, and two loops briefly overlapping
+  # is pointless even though it is safe (firing dedup). Same posture as the
+  # boss + boss-dev deployments, for the same RWO reason.
+  strategy: {type: Recreate}
+  template:
+    metadata:
+      labels: {app: boss-conductor}
+    spec:
+      # No k8s API access: the conductor speaks HTTP to the jobs API and
+      # git/HTTP to the forge and NOTHING to Kubernetes. No ServiceAccount
+      # is granted anything; the token is not even mounted.
+      automountServiceAccountToken: false
+      # The forge registry needs a pull secret, same as every boss-image
+      # consumer in this namespace (boss-dev.yaml).
+      imagePullSecrets:
+        - {name: forgejo-registry}
+      securityContext:
+        # The clone volume is group-owned so the non-root boss user
+        # (UID 1500 in the image) can write to it — matches boss.yaml's
+        # boss-auth posture.
+        fsGroup: 1500
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: conductor
+          # Placeholder tag — cluster-deploy-runner.sh rewrites this to the
+          # freshly-built :$HEAD on every converge (see the header + the
+          # boss-conductor patch in that runner). :latest is only what a
+          # hand-apply before the first converge would pull.
+          image: 10.20.0.15:3000/david/boss:latest
+          command: ["/usr/local/bin/boss", "train", "cadence"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+          envFrom:
+            - configMapRef: {name: boss-conductor-env}
+          env:
+            # The forge token file, read directly by `boss train` verbs.
+            # BOSS_TRAIN_FORGE_TOKEN_FILE defaults to this exact path, but
+            # setting it explicitly ties the env to the mount below so a
+            # future default change cannot silently un-wire them.
+            - {name: BOSS_TRAIN_FORGE_TOKEN_FILE, value: /etc/boss-train/forge.token}
+          volumeMounts:
+            - {name: home, mountPath: /var/lib/boss-train}
+            - {name: forge-token, mountPath: /etc/boss-train, readOnly: true}
+          resources:
+            # A supervisor loop plus occasional git/gate shell-outs — modest
+            # steady state, headroom for a merge assembly. Bounded so a
+            # runaway cannot starve the SoR sharing these nodes.
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
+      volumes:
+        - name: home
+          persistentVolumeClaim: {claimName: boss-conductor-home}
+        # THE FORGE WRITE TOKEN, mounted rather than hand-placed
+        # (7ee101aa) — the SAME Secret and the SAME mapping the boss-dev
+        # pod uses: the Secret's `token` key onto the filename the train
+        # verbs expect (/etc/boss-train/forge.token). The credential broker
+        # rotates this Secret with no pod-side action; the kubelet re-syncs
+        # the mount. `optional: true`, same posture as boss-dev: an absent
+        # Secret is a closed door (a conductor that cannot push), not a pod
+        # stuck in ContainerCreating.
+        - name: forge-token
+          secret:
+            secretName: boss-dev-forge-token
+            optional: true
+            defaultMode: 0400
+            items:
+              - {key: token, path: forge.token}

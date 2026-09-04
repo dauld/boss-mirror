@@ -443,5 +443,11 @@
          this network; identity is a passkey at the IdP. Break-glass is
          still reachable for an operator with curl (POST /api/auth/login)
          — deliberately not a button, so nobody drifts back to it. -->
+    <!-- The hardware-key ceremony (break-glass-is-a-key-you-hold.md)
+         lives at /break-glass — a page the gateway binary serves
+         itself, unlinked from here on purpose. Same posture as the
+         curl path above: a typed URL an operator knows, not an
+         affordance a user finds. During the Q6 soak both doors exist;
+         the curl path retires in the follow-up car. -->
   </div>
 </div>

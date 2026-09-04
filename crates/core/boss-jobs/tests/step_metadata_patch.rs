@@ -85,6 +85,8 @@ fn build_app(policy: Arc<dyn PolicyClient>) -> (Router, Arc<InMemoryJobs>) {
         subject_existence: None,
         roster: None,
         clock: Arc::new(boss_clock_client::WallClockClient),
+        cadence: None,
+        delivery: None,
     };
     (router(state), jobs)
 }
@@ -701,6 +703,8 @@ fn registry_app() -> Router {
         subject_existence: None,
         roster: Some(Arc::new(AdminRoster)),
         clock: Arc::new(boss_clock_client::WallClockClient),
+        cadence: None,
+        delivery: None,
     };
     router(state)
 }

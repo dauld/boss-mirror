@@ -80,6 +80,8 @@ fn build_app(policy: Arc<dyn PolicyClient>) -> (Router, Arc<InMemoryJobs>) {
         subject_existence: None,
         roster: None,
         clock: Arc::new(boss_clock_client::WallClockClient),
+        cadence: None,
+        delivery: None,
     };
     (router(state), jobs)
 }

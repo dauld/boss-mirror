@@ -11,6 +11,7 @@
   const GROUPS: Readonly<Record<ItTabGroup, ReadonlyArray<{ label: string; path: string }>>> = {
     operate: [
       { label: 'Incidents', path: '/it/operate' },
+      { label: 'Yard status', path: '/it/operate/yard-status' },
       { label: 'Audit Log', path: '/it/operate/audit' },
       { label: 'Performance', path: '/it/operate/perf' },
       { label: 'Atlas', path: '/it/operate/atlas' },

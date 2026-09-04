@@ -337,6 +337,12 @@ async fn run_server<R: JobsRepository + 'static>(
         subject_existence,
         roster,
         clock: clock.clone(),
+        // The yard-status read-model reads these registries directly (the
+        // /api/cadence and /api/delivery doors are operator-only, so the
+        // browser cannot). Clone the Arc — the same repos back both the
+        // operator doors below and this read-model.
+        cadence: cadence.clone(),
+        delivery: delivery.clone(),
     };
     let mut app = router(state);
     if let Some(repo) = scheduling {

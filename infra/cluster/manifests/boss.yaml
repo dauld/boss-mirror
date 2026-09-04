@@ -231,6 +231,15 @@ spec:
         - name: step-plugins
           configMap:
             name: step-plugins
+        # Break-glass PUBLIC credential records (boss-break-glass-
+        # credentials.yaml — the manifest header is the ceremony doc).
+        # `optional` so a deployment that has not adopted the ceremony
+        # still boots; the gateway answers 409 "no credential enrolled"
+        # rather than failing to mount.
+        - name: break-glass-credentials
+          configMap:
+            name: boss-break-glass-credentials
+            optional: true
       initContainers:
         # Converges the schema (infra/postgres/migrate.sh, manifest order)
         # on EVERY start — an existing database gets the migrations it is
@@ -370,6 +379,19 @@ spec:
             - {name: BOSS_AUTH_MAIL_FROM, value: "auth@send.algedonic.dev"}
             - name: BOSS_MAIL_API_TOKEN
               valueFrom: {secretKeyRef: {name: resend, key: api-key}}
+            # Break-glass hardware-key ceremony (break-glass-is-a-key-
+            # you-hold.md; store + ceremony doc in
+            # boss-break-glass-credentials.yaml). The DIR is the
+            # ConfigMap mount below — public records, re-read per
+            # ceremony so a committed record propagates without a
+            # restart. The TOKEN arms the one-time bootstrap
+            # enrollment window; the Secret exists only for the
+            # duration of David's enrollment ceremony (`optional` —
+            # absent means the window is closed, which is the steady
+            # state). A VALUE, not a path.
+            - {name: BOSS_BREAK_GLASS_DIR, value: /etc/boss/break-glass}
+            - name: BOSS_BREAK_GLASS_ENROLL_TOKEN
+              valueFrom: {secretKeyRef: {name: boss-break-glass-enroll, key: token, optional: true}}
             - {name: RUST_LOG, value: info}
           ports:
             - {containerPort: 4443, name: gateway}
@@ -403,6 +425,10 @@ spec:
             # exactly when you cannot afford it.
             - {name: boss-auth, mountPath: /var/lib/boss/auth}
             - {name: step-plugins, mountPath: /var/lib/boss/step-plugins, readOnly: true}
+            # Public break-glass credential records; the gateway only
+            # ever reads them (enrollment emits records for a commit,
+            # never a write here — the manifest header explains why).
+            - {name: break-glass-credentials, mountPath: /etc/boss/break-glass, readOnly: true}
 ---
 apiVersion: v1
 kind: Service

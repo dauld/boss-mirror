@@ -218,6 +218,12 @@ impl Config {
                 &format!("{forge_base}/{forge_repo}.git"),
             ),
             clone: format!("{home}/repo"),
+            // Default `/opt/boss` is the boss-gcp conductor's playground
+            // tree and stays unchanged. Set BOSS_TRAIN_DEPLOY_TREE="" to
+            // mean "the deploy happens elsewhere (the cluster converge),
+            // not here" — the intended config for a cluster-resident
+            // conductor, which has no such tree and no sudo. See
+            // `playground_deploy_disabled` and `deploy`.
             deploy_tree: env_or("BOSS_TRAIN_DEPLOY_TREE", "/opt/boss"),
             forge_kind: env_or("BOSS_TRAIN_FORGE", "forgejo"),
             auto_merge: std::env::var("BOSS_TRAIN_AUTO_MERGE").as_deref() == Ok("1"),
@@ -1817,6 +1823,28 @@ pub(crate) fn deploy_needed(current_key: &str, remote_main: &str) -> bool {
     current_key.is_empty() || remote_main.is_empty() || !remote_main.starts_with(current_key)
 }
 
+/// Is the conductor's own playground deploy turned OFF? An empty
+/// `deploy_tree` (`BOSS_TRAIN_DEPLOY_TREE=""`) is the deliberate
+/// config for the cluster-resident conductor: it has no `/opt/boss`
+/// tree and no sudo, and the cluster converges on forge main by
+/// itself — the forge-host cluster-deploy-runner takes the merge,
+/// not the conductor (deployment-as-network; the migration in
+/// docs/design/the-cluster-is-the-system.md). The default stays
+/// `/opt/boss`, so the boss-gcp conductor is unaffected; only an
+/// explicitly-empty tree disables the hop. Whitespace-only counts as
+/// empty — it can only be a mis-set env var, never a real path.
+pub(crate) fn playground_deploy_disabled(deploy_tree: &str) -> bool {
+    deploy_tree.trim().is_empty()
+}
+
+/// The `deployed`-step evidence a cluster-resident conductor stamps
+/// when it runs no playground deploy. It is a COMPLETION, not a
+/// block: there is genuinely nothing for the conductor to deploy, and
+/// the downstream convergence-verification step is what confirms the
+/// cluster actually took the merge.
+pub(crate) const NO_PLAYGROUND_DEPLOY_EVIDENCE: &str = "no playground deploy — the cluster converges on forge main via the deploy-runner \
+     (deployment-as-network); nothing to deploy from the conductor";
+
 /// Do two commit identifiers name the same commit? Shas arrive at
 /// different lengths from different mouths — the merge_ref is the
 /// forge's 12-char answer, `Capabilities.commit` is the full 40 the
@@ -3236,7 +3264,36 @@ impl Conductor {
 
     /// Carry a merged train out to the playground — only from a clean
     /// main tree; anything else is recorded and retried next run.
+    ///
+    /// EMPTY-TREE CONTRACT. When `deploy_tree` is empty
+    /// (`BOSS_TRAIN_DEPLOY_TREE=""`) the deploy happens ELSEWHERE, not
+    /// here: the cluster converges on forge main by itself via the
+    /// forge-host cluster-deploy-runner (deployment-as-network). This
+    /// is the deliberate config for a conductor running inside the
+    /// cluster, which has no `/opt/boss` tree and no sudo — the
+    /// migration in docs/design/the-cluster-is-the-system.md, which
+    /// retires the vestigial boss-gcp playground deploy. In that mode
+    /// deploy() does no git or tree access at all: it completes the
+    /// `deployed` step honestly (nothing to deploy) and returns, and
+    /// the downstream convergence-verification step is what proves the
+    /// cluster actually took the merge. The default stays `/opt/boss`,
+    /// so the boss-gcp conductor's path is byte-unchanged.
     async fn deploy(&self, train: &Value, deployed_step: &Value, now: DateTime<Utc>) -> Result<()> {
+        // Cluster-resident conductor: no playground deploy. Short-
+        // circuit BEFORE any git/tree access — there is no tree, and a
+        // no-op deploy has no business touching one. This is a
+        // COMPLETION, not a block (see NO_PLAYGROUND_DEPLOY_EVIDENCE):
+        // convergence verification downstream confirms the merge landed.
+        if playground_deploy_disabled(&self.cfg.deploy_tree) {
+            log("deploy skipped — no playground tree; the cluster converges on forge main");
+            self.complete_step(
+                train,
+                Some(deployed_step),
+                &[("deployed", Some(NO_PLAYGROUND_DEPLOY_EVIDENCE.to_string()))],
+            )
+            .await?;
+            return Ok(());
+        }
         let tree = self.cfg.deploy_tree.clone();
         let tree_path = Path::new(&tree);
         // Deploy only when needed. The skip decision comes before the
@@ -5441,13 +5498,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
     use super::{
-        ApiFailure, ConvergenceVerdict, Failure, JOBS_API_RETRY, RetryPolicy, SweepGuard,
-        arrival_already_filed, arrival_report, arrival_summary, auto_cancel_reason, boarded_head,
-        branch_moved_line, car_hold_reason, ci_overdue, classify_transport, commits_match,
-        convergence_verdict, deletable_branches, deploy_needed, local_jobs_problem,
-        overlay_metadata, parked_ready, releasable_cars, repo_path, resolve_train, retryable,
-        retrying, short_cause, skip_reason_branch_missing, skip_reason_conflict, stall_age_hours,
-        sweep_guard, sweep_note, sweep_settled, train_branch_to_delete, verdict_drift,
+        ApiFailure, ConvergenceVerdict, Failure, JOBS_API_RETRY, NO_PLAYGROUND_DEPLOY_EVIDENCE,
+        RetryPolicy, SweepGuard, arrival_already_filed, arrival_report, arrival_summary,
+        auto_cancel_reason, boarded_head, branch_moved_line, car_hold_reason, ci_overdue,
+        classify_transport, commits_match, convergence_verdict, deletable_branches, deploy_needed,
+        local_jobs_problem, overlay_metadata, parked_ready, playground_deploy_disabled,
+        releasable_cars, repo_path, resolve_train, retryable, retrying, short_cause,
+        skip_reason_branch_missing, skip_reason_conflict, stall_age_hours, sweep_guard, sweep_note,
+        sweep_settled, train_branch_to_delete, verdict_drift,
     };
     use crate::delivery_policy::DeliveryPolicy;
     use anyhow::{Result, anyhow};
@@ -6950,6 +7008,55 @@ mod tests {
         // surfaces its own errors; a skip must never rest on absence.
         assert!(deploy_needed("", full));
         assert!(deploy_needed("c0020201", ""));
+    }
+
+    // -- the playground-deploy-disabled decision ---------------------------
+    //
+    // The FIRST car of the conductor migration
+    // (docs/design/the-cluster-is-the-system.md): move the conductor
+    // into the cluster and retire the vestigial boss-gcp playground
+    // deploy. A cluster-resident conductor has no `/opt/boss` tree and
+    // no sudo, so an empty `deploy_tree` turns the hop OFF — deploy()
+    // short-circuits BEFORE any git/tree access and completes the step
+    // honestly. The default `/opt/boss` MUST stay enabled so the
+    // boss-gcp conductor is byte-unchanged.
+
+    #[test]
+    fn an_empty_deploy_tree_disables_the_playground_deploy() {
+        // The one intended off-switch: an explicitly-empty tree.
+        assert!(playground_deploy_disabled(""));
+        // Whitespace-only can only be a mis-set env var, never a path.
+        assert!(playground_deploy_disabled("   "));
+        assert!(playground_deploy_disabled("\t\n"));
+    }
+
+    #[test]
+    fn a_real_deploy_tree_keeps_the_playground_deploy() {
+        // The default the boss-gcp conductor runs under — unchanged.
+        assert!(!playground_deploy_disabled("/opt/boss"));
+        // And the /tmp path the tree-backed deploy tests exercise.
+        assert!(!playground_deploy_disabled("/tmp/boss-train-test/tree"));
+    }
+
+    #[test]
+    fn the_no_playground_deploy_evidence_names_the_convergence_path() {
+        // The completion evidence the cluster-resident conductor stamps
+        // on the `deployed` step. It reads as a COMPLETION (nothing to
+        // deploy), not a block, and points at what actually deploys.
+        let ev = NO_PLAYGROUND_DEPLOY_EVIDENCE;
+        assert!(ev.contains("no playground deploy"), "states the skip: {ev}");
+        assert!(
+            ev.contains("converges on forge main"),
+            "names where the deploy happens instead: {ev}"
+        );
+        assert!(
+            ev.contains("deploy-runner"),
+            "names the actor that deploys: {ev}"
+        );
+        assert!(
+            ev.contains("nothing to deploy from the conductor"),
+            "reads as a completion, not a block: {ev}"
+        );
     }
 
     #[test]

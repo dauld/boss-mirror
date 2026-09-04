@@ -674,6 +674,47 @@ fn build_router(local_auth_state: Option<Arc<LocalAuthState>>) -> axum::Router<A
                 app
             }
         };
+        // Break-glass ceremony (docs/design/break-glass-is-a-key-you-
+        // hold.md): the gateway as its own WebAuthn verifier. Best-
+        // effort mount for the same reason as the presence passkey —
+        // a malformed BOSS_PUBLIC_URL must degrade to "no break-glass
+        // routes", never crash the front door. The credentials.toml
+        // path above stays untouched during the soak (Q6).
+        let app = match boss_gateway::break_glass::BreakGlassState::from_env(
+            la.session_key.clone(),
+            la.audit.clone(),
+        ) {
+            Ok(bg) => {
+                let bg = std::sync::Arc::new(bg);
+                app.route(
+                    "/break-glass",
+                    axum::routing::get(boss_gateway::break_glass::ceremony_page),
+                )
+                .route(
+                    "/api/auth/break-glass/enroll/begin",
+                    axum::routing::post(boss_gateway::break_glass::enroll_begin)
+                        .with_state(bg.clone()),
+                )
+                .route(
+                    "/api/auth/break-glass/enroll/finish",
+                    axum::routing::post(boss_gateway::break_glass::enroll_finish)
+                        .with_state(bg.clone()),
+                )
+                .route(
+                    "/api/auth/break-glass/assert/begin",
+                    axum::routing::post(boss_gateway::break_glass::assert_begin)
+                        .with_state(bg.clone()),
+                )
+                .route(
+                    "/api/auth/break-glass/assert/finish",
+                    axum::routing::post(boss_gateway::break_glass::assert_finish).with_state(bg),
+                )
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "break-glass ceremony not mounted");
+                app
+            }
+        };
         app.route(
             "/api/auth/login",
             axum::routing::post(local_auth::login).with_state(la.clone()),
@@ -1025,6 +1066,49 @@ mod routing_tests {
                 "`{path}` fell through to the /api catch-all"
             );
         }
+    }
+
+    /// The break-glass ceremony routes are registered on the same
+    /// conditionally-built router as local auth; they too must beat
+    /// the /api catch-all, and the ceremony page must beat the SPA
+    /// fallback — a /break-glass URL answered with the dashboard
+    /// shell would be exactly the /simulator failure shape below.
+    #[tokio::test]
+    async fn break_glass_routes_survive_catch_all_and_spa_fallback() {
+        let store = CredentialStore::load("/nonexistent/boss-test-credentials.toml")
+            .expect("empty credential store");
+        let la = Arc::new(LocalAuthState {
+            store,
+            session_key: vec![0u8; 32],
+            http: reqwest::Client::new(),
+            audit: boss_gateway::audit::AuthAudit::disabled(),
+            guest_access: false,
+            oidc: None,
+            mail: boss_gateway::mail::from_env(),
+            public_url: "https://boss.test".into(),
+            forgot_seen: Default::default(),
+        });
+
+        for path in [
+            "/api/auth/break-glass/enroll/begin",
+            "/api/auth/break-glass/enroll/finish",
+            "/api/auth/break-glass/assert/begin",
+            "/api/auth/break-glass/assert/finish",
+        ] {
+            let (_, body) = get(app_with(Some(la.clone())), path).await;
+            assert!(
+                !body.contains(MISS),
+                "`{path}` fell through to the /api catch-all"
+            );
+        }
+
+        let (status, body) = get(app_with(Some(la)), "/break-glass").await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert!(
+            body.contains("break-glass/assert/begin"),
+            "/break-glass must serve the gateway's own ceremony page, not the \
+             SPA fallback: {body}"
+        );
     }
 
     /// Non-API paths must still reach the SPA — the fix narrows the

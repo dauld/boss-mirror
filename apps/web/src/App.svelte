@@ -59,6 +59,7 @@
   import DispatcherRuleEditPage from './dispatcher/DispatcherRuleEditPage.svelte';
   import SubjectsClassesPage from './it/subjects/SubjectsClassesPage.svelte';
   import YardPage from './it/yard/YardPage.svelte';
+  import YardStatusPage from './it/yard/YardStatusPage.svelte';
   import EstatePage from './it/estate/EstatePage.svelte';
   import FleetPage from './it/monitoring/FleetPage.svelte';
   import ItTabs from './it/ItTabs.svelte';
@@ -339,6 +340,9 @@
     {:else if route.kind === 'systemFleet'}
       <ItTabs group="operate" active="/it/operate/bottlenecks" />
       <FleetPage />
+    {:else if route.kind === 'systemYardStatus'}
+      <ItTabs group="operate" active="/it/operate/yard-status" />
+      <YardStatusPage />
     {:else if route.kind === 'experiments'}
       <ItTabs group="design" active="/it/design/experiments" />
       <ExperimentsPage />

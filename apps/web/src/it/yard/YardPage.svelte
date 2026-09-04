@@ -15,6 +15,12 @@
     type EtaPhase,
     type YardState,
     type TrainRow, troubleLabel } from './yard';
+  import {
+    fetchYardStatus,
+    gateSlots,
+    type YardStatus,
+  } from './yard-status';
+  import type { Remote } from '../../data/remote';
   import PacketCard from '@boss/web-kit/ui/PacketCard.svelte';
   import PacketModal, { type PacketJob } from '@boss/web-kit/ui/PacketModal.svelte';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
@@ -23,6 +29,15 @@
 
   let yard = $state<YardState | null>(null);
   let loading = $state(true);
+
+  // The gate slots + garage ride the server-computed read-model, whose
+  // capacity is the delivery policy's gate_max_concurrent — no constant
+  // baked into this page. Held as a Remote so an outage renders honestly
+  // (the same deserialize-once pattern the Yard-status page uses) rather
+  // than a false-empty approach.
+  let status = $state<Remote<YardStatus>>({ kind: 'loading' });
+  const slots = $derived(status.kind === 'ready' ? gateSlots(status.data.gates) : []);
+  const garage = $derived(status.kind === 'ready' ? status.data.garage : []);
 
   // The condensed packet panel (David, fc67bed2). The dock rows are a
   // slim projection — no steps, no metadata — so opening a packet
@@ -78,8 +93,10 @@
   onMount(() => {
     let cancelled = false;
     async function tick() {
-      const y = await fetchYard();
-      if (!cancelled && y) yard = y;
+      const [y, s] = await Promise.all([fetchYard(), fetchYardStatus()]);
+      if (cancelled) return;
+      if (y) yard = y;
+      status = s;
       loading = false;
     }
     tick();
@@ -298,31 +315,84 @@
     <!-- The approach (f930cda2): the car lifecycle upstream of the
          dock, which used to render as silence — 8 publish-requests,
          8 gates and an arrival in one hour once drew an empty yard.
-         Ordered by distance from the dock: publishing, gating, red,
-         green-unparked. Renders nothing when the approach is clear;
-         each row opens its own packet. -->
-    {#if yard.approach.length > 0}
+         The full pre-boarding lifecycle: queued → gating (the slots) →
+         green becomes a parked car, RED drops into the garage. Ordered
+         by distance from the dock: publishing, gating, red,
+         green-unparked; each row opens its own packet. The gate SLOTS
+         and the GARAGE come from the server-computed status (David,
+         2026-09-03) so capacity is the live policy, not folklore. -->
+    {#if yard.approach.length > 0 || slots.length > 0 || garage.length > 0}
       <div class="yard-section">04 — THE APPROACH <span class="yard-n">{yard.approach.length}</span></div>
-      <table class="yard-board">
-        <tbody>
-          {#each yard.approach as a (a.id)}
-            <tr class="yard-approach" ondblclick={() => openPacket(a.id)}>
-              <td class="yard-appr-state" data-state={a.state}>{a.state.replace('-', ' ')}</td>
-              <td>
-                <a
-                  href={`/jobs/${a.id}`}
-                  title="open the packet behind this row"
-                  onclick={e => {
-                    e.preventDefault();
-                    openPacket(a.id);
-                  }}>{a.branch}</a>
-              </td>
-              <td class="yard-stamp">{a.sha ? a.sha.slice(0, 8) : '—'}</td>
-              <td class="yard-stamp">{a.note ?? a.opened_on}</td>
-            </tr>
+
+      {#if yard.approach.length > 0}
+        <table class="yard-board">
+          <tbody>
+            {#each yard.approach as a (a.id)}
+              <tr class="yard-approach" ondblclick={() => openPacket(a.id)}>
+                <td class="yard-appr-state" data-state={a.state}>{a.state.replace('-', ' ')}</td>
+                <td>
+                  <a
+                    href={`/jobs/${a.id}`}
+                    title="open the packet behind this row"
+                    onclick={e => {
+                      e.preventDefault();
+                      openPacket(a.id);
+                    }}>{a.branch}</a>
+                </td>
+                <td class="yard-stamp">{a.sha ? a.sha.slice(0, 8) : '—'}</td>
+                <td class="yard-stamp">{a.note ?? a.opened_on}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+
+      <!-- The gate SLOTS: N parallel bays (N = the policy's
+           gate_max_concurrent), each empty or holding the car being
+           assessed in it. Capacity + usage legible at a glance. -->
+      {#if slots.length > 0}
+        <div class="yard-gates-head">
+          GATES
+          <span class="yard-gates-n"
+            >{slots.filter(s => s.kind === 'occupied').length} / {slots.length} in use</span>
+        </div>
+        <div class="yard-gates">
+          {#each slots as slot, i (i)}
+            {#if slot.kind === 'occupied'}
+              <button
+                type="button"
+                class="yard-slot is-busy"
+                title="open the gate-run packet"
+                onclick={() => openPacket(slot.gate.packet_id)}>
+                <span class="yard-slot-n">gate {i + 1}</span>
+                <span class="yard-slot-branch">{slot.gate.branch}</span>
+                <span class="yard-slot-since">gating since {slot.gate.since}</span>
+              </button>
+            {:else}
+              <div class="yard-slot is-free">
+                <span class="yard-slot-n">gate {i + 1}</span>
+                <span class="yard-slot-free">available</span>
+              </div>
+            {/if}
           {/each}
-        </tbody>
-      </table>
+        </div>
+      {/if}
+
+      <!-- The GARAGE: cars whose latest gate went RED, waiting for
+           rework. A branch that re-gated green has left already (the
+           server keeps only the latest run per branch). -->
+      {#if garage.length > 0}
+        <div class="yard-gates-head">GARAGE <span class="yard-gates-n">gated red, awaiting rework</span></div>
+        <ul class="yard-garage">
+          {#each garage as c (c.branch)}
+            <li class="yard-garage-row">
+              <span class="yard-garage-branch">{c.branch}</span>
+              <span class="yard-garage-check">{c.failed_check ?? 'run died outside a check'}</span>
+              <span class="yard-stamp">{c.since}</span>
+            </li>
+          {/each}
+        </ul>
+      {/if}
     {/if}
 
     <!-- Arrivals are trains that ARRIVED — a cancelled train never
@@ -531,6 +601,49 @@
     text-decoration: none;
   }
   .yard-empty { color: var(--static, #78716c); padding: 12px 0; font-size: 14px; }
+  /* Gates + garage sub-headers inside the Approach section: quieter than
+     a numbered section header, the same mono-caps grammar. */
+  .yard-gates-head {
+    font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
+    letter-spacing: var(--ls-nav, 0.14em); text-transform: uppercase;
+    color: var(--static, #7A838C); margin: 14px 0 8px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .yard-gates-n { color: var(--static, #7A838C); text-transform: none; letter-spacing: 0; }
+  /* The slots: N parallel bays. A busy bay wears the running-lamp warn,
+     a free one the muted hairline — the same palette the approach states
+     and the CI lamps use, no new colour. */
+  .yard-gates { display: grid; gap: 10px;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+  .yard-slot {
+    display: flex; flex-direction: column; gap: 3px; text-align: left;
+    border: 1px solid var(--hairline, #2A3138);
+    background: var(--card, var(--ink, #12161C));
+    padding: 10px 12px; min-height: 64px;
+    font: inherit; border-radius: 0;
+  }
+  .yard-slot.is-busy { border-color: var(--warn, #d9a441); cursor: pointer; }
+  .yard-slot.is-busy:hover, .yard-slot.is-busy:focus-visible {
+    border-color: var(--signal, #5FD4A8); }
+  .yard-slot.is-free { border-style: dashed; justify-content: center; }
+  .yard-slot-n { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--static, #7A838C); }
+  .yard-slot-branch { font-size: 13px; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; color: var(--text, #C7CED6); }
+  .yard-slot-since { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
+    color: var(--warn, #d9a441); font-variant-numeric: tabular-nums; }
+  .yard-slot-free { font-size: 12px; color: var(--static, #7A838C); font-style: italic; }
+  /* The garage: gated-red cars, one row each. The err lamp on the
+     branch, the failing check beside it. */
+  .yard-garage { list-style: none; padding: 0; margin: 0;
+    border: 1px solid var(--hairline, #2A3138); background: var(--card, var(--ink, #12161C)); }
+  .yard-garage-row { display: flex; align-items: center; gap: 12px; padding: 8px 12px;
+    border-bottom: 1px solid var(--hairline, #2A3138); font-size: 13px; }
+  .yard-garage-row:last-child { border-bottom: none; }
+  .yard-garage-branch { color: var(--err, #e2685c); font-weight: 600;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+  .yard-garage-check { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px;
+    color: var(--static, #7A838C); }
   .yard-flow { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
     letter-spacing: var(--ls-nav, 0.14em); color: var(--static, #7A838C);
     border-top: 1px solid var(--hairline, #2A3138); margin-top: 28px; padding-top: 12px; }

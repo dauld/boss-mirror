@@ -121,6 +121,8 @@ fn app() -> axum::Router {
         subject_existence: None,
         roster: Some(Arc::new(AdminRoster)),
         clock: Arc::new(boss_clock_client::WallClockClient),
+        cadence: None,
+        delivery: None,
     };
     router(state)
 }

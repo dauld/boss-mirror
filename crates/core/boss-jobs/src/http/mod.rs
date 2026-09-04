@@ -39,6 +39,7 @@ mod sim_clock;
 mod stations;
 mod steps;
 mod terminal_report;
+mod yard;
 
 use census::*;
 use jobs::*;
@@ -50,6 +51,7 @@ use sim_clock::*;
 use stations::*;
 use steps::*;
 use terminal_report::*;
+use yard::*;
 
 const DEFAULT_LIMIT: i64 = 100;
 const MAX_LIMIT: i64 = 1000;
@@ -107,6 +109,17 @@ pub struct JobsApiState<R: JobsRepository, B: EventBus> {
     pub roster: Option<Arc<dyn crate::owner_resolution::RosterLookup>>,
     /// Authoritative clock. See `boss-clock-client`.
     pub clock: Arc<dyn boss_clock_client::ClockClient>,
+    /// Cadence registry (read-only here). Wired so the yard-status
+    /// read-model can render the boarding predicate from the same rows
+    /// the conductor boards on — computed server-side, because the
+    /// `/api/cadence/*` door is operator-only and a browser cannot reach
+    /// it. `None` skips the predicate (tests / in-memory spike).
+    pub cadence: Option<Arc<dyn crate::cadence::CadenceRepository>>,
+    /// Delivery-policy registry (read-only here). Same reason as
+    /// `cadence`: the yard status names the stall / red-train thresholds
+    /// the conductor enforces, read from the live policy row rather than
+    /// a constant.
+    pub delivery: Option<Arc<dyn crate::delivery::DeliveryPolicyRepository>>,
 }
 
 /// `GET /api/jobs/job-edges` — the declared job-to-job link fields.
@@ -164,6 +177,13 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
         // obligation — ready/active step on an open packet — has
         // waited. Read-only, own row shape; Job and Step untouched.
         .route("/api/jobs/queue-age", get(list_queue_age::<R, B>))
+        // The yard status read-model (the-cluster-is-the-system.md
+        // Phase 0): "what is the yard doing, and why?" answered from the
+        // SoR in one payload — in-flight trains and their block reasons,
+        // the dock, the boarding predicate computed from the live cadence
+        // rows, recent arrivals. Read-only, own row shape; Job and Step
+        // untouched, `terminal-report` and `queue-age` the precedents.
+        .route("/api/yard/status", get(yard_status::<R, B>))
         .route("/api/jobs", get(list_jobs::<R, B>))
         .route("/api/jobs", post(create_job::<R, B>))
         .route("/api/jobs/{id}", get(get_job::<R, B>))

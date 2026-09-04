@@ -7,6 +7,7 @@
 //! these instead of redeclaring them.
 
 pub mod audit;
+pub mod break_glass;
 pub mod local_auth;
 pub mod mail;
 pub mod oidc;

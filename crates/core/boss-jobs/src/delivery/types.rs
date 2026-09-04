@@ -42,4 +42,9 @@ pub struct DeliveryPolicyRow {
     /// GB of free disk the CI host's latest host-scope estate
     /// observation must show before boarding assembles a consist.
     pub ci_host_floor_gb: i32,
+    /// How many gates `boss gate` admits at once before it refuses.
+    /// Read by the gate CLI (the number it enforces) AND by the yard
+    /// status surface (the number it draws as slots) — one source, so
+    /// the capacity a page shows is the capacity the pipeline obeys.
+    pub gate_max_concurrent: i32,
 }

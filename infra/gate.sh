@@ -604,6 +604,7 @@ PREFLIGHT_LINTS=(
     "layer-order-audit|infra/lint/layer-order-audit.sh"
     "no-wallclock|infra/lint/no-wallclock.sh"
     "one-stamp-per-transaction|infra/lint/one-stamp-per-transaction.sh"
+    "emitted-kinds-are-declared|infra/lint/emitted-kinds-are-declared.sh"
     "outbox-migration-ratchet|infra/lint/outbox-migration-ratchet.sh"
     "idempotence-ratchet|infra/lint/idempotence-ratchet.sh"
     "dispatcher-rules-ratchet|infra/lint/dispatcher-rules-ratchet.sh"

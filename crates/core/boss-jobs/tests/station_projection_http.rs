@@ -136,6 +136,8 @@ fn app(extra: Option<StationSpec>) -> axum::Router {
         subject_existence: None,
         roster: None,
         clock: Arc::new(boss_clock_client::WallClockClient),
+        cadence: None,
+        delivery: None,
     };
     router(state)
 }

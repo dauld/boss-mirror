@@ -278,6 +278,20 @@ fi
 # whole converge.
 $K set image -n boss cronjobs -l boss-chore=true "chore=$REGISTRY:$HEAD" || true
 
+# THE CLUSTER-RESIDENT CONDUCTOR runs the same boss image and converges
+# its tag here, exactly like the boss deployment above — the manifest
+# (boss-conductor.yaml) commits a :latest placeholder and this is where
+# the real :$HEAD replaces it. It is a Deployment in boss-dev, so the
+# `boss -n boss` patch and the CronJob selector both miss it; it gets its
+# own one-line patch. No `rollout status` follows: the conductor SHIPS
+# DORMANT (replicas 0) and stays there until an operator's explicit
+# cutover, so there is no rollout to wait on and a Ready-check would hang
+# on a deployment with no pods. `|| true`: a cluster where this manifest
+# has not applied yet (or a scaled-to-0 conductor) must not fail the
+# converge. When an operator scales it to 1, it is already pinned to the
+# HEAD this converge built.
+$K set image -n boss-dev deploy/boss-conductor "conductor=$REGISTRY:$HEAD" || true
+
 echo "$HEAD" > "$STAMP_FILE"
 rm -f "$FAILED_FILE"
 echo "cluster-deploy-runner: cluster on $REGISTRY:$HEAD"

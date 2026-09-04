@@ -161,6 +161,8 @@ async fn app_with(
         subject_existence: None,
         roster: None,
         clock: Arc::new(boss_clock_client::WallClockClient),
+        cadence: None,
+        delivery: None,
     };
     (router(state), jobs)
 }

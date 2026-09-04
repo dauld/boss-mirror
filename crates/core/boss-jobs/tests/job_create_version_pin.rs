@@ -90,6 +90,8 @@ async fn new_job_pins_to_active_version_not_default_one() {
         subject_existence: None,
         roster: None,
         clock: Arc::new(boss_clock_client::WallClockClient),
+        cadence: None,
+        delivery: None,
     };
     let app = router(state);
 
@@ -240,6 +242,8 @@ async fn a_republish_does_not_strand_a_job_opened_under_the_old_version() {
         subject_existence: None,
         roster: None,
         clock: Arc::new(boss_clock_client::WallClockClient),
+        cadence: None,
+        delivery: None,
     });
 
     let mut job = Job::new(

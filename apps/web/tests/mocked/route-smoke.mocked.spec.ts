@@ -51,6 +51,9 @@ const ROUTES: ReadonlyArray<string> = [
   // the mock's empty /api/workflows — page chrome + picker. The map
   // and flow pages died into the Atlas tab (already crawled above).
   '/it/operate/bottlenecks',
+  // Yard status renders the empty yard under the mock's `[]` catch-all
+  // for /api/yard/status — chrome + "no trains / no cars", no crash.
+  '/it/operate/yard-status',
   // The risk watchlist. Since CAR-6 it HAS a catalog entry, so the
   // drift test at the bottom of this file now enforces its presence
   // here instead of this line being the whole of its coverage.

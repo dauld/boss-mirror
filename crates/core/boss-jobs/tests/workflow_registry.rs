@@ -89,6 +89,8 @@ fn build_app(registry: Arc<dyn WorkflowRegistry>) -> Router {
         subject_existence: None,
         roster: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
+        cadence: None,
+        delivery: None,
     };
     router(state)
 }
@@ -402,6 +404,8 @@ async fn guest_cannot_publish_even_if_they_could_create() {
         subject_existence: None,
         roster: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
+        cadence: None,
+        delivery: None,
     };
     let app = router(state);
 

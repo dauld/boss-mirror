@@ -2027,27 +2027,34 @@ mod db_tests {
 
         let depth = by_name("train-board-on-dock-depth");
         assert_eq!(depth.verb, "board");
-        // 4 since 147-board-on-four.sql, back where 114 started. The
-        // 8 and 12 raises were made when a train was expensive; the
-        // forge runner now cycles build-image, locomotive, web and fast
-        // in about three minutes, and a dock that never exceeds 3-5
-        // made 12 unreachable — four consecutive trains opened and
-        // cancelled "nothing to board" on 2026-08-17 while three
-        // mergeable cars sat parked. `cooldown_minutes` is the setting
-        // that protects the single-concurrency runner, not the depth.
+        // 3 since 202609032030-cadence-supersede-by-name.sql. The
+        // history: 114 started at 4, raised to 8 then 12 when a train
+        // was expensive, dropped back to 4 (147) when a dock that never
+        // exceeds 3-5 made 12 unreachable, and now 3 — finished work
+        // should not wait for eleven friends (David 2026-09-03).
         //
-        // This assertion is why the number lives in exactly two places
-        // and both must move together: the migration seeds the row, and
-        // boss-gcp's LOCAL copy is what the boarding loop actually
-        // reads (131 and 147 both say so). Note that `--auto` gates a
-        // schema-only change with "fixture + lints only" and SKIPS the
-        // tests, so editing the migration alone leaves this red and you
-        // will not find out until a crate change drags boss-cli back
-        // into scope.
+        // WHY THIS ASSERTION MOVED TWICE-REMOVED. board-on-three
+        // (202609031515) tried to set 3 and SILENTLY NO-OP'd: its
+        // version-keyed retire missed the real active row against a
+        // diverged version history (123), so the live value stayed 4
+        // and this test kept asserting 4 — documenting the breakage
+        // rather than catching it. The supersede-by-name migration
+        // retires the active row BY NAME and this pin now asserts the
+        // value that actually took: 3.
+        //
+        // This is why the number lives in exactly two places that must
+        // move together — the migration seeds the row, this test pins
+        // it (§9a). Note `--auto` gates a schema-only change with
+        // "fixture + lints only" and SKIPS the tests, so editing the
+        // migration alone leaves this red until a crate change drags
+        // boss-cli back into scope. CAVEAT still live: this is the
+        // CLUSTER SoR value; whether the boarding loop reads it depends
+        // on resolving the conductor's cadence source (the-cluster-is-
+        // the-system Q2) — the conductor move makes it moot.
         assert_eq!(
             depth.basis,
             Basis::QueueDepth {
-                min_depth: 4,
+                min_depth: 3,
                 cooldown_minutes: 120,
             }
         );
@@ -2120,6 +2127,66 @@ mod db_tests {
         .execute(&db.pool)
         .await;
         assert!(dup.is_err(), "second active train-reconcile row accepted");
+    }
+
+    /// The SAFE supersede idiom (202609032030): retire the active row
+    /// BY NAME, insert the next version as MAX(version)+1. This must
+    /// land the new depth from a DIVERGENT state — an active row whose
+    /// version is NOT the one a version-keyed migration would name.
+    /// That divergence (measured in 123) is exactly why board-on-three
+    /// silently no-op'd: its `retire WHERE version = 3` missed the real
+    /// active row, so depth 3 never took and the API kept serving 4.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn supersede_by_name_lands_the_new_depth_from_a_divergent_state() {
+        let db = boss_testing::TestDb::new().await;
+        let name = "test-supersede-divergent";
+        // The divergent state: the active row is version 7 — a version
+        // NOT the one a version-keyed migration would try to retire.
+        // This is the shape that silently no-op'd board-on-three: a
+        // `retire WHERE version = 3` would miss version 7, leave it
+        // active, and the new insert would be refused or skipped.
+        sqlx::query(
+            "INSERT INTO cadence_rules \
+             (name, version, status, verb, basis, min_dock_depth, cooldown_minutes) \
+             VALUES ($1, 7, 'active', 'board', 'queue-depth', 4, 120)",
+        )
+        .bind(name)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        // The SAFE idiom — retire by name, insert at MAX+1 — the exact
+        // shape of migration 202609032030.
+        sqlx::query(
+            "UPDATE cadence_rules SET status = 'retired' WHERE name = $1 AND status = 'active'",
+        )
+        .bind(name)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO cadence_rules \
+             (name, version, status, verb, basis, every_minutes, at_times, min_dock_depth, cooldown_minutes) \
+             SELECT $1, COALESCE(MAX(version),0)+1, 'active', 'board', 'queue-depth', NULL, NULL, 3, 120 \
+             FROM cadence_rules WHERE name = $1",
+        )
+        .bind(name)
+        .execute(&db.pool)
+        .await
+        .expect("safe supersede must not be refused by the partial index");
+
+        // Exactly one active row, version 8, depth 3 — the change took
+        // from a state a version-keyed retire would have missed.
+        let rows: Vec<(i32, i32)> = sqlx::query_as(
+            "SELECT version, min_dock_depth FROM cadence_rules WHERE name = $1 AND status = 'active'",
+        )
+        .bind(name)
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1, "exactly one active row after supersede");
+        assert_eq!(rows[0].0, 8, "new version is MAX(7)+1");
+        assert_eq!(rows[0].1, 3, "the live depth is the new 3, not the stale 4");
     }
 
     /// Serve the REAL `/api/cadence/*` router over a TestDb — the same

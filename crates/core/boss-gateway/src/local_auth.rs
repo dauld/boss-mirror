@@ -798,9 +798,12 @@ fn is_admin(headers: &HeaderMap, key: &[u8]) -> bool {
     let Some(s) = extract_session(headers, key) else {
         return false;
     };
+    // `can_administer_auth`, not `has_global_read`: the same set plus
+    // the narrow break-glass role, whose auth-administration lever is
+    // exactly these endpoints (break-glass-is-a-key-you-hold.md Q4).
     s.role
         .as_deref()
-        .map(boss_core::roles::has_global_read)
+        .map(boss_core::roles::can_administer_auth)
         .unwrap_or(false)
 }
 

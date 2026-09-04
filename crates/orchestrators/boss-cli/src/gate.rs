@@ -47,13 +47,22 @@ use serde_json::{Value, json};
 
 use crate::train::boss_user;
 
-/// Concurrent gates admitted by default. Three is inside the measured
-/// comfort zone on w-1 (32 cores, one NVMe): at FIVE concurrent gates
-/// I/O pressure sat at 65% while CPU pressure stayed at 0.00, and
-/// per-gate wall time went from ~35 to ~93 minutes — total throughput
-/// still beat serial, but each verdict arrived slower than two gates'
-/// worth of queueing. Override with BOSS_GATE_MAX_CONCURRENT when the
-/// node grows (or shrinks).
+/// The COMPILED fallback for how many gates run at once — the last
+/// resort when neither the env override nor the delivery policy can be
+/// read. It is no longer the SOLE source: the number an operator tunes
+/// lives in the `delivery_policy` registry (`gate_max_concurrent`),
+/// which this verb fetches the same way the conductor does, so raising
+/// the bound from 3 to 4 is a policy edit, not a code car. This constant
+/// survives only so a gate can still run when the registry is
+/// unreachable, and its value matches the seeded policy row
+/// (boss-cli's `the_seeded_policy_equals_the_compiled_fallback` pins
+/// the two — CLAUDE.md §9a).
+///
+/// Three is inside the measured comfort zone on w-1 (32 cores, one
+/// NVMe): at FIVE concurrent gates I/O pressure sat at 65% while CPU
+/// pressure stayed at 0.00, and per-gate wall time went from ~35 to ~93
+/// minutes — total throughput still beat serial, but each verdict
+/// arrived slower than two gates' worth of queueing.
 const DEFAULT_MAX_CONCURRENT: usize = 3;
 
 /// The placeholders the runner manifest carries.
@@ -186,36 +195,90 @@ pub(crate) fn name_hint(branch: &str) -> String {
     }
 }
 
-/// The concurrency bound, from its env override or the default.
+/// The concurrency bound: the env override when set, else `fallback`.
 ///
-/// Pure over the raw env value so the parsing rules pin in tests.
-/// An unparseable value REFUSES rather than silently meaning 3 — a
-/// typo'd bound that quietly becomes the default is the same defect
-/// class as the wrong-instance default this file already refuses
-/// (packet aa783636): right sometimes, silently wrong when it matters.
-/// Zero refuses too: it would deny every gate forever, which is a
-/// misconfiguration, not a policy — set 1 to serialize.
-pub(crate) fn max_concurrent_from(raw: Option<&str>) -> Result<usize> {
+/// THE SOURCE CHAIN is env > policy > compiled. This function owns the
+/// env leg — it is pure over the raw env value so the parsing rules pin
+/// in tests — and takes the resolved `fallback` (the delivery policy's
+/// `gate_max_concurrent`, or the compiled default when the registry was
+/// unreadable) for when no override is set. The override keeps its old
+/// meaning: it is the operator's escape hatch when the node has grown or
+/// shrunk between policy edits.
+///
+/// An unparseable override REFUSES rather than silently meaning the
+/// fallback — a typo'd bound that quietly becomes some other number is
+/// the same defect class as the wrong-instance default this file already
+/// refuses (packet aa783636): right sometimes, silently wrong when it
+/// matters. Zero refuses too: it would deny every gate forever, which is
+/// a misconfiguration, not a policy — set 1 to serialize.
+pub(crate) fn max_concurrent_from(raw: Option<&str>, fallback: usize) -> Result<usize> {
     let Some(v) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
-        return Ok(DEFAULT_MAX_CONCURRENT);
+        return Ok(fallback);
     };
     let n: usize = v.parse().map_err(|_| {
         anyhow!(
             "BOSS_GATE_MAX_CONCURRENT={v} is not a count. Set a positive integer \
-             (default {DEFAULT_MAX_CONCURRENT}), or unset it."
+             (currently {fallback}), or unset it to take the delivery policy's bound."
         )
     })?;
     if n == 0 {
         bail!(
             "BOSS_GATE_MAX_CONCURRENT=0 would refuse every gate. Set 1 to \
-             serialize, or unset it for the default {DEFAULT_MAX_CONCURRENT}."
+             serialize, or unset it to take the delivery policy's bound ({fallback})."
         );
     }
     Ok(n)
 }
 
-fn max_concurrent() -> Result<usize> {
-    max_concurrent_from(std::env::var("BOSS_GATE_MAX_CONCURRENT").ok().as_deref())
+/// The policy leg of the source chain: the `gate_max_concurrent` on the
+/// active `train-conductor` delivery policy, or the compiled fallback
+/// when the registry is unreachable, absent, or holds a nonsense value.
+///
+/// NEVER FAILS — a policy read that cannot answer must not stop a gate,
+/// exactly as the conductor's `resolve_from` falls back rather than
+/// wedging every train. A degraded read is warned about (one line) so
+/// "the bound looks wrong" has a trail, then the compiled default
+/// carries the gate.
+async fn policy_max_concurrent(http: &reqwest::Client) -> usize {
+    let fetched = api(
+        http,
+        reqwest::Method::GET,
+        "/api/delivery/policy/train-conductor",
+        None,
+    )
+    .await;
+    let row = match fetched {
+        Ok(Some(v)) if !v.is_null() => v,
+        // No policy, a null answer, or an unreachable registry: the
+        // compiled default is the honest fallback.
+        _ => return DEFAULT_MAX_CONCURRENT,
+    };
+    // The API answers the bare row (or `{data: row}`); read either.
+    let n = row
+        .get("data")
+        .unwrap_or(&row)
+        .get("gate_max_concurrent")
+        .and_then(Value::as_i64);
+    match n {
+        Some(n) if n > 0 => n as usize,
+        _ => {
+            eprintln!(
+                "boss gate: delivery policy has no usable gate_max_concurrent — \
+                 using the compiled bound of {DEFAULT_MAX_CONCURRENT}"
+            );
+            DEFAULT_MAX_CONCURRENT
+        }
+    }
+}
+
+/// The concurrency bound in force: env override > delivery policy >
+/// compiled fallback.
+async fn max_concurrent(http: &reqwest::Client) -> Result<usize> {
+    let fallback = policy_max_concurrent(http).await;
+    max_concurrent_from(
+        std::env::var("BOSS_GATE_MAX_CONCURRENT").ok().as_deref(),
+        fallback,
+    )
 }
 
 /// The polite refusal at the concurrency bound, or None below it.
@@ -761,9 +824,12 @@ pub async fn run(
     // bound should cost a line of output, not a gate slot.
     let mode = normalize_mode(&mode.unwrap_or_default())?;
     park.require_complete()?;
-    let max = max_concurrent()?;
-    let sha = resolve_sha(branch);
     let http = reqwest::Client::new();
+    // The concurrency bound: env override > delivery policy > compiled.
+    // Fetched here, before the packet, so a bad env override refuses
+    // without side effects — the policy read never fails, it falls back.
+    let max = max_concurrent(&http).await?;
+    let sha = resolve_sha(branch);
 
     // Reuse before filing. See `reusable_packet`.
     let open = rows(
@@ -1349,26 +1415,32 @@ mod tests {
         assert_eq!(crowd_refusal(&[], 1), None);
     }
 
-    /// The env override: absent means the default, a count means that
-    /// count, and GARBAGE REFUSES rather than silently meaning 3 — a
-    /// typo that becomes the default is the aa783636 defect shape
+    /// The env override: absent means the FALLBACK (the delivery
+    /// policy's bound, resolved by the caller), a count means that count,
+    /// and GARBAGE REFUSES rather than silently meaning the fallback — a
+    /// typo that becomes some other number is the aa783636 defect shape
     /// (right sometimes, silently wrong when it matters).
     #[test]
     fn the_concurrency_bound_parses_or_refuses() {
-        assert_eq!(max_concurrent_from(None).unwrap(), DEFAULT_MAX_CONCURRENT);
+        // Absent / blank override → the fallback the caller passed, which
+        // is the policy value in production and the compiled default when
+        // the registry was unreadable. Two fallbacks prove it is the
+        // argument, not a baked-in 3.
+        assert_eq!(max_concurrent_from(None, 4).unwrap(), 4);
         assert_eq!(
-            max_concurrent_from(Some("")).unwrap(),
+            max_concurrent_from(None, DEFAULT_MAX_CONCURRENT).unwrap(),
             DEFAULT_MAX_CONCURRENT
         );
-        assert_eq!(
-            max_concurrent_from(Some("  ")).unwrap(),
-            DEFAULT_MAX_CONCURRENT
-        );
-        assert_eq!(max_concurrent_from(Some("5")).unwrap(), 5);
-        assert_eq!(max_concurrent_from(Some(" 1 ")).unwrap(), 1);
+        assert_eq!(max_concurrent_from(Some(""), 4).unwrap(), 4);
+        assert_eq!(max_concurrent_from(Some("  "), 7).unwrap(), 7);
+
+        // A set override WINS over the fallback — the operator's escape
+        // hatch when the node grew or shrank between policy edits.
+        assert_eq!(max_concurrent_from(Some("5"), 3).unwrap(), 5);
+        assert_eq!(max_concurrent_from(Some(" 1 "), 9).unwrap(), 1);
 
         for bad in ["three", "-1", "2.5"] {
-            let err = max_concurrent_from(Some(bad)).expect_err("garbage must refuse");
+            let err = max_concurrent_from(Some(bad), 3).expect_err("garbage must refuse");
             assert!(
                 err.to_string().contains("BOSS_GATE_MAX_CONCURRENT"),
                 "the refusal must name the variable: {err}"
@@ -1376,7 +1448,7 @@ mod tests {
         }
         // Zero would refuse every gate forever — a misconfiguration,
         // not a policy. The message teaches `1` for serialize.
-        let err = max_concurrent_from(Some("0")).expect_err("zero must refuse");
+        let err = max_concurrent_from(Some("0"), 3).expect_err("zero must refuse");
         assert!(err.to_string().contains("Set 1 to serialize"), "{err}");
     }
 
