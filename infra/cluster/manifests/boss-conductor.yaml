@@ -1,18 +1,18 @@
 # boss-conductor — the train conductor, resident in the cluster.
 #
 # ============================================================================
-# SHIPPED DORMANT. replicas: 0. Landing this car changes NOTHING at
-# runtime.
+# ACTIVE since 2026-09-04. replicas: 1 — the cluster IS the conductor now.
 # ============================================================================
 #
-# This Deployment IS the cluster-resident conductor, but it starts with
-# ZERO replicas on purpose: the conductor that actually drives the yard
-# today is the systemd unit `boss-train.service` on boss-gcp
-# (infra/train/boss-train.service). Two conductors both firing would be
-# safe (see CONCURRENCY below) but the migration is a deliberate cutover,
-# not a race — so this pod exists, converges its config from the tree,
-# and sits at 0 replicas until an operator scales it up. Applying this
-# manifest is shipping the machine; the CUTOVER (below) is turning it on.
+# This Deployment IS the cluster-resident conductor. It shipped dormant
+# (replicas: 0) and was cut over by flipping that line to 1 in the tree,
+# so the converge — not an operator's kubectl — turns it on and keeps it
+# on (an imperative scale reverts on the next converge; this line does
+# not). The old systemd conductor `boss-train.service` on boss-gcp
+# (infra/train/boss-train.service) may still be running; two conductors
+# firing is safe (see CONCURRENCY below), so retiring the boss-gcp unit is
+# cleanup, not a precondition. The cutover was done through the manifest
+# precisely so nobody has to be the operator in the middle of it.
 #
 # WHY MOVE THE CONDUCTOR INTO THE CLUSTER (car 2 of the migration;
 # docs/design/the-cluster-is-the-system.md, David-decided). The forge
@@ -195,8 +195,13 @@ metadata:
   namespace: boss-dev
   labels: {app.kubernetes.io/part-of: boss, boss.dev/purpose: conductor}
 spec:
-  # DORMANT. See the header. The cutover is `kubectl scale ... --replicas=1`.
-  replicas: 0
+  # ACTIVE. Cut over 2026-09-04: the conductor now runs in the cluster.
+  # replicas:1 IS the cutover — declarative, so it converges and stays
+  # (a `kubectl scale` would be reverted by the next converge; the durable
+  # switch is this line). The old boss-gcp boss-train.service may still be
+  # running; two conductors firing is safe (CONCURRENCY, in the header) —
+  # retiring boss-gcp's unit is cleanup, not a precondition.
+  replicas: 1
   selector:
     matchLabels: {app: boss-conductor}
   # Recreate, not RollingUpdate: the conductor is a singleton loop holding
