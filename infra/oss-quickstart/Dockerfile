@@ -189,6 +189,14 @@ FROM debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf8
 # Runtime deps: ca-certs for outbound HTTPS (the gateway), libssl
 # for rustls's native bridge, postgresql-client for the init
 # script's psql calls, tini as PID 1 so signal forwarding works.
+# git: the cluster-resident train conductor (`boss train cadence`)
+# clones the repo and asks `git merge-base --is-ancestor` to verify a
+# train's merge is in the running commit. It used to run on boss-gcp,
+# which had host git; moved into this image by the 2026-09-04 cutover,
+# it silently lost git — exact-match convergence still worked (a string
+# compare) but ancestry did not, so every superseded train wedged at
+# `converged`. Named by the conductor's own log once ensure_clone
+# stopped swallowing the error.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \
@@ -198,6 +206,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
     jq \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # BOSS runs as a non-root user. UID 1500 matches the systemd-deploy

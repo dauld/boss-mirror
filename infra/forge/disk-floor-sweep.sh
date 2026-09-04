@@ -53,14 +53,21 @@
 #   ssh 10.20.0.15 'cd /home/david/boss && git pull && sudo infra/forge/install.sh'
 #
 # Usage: disk-floor-sweep.sh [floor_gb]
-#   floor_gb overrides BOSS_DISK_FLOOR_GB (default 25). The optional
+#   floor_gb overrides BOSS_DISK_FLOOR_GB (default 70, = CI's floor). The optional
 #   arg is what the reclaim-disk ops verb passes.
 set -euo pipefail
 
 REGISTRY="${BOSS_FORGE_REGISTRY:-10.20.0.15:3000/david/boss}"
 export DOCKER_HOST="${DOCKER_HOST:-unix:///run/user/1000/docker.sock}"
 
-FLOOR_GB="${1:-${BOSS_DISK_FLOOR_GB:-25}}"
+# 70, not 25, and it MUST match locomotive.sh's BOSS_CI_MIN_FREE_GB (§9a
+# — one number wearing two names). The sweep's job is to keep at least
+# what CI needs to START a cold build. A 25GB floor defended NOTHING in
+# the 65-70GB band where CI actually refuses (LOCOMOTIVE RED, need 70):
+# the sweep logged "nothing to do" at 67GB free while train after train
+# died there on 2026-09-04. If these two floors ever diverge, the sweep
+# keeps less than CI needs and every build gambles on luck.
+FLOOR_GB="${1:-${BOSS_DISK_FLOOR_GB:-70}}"
 case "$FLOOR_GB" in
     ''|*[!0-9]*)
         echo "disk-floor-sweep: floor must be a whole number of GB, got '$FLOOR_GB'" >&2
