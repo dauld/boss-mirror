@@ -33,6 +33,15 @@ set -u
 
 cd "$(dirname "$0")/.."
 
+# Incremental compilation helps REPEATED local builds; a gate build is
+# cold and one-shot, so incremental only writes an incremental/ dir that
+# is pure disk cost here — part of the ~80GB target/ that exhausted the
+# forge CI disk and blocked trains (2026-09-04;
+# docs/design/the-build-plane-manages-itself.md). Off for the gate and CI
+# (this script IS the CI rust job); a human's own `cargo build` outside
+# this script is untouched and keeps incremental.
+export CARGO_INCREMENTAL=0
+
 SCOPE=()
 NAMED=()
 AUTO=0
