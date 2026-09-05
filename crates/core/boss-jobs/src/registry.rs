@@ -324,6 +324,7 @@ fn workflow_design_spec() -> WorkflowSpec {
                 field_type: "string".into(),
                 required: true,
                 filled_by: boss_core::job::FilledBy::Executor,
+                item_keys: Vec::new(),
             }],
             ..Default::default()
         },
@@ -358,6 +359,7 @@ fn workflow_design_spec() -> WorkflowSpec {
                 field_type: "pending|approved|rejected|changes-requested".into(),
                 required: true,
                 filled_by: boss_core::job::FilledBy::Executor,
+                item_keys: Vec::new(),
             }],
             ..Default::default()
         },
@@ -467,6 +469,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     field_type: "string".into(),
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
+                    item_keys: Vec::new(),
                 },
                 // Required, deliberately. See the doc comment: the
                 // sentence that keeps a change small is the one about
@@ -478,6 +481,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     field_type: "string".into(),
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
+                    item_keys: Vec::new(),
                 },
             ],
             ..Default::default()
@@ -498,6 +502,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     field_type: "string".into(),
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
+                    item_keys: Vec::new(),
                 },
             ],
             ..Default::default()
@@ -514,6 +519,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     field_type: "string".into(),
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
+                    item_keys: Vec::new(),
                 },
                 // How the change was seen working on a running system
                 // — or why there is nothing to observe. Required
@@ -526,6 +532,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     field_type: "string".into(),
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
+                    item_keys: Vec::new(),
                 },
                 // The gate's OWN account of the run, not the author's.
                 //
@@ -561,6 +568,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     field_type: "string".into(),
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
+                    item_keys: Vec::new(),
                 },
                 // What the change LOOKS like, for a car that changes a
                 // rendered surface — a screenshot path, or what was
@@ -584,6 +592,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     field_type: "string".into(),
                     required: false,
                     filled_by: boss_core::job::FilledBy::Executor,
+                    item_keys: Vec::new(),
                 },
             ],
             ..Default::default()
@@ -599,6 +608,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                 field_type: "string".into(),
                 required: true,
                 filled_by: boss_core::job::FilledBy::Executor,
+                item_keys: Vec::new(),
             }],
             ..Default::default()
         },
@@ -628,12 +638,14 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     field_type: "string".into(),
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
+                    item_keys: Vec::new(),
                 },
                 boss_core::job::StepField {
                     name: "method".into(),
                     field_type: "browser|api|log".into(),
                     required: false,
                     filled_by: boss_core::job::FilledBy::Executor,
+                    item_keys: Vec::new(),
                 },
             ],
             ..Default::default()
@@ -785,6 +797,7 @@ fn regenerate_deployment_spec() -> WorkflowSpec {
                 field_type: "string".into(),
                 required: true,
                 filled_by: boss_core::job::FilledBy::Executor,
+                item_keys: Vec::new(),
             }],
             ..Default::default()
         }
@@ -816,12 +829,14 @@ fn regenerate_deployment_spec() -> WorkflowSpec {
                     field_type: "string".into(),
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
+                    item_keys: Vec::new(),
                 },
                 boss_core::job::StepField {
                     name: "destroying".into(),
                     field_type: "string".into(),
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
+                    item_keys: Vec::new(),
                 },
             ],
             ..Default::default()
@@ -1027,6 +1042,7 @@ fn backlog_item_spec() -> WorkflowSpec {
                     field_type: DISPOSITIONS.into(),
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
+                    item_keys: Vec::new(),
                 },
                 // What was checked, and what it showed. Required: see
                 // the doc comment. An item routed without a
@@ -1037,6 +1053,7 @@ fn backlog_item_spec() -> WorkflowSpec {
                     field_type: "string".into(),
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
+                    item_keys: Vec::new(),
                 },
                 // The decider's brief, written at routing time: what
                 // they must read (markdown) and the answer the triager
@@ -1047,12 +1064,14 @@ fn backlog_item_spec() -> WorkflowSpec {
                     field_type: "string".into(),
                     required: false,
                     filled_by: boss_core::job::FilledBy::Executor,
+                    item_keys: Vec::new(),
                 },
                 boss_core::job::StepField {
                     name: "proposed".into(),
                     field_type: "string".into(),
                     required: false,
                     filled_by: boss_core::job::FilledBy::Executor,
+                    item_keys: Vec::new(),
                 },
             ],
             ..Default::default()
@@ -1261,6 +1280,7 @@ fn maintenance_spec(kind: &str, label: &str, description: &str) -> WorkflowSpec 
                 field_type: "string".into(),
                 required: true,
                 filled_by: boss_core::job::FilledBy::Executor,
+                item_keys: Vec::new(),
             }],
             ..Default::default()
         },
@@ -1791,6 +1811,14 @@ where
 /// Steps are named by `spec_slug` (the stable machine-facing id the
 /// filer authored against), falling back to `title` for steps born
 /// outside a spec.
+///
+/// A field that declares `item_keys` is checked for SHAPE as well as
+/// presence: the value must be an array, and every element an object
+/// carrying each named key as a non-empty string. A miss is reported
+/// as `field[i].key` so the 422 names the element, not just the field.
+/// Presence and shape are the same refusal: a `questions` array whose
+/// elements have no `title` renders as "nothing to review", which is
+/// exactly what an absent `questions` renders as.
 pub fn missing_filer_fields(steps: &[Step]) -> Vec<(String, String)> {
     steps
         .iter()
@@ -1798,13 +1826,45 @@ pub fn missing_filer_fields(steps: &[Step]) -> Vec<(String, String)> {
             step.fields
                 .iter()
                 .filter(|f| f.required && f.filled_by == boss_core::job::FilledBy::Filer)
-                .filter(|f| filer_value_missing(step.metadata.get(&f.name)))
-                .map(|f| {
+                .flat_map(|f| filer_field_misses(f, step.metadata.get(&f.name)))
+                .map(|field| {
                     (
                         step.spec_slug.clone().unwrap_or_else(|| step.title.clone()),
-                        f.name.clone(),
+                        field,
                     )
                 })
+        })
+        .collect()
+}
+
+/// Every miss on one filer field: the bare name when the value is
+/// absent, else one `name[i].key` per element key the shape lacks.
+fn filer_field_misses(
+    field: &boss_core::job::StepField,
+    value: Option<&serde_json::Value>,
+) -> Vec<String> {
+    if filer_value_missing(value) {
+        return vec![field.name.clone()];
+    }
+    if field.item_keys.is_empty() {
+        return Vec::new();
+    }
+    let Some(items) = value.and_then(|v| v.as_array()) else {
+        return vec![format!("{} (not an array)", field.name)];
+    };
+    items
+        .iter()
+        .enumerate()
+        .flat_map(|(i, item)| {
+            field
+                .item_keys
+                .iter()
+                .filter(move |key| {
+                    item.get(key.as_str())
+                        .and_then(|v| v.as_str())
+                        .is_none_or(|s| s.trim().is_empty())
+                })
+                .map(move |key| format!("{}[{i}].{key}", field.name))
         })
         .collect()
 }
@@ -3880,18 +3940,21 @@ mod tests {
                 field_type: "string".into(),
                 required: true,
                 filled_by: FilledBy::Filer,
+                item_keys: Vec::new(),
             },
             StepField {
                 name: "markdown".into(),
                 field_type: "string".into(),
                 required: true,
                 filled_by: FilledBy::Filer,
+                item_keys: Vec::new(),
             },
             StepField {
                 name: "resolutions".into(),
                 field_type: "array".into(),
                 required: true,
                 filled_by: FilledBy::Executor,
+                item_keys: Vec::new(),
             },
         ];
         step.metadata = serde_json::json!({ "title": "Packet loss" });
@@ -3918,6 +3981,7 @@ mod tests {
             field_type: "string".into(),
             required: true,
             filled_by: FilledBy::Filer,
+            item_keys: Vec::new(),
         }];
 
         // An explicit null is not a value.
@@ -3942,6 +4006,66 @@ mod tests {
     }
 
     #[test]
+    fn missing_filer_fields_checks_the_shape_of_a_structured_field() {
+        use boss_core::job::{FilledBy, StepField};
+        // The design-doc review: `questions` is a filer field whose
+        // elements must each carry anchor, title and proposal. Eight
+        // packets on 2026-09-04/05 were admitted with no `title` on
+        // any element and rendered "nothing to review" — the same
+        // outcome as no questions at all, so it is the same refusal.
+        let mut step = Step::new(JobId::new(), "review-design", "Answer the questions", 0);
+        step.spec_slug = Some("review".into());
+        step.fields = vec![StepField {
+            name: "questions".into(),
+            field_type: "array".into(),
+            required: true,
+            filled_by: FilledBy::Filer,
+            item_keys: vec!["anchor".into(), "title".into(), "proposal".into()],
+        }];
+
+        // A title-less element is named by index and key.
+        step.metadata = serde_json::json!({ "questions": [
+            { "anchor": "Q1", "title": "first brick?", "proposal": "the cheap one" },
+            { "anchor": "Q2", "proposal": "ship it" },
+            { "anchor": "Q3", "title": "  ", "proposal": "ship it" },
+        ]});
+        assert_eq!(
+            missing_filer_fields(std::slice::from_ref(&step)),
+            vec![
+                ("review".to_string(), "questions[1].title".to_string()),
+                ("review".to_string(), "questions[2].title".to_string()),
+            ],
+            "each element missing a declared key is named; blank counts as missing"
+        );
+
+        // Not an array at all — prose where the tracker wants data —
+        // is the original 2026-09-02 defect (questions written into
+        // `detail`) and is refused by name.
+        step.metadata = serde_json::json!({ "questions": "Q1: first brick? ship the cheap one" });
+        assert_eq!(
+            missing_filer_fields(std::slice::from_ref(&step)),
+            vec![("review".to_string(), "questions (not an array)".to_string())]
+        );
+
+        // Absent stays the bare field name — presence first.
+        step.metadata = serde_json::json!({});
+        assert_eq!(
+            missing_filer_fields(std::slice::from_ref(&step)),
+            vec![("review".to_string(), "questions".to_string())]
+        );
+
+        // Well-shaped, and an EMPTY array, both admit: an empty array
+        // is the filer's explicit "no open questions" (boss design
+        // --no-questions writes exactly that), not an omission.
+        step.metadata = serde_json::json!({ "questions": [
+            { "anchor": "Q1", "title": "first brick?", "proposal": "the cheap one" },
+        ]});
+        assert!(missing_filer_fields(std::slice::from_ref(&step)).is_empty());
+        step.metadata = serde_json::json!({ "questions": [] });
+        assert!(missing_filer_fields(std::slice::from_ref(&step)).is_empty());
+    }
+
+    #[test]
     fn missing_filer_fields_ignores_optional_filer_fields() {
         use boss_core::job::{FilledBy, StepField};
         let mut step = Step::new(JobId::new(), "review-design", "Answer the questions", 0);
@@ -3950,6 +4074,7 @@ mod tests {
             field_type: "string".into(),
             required: false,
             filled_by: FilledBy::Filer,
+            item_keys: Vec::new(),
         }];
         assert!(
             missing_filer_fields(std::slice::from_ref(&step)).is_empty(),

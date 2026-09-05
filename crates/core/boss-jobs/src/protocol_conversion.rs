@@ -518,6 +518,7 @@ mod tests {
             field_type: "string".to_string(),
             required,
             filled_by: boss_core::job::FilledBy::Executor,
+            item_keys: Vec::new(),
         }
     }
 

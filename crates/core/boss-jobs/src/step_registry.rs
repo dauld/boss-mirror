@@ -803,12 +803,14 @@ mod tests {
                 field_type: "integer".into(),
                 required: true,
                 filled_by: boss_core::job::FilledBy::Executor,
+                item_keys: Vec::new(),
             },
             StepField {
                 name: "notes".into(),
                 field_type: "string".into(),
                 required: false,
                 filled_by: boss_core::job::FilledBy::Executor,
+                item_keys: Vec::new(),
             },
         ];
         // Missing required authored field → error naming it.

@@ -69,6 +69,7 @@ pub fn validate_workflow(spec: &WorkflowSpec, registry: &StepRegistry) -> Vec<Wo
     // Phase 0 — metadata default value shapes.
     for step in &spec.steps {
         check_metadata_defaults_values(spec, step, registry, &mut errs);
+        check_item_keys_name_an_array(spec, step, &mut errs);
     }
     // Phases 1–3 — viability of the predicate graph.
     check_viability(spec, registry, &mut errs);
@@ -842,6 +843,29 @@ fn check_metadata_defaults_values(
 /// True when the value is an obvious placeholder rather than a real
 /// default (e.g. `""` for a date field a downstream step populates at
 /// completion time).
+/// `item_keys` describes the elements of an ARRAY field; on any other
+/// type it describes nothing, and admission would silently never check
+/// it. Refuse the spec instead of storing a shape nobody reads.
+fn check_item_keys_name_an_array(
+    spec: &WorkflowSpec,
+    step: &StepSpec,
+    errs: &mut Vec<WorkflowLintError>,
+) {
+    for field in &step.fields {
+        if !field.item_keys.is_empty() && field.field_type != "array" {
+            errs.push(WorkflowLintError {
+                workflow: spec.kind.clone(),
+                step: step.title.clone(),
+                reason: format!(
+                    "field '{}' declares item_keys {:?} but is a '{}', not an array — \
+                     item_keys describes array elements and would never be checked",
+                    field.name, field.item_keys, field.field_type
+                ),
+            });
+        }
+    }
+}
+
 fn is_placeholder_default(field_type: &str, value: &Value) -> bool {
     matches!(
         (field_type, value),
@@ -945,6 +969,62 @@ mod tests {
     fn minimal_viable_jobkind_passes() {
         let reg = StepRegistry::v1();
         assert!(validate_workflow(&viable_spec("ok"), &reg).is_empty());
+    }
+
+    #[test]
+    fn item_keys_on_a_non_array_field_is_refused() {
+        // `item_keys` is the registry stating an element shape. On a
+        // string field there are no elements, so the declaration
+        // would be stored and never checked — the exact "prose that
+        // cannot enforce" a shape declaration exists to replace.
+        let reg = StepRegistry::v1();
+        let field = |field_type: &str| boss_core::job::StepField {
+            name: "questions".into(),
+            field_type: field_type.into(),
+            required: true,
+            filled_by: boss_core::job::FilledBy::Filer,
+            item_keys: vec!["anchor".into(), "title".into()],
+        };
+        let spec_with = |field_type: &str| {
+            WorkflowSpec::platform_seed(
+                "doc",
+                "doc",
+                "test",
+                vec!["custom".into()],
+                vec![
+                    StepSpec {
+                        title: "drafted".into(),
+                        kind: "trigger".into(),
+                        ready_when: "true".into(),
+                        metadata_defaults: serde_json::json!({
+                            "trigger_kind": "operator", "trigger_name": "t"
+                        }),
+                        ..Default::default()
+                    },
+                    StepSpec {
+                        title: "review".into(),
+                        kind: "task".into(),
+                        ready_when: "steps.drafted.done".into(),
+                        fields: vec![field(field_type)],
+                        terminal: Some(Terminal {
+                            outcome: "published".into(),
+                        }),
+                        ..Default::default()
+                    },
+                ],
+            )
+        };
+        let errs = validate_workflow(&spec_with("string"), &reg);
+        assert!(
+            errs.iter()
+                .any(|e| e.step == "review" && e.reason.contains("item_keys")),
+            "a string field with item_keys is refused by name: {errs:?}"
+        );
+        let errs = validate_workflow(&spec_with("array"), &reg);
+        assert!(
+            !errs.iter().any(|e| e.reason.contains("item_keys")),
+            "an array field with item_keys is the intended shape: {errs:?}"
+        );
     }
 
     #[test]
@@ -1079,6 +1159,7 @@ mod tests {
                         field_type: "ship|scrap|investigate".into(),
                         required: true,
                         filled_by: boss_core::job::FilledBy::Executor,
+                        item_keys: Vec::new(),
                     }],
                     ..Default::default()
                 },
@@ -1091,6 +1172,7 @@ mod tests {
                         field_type: "ship|scrap".into(),
                         required: true,
                         filled_by: boss_core::job::FilledBy::Executor,
+                        item_keys: Vec::new(),
                     }],
                     // Stamped at materialization, so the step carries the
                     // key from the moment it exists — which is why the
@@ -1157,6 +1239,7 @@ mod tests {
                         field_type: "ship|scrap".into(),
                         required: true,
                         filled_by: boss_core::job::FilledBy::Executor,
+                        item_keys: Vec::new(),
                     }],
                     ..Default::default()
                 },
@@ -1169,6 +1252,7 @@ mod tests {
                         field_type: "string".into(),
                         required: false,
                         filled_by: boss_core::job::FilledBy::Executor,
+                        item_keys: Vec::new(),
                     }],
                     ..Default::default()
                 },
@@ -1226,6 +1310,7 @@ mod tests {
                         field_type: "package|skip".into(),
                         required: false,
                         filled_by: boss_core::job::FilledBy::Executor,
+                        item_keys: Vec::new(),
                     }],
                     ..Default::default()
                 },
@@ -1277,6 +1362,7 @@ mod tests {
                         field_type: "package|skip".into(),
                         required: false,
                         filled_by: boss_core::job::FilledBy::Executor,
+                        item_keys: Vec::new(),
                     }],
                     ..Default::default()
                 },
@@ -1390,6 +1476,7 @@ mod tests {
             field_type: "string".into(),
             required: true,
             filled_by: boss_core::job::FilledBy::Executor,
+            item_keys: Vec::new(),
         }
     }
 
@@ -1439,6 +1526,7 @@ mod tests {
             field_type: "string".into(),
             required: false,
             filled_by: boss_core::job::FilledBy::Executor,
+            item_keys: Vec::new(),
         });
         assert!(
             validate_workflow(&spec, &reg)

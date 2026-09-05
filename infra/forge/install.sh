@@ -35,7 +35,15 @@ set -euo pipefail
 cd "$(dirname "$0")" || exit 1
 HERE="$(pwd)"
 
-if [ "$(id -u)" -ne 0 ]; then
+# Where units land and who reloads them. Overridable so the installer
+# can be exercised into a scratch directory with a stub systemctl —
+# infra/lint/forge-install-covers-the-ops-runner.sh runs it on every
+# gate and asserts what it would install. On the host both are the
+# defaults, and root is required as before.
+ETC="${INSTALL_ETC:-/etc/systemd/system}"
+SYSTEMCTL="${INSTALL_SYSTEMCTL:-systemctl}"
+
+if [ "$ETC" = "/etc/systemd/system" ] && [ "$(id -u)" -ne 0 ]; then
     echo "install.sh: needs root to write /etc/systemd/system — re-run with sudo." >&2
     exit 1
 fi
@@ -87,7 +95,7 @@ for u in "${UNITS[@]}"; do
             echo "install.sh: ${u}.${ext} is listed here but missing from ${HERE}" >&2
             exit 1
         fi
-        install -m 0644 "$src" "/etc/systemd/system/${u}.${ext}"
+        install -m 0644 "$src" "${ETC}/${u}.${ext}"
     done
     installed=$((installed + 1))
 done
@@ -103,7 +111,7 @@ done
 # line (1.33). Downloads once; a later run finds it and moves on.
 KUBECTL_VERSION="v1.33.3"
 KUBECTL_SHA256="2fcf65c64f352742dc253a25a7c95617c2aba79843d1b74e585c69fe4884afb0"
-if [ ! -x /usr/local/bin/kubectl ]; then
+if [ "${INSTALL_KUBECTL:-1}" = "1" ] && [ ! -x /usr/local/bin/kubectl ]; then
     tmp="$(mktemp)"
     if curl -sfL -o "$tmp" "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
         && echo "${KUBECTL_SHA256}  ${tmp}" | sha256sum -c - >/dev/null; then
@@ -124,15 +132,33 @@ fi
 # is installed from the tree, so it converges instead of drifting.
 JOBS_URL="http://10.20.0.34:7900"
 for u in "${UNITS[@]}"; do
-    mkdir -p "/etc/systemd/system/${u}.service.d"
+    mkdir -p "${ETC}/${u}.service.d"
     printf '[Service]\nEnvironment=BOSS_JOBS_URL=%s\n' "$JOBS_URL" \
-        > "/etc/systemd/system/${u}.service.d/jobs-url.conf"
+        > "${ETC}/${u}.service.d/jobs-url.conf"
 done
 
-systemctl daemon-reload
-for u in "${UNITS[@]}"; do
-    systemctl enable --now "${u}.timer"
-    printf '  %-24s %s\n' "$u" "$(systemctl is-active "${u}.timer")"
+# The ops-request runner is the same unit boss-gcp runs (infra/ops), so
+# it is installed from there — with THIS host's identity and checkout in
+# a drop-in, never in a second copy of the unit file. Until 2026-09-05
+# it answered packets on this host only because someone had installed
+# it by hand; a rebuild would have lost the read door (packet 4d5f158a,
+# infra/forge/OPERATIONS.md §Residue). The empty `ExecStart=` line
+# clears the unit's own command before the override, which is how a
+# drop-in replaces rather than appends an ExecStart.
+OPS_DIR="$(cd "${HERE}/../ops" && pwd)"
+REPO="$(cd "${HERE}/../.." && pwd)"
+for ext in service timer; do
+    install -m 0644 "${OPS_DIR}/boss-ops-runner.${ext}" "${ETC}/boss-ops-runner.${ext}"
+done
+mkdir -p "${ETC}/boss-ops-runner.service.d"
+printf '[Service]\nEnvironment=HOST_ID=forge\nExecStart=\nExecStart=/usr/bin/env BOSS_JOBS_URL=%s %s/infra/ops/ops-runner.sh\n' \
+    "$JOBS_URL" "$REPO" > "${ETC}/boss-ops-runner.service.d/forge.conf"
+installed=$((installed + 1))
+
+"$SYSTEMCTL" daemon-reload
+for u in "${UNITS[@]}" boss-ops-runner; do
+    "$SYSTEMCTL" enable --now "${u}.timer"
+    printf '  %-24s %s\n' "$u" "$("$SYSTEMCTL" is-active "${u}.timer")"
 done
 
 echo "install.sh: ${installed} unit pair(s) installed and enabled"

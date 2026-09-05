@@ -238,6 +238,7 @@ async fn executor_fields_stay_create_legal_and_required_at_done() {
                     field_type: "string".into(),
                     required: true,
                     filled_by: FilledBy::Executor,
+                    item_keys: Vec::new(),
                 }],
                 ..Default::default()
             },

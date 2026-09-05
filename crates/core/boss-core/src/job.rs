@@ -266,6 +266,17 @@ pub struct StepField {
     /// required-at-done, exactly the contract it already had.
     #[serde(default)]
     pub filled_by: FilledBy,
+    /// For an `array` field: the keys every element must carry, each
+    /// with a non-empty string value. Registry data, so a protocol can
+    /// state the SHAPE of its structured input and not only its
+    /// presence — a design doc's `questions` are `[{anchor, title,
+    /// proposal}]`, and eight packets in one session (2026-09-04/05)
+    /// were admitted with no `title` on any element and dead-ended at
+    /// "nothing to review". Empty (the default) means any element
+    /// shape is accepted, which is what every field authored before
+    /// this existed already meant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub item_keys: Vec<String>,
 }
 
 /// Who supplies a step field's value — the enforcement point follows
@@ -717,6 +728,7 @@ mod tests {
             field_type: "string".into(),
             required: true,
             filled_by: FilledBy::Filer,
+            item_keys: Vec::new(),
         };
         let json = serde_json::to_value(&f).unwrap();
         assert_eq!(json["filled_by"], serde_json::json!("filer"));
@@ -728,6 +740,7 @@ mod tests {
         // default.
         let exec = StepField {
             filled_by: FilledBy::Executor,
+            item_keys: Vec::new(),
             ..f
         };
         let json = serde_json::to_value(&exec).unwrap();
