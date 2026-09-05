@@ -610,6 +610,7 @@ PREFLIGHT_LINTS=(
     "dispatcher-rules-ratchet|infra/lint/dispatcher-rules-ratchet.sh"
     "steptype-bundle-ratchet|infra/lint/steptype-bundle-ratchet.sh"
     "schema-converge|infra/lint/schema-converge.sh"
+    "a-failed-prepare-degrades-the-pod|infra/lint/a-failed-prepare-degrades-the-pod.sh"
     "migrations-append-only|infra/lint/migrations-append-only.sh"
     "migration-numbers-unique|infra/lint/migration-numbers-unique.sh"
     "no-secrets|infra/lint/no-secrets.sh"

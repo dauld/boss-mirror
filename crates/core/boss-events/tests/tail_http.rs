@@ -83,6 +83,57 @@ fn get_req(uri: &str, user_header: &str) -> Request<Body> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn stats_report_the_logs_size_and_growth() {
+    // David, 2026-09-02 (168b3f25): "We need size and growth stats on
+    // audit log to make sure it isn't growing unsustainably." The
+    // number lived in a nightly pod log; now it is a read.
+    let db = TestDb::new().await;
+    let writer = PgAuditWriter::new(db.pool.clone());
+    // Three of kind `a` (two today, one 40h ago) and one `b` today.
+    seed(&writer, "jobs", "growth.a", 10).await;
+    seed(&writer, "jobs", "growth.a", 60).await;
+    seed(&writer, "jobs", "growth.a", 40 * 60).await;
+    seed(&writer, "ledger", "growth.b", 5).await;
+    let app: Router = audit_tail_router(db.pool.clone());
+
+    let resp = app
+        .clone()
+        .oneshot(get_req("/api/events/stats", &operator_user()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let j = body_json(resp).await;
+    assert!(j["total_rows"].as_i64().unwrap() >= 4, "{j}");
+    assert!(
+        j["table_bytes"].as_i64().unwrap() > 0,
+        "size on disk is a number"
+    );
+    assert!(j["rows_last_24h"].as_i64().unwrap() >= 3, "{j}");
+    assert!(j["rows_last_7d"].as_i64().unwrap() >= 4, "{j}");
+    let days = j["per_day"].as_array().unwrap();
+    let summed: i64 = days.iter().map(|d| d["rows"].as_i64().unwrap()).sum();
+    assert!(
+        summed >= 4,
+        "per-day buckets carry every row of the window: {j}"
+    );
+    assert!(days.iter().all(|d| d["day"].as_str().is_some()));
+    let top = j["top_kinds"].as_array().unwrap();
+    let a = top
+        .iter()
+        .find(|k| k["kind"] == "growth.a")
+        .expect("growth.a is counted");
+    assert_eq!(a["rows"], 3, "{j}");
+    assert!(j["oldest_at"].as_str().is_some() && j["newest_at"].as_str().is_some());
+
+    // The same door as the tail: a plain user is refused.
+    let resp = app
+        .oneshot(get_req("/api/events/stats", &plain_user()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn plain_user_is_forbidden() {
     let db = TestDb::new().await;
     let app: Router = audit_tail_router(db.pool.clone());

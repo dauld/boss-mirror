@@ -20,6 +20,7 @@
   import Section from '@boss/web-kit/ui/Section.svelte';
   import FileAttachments from '../../content/FileAttachments.svelte';
   import { appNow, appToday } from '@boss/web-kit/sim-clock';
+  import { formatDate } from '@boss/web-kit/ui/date';
 
   type AuditEntry = {
     event_id: string;
@@ -41,6 +42,62 @@
   const LIVE_BUFFER_CAP = 500;
 
   let loadState: State = $state<State>({ kind: 'loading' });
+
+  // Size and growth (168b3f25). David, 2026-09-02: "We need size and
+  // growth stats on audit log to make sure it isn't growing
+  // unsustainably." Read once on mount from /api/events/stats and
+  // refreshed on a slow cadence — the numbers move by the hour, not
+  // the second, and the SSE tail below already carries the live feel.
+  type AuditStats = {
+    total_rows: number;
+    table_bytes: number;
+    oldest_at: string | null;
+    newest_at: string | null;
+    rows_last_24h: number;
+    rows_last_7d: number;
+    per_day: ReadonlyArray<{ day: string; rows: number }>;
+    top_kinds: ReadonlyArray<{ kind: string; rows: number }>;
+  };
+  type StatsState =
+    | { kind: 'loading' }
+    | { kind: 'ready'; stats: AuditStats }
+    | { kind: 'error'; message: string };
+  const STATS_RELOAD_MS = 60_000;
+  let statsState = $state<StatsState>({ kind: 'loading' });
+
+  async function loadStats(): Promise<void> {
+    try {
+      const r = await fetch('/api/events/stats', { headers: { Accept: 'application/json' } });
+      if (!r.ok) {
+        statsState = { kind: 'error', message: `HTTP ${r.status}` };
+        return;
+      }
+      statsState = { kind: 'ready', stats: (await r.json()) as AuditStats };
+    } catch (e) {
+      statsState = { kind: 'error', message: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  function humanBytes(n: number): string {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let v = n;
+    let i = 0;
+    while (v >= 1024 && i < units.length - 1) {
+      v /= 1024;
+      i += 1;
+    }
+    return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+  }
+
+  function perDayMax(days: ReadonlyArray<{ rows: number }>): number {
+    return days.reduce((m, d) => (d.rows > m ? d.rows : m), 1);
+  }
+
+  $effect(() => {
+    void loadStats();
+    const t = setInterval(() => void loadStats(), STATS_RELOAD_MS);
+    return () => clearInterval(t);
+  });
   let sourceFilter = $state('');
   let kindFilter = $state('');
   let limit = $state<(typeof LIMIT_CHOICES)[number]>(100);
@@ -246,6 +303,60 @@
     title="Audit Log"
     subtitle="Live tail of every domain event. Operator tier only."
   />
+
+  <Section title="Size and growth" wide>
+    {#if statsState.kind === 'loading'}
+      <p class="events-stats-note">Measuring the log…</p>
+    {:else if statsState.kind === 'error'}
+      <p class="events-stats-note">Stats unavailable: {statsState.message}</p>
+    {:else}
+      {@const st = statsState.stats}
+      <div class="events-stats">
+        <div class="events-stat">
+          <span class="events-stat-label">Rows</span>
+          <span class="events-stat-value">{st.total_rows.toLocaleString()}</span>
+        </div>
+        <div class="events-stat">
+          <span class="events-stat-label">On disk</span>
+          <span class="events-stat-value">{humanBytes(st.table_bytes)}</span>
+        </div>
+        <div class="events-stat">
+          <span class="events-stat-label">Last 24h</span>
+          <span class="events-stat-value">{st.rows_last_24h.toLocaleString()}</span>
+        </div>
+        <div class="events-stat">
+          <span class="events-stat-label">Per day, 7d avg</span>
+          <span class="events-stat-value">{Math.round(st.rows_last_7d / 7).toLocaleString()}</span>
+        </div>
+        <div class="events-stat">
+          <span class="events-stat-label">Since</span>
+          <span class="events-stat-value">{st.oldest_at ? formatDate(st.oldest_at) : '—'}</span>
+        </div>
+      </div>
+      <div class="events-growth">
+        <div class="events-per-day">
+          <h4>Rows per day, last 30 days</h4>
+          {#each st.per_day as d (d.day)}
+            <div class="events-day">
+              <span class="events-day-label">{d.day.slice(5)}</span>
+              <span class="events-day-bar" style="width: {Math.max(2, Math.round((100 * d.rows) / perDayMax(st.per_day)))}%"></span>
+              <span class="events-day-rows">{d.rows.toLocaleString()}</span>
+            </div>
+          {/each}
+        </div>
+        <div class="events-top-kinds">
+          <h4>Busiest kinds, last 30 days</h4>
+          <table>
+            <tbody>
+              {#each st.top_kinds as k (k.kind)}
+                <tr><td class="events-kind">{k.kind}</td><td class="events-kind-rows">{k.rows.toLocaleString()}</td></tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    {/if}
+  </Section>
 
   <Section title="Filters" wide>
       <div class="events-filters">
@@ -530,4 +641,21 @@
     font-size: 11px;
     color: #94a3b8;
   }
+
+  .events-stats-note { margin: 0; opacity: 0.8; }
+  .events-stats { display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 12px; }
+  .events-stat { display: flex; flex-direction: column; min-width: 110px; }
+  .events-stat-label { font-size: 12px; opacity: 0.7; }
+  .events-stat-value { font-size: 20px; font-variant-numeric: tabular-nums; }
+  .events-growth { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 20px; }
+  @media (max-width: 800px) { .events-growth { grid-template-columns: minmax(0, 1fr); } }
+  .events-growth h4 { margin: 0 0 6px; font-size: 13px; opacity: 0.8; }
+  .events-day { display: grid; grid-template-columns: 44px minmax(0, 1fr) 64px; align-items: center; gap: 8px; font-size: 12px; line-height: 1.5; }
+  .events-day-label { opacity: 0.7; font-variant-numeric: tabular-nums; }
+  .events-day-bar { display: block; height: 8px; border-radius: 2px; background: currentColor; opacity: 0.45; }
+  .events-day-rows { text-align: right; font-variant-numeric: tabular-nums; }
+  .events-top-kinds table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .events-top-kinds td { padding: 2px 0; }
+  .events-kind { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 0; }
+  .events-kind-rows { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; padding-left: 8px; }
 </style>

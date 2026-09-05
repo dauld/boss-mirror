@@ -34,9 +34,15 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser, Debug)]
 #[command(name = "boss-clock-api", about = "Boss Clock API", version)]
 struct Cli {
-    /// HTTP bind address. Defaults to the canonical clock port
-    /// (7060 via boss-ports).
-    #[arg(long, default_value_t = default_bind())]
+    /// HTTP bind address. Defaults to loopback on the canonical clock
+    /// port (7060 via boss-ports). `BOSS_CLOCK_HTTP_BIND` widens it
+    /// where a deployment declares that it should: the cluster's
+    /// `boss-clock-internal` Service targets this port from other
+    /// pods (the conductor), and a loopback bind answers it with
+    /// connection refused — which is exactly what happened on
+    /// 2026-09-05 when the Service landed and the clock did not
+    /// (train #211: the conductor kept falling back to wallclock).
+    #[arg(long, env = "BOSS_CLOCK_HTTP_BIND", default_value_t = default_bind())]
     http_bind: String,
 
     /// Postgres URL — required when running in sim mode so the
@@ -188,4 +194,35 @@ async fn main() -> Result<()> {
     info!(addr = %bind, "boss-clock-api listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bind_defaults_to_loopback_and_the_env_widens_it() {
+        // Loopback unless a deployment says otherwise — the trust
+        // model's default, unchanged.
+        let cli = Cli::try_parse_from(["boss-clock-api"]).unwrap();
+        assert_eq!(
+            cli.http_bind,
+            format!("127.0.0.1:{}", boss_ports::prod("clock"))
+        );
+
+        // The cluster declares the wider bind in its manifest, as an
+        // env var, so the Service that targets this port is answered.
+        // SAFETY: tests in this binary do not share this variable.
+        unsafe { std::env::set_var("BOSS_CLOCK_HTTP_BIND", "0.0.0.0:7060") };
+        let cli = Cli::try_parse_from(["boss-clock-api"]).unwrap();
+        unsafe { std::env::remove_var("BOSS_CLOCK_HTTP_BIND") };
+        assert_eq!(cli.http_bind, "0.0.0.0:7060");
+
+        // The flag still wins over the env — an operator's explicit
+        // word beats a deployment default.
+        unsafe { std::env::set_var("BOSS_CLOCK_HTTP_BIND", "0.0.0.0:7060") };
+        let cli = Cli::try_parse_from(["boss-clock-api", "--http-bind", "127.0.0.1:1"]).unwrap();
+        unsafe { std::env::remove_var("BOSS_CLOCK_HTTP_BIND") };
+        assert_eq!(cli.http_bind, "127.0.0.1:1");
+    }
 }

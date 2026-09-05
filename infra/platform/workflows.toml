@@ -1753,6 +1753,196 @@ field_type = "string"
 required = true
 
 # ---------------------------------------------------------------------
+# emergency-merge — the sanctioned lane when the system of record is down.
+#
+# WHY THIS EXISTS. Every pipeline door routes through the jobs API: gate
+# filing, boarding, parking, publishing, packet annotation. So an outage
+# of the system of record locks the very pipeline that would ship its
+# fix, and a hand-hotfix to the cluster is stomped by converge within
+# seconds (a hand-built image survived five seconds on 2026-09-02). That
+# day an improvised lane worked — a full local gate on the builder pod,
+# David's approval, a fast-forward merge to forge main, converge
+# self-deploying it — and it was written into a memory and a runbook
+# line, which is prose. Prose cannot enforce (packet 2e136a67). This is
+# the lane as protocol: each step names its precondition and the
+# evidence it must carry before the next can become ready, and the one
+# trust decision in it — bypassing the train — is a sign-off owed by a
+# platform-admin, never an engineering call an agent makes alone.
+#
+# THE ROLLBACK LEVER COMES FIRST. On 2026-09-02 the merge lane ran for
+# 55 minutes while `kubectl rollout undo` to a named last-good revision
+# sat available: the unnamed `auth can-i patch deployment` answered no,
+# the name-scoped grant answers yes only when asked by name. "Roll back"
+# is a target, not a verb — `last_good` must NAME the revision or image
+# rolled to, or say why none exists, and only `no-good-revision` opens
+# the merge lane. A restored service ends the packet there.
+#
+# THE EVIDENCE IS A RECEIPT, NOT A CLAIM. `gate-locally` carries the
+# sha the local `infra/gate.sh` run stamped in `.gate-receipt.json` and
+# its verdict; a green receipt on the branch about to bypass the train
+# is the whole basis on which the approver signs. `converged` carries
+# the commit `/api/jobs/health` reports once the fix is live — the
+# system of record answering on the fix is what "restored" means, not
+# the merge landing. `retro` is required, not optional: an emergency
+# lane that never files its retro is a lane that will be improvised
+# again next time. Cross-step equalities (health_commit = merge_sha)
+# are the reviewer's to check; the row cannot express them yet.
+#
+# NOT the credential break-glass. `break-glass-is-a-key-you-hold.md`
+# is the hardware-key door for a locked-out operator; this is the
+# delivery lane for a fix the pipeline cannot carry. Different doors,
+# and the name here is chosen so the two never read as one.
+[[workflow]]
+kind = "emergency-merge"
+label = "Emergency merge"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "The sanctioned lane for a fix the pipeline cannot carry because the system of record is down. Rollback to a NAMED last-good revision is tried first and ends the packet if it restores service; otherwise the fix is gated locally for a real receipt, a platform-admin signs the train bypass, the branch fast-forwards onto main, the system of record is read answering on the fix, and the retro is filed. Each step carries the evidence the next needs to become ready, so the lane cannot be improvised twice the same way."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "declared"
+kind = "trigger"
+ready_when = "true"
+title_template = "System of record down: {metadata.outage}"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "operator-declares-the-sor-down" }
+
+# `outage` is a FILER field: what is down and how it was measured (the
+# health URL and its answer, the crash-loop line). Bound from the Job so
+# the filer supplies it at admission or the packet is refused.
+[[workflow.step]]
+title = "undo-first"
+kind = "task"
+ready_when = "steps.declared.done"
+title_template = "Try the rollback lever first"
+authority_role = "platform-admin"
+metadata_defaults = { outage = "{metadata.outage}", procedure = "Before any merge lane: is there a last-known-good artifact to roll to? Ask the NAMED form — `kubectl auth can-i patch deployment/boss -n boss` (the unnamed form answers no for a name-scoped grant) — then read `kubectl rollout history deployment/boss -n boss` and map revisions to IMAGE TAGS: two revisions can carry the same broken image, and undoing between them is a no-op that reads as a rollback. Record in `last_good` the revision and image you rolled to, or why none exists. `restored` means the system of record answers on that artifact; then this packet is done." }
+
+[[workflow.step.fields]]
+name = "outage"
+field_type = "string"
+required = true
+filled_by = "filer"
+
+[[workflow.step.fields]]
+name = "last_good"
+field_type = "string"
+required = true
+
+[[workflow.step.fields]]
+name = "undo_result"
+field_type = "restored|no-good-revision"
+required = true
+
+# The approver's read is REQUIRED here (phase 4 of the viability lint):
+# the sign-off that follows renders this step's fields, and a bypass
+# approved off an empty screen is the thing this protocol exists to end.
+[[workflow.step]]
+title = "gate-locally"
+kind = "task"
+ready_when = "steps.undo-first.done AND steps.undo-first.metadata.undo_result = \"no-good-revision\""
+title_template = "Gate the fix locally — a real receipt"
+authority_role = "platform-admin"
+metadata_defaults = { procedure = "Branch from origin/main. Run the FULL `infra/gate.sh` on the builder pod — not --quick, not --auto — and read `.gate-receipt.json`: `receipt_sha` is the sha it stamped and must be the branch head you will merge; `receipt_verdict` must be green. Never test against the production database. Write `sign_off_context` for the approver: what the change is, why the train cannot carry it, and the receipt." }
+
+[[workflow.step.fields]]
+name = "branch"
+field_type = "string"
+required = true
+
+[[workflow.step.fields]]
+name = "receipt_sha"
+field_type = "string"
+required = true
+
+[[workflow.step.fields]]
+name = "receipt_verdict"
+field_type = "green"
+required = true
+
+[[workflow.step.fields]]
+name = "sign_off_context"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "approve"
+kind = "sign-off"
+ready_when = "steps.gate-locally.done"
+title_template = "Approve the train bypass — the operator's call"
+authority_role = "platform-admin"
+sign_offs_required = ["platform-admin"]
+metadata_defaults = { authority_role = "platform-admin" }
+
+[[workflow.step.fields]]
+name = "decision"
+field_type = "approved|rejected"
+required = true
+
+[[workflow.step]]
+title = "merge"
+kind = "task"
+ready_when = "steps.approve.done AND steps.approve.metadata.decision = \"approved\""
+title_template = "Fast-forward the fix onto main"
+authority_role = "platform-admin"
+metadata_defaults = { procedure = "`git merge-base --is-ancestor origin/main <branch>` must hold — a branch on an old base merges clean and reverts the trains. Then `git push origin <branch>:main`, never --force. `merge_sha` is the sha main now points at, read from `git ls-remote origin main`, never typed. Converge on the forge host deploys main on its next tick; the image build is the wait." }
+
+[[workflow.step.fields]]
+name = "merge_sha"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "converged"
+kind = "task"
+ready_when = "steps.merge.done"
+title_template = "The system of record answers on the fix"
+authority_role = "platform-admin"
+metadata_defaults = { procedure = "Read `/api/jobs/health` on the system of record (10.20.0.34:7900) and record `capabilities.commit` as `health_commit`. It must equal `merge_sha`; a service that is up on a different commit is not restored on this fix." }
+
+[[workflow.step.fields]]
+name = "health_commit"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "retro"
+kind = "task"
+ready_when = "steps.converged.done"
+title_template = "File the retro"
+authority_role = "platform-admin"
+metadata_defaults = { procedure = "File the retro packet (protocol-retro or a post-mortem backlog item) naming what the pipeline could not do and which door is missing, and record its id or title here. The lane is closed only with its retro on the board." }
+
+[[workflow.step.fields]]
+name = "retro_packet"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "rolled-back"
+kind = "outcome"
+ready_when = "steps.undo-first.done AND steps.undo-first.metadata.undo_result = \"restored\""
+title_template = "Restored by rollback — no merge lane needed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "rolled-back" }
+
+[[workflow.step]]
+title = "refused"
+kind = "outcome"
+ready_when = "steps.approve.done AND steps.approve.metadata.decision = \"rejected\""
+title_template = "Bypass refused — the fix waits for the pipeline"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "refused" }
+
+[[workflow.step]]
+title = "merged"
+kind = "outcome"
+ready_when = "steps.retro.done"
+title_template = "Restored by emergency merge — retro filed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "merged" }
+
 # ops-request — a host-side debug read is a packet (729329c6, PULL half).
 #
 # David: "I am really tired of the copy pasting after sshing." The

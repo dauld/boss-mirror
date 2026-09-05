@@ -114,6 +114,14 @@ pub(crate) enum Action {
 /// Refuses rather than guesses, and the refusal names both shapes —
 /// a row is edited by a person, and "unknown verb" without the
 /// alternatives is the kind of message that sends someone to the source.
+/// The verbs that put a train on the track. `board` assembles and
+/// departs one; `run` is reconcile-then-board. Serialization holds
+/// exactly these — a reconcile or a packet-open never needs a clear
+/// track, and holding them would be a second, wrong cooldown.
+pub(crate) fn departs_a_train(verb: &str) -> bool {
+    matches!(verb, "board" | "run")
+}
+
 pub(crate) fn parse_action(verb: &str) -> Result<Action> {
     if let Some(kind) = verb.strip_prefix("open:") {
         let kind = kind.trim();
@@ -395,21 +403,47 @@ pub(crate) enum Decision {
     /// so in the journal. The elapsed time is the run's, not the
     /// window's: it is the number an operator wants.
     StillRunning(std::time::Duration),
+    /// Due, and this rule would depart a train, but one is already on
+    /// the track (that many pr-train packets are open). The window is
+    /// NOT claimed: the moment the track clears — the previous train
+    /// arrives OR cancels, both close its packet — the next tick fires
+    /// against the dock as it stands. Single-track railway (a8c6773b).
+    TrackOccupied(u32),
+    /// Due, would depart a train, and the track could not be read. A
+    /// failed probe never boards — the same rule the dock probe keeps.
+    TrackUnknown,
 }
 
 /// The whole per-tick scheduling decision for one rule, as a pure
-/// function of (rule, boss-clock now, last firing, dock depth,
-/// what this loop already has in flight).
+/// function of (rule, boss-clock now, last firing, dock depth, open
+/// trains, what this loop already has in flight).
+///
+/// `open_trains` is the track: how many pr-train packets are open
+/// right now. It gates only the verbs that depart a train, and it
+/// gates them BEFORE the window is claimed, so a held boarding leaves
+/// no firing behind and no cooldown starts from the hold. That is the
+/// difference between "the next train departs when the previous one
+/// lands" and "the next train departs 45 minutes after we noticed the
+/// previous one had not landed yet". Two trains on one main is a
+/// stale-base merge and a double deploy; before this nothing checked.
 pub(crate) fn decide(
     rule: &CadenceRule,
     now: DateTime<Utc>,
     last: Option<&LastFiring>,
     dock_depth: Option<u32>,
+    open_trains: Option<u32>,
     running: &[RunSnapshot],
 ) -> Decision {
     let Some(window) = due_window(rule, now, last, dock_depth) else {
         return Decision::Hold;
     };
+    if departs_a_train(&rule.verb) {
+        match open_trains {
+            None => return Decision::TrackUnknown,
+            Some(n) if n > 0 => return Decision::TrackOccupied(n),
+            Some(_) => {}
+        }
+    }
     // Per rule, deliberately: a long reconcile must not gag the
     // boarding window or the queue-depth board. Overlap between
     // rules is the conductor's flock to arbitrate, not this loop's.
@@ -430,6 +464,20 @@ pub(crate) fn runtime_secs(elapsed: std::time::Duration) -> u64 {
 /// journalled by the spawned task with its true elapsed time.
 pub(crate) fn completion_line(rule: &str, verb: &str, rc: i32, runtime_secs: u64) -> String {
     format!("{rule} verb={verb} rc={rc} in {runtime_secs}s")
+}
+
+/// The held-track line: a due departure that waits for the previous
+/// train. Journalled every tick it holds, because a boarding that
+/// silently does not happen is indistinguishable from a dead loop.
+pub(crate) fn track_occupied_line(rule: &str, open_trains: u32) -> String {
+    let s = if open_trains == 1 { "" } else { "s" };
+    format!("{rule} held — track occupied ({open_trains} open train{s}) — departs when it clears")
+}
+
+/// The blind-track line: the departure holds because the track could
+/// not be read, and says which probe failed rather than boarding anyway.
+pub(crate) fn track_unknown_line(rule: &str) -> String {
+    format!("{rule} held — open-train probe failed, not departing blind")
 }
 
 /// The skipped-window line. A window that does not fire must say why;
@@ -901,6 +949,33 @@ async fn probe_dock_depth(http: &reqwest::Client, base: &str) -> Result<u32> {
     Ok(depth)
 }
 
+/// How many trains are on the track: open pr-train packets, read off
+/// the list's `total` rather than its page — a limit is not a filter,
+/// and one open train is already one too many for a departure.
+async fn probe_open_trains(http: &reqwest::Client, base: &str) -> Result<u32> {
+    let body = api(
+        http,
+        reqwest::Method::GET,
+        base,
+        "/api/jobs?kind=pr-train&status=open&limit=1",
+        None,
+    )
+    .await?
+    .ok_or_else(|| anyhow!("the pr-train list came back empty"))?;
+    open_train_count(&body)
+}
+
+/// The count a list response carries. `total` is authoritative; a
+/// body without it is an error, never zero — zero is what a wrong
+/// deployment answers, and this number decides whether a train departs.
+pub(crate) fn open_train_count(body: &Value) -> Result<u32> {
+    let total = body
+        .get("total")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("the pr-train list carries no `total`: {body}"))?;
+    u32::try_from(total).context("open-train total does not fit a u32")
+}
+
 // ---------------------------------------------------------------------------
 // The executor — evaluate, claim, run the verb, record what happened.
 // ---------------------------------------------------------------------------
@@ -1118,12 +1193,29 @@ async fn tick(
             Err(e) => log(format!("dock probe failed — queue-depth rules hold: {e:#}")),
         }
     }
+    // The track is read once per tick, and only when a rule could
+    // depart a train — a loop with no departing rule never asks.
+    let mut open_trains: Option<u32> = None;
+    if rules.iter().any(|r| departs_a_train(&r.verb)) {
+        match probe_open_trains(http, base).await {
+            Ok(n) => open_trains = Some(n),
+            Err(e) => log(format!("open-train probe failed — departures hold: {e:#}")),
+        }
+    }
     for rule in &rules {
         let last = last_firing(http, base, &rule.name).await?;
-        let window = match decide(rule, now, last.as_ref(), dock_depth, &running) {
+        let window = match decide(rule, now, last.as_ref(), dock_depth, open_trains, &running) {
             Decision::Hold => continue,
             Decision::StillRunning(elapsed) => {
                 log(still_running_line(&rule.name, elapsed));
+                continue;
+            }
+            Decision::TrackOccupied(n) => {
+                log(track_occupied_line(&rule.name, n));
+                continue;
+            }
+            Decision::TrackUnknown => {
+                log(track_unknown_line(&rule.name));
                 continue;
             }
             Decision::Fire(window) => window,
@@ -1815,7 +1907,14 @@ mod tests {
         let rule = wall_rule(10);
         let last = fired(&rule, utc(2026, 8, 13, 10, 0, 0));
         assert_eq!(
-            decide(&rule, utc(2026, 8, 13, 10, 10, 0), Some(&last), None, &[]),
+            decide(
+                &rule,
+                utc(2026, 8, 13, 10, 10, 0),
+                Some(&last),
+                None,
+                None,
+                &[]
+            ),
             Decision::Fire(utc(2026, 8, 13, 10, 10, 0))
         );
     }
@@ -1833,6 +1932,7 @@ mod tests {
                 utc(2026, 8, 13, 10, 10, 0),
                 Some(&last),
                 None,
+                None,
                 &[running("train-reconcile", 612)],
             ),
             Decision::StillRunning(std::time::Duration::from_secs(612))
@@ -1848,7 +1948,14 @@ mod tests {
         let rule = clock_rule(); // train-window
         let now = utc(2026, 8, 13, 18, 0, 0);
         assert_eq!(
-            decide(&rule, now, None, None, &[running("train-reconcile", 1_800)]),
+            decide(
+                &rule,
+                now,
+                None,
+                None,
+                Some(0),
+                &[running("train-reconcile", 1_800)]
+            ),
             Decision::Fire(now)
         );
     }
@@ -1864,10 +1971,107 @@ mod tests {
             vec![running("train-window", 300)],
         ] {
             assert_eq!(
-                decide(&rule, mid_bucket, Some(&last), None, &r),
+                decide(&rule, mid_bucket, Some(&last), None, None, &r),
                 Decision::Hold
             );
         }
+    }
+
+    // -- the track: one train at a time ------------------------------------
+
+    #[test]
+    fn a_due_departure_holds_while_a_train_is_on_the_track() {
+        // Dock deep, cooldown long past, nothing in flight: due. But a
+        // train is open, so the window is NOT claimed — the next tick
+        // after it closes departs against the dock as it stands then.
+        let rule = depth_rule(1, 45);
+        let now = utc(2026, 9, 5, 8, 0, 0);
+        assert_eq!(
+            decide(&rule, now, None, Some(3), Some(1), &[]),
+            Decision::TrackOccupied(1)
+        );
+        assert_eq!(
+            decide(&rule, now, None, Some(3), Some(0), &[]),
+            Decision::Fire(now),
+            "the track clears the moment the previous packet closes — arrived or cancelled alike"
+        );
+    }
+
+    #[test]
+    fn a_departure_never_leaves_blind() {
+        // The probe failed: hold, exactly as a failed dock probe holds.
+        let rule = depth_rule(1, 45);
+        assert_eq!(
+            decide(&rule, utc(2026, 9, 5, 8, 0, 0), None, Some(3), None, &[]),
+            Decision::TrackUnknown
+        );
+    }
+
+    #[test]
+    fn the_clock_window_waits_for_the_track_too() {
+        // 18:05 is a `run` (reconcile then board). A train in flight at
+        // the window holds it; the window is not lost — it stays due
+        // and fires on the first clear tick — so serialization is a
+        // property of departing, not of one cadence basis.
+        let rule = clock_rule(); // 06:00 and 18:00
+        let window = utc(2026, 9, 5, 18, 0, 0);
+        assert_eq!(
+            decide(&rule, window, None, None, Some(2), &[]),
+            Decision::TrackOccupied(2)
+        );
+        assert_eq!(
+            decide(&rule, utc(2026, 9, 5, 18, 40, 0), None, None, Some(0), &[]),
+            Decision::Fire(window),
+            "the same 18:00 window fires once the track is clear"
+        );
+    }
+
+    #[test]
+    fn a_rule_that_departs_nothing_ignores_the_track() {
+        // reconcile must run WHILE a train is in flight — it is what
+        // lands the train. Holding it on the track would deadlock.
+        let rule = wall_rule(10);
+        let now = utc(2026, 9, 5, 8, 10, 0);
+        assert_eq!(
+            decide(&rule, now, None, None, Some(1), &[]),
+            Decision::Fire(now)
+        );
+        assert_eq!(
+            decide(&rule, now, None, None, None, &[]),
+            Decision::Fire(now),
+            "an unread track is no reason to skip a reconcile"
+        );
+        assert!(departs_a_train("board") && departs_a_train("run"));
+        assert!(!departs_a_train("reconcile") && !departs_a_train("open:protocol-retro"));
+    }
+
+    #[test]
+    fn the_open_train_count_reads_total_not_the_page() {
+        // limit=1 in the probe: the page is one row even with three
+        // trains open. `total` is the number; a body without it errors.
+        let body = serde_json::json!({"data": [{"id": "t1"}], "limit": 1, "offset": 0, "total": 3});
+        assert_eq!(open_train_count(&body).unwrap(), 3);
+        let bare = serde_json::json!({"data": []});
+        assert!(
+            open_train_count(&bare).is_err(),
+            "no total is an error, never zero"
+        );
+    }
+
+    #[test]
+    fn the_held_track_lines_say_why() {
+        assert_eq!(
+            track_occupied_line("train-board-on-dock-depth", 1),
+            "train-board-on-dock-depth held — track occupied (1 open train) — departs when it clears"
+        );
+        assert_eq!(
+            track_occupied_line("train-window", 2),
+            "train-window held — track occupied (2 open trains) — departs when it clears"
+        );
+        assert_eq!(
+            track_unknown_line("train-window"),
+            "train-window held — open-train probe failed, not departing blind"
+        );
     }
 
     #[test]

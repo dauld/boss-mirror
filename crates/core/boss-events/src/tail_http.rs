@@ -43,6 +43,7 @@ pub fn audit_tail_router(pool: PgPool) -> Router {
     };
     Router::new()
         .route("/api/events/health", get(events_health))
+        .route("/api/events/stats", get(stats))
         .route("/api/events/tail", get(tail))
         .route("/api/events/stream", get(stream))
         // Operator-on-demand export. Streams matching audit_log
@@ -73,6 +74,139 @@ pub struct AuditEntry {
 
 /// Liveness probe — used by deploy-services.sh + IT Monitoring
 /// page to confirm the service is reachable. No auth gate.
+/// How big the log is and how fast it grows (168b3f25). David,
+/// 2026-09-02: "We need size and growth stats on audit log to make
+/// sure it isn't growing unsustainably." Until now the only size
+/// reading was `total_rows` inside the nightly integrity checker's
+/// pod log — a number nobody reads is a number nobody has. One read,
+/// six SQL statements, all over the log itself; the per-day buckets
+/// and top kinds cover the last 30 days, which is the horizon a trend
+/// needs and cheap enough to answer on demand.
+///
+/// Every window is anchored at the log's OWN newest row, not the wall
+/// clock (no-wallclock): "last 24h" is the day before the newest event.
+/// For a live log the two are the same instant; for a quiet or
+/// replayed one this is the honest reading — growth measured against
+/// the log's head, and an empty log has no windows at all.
+#[derive(Debug, Serialize)]
+pub struct AuditStats {
+    pub total_rows: i64,
+    /// `pg_total_relation_size('audit_log')`: heap + indexes + toast.
+    pub table_bytes: i64,
+    pub oldest_at: Option<DateTime<Utc>>,
+    pub newest_at: Option<DateTime<Utc>>,
+    pub rows_last_24h: i64,
+    pub rows_last_7d: i64,
+    /// One bucket per UTC day with rows in the last 30 days, oldest first.
+    pub per_day: Vec<DayRows>,
+    /// The kinds writing most in the last 30 days, busiest first.
+    pub top_kinds: Vec<KindRows>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DayRows {
+    pub day: String,
+    pub rows: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct KindRows {
+    pub kind: String,
+    pub rows: i64,
+}
+
+pub async fn audit_stats(pool: &PgPool) -> Result<AuditStats, String> {
+    let (total_rows, oldest_at, newest_at): (i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>) =
+        sqlx::query_as("SELECT COUNT(*)::BIGINT, MIN(timestamp), MAX(timestamp) FROM audit_log")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    let (table_bytes,): (i64,) =
+        sqlx::query_as("SELECT pg_total_relation_size('audit_log')::BIGINT")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    let Some(head) = newest_at else {
+        return Ok(AuditStats {
+            total_rows,
+            table_bytes,
+            oldest_at,
+            newest_at,
+            rows_last_24h: 0,
+            rows_last_7d: 0,
+            per_day: Vec::new(),
+            top_kinds: Vec::new(),
+        });
+    };
+    let (rows_last_24h,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*)::BIGINT FROM audit_log \
+         WHERE timestamp >= $1::timestamptz - INTERVAL '24 hours'",
+    )
+    .bind(head)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let (rows_last_7d,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*)::BIGINT FROM audit_log \
+         WHERE timestamp >= $1::timestamptz - INTERVAL '7 days'",
+    )
+    .bind(head)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let per_day: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT to_char(date_trunc('day', timestamp AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day, \
+         COUNT(*)::BIGINT FROM audit_log \
+         WHERE timestamp >= $1::timestamptz - INTERVAL '30 days' GROUP BY 1 ORDER BY 1",
+    )
+    .bind(head)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let top_kinds: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT kind, COUNT(*)::BIGINT FROM audit_log \
+         WHERE timestamp >= $1::timestamptz - INTERVAL '30 days' GROUP BY kind ORDER BY 2 DESC LIMIT 12",
+    )
+    .bind(head)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(AuditStats {
+        total_rows,
+        table_bytes,
+        oldest_at,
+        newest_at,
+        rows_last_24h,
+        rows_last_7d,
+        per_day: per_day
+            .into_iter()
+            .map(|(day, rows)| DayRows { day, rows })
+            .collect(),
+        top_kinds: top_kinds
+            .into_iter()
+            .map(|(kind, rows)| KindRows { kind, rows })
+            .collect(),
+    })
+}
+
+/// `GET /api/events/stats` — the same door as the tail: operator or
+/// auditor tier, or a role with global read.
+async fn stats(State(state): State<AuditTailState>, CurrentUser(user): CurrentUser) -> Response {
+    let tier_ok = matches!(user.access_tier, AccessTier::Operator | AccessTier::Auditor);
+    let role_ok = boss_core::roles::has_global_read(&user.role);
+    if !(tier_ok || role_ok) {
+        return (
+            StatusCode::FORBIDDEN,
+            "operator tier or executive role required",
+        )
+            .into_response();
+    }
+    match audit_stats(&state.pool).await {
+        Ok(stats) => Json(stats).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
 async fn events_health() -> Response {
     Json(serde_json::json!({"status": "ok"})).into_response()
 }

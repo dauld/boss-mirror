@@ -287,6 +287,14 @@ spec:
             # events were being written 17 months in the past, leaving
             # 33,042 entries stamped before their predecessor.
             - {name: BOSS_CLOCK_MODE, value: wall}
+            # The clock answers the cluster, not only its own pod. The
+            # `boss-clock-internal` Service (boss-clock-internal.yaml)
+            # targets 7060 so the conductor can ask the clock instead of
+            # falling back to wallclock — and a loopback bind refuses it.
+            # Widened here, declared in the manifest, the way the jobs
+            # API already listens on 0.0.0.0 behind boss-jobs-internal;
+            # no LoadBalancer exposes 7060, so the reach is the cluster.
+            - {name: BOSS_CLOCK_HTTP_BIND, value: "0.0.0.0:7060"}
             - {name: BOSS_DEFAULT_USER_EMAIL, value: david@algedonic.dev}
             - {name: BOSS_BOOTSTRAP_ADMIN_EMAIL, value: david@algedonic.dev}
             - {name: BOSS_STATIC_DIR, value: /opt/boss/spa}

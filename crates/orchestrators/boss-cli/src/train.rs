@@ -1031,6 +1031,21 @@ where
 
 /// The list body, whether or not the endpoint wrapped it in
 /// `{"data": [...]}`.
+/// The train holding the track, named for the journal, or None when
+/// the track is clear. Any open pr-train packet occupies it: arrived
+/// and cancelled trains are closed, so both clear the track — a red
+/// train that stall-cancels never blocks the next one.
+pub(crate) fn track_occupied_by(open_trains: &[Value]) -> Option<String> {
+    open_trains.first().map(|t| {
+        let title = t
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("an unnamed train");
+        let id = t.get("id").and_then(Value::as_str).unwrap_or("?");
+        format!("{title} ({})", &id[..id.len().min(8)])
+    })
+}
+
 pub(crate) fn rows(resp: Option<Value>) -> Result<Vec<Value>> {
     let resp = resp.ok_or_else(|| anyhow!("empty response for a list call"))?;
     let list = match resp {
@@ -4809,6 +4824,28 @@ impl Conductor {
         // train_branch stamp on the next line.
         let window = now.format("%Y-%m-%d %H:%M").to_string();
         let train_branch = format!("train/{}", now.format("%Y%m%d-%H%M"));
+
+        // THE TRACK — one train at a time. The cadence loop holds a
+        // departure before it claims a window (cadence::decide), so
+        // this is the backstop for a hand-run `boss train board` and
+        // for two conductors racing: an open pr-train packet means the
+        // previous train has not arrived or cancelled, and a second
+        // consist assembled now would merge onto a main the first is
+        // about to change (a8c6773b). No packet is opened for a hold —
+        // it is not a refusal, the yard is not empty, and the next tick
+        // after the track clears departs.
+        let on_track = rows(
+            self.api(
+                Method::GET,
+                "/api/jobs?kind=pr-train&status=open&limit=5",
+                None,
+            )
+            .await?,
+        )?;
+        if let Some(occupant) = track_occupied_by(&on_track) {
+            log(format!("BOARDING HELD — track occupied by {occupant}"));
+            return Ok(());
+        }
 
         // THE HOST CHECK — before anything is assembled. On 2026-09-03
         // the conductor boarded two consists onto a CI host whose disk
@@ -8633,5 +8670,31 @@ mod tests {
             .all(|f| f == "Cargo.toml"),
             "version numbers are not filenames"
         );
+    }
+}
+
+#[cfg(test)]
+mod track_tests {
+    use super::track_occupied_by;
+    use serde_json::json;
+
+    #[test]
+    fn an_open_train_occupies_the_track_and_is_named() {
+        let open = vec![json!({
+            "id": "48b67f2e-9970-456f-817a-d085975b915f",
+            "title": "PR train 2026-09-05 07:26",
+            "status": "open"
+        })];
+        assert_eq!(
+            track_occupied_by(&open).as_deref(),
+            Some("PR train 2026-09-05 07:26 (48b67f2e)")
+        );
+    }
+
+    #[test]
+    fn no_open_train_means_a_clear_track() {
+        // The caller lists status=open only; an arrived or cancelled
+        // train is closed and never reaches this list.
+        assert_eq!(track_occupied_by(&[]), None);
     }
 }
