@@ -249,22 +249,23 @@ jobs:
       - name: Build
         run: bun run build
 
-      - name: Install Playwright browser
-        # `bun x`, NOT `bunx`. The image copies a single file from
-        # oven/bun — `COPY --from=bun /usr/local/bin/bun` — and `bunx`
-        # is a separate symlink that does not come with it. Locally
-        # both work, so this passed every check on a developer's box
-        # and exited 127 on train 52's first run. `bun x` is the same
-        # command with no second binary to depend on.
-        #
-        # --with-deps pulls the shared libraries chromium needs on
-        # slim-bookworm; the job container runs as root and the
-        # Dockerfile's own apt-get proves the base can reach a mirror.
-        run: bun x playwright install --with-deps chromium
-
       - name: Frontend smoke (mocked backend)
         # Every /api call is intercepted in-browser, so there is no
         # backend and no seeding — 61 assertions in ~40s.
+        #
+        # NO BROWSER INSTALL STEP, on purpose. The CI image bakes
+        # chromium and its system libraries at PLAYWRIGHT_BROWSERS_PATH
+        # (infra/forge/boss-ci/Dockerfile, pinned to the workspace's
+        # @playwright/test 1.61.0), so the `bun x playwright install
+        # --with-deps chromium` that used to sit here downloaded a
+        # browser the image already had — from cdn.playwright.dev,
+        # which resolved to an unroutable IPv6 address and redded
+        # train #162 (a700d3a4) — and ran apt for libraries already
+        # present. A step that fetches from the public internet on
+        # every run is a network dependency the image was built to
+        # remove; the suite finds the baked browser through the
+        # image's own env. Moving the pin in package.json means
+        # moving it in the Dockerfile in the same car.
         run: bun run test:mocked
 
   fast:
