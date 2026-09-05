@@ -1218,11 +1218,15 @@ mod tests {
         //
         // `ship` is reachable only via a clause reading `watch`'s
         // `flag`, and `watch` has neither run nor declared a default —
-        // so at run time `steps.watch.metadata.flag` is ABSENT, boss-expr
-        // errors, and `ship` never becomes ready. Seeding every declared
-        // field as null regardless of state would make `!=` read true
-        // here and error there: the gate would pass a workflow with a
-        // branch that can never be taken.
+        // so at run time `steps.watch.metadata.flag` is ABSENT. Since
+        // 7b756357 boss-expr resolves that to `Absent`, which compares
+        // FALSE against a literal, so `= "go"` is false in both the lint
+        // synth and the engine: `ship` never becomes ready and route
+        // "ship" is a genuine orphan. (A `!=` clause would read TRUE
+        // over the same absent field — reachable, correctly not an
+        // orphan — which is the semantics change; this test keeps the
+        // `=` case, the one that stays unreachable, so it still proves
+        // the lint is never more permissive than the engine.)
         let reg = StepRegistry::v1();
         let spec = WorkflowSpec::platform_seed(
             "unrun",
@@ -1259,8 +1263,7 @@ mod tests {
                 StepSpec {
                     title: "ship".into(),
                     kind: "task".into(),
-                    ready_when: "steps.decide.done AND steps.watch.metadata.flag != \"stop\""
-                        .into(),
+                    ready_when: "steps.decide.done AND steps.watch.metadata.flag = \"go\"".into(),
                     terminal: Some(Terminal {
                         outcome: "shipped".into(),
                     }),

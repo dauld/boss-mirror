@@ -664,6 +664,28 @@ pub fn match_event(
             let mut args = Vec::with_capacity(ds.args.len());
             for (k, expr) in &ds.args {
                 match expr::eval(expr, &ctx) {
+                    // A spawn arg REQUIRES a concrete value. Since
+                    // 7b756357 boss-expr resolves an absent path to
+                    // `Value::Absent` (so `when` predicates evaluate
+                    // false instead of erroring) — but an arg that
+                    // resolved to nothing is the 2026-08-24 incident: a
+                    // rule naming `job_id` where the payload carries
+                    // `id` would otherwise spawn a job with an absent
+                    // subject. Reject it, skip-and-name the rule, and
+                    // leave the innocent neighbours on the topic firing.
+                    Ok(Value::Absent) => {
+                        let what = match expr {
+                            Expr::Identifier(path) => path.join("."),
+                            other => format!("{other:?}"),
+                        };
+                        arg_failure = Some(MatchError::ArgFailed {
+                            rule: rule.name.clone(),
+                            handler: ds.handler.clone(),
+                            arg: k.clone(),
+                            err: expr::EvalError::UnknownIdentifier(what),
+                        });
+                        break;
+                    }
                     Ok(val) => args.push((k.clone(), val)),
                     Err(err) => {
                         arg_failure = Some(MatchError::ArgFailed {

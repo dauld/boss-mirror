@@ -5376,6 +5376,70 @@ mod tests {
     }
 
     #[test]
+    fn materialize_readies_an_absent_optional_flag_gate() {
+        // 7b756357: a `NOT job.metadata.x` gate over an ABSENT flag
+        // READIES (optional-flag-defaults-off), where the eval error
+        // used to leave it pending forever and dead-letter its marker. A
+        // `job.metadata.go = "true"` gate stays PENDING until go is set —
+        // the job-metadata guard keeps it waiting rather than skipping.
+        let spec = WorkflowSpec::platform_seed(
+            "absent-gate",
+            "Absent gate",
+            "test",
+            vec!["custom".into()],
+            vec![
+                StepSpec {
+                    title: "opened".into(),
+                    kind: "trigger".into(),
+                    ready_when: "true".into(),
+                    title_template: "Opened".into(),
+                    ..Default::default()
+                },
+                StepSpec {
+                    title: "act".into(),
+                    kind: "task".into(),
+                    ready_when: "NOT job.metadata.blocked".into(),
+                    title_template: "Act".into(),
+                    ..Default::default()
+                },
+                StepSpec {
+                    title: "gated".into(),
+                    kind: "task".into(),
+                    ready_when: "job.metadata.go = \"true\"".into(),
+                    title_template: "Gated".into(),
+                    ..Default::default()
+                },
+            ],
+        );
+        let subject = Subject::new("custom", "c-1");
+        let reg = StepRegistry::v1();
+        let steps = materialize_steps_at(
+            &spec,
+            &subject,
+            JobId::new(),
+            &serde_json::Value::Object(Default::default()),
+            StepId::new,
+            None,
+            Some(&reg),
+        );
+        assert_eq!(
+            steps[0].status,
+            StepStatus::Completed,
+            "the lone trigger is born completed"
+        );
+        assert_eq!(
+            steps[1].status,
+            StepStatus::Ready,
+            "NOT job.metadata.blocked over an absent flag readies (was pending-forever before 7b756357)"
+        );
+        assert_eq!(
+            steps[2].status,
+            StepStatus::Pending,
+            "job.metadata.go = \"true\" over an absent flag stays pending, not skipped"
+        );
+    }
+
+    #[test]
     fn materialize_with_no_provenance_fires_first_trigger() {
         // An operator-opened Job carries no `trigger_name`: the first
         // trigger fires (compat), the rest Skip — never all of them.
