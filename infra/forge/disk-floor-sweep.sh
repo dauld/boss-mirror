@@ -123,13 +123,18 @@ done_at() { # step-name
 # 68 images, 85.88GB, 83.28GB reclaimable (96%) — the bulk of a 228GB
 # disk with 71GB free, while this script pruned the rootless daemon
 # to the floor and reported "a human decides next". Unused images
-# older than a day: the running job's image is in use and docker will
-# not prune it; the newest tag is what the next job pulls; anything
-# older is a LAN re-pull (3.47GB) away if ever wanted again. `sudo -n`
+# older than FOUR HOURS: the running job's image is in use and docker
+# will not prune it; a train's whole CI is under an hour; the newest
+# tag is what the next job pulls and is a LAN re-pull (3.47GB) away if
+# pruned. A day was the first cut, and a day is exactly what a busy
+# day defeats: on 2026-09-05 eight trains left eight per-train images
+# (~40GB) under the age filter, the forge slid 109 → 71GB free between
+# builds, and this sweep at 17:10 reported FLOOR UNMET at 98GB with
+# nothing left it was allowed to remove. `sudo -n`
 # because the system socket is root's — the same sudo the converge
 # runner uses for `docker run`; refused means the step is skipped and
 # says so, never a silent zero.
-if sudo -n docker image prune -af --filter "until=24h" 2>&1 | tail -1; then
+if sudo -n docker image prune -af --filter "until=4h" 2>&1 | tail -1; then
     :
 else
     echo "disk-floor-sweep: system-daemon image prune skipped — sudo -n docker refused"
