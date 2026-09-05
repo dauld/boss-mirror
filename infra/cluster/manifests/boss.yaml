@@ -334,6 +334,14 @@ spec:
             # or zero collections fire and AR balloons.
             - {name: BOSS_EVENT_WEBHOOK_URL, value: "http://127.0.0.1:7099/callback"}
             - {name: BOSS_SIM_CALLBACK_BIND, value: "127.0.0.1:7099"}
+            # PARKED: the brewery sim tick daemon is off on the cluster
+            # (2026-09-05, park packet 59f063de — the sim is paused behind
+            # IT delivery reliability). The tenant is still published, so
+            # the app keeps its brewery data; only the packet generator is
+            # stopped. Flip to "true" (or delete this line) to resume; the
+            # 791 already-parked packets unblock separately (their
+            # parked_batch=brewery-sim-2026-09-05).
+            - {name: BOSS_SIM_ENABLED, value: "false"}
             - {name: BOSS_DISPATCH_STRATEGY, value: spread}
             # Decides-vs-executes (291a73a7, option c): decision-shaped
             # steps go to the role's human holder; executable platform

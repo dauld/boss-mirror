@@ -66,6 +66,27 @@ wait_for_dispatcher() {
 start_sim() {
     exec boss-brewery-sim 2>&1
 }
+# Whether the brewery tick daemon should run. Default: yes — the OSS
+# quickstart and the public brewery demo want live data. The cluster
+# sets BOSS_SIM_ENABLED=false to PARK the sim behind IT delivery
+# reliability (2026-09-05, park packet 59f063de): the tenant is still
+# published so the app keeps its brewery data, but no tick daemon spawns
+# new packets onto the yard. A flag, not a code fork, so only the
+# deployment that decided to pause it is affected.
+sim_enabled() {
+    case "${BOSS_SIM_ENABLED:-true}" in
+        false|False|FALSE|0|no|No|NO|off|Off|OFF) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+# When the sim is disabled AND this launch is a tracked background child
+# (the degraded-then-cleared path), the child must NOT exit — the
+# launcher's `wait -n` ends the pod on any child's departure. Hold the
+# PID alive with no sim instead. A hook so the self-test can replace it.
+hold_without_sim() {
+    echo "    boss-brewery-sim DISABLED — tenant published, holding without a tick daemon (parked)"
+    exec sleep infinity
+}
 
 # Publish the tenant, then start the sim in the background. Returns 0
 # whether or not the publish succeeded — the caller keeps launching.
@@ -74,8 +95,15 @@ launch_tenant_and_sim() {
     local -n launched_pids=$1
     local retry="${BOSS_PREPARE_RETRY_SECONDS:-300}"
     if publish_tenant; then
-        ( wait_for_dispatcher; start_sim ) &
-        launched_pids+=($!)
+        if sim_enabled; then
+            ( wait_for_dispatcher; start_sim ) &
+            launched_pids+=($!)
+        else
+            # Tenant published synchronously above; no tick daemon, so no
+            # tracked child to add — the launcher simply runs one fewer
+            # service and the pod's other long-lived children keep it up.
+            echo "    boss-brewery-sim DISABLED (BOSS_SIM_ENABLED=${BOSS_SIM_ENABLED:-true}) — tenant published, tick daemon parked"
+        fi
         return 0
     fi
     echo "DEGRADED: tenant prepare failed — every API stays up and the gateway starts; the sim stays DOWN until prepare succeeds; the reset baseline is untouched; retrying every ${retry}s" >&2
@@ -86,9 +114,13 @@ launch_tenant_and_sim() {
             echo "DEGRADED: tenant prepare still failing (attempt ${attempt} in ${retry}s)" >&2
             sleep "$retry"
         done
-        echo "DEGRADED: cleared — tenant prepared on attempt ${attempt}; starting the sim" >&2
-        wait_for_dispatcher
-        start_sim
+        echo "DEGRADED: cleared — tenant prepared on attempt ${attempt}" >&2
+        if sim_enabled; then
+            wait_for_dispatcher
+            start_sim
+        else
+            hold_without_sim
+        fi
     ) &
     launched_pids+=($!)
     return 0

@@ -56,5 +56,35 @@ wait "${PIDS[0]}"
 [[ -f "$tmp/sim" ]] || { echo "FAIL: a successful publish did not start the sim" >&2; exit 1; }
 ! grep -q DEGRADED "$err" || { echo "FAIL: a successful publish printed DEGRADED" >&2; exit 1; }
 
-echo "a-failed-prepare-degrades-the-pod: self-test ok — a failed publish degrades and retries (3 attempts, sim started once, after readyz); a clean publish starts the sim with no DEGRADED line"
+# Sim DISABLED (BOSS_SIM_ENABLED=false): the tenant is still published,
+# but no tick daemon starts and no tracked child is added on the happy
+# path — parking the sim (2026-09-05, park packet 59f063de) must not
+# spawn a packet generator, and must not leave the launcher a child that
+# would exit and end the pod.
+rm -f "$tmp/attempts" "$tmp/sim" "$tmp/readyz"
+export BOSS_SIM_ENABLED=false
+publish_tenant() { echo 1 >"$STUB_DIR/attempts"; return 0; }
+PIDS=()
+launch_tenant_and_sim PIDS 2>"$err"
+[[ "${#PIDS[@]}" -eq 0 ]] || { echo "FAIL: disabled sim added ${#PIDS[@]} tracked child(ren) on a clean publish — expected none" >&2; exit 1; }
+[[ ! -f "$tmp/sim" ]] || { echo "FAIL: disabled sim started the tick daemon on a clean publish" >&2; exit 1; }
+[[ -f "$tmp/attempts" ]] || { echo "FAIL: disabled sim skipped the tenant publish — the app would have no brewery data" >&2; exit 1; }
+# Disabled + a failing-then-clearing publish: the retry child holds
+# without a sim (hold_without_sim), so it publishes but never starts the
+# daemon. Override the hold hook so the test does not block on it.
+rm -f "$tmp/attempts" "$tmp/sim" "$tmp/readyz"
+hold_without_sim() { echo "held" >>"$STUB_DIR/held"; exit 0; }
+publish_tenant() {
+    local n=0; [[ -f "$STUB_DIR/attempts" ]] && n=$(<"$STUB_DIR/attempts")
+    n=$((n + 1)); echo "$n" >"$STUB_DIR/attempts"; [[ "$n" -ge 2 ]]
+}
+PIDS=()
+launch_tenant_and_sim PIDS 2>"$err"
+[[ "${#PIDS[@]}" -eq 1 ]] || { echo "FAIL: disabled+degraded expected one retry child, got ${#PIDS[@]}" >&2; exit 1; }
+wait "${PIDS[0]}"
+[[ ! -f "$tmp/sim" ]] || { echo "FAIL: disabled+degraded started the tick daemon" >&2; exit 1; }
+[[ -f "$tmp/held" ]] || { echo "FAIL: disabled+degraded did not hold without a sim — the child would exit and end the pod" >&2; exit 1; }
+unset BOSS_SIM_ENABLED
+
+echo "a-failed-prepare-degrades-the-pod: self-test ok — a failed publish degrades and retries (3 attempts, sim started once, after readyz); a clean publish starts the sim with no DEGRADED line; BOSS_SIM_ENABLED=false publishes the tenant but starts no daemon and holds without exiting"
 exit 0
