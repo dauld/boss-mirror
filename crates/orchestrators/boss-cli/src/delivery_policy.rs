@@ -102,7 +102,7 @@ pub(crate) const COMPILED_BLIP_CAUSE_BUDGET: usize = 80;
 /// the run still died mid-flight, because a start floor cannot see the
 /// consist's mid-run consumption. 90 is the measured cold build plus
 /// headroom for exactly that growth.
-pub(crate) const COMPILED_CI_HOST_FLOOR_GB: i64 = 90;
+pub(crate) const COMPILED_CI_HOST_FLOOR_GB: i64 = 40;
 
 /// How many gates `boss gate` admits at once before it refuses. Unlike
 /// most of its siblings this constant DID have a pre-registry ancestor —
@@ -366,8 +366,10 @@ mod tests {
         assert_eq!(p.skip_reason_file_budget, 96);
         assert_eq!(p.blip_cause_budget, 80);
         assert_eq!(
-            p.ci_host_floor_gb, 90,
-            "the measured ~74GB cold build plus headroom (gate.sh's disk-floor note)"
+            p.ci_host_floor_gb, 40,
+            "policy v3 (approval d99b198d, 2026-09-05): the forge runs lean CI green at \
+             60-70GB free and the locomotive's own door is 70, so the boarding floor sits \
+             under it; the old 90 measured a FULL gate build that now runs in-cluster"
         );
         assert_eq!(
             p.gate_max_concurrent, 3,

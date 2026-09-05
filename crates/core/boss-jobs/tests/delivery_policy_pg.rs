@@ -28,7 +28,16 @@ async fn the_seeded_policy_is_active_and_readable_through_the_port() {
         .unwrap()
         .expect("the seed migration leaves exactly one active policy");
     assert_eq!(policy.name, POLICY);
-    assert_eq!(policy.version, 1);
+    // The seed inserts v1; 202609050500-the-ci-host-floor-is-forty then
+    // retires it and inserts its copy as version + 1 with the floor at
+    // 40 — so a fresh schema is in force at v2 (a live registry that had
+    // already moved to v2 lands at v3: the migration copies whatever was
+    // active, it does not hard-code a number). The floor is the point.
+    assert_eq!(policy.version, 2);
+    assert_eq!(
+        policy.ci_host_floor_gb, 40,
+        "policy v3's one change (approval d99b198d)"
+    );
     assert!(
         policy
             .consist_excluded_lints

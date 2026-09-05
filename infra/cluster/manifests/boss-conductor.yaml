@@ -175,13 +175,19 @@ data:
   BOSS_TRAIN_CADENCE_TICK_SECONDS: "60"
   BOSS_TRAIN_CADENCE_DRAIN_SECONDS: "30"
   RUST_LOG: "info"
-  # BOSS_TRAIN_CI_HOST is DELIBERATELY UNSET. It gates boarding on a
-  # specific box's free disk, and it has no default because a wrong node
-  # id gates boardings on the wrong box ("never observed"). Absent, the
-  # pre-boarding host check is skipped with one journal line and boarding
-  # behaves as before. At CUTOVER, set it to the estate node id that runs
-  # the gate/CI build (the `boss.dev/purpose: build` node) by adding it
-  # here — a one-line ConfigMap edit shipped as a car, then a converge.
+  # THE CI-HOST CHECK IS LIVE. `forge` is the estate node id of the box
+  # CI runs on (Forgejo Actions, the locomotive's disk door), and since
+  # feat/the-forge-observes-itself (#205) that host reports itself
+  # every 15 minutes — a wrong id would gate boardings on a box that is
+  # "never observed", which is why this stayed unset until the observer
+  # existed. The floor it reads is the delivery policy's
+  # ci_host_floor_gb (40 as of policy v3, David 2026-09-05): below it,
+  # boarding refuses before a train is assembled, instead of the
+  # locomotive refusing after a build has already eaten the margin
+  # (train #204, 2026-09-05 — 3549346c). Set here, declaratively, so a
+  # converge re-asserts it; the value is the host's registry id, not a
+  # hostname.
+  BOSS_TRAIN_CI_HOST: "forge"
   #
   # BOSS_TRAIN_ALLOW_LOCAL_JOBS is DELIBERATELY UNSET: the SoR above is a
   # real cross-cluster address, not loopback, so the loopback preflight

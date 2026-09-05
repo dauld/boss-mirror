@@ -14,6 +14,18 @@ Description=BOSS forge: keep the root volume above the disk floor (regenerable c
 
 [Service]
 Type=oneshot
+# THE SWEEP FLOOR SITS ABOVE THE CI FLOOR. The script's default floor
+# (70) is the same number the locomotive refuses under
+# (BOSS_CI_MIN_FREE_GB, 70), so a sweep reclaimed to 70 and stopped —
+# and the next train's build ate the margin before the check ran:
+# 2026-09-05, 74GB free at 02:07 after the sweep, 65GB at 02:55 when
+# train #204 was refused at the door, with the sweep declaring itself
+# done at exactly the floor an hour earlier. A floor only buys headroom
+# if it is HIGHER than the one being defended. 100 leaves ~30GB — three
+# to five train+converge cycles (5-9GB each, measured) — between sweeps.
+# The script stops at the floor and touches only regenerable caches, so
+# a higher number costs nothing when the disk is already above it.
+Environment=BOSS_DISK_FLOOR_GB=100
 # Rootless docker, same as cluster-deploy-runner; the script defaults
 # DOCKER_HOST itself.
 User=david
