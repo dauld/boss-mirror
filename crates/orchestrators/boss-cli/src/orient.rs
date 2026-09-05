@@ -54,6 +54,28 @@ fn at_step(v: &Value) -> String {
 /// ([[a-clean-merge-is-not-a-correct-merge]]), so the conductor must
 /// re-gate it before boarding — L2 of the orientation protocol
 /// (acedf981): measure current reality before building or boarding.
+/// Open car packets that are residue: their forge branch is GONE, yet
+/// they are not in the one state where a vanished branch is normal —
+/// `Proven in prod`, the landed-awaiting-proof step whose branch the
+/// train already swept. Everything else with a gone branch is a packet
+/// that landed via a twin, was abandoned, or stuck while its branch
+/// disappeared — the inflated-open-count residue L3 exists to surface
+/// (acedf981; [[a-left-behind-car-may-be-a-landed-twin]]). Each pair is
+/// (branch, current-step title). A missing/empty branch is not residue:
+/// a car that never pushed has nothing gone.
+fn residue_cars<'a>(
+    open_cars: &'a [(String, String)],
+    forge_heads: &std::collections::BTreeSet<String>,
+) -> Vec<&'a str> {
+    open_cars
+        .iter()
+        .filter(|(branch, step)| {
+            !branch.is_empty() && !forge_heads.contains(branch) && step != "Proven in prod"
+        })
+        .map(|(branch, _)| branch.as_str())
+        .collect()
+}
+
 fn bases_behind(checks: &[(String, Option<i32>)]) -> Vec<&str> {
     checks
         .iter()
@@ -180,6 +202,36 @@ pub async fn run() -> Result<()> {
                 }
                 if orphans.len() > SHOWN {
                     println!("    …and {} more", orphans.len() - SHOWN);
+                }
+            }
+            // RESIDUE (L3, acedf981): the inverse cross-ref. Orphans are
+            // forge heads no packet claims; residue is open car packets
+            // whose branch is GONE — landed via a twin, abandoned, or
+            // stuck — excluding the normal landed-awaiting-proof state.
+            let forge_heads: std::collections::BTreeSet<String> =
+                String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .filter_map(|l| l.split_whitespace().nth(1))
+                    .filter_map(|r| r.strip_prefix("refs/heads/"))
+                    .map(str::to_string)
+                    .collect();
+            let open_cars: Vec<(String, String)> = cars
+                .iter()
+                .filter(|c| c.get("status").and_then(Value::as_str) == Some("open"))
+                .map(|c| (md_str(c, "branch").to_string(), at_step(c)))
+                .collect();
+            let residue = residue_cars(&open_cars, &forge_heads);
+            if residue.is_empty() {
+                println!(
+                    "\n  RESIDUE — none: every open car still has a forge branch (or is landed-awaiting-proof)"
+                );
+            } else {
+                println!(
+                    "\n  RESIDUE — {} open car(s) whose forge branch is GONE (likely landed via a twin or abandoned; close the packet, or `boss merged <branch>` — see the left-behind-twin trap):",
+                    residue.len()
+                );
+                for b in &residue {
+                    println!("    {b}");
                 }
             }
         }
@@ -317,6 +369,34 @@ pub async fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn heads(bs: &[&str]) -> std::collections::BTreeSet<String> {
+        bs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn residue_is_an_open_car_whose_branch_vanished_mid_flight() {
+        let open = vec![
+            ("fix/gone".to_string(), "Open for review".to_string()),
+            ("fix/live".to_string(), "Gate green".to_string()),
+        ];
+        // fix/gone is not among the forge heads and is not
+        // landed-awaiting-proof -> residue; fix/live still has a head.
+        assert_eq!(residue_cars(&open, &heads(&["fix/live"])), vec!["fix/gone"]);
+    }
+
+    #[test]
+    fn a_landed_awaiting_proof_car_with_a_swept_branch_is_not_residue() {
+        let open = vec![("fix/landed".to_string(), "Proven in prod".to_string())];
+        // Its branch was swept by the train — the normal state, not residue.
+        assert!(residue_cars(&open, &heads(&[])).is_empty());
+    }
+
+    #[test]
+    fn a_car_that_never_pushed_a_branch_is_not_residue() {
+        let open = vec![(String::new(), "Publishing".to_string())];
+        assert!(residue_cars(&open, &heads(&[])).is_empty());
+    }
 
     #[test]
     fn bases_behind_flags_only_the_not_ancestor_code() {

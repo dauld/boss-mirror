@@ -37,7 +37,8 @@ use boss_dispatcher_handlers::handlers::{
     network_census::NetworkCensus, packaging_allocate::PackagingAllocate, people_hire::PeopleHire,
     people_terminate::PeopleTerminate, products_consume::ProductsConsume,
     products_consume_from_invoice::ProductsConsumeFromInvoice, products_produce::ProductsProduce,
-    shipping_create::ShippingCreate, webhook_notify::WebhookNotify,
+    shipping_create::ShippingCreate, sweep_empty_decisions::MaintenanceSweepInspect,
+    webhook_notify::WebhookNotify,
 };
 use tokio::net::TcpListener;
 use tracing::{info, warn};
@@ -156,6 +157,12 @@ async fn main() -> Result<()> {
             // A closed Job wakes its waiters: clears metadata.waiting_on
             // (the '*' job edge) so blocked steps re-evaluate (e9291570).
             handlers.register(JobsClearWaiting::new(cfg.jobs_api_url.clone()));
+            // The empty-decisions sweep runs itself: on the sweep's
+            // Inspect checklist becoming ready, scan open packets for
+            // approval decisions that recorded nothing, complete the
+            // checklist, and route (action_needed) to Remediate or Clear
+            // (ee8ec68a — mechanical inspections become automation).
+            handlers.register(MaintenanceSweepInspect::new(cfg.jobs_api_url.clone()));
             // A closing Job completes the open step it was authorized
             // by, on the Job its declared edge names — the merged car
             // → feedback-packet obligation (2c4ae549). Generic: which

@@ -924,3 +924,20 @@ when = 'subject_id = "boss-dev-forge-token"'
 [[rule.do]]
 handler = "credential.rotate.forgejo"
 args = { forge_user = "\"david\"", secret_namespace = "\"boss-dev\"", secret_name = "\"boss-dev-forge-token\"", secret_key = "\"token\"", scopes = "\"write:repository\"", verify_repo = "\"david/boss\"" }
+
+# The empty-decisions sweep inspects itself. A cross-protocol reactor:
+# the daily `maintenance-sweep-empty-decisions-daily` spawn files a
+# sweep whose `Inspect: empty-decisions` checklist nothing was
+# completing, so it piled up. This rides the shared `step.ready.*`
+# subscription (like the marker completer) and self-filters to that one
+# checklist: it counts the approval decisions that completed empty in
+# the window, completes the checklist, and stamps action_needed so the
+# packet routes to Remediate or Clear. Seeded by
+# 202609052030-the-empty-decisions-sweep-inspects-itself.sql; present
+# here because dispatcher_rules_seed_matches_toml compares BOTH
+# directions.
+[[rule]]
+name = "inspect-empty-decisions-sweep-on-step-ready"
+on_event = "step.ready.*"
+[[rule.do]]
+handler = "maintenance.sweep.inspect"

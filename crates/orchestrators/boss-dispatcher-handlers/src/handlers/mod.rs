@@ -50,4 +50,5 @@ pub mod products_consume;
 pub mod products_consume_from_invoice;
 pub mod products_produce;
 pub mod shipping_create;
+pub mod sweep_empty_decisions;
 pub mod webhook_notify;

@@ -159,7 +159,7 @@ set -euo pipefail
 # no routing: it advances the very packet that fired it, spawns
 # nothing, and every write it makes lands back on that packet's own
 # steps.
-BASELINE=55
+BASELINE=56  # +inspect-empty-decisions-sweep-on-step-ready: a cross-protocol reactor (a maintenance-sweep inspection driven by a step becoming ready), which a single Workflow definition cannot express
 RULES_FILE="infra/dispatcher/rules.toml"
 
 count=$(grep -c '^\[\[rule\]\]' "$RULES_FILE")
