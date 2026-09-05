@@ -685,6 +685,88 @@ pub fn garage(gate_runs: &[(Job, Vec<Step>)], settled_branches: &[String]) -> Ve
     out
 }
 
+/// What the conductor is doing, in its own record — and, crucially,
+/// whether it has been heard from at all.
+///
+/// WHY THIS EXISTS. Every trouble signal on this board is written by
+/// some component, and the conductor writes most of them. So when the
+/// conductor stops, its failures render as HEALTH: on 2026-09-04 it was
+/// dead for two and a half hours (a fresh pod lost the git credential
+/// its `--global` config held) while the yard drew full docks, healthy
+/// trains and live gates. Eleven distinct "the board said fine and it
+/// was not" incidents in two days share this one shape — absence of a
+/// trouble flag rendered as absence of trouble.
+///
+/// The fix is to make SILENCE a first-class reading rather than a gap.
+/// The conductor already records every cadence firing — rule, verb,
+/// instant, and (since the 2026-09-04 cooldown fix) its exit code — so
+/// "when did it last act, and did that act succeed" is answerable from
+/// the record without asking the conductor anything.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConductorHealth {
+    /// When it last fired the rule this health is measured against.
+    /// `None` means never — a conductor that has not acted in the
+    /// window we keep, which is itself the loudest possible reading.
+    pub last_seen: Option<String>,
+    /// Minutes since `last_seen`. `None` when there is no firing or no
+    /// clock: no reading, rather than a fabricated zero.
+    pub silent_for_minutes: Option<i64>,
+    /// The rule's OWN declared interval — the conductor's stated
+    /// heartbeat, taken from the cadence registry rather than a
+    /// constant here, so changing the cadence moves the expectation
+    /// with it.
+    pub expected_every_minutes: Option<i64>,
+    /// True when silence has run past `SILENT_AFTER_INTERVALS` of that
+    /// declared heartbeat. THE FIELD THE BOARD SHOULD DEFER TO: while
+    /// this is true, every section whose truth the conductor writes is
+    /// last-known-good, not current.
+    pub silent: bool,
+    /// The verb it last ran, and how that went. A conductor that is
+    /// running but FAILING every pass looks identical to a healthy one
+    /// unless the exit code is on the surface — 2026-09-04 again, where
+    /// `rc=3` (preflight refusing) repeated for hours in a log nobody
+    /// was reading.
+    pub last_verb: Option<String>,
+    pub last_rc: Option<i32>,
+}
+
+/// How many declared intervals of silence before the board stops
+/// trusting what the conductor wrote. Two, not one: a single missed
+/// tick is a slow pass or a restart, and crying wolf at every blip
+/// trains an operator to ignore the signal — which is how the real
+/// outage stayed invisible.
+pub const SILENT_AFTER_INTERVALS: i64 = 2;
+
+/// Read the conductor's liveness from its own firing record.
+///
+/// Pure, so the decision is testable without a database or a clock.
+/// Every unknown stays unknown: no firing, or no clock, yields `None`
+/// readings and `silent: false` — because "I cannot tell" must not be
+/// dressed up as either health or alarm.
+pub fn conductor_health(
+    last_fired_at: Option<chrono::DateTime<chrono::Utc>>,
+    last_verb: Option<&str>,
+    last_rc: Option<i32>,
+    expected_every_minutes: Option<i64>,
+    now: Option<chrono::DateTime<chrono::Utc>>,
+) -> ConductorHealth {
+    let silent_for = last_fired_at
+        .zip(now)
+        .map(|(f, n)| (n - f).num_minutes().max(0));
+    let silent = match (silent_for, expected_every_minutes) {
+        (Some(mins), Some(every)) if every > 0 => mins > every * SILENT_AFTER_INTERVALS,
+        _ => false,
+    };
+    ConductorHealth {
+        last_seen: last_fired_at.map(|t| t.to_rfc3339()),
+        silent_for_minutes: silent_for,
+        expected_every_minutes,
+        silent,
+        last_verb: last_verb.map(str::to_string),
+        last_rc,
+    }
+}
+
 /// The whole yard status — the one payload the surface renders. Every
 /// field is a function of the inputs; nothing is fetched here, so the
 /// assembly is testable without a database. The HTTP handler reads the
@@ -799,6 +881,95 @@ mod tests {
             tags: vec![],
             simulated: false,
         }
+    }
+
+    fn at(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    /// 2026-09-04: the conductor died at 17:16 and the yard drew full
+    /// docks and healthy trains for two and a half hours. Silence has to
+    /// be a reading, not a gap.
+    #[test]
+    fn a_silent_conductor_reads_as_silent() {
+        let fired = at("2026-09-04T17:16:00Z");
+        // 20-minute heartbeat, 2h39m of silence: well past 2 intervals.
+        let h = conductor_health(
+            Some(fired),
+            Some("reconcile"),
+            Some(0),
+            Some(20),
+            Some(at("2026-09-04T19:55:00Z")),
+        );
+        assert!(h.silent, "2h39m against a 20m heartbeat must read silent");
+        assert_eq!(h.silent_for_minutes, Some(159));
+        assert_eq!(h.expected_every_minutes, Some(20));
+
+        // One missed tick is a slow pass or a restart, not an outage —
+        // crying wolf at every blip is how the real one gets ignored.
+        let h = conductor_health(
+            Some(fired),
+            Some("reconcile"),
+            Some(0),
+            Some(20),
+            Some(at("2026-09-04T17:41:00Z")),
+        );
+        assert!(!h.silent, "25m against a 20m heartbeat is one slow tick");
+    }
+
+    /// A conductor that RUNS but fails every pass looks identical to a
+    /// healthy one unless its exit code is on the surface. rc=3 was the
+    /// preflight refusing, repeating for hours in a log nobody read.
+    #[test]
+    fn a_failing_conductor_carries_its_exit_code() {
+        let h = conductor_health(
+            Some(at("2026-09-04T19:40:00Z")),
+            Some("reconcile"),
+            Some(3),
+            Some(20),
+            Some(at("2026-09-04T19:45:00Z")),
+        );
+        assert!(
+            !h.silent,
+            "it is running — the trouble is the rc, not silence"
+        );
+        assert_eq!(h.last_rc, Some(3));
+        assert_eq!(h.last_verb.as_deref(), Some("reconcile"));
+    }
+
+    /// "I cannot tell" must not be dressed up as health OR as alarm.
+    #[test]
+    fn no_firing_and_no_clock_assert_nothing() {
+        let none = conductor_health(None, None, None, Some(20), Some(at("2026-09-04T19:00:00Z")));
+        assert_eq!(none.last_seen, None);
+        assert_eq!(none.silent_for_minutes, None);
+        assert!(!none.silent, "never-seen is not a silence measurement");
+
+        let no_clock = conductor_health(
+            Some(at("2026-09-04T17:16:00Z")),
+            Some("reconcile"),
+            Some(0),
+            Some(20),
+            None,
+        );
+        assert_eq!(no_clock.silent_for_minutes, None);
+        assert!(!no_clock.silent);
+
+        // No declared heartbeat: nothing to measure against.
+        let no_rule = conductor_health(
+            Some(at("2026-09-04T10:00:00Z")),
+            Some("reconcile"),
+            Some(0),
+            None,
+            Some(at("2026-09-04T19:00:00Z")),
+        );
+        assert_eq!(no_rule.silent_for_minutes, Some(540));
+        assert!(
+            !no_rule.silent,
+            "9h of silence, but no declared interval to call it late"
+        );
     }
 
     fn step(slug: &str, title: &str, status: StepStatus, metadata: Value) -> Step {

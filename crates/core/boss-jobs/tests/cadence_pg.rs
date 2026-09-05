@@ -97,11 +97,24 @@ async fn seeded_rules_serve_the_thresholds_the_schema_declares() {
         // actually takes; both pins now assert 3. This one is the FOURTH
         // place the number lives — the gate found it after the sibling
         // was moved, exactly as this comment warned.
-        Some(3),
+        // 1 since 202609042110-a-lone-car-still-ships.sql: the threshold
+        // stopped being a batch SIZE and became a latency BOUND. At 3, a
+        // car whose neighbours had not arrived waited for one of two
+        // daily clock windows — on 2026-09-04 two green cars sat with
+        // the next window nine hours out — so the yard's constraint was
+        // quorum rather than readiness. Now: whatever is waiting, at
+        // most every 45 minutes.
+        //
+        // This pin caught the change, exactly as the comment above
+        // predicted: the migration was gated `--auto` (fixture + lints,
+        // tests SKIPPED), went green, and reddened the train's CI on the
+        // assembled tree instead. Cheap here, expensive there — the
+        // lesson is that a schema-only change still owns its pins.
+        Some(1),
         "boarding threshold drifted from the schema — this is the \
          2026-08-13 split-brain, and it made the operator's answer wrong"
     );
-    assert_eq!(depth.cooldown_minutes, Some(120));
+    assert_eq!(depth.cooldown_minutes, Some(45));
 }
 
 /// A calendar rule must be served WHOLE — cadence, anchor_date and

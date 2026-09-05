@@ -1094,6 +1094,36 @@ pub(crate) fn truthy(v: Option<&Value>) -> bool {
     }
 }
 
+/// How long a gate-run may stay active before it is presumed dead: the
+/// gate Job's own `activeDeadlineSeconds` (10800 = 3h) from
+/// `infra/gate-runner/gate-runner.yaml`. Past it Kubernetes has killed
+/// the Job. CLAUDE.md §9a — the manifest is the authority; if that
+/// deadline moves, move this. A CEILING, not an expectation (a normal
+/// gate finishes in ~15-90 min), so it can only settle runs truly gone.
+pub(crate) const GATE_DEADLINE_HOURS: i64 = 3;
+
+/// How long a gate-run has been active with no verdict, when that is
+/// long enough to call it dead — `None` means leave it alone.
+///
+/// Pure so the decision is testable without an API: a run is dead when
+/// it has NOT reported a verdict AND its `opened_at` predates the Job
+/// deadline. A run with no `opened_at` yields `None` — absence of a
+/// stamp is not evidence of death, and settling on a guess would put a
+/// verdict nobody observed into the audit log.
+pub(crate) fn dead_gate_run_hours(run: &Value, now: DateTime<Utc>) -> Option<i64> {
+    let verdict_step = find_step(run, "record-verdict", "Record the gate verdict");
+    if step_done(verdict_step) {
+        return None;
+    }
+    let opened = metadata_map(run)
+        .get("opened_at")
+        .and_then(Value::as_str)
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.with_timezone(&Utc))?;
+    let hours = (now - opened).num_hours();
+    (hours >= GATE_DEADLINE_HOURS).then_some(hours)
+}
+
 pub(crate) fn metadata_map(v: &Value) -> Map<String, Value> {
     match v.get("metadata") {
         Some(Value::Object(m)) => m.clone(),
@@ -2249,6 +2279,40 @@ pub(crate) fn ci_overdue(
             "CI has not answered in {hours}h (threshold {threshold_hours}h) — no verdict, not a red one"
         )
     })
+}
+
+/// Why a train that is READY to merge is not being merged.
+///
+/// THE SILENT DECLINE THIS CLOSES. On 2026-09-04 a `boss train reconcile`
+/// run by hand sat on a train with green CI and an OPEN PR and did
+/// nothing — the merge arm requires `auto_merge`, which reads
+/// `BOSS_TRAIN_AUTO_MERGE` from the environment, and a verb run by hand
+/// inherits no unit (the conductor's ConfigMap is what sets it; see
+/// §Doors). The else-branch was silence, so two reconciles reported a
+/// clean pass while achieving nothing they were run for, and the
+/// operator spent hours looking for a deeper fault that did not exist.
+/// A conductor that declines to do the one thing it was run for owes an
+/// answer, and the answer must name the reason: a verdict someone must
+/// go re-derive is not a verdict.
+///
+/// ONLY THE GENUINELY-DECLINED CASE. Not-green and already-merged/closed
+/// are the ordinary states of nearly every reconcile pass and are
+/// reported elsewhere (`verdict_drift`, `ci_overdue`, the `merged` step);
+/// naming them here would put a line on every train every ten minutes
+/// and the signal would be furniture inside a day. Green + OPEN +
+/// declined is the one state that looks like progress and is not.
+pub(crate) fn merge_declined_reason(
+    auto_merge: bool,
+    verdict: &str,
+    pr_state: Option<&str>,
+) -> Option<&'static str> {
+    if auto_merge || verdict != "green" || pr_state != Some("OPEN") {
+        return None;
+    }
+    Some(
+        "BOSS_TRAIN_AUTO_MERGE is not \"1\" (a verb run by hand inherits \
+         no unit environment; the conductor's ConfigMap sets it)",
+    )
 }
 
 /// The boarding hold, pure: a car released from that many red trains
@@ -3666,6 +3730,62 @@ impl Conductor {
         }
     }
 
+    /// Settle gate-runs whose runner died without reporting: complete
+    /// `record-verdict` as `lost`, the terminal the workflow already
+    /// provides for exactly this. NOT green and NOT failed — the checks
+    /// never finished, so the run says nothing about the branch, and a
+    /// verdict nobody observed would be a lie the audit log carries
+    /// forever. The decision itself is `dead_gate_run_hours`, pure and
+    /// tested; this is the adapter that acts on it.
+    async fn reap_dead_gate_runs(&self, now: DateTime<Utc>) -> Result<()> {
+        let runs = rows(
+            self.api(
+                Method::GET,
+                "/api/jobs?kind=gate-run&status=open&limit=100",
+                None,
+            )
+            .await?,
+        )?;
+        for r0 in runs {
+            let rid = job_id(&r0)?.to_string();
+            let run = self.get_job(&rid).await?;
+            let Some(hours) = dead_gate_run_hours(&run, now) else {
+                continue;
+            };
+            let branch = metadata_map(&run)
+                .get("branch")
+                .and_then(Value::as_str)
+                .unwrap_or("(no branch)")
+                .to_string();
+            log(format!(
+                "reconcile: gate-run {} ({branch}) active {hours}h with no verdict — \
+                 past the {GATE_DEADLINE_HOURS}h Job deadline, settling as lost",
+                id8(&rid)
+            ));
+            let verdict_step = find_step(&run, "record-verdict", "Record the gate verdict");
+            self.complete_step(
+                &run,
+                verdict_step,
+                &[
+                    ("verdict", Some("lost".to_string())),
+                    (
+                        "receipt",
+                        Some(format!(
+                            "NO VERDICT WAS PRODUCED. Active {hours}h with none recorded, past \
+                             the gate Job's {GATE_DEADLINE_HOURS}h activeDeadlineSeconds, so the \
+                             pod is gone and the checks never finished. Settled as LOST by the \
+                             conductor's reconcile: this run says nothing about {branch}, and an \
+                             infrastructure death is not a consist failure. Re-gate for a real \
+                             verdict."
+                        )),
+                    ),
+                ],
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn reconcile(&self, now: DateTime<Utc>) -> Result<()> {
         // Keep the clone fetched before the convergence check below asks git
         // "is the cluster's running commit a descendant of this train's
@@ -3688,6 +3808,26 @@ impl Conductor {
                 "reconcile: ensure_clone failed — ancestry-based convergence \
                  reads None this pass (converges nothing, retries): {e}"
             ));
+        }
+        // Bury the yard's dead before reading it. A gate pod that dies
+        // without recording a verdict leaves its packet at
+        // `record-verdict` forever: it holds one of the three gate slots,
+        // renders as a live gate, and nothing ever clears it. On
+        // 2026-09-04 two such ghosts sat there 17 hours with their
+        // branches long landed, and a third silently ate a car — the
+        // change was never gated and nobody noticed until a census.
+        //
+        // gate-runner.yaml already states the intent ("a runner that dies
+        // anyway leaves an overdue packet — the alarm the protocol
+        // already provides"); the alarm just had nobody listening. This
+        // is the listener, and it belongs in reconcile because reconcile
+        // IS the verb that makes the record match reality.
+        //
+        // Settling requires no cluster access, only a clock: past the
+        // gate Job's own activeDeadlineSeconds, Kubernetes has already
+        // killed the Job, so a packet still claiming to gate cannot be.
+        if let Err(e) = self.reap_dead_gate_runs(now).await {
+            log(format!("reconcile: gate-run reap failed (non-fatal): {e}"));
         }
         let trains = rows(
             self.api(
@@ -3807,10 +3947,8 @@ impl Conductor {
                 continue;
             }
 
-            if self.cfg.auto_merge
-                && verdict == "green"
-                && info.get("state").and_then(Value::as_str) == Some("OPEN")
-            {
+            let pr_state = info.get("state").and_then(Value::as_str);
+            if self.cfg.auto_merge && verdict == "green" && pr_state == Some("OPEN") {
                 log(format!(
                     "CI green — merging {pr_url} (train protocol 27ab7680)"
                 ));
@@ -3818,6 +3956,14 @@ impl Conductor {
                     self.forge.merge(&pr_url).await?;
                     info = self.forge.pr_info(&pr_url).await?;
                 }
+            } else if let Some(why) = merge_declined_reason(self.cfg.auto_merge, verdict, pr_state)
+            {
+                // A decline says so. Silence here cost 2026-09-04 hours —
+                // see `merge_declined_reason`. Not stamped-once like the
+                // overdue sentinel: green-and-unmerged is a train stopped
+                // one step from landing, and it should read as stopped on
+                // every pass until the switch is on or the operator merges.
+                log(format!("CI green on {pr_url} but NOT merging — {why}"));
             }
 
             let merged_step = find_step(&t, "merged", "Merged into main");
@@ -5364,6 +5510,55 @@ pub async fn run(phase: Phase, dry: bool, now: DateTime<Utc>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// 2026-09-04: two gate-runs whose pods were evicted sat at
+    /// `record-verdict` for 17 hours, each holding one of three gate
+    /// slots and rendering as a live gate, while their branches had long
+    /// since landed. A third died the same way and silently ate a car —
+    /// the change was never gated and nobody noticed until a census.
+    /// gate-runner.yaml already promised "a runner that dies anyway
+    /// leaves an overdue packet"; nothing was listening.
+    #[test]
+    fn a_gate_run_past_the_job_deadline_is_dead() {
+        let now = DateTime::parse_from_rfc3339("2026-09-04T13:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let run = |opened: &str, verdict_done: bool| {
+            serde_json::json!({
+                "id": "11111111-1111-1111-1111-111111111111",
+                "metadata": { "branch": "feat/x", "opened_at": opened },
+                "steps": [{
+                    "spec_slug": "record-verdict",
+                    "title": "Record the gate verdict",
+                    "status": if verdict_done { "completed" } else { "ready" },
+                    "metadata": {}
+                }]
+            })
+        };
+        // 17h with no verdict: dead, and it reports how long.
+        assert_eq!(
+            dead_gate_run_hours(&run("2026-09-03T20:00:00Z", false), now),
+            Some(17)
+        );
+        // Inside the deadline it is simply a gate that is running.
+        assert_eq!(
+            dead_gate_run_hours(&run("2026-09-04T11:30:00Z", false), now),
+            None
+        );
+        // A run that REPORTED is never ours to touch, however old.
+        assert_eq!(
+            dead_gate_run_hours(&run("2026-09-03T20:00:00Z", true), now),
+            None
+        );
+        // No stamp, no claim — settling on a guess would write a verdict
+        // nobody observed into the audit log.
+        let unstamped = serde_json::json!({
+            "id": "22222222-2222-2222-2222-222222222222",
+            "metadata": { "branch": "feat/y" },
+            "steps": [{"spec_slug":"record-verdict","title":"Record the gate verdict","status":"ready","metadata":{}}]
+        });
+        assert_eq!(dead_gate_run_hours(&unstamped, now), None);
+    }
+
     use super::*;
 
     // ---------------------------------------------------------------
@@ -5581,10 +5776,10 @@ mod tests {
         RetryPolicy, SweepGuard, arrival_already_filed, arrival_report, arrival_summary,
         auto_cancel_reason, boarded_head, branch_moved_line, car_hold_reason, ci_overdue,
         classify_transport, commits_match, convergence_verdict, deletable_branches, deploy_needed,
-        local_jobs_problem, overlay_metadata, parked_ready, playground_deploy_disabled,
-        releasable_cars, repo_path, resolve_train, retryable, retrying, short_cause,
-        skip_reason_branch_missing, skip_reason_conflict, stall_age_hours, sweep_guard, sweep_note,
-        sweep_settled, train_branch_to_delete, verdict_drift,
+        local_jobs_problem, merge_declined_reason, overlay_metadata, parked_ready,
+        playground_deploy_disabled, releasable_cars, repo_path, resolve_train, retryable, retrying,
+        short_cause, skip_reason_branch_missing, skip_reason_conflict, stall_age_hours,
+        sweep_guard, sweep_note, sweep_settled, train_branch_to_delete, verdict_drift,
     };
     use crate::delivery_policy::DeliveryPolicy;
     use anyhow::{Result, anyhow};
@@ -6711,6 +6906,45 @@ mod tests {
             {"spec_slug":"ci","title":"CI verdict","status":"pending","metadata":{}}
         ]});
         assert_eq!(ci_overdue(&t, ts("2026-08-16T00:00:00Z"), 2), None);
+    }
+
+    // -- the silent decline ------------------------------------------------
+
+    #[test]
+    fn a_mergeable_train_the_conductor_declines_to_merge_says_so() {
+        // The 2026-09-04 case: green CI, an OPEN PR, and a reconcile run
+        // by hand — so BOSS_TRAIN_AUTO_MERGE, which only the conductor's
+        // unit sets, was absent. The train was not merged and nothing was
+        // logged; two passes read as successful.
+        let why = merge_declined_reason(false, "green", Some("OPEN"))
+            .expect("green + OPEN + auto-merge off is a decline, not a no-op");
+        assert!(
+            why.contains("BOSS_TRAIN_AUTO_MERGE"),
+            "the reason names the switch that is off: {why}"
+        );
+        assert!(
+            why.contains("unit"),
+            "and why a hand-run verb does not have it: {why}"
+        );
+    }
+
+    #[test]
+    fn a_train_the_conductor_does_merge_is_not_a_decline() {
+        // The configured conductor merges; the merge itself is the line.
+        assert_eq!(merge_declined_reason(true, "green", Some("OPEN")), None);
+    }
+
+    #[test]
+    fn ordinary_states_are_not_declines() {
+        // Reconcile runs every ten minutes over every open train. A train
+        // whose CI has not answered, or that is red, or that already
+        // landed, is not being declined anything — reporting those here
+        // would be a line per train per pass.
+        assert_eq!(merge_declined_reason(false, "pending", Some("OPEN")), None);
+        assert_eq!(merge_declined_reason(false, "failing", Some("OPEN")), None);
+        assert_eq!(merge_declined_reason(false, "green", Some("MERGED")), None);
+        assert_eq!(merge_declined_reason(false, "green", Some("CLOSED")), None);
+        assert_eq!(merge_declined_reason(false, "green", None), None);
     }
 
     // -- the two-strike hold -----------------------------------------------

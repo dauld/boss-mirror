@@ -137,6 +137,22 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
         Some(repo) => repo.active_rules().await.unwrap_or_default(),
         None => Vec::new(),
     };
+    // The conductor's liveness, from the record IT writes. The reconcile
+    // rule is the heartbeat: it is the pass that keeps every train's
+    // truth current, so its last firing is what "have we heard from the
+    // conductor" means. Read straight from the repository this process
+    // holds, like the rules and the policy above — and degraded to
+    // "unknown" on any failure, never to "fine".
+    const HEARTBEAT_RULE: &str = "train-reconcile";
+    let last_firing = match state.cadence.as_ref() {
+        Some(repo) => repo.last_firing(HEARTBEAT_RULE).await.ok().flatten(),
+        None => None,
+    };
+    let heartbeat_minutes = rules
+        .iter()
+        .find(|r| r.name == HEARTBEAT_RULE)
+        .and_then(|r| r.every_minutes)
+        .map(i64::from);
     let policy = match state.delivery.as_ref() {
         Some(repo) => repo.active_policy("train-conductor").await.ok().flatten(),
         None => None,
@@ -173,7 +189,14 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
         &car_branches,
         &settled_car_branches,
     );
-    Json(with_now(status, now)).into_response()
+    let health = yard::conductor_health(
+        last_firing.as_ref().map(|f| f.fired_at),
+        Some(HEARTBEAT_RULE),
+        last_firing.as_ref().and_then(|f| f.rc),
+        heartbeat_minutes,
+        Some(now),
+    );
+    Json(with_conductor(with_now(status, now), health)).into_response()
 }
 
 /// The dock's parked cars: the loading-dock station queue when a station
@@ -222,6 +245,19 @@ async fn dock_cars<R: JobsRepository + 'static, B: EventBus + 'static>(
 /// The status with the clock instant attached — the same `now` field
 /// `queue-age` returns, so a client renders elapsed times against the
 /// server's clock rather than its own.
+/// The conductor's liveness, attached to the payload. Injected here
+/// rather than threaded through `build_status` so it composes with the
+/// read-model instead of widening it — the same shape `with_now` uses.
+fn with_conductor(mut v: serde_json::Value, health: yard::ConductorHealth) -> serde_json::Value {
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert(
+            "conductor".to_string(),
+            serde_json::to_value(health).unwrap_or_else(|_| serde_json::json!({})),
+        );
+    }
+    v
+}
+
 fn with_now(status: yard::YardStatus, now: chrono::DateTime<chrono::Utc>) -> serde_json::Value {
     let mut v = serde_json::to_value(status).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = v.as_object_mut() {

@@ -197,6 +197,25 @@ FROM debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf8
 # compare) but ancestry did not, so every superseded train wedged at
 # `converged`. Named by the conductor's own log once ensure_clone
 # stopped swallowing the error.
+#
+# python3: the SAME LOSS, found the same way one cutover later. The
+# conductor runs the consist check — the 34 cheap lints, against the
+# assembled tree — before it opens a PR, and
+# `a-kind-bundle-does-not-tighten.sh` parses the platform manifest with
+# a small inline python3 (deliberately hand-rolled rather than tomllib,
+# which is 3.11+). On a box without python3 that lint cannot RUN, and
+# the conductor reported the result as "1 of 34 checks disagree with
+# the assembled tree" — refusing to board, striking no car, and
+# blocking every train behind an infrastructure gap dressed as a
+# consist failure (CLAUDE.md: an infrastructure refusal is not a
+# consist failure).
+#
+# It hid until 2026-09-04 21:15 because every earlier board that day
+# ran from the dev pod, which has python3; that firing was the first
+# time the CONDUCTOR boarded from its own container since the cutover.
+# The lesson both entries share: a component moved into this image
+# loses every host tool it never declared, and it discovers which ones
+# only when it next needs them.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \
@@ -207,6 +226,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     jq \
     git \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # BOSS runs as a non-root user. UID 1500 matches the systemd-deploy

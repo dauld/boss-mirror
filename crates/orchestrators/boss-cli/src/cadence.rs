@@ -2112,8 +2112,22 @@ mod db_tests {
         assert_eq!(
             depth.basis,
             Basis::QueueDepth {
-                min_depth: 3,
-                cooldown_minutes: 120,
+                // 1 / 45 since 202609042110-a-lone-car-still-ships.sql.
+                // The threshold stopped being a batch SIZE and became a
+                // latency BOUND: at 3, a car whose neighbours had not
+                // arrived waited for one of two daily clock windows, and
+                // on 2026-09-04 two green cars sat with the next window
+                // nine hours out. Boarding is now "whatever is waiting,
+                // at most every 45 minutes" — batching still happens
+                // opportunistically, it is simply no longer required.
+                //
+                // The cooldown is now the real control, and it is safe
+                // to lean on: since
+                // fix/a-failed-board-does-not-hold-the-window a firing
+                // that FAILED no longer consumes its window, so a bad
+                // board costs one tick instead of 45 minutes.
+                min_depth: 1,
+                cooldown_minutes: 45,
             }
         );
     }
