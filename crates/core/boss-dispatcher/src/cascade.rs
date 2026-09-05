@@ -96,6 +96,10 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // jobs.job.updated (and wakes metadata-gated steps in the
         // same write, aa9980c8).
         ("jobs.clear_waiting", vec!["jobs.job.updated"]),
+        (
+            "maintenance.sweep.inspect",
+            vec!["jobs.step.completed", "jobs.job.updated"],
+        ),
         ("jobs.subjob_resolve", vec!["jobs.step.completed"]),
         // Completes the open branch on the Job a declared edge names
         // (a merged car answering its feedback packet). The completion
