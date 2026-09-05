@@ -87,7 +87,7 @@ fi
 # stops the roll before the build: main has moved, and a human said not
 # yet. Loud on every tick, exit 0 — a hold is a decision, not a failure.
 . "$REPO/infra/forge/cluster-deploy-lib.sh"
-if reason=$(converge_held "${BOSS_CONVERGE_HOLD:-$HOME/.boss-converge-hold}"); then
+if reason=$(converge_held "${BOSS_CONVERGE_HOLD:-/var/tmp/boss-converge-hold}"); then
     echo "cluster-deploy-runner: converge HELD — $reason — main at $HEAD not built or rolled (release-converge lifts it)" >&2
     exit 0
 fi

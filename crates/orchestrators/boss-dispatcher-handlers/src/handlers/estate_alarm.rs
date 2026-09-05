@@ -287,6 +287,45 @@ fn stale_series(rows: &[Value], per_host: bool, scope: &str, now: DateTime<Utc>)
     out
 }
 
+/// How long a finding a HUMAN settled as `stale` or `duplicate` stays
+/// settled. The bastion's retired boss-train.service raised the same
+/// alarm at 05:07 and again at 16:0x on 2026-09-05, both closed as
+/// "retired by design" — a condition the estate registry already
+/// states, re-raised every three comparisons because nothing converges
+/// the bastion yet. An alarm the operator has just answered is noise
+/// until the answer can change; a week is that horizon here. A packet
+/// closed as BUILT (the condition was fixed) does not suppress: a
+/// recurrence after a fix is a new fact.
+const SETTLED_DAYS: i64 = 7;
+
+/// `estate_finding` keys whose packet a human closed as `stale` or
+/// `duplicate` within [`SETTLED_DAYS`] — pure over the closed listing.
+fn settled_recently(closed_jobs: &[Value], now: DateTime<Utc>) -> BTreeSet<String> {
+    closed_jobs
+        .iter()
+        .filter_map(|j| {
+            let key = j
+                .get("metadata")?
+                .get("estate_finding")?
+                .as_str()?
+                .to_string();
+            let closed_on = j.get("closed_on")?.as_str()?;
+            let closed = chrono::NaiveDate::parse_from_str(closed_on, "%Y-%m-%d").ok()?;
+            if (now.date_naive() - closed).num_days() > SETTLED_DAYS {
+                return None;
+            }
+            let settled = j
+                .get("steps")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|s| s.get("metadata")?.get("disposition")?.as_str())
+                .any(|d| d == "stale" || d == "duplicate");
+            settled.then_some(key)
+        })
+        .collect()
+}
+
 /// `estate_finding` keys already carried by an open packet — the dedup
 /// set, pure over the jobs listing.
 fn already_raised(open_jobs: &[Value]) -> BTreeSet<String> {
@@ -518,10 +557,29 @@ impl Handler for EstateAlarm {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let raised = already_raised(&open_rows);
+        let mut raised = already_raised(&open_rows);
+        // And the findings a human settled recently: closed as stale or
+        // duplicate within SETTLED_DAYS, read from the closed listing so
+        // an answered alarm is not asked again until the answer can change.
+        let closed = get_json(
+            &self.client,
+            &format!(
+                "{}/api/jobs?kind=backlog-item&status=closed&limit=200",
+                self.base()
+            ),
+            &ctx.rule_name,
+        )
+        .await?;
+        let closed_rows: Vec<Value> = closed
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        raised.extend(settled_recently(&closed_rows, now));
 
         for (key, body) in to_raise {
             if raised.contains(&key) {
+                tracing::info!(finding = %key, "estate.alarm: already raised or recently settled — not re-raising");
                 continue;
             }
             post_json(
@@ -857,5 +915,49 @@ mod tests {
         let a = json!({"host": "boss-gcp", "scope": "host"});
         let b = json!({"host": "boss-gcp", "scope": "host-units"});
         assert_eq!(unobserved_key(&a), unobserved_key(&b));
+    }
+
+    fn closed_alarm(key: &str, closed_on: &str, disposition: &str) -> Value {
+        json!({
+            "id": "x", "kind": "backlog-item", "status": "closed", "closed_on": closed_on,
+            "metadata": {"estate_finding": key},
+            "steps": [{"title": "Measure the claim, choose a route", "status": "completed", "metadata": {"disposition": disposition}}]
+        })
+    }
+
+    #[test]
+    fn a_finding_a_human_settled_this_week_is_not_re_raised() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 5, 17, 0, 0).unwrap();
+        let closed = vec![
+            closed_alarm(
+                "unit_unhealthy:boss-gcp/boss-train.service",
+                "2026-09-05",
+                "stale",
+            ),
+            closed_alarm(
+                "unit_unhealthy:boss-gcp/other.service",
+                "2026-09-04",
+                "duplicate",
+            ),
+            closed_alarm("unobserved:forge", "2026-08-20", "stale"),
+            closed_alarm("not_ready:cp-2", "2026-09-05", "build"),
+        ];
+        let settled = settled_recently(&closed, now);
+        assert!(
+            settled.contains("unit_unhealthy:boss-gcp/boss-train.service"),
+            "closed stale today"
+        );
+        assert!(
+            settled.contains("unit_unhealthy:boss-gcp/other.service"),
+            "closed duplicate yesterday"
+        );
+        assert!(
+            !settled.contains("unobserved:forge"),
+            "settled sixteen days ago — the answer may have changed"
+        );
+        assert!(
+            !settled.contains("not_ready:cp-2"),
+            "closed as BUILT — a recurrence after a fix is a new fact"
+        );
     }
 }

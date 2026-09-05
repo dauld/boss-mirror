@@ -599,6 +599,7 @@ PREFLIGHT_LINTS=(
     "the-converge-rolls-back-to-a-named-build|infra/lint/the-converge-rolls-back-to-a-named-build.sh"
     "the-executor-never-waits-on-its-visibility|infra/lint/the-executor-never-waits-on-its-visibility.sh"
     "the-cluster-knows-it-is-working|infra/lint/the-cluster-knows-it-is-working.sh"
+    "alerts-are-packets|infra/lint/alerts-are-packets.sh"
     "the-controls-are-bounded-verbs|infra/lint/the-controls-are-bounded-verbs.sh"
     "seed-bypass-smell|infra/lint/seed-bypass-smell.sh"
     "no-todo-citation|infra/lint/no-todo-citation.sh"

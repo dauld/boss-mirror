@@ -7,7 +7,12 @@
 # not a failure). The ops verbs `hold-converge` / `release-converge`
 # call this; the reason rides on the packet and in the file.
 set -uo pipefail
-HOLD_FILE="${BOSS_CONVERGE_HOLD:-$HOME/.boss-converge-hold}"
+# A FIXED path, not $HOME: the ops runner executes verbs as root with no
+# HOME in its environment (2026-09-05: "HOME: unbound variable" on the
+# first release-converge), and the converge reads the hold as david —
+# two homes would be two files. /var/tmp is writable by both and
+# survives a reboot.
+HOLD_FILE="${BOSS_CONVERGE_HOLD:-/var/tmp/boss-converge-hold}"
 case "${1:-}" in
     hold)
         reason="${2:?hold needs a reason}"

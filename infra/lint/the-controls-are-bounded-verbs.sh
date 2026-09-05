@@ -31,6 +31,14 @@ print("verbs: rollback-to, hold-converge, release-converge are bounded and autho
 PY
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 export BOSS_CONVERGE_HOLD="$tmp/hold"
+# Under the ops runner a verb runs as root with NO HOME — the scripts
+# must not need one (2026-09-05: "HOME: unbound variable").
+env -i PATH="$PATH" BOSS_CONVERGE_HOLD="$tmp/hold" bash "$repo/infra/forge/converge-hold.sh" hold no-home-here >/dev/null || fail "converge-hold.sh needs HOME (the ops runner has none)"
+env -i PATH="$PATH" BOSS_CONVERGE_HOLD="$tmp/hold" bash "$repo/infra/forge/converge-hold.sh" release >/dev/null || fail "release needs HOME"
+env -i PATH="$PATH" bash -n "$repo/infra/forge/rollback-to.sh" || fail "rollback-to.sh does not parse"
+# Code lines only — a comment may name $HOME to say why it is not used.
+grep -vE '^\s*#' "$repo/infra/forge/rollback-to.sh" | grep -qE '\$HOME' && fail "rollback-to.sh still reads \$HOME"
+grep -vE '^\s*#' "$repo/infra/forge/converge-hold.sh" | grep -qE '\$HOME' && fail "converge-hold.sh still reads \$HOME"
 bash "$repo/infra/forge/converge-hold.sh" hold learning-the-new-runner >/dev/null || fail "hold failed"
 [[ "$(<"$tmp/hold")" == "learning-the-new-runner" ]] || fail "the hold file does not carry the reason"
 # shellcheck source=/dev/null
@@ -40,5 +48,5 @@ reason=$(converge_held "$tmp/hold") || fail "the runner's hold check did not see
 bash "$repo/infra/forge/converge-hold.sh" release >/dev/null || fail "release failed"
 converge_held "$tmp/hold" >/dev/null && fail "a released hold still holds"
 bash "$repo/infra/forge/converge-hold.sh" hold 2>/dev/null && fail "a hold with no reason was accepted"
-echo "the-controls-are-bounded-verbs: self-test ok — three bounded, authorized ops verbs; the hold round-trips through the file the runner reads; a hold needs a reason; a rollback needs a sha"
+echo "the-controls-are-bounded-verbs: self-test ok — three bounded, authorized ops verbs; the hold round-trips through the file the runner reads, with no HOME in the environment; a hold needs a reason; a rollback needs a sha"
 exit 0

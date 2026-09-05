@@ -10,7 +10,9 @@
 set -uo pipefail
 . "$(dirname "$0")/cluster-deploy-lib.sh"
 sha="${1:?rollback-to needs the sha of the build to serve}"
-KUBECONFIG_PATH="${BOSS_FORGE_KUBECONFIG:-$HOME/kc.yaml}"
+# The converge's kubeconfig by its fixed path: this runs as root with no
+# HOME under the ops runner, and as david by hand.
+KUBECONFIG_PATH="${BOSS_FORGE_KUBECONFIG:-/home/david/kc.yaml}"
 REGISTRY="${REGISTRY:-10.20.0.15:3000/david/boss}"
 K="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
 before=$($K get deploy boss -n boss -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null)

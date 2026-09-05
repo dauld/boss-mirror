@@ -1097,6 +1097,50 @@ pub(crate) fn dead_gate_run_hours(run: &Value, now: DateTime<Utc>) -> Option<i64
     (hours >= GATE_DEADLINE_HOURS).then_some(hours)
 }
 
+/// Should this closed gate-run's verdict be buried if its sha landed?
+/// Returns the (sha, verdict) to check when the run is closed with a
+/// `failed` or `lost` verdict, names a sha, is not already superseded,
+/// and was opened within the yard's approach window — the same two days
+/// after which the lens calls a closed gate archaeology, so nothing
+/// older is touched. Everything else is None: a green needs no burial,
+/// an open run is live activity, and an annotated run is settled.
+pub(crate) const APPROACH_FRESH_DAYS: i64 = 2;
+
+pub(crate) fn verdict_to_bury(run: &Value, now: DateTime<Utc>) -> Option<(String, String)> {
+    if run.get("status").and_then(Value::as_str) != Some("closed") {
+        return None;
+    }
+    let md = metadata_map(run);
+    if md
+        .get("superseded")
+        .is_some_and(|v| !v.is_null() && v != &Value::Bool(false))
+    {
+        return None;
+    }
+    let verdict_step = find_step(run, "record-verdict", "Record the gate verdict");
+    let verdict = verdict_step
+        .and_then(|s| s.get("metadata"))
+        .and_then(|m| m.get("verdict"))
+        .and_then(Value::as_str)
+        .or_else(|| md.get("outcome").and_then(Value::as_str))?;
+    if verdict != "failed" && verdict != "lost" {
+        return None;
+    }
+    let sha = md.get("sha").and_then(Value::as_str)?.to_string();
+    if sha.is_empty() {
+        return None;
+    }
+    let opened = md
+        .get("opened_at")
+        .and_then(Value::as_str)
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.with_timezone(&Utc))?;
+    if (now - opened).num_days() > APPROACH_FRESH_DAYS {
+        return None;
+    }
+    Some((sha, verdict.to_string()))
+}
+
 pub(crate) fn metadata_map(v: &Value) -> Map<String, Value> {
     match v.get("metadata") {
         Some(Value::Object(m)) => m.clone(),
@@ -3807,6 +3851,81 @@ impl Conductor {
         Ok(())
     }
 
+    /// A change that landed buries its own verdicts. A closed gate-run
+    /// whose verdict was `failed` or `lost` stays a red row on the yard's
+    /// approach until a car names its branch, a later green answers it,
+    /// or an operator annotates it `superseded` — and a change that went
+    /// to main through the emergency lane has none of those, so its dead
+    /// gate sat red on the yard for a day (fix/lean-ci-builds, lost
+    /// 2026-09-04, buried by hand 2026-09-05). This is the machine's
+    /// version of that annotation: if the run's sha is already an
+    /// ancestor of main, the question it raised is answered by main
+    /// itself. `verdict_to_bury` decides, pure and tested; this is the
+    /// adapter that asks git and writes the annotation the yard reads.
+    async fn bury_landed_verdicts(&self, now: DateTime<Utc>) -> Result<()> {
+        let runs = rows(
+            self.api(
+                Method::GET,
+                "/api/jobs?kind=gate-run&status=closed&limit=100",
+                None,
+            )
+            .await?,
+        )?;
+        let clone = self.cfg.clone.clone();
+        for run in runs {
+            let Some((sha, verdict)) = verdict_to_bury(&run, now) else {
+                continue;
+            };
+            let landed = sh_unchecked(&[
+                "git",
+                "-C",
+                &clone,
+                "merge-base",
+                "--is-ancestor",
+                &sha,
+                "origin/main",
+            ])?
+            .status
+            .success();
+            if !landed {
+                continue;
+            }
+            let main_sha = stdout_str(&sh_unchecked(&[
+                "git",
+                "-C",
+                &clone,
+                "rev-parse",
+                "--short",
+                "origin/main",
+            ])?)
+            .trim()
+            .to_string();
+            let rid = job_id(&run)?.to_string();
+            let branch = metadata_map(&run)
+                .get("branch")
+                .and_then(Value::as_str)
+                .unwrap_or("(no branch)")
+                .to_string();
+            log(format!(
+                "reconcile: gate-run {} ({branch}) went {verdict}, but its sha {} is an ancestor of main ({main_sha}) — the change landed; burying the verdict",
+                id8(&rid),
+                &sha[..sha.len().min(7)]
+            ));
+            self.merge_job_metadata(
+                &rid,
+                vec![(
+                    "superseded",
+                    json!(format!(
+                        "landed on main: {} is an ancestor of {main_sha} — the change went in without this gate (a re-gate or the emergency lane); buried by the conductor's reconcile",
+                        &sha[..sha.len().min(7)]
+                    )),
+                )],
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn reconcile(&self, now: DateTime<Utc>) -> Result<()> {
         // Keep the clone fetched before the convergence check below asks git
         // "is the cluster's running commit a descendant of this train's
@@ -3849,6 +3968,11 @@ impl Conductor {
         // killed the Job, so a packet still claiming to gate cannot be.
         if let Err(e) = self.reap_dead_gate_runs(now).await {
             log(format!("reconcile: gate-run reap failed (non-fatal): {e}"));
+        }
+        if let Err(e) = self.bury_landed_verdicts(now).await {
+            log(format!(
+                "reconcile: burying landed verdicts failed this pass (retries next): {e}"
+            ));
         }
         let trains = rows(
             self.api(
@@ -8659,5 +8783,89 @@ mod track_tests {
         // The caller lists status=open only; an arrived or cancelled
         // train is closed and never reaches this list.
         assert_eq!(track_occupied_by(&[]), None);
+    }
+}
+
+#[cfg(test)]
+mod burial_tests {
+    use super::verdict_to_bury;
+    use chrono::{TimeZone, Utc};
+    use serde_json::json;
+
+    fn run(
+        status: &str,
+        verdict: &str,
+        opened: &str,
+        extra: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut md = json!({"branch": "fix/lean-ci-builds", "sha": "6c0e31a34a7659aebd63c07218cfddc1e3542fb9", "opened_at": opened});
+        if let Some(o) = extra.as_object() {
+            for (k, v) in o {
+                md[k] = v.clone();
+            }
+        }
+        json!({
+            "id": "335d5f6d-0000-0000-0000-000000000000", "kind": "gate-run", "status": status, "metadata": md,
+            "steps": [{"title": "Record the gate verdict", "spec_slug": "record-verdict", "status": "completed", "metadata": {"verdict": verdict}}]
+        })
+    }
+
+    #[test]
+    fn a_fresh_lost_or_failed_verdict_with_a_sha_is_a_candidate() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 5, 17, 0, 0).unwrap();
+        for v in ["lost", "failed"] {
+            let r = run("closed", v, "2026-09-04T00:20:43Z", json!({}));
+            assert_eq!(
+                verdict_to_bury(&r, now),
+                Some((
+                    "6c0e31a34a7659aebd63c07218cfddc1e3542fb9".to_string(),
+                    v.to_string()
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn a_green_an_open_run_an_annotated_run_and_archaeology_are_left_alone() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 5, 17, 0, 0).unwrap();
+        assert_eq!(
+            verdict_to_bury(
+                &run("closed", "green", "2026-09-04T00:20:43Z", json!({})),
+                now
+            ),
+            None
+        );
+        assert_eq!(
+            verdict_to_bury(&run("open", "lost", "2026-09-04T00:20:43Z", json!({})), now),
+            None
+        );
+        assert_eq!(
+            verdict_to_bury(
+                &run(
+                    "closed",
+                    "lost",
+                    "2026-09-04T00:20:43Z",
+                    json!({"superseded": "by hand"})
+                ),
+                now
+            ),
+            None
+        );
+        assert_eq!(
+            verdict_to_bury(
+                &run("closed", "lost", "2026-09-01T00:20:43Z", json!({})),
+                now
+            ),
+            None,
+            "older than the approach window"
+        );
+        assert_eq!(
+            verdict_to_bury(
+                &run("closed", "lost", "2026-09-04T00:20:43Z", json!({"sha": ""})),
+                now
+            ),
+            None,
+            "no sha, nothing to ask git"
+        );
     }
 }
