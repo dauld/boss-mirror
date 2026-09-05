@@ -12,11 +12,15 @@
 # contract intact. Otherwise spawn today's Job.
 #
 # The visibility contract, stated once: the timer is the EXECUTOR,
-# the Job is the VISIBILITY. Success (ExecStartPost → boss-step.sh)
-# completes `run` and the outcome marker closes the Job; failure
-# completes nothing and the Job stays OPEN — on the fleet, the
-# canvas, and the stage numbers — until a successful run or a human
-# closes it.
+# the Job is the VISIBILITY. ExecStopPost → boss-step.sh records the
+# verdict from systemd's $SERVICE_RESULT: success completes `run` as
+# `ok` and the packet closes "Maintenance completed"; a run that died
+# completes it with how (exit-code, timeout, signal) and the packet
+# closes "Maintenance failed". A Job still OPEN at `run` is therefore a
+# run in progress or a host that rebooted mid-run — which is what the
+# recovery above is for. (Until 2026-09-05 the completion sat on
+# ExecStartPost, which systemd skips on failure, so a failed run left
+# its packet open looking exactly like one in progress.)
 #
 # Deliberately NOT the dispatcher's schedule runner: that fires on
 # SIM-day boundaries, and at warp a daily rule fires every couple of

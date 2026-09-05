@@ -41,4 +41,4 @@ TimeoutStartSec=30min
 # sibling is not a thing systemd does.
 ExecStartPre=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /home/david/boss/infra/boss-maintenance-wrap.sh maintenance-disk-floor-sweep "Forge disk floor sweep"
 ExecStart=/home/david/boss/infra/forge/disk-floor-sweep.sh
-ExecStartPost=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /home/david/boss/infra/boss-step.sh maintenance-disk-floor-sweep run result=ok
+ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /home/david/boss/infra/boss-step.sh maintenance-disk-floor-sweep run

@@ -1287,10 +1287,26 @@ fn maintenance_spec(kind: &str, label: &str, description: &str) -> WorkflowSpec 
         StepSpec {
             title: "completed".into(),
             kind: "outcome".into(),
-            ready_when: "steps.run.done".into(),
+            ready_when: "steps.run.done AND steps.run.metadata.result = \"ok\"".into(),
             title_template: "Maintenance completed".into(),
+            metadata_defaults: serde_json::json!({ "outcome_kind": "completed" }),
             terminal: Some(Terminal {
                 outcome: "completed".into(),
+            }),
+            ..Default::default()
+        },
+        // A run that died records how (boss-step.sh from ExecStopPost:
+        // the service result and exit status) and lands here, instead
+        // of sitting open looking like a run in progress until a later
+        // run closed it "ok" (2026-09-05, twice in one afternoon).
+        StepSpec {
+            title: "failed".into(),
+            kind: "outcome".into(),
+            ready_when: "steps.run.done AND steps.run.metadata.result != \"ok\"".into(),
+            title_template: "Maintenance failed".into(),
+            metadata_defaults: serde_json::json!({ "outcome_kind": "aborted" }),
+            terminal: Some(Terminal {
+                outcome: "failed".into(),
             }),
             ..Default::default()
         },

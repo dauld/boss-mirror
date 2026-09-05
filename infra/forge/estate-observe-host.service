@@ -31,4 +31,4 @@ Environment=JOBS_API=http://10.20.0.34:7900
 # outranks any drop-in.
 ExecStartPre=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /home/david/boss/infra/boss-maintenance-wrap.sh maintenance-estate-observe-host "estate host observation (forge)"
 ExecStart=/home/david/boss/infra/estate/observe-host.sh
-ExecStartPost=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /home/david/boss/infra/boss-step.sh maintenance-estate-observe-host run result=ok
+ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /home/david/boss/infra/boss-step.sh maintenance-estate-observe-host run

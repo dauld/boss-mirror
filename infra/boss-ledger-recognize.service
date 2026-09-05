@@ -14,7 +14,7 @@ Environment=RUST_LOG=info
 Environment=BOSS_LEDGER_RULESET=2
 ExecStartPre=/opt/boss/infra/boss-maintenance-wrap.sh maintenance-ledger-recognize "Revenue-recognition run"
 ExecStart=/usr/local/bin/boss-ledger-recognize --config /etc/boss-ledger-api.toml
-ExecStartPost=/opt/boss/infra/boss-step.sh maintenance-ledger-recognize run result=ok
+ExecStopPost=-/opt/boss/infra/boss-step.sh maintenance-ledger-recognize run
 # Runs as root to match boss-ledger-api.service + the
 # boss-messages-events-purge / boss-audit-integrity-check
 # timer pattern. The recognize binary authenticates to

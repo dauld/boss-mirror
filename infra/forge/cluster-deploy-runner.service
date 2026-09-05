@@ -10,4 +10,4 @@ TimeoutStartSec=90min
 # this checkout, which is where the installed units already point.
 ExecStartPre=/home/david/boss/infra/boss-maintenance-wrap.sh maintenance-cluster-converge "Cluster converge on forge main"
 ExecStart=/home/david/boss/infra/forge/cluster-deploy-runner.sh
-ExecStartPost=/home/david/boss/infra/boss-step.sh maintenance-cluster-converge run result=ok
+ExecStopPost=-/home/david/boss/infra/boss-step.sh maintenance-cluster-converge run

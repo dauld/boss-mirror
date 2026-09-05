@@ -308,8 +308,8 @@ echo "cluster-deploy-runner: cluster on $REGISTRY:$HEAD"
 # a drift is a finding about it, not a reason to roll it back.
 #
 # A failure — drift (exit 1) or cannot-verify (exit 2, which is
-# 'unknown', not 'clean') — fails this unit, so ExecStartPost never
-# closes the converge packet and it stays open on the fleet view
+# 'unknown', not 'clean') — fails this unit, so ExecStopPost closes
+# the converge packet "Maintenance failed" with the exit status
 # (timers-leave-a-packet): the alarm channel that already exists,
 # carrying the check's own report in the journal. It does not retry on
 # its own; the next converge — the next main move — re-applies and

@@ -16,7 +16,7 @@ Environment=RUST_LOG=info
 # only — a failed run leaves the Job open and loud.
 ExecStartPre=/opt/boss/infra/boss-maintenance-wrap.sh maintenance-audit-integrity "Audit-log integrity check"
 ExecStart=/usr/local/bin/boss-audit-integrity-check --config /etc/boss-audit-integrity-check.toml
-ExecStartPost=/opt/boss/infra/boss-step.sh maintenance-audit-integrity run result=ok
+ExecStopPost=-/opt/boss/infra/boss-step.sh maintenance-audit-integrity run
 # Runs as root to match the boss-messages-events-purge timer
 # pattern. The scan itself is read-only and authenticates to
 # Postgres via the `boss` role/password in postgres_url, not
