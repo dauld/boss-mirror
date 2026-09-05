@@ -1044,15 +1044,9 @@ pub(crate) fn rows(resp: Option<Value>) -> Result<Vec<Value>> {
 }
 
 pub(crate) fn find_step<'a>(job: &'a Value, slug: &str, title: &str) -> Option<&'a Value> {
-    let steps = job.get("steps").and_then(Value::as_array)?;
-    steps
-        .iter()
-        .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some(slug))
-        .or_else(|| {
-            steps
-                .iter()
-                .find(|s| s.get("title").and_then(Value::as_str) == Some(title))
-        })
+    // One lookup, defined in core beside the car builders: the parkers
+    // read the same review step this file boards (CLAUDE.md 9a).
+    boss_jobs::car::find_step(job, slug, title)
 }
 
 pub(crate) fn step_done(step: Option<&Value>) -> bool {
@@ -1465,19 +1459,18 @@ pub(crate) fn cancellable_run_ids(runs: &[Value], pr_index: &str, head_sha: &str
 /// the clone, and a car whose branch was never pushed still occupies
 /// the dock from the author's point of view.)
 pub(crate) fn parked_ready(job: &Value) -> bool {
+    // "Parked" — named branch, no train stamp, review still waiting — is
+    // core's predicate (`car::is_parked`), shared with `boss park` and
+    // the auto-park handler so that what they refresh on a re-gate is
+    // exactly what this counts at the dock. Boarding's own refinements
+    // stay here: a `train/` branch is a consist, not a car, and a held
+    // car is parked but must not ride.
     let md = job.get("metadata").cloned().unwrap_or(Value::Null);
     let branch = md.get("branch").and_then(Value::as_str).unwrap_or_default();
-    if branch.is_empty() || truthy(md.get("train")) || branch.starts_with("train/") {
+    if branch.starts_with("train/") || !boss_jobs::car::is_parked(job) {
         return false;
     }
     let review = find_step(job, "review", "Open for review");
-    let review_status = review
-        .and_then(|s| s.get("status"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if !(review_status == "ready" || review_status == "active") {
-        return false;
-    }
     // A HELD car does not board. `metadata.hold` on the review step is
     // set by whoever parked it, and says "this is gated green and still
     // must not ride yet" - a car whose branch is correct but whose

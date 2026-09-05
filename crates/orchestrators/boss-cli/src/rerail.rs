@@ -88,23 +88,27 @@ async fn repoint(
     http: &reqwest::Client,
     car_id: &str,
     new_branch: &str,
-    receipt_raw: &str,
+    receipt: &boss_jobs::car::Receipt,
     old_branch: &str,
 ) -> Result<()> {
+    // The regate write itself — receipt verbatim, skip cleared — is
+    // core's builder, shared with `boss park` and the auto-park handler
+    // (a re-gate of a still-parked car refreshes it the same way); the
+    // repoint is what rerail adds, because here the branch moved too.
+    let mut patch = boss_jobs::car::regate_patch(
+        receipt,
+        &format!(
+            "rerailed from {old_branch} by boss rerail: new branch cut from \
+             origin/main, re-gated, receipt machine-copied to regate_receipt \
+             (the frozen gate step stays as the original head's record)"
+        ),
+    );
+    patch["branch"] = json!(new_branch);
     gate::api(
         http,
         reqwest::Method::PATCH,
         &format!("/api/jobs/{car_id}/metadata"),
-        Some(json!({
-            "branch": new_branch,
-            "regate_receipt": receipt_raw,
-            "skip_reason": null,
-            "rerail_note": format!(
-                "rerailed from {old_branch} by boss rerail: new branch cut from \
-                 origin/main, re-gated, receipt machine-copied to regate_receipt \
-                 (the frozen gate step stays as the original head's record)"
-            ),
-        })),
+        Some(patch),
     )
     .await?;
     Ok(())
@@ -138,7 +142,7 @@ async fn finish(
     // Machine-copied, green-preferring, head-matched — every property
     // the by-hand transcription kept getting wrong, in one call.
     let receipt = park::receipt_for(&gate_runs, new_branch, &head)?;
-    repoint(http, car_id, new_branch, &receipt.raw, old_branch).await?;
+    repoint(http, car_id, new_branch, &receipt, old_branch).await?;
     println!(
         "boss rerail: {} repointed {old_branch} -> {new_branch} — receipt copied, \
          skip cleared; the next boarding takes it",

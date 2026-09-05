@@ -158,30 +158,33 @@ async fn post_json_return(
         .map_err(|e| HandlerError::Downstream(format!("POST {url} not JSON: {e}")))
 }
 
-/// PUT a body, mapping non-2xx the same way. Completing a car step is a
-/// PUT, which the shared POST helper does not cover.
-async fn put_json(
+/// PUT or PATCH a body, mapping non-2xx the same way. Completing a car
+/// step is a PUT and refreshing a parked car's receipt is a PATCH on
+/// the metadata door; the shared POST helper covers neither.
+async fn write_json(
     client: &reqwest::Client,
+    method: reqwest::Method,
     url: &str,
     body: &Value,
     rule_name: &str,
 ) -> Result<(), HandlerError> {
+    let verb = method.to_string();
     let resp = client
-        .put(url)
+        .request(method, url)
         .header("content-type", "application/json")
         .header("x-boss-user", dispatcher_actor_header(rule_name))
         .header("x-sim-origin", super::common::sim_origin_value())
         .json(body)
         .send()
         .await
-        .map_err(|e| HandlerError::Downstream(format!("PUT {url}: {e}")))?;
+        .map_err(|e| HandlerError::Downstream(format!("{verb} {url}: {e}")))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         return Err(if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
-            HandlerError::Permanent(format!("PUT {url} returned {status}: {text}"))
+            HandlerError::Permanent(format!("{verb} {url} returned {status}: {text}"))
         } else {
-            HandlerError::Downstream(format!("PUT {url} returned {status}: {text}"))
+            HandlerError::Downstream(format!("{verb} {url} returned {status}: {text}"))
         });
     }
     Ok(())
@@ -219,6 +222,51 @@ impl Handler for JobsAutoPark {
             // Green, but no park intent — a manual gate. Nothing to do.
             return Ok(());
         };
+
+        // A RE-GATE REFRESHES THE PARKED CAR; IT DOES NOT FILE A TWIN.
+        // Measured 2026-09-05 (backlog d052afad): this handler filed a
+        // car per green gate, so the dock held 10 cars for 6 branches and
+        // each first car sat with a receipt for a vanished head, left
+        // behind by every train. The fresh receipt rides the existing
+        // car as `regate_receipt` — the rerail write, one builder in
+        // core — and the skip clears. A boarded or closed car is spent
+        // history; then, and only then, a new car.
+        let open = get_json(
+            &self.client,
+            &format!(
+                "{}/api/jobs?kind=ship-a-change&status=open&subject_id={}&limit=50",
+                self.base(),
+                inputs.branch
+            ),
+            &ctx.rule_name,
+        )
+        .await?;
+        let cars: Vec<Value> = open
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(parked) = car::parked_car_for(&cars, &inputs.branch) {
+            let id = parked.get("id").and_then(Value::as_str).ok_or_else(|| {
+                HandlerError::Downstream("auto-park: parked car has no id".into())
+            })?;
+            let note = format!(
+                "re-gated in place: green at {} (gate-run {}) — receipt machine-copied to \
+                 regate_receipt by the auto-park handler; the frozen gate step stays as the \
+                 original head's record",
+                &inputs.receipt.head[..12.min(inputs.receipt.head.len())],
+                ev.job_id
+            );
+            write_json(
+                &self.client,
+                reqwest::Method::PATCH,
+                &format!("{}/api/jobs/{}/metadata", self.base(), id),
+                &car::regate_patch(&inputs.receipt, &note),
+                &ctx.rule_name,
+            )
+            .await?;
+            return Ok(());
+        }
 
         let now = boss_clock_client::now_from(&self.clock).await;
 
@@ -271,8 +319,9 @@ impl Handler for JobsAutoPark {
                 .ok_or_else(|| {
                     HandlerError::Downstream(format!("auto-park: car missing step '{title}'"))
                 })?;
-            put_json(
+            write_json(
                 &self.client,
+                reqwest::Method::PUT,
                 &format!("{}/api/jobs/{}/steps/{}", self.base(), car_id, step_id),
                 &json!({"status": "completed", "metadata": meta}),
                 &ctx.rule_name,

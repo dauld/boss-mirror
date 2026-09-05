@@ -27,7 +27,7 @@
 //! discipline someone remembers and becomes something the verb enforces.
 
 use anyhow::{Result, bail};
-use boss_jobs::car::{Receipt, car_body, step_fields};
+use boss_jobs::car::{Receipt, car_body, parked_car_for, regate_patch, step_fields};
 use serde_json::{Value, json};
 
 /// Find the receipt for `branch` among gate-run packets, or refuse.
@@ -299,6 +299,57 @@ pub(crate) async fn run(
             Some(full)
         }
     };
+
+    // A RE-GATE REFRESHES THE PARKED CAR; IT DOES NOT FILE A TWIN.
+    // Measured 2026-09-05 (backlog d052afad): the dock held 10 cars for
+    // 6 branches because every re-gate parked again, and each first car
+    // then sat with a receipt for a head that no longer existed — left
+    // behind by every train as "gated, then changed" until closed by
+    // hand. Skipping the duplicate would be worse (the stale car could
+    // never board); the fix is the rerail write: the fresh receipt rides
+    // the job as `regate_receipt`, verbatim, and the skip is cleared. A
+    // car that has BOARDED or closed is spent history — a new car then.
+    let parked = crate::gate::rows(
+        crate::gate::api(
+            &http,
+            reqwest::Method::GET,
+            &format!("/api/jobs?kind=ship-a-change&status=open&subject_id={branch}&limit=50"),
+            None,
+        )
+        .await?,
+    );
+    if let Some(car) = parked_car_for(&parked, branch) {
+        let id = car
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("parked car for {branch} has no id"))?
+            .to_string();
+        let id8 = &id[..8.min(id.len())];
+        if dry {
+            println!(
+                "boss park: DRY would refresh the receipt on parked car {id8} \
+                 (regate_receipt), not file a second"
+            );
+            return Ok(());
+        }
+        let note = format!(
+            "re-gated in place: green at {} — receipt machine-copied to regate_receipt \
+             by boss park; the frozen gate step stays as the original head's record",
+            &receipt.head[..12.min(receipt.head.len())]
+        );
+        crate::gate::api(
+            &http,
+            reqwest::Method::PATCH,
+            &format!("/api/jobs/{id}/metadata"),
+            Some(regate_patch(&receipt, &note)),
+        )
+        .await?;
+        println!(
+            "boss park: car {id8} was already parked for {branch} — receipt refreshed \
+             (regate_receipt), no second car"
+        );
+        return Ok(());
+    }
 
     if dry {
         println!("boss park: DRY would file a car for {branch} carrying that receipt");

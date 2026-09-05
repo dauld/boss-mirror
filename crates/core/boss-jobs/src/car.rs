@@ -121,6 +121,97 @@ pub fn step_fields(
     ]
 }
 
+/// The review step a parked car waits at. The conductor reads it as
+/// the dock: a car whose review is `ready`/`active` is parked, and
+/// boarding stamps `metadata.train` rather than completing it (so a
+/// cancelled train can release the car by clearing the stamp).
+pub const REVIEW: &str = "Open for review";
+
+/// A step by its registry slug, falling back to its title. The same
+/// lookup the conductor uses; one definition (CLAUDE.md 9a).
+pub fn find_step<'a>(job: &'a Value, slug: &str, title: &str) -> Option<&'a Value> {
+    let steps = job.get("steps").and_then(Value::as_array)?;
+    steps
+        .iter()
+        .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some(slug))
+        .or_else(|| {
+            steps
+                .iter()
+                .find(|s| s.get("title").and_then(Value::as_str) == Some(title))
+        })
+}
+
+/// Is this car still PARKED — gated, filed, and waiting at the dock —
+/// rather than boarded (a train stamped it) or past review?
+///
+/// ONE PREDICATE, THREE READERS. The conductor counts the dock with it
+/// (`parked_ready` adds boarding's own refinements: a `hold`, a
+/// `train/` branch). `boss park` and the dispatcher's auto-park handler
+/// ask it the question this file exists for: when a branch is gated
+/// AGAIN, is there a car to refresh, or is a new one due? Measured
+/// 2026-09-05 (backlog d052afad): every re-gate filed a twin, the dock
+/// held 10 cars for 6 branches, and the first car of each pair sat
+/// there with a receipt for a head that no longer existed — left behind
+/// by every train as "gated, then changed" until closed by hand.
+///
+/// Status is deliberately not read here: callers list `status=open`,
+/// and a fixture without a top-level status must still answer.
+pub fn is_parked(car: &Value) -> bool {
+    let md = car.get("metadata");
+    let branch = md
+        .and_then(|m| m.get("branch"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if branch.is_empty() || is_set(md.and_then(|m| m.get("train"))) {
+        return false;
+    }
+    matches!(
+        find_step(car, "review", REVIEW)
+            .and_then(|s| s.get("status"))
+            .and_then(Value::as_str),
+        Some("ready" | "active")
+    )
+}
+
+/// The car a re-gate of `branch` refreshes, if one is still parked.
+/// `None` means file a new car — the branch has none, or its car has
+/// boarded or reached a terminal and that history is spent.
+pub fn parked_car_for<'a>(cars: &'a [Value], branch: &str) -> Option<&'a Value> {
+    cars.iter().find(|c| {
+        c.pointer("/metadata/branch").and_then(Value::as_str) == Some(branch) && is_parked(c)
+    })
+}
+
+/// The metadata patch that supersedes a parked car's gate receipt.
+///
+/// A completed step is frozen, so a fresh receipt rides the JOB as
+/// `regate_receipt` — the key boarding (`receipt_skip_reason`) and
+/// `boss receipt` both read in preference to the gate step. VERBATIM,
+/// like the gate step's copy: a rebuilt receipt once let a wrong head
+/// through. `skip_reason` is present-and-null on purpose — the metadata
+/// door deletes a null key, so the conductor's "left behind" reason
+/// goes with the stale receipt. One builder for `boss park`, the
+/// auto-park handler and `boss rerail`, so the write cannot drift.
+pub fn regate_patch(receipt: &Receipt, note: &str) -> Value {
+    json!({
+        "regate_receipt": receipt.raw,
+        "skip_reason": Value::Null,
+        "regate_note": note,
+    })
+}
+
+/// A metadata stamp that is present: the conductor writes `train` as
+/// an id and clears it to `null` on release; an empty string reads as
+/// cleared too.
+fn is_set(v: Option<&Value>) -> bool {
+    match v {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(_) => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +312,84 @@ mod tests {
         // An empty mode still reads as a full gate.
         assert_eq!(f[2].1["gates"], json!("full"));
         assert_eq!(f[2].1["receipt"], json!(GREEN));
+    }
+}
+
+#[cfg(test)]
+mod regate_tests {
+    use super::*;
+
+    const GREEN: &str = r#"{"verdict": "green", "head": "0123456789abcdef0123456789abcdef01234567", "mode": "full", "fails": []}"#;
+
+    fn receipt() -> Receipt {
+        Receipt {
+            raw: GREEN.to_string(),
+            head: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            mode: "full".to_string(),
+        }
+    }
+
+    /// A car as the jobs API lists it: open, branch in metadata, review
+    /// step waiting — the shape both parkers and the conductor read.
+    fn car(id: &str, branch: &str, review_status: &str, train: Value) -> Value {
+        json!({
+            "id": id,
+            "kind": "ship-a-change",
+            "status": "open",
+            "metadata": { "branch": branch, "train": train },
+            "steps": [
+                {"spec_slug": "gate", "title": GATE, "status": "completed"},
+                {"spec_slug": "review", "title": REVIEW, "status": review_status},
+            ]
+        })
+    }
+
+    #[test]
+    fn a_car_waiting_at_review_with_no_train_is_parked() {
+        assert!(is_parked(&car("c1", "fix/x", "ready", Value::Null)));
+        assert!(is_parked(&car("c1", "fix/x", "active", Value::Null)));
+    }
+
+    #[test]
+    fn a_boarded_car_is_not_parked() {
+        // The conductor stamps `metadata.train` when a car boards and
+        // clears it (Null) when a cancelled train releases the car.
+        assert!(!is_parked(&car("c1", "fix/x", "ready", json!("train-1"))));
+        assert!(is_parked(&car("c1", "fix/x", "ready", json!(""))));
+    }
+
+    #[test]
+    fn a_car_past_review_is_not_parked() {
+        assert!(!is_parked(&car("c1", "fix/x", "completed", Value::Null)));
+        assert!(!is_parked(&car("c1", "fix/x", "skipped", Value::Null)));
+        assert!(!is_parked(&car("c1", "fix/x", "pending", Value::Null)));
+    }
+
+    #[test]
+    fn a_car_naming_no_branch_is_not_parked() {
+        assert!(!is_parked(&car("c1", "", "ready", Value::Null)));
+    }
+
+    #[test]
+    fn the_parked_car_for_a_branch_is_the_one_still_at_the_dock() {
+        let cars = vec![
+            car("boarded", "fix/x", "ready", json!("train-9")),
+            car("other", "fix/y", "ready", Value::Null),
+            car("parked", "fix/x", "ready", Value::Null),
+        ];
+        let got = parked_car_for(&cars, "fix/x").expect("one car is parked");
+        assert_eq!(got["id"], "parked");
+        assert!(parked_car_for(&cars, "fix/z").is_none());
+    }
+
+    #[test]
+    fn the_regate_patch_copies_the_receipt_verbatim_and_clears_the_skip() {
+        let p = regate_patch(&receipt(), "why");
+        // VERBATIM: the receipt string, not a rebuilt object.
+        assert_eq!(p["regate_receipt"], json!(GREEN));
+        // Present-and-null: the metadata door DELETES a null key, which
+        // is how the conductor's "left behind" reason goes away.
+        assert!(p.get("skip_reason").is_some_and(Value::is_null));
+        assert_eq!(p["regate_note"], json!("why"));
     }
 }
