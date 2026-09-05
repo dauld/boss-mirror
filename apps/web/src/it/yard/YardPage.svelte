@@ -20,6 +20,8 @@
     gateSlots,
     type YardStatus,
   } from './yard-status';
+  import { factoryStations, floorIsIdle } from './yard-factory';
+  import YardFactory from './YardFactory.svelte';
   import type { Remote } from '../../data/remote';
   import PacketCard from '@boss/web-kit/ui/PacketCard.svelte';
   import PacketModal, { type PacketJob } from '@boss/web-kit/ui/PacketModal.svelte';
@@ -46,6 +48,11 @@
   const gatesInUse = $derived(slots.filter(sl => sl.kind === 'occupied').length);
   const gatesFree = $derived(Math.max(gateCapacity - gatesInUse, 0));
   const waitingToGate = $derived(yard ? yard.approach.filter(a => a.state === 'publishing').length : 0);
+  // The factory floor — the same read-model as the board below, told as
+  // a moving production line (David, 2026-09-05: 'make it look more like
+  // Factorio'). A pure mapping; the animation lives in the component.
+  const factory = $derived(yard ? factoryStations(yard, slots) : []);
+  const factoryIdle = $derived(floorIsIdle(factory));
 
   // The condensed packet panel (David, fc67bed2). The dock rows are a
   // slim projection — no steps, no metadata — so opening a packet
@@ -179,6 +186,10 @@
   {:else if !yard}
     <div class="yard-empty">The yard is unreachable right now.</div>
   {:else}
+    <!-- The factory floor leads the board: the whole pipeline as one
+         animated line before the tables that detail each stage. -->
+    <YardFactory stations={factory} idle={factoryIdle} onOpen={openPacket} />
+
     <!--
       THE SCOREBOARD LEADS. David, 2026-08-28: "We should have these
       stats at the top of the Train Yard if they are what matter." The

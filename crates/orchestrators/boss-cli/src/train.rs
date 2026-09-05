@@ -5574,21 +5574,6 @@ impl Conductor {
                 )),
             }
         }
-        for car in releasable_cars(&cars, tid) {
-            let cid = job_id(car)?;
-            // NOTHING TO REOPEN. Releasing a car is a metadata write and
-            // only a metadata write, because boarding no longer completes
-            // its `review` step — see the boarding loop. This used to PUT
-            // the step back to `ready`, which the row silently refused
-            // (terminal steps are frozen in `update_step_at`) and which
-            // now 409s out loud, taking the whole cancel with it. A car
-            // that predates this change still carries a completed review
-            // and cannot be released; those were translated into fresh
-            // packets by hand on 2026-08-15 rather than reversed.
-            self.merge_job_metadata(cid, release_stamps(car, reason, count_red))
-                .await?;
-            log(format!("released car {} back to the dock", id8(cid)));
-        }
 
         let pr_url = find_step(train, "pr", "Open the batched PR")
             .and_then(|s| s.get("metadata"))
@@ -5636,6 +5621,34 @@ impl Conductor {
                 self.forge.close_pr(pr_url).await?;
                 log(format!("closed {pr_url} unmerged"));
             }
+        }
+
+        // RELEASE THE CARS ONLY AFTER THE FORGE WRITES SUCCEED. Cancel
+        // does two kinds of write: releasing a car is a jobs-API metadata
+        // write (reliable, local), closing the PR is a forge write (the
+        // flaky one — an unreachable forge, a read-only token). Releasing
+        // FIRST left "half-cancelled" trains: the cars back on the dock
+        // but the PR still open, because close_pr's `?` returned Err with
+        // the release already done (10bb1e1a; the comment at the top of
+        // this file's cancel path names the two it stranded). Doing the
+        // flaky writes first means a forge failure aborts here with the
+        // train fully intact — cars still aboard, PR still open — so a
+        // re-run is clean, and the car release only happens once the PR is
+        // actually closed.
+        for car in releasable_cars(&cars, tid) {
+            let cid = job_id(car)?;
+            // NOTHING TO REOPEN. Releasing a car is a metadata write and
+            // only a metadata write, because boarding no longer completes
+            // its `review` step — see the boarding loop. This used to PUT
+            // the step back to `ready`, which the row silently refused
+            // (terminal steps are frozen in `update_step_at`) and which
+            // now 409s out loud, taking the whole cancel with it. A car
+            // that predates this change still carries a completed review
+            // and cannot be released; those were translated into fresh
+            // packets by hand on 2026-08-15 rather than reversed.
+            self.merge_job_metadata(cid, release_stamps(car, reason, count_red))
+                .await?;
+            log(format!("released car {} back to the dock", id8(cid)));
         }
 
         // The cancelled terminal is gated (blocked_by) on collect; a
@@ -8868,6 +8881,125 @@ mod tests {
             .iter()
             .all(|f| f == "Cargo.toml"),
             "version numbers are not filenames"
+        );
+    }
+
+    // -- cancel releases cars only after the forge write succeeds -----
+    struct CancelForge {
+        close_called: std::sync::Arc<std::sync::Mutex<bool>>,
+    }
+    #[async_trait::async_trait]
+    impl Forge for CancelForge {
+        async fn pr_info(&self, _url: &str) -> Result<Value> {
+            bail!("not exercised")
+        }
+        async fn pr_create(
+            &self,
+            _repo: &str,
+            _head_branch: &str,
+            _title: &str,
+            _body: &str,
+        ) -> Result<String> {
+            bail!("not exercised")
+        }
+        async fn merge(&self, _url: &str) -> Result<()> {
+            bail!("not exercised")
+        }
+        async fn close_pr(&self, _url: &str) -> Result<()> {
+            *self.close_called.lock().unwrap() = true;
+            bail!("HTTP 403: forge write refused")
+        }
+        async fn delete_branch(&self, _branch: &str) -> Result<bool> {
+            bail!("not exercised")
+        }
+        async fn branch_head(&self, _branch: &str) -> Result<Option<String>> {
+            bail!("not exercised")
+        }
+        async fn cancel_ci_runs(&self, _pr_index: &str, _head_sha: &str) -> Result<usize> {
+            Ok(0)
+        }
+    }
+
+    /// 10bb1e1a: releasing a car is a jobs-API metadata write; closing
+    /// the PR is the flaky forge write. Releasing FIRST left
+    /// "half-cancelled" trains — cars back on the dock, PR still open —
+    /// when close_pr's `?` returned Err with the release already done.
+    /// This drives cancel_train against a real in-process jobs server
+    /// with a forge whose close_pr FAILS, and asserts NO car was
+    /// released: the release now happens only after the PR is closed.
+    #[tokio::test]
+    async fn cancel_does_not_release_cars_when_close_pr_fails() {
+        use axum::extract::Path;
+        use axum::routing::get;
+        use axum::{Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        let train = json!({
+            "id": "t1", "kind": "pr-train", "status": "open",
+            "metadata": { "boarded_jobs": ["c1"], "train_ref": "train/x@abcdef1" },
+            "steps": [
+                {"id":"s-pr","spec_slug":"pr","title":"Open the batched PR","status":"completed","metadata":{"pr_url":"https://forge.example/david/boss/pulls/9"}},
+                {"id":"s-collect","spec_slug":"collect","title":"Collect what is ready to board","status":"completed","metadata":{}},
+                {"id":"s-cancelled","spec_slug":"cancelled","title":"Cancelled — nothing to board","status":"ready","metadata":{}}
+            ]
+        });
+        let car = json!({
+            "id": "c1", "kind": "ship-a-change", "status": "open",
+            "metadata": { "train": "t1", "branch": "fix/x" },
+            "steps": [{"id":"c-rev","spec_slug":"review","title":"Open for review","status":"ready","metadata":{}}]
+        });
+
+        // Every PUT the conductor makes; a release is a PUT /api/jobs/{car}.
+        let puts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let train_list = train.clone();
+        let train_one = train.clone();
+        let car_one = car.clone();
+        let puts_route = puts.clone();
+        let app = Router::new()
+            .route(
+                "/api/jobs",
+                get(move || {
+                    let train = train_list.clone();
+                    async move { Json(json!({ "data": [train] })) }
+                }),
+            )
+            .route(
+                "/api/jobs/{id}",
+                get(move |Path(id): Path<String>| {
+                    let (t, c) = (train_one.clone(), car_one.clone());
+                    async move { Json(if id == "t1" { t } else { c }) }
+                })
+                .put(move |Path(id): Path<String>, _b: Json<Value>| {
+                    let puts = puts_route.clone();
+                    async move {
+                        puts.lock().unwrap().push(id);
+                        Json(json!({}))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let close_called = Arc::new(Mutex::new(false));
+        let mut c = cleanup_conductor(
+            "forgejo",
+            Box::new(CancelForge {
+                close_called: close_called.clone(),
+            }),
+        );
+        c.cfg.jobs = format!("http://{addr}");
+
+        let res = c.cancel_train("t1", "forge unreachable", false).await;
+        assert!(res.is_err(), "cancel must surface the close_pr failure");
+        assert!(
+            *close_called.lock().unwrap(),
+            "close_pr must have been attempted"
+        );
+        assert!(
+            !puts.lock().unwrap().contains(&"c1".to_string()),
+            "the car was released despite close_pr failing — a half-cancelled train"
         );
     }
 }
