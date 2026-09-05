@@ -1,0 +1,22 @@
+# The clock's in-cluster door (backlog d5ee79dc). The conductor moved
+# into the cluster on 2026-09-04 with a ConfigMap that named the jobs
+# API only; its cadence loop reads BOSS_CLOCK_URL and falls back to
+# boss-ports' default — http://127.0.0.1:7060, the single-host layout —
+# so every pass logged "clock-api unreachable; falling back to
+# wallclock — dates may be wrong in sim mode". Harmless while the
+# production clock is wall time, and wrong the day a deployment runs in
+# sim mode. Same shape as boss-dispatcher-internal / boss-docs-internal
+# (b03c773b): a ClusterIP in front of the all-in-one boss pod, on the
+# port boss-ports assigns the clock; the pod needs no containerPort
+# declaration for a Service to reach it, exactly as the dispatcher's
+# 7950 proved. Health: GET /api/clock/health; the instant: /api/clock/now.
+apiVersion: v1
+kind: Service
+metadata:
+  name: boss-clock-internal
+  namespace: boss
+spec:
+  type: ClusterIP
+  selector: {app: boss}
+  ports:
+    - {port: 7060, targetPort: 7060, name: clock}

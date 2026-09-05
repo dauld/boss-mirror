@@ -151,6 +151,12 @@ data:
   # address, so BOSS_TRAIN_ALLOW_LOCAL_JOBS stays unset and preflight's
   # loopback guard stays armed.
   BOSS_JOBS_URL: "http://boss-jobs-internal.boss.svc.cluster.local:7900"
+  # The clock, by its in-cluster door (boss-clock-internal.yaml). Unset,
+  # the cadence loop defaulted to the single-host 127.0.0.1:7060 and
+  # warned "clock-api unreachable; falling back to wallclock" on every
+  # pass — the same cutover omission as the git credential and the CI
+  # host: the code kept a capability and the environment lost it.
+  BOSS_CLOCK_URL: "http://boss-clock-internal.boss.svc.cluster.local:7060"
   # The forge is the source (train.rs: "THE FORGE IS THE SOURCE; GITHUB
   # IS A PERIODIC BACKUP"). Select the forgejo adapter explicitly — unset,
   # the conductor falls back to the `gh` GitHub adapter and points a whole
