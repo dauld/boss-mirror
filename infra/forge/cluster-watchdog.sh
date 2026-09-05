@@ -12,6 +12,7 @@
 #      WATCHDOG_STATE (dark-count file), WATCHDOG_DARK_LIMIT (checks).
 set -uo pipefail
 . "$(dirname "$0")/cluster-watchdog-lib.sh"
+. "$(dirname "$0")/alert-lib.sh"
 JOBS_API="${JOBS_API:-http://10.20.0.34:7900}"
 KUBECONFIG_PATH="${KUBECONFIG_PATH:-$HOME/kc.yaml}"
 REGISTRY="${REGISTRY:-10.20.0.15:3000/david/boss}"
@@ -32,6 +33,7 @@ decision=$(watchdog_decision "$live" "$image" "$stamp" "$dark" "$LIMIT")
 case "$decision" in
     ok)
         echo "cluster ok: api answers on $live_commit, deployment serves $image, last converged $stamp"
+        alert_replay || true
         ;;
     wait)
         echo "cluster DARK ($dark of $LIMIT checks): api silent, deployment serves $image, last converged $stamp — waiting one more check before acting" >&2
@@ -43,13 +45,16 @@ case "$decision" in
             && $K rollout status deploy/boss -n boss --timeout=420s; then
             echo "cluster RESTORED on the last converged build $stamp — the head that was serving ($image) needs a fix on main" >&2
             echo 0 > "$STATE"
+            alert "cluster restored by the watchdog: rolled to the last converged build $stamp" "The API was dark for $dark checks while the deployment served $image; the watchdog rolled deploy/boss to $REGISTRY:$stamp by name and it went Ready. The head $image needs a fix on main before the converge rolls it again."
         else
             echo "cluster STILL DARK after rolling to $stamp — hands needed" >&2
+            alert "cluster DARK: hands needed — the rollback to $stamp did not restore it" "The API was dark for $dark checks; the deployment served $image; rolling to $REGISTRY:$stamp did not go Ready. Read the forge journal for cluster-deploy-runner and cluster-watchdog."
             exit 1
         fi
         ;;
     hands)
         echo "cluster DARK past $LIMIT checks on the last converged build itself ($image, stamp $stamp) — nothing this loop can roll to; hands needed" >&2
+        alert "cluster DARK: hands needed — the last converged build itself is dark" "The API has been dark for $dark checks while the deployment serves $image, which is the last converged build ($stamp); nothing safe to roll to. Read the forge journal for cluster-deploy-runner and cluster-watchdog."
         exit 1
         ;;
 esac
