@@ -1319,6 +1319,63 @@ pub(crate) fn publish_car_branch(clone: &str, branch: &str) -> Result<bool> {
     let upstream = format!("origin/{branch}");
     let (have_local, have_upstream) = (exists(&local)?, exists(&upstream)?);
 
+    // THE FORGE IS THE AUTHORITY ON A CAR'S BRANCH. Read its current head
+    // before deciding anything: a clone's remote-tracking ref is a memory
+    // of an earlier fetch, and on 2026-09-05 a restacked car's forge
+    // branch read as the PRE-restack sha after a boarding (packet
+    // c1d56d13). If the forge already carries what this clone would
+    // push — or has moved beyond it — there is nothing to publish, and
+    // pushing a stale copy is exactly the overwrite this guards against.
+    // The push below is a plain push (never --force), so git would refuse
+    // a diverged head anyway; refusing here says WHY in the journal
+    // instead of a silent rc=1.
+    // A `+` refspec: the tracking ref may hold an OLDER head (the very
+    // memory this guards against), and a plain fetch refuses to move it
+    // backwards-and-sideways — which would leave the clone believing the
+    // fork still carries what it last saw.
+    let _ = sh_unchecked(&[
+        "git",
+        "-C",
+        clone,
+        "fetch",
+        "-q",
+        "fork",
+        &format!("+refs/heads/{branch}:refs/remotes/fork/{branch}"),
+    ]);
+    let fork_ref = format!("fork/{branch}");
+    if exists(&fork_ref)? {
+        let candidate = match (have_local, have_upstream) {
+            (true, _) => Some(local.clone()),
+            (false, true) => Some(upstream.clone()),
+            (false, false) => None,
+        };
+        if let Some(c) = candidate {
+            let same = is_ancestor(&c, &fork_ref)? && is_ancestor(&fork_ref, &c)?;
+            if same {
+                // Already published: the fork carries exactly this head.
+                // Nothing to push, and the answer is "yes, it is there" —
+                // publishing twice is idempotent, not a refusal.
+                return Ok(true);
+            }
+            let fork_ahead = is_ancestor(&c, &fork_ref)?;
+            let diverged = !fork_ahead && !is_ancestor(&fork_ref, &c)?;
+            if fork_ahead || diverged {
+                let fork_head =
+                    sh_unchecked(&["git", "-C", clone, "rev-parse", "--short", &fork_ref])?;
+                log(format!(
+                    "{branch}: the fork already carries {} ({}) — not publishing {c} over it",
+                    stdout_str(&fork_head).trim(),
+                    if fork_ahead {
+                        "ahead of this clone"
+                    } else {
+                        "diverged from this clone"
+                    }
+                ));
+                return Ok(false);
+            }
+        }
+    }
+
     let src = match (have_local, have_upstream) {
         (false, false) => return Ok(false),
         (true, false) => local,
@@ -8150,6 +8207,61 @@ mod tests {
 
     /// The mirror image, and the reason ordering alone is not the fix:
     /// when the fork does not have the branch at all, ANY source
+    #[test]
+    fn a_fork_that_moved_on_is_never_overwritten() {
+        // The car was restacked and force-pushed to the FORK by its author;
+        // this clone still holds the pre-restack head locally and as
+        // origin/<branch>. Boarding must not publish the stale copy over
+        // the fork's newer, diverged head (2026-09-05, packet c1d56d13).
+        let (_g, clone) = clone_fixture("fork-moved-on");
+        commit_branch(&clone, "feat/moved");
+        git_ok(&clone, &["push", "-q", "origin", "feat/moved"]);
+        git_ok(&clone, &["push", "-q", "fork", "feat/moved"]);
+        let stale = rev(&clone, "feat/moved");
+        // A second clone restacks the branch (a new root commit) and
+        // force-pushes it to the fork — the author's re-rail.
+        let other = clone.parent().expect("root").join("other");
+        let fork_url = clone.parent().expect("root").join("fork.git");
+        let out = std::process::Command::new("git")
+            .args(["clone", "-q", fork_url.to_str().expect("utf8")])
+            .arg(&other)
+            .output()
+            .expect("clone");
+        assert!(out.status.success());
+        git_ok(&other, &["config", "user.email", "t@example.com"]);
+        git_ok(&other, &["config", "user.name", "t"]);
+        git_ok(&other, &["checkout", "-q", "--orphan", "feat/moved"]);
+        std::fs::write(other.join("README"), "restacked").expect("write");
+        git_ok(&other, &["add", "-A"]);
+        git_ok(&other, &["commit", "-qm", "restacked"]);
+        git_ok(&other, &["push", "-q", "-f", "origin", "feat/moved"]);
+        let moved = rev(&other, "feat/moved");
+        assert_ne!(moved, stale, "precondition: the fork moved on");
+
+        assert!(
+            !publish_car_branch(clone.to_str().expect("utf8"), "feat/moved").expect("publish"),
+            "a diverged fork head is not something this clone may overwrite"
+        );
+        let fork_now = String::from_utf8_lossy(
+            &std::process::Command::new("git")
+                .args([
+                    "-C",
+                    fork_url.to_str().expect("utf8"),
+                    "rev-parse",
+                    "refs/heads/feat/moved",
+                ])
+                .output()
+                .expect("rev-parse")
+                .stdout,
+        )
+        .trim()
+        .to_string();
+        assert_eq!(
+            fork_now, moved,
+            "the fork must still carry the author's restacked head"
+        );
+    }
+
     /// pushes cleanly, so nothing rejects a stale one. The descendant
     /// has to be chosen deliberately.
     #[test]

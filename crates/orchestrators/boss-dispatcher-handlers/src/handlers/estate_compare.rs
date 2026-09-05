@@ -84,14 +84,20 @@ pub(crate) const UNITS_SCOPE: &str = "host-units";
 /// The disk floor that turns a host reading into a HARD finding
 /// (49a8d842: the forge host — 228G, 83% full, "THE TIGHT ONE" — could
 /// fill and the comparison would keep answering unknown_scope). Free
-/// below 16 GiB or below 8% of capacity is `disk_tight`: past that a
-/// full gate cannot run and postgres-shaped failures start wearing
-/// unrelated crates' names (the locomotive's own 70G lesson, scaled to
-/// hosts that do less). Deliberately alarm-tight, not sweep-tight —
-/// the 08-30 sweep flagged 83% as worth WATCHING; the alarm fires when
-/// it is worth WAKING someone.
+/// below 16 GiB or below 35% of capacity is `disk_tight`.
+///
+/// WHY 35% (was 8%). The alarm is worth waking someone for only if it
+/// arrives BEFORE the pipeline stops: the CI host's locomotive refuses
+/// a run below 70 GB, the sweep keeps 100 GB, the conductor will not
+/// board below 40 GB. On a 228 GB forge 8% was 18 GB — a packet that
+/// would have landed hours after CI had gone red (2026-09-05: the
+/// series ran 109 → 71 GB across eight trains with no finding at all).
+/// 35% of 228 is 80 GB: above the locomotive's floor by the three
+/// consecutive comparisons the raiser demands before it files. On a
+/// 48 GB bastion 35% is under the 16 GiB minimum, which then rules —
+/// the same reading as before for hosts that do less.
 const DISK_TIGHT_FLOOR_GB: i64 = 16;
-const DISK_TIGHT_FLOOR_PCT: i64 = 8;
+const DISK_TIGHT_FLOOR_PCT: i64 = 35;
 
 /// The self-scoped host comparison, pure: for each observed host that
 /// is also declared, drift on the identity fields + the disk floor;
@@ -618,11 +624,14 @@ mod tests {
         // 12G free of 47: below the 16G floor.
         let tight = compare_host(&declared, &host_obs("boss-gcp-1", 12, 47));
         assert_eq!(tight["findings"]["disk_tight"][0]["id"], "boss-gcp-1");
-        // 38G free of 228: above both floors (16G and 8%).
-        let fine = compare_host(&declared, &host_obs("forge-host", 38, 228));
+        // 95G free of 228: above both floors (16G and 35% = 80G).
+        let fine = compare_host(&declared, &host_obs("forge-host", 95, 228));
         assert_eq!(fine["findings"]["disk_tight"].as_array().unwrap().len(), 0);
-        // 17G free of 228 is above the GB floor but under 8% — tight.
-        let pct = compare_host(&declared, &host_obs("forge-host", 17, 228));
+        // 71G free of 228 (the forge at 16:57 on 2026-09-05, mid-build,
+        // with the locomotive's 70G refusal one train away) is above the
+        // GB floor but under 35% — tight, and a packet lands before CI
+        // goes red instead of hours after.
+        let pct = compare_host(&declared, &host_obs("forge-host", 71, 228));
         assert_eq!(pct["findings"]["disk_tight"].as_array().unwrap().len(), 1);
     }
 
