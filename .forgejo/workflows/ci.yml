@@ -178,6 +178,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Locomotive check
+        # The job token, so a REFUSAL (disk floor, stale runner image,
+        # wrong uid — the runner declining to run, not a check failing)
+        # can be posted as a commit status the conductor reads; without
+        # it a refusal is a plain red that strikes every car aboard.
+        env:
+          FORGE_TOKEN: ${{ github.token }}
         run: bash infra/forge/locomotive.sh
 
   # THE FRONTEND JOB THAT WAS ONLY EVER ON GITHUB.
