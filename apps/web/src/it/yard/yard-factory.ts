@@ -213,3 +213,45 @@ export function factoryStations(
 export function floorIsIdle(stations: readonly FactoryStation[]): boolean {
   return stations.every(s => s.wagons.length === 0 && s.machines.every(m => !m.busy));
 }
+
+/// The conductor's own line — the Train Yard's personified service
+/// reporting what the floor is doing (David, 2026-09-04, design
+/// 7cdd8047: "the Conductor as essentially a personified service to
+/// report what it is doing on the train yard page"). Pure over the
+/// stations: trouble first (a stuck car is the thing to say), then the
+/// shape of the work, then quiet. One sentence, present tense, the
+/// voice of the line itself.
+export function conductorLine(stations: readonly FactoryStation[]): string {
+  const count = (key: string): number =>
+    stations.find(s => s.key === key)?.wagons.length ?? 0;
+  const busyGates = stations
+    .find(s => s.key === 'gates')
+    ?.machines.filter(m => m.busy).length ?? 0;
+  const blocked = stations
+    .flatMap(s => s.wagons)
+    .filter(w => w.tone === 'blocked' || w.tone === 'red').length;
+  const transit = count('transit');
+  const assembling = count('assembly');
+  const arrived = count('arrived');
+
+  if (blocked > 0) {
+    return `Heads up — ${blocked} car${blocked === 1 ? '' : 's'} stuck; I'm holding the rest of the line.`;
+  }
+  const moving = busyGates + assembling + transit;
+  if (moving === 0 && arrived === 0) {
+    return 'The line is quiet — nothing on the belt right now.';
+  }
+  const parts: string[] = [];
+  if (busyGates > 0) parts.push(`${busyGates} at the gates`);
+  if (assembling > 0) parts.push(`${assembling} assembling`);
+  if (transit > 0) parts.push(`${transit} rolling out`);
+  const lead = parts.length > 0 ? parts.join(', ') : 'the belt clear';
+  const tail = arrived > 0 ? `, ${arrived} just landed` : '';
+  return `${lead}${tail} — all green.`;
+}
+
+/// How many cars are on the line right now (every wagon across every
+/// station) — the production count for the floor header.
+export function carsOnLine(stations: readonly FactoryStation[]): number {
+  return stations.reduce((n, s) => n + s.wagons.length, 0);
+}

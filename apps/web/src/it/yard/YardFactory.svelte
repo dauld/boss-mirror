@@ -11,7 +11,7 @@
   // out of one bay and into the next — the state change told as motion.
   import { fly, scale } from 'svelte/transition';
   import { protocolHue } from './yard';
-  import type { FactoryStation, Wagon } from './yard-factory';
+  import { conductorLine, carsOnLine, type FactoryStation, type Wagon } from './yard-factory';
 
   const { stations, idle, onOpen } = $props<{
     stations: readonly FactoryStation[];
@@ -22,12 +22,27 @@
   const open = (w: Wagon) => {
     if (w.packetId) onOpen(w.packetId);
   };
+
+  // The conductor is the floor's personified voice (design 7cdd8047),
+  // and the header carries the live production count.
+  const says = $derived(conductorLine(stations));
+  const onLine = $derived(carsOnLine(stations));
 </script>
 
 <section class="factory" aria-label="the factory floor">
   <div class="factory-head">
     <span class="factory-title">THE FACTORY FLOOR</span>
-    <span class="factory-run" class:idle>{idle ? 'idle — no work on the line' : 'running'}</span>
+    <span class="factory-run" class:idle
+      >{idle ? 'idle — no work on the line' : `${onLine} on the line`}</span>
+  </div>
+
+  <!-- The conductor speaks (7cdd8047): a personified line reporting what
+       the floor is doing, trouble first. -->
+  <div class="conductor">
+    <span class="conductor-badge" aria-hidden="true">
+      <span class="conductor-cap"></span>
+    </span>
+    <span class="conductor-says" role="status">{says}</span>
   </div>
 
   <div class="line">
@@ -396,6 +411,61 @@
   .chev {
     color: var(--static, #4a525b);
     font-size: 16px;
+  }
+
+  /* The conductor: a small figure (a cap) with a speech bubble — the
+     floor's own voice. Quiet palette; the words carry it. */
+  .conductor {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 12px;
+  }
+  .conductor-badge {
+    position: relative;
+    width: 22px;
+    height: 22px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--ink, #0e1218);
+    border: 1px solid var(--hairline, #2a3138);
+  }
+  .conductor-cap {
+    position: absolute;
+    left: 4px;
+    right: 4px;
+    top: 5px;
+    height: 6px;
+    background: var(--signal, #5fd4a8);
+    border-radius: 2px 2px 0 0;
+  }
+  .conductor-cap::after {
+    content: '';
+    position: absolute;
+    left: -2px;
+    right: -2px;
+    bottom: -2px;
+    height: 2px;
+    background: var(--signal, #5fd4a8);
+  }
+  .conductor-says {
+    position: relative;
+    font-size: 12px;
+    color: var(--text, #c7ced6);
+    background: var(--ink, #0e1218);
+    border: 1px solid var(--hairline, #2a3138);
+    border-radius: 3px;
+    padding: 5px 10px;
+    font-style: italic;
+  }
+  .conductor-says::before {
+    content: '';
+    position: absolute;
+    left: -5px;
+    top: 50%;
+    transform: translateY(-50%);
+    border: 5px solid transparent;
+    border-right-color: var(--hairline, #2a3138);
   }
 
   @keyframes bob {

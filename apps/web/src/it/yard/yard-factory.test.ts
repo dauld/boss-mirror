@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { factoryStations, floorIsIdle } from './yard-factory';
+import { factoryStations, floorIsIdle, conductorLine, carsOnLine, type Wagon, type FactoryStation } from './yard-factory';
 import type { YardState } from './yard';
 import type { GateSlot } from './yard-status';
 
@@ -122,5 +122,45 @@ describe('factoryStations', () => {
     expect(floorIsIdle(factoryStations(yardOf({}), [freeSlot, freeSlot]))).toBe(true);
     expect(floorIsIdle(factoryStations(yardOf({}), [busySlot('fix/x')]))).toBe(false);
     expect(floorIsIdle(factoryStations(yardOf({ dock: [car('d', 'fix/d')] }), []))).toBe(false);
+  });
+});
+
+describe('conductorLine + carsOnLine', () => {
+  const st = (key: string, wagons: Partial<Wagon>[] = [], machines: { busy: boolean }[] = []) =>
+    ({
+      key,
+      label: key.toUpperCase(),
+      wagons: wagons.map(w => ({ id: 'x', label: 'x', kind: 'k', sim: false, tone: 'queued', isTrain: false, cars: 0, detail: '', packetId: null, ...w })),
+      machines: machines.map((m, i) => ({ id: `g${i}`, busy: m.busy, label: 'g', branch: null, since: null, packetId: null })),
+    }) as unknown as FactoryStation;
+
+  it('leads with trouble when a car is stuck', () => {
+    const s = [st('assembly', [{ tone: 'blocked', isTrain: true }])];
+    expect(conductorLine(s)).toContain('stuck');
+  });
+
+  it('is quiet when nothing is on the belt', () => {
+    const s = [st('gates'), st('assembly'), st('transit'), st('arrived')];
+    expect(conductorLine(s)).toContain('quiet');
+  });
+
+  it('reports the shape of the work when green', () => {
+    const s = [
+      st('gates', [], [{ busy: true }, { busy: false }]),
+      st('assembly', [{ isTrain: true }]),
+      st('transit', [{ isTrain: true }]),
+      st('arrived', [{ isTrain: true }]),
+    ];
+    const line = conductorLine(s);
+    expect(line).toContain('1 at the gates');
+    expect(line).toContain('1 assembling');
+    expect(line).toContain('1 rolling out');
+    expect(line).toContain('just landed');
+    expect(line).toContain('all green');
+  });
+
+  it('counts every wagon on the line', () => {
+    const s = [st('gates', [{}]), st('dock', [{}, {}])];
+    expect(carsOnLine(s)).toBe(3);
   });
 });
