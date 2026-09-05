@@ -45,6 +45,23 @@ fn at_step(v: &Value) -> String {
         .to_string()
 }
 
+/// Branches whose base has fallen behind `origin/main`. Each pair is
+/// (branch, exit code of `git merge-base --is-ancestor origin/main
+/// origin/<branch>`): 0 = main is an ancestor (fresh), 1 = not an
+/// ancestor (behind), anything else = a bad or missing ref, which we do
+/// NOT flag (a deleted branch is not a stale one). A parked car on a
+/// stale base merges clean and reverts the train
+/// ([[a-clean-merge-is-not-a-correct-merge]]), so the conductor must
+/// re-gate it before boarding — L2 of the orientation protocol
+/// (acedf981): measure current reality before building or boarding.
+fn bases_behind(checks: &[(String, Option<i32>)]) -> Vec<&str> {
+    checks
+        .iter()
+        .filter(|(_, code)| *code == Some(1))
+        .map(|(b, _)| b.as_str())
+        .collect()
+}
+
 pub async fn run() -> Result<()> {
     let http = reqwest::Client::new();
 
@@ -201,6 +218,72 @@ pub async fn run() -> Result<()> {
         );
     }
 
+    // FRESHNESS (L2, acedf981) — parked and stranded branches whose
+    // base has fallen behind origin/main. A car cut from an old main
+    // merges clean and reverts the trains, so a green gate on a stale
+    // base is a re-gate, not a boarding. Needs the objects (merge-base),
+    // so it fetches; like ORPHANS, a failed read prints WHY and skips
+    // rather than failing the verb.
+    let mut fresh_targets: Vec<String> = dock
+        .as_ref()
+        .map(|d| rows(Some(d.clone())))
+        .unwrap_or_default()
+        .iter()
+        .map(|c| md_str(c, "branch").to_string())
+        .filter(|b| !b.is_empty())
+        .collect();
+    fresh_targets.extend(stranded.iter().cloned());
+    fresh_targets.sort();
+    fresh_targets.dedup();
+    if !fresh_targets.is_empty() {
+        match crate::git_auth::command()
+            .args(["fetch", "-q", "origin"])
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                let checks: Vec<(String, Option<i32>)> = fresh_targets
+                    .iter()
+                    .map(|b| {
+                        let code = crate::git_auth::command()
+                            .args([
+                                "merge-base",
+                                "--is-ancestor",
+                                "origin/main",
+                                &format!("origin/{b}"),
+                            ])
+                            .output()
+                            .ok()
+                            .and_then(|o| o.status.code());
+                        (b.clone(), code)
+                    })
+                    .collect();
+                let behind = bases_behind(&checks);
+                if behind.is_empty() {
+                    println!(
+                        "\n  FRESHNESS — every parked/stranded branch is based on current origin/main"
+                    );
+                } else {
+                    println!(
+                        "\n  FRESHNESS — {} branch(es) based BEHIND origin/main (re-gate before \
+                         boarding; a stale base merges clean and reverts the train):",
+                        behind.len()
+                    );
+                    for b in behind {
+                        println!("    {b}");
+                    }
+                }
+            }
+            Ok(out) => println!(
+                "\n  FRESHNESS — skipped: git fetch failed ({})",
+                String::from_utf8_lossy(&out.stderr)
+                    .lines()
+                    .next()
+                    .unwrap_or("no stderr")
+            ),
+            Err(e) => println!("\n  FRESHNESS — skipped: could not run git ({e})"),
+        }
+    }
+
     // The task queue, as a number.
     let tasks = api(
         &http,
@@ -229,4 +312,26 @@ pub async fn run() -> Result<()> {
         "    a stranded green above may already BE the fix: rescue it, never rebuild it blind"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bases_behind_flags_only_the_not_ancestor_code() {
+        let checks = vec![
+            ("fresh/a".to_string(), Some(0)),  // main is an ancestor — fresh
+            ("stale/b".to_string(), Some(1)),  // not an ancestor — behind
+            ("gone/c".to_string(), Some(128)), // bad/missing ref — not flagged
+            ("err/d".to_string(), None),       // git could not run — not flagged
+        ];
+        assert_eq!(bases_behind(&checks), vec!["stale/b"]);
+    }
+
+    #[test]
+    fn bases_behind_is_empty_when_all_fresh() {
+        let checks = vec![("a".to_string(), Some(0)), ("b".to_string(), Some(0))];
+        assert!(bases_behind(&checks).is_empty());
+    }
 }
