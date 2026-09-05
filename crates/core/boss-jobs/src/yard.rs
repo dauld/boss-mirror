@@ -708,11 +708,17 @@ pub fn gates(
 /// failed then re-gated green is fixed and does not show — so gate-runs
 /// are grouped by branch, the latest kept (by `opened_on`, tie-broken by
 /// packet id so the order is total), and the garage is every branch
-/// whose latest is a non-green terminal verdict (`failed` / `lost` /
-/// `unreadable`). In-flight runs (no verdict) do not count as the latest
-/// state: a branch being re-gated right now is in the SLOTS, not the
-/// garage, so a still-running retry is only kept as latest when it is the
-/// sole run. Sorted by branch for a stable render.
+/// whose latest verdict is `failed`: a red that a check actually judged.
+/// `lost` and `unreadable` are NOT reds — a lost run says "no verdict was
+/// produced" (the runner died, the reaper buried it), an unreadable one
+/// says the receipt could not be parsed — and a branch nobody judged is
+/// not awaiting rework. Measured 2026-09-05: the garage held
+/// fix/lean-ci-builds on a reaper-settled `lost` run while the branch's
+/// head was already reachable from main, drawing rework where there was
+/// none. In-flight runs (no verdict) do not count as the latest state: a
+/// branch being re-gated right now is in the SLOTS, not the garage, so a
+/// still-running retry is only kept as latest when it is the sole run.
+/// Sorted by branch for a stable render.
 pub fn garage(gate_runs: &[(Job, Vec<Step>)], settled_branches: &[String]) -> Vec<GaragedCar> {
     use std::collections::HashMap;
     // branch -> the latest (job, steps) seen for it.
@@ -746,10 +752,10 @@ pub fn garage(gate_runs: &[(Job, Vec<Step>)], settled_branches: &[String]) -> Ve
                 return None;
             }
             let verdict = gate_run_verdict(steps)?;
-            // A terminal non-green verdict = red: awaiting rework. Green
-            // is fixed; an in-flight run has no verdict and was filtered
-            // above.
-            (verdict != "green").then(|| GaragedCar {
+            // Only a JUDGED red is rework. Green is fixed; lost and
+            // unreadable were never judged; an in-flight run has no
+            // verdict and was filtered above.
+            (verdict == "failed").then(|| GaragedCar {
                 branch: branch.to_string(),
                 failed_check: failing_check(steps),
                 since: g.opened_on.to_string(),
@@ -1788,15 +1794,42 @@ mod tests {
 
     #[test]
     fn a_red_with_no_named_check_still_garages_without_a_check() {
-        // A run that died outside a check (headroom guard, crash) names
-        // no failing check — the garage row shows the branch anyway.
+        // A judged red that names no failing check (a receipt with no
+        // `checks`, a runner that failed outside a check) — the garage
+        // row shows the branch anyway. `failed`, not `lost`: a lost run
+        // was never judged and does not garage.
         let runs = vec![(
             gate_run_on("feat/x", 3),
-            vec![verdict_step("lost", json!([]))],
+            vec![verdict_step("failed", json!([]))],
         )];
         let g = garage(&runs, &[]);
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].failed_check, None);
+    }
+
+    #[test]
+    fn a_lost_run_is_not_a_red_and_leaves_the_garage() {
+        // The reaper settles a dead runner as `lost`: NO VERDICT WAS
+        // PRODUCED. That says nothing about the branch — it was never
+        // judged — so it is not rework awaiting a fix. Measured
+        // 2026-09-05: fix/lean-ci-builds sat in the garage on a lost
+        // run while its head was reachable from main.
+        let runs = vec![(
+            gate_run_on("fix/lean-ci-builds", 4),
+            vec![verdict_step("lost", json!([]))],
+        )];
+        assert!(
+            garage(&runs, &[]).is_empty(),
+            "a lost run is unknown, not red"
+        );
+        let runs = vec![(
+            gate_run_on("fix/x", 4),
+            vec![verdict_step("unreadable", json!([]))],
+        )];
+        assert!(
+            garage(&runs, &[]).is_empty(),
+            "an unreadable run is unknown, not red"
+        );
     }
 
     #[test]
