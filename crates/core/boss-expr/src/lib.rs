@@ -45,6 +45,14 @@ pub enum Value {
     Int(i64),
     Float(f64),
     String(String),
+    /// A path that resolved to nothing — a missing key, a traversal into
+    /// a non-object, or a present-but-unrepresentable array/object. It
+    /// is FALSE in boolean position and UNEQUAL to every literal, so a
+    /// predicate over optional metadata evaluates instead of raising
+    /// (design 7b756357, David 2026-08-22): `job.metadata.x = "true"`
+    /// over an absent `x` is a clean false, not an UnknownIdentifier
+    /// that pins the step pending forever.
+    Absent,
 }
 
 impl Value {
@@ -56,6 +64,7 @@ impl Value {
             Value::Int(_) => "int",
             Value::Float(_) => "float",
             Value::String(_) => "string",
+            Value::Absent => "absent",
         }
     }
 
@@ -65,6 +74,10 @@ impl Value {
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             Value::Bool(b) => Some(*b),
+            // Absent reads false in boolean position — `NOT job.metadata.x`
+            // over an absent flag is true, `x AND y` is false — while
+            // every other non-bool still refuses to coerce.
+            Value::Absent => Some(false),
             _ => None,
         }
     }
@@ -78,6 +91,7 @@ impl fmt::Display for Value {
             Value::Int(i) => write!(f, "{i}"),
             Value::Float(x) => write!(f, "{x}"),
             Value::String(s) => write!(f, "{s}"),
+            Value::Absent => write!(f, "absent"),
         }
     }
 }
@@ -559,18 +573,23 @@ pub fn eval(expr: &Expr, ctx: &Context<'_>) -> Result<Value, EvalError> {
 }
 
 fn resolve_identifier(path: &[String], payload: &serde_json::Value) -> Result<Value, EvalError> {
+    // Resolution never raises. A missing key, a traversal into a
+    // non-object, or a present array/object (no scalar Value) all
+    // resolve to `Absent`, which the operators read as false. Before
+    // 7b756357 each of these was an `UnknownIdentifier` that a step's
+    // `ready_when` could not survive — the step held pending forever and
+    // the dispatcher dead-lettered its side effect.
     let mut cur = payload;
     for segment in path {
         match cur {
-            serde_json::Value::Object(map) => {
-                cur = map
-                    .get(segment)
-                    .ok_or_else(|| EvalError::UnknownIdentifier(path.join(".")))?;
-            }
-            _ => return Err(EvalError::UnknownIdentifier(path.join("."))),
+            serde_json::Value::Object(map) => match map.get(segment) {
+                Some(v) => cur = v,
+                None => return Ok(Value::Absent),
+            },
+            _ => return Ok(Value::Absent),
         }
     }
-    json_to_value(cur).ok_or_else(|| EvalError::UnknownIdentifier(path.join(".")))
+    Ok(json_to_value(cur).unwrap_or(Value::Absent))
 }
 
 fn json_to_value(v: &serde_json::Value) -> Option<Value> {
@@ -612,6 +631,11 @@ fn eval_binop(op: BinaryOp, l: &Value, r: &Value) -> Result<Value, EvalError> {
         BinaryOp::Eq => Ok(Value::Bool(values_equal(l, r))),
         BinaryOp::Neq => Ok(Value::Bool(!values_equal(l, r))),
         BinaryOp::Lt | BinaryOp::Lte | BinaryOp::Gt | BinaryOp::Gte => {
+            // An absent operand orders against nothing: every inequality
+            // over it is false, the same way it compares unequal.
+            if matches!(l, Value::Absent) || matches!(r, Value::Absent) {
+                return Ok(Value::Bool(false));
+            }
             let ord = compare_values(l, r)?;
             let result = match op {
                 BinaryOp::Lt => ord.is_lt(),
@@ -852,14 +876,91 @@ mod tests {
         );
     }
 
+    // 7b756357: a missing identifier is Absent, not an error — and
+    // Absent is false against every literal and in boolean position, so
+    // a predicate over optional metadata evaluates instead of pinning
+    // its step pending forever.
     #[test]
-    fn eval_missing_identifier_errors() {
+    fn a_missing_identifier_resolves_to_absent() {
         let payload = json!({});
         let c = ctx(&payload);
-        assert!(matches!(
-            eval(&parse("nope").unwrap(), &c),
-            Err(EvalError::UnknownIdentifier(_))
-        ));
+        assert_eq!(eval(&parse("nope").unwrap(), &c), Ok(Value::Absent));
+    }
+
+    #[test]
+    fn absent_is_false_against_every_literal() {
+        let payload = json!({ "metadata": {} });
+        let c = ctx(&payload);
+        // The idiom the fix exists for.
+        assert_eq!(
+            eval(&parse("metadata.x = \"true\"").unwrap(), &c),
+            Ok(Value::Bool(false))
+        );
+        assert_eq!(
+            eval(&parse("metadata.x != \"true\"").unwrap(), &c),
+            Ok(Value::Bool(true))
+        );
+        assert_eq!(
+            eval(&parse("metadata.n = 5").unwrap(), &c),
+            Ok(Value::Bool(false))
+        );
+    }
+
+    #[test]
+    fn absent_orders_against_nothing() {
+        let payload = json!({});
+        let c = ctx(&payload);
+        for src in ["n < 5", "n <= 5", "n > 5", "n >= 5"] {
+            assert_eq!(
+                eval(&parse(src).unwrap(), &c),
+                Ok(Value::Bool(false)),
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_is_false_in_boolean_position() {
+        let payload = json!({ "ready": true });
+        let c = ctx(&payload);
+        // A bare optional flag: absent reads false, so NOT flag is true —
+        // the optional-flag-defaults-off behavior the design wants.
+        assert_eq!(eval(&parse("missing_flag").unwrap(), &c), Ok(Value::Absent));
+        assert_eq!(
+            eval(&parse("NOT missing_flag").unwrap(), &c),
+            Ok(Value::Bool(true))
+        );
+        assert_eq!(
+            eval(&parse("ready AND missing_flag").unwrap(), &c),
+            Ok(Value::Bool(false))
+        );
+        assert_eq!(
+            eval(&parse("ready OR missing_flag").unwrap(), &c),
+            Ok(Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn a_present_array_or_object_is_absent_not_a_crash() {
+        // A path that lands on an array/object has no scalar Value; a
+        // predicate over it is false rather than an error.
+        let payload = json!({ "questions": [1, 2], "obj": { "a": 1 } });
+        let c = ctx(&payload);
+        assert_eq!(eval(&parse("questions").unwrap(), &c), Ok(Value::Absent));
+        assert_eq!(
+            eval(&parse("obj = \"x\"").unwrap(), &c),
+            Ok(Value::Bool(false))
+        );
+    }
+
+    #[test]
+    fn a_present_scalar_still_resolves_normally() {
+        let payload = json!({ "metadata": { "x": "true" } });
+        let c = ctx(&payload);
+        assert_eq!(
+            eval(&parse("metadata.x = \"true\"").unwrap(), &c),
+            Ok(Value::Bool(true))
+        );
     }
 
     #[test]
