@@ -51,6 +51,34 @@ fi
 WORKFLOW="$1"; shift
 STEP_TITLE="$1"; shift
 
+# A VERDICT FOR THE RUN THAT JUST ENDED. systemd hands every
+# ExecStopPost= process $SERVICE_RESULT (success / exit-code / timeout /
+# signal / ...) and $EXIT_STATUS, and ExecStopPost runs whether ExecStart
+# succeeded or not — unlike ExecStartPost, which systemd SKIPS when
+# ExecStart fails. Until 2026-09-05 every timer completed its packet
+# from ExecStartPost, so a failed run recorded nothing: the disk-floor
+# sweep's 16:10 packet sat open through two FLOOR UNMET runs looking
+# exactly like a run in progress, and forge-converge's 17:39 failure
+# (exit 1) was closed "ok" by the next run's recovery. A packet that
+# cannot say "failed" is not the record of the run.
+#
+# So when the caller passes no result of its own, the result IS the
+# service result: `ok` for success (the word the outcome predicates
+# route on), otherwise systemd's word for how it died, with the exit
+# status beside it. An explicit result= pair still wins.
+if [ -n "${SERVICE_RESULT:-}" ] && ! printf '%s\n' "$@" | grep -q '^result='; then
+    if [ "$SERVICE_RESULT" = "success" ]; then
+        set -- "$@" "result=ok"
+    else
+        set -- "$@" "result=$SERVICE_RESULT" "exit_status=${EXIT_STATUS:-unknown}"
+    fi
+fi
+# The lint's self-test reads the pairs this run would record, and stops.
+if [ -n "${BOSS_STEP_DRY_RUN:-}" ]; then
+    printf '%s\n' "$@"
+    exit 0
+fi
+
 # WHERE THE PACKET GOES IS NOT A DEFAULT, IT IS A DECISION.
 #
 # This read `${BOSS_JOBS_URL:-http://127.0.0.1:7900}` until 2026-08-17.

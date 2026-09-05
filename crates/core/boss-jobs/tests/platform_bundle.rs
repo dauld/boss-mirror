@@ -265,3 +265,61 @@ fn the_design_doc_protocol_declares_its_questions() {
     let titles: Vec<&str> = doc.steps.iter().map(|s| s.title.as_str()).collect();
     assert_eq!(titles, vec!["drafted", "review", "fold", "published"]);
 }
+
+/// A maintenance packet ends in its verdict. Until 2026-09-05 every
+/// maintenance kind had one terminal, reached on `steps.run.done`
+/// regardless of how the run went — and the unit only completed the
+/// run step from ExecStartPost, which systemd skips on failure. So a
+/// failed run either sat open looking like a run in progress
+/// (disk-floor-sweep, 16:10, two FLOOR UNMET runs) or was closed "ok"
+/// by the next run's recovery (forge-converge, 17:39, exit 1). Now the
+/// run step's `result` routes: `ok` completes, anything else fails —
+/// in the bundle AND in the three kinds still compiled into
+/// platform_workflows(), which are one contract.
+#[test]
+fn every_maintenance_kind_ends_in_its_verdict() {
+    let mut kinds: Vec<WorkflowSpec> = bundle()
+        .into_iter()
+        .filter(|w| w.kind.starts_with("maintenance-"))
+        .collect();
+    kinds.extend(
+        boss_jobs::registry::platform_workflows()
+            .into_iter()
+            .filter(|w| w.kind.starts_with("maintenance-")),
+    );
+    assert!(
+        kinds.len() >= 19,
+        "expected the 16 bundled + 3 compiled maintenance kinds"
+    );
+    for w in kinds {
+        let terminals: Vec<(&str, &str)> = w
+            .steps
+            .iter()
+            .filter_map(|s| {
+                s.terminal
+                    .as_ref()
+                    .map(|t| (t.outcome.as_str(), s.ready_when.as_str()))
+            })
+            .collect();
+        assert_eq!(
+            terminals.iter().map(|(o, _)| *o).collect::<Vec<_>>(),
+            vec!["completed", "failed"],
+            "{}: a maintenance packet ends in completed or failed, nothing else",
+            w.kind
+        );
+        assert!(
+            terminals[0]
+                .1
+                .contains("steps.run.metadata.result = \"ok\""),
+            "{}: completed must require the run's result to be ok",
+            w.kind
+        );
+        assert!(
+            terminals[1]
+                .1
+                .contains("steps.run.metadata.result != \"ok\""),
+            "{}: failed must be every other result",
+            w.kind
+        );
+    }
+}

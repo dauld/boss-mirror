@@ -38,4 +38,4 @@ Environment=UNITS=boss-estate-observe-host.timer
 # both.
 ExecStartPre=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-maintenance-wrap.sh maintenance-estate-observe-units "estate unit observation"
 ExecStart=/opt/boss/infra/estate/observe-units.sh
-ExecStartPost=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-step.sh maintenance-estate-observe-units run result=ok
+ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-step.sh maintenance-estate-observe-units run

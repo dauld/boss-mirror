@@ -21,7 +21,7 @@ Environment=RUST_LOG=info
 # only — a failed run leaves the Job open and loud.
 ExecStartPre=/opt/boss/infra/boss-maintenance-wrap.sh maintenance-ledger-replay "Ledger replay check"
 ExecStart=/usr/local/bin/boss-ledger-replay-check --deep --config /etc/boss-ledger-api.toml
-ExecStartPost=/opt/boss/infra/boss-step.sh maintenance-ledger-replay run result=ok
+ExecStopPost=-/opt/boss/infra/boss-step.sh maintenance-ledger-replay run
 # Runs as root to match the boss-audit-integrity-check timer pattern. The
 # check authenticates to Postgres via the `boss` role in postgres_url, not
 # the Linux user. Tighten to a dedicated service user once Boss adopts

@@ -3,9 +3,15 @@
 #
 # WHY. boss-maintenance-wrap.sh states the contract: "the timer is the
 # EXECUTOR, the Job is the VISIBILITY." ExecStartPre opens or reuses a
-# Job, ExecStartPost completes it, and a FAILED run completes nothing —
-# so the Job stays open on the fleet view until a later run succeeds or
-# a human closes it.
+# Job and ExecStopPost records the verdict — boss-step.sh reads
+# systemd's $SERVICE_RESULT, so a run that succeeded closes the packet
+# "Maintenance completed" and a run that died closes it "Maintenance
+# failed" with how it died. Until 2026-09-05 the completion sat on
+# ExecStartPost, which systemd skips when ExecStart fails: a failed run
+# recorded NOTHING, its packet stayed open looking like a run still in
+# progress (disk-floor-sweep, 16:10, through two FLOOR UNMET runs) or
+# was closed "ok" by the next run's recovery (forge-converge, 17:39,
+# exit 1). Check 3b refuses that shape.
 #
 # Three of eleven timers were wired that way. Eight ran nightly with no
 # packet, no findings, no event-log trace and nobody's queue, which
@@ -22,7 +28,8 @@
 # WHAT IT CHECKS, for every row of deploy-services.sh's TIMERS array:
 #   1. the .service unit exists where the array says it does
 #   2. it calls boss-maintenance-wrap.sh with a kind (opens the Job)
-#   3. it calls boss-step.sh with the SAME kind (completes it)
+#   3. it calls boss-step.sh with the SAME kind (records the verdict)
+#   3b. that call is on ExecStopPost, the one phase that runs on failure
 #   4. that kind is a real Workflow in the platform bundle
 #
 # (3) and (4) are the ones worth having. A unit that opens a Job and
@@ -88,14 +95,23 @@ for row in $rows; do
 
     if [ -z "$open_kind" ]; then
         echo "timers-leave-a-packet: $name runs with no Job — add an ExecStartPre calling" >&2
-        echo "    boss-maintenance-wrap.sh <kind> \"<label>\", and an ExecStartPost calling" >&2
-        echo "    boss-step.sh <kind> run result=ok. A timer with no packet fails silently." >&2
+        echo "    boss-maintenance-wrap.sh <kind> \"<label>\", and an ExecStopPost calling" >&2
+        echo "    boss-step.sh <kind> run. A timer with no packet fails silently." >&2
         problems=$((problems + 1)); continue
     fi
     if [ -z "$done_kind" ]; then
         echo "timers-leave-a-packet: $name OPENS a Job ($open_kind) and never completes it." >&2
-        echo "    Missing the ExecStartPost boss-step.sh call: every run would leave an open" >&2
+        echo "    Missing the ExecStopPost boss-step.sh call: every run would leave an open" >&2
         echo "    packet, so the fleet view fills with failures that did not happen." >&2
+        problems=$((problems + 1)); continue
+    fi
+    # 3b. A completion that only runs on success records no failure.
+    if grep -qE '^ExecStartPost=-?.*boss-step\.sh' "$unit" || ! grep -qE '^ExecStopPost=-?.*boss-step\.sh' "$unit"; then
+        echo "timers-leave-a-packet: $name records its verdict from a phase systemd skips on" >&2
+        echo "    failure. Put the boss-step.sh call on ExecStopPost=- (it runs whether ExecStart" >&2
+        echo "    succeeded or not, with \$SERVICE_RESULT set) and pass no result= of your own:" >&2
+        echo "    boss-step.sh reads the service result, so a run that died closes its packet" >&2
+        echo "    'Maintenance failed' instead of sitting open as if it were still running." >&2
         problems=$((problems + 1)); continue
     fi
     if [ "$open_kind" != "$done_kind" ]; then
@@ -172,6 +188,32 @@ for helper in infra/boss-maintenance-wrap.sh infra/boss-step.sh; do
         problems=$((problems + 1))
     fi
 done
+
+# 6. AND boss-step.sh MUST TURN THE SERVICE RESULT INTO A VERDICT.
+#
+# Check 3b proves the call sits where systemd will make it on failure;
+# this proves what the call records. Driven through the real script in
+# dry-run mode (it prints the pairs it would write and stops), because
+# the behaviour under test is the derivation, not the arithmetic.
+verdict() { # <service result> <exit status> [explicit pairs...]
+    local sr="$1" es="$2"; shift 2
+    SERVICE_RESULT="$sr" EXIT_STATUS="$es" BOSS_STEP_DRY_RUN=1 \
+        BOSS_JOBS_URL=http://example.invalid \
+        bash infra/boss-step.sh maintenance-selftest run "$@" 2>/dev/null | tr '\n' ' '
+}
+if ! verdict success 0 | grep -q 'result=ok'; then
+    echo "timers-leave-a-packet: boss-step.sh does not record a successful run as result=ok" >&2
+    problems=$((problems + 1))
+fi
+if ! verdict exit-code 1 | grep -q 'result=exit-code exit_status=1'; then
+    echo "timers-leave-a-packet: boss-step.sh does not record a failed run's service result" >&2
+    echo "    and exit status (SERVICE_RESULT=exit-code EXIT_STATUS=1 gave: $(verdict exit-code 1))" >&2
+    problems=$((problems + 1))
+fi
+if ! verdict exit-code 1 result=floor-unmet | grep -q 'result=floor-unmet'; then
+    echo "timers-leave-a-packet: boss-step.sh overrides a caller's explicit result=" >&2
+    problems=$((problems + 1))
+fi
 
 if [ "$problems" -gt 0 ]; then
     echo "" >&2

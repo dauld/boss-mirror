@@ -38,6 +38,14 @@
   let status = $state<Remote<YardStatus>>({ kind: 'loading' });
   const slots = $derived(status.kind === 'ready' ? gateSlots(status.data.gates) : []);
   const garage = $derived(status.kind === 'ready' ? status.data.garage : []);
+  // Operating info for the GATES view (David, feedback 3771438f): the
+  // capacity is the live delivery policy, the usage is now, and the
+  // approach's publishing rows are the branches queued to reach a gate.
+  const gatesReady = $derived(status.kind === 'ready');
+  const gateCapacity = $derived(status.kind === 'ready' ? status.data.gates.capacity : 0);
+  const gatesInUse = $derived(slots.filter(sl => sl.kind === 'occupied').length);
+  const gatesFree = $derived(Math.max(gateCapacity - gatesInUse, 0));
+  const waitingToGate = $derived(yard ? yard.approach.filter(a => a.state === 'publishing').length : 0);
 
   // The condensed packet panel (David, fc67bed2). The dock rows are a
   // slim projection — no steps, no metadata — so opening a packet
@@ -215,7 +223,7 @@
          green-unparked; each row opens its own packet. The gate SLOTS
          and the GARAGE come from the server-computed status (David,
          2026-09-03) so capacity is the live policy, not folklore. -->
-    {#if yard.approach.length > 0 || slots.length > 0 || garage.length > 0}
+    {#if yard.approach.length > 0 || gatesReady}
       <div class="yard-section">01 — THE APPROACH <span class="yard-n">{yard.approach.length}</span></div>
 
       {#if yard.approach.length > 0}
@@ -241,14 +249,21 @@
         </table>
       {/if}
 
-      <!-- The gate SLOTS: N parallel bays (N = the policy's
-           gate_max_concurrent), each empty or holding the car being
-           assessed in it. Capacity + usage legible at a glance. -->
-      {#if slots.length > 0}
+      <!-- The gate SLOTS: the one gates view (David, feedback 3771438f —
+           a gate mid-run used to draw both a slot here and a row in the
+           approach table above). N parallel bays, N = the policy's live
+           gate_max_concurrent. A standing section: the bays show even
+           when idle, so "nothing is gating" is a fact the board states,
+           not an absence. The header carries the operating info —
+           utilization, free bays, and how many branches are queued to
+           reach a gate. -->
+      {#if gatesReady}
         <div class="yard-gates-head">
           GATES
           <span class="yard-gates-n"
-            >{slots.filter(s => s.kind === 'occupied').length} / {slots.length} in use</span>
+            >{gatesInUse} / {gateCapacity} in use · {gatesFree} free{waitingToGate > 0
+              ? ` · ${waitingToGate} waiting to gate`
+              : ''}</span>
         </div>
         <div class="yard-gates">
           {#each slots as slot, i (i)}
@@ -273,19 +288,30 @@
       {/if}
 
       <!-- The GARAGE: cars whose latest gate went RED, waiting for
-           rework. A branch that re-gated green has left already (the
-           server keeps only the latest run per branch). -->
-      {#if garage.length > 0}
-        <div class="yard-gates-head">GARAGE <span class="yard-gates-n">gated red, awaiting rework</span></div>
-        <ul class="yard-garage">
-          {#each garage as c (c.branch)}
-            <li class="yard-garage-row">
-              <span class="yard-garage-branch">{c.branch}</span>
-              <span class="yard-garage-check">{c.failed_check ?? 'run died outside a check'}</span>
-              <span class="yard-stamp">{c.since}</span>
-            </li>
-          {/each}
-        </ul>
+           rework. A standing visual section even when empty (David,
+           feedback 3771438f): an empty garage is a claim worth making —
+           nothing is gated red — not a section that vanishes. A branch
+           that re-gated green has left already (the server keeps only
+           the latest run per branch). -->
+      {#if gatesReady}
+        <div class="yard-gates-head">
+          GARAGE
+          <span class="yard-gates-n"
+            >{garage.length > 0 ? 'gated red, awaiting rework' : 'nothing gated red'}</span>
+        </div>
+        {#if garage.length > 0}
+          <ul class="yard-garage">
+            {#each garage as c (c.branch)}
+              <li class="yard-garage-row">
+                <span class="yard-garage-branch">{c.branch}</span>
+                <span class="yard-garage-check">{c.failed_check ?? 'run died outside a check'}</span>
+                <span class="yard-stamp">{c.since}</span>
+              </li>
+            {/each}
+          </ul>
+        {:else}
+          <div class="yard-garage-empty">no cars in the garage — every gated branch is green or moving</div>
+        {/if}
       {/if}
     {/if}
 
@@ -641,6 +667,8 @@
   .yard-slot-since { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
     color: var(--warn, #d9a441); font-variant-numeric: tabular-nums; }
   .yard-slot-free { font-size: 12px; color: var(--static, #7A838C); font-style: italic; }
+  .yard-garage-empty { font-size: 12px; color: var(--static, #7A838C); font-style: italic;
+    border: 1px dashed var(--hairline, #2A3138); padding: 10px 12px; }
   /* The garage: gated-red cars, one row each. The err lamp on the
      branch, the failing check beside it. */
   .yard-garage { list-style: none; padding: 0; margin: 0;

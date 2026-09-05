@@ -20,7 +20,7 @@ expect down  2de17dd none    3 hands           # no stamp yet: nothing to roll t
 # Its packet is visibility, never a precondition: both hooks must be
 # prefixed `-` so systemd runs the watchdog whatever the API says.
 grep -qE '^ExecStartPre=-/home/david/boss/infra/boss-maintenance-wrap.sh maintenance-cluster-watchdog' "$unit" || fail "the watchdog's packet hook is missing or is not best-effort (needs the - prefix)"
-grep -qE '^ExecStartPost=-/home/david/boss/infra/boss-step.sh maintenance-cluster-watchdog' "$unit" || fail "the watchdog's completion hook is missing or is not best-effort (needs the - prefix)"
+grep -qE '^ExecStopPost=-/home/david/boss/infra/boss-step.sh maintenance-cluster-watchdog' "$unit" || fail "the watchdog's completion hook is missing or is not best-effort (needs the - prefix)"
 grep -qE '^ExecStart(Pre|Post)?=/home/david/boss/infra/(boss-maintenance-wrap|boss-step)' "$unit" && fail "a packet hook on the watchdog is a hard precondition — it would deadlock on the API it watches"
 grep -q '^ExecStart=/home/david/boss/infra/forge/cluster-watchdog.sh' "$unit" || fail "the unit does not run the watchdog"
 echo "the-cluster-knows-it-is-working: self-test ok — ok/wait/roll-to-stamp/hands decided as designed (7 cases); its packet hooks are best-effort, never a precondition"

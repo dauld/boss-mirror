@@ -541,10 +541,11 @@ terminal = { outcome = "unfounded" }
 #
 # boss-maintenance-wrap.sh states the contract already: "the timer is
 # the EXECUTOR, the Job is the VISIBILITY". ExecStartPre opens (or
-# reuses) a Job, ExecStartPost completes it, and a FAILED run completes
-# nothing — so the Job stays open on the fleet view until a later run
-# succeeds or a human closes it. Three chores were wired that way:
-# backup, audit-integrity, ledger-replay.
+# reuses) a Job and ExecStopPost records its verdict — `ok` closes it
+# "Maintenance completed", anything else "Maintenance failed" (since
+# 2026-09-05; before that a failed run recorded nothing and its Job sat
+# open looking like a run in progress). Three chores were wired that
+# way: backup, audit-integrity, ledger-replay.
 #
 # Five were not, and had no packet, no findings, no event-log trace and
 # nobody's queue. A silent failure in any of them looks exactly like a
@@ -591,10 +592,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # boss-ledger-recognize.service
 [[workflow]]
@@ -627,10 +641,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # boss-ml-inference-batch.service
 [[workflow]]
@@ -663,10 +690,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # boss-messages-events-purge.service
 [[workflow]]
@@ -699,10 +739,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # boss-files-gc.service
 [[workflow]]
@@ -735,10 +788,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # boss-estate-observe-host.service
 [[workflow]]
@@ -768,10 +834,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # boss-estate-observe-units.service
 [[workflow]]
@@ -801,10 +880,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # boss-views-catchup.service
 [[workflow]]
@@ -834,10 +926,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # boss-search-reindex.service
 [[workflow]]
@@ -867,10 +972,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # boss-deploy-confirm.service
 [[workflow]]
@@ -900,10 +1018,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 
 # THE FORGE HOST'S OWN CHORES.
@@ -946,10 +1077,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # cluster-deploy-runner.service (forge host)
 [[workflow]]
@@ -979,10 +1123,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # disk-floor-sweep.service (forge host)
 [[workflow]]
@@ -1012,10 +1169,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # forge-converge.service (forge host)
 [[workflow]]
@@ -1045,10 +1215,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # maintenance-cluster-watchdog — the loop that knows the cluster is
 # working from OUTSIDE it (infra/forge/cluster-watchdog.sh, every five
@@ -1085,10 +1268,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # ---------------------------------------------------------------------------
 # ship-a-change — the delivery protocol itself, and the last of the
@@ -1392,9 +1588,23 @@ required = true
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
+metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # ---------------------------------------------------------------------
 # THE TWO MOST-EDITED PROTOCOLS, moved here from Rust (e332a320).

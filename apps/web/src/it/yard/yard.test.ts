@@ -974,10 +974,11 @@ const publishEnv = (jobs: readonly JobLite[]): StationQueueEnvelope => ({
 });
 
 describe('approach', () => {
-  test('an open gate-run is gating, whatever else the branch has', () => {
-    const rows = approach([gateRun({})], null, [ship('fix/x')], NOW);
-    expect(rows.map(r => r.state)).toEqual(['gating']);
-    expect(rows[0]?.branch).toBe('fix/x');
+  test('an open gate-run is the GATES view, not an approach row', () => {
+    // The gate mid-run lives in the server-computed slots the page
+    // renders beside the approach; drawing it here too was the
+    // redundancy David flagged (feedback 3771438f).
+    expect(approach([gateRun({})], null, [ship('fix/x')], NOW)).toEqual([]);
   });
 
   test('a green gate with no car anywhere is the gap the dock cannot see', () => {
@@ -1058,8 +1059,9 @@ describe('approach', () => {
       status: 'closed', opened_on: '2026-08-27', steps: [verdictStep('green')],
     });
     expect(approach([old], null, [], NOW)).toEqual([]);
-    // An OPEN gate-run is live activity at any age.
-    expect(approach([gateRun({ opened_on: '2026-08-27' })], null, [], NOW).length).toBe(1);
+    // An OPEN gate-run is live activity at any age — but it lives in the
+    // GATES slots, so it is never an approach row.
+    expect(approach([gateRun({ opened_on: '2026-08-27' })], null, [], NOW)).toEqual([]);
   });
 
   test('open publish-requests ride in front, with the requester on the row', () => {
@@ -1073,7 +1075,7 @@ describe('approach', () => {
     ]);
   });
 
-  test('rows group by distance from the dock: publishing, gating, red, green', () => {
+  test('rows group by distance from the dock: publishing, red, green (gating is the slots)', () => {
     const rows = approach(
       [
         gateRun({ id: 'g1', metadata: { branch: 'fix/a' } }),
@@ -1083,7 +1085,8 @@ describe('approach', () => {
       publishEnv([gateRun({ id: 'p1', kind: 'publish-request', metadata: { branch: 'fix/d' } })]),
       [], NOW,
     );
-    expect(rows.map(r => r.state)).toEqual(['publishing', 'gating', 'gated-red', 'gated-green']);
+    // fix/a is mid-gate — it is a GATES slot, not an approach row.
+    expect(rows.map(r => r.state)).toEqual(['publishing', 'gated-red', 'gated-green']);
   });
 
   test('assembleYard without the new feeds still assembles, approach empty', () => {
@@ -1092,18 +1095,16 @@ describe('approach', () => {
   });
 });
 
-describe('approach — a live gate outranks any same-day verdict', () => {
-  test('an open packet wins for its branch wherever the server put it', () => {
+describe('approach — a live gate suppresses its branch\'s stale verdict', () => {
+  test('a live re-gate hides a same-day closed green for its branch', () => {
     // Server order within a day is not insertion order (measured
     // 2026-08-31: two refused-launch packets sorted above the gates
-    // that ran). A closed green served FIRST must not shadow the
-    // branch's live re-gate.
+    // that ran). A closed green served FIRST must not draw a green
+    // approach row while the branch is being re-gated — the live gate
+    // is the GATES slot, and no stale verdict rides beneath it.
     const closedGreen = gateRun({ id: 'g-old', status: 'closed', steps: [verdictStep('green')] });
     const liveRegate = gateRun({ id: 'g-live' });
-    const rows = approach([closedGreen, liveRegate], null, [], NOW);
-    expect(rows.map(r => ({ id: r.id, state: r.state }))).toEqual([
-      { id: 'g-live', state: 'gating' },
-    ]);
+    expect(approach([closedGreen, liveRegate], null, [], NOW)).toEqual([]);
   });
 });
 

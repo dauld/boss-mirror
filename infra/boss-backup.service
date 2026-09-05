@@ -10,5 +10,5 @@ Type=oneshot
 # only — a failed run leaves the Job open and loud.
 ExecStartPre=/opt/boss/infra/boss-maintenance-wrap.sh maintenance-backup "Nightly backup"
 ExecStart=/opt/boss/infra/backup.sh
-ExecStartPost=/opt/boss/infra/boss-step.sh maintenance-backup run result=ok
+ExecStopPost=-/opt/boss/infra/boss-step.sh maintenance-backup run
 User=root

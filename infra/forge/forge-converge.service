@@ -22,9 +22,10 @@ Environment=BOSS_JOBS_URL=http://10.20.0.34:7900
 # the forge is briefly unreachable.
 TimeoutStartSec=10min
 # The timer is the executor; the Job is the visibility. ExecStartPre
-# opens (or reuses) the maintenance-forge-converge packet, ExecStartPost
-# completes it; a failed ExecStart runs no Post, so a failed converge
-# leaves the packet open on the fleet view — the alarm. (timers-leave-a-packet)
+# opens (or reuses) the maintenance-forge-converge packet; ExecStopPost
+# records the verdict whether ExecStart succeeded or not, so a failed
+# converge closes its packet "Maintenance failed" — the alarm, naming
+# the exit status. (timers-leave-a-packet)
 ExecStartPre=/home/david/boss/infra/boss-maintenance-wrap.sh maintenance-forge-converge "Forge host converges on its own units"
 ExecStart=/home/david/boss/infra/forge/forge-converge.sh
-ExecStartPost=/home/david/boss/infra/boss-step.sh maintenance-forge-converge run result=ok
+ExecStopPost=-/home/david/boss/infra/boss-step.sh maintenance-forge-converge run

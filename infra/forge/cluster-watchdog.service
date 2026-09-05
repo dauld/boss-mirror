@@ -17,4 +17,4 @@ Environment=WATCHDOG_STATE=/home/david/.boss-watchdog-dark
 Environment=WATCHDOG_DARK_LIMIT=3
 ExecStartPre=-/home/david/boss/infra/boss-maintenance-wrap.sh maintenance-cluster-watchdog "Cluster watchdog"
 ExecStart=/home/david/boss/infra/forge/cluster-watchdog.sh
-ExecStartPost=-/home/david/boss/infra/boss-step.sh maintenance-cluster-watchdog run result=ok
+ExecStopPost=-/home/david/boss/infra/boss-step.sh maintenance-cluster-watchdog run

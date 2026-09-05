@@ -57,6 +57,18 @@ free, so the sweep buys the headroom a consist consumes mid-flight. A
 sweep floor equal to the CI floor never bought anything (2026-09-05,
 train #204).
 
+**Every run ends in its verdict.** Each unit above opens (or reuses)
+its `maintenance-*` packet from ExecStartPre and records the verdict
+from `ExecStopPost` — the one phase systemd runs whether ExecStart
+succeeded or not. `boss-step.sh` reads `$SERVICE_RESULT`: a run that
+succeeded closes its packet *Maintenance completed*; one that died
+closes it *Maintenance failed* carrying `result` (`exit-code`,
+`timeout`, `signal`) and `exit_status`. A packet still open at "Run to
+completion" therefore means the run is genuinely still running, or the
+host rebooted mid-run — and the next run's wrap adopts and completes
+it. Before 2026-09-05 a failed run recorded nothing, and the open
+packet looked exactly like a run in progress.
+
 ## Reading the host from the pod
 
 No ssh from the pod. Three doors, all read-only:

@@ -207,7 +207,7 @@ export type YardState = Readonly<{
 }>;
 
 /** Where an inbound branch stands, ordered by distance from the dock. */
-export type ApproachState = 'publishing' | 'gating' | 'gated-red' | 'gated-green';
+export type ApproachState = 'publishing' | 'gated-red' | 'gated-green';
 
 export type ApproachRow = Readonly<{
   /** The packet behind the row — a publish-request or gate-run Job. */
@@ -276,7 +276,6 @@ export function approach(
       };
     });
 
-  const gating: ApproachRow[] = [];
   const red: ApproachRow[] = [];
   const green: ApproachRow[] = [];
   // A live gate outranks every same-day verdict for its branch: server
@@ -333,8 +332,11 @@ export function approach(
       note: null,
     };
     if (g.status === 'open') {
+      // A gate mid-run is the GATES view's row now (the server-computed
+      // slots), not one here — the redundancy David flagged. It still
+      // CLAIMS its branch, so a stale same-day verdict for that branch
+      // cannot draw a red/green row beneath the live gate.
       seen.add(branch);
-      gating.push({ ...row, state: 'gating' });
       continue;
     }
     // A superseded run does NOT claim its branch's row: same-day server
@@ -361,7 +363,7 @@ export function approach(
       red.push({ ...row, state: 'gated-red' });
     }
   }
-  return [...publishing, ...gating, ...red, ...green];
+  return [...publishing, ...red, ...green];
 }
 
 function step(j: WithSteps, slug: string, titleFallback: string): StepLite | null {

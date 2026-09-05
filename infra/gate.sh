@@ -637,6 +637,7 @@ PREFLIGHT_LINTS=(
     "every-spa-api-path-is-routed|infra/lint/every-spa-api-path-is-routed.sh"
     "forge-install-covers-the-ops-runner|infra/lint/forge-install-covers-the-ops-runner.sh"
     "the-observer-retains-and-replays|infra/lint/the-observer-retains-and-replays.sh"
+    "a-signature-follows-its-decision|infra/lint/a-signature-follows-its-decision.sh"
     # The one roster entry allowed a network fetch: report-only (always
     # exits 0) and soft-skips when the tool or the advisory DB is
     # absent, so it cannot red a gate — it can only add a report line.
