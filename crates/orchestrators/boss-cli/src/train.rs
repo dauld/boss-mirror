@@ -2160,8 +2160,34 @@ pub(crate) fn auto_cancel_reason(
 /// the cars are released with the stall named in their `skip_reason`, so
 /// the record says which question to ask without inventing a strike
 /// nothing reads.
-pub(crate) fn verdict_strikes_cars(verdict: &str) -> bool {
-    verdict == "failing"
+pub(crate) fn verdict_strikes_cars(verdict: &str, rollup: Option<&Value>) -> bool {
+    if verdict != "failing" {
+        return false;
+    }
+    // A failing verdict strikes UNLESS a failing check says it REFUSED.
+    // The locomotive job posts a commit status whose description starts
+    // with `refused:` when it declines to run — a disk floor, a stale
+    // runner image, a wrong uid — before any check has judged the tree.
+    // Three times (2026-08-22, 09-02, 09-05 train #204) that refusal
+    // was recorded as a plain red and struck every car aboard; two
+    // strikes hold a car out until a human looks. The word must sit on
+    // a FAILING check: a passing check that mentions refusing proves
+    // nothing, and a bare failure with no description is a real red.
+    !any_failing_check_refused(rollup)
+}
+
+/// Does any FAILING check in the rollup carry a `refused` description?
+pub(crate) fn any_failing_check_refused(rollup: Option<&Value>) -> bool {
+    rollup
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|c| c.get("conclusion").and_then(Value::as_str) == Some("FAILURE"))
+        .any(|c| {
+            c.get("description")
+                .and_then(Value::as_str)
+                .is_some_and(|d| d.trim_start().to_lowercase().starts_with("refused"))
+        })
 }
 
 /// The metadata a released car carries away from a cancelled train.
@@ -3957,8 +3983,12 @@ impl Conductor {
                 if self.cfg.dry {
                     log(format!("DRY: would cancel {} ({reason})", id8(&tid)));
                 } else {
-                    self.cancel_train(&tid, &reason, verdict_strikes_cars(verdict))
-                        .await?;
+                    self.cancel_train(
+                        &tid,
+                        &reason,
+                        verdict_strikes_cars(verdict, info.get("statusCheckRollup")),
+                    )
+                    .await?;
                 }
                 continue;
             }
@@ -6867,9 +6897,41 @@ mod tests {
     }
 
     #[test]
+    fn an_infrastructure_refusal_strikes_no_car() {
+        // The locomotive refused before any check ran (train #204,
+        // 2026-09-05: 65GB free on the forge, need 70GB) and said so on
+        // its commit status. Nothing judged the cars.
+        let refused = json!([
+            {"context": "CI / build-image (pull_request)", "conclusion": "SUCCESS", "description": ""},
+            {"context": "CI / locomotive refusal", "conclusion": "FAILURE",
+             "description": "refused: 65GB free on the workspace filesystem, need 70GB"},
+        ]);
+        assert!(!verdict_strikes_cars("failing", Some(&refused)));
+        // A judged red strikes.
+        let real_red = json!([
+            {"context": "CI / test (pull_request)", "conclusion": "FAILURE", "description": "3 checks failed"},
+        ]);
+        assert!(verdict_strikes_cars("failing", Some(&real_red)));
+        // No description is not a refusal claim.
+        let bare = json!([{"context": "CI / test (pull_request)", "conclusion": "FAILURE"}]);
+        assert!(
+            verdict_strikes_cars("failing", Some(&bare)),
+            "no description is not a refusal claim"
+        );
+        // The word on a PASSING check proves nothing about the failing one.
+        let green_mentions = json!([
+            {"context": "CI / fast (pull_request)", "conclusion": "SUCCESS", "description": "refused nothing"},
+            {"context": "CI / web (pull_request)", "conclusion": "FAILURE", "description": "svelte-check"},
+        ]);
+        assert!(verdict_strikes_cars("failing", Some(&green_mentions)));
+        // Only a failing verdict can strike at all.
+        assert!(!verdict_strikes_cars("aborted", Some(&refused)));
+    }
+
+    #[test]
     fn an_aborted_train_leaves_its_cars_unstruck() {
         // The strike is what was wrong. Nothing judged these cars.
-        assert!(!verdict_strikes_cars("aborted"));
+        assert!(!verdict_strikes_cars("aborted", None));
         let car = json!({"id": "car-1", "metadata": {"red_trains": 1}});
         let stamps = release_stamps(&car, "CI aborted without a verdict", false);
         assert!(
@@ -6887,7 +6949,7 @@ mod tests {
     fn a_genuinely_red_train_still_strikes_its_cars() {
         // The two-strike hold has to keep working — without it the
         // auto-cancel is a loop that burns CI all night.
-        assert!(verdict_strikes_cars("failing"));
+        assert!(verdict_strikes_cars("failing", None));
         let car = json!({"id": "car-1", "metadata": {"red_trains": 1}});
         let stamps = release_stamps(&car, "CI red", true);
         assert_eq!(
@@ -6903,8 +6965,8 @@ mod tests {
     #[test]
     fn only_a_failing_verdict_strikes() {
         // Neither silence nor success is a strike.
-        assert!(!verdict_strikes_cars("pending"));
-        assert!(!verdict_strikes_cars("green"));
+        assert!(!verdict_strikes_cars("pending", None));
+        assert!(!verdict_strikes_cars("green", None));
     }
 
     // -- the CI verdict blind spot -----------------------------------------
