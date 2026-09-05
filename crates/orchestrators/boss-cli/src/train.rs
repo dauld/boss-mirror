@@ -1285,6 +1285,10 @@ pub(crate) fn publish_car_branch(clone: &str, branch: &str) -> Result<bool> {
     // The push below is a plain push (never --force), so git would refuse
     // a diverged head anyway; refusing here says WHY in the journal
     // instead of a silent rc=1.
+    // A `+` refspec: the tracking ref may hold an OLDER head (the very
+    // memory this guards against), and a plain fetch refuses to move it
+    // backwards-and-sideways — which would leave the clone believing the
+    // fork still carries what it last saw.
     let _ = sh_unchecked(&[
         "git",
         "-C",
@@ -1292,7 +1296,7 @@ pub(crate) fn publish_car_branch(clone: &str, branch: &str) -> Result<bool> {
         "fetch",
         "-q",
         "fork",
-        &format!("refs/heads/{branch}:refs/remotes/fork/{branch}"),
+        &format!("+refs/heads/{branch}:refs/remotes/fork/{branch}"),
     ]);
     let fork_ref = format!("fork/{branch}");
     if exists(&fork_ref)? {
