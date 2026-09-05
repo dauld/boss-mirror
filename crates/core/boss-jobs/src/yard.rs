@@ -227,7 +227,12 @@ fn phase_of(steps: &[Step]) -> TrainPhase {
 /// conductor wrote it to. Order matters: a deploy block is the most
 /// specific and most-recently-buried, so it wins over the coarser
 /// stall/converge latches when both are present.
-fn block_of(job: &Job, steps: &[Step], phase: TrainPhase) -> Option<TrainBlock> {
+fn block_of(
+    job: &Job,
+    steps: &[Step],
+    phase: TrainPhase,
+    stall_before: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<TrainBlock> {
     // A deploy block lives on the `deployed` step and is meaningful only
     // while that step has not completed — a completed deploy cleared it
     // by advancing, even though the keys are not erased.
@@ -268,7 +273,39 @@ fn block_of(job: &Job, steps: &[Step], phase: TrainPhase) -> Option<TrainBlock> 
             since: since.to_string(),
         });
     }
+    // DERIVED STALL — every check above reads a flag the CONDUCTOR
+    // writes, so a conductor that cannot run makes every train it is
+    // failing to move look healthy. On 2026-09-04 train #198 sat at
+    // `converged` for 2h21m against a 2h policy showing block: None,
+    // because the reconcile that stamps `stalled_since` was itself what
+    // was down. CLAUDE.md: "an alarm that reports through its subject
+    // dies with it."
+    //
+    // The read-model already holds the step stamps and the policy, so it
+    // can answer without asking. An arrived train is never stalled; a
+    // train with no completion stamps yields nothing rather than a guess.
+    if phase != TrainPhase::Arrived
+        && let Some(deadline) = stall_before
+        && let Some(newest) = newest_completion(steps)
+        && newest < deadline
+    {
+        return Some(TrainBlock::Stalled {
+            since: newest.to_rfc3339(),
+        });
+    }
     None
+}
+
+/// The most recent `completed_at` across a train's steps — how long it
+/// has been standing still. Steps without the stamp are skipped rather
+/// than treated as ancient.
+fn newest_completion(steps: &[Step]) -> Option<chrono::DateTime<chrono::Utc>> {
+    steps
+        .iter()
+        .filter_map(|s| s.metadata.get("completed_at").and_then(Value::as_str))
+        .filter_map(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&chrono::Utc))
+        .max()
 }
 
 /// A metadata flag written as either `true` or the string `"true"`
@@ -279,7 +316,11 @@ fn truthy(v: &Value) -> bool {
 }
 
 /// Build one train row from its Job and steps.
-pub fn train_status(job: &Job, steps: &[Step]) -> TrainStatus {
+pub fn train_status(
+    job: &Job,
+    steps: &[Step],
+    stall_before: Option<chrono::DateTime<chrono::Utc>>,
+) -> TrainStatus {
     let phase = phase_of(steps);
     let car_count = job
         .metadata
@@ -291,7 +332,7 @@ pub fn train_status(job: &Job, steps: &[Step]) -> TrainStatus {
         title: job.title.clone(),
         phase,
         at_step: at_step(steps),
-        block: block_of(job, steps, phase),
+        block: block_of(job, steps, phase, stall_before),
         ci_result: find_step(steps, &CI)
             .and_then(|s| meta_str(&s.metadata, "result"))
             .map(str::to_string),
@@ -580,7 +621,25 @@ pub struct ActiveGate {
     /// When the gate-run opened — date-level, its own `opened_on` stamp,
     /// the finest instant a gate-run Job carries (like `DockCar`).
     pub since: String,
+    /// True when this run has been "active" longer than a gate Job can
+    /// physically live: it is not gating, it is a corpse holding a slot.
+    /// A gate pod that dies without recording a verdict leaves its packet
+    /// at `record-verdict` forever, and the surface then draws it exactly
+    /// like a healthy run — on 2026-09-04 two such ghosts sat in the
+    /// gates section for 17 hours with their branches long since landed,
+    /// and a third silently ate a car that was never gated at all.
+    #[serde(default)]
+    pub stale: bool,
 }
+
+/// How long a gate-run may legitimately stay active before the surface
+/// calls it dead. This is the gate Job's own `activeDeadlineSeconds`
+/// (10800 = 3h) from `infra/gate-runner/gate-runner.yaml`: past it,
+/// Kubernetes has already killed the Job, so a packet still claiming to
+/// gate cannot be. CLAUDE.md §9a — the number lives in two places and
+/// the manifest is the authority; move this if that moves. A ceiling,
+/// not an expectation: a normal gate finishes in ~15-90 min.
+pub const GATE_MAX_ACTIVE_HOURS: i64 = 3;
 
 /// The gate slots the Approach renders: how many gates run at once
 /// (`capacity`, from the delivery policy — never a constant baked into
@@ -610,7 +669,13 @@ pub struct GaragedCar {
 /// (open, no verdict yet) are sorted by `since` then `branch` so slot
 /// assignment is deterministic — the same run lands in the same slot
 /// across polls.
-pub fn gates(gate_runs: &[(Job, Vec<Step>)], capacity: i32) -> Gates {
+pub fn gates(
+    gate_runs: &[(Job, Vec<Step>)],
+    capacity: i32,
+    now: Option<chrono::DateTime<chrono::Utc>>,
+) -> Gates {
+    // Past this instant a run has outlived the Job meant to be running it.
+    let dead_before = now.map(|n| n - chrono::Duration::hours(GATE_MAX_ACTIVE_HOURS));
     let mut active: Vec<ActiveGate> = gate_runs
         .iter()
         .filter(|(g, _)| g.status == JobStatus::Open)
@@ -622,6 +687,16 @@ pub fn gates(gate_runs: &[(Job, Vec<Step>)], capacity: i32) -> Gates {
                     branch: branch.to_string(),
                     packet_id: g.id.to_string(),
                     since: g.opened_on.to_string(),
+                    // `opened_at` is the RFC3339 instant; `opened_on` is
+                    // only a date, too coarse to tell a long-running gate
+                    // from a dead one on the same day. No stamp or no
+                    // clock means no claim: absence is not evidence.
+                    stale: match (dead_before, meta_str(&g.metadata, "opened_at")) {
+                        (Some(cutoff), Some(at)) => chrono::DateTime::parse_from_rfc3339(at)
+                            .map(|t| t.with_timezone(&chrono::Utc) < cutoff)
+                            .unwrap_or(false),
+                        _ => false,
+                    },
                 })
         })
         .collect();
@@ -820,10 +895,22 @@ pub fn build_status(
     gate_runs: &[(Job, Vec<Step>)],
     car_branches: &[String],
     settled_car_branches: &[String],
+    now: Option<chrono::DateTime<chrono::Utc>>,
 ) -> YardStatus {
+    // The instant a train must have completed SOMETHING after, or it is
+    // standing still. Computed once so train_status stays a pure
+    // comparison, and only when the policy declares a window.
+    // Both derivations below follow one rule: no clock means no claim.
+    // A caller without a clock (the denied-reader's empty status) gets a
+    // status that asserts no trouble rather than inventing a reading —
+    // and this keeps wall-clock out of the read-model entirely, which is
+    // what `no-wallclock` protects (sim runs must not see real time).
+    let stall_before = now
+        .zip(policy.map(|p| p.stall_hours).filter(|h| *h > 0))
+        .map(|(n, h)| n - chrono::Duration::hours(i64::from(h)));
     let trains = open_trains
         .iter()
-        .map(|(j, s)| train_status(j, s))
+        .map(|(j, s)| train_status(j, s, stall_before))
         .collect();
     let dock: Vec<DockCar> = dock_cars.iter().map(dock_car).collect();
     let boarding = boarding_predicate(rules, dock.len());
@@ -843,7 +930,7 @@ pub fn build_status(
         boarding,
         recent,
         stranded: stranded_greens(gate_runs, car_branches),
-        gates: gates(gate_runs, capacity),
+        gates: gates(gate_runs, capacity, now),
         garage: garage(gate_runs, settled_car_branches),
         policy: policy_thresholds(policy),
     }
@@ -970,6 +1057,17 @@ mod tests {
             !no_rule.silent,
             "9h of silence, but no declared interval to call it late"
         );
+    }
+
+    /// A fixed instant for status assembly in tests. Never the wall
+    /// clock: `no-wallclock` forbids it, and a test that reads real time
+    /// is a test that changes answer overnight.
+    fn fixed_now() -> Option<chrono::DateTime<chrono::Utc>> {
+        Some(
+            chrono::DateTime::parse_from_rfc3339("2026-09-04T12:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        )
     }
 
     fn step(slug: &str, title: &str, status: StepStatus, metadata: Value) -> Step {
@@ -1132,7 +1230,7 @@ mod tests {
             ),
         ];
         let job = train(vec![], json!({}));
-        let ts = train_status(&job, &steps);
+        let ts = train_status(&job, &steps, None);
         assert_eq!(ts.phase, TrainPhase::Deploying);
         assert_eq!(
             ts.block,
@@ -1158,7 +1256,7 @@ mod tests {
             }),
         )];
         let job = train(vec![], json!({}));
-        assert_eq!(block_of(&job, &steps, TrainPhase::Converging), None);
+        assert_eq!(block_of(&job, &steps, TrainPhase::Converging, None), None);
     }
 
     #[test]
@@ -1178,7 +1276,7 @@ mod tests {
             step("merged", "Merged into main", StepStatus::Ready, json!({})),
         ];
         let job = train(vec![], json!({}));
-        let ts = train_status(&job, &steps);
+        let ts = train_status(&job, &steps, None);
         assert_eq!(
             ts.block,
             Some(TrainBlock::CiRed {
@@ -1208,7 +1306,7 @@ mod tests {
             ),
         ];
         let job = train(vec![], json!({}));
-        assert_eq!(block_of(&job, &steps, TrainPhase::Deploying), None);
+        assert_eq!(block_of(&job, &steps, TrainPhase::Deploying, None), None);
     }
 
     #[test]
@@ -1228,13 +1326,13 @@ mod tests {
         ];
         let job = train(vec![], json!({ "converge_alarm_filed": true }));
         assert_eq!(
-            block_of(&job, &steps, TrainPhase::Converging),
+            block_of(&job, &steps, TrainPhase::Converging, None),
             Some(TrainBlock::ConvergeOverdue)
         );
         // Also accepts the string form older writes used.
         let job2 = train(vec![], json!({ "converge_alarm_filed": "true" }));
         assert_eq!(
-            block_of(&job2, &steps, TrainPhase::Converging),
+            block_of(&job2, &steps, TrainPhase::Converging, None),
             Some(TrainBlock::ConvergeOverdue)
         );
     }
@@ -1249,7 +1347,7 @@ mod tests {
         )];
         let job = train(vec![], json!({ "stalled_since": "2026-09-03T00:00:00Z" }));
         assert_eq!(
-            block_of(&job, &steps, TrainPhase::Boarding),
+            block_of(&job, &steps, TrainPhase::Boarding, None),
             Some(TrainBlock::Stalled {
                 since: "2026-09-03T00:00:00Z".into()
             })
@@ -1271,7 +1369,7 @@ mod tests {
         ];
         let job = train(vec![], json!({ "stalled_since": "2026-09-03T00:00:00Z" }));
         assert!(matches!(
-            block_of(&job, &steps, TrainPhase::Deploying),
+            block_of(&job, &steps, TrainPhase::Deploying, None),
             Some(TrainBlock::DeployBlocked { .. })
         ));
     }
@@ -1288,7 +1386,7 @@ mod tests {
             ),
         ];
         let job = train(vec![], json!({}));
-        assert_eq!(train_status(&job, &steps).block, None);
+        assert_eq!(train_status(&job, &steps, None).block, None);
     }
 
     // ---- boarding predicate, from live rules ----
@@ -1519,7 +1617,7 @@ mod tests {
                 vec![verdict_step("green", json!([]))],
             ),
         ];
-        let g = gates(&runs, 4);
+        let g = gates(&runs, 4, None);
         assert_eq!(g.capacity, 4);
         // Sorted by `since` then branch: the day-2 run precedes the day-3.
         let branches: Vec<&str> = g.active.iter().map(|a| a.branch.as_str()).collect();
@@ -1535,8 +1633,8 @@ mod tests {
     fn capacity_is_the_number_passed_never_a_constant() {
         // The same runs render into whatever capacity the policy set.
         let runs = vec![(gate_run_on("feat/x", 2), vec![in_flight_step()])];
-        assert_eq!(gates(&runs, 3).capacity, 3);
-        assert_eq!(gates(&runs, 7).capacity, 7);
+        assert_eq!(gates(&runs, 3, None).capacity, 3);
+        assert_eq!(gates(&runs, 7, None).capacity, 7);
     }
 
     #[test]
@@ -1545,7 +1643,7 @@ mod tests {
         // gates — a slot holds a car being assessed RIGHT NOW.
         let mut j = gate_run_on("feat/x", 2);
         j.status = JobStatus::Closed;
-        let g = gates(&[(j, vec![in_flight_step()])], 3);
+        let g = gates(&[(j, vec![in_flight_step()])], 3, None);
         assert!(g.active.is_empty());
     }
 
@@ -1590,6 +1688,59 @@ mod tests {
         // never parks, so a red branch with no car is the ordinary case
         // the garage exists to show.
         assert_eq!(garage(&runs, &[]).len(), 1);
+    }
+
+    /// Train #198, 2026-09-04: merged and deployed at 17:10:17Z, still at
+    /// `converged` at 19:31Z — 2h21m against a 2h policy — and the board
+    /// showed it healthy, because `stalled_since` is stamped by the
+    /// conductor's reconcile and the conductor was what was down.
+    #[test]
+    fn a_train_standing_still_past_the_window_is_stalled_without_the_conductor() {
+        let steps = vec![done(DEPLOYED.slug, DEPLOYED.title, "2026-09-04T17:10:17Z")];
+        let job = train(vec![], json!({}));
+        let past = chrono::DateTime::parse_from_rfc3339("2026-09-04T17:31:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        match block_of(&job, &steps, TrainPhase::Converging, Some(past)) {
+            Some(TrainBlock::Stalled { since }) => assert!(since.starts_with("2026-09-04T17:10")),
+            other => panic!("a train past its stall window must look troubled, got {other:?}"),
+        }
+        // Deadline BEFORE the last completion: it moved recently enough.
+        let fresh = chrono::DateTime::parse_from_rfc3339("2026-09-04T17:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            block_of(&job, &steps, TrainPhase::Converging, Some(fresh)),
+            None
+        );
+        // An arrived train is never stalled, however long ago it landed.
+        assert_eq!(
+            block_of(&job, &steps, TrainPhase::Arrived, Some(past)),
+            None
+        );
+    }
+
+    /// Two gate-runs whose pods were evicted sat in the gates section for
+    /// 17 hours on 2026-09-04, drawn exactly like live ones, while their
+    /// branches had already landed.
+    #[test]
+    fn a_gate_run_older_than_the_job_deadline_is_stale() {
+        let mut g = gate_run_on("feat/x", 3);
+        g.metadata = json!({ "branch": "feat/x", "opened_at": "2026-09-03T20:00:00Z" });
+        let runs = vec![(g, vec![in_flight_step()])];
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-04T13:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let out = gates(&runs, 3, Some(now));
+        assert!(out.active[0].stale, "17h active is past any gate deadline");
+
+        // Inside the deadline it is simply a gate that is running.
+        let soon = chrono::DateTime::parse_from_rfc3339("2026-09-03T21:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(!gates(&runs, 3, Some(soon)).active[0].stale);
+        // No clock: no claim either way.
+        assert!(!gates(&runs, 3, None).active[0].stale);
     }
 
     #[test]
@@ -1667,7 +1818,7 @@ mod tests {
             garage(&runs, &[]).is_empty(),
             "an in-flight retry is not garaged"
         );
-        assert_eq!(gates(&runs, 3).active.len(), 1, "it occupies a slot");
+        assert_eq!(gates(&runs, 3, None).active.len(), 1, "it occupies a slot");
     }
 
     #[test]
@@ -1764,6 +1915,7 @@ mod tests {
             &[stranded_run],
             &["feat/a".into(), "feat/b".into()],
             &[],
+            fixed_now(),
         );
 
         // The block is named, prominently, on the train row.
@@ -1813,7 +1965,7 @@ mod tests {
         // With no delivery policy the page shows the same bound a gate
         // obeys against an unreachable registry — never a fabricated
         // number.
-        let status = build_status(&[], &[], &[], &[], None, &[], &[], &[]);
+        let status = build_status(&[], &[], &[], &[], None, &[], &[], &[], fixed_now());
         assert_eq!(status.gates.capacity, COMPILED_GATE_MAX_CONCURRENT);
     }
 
@@ -1852,6 +2004,7 @@ mod tests {
             &[in_flight, red],
             &[],
             &[],
+            fixed_now(),
         );
         assert_eq!(status.gates.capacity, 4);
         assert_eq!(status.gates.active.len(), 1);
@@ -1866,7 +2019,7 @@ mod tests {
         let many: Vec<(Job, Vec<Step>)> = (0..RECENT_LIMIT + 5)
             .map(|_| (train(vec![], json!({ "outcome": "arrived" })), vec![]))
             .collect();
-        let status = build_status(&[], &many, &[], &[], None, &[], &[], &[]);
+        let status = build_status(&[], &many, &[], &[], None, &[], &[], &[], fixed_now());
         assert_eq!(status.recent.len(), RECENT_LIMIT);
     }
 }

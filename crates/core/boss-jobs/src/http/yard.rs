@@ -188,6 +188,7 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
         &gate_runs,
         &car_branches,
         &settled_car_branches,
+        Some(now),
     );
     let health = yard::conductor_health(
         last_firing.as_ref().map(|f| f.fired_at),
@@ -269,6 +270,6 @@ fn with_now(status: yard::YardStatus, now: chrono::DateTime<chrono::Utc>) -> ser
 /// The empty yard a denied caller gets — well-formed, so the page renders
 /// "nothing to show" rather than an error or a false-empty.
 fn empty_status() -> serde_json::Value {
-    let status = yard::build_status(&[], &[], &[], &[], None, &[], &[], &[]);
+    let status = yard::build_status(&[], &[], &[], &[], None, &[], &[], &[], None);
     serde_json::to_value(status).unwrap_or_else(|_| serde_json::json!({}))
 }

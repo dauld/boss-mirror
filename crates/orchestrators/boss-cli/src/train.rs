@@ -3730,6 +3730,29 @@ impl Conductor {
         }
     }
 
+    /// Record why the machine abandoned this window, on the same
+    /// `cancelled` terminal a human's `--reason` fills.
+    ///
+    /// The terminal fires off the `empty` predicate, so until now a
+    /// SELF-cancellation completed it with no reason at all. Measured
+    /// 2026-09-05: of 16 cancelled trains, the 11 a human cancelled
+    /// all carry a reason and the 5 the MACHINE cancelled carry none —
+    /// including both of the previous night's consist refusals, which
+    /// is why a jammed yard could only be explained by reading the
+    /// conductor's pod log.
+    ///
+    /// MTTR is detection plus fix, and the fixes have been quick; the
+    /// hours went to finding out. A refusal that leaves no record on
+    /// the packet it refused is the detection cost in its purest form.
+    async fn record_abandon_reason(&self, train: &Value, reason: &str) -> Result<()> {
+        self.complete_step(
+            train,
+            find_step(train, "cancelled", "Cancelled — nothing to board"),
+            &[("reason", Some(reason.to_string()))],
+        )
+        .await
+    }
+
     /// Settle gate-runs whose runner died without reporting: complete
     /// `record-verdict` as `lost`, the terminal the workflow already
     /// provides for exactly this. NOT green and NOT failed — the checks
@@ -4797,12 +4820,15 @@ impl Conductor {
                 let collect = find_step(&train, "collect", "Collect what is ready to board");
                 self.merge_job_metadata(&train_id, vec![("empty", json!("true"))])
                     .await?;
+                let abandon_reason =
+                    format!("boarding refused before any car was collected — {reason}");
                 self.complete_step(
                     &train,
                     collect,
                     &[("boarded", Some(format!("nothing boarded — {reason}")))],
                 )
                 .await?;
+                self.record_abandon_reason(&train, &abandon_reason).await?;
                 return Ok(());
             }
             host_readiness::Readiness::Unverifiable { reason } => {
@@ -4827,6 +4853,9 @@ impl Conductor {
         if cands.is_empty() {
             self.merge_job_metadata(&train_id, vec![("empty", json!("true"))])
                 .await?;
+            let abandon_reason =
+                "no car was parked and ready when the window opened — an idle window, not a failure"
+                    .to_string();
             self.complete_step(
                 &train,
                 collect,
@@ -4836,6 +4865,7 @@ impl Conductor {
                 )],
             )
             .await?;
+            self.record_abandon_reason(&train, &abandon_reason).await?;
             log("empty window — train cancels via the marker");
             return Ok(());
         }
@@ -5051,6 +5081,15 @@ impl Conductor {
                 &[("boarded", Some(format!("nothing — {reason}")))],
             )
             .await?;
+            // The consist detail already rode onto the JOB above; this
+            // puts the headline on the terminal, where the yard and
+            // `boss orient` read a cancellation's reason. Twice on the
+            // night of 2026-09-04 this refusal cancelled a train with
+            // the terminal blank, and the only way to learn that one
+            // lint could not EXECUTE (python3 absent from the
+            // conductor's image) was to read the pod's log.
+            self.record_abandon_reason(&train, &format!("consist check refused — {reason}"))
+                .await?;
             log(format!(
                 "consist check refused the consist: no PR opened, no CI spent — {} car(s) stay \
                  boardable and unstruck",
@@ -5510,6 +5549,44 @@ pub async fn run(phase: Phase, dry: bool, now: DateTime<Utc>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    // -- a machine cancellation says why -------------------------------
+
+    /// Measured 2026-09-05 across every cancelled train on the record:
+    /// the 11 a HUMAN cancelled all carry a reason (from `--reason`),
+    /// and the 5 the MACHINE cancelled carry none. Both of the previous
+    /// night's consist refusals were in the silent five, which is why a
+    /// jammed yard could only be explained by reading a pod log.
+    ///
+    /// The terminal fires off the `empty` predicate, so a self-cancel
+    /// used to complete it with no reason at all. Every abandonment now
+    /// names its cause on the same field a human fills — and the causes
+    /// must stay DISTINGUISHABLE, because "nothing was ready" is a
+    /// healthy idle window while "a check could not run" is an outage.
+    #[test]
+    fn every_abandonment_reason_names_its_cause() {
+        // An idle window must not read like a failure.
+        let idle =
+            "no car was parked and ready when the window opened — an idle window, not a failure";
+        assert!(idle.contains("idle window"));
+        assert!(!idle.to_lowercase().contains("refus"));
+
+        // A consist refusal must name the check, not merely that one failed.
+        let failed = vec![LintFailure {
+            name: "a-kind-bundle-does-not-tighten".into(),
+            files: vec!["infra/platform/workflows.toml".into()],
+            output: "python3: command not found".into(),
+        }];
+        let reason = consist_refusal_reason(&failed, 200);
+        assert!(
+            reason.contains("a-kind-bundle-does-not-tighten"),
+            "a refusal that does not name the check is one an operator must go re-derive: {reason}"
+        );
+
+        // With nothing to name, say so rather than implying a verdict.
+        let empty = consist_refusal_reason(&[], 200);
+        assert!(empty.contains("no failing check named"), "{empty}");
+    }
+
     /// 2026-09-04: two gate-runs whose pods were evicted sat at
     /// `record-verdict` for 17 hours, each holding one of three gate
     /// slots and rendering as a live gate, while their branches had long
