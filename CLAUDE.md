@@ -581,6 +581,24 @@ new surface against.
   was a no-op that read as a rollback. Roll to the last known-good
   artifact, named and verified — never to "the previous one".
 
+- **An arm that needs the patient is not an arm.** On 2026-09-05 a build
+  bricked the cluster's boot and the system of record was dark for
+  four hours. Detection took four minutes; nothing that could act was
+  free to: the converge that deploys a fix opens its packet through the
+  jobs API as a hard ExecStartPre, so it never started; its boot-failure
+  rollback targeted the revision its own apply had just created from
+  the manifest's placeholder image, which cannot boot; the gate never
+  builds the image, so the missing file was green; and the estate
+  observer reports through the API it observes. Every loop that can
+  ACT must owe nothing to what it watches — visibility is best-effort
+  (`ExecStartPre=-`, a wrap that exits 0 on an unreachable API), the
+  rollback target is a NAMED last-converged build, the image proves it
+  boots before it rolls, and a watchdog reads the API from outside and
+  rolls to that build on its own (`infra/forge/cluster-watchdog.sh`).
+  A system that knows it is working states so from a loop that does
+  not need the thing it is stating to be alive. David's rule for every
+  manual command since: say what makes it the last time.
+
 - **Mechanical operations belong to the machine.** Five times in one day
   an operator was the transport for a command whose output the system
   could have read itself. The foothold already exists — the cadence loop

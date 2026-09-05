@@ -14,10 +14,16 @@
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# sourced_files LAUNCHER — the basenames the launcher sources from its own dir.
+# sourced_files LAUNCHER — the basenames the launcher sources from its
+# own dir: the `SOURCED=( … )` list it declares (one definition, read
+# by its source loop and by `--check`), plus any bare
+# `. "$(dirname "${BASH_SOURCE[0]}")/<file>"` line.
 sourced_files() {
-    grep -oE '^\s*\.\s+"\$\(dirname\s+"\$\{BASH_SOURCE\[0\]\}"\)/[^"]+"' "$1" \
-        | sed -E 's|.*\)/([^"]+)".*|\1|' | sort -u
+    {
+        grep -oE '^SOURCED=\([^)]*\)' "$1" | sed -E 's/^SOURCED=\(//; s/\)$//' | tr ' ' '\n'
+        grep -oE '^\s*\.\s+"\$\(dirname\s+"\$\{BASH_SOURCE\[0\]\}"\)/[^"]+"' "$1" \
+            | sed -E 's|.*\)/([^"]+)".*|\1|'
+    } | sed '/^$/d' | sort -u
 }
 # launcher_dir DOCKERFILE — where the launcher is COPYed to (its directory).
 launcher_dir() {
@@ -41,13 +47,17 @@ missing() {
 
 self_test() {
     local fx; fx="$(mktemp -d)"; trap 'rm -rf "$fx"' RETURN
-    printf '. "$(dirname "${BASH_SOURCE[0]}")/tenant-launch.sh"\n. "$(dirname "${BASH_SOURCE[0]}")/other-lib.sh"\n' >"$fx/launcher.sh"
+    printf 'SOURCED=(tenant-launch.sh other-lib.sh)\nfor f in "${SOURCED[@]}"; do . "$HERE/$f"; done\n' >"$fx/launcher.sh"
     # The Dockerfile verb is spelled through a variable so this fixture
     # line does not read as SQL to api-path-bypass-smell.
     local v="COPY"
     printf '%s infra/oss-quickstart/services-launcher.sh /usr/local/bin/boss-launch\n%s infra/oss-quickstart/tenant-launch.sh /usr/local/bin/tenant-launch.sh\n' "$v" "$v" >"$fx/Dockerfile"
     local got; got="$(missing "$fx/launcher.sh" "$fx/Dockerfile" | tr '\n' ' ' | sed 's/ $//')"
     [[ "$got" == "other-lib.sh" ]] || { echo "the-image-carries-what-the-launcher-sources: self-test FAILED — expected the planted 'other-lib.sh' alone, got '$got'" >&2; return 1; }
+    # A launcher with NO declared sources is a lint that would pass on
+    # nothing — refuse that shape too, so a refactor cannot blind it.
+    printf 'echo hello\n' >"$fx/launcher.sh"
+    [[ -z "$(sourced_files "$fx/launcher.sh")" ]] || { echo "the-image-carries-what-the-launcher-sources: self-test FAILED — read sources from a launcher that declares none" >&2; return 1; }
     echo "the-image-carries-what-the-launcher-sources: self-test ok — planted other-lib.sh caught, tenant-launch.sh copied beside the launcher passes"
 }
 if [[ "${1:-}" == "--self-test" ]]; then self_test; exit $?; fi
@@ -56,6 +66,10 @@ self_test || exit 1
 repo="$(cd "$here/../.." && pwd)"
 launcher="$repo/infra/oss-quickstart/services-launcher.sh"
 df="$repo/infra/oss-quickstart/Dockerfile"
+if [[ -z "$(sourced_files "$launcher")" ]]; then
+    echo "the-image-carries-what-the-launcher-sources: FAIL — the launcher declares no sourced files (no SOURCED=( … ) list); a check that reads nothing is not running" >&2
+    exit 1
+fi
 m="$(missing "$launcher" "$df")"
 if [[ -n "$m" ]]; then
     echo "the-image-carries-what-the-launcher-sources: FAIL — the launcher sources these from its own directory, and the Dockerfile does not copy them beside /usr/local/bin/boss-launch:" >&2

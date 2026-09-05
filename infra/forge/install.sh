@@ -79,12 +79,19 @@ fi
 #   (49a8d842), and the boarding host check (BOSS_TRAIN_CI_HOST) can
 #   only read a host that reports. Same script as boss-gcp's observer,
 #   HOST_ID=forge.
+# cluster-watchdog: the loop that knows the cluster is working from
+#   OUTSIDE it — reads the API, compares what serves with what the
+#   converge last stamped, rolls to that build by name when the API
+#   has been dark longer than a deploy, and says so every 5 minutes.
+#   No maintenance wrap, by design: the 2026-09-05 outage lasted four
+#   hours because every loop that could act needed the API it watched.
 UNITS=(
     reap-dead-ci-jobs
     cluster-deploy-runner
     disk-floor-sweep
     forge-converge
     estate-observe-host
+    cluster-watchdog
 )
 
 installed=0

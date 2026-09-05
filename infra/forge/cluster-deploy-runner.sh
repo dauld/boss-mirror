@@ -83,6 +83,14 @@ if [ "$HEAD" = "$(cat "$FAILED_FILE" 2>/dev/null || echo none)" ]; then
     exit 1
 fi
 
+# An operator's hold (converge-hold.sh, the hold-converge ops verb)
+# stops the roll before the build: main has moved, and a human said not
+# yet. Loud on every tick, exit 0 — a hold is a decision, not a failure.
+. "$REPO/infra/forge/cluster-deploy-lib.sh"
+if reason=$(converge_held "${BOSS_CONVERGE_HOLD:-$HOME/.boss-converge-hold}"); then
+    echo "cluster-deploy-runner: converge HELD — $reason — main at $HEAD not built or rolled (release-converge lifts it)" >&2
+    exit 0
+fi
 echo "cluster-deploy-runner: forge main moved $LAST -> $HEAD; building"
 git checkout -q "$HEAD" 2>/dev/null || git checkout -qf "$HEAD"
 
@@ -113,6 +121,18 @@ docker build -q -f infra/oss-quickstart/Dockerfile \
     --build-arg BOSS_BUILD_COMMIT="$(git rev-parse HEAD)" \
     -t "$REGISTRY:$HEAD" .
 docker push "$REGISTRY:$HEAD"
+
+# The image proves it can boot before it goes anywhere near the cluster
+# (cluster-deploy-lib.sh image_boots): its own launcher checks that
+# every file it sources is beside it. A head that fails here is
+# quarantined like a head that failed on the cluster — with no dark
+# window at all, because nothing was applied.
+. "$REPO/infra/forge/cluster-deploy-lib.sh"
+if ! image_boots docker "$REGISTRY:$HEAD"; then
+    echo "$HEAD" > "$FAILED_FILE"
+    echo "cluster-deploy-runner: $HEAD fails its own boot check — not rolling it; quarantined (rm $FAILED_FILE to retry it)" >&2
+    exit 1
+fi
 
 # THE CONVERGE CLEANS UP AFTER ITSELF.
 #
@@ -157,8 +177,15 @@ K="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro alpine/k8s:1.3
 # on. A failed apply aborts here (set -e): no stamp is written, the
 # next timer run retries.
 KM="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro -v $REPO/infra/cluster/manifests:/manifests:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
-echo "cluster-deploy-runner: applying infra/cluster/manifests"
+# The applied copy carries the build that is ALREADY converged (the
+# stamp), not the manifest's placeholder tag: the apply must never
+# change what runs. Rolling to $HEAD is roll_deployment's job below.
+APPLY_DIR="$(mktemp -d -t cluster-deploy-manifests.XXXXXX)"
+manifests_with_image "$REPO/infra/cluster/manifests" "$APPLY_DIR" "$REGISTRY" "$LAST"
+KM="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro -v $APPLY_DIR:/manifests:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
+echo "cluster-deploy-runner: applying infra/cluster/manifests (boss image pinned to the converged $LAST)"
 $KM apply -f /manifests
+rm -rf "$APPLY_DIR"
 
 # StepPlugin bundles converge from the tree too (job d35aec77).
 # Code converges in the image, config in the manifests above, schema
@@ -242,40 +269,13 @@ fi
 # class minted by hand during the firefight. Both images move in one
 # json patch so every revision in history is a coherent template and
 # every rollback target is real.
-PRE_REV=$($K get deploy boss -n boss -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')
-$K patch deploy boss -n boss --type=json \
-    -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/image\",\"value\":\"$REGISTRY:$HEAD\"},{\"op\":\"replace\",\"path\":\"/spec/template/spec/initContainers/0/image\",\"value\":\"$REGISTRY:$HEAD\"}]"
-
-# THE ROLL PROVES ITSELF OR IT REVERTS (packet ec50db46, post-mortem
-# chain 4). strategy=Recreate means the old pod is already gone; a
-# build that cannot boot is an OUTAGE with no floor unless something
-# reverts it. On 2026-09-02 this line's predecessor timed out, set -e
-# killed the run, and the crash-loop ran unattended for 55 minutes
-# while the previous revision — a working image — sat one undo away.
-# The undo targets the revision READ BEFORE the roll, never "back
-# one": history can hold templates this run did not make.
-if ! $K rollout status deploy/boss -n boss --timeout=420s; then
-    echo "cluster-deploy-runner: $HEAD never went Ready — rolling back to revision $PRE_REV" >&2
-    echo "$HEAD" > "$FAILED_FILE"
-    if $K rollout undo deploy/boss -n boss --to-revision="$PRE_REV" \
-        && $K rollout status deploy/boss -n boss --timeout=300s; then
-        echo "cluster-deploy-runner: rolled back — cluster serves the pre-$HEAD build; $HEAD is quarantined (rm $FAILED_FILE to retry it)" >&2
-    else
-        echo "cluster-deploy-runner: ROLLBACK ALSO FAILED — the cluster needs hands NOW" >&2
-    fi
+# Roll to $HEAD; on a boot failure roll back to the last CONVERGED build
+# by image name (cluster-deploy-lib.sh roll_deployment) — never to
+# "the previous revision", which on 2026-09-05 was the placeholder the
+# apply had just created and could not boot.
+if ! roll_deployment "$K" "$REGISTRY" "$HEAD" "$LAST" "$FAILED_FILE"; then
     exit 1
 fi
-
-# CronJob chores run the same build as the deployment — but they
-# advance only AFTER the deploy proves bootable, so a bricked build
-# never takes the chore fleet down with it (before this ordering, the
-# chores were pinned pre-watch and a failed roll left every chore on
-# the broken image). `set image` on a deploy does not touch CronJobs,
-# so the whole labeled set is pinned here — the chore contract
-# (boss-chore=true label + container named `chore`) is what makes
-# this one selector instead of a per-chore list that drifts.
-# `|| true`: a cluster with no chores applied yet must not fail the
-# whole converge.
 $K set image -n boss cronjobs -l boss-chore=true "chore=$REGISTRY:$HEAD" || true
 
 # THE CLUSTER-RESIDENT CONDUCTOR runs the same boss image and converges

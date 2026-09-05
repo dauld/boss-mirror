@@ -48,7 +48,8 @@ closed for everything in the installer's `UNITS` list.
 | `disk-floor-sweep` | hourly (boot +5) | keep free disk above the floor, `BOSS_DISK_FLOOR_GB=100` in the service; prunes the **system** daemon's CI images first (`until=24h`), then the rootless caches, in a fixed order; regenerable caches only, never volumes | exits non-zero with `FLOOR UNMET — a human decides next` rather than deleting harder |
 | `reap-dead-ci-jobs` | daily (boot +15) | remove the containers and volumes of crashed CI jobs | journal |
 | `estate-observe-host` | 15 min (boot +3) | record this host's disk, load and units into the estate as observations; the conductor's boarding refuses on a positive "host is short" reading | journal; a stale series reads as unverifiable, and boarding proceeds with one loud line |
-| `boss-ops-runner` | ~1 min | answer `ops-request` packets filed against `forge` with a verb from `infra/ops/verbs.json` | `refused` outcome on the packet; **hand-installed** — see Residue |
+| `boss-ops-runner` | ~1 min | answer `ops-request` packets filed against `forge` with a verb from `infra/ops/verbs.json` | `refused` outcome on the packet; installed by `install.sh` since 2026-09-05 (a drop-in carries this host's identity) |
+| `cluster-watchdog` | 5 min (boot +2) | know the cluster is working from outside it; roll to the last converged build after three dark checks | its own journal line every tick, `hands needed` when it cannot act |
 
 Two disk floors, deliberately different: the locomotive refuses a CI
 run below **70 GB** free at run start, and the sweep keeps **100 GB**
@@ -70,9 +71,12 @@ No ssh from the pod. Three doors, all read-only:
   about a minute with the output on the packet's `execute` step. Verbs:
   `df`, `uptime`, `timer-list`, `unit-status <unit>`, `journal-tail
   <unit> [n]`, `disk-report` (what is consuming disk — both daemons,
-  Forgejo's data, the checkout), and the one mutating verb,
-  `reclaim-disk <floor>` (the sweep, with a floor). The verb list is
-  the tree's, never the packet's.
+  Forgejo's data, the checkout), and the mutating verbs, each
+  authorized by name in `verbs.json`: `reclaim-disk <floor>` (the
+  sweep, with a floor), `rollback-to <sha>` (roll deploy/boss to a
+  named build, verified Ready), `hold-converge <reason>` and
+  `release-converge` (the runner builds and rolls nothing while a
+  hold stands). The verb list is the tree's, never the packet's.
 - **The Forgejo API** with the repo-scoped token at `/etc/forge/token`
   on the pod: runs at `/api/v1/repos/david/boss/actions/tasks`, a job's
   log at `/api/v1/repos/david/boss/actions/jobs/<jobId>/logs`, a
@@ -129,7 +133,69 @@ and `journal-tail forgejo-runner` say whether it is dead, stuck on a
 cleanup, or running tasks for a different reason. A restart of
 `forgejo-runner.service` is the remedy and is a human action today.
 
-### 4. Landed but never installed
+### 4. The CI runner cannot resolve github.com
+
+2026-09-05 08:13: the locomotive job of train #212 died in eleven seconds
+with `could not fetch remote 'origin': … Could not resolve host:
+github.com` while fetching `actions/checkout`, one minute after
+build-image on the same run had checked out fine. No car's code ran.
+Every CI job resolves `actions/checkout@v4` against github.com on
+start, so a DNS blip on this host is a red train with no car at fault,
+and it carries no `refused:` status, so the conductor would strike the
+cars. Read the job log's first lines; cancel naming the cause
+(`boss train cancel <id> --reason …`, run in the conductor pod, which
+holds the write token) and the cars come back with no strike. The
+durable fix is a mirror of the action on this forge (packet
+d9a34560).
+
+### 5. A build bricks the cluster's boot
+
+2026-09-05 09:33: train #213 rolled an image whose launcher sourced a
+file the image had not copied beside it; the pod crash-looped before
+any API started and the system of record was dark until 14:00. Three
+things went wrong at once, and each now has its own guard:
+
+- **The converge's rollback rolled to the wrong place.** It targeted the
+  revision its own `kubectl apply` had just created from the manifest's
+  literal image tag (`b2814ef`, a 2026-08-10 build that cannot boot
+  against today's registry). Now (`cluster-deploy-lib.sh`) it rolls back
+  to the last CONVERGED build by image name — the sha in
+  `~/.boss-last-built` — verifies it Ready, and applies manifests with
+  that same image so no placeholder revision exists.
+- **Nothing proved the image could boot.** Now the converge runs the
+  image's own `boss-launch --check` before anything is applied; a head
+  that fails is quarantined with no dark window. The pre-merge half
+  (CI builds and boots the product image, the converge pulls it) is
+  the next car.
+- **The converge could not run while the API was dark**, because its
+  packet step (`boss-maintenance-wrap.sh` as ExecStartPre) failed on the
+  unreachable API and systemd never started it — the loop that would
+  have restored the system of record was waiting on it. Now the wrap
+  exits 0 with a loud UNREACHABLE line; the work runs, one run's
+  visibility is lost.
+
+The lever, by name, if it is ever needed by hand again:
+`rollback-to <sha>` as an ops verb, or on this host
+`sudo docker run --rm --network host -v /home/david/kc.yaml:/kc:ro
+alpine/k8s:1.33.3 kubectl --kubeconfig=/kc -n boss rollout undo
+deployment/boss --to-revision=<revision whose image is the last converged
+sha>`; read the revision from `rollout history --revision=N`. And the
+converge by hand, bypassing its packet step:
+`cd /home/david/boss && git fetch -q forgejo main && git checkout -qf
+forgejo/main && infra/forge/cluster-deploy-runner.sh`.
+
+### 6. The cluster is dark and nobody is awake
+
+`cluster-watchdog` (every 5 minutes, no packet precondition) reads
+`/api/jobs/health` from this host, compares what the deployment serves
+with the last converged build, and after three dark checks rolls the
+deployment to that build by name. Its journal says every five minutes
+either `cluster ok: api answers on <sha>, deployment serves <sha>, last
+converged <sha>` or why not; `hands needed` means the converged build
+itself is dark. Read it over the journal gateway when the API is down —
+that is the point of it.
+
+### 7. Landed but never installed
 
 A unit authored in the tree but never on the host. Closed for the
 installer's `UNITS` list by `forge-converge`; `timer-list` shows the
@@ -138,16 +204,12 @@ symptom. The two hand-installed pieces below are still open.
 
 ## Residue (measured 2026-09-05)
 
-- `boss-ops-runner.service` runs on this host (its journal says so
-  every minute) but is not in `install.sh`'s `UNITS` — `infra/ops` units
-  are named in `forge-converge`'s description and not installed by it.
-  A host rebuild loses the ops door.
 - `systemd-journal-gatewayd` is hand-installed and not in the tree at
-  all. A host rebuild loses the read door.
-
-Both are the class this file exists to end, and each is one car:
-extend the installer to `infra/ops` (with the checkout path the unit's
-`ExecStart` expects), and add the gateway's socket unit to the tree.
+  all. A host rebuild loses the read door — the one door that works
+  when the API is dark. One car: the socket unit in the tree, installed
+  by `install.sh`.
+- The ops runner's residue closed on 2026-09-05 (`install.sh` lands it
+  from `infra/ops` with a drop-in for this host).
 
 ## Related
 

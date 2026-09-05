@@ -595,6 +595,11 @@ PREFLIGHT_LINTS=(
     # gate failure eleven minutes later (design 775f0b35 Q3).
     "workspace-declares-what-it-runs|infra/lint/workspace-declares-what-it-runs.sh"
     "the-image-carries-what-the-launcher-sources|infra/lint/the-image-carries-what-the-launcher-sources.sh"
+    "the-launcher-checks-its-own-image|infra/lint/the-launcher-checks-its-own-image.sh"
+    "the-converge-rolls-back-to-a-named-build|infra/lint/the-converge-rolls-back-to-a-named-build.sh"
+    "the-executor-never-waits-on-its-visibility|infra/lint/the-executor-never-waits-on-its-visibility.sh"
+    "the-cluster-knows-it-is-working|infra/lint/the-cluster-knows-it-is-working.sh"
+    "the-controls-are-bounded-verbs|infra/lint/the-controls-are-bounded-verbs.sh"
     "seed-bypass-smell|infra/lint/seed-bypass-smell.sh"
     "no-todo-citation|infra/lint/no-todo-citation.sh"
     "no-step-kind-match|infra/lint/no-step-kind-match.sh"

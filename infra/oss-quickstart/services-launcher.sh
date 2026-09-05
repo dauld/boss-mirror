@@ -83,6 +83,24 @@ SERVICES=(
     "boss-gateway"
 )
 
+# The files this launcher sources from its own directory — ONE list,
+# read by the source lines and by `--check` (CLAUDE.md §9a: a fact that
+# lives twice drifts). The image build copies them beside the launcher;
+# `--check` is how the converge proves it did before rolling the
+# cluster (2026-09-05: it had not, and the pod crash-looped for hours).
+HERE="$(dirname "${BASH_SOURCE[0]}")"
+SOURCED=(tenant-launch.sh)
+if [[ "${1:-}" == "--check" ]]; then
+    missing=0
+    for f in "${SOURCED[@]}"; do
+        [[ -f "$HERE/$f" ]] || { echo "launcher check: $HERE/$f is missing — the image did not copy it beside the launcher"; missing=1; }
+    done
+    for svc in "${SERVICES[@]}"; do
+        command -v "$svc" >/dev/null 2>&1 || echo "launcher check: note — $svc not on PATH (it would be SKIPped at launch)"
+    done
+    [[ "$missing" -eq 0 ]] && echo "launcher check: ok — ${#SOURCED[@]} sourced file(s) present"
+    exit "$missing"
+fi
 PIDS=()
 
 # Generate /etc/boss-*.toml configs at container start. The API
@@ -120,8 +138,10 @@ trap cleanup TERM INT
 # prepare retries in a background child that becomes the sim when it
 # succeeds. On 2026-09-02 the seed's exit 1 met this file's `set -e`
 # and took the jobs API down for 65 minutes over a one-field 400.
-# shellcheck source=/dev/null
-. "$(dirname "${BASH_SOURCE[0]}")/tenant-launch.sh"
+for f in "${SOURCED[@]}"; do
+    # shellcheck source=/dev/null
+    . "$HERE/$f"
+done
 
 echo "==> boss-launch starting ${#SERVICES[@]} services"
 for svc in "${SERVICES[@]}"; do

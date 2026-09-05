@@ -64,11 +64,35 @@ BOSS_USER='{"id":"automation:maintenance-timer","role":"platform-admin","access_
 API_CURL="$(dirname "$0")/boss-api-curl.sh"
 [ -x "$API_CURL" ] || API_CURL=boss-api-curl.sh
 
+# THE EXECUTOR NEVER WAITS ON ITS VISIBILITY. If the jobs API cannot
+# be reached at all past the transport deadline, this run has no
+# packet — and it still RUNS. On 2026-09-05 the cluster's system of
+# record was dark for four hours because the one loop that could have
+# restored it, cluster-deploy-runner, has this script as its
+# ExecStartPre: the wrap failed on the unreachable API, systemd never
+# started the converge, and the fix on main sat unbuilt until a human
+# ran the script by hand. A chore that cannot record itself must say
+# so and go; a chore that refuses to run because it cannot be seen is
+# the outage. An API that ANSWERS with an error is a different thing —
+# a contract or configuration fault — and still aborts the run.
+transport_unreachable() {  # $1 = curl exit code
+    case "$1" in 6|7|28|35|52|55|56) return 0 ;; *) return 1 ;; esac
+}
+reply=""; rc=0
+reply=$("$API_CURL" -fsS -H "x-boss-user: $BOSS_USER" \
+    "$BASE/api/jobs?kind=$KIND&status=open&limit=2") || rc=$?
+if [ "$rc" -ne 0 ]; then
+    if transport_unreachable "$rc"; then
+        echo "boss-maintenance-wrap: the jobs API at $BASE is UNREACHABLE (curl exit $rc, past the transport deadline) — running $KIND WITHOUT its packet; the work goes on, only this run's visibility is lost" >&2
+        exit 0
+    fi
+    echo "boss-maintenance-wrap: the jobs API answered an error for $KIND (curl exit $rc) — a contract or configuration fault, aborting the run" >&2
+    exit "$rc"
+fi
 # `.data` missing from the reply means the jobs API changed shape —
 # error out (aborting the timer run) rather than reading it as zero
 # open Jobs and spawning a duplicate.
-open_count=$("$API_CURL" -fsS -H "x-boss-user: $BOSS_USER" \
-    "$BASE/api/jobs?kind=$KIND&status=open&limit=2" \
+open_count=$(printf '%s' "$reply" \
     | jq '.data | if . == null then error("jobs reply has no .data") else length end')
 
 if [ "$open_count" != "0" ]; then
@@ -76,6 +100,7 @@ if [ "$open_count" != "0" ]; then
     exit 0
 fi
 
+rc=0
 "$API_CURL" -fsS -X POST "$BASE/api/jobs" \
     -H "x-boss-user: $BOSS_USER" -H "content-type: application/json" \
     ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
@@ -88,5 +113,13 @@ fi
         status: "open",
         metadata: {chore: $kind},
         tags: ["maintenance"]
-    }')" >/dev/null
+    }')" >/dev/null || rc=$?
+if [ "$rc" -ne 0 ]; then
+    if transport_unreachable "$rc"; then
+        echo "boss-maintenance-wrap: the jobs API at $BASE went UNREACHABLE while spawning $KIND (curl exit $rc) — running WITHOUT its packet" >&2
+        exit 0
+    fi
+    echo "boss-maintenance-wrap: spawning today's $KIND Job failed (curl exit $rc) — aborting the run" >&2
+    exit "$rc"
+fi
 echo "boss-maintenance-wrap: spawned today's $KIND Job"

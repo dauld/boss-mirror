@@ -1050,6 +1050,46 @@ title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
 
+# maintenance-cluster-watchdog — the loop that knows the cluster is
+# working from OUTSIDE it (infra/forge/cluster-watchdog.sh, every five
+# minutes on the forge). Reads /api/jobs/health, compares what the
+# deployment serves with the build the converge last stamped as good,
+# and rolls to that build by name when the API has been dark longer
+# than a deploy; the packet is this loop's visibility on days it can
+# reach the API, never its precondition (2026-09-05: four hours dark
+# because every loop that could act needed the API it watched).
+[[workflow]]
+kind = "maintenance-cluster-watchdog"
+label = "Cluster watchdog"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Every five minutes the forge reads the cluster's jobs API from outside it and compares what the deployment serves with the last converged build. Dark past a deploy's worth of checks on a non-converged image, it rolls the deployment to the converged build by name; dark on the converged build itself, it says hands are needed. The packet records the run when the API can take it; the run never waits for the packet."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "systemd-timer" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Run to completion"
+authority_role = "platform-admin"
+fields = [{ name = "result", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done"
+title_template = "Maintenance completed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
 # ---------------------------------------------------------------------------
 # ship-a-change — the delivery protocol itself, and the last of the
 # high-traffic trio protocols-as-data.md sequences by blast radius:

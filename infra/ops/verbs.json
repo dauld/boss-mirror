@@ -25,6 +25,21 @@
     "this protocol exists to ban."
   ],
   "verbs": {
+    "rollback-to": {
+      "about": "MUTATING — roll deploy/boss to a NAMED build and verify it Ready (infra/forge/rollback-to.sh). The lever the 2026-09-05 outage needed a human's shell for: the classifier blocks the agent's kubectl, the converge's own rollback had rolled to the wrong image, and David was asleep. Authorized by David, 2026-09-05: 'it is obvious we need a lot more ad hoc controls while we are still learning'. The sha names an image the registry holds — read it from `rollout history` or the converge's stamp, never guess. Leaves the stamp and main untouched: a rollback buys time for a fix.",
+      "argv": ["/home/david/boss/infra/forge/rollback-to.sh", "{1}"],
+      "params": [{"name": "sha", "pattern": "^[0-9a-f]{7,40}$"}]
+    },
+    "hold-converge": {
+      "about": "MUTATING — an operator's hold on the cluster converge: writes the hold file the runner reads before it builds or rolls anything (infra/forge/converge-hold.sh). Same authorization as rollback-to (David, 2026-09-05). The reason is one token (no spaces; use dashes) and rides on the packet.",
+      "argv": ["/home/david/boss/infra/forge/converge-hold.sh", "hold", "{1}"],
+      "params": [{"name": "reason", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$"}]
+    },
+    "release-converge": {
+      "about": "MUTATING — lifts the converge hold (infra/forge/converge-hold.sh release). Same authorization as rollback-to (David, 2026-09-05).",
+      "argv": ["/home/david/boss/infra/forge/converge-hold.sh", "release"],
+      "params": []
+    },
     "unit-status": {
       "about": "systemctl status of one unit",
       "argv": ["systemctl", "status", "--no-pager", "--", "{1}"],

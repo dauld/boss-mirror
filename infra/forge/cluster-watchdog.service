@@ -1,0 +1,20 @@
+[Unit]
+Description=BOSS forge: the cluster watchdog — knows the cluster is working from outside it, rolls to the last converged build when it is not
+# Its packet is VISIBILITY, never a precondition: the wrap and the step
+# are prefixed `-` so systemd runs the watchdog whatever they return,
+# and the wrap itself now exits 0 on an unreachable API. A watchdog
+# that must be seen by the API it watches before it may act is the
+# 2026-09-05 deadlock again.
+
+[Service]
+Type=oneshot
+User=david
+Environment=JOBS_API=http://10.20.0.34:7900
+Environment=KUBECONFIG_PATH=/home/david/kc.yaml
+Environment=REGISTRY=10.20.0.15:3000/david/boss
+Environment=BOSS_FORGE_LAST_BUILT=/home/david/.boss-last-built
+Environment=WATCHDOG_STATE=/home/david/.boss-watchdog-dark
+Environment=WATCHDOG_DARK_LIMIT=3
+ExecStartPre=-/home/david/boss/infra/boss-maintenance-wrap.sh maintenance-cluster-watchdog "Cluster watchdog"
+ExecStart=/home/david/boss/infra/forge/cluster-watchdog.sh
+ExecStartPost=-/home/david/boss/infra/boss-step.sh maintenance-cluster-watchdog run result=ok
