@@ -20,8 +20,14 @@
 #
 # A failed POST fails LOUDLY with the target named — the cluster
 # observer shipped silent-on-curl-failure once (3ddd8333) and that
-# class does not get a second landing.
+# class does not get a second landing. And it is RETAINED: the reading
+# is spooled and replayed, oldest first, on the next run that reaches
+# the API, so an outage of the system of record shows in the series as
+# readings that arrived late rather than as a hole (observe-lib.sh,
+# packet ec50db46).
 set -eu
+# shellcheck source=/dev/null
+. "$(dirname "$0")/observe-lib.sh"
 
 : "${HOST_ID:?HOST_ID is required and must match the estate node id}"
 : "${JOBS_API:?JOBS_API is required}"
@@ -60,21 +66,15 @@ observation=$(jq -n \
 
 echo "observing $HOST_ID: cpu=$cpu mem=${mem_gb}G disk=${disk_gb}G free=${free_gb}G"
 
-# No temp file: the first scheduled firing failed curl exit 23 (a WRITE
-# error) under the unit while the POST itself had succeeded server-side,
-# and the old message called that UNREACHABLE - two lies from one -o.
-# Body and status ride one capture instead; the label states only what
-# curl's exit actually says.
-resp=$(printf '%s' "$observation" | curl -s -w '\n%{http_code}' \
-  -X POST -H 'content-type: application/json' \
-  -H 'x-boss-user: {"id":"automation:estate-observer-host","role":"platform-admin","access_tier":"operator"}' \
-  --data-binary @- \
-  "$JOBS_API/api/estate/observation") \
-  || { rc=$?; echo "jobs api: curl failed (exit $rc, target $JOBS_API)"; exit 1; }
-code=${resp##*
-}
-body=${resp%
-*}
-
-echo "jobs api: $code $body"
-test "$code" = "202"
+# No temp file (observe-lib.sh post_observation): the first scheduled
+# firing failed curl exit 23 (a WRITE error) under the unit while the
+# POST itself had succeeded server-side, and the old message called
+# that UNREACHABLE — two lies from one -o. Body and status ride one
+# capture; the label states only what curl's exit actually says.
+if post_observation "$observation"; then
+    spool_replay || true
+else
+    spool_put "$observation"
+    echo "retained: observation spooled ($(spool_count) waiting) — replays when the jobs api answers"
+    exit 1
+fi
