@@ -47,13 +47,15 @@ NAMED=()
 AUTO=0
 QUICK=0
 LINT=0
+ROSTER=0
 while [ $# -gt 0 ]; do
     case "$1" in
         -p) shift; SCOPE+=(-p "${1:?-p needs a crate name}"); NAMED+=("$1"); shift ;;
         --auto) AUTO=1; shift ;;
         --quick) QUICK=1; shift ;;
         --lint) LINT=1; shift ;;
-        *) echo "gate.sh: unknown arg: $1 (accepts -p <crate>, --auto, --quick and --lint)" >&2; exit 2 ;;
+        --roster) ROSTER=1; shift ;;
+        *) echo "gate.sh: unknown arg: $1 (accepts -p <crate>, --auto, --quick, --lint and --roster)" >&2; exit 2 ;;
     esac
 done
 # Alternatives, not companions: --auto derives exactly what -p states,
@@ -204,8 +206,8 @@ require_headroom "to start"
 #     infra/gate.sh, infra/lint/*, .forgejo/workflows/ci.yml
 #         -> boss-testing, which owns gate_sh.rs. That test pins that
 #            ci.yml invokes this script, that this script runs every
-#            check, and that every executable in infra/lint/ appears
-#            here. Omitting these would let `--auto` skip the only
+#            check, and that every infra/lint/*.sh either runs in the
+#            pre-flight or is named in its exclusion set. Omitting these would let `--auto` skip the only
 #            test guarding the file being edited — which this very car
 #            would have done to itself.
 #     infra/dispatcher/rules.toml -> boss-dispatcher, which owns
@@ -584,71 +586,85 @@ check() {
 # quietly missing from the local pre-flight still passes locally and
 # still reds a full gate, which is precisely the failure being fixed.
 #
-# `svelte-check` is NOT here — it installs packages, which is minutes,
-# not seconds. `no-snapshot-arrays` is not here either; it needs a
-# build, and the delivery policy already excludes it for that reason.
-PREFLIGHT_LINTS=(
-    # FIRST on purpose: it says what this workspace cannot cover, which
-    # frames every result below it. A green pre-flight on a machine with
-    # no Postgres is 118 database-backed test targets unrun, and saying
-    # so before the rest is the difference between confidence and a
-    # gate failure eleven minutes later (design 775f0b35 Q3).
-    "workspace-declares-what-it-runs|infra/lint/workspace-declares-what-it-runs.sh"
-    "the-image-carries-what-the-launcher-sources|infra/lint/the-image-carries-what-the-launcher-sources.sh"
-    "the-launcher-checks-its-own-image|infra/lint/the-launcher-checks-its-own-image.sh"
-    "the-converge-rolls-back-to-a-named-build|infra/lint/the-converge-rolls-back-to-a-named-build.sh"
-    "the-executor-never-waits-on-its-visibility|infra/lint/the-executor-never-waits-on-its-visibility.sh"
-    "the-cluster-knows-it-is-working|infra/lint/the-cluster-knows-it-is-working.sh"
-    "alerts-are-packets|infra/lint/alerts-are-packets.sh"
-    "the-controls-are-bounded-verbs|infra/lint/the-controls-are-bounded-verbs.sh"
-    "seed-bypass-smell|infra/lint/seed-bypass-smell.sh"
-    "no-todo-citation|infra/lint/no-todo-citation.sh"
-    "no-step-kind-match|infra/lint/no-step-kind-match.sh"
-    "api-path-bypass-smell|infra/lint/api-path-bypass-smell.sh"
-    "dispatcher-actor-stamp|infra/lint/dispatcher-actor-stamp.sh"
-    "sim-boundary-audit|infra/lint/sim-boundary-audit.sh"
-    "tier-import-audit|infra/lint/tier-import-audit.sh"
-    "layer-order-audit|infra/lint/layer-order-audit.sh"
-    "no-wallclock|infra/lint/no-wallclock.sh"
-    "one-stamp-per-transaction|infra/lint/one-stamp-per-transaction.sh"
-    "emitted-kinds-are-declared|infra/lint/emitted-kinds-are-declared.sh"
-    "outbox-migration-ratchet|infra/lint/outbox-migration-ratchet.sh"
-    "idempotence-ratchet|infra/lint/idempotence-ratchet.sh"
-    "dispatcher-rules-ratchet|infra/lint/dispatcher-rules-ratchet.sh"
-    "steptype-bundle-ratchet|infra/lint/steptype-bundle-ratchet.sh"
-    "schema-converge|infra/lint/schema-converge.sh"
-    "a-failed-prepare-degrades-the-pod|infra/lint/a-failed-prepare-degrades-the-pod.sh"
-    "migrations-append-only|infra/lint/migrations-append-only.sh"
-    "migration-numbers-unique|infra/lint/migration-numbers-unique.sh"
-    "no-secrets|infra/lint/no-secrets.sh"
-    "no-session-paths|infra/lint/no-session-paths.sh"
-    "session-key-persists|infra/lint/session-key-persists.sh"
-    "invariant-register|infra/lint/invariant-register.sh"
-    "crate-counts-fresh|infra/lint/crate-counts-fresh.sh"
-    "registry-bump-order|infra/lint/registry-bump-retires-first.sh"
-    "ci-tools-declared|infra/lint/ci-tools-declared.sh"
-    "timers-leave-a-packet|infra/lint/timers-leave-a-packet.sh"
-    "step-plugin-bundle|infra/lint/step-plugin-bundle-exists.sh"
-    "step-plugins-own-their-keys|infra/lint/step-plugins-own-their-keys.sh"
-    "one-palette|infra/lint/one-palette.sh"
-    "one-date-format|infra/lint/one-date-format.sh"
-    "kind-bundle-does-not-tighten|infra/lint/a-kind-bundle-does-not-tighten.sh"
-    "new-style-has-a-caller|infra/lint/a-new-style-has-a-caller.sh"
-    "every-spa-api-path-is-routed|infra/lint/every-spa-api-path-is-routed.sh"
-    "forge-install-covers-the-ops-runner|infra/lint/forge-install-covers-the-ops-runner.sh"
-    "the-observer-retains-and-replays|infra/lint/the-observer-retains-and-replays.sh"
-    # The one roster entry allowed a network fetch: report-only (always
-    # exits 0) and soft-skips when the tool or the advisory DB is
-    # absent, so it cannot red a gate — it can only add a report line.
-    "cargo-advisories|infra/lint/cargo-advisories.sh"
+# The roster is the DIRECTORY. Until 2026-09-05 it was a hand-listed
+# array here, and every car that added a lint edited the same tail
+# line: four cars collided on it in one day, and the fourth was left
+# behind by train #218 ("conflict: infra/gate.sh"). That is the
+# manifest.txt lesson (CLAUDE.md §9a) one level up — a list holding no
+# information its source does not is a merge conflict waiting to
+# happen. Adding a lint is now dropping a file in infra/lint/; this
+# file does not change. The conductor's consist check discovers its
+# lints the same way (train.rs `cheap_lints`: every infra/lint/*.sh,
+# sorted, minus the delivery policy's exclusions), so the two readers
+# agree by construction rather than by being kept in step.
+#
+# What is NOT run here is written down once, with its reason. Each
+# needs something a bare tree cannot answer in seconds. The set is
+# pinned by boss-testing's gate_sh.rs, which asks this script (via
+# `--roster`) rather than re-parsing it.
+PREFLIGHT_EXCLUDES=(
+    # live-DB sweeps on systemd timers, not static checks
+    "infra/lint/audit-ordering.sh"
+    "infra/lint/conservation-invariants.sh"
+    # needs a built workspace (boss-ports-list); CI builds, then runs it
+    "infra/lint/no-snapshot-arrays.sh"
+    # installs packages — minutes, not seconds; the web phase below runs it
+    "infra/lint/svelte-check.sh"
 )
+
+# FIRST on purpose: it says what this workspace cannot cover, which
+# frames every result below it. A green pre-flight on a machine with
+# no Postgres is 118 database-backed test targets unrun, and saying
+# so before the rest is the difference between confidence and a
+# gate failure eleven minutes later (design 775f0b35 Q3).
+PREFLIGHT_FIRST="infra/lint/workspace-declares-what-it-runs.sh"
+
+# One `<name> <path>` line per lint, in the order they run: the pinned
+# first, then the directory in C-locale order, so two hosts ask the
+# same questions in the same sequence. An exclusion naming a file that
+# no longer exists is refused: left standing, it would keep a future
+# lint of that name out of the gate without anyone deciding so.
+#
+# `cargo-advisories` is the one lint allowed a network fetch: it is
+# report-only (always exits 0) and soft-skips when the tool or the
+# advisory DB is absent, so it cannot red a gate — only add a line.
+preflight_roster() {
+    local path
+    for path in "${PREFLIGHT_EXCLUDES[@]}" "$PREFLIGHT_FIRST"; do
+        if [ ! -f "$path" ]; then
+            echo "gate.sh: the pre-flight roster names a lint that does not exist: $path" >&2
+            return 1
+        fi
+    done
+    echo "$(basename "$PREFLIGHT_FIRST" .sh) $PREFLIGHT_FIRST"
+    for path in $(LC_ALL=C ls infra/lint/*.sh); do
+        [ "$path" = "$PREFLIGHT_FIRST" ] && continue
+        case " ${PREFLIGHT_EXCLUDES[*]} " in *" $path "*) continue ;; esac
+        echo "$(basename "$path" .sh) $path"
+    done
+}
+
+if [ "$ROSTER" -eq 1 ]; then
+    preflight_roster
+    exit $?
+fi
 
 run_preflight() {
     check "fmt" cargo fmt -- --check
-    local entry
-    for entry in "${PREFLIGHT_LINTS[@]}"; do
-        check "${entry%%|*}" "${entry#*|}"
-    done
+    local roster name path
+    if ! roster=$(preflight_roster); then
+        echo "GATE FAIL: preflight-roster" >&2
+        FAILED+=("preflight-roster")
+        RAN+=("preflight-roster:fail")
+        return
+    fi
+    # `bash <path>` rather than executing it, as the consist check does:
+    # a checkout may not carry the executable bit, and a lint that
+    # quietly could not run is the under-covering gate this roster
+    # exists to prevent.
+    while read -r name path; do
+        check "$name" bash "$path"
+    done <<< "$roster"
 }
 
 # `--quick` stops here. It is a PRE-FLIGHT, not a gate, and says so:

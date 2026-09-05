@@ -151,21 +151,20 @@ fn gate_script_covers_the_checks() {
         );
     }
 
-    // The lint roster used to be hand-listed here, and by 2026-08-13 it
-    // had drifted to a strict subset: dispatcher-rules-ratchet,
-    // schema-converge and no-secrets all ran in gate.sh while this test
-    // said nothing about them, so any of the three — including the
-    // secret scanner — could have been deleted from the gate silently.
-    // That is the same under-covering shape PR #226 shipped twice, just
-    // one level up, so the roster is derived instead of restated
-    // (CLAUDE.md §9a).
+    // The lint roster used to be hand-listed in gate.sh, and by
+    // 2026-08-13 this test had drifted to a strict subset of it. It was
+    // pinned then; on 2026-09-05 the list itself was collapsed — four
+    // cars collided on its tail line in one day and train #218 left one
+    // behind — so gate.sh now derives the pre-flight roster from
+    // infra/lint/ minus a named exclusion set (CLAUDE.md §9a, the
+    // manifest.txt lesson one level up).
     //
-    // Every executable check in infra/lint/ must appear in gate.sh
-    // unless it is listed below with a reason. The directory does hold
-    // legitimate non-gate scripts — that was the original objection to
-    // globbing — but "which ones and why" is a decision that should be
-    // written down once, here, rather than expressed as absence.
-    let not_gated: &[(&str, &str)] = &[
+    // Under-covering can therefore arrive only one way now: a lint
+    // slipping into that exclusion set. So the exclusion set is what is
+    // pinned. It is asked of the script itself (`--roster`), not
+    // re-parsed from its text — a second parser of the array would be
+    // the pair reopening.
+    let not_preflighted: &[(&str, &str)] = &[
         (
             "conservation-invariants.sh",
             "live-DB sweep on a systemd timer, not a static check",
@@ -180,7 +179,34 @@ fn gate_script_covers_the_checks() {
              proposed separately; it is the check that would have caught \
              the stale _generated/ports.ts",
         ),
+        (
+            "svelte-check.sh",
+            "installs packages — minutes, not seconds; the gate's web phase \
+             runs it, and that is asserted below",
+        ),
     ];
+
+    let out = std::process::Command::new("bash")
+        .arg(repo_root().join("infra/gate.sh"))
+        .arg("--roster")
+        .current_dir(repo_root())
+        .output()
+        .expect("run gate.sh --roster");
+    assert!(
+        out.status.success(),
+        "infra/gate.sh --roster refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let roster = String::from_utf8_lossy(&out.stdout);
+    let preflighted: Vec<&str> = roster
+        .lines()
+        .filter_map(|l| l.split_once(' ').map(|(_, path)| path))
+        .collect();
+    assert_eq!(
+        preflighted.first().copied(),
+        Some("infra/lint/workspace-declares-what-it-runs.sh"),
+        "the pre-flight must open by saying what the workspace cannot cover"
+    );
 
     let mut missing = Vec::new();
     for entry in std::fs::read_dir(repo_root().join("infra/lint")).expect("read infra/lint") {
@@ -189,19 +215,25 @@ fn gate_script_covers_the_checks() {
             Some(n) if n.ends_with(".sh") => n.to_string(),
             _ => continue,
         };
-        if not_gated.iter().any(|(n, _)| *n == name) {
-            continue;
-        }
-        if !gate.contains(&name) {
+        let excluded = not_preflighted.iter().any(|(n, _)| *n == name);
+        let runs = preflighted
+            .iter()
+            .any(|p| *p == format!("infra/lint/{name}"));
+        if excluded == runs {
             missing.push(name);
         }
     }
     missing.sort();
     assert!(
         missing.is_empty(),
-        "infra/lint/ holds check(s) that infra/gate.sh does not run: {missing:?}. \
-         Either add them to the gate, or add them to `not_gated` in this test \
-         with the reason they are exempt."
+        "infra/lint/ and gate.sh's pre-flight disagree on: {missing:?}. A lint \
+         listed here as not-preflighted must be in gate.sh's PREFLIGHT_EXCLUDES, \
+         and one excluded there must be listed here with the reason it is exempt."
+    );
+    assert!(
+        gate.contains("infra/lint/svelte-check.sh"),
+        "svelte-check.sh is kept out of the pre-flight for cost, not for coverage: \
+         the gate's web phase must still run it"
     );
 }
 
