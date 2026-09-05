@@ -44,7 +44,7 @@ pub(crate) enum Verdict {
 /// name-only section); anything else is a hard error (a missing ref
 /// must not read as "clean").
 pub(crate) fn trial_merge(clone: &str, ours: &str, theirs: &str) -> Result<Verdict> {
-    let out = std::process::Command::new("git")
+    let out = crate::git_auth::command()
         .arg("-C")
         .arg(clone)
         .args(["merge-tree", "--write-tree", "--name-only", ours, theirs])
@@ -91,7 +91,7 @@ pub(crate) fn set_hash(clone: &str, pairs: &[(String, String)]) -> Result<String
     let mut sorted: Vec<String> = pairs.iter().map(|(b, h)| format!("{b}@{h}")).collect();
     sorted.sort();
     let joined = sorted.join("\n");
-    let out = std::process::Command::new("git")
+    let out = crate::git_auth::command()
         .arg("-C")
         .arg(clone)
         .args(["hash-object", "--stdin"])

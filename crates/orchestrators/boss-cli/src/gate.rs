@@ -734,7 +734,7 @@ pub(crate) fn stamp(now: chrono::DateTime<chrono::Utc>) -> String {
 /// because a receipt is worth much less when nobody can say which tree
 /// it vouched for.
 pub(crate) fn resolve_sha(branch: &str) -> String {
-    let out = std::process::Command::new("git")
+    let out = crate::git_auth::command()
         .args(["ls-remote", "origin", &format!("refs/heads/{branch}")])
         .output();
     if let Some(sha) = out.ok().filter(|o| o.status.success()).and_then(|o| {

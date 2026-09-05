@@ -163,7 +163,7 @@
   <PageHeader
     eyebrow="IT · Forge line"
     title="The train yard"
-    subtitle="Parked → boarded → departed → arrived — the pipeline's queues, live"
+    subtitle="Gated → parked → boarded → departed → arrived → proven — the pipeline's queues, in the order a change travels"
   />
 
   {#if loading}
@@ -182,6 +182,14 @@
       the panel is absent rather than showing zeros for a version whose
       packets are all still in flight.
     -->
+    <!-- SECTION ORDER IS THE PROTOCOL'S ORDER (David, feedback 7d31e246:
+         "rearrange the Train Yard to flow in protocol-sequence order").
+         A change travels approach → dock → yard → transit → arrival →
+         proof, and the page reads top to bottom in exactly that
+         sequence, after the scoreboard. The numbering is the flow; a
+         block moved out of sequence is a wrong page, and
+         yard-page-order.test.ts pins the headings' order. -->
+
     {#if yard.delivery.length > 0}
       <div class="yard-section">00 — DELIVERY</div>
       <div class="yard-scoreboard">
@@ -198,120 +206,6 @@
       </div>
     {/if}
 
-    {#if yard.awaitingProof.length > 0}
-      <div class="yard-section">
-        00b — AWAITING PROOF <span class="yard-n">{yard.awaitingProof.length}</span>
-      </div>
-      <!--
-        Merged, deployed, and unverified. These belong to none of the
-        yard's other partitions — open trains, arrivals, the dock — so
-        seven of them sat invisible on 2026-08-28 while being the agreed
-        bottleneck.
-      -->
-      <div class="yard-awaiting">
-        {#each yard.awaitingProof as c (c.id)}
-          <a class="yard-awaiting-car" href="/ux/jobs/{c.id}">{c.title}</a>
-        {/each}
-      </div>
-    {/if}
-
-    {#snippet trainBlock(t: TrainRow)}
-      <div class="yard-trainblock">
-        <div class="yard-trainhead">
-          {#if t.live}<span class="yard-dot" title="in motion"></span>{/if}
-          <span class="yard-trainname">{t.title}</span>
-          <span class="yard-lamp" class:ok={t.lamp === 'green'} class:err={t.lamp === 'failing'} class:run={t.lamp === 'pending'}>
-            {t.lamp === 'green' ? 'CI ✓' : t.lamp === 'failing' ? 'CI ✗' : 'CI …'}
-          </span>
-          <span class="yard-chip">{t.status}</span>
-          {#if t.trouble}
-            <span class="yard-trouble" title="an alarm was already raised for this train">
-              {troubleLabel(t.trouble)}
-            </span>
-          {/if}
-          {#if t.eta.phase !== 'arrived'}
-            <span class="yard-eta" class:est={t.eta.kind === 'eta'} title={etaTitle(t.eta)}>
-              {etaText(t.eta)}
-            </span>
-          {/if}
-          <span class="yard-stamp">{stampOf(t)}</span>
-        </div>
-        <div class="yard-consist">
-          {#if t.cars.length === 0}
-            <span class="yard-empty">consist forming…</span>
-          {:else}
-            {#each t.cars as c (c.id)}
-              <PacketCard card={c} size="consist" onOpen={openPacket} />
-            {/each}
-          {/if}
-        </div>
-      </div>
-    {/snippet}
-
-    <!-- The departure line is the MERGE (0bba59f7). Pre-merge is yard
-         work — assembling, inspecting (CI), under repair — where a red
-         lamp is status, not alarm; red is deliberately NOT softened,
-         it just lives here. Post-merge is transit, green by
-         construction, and short. -->
-    <div class="yard-section">
-      01 — IN THE YARD <span class="yard-n">{split.inYard.length}</span>
-      <span class="yard-hint">assembling · inspecting · under repair — red is work, not a wreck</span>
-    </div>
-    {#if split.inYard.length === 0}
-      <div class="yard-empty">Yard clear — nothing assembling.</div>
-    {:else}
-      {#each split.inYard as t (t.id)}{@render trainBlock(t)}{/each}
-    {/if}
-
-    <div class="yard-section">
-      02 — DEPARTED · IN TRANSIT <span class="yard-n">{split.inTransit.length}</span>
-      <span class="yard-hint">past the merge — irreversible, green by construction</span>
-    </div>
-    {#if split.inTransit.length === 0}
-      <div class="yard-empty">Nothing in transit.</div>
-    {:else}
-      {#each split.inTransit as t (t.id)}{@render trainBlock(t)}{/each}
-    {/if}
-
-    <!-- The dock is a station rendered (stations.md): when the
-         registry served, the header carries the station's own facts —
-         the ordering discipline (Q2: never wonder why the queue is in
-         this order) and the advisory WIP verdict (Q3: warn, don't
-         enforce). The derived fallback has no facts to show.
-
-         The walk upstream sits INSIDE this div, anchored left (David,
-         feedback 3ccb79f5) — a queue that isn't filling is diagnosed
-         upstream, and the affordance has to be where the operator is
-         already looking when they notice. It is navigation, not
-         content: the dock gains no row, no count, no state. -->
-    <div class="yard-section">
-      {#if upstream}
-        <button
-          type="button"
-          class="yard-upstream"
-          title={upstream.title}
-          onclick={() => navigate(upstream.href)}>{upstream.label}</button>
-      {/if}
-      03 — LOADING DOCK <span class="yard-n">{yard.dock.length}</span>
-      {#if yard.dockStation.source === 'station'}
-        <span class="yard-discipline" title="queue discipline"
-          >{disciplineLabel(yard.dockStation.discipline)}</span>
-        {#if wipAdvisory(yard.dockStation)}
-          <span class="yard-wip" title="over the station's advisory WIP limit"
-            >{wipAdvisory(yard.dockStation)}</span>
-        {/if}
-      {/if}
-    </div>
-    {#if yard.dock.length === 0}
-      <div class="yard-empty">The dock is clear.</div>
-    {:else}
-      <div class="yard-dock">
-        {#each yard.dock as c (c.id)}
-          <PacketCard card={c} size="dock" onOpen={openPacket} />
-        {/each}
-      </div>
-    {/if}
-
     <!-- The approach (f930cda2): the car lifecycle upstream of the
          dock, which used to render as silence — 8 publish-requests,
          8 gates and an arrival in one hour once drew an empty yard.
@@ -322,7 +216,7 @@
          and the GARAGE come from the server-computed status (David,
          2026-09-03) so capacity is the live policy, not folklore. -->
     {#if yard.approach.length > 0 || slots.length > 0 || garage.length > 0}
-      <div class="yard-section">04 — THE APPROACH <span class="yard-n">{yard.approach.length}</span></div>
+      <div class="yard-section">01 — THE APPROACH <span class="yard-n">{yard.approach.length}</span></div>
 
       {#if yard.approach.length > 0}
         <table class="yard-board">
@@ -395,6 +289,70 @@
       {/if}
     {/if}
 
+    <!-- The dock is a station rendered (stations.md): when the
+         registry served, the header carries the station's own facts —
+         the ordering discipline (Q2: never wonder why the queue is in
+         this order) and the advisory WIP verdict (Q3: warn, don't
+         enforce). The derived fallback has no facts to show.
+
+         The walk upstream sits INSIDE this div, anchored left (David,
+         feedback 3ccb79f5) — a queue that isn't filling is diagnosed
+         upstream, and the affordance has to be where the operator is
+         already looking when they notice. It is navigation, not
+         content: the dock gains no row, no count, no state. -->
+    <div class="yard-section">
+      {#if upstream}
+        <button
+          type="button"
+          class="yard-upstream"
+          title={upstream.title}
+          onclick={() => navigate(upstream.href)}>{upstream.label}</button>
+      {/if}
+      02 — LOADING DOCK <span class="yard-n">{yard.dock.length}</span>
+      {#if yard.dockStation.source === 'station'}
+        <span class="yard-discipline" title="queue discipline"
+          >{disciplineLabel(yard.dockStation.discipline)}</span>
+        {#if wipAdvisory(yard.dockStation)}
+          <span class="yard-wip" title="over the station's advisory WIP limit"
+            >{wipAdvisory(yard.dockStation)}</span>
+        {/if}
+      {/if}
+    </div>
+    {#if yard.dock.length === 0}
+      <div class="yard-empty">The dock is clear.</div>
+    {:else}
+      <div class="yard-dock">
+        {#each yard.dock as c (c.id)}
+          <PacketCard card={c} size="dock" onOpen={openPacket} />
+        {/each}
+      </div>
+    {/if}
+
+    <!-- The departure line is the MERGE (0bba59f7). Pre-merge is yard
+         work — assembling, inspecting (CI), under repair — where a red
+         lamp is status, not alarm; red is deliberately NOT softened,
+         it just lives here. Post-merge is transit, green by
+         construction, and short. -->
+    <div class="yard-section">
+      03 — IN THE YARD <span class="yard-n">{split.inYard.length}</span>
+      <span class="yard-hint">assembling · inspecting · under repair — red is work, not a wreck</span>
+    </div>
+    {#if split.inYard.length === 0}
+      <div class="yard-empty">Yard clear — nothing assembling.</div>
+    {:else}
+      {#each split.inYard as t (t.id)}{@render trainBlock(t)}{/each}
+    {/if}
+
+    <div class="yard-section">
+      04 — DEPARTED · IN TRANSIT <span class="yard-n">{split.inTransit.length}</span>
+      <span class="yard-hint">past the merge — irreversible, green by construction</span>
+    </div>
+    {#if split.inTransit.length === 0}
+      <div class="yard-empty">Nothing in transit.</div>
+    {:else}
+      {#each split.inTransit as t (t.id)}{@render trainBlock(t)}{/each}
+    {/if}
+
     <!-- Arrivals are trains that ARRIVED — a cancelled train never
          did, and it keeps its own muted line below rather than
          disappearing. Ordered by the best arrival instant each train
@@ -443,7 +401,57 @@
       </div>
     {/if}
 
-    <div class="yard-flow">GATED → PARKED → BOARDED → <em>DEPARTED</em> → ARRIVED</div>
+    {#if yard.awaitingProof.length > 0}
+      <div class="yard-section">
+        06 — AWAITING PROOF <span class="yard-n">{yard.awaitingProof.length}</span>
+      </div>
+      <!--
+        Merged, deployed, and unverified. These belong to none of the
+        yard's other partitions — open trains, arrivals, the dock — so
+        seven of them sat invisible on 2026-08-28 while being the agreed
+        bottleneck.
+      -->
+      <div class="yard-awaiting">
+        {#each yard.awaitingProof as c (c.id)}
+          <a class="yard-awaiting-car" href="/ux/jobs/{c.id}">{c.title}</a>
+        {/each}
+      </div>
+    {/if}
+
+    {#snippet trainBlock(t: TrainRow)}
+      <div class="yard-trainblock">
+        <div class="yard-trainhead">
+          {#if t.live}<span class="yard-dot" title="in motion"></span>{/if}
+          <span class="yard-trainname">{t.title}</span>
+          <span class="yard-lamp" class:ok={t.lamp === 'green'} class:err={t.lamp === 'failing'} class:run={t.lamp === 'pending'}>
+            {t.lamp === 'green' ? 'CI ✓' : t.lamp === 'failing' ? 'CI ✗' : 'CI …'}
+          </span>
+          <span class="yard-chip">{t.status}</span>
+          {#if t.trouble}
+            <span class="yard-trouble" title="an alarm was already raised for this train">
+              {troubleLabel(t.trouble)}
+            </span>
+          {/if}
+          {#if t.eta.phase !== 'arrived'}
+            <span class="yard-eta" class:est={t.eta.kind === 'eta'} title={etaTitle(t.eta)}>
+              {etaText(t.eta)}
+            </span>
+          {/if}
+          <span class="yard-stamp">{stampOf(t)}</span>
+        </div>
+        <div class="yard-consist">
+          {#if t.cars.length === 0}
+            <span class="yard-empty">consist forming…</span>
+          {:else}
+            {#each t.cars as c (c.id)}
+              <PacketCard card={c} size="consist" onOpen={openPacket} />
+            {/each}
+          {/if}
+        </div>
+      </div>
+    {/snippet}
+
+    <div class="yard-flow">GATED → PARKED → BOARDED → <em>DEPARTED</em> → ARRIVED → PROVEN</div>
   {/if}
 </div>
 

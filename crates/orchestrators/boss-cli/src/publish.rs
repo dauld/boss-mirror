@@ -132,7 +132,7 @@ pub(crate) fn verify(local: &str, on_forge: &str, branch: &str) -> Result<()> {
 }
 
 fn git(args: &[&str]) -> Result<std::process::Output> {
-    std::process::Command::new("git")
+    crate::git_auth::command()
         .args(args)
         .output()
         .map_err(|e| anyhow::anyhow!("could not run git {args:?}: {e}"))

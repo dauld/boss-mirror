@@ -12,7 +12,6 @@
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::docs_flush::{self, DecisionKind, FlushDecision};
 
@@ -311,7 +310,7 @@ where
 }
 
 fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {
-    let output = Command::new("git")
+    let output = crate::git_auth::command()
         .args(args)
         .current_dir(cwd)
         .output()
@@ -324,7 +323,7 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {
 }
 
 fn run_git_capture(cwd: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
+    let output = crate::git_auth::command()
         .args(args)
         .current_dir(cwd)
         .output()

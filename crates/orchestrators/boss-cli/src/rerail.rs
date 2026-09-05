@@ -33,7 +33,7 @@ use crate::park;
 
 /// Shell out to git in a directory, capturing stderr for the error.
 fn git(dir: &str, args: &[&str]) -> Result<String> {
-    let out = std::process::Command::new("git")
+    let out = crate::git_auth::command()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -193,7 +193,7 @@ pub async fn run(given: &str, finish_only: bool, dry: bool) -> Result<()> {
     }
 
     git(".", &["worktree", "add", "--detach", &wt, "origin/main"])?;
-    let picked = std::process::Command::new("git")
+    let picked = crate::git_auth::command()
         .arg("-C")
         .arg(&wt)
         .args(["cherry-pick", &range])

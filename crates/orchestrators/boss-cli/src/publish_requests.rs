@@ -210,7 +210,7 @@ fn git_in(clone: &Path, args: &[&str]) -> Result<std::process::Output> {
     // EVERY git call names its repository explicitly (5b65c2a8): a git
     // fixture or a drain must never act on whatever repo the process
     // happens to be standing in.
-    std::process::Command::new("git")
+    crate::git_auth::command()
         .arg("-C")
         .arg(clone)
         .args(args)

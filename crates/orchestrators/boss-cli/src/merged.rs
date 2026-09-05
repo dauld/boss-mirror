@@ -228,14 +228,14 @@ pub fn observe(clone: &str, remote: &str, branch: &str) -> Observations {
     if let (Some(m), Some(b)) = (&main_sha, &branch_sha) {
         // Both objects have to be present locally to compare them.
         let have = |s: &str| {
-            std::process::Command::new("git")
+            crate::git_auth::command()
                 .args(["-C", clone, "cat-file", "-e", &format!("{s}^{{commit}}")])
                 .status()
                 .map(|st| st.success())
                 .unwrap_or(false)
         };
         if have(m) && have(b) {
-            is_ancestor = std::process::Command::new("git")
+            is_ancestor = crate::git_auth::command()
                 .args(["-C", clone, "merge-base", "--is-ancestor", b, m])
                 .status()
                 .ok()

@@ -250,7 +250,13 @@ fn log(msg: impl std::fmt::Display) {
 /// Run a command capturing output; error on non-zero exit with the
 /// same message shape the python `sh()` raised.
 fn sh_in(cwd: Option<&Path>, check: bool, args: &[&str]) -> Result<Output> {
-    let mut cmd = Command::new(args[0]);
+    // git carries the forge credential on the command itself
+    // (git_auth); every other program runs bare.
+    let mut cmd = if args[0] == "git" {
+        crate::git_auth::command()
+    } else {
+        Command::new(args[0])
+    };
     cmd.args(&args[1..]);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
@@ -363,53 +369,11 @@ pub(crate) fn local_jobs_problem(jobs_url: &str, allow_local: bool) -> Option<St
 }
 
 /// Return the list of problems; empty means the locomotive is fit.
-/// Authenticate git to the PRIVATE forge. Must run before ANY remote op.
-///
-/// The conductor moved into the cluster with only the forge token mounted
-/// (`BOSS_TRAIN_FORGE_TOKEN_FILE`); its clone/fetch were anonymous, so
-/// every remote op failed rc=128 on the private repo. The token goes in as
-/// an `http.extraHeader`, NOT in the URL: git commands and their URLs get
-/// printed in error logs, and a token embedded in a URL would leak there.
-/// `--global` so clone, fetch and push all carry it.
-///
-/// IT LIVES HERE, NOT IN `ensure_clone`, BECAUSE `--global` WRITES TO THE
-/// CONTAINER'S HOME. The first fix set it inside `ensure_clone` only, which
-/// held exactly as long as that pod did: the clone lives on a PVC and
-/// survives a roll, but `~/.gitconfig` does not. When the deployment rolled
-/// to a fresh pod on 2026-09-04, `preflight` — which runs FIRST and dry-
-/// fetches both remotes — hit an unauthenticated git and exited 3, so the
-/// 18:05 window boarded nothing. A fix that only holds until the next
-/// restart is not a fix.
-///
-/// Best-effort by design: an unreadable or absent token leaves git
-/// anonymous, which fails loudly at the next remote op rather than
-/// silently pretending to be configured.
-fn configure_git_auth() {
-    let Ok(token) = fs::read_to_string(env_or(
-        "BOSS_TRAIN_FORGE_TOKEN_FILE",
-        "/etc/boss-train/forge.token",
-    )) else {
-        return;
-    };
-    let token = token.trim();
-    if token.is_empty() {
-        return;
-    }
-    let _ = sh(&[
-        "git",
-        "config",
-        "--global",
-        "http.extraHeader",
-        &format!("Authorization: token {token}"),
-    ]);
-}
-
 fn preflight(cfg: &Config) -> Result<Vec<String>> {
     let mut problems = Vec::new();
-    // Before the dry fetches below, which are remote ops and need auth on
-    // a private forge. Idempotent, so calling it here and in ensure_clone
-    // costs one `git config` write.
-    configure_git_auth();
+    // Every git command below carries the forge credential on itself
+    // (git_auth::command) — nothing to configure first, nothing written
+    // to this or any other user's git config.
     // The drift sentinel runs first, clone or no clone: a conductor
     // whose bookkeeping would land on this box instead of the system
     // of record must not pull at all.
@@ -4516,7 +4480,6 @@ impl Conductor {
 
     fn ensure_clone(&self) -> Result<()> {
         let clone = &self.cfg.clone;
-        configure_git_auth();
         if !Path::new(clone).join(".git").is_dir() {
             // A dir left from a partial/interrupted clone — present but
             // with no .git — makes `git clone` refuse ("destination

@@ -142,7 +142,7 @@ pub async fn run() -> Result<()> {
             .map(|g| md_str(g, "branch").to_string())
             .filter(|b| !b.is_empty()),
     );
-    match std::process::Command::new("git")
+    match crate::git_auth::command()
         .args(["ls-remote", "--heads", "origin"])
         .output()
     {
