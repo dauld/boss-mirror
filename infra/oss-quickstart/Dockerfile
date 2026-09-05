@@ -306,6 +306,15 @@ COPY infra/seed-brewery-tenant.sh /opt/boss/infra/seed-brewery-tenant.sh
 # Quickstart launcher + init scripts.
 COPY infra/oss-quickstart/init.sh /usr/local/bin/boss-init
 COPY infra/oss-quickstart/services-launcher.sh /usr/local/bin/boss-launch
+# What the launcher SOURCES must land beside it: services-launcher.sh
+# reads tenant-launch.sh from its own directory, which in this image is
+# /usr/local/bin, not infra/oss-quickstart. On 2026-09-05 the launcher
+# landed without this line and the pod crash-looped on "No such file"
+# before any API started — the system of record was dark for the
+# duration of a rollback. The gate cannot see the image's file set
+# (it never builds the image), so infra/lint/the-image-carries-what-
+# the-launcher-sources.sh pins this pairing instead.
+COPY infra/oss-quickstart/tenant-launch.sh /usr/local/bin/tenant-launch.sh
 # The maintenance-packet wrap scripts, so in-cluster CronJob chores
 # (boss-search-reindex first) open and complete their packets the same
 # way the boss-gcp timers do — one script pair, both hosts (jq above

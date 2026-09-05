@@ -594,6 +594,7 @@ PREFLIGHT_LINTS=(
     # so before the rest is the difference between confidence and a
     # gate failure eleven minutes later (design 775f0b35 Q3).
     "workspace-declares-what-it-runs|infra/lint/workspace-declares-what-it-runs.sh"
+    "the-image-carries-what-the-launcher-sources|infra/lint/the-image-carries-what-the-launcher-sources.sh"
     "seed-bypass-smell|infra/lint/seed-bypass-smell.sh"
     "no-todo-citation|infra/lint/no-todo-citation.sh"
     "no-step-kind-match|infra/lint/no-step-kind-match.sh"
