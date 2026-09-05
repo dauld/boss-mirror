@@ -706,8 +706,9 @@ pub fn gates(
 
 /// The garage: cars whose MOST-RECENT gate-run is red. A branch that
 /// failed then re-gated green is fixed and does not show — so gate-runs
-/// are grouped by branch, the latest kept (by `opened_on`, tie-broken by
-/// packet id so the order is total), and the garage is every branch
+/// are grouped by branch, the latest kept (by the `opened_at` instant,
+/// falling back to `opened_on`, tie-broken by packet id so the order is
+/// total), and the garage is every branch
 /// whose latest verdict is `failed`: a red that a check actually judged.
 /// `lost` and `unreadable` are NOT reds — a lost run says "no verdict was
 /// produced" (the runner died, the reaper buried it), an unreadable one
@@ -722,14 +723,28 @@ pub fn gates(
 pub fn garage(gate_runs: &[(Job, Vec<Step>)], settled_branches: &[String]) -> Vec<GaragedCar> {
     use std::collections::HashMap;
     // branch -> the latest (job, steps) seen for it.
+    // The instant a run opened: `metadata.opened_at` (RFC3339, stamped
+    // by `boss gate`) when present, else the row's `opened_on` at
+    // midnight. `opened_on` alone has DAY resolution, so two gates of
+    // one branch on one day tied on it and the packet-id tiebreak — a
+    // random UUID — chose between a morning red and an afternoon green
+    // by luck: on 2026-09-05 feat/the-ci-host-check-is-live sat in the
+    // garage after its second gate went green. The id still breaks a
+    // true tie, so the order stays total.
+    let opened_instant = |g: &Job| -> (chrono::NaiveDateTime, String) {
+        let at = meta_str(&g.metadata, "opened_at")
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t.naive_utc())
+            .unwrap_or_else(|| g.opened_on.and_hms_opt(0, 0, 0).unwrap_or_default());
+        (at, g.id.to_string())
+    };
     let mut latest: HashMap<&str, (&Job, &[Step])> = HashMap::new();
     for (g, steps) in gate_runs {
         let Some(branch) = meta_str(&g.metadata, "branch").filter(|b| !b.is_empty()) else {
             continue;
         };
         match latest.get(branch) {
-            Some((prev, _))
-                if (prev.opened_on, prev.id.to_string()) >= (g.opened_on, g.id.to_string()) => {}
+            Some((prev, _)) if opened_instant(prev) >= opened_instant(g) => {}
             _ => {
                 latest.insert(branch, (g, steps.as_slice()));
             }
@@ -1805,6 +1820,45 @@ mod tests {
         let g = garage(&runs, &[]);
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].failed_check, None);
+    }
+
+    #[test]
+    fn two_runs_on_one_day_are_ordered_by_instant_not_by_id() {
+        // A branch gated red at 05:14 and green at 05:29 the same day.
+        // `opened_on` has day resolution, so the two tie on it, and the
+        // packet-id tiebreak is a random UUID — here rigged so the RED
+        // run's id sorts higher. The later INSTANT must win: the branch
+        // was fixed and re-gated, it is not awaiting rework. Measured
+        // 2026-09-05: feat/the-ci-host-check-is-live sat in the garage
+        // after its second gate went green.
+        let mut red = gate_run_on("feat/the-ci-host-check-is-live", 5);
+        red.id = boss_core::job::JobId::from_uuid(
+            uuid::Uuid::parse_str("ffffffff-ffff-4fff-8fff-ffffffffffff").unwrap(),
+        );
+        red.metadata["opened_at"] = json!("2026-09-05T05:14:00Z");
+        let mut green = gate_run_on("feat/the-ci-host-check-is-live", 5);
+        green.id = boss_core::job::JobId::from_uuid(
+            uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000000").unwrap(),
+        );
+        green.metadata["opened_at"] = json!("2026-09-05T05:29:00Z");
+        let runs = vec![
+            (red, vec![verdict_step("failed", json!([]))]),
+            (green, vec![verdict_step("green", json!([]))]),
+        ];
+        assert!(
+            garage(&runs, &[]).is_empty(),
+            "the later instant is the latest run"
+        );
+        // And the other way round: green first, red later — garaged.
+        let mut green2 = gate_run_on("feat/y", 5);
+        green2.metadata["opened_at"] = json!("2026-09-05T05:14:00Z");
+        let mut red2 = gate_run_on("feat/y", 5);
+        red2.metadata["opened_at"] = json!("2026-09-05T05:29:00Z");
+        let runs = vec![
+            (green2, vec![verdict_step("green", json!([]))]),
+            (red2, vec![verdict_step("failed", json!([]))]),
+        ];
+        assert_eq!(garage(&runs, &[]).len(), 1);
     }
 
     #[test]
