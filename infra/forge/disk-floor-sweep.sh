@@ -114,6 +114,29 @@ done_at() { # step-name
 # <24h, sweep freed nothing — it took a hand `docker builder prune -af`).
 # `|| true`: a docker hiccup here must not stop the remaining
 # remediations — the unmet floor at the end is what fails loudly.
+# THE DAEMON CI RUNS IN, FIRST. This host has two docker daemons
+# (reap-dead-ci-jobs header): david's rootless one, where the converge
+# builds and which every step below prunes, and the SYSTEM one that
+# Forgejo Actions jobs run in. Every train's build-image job leaves a
+# 10.20.0.15:3000/david/boss-ci:<sha> tag in the system daemon and
+# nothing ever removed one: measured 2026-09-05 03:19 (disk-report),
+# 68 images, 85.88GB, 83.28GB reclaimable (96%) — the bulk of a 228GB
+# disk with 71GB free, while this script pruned the rootless daemon
+# to the floor and reported "a human decides next". Unused images
+# older than a day: the running job's image is in use and docker will
+# not prune it; the newest tag is what the next job pulls; anything
+# older is a LAN re-pull (3.47GB) away if ever wanted again. `sudo -n`
+# because the system socket is root's — the same sudo the converge
+# runner uses for `docker run`; refused means the step is skipped and
+# says so, never a silent zero.
+if sudo -n docker image prune -af --filter "until=24h" 2>&1 | tail -1; then
+    :
+else
+    echo "disk-floor-sweep: system-daemon image prune skipped — sudo -n docker refused"
+fi
+if floor_met_after "system-daemon unused-image prune (older than 24h)"; then
+    done_at "system-daemon image prune"
+fi
 docker builder prune -af || true
 if floor_met_after "builder cache prune (all)"; then
     done_at "builder cache prune"

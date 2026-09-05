@@ -1038,11 +1038,35 @@ fn backlog_item_spec() -> WorkflowSpec {
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
                 },
+                // The decider's brief, written at routing time: what
+                // they must read (markdown) and the answer the triager
+                // would give. Optional — only the design route needs
+                // them; the decide step's surface says when absent.
+                boss_core::job::StepField {
+                    name: "context_md".into(),
+                    field_type: "string".into(),
+                    required: false,
+                    filled_by: boss_core::job::FilledBy::Executor,
+                },
+                boss_core::job::StepField {
+                    name: "proposed".into(),
+                    field_type: "string".into(),
+                    required: false,
+                    filled_by: boss_core::job::FilledBy::Executor,
+                },
             ],
             ..Default::default()
         },
         branch("measure", "Re-measure the claim", "verify"),
-        branch("design-review", "Decide the design", "design"),
+        // answer-question, not a bare task: the decision surface —
+        // question, the asker's context, a proposed answer, verdict —
+        // the same step user-feedback's design route uses. A task here
+        // reached David's queue as a title and two empty boxes
+        // (2026-09-05, three items).
+        StepSpec {
+            kind: "answer-question".into(),
+            ..branch("design-review", "Decide the design", "design")
+        },
         branch("build", "Build the change", "build"),
         closing_branch(
             "duplicate",

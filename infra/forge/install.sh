@@ -66,11 +66,17 @@ fi
 #   uninstalled through the 2026-09-03 fill is the most recent instance.
 #   The bootstrap that installs forge-converge is the one surviving hand
 #   action — after it, the host converges like the cluster.
+# estate-observe-host: the forge observes itself every 15 minutes —
+#   the estate loop's tightest disk was the one box with no observer
+#   (49a8d842), and the boarding host check (BOSS_TRAIN_CI_HOST) can
+#   only read a host that reports. Same script as boss-gcp's observer,
+#   HOST_ID=forge.
 UNITS=(
     reap-dead-ci-jobs
     cluster-deploy-runner
     disk-floor-sweep
     forge-converge
+    estate-observe-host
 )
 
 installed=0
@@ -85,6 +91,29 @@ for u in "${UNITS[@]}"; do
     done
     installed=$((installed + 1))
 done
+
+# kubectl ON THE HOST, for the observer that closes the converge loop.
+# cluster-deploy-runner drives kubectl through the alpine/k8s image
+# (no host binary needed to APPLY), but check-manifests-applied.sh —
+# the "is what's in the tree what's running?" read that 60690755 found
+# running nowhere with a real credential — calls plain `kubectl` over
+# every manifest and cannot be fed through a container mount cleanly.
+# One binary, pinned by sha so CDN weather cannot ship a different one
+# (the a700d3a4 lesson), the same version as the image and the cluster
+# line (1.33). Downloads once; a later run finds it and moves on.
+KUBECTL_VERSION="v1.33.3"
+KUBECTL_SHA256="2fcf65c64f352742dc253a25a7c95617c2aba79843d1b74e585c69fe4884afb0"
+if [ ! -x /usr/local/bin/kubectl ]; then
+    tmp="$(mktemp)"
+    if curl -sfL -o "$tmp" "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+        && echo "${KUBECTL_SHA256}  ${tmp}" | sha256sum -c - >/dev/null; then
+        install -m 0755 "$tmp" /usr/local/bin/kubectl
+        echo "install.sh: kubectl ${KUBECTL_VERSION} installed"
+    else
+        echo "install.sh: kubectl download or checksum failed — the manifests check will report 'cannot verify' until it is present" >&2
+    fi
+    rm -f "$tmp"
+fi
 
 # The system of record for the maintenance packets these units open.
 # ONE definition (§9a), written as a per-unit drop-in so

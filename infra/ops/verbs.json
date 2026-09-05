@@ -61,6 +61,11 @@
       "params": [
         { "name": "floor_gb", "pattern": "^[0-9]{1,3}$", "default": "25" }
       ]
+    },
+    "disk-report": {
+      "about": "READ-ONLY: what is consuming this host's disk — df, BOTH docker daemons (system: the CI jobs; rootless: the converge builds), and a fixed list of directories largest-first. No arguments, nothing mutated; sudo -n is tried where root is needed and each line says when it was refused. Added 2026-09-05 after the locomotive refused #204 at 65GB and the bounded reclaim stopped at the floor with nobody able to say what held the rest (David: 'I want to understand what is consuming disk first').",
+      "argv": ["/home/david/boss/infra/forge/disk-report.sh"],
+      "params": []
     }
   }
 }

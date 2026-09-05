@@ -324,16 +324,32 @@
     root.appendChild(body);
 
     function meta(key) {
-      // Step first, Job second: the step's brief is written for THIS
-      // decision; the Job's fields are the packet-wide fallback.
+      // Step first, Job second, the routing step third: the step's
+      // brief is written for THIS decision; the Job's fields are the
+      // packet-wide fallback; and on a triaged packet (backlog-item,
+      // user-feedback) the brief is written by whoever chose the
+      // `design` route, in the same write as the disposition — so it
+      // sits on that completed step, not on this one. Reading it here
+      // is what lets the route and its brief be one act (2026-09-05:
+      // three items reached the decider with the brief a step away).
       const own =
         step.metadata && typeof step.metadata[key] === 'string'
           ? step.metadata[key].trim()
           : '';
       if (own) return own;
-      return job && job.metadata && typeof job.metadata[key] === 'string'
-        ? job.metadata[key].trim()
-        : '';
+      const packet =
+        job && job.metadata && typeof job.metadata[key] === 'string'
+          ? job.metadata[key].trim()
+          : '';
+      if (packet) return packet;
+      const steps = (job && Array.isArray(job.steps)) ? job.steps : [];
+      const router = steps.find(
+        (s) =>
+          s && s.id !== step.id && s.status === 'completed' &&
+          s.metadata && typeof s.metadata.disposition === 'string' &&
+          typeof s.metadata[key] === 'string' && s.metadata[key].trim(),
+      );
+      return router ? router.metadata[key].trim() : '';
     }
 
     function render() {

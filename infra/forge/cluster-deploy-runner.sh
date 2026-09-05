@@ -295,3 +295,31 @@ $K set image -n boss-dev deploy/boss-conductor "conductor=$REGISTRY:$HEAD" || tr
 echo "$HEAD" > "$STAMP_FILE"
 rm -f "$FAILED_FILE"
 echo "cluster-deploy-runner: cluster on $REGISTRY:$HEAD"
+
+# THE CONVERGE VERIFIES WHAT IT APPLIED (60690755). Everything above
+# is a write; nothing above reads back whether the cluster now holds
+# what the tree says. infra/cluster/check-manifests-applied.sh is that
+# read — every named object present, and for the kinds where
+# present-but-wrong is the realistic failure, contents matching — and
+# it was running nowhere with a credential that could see the 41
+# objects (the dev-session credential reports 39 unreadable). This is
+# the one place with both the tree and the admin kubeconfig, so it
+# runs here, AFTER the stamp: the deploy above is real either way, and
+# a drift is a finding about it, not a reason to roll it back.
+#
+# A failure — drift (exit 1) or cannot-verify (exit 2, which is
+# 'unknown', not 'clean') — fails this unit, so ExecStartPost never
+# closes the converge packet and it stays open on the fleet view
+# (timers-leave-a-packet): the alarm channel that already exists,
+# carrying the check's own report in the journal. It does not retry on
+# its own; the next converge — the next main move — re-applies and
+# re-checks, which is the honest cadence for a drift.
+echo "cluster-deploy-runner: verifying infra/cluster/manifests against the cluster"
+check_rc=0
+KUBECONFIG="$KUBECONFIG_PATH" "$REPO/infra/cluster/check-manifests-applied.sh" || check_rc=$?
+if [ "$check_rc" -ne 0 ]; then
+    rc=$check_rc
+    echo "cluster-deploy-runner: MANIFESTS CHECK FAILED (rc=$rc) — the tree and the cluster disagree, or the check could not verify; the converge packet stays open until a converge passes it" >&2
+    exit 1
+fi
+echo "cluster-deploy-runner: manifests verified — the cluster holds what the tree declares"

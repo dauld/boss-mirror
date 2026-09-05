@@ -210,6 +210,23 @@ required = true
 name = "evidence"
 field_type = "string"
 required = true
+# The decider's brief, written at routing time by whoever chose
+# `design`: what they must READ (markdown — the measurement, the
+# options, the artifact) and the answer you would give. Optional here
+# because only the design route needs them; the decide step's surface
+# says loudly when they are absent. They live on THIS step so the
+# route and its brief are one write — 2026-09-05, three items reached
+# David's queue as "Decide the design" with nothing to read, because
+# the brief had gone onto the triage evidence and the decide step was
+# a bare task.
+[[workflow.step.fields]]
+name = "context_md"
+field_type = "string"
+required = false
+[[workflow.step.fields]]
+name = "proposed"
+field_type = "string"
+required = false
 
 [[workflow.step]]
 title = "measure"
@@ -220,7 +237,14 @@ authority_role = "platform-admin"
 
 [[workflow.step]]
 title = "design-review"
-kind = "task"
+# answer-question, not task: the decision surface (question, the
+# asker's markdown context, a proposed answer to copy, verdict +
+# answer) — the same step user-feedback's design route already uses.
+# A bare task showed a title and two empty boxes, so the person
+# deciding had nothing to decide FROM. The plugin reads context_md
+# and proposed from this step, then the packet, then the triage step
+# that routed here.
+kind = "answer-question"
 ready_when = "steps.triage.done AND steps.triage.metadata.disposition = \"design\""
 title_template = "Decide the design"
 authority_role = "platform-admin"

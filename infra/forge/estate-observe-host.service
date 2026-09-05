@@ -1,0 +1,34 @@
+# The forge host observes itself (49a8d842). The estate loop watched
+# boss-gcp only, while the forge — Forgejo, the registry, the CI
+# runner, and the tightest disk in the estate (228G, 83% full on
+# 2026-08-30) — produced no observations at all: its disk could fill
+# and the comparison would say nothing, which is how 2026-09-02's fill
+# blocked every train unseen. boss-estate-observe-host.service in
+# infra/estate/ is the same observer for boss-gcp, with its own note
+# that the forge "runs the SAME pair with two overrides, installed by
+# hand until its config-not-in-repo debt is paid". This is that debt
+# paid: the forge's pair lives in the tree, in install.sh's UNITS, and
+# forge-converge installs it like every other unit here.
+#
+# Same script, two overrides: HOST_ID=forge (must match the estate
+# node row id — a wrong id is "never observed" for the box that
+# matters) and the forge's checkout path. The wrap pair is the
+# timers-leave-a-packet contract; the label names the host so the
+# daily packet reads apart from boss-gcp's.
+[Unit]
+Description=BOSS forge: observe this host and record what was there
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Reads df/nproc/meminfo and POSTs — nothing here needs root.
+User=david
+Environment=HOST_ID=forge
+Environment=JOBS_API=http://10.20.0.34:7900
+# BOSS_JOBS_URL pinned INLINE (the boss-estate-observe-host idiom):
+# the helpers refuse without one, and env(1) on the Exec line
+# outranks any drop-in.
+ExecStartPre=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /home/david/boss/infra/boss-maintenance-wrap.sh maintenance-estate-observe-host "estate host observation (forge)"
+ExecStart=/home/david/boss/infra/estate/observe-host.sh
+ExecStartPost=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /home/david/boss/infra/boss-step.sh maintenance-estate-observe-host run result=ok

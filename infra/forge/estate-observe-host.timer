@@ -1,0 +1,15 @@
+# Every 15 minutes, matching the cluster's kubernetes-nodes observer
+# (boss-estate-observe.yaml) rather than boss-gcp's daily host timer:
+# the forge's free disk is the one number in the estate that moves by
+# gigabytes per hour (a converge builds images; CI fills target/), and
+# the boarding host check reads the NEWEST observation against a
+# max age — a daily sample is stale for most of the day.
+[Unit]
+Description=BOSS forge: host self-observation (every 15 minutes)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target
