@@ -1303,24 +1303,21 @@ pub(crate) fn publish_car_branch(clone: &str, branch: &str) -> Result<bool> {
         };
         if let Some(c) = candidate {
             let same = is_ancestor(&c, &fork_ref)? && is_ancestor(&fork_ref, &c)?;
-            let fork_ahead = is_ancestor(&c, &fork_ref)? && !same;
-            let diverged = !is_ancestor(&c, &fork_ref)? && !is_ancestor(&fork_ref, &c)?;
-            if same || fork_ahead || diverged {
+            if same {
+                // Already published: the fork carries exactly this head.
+                // Nothing to push, and the answer is "yes, it is there" —
+                // publishing twice is idempotent, not a refusal.
+                return Ok(true);
+            }
+            let fork_ahead = is_ancestor(&c, &fork_ref)?;
+            let diverged = !fork_ahead && !is_ancestor(&fork_ref, &c)?;
+            if fork_ahead || diverged {
+                let fork_head =
+                    sh_unchecked(&["git", "-C", clone, "rev-parse", "--short", &fork_ref])?;
                 log(format!(
                     "{branch}: the fork already carries {} ({}) — not publishing {c} over it",
-                    &stdout_str(&sh_unchecked(&[
-                        "git",
-                        "-C",
-                        clone,
-                        "rev-parse",
-                        "--short",
-                        &fork_ref
-                    ])?)
-                    .trim()
-                    .to_string(),
-                    if same {
-                        "identical"
-                    } else if fork_ahead {
+                    stdout_str(&fork_head).trim(),
+                    if fork_ahead {
                         "ahead of this clone"
                     } else {
                         "diverged from this clone"
