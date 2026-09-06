@@ -78,6 +78,14 @@ jobs:
       - name: Build and push the runner image
         env:
           TOKEN: ${{ secrets.FORGE_PACKAGE_TOKEN }}
+          # The job's own repo-scoped credential, the same one locomotive
+          # passes to post ITS refusal status. FORGE_PACKAGE_TOKEN above is
+          # read:repository + write:package and cannot write a commit
+          # status; this can. Used ONLY on the exhausted-transient path
+          # below, to post a `refused:` status so the conductor's strike
+          # rule spares the innocent cars aboard (train.rs
+          # verdict_strikes_cars / any_failing_check_refused).
+          FORGE_TOKEN: ${{ github.token }}
           # Kaniko resolves a git:// context over HTTPS by default and
           # the forge speaks plain HTTP on 3000, so the first run died
           # with "server gave HTTP response to HTTPS client". This is
@@ -169,6 +177,40 @@ jobs:
               echo "  This is no longer weather. Check DNS on the runner host:"
               echo "    resolvectl status        # is there still only one upstream?"
               echo "    docker run --rm alpine:3 getent hosts production.cloudfront.docker.com"
+              # SAY "refused" WHERE THE CONDUCTOR READS — symmetric with
+              # locomotive.sh. We reach here ONLY after the classifier above
+              # deemed the fault TRANSIENT on every attempt: a real break
+              # (a broken Dockerfile, a compile error) matched none of the
+              # network patterns and already exited at "not a network fault,
+              # not retrying" WITHOUT reaching this branch. So a `refused:`
+              # status posted here can never mask a broken car — the guard
+              # is the wrapper's own transient determination, never a bare
+              # failure. The job still exits 1 (a red); the extra commit
+              # status is what tells the conductor's strike rule to spare
+              # the cars aboard, exactly as locomotive's disk-floor refusal
+              # does — train.rs any_failing_check_refused matches a FAILING
+              # check whose description starts with "refused". Best-effort:
+              # no token or a rejected POST is one line and the old
+              # behaviour (a plain red that strikes) — never a second
+              # failure mode. The description is a FIXED string, so there is
+              # nothing to JSON-escape and no need for python3 (absent from
+              # kaniko's busybox); the POST uses busybox wget.
+              if [ -n "${FORGE_TOKEN:-}" ] && [ -n "${GITHUB_SHA:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
+                api="${GITHUB_API_URL:-http://10.20.0.15:3000/api/v1}"
+                body="$(printf '{"state":"failure","context":"CI / build-image refusal","description":"refused: build-image infra fault (registry/DNS unreachable)","target_url":"%s"}' \
+                  "${GITHUB_SERVER_URL:-http://10.20.0.15:3000}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID:-}")"
+                if wget -q -O /dev/null \
+                     --header="Authorization: token ${FORGE_TOKEN}" \
+                     --header="Content-Type: application/json" \
+                     --post-data="$body" \
+                     "${api}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}"; then
+                  echo "build-image: refusal posted as a commit status (context 'CI / build-image refusal') — the conductor will spare the cars."
+                else
+                  echo "build-image: could not post the refusal status — the conductor will read this as a plain red."
+                fi
+              else
+                echo "build-image: no FORGE_TOKEN/GITHUB_SHA/GITHUB_REPOSITORY in the environment — refusal not posted, the conductor will read a plain red."
+              fi
               exit 1
             fi
             echo "build-image: transient network fault, retrying (${attempt}/${MAX_ATTEMPTS})."

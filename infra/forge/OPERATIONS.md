@@ -94,6 +94,37 @@ No ssh from the pod. Three doors, all read-only:
   log at `/api/v1/repos/david/boss/actions/jobs/<jobId>/logs`, a
   commit's statuses at `/commits/<sha>/status`.
 
+  **Getting `<jobId>` right — the trap (live-confirmed 2026-09-06).**
+  The log endpoint answers, silently, for the WRONG noun. Two ids look
+  interchangeable and are not:
+  - `.../actions/tasks/<id>/logs` → **404** (wrong noun; there is no
+    per-task log route).
+  - `.../actions/jobs/<jobId>/logs` → the log, but ONLY when `<jobId>`
+    is the **job id** from `GET /actions/runs/<run>/jobs`. That payload
+    is a plain array; each job carries both an `id` (the log key) and a
+    `task_id`. **Passing the `task_id` returns a DIFFERENT job's log**
+    — a success log for a failed run — with a 200, not an error.
+
+  So resolve, never guess:
+  1. A failing check's combined-status `target_url` is
+     `…/actions/runs/<run>/jobs/<index>` — it carries the run and the
+     job's POSITION in that run.
+  2. `GET /actions/runs/<run>/jobs` → index into the array at `<index>`;
+     read that entry's `id` (cross-check its `name` against the check),
+     **not** its `task_id`.
+  3. `GET /actions/jobs/<id>/logs` with `Range: bytes=-16384` → the tail
+     only (the forge honours the Range with `206 Partial Content`; a
+     `test` job's log runs to megabytes). Read the tail; never grep for
+     `test result: FAILED`.
+
+  Worked example: run 462's failing `web` was job `id` 2008 /
+  `task_id` 1939 — `jobs/2008/logs` is the real failure, `jobs/1939/logs`
+  an unrelated success. The conductor now does all of this
+  automatically for a red train (`attach_failing_logs` in
+  `crates/orchestrators/boss-cli/src/train.rs`): the failing job's log
+  tail rides on the `ci` step's `check_logs` and in the red-train
+  alert's `failing_logs`, so a red verdict names WHY, not just WHICH.
+
 Anything else — a restart, a prune beyond the sweep, a compose action
 — is a human on the host, and the command should be handed over ready
 to paste with its expected output stated.

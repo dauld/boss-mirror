@@ -122,6 +122,45 @@ pub(crate) fn departs_a_train(verb: &str) -> bool {
     matches!(verb, "board" | "run")
 }
 
+/// The outcome code recorded for a departing board that RAN CLEANLY yet
+/// boarded nothing — an idle firing. Negative on purpose, like
+/// `run_verb`'s `-1` "could not start": the recorded `rc` is the loop's
+/// assessment of the firing's effect, not only the child's raw exit
+/// code, and no real process exit is negative. `due_window` reads it as
+/// "did no work" via the same `rc != 0` release the failed-firing case
+/// already takes.
+pub(crate) const IDLE_BOARD_RC: i32 = -2;
+
+/// Did a departing board actually board a car? A boarded car takes the
+/// `train` stamp before `board()` returns, so it stops being
+/// `parked_ready` and the dock the loop probes FALLS. An idle window
+/// (nothing genuinely boardable — the reported bug: a car counted at
+/// probe time but held or branch-missing by the time boarding ran) and
+/// a consist that skipped every car both leave the dock where it was.
+///
+/// `after < before` is the whole test. New cars arriving mid-board only
+/// raise `after`, so the answer can misread a productive board as idle
+/// (never the reverse) — harmless: that board departed a train, so the
+/// track is occupied and the next window holds regardless.
+pub(crate) fn board_reduced_the_dock(before: u32, after: u32) -> bool {
+    after < before
+}
+
+/// What the loop RECORDS as a firing's `rc`. The child's exit code
+/// verbatim in every case but one: a departing board that exited 0 yet
+/// boarded nothing is an idle firing (`IDLE_BOARD_RC`), so the
+/// queue-depth cooldown does not hold it and a car that parks moments
+/// later boards at the next tick instead of waiting out the window. A
+/// board that DID board keeps `rc = 0` and starts the cooldown — the
+/// anti-thrash guard is untouched; only the zero-boarded case changes.
+pub(crate) fn recorded_rc(verb: &str, process_rc: i32, boarded_a_car: bool) -> i32 {
+    if departs_a_train(verb) && process_rc == 0 && !boarded_a_car {
+        IDLE_BOARD_RC
+    } else {
+        process_rc
+    }
+}
+
 pub(crate) fn parse_action(verb: &str) -> Result<Action> {
     if let Some(kind) = verb.strip_prefix("open:") {
         let kind = kind.trim();
@@ -349,21 +388,33 @@ pub(crate) fn due_window(
             // deep (cars skipped on conflicts) re-fires at most once
             // per cooldown instead of every tick.
             //
-            // It guards a firing that RAN. A firing that failed boarded
-            // nothing, so there is nothing to re-fire against and holding
-            // the window only postpones the retry: on 2026-09-04 a board
-            // fired against a conductor whose clone was broken, exited
-            // rc=1 in 0s, and left a threshold-met dock parked for the
-            // full two hours behind a conductor that was healthy again
-            // within minutes.
+            // It guards a firing that DID WORK — a board that boarded a
+            // car. A firing that boarded nothing has nothing to re-fire
+            // against, so holding the window only postpones useful work.
+            // Two ways a firing boards nothing, both released here:
+            //
+            //   - It FAILED (rc != 0). 2026-09-04: a board fired against
+            //     a conductor whose clone was broken, exited rc=1 in 0s,
+            //     and left a threshold-met dock parked the full two hours
+            //     behind a conductor healthy again within minutes.
+            //
+            //   - It RAN CLEANLY but was IDLE (rc == IDLE_BOARD_RC). The
+            //     dock met the threshold at probe time, but by the time
+            //     boarding ran nothing was genuinely boardable — a car
+            //     held or branch-missing between the two. 2026-09-06: an
+            //     idle board burned the full 45-minute cooldown, and four
+            //     green cars that parked minutes later waited it out. The
+            //     loop records that boarded-nothing outcome as
+            //     IDLE_BOARD_RC (see `recorded_rc`), which is `!= 0` and
+            //     so releases here by the same test as a failure.
             //
             // `rc == None` is deliberately held, not released: no outcome
             // recorded means the run is still in flight or was cut off
             // mid-verb, and re-firing under it would double-board. Only a
-            // KNOWN failure opens the window early.
-            let last_failed = last.is_some_and(|l| l.rc.is_some_and(|rc| rc != 0));
+            // KNOWN boarded-nothing outcome opens the window early.
+            let last_did_no_work = last.is_some_and(|l| l.rc.is_some_and(|rc| rc != 0));
             if let Some(last) = last
-                && !last_failed
+                && !last_did_no_work
                 && now - last.fired_at < Duration::minutes(i64::from(*cooldown_minutes))
             {
                 return None;
@@ -1120,6 +1171,11 @@ impl Runs {
     /// rc + runtime into the claimed row, and journalling the
     /// completion line — so none of it depends on the loop being
     /// free, and the loop is free immediately.
+    ///
+    /// `dock_depth` is the parked-ready count the firing was claimed
+    /// against (queue-depth rules only). It is the "before" the tail
+    /// compares a fresh probe against to tell a board that boarded a car
+    /// from an idle one — see `recorded_rc`.
     fn spawn_verb(
         &mut self,
         http: &reqwest::Client,
@@ -1127,6 +1183,7 @@ impl Runs {
         rule: &CadenceRule,
         firing_id: String,
         now: DateTime<Utc>,
+        dock_depth: Option<u32>,
     ) {
         let http = http.clone();
         let base = base.to_string();
@@ -1135,7 +1192,7 @@ impl Runs {
         let rule_name = rule.name.clone();
         let started = Instant::now();
         let handle = tokio::spawn(async move {
-            let rc = match run_verb(&verb, &rule_name, now).await {
+            let process_rc = match run_verb(&verb, &rule_name, now).await {
                 Ok(rc) => rc,
                 Err(e) => {
                     // The verb never started. Say so, then record it
@@ -1146,6 +1203,27 @@ impl Runs {
                 }
             };
             let secs = runtime_secs(started.elapsed());
+            // Did this board board a car? Only a departing verb that
+            // exited cleanly can be idle; anything else keeps its own rc.
+            // A boarded car takes the `train` stamp before the child
+            // returns, so a fresh dock probe FALLS iff at least one car
+            // boarded. A probe we cannot read leaves `boarded_a_car`
+            // true — the conservative reading holds the cooldown, exactly
+            // as before this fix.
+            let boarded_a_car = if departs_a_train(&verb) && process_rc == 0 {
+                match (dock_depth, probe_dock_depth(&http, &base).await) {
+                    (Some(before), Ok(after)) => board_reduced_the_dock(before, after),
+                    _ => true,
+                }
+            } else {
+                true
+            };
+            let rc = recorded_rc(&verb, process_rc, boarded_a_car);
+            if rc == IDLE_BOARD_RC {
+                log(format!(
+                    "{name}: board boarded nothing — idle firing, cooldown not held"
+                ));
+            }
             if let Err(e) = record_outcome(&http, &base, &firing_id, rc, secs).await {
                 log(format!(
                     "{name}: recording the firing outcome failed: {e:#}"
@@ -1267,8 +1345,10 @@ async fn tick(
             rule.basis.as_str()
         ));
         // Spawn and move on. The tick that fires a 30-minute deploy
-        // ends in milliseconds like any other.
-        runs.spawn_verb(http, base, rule, id, now);
+        // ends in milliseconds like any other. `dock_depth` rides along
+        // as the "before" the tail probes against to tell an idle board
+        // from one that boarded a car.
+        runs.spawn_verb(http, base, rule, id, now, dock_depth);
     }
     Ok(TickSummary {
         rules: rules.len(),
@@ -1827,6 +1907,66 @@ mod tests {
             ),
             None,
             "no recorded rc means unfinished, not failed — hold"
+        );
+    }
+
+    /// A boarded car takes the `train` stamp before `board()` returns, so
+    /// the dock the loop probes FALLS iff at least one car boarded.
+    #[test]
+    fn board_reduced_the_dock_reads_the_fall() {
+        // The dock fell — cars left it, so the board boarded them.
+        assert!(board_reduced_the_dock(4, 1));
+        assert!(board_reduced_the_dock(1, 0));
+        // The dock held — an idle window (nothing genuinely boardable) or
+        // a consist that skipped every car. New cars arriving mid-board
+        // only raise `after`, so a rise still reads as "boarded nothing".
+        assert!(!board_reduced_the_dock(4, 4));
+        assert!(!board_reduced_the_dock(1, 1));
+        assert!(!board_reduced_the_dock(1, 5));
+    }
+
+    /// 2026-09-06 ~16:19: `train-board-on-dock-depth` (min 1, cooldown 45)
+    /// fired when the only thing at the dock was a car counted at probe
+    /// time but held / branch-missing by the time boarding ran. The board
+    /// boarded NOTHING, exited rc=0, and still burned the full 45-minute
+    /// cooldown — so four green cars that parked ~16:29 waited until ~17:04
+    /// to board. An idle board must be a no-op for the cooldown; a board
+    /// that DID board a car must still start it.
+    #[test]
+    fn an_idle_board_does_not_hold_the_cooldown() {
+        // The recording contract: a departing board that ran cleanly
+        // (rc 0) yet boarded nothing is recorded as an idle firing, NOT
+        // the success rc that holds the cooldown...
+        assert_eq!(recorded_rc("board", 0, false), IDLE_BOARD_RC);
+        assert_eq!(recorded_rc("run", 0, false), IDLE_BOARD_RC);
+        // ...while a board that boarded a car keeps rc 0 and holds it.
+        assert_eq!(recorded_rc("board", 0, true), 0);
+        // A real failure is recorded verbatim (the 2026-09-04 case
+        // stands), and a non-departing verb is never an "idle board".
+        assert_eq!(recorded_rc("board", 1, false), 1);
+        assert_eq!(recorded_rc("reconcile", 0, false), 0);
+
+        // End to end at the cooldown: the idle firing releases the window,
+        // so cars that parked minutes later board at the next tick...
+        let rule = depth_rule(1, 45);
+        let fired_at = utc(2026, 9, 6, 16, 19, 0);
+        let idle = fired_rc(&rule, fired_at, Some(recorded_rc("board", 0, false)));
+        assert_eq!(
+            due_window(&rule, utc(2026, 9, 6, 16, 29, 0), Some(&idle), Some(4)),
+            Some(utc(2026, 9, 6, 16, 29, 0)),
+            "cars that park after an idle board must board next tick, not wait out the cooldown"
+        );
+        // ...whereas a productive board (rc 0) still holds the window.
+        let productive = fired_rc(&rule, fired_at, Some(recorded_rc("board", 0, true)));
+        assert_eq!(
+            due_window(
+                &rule,
+                utc(2026, 9, 6, 16, 29, 0),
+                Some(&productive),
+                Some(4)
+            ),
+            None,
+            "a board that boarded a car must still start the 45-minute cooldown"
         );
     }
 
