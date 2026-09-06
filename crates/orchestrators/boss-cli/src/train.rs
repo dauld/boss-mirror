@@ -2339,10 +2339,66 @@ pub(crate) fn red_train_alert(
     })
 }
 
+/// The backlog-item body for a red-train alert. A FREE, PURE function so
+/// it can be tested against the fields the jobs API demands — which is
+/// exactly what the first cut of this alert got wrong: it omitted
+/// `owner_id`, `status`, and `tags`, so every POST returned HTTP 422 and,
+/// because reconcile filed the alert with `?`, the whole pass aborted at
+/// rc=1. One red train then froze all landings for ~8h (2026-09-06). The
+/// gate passed it because it only exercised `red_train_alert` (the pure
+/// decision), never this body against the API. Now the body is pure and
+/// pinned, and `reconcile` files it best-effort (see `announce_red_train`).
+pub(crate) fn red_train_alert_body(tid: &str, alert: &RedTrainAlert) -> Value {
+    json!({
+        "kind": "backlog-item",
+        "title": alert.title,
+        "subject": {"subject_kind": "custom", "id": "bosspipeline"},
+        "owner_id": "emp-david",
+        "status": "open",
+        "tags": [],
+        "priority": "urgent",
+        "metadata": {
+            "title": alert.title,
+            "train_alert": tid,
+            "failing_checks": alert.failing,
+            "refused": alert.refused,
+            "reporter": "conductor",
+            "source": "pipeline-failure (red train)",
+        }
+    })
+}
+
 #[cfg(test)]
 mod red_train_alert_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_alert_body_carries_every_field_the_jobs_api_demands() {
+        // The exact regression that froze the conductor for 8h: the body
+        // must carry owner_id, status, and tags, or the POST is a 422.
+        let alert = RedTrainAlert {
+            title: "Red train abcd1234 — CI failed: CI / web".into(),
+            failing: vec!["CI / web".into()],
+            refused: false,
+        };
+        let b = red_train_alert_body("abcd1234-0000-0000-0000-000000000000", &alert);
+        for f in [
+            "kind", "title", "subject", "owner_id", "status", "tags", "priority", "metadata",
+        ] {
+            assert!(
+                b.get(f).is_some(),
+                "the alert body must carry `{f}` — its absence returned HTTP 422 and froze reconcile"
+            );
+        }
+        assert_eq!(b["status"], "open");
+        assert_eq!(b["owner_id"], "emp-david");
+        assert_eq!(b["tags"], json!([]));
+        assert_eq!(
+            b["metadata"]["train_alert"], "abcd1234-0000-0000-0000-000000000000",
+            "keyed by train_alert so train_alert_exists dedups"
+        );
+    }
 
     fn train(verdict_merged: bool) -> Value {
         let merged = if verdict_merged {
@@ -3555,21 +3611,30 @@ impl Conductor {
     /// subject), keyed by `train_alert` so a repeat pass dedups and the
     /// overdue/watchlist machinery can see it.
     async fn file_train_alert(&self, tid: &str, alert: &RedTrainAlert) -> Result<()> {
-        let body = json!({
-            "kind": "backlog-item",
-            "title": alert.title,
-            "subject": {"subject_kind": "custom", "id": "bosspipeline"},
-            "priority": "urgent",
-            "metadata": {
-                "title": alert.title,
-                "train_alert": tid,
-                "failing_checks": alert.failing,
-                "refused": alert.refused,
-                "reporter": "conductor",
-                "source": "pipeline-failure (red train)",
-            }
-        });
-        self.api(Method::POST, "/api/jobs", Some(body)).await?;
+        self.api(
+            Method::POST,
+            "/api/jobs",
+            Some(red_train_alert_body(tid, alert)),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Announce a red train unless it is already announced — best-effort
+    /// caller in `reconcile`. Both the existence check and the POST are
+    /// fallible; the caller treats ANY error here as non-fatal, because
+    /// filing an alert is observability and must never abort the pass
+    /// that boards, merges, and auto-cancels. See `reconcile`.
+    async fn announce_red_train(&self, tid: &str, alert: &RedTrainAlert) -> Result<()> {
+        if self.train_alert_exists(tid).await? {
+            return Ok(());
+        }
+        self.file_train_alert(tid, alert).await?;
+        log(format!(
+            "train {} red — filed alert: {}",
+            id8(tid),
+            alert.title
+        ));
         Ok(())
     }
 
@@ -4325,6 +4390,14 @@ impl Conductor {
             // stalls out into auto-cancel below, and not only when a human
             // asks. One urgent packet naming the failing check, deduped, so
             // a red train is never a surprise (d69c4274).
+            //
+            // BEST-EFFORT, and that is load-bearing: filing this alert is
+            // observability, and observability must NEVER abort the pass
+            // that boards, merges, and auto-cancels. The first cut filed it
+            // with `?`, so a malformed body (HTTP 422) aborted reconcile at
+            // rc=1 every pass — one red train froze all landings for ~8h
+            // (2026-09-06). Any error here now logs and the pass continues,
+            // so a broken alert is at worst a missing alert, never a wedge.
             if info.get("state").and_then(Value::as_str) == Some("OPEN")
                 && let Some(alert) = red_train_alert(&t, verdict, info.get("statusCheckRollup"))
             {
@@ -4334,12 +4407,10 @@ impl Conductor {
                         id8(&tid),
                         alert.title
                     ));
-                } else if !self.train_alert_exists(&tid).await? {
-                    self.file_train_alert(&tid, &alert).await?;
+                } else if let Err(e) = self.announce_red_train(&tid, &alert).await {
                     log(format!(
-                        "train {} red — filed alert: {}",
-                        id8(&tid),
-                        alert.title
+                        "train {} red — alert filing failed (non-fatal, reconcile continues): {e}",
+                        id8(&tid)
                     ));
                 }
             }
