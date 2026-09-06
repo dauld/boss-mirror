@@ -252,11 +252,14 @@ spec:
           emptyDir: {}
         - name: pg-shm
           emptyDir: {medium: Memory, sizeLimit: 1Gi}
-        # run.sh ships in the repo; the ConfigMap is created from it at
-        # apply time so the Job needs no clone to BOOTSTRAP itself:
-        #   kubectl -n boss-dev create configmap gate-runner-script \
-        #     --from-file=run.sh=infra/gate-runner/run.sh \
-        #     --dry-run=client -o yaml | kubectl apply -f -
+        # run.sh ships in the repo and reaches the pod through this
+        # ConfigMap, because run.sh is what performs the clone and so
+        # cannot come FROM the clone. Regenerate it from the tree with
+        #   ./infra/gate-runner/apply-script-configmap.sh
+        # and ask whether it has drifted with --check. This used to be
+        # a kubectl command in a comment; on 2026-08-26 the live copy
+        # turned out to hold an unlanded branch is script, and ten gates
+        # issued receipts from a gate that is not in this repository.
         - name: run-script
           configMap: {name: gate-runner-script, defaultMode: 0755}
         # Read-only forge credential. NOT optional: without it the clone

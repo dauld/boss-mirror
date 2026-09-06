@@ -3902,6 +3902,150 @@ mod tests {
     }
     use super::*;
 
+    /// The `post-mortem` protocol is an ANALYSIS that produces many
+    /// countermeasures, not a single decision handed to the operator.
+    ///
+    /// It exists because an incident retrospective was filed on
+    /// `backlog-item`, whose triage → "Decide the design"
+    /// (`answer-question`) → build shape routed the ENTIRE retrospective
+    /// into the operator's design-decision queue as one verdict. A
+    /// post-mortem is IT-worked analysis whose product is a SET of
+    /// corrective actions, each of which becomes its own packet. So the
+    /// load-bearing assertion here is the negative one: this protocol
+    /// carries NO step that collapses the whole thing into one operator
+    /// decision (no `answer-question`, no approval-surface step whose
+    /// completion the whole flow funnels through). Authored as DATA in
+    /// the bundle, so the assertions follow it there — a new protocol
+    /// never touches Rust (see `the_platform_bundle_matches_the_specs_it
+    /// _replaced`).
+    #[test]
+    fn bundle_post_mortem_is_analysis_into_many_packets_not_one_decision() {
+        let bundled = crate::seed_loader::load_workflows(platform_bundle_path())
+            .expect("the platform bundle parses");
+        let pm = bundled
+            .iter()
+            .find(|k| k.kind == "post-mortem")
+            .expect("post-mortem present in the bundle");
+
+        assert_eq!(pm.version, 1);
+        assert_eq!(pm.status, WorkflowStatus::Active);
+        assert_eq!(pm.category, "platform");
+        assert_eq!(pm.subject_kinds, vec!["custom".to_string()]);
+        assert_eq!(pm.owning_team, "platform");
+
+        let step = |title: &str| {
+            pm.steps
+                .iter()
+                .find(|s| s.title == title)
+                .unwrap_or_else(|| panic!("`{title}` step present in post-mortem"))
+        };
+
+        // Kinds: analysis and countermeasures are IT WORK (`task`), the
+        // close is a `sign-off`, and the escape hatch is an `outcome`.
+        assert_eq!(step("recorded").kind, "trigger");
+        assert_eq!(step("analysis").kind, "task");
+        assert_eq!(step("countermeasures").kind, "task");
+        assert_eq!(step("complete").kind, "sign-off");
+        assert_eq!(step("abandoned").kind, "outcome");
+
+        // The implicit DAG: an edge A → B exists iff B.ready_when
+        // references A. recorded → analysis → countermeasures → complete,
+        // with abandoned branching off analysis.
+        assert_eq!(step("recorded").ready_when, "true", "trigger fires at open");
+        assert!(
+            step("analysis").ready_when.contains("steps.recorded"),
+            "analysis is ready after the trigger"
+        );
+        assert!(
+            step("countermeasures")
+                .ready_when
+                .contains("steps.analysis"),
+            "countermeasures is ready after analysis"
+        );
+        assert!(
+            step("complete")
+                .ready_when
+                .contains("steps.countermeasures"),
+            "complete is ready after countermeasures"
+        );
+        let abandoned_rw = &step("abandoned").ready_when;
+        assert!(
+            abandoned_rw.contains("steps.analysis"),
+            "abandoned branches off analysis (the DAG edge the lint needs)"
+        );
+        assert!(
+            abandoned_rw.contains("job.metadata.abandoned"),
+            "abandoned needs a person-set marker, or the dispatcher auto-completes \
+             it the instant analysis finishes and shuts the Job"
+        );
+
+        // THE POINT OF THE PROTOCOL: no step routes the whole
+        // retrospective to the operator as a single decision. That is
+        // exactly what filing it on `backlog-item` did, via the
+        // `answer-question` "Decide the design" step. Asserted through a
+        // kinds membership check rather than a `kind ==` comparison,
+        // which `infra/lint/no-step-kind-match.sh` refuses even in a
+        // src-file test.
+        let step_kinds: Vec<&str> = pm.steps.iter().map(|s| s.kind.as_str()).collect();
+        assert!(
+            !step_kinds.contains(&"answer-question"),
+            "a post-mortem must NOT collapse into one operator decision — a \
+             countermeasure that needs judgement becomes its OWN design-decision \
+             packet, filed by the countermeasures step, not a step in this Workflow"
+        );
+
+        // `countermeasures` records the filed packets (plural), and its
+        // required field is also what keeps the `complete` sign-off from
+        // arriving blind (viability lint Phase 4).
+        let cms = step("countermeasures");
+        let cms_field = cms
+            .fields
+            .iter()
+            .find(|f| f.name == "countermeasures")
+            .expect("countermeasures step declares a `countermeasures` field");
+        assert!(
+            cms_field.required,
+            "countermeasures must be recorded at done"
+        );
+        assert_eq!(
+            cms_field.field_type, "array",
+            "MANY corrective actions, each its own packet — an array, not one field"
+        );
+
+        // The happy terminal IS the sign-off, and it requires a
+        // `decision` so completion cannot lose the judgement (Phase 5).
+        let complete = step("complete");
+        assert_eq!(
+            complete.terminal.as_ref().map(|t| t.outcome.as_str()),
+            Some("completed"),
+            "reaching the sign-off closes the Job completed"
+        );
+        assert!(
+            complete.fields.iter().any(|f| f.required),
+            "the sign-off must record its decision, not close empty (Phase 5)"
+        );
+
+        // The escape hatch is a real, countable outcome.
+        assert_eq!(
+            step("abandoned")
+                .terminal
+                .as_ref()
+                .map(|t| t.outcome.as_str()),
+            Some("abandoned")
+        );
+
+        // And it is a viable protocol: every step reachable, every
+        // terminal reachable, no blind sign-off, no orphan fork. This
+        // names post-mortem specifically; `the_bundle_is_as_viable_as
+        // _the_code` proves it for the whole bundle.
+        let registry = crate::step_registry::StepRegistry::v1();
+        let findings = crate::workflow_lint::validate_all(std::slice::from_ref(pm), &registry);
+        assert!(
+            findings.is_empty(),
+            "post-mortem has viability findings: {findings:#?}"
+        );
+    }
+
     #[test]
     fn expand_metadata_substitutes_subject_fields_in_string_leaves() {
         let subject = Subject::new("account", "acc-bigseed-0042");

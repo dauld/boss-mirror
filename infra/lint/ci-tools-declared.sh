@@ -82,10 +82,23 @@ invoked=$(
         # per-commit (boss-ci:${{ github.sha }}), so the fixed part is
         # the repo up to the colon.
         index(image, want) != 1 { next }
-        /^[[:space:]]*run:[[:space:]]*[|>]/ { inblock = 1; cont = 0; next }
+        /^[[:space:]]*run:[[:space:]]*[|>]/ {
+            inblock = 1; cont = 0
+            match($0, /^[[:space:]]*/); runindent = RLENGTH
+            next
+        }
         inblock {
             if ($0 ~ /^[[:space:]]*$/) next
-            if ($0 !~ /^[[:space:]][[:space:]]+/) { inblock = 0 }
+            # A block scalar ends at the first non-blank line indented no
+            # deeper than the `run:` key that opened it — the next step
+            # (`- name:`), a sibling key (`env:`), or the next job. The
+            # earlier test (<2 leading spaces) held only because every
+            # run: block used to be the LAST step of its job; a checkout
+            # moved into a run: step and FOLLOWED by more steps (d9a34560)
+            # exposed that, scraping `- name` and `env:` as if they were
+            # commands. Depth is the real boundary, so it is what we test.
+            match($0, /^[[:space:]]*/)
+            if (RLENGTH <= runindent) { inblock = 0 }
             else {
                 line = $0; sub(/^[[:space:]]+/, "", line)
                 was_cont = cont

@@ -295,6 +295,24 @@ pub(crate) fn compare(declared: &[Json], observation: &Json) -> Json {
     })
 }
 
+/// Units retired BY DESIGN that a per-host observer still watches, so a
+/// stale observation reports them unhealthy on every ~5-minute firing.
+/// Keyed `(host, unit)` and matched host-scoped: a retired unit's
+/// inevitable "inactive" is suppressed on ITS host only, while the same
+/// unit name on any OTHER host still surfaces.
+///
+/// `boss-gcp` / `boss-train.service`: the conductor moved into the
+/// cluster on 2026-09-04 (feat/conductor-cutover), and the boss-gcp node
+/// registry `notes` say "boss-train.service here is retired by design."
+/// boss-gcp's `observe-units.sh` still lists it in the default UNITS
+/// set, so every unit observation flags it — a persistent false alarm
+/// that masks real findings.
+///
+/// INTERIM. The durable fix is boss-gcp's per-host `observe-units`
+/// config dropping the unit from what it watches; that needs boss-gcp to
+/// converge, which it does not today. Remove this entry once it does.
+const RETIRED_UNITS: &[(&str, &str)] = &[("boss-gcp", "boss-train.service")];
+
 /// The self-scoped unit comparison, pure: every observed unit whose
 /// observer did not stamp `healthy: true` is a finding. Deliberately
 /// no recomputation from the raw states — the observer derived health
@@ -307,6 +325,12 @@ pub(crate) fn compare(declared: &[Json], observation: &Json) -> Json {
 /// comparisons series is what the eventual raiser gets calibrated on
 /// (report first, raise later), so it carries names and counts, not
 /// twenty lines of log per unit per five minutes.
+///
+/// KNOWN-RETIRED units are suppressed by `RETIRED_UNITS` below — a unit
+/// an observer still watches after it was retired by design reports
+/// unhealthy forever, and that inevitability is noise, not a finding
+/// (CLAUDE.md's "a check nobody reads" hazard: constant false alarms
+/// train people to ignore the surface).
 pub(crate) fn compare_units(observation: &Json) -> Json {
     let nodes: Vec<&Json> = observation
         .get("nodes")
@@ -328,6 +352,18 @@ pub(crate) fn compare_units(observation: &Json) -> Json {
         {
             units += 1;
             if unit.get("healthy").and_then(Json::as_bool) == Some(true) {
+                continue;
+            }
+            // Suppress a KNOWN-RETIRED unit on ITS host: an observer still
+            // watching a by-design-dead unit reports it inactive forever,
+            // and that inevitability is noise, not a finding. Host-scoped
+            // — the same unit name on any other host still surfaces — and
+            // it stays counted in `units`, only kept out of the findings.
+            let unit_name = unit.get("unit").and_then(Json::as_str).unwrap_or("");
+            if RETIRED_UNITS
+                .iter()
+                .any(|&(h, u)| h == host && u == unit_name)
+            {
                 continue;
             }
             units_unhealthy.push(json!({
@@ -678,18 +714,25 @@ mod tests {
     // ----- the self-scoped unit comparison (729329c6) -----
 
     fn units_obs(units: Json) -> Json {
+        units_obs_on("boss-gcp", units)
+    }
+
+    fn units_obs_on(host: &str, units: Json) -> Json {
         json!({ "scope": "host-units", "observer": "boss-estate-observe-units",
-                "nodes": [{ "id": "boss-gcp", "healthy": true, "units": units }] })
+                "nodes": [{ "id": host, "healthy": true, "units": units }] })
     }
 
     #[test]
     fn an_unhealthy_unit_is_the_finding() {
-        // The quiet-conductor class: boss-train.service dead while a
-        // CI-green train sat unmerged for two hours with no signal.
+        // The class the comparison exists for: a live unit dead while a
+        // CI-green train sat unmerged for two hours with no signal. (The
+        // original incident was boss-train.service, now retired by design
+        // on boss-gcp and suppressed — see the RETIRED_UNITS tests below;
+        // any non-retired unit still surfaces exactly like this.)
         let body = compare_units(&units_obs(json!([
-            {"unit":"boss-train.service","load_state":"loaded","active_state":"inactive",
+            {"unit":"boss-jobs-api.service","load_state":"loaded","active_state":"inactive",
              "sub_state":"dead","result":"success","exec_main_status":0,"healthy":false,
-             "journal":"Sep 02 08:15:00 boss-gcp systemd[1]: Stopped boss-train."},
+             "journal":"Sep 02 08:15:00 boss-gcp systemd[1]: Stopped boss-jobs-api."},
             {"unit":"forgejo.service","load_state":"loaded","active_state":"active",
              "sub_state":"running","result":"success","exec_main_status":0,"healthy":true},
         ])));
@@ -697,12 +740,70 @@ mod tests {
         assert_eq!(body["counts"]["units_unhealthy"], 1);
         let finding = &body["findings"]["units_unhealthy"][0];
         assert_eq!(finding["host"], "boss-gcp");
-        assert_eq!(finding["unit"], "boss-train.service");
+        assert_eq!(finding["unit"], "boss-jobs-api.service");
         assert_eq!(finding["active_state"], "inactive");
         // The journal excerpt stays on the OBSERVATION row — copying
         // ~20 lines into every comparison would double the evidence's
         // storage without doubling the evidence.
         assert!(finding.get("journal").is_none());
+    }
+
+    #[test]
+    fn a_retired_unit_on_its_host_is_not_a_finding() {
+        // boss-gcp/boss-train.service: retired by design at the
+        // 2026-09-04 conductor cutover, but boss-gcp's observer still
+        // watches it and reports it inactive every ~5 minutes. The
+        // comparison must NOT turn that inevitability into a finding —
+        // but it stays counted as an observed unit (it was observed).
+        let body = compare_units(&units_obs(json!([
+            {"unit":"boss-train.service","load_state":"loaded","active_state":"inactive",
+             "sub_state":"dead","result":"success","exec_main_status":0,"healthy":false},
+            {"unit":"forgejo.service","load_state":"loaded","active_state":"active",
+             "sub_state":"running","result":"success","exec_main_status":0,"healthy":true},
+        ])));
+        assert_eq!(body["counts"]["units"], 2);
+        assert_eq!(body["counts"]["units_unhealthy"], 0);
+        assert_eq!(
+            body["findings"]["units_unhealthy"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_retired_unit_name_on_another_host_still_surfaces() {
+        // The suppression is (host, unit)-scoped: boss-train.service is
+        // retired only on boss-gcp. The SAME unit name unhealthy on any
+        // other host is a real finding and must surface.
+        let body = compare_units(&units_obs_on(
+            "cp-1",
+            json!([
+                {"unit":"boss-train.service","load_state":"loaded","active_state":"inactive",
+                 "sub_state":"dead","result":"success","exec_main_status":0,"healthy":false},
+            ]),
+        ));
+        assert_eq!(body["counts"]["units_unhealthy"], 1);
+        let finding = &body["findings"]["units_unhealthy"][0];
+        assert_eq!(finding["host"], "cp-1");
+        assert_eq!(finding["unit"], "boss-train.service");
+    }
+
+    #[test]
+    fn a_non_retired_unhealthy_unit_still_surfaces_on_boss_gcp() {
+        // The suppression touches ONLY the listed (host, unit) pairs:
+        // any other unhealthy unit on boss-gcp is still a finding.
+        let body = compare_units(&units_obs(json!([
+            {"unit":"boss-dispatcher.service","load_state":"loaded","active_state":"failed",
+             "sub_state":"failed","result":"exit-code","exec_main_status":1,"healthy":false},
+            {"unit":"boss-train.service","load_state":"loaded","active_state":"inactive",
+             "sub_state":"dead","result":"success","exec_main_status":0,"healthy":false},
+        ])));
+        assert_eq!(body["counts"]["units"], 2);
+        assert_eq!(body["counts"]["units_unhealthy"], 1);
+        let finding = &body["findings"]["units_unhealthy"][0];
+        assert_eq!(finding["unit"], "boss-dispatcher.service");
     }
 
     #[test]

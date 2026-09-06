@@ -129,6 +129,22 @@ jobs:
           MAX_ATTEMPTS=3
           attempt=1
           while :; do
+            # IDEMPOTENT RETRY. Kaniko clones the git:// --context into
+            # /kaniko/buildcontext (config.BuildContextDir, v1.23.2), and
+            # go-git's PlainClone refuses a directory that already holds a
+            # repo. So attempt 1's clone made attempt 2 die with "error
+            # resolving source context: repository already exists" — a
+            # message the network-fault classifier below does NOT match,
+            # so the loop bailed hard ("not a network fault, not
+            # retrying") and a single DNS flake on attempt 1 became a
+            # guaranteed red the retry could never clear (run 469, job
+            # 2041, train #236). Removing the clone restores the exact
+            # precondition of attempt 1 — a nonexistent context dir kaniko
+            # re-clones from scratch — so a real transient gets a real
+            # second try. No-op on attempt 1 (the dir does not exist yet);
+            # touches only the git-context clone, never kaniko's layer
+            # cache (/cache) or the remote --cache-repo.
+            rm -rf /kaniko/buildcontext
             set +e
             OUT="$(/kaniko/executor \
                 --context "git://david:${TOKEN}@10.20.0.15:3000/david/boss.git#${GITHUB_SHA}" \
@@ -175,7 +191,23 @@ jobs:
     container:
       image: 10.20.0.15:3000/david/boss-ci:${{ github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out from the forge, not github.com
+        # actions/checkout is a JavaScript action the runner pulls from
+        # github.com before the job starts; the runner's container DNS
+        # has no redundancy (see build-image's retry note), so one
+        # dropped lookup there reds the whole train with no car at fault
+        # — d9a34560. The repo is on the forge at a LAN IP, so a git
+        # clone by IP resolves no name. github.token is the job's own
+        # repo-scoped credential, the same one locomotive passes below.
+        env:
+          FORGE_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          git init -q .
+          git remote add origin \
+            "http://x-access-token:${FORGE_TOKEN}@10.20.0.15:3000/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth=1 origin "${GITHUB_REF}"
+          git checkout -q --force FETCH_HEAD
 
       - name: Locomotive check
         # The job token, so a REFUSAL (disk floor, stale runner image,
@@ -215,11 +247,24 @@ jobs:
     needs: [locomotive]
     container:
       image: 10.20.0.15:3000/david/boss-ci:${{ github.sha }}
-    defaults:
-      run:
-        working-directory: apps/web
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out from the forge, not github.com
+        # actions/checkout is a JavaScript action the runner pulls from
+        # github.com before the job starts; the runner's container DNS
+        # has no redundancy (see build-image's retry note), so one
+        # dropped lookup there reds the whole train with no car at fault
+        # — d9a34560. The repo is on the forge at a LAN IP, so a git
+        # clone by IP resolves no name. github.token is the job's own
+        # repo-scoped credential, the same one locomotive passes below.
+        env:
+          FORGE_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          git init -q .
+          git remote add origin \
+            "http://x-access-token:${FORGE_TOKEN}@10.20.0.15:3000/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth=1 origin "${GITHUB_REF}"
+          git checkout -q --force FETCH_HEAD
 
       - name: Install dependencies
         # PUPPETEER_SKIP_DOWNLOAD for the same reason svelte-check.sh
@@ -227,9 +272,11 @@ jobs:
         # browser download fails in this container, and bun aborts the
         # WHOLE install on a failed postinstall — so nothing installs
         # and the failure reads as a missing tool.
+        working-directory: apps/web
         run: PUPPETEER_SKIP_DOWNLOAD=1 bun install --frozen-lockfile
 
       - name: Typecheck
+        working-directory: apps/web
         run: bun run typecheck
 
       - name: web-kit unit tests
@@ -250,9 +297,11 @@ jobs:
         run: bun run test:unit
 
       - name: Unit tests
+        working-directory: apps/web
         run: bun run test:unit
 
       - name: Build
+        working-directory: apps/web
         run: bun run build
 
       - name: Frontend smoke (mocked backend)
@@ -272,6 +321,7 @@ jobs:
         # remove; the suite finds the baked browser through the
         # image's own env. Moving the pin in package.json means
         # moving it in the Dockerfile in the same car.
+        working-directory: apps/web
         run: bun run test:mocked
 
   fast:
@@ -280,7 +330,23 @@ jobs:
     container:
       image: 10.20.0.15:3000/david/boss-ci:${{ github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out from the forge, not github.com
+        # actions/checkout is a JavaScript action the runner pulls from
+        # github.com before the job starts; the runner's container DNS
+        # has no redundancy (see build-image's retry note), so one
+        # dropped lookup there reds the whole train with no car at fault
+        # — d9a34560. The repo is on the forge at a LAN IP, so a git
+        # clone by IP resolves no name. github.token is the job's own
+        # repo-scoped credential, the same one locomotive passes below.
+        env:
+          FORGE_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          git init -q .
+          git remote add origin \
+            "http://x-access-token:${FORGE_TOKEN}@10.20.0.15:3000/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth=1 origin "${GITHUB_REF}"
+          git checkout -q --force FETCH_HEAD
 
       - name: Format check
         run: cargo fmt --all -- --check
@@ -351,16 +417,29 @@ jobs:
       # This is the disposable-server case the guard's own message names.
       BOSS_TEST_ALLOW_PRODUCTION_SERVER: "1"
     steps:
-      # fetch-depth: 0 because the gate's migrations-append-only check
-      # asks git whether this branch modified a migration that already
-      # exists on the trunk. checkout@v4 defaults to a depth-1 clone,
-      # where there is no trunk to compare against — and that check
-      # refuses to run rather than pass silently, so a shallow clone
-      # would red every train instead of quietly under-covering. The
-      # extra history is cheap; the repo's .git is ~20M.
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      # THE FORGE IS THE TRUNK, AND IT IS ON THE LAN.
+      #
+      # Replaces actions/checkout@v4 (a github.com fetch — d9a34560, and
+      # the shape of the 2026-08-26 build-image DNS flake) with a git
+      # clone from the forge by IP, which resolves no name. Full history,
+      # not a single-ref shallow clone, because migrations-append-only
+      # asks git whether this branch touched a migration already on the
+      # trunk and resolves that trunk as origin/main: `git fetch origin`
+      # brings it, the second fetch brings the ref under test. checkout@v4
+      # gave this the same depth via fetch-depth: 0; the extra history is
+      # cheap, the repo's .git is ~20M. github.token is the job's own
+      # repo-scoped credential (locomotive below passes the same one).
+      - name: Check out from the forge, not github.com
+        env:
+          FORGE_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          git init -q .
+          git remote add origin \
+            "http://x-access-token:${FORGE_TOKEN}@10.20.0.15:3000/${GITHUB_REPOSITORY}.git"
+          git fetch -q origin
+          git fetch -q origin "${GITHUB_REF}"
+          git checkout -q --force FETCH_HEAD
 
       - name: Apply schema
         run: infra/postgres/migrate.sh -- psql "$DATABASE_URL"
