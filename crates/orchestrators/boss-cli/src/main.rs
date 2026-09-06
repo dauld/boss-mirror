@@ -4,6 +4,7 @@ use tracing_subscriber::EnvFilter;
 
 mod cadence;
 mod census;
+mod channels;
 mod credential;
 mod delivery_policy;
 mod deploy;
@@ -237,6 +238,10 @@ enum Commands {
     /// one read, with the startup checklist at the end (CLAUDE.md
     /// §Engineering Session Startup; automation of acedf981's L1).
     Orient,
+    /// Where the IT department's work comes from — the input-channel
+    /// mix (user-feedback vs monitoring/error-discovery), the algedonic
+    /// reading over recent work (docs/design/it-delivery-channels.md).
+    Channels,
     /// A conflict-skipped car back aboard, with the traps encoded:
     /// new branch from current main (never a force-push), rebase with
     /// ONE human stop on a real conflict, gate, receipt machine-copied
@@ -979,6 +984,7 @@ async fn main() -> Result<()> {
             JobAction::Patch { job, patch } => job::patch(&job, &patch).await,
         },
         Commands::Orient => orient::run().await,
+        Commands::Channels => channels::run().await,
         Commands::Design {
             title,
             markdown,
