@@ -204,6 +204,13 @@ spec:
     metadata:
       labels: {app: boss}
     spec:
+      # The SoR app rides its data: control-plane nodes only, never a
+      # flaky worker. Unpinned, this Deployment landed on w-1 and was
+      # evicted when w-1 shed pods — :7900 went dark for minutes on a
+      # Multi-Attach stall (90932d98). Its StatefulSets were already
+      # pinned; the app was not.
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
       # The image runs as uid/gid 1500 (boss), but a freshly provisioned
       # Longhorn volume mounts root:root 0755 — so the credential store
       # was unwritable and boss-auth failed on the temp file. fsGroup
