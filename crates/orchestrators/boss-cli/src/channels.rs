@@ -252,7 +252,196 @@ pub async fn run() -> Result<()> {
         ),
         None => println!("\n  proactive share: n/a — no classified work in the window"),
     }
+
+    // Delivery mix over the dock: how the work about to ship will ship.
+    // A single fetch keeps the per-car diffs honest against the forge;
+    // a car whose branch is gone (already merged) is skipped, not
+    // miscounted.
+    let _ = std::process::Command::new("git")
+        .args(["fetch", "origin", "--quiet"])
+        .status();
+    let cars = crate::gate::api(
+        &http,
+        reqwest::Method::GET,
+        "/api/jobs?kind=ship-a-change&status=open&limit=200",
+        None,
+    )
+    .await?;
+    let boardable: Vec<Value> = cars
+        .as_ref()
+        .and_then(|b| b.get("data"))
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter(|c| {
+                    c.get("steps")
+                        .and_then(Value::as_array)
+                        .map(|ss| {
+                            ss.iter().any(|st| {
+                                st.get("title").and_then(Value::as_str) == Some("Open for review")
+                                    && st.get("status").and_then(Value::as_str) == Some("ready")
+                            })
+                        })
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut dmix: std::collections::BTreeMap<DeliveryChannel, usize> =
+        std::collections::BTreeMap::new();
+    let mut skipped = 0usize;
+    for car in &boardable {
+        let branch = car
+            .get("metadata")
+            .and_then(|m| m.get("branch"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        match (!branch.is_empty())
+            .then(|| changed_paths_for(branch))
+            .flatten()
+        {
+            Some(paths) => *dmix.entry(delivery_channel(&paths)).or_insert(0) += 1,
+            None => skipped += 1,
+        }
+    }
+    let dtotal: usize = dmix.values().sum();
+    println!(
+        "\n  DELIVERY mix — {} car(s) in the dock{}",
+        dtotal,
+        if skipped > 0 {
+            format!(" ({skipped} skipped: branch resolved by no forge ref)")
+        } else {
+            String::new()
+        }
+    );
+    for (ch, n) in &dmix {
+        let pct = if dtotal > 0 {
+            (*n as f64) * 100.0 / (dtotal as f64)
+        } else {
+            0.0
+        };
+        println!("    {:<10} {:>4}  {:>5.1}%", ch.label(), n, pct);
+    }
+    if let Some(d) = dmix.get(&DeliveryChannel::Data) {
+        let share = if dtotal > 0 {
+            *d as f64 / dtotal as f64
+        } else {
+            0.0
+        };
+        println!(
+            "\n  data-delivery share: {:.0}% — {}",
+            share * 100.0,
+            if share >= 0.5 {
+                "shipping light"
+            } else {
+                "still mostly build-and-deploy"
+            }
+        );
+    }
     Ok(())
+}
+
+/// How a change ships — the delivery channel, ordered lightest to
+/// heaviest by reversibility/blast-radius. A car spanning several
+/// artifact types ships on its HEAVIEST channel: a registry row plus a
+/// crate still needs the build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum DeliveryChannel {
+    Data,
+    Config,
+    Software,
+    Infra,
+}
+
+impl DeliveryChannel {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            DeliveryChannel::Data => "data",
+            DeliveryChannel::Config => "config",
+            DeliveryChannel::Software => "software",
+            DeliveryChannel::Infra => "infra",
+        }
+    }
+}
+
+/// Weight one path. Higher is heavier to deliver. An unknown path is
+/// treated as software — mis-routing a change too LIGHT is the dangerous
+/// direction (a software change shipped as data is broken), too heavy is
+/// only wasteful.
+fn path_weight(path: &str) -> u8 {
+    let p = path;
+    // infra/hardware (4)
+    if p.starts_with("infra/cluster/talos/") || p.contains("/talos/") {
+        return 4;
+    }
+    // software (3)
+    if p.starts_with("crates/") || p.starts_with("apps/") {
+        return 3;
+    }
+    // config (2): deployed, but no build
+    if p.starts_with("infra/cluster/manifests/")
+        || p.ends_with(".service")
+        || p.starts_with(".forgejo/")
+        || p.starts_with(".github/")
+        || p.starts_with("infra/lint/")
+        || p.starts_with("infra/gate")
+        || p.ends_with("Dockerfile")
+        || p.ends_with("install.sh")
+    {
+        return 2;
+    }
+    // data (1): registry rows / docs / seeds — no build, no deploy
+    if p.starts_with("infra/postgres/schema/")
+        || p.contains("/seeds/")
+        || p.ends_with("workflows.toml")
+        || p.ends_with("rules.toml")
+        || p.ends_with("-registry.sql")
+        || p.starts_with("docs/")
+        || p.ends_with(".md")
+        || p.contains("/content/")
+    {
+        return 1;
+    }
+    // unknown → software (conservative)
+    3
+}
+
+/// The delivery channel for a set of changed paths: the heaviest wins.
+/// An empty set is Data (nothing to build or deploy).
+pub(crate) fn delivery_channel(paths: &[String]) -> DeliveryChannel {
+    let w = paths.iter().map(|p| path_weight(p)).max().unwrap_or(1);
+    match w {
+        4 => DeliveryChannel::Infra,
+        3 => DeliveryChannel::Software,
+        2 => DeliveryChannel::Config,
+        _ => DeliveryChannel::Data,
+    }
+}
+
+/// A car's changed files, best-effort, from the forge ref against
+/// origin/main. Returns None when git cannot resolve the branch (a
+/// merged car whose branch is gone) so the caller can skip rather than
+/// miscount.
+fn changed_paths_for(branch: &str) -> Option<Vec<String>> {
+    let out = std::process::Command::new("git")
+        .args([
+            "diff",
+            "--name-only",
+            &format!("origin/main...origin/{branch}"),
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let files: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if files.is_empty() { None } else { Some(files) }
 }
 
 #[cfg(test)]
@@ -367,5 +556,62 @@ mod tests {
     #[test]
     fn proactive_share_is_none_on_empty() {
         assert_eq!(proactive_share(&BTreeMap::new()), None);
+    }
+
+    #[test]
+    fn delivery_channel_classifies_by_artifact() {
+        assert_eq!(
+            delivery_channel(&["infra/postgres/schema/2026-x.sql".into()]),
+            DeliveryChannel::Data
+        );
+        assert_eq!(
+            delivery_channel(&["infra/platform/workflows.toml".into()]),
+            DeliveryChannel::Data
+        );
+        assert_eq!(
+            delivery_channel(&[".forgejo/workflows/ci.yml".into()]),
+            DeliveryChannel::Config
+        );
+        assert_eq!(
+            delivery_channel(&["crates/core/boss-jobs/src/lib.rs".into()]),
+            DeliveryChannel::Software
+        );
+        assert_eq!(
+            delivery_channel(&["infra/cluster/talos/w-1.yaml".into()]),
+            DeliveryChannel::Infra
+        );
+    }
+
+    #[test]
+    fn delivery_channel_is_the_heaviest_of_a_mixed_car() {
+        // a registry row PLUS a crate still needs the build → software
+        assert_eq!(
+            delivery_channel(&[
+                "infra/dispatcher/rules.toml".into(),
+                "crates/core/boss-dispatcher/src/x.rs".into(),
+            ]),
+            DeliveryChannel::Software
+        );
+        // config PLUS infra → infra
+        assert_eq!(
+            delivery_channel(&[
+                ".forgejo/workflows/ci.yml".into(),
+                "infra/cluster/talos/cp-1.yaml".into(),
+            ]),
+            DeliveryChannel::Infra
+        );
+    }
+
+    #[test]
+    fn an_unknown_path_is_conservative_software() {
+        assert_eq!(
+            delivery_channel(&["some/random/file.xyz".into()]),
+            DeliveryChannel::Software
+        );
+    }
+
+    #[test]
+    fn an_empty_change_is_data() {
+        assert_eq!(delivery_channel(&[]), DeliveryChannel::Data);
     }
 }
