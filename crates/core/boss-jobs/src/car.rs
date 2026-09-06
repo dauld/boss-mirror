@@ -38,7 +38,12 @@ pub fn stamp(now: chrono::DateTime<chrono::Utc>) -> String {
 }
 
 /// The ship-a-change packet body for a car.
-pub fn car_body(branch: &str, summary: &str, backlog_item: Option<&str>) -> Value {
+pub fn car_body(
+    branch: &str,
+    summary: &str,
+    backlog_item: Option<&str>,
+    delivery_channel: Option<&str>,
+) -> Value {
     let mut metadata = json!({ "branch": branch, "summary": summary });
     if let Some(item) = backlog_item {
         // A declared job edge — ref-checked by the API at the write,
@@ -46,6 +51,12 @@ pub fn car_body(branch: &str, summary: &str, backlog_item: Option<&str>) -> Valu
         // A mistyped id is refused instead of silently pointing at
         // nothing.
         metadata["backlog_item"] = json!(item);
+    }
+    // How this change ships (data/config/software/infra), derived at the
+    // gate and carried here so the yard and channel-gated delivery read
+    // it off the car. Absent when the gate could not classify the diff.
+    if let Some(dc) = delivery_channel {
+        metadata["delivery_channel"] = json!(dc);
     }
     json!({
         "kind": "ship-a-change",
@@ -225,7 +236,16 @@ mod tests {
 
     #[test]
     fn the_car_body_carries_the_fields_the_api_demands() {
-        let b = car_body("feat/x", "A thing does the thing. And more.", None);
+        let b = car_body("feat/x", "A thing does the thing. And more.", None, None);
+        assert!(
+            b["metadata"].get("delivery_channel").is_none(),
+            "no delivery_channel when None"
+        );
+        let d = car_body("feat/x", "A thing.", None, Some("data"));
+        assert_eq!(
+            d["metadata"]["delivery_channel"], "data",
+            "the car carries the delivery channel the gate stamped"
+        );
         for f in [
             "kind", "subject", "title", "owner_id", "status", "priority", "metadata", "tags",
         ] {
@@ -242,6 +262,7 @@ mod tests {
             "feat/x",
             "Summary",
             Some("de6f0c06-a341-4445-9f47-399dc27a60fb"),
+            None,
         );
         assert_eq!(
             b["metadata"]["backlog_item"],

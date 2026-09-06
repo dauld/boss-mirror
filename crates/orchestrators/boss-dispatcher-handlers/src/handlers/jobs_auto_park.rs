@@ -65,6 +65,7 @@ struct AutoParkInputs {
     test: String,
     verified: String,
     backlog_item: Option<String>,
+    delivery_channel: Option<String>,
     receipt: Receipt,
 }
 
@@ -118,6 +119,10 @@ fn auto_park_inputs(
         excludes: field("park_excludes"),
         test: field("park_test"),
         verified: field("park_verified"),
+        delivery_channel: md
+            .get("delivery_channel")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         backlog_item: md
             .get("park_backlog_item")
             .and_then(Value::as_str)
@@ -277,6 +282,7 @@ impl Handler for JobsAutoPark {
             &inputs.branch,
             &inputs.summary,
             inputs.backlog_item.as_deref(),
+            inputs.delivery_channel.as_deref(),
         );
         let created = post_json_return(
             &self.client,

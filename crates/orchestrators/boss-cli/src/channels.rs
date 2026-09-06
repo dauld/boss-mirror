@@ -420,11 +420,19 @@ pub(crate) fn delivery_channel(paths: &[String]) -> DeliveryChannel {
     }
 }
 
+/// The delivery channel a branch would ship on, as a label — for
+/// stamping on a gate-run so the car (and later the channel-gated
+/// delivery) can branch on it without re-deriving. `None` when the
+/// branch has no forge diff to classify (already merged / not pushed).
+pub(crate) fn delivery_channel_for(branch: &str) -> Option<String> {
+    changed_paths_for(branch).map(|paths| delivery_channel(&paths).label().to_string())
+}
+
 /// A car's changed files, best-effort, from the forge ref against
 /// origin/main. Returns None when git cannot resolve the branch (a
 /// merged car whose branch is gone) so the caller can skip rather than
 /// miscount.
-fn changed_paths_for(branch: &str) -> Option<Vec<String>> {
+pub(crate) fn changed_paths_for(branch: &str) -> Option<Vec<String>> {
     let out = std::process::Command::new("git")
         .args([
             "diff",

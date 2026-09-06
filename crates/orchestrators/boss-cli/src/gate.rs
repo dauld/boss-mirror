@@ -367,7 +367,24 @@ pub(crate) fn render_job(
 /// `metadata`, `tags`. `opened_on` is deliberately **not** — the create
 /// handler stamps it from the authoritative (sim-aware) clock precisely
 /// so operator-initiated creates inherit it rather than guessing.
-pub(crate) fn gate_run_body(branch: &str, sha: &str, manifest: &str) -> Value {
+pub(crate) fn gate_run_body(
+    branch: &str,
+    sha: &str,
+    manifest: &str,
+    delivery_channel: Option<&str>,
+) -> Value {
+    let mut metadata = json!({
+        "branch": branch,
+        "sha": sha,
+        "runner": manifest,
+    });
+    // The delivery channel this change ships on (data/config/software/
+    // infra), derived from what it touches. Stamped so the car and the
+    // channel-gated delivery can branch on it without re-deriving; absent
+    // when the branch had no forge diff to classify.
+    if let Some(dc) = delivery_channel {
+        metadata["delivery_channel"] = json!(dc);
+    }
     json!({
         "kind": "gate-run",
         "title": format!("Gate: {branch}"),
@@ -376,11 +393,7 @@ pub(crate) fn gate_run_body(branch: &str, sha: &str, manifest: &str) -> Value {
         "priority": "standard",
         "status": "open",
         "tags": [],
-        "metadata": {
-            "branch": branch,
-            "sha": sha,
-            "runner": manifest,
-        },
+        "metadata": metadata,
     })
 }
 
@@ -864,6 +877,7 @@ pub async fn run(
                         branch,
                         &sha,
                         &manifest_path.display().to_string(),
+                        crate::channels::delivery_channel_for(branch).as_deref(),
                     )),
                 )
                 .await?;
@@ -1538,7 +1552,12 @@ mod tests {
     /// omission returning.
     #[test]
     fn the_packet_body_carries_every_field_the_api_demands() {
-        let b = gate_run_body("feat/x", "abc123", "infra/gate-runner/gate-runner.yaml");
+        let b = gate_run_body(
+            "feat/x",
+            "abc123",
+            "infra/gate-runner/gate-runner.yaml",
+            None,
+        );
         // Exactly the `Job` fields with no serde default and no Option.
         for field in [
             "kind", "subject", "title", "owner_id", "status", "priority", "metadata", "tags",
@@ -1562,7 +1581,12 @@ mod tests {
     /// caller's idea of the date for the company's.
     #[test]
     fn the_packet_lets_the_api_stamp_the_open_date() {
-        let b = gate_run_body("feat/x", "abc123", "infra/gate-runner/gate-runner.yaml");
+        let b = gate_run_body(
+            "feat/x",
+            "abc123",
+            "infra/gate-runner/gate-runner.yaml",
+            None,
+        );
         assert!(
             b.get("opened_on").is_none(),
             "`opened_on` must be left to the create handler's clock"
@@ -1583,7 +1607,12 @@ mod tests {
     /// the type actually sees.
     #[test]
     fn the_body_deserializes_into_the_job_type_the_api_parses_it_as() {
-        let mut b = gate_run_body("feat/x", "abc123", "infra/gate-runner/gate-runner.yaml");
+        let mut b = gate_run_body(
+            "feat/x",
+            "abc123",
+            "infra/gate-runner/gate-runner.yaml",
+            None,
+        );
         b.as_object_mut()
             .expect("body is an object")
             .insert("opened_on".into(), json!("2026-08-27"));
@@ -1600,8 +1629,24 @@ mod tests {
     /// rig produced a verdict without guessing from the branch name.
     #[test]
     fn the_packet_records_which_runner_manifest_rendered_it() {
-        let b = gate_run_body("feat/x", "abc123", "infra/gate-runner/local.yaml");
+        let b = gate_run_body("feat/x", "abc123", "infra/gate-runner/local.yaml", None);
         assert_eq!(b["metadata"]["runner"], "infra/gate-runner/local.yaml");
+    }
+
+    #[test]
+    fn the_gate_run_stamps_the_delivery_channel_when_known() {
+        // None (branch had no forge diff to classify) leaves it unstamped.
+        let b = gate_run_body("feat/x", "abc123", "infra/gate-runner/local.yaml", None);
+        assert!(b["metadata"].get("delivery_channel").is_none());
+        // A known channel rides on the gate-run so the car and the
+        // channel-gated delivery can read it without re-deriving.
+        let d = gate_run_body(
+            "feat/x",
+            "abc123",
+            "infra/gate-runner/local.yaml",
+            Some("data"),
+        );
+        assert_eq!(d["metadata"]["delivery_channel"], "data");
     }
 
     /// THE SPELLING THE HELP TEXT ALWAYS PROMISED.

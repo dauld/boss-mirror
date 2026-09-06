@@ -360,7 +360,7 @@ pub(crate) async fn run(
         &http,
         reqwest::Method::POST,
         "/api/jobs",
-        Some(car_body(branch, summary, backlog_item.as_deref())),
+        Some(car_body(branch, summary, backlog_item.as_deref(), None)),
     )
     .await?;
     let car = created

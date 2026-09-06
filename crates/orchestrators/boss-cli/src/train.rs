@@ -2270,6 +2270,145 @@ pub(crate) fn any_failing_check_refused(rollup: Option<&Value>) -> bool {
         })
 }
 
+/// The names of the checks that FAILED, from the rollup — `context`
+/// (status checks) or `name` (check runs), whichever the entry carries.
+pub(crate) fn failing_checks(rollup: Option<&Value>) -> Vec<String> {
+    rollup
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|c| c.get("conclusion").and_then(Value::as_str) == Some("FAILURE"))
+        .map(|c| {
+            c.get("context")
+                .or_else(|| c.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("unnamed check")
+                .to_string()
+        })
+        .collect()
+}
+
+/// A red train's self-announcement.
+pub(crate) struct RedTrainAlert {
+    pub(crate) title: String,
+    pub(crate) failing: Vec<String>,
+    pub(crate) refused: bool,
+}
+
+/// A red train announces itself IMMEDIATELY — pure over the LIVE verdict,
+/// like [`auto_cancel_reason`], but it fires on the FIRST red pass rather
+/// than waiting out the stall threshold, because the point is that a red
+/// train is never a surprise (d69c4274, David: "red trains shouldn't
+/// surprise us"). `Some` when the live CI verdict is `failing` and the
+/// train has not merged; `None` otherwise. The alert NAMES the failing
+/// checks and whether any was an infrastructure refusal, so the reader
+/// sees WHAT failed without re-deriving it from the forge ("a verdict
+/// must name what failed").
+pub(crate) fn red_train_alert(
+    train: &Value,
+    live_verdict: &str,
+    rollup: Option<&Value>,
+) -> Option<RedTrainAlert> {
+    if live_verdict != "failing" {
+        return None;
+    }
+    // A merged train's checks are history; the content already landed.
+    if step_done(find_step(train, "merged", "Merged into main")) {
+        return None;
+    }
+    let failing = failing_checks(rollup);
+    let refused = any_failing_check_refused(rollup);
+    let id = train.get("id").and_then(Value::as_str).unwrap_or("");
+    let named = if failing.is_empty() {
+        "check names unavailable".to_string()
+    } else {
+        failing.join(", ")
+    };
+    let title = if refused {
+        format!(
+            "Red train {} — CI REFUSED (infrastructure, not the consist): {named}",
+            id8(id)
+        )
+    } else {
+        format!("Red train {} — CI failed: {named}", id8(id))
+    };
+    Some(RedTrainAlert {
+        title,
+        failing,
+        refused,
+    })
+}
+
+#[cfg(test)]
+mod red_train_alert_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn train(verdict_merged: bool) -> Value {
+        let merged = if verdict_merged {
+            "completed"
+        } else {
+            "pending"
+        };
+        json!({
+            "id": "e799e241-aaaa-bbbb-cccc-000000000000",
+            "steps": [{"metadata": {"spec_slug": "merged"}, "title": "Merged into main", "status": merged}]
+        })
+    }
+    fn rollup(entries: Value) -> Value {
+        entries
+    }
+
+    #[test]
+    fn a_red_train_announces_the_failing_check() {
+        let r = red_train_alert(
+            &train(false),
+            "failing",
+            Some(&rollup(json!([
+                {"context": "CI / build-image", "conclusion": "SUCCESS"},
+                {"context": "CI / test", "conclusion": "FAILURE"}
+            ]))),
+        )
+        .expect("a red train alerts");
+        assert_eq!(r.failing, vec!["CI / test".to_string()]);
+        assert!(!r.refused);
+        assert!(
+            r.title.contains("CI / test"),
+            "title names the check: {}",
+            r.title
+        );
+    }
+
+    #[test]
+    fn a_green_or_pending_verdict_is_no_alert() {
+        assert!(red_train_alert(&train(false), "green", None).is_none());
+        assert!(red_train_alert(&train(false), "pending", None).is_none());
+    }
+
+    #[test]
+    fn a_merged_train_is_no_alert_whatever_the_verdict() {
+        assert!(red_train_alert(&train(true), "failing", None).is_none());
+    }
+
+    #[test]
+    fn an_infrastructure_refusal_is_named_as_such() {
+        let r = red_train_alert(
+            &train(false),
+            "failing",
+            Some(&rollup(json!([
+                {"context": "CI / locomotive", "conclusion": "FAILURE", "description": "refused: disk floor"}
+            ]))),
+        )
+        .expect("a refusal still alerts");
+        assert!(r.refused);
+        assert!(
+            r.title.to_lowercase().contains("refused"),
+            "title says refused: {}",
+            r.title
+        );
+    }
+}
+
 /// The metadata a released car carries away from a cancelled train.
 ///
 /// `train`/`boarded_head` cleared so the dock counts it again, why it
@@ -3387,6 +3526,53 @@ impl Conductor {
             .ok_or_else(|| anyhow!("job {id} came back empty"))
     }
 
+    /// Is there already an open alert for this train? A red train is ONE
+    /// alert, deduped by the `train_alert` key, not one per reconcile.
+    async fn train_alert_exists(&self, tid: &str) -> Result<bool> {
+        let body = self
+            .api(
+                Method::GET,
+                "/api/jobs?kind=backlog-item&status=open&limit=200",
+                None,
+            )
+            .await?;
+        Ok(body
+            .as_ref()
+            .and_then(|b| b.get("data"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|j| {
+                j.get("metadata")
+                    .and_then(|m| m.get("train_alert"))
+                    .and_then(Value::as_str)
+                    == Some(tid)
+            }))
+    }
+
+    /// File the urgent packet a red train becomes — the estate-alarm
+    /// idiom (kind backlog-item, priority urgent, on the pipeline
+    /// subject), keyed by `train_alert` so a repeat pass dedups and the
+    /// overdue/watchlist machinery can see it.
+    async fn file_train_alert(&self, tid: &str, alert: &RedTrainAlert) -> Result<()> {
+        let body = json!({
+            "kind": "backlog-item",
+            "title": alert.title,
+            "subject": {"subject_kind": "custom", "id": "bosspipeline"},
+            "priority": "urgent",
+            "metadata": {
+                "title": alert.title,
+                "train_alert": tid,
+                "failing_checks": alert.failing,
+                "refused": alert.refused,
+                "reporter": "conductor",
+                "source": "pipeline-failure (red train)",
+            }
+        });
+        self.api(Method::POST, "/api/jobs", Some(body)).await?;
+        Ok(())
+    }
+
     /// Complete `step` on `job` with evidence fields (None values are
     /// dropped, matching the python kwargs filter).
     async fn complete_step(
@@ -4135,6 +4321,29 @@ impl Conductor {
             // the release counts against the cars is a separate
             // question, and only a returned failing verdict answers it
             // yes (`verdict_strikes_cars`).
+            // A red train announces ITSELF, immediately — not only when it
+            // stalls out into auto-cancel below, and not only when a human
+            // asks. One urgent packet naming the failing check, deduped, so
+            // a red train is never a surprise (d69c4274).
+            if info.get("state").and_then(Value::as_str) == Some("OPEN")
+                && let Some(alert) = red_train_alert(&t, verdict, info.get("statusCheckRollup"))
+            {
+                if self.cfg.dry {
+                    log(format!(
+                        "DRY: would alert on red train {} ({})",
+                        id8(&tid),
+                        alert.title
+                    ));
+                } else if !self.train_alert_exists(&tid).await? {
+                    self.file_train_alert(&tid, &alert).await?;
+                    log(format!(
+                        "train {} red — filed alert: {}",
+                        id8(&tid),
+                        alert.title
+                    ));
+                }
+            }
+
             if self.cfg.auto_cancel
                 && info.get("state").and_then(Value::as_str) == Some("OPEN")
                 && let Some(reason) = auto_cancel_reason(&t, verdict, now, policy.stall_hours)
