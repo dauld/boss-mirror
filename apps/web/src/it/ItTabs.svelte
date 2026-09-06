@@ -12,6 +12,7 @@
     operate: [
       { label: 'Incidents', path: '/it/operate' },
       { label: 'Yard status', path: '/it/operate/yard-status' },
+      { label: 'Conductor', path: '/it/operate/conductor' },
       { label: 'Audit Log', path: '/it/operate/audit' },
       { label: 'Performance', path: '/it/operate/perf' },
       { label: 'Atlas', path: '/it/operate/atlas' },

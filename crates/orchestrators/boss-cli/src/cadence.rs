@@ -1203,7 +1203,22 @@ async fn tick(
         }
     }
     for rule in &rules {
-        let last = last_firing(http, base, &rule.name).await?;
+        // PER-RULE ISOLATION. Cadence rules are independent; one rule's
+        // failed read or claim must not abort the tick and starve every
+        // rule behind it in the list — the same "one bad element freezes
+        // the batch" shape that froze reconcile for ~8h on 2026-09-06.
+        // A failure holds THIS rule for this tick (retried next), exactly
+        // like the dock/open-train probes above.
+        let last = match last_firing(http, base, &rule.name).await {
+            Ok(l) => l,
+            Err(e) => {
+                log(format!(
+                    "cadence: last-firing read failed for {} — rule held this tick: {e:#}",
+                    rule.name
+                ));
+                continue;
+            }
+        };
         let window = match decide(rule, now, last.as_ref(), dock_depth, open_trains, &running) {
             Decision::Hold => continue,
             Decision::StillRunning(elapsed) => {
@@ -1228,7 +1243,17 @@ async fn tick(
             ));
             continue;
         }
-        if !claim_firing(http, base, &id, rule, now, dock_depth).await? {
+        let claimed = match claim_firing(http, base, &id, rule, now, dock_depth).await {
+            Ok(c) => c,
+            Err(e) => {
+                log(format!(
+                    "cadence: firing claim failed for {} ({id}) — rule held this tick: {e:#}",
+                    rule.name
+                ));
+                continue;
+            }
+        };
+        if !claimed {
             continue; // someone else holds this window
         }
         let depth_note = match (&rule.basis, dock_depth) {

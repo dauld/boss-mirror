@@ -99,6 +99,7 @@ export const SECTION_FOR_ROUTE: Readonly<Record<Route['kind'], string>> = {
   systemMonitoringPerf: 'system-incidents',
   systemMonitoringEvents: 'system-incidents',
   systemMonitoringAtlas: 'system-incidents',
+  systemMonitoringConductor: 'system-incidents',
   systemFleet: 'system-incidents',
   systemYardStatus: 'system-incidents',
   systemStepPlugins: 'system-step-plugins',

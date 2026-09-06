@@ -84,6 +84,7 @@ export type Route =
   | { kind: 'systemMonitoringPerf' }
   | { kind: 'systemMonitoringEvents' }
   | { kind: 'systemMonitoringAtlas' }
+  | { kind: 'systemMonitoringConductor' }
   | { kind: 'policy' }
   | { kind: 'workflows' }
   | { kind: 'workflowsAdmin' }
@@ -155,6 +156,7 @@ export function parseRoute(pathname: string): Route {
     if (p === '/operate/atlas') return { kind: 'systemMonitoringAtlas' };
     if (p === '/operate/bottlenecks') return { kind: 'systemFleet' };
     if (p === '/operate/yard-status') return { kind: 'systemYardStatus' };
+    if (p === '/operate/conductor') return { kind: 'systemMonitoringConductor' };
     // 3. Registry — one surface over the registry family.
     if (p === '/registry') return { kind: 'workflows' };
     if (p === '/registry/new') return { kind: 'workflowNew' };

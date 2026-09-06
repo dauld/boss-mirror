@@ -64,6 +64,7 @@ describe('parseRoute — every specific path matches its specific case', () => {
     ['/it/operate/audit', { kind: 'systemMonitoringEvents' }],
     ['/it/operate/atlas', { kind: 'systemMonitoringAtlas' }],
     ['/it/operate/bottlenecks', { kind: 'systemFleet' }],
+    ['/it/operate/conductor', { kind: 'systemMonitoringConductor' }],
     ['/it/kb', { kind: 'systemKb' }],
     ['/it/registry/subjects', { kind: 'systemSubjects' }],
     // /it/* is the canonical spelling for IT surfaces (0fc8b216); the

@@ -4290,9 +4290,21 @@ impl Conductor {
             )
             .await?,
         )?;
+        let trains_len = trains.len();
+        let mut isolated_failures = 0usize;
         for t0 in trains {
-            let tid = job_id(&t0)?.to_string();
-            let mut t = self.get_job(&tid).await?;
+            // PER-TRAIN ISOLATION (2026-09-06). One train's failure — a
+            // failed observability write, a forge blip, a merge conflict —
+            // must never abort the pass and wedge every train behind it.
+            // That is what froze all landings for ~8h: a red-train alert
+            // POST returned 422 and, filed with `?`, aborted reconcile
+            // every pass. Each iteration now runs in its own fallible
+            // scope, so a sick train costs itself one pass, not the fleet.
+            // (`continue` inside the loop body therefore becomes
+            // `return Ok(())` — the same "skip the rest of this train".)
+            let outcome: Result<()> = async {
+                let tid = job_id(&t0)?.to_string();
+                let mut t = self.get_job(&tid).await?;
             // The rules THIS train departed under, which may not be the
             // ones in force now.
             let policy = self.policy_for(&t).await;
@@ -4302,7 +4314,7 @@ impl Conductor {
             self.note_stall(&t, now, &policy).await?;
             let pr_step = find_step(&t, "pr", "Open the batched PR");
             if !step_done(pr_step) {
-                continue; // this window's board phase, or a stalled assembly
+                return Ok(()); // this window's board phase, or a stalled assembly
             }
             let pr_url = pr_step
                 .and_then(|s| s.get("metadata"))
@@ -4311,7 +4323,7 @@ impl Conductor {
                 .unwrap_or_default()
                 .to_string();
             if pr_url.is_empty() {
-                continue;
+                return Ok(());
             }
             let mut info = self.forge.pr_info(&pr_url).await?;
 
@@ -4430,7 +4442,7 @@ impl Conductor {
                     )
                     .await?;
                 }
-                continue;
+                return Ok(());
             }
 
             let pr_state = info.get("state").and_then(Value::as_str);
@@ -4538,6 +4550,33 @@ impl Conductor {
                 // the overdue alarm bounds the silence.
                 log(format!("convergence check failed (run stands): {e}"));
             }
+                Ok(())
+            }
+            .await;
+            if let Err(e) = outcome {
+                isolated_failures += 1;
+                let tid = t0
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(id8)
+                    .unwrap_or_else(|| "?".to_string());
+                log(format!(
+                    "reconcile: train {tid} failed this pass — isolated, other trains continue: {e}"
+                ));
+            }
+        }
+        // Isolation must not become a blind spot. If EVERY train failed
+        // this pass, that is almost never N independent per-train faults —
+        // it is a systemic outage (forge / API / auth) that per-train
+        // logging would scatter into noise indistinguishable from an
+        // all-green pass. Say so, loudly and once, so a total downstream
+        // failure surfaces rather than hiding behind the very isolation
+        // that protects against the single-bad-train case.
+        if trains_len > 0 && isolated_failures == trains_len {
+            log(format!(
+                "reconcile: ALL {trains_len} train(s) failed this pass — likely a SYSTEMIC \
+                 outage (forge/API/auth), not per-train faults; investigate"
+            ));
         }
         // Housekeeping must not fail a run whose real work succeeded.
         // The sweep runs last, after merges, deploys and evidence are
@@ -4596,30 +4635,60 @@ impl Conductor {
         if cars.is_empty() {
             return Ok(());
         }
-        // One fetch brings main + every parked branch into temp refs the
-        // trial merges can address; refs/preview/* is cleaned each tick
-        // so a deleted branch does not linger as a phantom.
+        // Bring main + every parked branch into temp refs the trial
+        // merges can address; refs/preview/* is cleaned each tick so a
+        // deleted branch does not linger as a phantom.
+        //
+        // BEST-EFFORT PER BRANCH (2026-09-06). One car whose branch has
+        // vanished — rerailed, deleted, or held with its branch removed —
+        // must not abort the whole preview: a single combined fetch with
+        // a missing refspec exits rc=128 and blanked the entire dock
+        // projection every pass. `main` is required (the baseline); each
+        // car branch is fetched on its own, and a car whose ref does not
+        // resolve is dropped from the preview (it is not boardable anyway).
         let dir = Some(Path::new(clone.as_str()));
-        let mut args_owned: Vec<String> = vec![
-            "git".into(),
-            "fetch".into(),
-            "--quiet".into(),
-            "origin".into(),
-            "+refs/heads/main:refs/preview/main".into(),
-        ];
+        sh_in(
+            dir,
+            true,
+            &[
+                "git",
+                "fetch",
+                "--quiet",
+                "origin",
+                "+refs/heads/main:refs/preview/main",
+            ],
+        )?;
         for (_, _, b) in &cars {
-            args_owned.push(format!("+refs/heads/{b}:refs/preview/{b}"));
+            let refspec = format!("+refs/heads/{b}:refs/preview/{b}");
+            // check=false: a vanished branch is expected here and handled
+            // by the resolve-and-drop below, not an error.
+            let _ = sh_in(dir, false, &["git", "fetch", "--quiet", "origin", &refspec]);
         }
-        let args: Vec<&str> = args_owned.iter().map(String::as_str).collect();
-        sh_in(dir, true, &args)?;
-        let rev = |r: &str| -> Result<String> {
-            let out = sh_in(dir, true, &["git", "rev-parse", r])?;
-            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        let rev = |r: &str| -> Option<String> {
+            let out = sh_in(dir, false, &["git", "rev-parse", "--verify", "--quiet", r]).ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            (!s.is_empty()).then_some(s)
         };
-        let main_sha = rev("refs/preview/main")?;
+        let main_sha =
+            rev("refs/preview/main").ok_or_else(|| anyhow!("preview: main ref did not resolve"))?;
         let mut pairs: Vec<(String, String)> = Vec::new();
-        for (_, _, b) in &cars {
-            pairs.push((b.clone(), rev(&format!("refs/preview/{b}"))?));
+        cars.retain(|(_, _, b)| match rev(&format!("refs/preview/{b}")) {
+            Some(sha) => {
+                pairs.push((b.clone(), sha));
+                true
+            }
+            None => {
+                log(format!(
+                    "preview: branch {b} did not resolve (vanished?) — dropped from the dock preview"
+                ));
+                false
+            }
+        });
+        if cars.is_empty() {
+            return Ok(());
         }
         let set = dp::set_hash(clone, &pairs)?;
         let stamp = boss_jobs::car::stamp(now);

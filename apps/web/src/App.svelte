@@ -79,6 +79,7 @@
   import WorkflowsPage from './kb/WorkflowsPage.svelte';
   import PerfPage from './it/monitoring/PerfPage.svelte';
   import EventsPage from './it/monitoring/EventsPage.svelte';
+  import ConductorPage from './it/monitoring/ConductorPage.svelte';
   import PoPage from './po/PoPage.svelte';
   import VendorInvoicePage from './po/VendorInvoicePage.svelte';
   import WatchlistPage from './accounts/WatchlistPage.svelte';
@@ -392,6 +393,9 @@
     {:else if route.kind === 'systemMonitoringAtlas'}
       <ItTabs group="operate" active="/it/operate/atlas" />
       <AtlasPage />
+    {:else if route.kind === 'systemMonitoringConductor'}
+      <ItTabs group="operate" active="/it/operate/conductor" />
+      <ConductorPage />
     {:else if route.kind === 'po'}
       <PoPage poId={route.poId} />
     {:else if route.kind === 'vendorInvoice'}

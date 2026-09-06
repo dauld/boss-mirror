@@ -470,6 +470,14 @@ impl Handler for EstateAlarm {
         // First-key-wins map: two stale series on one host collapse to
         // one raise before the dedup fetch ever runs.
         let mut to_raise: BTreeMap<String, Value> = BTreeMap::new();
+        // Best-effort accumulator (2026-09-06). A single scope's fetch or
+        // a single finding's POST must never block the others: the alarm
+        // system silently blocking its own alarms is the worst failure
+        // mode for the thing meant to catch a dead conductor. Sub-ops fail
+        // soft into here; every one that failed is surfaced as ONE error
+        // at the end, so a transient still NAKs for retry (dedup makes the
+        // retry idempotent) while every alarm that COULD raise, did.
+        let mut errors: Vec<String> = Vec::new();
 
         // --- The persistence half: does the TRIGGERING comparison's
         // finding survive the last PERSIST_N of its own series? Only
@@ -479,7 +487,7 @@ impl Handler for EstateAlarm {
             // The recorded series IS the state (the handler keeps
             // none). Scope travels down in the query — a page across
             // all scopes is spent by whichever series ticks fastest.
-            let recent = get_json(
+            match get_json(
                 &self.client,
                 &format!(
                     "{}/api/estate/comparisons?scope={scope}&limit=20",
@@ -487,28 +495,35 @@ impl Handler for EstateAlarm {
                 ),
                 &ctx.rule_name,
             )
-            .await?;
-            let rows: Vec<Value> = recent
-                .get("data")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            // Rows are event envelopes; the comparison rides in
-            // `payload` (recorded verbatim by the dumb door). Fall back
-            // to the row itself so a flattened future shape keeps
-            // working.
-            let payloads: Vec<Value> = rows
-                .iter()
-                .map(|r| r.get("payload").cloned().unwrap_or_else(|| r.clone()))
-                .collect();
-            for key in persistent_keys(&payloads, scope, host, PERSIST_N) {
-                let latest = hard
-                    .iter()
-                    .find(|(k, _)| *k == key)
-                    .map(|(_, e)| excerpt(e))
-                    .unwrap_or_default();
-                let body = alarm_body(&key, scope, host, &evidence, &latest);
-                to_raise.entry(key).or_insert(body);
+            .await
+            {
+                Ok(recent) => {
+                    let rows: Vec<Value> = recent
+                        .get("data")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    // Rows are event envelopes; the comparison rides in
+                    // `payload` (recorded verbatim by the dumb door). Fall
+                    // back to the row itself so a flattened future shape
+                    // keeps working.
+                    let payloads: Vec<Value> = rows
+                        .iter()
+                        .map(|r| r.get("payload").cloned().unwrap_or_else(|| r.clone()))
+                        .collect();
+                    for key in persistent_keys(&payloads, scope, host, PERSIST_N) {
+                        let latest = hard
+                            .iter()
+                            .find(|(k, _)| *k == key)
+                            .map(|(_, e)| excerpt(e))
+                            .unwrap_or_default();
+                        let body = alarm_body(&key, scope, host, &evidence, &latest);
+                        to_raise.entry(key).or_insert(body);
+                    }
+                }
+                Err(e) => errors.push(format!(
+                    "persistence-half comparisons fetch (scope {scope}) failed; the silence half still ran: {e}"
+                )),
             }
         }
 
@@ -519,7 +534,7 @@ impl Handler for EstateAlarm {
         // is exactly when a dead observer is lying loudest.
         let now = boss_clock_client::now_from(&self.clock).await;
         for (watched_scope, per_host) in WATCHED_SERIES {
-            let obs = get_json(
+            let obs = match get_json(
                 &self.client,
                 &format!(
                     "{}/api/estate/observations?scope={watched_scope}&limit=50",
@@ -527,7 +542,16 @@ impl Handler for EstateAlarm {
                 ),
                 &ctx.rule_name,
             )
-            .await?;
+            .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    errors.push(format!(
+                        "observation fetch for scope {watched_scope} failed; other scopes still checked: {e}"
+                    ));
+                    continue;
+                }
+            };
             let rows: Vec<Value> = obs
                 .get("data")
                 .and_then(Value::as_array)
@@ -539,59 +563,98 @@ impl Handler for EstateAlarm {
             }
         }
 
-        if to_raise.is_empty() {
-            return Ok(());
-        }
-
-        let open = get_json(
-            &self.client,
-            &format!(
-                "{}/api/jobs?kind=backlog-item&status=open&limit=200",
-                self.base()
-            ),
-            &ctx.rule_name,
-        )
-        .await?;
-        let open_rows: Vec<Value> = open
-            .get("data")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let mut raised = already_raised(&open_rows);
-        // And the findings a human settled recently: closed as stale or
-        // duplicate within SETTLED_DAYS, read from the closed listing so
-        // an answered alarm is not asked again until the answer can change.
-        let closed = get_json(
-            &self.client,
-            &format!(
-                "{}/api/jobs?kind=backlog-item&status=closed&limit=200",
-                self.base()
-            ),
-            &ctx.rule_name,
-        )
-        .await?;
-        let closed_rows: Vec<Value> = closed
-            .get("data")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        raised.extend(settled_recently(&closed_rows, now));
-
-        for (key, body) in to_raise {
-            if raised.contains(&key) {
-                tracing::info!(finding = %key, "estate.alarm: already raised or recently settled — not re-raising");
-                continue;
-            }
-            post_json(
+        // Dedup + raise, only when there is something to raise. The dedup
+        // reads are a safety prerequisite — without them a re-raise storms
+        // duplicates — so if EITHER fails we HOLD this pass's findings for
+        // retry rather than raise blind.
+        if !to_raise.is_empty() {
+            let open = get_json(
                 &self.client,
-                &format!("{}/api/jobs", self.base()),
-                &body,
+                &format!(
+                    "{}/api/jobs?kind=backlog-item&status=open&limit=200",
+                    self.base()
+                ),
                 &ctx.rule_name,
             )
-            .await?;
-            tracing::info!(finding = %key, scope, "estate.alarm raised a packet");
+            .await;
+            // And the findings a human settled recently: closed as stale
+            // or duplicate within SETTLED_DAYS, so an answered alarm is
+            // not asked again until the answer can change.
+            let closed = get_json(
+                &self.client,
+                &format!(
+                    "{}/api/jobs?kind=backlog-item&status=closed&limit=200",
+                    self.base()
+                ),
+                &ctx.rule_name,
+            )
+            .await;
+            match (open, closed) {
+                (Ok(open), Ok(closed)) => {
+                    let open_rows: Vec<Value> = open
+                        .get("data")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut raised = already_raised(&open_rows);
+                    let closed_rows: Vec<Value> = closed
+                        .get("data")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    raised.extend(settled_recently(&closed_rows, now));
+
+                    for (key, body) in to_raise {
+                        if raised.contains(&key) {
+                            tracing::info!(finding = %key, "estate.alarm: already raised or recently settled — not re-raising");
+                            continue;
+                        }
+                        if let Err(e) = post_json(
+                            &self.client,
+                            &format!("{}/api/jobs", self.base()),
+                            &body,
+                            &ctx.rule_name,
+                        )
+                        .await
+                        {
+                            errors.push(format!(
+                                "raise for {key} failed; other findings still raised: {e}"
+                            ));
+                            continue;
+                        }
+                        tracing::info!(finding = %key, scope, "estate.alarm raised a packet");
+                    }
+                }
+                (open_r, closed_r) => {
+                    let mut why = Vec::new();
+                    if let Err(e) = open_r {
+                        why.push(format!("open: {e}"));
+                    }
+                    if let Err(e) = closed_r {
+                        why.push(format!("closed: {e}"));
+                    }
+                    errors.push(format!(
+                        "dedup fetch failed; {} finding(s) held for retry to avoid duplicate alarms ({})",
+                        to_raise.len(),
+                        why.join(", ")
+                    ));
+                }
+            }
         }
-        Ok(())
+
+        // One aggregated exit. Every alarm that could raise did; any
+        // sub-op that failed NAKs the firing for redelivery, where dedup
+        // makes the retry idempotent. Silence is never the result of one
+        // bad scope or one bad POST.
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(HandlerError::Downstream(format!(
+                "estate.alarm: {} sub-operation(s) failed this pass (every alarm that could raise did; the rest retry): {}",
+                errors.len(),
+                errors.join(" | ")
+            )))
+        }
     }
 }
 
