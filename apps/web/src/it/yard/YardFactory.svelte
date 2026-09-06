@@ -254,7 +254,7 @@
     font: inherit;
     cursor: pointer;
     max-width: 130px;
-    animation: bob 2.8s ease-in-out infinite;
+    animation: bob 2.8s ease-in-out infinite, carry 3.6s ease-in-out infinite;
     animation-delay: calc(var(--i, 0) * -0.4s);
   }
   .wagon:hover {
@@ -383,6 +383,22 @@
     font-size: 13px;
     display: inline-block;
   }
+  /* An inserter arm on a working gate — the Factorio touch: a little
+     arm that swings over the bay while the machine runs. */
+  .machine.busy {
+    position: relative;
+  }
+  .machine.busy::after {
+    content: '';
+    position: absolute;
+    top: -6px;
+    right: 10px;
+    width: 2px;
+    height: 9px;
+    background: var(--warn, #d9a441);
+    transform-origin: bottom center;
+    animation: grab 1.4s ease-in-out infinite;
+  }
   .gear.spin {
     color: var(--warn, #d9a441);
     animation: spin 2.2s linear infinite;
@@ -468,6 +484,16 @@
     border-right-color: var(--hairline, #2a3138);
   }
 
+  @keyframes grab {
+    0%, 100% { transform: rotate(-18deg); }
+    50% { transform: rotate(22deg); }
+  }
+  /* The belt carries its cars: a small drift downstream and back, so a
+     wagon reads as riding a moving belt rather than parked on it. */
+  @keyframes carry {
+    0%, 100% { transform: translateX(0); }
+    50% { transform: translateX(2.5px); }
+  }
   @keyframes bob {
     0%,
     100% {
@@ -513,6 +539,7 @@
     .tone-moving,
     .belt-tread,
     .gear.spin,
+    .machine.busy::after,
     .factory-run::before {
       animation: none !important;
     }
