@@ -266,7 +266,7 @@ impl Handler for JobsAutoPark {
                 &self.client,
                 reqwest::Method::PATCH,
                 &format!("{}/api/jobs/{}/metadata", self.base(), id),
-                &car::regate_patch(&inputs.receipt, &note),
+                &car::regate_patch(&inputs.receipt, &note, inputs.delivery_channel.as_deref()),
                 &ctx.rule_name,
             )
             .await?;

@@ -203,12 +203,24 @@ pub fn parked_car_for<'a>(cars: &'a [Value], branch: &str) -> Option<&'a Value> 
 /// door deletes a null key, so the conductor's "left behind" reason
 /// goes with the stale receipt. One builder for `boss park`, the
 /// auto-park handler and `boss rerail`, so the write cannot drift.
-pub fn regate_patch(receipt: &Receipt, note: &str) -> Value {
-    json!({
+pub fn regate_patch(receipt: &Receipt, note: &str, delivery_channel: Option<&str>) -> Value {
+    let mut patch = json!({
         "regate_receipt": receipt.raw,
         "skip_reason": Value::Null,
         "regate_note": note,
-    })
+    });
+    // Re-classify the channel from the re-gated diff and carry it, the
+    // same field `car_body` stamps on a fresh car. Without this a
+    // re-gate — the common path: every `--wait --park` of an existing
+    // car, plus `boss park`/`boss rerail` — dropped `delivery_channel`,
+    // so the yard and the channel mixes under-counted every branch that
+    // was ever rebased or rerailed. Omitted (not nulled) when the diff
+    // could not be classified: a null key is DELETED by the metadata
+    // door, which would strip a channel the car already carried.
+    if let Some(dc) = delivery_channel {
+        patch["delivery_channel"] = json!(dc);
+    }
+    patch
 }
 
 /// A metadata stamp that is present: the conductor writes `train` as
@@ -405,12 +417,27 @@ mod regate_tests {
 
     #[test]
     fn the_regate_patch_copies_the_receipt_verbatim_and_clears_the_skip() {
-        let p = regate_patch(&receipt(), "why");
+        let p = regate_patch(&receipt(), "why", None);
         // VERBATIM: the receipt string, not a rebuilt object.
         assert_eq!(p["regate_receipt"], json!(GREEN));
         // Present-and-null: the metadata door DELETES a null key, which
         // is how the conductor's "left behind" reason goes away.
         assert!(p.get("skip_reason").is_some_and(Value::is_null));
         assert_eq!(p["regate_note"], json!("why"));
+    }
+
+    #[test]
+    fn the_regate_patch_carries_the_delivery_channel_when_known() {
+        // A re-gate re-classifies and stamps the channel, so a rebased
+        // or rerailed car is counted in the yard's mixes like a fresh one.
+        let p = regate_patch(&receipt(), "why", Some("config"));
+        assert_eq!(p["delivery_channel"], "config");
+        // Unknown diff: OMITTED, never nulled — a null key is deleted by
+        // the metadata door, which would strip a channel already on the car.
+        let q = regate_patch(&receipt(), "why", None);
+        assert!(
+            q.get("delivery_channel").is_none(),
+            "no delivery_channel key when the diff could not be classified"
+        );
     }
 }

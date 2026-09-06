@@ -95,6 +95,9 @@ async fn repoint(
     // core's builder, shared with `boss park` and the auto-park handler
     // (a re-gate of a still-parked car refreshes it the same way); the
     // repoint is what rerail adds, because here the branch moved too.
+    // The branch moved, so re-classify the channel from the new branch's
+    // diff (None if it won't resolve — safe, the key is then left as-is).
+    let dc = crate::channels::delivery_channel_for(new_branch);
     let mut patch = boss_jobs::car::regate_patch(
         receipt,
         &format!(
@@ -102,6 +105,7 @@ async fn repoint(
              origin/main, re-gated, receipt machine-copied to regate_receipt \
              (the frozen gate step stays as the original head's record)"
         ),
+        dc.as_deref(),
     );
     patch["branch"] = json!(new_branch);
     gate::api(

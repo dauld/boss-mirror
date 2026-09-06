@@ -337,11 +337,14 @@ pub(crate) async fn run(
              by boss park; the frozen gate step stays as the original head's record",
             &receipt.head[..12.min(receipt.head.len())]
         );
+        // Re-classify the channel from the current diff so the refreshed
+        // car carries it like a fresh park (None if the diff won't resolve).
+        let dc = crate::channels::delivery_channel_for(branch);
         crate::gate::api(
             &http,
             reqwest::Method::PATCH,
             &format!("/api/jobs/{id}/metadata"),
-            Some(regate_patch(&receipt, &note)),
+            Some(regate_patch(&receipt, &note, dc.as_deref())),
         )
         .await?;
         println!(
