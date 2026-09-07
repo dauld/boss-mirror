@@ -86,6 +86,11 @@
       "about": "MUTATING — trigger ONE cluster converge NOW by starting the existing cluster-deploy-runner oneshot: the same unit the 10-minute timer runs (same User=david, same $HOME/env, same maintenance-wrap, same build+push+roll). The event-driven fast path — a dispatcher rule spawns this on a pr-train's merged-step-done, so the cluster converges ~1 minute after merge instead of waiting up to 10 minutes for the timer tick. It only ACCELERATES: cluster-deploy-runner.timer and cluster-watchdog remain the independent floor (they owe nothing to NATS/SoR, which this fast path does — so a cluster-down event path costs latency, never a missed converge). Idempotent and self-guarding by construction of the script it starts: exits 0 if forge main has not moved vs the stamp, honors the converge hold file and the bricked-boot quarantine, so a redundant fire is a safe no-op. --no-block returns immediately (systemd owns the run), so the ~1-minute ops-runner does not block on or time out the build. Authorized by David 2026-09-07 — same explicit per-verb process as reclaim-disk / rollback-to (this entry is a precedent for the PROCESS, not a loosened default).",
       "argv": ["systemctl", "start", "--no-block", "cluster-deploy-runner.service"],
       "params": []
+    },
+    "mirror-base-images": {
+      "about": "MUTATING — mirror the CI build's external base images (the kaniko executor from gcr.io, plus the boss-ci Dockerfile's oven/bun and rust bases from docker.io) into the forge registry, so build-image resolves NO public DNS. Runs infra/forge/mirror-base-images.sh, which pulls a FIXED in-tree list and pushes it to 10.20.0.15:3000/david — bounded by construction like reclaim-disk (no packet-supplied image name). The gcr.io/docker.io DNS flake reddened trains #236 and #250; this moves that lookup off the every-train hot path onto an occasional, retryable job. Idempotent (re-mirrors the same tags). Authorized by David 2026-09-07, same explicit per-verb process as reclaim-disk / rollback-to / converge. Backlog 7f408b99.",
+      "argv": ["/home/david/boss/infra/forge/mirror-base-images.sh"],
+      "params": []
     }
   }
 }

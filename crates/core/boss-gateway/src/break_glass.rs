@@ -357,6 +357,27 @@ pub struct BreakGlassState {
     counters: Mutex<HashMap<String, u32>>,
 }
 
+/// The break-glass relying party, built identically for production
+/// (`from_env`) and tests so the two cannot drift (CLAUDE.md §9a).
+///
+/// Presence-only (`danger_set_user_presence_only_security_keys`) BY
+/// DESIGN: the door is "a touch on an attested, device-bound key"
+/// (docs/design/break-glass-is-a-key-you-hold.md), never a PIN. It
+/// also drops webauthn-rs's default SecurityKey `credProtect:
+/// UserVerificationRequired` extension, which the browser rejects as
+/// incongruent with the flow's `userVerification: preferred` BEFORE
+/// the touch (a `NotSupportedError` at options validation) — the bug
+/// that blocked the first real enrollment. Device-binding is
+/// unaffected: attestation stays `direct` (raised in `enroll_begin`)
+/// and the finish handler still refuses any backup-eligible / synced
+/// credential. Only the PIN prompt goes.
+fn break_glass_webauthn(rp_id: &str, origin: &Url) -> anyhow::Result<Webauthn> {
+    Ok(WebauthnBuilder::new(rp_id, origin)?
+        .rp_name("BOSS break-glass")
+        .danger_set_user_presence_only_security_keys(true)
+        .build()?)
+}
+
 impl BreakGlassState {
     /// rp_id / origin derive from BOSS_PUBLIC_URL, exactly like the
     /// presence-passkey ceremony — one host, one RP identity.
@@ -368,9 +389,7 @@ impl BreakGlassState {
             .host_str()
             .ok_or_else(|| anyhow::anyhow!("BOSS_PUBLIC_URL has no host"))?
             .to_string();
-        let webauthn = WebauthnBuilder::new(&rp_id, &origin)?
-            .rp_name("BOSS break-glass")
-            .build()?;
+        let webauthn = break_glass_webauthn(&rp_id, &origin)?;
         Ok(Self {
             session_key,
             webauthn,
@@ -942,11 +961,7 @@ mod tests {
 
     fn state_with(dir: &Path, enroll_token: Option<&str>) -> Arc<BreakGlassState> {
         let origin = Url::parse("https://boss.test").unwrap();
-        let webauthn = WebauthnBuilder::new("boss.test", &origin)
-            .unwrap()
-            .rp_name("BOSS break-glass")
-            .build()
-            .unwrap();
+        let webauthn = break_glass_webauthn("boss.test", &origin).unwrap();
         Arc::new(BreakGlassState {
             session_key: KEY.to_vec(),
             webauthn,
@@ -973,6 +988,37 @@ mod tests {
     async fn body_string(resp: Response) -> String {
         let bytes = to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
         String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// Regression (the first real enrollment, 2026-09-07): webauthn-rs's
+    /// default SecurityKey flow sets credProtect=UserVerificationRequired,
+    /// which the browser rejects as incongruent with the flow's
+    /// userVerification=preferred BEFORE the touch. The presence-only
+    /// builder must leave credProtect absent.
+    #[test]
+    fn enrollment_options_carry_no_cred_protect() {
+        let origin = Url::parse("https://boss.test").unwrap();
+        let webauthn = break_glass_webauthn("boss.test", &origin).unwrap();
+        let user = Uuid::new_v5(&Uuid::NAMESPACE_OID, BREAK_GLASS_ACTOR.as_bytes());
+        let (ccr, _rs) = webauthn
+            .start_securitykey_registration(
+                user,
+                BREAK_GLASS_ACTOR,
+                "BOSS break-glass",
+                None,
+                None,
+                Some(AuthenticatorAttachment::CrossPlatform),
+            )
+            .unwrap();
+        let cred_protect = ccr
+            .public_key
+            .extensions
+            .as_ref()
+            .and_then(|e| e.cred_protect.as_ref());
+        assert!(
+            cred_protect.is_none(),
+            "presence-only break-glass must not request credProtect (browsers reject it pre-touch); got {cred_protect:?}"
+        );
     }
 
     // ---- store ------------------------------------------------------
