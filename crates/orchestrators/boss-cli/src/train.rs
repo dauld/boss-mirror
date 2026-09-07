@@ -1088,6 +1088,82 @@ pub(crate) fn rows(resp: Option<Value>) -> Result<Vec<Value>> {
     }
 }
 
+/// One page of a paginated `/api/jobs` read. Kept at the historical
+/// 100 so a backlog that fits under a page still makes exactly one
+/// call: the defect this file fixes is paging PAST a page, not making
+/// the page bigger.
+pub(crate) const PAGE_LIMIT: usize = 100;
+
+/// The `total` a list response carries — the DB-wide count of rows
+/// matching the filter AND the caller's policy scope, authoritative
+/// over any single page's length (`http/jobs.rs` builds it beside
+/// `data`). A body without it is an error, never zero: zero is what a
+/// wrong deployment answers (CLAUDE.md §Doors), and this number decides
+/// whether every matching car has been read.
+pub(crate) fn list_total(body: &Value) -> Result<usize> {
+    let total = body
+        .get("total")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("list response carries no `total`: {body}"))?;
+    usize::try_from(total).context("list total does not fit a usize")
+}
+
+/// The offset to request next, or `None` once the rows already gathered
+/// cover `total`. The pure pagination decision behind `list_all_pages`.
+///
+/// A limit is not a filter (memory: a-limit-is-not-a-filter). The job
+/// list is `ORDER BY opened_on DESC`, so a car opened days ago but
+/// gated and parked today has an OLD `opened_on` and sorts to the tail.
+/// Once more than one page of open cars exist (in-flight + parked +
+/// landed-but-unclosed residue), a parked-ready car falls off page one
+/// and, read with a bare `limit=`, never boards — silently, and exactly
+/// when a backlog builds. Looping on this until it returns `None` makes
+/// a read see every matching row.
+pub(crate) fn next_offset(total: usize, fetched: usize) -> Option<usize> {
+    if fetched >= total {
+        None
+    } else {
+        Some(fetched)
+    }
+}
+
+/// Every row of a paginated `/api/jobs` list, not just page one.
+///
+/// `fetch` is handed the offset to request and returns that page's body
+/// (with `data` and `total`); this pages on `offset` — via
+/// [`next_offset`] over the response's [`list_total`] — until the rows
+/// gathered cover `total`. Shared by every whole-open-set read in the
+/// conductor: boarding (`candidates`), the branch-sweep guard
+/// (`open_car_branches`), the dock's merge preview (`preview_dock`),
+/// and the cadence loop's dock-depth probe (`cadence::probe_dock_depth`)
+/// — one paginator so none of them can under-read the dock again.
+///
+/// Terminates: each page advances `offset` by the rows it returned, and
+/// a page that returns nothing stops the loop, so a `total` that shrinks
+/// mid-read (a car closing between pages) cannot spin it.
+pub(crate) async fn list_all_pages<F, Fut>(fetch: F) -> Result<Vec<Value>>
+where
+    F: Fn(usize) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<Value>>>,
+{
+    let mut out: Vec<Value> = Vec::new();
+    loop {
+        let body = fetch(out.len())
+            .await?
+            .ok_or_else(|| anyhow!("empty response for a list call"))?;
+        let total = list_total(&body)?;
+        let page = rows(Some(body))?;
+        if page.is_empty() {
+            break;
+        }
+        out.extend(page);
+        if next_offset(total, out.len()).is_none() {
+            break;
+        }
+    }
+    Ok(out)
+}
+
 pub(crate) fn find_step<'a>(job: &'a Value, slug: &str, title: &str) -> Option<&'a Value> {
     // One lookup, defined in core beside the car builders: the parkers
     // read the same review step this file boards (CLAUDE.md 9a).
@@ -5534,14 +5610,21 @@ impl Conductor {
     async fn preview_dock(&self, now: DateTime<Utc>) -> Result<()> {
         use crate::dock_preview as dp;
         let clone = &self.cfg.clone;
-        let listed = rows(
+        // Every parked car needs its merge preview, so read past page
+        // one: a tail car left off would silently get no preview, and
+        // the pairwise-conflict set would be computed over an incomplete
+        // dock — a "clean" preview that hides a real conflict.
+        let listed = list_all_pages(|offset| async move {
             self.api(
                 Method::GET,
-                "/api/jobs?kind=ship-a-change&status=open&limit=100",
+                &format!(
+                    "/api/jobs?kind=ship-a-change&status=open&limit={PAGE_LIMIT}&offset={offset}"
+                ),
                 None,
             )
-            .await?,
-        )?;
+            .await
+        })
+        .await?;
         let mut cars: Vec<(String, Value, String)> = Vec::new(); // (id, job, branch)
         for j0 in listed {
             let jid = job_id(&j0)?.to_string();
@@ -5909,14 +5992,20 @@ impl Conductor {
     /// (the jobs list returns full metadata); an open car with no
     /// branch yet contributes nothing.
     async fn open_car_branches(&self) -> Result<BTreeSet<String>> {
-        let listed = rows(
+        // Every open car's branch, past page one: an older open car
+        // sorts to the tail, and a capped read that misses it would let
+        // the sweep delete a branch a still-open car names.
+        let listed = list_all_pages(|offset| async move {
             self.api(
                 Method::GET,
-                "/api/jobs?kind=ship-a-change&status=open&limit=100",
+                &format!(
+                    "/api/jobs?kind=ship-a-change&status=open&limit={PAGE_LIMIT}&offset={offset}"
+                ),
                 None,
             )
-            .await?,
-        )?;
+            .await
+        })
+        .await?;
         Ok(listed
             .iter()
             .filter_map(|j| {
@@ -5990,14 +6079,21 @@ impl Conductor {
     async fn candidates(&self) -> Result<(Vec<(Value, String)>, Vec<Value>)> {
         let mut out = Vec::new();
         let mut left_behind = Vec::new();
-        let listed = rows(
+        // EVERY open car, not just page one. A car opened days ago but
+        // parked today sorts to the tail (`ORDER BY opened_on DESC`), so
+        // a bare `limit=` boards nothing from the tail once the backlog
+        // passes a page — the silent starvation this fix exists for.
+        let listed = list_all_pages(|offset| async move {
             self.api(
                 Method::GET,
-                "/api/jobs?kind=ship-a-change&status=open&limit=100",
+                &format!(
+                    "/api/jobs?kind=ship-a-change&status=open&limit={PAGE_LIMIT}&offset={offset}"
+                ),
                 None,
             )
-            .await?,
-        )?;
+            .await
+        })
+        .await?;
         for j0 in listed {
             let jid = job_id(&j0)?.to_string();
             let j = self.get_job(&jid).await?;
@@ -7517,6 +7613,93 @@ mod tests {
             "metadata": {"receipt": {"verdict": "green", "dirty": false, "head": "abc12345"}},
         }));
         assert_eq!(receipt_skip_reason(&obj, Some("abc12345")), None);
+    }
+
+    // -- the conductor reads all its cars, not just page one -----------
+
+    #[test]
+    fn next_offset_pages_past_the_first_hundred() {
+        // A backlog under one page needs no second read.
+        assert_eq!(next_offset(0, 0), None);
+        assert_eq!(next_offset(42, 42), None);
+        assert_eq!(next_offset(PAGE_LIMIT, PAGE_LIMIT), None);
+        // 150 open cars, 100 read: page two starts at offset 100.
+        assert_eq!(next_offset(150, 100), Some(100));
+        // page two read: the whole backlog is covered.
+        assert_eq!(next_offset(150, 150), None);
+        // defensive — a `total` that shrank mid-read never asks for more.
+        assert_eq!(next_offset(150, 160), None);
+    }
+
+    #[test]
+    fn list_total_reads_total_not_the_page() {
+        let body = json!({"data": [{"id": "car-1"}], "limit": 100, "offset": 0, "total": 150});
+        assert_eq!(list_total(&body).unwrap(), 150);
+        // no `total` is an error, never zero: zero is a wrong deployment.
+        assert!(list_total(&json!({"data": []})).is_err());
+    }
+
+    /// THE STARVATION REGRESSION. A parked-ready car opened days ago
+    /// sorts to the tail of `opened_on DESC`; with 150 open cars it sits
+    /// on page two (offset 100). The old bare `limit=100` read left it
+    /// off page one forever. `list_all_pages` — the read every whole-dock
+    /// caller now shares (candidates, open_car_branches, preview_dock,
+    /// probe_dock_depth) — must gather it.
+    #[tokio::test]
+    async fn list_all_pages_reads_the_car_on_page_two() {
+        let all: Vec<Value> = (0..150)
+            .map(|i| json!({"id": format!("car-{i}")}))
+            .collect();
+        let all_ref = &all;
+        let calls = std::cell::Cell::new(0u32);
+        let gathered = list_all_pages(|offset| {
+            calls.set(calls.get() + 1);
+            async move {
+                let page: Vec<Value> = all_ref
+                    .iter()
+                    .skip(offset)
+                    .take(PAGE_LIMIT)
+                    .cloned()
+                    .collect();
+                anyhow::Ok(Some(json!({
+                    "data": page,
+                    "total": all_ref.len(),
+                    "offset": offset,
+                    "limit": PAGE_LIMIT,
+                })))
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(gathered.len(), 150, "every open car must be read");
+        assert!(
+            gathered.iter().any(|j| j["id"] == "car-149"),
+            "the car on page two must be gathered, not left off page one"
+        );
+        assert_eq!(calls.get(), 2, "150 cars is two pages of 100");
+    }
+
+    /// A backlog that fits under a page still makes exactly one call —
+    /// the fix is paging PAST a page, never changing behaviour below it.
+    #[tokio::test]
+    async fn list_all_pages_makes_one_call_below_a_page() {
+        let calls = std::cell::Cell::new(0u32);
+        let gathered = list_all_pages(|offset| {
+            calls.set(calls.get() + 1);
+            async move {
+                assert_eq!(offset, 0, "a sub-page backlog never asks for page two");
+                anyhow::Ok(Some(json!({
+                    "data": (0..42).map(|i| json!({"id": i})).collect::<Vec<_>>(),
+                    "total": 42,
+                    "offset": offset,
+                    "limit": PAGE_LIMIT,
+                })))
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(gathered.len(), 42);
+        assert_eq!(calls.get(), 1);
     }
 
     #[test]

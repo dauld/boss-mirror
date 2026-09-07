@@ -969,16 +969,21 @@ async fn api_once(
 }
 
 async fn probe_dock_depth(http: &reqwest::Client, base: &str) -> Result<u32> {
-    let listed = train::rows(
+    // Every open car, not just page one. A limit is not a filter: the
+    // dock builds past a page (in-flight + parked + landed-but-unclosed
+    // residue), and a page-one read under-counts it, so the depth-driven
+    // board never fires exactly when the backlog most needs draining.
+    let listed = train::list_all_pages(|offset| async move {
         api(
             http,
             reqwest::Method::GET,
             base,
-            "/api/jobs?kind=ship-a-change&status=open&limit=100",
+            &format!("/api/jobs?kind=ship-a-change&status=open&limit=100&offset={offset}"),
             None,
         )
-        .await?,
-    )?;
+        .await
+    })
+    .await?;
     let mut depth = 0u32;
     for j in listed {
         let Some(id) = j.get("id").and_then(Value::as_str) else {
@@ -2220,6 +2225,41 @@ mod tests {
         assert!(
             open_train_count(&bare).is_err(),
             "no total is an error, never zero"
+        );
+    }
+
+    /// `probe_dock_depth` counts the dock through the shared paginator,
+    /// so a dock deeper than one page is counted whole rather than
+    /// clipped at 100 — otherwise the depth-driven board never fires
+    /// when the backlog most needs draining. This pins the read the
+    /// probe depends on (its per-job `parked_ready` fetch is HTTP-bound;
+    /// `parked_ready` itself is tested in train.rs).
+    #[tokio::test]
+    async fn probe_dock_depth_reads_the_whole_dock() {
+        let all: Vec<Value> = (0..150)
+            .map(|i| json!({"id": format!("car-{i}")}))
+            .collect();
+        let all_ref = &all;
+        let listed = train::list_all_pages(|offset| async move {
+            let page: Vec<Value> = all_ref
+                .iter()
+                .skip(offset)
+                .take(train::PAGE_LIMIT)
+                .cloned()
+                .collect();
+            anyhow::Ok(Some(json!({
+                "data": page,
+                "total": all_ref.len(),
+                "offset": offset,
+                "limit": train::PAGE_LIMIT,
+            })))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            listed.len(),
+            150,
+            "the dock must be read past page one or the depth board never fires"
         );
     }
 
