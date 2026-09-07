@@ -38,6 +38,7 @@ IMAGES="
 gcr.io/kaniko-project/executor:v1.23.2-debug|kaniko-executor:v1.23.2-debug
 docker.io/oven/bun:1.3-slim|bun:1.3-slim
 docker.io/library/rust:1.96.1-slim-bookworm|rust:1.96.1-slim-bookworm
+docker.io/library/postgres:16|postgres:16
 "
 
 mappings() { printf '%s\n' "$IMAGES" | sed '/^[[:space:]]*$/d'; }

@@ -23,7 +23,7 @@ use axum::http::{Request, StatusCode};
 use boss_core::job::{Job, JobId, JobStatus, Priority, Step, StepId, StepStatus, Subject};
 use boss_core::port::EventBus;
 use boss_core::publisher::DomainPublisher;
-use boss_jobs::cadence::{CadenceRepository, CadenceRuleRow, InMemoryCadence};
+use boss_jobs::cadence::{CadenceRepository, CadenceRuleRow, InMemoryCadence, NewFiring};
 use boss_jobs::delivery::{
     DeliveryPolicyRepository, DeliveryPolicyRow, InMemoryDeliveryPolicy, StoredPolicy,
 };
@@ -87,6 +87,43 @@ fn clock_rule() -> CadenceRuleRow {
     }
 }
 
+/// The conductor's heartbeat rule: an interval basis, verb `reconcile`.
+fn reconcile_rule() -> CadenceRuleRow {
+    CadenceRuleRow {
+        name: "train-reconcile".into(),
+        verb: "reconcile".into(),
+        basis: "interval".into(),
+        every_minutes: Some(10),
+        at_times: None,
+        min_dock_depth: None,
+        cooldown_minutes: None,
+        cadence: None,
+        anchor_date: None,
+        business_calendar: None,
+    }
+}
+
+/// Record a firing the way the conductor does: claim the window, then
+/// (when the verb has finished) merge its exit code in. `rc: None`
+/// leaves the run in flight.
+async fn fire(cadence: &InMemoryCadence, rule: &str, verb: &str, at: &str, rc: Option<i32>) {
+    let firing_id = format!("{rule}@{at}");
+    cadence
+        .claim_firing(&NewFiring {
+            firing_id: firing_id.clone(),
+            rule_name: rule.into(),
+            verb: verb.into(),
+            basis: "test".into(),
+            fired_at: t(at),
+            detail: json!({}),
+        })
+        .await
+        .unwrap();
+    if let Some(rc) = rc {
+        cadence.record_outcome(&firing_id, rc, 30).await.unwrap();
+    }
+}
+
 fn policy_row() -> StoredPolicy {
     StoredPolicy {
         row: DeliveryPolicyRow {
@@ -111,6 +148,15 @@ fn app_with(
     rules: Vec<CadenceRuleRow>,
     policy: Vec<StoredPolicy>,
 ) -> (axum::Router, Arc<InMemoryJobs>) {
+    app_with_cadence(InMemoryCadence::new(rules), policy)
+}
+
+/// `app_with`, but over a cadence repository the test has already
+/// written firings into.
+fn app_with_cadence(
+    cadence: InMemoryCadence,
+    policy: Vec<StoredPolicy>,
+) -> (axum::Router, Arc<InMemoryJobs>) {
     let jobs = Arc::new(InMemoryJobs::new());
     let policy_client: Arc<dyn PolicyClient> = Arc::new(
         FakePolicyClient::builder()
@@ -119,7 +165,7 @@ fn app_with(
     );
     let bus = RecordingEventBus::new();
     let bus_dyn: Arc<dyn EventBus> = bus.clone();
-    let cadence: Arc<dyn CadenceRepository> = Arc::new(InMemoryCadence::new(rules));
+    let cadence: Arc<dyn CadenceRepository> = Arc::new(cadence);
     let delivery: Arc<dyn DeliveryPolicyRepository> = Arc::new(InMemoryDeliveryPolicy::new(policy));
     let state = JobsApiState {
         jobs: jobs.clone(),
@@ -344,6 +390,25 @@ async fn seed_full(jobs: &InMemoryJobs) {
     .unwrap();
 }
 
+/// Two parked cars and nothing else — a dock with no train on the track,
+/// so the board decision is about the dock and the cooldown alone.
+async fn seed_dock_only(jobs: &InMemoryJobs) {
+    let now = t(NOW);
+    for (id, branch, title) in [
+        ("22222222-2222-2222-2222-222222222222", "feat/a", "A fix"),
+        ("44444444-4444-4444-4444-444444444444", "feat/b", "B fix"),
+    ] {
+        let car = job(
+            "ship-a-change",
+            id,
+            title,
+            JobStatus::Open,
+            json!({ "branch": branch }),
+        );
+        jobs.create_job_at(&car, now, &[]).await.unwrap();
+    }
+}
+
 async fn get(app: &axum::Router, role: &str) -> (StatusCode, Value) {
     let resp = app
         .clone()
@@ -414,6 +479,87 @@ async fn a_changed_cadence_rule_moves_the_line() {
     assert_eq!(body["boarding"]["dock_threshold"], 2);
     // Two parked, threshold two → met.
     assert_eq!(body["boarding"]["threshold_met"], true);
+}
+
+/// 2026-09-07, twice: the operator watched a threshold-met dock not
+/// board and asked why. The answer lived only in the conductor's journal
+/// — a cooldown with minutes left. Now the payload says so, with the
+/// minutes, read from the board rule's own last firing.
+#[tokio::test]
+async fn a_recent_board_firing_reads_as_a_cooldown_hold_with_the_minutes_left() {
+    // Threshold 2 so the two-car dock is met; no train on the track (an
+    // open train would rank first — the next test).
+    let mut d = depth_rule();
+    d.min_dock_depth = Some(2);
+    let cadence = InMemoryCadence::new(vec![d]);
+    // Boarded 33 minutes before NOW, cleanly (rc 0): 120 − 33 = 87 left.
+    fire(
+        &cadence,
+        "train-board-on-dock-depth",
+        "board",
+        "2026-09-03T11:27:00Z",
+        Some(0),
+    )
+    .await;
+    let (app, jobs) = app_with_cadence(cadence, vec![policy_row()]);
+    seed_dock_only(&jobs).await;
+    let (status, body) = get(&app, "operator").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let b = &body["boarding"];
+    assert_eq!(b["dock_depth"], 2);
+    assert_eq!(b["threshold_met"], true);
+    assert_eq!(b["held_because"], "cooldown — 87 min left");
+    assert_eq!(b["cooldown_remaining_minutes"], 87);
+    assert_eq!(b["last_board_at"], "2026-09-03T11:27:00Z");
+    assert_eq!(
+        b["next_board"],
+        "boards on the next tick once the cooldown clears (87 min)"
+    );
+}
+
+/// The single track is the hold the conductor checks first: the seed's
+/// one open train (mid-deploy) holds the dock before its depth does, and
+/// the sentence still names the depth that has to follow.
+#[tokio::test]
+async fn an_open_train_reads_as_track_occupied_before_anything_else() {
+    let (app, jobs) = app_with(vec![depth_rule(), clock_rule()], vec![policy_row()]);
+    seed_full(&jobs).await;
+    let (_, body) = get(&app, "operator").await;
+
+    let b = &body["boarding"];
+    assert_eq!(b["held_because"], "track occupied (1 open train)");
+    assert!(b["cooldown_remaining_minutes"].is_null());
+    assert!(b["last_board_at"].is_null());
+    assert_eq!(
+        b["next_board"],
+        "boards on the next tick once the track clears and the dock reaches 4"
+    );
+}
+
+/// `conductor.last_verb` said `train-reconcile` — the RULE's name, passed
+/// where the verb belonged. The verb is on the rule row; it is read there.
+#[tokio::test]
+async fn the_conductor_block_names_the_verb_it_ran_not_the_rule() {
+    let cadence = InMemoryCadence::new(vec![depth_rule(), reconcile_rule()]);
+    fire(
+        &cadence,
+        "train-reconcile",
+        "reconcile",
+        "2026-09-03T11:57:00Z",
+        Some(0),
+    )
+    .await;
+    let (app, jobs) = app_with_cadence(cadence, vec![policy_row()]);
+    seed_full(&jobs).await;
+    let (_, body) = get(&app, "operator").await;
+
+    let c = &body["conductor"];
+    assert_eq!(c["last_verb"], "reconcile");
+    assert_eq!(c["last_rc"], 0);
+    assert_eq!(c["silent_for_minutes"], 3);
+    assert_eq!(c["expected_every_minutes"], 10);
+    assert_eq!(c["silent"], false);
 }
 
 #[tokio::test]
@@ -527,8 +673,14 @@ async fn no_cadence_or_policy_wired_degrades_gracefully() {
     assert_eq!(status, StatusCode::OK);
     // Trains still surface.
     assert_eq!(body["trains"].as_array().unwrap().len(), 1);
-    // No cadence → the honest "no configured cadence" line.
+    // No cadence → the honest "no configured cadence" line, and no hold
+    // invented for a depth rule that does not exist.
     assert!(body["boarding"]["dock_threshold"].is_null());
+    assert!(body["boarding"]["held_because"].is_null());
+    assert_eq!(
+        body["boarding"]["next_board"],
+        "no depth rule is configured — nothing boards on dock depth"
+    );
     assert!(
         body["boarding"]["summary"]
             .as_str()

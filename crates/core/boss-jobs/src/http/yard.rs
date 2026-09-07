@@ -172,11 +172,16 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
         Some(repo) => repo.last_firing(HEARTBEAT_RULE).await.ok().flatten(),
         None => None,
     };
-    let heartbeat_minutes = rules
-        .iter()
-        .find(|r| r.name == HEARTBEAT_RULE)
-        .and_then(|r| r.every_minutes)
-        .map(i64::from);
+    let heartbeat_rule = rules.iter().find(|r| r.name == HEARTBEAT_RULE);
+    let heartbeat_minutes = heartbeat_rule.and_then(|r| r.every_minutes).map(i64::from);
+    // The board rule's last firing — the fact the cooldown hold is read
+    // from. The rule is found by SHAPE (the row declaring
+    // `min_dock_depth`), the same way the predicate finds its threshold,
+    // so a renamed row moves both together.
+    let last_board = match (state.cadence.as_ref(), yard::depth_rule(&rules)) {
+        (Some(repo), Some(rule)) => repo.last_firing(&rule.name).await.ok().flatten(),
+        _ => None,
+    };
     let policy = match state.delivery.as_ref() {
         Some(repo) => repo.active_policy("train-conductor").await.ok().flatten(),
         None => None,
@@ -208,15 +213,19 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
         &closed_trains,
         &dock_cars,
         &rules,
+        last_board.as_ref(),
         policy.as_ref(),
         &gate_runs,
         &car_branches,
         &settled_car_branches,
         Some(now),
     );
+    // The VERB the heartbeat rule runs (`reconcile`), read from its row.
+    // This used to pass the rule's NAME, so `last_verb` said
+    // `train-reconcile` — a label that was not the fact it named.
     let health = yard::conductor_health(
         last_firing.as_ref().map(|f| f.fired_at),
-        Some(HEARTBEAT_RULE),
+        heartbeat_rule.map(|r| r.verb.as_str()),
         last_firing.as_ref().and_then(|f| f.rc),
         heartbeat_minutes,
         Some(now),
@@ -294,6 +303,6 @@ fn with_now(status: yard::YardStatus, now: chrono::DateTime<chrono::Utc>) -> ser
 /// The empty yard a denied caller gets — well-formed, so the page renders
 /// "nothing to show" rather than an error or a false-empty.
 fn empty_status() -> serde_json::Value {
-    let status = yard::build_status(&[], &[], &[], &[], None, &[], &[], &[], None);
+    let status = yard::build_status(&[], &[], &[], &[], None, None, &[], &[], &[], None);
     serde_json::to_value(status).unwrap_or_else(|_| serde_json::json!({}))
 }

@@ -34,13 +34,14 @@
   import { session } from '@boss/web-kit/session/session.svelte';
   import {
     blockLabel,
+    boardHold,
     boardsWhen,
     conductorReading,
     elapsedText,
     fetchYardStatus,
     gateSlots,
     journeyText,
-    lastRuleReading,
+    lastVerbReading,
     phaseLabel,
     type TrainStatus,
     type YardStatus,
@@ -81,15 +82,17 @@
 
   // The CONDUCTOR block: the actor that boards the dock, read from its
   // own firing record (the-board-does-not-lie) — never inferred from
-  // the dock looking full or the trains looking healthy. The boarding
-  // line is the live cadence rule, rendered as a RULE and never a
-  // next-board time (the rule is depth-triggered; it has no clock).
-  // `moving` is the server's own phase / step / block per train in
-  // transit, so a wedged train shows WHERE and WHY beside the actor
-  // that should be moving it.
+  // the dock looking full or the trains looking healthy. The boards
+  // line is the server's HOLD — why the dock is not boarding right now
+  // and what clears it, derived from the conductor's own facts — with
+  // the live cadence rule beneath it; never a next-board time (the
+  // rule is depth-triggered; it has no clock). `moving` is the server's
+  // own phase / step / block per train in transit, so a wedged train
+  // shows WHERE and WHY beside the actor that should be moving it.
   const conductor = $derived(status.kind === 'ready' ? status.data.conductor : null);
   const liveness = $derived(conductorReading(conductor));
-  const lastRule = $derived(lastRuleReading(conductor));
+  const lastVerb = $derived(lastVerbReading(conductor));
+  const hold = $derived(status.kind === 'ready' ? boardHold(status.data.boarding) : null);
   const boardingRule = $derived(status.kind === 'ready' ? boardsWhen(status.data.boarding) : '');
   const moving = $derived(
     status.kind === 'ready' ? status.data.trains.filter(t => t.phase !== 'arrived') : [],
@@ -523,21 +526,36 @@
           <span class="yard-cond-v" data-tone={liveness.tone}>{liveness.text}</span>
         </div>
         <div class="yard-cond-row">
-          <!-- "last rule", not "last verb": the field carries the rule
-               name the heartbeat is measured against. -->
-          <span class="yard-cond-k">last rule</span>
-          <span class="yard-cond-v" data-tone={lastRule.tone}>{lastRule.text}</span>
+          <!-- The heartbeat rule's VERB (reconcile), read from its
+               registry row, and the exit code of its last pass. -->
+          <span class="yard-cond-k">last verb</span>
+          <span class="yard-cond-v" data-tone={lastVerb.tone}>{lastVerb.text}</span>
         </div>
+        <!-- "boards": WHY the dock is not boarding right now and what
+             clears it, read server-side from the conductor's own facts
+             (the board rule's last firing, the open trains, the dock).
+             Twice on 2026-09-07 the operator watched a full dock not
+             board and had to ask; the answer was in the conductor's
+             journal. The depth rule has no clock, so the "next" line is
+             always "once <the hold clears>" — never a time. An older
+             server that sends no hold gets the rule alone, not a guess. -->
+        {#if hold}
+          <div class="yard-cond-row">
+            <span class="yard-cond-k">boards</span>
+            <span class="yard-cond-v" data-tone={hold.primary.tone}>{hold.primary.text}</span>
+            {#if hold.lastBoard}<span class="yard-since">last board {hold.lastBoard}</span>{/if}
+          </div>
+          {#if hold.next}
+            <div class="yard-cond-row">
+              <span class="yard-cond-k">next</span>
+              <span class="yard-cond-v" data-tone="muted">{hold.next}</span>
+            </div>
+          {/if}
+        {/if}
         <div class="yard-cond-row">
-          <span class="yard-cond-k">boards</span>
+          <span class="yard-cond-k">rule</span>
           <span class="yard-cond-v" data-tone="muted" title="the live cadence rule — never a predicted time"
             >{boardingRule}</span>
-          <!-- HOOK (needs a Rust change; out of scope for this car): when
-               the read-model carries the cooldown REMAINING and the
-               held-because reason (e.g. boarding.cooldown_remaining_minutes,
-               boarding.held_because), render them on this line as
-               "cooldown clears in Nm" / "held — <why>". Until then the
-               line states the rule, and never a time. -->
         </div>
         {#each moving as t (t.id)}
           {@const since = movingFor(t)}

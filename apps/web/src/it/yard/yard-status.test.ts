@@ -1,12 +1,16 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   blockLabel,
+  boardHold,
   boardsWhen,
+  clockText,
   conductorReading,
   elapsedText,
   gateSlots,
   journeyText,
-  lastRuleReading,
+  lastVerbReading,
   parseYardStatus,
   phaseLabel,
   trainTone,
@@ -127,7 +131,7 @@ describe('parseYardStatus', () => {
         silent_for_minutes: 47,
         expected_every_minutes: 10,
         silent: true,
-        last_verb: 'train-reconcile',
+        last_verb: 'reconcile',
         last_rc: 3,
       },
     });
@@ -136,7 +140,7 @@ describe('parseYardStatus', () => {
       silent_for_minutes: 47,
       expected_every_minutes: 10,
       silent: true,
-      last_verb: 'train-reconcile',
+      last_verb: 'reconcile',
       last_rc: 3,
     });
   });
@@ -179,7 +183,52 @@ describe('parseYardStatus', () => {
       dock_depth: 5,
       threshold_met: true,
       summary: 'Boards at 4 parked cars; 5 car(s) parked now.',
+      held_because: null,
+      cooldown_remaining_minutes: null,
+      last_board_at: null,
+      next_board: null,
     });
+  });
+
+  test('the boarding hold parses when the server sends it', () => {
+    const b = parseYardStatus({
+      boarding: {
+        dock_threshold: 4,
+        dock_depth: 5,
+        at_times: [],
+        summary: 'x',
+        held_because: 'cooldown — 12 min left',
+        cooldown_remaining_minutes: 12,
+        last_board_at: '2026-09-07T20:41:00Z',
+        next_board: 'boards on the next tick once the cooldown clears (12 min)',
+      },
+    }).boarding;
+    expect(b.held_because).toBe('cooldown — 12 min left');
+    expect(b.cooldown_remaining_minutes).toBe(12);
+    expect(b.last_board_at).toBe('2026-09-07T20:41:00Z');
+    expect(b.next_board).toBe('boards on the next tick once the cooldown clears (12 min)');
+  });
+
+  test('an absent hold is null in every field — never a hold that is not there', () => {
+    // An older server sends no hold; a clear dock sends held_because
+    // null WITH a next_board. The two must stay distinguishable.
+    const older = parseYardStatus({ boarding: { dock_depth: 5, at_times: [], summary: 'x' } })
+      .boarding;
+    expect(older.held_because).toBeNull();
+    expect(older.cooldown_remaining_minutes).toBeNull();
+    expect(older.last_board_at).toBeNull();
+    expect(older.next_board).toBeNull();
+    const clear = parseYardStatus({
+      boarding: {
+        dock_depth: 5,
+        at_times: [],
+        summary: 'x',
+        held_because: null,
+        next_board: 'boards on the next tick',
+      },
+    }).boarding;
+    expect(clear.held_because).toBeNull();
+    expect(clear.next_board).toBe('boards on the next tick');
   });
 });
 
@@ -190,7 +239,7 @@ const health = (over: Partial<ConductorHealth> = {}): ConductorHealth => ({
   silent_for_minutes: 3,
   expected_every_minutes: 10,
   silent: false,
-  last_verb: 'train-reconcile',
+  last_verb: 'reconcile',
   last_rc: 0,
   ...over,
 });
@@ -230,30 +279,30 @@ describe('conductorReading', () => {
   });
 });
 
-describe('lastRuleReading', () => {
-  // `last_verb` carries the RULE NAME today (train-reconcile), not a
-  // verb — the label says "rule" so the words stay anchored to the fact.
-  test('a clean last pass reads ok with its rule and rc', () => {
-    expect(lastRuleReading(health())).toEqual({ tone: 'ok', text: 'train-reconcile · rc 0' });
+describe('lastVerbReading', () => {
+  // `last_verb` is the heartbeat rule's VERB (reconcile), read from its
+  // registry row — it used to carry the rule's name under a "rule" label.
+  test('a clean last pass reads ok with its verb and rc', () => {
+    expect(lastVerbReading(health())).toEqual({ tone: 'ok', text: 'reconcile · rc 0' });
   });
 
   test('a failing last pass is an error the rc names', () => {
-    expect(lastRuleReading(health({ last_rc: 3 }))).toEqual({
+    expect(lastVerbReading(health({ last_rc: 3 }))).toEqual({
       tone: 'err',
-      text: 'train-reconcile · rc 3 — the last pass failed',
+      text: 'reconcile · rc 3 — the last pass failed',
     });
   });
 
-  test('a rule with no recorded rc reads muted, rc unknown', () => {
-    expect(lastRuleReading(health({ last_rc: null }))).toEqual({
+  test('a verb with no recorded rc reads muted, rc unknown', () => {
+    expect(lastVerbReading(health({ last_rc: null }))).toEqual({
       tone: 'muted',
-      text: 'train-reconcile · rc unknown',
+      text: 'reconcile · rc unknown',
     });
   });
 
-  test('no rule on record, and no block at all, both read muted', () => {
-    expect(lastRuleReading(health({ last_verb: null })).text).toBe('no rule on record');
-    expect(lastRuleReading(null).text).toBe('no rule on record');
+  test('no verb on record, and no block at all, both read muted', () => {
+    expect(lastVerbReading(health({ last_verb: null })).text).toBe('no verb on record');
+    expect(lastVerbReading(null).text).toBe('no verb on record');
   });
 });
 
@@ -265,6 +314,10 @@ describe('boardsWhen', () => {
     dock_depth: 2,
     threshold_met: false,
     summary: 'Boards at 4 parked cars (then a 120m cooldown); 2 car(s) parked now.',
+    held_because: null,
+    cooldown_remaining_minutes: null,
+    last_board_at: null,
+    next_board: null,
     ...over,
   });
 
@@ -302,6 +355,105 @@ describe('boardsWhen', () => {
       .toBe('Boards at 06:00 UTC.');
     expect(boardsWhen(predicate({ dock_threshold: null, threshold_met: null, summary: '' })))
       .toBe('no boarding rule configured');
+  });
+});
+
+// The "boards" row: why the dock is not boarding, from the server's
+// hold. Twice on 2026-09-07 the operator watched a full dock not board
+// and asked why; the answer was in the conductor's journal.
+describe('boardHold', () => {
+  const predicate = (over: Partial<BoardingPredicate> = {}): BoardingPredicate => ({
+    dock_threshold: 4,
+    cooldown_minutes: 45,
+    at_times: [],
+    dock_depth: 5,
+    threshold_met: true,
+    summary: 'x',
+    held_because: null,
+    cooldown_remaining_minutes: null,
+    last_board_at: null,
+    next_board: 'boards on the next tick',
+    ...over,
+  });
+
+  test('a hold is the primary line, the next sentence beneath, the last board as a clock time', () => {
+    const v = boardHold(
+      predicate({
+        held_because: 'cooldown — 12 min left',
+        cooldown_remaining_minutes: 12,
+        last_board_at: '2026-09-07T20:41:00Z',
+        next_board: 'boards on the next tick once the cooldown clears (12 min)',
+      }),
+    );
+    expect(v).toEqual({
+      primary: { tone: null, text: 'held: cooldown — 12 min left' },
+      next: 'boards on the next tick once the cooldown clears (12 min)',
+      lastBoard: '20:41 UTC',
+    });
+  });
+
+  test("a clear dock boards on the next tick — the server's sentence, in ok, never a time", () => {
+    const v = boardHold(predicate());
+    expect(v).toEqual({
+      primary: { tone: 'ok', text: 'boards on the next tick' },
+      next: null,
+      lastBoard: null,
+    });
+    expect(v!.primary.text).not.toMatch(/\d\d:\d\d|next at|in \d+m/);
+  });
+
+  test('no depth rule reads muted — nothing boards on depth, so nothing is promised', () => {
+    const v = boardHold(
+      predicate({
+        dock_threshold: null,
+        threshold_met: null,
+        next_board: 'no depth rule is configured — nothing boards on dock depth',
+      }),
+    );
+    expect(v!.primary).toEqual({
+      tone: 'muted',
+      text: 'no depth rule is configured — nothing boards on dock depth',
+    });
+  });
+
+  test('an older server that sends no hold gets none — the page states the rule instead', () => {
+    expect(boardHold(predicate({ held_because: null, next_board: null }))).toBeNull();
+  });
+});
+
+describe('clockText', () => {
+  test('a stamp reads as the UTC clock time it names, in the at_times idiom', () => {
+    expect(clockText('2026-09-07T20:41:00Z')).toBe('20:41 UTC');
+    expect(clockText('2026-09-07T20:41:00+00:00')).toBe('20:41 UTC');
+    expect(clockText('2026-09-07T03:05:09.123Z')).toBe('03:05 UTC');
+  });
+  test('absent or unparseable is null — never a fabricated time', () => {
+    expect(clockText(null)).toBeNull();
+    expect(clockText('')).toBeNull();
+    expect(clockText('not a stamp')).toBeNull();
+  });
+});
+
+// The template renders the hold through `boardHold` and nothing else —
+// no time of day of its own. Pinned on the source, in the
+// yard-page-order idiom, so the W1 hook cannot quietly reopen.
+describe('the conductor block renders the server hold', () => {
+  const src = readFileSync(join(import.meta.dir, 'YardPage.svelte'), 'utf8');
+
+  test('the boards row is the hold — primary line, next beneath, last board as a clock time', () => {
+    expect(src).toContain('boardHold(status.data.boarding)');
+    expect(src).toContain('{hold.primary.text}');
+    expect(src).toContain('{hold.next}');
+    expect(src).toContain('last board {hold.lastBoard}');
+  });
+
+  test('the hook that waited on the Rust change is closed', () => {
+    expect(src).not.toContain('HOOK (needs a Rust change');
+  });
+
+  test('the last-verb row is labelled by the fact it shows', () => {
+    expect(src).toContain('lastVerbReading(conductor)');
+    expect(src).not.toContain('lastRuleReading');
   });
 });
 

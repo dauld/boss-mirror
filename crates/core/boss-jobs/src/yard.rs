@@ -32,7 +32,7 @@ use boss_core::job::{Job, JobStatus, Step, StepStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::cadence::CadenceRuleRow;
+use crate::cadence::{CadenceRuleRow, LastFiring};
 use crate::delivery::DeliveryPolicyRow;
 
 /// A pr-train's step vocabulary, addressed by spec slug with a title
@@ -388,10 +388,51 @@ pub struct BoardingPredicate {
     /// A plain-language sentence an operator can read without knowing
     /// the rule shapes.
     pub summary: String,
+    /// Why it is not boarding RIGHT NOW and what clears it — flattened,
+    /// so `held_because` rides the wire beside `threshold_met`.
+    #[serde(flatten)]
+    pub hold: BoardHold,
+}
+
+/// Why the dock is not boarding RIGHT NOW, and what clears it.
+///
+/// The conductor decides this every tick (`boss-cli` `cadence::decide`:
+/// the depth and cooldown guards in `due_window`, then the single-track
+/// check) and until now wrote the answer only to its journal. Twice on
+/// 2026-09-07 an operator watched a threshold-met dock not board and
+/// had to ask why; both times the answer was a cooldown with minutes
+/// left. So the read-model re-derives the decision from the same facts
+/// the conductor reads — the depth rule, the board rule's last firing,
+/// the dock, the open trains — and says it here.
+///
+/// A SECOND derivation of that decision (CLAUDE.md §9a): the conductor's
+/// acts, this one only reports, and the two are pinned together by the
+/// unit tests on `boarding_hold` (one per hold, one per release rule,
+/// one for precedence) and the HTTP cases in `tests/yard_status_http.rs`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoardHold {
+    /// The hold in force — `"track occupied (N open train(s))"`,
+    /// `"cooldown — M min left"`, or `"below threshold (depth D of T)"`
+    /// — or `None` when the dock would board on the conductor's next
+    /// tick. When several apply the line names one, in the order the
+    /// conductor checks them: track, then cooldown, then depth.
+    pub held_because: Option<String>,
+    /// Minutes until the board cooldown clears; `None` when none is
+    /// running — never fired, elapsed, or released by a firing that
+    /// boarded nothing.
+    pub cooldown_remaining_minutes: Option<u32>,
+    /// When the board rule last fired, released or not.
+    pub last_board_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The sentence. A depth rule has no clock (`next_due` promises it
+    /// no window), so this is always "boards on the next tick once …",
+    /// naming EVERY hold that has to clear — never a time of day.
+    pub next_board: String,
 }
 
 /// A cadence rule fires by DEPTH when it declares `min_dock_depth`.
-fn depth_rule(rules: &[CadenceRuleRow]) -> Option<&CadenceRuleRow> {
+/// Public so the handler reads the board rule's last firing under the
+/// same row the predicate reads the threshold from.
+pub fn depth_rule(rules: &[CadenceRuleRow]) -> Option<&CadenceRuleRow> {
     rules.iter().find(|r| r.min_dock_depth.is_some())
 }
 
@@ -417,7 +458,13 @@ fn at_times_of(rule: Option<&CadenceRuleRow>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub fn boarding_predicate(rules: &[CadenceRuleRow], dock_depth: usize) -> BoardingPredicate {
+pub fn boarding_predicate(
+    rules: &[CadenceRuleRow],
+    dock_depth: usize,
+    last_board: Option<&LastFiring>,
+    open_trains: usize,
+    now: Option<chrono::DateTime<chrono::Utc>>,
+) -> BoardingPredicate {
     let depth = depth_rule(rules);
     let dock_threshold = depth.and_then(|r| r.min_dock_depth);
     let cooldown_minutes = depth.and_then(|r| r.cooldown_minutes);
@@ -461,6 +508,101 @@ pub fn boarding_predicate(rules: &[CadenceRuleRow], dock_depth: usize) -> Boardi
         dock_depth,
         threshold_met,
         summary,
+        hold: boarding_hold(rules, last_board, dock_depth, open_trains, now),
+    }
+}
+
+/// The conductor's cooldown-release rule, verbatim from `due_window`: a
+/// firing that boarded nothing — failed (`rc != 0`) or idle (the loop
+/// records that as a non-zero `IDLE_BOARD_RC`) — releases the window
+/// early. No recorded outcome (`rc == None`) is still in flight and
+/// HOLDS, since re-firing under it would double-board.
+fn cooldown_released(last: &LastFiring) -> bool {
+    last.rc.is_some_and(|rc| rc != 0)
+}
+
+/// The boarding decision for the queue-depth rule, as the conductor
+/// would make it on its next tick — see [`BoardHold`].
+///
+/// Pure: (rules, the board rule's last firing, dock depth, open trains,
+/// now) in, the hold out. The cooldown needs a clock: no clock, no
+/// cooldown reading — the rule `build_status` keeps for stalls. Only the
+/// clockless empty status takes that path, and it carries no firing.
+pub fn boarding_hold(
+    rules: &[CadenceRuleRow],
+    last_board: Option<&LastFiring>,
+    dock_depth: usize,
+    open_trains: usize,
+    now: Option<chrono::DateTime<chrono::Utc>>,
+) -> BoardHold {
+    let depth = depth_rule(rules);
+    let threshold = depth.and_then(|r| r.min_dock_depth);
+    let cooldown_remaining = last_board
+        .filter(|l| !cooldown_released(l))
+        .zip(now)
+        .zip(depth.and_then(|r| r.cooldown_minutes).filter(|cd| *cd > 0))
+        .and_then(|((last, now), cd)| {
+            let elapsed = now - last.fired_at;
+            (elapsed < chrono::Duration::minutes(i64::from(cd)))
+                .then(|| i64::from(cd) - elapsed.num_minutes())
+                // Held means at least a minute left; a firing stamped in
+                // the future (clock skew) reads as the whole cooldown.
+                .and_then(|left| u32::try_from(left.clamp(1, i64::from(cd))).ok())
+        });
+
+    // (why it holds, what clears it) — in the conductor's order.
+    // No depth rule → nothing boards on dock depth and nothing can HOLD a
+    // boarding that does not exist: no "track occupied", no cooldown, no
+    // threshold. The degraded case pinned by
+    // no_cadence_or_policy_wired_degrades_gracefully.
+    if threshold.is_none() {
+        return BoardHold {
+            held_because: None,
+            cooldown_remaining_minutes: None,
+            last_board_at: None,
+            next_board: "no depth rule is configured — nothing boards on dock depth".to_string(),
+        };
+    }
+    let mut holds: Vec<(String, String)> = Vec::new();
+    if open_trains > 0 {
+        let s = if open_trains == 1 { "" } else { "s" };
+        holds.push((
+            format!("track occupied ({open_trains} open train{s})"),
+            "the track clears".to_string(),
+        ));
+    }
+    if let Some(m) = cooldown_remaining {
+        holds.push((
+            format!("cooldown — {m} min left"),
+            format!("the cooldown clears ({m} min)"),
+        ));
+    }
+    if let Some(t) = threshold
+        && (dock_depth as i64) < i64::from(t)
+    {
+        holds.push((
+            format!("below threshold (depth {dock_depth} of {t})"),
+            format!("the dock reaches {t}"),
+        ));
+    }
+
+    let next_board = match threshold {
+        None => "no depth rule is configured — nothing boards on dock depth".to_string(),
+        Some(_) if holds.is_empty() => "boards on the next tick".to_string(),
+        Some(_) => format!(
+            "boards on the next tick once {}",
+            holds
+                .iter()
+                .map(|(_, clears)| clears.as_str())
+                .collect::<Vec<_>>()
+                .join(" and ")
+        ),
+    };
+    BoardHold {
+        held_because: holds.into_iter().next().map(|(why, _)| why),
+        cooldown_remaining_minutes: cooldown_remaining,
+        last_board_at: last_board.map(|l| l.fired_at),
+        next_board,
     }
 }
 
@@ -922,6 +1064,8 @@ pub const RECENT_LIMIT: usize = 8;
 ///   enough; the terminal report owns precise cycle stats).
 /// - `dock_cars` — the loading-dock queue's parked cars.
 /// - `rules` — the active cadence rows.
+/// - `last_board` — the board rule's last firing, which the cooldown
+///   hold is read from.
 /// - `policy` — the active delivery policy, if any.
 /// - `gate_runs` / `car_branches` — for the stranded cross-ref.
 /// - `settled_car_branches` — branches whose car reached a terminal; the
@@ -932,6 +1076,7 @@ pub fn build_status(
     closed_trains: &[(Job, Vec<Step>)],
     dock_cars: &[Job],
     rules: &[CadenceRuleRow],
+    last_board: Option<&LastFiring>,
     policy: Option<&DeliveryPolicyRow>,
     gate_runs: &[(Job, Vec<Step>)],
     car_branches: &[String],
@@ -954,7 +1099,7 @@ pub fn build_status(
         .map(|(j, s)| train_status(j, s, stall_before))
         .collect();
     let dock: Vec<DockCar> = dock_cars.iter().map(dock_car).collect();
-    let boarding = boarding_predicate(rules, dock.len());
+    let boarding = boarding_predicate(rules, dock.len(), last_board, open_trains.len(), now);
     let recent = closed_trains
         .iter()
         .take(RECENT_LIMIT)
@@ -1441,7 +1586,7 @@ mod tests {
         clock.at_times = Some(json!(["06:00", "18:00"]));
         let rules = vec![depth, clock];
 
-        let p = boarding_predicate(&rules, 2);
+        let p = boarding_predicate(&rules, 2, None, 0, None);
         assert_eq!(p.dock_threshold, Some(4));
         assert_eq!(p.cooldown_minutes, Some(120));
         assert_eq!(p.at_times, vec!["06:00", "18:00"]);
@@ -1457,14 +1602,14 @@ mod tests {
     fn the_predicate_reports_the_threshold_met_when_the_dock_is_deep() {
         let mut depth = rule("queue-depth");
         depth.min_dock_depth = Some(4);
-        let p = boarding_predicate(&[depth], 5);
+        let p = boarding_predicate(&[depth], 5, None, 0, None);
         assert_eq!(p.threshold_met, Some(true));
         assert!(p.summary.contains("the dock threshold is met"));
     }
 
     #[test]
     fn no_cadence_rules_reads_as_no_configured_cadence_not_a_fake_schedule() {
-        let p = boarding_predicate(&[], 3);
+        let p = boarding_predicate(&[], 3, None, 0, None);
         assert_eq!(p.dock_threshold, None);
         assert_eq!(p.threshold_met, None);
         assert!(p.at_times.is_empty());
@@ -1476,8 +1621,212 @@ mod tests {
     fn a_malformed_at_times_degrades_to_the_string_entries_only() {
         let mut clock = rule("clock");
         clock.at_times = Some(json!(["06:00", 18, null]));
-        let p = boarding_predicate(&[clock], 0);
+        let p = boarding_predicate(&[clock], 0, None, 0, None);
         assert_eq!(p.at_times, vec!["06:00"]);
+    }
+
+    // ---- the boarding hold: why it is not boarding, from the conductor's facts ----
+
+    fn board_rule(threshold: i32, cooldown: i32) -> CadenceRuleRow {
+        let mut r = rule("queue-depth");
+        r.name = "train-board-on-dock-depth".into();
+        r.verb = "board".into();
+        r.min_dock_depth = Some(threshold);
+        r.cooldown_minutes = Some(cooldown);
+        r
+    }
+
+    fn fired(at_rfc3339: &str, rc: Option<i32>) -> LastFiring {
+        LastFiring {
+            firing_id: "f".into(),
+            fired_at: at(at_rfc3339),
+            rc,
+        }
+    }
+
+    /// 2026-09-07, twice: a threshold-met dock, no board, and the only
+    /// answer was in the conductor's journal — "45-min cooldown, N left".
+    #[test]
+    fn a_recent_board_holds_the_dock_for_the_minutes_left_in_the_cooldown() {
+        let last = fired("2026-09-07T20:00:00Z", Some(0));
+        let h = boarding_hold(
+            &[board_rule(4, 45)],
+            Some(&last),
+            5,
+            0,
+            Some(at("2026-09-07T20:33:30Z")),
+        );
+        assert_eq!(h.held_because.as_deref(), Some("cooldown — 12 min left"));
+        assert_eq!(h.cooldown_remaining_minutes, Some(12));
+        assert_eq!(h.last_board_at, Some(at("2026-09-07T20:00:00Z")));
+        assert_eq!(
+            h.next_board,
+            "boards on the next tick once the cooldown clears (12 min)"
+        );
+    }
+
+    #[test]
+    fn a_board_that_boarded_nothing_releases_the_cooldown() {
+        // The conductor's own release rule (`due_window`): a failed board
+        // (rc 1) or an idle one (IDLE_BOARD_RC, -2) has nothing to re-fire
+        // against, so it holds nothing — but it is still the last board.
+        let now = Some(at("2026-09-07T20:05:00Z"));
+        for rc in [1, -2] {
+            let last = fired("2026-09-07T20:00:00Z", Some(rc));
+            let h = boarding_hold(&[board_rule(4, 45)], Some(&last), 5, 0, now);
+            assert_eq!(h.held_because, None, "rc={rc}");
+            assert_eq!(h.cooldown_remaining_minutes, None, "rc={rc}");
+            assert_eq!(h.last_board_at, Some(at("2026-09-07T20:00:00Z")));
+            assert_eq!(h.next_board, "boards on the next tick");
+        }
+    }
+
+    #[test]
+    fn a_board_with_no_outcome_yet_still_holds() {
+        // rc == None is in flight, not released: re-firing under it would
+        // double-board, so the conductor holds, and so does the reading.
+        let last = fired("2026-09-07T20:00:00Z", None);
+        let h = boarding_hold(
+            &[board_rule(4, 45)],
+            Some(&last),
+            5,
+            0,
+            Some(at("2026-09-07T20:05:00Z")),
+        );
+        assert_eq!(h.held_because.as_deref(), Some("cooldown — 40 min left"));
+        assert_eq!(h.cooldown_remaining_minutes, Some(40));
+    }
+
+    #[test]
+    fn an_elapsed_cooldown_holds_nothing() {
+        let last = fired("2026-09-07T19:00:00Z", Some(0));
+        let h = boarding_hold(
+            &[board_rule(4, 45)],
+            Some(&last),
+            5,
+            0,
+            Some(at("2026-09-07T20:00:00Z")),
+        );
+        assert_eq!(h.held_because, None);
+        assert_eq!(h.cooldown_remaining_minutes, None);
+        assert_eq!(h.last_board_at, Some(at("2026-09-07T19:00:00Z")));
+        assert_eq!(h.next_board, "boards on the next tick");
+    }
+
+    #[test]
+    fn a_shallow_dock_is_held_below_threshold() {
+        let h = boarding_hold(
+            &[board_rule(4, 45)],
+            None,
+            2,
+            0,
+            Some(at("2026-09-07T20:00:00Z")),
+        );
+        assert_eq!(
+            h.held_because.as_deref(),
+            Some("below threshold (depth 2 of 4)")
+        );
+        assert_eq!(h.cooldown_remaining_minutes, None);
+        assert_eq!(h.last_board_at, None);
+        assert_eq!(
+            h.next_board,
+            "boards on the next tick once the dock reaches 4"
+        );
+    }
+
+    #[test]
+    fn an_open_train_holds_every_departure_first() {
+        // Single-track railway: a train on the main holds a departure
+        // whatever the dock says, so the track is named before the
+        // cooldown or the depth — and the sentence names all three.
+        let last = fired("2026-09-07T20:00:00Z", Some(0));
+        let now = Some(at("2026-09-07T20:10:00Z"));
+        let h = boarding_hold(&[board_rule(4, 45)], Some(&last), 2, 2, now);
+        assert_eq!(
+            h.held_because.as_deref(),
+            Some("track occupied (2 open trains)")
+        );
+        assert_eq!(h.cooldown_remaining_minutes, Some(35));
+        assert_eq!(
+            h.next_board,
+            "boards on the next tick once the track clears and the cooldown clears (35 min) \
+             and the dock reaches 4"
+        );
+        let one = boarding_hold(&[board_rule(4, 45)], None, 5, 1, now);
+        assert_eq!(
+            one.held_because.as_deref(),
+            Some("track occupied (1 open train)")
+        );
+        assert_eq!(
+            one.next_board,
+            "boards on the next tick once the track clears"
+        );
+    }
+
+    #[test]
+    fn the_cooldown_outranks_the_depth() {
+        let last = fired("2026-09-07T20:00:00Z", Some(0));
+        let h = boarding_hold(
+            &[board_rule(4, 45)],
+            Some(&last),
+            2,
+            0,
+            Some(at("2026-09-07T20:10:00Z")),
+        );
+        assert_eq!(h.held_because.as_deref(), Some("cooldown — 35 min left"));
+        assert_eq!(
+            h.next_board,
+            "boards on the next tick once the cooldown clears (35 min) and the dock reaches 4"
+        );
+    }
+
+    #[test]
+    fn a_clear_dock_boards_on_the_next_tick_never_at_a_time() {
+        let h = boarding_hold(
+            &[board_rule(4, 45)],
+            None,
+            4,
+            0,
+            Some(at("2026-09-07T20:10:00Z")),
+        );
+        assert_eq!(h.held_because, None);
+        assert_eq!(h.cooldown_remaining_minutes, None);
+        assert_eq!(h.next_board, "boards on the next tick");
+        // The depth rule has no clock; a time of day here would be invented.
+        assert!(!h.next_board.contains(':'), "{}", h.next_board);
+    }
+
+    #[test]
+    fn no_depth_rule_says_so_rather_than_inventing_a_hold() {
+        let mut clock = rule("clock");
+        clock.at_times = Some(json!(["06:00"]));
+        let h = boarding_hold(&[clock], None, 3, 0, Some(at("2026-09-07T20:10:00Z")));
+        assert_eq!(h.held_because, None);
+        assert_eq!(
+            h.next_board,
+            "no depth rule is configured — nothing boards on dock depth"
+        );
+    }
+
+    #[test]
+    fn the_hold_rides_the_predicate_flat_on_the_wire() {
+        let last = fired("2026-09-07T20:00:00Z", Some(0));
+        let p = boarding_predicate(
+            &[board_rule(4, 45)],
+            5,
+            Some(&last),
+            0,
+            Some(at("2026-09-07T20:33:00Z")),
+        );
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["threshold_met"], true);
+        assert_eq!(v["held_because"], "cooldown — 12 min left");
+        assert_eq!(v["cooldown_remaining_minutes"], 12);
+        assert_eq!(v["last_board_at"], "2026-09-07T20:00:00Z");
+        assert_eq!(
+            v["next_board"],
+            "boards on the next tick once the cooldown clears (12 min)"
+        );
     }
 
     // ---- recent trains ----
@@ -2037,6 +2386,7 @@ mod tests {
             &closed,
             &dock,
             &rules,
+            None,
             Some(&policy),
             &[stranded_run],
             &["feat/a".into(), "feat/b".into()],
@@ -2091,7 +2441,7 @@ mod tests {
         // With no delivery policy the page shows the same bound a gate
         // obeys against an unreachable registry — never a fabricated
         // number.
-        let status = build_status(&[], &[], &[], &[], None, &[], &[], &[], fixed_now());
+        let status = build_status(&[], &[], &[], &[], None, None, &[], &[], &[], fixed_now());
         assert_eq!(status.gates.capacity, COMPILED_GATE_MAX_CONCURRENT);
     }
 
@@ -2126,6 +2476,7 @@ mod tests {
             &[],
             &[],
             &[],
+            None,
             Some(&policy),
             &[in_flight, red],
             &[],
@@ -2145,7 +2496,7 @@ mod tests {
         let many: Vec<(Job, Vec<Step>)> = (0..RECENT_LIMIT + 5)
             .map(|_| (train(vec![], json!({ "outcome": "arrived" })), vec![]))
             .collect();
-        let status = build_status(&[], &many, &[], &[], None, &[], &[], &[], fixed_now());
+        let status = build_status(&[], &many, &[], &[], None, None, &[], &[], &[], fixed_now());
         assert_eq!(status.recent.len(), RECENT_LIMIT);
     }
 }

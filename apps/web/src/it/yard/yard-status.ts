@@ -60,6 +60,19 @@ export type BoardingPredicate = Readonly<{
   dock_depth: number;
   threshold_met: boolean | null;
   summary: string;
+  /** Why the dock is not boarding RIGHT NOW — `track occupied (…)`,
+   *  `cooldown — M min left`, `below threshold (…)` — or null when it
+   *  boards on the conductor's next tick. Derived server-side from the
+   *  conductor's own facts (the board rule's last firing, the open
+   *  trains, the dock). Null on an older server, with `next_board` null
+   *  beside it; the page then states the rule and never a hold. */
+  held_because: string | null;
+  cooldown_remaining_minutes: number | null;
+  /** When the board rule last fired (RFC3339), released or not. */
+  last_board_at: string | null;
+  /** "boards on the next tick once …" — never a time of day; the depth
+   *  rule has no clock. Null on a server that does not send it. */
+  next_board: string | null;
 }>;
 
 export type RecentTrain = Readonly<{
@@ -109,8 +122,9 @@ export type ConductorHealth = Readonly<{
   silent_for_minutes: number | null;
   expected_every_minutes: number | null;
   silent: boolean;
-  /** Today this carries the RULE NAME the heartbeat is measured against
-   *  (`train-reconcile`), not a verb — the page labels it "last rule". */
+  /** The verb of the heartbeat rule (`reconcile`), read from its
+   *  registry row. It used to carry the rule's NAME (`train-reconcile`)
+   *  under a "last rule" label; the label now matches the fact. */
   last_verb: string | null;
   last_rc: number | null;
 }>;
@@ -208,6 +222,14 @@ function parseBoarding(raw: unknown): BoardingPredicate {
     dock_depth: Number(o.dock_depth ?? 0),
     threshold_met: typeof o.threshold_met === 'boolean' ? o.threshold_met : null,
     summary: String(o.summary ?? ''),
+    // The hold: absent → null in every field. Never default a hold that
+    // is not there, and never a "boards on the next tick" the server did
+    // not say.
+    held_because: typeof o.held_because === 'string' ? o.held_because : null,
+    cooldown_remaining_minutes:
+      typeof o.cooldown_remaining_minutes === 'number' ? o.cooldown_remaining_minutes : null,
+    last_board_at: typeof o.last_board_at === 'string' ? o.last_board_at : null,
+    next_board: typeof o.next_board === 'string' ? o.next_board : null,
   };
 }
 
@@ -403,11 +425,11 @@ export function conductorReading(c: ConductorHealth | null): Reading {
   return { tone: 'warn', text: 'no firing on record — liveness unknown' };
 }
 
-/** The last rule the conductor ran and how that went. A conductor that
+/** The last verb the conductor ran and how that went. A conductor that
  *  is running but FAILING every pass looks identical to a healthy one
  *  unless the exit code is on the surface. */
-export function lastRuleReading(c: ConductorHealth | null): Reading {
-  if (!c || c.last_verb === null) return { tone: 'muted', text: 'no rule on record' };
+export function lastVerbReading(c: ConductorHealth | null): Reading {
+  if (!c || c.last_verb === null) return { tone: 'muted', text: 'no verb on record' };
   if (c.last_rc === null) return { tone: 'muted', text: `${c.last_verb} · rc unknown` };
   if (c.last_rc === 0) return { tone: 'ok', text: `${c.last_verb} · rc 0` };
   return { tone: 'err', text: `${c.last_verb} · rc ${c.last_rc} — the last pass failed` };
@@ -429,6 +451,53 @@ export function boardsWhen(b: BoardingPredicate): string {
     : `${depth} — boards when the dock reaches ${t}${cooldown ? ` and ${cooldown}` : ''}`;
   const clock = b.at_times.length > 0 ? ` · or by the clock at ${b.at_times.join(' / ')} UTC` : '';
   return rule + clock;
+}
+
+/** An RFC3339 stamp as the clock time it names, `HH:MM UTC` — the
+ *  registry's own `at_times` idiom — or null when absent or unparseable. */
+export function clockText(stamp: string | null): string | null {
+  if (!stamp) return null;
+  const ms = Date.parse(stamp);
+  if (Number.isNaN(ms)) return null;
+  const d = new Date(ms);
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const mm = String(d.getUTCMinutes()).padStart(2, '0');
+  return `${hh}:${mm} UTC`;
+}
+
+/** The "boards" row: the hold in force as the primary line, the "next"
+ *  sentence beneath it, the last board as a clock time. */
+export type BoardHoldView = Readonly<{
+  /** `held: <why>` in the row's plain colour (`tone: null`) — a hold is
+   *  the protocol working, not an alarm; "boards on the next tick" in
+   *  ok; a no-depth-rule line muted. */
+  primary: Readonly<{ tone: Reading['tone'] | null; text: string }>;
+  next: string | null;
+  lastBoard: string | null;
+}>;
+
+/** Why the dock is not boarding right now, from the server's own hold.
+ *  Null when the server sent none (an older build): the page then keeps
+ *  stating the rule, and never says "boards on the next tick" on its
+ *  own authority. Every line is the server's sentence — the depth rule
+ *  has no clock, so nothing here is a time of day. */
+export function boardHold(b: BoardingPredicate): BoardHoldView | null {
+  const lastBoard = clockText(b.last_board_at);
+  if (b.held_because !== null) {
+    return {
+      primary: { tone: null, text: `held: ${b.held_because}` },
+      next: b.next_board,
+      lastBoard,
+    };
+  }
+  if (b.next_board !== null) {
+    return {
+      primary: { tone: b.dock_threshold !== null ? 'ok' : 'muted', text: b.next_board },
+      next: null,
+      lastBoard,
+    };
+  }
+  return null;
 }
 
 /** Elapsed since an RFC3339 stamp, in the `journeyText` idiom. An absent
