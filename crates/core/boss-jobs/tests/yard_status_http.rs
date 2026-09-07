@@ -541,3 +541,64 @@ async fn no_cadence_or_policy_wired_degrades_gracefully() {
     // bound a gate obeys against an unreachable registry.
     assert_eq!(body["gates"]["capacity"], 3);
 }
+
+/// A day of arrivals must not push the open train off the board.
+///
+/// The trains read was ONE query — "open OR closed since" — ordered by
+/// `opened_on` (a DATE) and cut at `TRAIN_WINDOW`. On 2026-09-07 the yard
+/// opened 82 trains in a day; the window sliced that same-day tie
+/// wherever Postgres chose, the one open train fell out, and
+/// `/api/yard/status` drew `trains: []` while
+/// `/api/jobs?kind=pr-train&status=open` showed it — measured three
+/// times at the yard's exact query (`limit=60`), absent every time, and
+/// present at `limit=100`. The open trains are read on their own now.
+///
+/// The open train here is a day OLDER than the flood, which is when
+/// `opened_on desc` puts it last deterministically in both adapters —
+/// the same-day case is merely arbitrary, this one is certain. Red first:
+/// with the single windowed read, `trains` comes back empty.
+#[tokio::test]
+async fn a_day_of_arrivals_does_not_push_the_open_train_off_the_board() {
+    use boss_jobs::yard::{RECENT_LIMIT, TRAIN_WINDOW};
+
+    let (app, jobs) = app_with(vec![depth_rule(), clock_rule()], vec![policy_row()]);
+    let now = t(NOW);
+
+    let mut in_flight = job(
+        "pr-train",
+        "11111111-1111-1111-1111-111111111111",
+        "train #200",
+        JobStatus::Open,
+        json!({}),
+    );
+    in_flight.opened_on = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+    jobs.create_job_at(&in_flight, now, &[]).await.unwrap();
+
+    // Exactly one window of same-day arrivals, every one newer than the
+    // open train and closed inside the retention window.
+    for i in 0..TRAIN_WINDOW {
+        let arrived = job(
+            "pr-train",
+            &format!("33333333-3333-3333-3333-{i:012}"),
+            &format!("train #{}", 201 + i),
+            JobStatus::Closed,
+            json!({}),
+        );
+        jobs.create_job_at(&arrived, now, &[]).await.unwrap();
+    }
+
+    let (status, body) = get(&app, "operator").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let trains = body["trains"].as_array().unwrap();
+    assert_eq!(
+        trains.len(),
+        1,
+        "the open train is on the board whatever arrived after it: {body}"
+    );
+    assert_eq!(trains[0]["id"], in_flight.id.to_string());
+    assert_eq!(trains[0]["title"], "train #200");
+
+    // The recent tail still reads the arrivals, capped as before.
+    assert_eq!(body["recent"].as_array().unwrap().len(), RECENT_LIMIT);
+}

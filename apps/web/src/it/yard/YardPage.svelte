@@ -4,17 +4,34 @@
   // A queue lens in the departure-board idiom: every row is a Job
   // the conductor writes; nothing here is new state. Reads are
   // audit-readonly-safe by construction.
+  //
+  // ONE write (backlog 7a24caf3): the cancel button stamps
+  // `cancel_requested` on a troubled, not-yet-merged train through the
+  // metadata merge, and the conductor honours it on its next reconcile.
+  // The page offers the button only to a platform-admin session
+  // (`CANCEL_ROLE`) — affordance, not the gate. The gate is the API's
+  // `job:update`, which an audit-readonly guest does not hold: a guest
+  // who reaches the endpoint by hand is refused there, and the page
+  // shows that refusal in the server's own words.
   import { onMount } from 'svelte';
   import {
+    CANCEL_ROLE,
+    canOfferCancel,
+    cancelRequestBody,
     disciplineLabel,
     dockUpstream,
     fetchYard,
     splitAtDeparture,
+    troubleLabel,
     wipAdvisory,
+    type CancelRequest,
     type Eta,
     type EtaPhase,
+    type TrainRow,
+    type YardPartition,
     type YardState,
-    type TrainRow, troubleLabel } from './yard';
+  } from './yard';
+  import { session } from '@boss/web-kit/session/session.svelte';
   import {
     blockLabel,
     boardsWhen,
@@ -139,6 +156,69 @@
   const split = $derived(
     yard ? splitAtDeparture(yard.inFlight) : { inYard: [], inTransit: [] },
   );
+
+  // The viewer, for the one write on this page. The session is the
+  // app's single identity read (web-kit's `/api/session` probe,
+  // resolved to an Employee row); its `id` is the actor the stamp
+  // names, its `role` the affordance gate.
+  const viewer = $derived(session.value.kind === 'ready' ? session.value.user : null);
+  const viewerPrivileged = $derived(
+    session.value.kind === 'ready' && session.value.user.role === CANCEL_ROLE,
+  );
+
+  // The cancel dialog: one train at a time, a reason typed, the write
+  // in flight, and the server's own words when it refuses. A sent
+  // stamp is kept by train id so the chip shows at once; the 10s poll
+  // then reads the same stamp back off the Job and the local copy is
+  // moot.
+  let cancelFor = $state<string | null>(null);
+  let cancelReason = $state('');
+  let cancelBusy = $state(false);
+  let cancelError = $state<string | null>(null);
+  let cancelSent = $state<Readonly<Record<string, CancelRequest>>>({});
+
+  function openCancel(t: TrainRow): void {
+    cancelFor = t.id;
+    cancelReason = '';
+    cancelError = null;
+  }
+
+  function closeCancel(): void {
+    cancelFor = null;
+    cancelReason = '';
+    cancelError = null;
+  }
+
+  async function requestCancel(t: TrainRow): Promise<void> {
+    if (!viewer) return;
+    const body = cancelRequestBody(viewer.id, cancelReason, new Date().toISOString());
+    if (!body) {
+      cancelError = 'A reason is required.';
+      return;
+    }
+    cancelBusy = true;
+    cancelError = null;
+    try {
+      const r = await fetch(`/api/jobs/${encodeURIComponent(t.id)}/metadata`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        // The server's words, never swallowed — a 403 here is the real
+        // gate speaking.
+        const text = (await r.text()).trim();
+        cancelError = `HTTP ${r.status}${text ? ` — ${text}` : ''}`;
+        return;
+      }
+      cancelSent = { ...cancelSent, [t.id]: body.cancel_requested };
+      closeCancel();
+    } catch (e) {
+      cancelError = e instanceof Error ? e.message : String(e);
+    } finally {
+      cancelBusy = false;
+    }
+  }
 
   onMount(() => {
     let cancelled = false;
@@ -492,7 +572,7 @@
     {#if split.inYard.length === 0}
       <div class="yard-empty">Yard clear — nothing assembling.</div>
     {:else}
-      {#each split.inYard as t (t.id)}{@render trainBlock(t)}{/each}
+      {#each split.inYard as t (t.id)}{@render trainBlock(t, 'in-yard')}{/each}
     {/if}
 
     <div class="yard-section">
@@ -502,7 +582,7 @@
     {#if split.inTransit.length === 0}
       <div class="yard-empty">Nothing in transit.</div>
     {:else}
-      {#each split.inTransit as t (t.id)}{@render trainBlock(t)}{/each}
+      {#each split.inTransit as t (t.id)}{@render trainBlock(t, 'in-transit')}{/each}
     {/if}
 
     <!-- Arrivals are trains that ARRIVED — a cancelled train never
@@ -570,7 +650,8 @@
       </div>
     {/if}
 
-    {#snippet trainBlock(t: TrainRow)}
+    {#snippet trainBlock(t: TrainRow, partition: YardPartition)}
+      {@const pending = t.cancelRequested ?? cancelSent[t.id] ?? null}
       <div class="yard-trainblock">
         <div class="yard-trainhead">
           {#if t.live}<span class="yard-dot" title="in motion"></span>{/if}
@@ -583,6 +664,29 @@
             <span class="yard-trouble" title="an alarm was already raised for this train">
               {troubleLabel(t.trouble)}
             </span>
+          {/if}
+          <!-- The cancel control. A refusal outranks a request (the
+               conductor looked and the train had already merged); a
+               request — read off the Job, or sent from this page a
+               moment ago — replaces the button; the button itself is
+               offered only where canOfferCancel says so: in the yard,
+               troubled, privileged, not yet asked. -->
+          {#if t.cancelRefused}
+            <span
+              class="yard-cancel-chip is-refused"
+              title="the conductor looked — the train had already merged"
+              >cancel refused — already merged</span>
+          {:else if pending}
+            <span
+              class="yard-cancel-chip"
+              title={`requested by ${pending.by}${pending.at ? ` at ${pending.at}` : ''} — ${pending.reason}`}
+              >cancel requested — the conductor acts within 10 min</span>
+          {:else if canOfferCancel(t, partition, viewerPrivileged)}
+            <button
+              type="button"
+              class="yard-cancel-btn"
+              title="ask the conductor to cancel this train — the cars return to the dock unstruck"
+              onclick={() => openCancel(t)}>cancel train</button>
           {/if}
           {#if t.eta.phase !== 'arrived'}
             <span class="yard-eta" class:est={t.eta.kind === 'eta'} title={etaTitle(t.eta)}>
@@ -601,6 +705,32 @@
           {/if}
           <span class="yard-stamp">{stampOf(t)}</span>
         </div>
+        {#if cancelFor === t.id}
+          <form
+            class="yard-cancel-form"
+            onsubmit={e => {
+              e.preventDefault();
+              void requestCancel(t);
+            }}>
+            <label class="yard-cancel-label" for="yard-cancel-reason-{t.id}">reason</label>
+            <input
+              id="yard-cancel-reason-{t.id}"
+              class="yard-cancel-reason"
+              type="text"
+              bind:value={cancelReason}
+              placeholder="why this train is pulled — read later by whoever asks"
+              disabled={cancelBusy}
+              autocomplete="off" />
+            <button
+              type="submit"
+              class="yard-cancel-btn is-confirm"
+              disabled={cancelBusy || cancelReason.trim() === ''}
+              >{cancelBusy ? 'requesting…' : 'request cancel'}</button>
+            <button type="button" class="yard-cancel-btn" onclick={closeCancel} disabled={cancelBusy}
+              >keep</button>
+            {#if cancelError}<span class="yard-cancel-err">{cancelError}</span>{/if}
+          </form>
+        {/if}
         <div class="yard-consist">
           {#if t.cars.length === 0}
             <span class="yard-empty">consist forming…</span>
@@ -703,6 +833,52 @@
     border-radius: 2px;
     text-transform: uppercase;
   }
+  /* The cancel control, in the badge idiom. The button is quiet until
+     hovered — it sits beside a red badge and must not shout over it.
+     The chip that replaces it reads in the warn tone because the
+     request is pending, not done: the conductor acts, this page asks. */
+  .yard-cancel-btn {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 1px 8px;
+    border: 1px solid var(--hairline, #2A3138);
+    border-radius: 2px;
+    background: transparent;
+    color: var(--text-dim, #78716c);
+    cursor: pointer;
+  }
+  .yard-cancel-btn:hover:not(:disabled), .yard-cancel-btn:focus-visible {
+    color: var(--err, #e2685c); border-color: var(--err, #e2685c);
+  }
+  .yard-cancel-btn.is-confirm { color: var(--err, #e2685c); border-color: var(--err, #e2685c); }
+  .yard-cancel-btn:disabled { opacity: 0.5; cursor: default; }
+  .yard-cancel-chip {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    padding: 1px 6px;
+    border: 1px solid var(--warn, #d9a441);
+    color: var(--warn, #d9a441);
+    border-radius: 2px;
+    white-space: nowrap;
+  }
+  .yard-cancel-chip.is-refused { border-color: var(--static, #7A838C); color: var(--static, #7A838C); }
+  .yard-cancel-form {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    padding: 8px 12px; border-top: 1px solid var(--hairline, #2A3138);
+  }
+  .yard-cancel-label { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
+    letter-spacing: 0.1em; color: var(--static, #7A838C); text-transform: uppercase; }
+  .yard-cancel-reason {
+    flex: 1 1 240px; min-width: 160px;
+    font: inherit; font-size: 12.5px; padding: 3px 8px;
+    background: var(--bg, var(--void, #0D1014)); color: var(--text, #C7CED6);
+    border: 1px solid var(--hairline, #2A3138); border-radius: 2px;
+  }
+  .yard-cancel-err { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
+    color: var(--err, #e2685c); flex-basis: 100%; }
   .yard-chip { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
     letter-spacing: 0.1em; border: 1px solid var(--hairline, #2A3138); padding: 2px 8px; }
   .yard-lamp { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;

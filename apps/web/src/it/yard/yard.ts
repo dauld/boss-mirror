@@ -88,6 +88,14 @@ export type TrainRow = Readonly<{
   eta: Eta;
   /** Non-null when the train is in trouble the board must show. */
   trouble: TrainTrouble | null;
+  /** An operator's standing request that the conductor cancel this
+   *  train (`metadata.cancel_requested`), read back off the Job so a
+   *  reload shows the pending state. */
+  cancelRequested: CancelRequest | null;
+  /** The conductor stamped `cancel_refused` — the train had already
+   *  merged when it looked. A refused request must never render as a
+   *  pending one. */
+  cancelRefused: boolean;
 }>;
 
 // The `GET /api/stations/{name}/queue` envelope (stations.md; the
@@ -804,6 +812,77 @@ export function splitAtDeparture(trains: readonly TrainRow[]): Readonly<{
   };
 }
 
+// ---------------------------------------------------------------------
+// The cancel request — the yard's one write (backlog 7a24caf3).
+//
+// Cancelling a red or stalled train used to be a classifier-gated CLI
+// verb (`boss train cancel`). The page gains no verb of its own: it
+// leaves a REQUEST STAMP on the train's Job through the metadata merge
+// (`PATCH /api/jobs/{id}/metadata` merges top-level keys; a null value
+// deletes one), and the conductor's reconcile — every ≤10 min — honours
+// it on an open, not-yet-merged train: closes the PR, releases the cars
+// to the dock, no strike. A train that had already merged is stamped
+// `cancel_refused` instead. The effect is asynchronous by design, and
+// the chip that replaces the button says so.
+// ---------------------------------------------------------------------
+
+/** The stamp. `by` is the viewer's employee id; `at` is RFC3339 UTC. */
+export type CancelRequest = Readonly<{ by: string; reason: string; at: string }>;
+
+/** Which side of the departure line a train block is rendered on — the
+ *  page names it at the render site, because the snippet cannot know. */
+export type YardPartition = 'in-yard' | 'in-transit';
+
+/** The one role the page offers the button to. Affordance, not the
+ *  gate: the gate is the API's `job:update`, which an audit-readonly
+ *  guest does not hold. Spelled as `boss_core::roles::PLATFORM_ADMIN_ROLE`
+ *  spells it. */
+export const CANCEL_ROLE = 'platform-admin';
+
+/** The exact PATCH body, or null when it would carry no reason or no
+ *  actor. The reason is read by a human later ("why was this train
+ *  pulled?"), so an empty one is refused here, before any request. */
+export function cancelRequestBody(
+  by: string,
+  reason: string,
+  at: string,
+): Readonly<{ cancel_requested: CancelRequest }> | null {
+  const trimmed = reason.trim();
+  if (by === '' || trimmed === '') return null;
+  return { cancel_requested: { by, reason: trimmed, at } };
+}
+
+/** The button appears only where every guard holds: the train is on
+ *  the yard side of the departure line (post-merge is irreversible), it
+ *  is in trouble the board already shows, the viewer holds the role,
+ *  and nobody has asked already. */
+export function canOfferCancel(
+  row: TrainRow,
+  partition: YardPartition,
+  viewerPrivileged: boolean,
+): boolean {
+  return (
+    partition === 'in-yard' &&
+    row.trouble !== null &&
+    viewerPrivileged &&
+    row.cancelRequested === null
+  );
+}
+
+function readCancelRequest(j: JobLite): CancelRequest | null {
+  const v = (j.metadata as { cancel_requested?: unknown } | null)?.cancel_requested;
+  if (typeof v !== 'object' || v === null) return null;
+  const o = v as { by?: unknown; reason?: unknown; at?: unknown };
+  const str = (x: unknown): string => (typeof x === 'string' ? x : '');
+  return { by: str(o.by), reason: str(o.reason), at: str(o.at) };
+}
+
+/** Presence only: the refusal's shape belongs to the conductor. */
+function readCancelRefused(j: JobLite): boolean {
+  const v = (j.metadata as { cancel_refused?: unknown } | null)?.cancel_refused;
+  return v !== undefined && v !== null;
+}
+
 export function ciLamp(j: JobLite): Lamp {
   const ci = step(j, 'ci', 'CI verdict');
   const result = (ci?.metadata as { result?: string } | null)?.result;
@@ -859,6 +938,8 @@ export function toTrainRow(
     arrivedAt: arrivalStamp(j),
     eta: trainEta(j, medians, nowMs),
     trouble: trainTrouble(j),
+    cancelRequested: readCancelRequest(j),
+    cancelRefused: readCancelRefused(j),
   };
 }
 

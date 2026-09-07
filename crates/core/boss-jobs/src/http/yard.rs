@@ -21,16 +21,14 @@ use super::*;
 
 use crate::yard;
 
-/// How wide the read windows are. Trains: enough to hold the open ones
-/// plus the recent closed ones the status shows. Cars / gate-runs: the
-/// stranded cross-ref wants the recent gating history and the dock's
-/// backing cars.
-const TRAIN_WINDOW: i64 = 60;
+/// How wide the read windows are. Trains: `yard::TRAIN_WINDOW`, one per
+/// read. Cars / gate-runs: the stranded cross-ref wants the recent
+/// gating history and the dock's backing cars.
 const CAR_WINDOW: i64 = 400;
 const GATE_RUN_WINDOW: i64 = 60;
 /// Keep closed trains from the last two weeks in the "recent" window —
-/// combined with `status=open` as OR, this is "in flight OR recently
-/// arrived/cancelled", the question the surface asks.
+/// "recently arrived/cancelled", the tail the surface shows beside the
+/// in-flight trains.
 const RECENT_TRAIN_DAYS: i64 = 14;
 
 pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'static>(
@@ -58,33 +56,59 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
     let scope = job_scope_from_predicate(&user, &predicate);
     let now = boss_clock_client::now_from(&state.clock).await;
 
-    // Trains: open OR recently closed, in one query. `opened_on desc`
-    // ordering from the adapter puts the newest first, which is the order
-    // the recent list wants.
-    let train_filter = JobFilter {
+    // Trains: two reads, because one cannot hold both. The in-flight
+    // trains are read whole — `status=open`, a handful at most — and the
+    // recent tail through the retention window. They used to be ONE
+    // "open OR closed since" read, cut at TRAIN_WINDOW and ordered by
+    // `opened_on`, a DATE: on 2026-09-07 the yard opened 82 trains in a
+    // day, the window sliced that same-day tie wherever Postgres chose,
+    // the one open train fell out, and the board drew `trains: []` while
+    // `/api/jobs?kind=pr-train&status=open` showed it. A day of arrivals
+    // is the tail's problem now, never the open list's (pinned by
+    // `a_day_of_arrivals_does_not_push_the_open_train_off_the_board`).
+    let pr_train = |status, closed_since| JobFilter {
         kind: Some("pr-train".to_string()),
-        status: Some(JobStatus::Open),
-        closed_since: Some((now - chrono::Duration::days(RECENT_TRAIN_DAYS)).date_naive()),
+        status,
+        closed_since,
         scope: scope.clone(),
         ..Default::default()
     };
-    let trains = match state.jobs.list_jobs(&train_filter, TRAIN_WINDOW, 0).await {
+    let in_flight = pr_train(Some(JobStatus::Open), None);
+    let recent = pr_train(
+        None,
+        Some((now - chrono::Duration::days(RECENT_TRAIN_DAYS)).date_naive()),
+    );
+    let open_rows = match state
+        .jobs
+        .list_jobs(&in_flight, yard::TRAIN_WINDOW, 0)
+        .await
+    {
+        Ok((rows, _)) => rows,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let recent_rows = match state.jobs.list_jobs(&recent, yard::TRAIN_WINDOW, 0).await {
         Ok((rows, _)) => rows,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
 
-    // Partition into open (in-flight) and closed (recent) and attach each
-    // train's steps — the phase and the block reason are facts about the
-    // steps, so a status without them could only list.
+    // Attach each train's steps — the phase and the block reason are facts
+    // about the steps, so a status without them could only list. The
+    // windowed read keeps live trains too (that is the window's contract);
+    // the open read owns those, so only its terminal rows become the
+    // recent list — `opened_on desc` from the adapter is already the
+    // order that list wants.
     let mut open_trains: Vec<(boss_core::job::Job, Vec<boss_core::job::Step>)> = Vec::new();
-    let mut closed_trains: Vec<(boss_core::job::Job, Vec<boss_core::job::Step>)> = Vec::new();
-    for job in trains {
+    for job in open_rows {
         let steps = state.jobs.list_steps(&job.id).await.unwrap_or_default();
-        if job.status == JobStatus::Open {
-            open_trains.push((job, steps));
-        } else {
-            closed_trains.push((job, steps));
-        }
+        open_trains.push((job, steps));
+    }
+    let mut closed_trains: Vec<(boss_core::job::Job, Vec<boss_core::job::Step>)> = Vec::new();
+    for job in recent_rows
+        .into_iter()
+        .filter(|j| j.status != JobStatus::Open)
+    {
+        let steps = state.jobs.list_steps(&job.id).await.unwrap_or_default();
+        closed_trains.push((job, steps));
     }
 
     // The cars: the dock's parked cars come from the station queue lens

@@ -27,6 +27,11 @@ import {
   type StationQueueEnvelope,
   trainTrouble,
   troubleLabel,
+  toTrainRow,
+  cancelRequestBody,
+  canOfferCancel,
+  CANCEL_ROLE,
+  type TrainRow,
 } from './yard';
 
 function train(over: Partial<JobLite>): JobLite {
@@ -1341,5 +1346,130 @@ describe('a troubled train looks troubled', () => {
     expect(trainTrouble(train({ metadata: {} }))).toBeNull();
     // An empty stall stamp is not a stall.
     expect(trainTrouble(train({ metadata: { stalled_since: '' } }))).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------
+// The yard's cancel button (backlog 7a24caf3). The page writes ONE
+// stamp — `cancel_requested` — through the metadata merge, and the
+// conductor's reconcile honours it. Everything the button may or may
+// not do is a pure rule here, so the page carries no judgement of its
+// own.
+// ---------------------------------------------------------------------
+
+describe('cancelRequestBody', () => {
+  const at = '2026-09-07T21:00:00.000Z';
+
+  test('is exactly the stamp the conductor reads', () => {
+    expect(cancelRequestBody('emp-007', 'CI red on a flaky test, re-gate the cars', at)).toEqual({
+      cancel_requested: { by: 'emp-007', reason: 'CI red on a flaky test, re-gate the cars', at },
+    });
+  });
+
+  test('refuses an empty or whitespace-only reason', () => {
+    // A stamp with no reason answers nothing when someone asks later
+    // why the train was pulled.
+    expect(cancelRequestBody('emp-007', '', at)).toBeNull();
+    expect(cancelRequestBody('emp-007', '   \n', at)).toBeNull();
+  });
+
+  test('trims the reason it stamps', () => {
+    expect(cancelRequestBody('emp-007', '  stalled 4h  ', at)?.cancel_requested.reason).toBe(
+      'stalled 4h',
+    );
+  });
+
+  test('refuses a stamp with no actor — provenance is not optional', () => {
+    expect(cancelRequestBody('', 'stalled', at)).toBeNull();
+  });
+});
+
+describe('canOfferCancel', () => {
+  const row = (over: Partial<TrainRow> = {}): TrainRow =>
+    ({
+      id: 't1',
+      title: 'PR train',
+      status: 'BOARDED',
+      lamp: 'failing',
+      cars: [],
+      live: false,
+      outcome: 'unknown',
+      arrivedAt: { ms: 0, at: '', basis: 'opened_on' },
+      eta: { kind: 'phase', phase: 'blocked' },
+      trouble: { kind: 'ci-red' },
+      cancelRequested: null,
+      cancelRefused: false,
+      ...over,
+    }) as TrainRow;
+
+  test('in the yard, troubled, privileged, not yet requested → offered', () => {
+    expect(canOfferCancel(row(), 'in-yard', true)).toBe(true);
+    expect(canOfferCancel(row({ trouble: { kind: 'stalled' } }), 'in-yard', true)).toBe(true);
+    expect(canOfferCancel(row({ trouble: { kind: 'converge-overdue' } }), 'in-yard', true)).toBe(
+      true,
+    );
+  });
+
+  test('never in transit — past the merge is irreversible (the departure line)', () => {
+    expect(canOfferCancel(row({ status: 'DEPARTED' }), 'in-transit', true)).toBe(false);
+  });
+
+  test('never on a train that is not in trouble', () => {
+    expect(canOfferCancel(row({ trouble: null, lamp: 'green' }), 'in-yard', true)).toBe(false);
+  });
+
+  test('never for an unprivileged viewer', () => {
+    expect(canOfferCancel(row(), 'in-yard', false)).toBe(false);
+  });
+
+  test('never twice — a pending request hides the button', () => {
+    const pending = row({
+      cancelRequested: { by: 'emp-007', reason: 'stalled', at: '2026-09-07T21:00:00Z' },
+    });
+    expect(canOfferCancel(pending, 'in-yard', true)).toBe(false);
+  });
+
+  test('the privileged role is platform-admin, spelled the way boss_core spells it', () => {
+    expect(CANCEL_ROLE).toBe('platform-admin');
+  });
+});
+
+describe('TrainRow carries the cancel stamps off the job metadata', () => {
+  const none = new Map<string, JobLite>();
+
+  test('a pending request is read back so a reload shows it', () => {
+    const j = train({
+      metadata: {
+        cancel_requested: { by: 'emp-007', reason: 'stalled', at: '2026-09-07T21:00:00Z' },
+      },
+    });
+    const r = toTrainRow(j, none, false);
+    expect(r.cancelRequested).toEqual({
+      by: 'emp-007',
+      reason: 'stalled',
+      at: '2026-09-07T21:00:00Z',
+    });
+    expect(r.cancelRefused).toBe(false);
+  });
+
+  test('no stamp, no request', () => {
+    expect(toTrainRow(train({ metadata: {} }), none, false).cancelRequested).toBeNull();
+    expect(toTrainRow(train({ metadata: null }), none, false).cancelRequested).toBeNull();
+  });
+
+  test('a malformed stamp is not a request', () => {
+    expect(
+      toTrainRow(train({ metadata: { cancel_requested: 'yes' } }), none, false).cancelRequested,
+    ).toBeNull();
+  });
+
+  test("the conductor's refusal is read back too — the chip must not claim a cancel that was refused", () => {
+    const j = train({
+      metadata: {
+        cancel_requested: { by: 'emp-007', reason: 'stalled', at: '2026-09-07T21:00:00Z' },
+        cancel_refused: { reason: 'already merged', at: '2026-09-07T21:04:00Z' },
+      },
+    });
+    expect(toTrainRow(j, none, false).cancelRefused).toBe(true);
   });
 });

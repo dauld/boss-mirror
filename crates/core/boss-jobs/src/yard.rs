@@ -900,6 +900,14 @@ pub struct YardStatus {
     pub policy: PolicyThresholds,
 }
 
+/// How many trains each of the handler's two train reads fetches: every
+/// in-flight train (a handful, bounded by policy) and the recent tail.
+/// Named here, beside `RECENT_LIMIT`, so the test that pins the window
+/// (`a_day_of_arrivals_does_not_push_the_open_train_off_the_board`)
+/// seeds exactly one window of arrivals rather than a second copy of
+/// this number (CLAUDE.md §9a).
+pub const TRAIN_WINDOW: i64 = 60;
+
 /// How many recent trains the status carries. Enough to read a trend in
 /// arrivals/cancellations without turning the surface into a history log
 /// — the terminal report owns the long view.

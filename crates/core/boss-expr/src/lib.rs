@@ -919,6 +919,45 @@ mod tests {
         }
     }
 
+    /// `field > ""` is the idiom for "present and a NON-EMPTY string" —
+    /// the footgun-free alternative to `field != ""`. A missing field is
+    /// `Absent`, unequal to every literal, so `field != ""` reads TRUE
+    /// over a missing field: exactly the predicate that auto-superseded
+    /// `incident-post-mortem` packets the instant they opened (cb9661fe).
+    /// `field > ""` instead reads FALSE when the field is absent (orders
+    /// against nothing) OR empty (`"" > ""` is false), and TRUE only for
+    /// a present, non-empty string — so a terminal gated on it waits for
+    /// the marker to be set.
+    #[test]
+    fn present_and_nonempty_string_idiom() {
+        // The footgun `!= ""` is TRUE over a missing field.
+        let absent = json!({ "metadata": {} });
+        assert_eq!(
+            eval(&parse("metadata.x != \"\"").unwrap(), &ctx(&absent)),
+            Ok(Value::Bool(true)),
+            "the footgun: a missing field is unequal to the empty string"
+        );
+        // The idiom `> ""`: false for absent, false for empty, true only
+        // for a present non-empty string.
+        assert_eq!(
+            eval(&parse("metadata.x > \"\"").unwrap(), &ctx(&absent)),
+            Ok(Value::Bool(false)),
+            "absent orders against nothing"
+        );
+        let empty = json!({ "metadata": { "x": "" } });
+        assert_eq!(
+            eval(&parse("metadata.x > \"\"").unwrap(), &ctx(&empty)),
+            Ok(Value::Bool(false)),
+            "the empty string is not greater than itself"
+        );
+        let present = json!({ "metadata": { "x": "job-123" } });
+        assert_eq!(
+            eval(&parse("metadata.x > \"\"").unwrap(), &ctx(&present)),
+            Ok(Value::Bool(true)),
+            "a present non-empty string is greater than empty"
+        );
+    }
+
     #[test]
     fn absent_is_false_in_boolean_position() {
         let payload = json!({ "ready": true });

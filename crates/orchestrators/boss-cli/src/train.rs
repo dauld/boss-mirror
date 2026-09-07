@@ -2559,6 +2559,62 @@ pub(crate) fn auto_cancel_reason(
     })
 }
 
+/// The operator's cancel stamp, parsed: `(reason, by)` when
+/// `metadata.cancel_requested` is an object carrying a non-empty
+/// `reason` and a non-empty `by`. Anything else — absent, a bare
+/// string, an empty reason — is not a request and the conductor does
+/// nothing on it: the reason lands on every released car as its
+/// `skip_reason`, and a cancel that cannot say why or by whom is not
+/// one the record can carry.
+fn cancel_request(train: &Value) -> Option<(String, String)> {
+    let req = train
+        .get("metadata")?
+        .get("cancel_requested")?
+        .as_object()?;
+    let reason = req.get("reason")?.as_str()?.trim();
+    let by = req.get("by")?.as_str()?.trim();
+    (!reason.is_empty() && !by.is_empty()).then(|| (reason.to_string(), by.to_string()))
+}
+
+/// The operator's cancel decision, pure — the yard's cancel button
+/// (7a24caf3). An operator stamps the train's metadata
+/// (`PATCH /api/jobs/{id}/metadata` with `cancel_requested: {by,
+/// reason, at}`) and `reconcile` honours it on its next pass the way
+/// it auto-cancels a stalled red — except that an operator's verb
+/// NEVER strikes the cars (see `cancel`, the CLI verb). Some(reason)
+/// is what lands on every released car.
+///
+/// A merged train is not a candidate whatever the stamp says: the
+/// content landed, and releasing its cars would re-board changes that
+/// are already on main. That train gets `operator_cancel_refusal`.
+pub(crate) fn operator_cancel_reason(train: &Value) -> Option<String> {
+    if step_done(find_step(train, "merged", "Merged into main")) {
+        return None;
+    }
+    let (reason, by) = cancel_request(train)?;
+    Some(format!("operator cancel: {reason} (by {by})"))
+}
+
+/// The answer a merged train owes a cancel request it cannot honour,
+/// stamped ONCE as `cancel_refused` (like `ci_overdue_since`): the
+/// request stays on the record, the refusal says why, and the yard has
+/// something to render instead of a button that silently did nothing.
+pub(crate) fn operator_cancel_refusal(train: &Value) -> Option<String> {
+    let merged = find_step(train, "merged", "Merged into main");
+    if truthy(train.get("metadata").and_then(|m| m.get("cancel_refused")))
+        || !step_done(merged)
+        || cancel_request(train).is_none()
+    {
+        return None;
+    }
+    let merge_ref = merged
+        .and_then(|s| s.get("metadata"))
+        .and_then(|m| m.get("merge_ref"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    Some(format!("already merged at {merge_ref}"))
+}
+
 /// Does this train's cancellation count against the cars aboard?
 ///
 /// ONLY A RETURNED FAILING VERDICT. A strike is a claim that CI looked
@@ -5453,6 +5509,19 @@ impl Conductor {
                 }
             }
 
+            // The yard's cancel button (7a24caf3): an operator's
+            // `cancel_requested` stamp is honoured before the automatic
+            // rule and never strikes the cars. Non-fatal by construction
+            // — the method returns a bool, so nothing here can abort the
+            // pass — and a request claims the train's pass whether the
+            // cancel succeeded, is dry, or is being retried.
+            if self
+                .honour_cancel_request(&t, &tid, info.get("state").and_then(Value::as_str))
+                .await
+            {
+                return Ok(());
+            }
+
             if self.cfg.auto_cancel
                 && info.get("state").and_then(Value::as_str) == Some("OPEN")
                 && let Some(reason) = auto_cancel_reason(&t, verdict, now, policy.stall_hours)
@@ -7054,6 +7123,68 @@ impl Conductor {
     /// has evidence that the CARS were implicated.
     async fn cancel(&self, handle: &str, reason: &str) -> Result<()> {
         self.cancel_train(handle, reason, false).await
+    }
+
+    /// Honour an operator's `cancel_requested` stamp — the yard's cancel
+    /// button, read by `reconcile`. Returns whether the request has
+    /// claimed this train's pass: when it has, the caller skips the rest
+    /// of the pass for this train, because a train under a cancel
+    /// request must not go on to merge — whether the cancel succeeded,
+    /// is dry, or is being retried.
+    ///
+    /// NON-FATAL BY CONSTRUCTION: this returns `bool`, not `Result`, so
+    /// the reconcile loop cannot `?` it. A cancel is forge writes first
+    /// (`cancel_train` closes the PR before releasing a car) and the
+    /// forge is the flaky half; a refusal there LOGS and the train stays
+    /// intact — cars aboard, stamp in place — so the next pass retries.
+    /// A fatal write in this loop once froze all landings for ~8h
+    /// (boss-conductor-loop-writes-must-not-be-fatal).
+    async fn honour_cancel_request(
+        &self,
+        train: &Value,
+        tid: &str,
+        pr_state: Option<&str>,
+    ) -> bool {
+        if let Some(refusal) = operator_cancel_refusal(train) {
+            log(format!(
+                "train {}: cancel requested but {refusal} — refusing, cars stay landed",
+                id8(tid)
+            ));
+            if let Err(e) = self
+                .merge_job_metadata(tid, vec![("cancel_refused", json!(refusal))])
+                .await
+            {
+                log(format!(
+                    "train {}: cancel_refused stamp failed (non-fatal, retries next pass): {e}",
+                    id8(tid)
+                ));
+            }
+            return false;
+        }
+        let Some(reason) = operator_cancel_reason(train) else {
+            return false;
+        };
+        if pr_state != Some("OPEN") {
+            // Neither merged nor open — closed on the forge by hand, or
+            // mid-merge. The same gate the automatic rule keeps: the
+            // operator verb (`boss train cancel`) takes it from here.
+            log(format!(
+                "train {}: cancel requested but its PR is {} — leaving it to `boss train cancel`",
+                id8(tid),
+                pr_state.unwrap_or("unknown")
+            ));
+            return false;
+        }
+        log(format!("train {} cancelling: {reason}", id8(tid)));
+        if self.cfg.dry {
+            log(format!("DRY: would cancel {} ({reason})", id8(tid)));
+        } else if let Err(e) = self.cancel_train(tid, &reason, false).await {
+            log(format!(
+                "train {}: cancel failed (non-fatal, train intact, retries next pass): {e}",
+                id8(tid)
+            ));
+        }
+        true
     }
 
     async fn cancel_train(&self, handle: &str, reason: &str, count_red: bool) -> Result<()> {
@@ -8690,6 +8821,71 @@ mod tests {
             auto_cancel_reason(&t, "failing", ts("2026-08-13T09:00:00Z"), 6),
             None
         );
+    }
+
+    // -- honouring the operator's cancel request ---------------------------
+    //
+    // The yard's cancel button (7a24caf3): an operator stamps
+    // `cancel_requested` on the train's metadata and reconcile honours
+    // it — unstruck, and never on a train that already merged.
+
+    fn requested_train(cancel_requested: serde_json::Value, merged: bool) -> serde_json::Value {
+        let mut t = red_train(&[], merged);
+        t["metadata"] = json!({ "cancel_requested": cancel_requested });
+        t
+    }
+
+    #[test]
+    fn an_operators_cancel_request_carries_its_reason_and_actor() {
+        let t = requested_train(
+            json!({"by": "emp-david", "reason": "bad consist", "at": "2026-09-07T01:00:00Z"}),
+            false,
+        );
+        assert_eq!(
+            operator_cancel_reason(&t).as_deref(),
+            Some("operator cancel: bad consist (by emp-david)")
+        );
+        assert_eq!(
+            operator_cancel_refusal(&t),
+            None,
+            "an honoured request is not also refused"
+        );
+    }
+
+    #[test]
+    fn no_stamp_is_no_request() {
+        assert_eq!(operator_cancel_reason(&red_train(&[], false)), None);
+    }
+
+    #[test]
+    fn a_request_without_a_reason_or_an_actor_is_not_honoured() {
+        // The reason lands on every released car as its skip_reason; a
+        // cancel that cannot say why is not one the conductor acts on.
+        let t = requested_train(json!({"by": "emp-david", "reason": "  "}), false);
+        assert_eq!(operator_cancel_reason(&t), None);
+        let t = requested_train(json!({"reason": "bad consist"}), false);
+        assert_eq!(operator_cancel_reason(&t), None, "no actor, no request");
+    }
+
+    #[test]
+    fn a_malformed_stamp_is_not_a_request() {
+        let t = requested_train(json!("please cancel"), false);
+        assert_eq!(operator_cancel_reason(&t), None);
+        assert_eq!(operator_cancel_refusal(&t), None);
+    }
+
+    #[test]
+    fn a_merged_train_refuses_the_request_once_instead_of_releasing_its_cars() {
+        let mut t = requested_train(json!({"by": "emp-david", "reason": "too late"}), true);
+        t["steps"][0]["metadata"]["merge_ref"] = json!("abc1234def56");
+        assert_eq!(operator_cancel_reason(&t), None, "the content landed");
+        assert_eq!(
+            operator_cancel_refusal(&t).as_deref(),
+            Some("already merged at abc1234def56")
+        );
+        // Stamped once: a refused train does not re-refuse every pass.
+        t["metadata"]["cancel_refused"] = json!("already merged at abc1234def56");
+        assert_eq!(operator_cancel_refusal(&t), None);
     }
 
     // -- a stall is not a red train ----------------------------------------
@@ -10709,6 +10905,255 @@ mod tests {
         assert!(
             !puts.lock().unwrap().contains(&"c1".to_string()),
             "the car was released despite close_pr failing — a half-cancelled train"
+        );
+    }
+
+    // -- the yard's cancel button, honoured non-fatally -------------------
+
+    /// The forge the cancel button meets: `close_pr` answers as told and
+    /// records the call; CI cancellation and branch deletion are the
+    /// no-ops a cancel tolerates.
+    struct OperatorCancelForge {
+        close_ok: bool,
+        close_called: std::sync::Arc<std::sync::Mutex<bool>>,
+    }
+    #[async_trait::async_trait]
+    impl Forge for OperatorCancelForge {
+        async fn pr_info(&self, _url: &str) -> Result<Value> {
+            bail!("not exercised")
+        }
+        async fn pr_create(
+            &self,
+            _repo: &str,
+            _head_branch: &str,
+            _title: &str,
+            _body: &str,
+        ) -> Result<String> {
+            bail!("not exercised")
+        }
+        async fn merge(&self, _url: &str) -> Result<()> {
+            bail!("not exercised")
+        }
+        async fn close_pr(&self, _url: &str) -> Result<()> {
+            *self.close_called.lock().unwrap() = true;
+            if self.close_ok {
+                Ok(())
+            } else {
+                bail!("HTTP 502: forge unreachable")
+            }
+        }
+        async fn delete_branch(&self, _branch: &str) -> Result<bool> {
+            Ok(true)
+        }
+        async fn branch_head(&self, _branch: &str) -> Result<Option<String>> {
+            bail!("not exercised")
+        }
+        async fn cancel_ci_runs(&self, _pr_index: &str, _head_sha: &str) -> Result<usize> {
+            Ok(0)
+        }
+    }
+
+    /// An open train carrying the operator's stamp and one boarded car
+    /// that already took a strike on an earlier consist.
+    fn requested_open_train() -> Value {
+        json!({
+            "id": "t1", "kind": "pr-train", "status": "open",
+            "metadata": {
+                "boarded_jobs": ["c1"], "train_ref": "train/x@abcdef1",
+                "cancel_requested": {"by": "emp-david", "reason": "bad consist", "at": "2026-09-07T01:00:00Z"}
+            },
+            "steps": [
+                {"id":"s-pr","spec_slug":"pr","title":"Open the batched PR","status":"completed","metadata":{"pr_url":"https://forge.example/david/boss/pulls/9"}},
+                {"id":"s-collect","spec_slug":"collect","title":"Collect what is ready to board","status":"completed","metadata":{}},
+                {"id":"s-cancelled","spec_slug":"cancelled","title":"Cancelled — nothing to board","status":"ready","metadata":{}},
+                {"id":"s-merged","spec_slug":"merged","title":"Merged into main","status":"ready","metadata":{}}
+            ]
+        })
+    }
+    fn struck_boarded_car() -> Value {
+        json!({
+            "id": "c1", "kind": "ship-a-change", "status": "open",
+            "metadata": { "train": "t1", "branch": "fix/x", "red_trains": 1 },
+            "steps": [{"id":"c-rev","spec_slug":"review","title":"Open for review","status":"ready","metadata":{}}]
+        })
+    }
+
+    type JobPuts = std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>;
+    type StepPuts = std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>;
+
+    /// An in-process jobs API holding one train and one car, recording
+    /// every write. Serves the open pr-train list and both fetches;
+    /// every other list answers empty.
+    async fn cancel_request_jobs_api(train: Value, car: Value) -> (String, JobPuts, StepPuts) {
+        use axum::extract::{Path, RawQuery};
+        use axum::routing::{get, put};
+        use axum::{Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        let job_puts: JobPuts = Arc::new(Mutex::new(Vec::new()));
+        let step_puts: StepPuts = Arc::new(Mutex::new(Vec::new()));
+        let (train_list, train_one) = (train.clone(), train);
+        let (jp, sp) = (job_puts.clone(), step_puts.clone());
+        let app = Router::new()
+            .route(
+                "/api/jobs",
+                get(move |RawQuery(q): RawQuery| {
+                    let train = train_list.clone();
+                    async move {
+                        let open_trains =
+                            q.unwrap_or_default().contains("kind=pr-train&status=open");
+                        let data: Vec<Value> = if open_trains { vec![train] } else { vec![] };
+                        Json(json!({ "data": data }))
+                    }
+                }),
+            )
+            .route(
+                "/api/jobs/{id}",
+                get(move |Path(id): Path<String>| {
+                    let (t, c) = (train_one.clone(), car.clone());
+                    async move { Json(if id == "t1" { t } else { c }) }
+                })
+                .put(move |Path(id): Path<String>, Json(body): Json<Value>| {
+                    let jp = jp.clone();
+                    async move {
+                        jp.lock().unwrap().push((id, body));
+                        Json(json!({}))
+                    }
+                }),
+            )
+            .route(
+                "/api/jobs/{id}/steps/{sid}",
+                put(
+                    move |Path((id, sid)): Path<(String, String)>, Json(body): Json<Value>| {
+                        let sp = sp.clone();
+                        async move {
+                            sp.lock().unwrap().push((id, sid, body));
+                            Json(json!({}))
+                        }
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), job_puts, step_puts)
+    }
+
+    fn cancel_request_conductor(
+        jobs: String,
+        close_ok: bool,
+    ) -> (Conductor, std::sync::Arc<std::sync::Mutex<bool>>) {
+        let close_called = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let mut c = cleanup_conductor(
+            "forgejo",
+            Box::new(OperatorCancelForge {
+                close_ok,
+                close_called: close_called.clone(),
+            }),
+        );
+        c.cfg.jobs = jobs;
+        (c, close_called)
+    }
+
+    /// The button, honoured: an open train stamped `cancel_requested` is
+    /// cancelled the way the operator verb cancels — the car released
+    /// UNSTRUCK (`red_trains` untouched) with the operator's reason as
+    /// its `skip_reason`, the `cancelled` terminal completed with that
+    /// reason — and the request claims the train's pass.
+    #[tokio::test]
+    async fn a_cancel_request_on_an_open_train_releases_its_cars_unstruck() {
+        let (jobs, job_puts, step_puts) =
+            cancel_request_jobs_api(requested_open_train(), struck_boarded_car()).await;
+        let (c, close_called) = cancel_request_conductor(jobs, true);
+
+        assert!(
+            c.honour_cancel_request(&requested_open_train(), "t1", Some("OPEN"))
+                .await
+        );
+        assert!(*close_called.lock().unwrap(), "the PR is closed unmerged");
+
+        let puts = job_puts.lock().unwrap();
+        let (_, car) = puts
+            .iter()
+            .find(|(id, _)| id == "c1")
+            .expect("the car was released");
+        let md = &car["metadata"];
+        assert!(
+            md.get("train").is_none(),
+            "released: the train stamp is gone"
+        );
+        assert_eq!(
+            md["skip_reason"].as_str().unwrap_or_default(),
+            "returned to dock: train cancelled (operator cancel: bad consist (by emp-david))"
+        );
+        assert_eq!(
+            md["red_trains"],
+            json!(1),
+            "an operator's cancel strikes no car"
+        );
+
+        let steps = step_puts.lock().unwrap();
+        let (_, _, cancelled) = steps
+            .iter()
+            .find(|(id, sid, _)| id == "t1" && sid == "s-cancelled")
+            .expect("the cancelled terminal was completed");
+        assert_eq!(
+            cancelled["metadata"]["reason"],
+            json!("operator cancel: bad consist (by emp-david)")
+        );
+    }
+
+    /// The forge refuses the close: the train stays intact — no car
+    /// released, no terminal completed — the request still claims the
+    /// pass (a train under a cancel request must not go on to merge),
+    /// and the method RETURNS, because it cannot fail: the reconcile
+    /// loop has nothing to `?` and the other trains continue.
+    #[tokio::test]
+    async fn a_forge_failure_leaves_the_train_intact_and_the_pass_alive() {
+        let (jobs, job_puts, step_puts) =
+            cancel_request_jobs_api(requested_open_train(), struck_boarded_car()).await;
+        let (c, close_called) = cancel_request_conductor(jobs, false);
+
+        assert!(
+            c.honour_cancel_request(&requested_open_train(), "t1", Some("OPEN"))
+                .await
+        );
+        assert!(*close_called.lock().unwrap(), "close_pr was attempted");
+        assert!(
+            job_puts.lock().unwrap().is_empty(),
+            "no car released, nothing stamped — a retry next pass is clean"
+        );
+        assert!(
+            step_puts.lock().unwrap().is_empty(),
+            "no terminal completed"
+        );
+    }
+
+    /// A request that arrives after the merge is refused on the record,
+    /// once, and does not claim the pass — the landed train goes on to
+    /// deploy and converge.
+    #[tokio::test]
+    async fn a_cancel_request_on_a_merged_train_is_stamped_refused() {
+        let mut train = requested_open_train();
+        train["steps"][3]["status"] = json!("completed");
+        train["steps"][3]["metadata"]["merge_ref"] = json!("abc1234def56");
+        let (jobs, job_puts, step_puts) =
+            cancel_request_jobs_api(train.clone(), struck_boarded_car()).await;
+        let (c, close_called) = cancel_request_conductor(jobs, true);
+
+        assert!(!c.honour_cancel_request(&train, "t1", Some("MERGED")).await);
+        assert!(!*close_called.lock().unwrap(), "nothing closed");
+        assert!(
+            step_puts.lock().unwrap().is_empty(),
+            "no terminal completed"
+        );
+        let puts = job_puts.lock().unwrap();
+        assert_eq!(puts.len(), 1, "one stamp on the train, nothing on the car");
+        let (id, body) = &puts[0];
+        assert_eq!(id, "t1");
+        assert_eq!(
+            body["metadata"]["cancel_refused"],
+            json!("already merged at abc1234def56")
         );
     }
 

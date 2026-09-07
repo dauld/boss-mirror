@@ -25,6 +25,13 @@
 //!   successors discriminate on its outcome), every value of the
 //!   discriminating enum is handled by some successor, or a wildcard
 //!   fallback covers the open-ended case.
+//! - **Phase 6 — a terminal cannot fire on create.** A terminal gated
+//!   on a job-metadata MARKER must read false while that marker is
+//!   absent — otherwise the dispatcher's complete-on-ready rule closes
+//!   the Job at that outcome the instant it opens. Catches the
+//!   `job.metadata.x != ""` / `NOT job.metadata.x` footgun over an
+//!   `Absent` field that auto-superseded `incident-post-mortem` packets
+//!   on create (cb9661fe).
 //!
 //! Runs at author time (`POST /api/workflows/_validate`), publish
 //! time (every registry path that can set a row ACTIVE — see
@@ -34,7 +41,7 @@
 //! exactly how the 2026-08-13 outage happened — `_validate` could
 //! name the problem the whole time, and publish never asked it.
 
-use crate::registry::{StepSpec, WorkflowSpec, predicate_step_refs};
+use crate::registry::{StepSpec, WorkflowSpec, predicate_refs_job_metadata, predicate_step_refs};
 use crate::step_registry::StepRegistry;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -80,6 +87,8 @@ pub fn validate_workflow(spec: &WorkflowSpec, registry: &StepRegistry) -> Vec<Wo
     }
     // Phase 5 — a human decision point must leave a record.
     check_decisions_leave_a_record(spec, registry, &mut errs);
+    // Phase 6 — a job-metadata-gated terminal must hold on create.
+    check_terminals_hold_on_create(spec, &mut errs);
     errs
 }
 
@@ -773,6 +782,100 @@ fn eval_pred(src: &str, payload: &Value) -> Option<bool> {
         helpers: &boss_expr::NoHelpers,
     };
     boss_expr::eval(&expr, &ctx).ok()?.as_bool()
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 — a job-metadata-gated terminal must hold on create
+// ---------------------------------------------------------------------------
+
+/// A terminal that is READY the instant the Job opens is completed by
+/// the dispatcher's complete-on-ready rule before any step can be
+/// filled — the Job closes at that outcome on create. That is fine for
+/// a terminal gated on real work (its step dependencies are not done
+/// yet), but a terminal gated on a JOB-METADATA MARKER exists precisely
+/// to WAIT until a person or agent sets the marker; if it is ready while
+/// the marker is absent, the gate is a no-op.
+///
+/// The footgun is `job.metadata.x != ""` / `!= "y"` / `NOT
+/// job.metadata.x`. A missing path resolves to `Absent`, which is
+/// UNEQUAL to every literal and FALSE in boolean position (boss-expr,
+/// design 7b756357) — so each of those reads TRUE over an absent
+/// marker. `incident-post-mortem` v1 shipped `superseded_by != ""` on
+/// its `superseded` terminal and auto-superseded every packet the
+/// instant it opened, before any step could be filled (cb9661fe,
+/// reproduced live 2026-09-07). It is the same shape the `abandoned`,
+/// `cancelled` and `proven` terminals were each hand-fixed against
+/// (registry.rs) — now caught for every workflow, at the author-time
+/// dry run and the publish gate, so no new version can ship it.
+///
+/// Scoped to terminals that reference `job.metadata`: one gated purely
+/// on step completions holds on its own here (its steps are not done at
+/// create), and a `result != "ok"` failure branch reads a step's OWN
+/// required-at-done metadata, not the Job's — neither is a broken
+/// marker gate.
+fn check_terminals_hold_on_create(spec: &WorkflowSpec, errs: &mut Vec<WorkflowLintError>) {
+    let payload = synth_fresh_job_payload(spec);
+    for step in spec.steps.iter().filter(|s| s.terminal.is_some()) {
+        if !predicate_refs_job_metadata(&step.ready_when) {
+            continue;
+        }
+        if eval_pred(&step.ready_when, &payload) == Some(true) {
+            errs.push(err(
+                spec,
+                &step.title,
+                format!(
+                    "is a terminal gated on a job-metadata marker that is READY on a \
+                     freshly-created Job (ready_when = `{}`): the marker is absent at create, \
+                     yet the predicate reads true, so the dispatcher's complete-on-ready rule \
+                     closes the Job at this outcome before any step is filled. A missing \
+                     metadata path is `Absent` — unequal to every literal and false in \
+                     boolean position — so `!= \"\"`, `!= \"x\"` and `NOT job.metadata.x` all \
+                     read true when the marker is unset. Test a present, non-empty marker \
+                     with `job.metadata.<field> > \"\"`, or an exact value with `= \"<value>\"`; \
+                     both read false when the marker is absent, so the terminal waits until it \
+                     is set.",
+                    step.ready_when
+                ),
+            ));
+        }
+    }
+}
+
+/// A freshly-created Job as the dispatcher first reconciles it: trigger
+/// steps are `Completed` at materialization (they describe a
+/// job-creation condition and have no work of their own), every other
+/// step is still pending, and `job.metadata` is empty — a Job opened
+/// with no metadata is the minimal case the gate must survive. Each
+/// step's metadata carries its `metadata_defaults` (stamped at
+/// materialization, present even while pending) plus, on the done
+/// triggers, its declared fields as null, mirroring what a materialized
+/// step actually looks like so a predicate evaluates here as it does at
+/// run time.
+fn synth_fresh_job_payload(spec: &WorkflowSpec) -> Value {
+    let mut steps = serde_json::Map::new();
+    for s in &spec.steps {
+        let done = s.ready_when.trim() == "true";
+        let mut metadata = serde_json::Map::new();
+        if let Value::Object(defaults) = &s.metadata_defaults {
+            for (k, v) in defaults {
+                metadata.insert(k.clone(), v.clone());
+            }
+        }
+        if done {
+            for f in s.fields.iter().map(|f| f.name.to_string()) {
+                metadata.entry(f).or_insert(Value::Null);
+            }
+        }
+        steps.insert(
+            s.title.clone(),
+            serde_json::json!({ "done": done, "metadata": Value::Object(metadata) }),
+        );
+    }
+    serde_json::json!({
+        "subject": {},
+        "job": { "metadata": {} },
+        "steps": Value::Object(steps),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1640,6 +1743,144 @@ mod tests {
                 .iter()
                 .all(|e| e.step != "approve"),
             "this phase judges human decision points only"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 6 — a job-metadata-gated terminal must not fire on create.
+    // -----------------------------------------------------------------
+
+    /// A retrospective/incident shape: a trigger, an analysis step, a
+    /// happy terminal, and a `superseded` terminal gated on a
+    /// job-metadata marker. The marker's whole job is to HOLD the
+    /// terminal until a person sets it.
+    fn incident_shape(superseded_ready_when: &str) -> WorkflowSpec {
+        WorkflowSpec::platform_seed(
+            "incident-post-mortem",
+            "Incident post-mortem",
+            "test",
+            vec!["custom".into()],
+            vec![
+                StepSpec {
+                    title: "recorded".into(),
+                    kind: "trigger".into(),
+                    ready_when: "true".into(),
+                    metadata_defaults: json!({
+                        "trigger_kind": "operator", "trigger_name": "incident-recorded"
+                    }),
+                    ..Default::default()
+                },
+                StepSpec {
+                    title: "analysis".into(),
+                    kind: "task".into(),
+                    ready_when: "steps.recorded.done".into(),
+                    ..Default::default()
+                },
+                StepSpec {
+                    title: "complete".into(),
+                    kind: "outcome".into(),
+                    ready_when: "steps.analysis.done".into(),
+                    metadata_defaults: json!({ "outcome_kind": "completed" }),
+                    terminal: Some(Terminal {
+                        outcome: "completed".into(),
+                    }),
+                    ..Default::default()
+                },
+                StepSpec {
+                    title: "superseded".into(),
+                    kind: "outcome".into(),
+                    ready_when: superseded_ready_when.into(),
+                    metadata_defaults: json!({ "outcome_kind": "aborted" }),
+                    terminal: Some(Terminal {
+                        outcome: "superseded".into(),
+                    }),
+                    ..Default::default()
+                },
+            ],
+        )
+    }
+
+    /// THE BUG (backlog-item cb9661fe, reproduced live 2026-09-07).
+    /// `job.metadata.superseded_by != ""` over an ABSENT field is TRUE:
+    /// a missing path resolves to `Absent`, which is unequal to every
+    /// literal (boss-expr, design 7b756357). The trigger auto-completes
+    /// at materialization, so the terminal is ready the instant the Job
+    /// opens, and the dispatcher's complete-on-ready rule closes it as
+    /// `superseded` before any step can be filled. The marker gate is a
+    /// no-op — exactly the shape the `abandoned`/`cancelled` terminals
+    /// were hand-fixed against, now caught for every workflow.
+    #[test]
+    fn a_metadata_marker_terminal_that_fires_when_the_marker_is_absent_is_refused() {
+        let reg = StepRegistry::v1();
+        let spec = incident_shape("steps.recorded.done AND job.metadata.superseded_by != \"\"");
+        let errs = validate_workflow(&spec, &reg);
+        assert!(
+            errs.iter()
+                .any(|e| e.step == "superseded" && e.reason.contains("freshly-created Job")),
+            "a terminal that fires while its metadata marker is absent must be refused: {errs:?}"
+        );
+    }
+
+    /// A bare `NOT job.metadata.<flag>` over an absent flag is TRUE in
+    /// boolean position — the same footgun in its negated form, and it
+    /// closes the Job on create just as surely.
+    #[test]
+    fn a_bare_not_metadata_terminal_is_refused() {
+        let reg = StepRegistry::v1();
+        let spec = incident_shape("steps.recorded.done AND NOT job.metadata.superseded_by");
+        let errs = validate_workflow(&spec, &reg);
+        assert!(
+            errs.iter()
+                .any(|e| e.step == "superseded" && e.reason.contains("freshly-created Job")),
+            "a `NOT job.metadata.x` terminal fires on create over an absent flag: {errs:?}"
+        );
+    }
+
+    /// THE FIX. `field > ""` is the boss-expr idiom for "present and a
+    /// non-empty string": an absent path orders against nothing (false),
+    /// `"" > ""` is false, and any non-empty string is greater. So the
+    /// marker gate now HOLDS until a person sets `superseded_by`, and
+    /// the workflow is otherwise viable.
+    #[test]
+    fn the_present_and_nonempty_idiom_holds_the_terminal() {
+        let reg = StepRegistry::v1();
+        let spec = incident_shape("steps.recorded.done AND job.metadata.superseded_by > \"\"");
+        let errs = validate_workflow(&spec, &reg);
+        assert!(
+            errs.is_empty(),
+            "`superseded_by > \"\"` holds until the marker is set — no finding: {errs:?}"
+        );
+    }
+
+    /// The `= "true"` marker idiom (used by every `abandoned` terminal)
+    /// already holds correctly: `Absent = "true"` is false, so the
+    /// terminal waits. Phase 6 must not flag it.
+    #[test]
+    fn an_equality_marker_terminal_is_not_flagged() {
+        let reg = StepRegistry::v1();
+        let spec = incident_shape("steps.recorded.done AND job.metadata.superseded_by = \"true\"");
+        assert!(
+            validate_workflow(&spec, &reg)
+                .iter()
+                .all(|e| e.step != "superseded"),
+            "an `= \"value\"` marker gate holds when the marker is absent"
+        );
+    }
+
+    /// A terminal gated only on step completions (no job-metadata
+    /// marker) is out of scope: the minimal viable workflow's terminal
+    /// fires off the trigger by design, and a `result != "ok"` failure
+    /// branch reads a step's OWN required-at-done metadata. Phase 6 keys
+    /// on a job-metadata reference so it touches neither.
+    #[test]
+    fn a_step_gated_terminal_is_not_flagged() {
+        let reg = StepRegistry::v1();
+        let spec = incident_shape("steps.analysis.done");
+        assert!(
+            validate_workflow(&spec, &reg)
+                .iter()
+                .all(|e| e.step != "superseded"),
+            "a terminal with no job-metadata marker is out of Phase 6's scope"
         );
     }
 }
