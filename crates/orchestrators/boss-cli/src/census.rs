@@ -1235,6 +1235,18 @@ pub(crate) fn stranded_gate_runs(
         {
             continue;
         }
+        // A gate-run an operator has marked HOLD is not stranded either —
+        // its green is deliberately waiting: gated on purpose without a
+        // park (a car that must land at a timed restart, or behind
+        // another car). The marker is the reason string, read with the
+        // same shape as `superseded`; orient's STRANDED list, the
+        // stranded-green alarm and the yard read-model all read it.
+        if g.get("metadata")
+            .and_then(|m| m.get("hold"))
+            .is_some_and(|v| !v.is_null() && v.as_bool() != Some(false))
+        {
+            continue;
+        }
         let green = g
             .get("steps")
             .and_then(Value::as_array)
@@ -1408,6 +1420,24 @@ mod tests {
         assert_eq!(
             stranded_gate_runs(&gate_runs, &BTreeSet::new()),
             vec!["fix/kept".to_string(), "fix/live".to_string()]
+        );
+    }
+
+    /// A green marked `hold` is deliberately waiting, not stranded: the
+    /// operator gated it and chose not to park (a car that must land at
+    /// a timed restart, or behind another). Orient must not offer it as
+    /// rescuable, and the alarm rides this same function.
+    #[test]
+    fn a_held_green_is_not_stranded() {
+        let gate_runs = vec![
+            json!({"metadata": {"branch": "fix/held", "hold": "lands at the next restart"},
+                   "steps": [{"metadata": {"verdict": "green"}}]}),
+            json!({"metadata": {"branch": "fix/live"},
+                   "steps": [{"metadata": {"verdict": "green"}}]}),
+        ];
+        assert_eq!(
+            stranded_gate_runs(&gate_runs, &BTreeSet::new()),
+            vec!["fix/live".to_string()]
         );
     }
 

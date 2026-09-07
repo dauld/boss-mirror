@@ -533,13 +533,25 @@ pub struct StrandedGreen {
     pub branch: String,
 }
 
-/// A gate-run is stranded when: it is not marked `superseded`, one of its
-/// steps recorded `verdict == "green"`, its branch is known, and no car
-/// claims that branch.
+/// A gate-run is stranded when: it is not marked `superseded`, it is not
+/// marked `hold`, one of its steps recorded `verdict == "green"`, its
+/// branch is known, and no car claims that branch.
 fn gate_run_is_stranded(gate_run: &Job, steps: &[Step], car_branches: &[String]) -> Option<String> {
     if gate_run
         .metadata
         .get("superseded")
+        .is_some_and(|v| !v.is_null() && v.as_bool() != Some(false))
+    {
+        return None;
+    }
+    // A gate-run an operator has marked `hold` is not stranded either —
+    // its green is deliberately waiting: gated on purpose without a park
+    // (a car that must land at a timed restart, or behind another car).
+    // The marker is the reason string, read with the same shape as
+    // `superseded`.
+    if gate_run
+        .metadata
+        .get("hold")
         .is_some_and(|v| !v.is_null() && v.as_bool() != Some(false))
     {
         return None;
@@ -1576,6 +1588,25 @@ mod tests {
         let g = gate_run("feat/x", json!({ "superseded": true }));
         let out = stranded_greens(&[(g, vec![green_step()])], &[]);
         assert!(out.is_empty());
+    }
+
+    /// A green marked `hold` is deliberately waiting, not stranded: the
+    /// operator gated it and chose not to park. Only the unheld green
+    /// beside it is stranded.
+    #[test]
+    fn a_held_green_is_not_stranded() {
+        let held = gate_run("feat/held", json!({ "hold": "lands at the next restart" }));
+        let free = gate_run("feat/free", json!({}));
+        let out = stranded_greens(
+            &[(held, vec![green_step()]), (free, vec![green_step()])],
+            &[],
+        );
+        assert_eq!(
+            out,
+            vec![StrandedGreen {
+                branch: "feat/free".into()
+            }]
+        );
     }
 
     #[test]

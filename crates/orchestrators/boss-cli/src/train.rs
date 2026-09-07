@@ -1360,12 +1360,12 @@ fn freshest_green_age(
 
 /// Which stranded greens are past the threshold AND not already
 /// alarmed — the pure decision the reconcile alarm rides on. Detection
-/// (green + no car + not superseded) is `census::stranded_gate_runs`,
-/// reused verbatim so there is ONE definition of "stranded" (CLAUDE.md
-/// §9a); this only layers the age gate (a just-gated green is not
-/// stranded yet) and the dedup (`already_alarmed` is the branches an
-/// open alarm already names, so a persisting strand is ONE packet, not
-/// one every ten minutes).
+/// (green + no car + not superseded + not held) is
+/// `census::stranded_gate_runs`, reused verbatim so there is ONE
+/// definition of "stranded" (CLAUDE.md §9a); this only layers the age
+/// gate (a just-gated green is not stranded yet) and the dedup
+/// (`already_alarmed` is the branches an open alarm already names, so a
+/// persisting strand is ONE packet, not one every ten minutes).
 pub(crate) fn stranded_greens_to_alarm(
     gate_runs: &[Value],
     car_branches: &BTreeSet<String>,
@@ -11491,6 +11491,29 @@ mod stranded_green_tests {
         )];
         assert!(
             stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, 45).is_empty()
+        );
+    }
+
+    /// A held green is deliberately waiting — census excludes it, so it
+    /// never alarms; the unheld green beside it, past threshold, still
+    /// does.
+    #[test]
+    fn a_held_green_is_not_selected() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 7, 12, 0, 0).unwrap();
+        let runs = [
+            green_run(
+                "gr-7",
+                "fix/held",
+                "2026-09-07T10:00:00Z",
+                None,
+                json!({"hold": "lands at the next restart"}),
+            ),
+            green_run("gr-8", "fix/free", "2026-09-07T10:00:00Z", None, json!({})),
+        ];
+        let out = stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, 45);
+        assert_eq!(
+            out.iter().map(|s| s.branch.as_str()).collect::<Vec<_>>(),
+            vec!["fix/free"]
         );
     }
 
