@@ -2127,6 +2127,33 @@ pub(crate) fn branch_moved_line(branch: &str, recorded: &str, current: &str) -> 
     )
 }
 
+/// The journal line one train earns when its sweep fails mid-flight —
+/// a boarded car fetched and 404'd (the Job was deleted), a malformed
+/// arrival-report write, a forge blip. Pure and named for the same
+/// reason reconcile's per-train isolation names its train: the sweep
+/// is best-effort per train, and best-effort without a named line is
+/// just silent. An abort here USED to take the whole sweep down on a
+/// `?`, so every later pending train went unswept and its landed
+/// branch piled up on the forge (disk debt).
+pub(crate) fn sweep_train_failed_line(train: &str, err: &anyhow::Error) -> String {
+    format!(
+        "sweep: train {} failed this pass — isolated, other trains continue: {err}",
+        id8(train)
+    )
+}
+
+/// The journal line one un-sweepable branch earns inside an otherwise
+/// healthy train — a forge blip on `branch_head`/`delete_branch`, say.
+/// Isolated per-branch so a single bad branch cannot strand the
+/// train's OTHER landed branches on the forge; the train stays
+/// unstamped so the branch is revisited next pass rather than leaked.
+pub(crate) fn sweep_branch_failed_line(branch: &str, car: &str, err: &anyhow::Error) -> String {
+    format!(
+        "sweep: branch {branch} (car {}) failed — isolated, other branches continue: {err}",
+        id8(car)
+    )
+}
+
 /// A train's sweep is settled once every boarded car has reached a
 /// terminal status — each branch is then deleted, deliberately kept
 /// (main / a still-open car's claim), or the car never landed and
@@ -5916,68 +5943,109 @@ impl Conductor {
         // live car's claim beats any landed car's deletion.
         let open_branches = self.open_car_branches().await?;
         for t in pending {
-            let tid = job_id(t)?;
-            let boarded: Vec<String> = t
-                .get("metadata")
-                .and_then(|m| m.get("boarded_jobs"))
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let mut cars = Vec::with_capacity(boarded.len());
-            for cid in &boarded {
-                cars.push(self.get_job(cid).await?);
-            }
-            // The full record, once per unswept train: the arrival
-            // report and the branch cleanup both read its steps,
-            // which the list rows do not carry.
-            let train = self.get_job(tid).await?;
-            self.file_arrival_report(&train, &cars).await?;
-            self.clean_arrived_train_branch(&train).await;
-            for (branch, car) in deletable_branches(&cars, &open_branches) {
-                // The job record proved the CONTENT landed; the head
-                // guard proves the branch still holds only that
-                // content. Both, or the branch stays (car 23923b40).
-                let recorded = cars
-                    .iter()
-                    .find(|c| c.get("id").and_then(Value::as_str) == Some(car.as_str()))
-                    .and_then(boarded_head)
-                    .map(str::to_string);
-                let current = self.forge.branch_head(&branch).await?;
-                let guard = sweep_guard(recorded.as_deref(), current.as_deref());
-                // Verdicts that keep a branch narrate themselves, and
-                // a branch already off the forge narrates nothing.
-                if let Some(note) = sweep_note(&guard, &branch, &car) {
-                    log(note);
+            // PER-TRAIN ISOLATION (mirrors reconcile's, 2026-09-06).
+            // The sweep is housekeeping and its CALLER already keeps the
+            // reconcile green — but the sweep had no per-item isolation
+            // of its own, so one persistent failure (a boarded car Job
+            // deleted → 404 at get_job, a malformed arrival-report
+            // PATCH, a forge blip on branch_head/delete_branch) aborted
+            // the WHOLE sweep on a `?` every pass. Every LATER pending
+            // train then went unswept and its landed `train/*` and car
+            // branches accumulated on the forge — the recurring
+            // forge-disk fill. Each train now runs in its own fallible
+            // scope: a sick train costs itself one pass, not the fleet.
+            let t_id = t.get("id").and_then(Value::as_str).unwrap_or("?");
+            let outcome: Result<()> = async {
+                let tid = job_id(t)?;
+                let boarded: Vec<String> = t
+                    .get("metadata")
+                    .and_then(|m| m.get("boarded_jobs"))
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut cars = Vec::with_capacity(boarded.len());
+                for cid in &boarded {
+                    cars.push(self.get_job(cid).await?);
                 }
-                if guard == SweepGuard::Delete {
-                    if self.cfg.dry {
-                        log(format!(
-                            "DRY: would delete branch {branch} (car {} landed)",
-                            id8(&car)
-                        ));
-                    } else if self.forge.delete_branch(&branch).await? {
-                        log(format!(
-                            "deleted branch {branch} (car {} landed)",
-                            id8(&car)
-                        ));
-                    } else {
-                        // It existed a moment ago — something else
-                        // swept it between the two calls. Rare, and
-                        // worth saying so it is not read as our doing.
-                        log(format!(
-                            "branch {branch} already gone (car {} landed)",
-                            id8(&car)
-                        ));
+                // The full record, once per unswept train: the arrival
+                // report and the branch cleanup both read its steps,
+                // which the list rows do not carry.
+                let train = self.get_job(tid).await?;
+                self.file_arrival_report(&train, &cars).await?;
+                self.clean_arrived_train_branch(&train).await;
+                // PER-BRANCH ISOLATION. One un-sweepable branch must not
+                // strand the train's OTHER landed branches on the forge:
+                // a `?` here would abort this train and leave its clean
+                // siblings undeleted (disk debt) until the failing one
+                // healed. A branch that failed also leaves the train
+                // UNSTAMPED below, so it is revisited next pass rather
+                // than marked swept with the branch leaked.
+                let mut branch_failures = 0usize;
+                for (branch, car) in deletable_branches(&cars, &open_branches) {
+                    let branch_outcome: Result<()> = async {
+                        // The job record proved the CONTENT landed; the head
+                        // guard proves the branch still holds only that
+                        // content. Both, or the branch stays (car 23923b40).
+                        let recorded = cars
+                            .iter()
+                            .find(|c| c.get("id").and_then(Value::as_str) == Some(car.as_str()))
+                            .and_then(boarded_head)
+                            .map(str::to_string);
+                        let current = self.forge.branch_head(&branch).await?;
+                        let guard = sweep_guard(recorded.as_deref(), current.as_deref());
+                        // Verdicts that keep a branch narrate themselves, and
+                        // a branch already off the forge narrates nothing.
+                        if let Some(note) = sweep_note(&guard, &branch, &car) {
+                            log(note);
+                        }
+                        if guard == SweepGuard::Delete {
+                            if self.cfg.dry {
+                                log(format!(
+                                    "DRY: would delete branch {branch} (car {} landed)",
+                                    id8(&car)
+                                ));
+                            } else if self.forge.delete_branch(&branch).await? {
+                                log(format!(
+                                    "deleted branch {branch} (car {} landed)",
+                                    id8(&car)
+                                ));
+                            } else {
+                                // It existed a moment ago — something else
+                                // swept it between the two calls. Rare, and
+                                // worth saying so it is not read as our doing.
+                                log(format!(
+                                    "branch {branch} already gone (car {} landed)",
+                                    id8(&car)
+                                ));
+                            }
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    if let Err(e) = branch_outcome {
+                        branch_failures += 1;
+                        log(sweep_branch_failed_line(&branch, &car, &e));
                     }
                 }
+                // Stamp swept only when EVERY branch was handled: a
+                // branch we could not sweep this pass must be revisited,
+                // and the stamp is what drops the train off the pending
+                // list. Stamping over an un-swept branch leaks it onto
+                // the forge forever — the very debt this isolation
+                // exists to stop.
+                if branch_failures == 0 && sweep_settled(&cars) {
+                    self.merge_job_metadata(tid, vec![("branches_swept", json!("true"))])
+                        .await?;
+                }
+                Ok(())
             }
-            if sweep_settled(&cars) {
-                self.merge_job_metadata(tid, vec![("branches_swept", json!("true"))])
-                    .await?;
+            .await;
+            if let Err(e) = outcome {
+                log(sweep_train_failed_line(t_id, &e));
             }
         }
         Ok(())
@@ -10872,6 +10940,207 @@ mod tests {
         assert!(
             w.contains(&("c2".to_string(), "meta".to_string())),
             "car 2's close marker lands on the retry"
+        );
+    }
+
+    /// The forge as a call recorder for the WHOLE sweep: `delete_branch`
+    /// notes the branch, `branch_head` answers a fixed head (so the
+    /// guard reads `Delete`), everything else is unreachable. The seam
+    /// the sweep's per-branch isolation is proven through.
+    struct SweepForge {
+        deleted: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        head: String,
+    }
+    #[async_trait::async_trait]
+    impl Forge for SweepForge {
+        async fn pr_info(&self, _url: &str) -> Result<Value> {
+            bail!("not exercised")
+        }
+        async fn pr_create(
+            &self,
+            _repo: &str,
+            _head_branch: &str,
+            _title: &str,
+            _body: &str,
+        ) -> Result<String> {
+            bail!("not exercised")
+        }
+        async fn merge(&self, _url: &str) -> Result<()> {
+            bail!("not exercised")
+        }
+        async fn close_pr(&self, _url: &str) -> Result<()> {
+            bail!("not exercised")
+        }
+        async fn delete_branch(&self, branch: &str) -> Result<bool> {
+            self.deleted.lock().unwrap().push(branch.to_string());
+            Ok(true)
+        }
+        async fn branch_head(&self, _branch: &str) -> Result<Option<String>> {
+            Ok(Some(self.head.clone()))
+        }
+        async fn cancel_ci_runs(&self, _pr_index: &str, _head_sha: &str) -> Result<usize> {
+            bail!("not exercised")
+        }
+    }
+
+    /// THE FLEET-LEVEL ISOLATION, end to end. Two arrived trains are
+    /// pending a sweep; train A's arrival-report write (a PATCH to the
+    /// jobs API) returns 500 every pass — the exact shape of a boarded
+    /// car deleted (404), a malformed report, or a forge blip. Before
+    /// the fix, the `?` on that write aborted the WHOLE sweep, so every
+    /// LATER pending train went unswept and its landed branch
+    /// accumulated on the forge (recurring disk debt). The sweep is now
+    /// best-effort per train: A is isolated and B is still swept.
+    ///
+    /// Ordered A-then-B deliberately — A is processed first, so an
+    /// abort takes B down with it under the old code. The assertion is
+    /// simply that B's branch WAS deleted.
+    #[tokio::test]
+    async fn one_trains_sweep_failing_does_not_block_the_next_train() {
+        use axum::extract::{Path, RawQuery};
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::get;
+        use axum::{Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        // A closed (arrived) train, `arrived` completed, one boarded
+        // car — the shape the sweep filters in as pending.
+        let train = |tid: &str| {
+            json!({
+                "id": tid, "kind": "pr-train", "status": "closed",
+                "metadata": { "boarded_jobs": [format!("car-{tid}")] },
+                "steps": [
+                    {"id":"s-arr","spec_slug":"arrived","title":"Train arrived","status":"completed","metadata":{}}
+                ]
+            })
+        };
+        // A landed car: closed + merged, its branch and boarded head on
+        // record, so `deletable_branches` yields it and the guard reads
+        // Delete.
+        let car = |tid: &str, branch: &str| {
+            json!({
+                "id": format!("car-{tid}"), "kind": "ship-a-change", "status": "closed",
+                "metadata": { "train": tid, "branch": branch, "outcome": "merged", "boarded_head": HEAD },
+                "steps": []
+            })
+        };
+
+        let train_a = train("tA");
+        let train_b = train("tB");
+        let car_a = car("tA", "fix/a");
+        let car_b = car("tB", "fix/b");
+
+        // A-then-B: the failing train is swept first, so an all-or-
+        // nothing abort strands B.
+        let closed_list = json!({ "data": [train_a.clone(), train_b.clone()], "total": 2 });
+
+        let by_id: std::collections::HashMap<String, Value> = [
+            ("tA".to_string(), train_a),
+            ("tB".to_string(), train_b),
+            ("car-tA".to_string(), car_a),
+            ("car-tB".to_string(), car_b),
+        ]
+        .into_iter()
+        .collect();
+        let by_id = Arc::new(by_id);
+
+        let list_route = closed_list.clone();
+        let by_id_get = by_id.clone();
+        let app = Router::new()
+            .route(
+                "/api/jobs",
+                get(move |RawQuery(q): RawQuery| {
+                    let list = list_route.clone();
+                    async move {
+                        let q = q.unwrap_or_default();
+                        // pr-train closed → the pending trains; the open
+                        // ship-a-change list (open_car_branches) → none.
+                        if q.contains("pr-train") {
+                            Json(list)
+                        } else {
+                            Json(json!({ "data": [], "total": 0 }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/jobs/{id}",
+                get(move |Path(id): Path<String>| {
+                    let by_id = by_id_get.clone();
+                    async move { Json(by_id.get(&id).cloned().unwrap_or(json!({}))) }
+                })
+                .put(|Path(_id): Path<String>, _b: Json<Value>| async move { Json(json!({})) }),
+            )
+            .route(
+                "/api/jobs/{id}/metadata",
+                axum::routing::patch(|Path(id): Path<String>, _b: Json<Value>| async move {
+                    // Train A's arrival report cannot be written — the
+                    // persistent per-train failure this test isolates.
+                    if id == "tA" {
+                        (StatusCode::INTERNAL_SERVER_ERROR, "boom").into_response()
+                    } else {
+                        Json(json!({})).into_response()
+                    }
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let deleted = Arc::new(Mutex::new(Vec::new()));
+        // github forge_kind: the train's OWN branch cleanup is a no-op
+        // (the repo auto-deletes merged PR heads), keeping the test on
+        // the CAR-branch sweep the isolation guards.
+        let mut c = cleanup_conductor(
+            "github",
+            Box::new(SweepForge {
+                deleted: deleted.clone(),
+                head: HEAD.to_string(),
+            }),
+        );
+        c.cfg.jobs = format!("http://{addr}");
+
+        // The sweep stays green — housekeeping is best-effort — and B's
+        // branch is deleted despite A failing.
+        c.sweep_landed_branches().await.unwrap();
+
+        let deleted = deleted.lock().unwrap().clone();
+        assert!(
+            deleted.contains(&"fix/b".to_string()),
+            "train B's landed branch went unswept because train A failed first — \
+             one bad train stranded the fleet (disk debt): {deleted:?}"
+        );
+        assert!(
+            !deleted.contains(&"fix/a".to_string()),
+            "train A aborted before its branch loop, so its branch is untouched \
+             this pass and retried next: {deleted:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_train_sweep_names_the_train() {
+        let line = sweep_train_failed_line("tA-1234567890", &anyhow!("HTTP 500"));
+        assert!(line.contains("tA-12345"), "must name the train: {line}");
+        assert!(line.contains("HTTP 500"), "must carry the cause: {line}");
+        assert!(
+            line.contains("other trains continue"),
+            "must say the fleet is not blocked: {line}"
+        );
+    }
+
+    #[test]
+    fn a_failed_branch_sweep_names_the_branch() {
+        let line = sweep_branch_failed_line("fix/x", "car-abcdef1234", &anyhow!("forge blip"));
+        assert!(line.contains("fix/x"), "must name the branch: {line}");
+        assert!(line.contains("car-abcd"), "must name the car: {line}");
+        assert!(line.contains("forge blip"), "must carry the cause: {line}");
+        assert!(
+            line.contains("other branches continue"),
+            "must say the train's other branches are not blocked: {line}"
         );
     }
 }
