@@ -96,17 +96,21 @@ export function factoryStations(
       tone:
         a.state === 'gated-red'
           ? ('red' as const)
-          : a.state === 'gated-green'
+          : a.state === 'gated-green' || a.state === 'held'
             ? ('green' as const)
             : ('queued' as const),
       isTrain: false,
       cars: 0,
+      // A held car is gated green (the tone) with its brake on (the
+      // detail) — never the "gated green" wording of a stranded one.
       detail:
         a.state === 'publishing'
           ? 'publishing'
           : a.state === 'gated-red'
             ? 'gate red — rework'
-            : 'gated green',
+            : a.state === 'held'
+              ? `held — ${a.hold ?? 'no reason recorded'}`
+              : 'gated green',
       packetId: a.id,
     }));
 

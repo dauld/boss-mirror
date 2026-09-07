@@ -210,8 +210,10 @@ export type YardState = Readonly<{
   approach: readonly ApproachRow[];
 }>;
 
-/** Where an inbound branch stands, ordered by distance from the dock. */
-export type ApproachState = 'publishing' | 'gated-red' | 'gated-green';
+/** Where an inbound branch stands, ordered by distance from the dock.
+ *  `held` is a gated-green car an operator is deliberately NOT parking
+ *  (`metadata.hold` on the gate-run) — brake on, not forgotten. */
+export type ApproachState = 'publishing' | 'gated-red' | 'gated-green' | 'held';
 
 export type ApproachRow = Readonly<{
   /** The packet behind the row — a publish-request or gate-run Job. */
@@ -223,6 +225,9 @@ export type ApproachRow = Readonly<{
   opened_on: string;
   /** Requester on publish rows; nothing yet on gate rows. */
   note: string | null;
+  /** The operator's reason for the hold — non-null exactly when `state`
+   *  is `held`; a stock phrase when the marker carried no reason. */
+  hold: string | null;
 }>;
 
 /** A closed gate older than this is archaeology, not approach. An OPEN
@@ -277,11 +282,22 @@ export function approach(
         state: 'publishing' as const,
         opened_on: j.opened_on,
         note: md.requested_by ?? null,
+        hold: null,
       };
     });
 
   const red: ApproachRow[] = [];
   const green: ApproachRow[] = [];
+  // HELD: a green the operator gated and deliberately did not park —
+  // waiting on another change, or on a David-timed restart. Without
+  // the marker a hold is indistinguishable from a stranded green, and a
+  // brake that looks like a gap gets "rescued" onto a train.
+  const held: ApproachRow[] = [];
+  const holdOf = (g: JobLite): string | null => {
+    const v = (g.metadata as { hold?: unknown } | null)?.hold;
+    if (typeof v === 'string') return v.trim() !== '' ? v : null;
+    return v === true ? 'no reason recorded' : null;
+  };
   // A live gate outranks every same-day verdict for its branch: server
   // order within a day is NOT insertion order (measured 2026-08-31 —
   // two refused-launch packets sorted above the gates that ran), and
@@ -334,6 +350,7 @@ export function approach(
       sha: md.sha ?? null,
       opened_on: g.opened_on,
       note: null,
+      hold: null,
     };
     if (g.status === 'open') {
       // A gate mid-run is the GATES view's row now (the server-computed
@@ -360,14 +377,24 @@ export function approach(
     // The verdict is data on whichever step recorded it, not a slug
     // this lens hardcodes (CLAUDE.md §9: data-keyed, not kind-keyed).
     if (verdict === 'green') {
-      if (!carClaimed.has(branch)) green.push({ ...row, state: 'gated-green' });
+      // A branch a car claims is the yard's row already. Otherwise a
+      // hold reads HELD; only an unheld green is the stranded gap.
+      const hold = holdOf(g);
+      if (carClaimed.has(branch)) {
+        // in the yard proper — the dock or a train reports it
+      } else if (hold !== null) {
+        held.push({ ...row, state: 'held', hold });
+      } else {
+        green.push({ ...row, state: 'gated-green' });
+      }
     } else if (verdict === 'failed' || verdict === 'lost') {
       // `lost` reads as red on purpose: the environment died before
       // saying anything, and "we don't know" must not read as fine.
       red.push({ ...row, state: 'gated-red' });
     }
   }
-  return [...publishing, ...red, ...green];
+  // Held last: a car with its brake on is the furthest from boarding.
+  return [...publishing, ...red, ...green, ...held];
 }
 
 function step(j: WithSteps, slug: string, titleFallback: string): StepLite | null {

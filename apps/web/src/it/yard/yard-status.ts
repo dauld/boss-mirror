@@ -99,6 +99,22 @@ export type PolicyThresholds = Readonly<{
   max_red_trains: number | null;
 }>;
 
+/** The conductor's liveness, read from its own firing record (the Rust
+ *  `ConductorHealth`). `silent` is THE field the board defers to: while
+ *  it is true, every section the conductor writes is last-known-good,
+ *  not current. Every unknown stays null — no firing or no clock is
+ *  "cannot tell", never dressed up as health or alarm. */
+export type ConductorHealth = Readonly<{
+  last_seen: string | null;
+  silent_for_minutes: number | null;
+  expected_every_minutes: number | null;
+  silent: boolean;
+  /** Today this carries the RULE NAME the heartbeat is measured against
+   *  (`train-reconcile`), not a verb — the page labels it "last rule". */
+  last_verb: string | null;
+  last_rc: number | null;
+}>;
+
 export type YardStatus = Readonly<{
   trains: readonly TrainStatus[];
   dock: readonly DockCar[];
@@ -108,6 +124,9 @@ export type YardStatus = Readonly<{
   gates: Gates;
   garage: readonly GaragedCar[];
   policy: PolicyThresholds;
+  /** `null` on a server that predates the reading — rendered as "no
+   *  reading", never as a healthy conductor. */
+  conductor: ConductorHealth | null;
   now: string;
 }>;
 
@@ -239,6 +258,22 @@ function parseGaragedCar(raw: unknown): GaragedCar {
   };
 }
 
+/** The conductor block. Absent on an older server → `null` (the page
+ *  says "no reading"); present with unknowns → nulls, never defaults. */
+function parseConductor(raw: unknown): ConductorHealth | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const o = raw as Record<string, unknown>;
+  return {
+    last_seen: typeof o.last_seen === 'string' ? o.last_seen : null,
+    silent_for_minutes: typeof o.silent_for_minutes === 'number' ? o.silent_for_minutes : null,
+    expected_every_minutes:
+      typeof o.expected_every_minutes === 'number' ? o.expected_every_minutes : null,
+    silent: o.silent === true,
+    last_verb: typeof o.last_verb === 'string' ? o.last_verb : null,
+    last_rc: typeof o.last_rc === 'number' ? o.last_rc : null,
+  };
+}
+
 export function parseYardStatus(raw: unknown): YardStatus {
   const o = asObject(raw, 'yard status');
   return {
@@ -252,6 +287,7 @@ export function parseYardStatus(raw: unknown): YardStatus {
     gates: parseGates(o.gates),
     garage: Array.isArray(o.garage) ? o.garage.map(parseGaragedCar) : [],
     policy: parsePolicy(o.policy),
+    conductor: parseConductor(o.conductor),
     now: String(o.now ?? ''),
   };
 }
@@ -332,4 +368,75 @@ export function gateSlots(gates: Gates): readonly GateSlot[] {
     const gate = gates.active[i];
     return gate ? ({ kind: 'occupied', gate } as const) : ({ kind: 'empty' } as const);
   });
+}
+
+// ---------------------------------------------------------------------
+// The CONDUCTOR block's readings. Each is a tone + one line, pure, so
+// "what does a silent conductor look like" is a test, not a screenshot.
+// ---------------------------------------------------------------------
+
+export type Reading = Readonly<{ tone: 'ok' | 'warn' | 'err' | 'muted'; text: string }>;
+
+/** Liveness, against the conductor's OWN declared heartbeat. Silence is
+ *  an error; no record is unknown (warn — worth a look, not an outage
+ *  claim); no block at all is an older server, and says so. */
+export function conductorReading(c: ConductorHealth | null): Reading {
+  if (!c) {
+    return {
+      tone: 'muted',
+      text: 'no liveness reading — this server does not report the conductor',
+    };
+  }
+  const every =
+    c.expected_every_minutes !== null ? ` · expects every ${c.expected_every_minutes}m` : '';
+  if (c.silent) {
+    const since =
+      c.silent_for_minutes !== null
+        ? `${c.silent_for_minutes}m since it last fired`
+        : 'past its declared heartbeat';
+    return { tone: 'err', text: `SILENT — ${since}${every}` };
+  }
+  if (c.silent_for_minutes !== null) {
+    return { tone: 'ok', text: `last seen ${c.silent_for_minutes}m ago${every}` };
+  }
+  if (c.last_seen !== null) return { tone: 'muted', text: `last seen ${c.last_seen}${every}` };
+  return { tone: 'warn', text: 'no firing on record — liveness unknown' };
+}
+
+/** The last rule the conductor ran and how that went. A conductor that
+ *  is running but FAILING every pass looks identical to a healthy one
+ *  unless the exit code is on the surface. */
+export function lastRuleReading(c: ConductorHealth | null): Reading {
+  if (!c || c.last_verb === null) return { tone: 'muted', text: 'no rule on record' };
+  if (c.last_rc === null) return { tone: 'muted', text: `${c.last_verb} · rc unknown` };
+  if (c.last_rc === 0) return { tone: 'ok', text: `${c.last_verb} · rc 0` };
+  return { tone: 'err', text: `${c.last_verb} · rc ${c.last_rc} — the last pass failed` };
+}
+
+/** When the next train boards, as the RULE — depth reached, cooldown
+ *  cleared — and never as a time. The board rule is queue-depth
+ *  triggered; it has no next-fire clock, and inventing one is exactly
+ *  the "the board said fine and it was not" the page exists to stop.
+ *  A clock rule beside it is quoted verbatim from the registry row. */
+export function boardsWhen(b: BoardingPredicate): string {
+  const t = b.dock_threshold;
+  if (t === null) return b.summary !== '' ? b.summary : 'no boarding rule configured';
+  const cooldown =
+    b.cooldown_minutes !== null ? `the cooldown (${b.cooldown_minutes}m) clears` : null;
+  const depth = `${b.dock_depth}/${t} parked`;
+  const rule = b.threshold_met
+    ? `threshold met — ${depth}; boards ${cooldown ? `when ${cooldown}` : "on the conductor's next pass"}`
+    : `${depth} — boards when the dock reaches ${t}${cooldown ? ` and ${cooldown}` : ''}`;
+  const clock = b.at_times.length > 0 ? ` · or by the clock at ${b.at_times.join(' / ')} UTC` : '';
+  return rule + clock;
+}
+
+/** Elapsed since an RFC3339 stamp, in the `journeyText` idiom. An absent
+ *  or unparseable stamp is `null` — no number rather than a fabricated
+ *  zero. */
+export function elapsedText(since: string | null | undefined, nowMs: number): string | null {
+  if (!since) return null;
+  const started = Date.parse(since);
+  if (Number.isNaN(started)) return null;
+  return journeyText(Math.max(nowMs - started, 0) / 1000);
 }

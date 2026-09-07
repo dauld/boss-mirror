@@ -64,14 +64,62 @@ export type EstateState = Readonly<{
 }>;
 
 // The dev session door. HARDCODED FALLBACK, and loudly so: the estate
-// registry DECLARES this door (service_instances row `boss-dev-ssh`,
-// port 22, migration 202608310030) but the jobs API serves only
-// /api/estate/nodes|observations|comparisons today — there is no
-// service-instances read endpoint yet. When one lands, this constant
-// dies and the launch block renders from the registry like everything
-// else on the page. Tracked on the estate reader item d471a8ce.
-export const DEV_SSH_URL = 'ssh://root@10.20.0.35';
-export const DEV_SSH_LABEL = 'root@10.20.0.35';
+// registry DECLARES this door — service_instances row `boss-dev-ssh`
+// in migration 202608310030-the-dev-session-has-an-ssh-door.sql:
+// Dropbear in the boss-dev pod, LoadBalancer 10.20.0.35 port 22,
+// key-only, root — but the jobs API serves only
+// /api/estate/nodes|observations|comparisons today (boss-jobs
+// http/mod.rs); there is no service-instances read endpoint. So the
+// row lives twice, and a fact that lives twice gets an equality test:
+// estate.test.ts pins the literal below to that migration, so a drift
+// is a red test, not a dead link. When a read endpoint lands, these
+// constants die and the launch block renders from the registry like
+// everything else on the page. Tracked on the estate reader item
+// d471a8ce.
+export type SshDoor = Readonly<{ user: string; host: string }>;
+export const DEV_SSH_DOOR: SshDoor = { user: 'root', host: '10.20.0.35' };
+export const DEV_SSH_LABEL = `${DEV_SSH_DOOR.user}@${DEV_SSH_DOOR.host}`;
+export const DEV_SSH_URL = `ssh://${DEV_SSH_LABEL}`;
+
+/** A declared node that can carry a jump: the bastion's address is the
+ *  one field the route cannot do without, so the type says so. */
+export type BastionNode = EstateNode & Readonly<{ address: string }>;
+
+/** The live node the registry declares as the bastion (role=bastion —
+ *  boss-gcp, the WireGuard hub, since 202609050510). 10.20.0.35 is a
+ *  LAN address; from outside the VPN the only way to it is through
+ *  this node. Null when none is declared, retired, or address-less:
+ *  the page then renders no route at all, never a broken one. */
+export function bastionOf(nodes: readonly EstateNode[]): BastionNode | null {
+  const isLiveBastion = (n: EstateNode): n is BastionNode =>
+    !n.retired && n.role === 'bastion' && n.address !== null;
+  return nodes.find(isLiveBastion) ?? null;
+}
+
+export type BastionRoutes = Readonly<{
+  /** Open a shell on the bastion. No username: the viewer's ssh config supplies it. */
+  shellUrl: string;
+  /** The second hop, typed on the bastion. */
+  hopCommand: string;
+  /** Both hops in one line, from anywhere. */
+  jumpCommand: string;
+  /** ~/.ssh/config lines that make the primary ssh:// link work from anywhere. */
+  sshConfig: string;
+}>;
+
+/** The three ways through the bastion to the door, spelled verbatim.
+ *  An ssh:// URL cannot express a ProxyJump, so the jump is offered as
+ *  a command and as config rather than as a link. `<you>` is left for
+ *  the viewer: the bastion account is theirs, not the page's. */
+export function bastionRoutes(bastionAddress: string, door: SshDoor = DEV_SSH_DOOR): BastionRoutes {
+  const target = `${door.user}@${door.host}`;
+  return {
+    shellUrl: `ssh://${bastionAddress}`,
+    hopCommand: `ssh ${target}`,
+    jumpCommand: `ssh -J <you>@${bastionAddress} ${target}`,
+    sshConfig: `Host ${door.host}\n  ProxyJump <you>@${bastionAddress}`,
+  };
+}
 
 function asArray(raw: unknown): readonly unknown[] {
   if (Array.isArray(raw)) return raw;

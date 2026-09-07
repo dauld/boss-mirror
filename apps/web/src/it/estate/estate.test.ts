@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import {
+  bastionOf,
+  bastionRoutes,
   comparisonVerdict,
+  DEV_SSH_DOOR,
+  DEV_SSH_LABEL,
   DEV_SSH_URL,
   fetchEstate,
   latestByScope,
@@ -114,7 +119,77 @@ describe('the dev workspace door', () => {
     // The href the page renders. Hardcoded until a service-instances
     // read endpoint exists (see the constant's comment); this pin
     // means a silent change to the door's address fails a test rather
-    // than shipping a dead link.
+    // than shipping a dead link. The literal is the `boss-dev-ssh`
+    // service_instances row of migration 202608310030: LoadBalancer
+    // 10.20.0.35, port 22, root. Change that row and this must go red.
     expect(DEV_SSH_URL).toBe('ssh://root@10.20.0.35');
+    expect(DEV_SSH_LABEL).toBe('root@10.20.0.35');
+    expect(DEV_SSH_DOOR).toEqual({ user: 'root', host: '10.20.0.35' });
+  });
+});
+
+describe('the bastion route', () => {
+  // 10.20.0.35 is a LAN address: the primary link works on the VPN and
+  // is dead from outside, where the only way in is THROUGH the bastion
+  // (boss-gcp, the WireGuard hub). ssh:// cannot carry a ProxyJump, so
+  // the page offers the jump explicitly — sourced from the registry
+  // node with role=bastion, never from a second hardcoded address.
+  const bastion = node({ id: 'boss-gcp', label: 'boss-gcp', address: '34.45.110.40', role: 'bastion', cpu: 4, memory_gb: 15, disk_gb: 48 });
+
+  test('bastionOf picks the live node declared as the bastion', () => {
+    const b = bastionOf(parseNodes([node(), bastion]));
+    expect(b?.id).toBe('boss-gcp');
+    expect(b?.address).toBe('34.45.110.40');
+  });
+
+  test('bastionOf is null when no bastion is declared, when it is retired, or when it has no address', () => {
+    // A missing route renders as nothing, never as ssh://null.
+    expect(bastionOf(parseNodes([node()]))).toBeNull();
+    expect(bastionOf(parseNodes([node(), { ...bastion, retired: true }]))).toBeNull();
+    expect(bastionOf(parseNodes([node(), { ...bastion, address: null }]))).toBeNull();
+    expect(bastionOf([])).toBeNull();
+  });
+
+  test('bastionRoutes spells the three ways through, verbatim', () => {
+    const r = bastionRoutes('34.45.110.40', { user: 'root', host: '10.20.0.35' });
+    // No username baked in: the viewer's ssh config supplies it.
+    expect(r.shellUrl).toBe('ssh://34.45.110.40');
+    expect(r.hopCommand).toBe('ssh root@10.20.0.35');
+    expect(r.jumpCommand).toBe('ssh -J <you>@34.45.110.40 root@10.20.0.35');
+    expect(r.sshConfig).toBe('Host 10.20.0.35\n  ProxyJump <you>@34.45.110.40');
+  });
+
+  test('bastionRoutes defaults to the pinned dev door', () => {
+    expect(bastionRoutes('34.45.110.40')).toEqual(bastionRoutes('34.45.110.40', DEV_SSH_DOOR));
+  });
+});
+
+describe('EstatePage renders the bastion route from the registry', () => {
+  // Source-level pin, the TriageBoard posture: bun test has no Svelte
+  // pass, and the coupling this guards against — a third address typed
+  // into the page — would appear in the source, not in a render.
+  const source = readFileSync(new URL('./EstatePage.svelte', import.meta.url), 'utf8');
+  const code = source
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1');
+
+  test('carries no address of its own — every IP comes from the registry node or the pinned door', () => {
+    expect(code).not.toMatch(/\b\d{1,3}(?:\.\d{1,3}){3}\b/);
+  });
+
+  test('selects the bastion from the nodes read and gates the block on it', () => {
+    expect(code).toMatch(/bastionOf\(/);
+    expect(code).toMatch(/bastionRoutes\(/);
+    // The block exists only inside an {#if} on the derived bastion —
+    // absent bastion, no link, so never a broken one.
+    expect(code).toMatch(/\{#if\s+bastion\b[^}]*\}[\s\S]*?bastion\.address[\s\S]*?\{\/if\}/);
+  });
+
+  test('the primary door is unchanged and the jump link carries no username', () => {
+    expect(code).toMatch(/href=\{DEV_SSH_URL\}/);
+    expect(code).toMatch(/href=\{routes\.shellUrl\}/);
+    expect(code).toMatch(/routes\.jumpCommand/);
+    expect(code).toMatch(/routes\.sshConfig/);
   });
 });

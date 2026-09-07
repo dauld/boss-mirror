@@ -1140,6 +1140,93 @@ describe('approach', () => {
     expect(approach([kept], null, [], NOW).map(r => r.state)).toEqual(['gated-red']);
   });
 
+  // HELD cars. An operator holds a car by gating it without parking;
+  // until the hold marker existed that rendered as a stranded green —
+  // a car someone forgot — and the two must read differently: a hold
+  // is a brake deliberately on, a stranded green is a gap.
+  test('a green gate-run an operator HELD reads held, with its reason — not stranded', () => {
+    const held = gateRun({
+      status: 'closed',
+      metadata: { branch: 'fix/x', sha: 'a'.repeat(40), hold: 'waiting for #240 to land first' },
+      steps: [verdictStep('green')],
+    });
+    expect(approach([held], null, [], NOW).map(r => ({ state: r.state, hold: r.hold }))).toEqual([
+      { state: 'held', hold: 'waiting for #240 to land first' },
+    ]);
+  });
+
+  test('a green without a hold is unchanged — gated-green, hold null', () => {
+    const rows = approach(
+      [gateRun({ status: 'closed', steps: [verdictStep('green')] })], null, [], NOW,
+    );
+    expect(rows.map(r => ({ state: r.state, hold: r.hold }))).toEqual([
+      { state: 'gated-green', hold: null },
+    ]);
+    // An empty, false or null marker is not a hold.
+    for (const hold of ['', false, null]) {
+      const r = approach(
+        [gateRun({
+          status: 'closed',
+          metadata: { branch: 'fix/x', hold },
+          steps: [verdictStep('green')],
+        })],
+        null, [], NOW,
+      );
+      expect(r.map(x => x.state)).toEqual(['gated-green']);
+    }
+  });
+
+  test('a bare `hold: true` is still a hold — with no reason recorded', () => {
+    const held = gateRun({
+      status: 'closed',
+      metadata: { branch: 'fix/x', hold: true },
+      steps: [verdictStep('green')],
+    });
+    const rows = approach([held], null, [], NOW);
+    expect(rows[0]?.state).toBe('held');
+    expect(rows[0]?.hold).toBe('no reason recorded');
+  });
+
+  test('a hold does not soften a red, and a superseded hold stays folded', () => {
+    // Red is work outstanding whatever the operator wrote; and dead
+    // (superseded) beats waiting (held) — the earlier `continue` wins.
+    const red = gateRun({
+      status: 'closed',
+      metadata: { branch: 'fix/x', hold: 'brake on' },
+      steps: [verdictStep('failed')],
+    });
+    expect(approach([red], null, [], NOW).map(r => r.state)).toEqual(['gated-red']);
+    const dead = gateRun({
+      status: 'closed',
+      metadata: { branch: 'fix/x', hold: 'brake on', superseded: true },
+      steps: [verdictStep('green')],
+    });
+    expect(approach([dead], null, [], NOW)).toEqual([]);
+  });
+
+  test("a held branch a car already claims is the yard's row, not the approach's", () => {
+    const held = gateRun({
+      status: 'closed',
+      metadata: { branch: 'fix/x', hold: 'brake on' },
+      steps: [verdictStep('green')],
+    });
+    expect(approach([held], null, [ship('fix/x')], NOW)).toEqual([]);
+  });
+
+  test('held rows sit behind the greens — furthest from the dock', () => {
+    const green = gateRun({
+      id: 'g-green', status: 'closed',
+      metadata: { branch: 'fix/g' }, steps: [verdictStep('green')],
+    });
+    const held = gateRun({
+      id: 'g-held', status: 'closed',
+      metadata: { branch: 'fix/h', hold: 'brake on' }, steps: [verdictStep('green')],
+    });
+    expect(approach([held, green], null, [], NOW).map(r => r.state)).toEqual([
+      'gated-green', 'held',
+    ]);
+  });
+
   test('a stale closed gate is archaeology, not approach', () => {
     const old = gateRun({
       status: 'closed', opened_on: '2026-08-27', steps: [verdictStep('green')],

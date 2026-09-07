@@ -16,9 +16,16 @@
     type YardState,
     type TrainRow, troubleLabel } from './yard';
   import {
+    blockLabel,
+    boardsWhen,
+    conductorReading,
+    elapsedText,
     fetchYardStatus,
     gateSlots,
     journeyText,
+    lastRuleReading,
+    phaseLabel,
+    type TrainStatus,
     type YardStatus,
   } from './yard-status';
   import { factoryStations, floorIsIdle } from './yard-factory';
@@ -54,6 +61,33 @@
   // Factorio'). A pure mapping; the animation lives in the component.
   const factory = $derived(yard ? factoryStations(yard, slots) : []);
   const factoryIdle = $derived(floorIsIdle(factory));
+
+  // The CONDUCTOR block: the actor that boards the dock, read from its
+  // own firing record (the-board-does-not-lie) — never inferred from
+  // the dock looking full or the trains looking healthy. The boarding
+  // line is the live cadence rule, rendered as a RULE and never a
+  // next-board time (the rule is depth-triggered; it has no clock).
+  // `moving` is the server's own phase / step / block per train in
+  // transit, so a wedged train shows WHERE and WHY beside the actor
+  // that should be moving it.
+  const conductor = $derived(status.kind === 'ready' ? status.data.conductor : null);
+  const liveness = $derived(conductorReading(conductor));
+  const lastRule = $derived(lastRuleReading(conductor));
+  const boardingRule = $derived(status.kind === 'ready' ? boardsWhen(status.data.boarding) : '');
+  const moving = $derived(
+    status.kind === 'ready' ? status.data.trains.filter(t => t.phase !== 'arrived') : [],
+  );
+
+  // Elapsed at the train's current position, from whichever stamp the
+  // record carries: a block's `since`, else the converge start the
+  // board already tracks for the same train. No stamp, no number.
+  function movingFor(t: TrainStatus): string | null {
+    const b = t.block;
+    const since = b && (b.kind === 'deploy-blocked' || b.kind === 'stalled') ? b.since : null;
+    if (since) return elapsedText(since, Date.now());
+    const row = yard?.inFlight.find(r => r.id === t.id) ?? null;
+    return row ? convergingFor(row) : null;
+  }
 
   // The condensed packet panel (David, fc67bed2). The dock rows are a
   // slim projection — no steps, no metadata — so opening a packet
@@ -244,7 +278,8 @@
          The full pre-boarding lifecycle: queued → gating (the slots) →
          green becomes a parked car, RED drops into the garage. Ordered
          by distance from the dock: publishing, gating, red,
-         green-unparked; each row opens its own packet. The gate SLOTS
+         green-unparked, HELD (gated green with the brake deliberately
+         on — not a stranded car); each row opens its own packet. The gate SLOTS
          and the GARAGE come from the server-computed status (David,
          2026-09-03) so capacity is the live policy, not folklore. -->
     {#if yard.approach.length > 0 || gatesReady}
@@ -254,7 +289,10 @@
         <table class="yard-board">
           <tbody>
             {#each yard.approach as a (a.id)}
-              <tr class="yard-approach" ondblclick={() => openPacket(a.id)}>
+              <tr
+                class="yard-approach"
+                class:is-held={a.state === 'held'}
+                ondblclick={() => openPacket(a.id)}>
                 <td class="yard-appr-state" data-state={a.state}>{a.state.replace('-', ' ')}</td>
                 <td>
                   <a
@@ -266,7 +304,13 @@
                     }}>{a.branch}</a>
                 </td>
                 <td class="yard-stamp">{a.sha ? a.sha.slice(0, 8) : '—'}</td>
-                <td class="yard-stamp">{a.note ?? a.opened_on}</td>
+                {#if a.hold !== null}
+                  <!-- The brake and its reason, where the note goes. -->
+                  <td class="yard-stamp yard-hold-note" title={`gated ${a.opened_on} — held, not parked`}
+                    >brake on — {a.hold}</td>
+                {:else}
+                  <td class="yard-stamp">{a.note ?? a.opened_on}</td>
+                {/if}
               </tr>
             {/each}
           </tbody>
@@ -375,6 +419,64 @@
         {#each yard.dock as c (c.id)}
           <PacketCard card={c} size="dock" onOpen={openPacket} />
         {/each}
+      </div>
+    {/if}
+
+    <!-- THE CONDUCTOR: the actor that boards this dock, read from its
+         own firing record. On 2026-09-04 the conductor was dead for two
+         and a half hours while this page drew full docks and healthy
+         trains — absence of a trouble flag rendered as absence of
+         trouble. So this is a STANDING block in the gates/garage idiom:
+         liveness against the conductor's own declared heartbeat, the
+         last rule it ran and its exit code, the boarding predicate from
+         the live cadence rows, and each train in transit at its
+         server-computed step. An older server that sends no reading
+         gets a line that SAYS "no reading". -->
+    {#if status.kind === 'ready'}
+      <div class="yard-gates-head" class:is-silent={conductor?.silent === true}>
+        CONDUCTOR
+        <span class="yard-gates-n">the actor that boards the dock</span>
+      </div>
+      <div class="yard-conductor" class:is-silent={conductor?.silent === true}>
+        <div class="yard-cond-row">
+          <span class="yard-cond-k">liveness</span>
+          <span class="yard-cond-v" data-tone={liveness.tone}>{liveness.text}</span>
+        </div>
+        <div class="yard-cond-row">
+          <!-- "last rule", not "last verb": the field carries the rule
+               name the heartbeat is measured against. -->
+          <span class="yard-cond-k">last rule</span>
+          <span class="yard-cond-v" data-tone={lastRule.tone}>{lastRule.text}</span>
+        </div>
+        <div class="yard-cond-row">
+          <span class="yard-cond-k">boards</span>
+          <span class="yard-cond-v" data-tone="muted" title="the live cadence rule — never a predicted time"
+            >{boardingRule}</span>
+          <!-- HOOK (needs a Rust change; out of scope for this car): when
+               the read-model carries the cooldown REMAINING and the
+               held-because reason (e.g. boarding.cooldown_remaining_minutes,
+               boarding.held_because), render them on this line as
+               "cooldown clears in Nm" / "held — <why>". Until then the
+               line states the rule, and never a time. -->
+        </div>
+        {#each moving as t (t.id)}
+          {@const since = movingFor(t)}
+          <div class="yard-cond-row" class:is-blocked={!!t.block}>
+            <span class="yard-cond-k">moving</span>
+            <span class="yard-cond-v"
+              >{t.title} · {phaseLabel(t.phase)}{t.at_step ? ` · at ${t.at_step}` : ''}</span>
+            {#if t.block}
+              <span class="yard-trouble" title="the block the conductor recorded">{blockLabel(t.block)}</span>
+            {/if}
+            {#if since}<span class="yard-since">for {since}</span>{/if}
+          </div>
+        {/each}
+        {#if moving.length === 0}
+          <div class="yard-cond-row">
+            <span class="yard-cond-k">moving</span>
+            <span class="yard-cond-v" data-tone="muted">no train in transit</span>
+          </div>
+        {/if}
       </div>
     {/if}
 
@@ -617,6 +719,17 @@
   .yard-appr-state[data-state='gated-red'] { color: var(--err, #e2685c); }
   .yard-appr-state[data-state='gated-green'] { color: var(--ok, #4fb98a); }
   .yard-appr-state[data-state='publishing'] { color: var(--static, #7A838C); }
+  /* A HELD car: brake deliberately on. Not the ok-green of a gated
+     green (which reads "ready — forgotten?"), not the warn of a running
+     gate, not the err of a red: a boxed lamp on a dimmed row, with the
+     reason where the note goes. Parked-brake-on, not stuck. */
+  .yard-appr-state[data-state='held'] { border: 1px solid var(--static, #7A838C);
+    padding: 1px 6px; }
+  .yard-approach.is-held td { color: var(--static, #7A838C); }
+  /* The lamp and the reason stay bright on the dimmed row (these
+     outrank the row rule by specificity — keep them so). */
+  .yard-approach.is-held .yard-appr-state,
+  .yard-approach.is-held .yard-hold-note { color: var(--text, #C7CED6); }
   .yard-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
     background: var(--signal, #5FD4A8); margin-right: 8px;
     animation: yard-pulse 1.4s ease-in-out infinite; }
@@ -719,6 +832,27 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
   .yard-garage-check { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px;
     color: var(--static, #7A838C); }
+  /* The conductor: the garage's card + hairline grammar, one reading a
+     row. Readings wear the lamp palette (ok / warn / err / muted). A
+     SILENT conductor turns the head and the border err — while it is
+     silent, every section it writes is last-known-good, not current,
+     and the whole block has to say so. */
+  .yard-gates-head.is-silent { color: var(--err, #e2685c); }
+  .yard-conductor { border: 1px solid var(--hairline, #2A3138);
+    background: var(--card, var(--ink, #12161C)); padding: 4px 0; }
+  .yard-conductor.is-silent { border-color: var(--err, #e2685c); }
+  .yard-cond-row { display: flex; align-items: baseline; gap: 12px; padding: 5px 12px;
+    font-size: 13px; flex-wrap: wrap; }
+  .yard-cond-k { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--static, #7A838C);
+    flex: 0 0 72px; }
+  .yard-cond-v { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px;
+    font-variant-numeric: tabular-nums; color: var(--text, #C7CED6); min-width: 0; }
+  .yard-cond-v[data-tone='ok'] { color: var(--ok, #4fb98a); }
+  .yard-cond-v[data-tone='warn'] { color: var(--warn, #d9a441); }
+  .yard-cond-v[data-tone='err'] { color: var(--err, #e2685c); }
+  .yard-cond-v[data-tone='muted'] { color: var(--static, #7A838C); }
+  .yard-cond-row.is-blocked .yard-cond-v { color: var(--err, #e2685c); }
   .yard-flow { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
     letter-spacing: var(--ls-nav, 0.14em); color: var(--static, #7A838C);
     border-top: 1px solid var(--hairline, #2A3138); margin-top: 28px; padding-top: 12px; }

@@ -83,7 +83,9 @@ No ssh from the pod. Three doors, all read-only:
   about a minute with the output on the packet's `execute` step. Verbs:
   `df`, `uptime`, `timer-list`, `unit-status <unit>`, `journal-tail
   <unit> [n]`, `disk-report` (what is consuming disk — both daemons,
-  Forgejo's data, the checkout), and the mutating verbs, each
+  Forgejo's data, the checkout), `reach <ipv4> <port>` (one TCP
+  connect from this host's vantage — the WireGuard overlay and the
+  LAN the pod cannot route to; nothing sent), and the mutating verbs, each
   authorized by name in `verbs.json`: `reclaim-disk <floor>` (the
   sweep, with a floor), `rollback-to <sha>` (roll deploy/boss to a
   named build, verified Ready), `hold-converge <reason>` and

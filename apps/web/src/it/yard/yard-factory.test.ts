@@ -74,6 +74,20 @@ describe('factoryStations', () => {
     expect(ap.every(w => !w.isTrain)).toBe(true);
   });
 
+  it('a held row is a green wagon whose detail says HELD and why — not "gated green"', () => {
+    // Without its own branch the held state fell through to the
+    // gated-green wording: a brake deliberately on, drawn as a car
+    // someone forgot.
+    const held = {
+      id: 'h1', branch: 'fix/held', sha: null, state: 'held',
+      opened_on: '2026-09-05', note: null, hold: 'waiting on #240',
+    } as never;
+    const s = factoryStations(yardOf({ approach: [held] }), []);
+    const [w] = station(s, 'approach').wagons;
+    expect(w?.tone).toBe('green');
+    expect(w?.detail).toBe('held — waiting on #240');
+  });
+
   it('an occupied gate is a machine that is busy AND a gating wagon', () => {
     const s = factoryStations(yardOf({}), [busySlot('fix/x'), freeSlot, freeSlot]);
     const g = station(s, 'gates');
