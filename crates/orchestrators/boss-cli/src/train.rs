@@ -757,6 +757,58 @@ pub(crate) fn consist_verdict(runs: &[LintRun], files_named: usize) -> ConsistVe
     }
 }
 
+/// Point the clone's `origin/main` at CURRENT forge main before the
+/// consist lints resolve their baseline against it.
+///
+/// THE FALSE POSITIVE THIS CLOSES (2026-09-06). Several cheap lints
+/// (`a-kind-bundle-does-not-tighten.sh`, `migrations-append-only.sh`)
+/// compute their baseline as `git merge-base(<trunk ref>, HEAD)` in
+/// the conductor's OWN clone, where the trunk ref is `origin/main`.
+/// A car merge pulls the car's ancestry — the last-landed main — into
+/// the assembled HEAD, but the clone's `origin/main` ref only advances
+/// on a fetch. When a prior train has landed and this board has not
+/// re-fetched since, that ref lags behind the tree it is being
+/// compared against, so the merge-base falls to a commit BEFORE the
+/// last train's changes and the lint reads those already-landed
+/// changes as if this consist introduced them. Observed: a
+/// `bill-approval.po_id is now required` refusal on a consist whose
+/// `step_types.toml` was byte-identical to main — nobody's car at
+/// fault, the whole train refused, boarding blocked until the next
+/// reconcile-fetch happened to freshen the ref.
+///
+/// BEST-EFFORT, NON-FATAL. A broken fetch must never hold a train (the
+/// rule: conductor loop writes must not be fatal). A failed freshen
+/// (a network blip, a missing remote) LOGS and returns; the lints then
+/// resolve against the ref as it already stands, which is exactly
+/// today's behaviour — so a failed freshen is never worse than not
+/// trying. The failure is logged, not `.ok()`-swallowed, so it stays
+/// visible. `origin` is the remote the conductor's clone fetches in
+/// `ensure_clone` and checks out the train branch from, and the remote
+/// the lints' `origin/main` trunk ref is fed by.
+fn freshen_trunk(clone: &str) {
+    match sh_unchecked(&[
+        "git",
+        "-C",
+        clone,
+        "fetch",
+        "--quiet",
+        "origin",
+        "+refs/heads/main:refs/remotes/origin/main",
+    ]) {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => log(format!(
+            "consist check: could not freshen origin/main (git fetch rc={}) — the lints will \
+             resolve their baseline against the trunk ref as it stands: {}",
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        Err(e) => log(format!(
+            "consist check: could not run the trunk fetch — the lints will resolve their \
+             baseline against the trunk ref as it stands: {e}"
+        )),
+    }
+}
+
 /// Ask every cheap lint in the assembled tree what it thinks, then
 /// decide. Every failure mode of this function itself lands as a
 /// warning on a `Proceed`.
@@ -6164,6 +6216,15 @@ impl Conductor {
         // consist should leave nothing behind on the forge to clean up
         // later (the 62 stale `train/*` branches of ab3fa473 are what
         // that debt looks like when nobody owns it).
+        //
+        // Freshen the trunk ref FIRST. The cheap lints resolve their
+        // baseline as `merge-base(origin/main, HEAD)` in this clone,
+        // and a train that landed since this board's `ensure_clone`
+        // leaves that ref lagging behind the assembled tree — which
+        // reads already-landed changes as this consist's own and
+        // refuses it (2026-09-06). Best-effort: a failed fetch logs
+        // and the lints use the ref as it stands, exactly as before.
+        freshen_trunk(clone);
         let verdict = consist_check(Path::new(clone), &self.policy);
         for w in verdict.warnings() {
             log(format!(
@@ -9734,6 +9795,90 @@ mod tests {
             "no lints is not a reason to hold a train: {verdict:?}"
         );
         assert!(!verdict.warnings().is_empty(), "but it is worth a line");
+    }
+
+    /// THE FALSE POSITIVE THIS FIXES (2026-09-06). The consist lints
+    /// resolve their baseline as `merge-base(origin/main, HEAD)` in the
+    /// conductor's clone; a prior train landing leaves that ref stale
+    /// until a fetch, and the lint then reads already-landed changes as
+    /// this consist's own. `freshen_trunk` points `origin/main` at
+    /// CURRENT forge main before the lints run. Simulate a prior train
+    /// landing (a second clone advances the forge) while this clone's
+    /// `origin/main` lags, then prove one freshen catches it up.
+    #[test]
+    fn freshen_trunk_catches_origin_main_up_to_the_forge() {
+        let (_g, clone) = clone_fixture("freshen-ok");
+        let root = clone.parent().expect("root").to_path_buf();
+        let origin = root.join("origin.git");
+
+        // Whoever landed the last train, standing in: a second clone
+        // advances the forge's main. THIS clone has not fetched since,
+        // so its origin/main is now stale.
+        let other = root.join("other");
+        git_ok(
+            &root,
+            &[
+                "clone",
+                "-q",
+                origin.to_str().expect("utf8"),
+                other.to_str().expect("utf8"),
+            ],
+        );
+        git_ok(&other, &["config", "user.email", "t@example.com"]);
+        git_ok(&other, &["config", "user.name", "t"]);
+        std::fs::write(other.join("LANDED"), "a prior train").expect("write");
+        git_ok(&other, &["add", "-A"]);
+        git_ok(&other, &["commit", "-qm", "prior train landed"]);
+        git_ok(&other, &["push", "-q", "origin", "main"]);
+        let forge_main = rev(&other, "HEAD");
+
+        // Before: the conductor clone's origin/main lags the forge.
+        assert_ne!(
+            rev(&clone, "origin/main"),
+            forge_main,
+            "precondition: origin/main is stale"
+        );
+
+        freshen_trunk(clone.to_str().expect("utf8"));
+
+        assert_eq!(
+            rev(&clone, "origin/main"),
+            forge_main,
+            "one freshen catches origin/main up to current forge main — which is the ref the \
+             consist lints' merge-base baseline is resolved against"
+        );
+    }
+
+    /// BEST-EFFORT, NON-FATAL. A freshen that cannot reach the remote
+    /// must LOG and return, never abort — the consist then proceeds on
+    /// the trunk ref as it stands, exactly today's fallback. A missing
+    /// `origin` remote makes the fetch exit non-zero; `freshen_trunk`
+    /// returning `()` at all is the guarantee (it cannot bail or
+    /// panic), and it must leave the tree untouched.
+    #[test]
+    fn a_failed_freshen_does_not_abort_and_changes_nothing() {
+        let root =
+            std::env::temp_dir().join(format!("boss-freshen-{}-noremote", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _g = Scratch(root.clone());
+        std::fs::create_dir_all(&root).expect("mkdir");
+        git_ok(&root, &["init", "-q", "-b", "main"]);
+        git_ok(&root, &["config", "user.email", "t@example.com"]);
+        git_ok(&root, &["config", "user.name", "t"]);
+        std::fs::write(root.join("README"), "no origin remote here").expect("write");
+        git_ok(&root, &["add", "-A"]);
+        git_ok(&root, &["commit", "-qm", "base"]);
+        let head_before = rev(&root, "HEAD");
+
+        // No `origin` remote: the fetch exits non-zero. freshen_trunk
+        // must swallow it and leave the tree exactly as it was.
+        freshen_trunk(root.to_str().expect("utf8"));
+
+        assert_eq!(
+            rev(&root, "HEAD"),
+            head_before,
+            "a failed freshen holds no train and changes nothing"
+        );
     }
 
     /// Discovery over the REAL `infra/lint/`, which is the claim that
