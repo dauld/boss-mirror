@@ -706,17 +706,32 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
                     "subject_id": subject_id,
                     "completed_on": step.completed_on,
                     "metadata": step.metadata,
-                    // ALWAYS present, defaulting false: the dispatcher
-                    // expr binder resolves flat identifiers only, and an
-                    // absent identifier is a PredicateFailed → Retry →
-                    // dead-letter storm, not a quiet false. The
+                    // `notify_on_done` and `spec_slug` are BOTH hoisted
+                    // to the payload root, and BOTH always present, for
+                    // one reason: the dispatcher expr binder resolves
+                    // flat top-level identifiers only, and an absent
+                    // identifier is a PredicateFailed → Retry →
+                    // dead-letter storm, not a quiet false.
+                    //
+                    // `notify_on_done` defaults false; the
                     // notify-on-step-done-marked rule (migration 106)
-                    // matches this field.
+                    // matches it.
+                    //
+                    // `spec_slug` is the step's stable slug, defaulting
+                    // to "" when the step has none (an ad-hoc step, or
+                    // one materialized before the column existed). It is
+                    // WHICH step of a kind completed: every step of a
+                    // pr-train is `kind = "task"`, so `step.done.task`
+                    // alone cannot tell `merged` from `deployed` from
+                    // `ci`, and a rule that must — `spec_slug ==
+                    // "merged"` — reads it here rather than digging into
+                    // the nested `metadata` the binder cannot reach.
                     "notify_on_done": step
                         .metadata
                         .get("notify_on_done")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false),
+                    "spec_slug": step.spec_slug.clone().unwrap_or_default(),
                 }),
             ));
         }

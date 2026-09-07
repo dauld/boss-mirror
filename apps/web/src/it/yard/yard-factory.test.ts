@@ -110,6 +110,21 @@ describe('factoryStations', () => {
     expect(station(s, 'arrived').wagons[0]?.tone).toBe('arrived');
   });
 
+  it('a converging train is in TRANSIT (deployed, awaiting convergence), not gone', () => {
+    // Deployed but not yet converged: it stays on the belt rather than
+    // dropping off the floor mid-converge.
+    const s = factoryStations(
+      yardOf({ inFlight: [train('t1', 'CONVERGING')] }),
+      [],
+    );
+    const transit = station(s, 'transit').wagons;
+    expect(transit.length).toBe(1);
+    expect(transit[0]?.tone).toBe('moving');
+    expect(transit[0]?.detail).toBe('deployed — converging');
+    // It is not an arrival — the cluster has not converged.
+    expect(station(s, 'arrived').wagons.length).toBe(0);
+  });
+
   it('a troubled train reads blocked wherever it sits', () => {
     const s = factoryStations(
       yardOf({ inFlight: [train('t1', 'BOARDED', { trouble: { kind: 'stalled' } })] }),

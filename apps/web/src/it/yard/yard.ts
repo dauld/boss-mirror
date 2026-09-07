@@ -63,7 +63,7 @@ export type CarRow = Readonly<{
 import { isSim } from '@boss/web-kit/ui/packet-card';
 export { isSim, PROTOCOL_PALETTE, protocolHue } from '@boss/web-kit/ui/packet-card';
 
-export type TrainStatus = 'BOARDING' | 'BOARDED' | 'DEPARTED' | 'ARRIVED';
+export type TrainStatus = 'BOARDING' | 'BOARDED' | 'DEPARTED' | 'CONVERGING' | 'ARRIVED';
 export type Lamp = 'green' | 'failing' | 'pending';
 
 export type TrainRow = Readonly<{
@@ -74,6 +74,10 @@ export type TrainRow = Readonly<{
   lamp: Lamp;
   mergeRef?: string | null;
   deployed?: string | null;
+  /** When the converge wait began (the deploy's instant), so the board
+   *  can show an elapsed "converging for …". Non-null only while the
+   *  train is CONVERGING — deployed, cluster not yet converged. */
+  convergingSince?: string | null;
   cars: readonly CarRow[];
   live: boolean;
   /** Why the train closed — `unknown` for one still in flight. */
@@ -599,12 +603,21 @@ export function arrivalMedians(
   };
 }
 
-export type EtaPhase = 'boarding' | 'ci' | 'merging' | 'deploying' | 'blocked' | 'arrived';
+export type EtaPhase =
+  | 'boarding'
+  | 'ci'
+  | 'merging'
+  | 'deploying'
+  | 'converging'
+  | 'blocked'
+  | 'arrived';
 
 export function etaPhase(status: TrainStatus, lamp: Lamp): EtaPhase {
   switch (status) {
     case 'ARRIVED':
       return 'arrived';
+    case 'CONVERGING':
+      return 'converging';
     case 'DEPARTED':
       return 'deploying';
     case 'BOARDED':
@@ -636,6 +649,14 @@ export function trainEta(j: JobLite, medians: ArrivalMedians, nowMs: number): Et
     const left = Math.max(legS - (nowMs - from) / 1000, 0) + restS;
     return { kind: 'eta', phase, atMs: nowMs + Math.round(left * 1000), basis };
   };
+
+  // Converging renders an elapsed "converging for …", not an ETA: there
+  // is no merge→converge median in `medians`, and inventing a converge
+  // duration would read as a promise. The board reads `convergingSince`
+  // (carried on the row by `toTrainRow`) for the elapsed instead — the
+  // same choice the server model makes (boss-jobs/src/yard.rs, which
+  // surfaces convergence as elapsed time, never a projection).
+  if (phase === 'converging') return phaseOnly;
 
   if (phase === 'ci' || phase === 'merging') {
     if (boardToMergeS === null || mergeToDeployS === null) return phaseOnly;
@@ -709,9 +730,27 @@ export function troubleLabel(t: TrainTrouble): string {
   }
 }
 
+// Mirrors `phase_of` in boss-jobs/src/yard.rs — the authoritative
+// server model. The `deployed` step completes in seconds, but the real
+// ~10-minute wait is the `converged` step ("Cluster converged"). A
+// deployed-but-unconverged train used to read as ARRIVED and vanish
+// from the board mid-converge (2026-09-02); CONVERGING keeps it live.
 export function trainStatus(j: JobLite): TrainStatus {
-  if (done(step(j, 'deployed', 'Deployed to the playground')) || j.status === 'closed')
+  if (j.status === 'closed') return 'ARRIVED';
+  const deployedDone = done(step(j, 'deployed', 'Deployed to the playground'));
+  const converged = step(j, 'converged', 'Cluster converged');
+  const hasConverged = converged !== null;
+  // ARRIVED when the terminal fired, OR a pre-converged workflow version
+  // (no `converged` step — its finish line is `deployed`, so its absence
+  // is arrival, not a stuck train), OR the cluster has converged.
+  if (
+    done(step(j, 'arrived', 'Train arrived')) ||
+    (deployedDone && !hasConverged) ||
+    (hasConverged && done(converged))
+  )
     return 'ARRIVED';
+  // Deployed, but the cluster has not converged on the merge yet.
+  if (deployedDone) return 'CONVERGING';
   if (done(step(j, 'merged', 'Merged into main'))) return 'DEPARTED';
   if (done(step(j, 'pr', 'Open the batched PR'))) return 'BOARDED';
   return 'BOARDING';
@@ -730,7 +769,8 @@ export function splitAtDeparture(trains: readonly TrainRow[]): Readonly<{
   inYard: readonly TrainRow[];
   inTransit: readonly TrainRow[];
 }> {
-  const departed = (t: TrainRow) => t.status === 'DEPARTED' || t.status === 'ARRIVED';
+  const departed = (t: TrainRow) =>
+    t.status === 'DEPARTED' || t.status === 'CONVERGING' || t.status === 'ARRIVED';
   return {
     inYard: trains.filter(t => !departed(t)),
     inTransit: trains.filter(departed),
@@ -758,6 +798,7 @@ export function toTrainRow(
   const pr = step(j, 'pr', 'Open the batched PR');
   const merged = step(j, 'merged', 'Merged into main');
   const deployed = step(j, 'deployed', 'Deployed to the playground');
+  const status = trainStatus(j);
   const cars: CarRow[] = (md.boarded_jobs ?? []).map(id => {
     const car = shipById.get(id);
     const cmd = (car?.metadata ?? {}) as {
@@ -778,10 +819,13 @@ export function toTrainRow(
     id: j.id,
     title: j.title,
     prUrl: ((pr?.metadata ?? {}) as { pr_url?: string }).pr_url ?? null,
-    status: trainStatus(j),
+    status,
     lamp: ciLamp(j),
     mergeRef: ((merged?.metadata ?? {}) as { merge_ref?: string }).merge_ref ?? null,
     deployed: ((deployed?.metadata ?? {}) as { deployed?: string }).deployed ?? null,
+    // Converging began when the deploy landed — the honest start of the
+    // wait. Only carried while the train is actually converging.
+    convergingSince: status === 'CONVERGING' ? stampAt(deployed) : null,
     cars,
     live,
     outcome: trainOutcome(j),

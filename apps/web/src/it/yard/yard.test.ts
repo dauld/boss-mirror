@@ -40,16 +40,41 @@ const s = (slug: string, status: string, metadata: Record<string, unknown> = {})
   ({ spec_slug: slug, title: slug, status, metadata });
 
 describe('trainStatus', () => {
-  test('walks BOARDING → BOARDED → DEPARTED → ARRIVED', () => {
+  test('walks BOARDING → BOARDED → DEPARTED → CONVERGING → ARRIVED', () => {
     expect(trainStatus(train({ steps: [s('pr', 'ready')] }))).toBe('BOARDING');
     expect(trainStatus(train({ steps: [s('pr', 'completed')] }))).toBe('BOARDED');
     expect(
       trainStatus(train({ steps: [s('pr', 'completed'), s('merged', 'completed')] })),
     ).toBe('DEPARTED');
+    // Deployed, but the cluster has not converged on the merge yet — the
+    // real ~10-minute wait. Still live, not arrived.
     expect(
       trainStatus(
-        train({ steps: [s('merged', 'completed'), s('deployed', 'completed')] }),
+        train({
+          steps: [
+            s('merged', 'completed'),
+            s('deployed', 'completed'),
+            s('converged', 'ready'),
+          ],
+        }),
       ),
+    ).toBe('CONVERGING');
+    // Both deployed AND converged done → arrived.
+    expect(
+      trainStatus(
+        train({
+          steps: [
+            s('merged', 'completed'),
+            s('deployed', 'completed'),
+            s('converged', 'completed'),
+          ],
+        }),
+      ),
+    ).toBe('ARRIVED');
+    // A pre-converged train has no `converged` step; its finish line is
+    // `deployed`, so its absence is arrival, not a stuck train.
+    expect(
+      trainStatus(train({ steps: [s('merged', 'completed'), s('deployed', 'completed')] })),
     ).toBe('ARRIVED');
     expect(trainStatus(train({ status: 'closed' }))).toBe('ARRIVED');
   });
@@ -395,6 +420,66 @@ const on = (slug: string, completedOn: string) => ({
   completed_on: completedOn,
 });
 
+// The converge-wait window (2026-09-02): `deployed` completes in
+// seconds, but the cluster takes ~10 minutes to converge on the merge.
+// A train there is deployed=completed, converged=ready, job open. It
+// must stay a LIVE, in-transit train — not vanish as an inert ARRIVED
+// row — until the cluster actually converges.
+describe('a converging train stays live, not arrived', () => {
+  const converging = () =>
+    train({
+      id: 'conv',
+      status: 'open',
+      steps: [
+        at('pr', '2026-09-07T08:00:00Z'),
+        s('ci', 'completed', { result: 'green' }),
+        at('merged', '2026-09-07T08:05:00Z'),
+        at('deployed', '2026-09-07T08:06:00Z'),
+        s('converged', 'ready'),
+      ],
+    });
+
+  test('trainStatus is CONVERGING while the converged step is not done', () => {
+    expect(trainStatus(converging())).toBe('CONVERGING');
+  });
+
+  test('it is in transit, keeps the live dot, and shows the converging phase', () => {
+    const now = Date.parse('2026-09-07T08:10:00Z');
+    const y = assembleYard([converging()], [], null, now);
+    // Open trains are in flight; the split puts it in transit, not the yard.
+    const { inTransit, inYard } = splitAtDeparture(y.inFlight);
+    expect(inTransit.map(t => t.id)).toEqual(['conv']);
+    expect(inYard).toEqual([]);
+    const row = y.inFlight[0]!;
+    expect(row.status).toBe('CONVERGING');
+    // The one live train — it keeps the pulsing dot.
+    expect(row.live).toBe(true);
+    expect(row.eta.phase).toBe('converging');
+    // Not an arrival: it is still open, the cluster has not converged.
+    expect(y.arrivals).toEqual([]);
+    // The converge-start instant (the deploy's) is surfaced for the
+    // elapsed "converging for …" chip.
+    expect(row.convergingSince).toBe('2026-09-07T08:06:00Z');
+  });
+
+  test('once the converged step completes, it is ARRIVED', () => {
+    const arrived = train({
+      id: 'conv',
+      status: 'open',
+      steps: [
+        at('deployed', '2026-09-07T08:06:00Z'),
+        s('converged', 'completed'),
+      ],
+    });
+    expect(trainStatus(arrived)).toBe('ARRIVED');
+    // And it is no longer live.
+    const now = Date.parse('2026-09-07T08:20:00Z');
+    const y = assembleYard([arrived], [], null, now);
+    expect(y.inFlight[0]?.live).toBe(false);
+    expect(y.inFlight[0]?.convergingSince).toBeNull();
+  });
+});
+
 describe('trainOutcome', () => {
   test('reads the terminal outcome the close stamps on the Job', () => {
     expect(trainOutcome(train({ status: 'closed', metadata: { outcome: 'arrived' } }))).toBe(
@@ -696,6 +781,7 @@ describe('etaPhase', () => {
     expect(etaPhase('BOARDED', 'failing')).toBe('blocked');
     expect(etaPhase('DEPARTED', 'green')).toBe('deploying');
     expect(etaPhase('DEPARTED', 'failing')).toBe('deploying');
+    expect(etaPhase('CONVERGING', 'green')).toBe('converging');
     expect(etaPhase('ARRIVED', 'green')).toBe('arrived');
   });
 });
@@ -1115,12 +1201,13 @@ describe('approach — a live gate suppresses its branch\'s stale verdict', () =
 describe('splitAtDeparture', () => {
   const row = (id: string, status: string) =>
     ({ id, status }) as unknown as Parameters<typeof splitAtDeparture>[0][number];
-  test('pre-merge trains are yard work; post-merge is transit', () => {
+  test('pre-merge trains are yard work; post-merge (converging included) is transit', () => {
     const { inYard, inTransit } = splitAtDeparture([
-      row('a', 'BOARDING'), row('b', 'BOARDED'), row('c', 'DEPARTED'), row('d', 'ARRIVED'),
+      row('a', 'BOARDING'), row('b', 'BOARDED'), row('c', 'DEPARTED'),
+      row('e', 'CONVERGING'), row('d', 'ARRIVED'),
     ]);
     expect(inYard.map(t => t.id)).toEqual(['a', 'b']);
-    expect(inTransit.map(t => t.id)).toEqual(['c', 'd']);
+    expect(inTransit.map(t => t.id)).toEqual(['c', 'e', 'd']);
   });
   test('a red-CI train still assembling is YARD — red is status, not a wreck', () => {
     // Placement only: nothing about the lamp changes, only which

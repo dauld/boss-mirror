@@ -18,6 +18,7 @@
   import {
     fetchYardStatus,
     gateSlots,
+    journeyText,
     type YardStatus,
   } from './yard-status';
   import { factoryStations, floorIsIdle } from './yard-factory';
@@ -137,9 +138,21 @@
     ci: 'CI running',
     merging: 'awaiting merge',
     deploying: 'deploying',
+    converging: 'awaiting cluster convergence',
     blocked: 'CI red',
     arrived: 'arrived',
   };
+
+  // The converge wait, as elapsed time — the honest measure when there
+  // is no median to project from (mirrors the yard-status page's idiom).
+  // Recomputed each 10s tick, when `yard` is reassigned and the row
+  // re-renders.
+  function convergingFor(t: TrainRow): string | null {
+    if (!t.convergingSince) return null;
+    const started = Date.parse(t.convergingSince);
+    if (Number.isNaN(started)) return null;
+    return journeyText((Date.now() - started) / 1000);
+  }
 
   // Always `~`: this is a median of what recent trains did, not a
   // promise about this one.
@@ -474,6 +487,16 @@
               {etaText(t.eta)}
             </span>
           {/if}
+          {#if t.status === 'CONVERGING'}
+            {@const since = convergingFor(t)}
+            {#if since}
+              <span
+                class="yard-since"
+                title="deployed — awaiting the cluster to converge on the merge"
+                >converging for {since}</span
+              >
+            {/if}
+          {/if}
           <span class="yard-stamp">{stampOf(t)}</span>
         </div>
         <div class="yard-consist">
@@ -609,6 +632,11 @@
     border: 1px solid var(--hairline, #2A3138); font-variant-numeric: tabular-nums;
     white-space: nowrap; }
   .yard-eta.est { color: var(--text, #C7CED6); }
+  /* The converge wait, as elapsed time — an active signal in the
+     signal-green idiom, not the muted arrival stamp. */
+  .yard-since { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
+    letter-spacing: 0.1em; color: var(--signal, #5FD4A8); font-variant-numeric: tabular-nums;
+    white-space: nowrap; }
   /* The arrivals row is a link to the train's landing report. */
   .yard-arrival { cursor: pointer; }
   .yard-arrival:hover { background: var(--bg, var(--void, #0D1014)); }

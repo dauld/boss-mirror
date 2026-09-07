@@ -170,9 +170,13 @@ export function factoryStations(
       packetId: t.id,
     }));
 
-  // TRANSIT — departed, merged, rolling to the cluster.
+  // TRANSIT — past the merge, rolling to the cluster: merged-and-
+  // deploying (DEPARTED) or deployed-and-awaiting-convergence
+  // (CONVERGING). Both are in motion, so both belong on the belt — a
+  // converging train that dropped off here would vanish mid-converge,
+  // the very disappearance this view exists to avoid.
   const transit: Wagon[] = yard.inFlight
-    .filter(t => t.status === 'DEPARTED')
+    .filter(t => t.status === 'DEPARTED' || t.status === 'CONVERGING')
     .map(t => ({
       id: t.id,
       label: t.title.replace(/^PR train\s*/i, ''),
@@ -181,7 +185,7 @@ export function factoryStations(
       tone: 'moving' as const,
       isTrain: true,
       cars: t.cars.length,
-      detail: t.deployed ? 'deployed — converging' : 'merged — deploying',
+      detail: t.status === 'CONVERGING' ? 'deployed — converging' : 'merged — deploying',
       packetId: t.id,
     }));
 
