@@ -1,16 +1,22 @@
-//! Boot-time quarantine — blast-radius control for the 2026-08-13
-//! outage.
+//! Boot-time viability check — what boot owes the operator when an
+//! ACTIVE Workflow cannot finish.
 //!
-//! Before: ANY active Workflow failing the viability lint made
-//! `boss-jobs-api` refuse to start. One bad registry row therefore
-//! took down jobs, docs, the gateway and the human door on the next
-//! routine pod roll, and recovery needed direct SQL.
+//! 2026-08-13: ANY unviable active Workflow made `boss-jobs-api`
+//! refuse to start; one registry row took down jobs, docs, the gateway
+//! and the human door on the next pod roll. The first fix auto-retired
+//! the row when no Jobs were pinned to it, and refused to start when
+//! open Jobs were.
 //!
-//! After: boot logs the problems at ERROR, retires the offending
-//! row(s) through the registry's own transactional path (so the log
-//! witnesses the retirement), emits one loud `jobs.kind.quarantined`
-//! marker per row, and CONTINUES STARTING — unless retiring would
-//! strand live work, which is the one case still worth refusing for.
+//! 2026-09-07: that fix took the system of record down again. Boot
+//! found `incident-post-mortem` v1 unviable with one open Job pinned,
+//! refused to start, and the pod crash-looped; it found
+//! `publish-to-github` v5 unviable with none pinned and retired a live
+//! protocol — a persisted write nobody asked for.
+//!
+//! The contract now: boot CHECKS and LOGS. It never refuses to start
+//! over a data condition and it never writes. Quarantine is a
+//! deliberate act (retire through the registry), not a boot
+//! side-effect.
 
 use std::sync::Arc;
 
@@ -19,7 +25,7 @@ use boss_jobs::events::{WORKFLOW_QUARANTINED, WORKFLOW_RETIRED};
 use boss_jobs::registry::{
     InMemoryWorkflows, StepSpec, Terminal, WorkflowRegistry, WorkflowSpec, WorkflowStatus,
 };
-use boss_jobs::workflow_quarantine::quarantine_unviable_active_workflows;
+use boss_jobs::workflow_quarantine::check_active_workflows_viable;
 use boss_jobs::{InMemoryJobs, JobsRepository};
 use chrono::NaiveDate;
 
@@ -72,147 +78,140 @@ async fn seed_open_job(jobs: &InMemoryJobs, kind: &str, version: i32, status: Jo
     jobs.create_job(&job).await.unwrap();
 }
 
+/// The row is still active afterwards, and no retirement or
+/// quarantine marker was written anywhere — boot touched nothing.
+async fn assert_untouched(registry: &InMemoryWorkflows, jobs: &InMemoryJobs, kind: &str) {
+    assert_eq!(
+        registry
+            .get_active(kind)
+            .await
+            .unwrap_or_else(|e| panic!("`{kind}` must still be active after boot: {e}"))
+            .status,
+        WorkflowStatus::Active,
+        "`{kind}` must still be active after boot"
+    );
+    assert!(
+        registry
+            .recorded_events()
+            .iter()
+            .all(|e| e.kind != WORKFLOW_RETIRED),
+        "boot must not retire anything"
+    );
+    assert!(
+        jobs.recorded_events()
+            .iter()
+            .all(|e| e.kind != WORKFLOW_QUARANTINED),
+        "boot must not write a quarantine marker"
+    );
+}
+
 #[tokio::test]
-async fn quarantine_retires_the_unviable_row_and_lets_boot_continue() {
+async fn an_unviable_row_with_no_open_jobs_is_reported_and_left_untouched() {
     let registry = Arc::new(InMemoryWorkflows::new());
     registry.seed(viable("healthy")).unwrap();
-    registry.seed(unviable("protocol-retro")).unwrap();
+    registry.seed(unviable("publish-to-github")).unwrap();
     let jobs = Arc::new(InMemoryJobs::new());
-    let actor = boss_core::actor::ActorId::Automation("workflow-quarantine".into());
-    let now = chrono::Utc::now();
 
-    let report =
-        quarantine_unviable_active_workflows(registry.as_ref(), jobs.as_ref(), &actor, now)
-            .await
-            .expect("quarantine pass completes");
+    let report = check_active_workflows_viable(registry.as_ref(), jobs.as_ref())
+        .await
+        .expect("boot check completes");
 
+    assert_eq!(report.checked, 2);
+    assert_eq!(report.unviable.len(), 1);
+    assert_eq!(report.unviable[0].kind, "publish-to-github");
+    assert_eq!(report.unviable[0].version, 1);
+    assert_eq!(report.unviable[0].open_jobs, 0);
     assert!(
-        report.stranded.is_empty(),
-        "no open jobs → nothing to refuse for"
-    );
-    assert!(report.may_start(), "boot must continue");
-    assert_eq!(report.quarantined.len(), 1);
-    assert_eq!(report.quarantined[0].kind, "protocol-retro");
-    assert!(
-        report.quarantined[0]
+        report.unviable[0]
             .problems
             .iter()
             .any(|p| p.reason.contains("no terminal")),
         "the report carries the problems the log printed"
     );
 
-    // The row is retired through the registry's own path, so the
-    // retirement is in the log like any other.
-    assert!(
-        registry.get_active("protocol-retro").await.is_err(),
-        "the offending row must no longer be active"
-    );
+    // 2026-09-07: this is the row boot used to retire. It must not.
+    assert_untouched(&registry, &jobs, "publish-to-github").await;
     assert!(
         registry.get_active("healthy").await.is_ok(),
         "a viable row is untouched"
     );
     assert!(
-        registry
-            .recorded_events()
-            .iter()
-            .any(|e| e.kind == WORKFLOW_RETIRED),
-        "the registry records the retirement"
-    );
-
-    // One loud marker per quarantined workflow.
-    let markers: Vec<_> = jobs
-        .recorded_events()
-        .into_iter()
-        .filter(|e| e.kind == WORKFLOW_QUARANTINED)
-        .collect();
-    assert_eq!(markers.len(), 1, "exactly one marker per quarantined row");
-    assert_eq!(markers[0].payload["kind"], "protocol-retro");
-    assert_eq!(markers[0].payload["version"], 1);
-    assert_eq!(
-        markers[0].payload["_actor"],
-        "automation:workflow-quarantine"
-    );
-    let problems = markers[0].payload["problems"]
-        .as_array()
-        .expect("problems array");
-    assert!(
-        problems
-            .iter()
-            .filter_map(|p| p["message"].as_str())
-            .any(|m| m.contains("no terminal")),
-        "the marker names why: {problems:?}"
+        jobs.recorded_events().is_empty(),
+        "boot wrote nothing at all"
     );
 }
 
 #[tokio::test]
-async fn quarantine_refuses_to_strand_open_jobs_pinned_to_the_row() {
+async fn an_unviable_row_with_open_jobs_pinned_is_reported_and_boot_continues() {
     let registry = Arc::new(InMemoryWorkflows::new());
-    registry.seed(unviable("protocol-retro")).unwrap();
+    registry.seed(unviable("incident-post-mortem")).unwrap();
     let jobs = Arc::new(InMemoryJobs::new());
     // Two open Jobs pinned to v1 of the offending Workflow, plus a
     // closed one that does not count.
-    seed_open_job(&jobs, "protocol-retro", 1, JobStatus::Open).await;
-    seed_open_job(&jobs, "protocol-retro", 1, JobStatus::Blocked).await;
-    seed_open_job(&jobs, "protocol-retro", 1, JobStatus::Closed).await;
-    let actor = boss_core::actor::ActorId::Automation("workflow-quarantine".into());
-    let now = chrono::Utc::now();
+    seed_open_job(&jobs, "incident-post-mortem", 1, JobStatus::Open).await;
+    seed_open_job(&jobs, "incident-post-mortem", 1, JobStatus::Blocked).await;
+    seed_open_job(&jobs, "incident-post-mortem", 1, JobStatus::Closed).await;
 
-    let report =
-        quarantine_unviable_active_workflows(registry.as_ref(), jobs.as_ref(), &actor, now)
-            .await
-            .expect("quarantine pass completes");
+    // 2026-09-07: this is the shape that crash-looped the system of
+    // record. The check must return Ok — there is no refusal any more.
+    let report = check_active_workflows_viable(registry.as_ref(), jobs.as_ref())
+        .await
+        .expect("an unviable row with pinned Jobs is a report, not a refusal");
 
-    assert!(
-        report.quarantined.is_empty(),
-        "auto-retiring would strand live work"
-    );
-    assert_eq!(report.stranded.len(), 1);
-    assert_eq!(report.stranded[0].kind, "protocol-retro");
-    assert_eq!(report.stranded[0].open_jobs, 2);
-    assert!(
-        !report.may_start(),
-        "this is the one case that still refuses to start"
-    );
-    let msg = report.refusal_message().expect("a refusal names the row");
-    assert!(
-        msg.contains("protocol-retro") && msg.contains('2'),
-        "refusal must name the workflow and the open-job count: {msg}"
-    );
-
-    // Nothing was retired, nothing was marked.
+    assert_eq!(report.unviable.len(), 1);
+    assert_eq!(report.unviable[0].kind, "incident-post-mortem");
     assert_eq!(
-        registry
-            .get_active("protocol-retro")
-            .await
-            .expect("still active")
-            .status,
-        WorkflowStatus::Active
+        report.unviable[0].open_jobs, 2,
+        "the report names how much live work sits on the row"
     );
-    assert!(
-        jobs.recorded_events()
-            .iter()
-            .all(|e| e.kind != WORKFLOW_QUARANTINED)
+
+    assert_untouched(&registry, &jobs, "incident-post-mortem").await;
+}
+
+/// The exact registry boot met on 2026-09-07: one unviable row with
+/// live work pinned, one with none, one healthy. Both unviable rows
+/// survive boot unchanged, and boot returns Ok.
+#[tokio::test]
+async fn the_2026_09_07_registry_boots_and_both_unviable_rows_survive() {
+    let registry = Arc::new(InMemoryWorkflows::new());
+    registry.seed(viable("healthy")).unwrap();
+    registry.seed(unviable("incident-post-mortem")).unwrap();
+    registry.seed(unviable("publish-to-github")).unwrap();
+    let jobs = Arc::new(InMemoryJobs::new());
+    seed_open_job(&jobs, "incident-post-mortem", 1, JobStatus::Open).await;
+
+    let report = check_active_workflows_viable(registry.as_ref(), jobs.as_ref())
+        .await
+        .expect("boot check completes");
+
+    assert_eq!(report.checked, 3);
+    let mut named: Vec<(&str, i64)> = report
+        .unviable
+        .iter()
+        .map(|u| (u.kind.as_str(), u.open_jobs))
+        .collect();
+    named.sort();
+    assert_eq!(
+        named,
+        vec![("incident-post-mortem", 1), ("publish-to-github", 0)]
     );
+
+    assert_untouched(&registry, &jobs, "incident-post-mortem").await;
+    assert_untouched(&registry, &jobs, "publish-to-github").await;
+    assert!(registry.get_active("healthy").await.is_ok());
 }
 
 #[tokio::test]
-async fn a_clean_registry_quarantines_nothing() {
+async fn a_clean_registry_reports_nothing() {
     let registry = Arc::new(InMemoryWorkflows::new());
     registry.seed(viable("healthy")).unwrap();
     let jobs = Arc::new(InMemoryJobs::new());
-    let actor = boss_core::actor::ActorId::Automation("workflow-quarantine".into());
 
-    let report = quarantine_unviable_active_workflows(
-        registry.as_ref(),
-        jobs.as_ref(),
-        &actor,
-        chrono::Utc::now(),
-    )
-    .await
-    .expect("quarantine pass completes");
+    let report = check_active_workflows_viable(registry.as_ref(), jobs.as_ref())
+        .await
+        .expect("boot check completes");
 
     assert_eq!(report.checked, 1);
-    assert!(report.quarantined.is_empty() && report.stranded.is_empty());
-    assert!(report.may_start());
+    assert!(report.unviable.is_empty());
     assert!(jobs.recorded_events().is_empty());
 }

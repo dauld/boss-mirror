@@ -68,8 +68,9 @@ pub const STEP_SIGNED_OFF: &str = "jobs.step.signed_off";
 /// named roles must re-sign before the step can complete.
 pub const STEP_STAMPS_INVALIDATED: &str = "jobs.step.stamps_invalidated";
 pub const JOB_CLOSED: &str = "jobs.job.closed";
-/// Boot found an ACTIVE Workflow that fails the viability lint and
-/// retired it so the service could start (`workflow_quarantine`).
+/// A quarantine pass found an ACTIVE Workflow that fails the viability
+/// lint and retired it. Boot no longer emits this: it checks and logs
+/// but never retires (`workflow_quarantine`).
 /// The sibling state event is the registry's own
 /// `jobs.kind.retired`; this marker is the loud one — it carries the
 /// problems that condemned the row, so the log answers "why is this
@@ -141,8 +142,8 @@ pub fn workflow_registry_event(
     boss_core::event::Event::new("jobs", kind, payload, boss_clock_client::wall_now())
 }
 
-/// The `jobs.kind.quarantined` marker: which Workflow row boot
-/// retired, and the lint problems that condemned it. Payload keys
+/// The `jobs.kind.quarantined` marker: which Workflow row a
+/// quarantine retired, and the lint problems that condemned it. Payload keys
 /// mirror the registry events (`kind`, `version`, `label`) plus a
 /// `problems` list in the same `{step, reason, message}` wire shape
 /// `POST /api/workflows/_validate` returns, so one reader parses

@@ -481,16 +481,14 @@ async fn reconcile_platform_workflows<R: JobsRepository>(
             tracing::warn!(error = %e, "platform Workflow reconcile failed");
         }
     }
-    verify_registry_viability(registry, jobs, clock).await;
+    verify_registry_viability(registry, jobs).await;
 }
 
 /// Boot-time viability check over the station registry — the sibling
 /// of [`verify_registry_viability`], for the queues rather than the
 /// protocols.
 ///
-/// Never exits. A Workflow quarantine can be forced to refuse (open
-/// Jobs pinned to the bad row would be stranded by an auto-retire);
-/// station membership is derived from the predicate at read time and
+/// Never exits. Station membership is derived from the predicate at read time and
 /// nothing is ever pinned to a station version, so retiring one
 /// strands nothing and there is no case that warrants refusing to
 /// start. A failure of the PASS itself is logged and start continues:
@@ -530,42 +528,31 @@ async fn verify_station_viability<R: JobsRepository>(
 /// spec can become invalid if an upstream StepType's enum domain
 /// changes.
 ///
-/// This used to `exit(1)` on the first bad row, which made one
-/// registry row a whole-service outage (2026-08-13). It now
-/// quarantines — see `boss_jobs::workflow_quarantine` for the
-/// semantics and the one case that still refuses to start.
+/// Never exits and never writes. This used to `exit(1)` on the first
+/// bad row — one registry row, whole-service outage (2026-08-13) —
+/// and then to auto-retire unpinned rows and refuse to start over
+/// pinned ones, which on 2026-09-07 crash-looped the system of record
+/// over one pinned `incident-post-mortem` Job and silently retired a
+/// live `publish-to-github`. A boot check reports; it does not act.
+/// See `boss_jobs::workflow_quarantine`.
 async fn verify_registry_viability<R: JobsRepository>(
     registry: &dyn boss_jobs::WorkflowRegistry,
     jobs: &R,
-    clock: &Arc<dyn boss_clock_client::ClockClient>,
 ) {
-    let actor = boss_core::actor::ActorId::Automation(
-        boss_jobs::workflow_quarantine::QUARANTINE_ACTOR.into(),
-    );
-    let now = boss_clock_client::now_from(clock).await;
-    let report = match boss_jobs::workflow_quarantine::quarantine_unviable_active_workflows(
-        registry, jobs, &actor, now,
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            // The pass itself failed, so we can't tell whether the
-            // registry is sound. Same rule as before: don't open for
-            // writes we can't reason about.
-            tracing::error!(error = %e, "refusing to start: boot viability check could not complete");
-            std::process::exit(1);
+    match boss_jobs::workflow_quarantine::check_active_workflows_viable(registry, jobs).await {
+        Ok(report) if !report.unviable.is_empty() => {
+            tracing::error!(
+                unviable = report.unviable.len(),
+                active = report.checked,
+                "started with unviable active Workflow(s) — each is named above; nothing was \
+                 retired, service is up"
+            );
         }
-    };
-    if let Some(msg) = report.refusal_message() {
-        tracing::error!("{msg}");
-        std::process::exit(1);
-    }
-    if !report.quarantined.is_empty() {
-        tracing::error!(
-            quarantined = report.quarantined.len(),
-            active = report.checked,
-            "started with quarantined Workflow(s) — retired and marked, service is up"
-        );
+        Ok(_) => {}
+        Err(e) => {
+            // The check itself could not run. Losing the check is not
+            // a reason to take the system of record down.
+            tracing::error!(error = %e, "boot viability check could not complete; starting anyway");
+        }
     }
 }
