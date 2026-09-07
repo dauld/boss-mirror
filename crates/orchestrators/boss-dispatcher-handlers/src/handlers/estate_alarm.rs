@@ -298,6 +298,13 @@ fn stale_series(rows: &[Value], per_host: bool, scope: &str, now: DateTime<Utc>)
 /// recurrence after a fix is a new fact.
 const SETTLED_DAYS: i64 = 7;
 
+/// The dedup read's page size. One bounded read (`closed_within`, so
+/// open packets plus only the last [`SETTLED_DAYS`] of closed ones)
+/// stays well under this in steady state; a `total` past it trips the
+/// truncation HOLD in [`dedup_page_complete`] rather than raising blind.
+/// This is the jobs API's own `MAX_LIMIT`, the largest page it serves.
+const DEDUP_PAGE: usize = 1000;
+
 /// `estate_finding` keys whose packet a human closed as `stale` or
 /// `duplicate` within [`SETTLED_DAYS`] — pure over the closed listing.
 fn settled_recently(closed_jobs: &[Value], now: DateTime<Utc>) -> BTreeSet<String> {
@@ -338,6 +345,16 @@ fn already_raised(open_jobs: &[Value]) -> BTreeSet<String> {
                 .map(str::to_string)
         })
         .collect()
+}
+
+/// Did the dedup read return every matching row? A page that came back
+/// shorter than the list's own `total` (`rows < total`) was TRUNCATED
+/// and cannot prove a finding unraised — treating it as complete
+/// re-files an alarm sitting beyond the page every ~10-min pass (the
+/// notification flood this guard exists to stop). The caller HOLDs on
+/// `false`, the same posture it already takes on a failed fetch.
+fn dedup_page_complete(rows: usize, total: usize) -> bool {
+    rows >= total
 }
 
 /// A compact, bounded rendering of one finding entry — the "latest
@@ -564,79 +581,92 @@ impl Handler for EstateAlarm {
         }
 
         // Dedup + raise, only when there is something to raise. The dedup
-        // reads are a safety prerequisite — without them a re-raise storms
-        // duplicates — so if EITHER fails we HOLD this pass's findings for
-        // retry rather than raise blind.
+        // read is a safety prerequisite — without it a re-raise storms
+        // duplicates — so if it FAILS, or comes back TRUNCATED, we HOLD
+        // this pass's findings for retry rather than raise blind.
+        //
+        // ONE bounded read answers both dedup questions: `closed_within`
+        // returns every open backlog-item PLUS anything closed in the
+        // last SETTLED_DAYS — exactly the window `settled_recently` asks
+        // about. It replaces two `limit=200` reads that treated a
+        // truncated page as the whole set. That was doubly blind: the
+        // closed set grows without bound, so `status=closed&limit=200`
+        // silently stopped seeing anything settled beyond row 200, and
+        // once open backlog-items passed 200 the open dedup missed its
+        // OWN alarm and re-filed it every ~10-min pass (the notification
+        // flood). Bounding the read to the recency window keeps it a
+        // page or two; a genuine overflow past DEDUP_PAGE trips the
+        // truncation HOLD below rather than re-raising blind.
         if !to_raise.is_empty() {
-            let open = get_json(
+            let listing = get_json(
                 &self.client,
                 &format!(
-                    "{}/api/jobs?kind=backlog-item&status=open&limit=200",
+                    "{}/api/jobs?kind=backlog-item&closed_within={SETTLED_DAYS}&limit={DEDUP_PAGE}",
                     self.base()
                 ),
                 &ctx.rule_name,
             )
             .await;
-            // And the findings a human settled recently: closed as stale
-            // or duplicate within SETTLED_DAYS, so an answered alarm is
-            // not asked again until the answer can change.
-            let closed = get_json(
-                &self.client,
-                &format!(
-                    "{}/api/jobs?kind=backlog-item&status=closed&limit=200",
-                    self.base()
-                ),
-                &ctx.rule_name,
-            )
-            .await;
-            match (open, closed) {
-                (Ok(open), Ok(closed)) => {
-                    let open_rows: Vec<Value> = open
+            match listing {
+                Ok(body) => {
+                    let rows: Vec<Value> = body
                         .get("data")
                         .and_then(Value::as_array)
                         .cloned()
                         .unwrap_or_default();
-                    let mut raised = already_raised(&open_rows);
-                    let closed_rows: Vec<Value> = closed
-                        .get("data")
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default();
-                    raised.extend(settled_recently(&closed_rows, now));
+                    // The list's own `total` is authoritative over the
+                    // page length; a missing `total` is treated as
+                    // truncated (fail-safe), never as zero.
+                    let complete = body
+                        .get("total")
+                        .and_then(Value::as_u64)
+                        .map(|t| usize::try_from(t).unwrap_or(usize::MAX))
+                        .is_some_and(|total| dedup_page_complete(rows.len(), total));
+                    if !complete {
+                        let total = body.get("total").and_then(Value::as_u64);
+                        errors.push(format!(
+                            "dedup read truncated ({} rows, total {total:?}); {} finding(s) held for retry to avoid duplicate alarms",
+                            rows.len(),
+                            to_raise.len()
+                        ));
+                    } else {
+                        // Partition by status: open packets carry the
+                        // live `estate_finding` dedup keys; the
+                        // recently-closed ones carry the settled-answer
+                        // keys. `status=open` matches the old open read
+                        // exactly (a cancelled packet never deduped).
+                        let (open_rows, closed_rows): (Vec<Value>, Vec<Value>) = rows
+                            .into_iter()
+                            .partition(|j| j.get("status").and_then(Value::as_str) == Some("open"));
+                        let mut raised = already_raised(&open_rows);
+                        raised.extend(settled_recently(&closed_rows, now));
 
-                    for (key, body) in to_raise {
-                        if raised.contains(&key) {
-                            tracing::info!(finding = %key, "estate.alarm: already raised or recently settled — not re-raising");
-                            continue;
+                        for (key, body) in to_raise {
+                            if raised.contains(&key) {
+                                tracing::info!(finding = %key, "estate.alarm: already raised or recently settled — not re-raising");
+                                continue;
+                            }
+                            if let Err(e) = post_json(
+                                &self.client,
+                                &format!("{}/api/jobs", self.base()),
+                                &body,
+                                &ctx.rule_name,
+                            )
+                            .await
+                            {
+                                errors.push(format!(
+                                    "raise for {key} failed; other findings still raised: {e}"
+                                ));
+                                continue;
+                            }
+                            tracing::info!(finding = %key, scope, "estate.alarm raised a packet");
                         }
-                        if let Err(e) = post_json(
-                            &self.client,
-                            &format!("{}/api/jobs", self.base()),
-                            &body,
-                            &ctx.rule_name,
-                        )
-                        .await
-                        {
-                            errors.push(format!(
-                                "raise for {key} failed; other findings still raised: {e}"
-                            ));
-                            continue;
-                        }
-                        tracing::info!(finding = %key, scope, "estate.alarm raised a packet");
                     }
                 }
-                (open_r, closed_r) => {
-                    let mut why = Vec::new();
-                    if let Err(e) = open_r {
-                        why.push(format!("open: {e}"));
-                    }
-                    if let Err(e) = closed_r {
-                        why.push(format!("closed: {e}"));
-                    }
+                Err(e) => {
                     errors.push(format!(
-                        "dedup fetch failed; {} finding(s) held for retry to avoid duplicate alarms ({})",
-                        to_raise.len(),
-                        why.join(", ")
+                        "dedup fetch failed; {} finding(s) held for retry to avoid duplicate alarms ({e})",
+                        to_raise.len()
                     ));
                 }
             }
@@ -808,6 +838,59 @@ mod tests {
     fn an_open_packet_with_the_key_suppresses_a_second() {
         let open = [json!({"metadata": {"estate_finding": "not_ready:cp-2"}})];
         assert!(already_raised(&open).contains("not_ready:cp-2"));
+    }
+
+    #[test]
+    fn dedup_page_complete_only_trusts_a_whole_page() {
+        assert!(
+            dedup_page_complete(0, 0),
+            "nothing matched is a complete answer"
+        );
+        assert!(dedup_page_complete(50, 50));
+        assert!(dedup_page_complete(250, 250));
+        assert!(
+            dedup_page_complete(260, 250),
+            "an over-count still covers the whole set"
+        );
+        assert!(
+            !dedup_page_complete(200, 250),
+            "a 200-of-250 page is truncated — it cannot prove a finding unraised"
+        );
+    }
+
+    #[test]
+    fn a_truncated_dedup_page_holds_rather_than_reraising() {
+        // The flood shape: 250 open alarms, and the one already carrying
+        // our finding sits at row 220 — beyond a 200-row page.
+        let key = "disk_tight:forge-host";
+        let mut open: Vec<Value> = (0..250)
+            .map(
+                |i| json!({"status": "open", "metadata": {"estate_finding": format!("other:{i}")}}),
+            )
+            .collect();
+        open[220] = json!({"status": "open", "metadata": {"estate_finding": key}});
+
+        // A COMPLETE read (all 250) finds the existing alarm and dedups.
+        assert!(dedup_page_complete(open.len(), 250));
+        assert!(
+            already_raised(&open).contains(key),
+            "a complete read sees the alarm on page three"
+        );
+
+        // A TRUNCATED read (first 200 rows) MISSES it — this is the
+        // defect: `already_raised` returns "not raised" and the alarm
+        // re-files every pass...
+        let truncated: Vec<Value> = open.iter().take(200).cloned().collect();
+        assert!(
+            !already_raised(&truncated).contains(key),
+            "the truncated page cannot see the alarm beyond row 200"
+        );
+        // ...so the completeness guard refuses to trust the page and the
+        // handler HOLDs instead of re-filing.
+        assert!(
+            !dedup_page_complete(truncated.len(), 250),
+            "a 200-of-250 read is truncated; the handler must HOLD, not re-file"
+        );
     }
 
     #[test]

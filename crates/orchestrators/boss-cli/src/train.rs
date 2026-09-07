@@ -2900,6 +2900,19 @@ pub(crate) fn red_train_alert_body(tid: &str, alert: &RedTrainAlert) -> Value {
     })
 }
 
+/// Has this train already filed its one red-train alert? The dedup is a
+/// per-train metadata FLAG (`red_alert_filed`), mirroring
+/// `deploy_alarm_filed` / `converge_alarm_filed` — NOT a scan of open
+/// backlog-items. The scan it replaces read `status=open&limit=200` and
+/// treated a truncated page as "no alert exists": once open
+/// backlog-items passed 200 the existing alert sat beyond row 200, the
+/// dedup answered "not raised", and the alert re-filed every ~10-min
+/// reconcile pass — a self-compounding notification flood. A flag on the
+/// train the caller already holds cannot truncate: it is one boolean.
+pub(crate) fn red_alert_filed(train: &Value) -> bool {
+    truthy(train.get("metadata").and_then(|m| m.get("red_alert_filed")))
+}
+
 #[cfg(test)]
 mod red_train_alert_tests {
     use super::*;
@@ -2929,7 +2942,7 @@ mod red_train_alert_tests {
         assert_eq!(b["tags"], json!([]));
         assert_eq!(
             b["metadata"]["train_alert"], "abcd1234-0000-0000-0000-000000000000",
-            "keyed by train_alert so train_alert_exists dedups"
+            "the packet still names its train; dedup is the train's red_alert_filed flag"
         );
     }
 
@@ -2977,6 +2990,20 @@ mod red_train_alert_tests {
     #[test]
     fn a_merged_train_is_no_alert_whatever_the_verdict() {
         assert!(red_train_alert(&train(true), "failing", None).is_none());
+    }
+
+    #[test]
+    fn the_red_alert_flag_suppresses_a_second_file() {
+        // A train with no flag has not filed yet; the flag, once
+        // stamped, makes `announce_red_train` a no-op. This is the whole
+        // dedup — no scan of open backlog-items, so no page to truncate.
+        let mut t = train(false);
+        assert!(!red_alert_filed(&t), "an unflagged train has not alerted");
+        t["metadata"] = json!({"red_alert_filed": true});
+        assert!(
+            red_alert_filed(&t),
+            "the flag on the train must suppress a second file"
+        );
     }
 
     #[test]
@@ -4485,34 +4512,11 @@ impl Conductor {
             .ok_or_else(|| anyhow!("job {id} came back empty"))
     }
 
-    /// Is there already an open alert for this train? A red train is ONE
-    /// alert, deduped by the `train_alert` key, not one per reconcile.
-    async fn train_alert_exists(&self, tid: &str) -> Result<bool> {
-        let body = self
-            .api(
-                Method::GET,
-                "/api/jobs?kind=backlog-item&status=open&limit=200",
-                None,
-            )
-            .await?;
-        Ok(body
-            .as_ref()
-            .and_then(|b| b.get("data"))
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .any(|j| {
-                j.get("metadata")
-                    .and_then(|m| m.get("train_alert"))
-                    .and_then(Value::as_str)
-                    == Some(tid)
-            }))
-    }
-
     /// File the urgent packet a red train becomes — the estate-alarm
     /// idiom (kind backlog-item, priority urgent, on the pipeline
-    /// subject), keyed by `train_alert` so a repeat pass dedups and the
-    /// overdue/watchlist machinery can see it.
+    /// subject), keyed by `train_alert` so the overdue/watchlist
+    /// machinery can see it. Dedup is the train's `red_alert_filed`
+    /// flag (see `announce_red_train`), not this key.
     async fn file_train_alert(&self, tid: &str, alert: &RedTrainAlert) -> Result<()> {
         self.api(
             Method::POST,
@@ -4524,15 +4528,32 @@ impl Conductor {
     }
 
     /// Announce a red train unless it is already announced — best-effort
-    /// caller in `reconcile`. Both the existence check and the POST are
+    /// caller in `reconcile`. Both the flag read and the POST are
     /// fallible; the caller treats ANY error here as non-fatal, because
     /// filing an alert is observability and must never abort the pass
     /// that boards, merges, and auto-cancels. See `reconcile`.
-    async fn announce_red_train(&self, tid: &str, alert: &RedTrainAlert) -> Result<()> {
-        if self.train_alert_exists(tid).await? {
+    ///
+    /// Dedup is a per-train metadata FLAG (`red_alert_filed`), mirroring
+    /// `deploy_alarm_filed` / `converge_alarm_filed` — not a scan of open
+    /// backlog-items. The scan it replaces read `status=open&limit=200`
+    /// and treated a truncated page as "no alert exists"; once open
+    /// backlog-items passed 200 the existing alert sat beyond row 200,
+    /// the dedup answered "not raised", and the alert re-filed every
+    /// reconcile pass (a self-compounding notification flood). The flag
+    /// is stamped only after a successful file, so a failed POST leaves
+    /// the train unflagged and the next pass retries.
+    async fn announce_red_train(&self, train: &Value, alert: &RedTrainAlert) -> Result<()> {
+        if red_alert_filed(train) {
             return Ok(());
         }
+        let tid = job_id(train)?;
         self.file_train_alert(tid, alert).await?;
+        self.api(
+            Method::PATCH,
+            &format!("/api/jobs/{tid}/metadata"),
+            Some(json!({"red_alert_filed": true})),
+        )
+        .await?;
         log(format!(
             "train {} red — filed alert: {}",
             id8(tid),
@@ -5397,7 +5418,7 @@ impl Conductor {
                         id8(&tid),
                         alert.title
                     ));
-                } else if let Err(e) = self.announce_red_train(&tid, &alert).await {
+                } else if let Err(e) = self.announce_red_train(&t, &alert).await {
                     log(format!(
                         "train {} red — alert filing failed (non-fatal, reconcile continues): {e}",
                         id8(&tid)
@@ -5616,14 +5637,25 @@ impl Conductor {
         // packet, not one every ten minutes. (A closed-then-still-
         // stranded green re-files — a recurrence after a human answered
         // is a new fact, the same call estate.alarm makes.)
-        let open_alarms = rows(
+        //
+        // Read PAST page one. A bare `limit=200` treated a truncated
+        // page as the whole set, so once open backlog-items passed 200
+        // the existing alarm sat beyond the page, `already_alarmed`
+        // missed it, and the strand re-filed every reconcile pass — a
+        // self-compounding flood. `list_all_pages` pages on `total`
+        // until every matching row is read (same paginator boarding and
+        // the dock preview use), so the dedup set is complete.
+        let open_alarms = list_all_pages(|offset| async move {
             self.api(
                 Method::GET,
-                "/api/jobs?kind=backlog-item&status=open&limit=200",
+                &format!(
+                    "/api/jobs?kind=backlog-item&status=open&limit={PAGE_LIMIT}&offset={offset}"
+                ),
                 None,
             )
-            .await?,
-        )?;
+            .await
+        })
+        .await?;
         let already_alarmed: BTreeSet<String> = open_alarms
             .iter()
             .filter_map(|j| {
@@ -11098,6 +11130,80 @@ mod stranded_green_tests {
         assert!(
             stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&["fix/stranded"]), now, 45)
                 .is_empty()
+        );
+    }
+
+    /// TRUNCATION REGRESSION at the stranded-green dedup. The existing
+    /// alarm for a strand can sit beyond a single page of open
+    /// backlog-items; a bare `limit=200` read that treats the truncated
+    /// page as the whole set misses it and re-files every pass (the
+    /// notification flood). Building the dedup set through
+    /// `list_all_pages` — as `alarm_stranded_greens` now does — gathers
+    /// the alarm on page three, so the strand is deduped. The truncated
+    /// half is the defect the fix removes.
+    #[tokio::test]
+    async fn a_dedup_alarm_beyond_the_first_page_still_dedups() {
+        use super::{PAGE_LIMIT, list_all_pages};
+        let now = Utc.with_ymd_and_hms(2026, 9, 7, 12, 0, 0).unwrap();
+        // 250 open backlog-items; the one naming our strand sits at row
+        // 220 — page three, beyond the old 200-row cap.
+        let mut open: Vec<serde_json::Value> = (0..250)
+            .map(|i| {
+                json!({"id": format!("bi-{i}"),
+                       "metadata": {"stranded_branch": format!("other/{i}")}})
+            })
+            .collect();
+        open[220] = json!({"id": "bi-220", "metadata": {"stranded_branch": "fix/stranded"}});
+        let open_ref = &open;
+        let gathered = list_all_pages(|offset| async move {
+            let page: Vec<serde_json::Value> = open_ref
+                .iter()
+                .skip(offset)
+                .take(PAGE_LIMIT)
+                .cloned()
+                .collect();
+            anyhow::Ok(Some(json!({
+                "data": page, "total": open_ref.len(), "offset": offset, "limit": PAGE_LIMIT,
+            })))
+        })
+        .await
+        .unwrap();
+        let already_alarmed: BTreeSet<String> = gathered
+            .iter()
+            .filter_map(|j| {
+                j.get("metadata")?
+                    .get("stranded_branch")?
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .collect();
+        let runs = [green_run(
+            "gr-trunc",
+            "fix/stranded",
+            "2026-09-07T10:00:00Z",
+            None,
+            json!({}),
+        )];
+        assert!(
+            stranded_greens_to_alarm(&runs, &branches(&[]), &already_alarmed, now, 45).is_empty(),
+            "the strand's alarm sits on page three; the paginated read must find it and dedup"
+        );
+        // The proof it was the pagination: a first-page-only view (the
+        // old truncated cap) MISSES the alarm and re-files.
+        let truncated: BTreeSet<String> = open
+            .iter()
+            .take(200)
+            .filter_map(|j| {
+                j.get("metadata")?
+                    .get("stranded_branch")?
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .collect();
+        assert_eq!(
+            stranded_greens_to_alarm(&runs, &branches(&[]), &truncated, now, 45).len(),
+            1,
+            "a truncated 200-row read misses the alarm and re-files — the defect this fixes"
         );
     }
 
