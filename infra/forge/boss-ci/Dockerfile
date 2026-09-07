@@ -27,7 +27,10 @@
 # into a shell: a pinned tag is reproducible and reviewable, and the
 # installer script wants unzip and writes to $HOME, neither of which
 # this image should acquire for one binary.
-FROM oven/bun:1.3-slim AS bun
+#
+# Bases come from the forge mirror (infra/forge/mirror-base-images.sh),
+# never a public registry: a new external base goes on that list FIRST.
+FROM 10.20.0.15:3000/david/bun:1.3-slim AS bun
 
 # PATCH-EXACT, and paired with rust-toolchain.toml. A floating `1.96`
 # resolves to whatever patch the tag points at today (1.96.1), which
@@ -36,7 +39,7 @@ FROM oven/bun:1.3-slim AS bun
 # every job, for a toolchain already installed here. Naming the patch on
 # both sides is what makes that resolve locally. Moving this line means
 # moving rust-toolchain.toml in the same car.
-FROM rust:1.96.1-slim-bookworm
+FROM 10.20.0.15:3000/david/rust:1.96.1-slim-bookworm
 
 # NODE COMES FROM NODESOURCE, NOT DEBIAN. bookworm ships Node 18, and
 # Playwright 1.61 refuses to start on anything below 20 — which is how
