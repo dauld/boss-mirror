@@ -4544,6 +4544,72 @@ impl Conductor {
         Ok(job)
     }
 
+    /// Close each boarded car of a just-merged train, BEST-EFFORT, and
+    /// return how many failed to close this pass.
+    ///
+    /// Each car's close is its own fallible scope: a failure LOGS a line
+    /// naming the car and the loop moves on, so one bad car cannot orphan
+    /// the rest. The caller completes the train's `merged` step only when
+    /// this returns 0, so a partial pass is retried on the next reconcile.
+    /// All three writes are idempotent — `get_job` reads, `complete_step`
+    /// early-returns on a done step, `merge_job_metadata` merges — so a
+    /// retry re-closes only the car that did not close before.
+    async fn close_boarded_cars(
+        &self,
+        tid: &str,
+        boarded: &[String],
+        merge_ref: &str,
+        pr_url: &str,
+    ) -> usize {
+        let mut failures = 0usize;
+        for cid in boarded {
+            // The car's review closes HERE, not at boarding — the change
+            // was open for review until it landed, and leaving the step
+            // ready while the car rides is what lets a cancelled train
+            // release it (see the boarding loop). Review first, because
+            // the ship-a-change spec gates `merged` on `steps.review.done
+            // AND job.metadata.merged`, and the marker below is what the
+            // dispatcher watches to close the Job.
+            let close: Result<()> = async {
+                let car = self.get_job(cid).await?;
+                let review = find_step(&car, "review", "Open for review");
+                if !step_done(review) {
+                    self.complete_step(
+                        &car,
+                        review,
+                        &[
+                            ("pr_url", Some(pr_url.to_string())),
+                            ("note", Some(format!("landed on main as {merge_ref}"))),
+                        ],
+                    )
+                    .await?;
+                }
+                // v3 ship-a-change gates `merged` on this marker; the
+                // dispatcher closes the Job once it is set.
+                self.merge_job_metadata(
+                    cid,
+                    vec![("merged", json!("true")), ("merge_ref", json!(merge_ref))],
+                )
+                .await?;
+                Ok(())
+            }
+            .await;
+            if let Err(e) = close {
+                // BEST-EFFORT: one car's failed close must not orphan the
+                // rest. Count it, name it, move on — the caller holds the
+                // `merged` step pending so the next reconcile retries it.
+                failures += 1;
+                log(format!(
+                    "train {} merged, but closing car {} failed (non-fatal, retries next \
+                     pass): {e}",
+                    id8(tid),
+                    id8(cid)
+                ));
+            }
+        }
+        failures
+    }
+
     // -----------------------------------------------------------------------
     // Phase 1 — reconcile open trains against reality
     // -----------------------------------------------------------------------
@@ -5312,8 +5378,6 @@ impl Conductor {
                     .chars()
                     .take(12)
                     .collect();
-                self.complete_step(&t, merged_step, &[("merge_ref", Some(merge_ref.clone()))])
-                    .await?;
                 let boarded: Vec<String> = t
                     .get("metadata")
                     .and_then(|m| m.get("boarded_jobs"))
@@ -5324,39 +5388,33 @@ impl Conductor {
                             .collect()
                     })
                     .unwrap_or_default();
-                for cid in boarded {
-                    // The car's review closes HERE, not at boarding —
-                    // the change was open for review until it landed,
-                    // and leaving the step ready while the car rides is
-                    // what lets a cancelled train release it (see the
-                    // boarding loop). Completed first, because the
-                    // ship-a-change spec gates `merged` on
-                    // `steps.review.done AND job.metadata.merged`, and
-                    // the marker below is what the dispatcher watches to
-                    // close the Job.
-                    let car = self.get_job(&cid).await?;
-                    let review = find_step(&car, "review", "Open for review");
-                    if !step_done(review) {
-                        self.complete_step(
-                            &car,
-                            review,
-                            &[
-                                ("pr_url", Some(pr_url.clone())),
-                                ("note", Some(format!("landed on main as {merge_ref}"))),
-                            ],
-                        )
+                // Close every boarded car BEST-EFFORT, then complete the
+                // train's `merged` step — and only when nothing failed.
+                //
+                // ORDER IS LOAD-BEARING. The first cut completed `merged`
+                // FIRST and looped the cars with `?`: one car whose close
+                // write errored aborted the (isolated) per-train scope, but
+                // `merged` was already `completed`, so the retry guard above
+                // (`state==MERGED && !step_done(merged)`) was false forever
+                // after — the OTHER landed cars never got their close
+                // markers and their car Jobs stayed open as residue,
+                // inflating the open-car count and starving boarding. Now a
+                // bad car costs only itself, and a partial pass leaves
+                // `merged` pending so the next reconcile retries the
+                // stragglers. Every close write is idempotent, so the retry
+                // re-closes only the car that did not close before.
+                let failures = self
+                    .close_boarded_cars(&tid, &boarded, &merge_ref, &pr_url)
+                    .await;
+                if failures == 0 {
+                    self.complete_step(&t, merged_step, &[("merge_ref", Some(merge_ref.clone()))])
                         .await?;
-                    }
-                    // v3 ship-a-change gates `merged` on this marker; the
-                    // dispatcher closes the Job once it is set.
-                    self.merge_job_metadata(
-                        &cid,
-                        vec![
-                            ("merged", json!("true")),
-                            ("merge_ref", json!(merge_ref.as_str())),
-                        ],
-                    )
-                    .await?;
+                } else {
+                    log(format!(
+                        "train {} merged, but {failures} car(s) failed to close this pass — \
+                         holding the `merged` step pending so the next reconcile retries them",
+                        id8(&tid)
+                    ));
                 }
                 t = self.get_job(&tid).await?;
             }
@@ -10368,6 +10426,237 @@ mod tests {
         assert!(
             !puts.lock().unwrap().contains(&"c1".to_string()),
             "the car was released despite close_pr failing — a half-cancelled train"
+        );
+    }
+
+    /// A three-car train where car 2's close write fails. Cars 1 and 3
+    /// must STILL get their review closed and `metadata.merged=true` (the
+    /// marker the dispatcher watches to close the car Job); only the one
+    /// bad car counts as a failure, and the pass does not abort. This is
+    /// the orphan bug: the pre-fix loop used `?` and completed `merged`
+    /// first, so one bad car left the rest as open residue forever —
+    /// inflating the open-car count and starving boarding.
+    #[tokio::test]
+    async fn a_bad_car_does_not_orphan_the_rest_of_the_train() {
+        use axum::extract::Path;
+        use axum::routing::{get, put};
+        use axum::{Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        fn car(id: &str) -> Value {
+            json!({
+                "id": id, "kind": "ship-a-change", "status": "open",
+                "metadata": { "train": "t1", "branch": format!("fix/{id}") },
+                "steps": [{"id": format!("{id}-rev"), "spec_slug": "review",
+                           "title": "Open for review", "status": "ready", "metadata": {}}]
+            })
+        }
+        let cars = json!({ "c1": car("c1"), "c2": car("c2"), "c3": car("c3") });
+
+        // (car id, endpoint) of every WRITE the conductor made.
+        let writes: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let cars_get = cars.clone();
+        let writes_step = writes.clone();
+        let writes_meta = writes.clone();
+        let app = Router::new()
+            .route(
+                "/api/jobs/{id}",
+                get(move |Path(id): Path<String>| {
+                    let cars = cars_get.clone();
+                    async move { Json(cars.get(&id).cloned().unwrap_or(Value::Null)) }
+                })
+                .put(move |Path(id): Path<String>, _b: Json<Value>| {
+                    let writes = writes_meta.clone();
+                    async move {
+                        // Car 2's metadata write is the one the SoR refuses
+                        // (422 — an answer, not a blip, so it is not retried).
+                        if id == "c2" {
+                            return (
+                                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                                Json(json!({"error": "no"})),
+                            );
+                        }
+                        writes.lock().unwrap().push((id, "meta".into()));
+                        (axum::http::StatusCode::OK, Json(json!({})))
+                    }
+                }),
+            )
+            .route(
+                "/api/jobs/{id}/steps/{sid}",
+                put(
+                    move |Path((id, _sid)): Path<(String, String)>, _b: Json<Value>| {
+                        let writes = writes_step.clone();
+                        async move {
+                            if id == "c2" {
+                                return (
+                                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                                    Json(json!({"error": "no"})),
+                                );
+                            }
+                            writes.lock().unwrap().push((id, "review".into()));
+                            (axum::http::StatusCode::OK, Json(json!({})))
+                        }
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut c = cleanup_conductor(
+            "forgejo",
+            Box::new(FakeForge {
+                deleted: Arc::new(Mutex::new(Vec::new())),
+                fail_deletes: false,
+            }),
+        );
+        c.cfg.jobs = format!("http://{addr}");
+
+        let boarded = vec!["c1".to_string(), "c2".to_string(), "c3".to_string()];
+        let failures = c
+            .close_boarded_cars("t1", &boarded, "abcdef123456", "https://forge/pulls/9")
+            .await;
+
+        assert_eq!(failures, 1, "exactly the one bad car (c2) is a failure");
+        let w = writes.lock().unwrap();
+        for good in ["c1", "c3"] {
+            assert!(
+                w.contains(&(good.to_string(), "review".to_string())),
+                "car {good} must still have its review closed — a bad car must not orphan it"
+            );
+            assert!(
+                w.contains(&(good.to_string(), "meta".to_string())),
+                "car {good} must still get metadata.merged — the dispatcher's close marker"
+            );
+        }
+        assert!(
+            !w.contains(&("c2".to_string(), "meta".to_string())),
+            "c2's write failed, so its close marker must NOT be recorded"
+        );
+    }
+
+    /// A partial pass leaves the failed car for the next reconcile, and
+    /// the re-run is idempotent for the cars that already closed. Pass 1:
+    /// car 2's write fails (the other two close). Pass 2: the server now
+    /// reports the already-closed reviews as `completed` and car 2's write
+    /// succeeds — so `close_boarded_cars` returns 0, re-closes only car 2,
+    /// and issues NO duplicate review write for cars 1 and 3.
+    #[tokio::test]
+    async fn a_partial_close_retries_the_failed_car_idempotently() {
+        use axum::extract::Path;
+        use axum::routing::{get, put};
+        use axum::{Json, Router};
+        use std::collections::HashSet;
+        use std::sync::{Arc, Mutex};
+
+        // Reviews the server has seen closed; drives idempotence — a car
+        // in here reports `review: completed`, so `complete_step`
+        // early-returns and issues no second write.
+        let reviewed: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        // Car 2 heals between passes.
+        let heal_c2 = Arc::new(Mutex::new(false));
+        // (car id, endpoint) of every WRITE, across both passes.
+        let writes: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let reviewed_get = reviewed.clone();
+        let reviewed_step = reviewed.clone();
+        let heal_step = heal_c2.clone();
+        let writes_step = writes.clone();
+        let writes_meta = writes.clone();
+        let app = Router::new()
+            .route(
+                "/api/jobs/{id}",
+                get(move |Path(id): Path<String>| {
+                    let reviewed = reviewed_get.clone();
+                    async move {
+                        let status = if reviewed.lock().unwrap().contains(&id) {
+                            "completed"
+                        } else {
+                            "ready"
+                        };
+                        Json(json!({
+                            "id": id, "kind": "ship-a-change", "status": "open",
+                            "metadata": { "train": "t1", "branch": format!("fix/{id}") },
+                            "steps": [{"id": format!("{id}-rev"), "spec_slug": "review",
+                                       "title": "Open for review", "status": status, "metadata": {}}]
+                        }))
+                    }
+                })
+                .put(move |Path(id): Path<String>, _b: Json<Value>| {
+                    let (heal, writes) = (heal_step.clone(), writes_meta.clone());
+                    async move {
+                        if id == "c2" && !*heal.lock().unwrap() {
+                            return (
+                                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                                Json(json!({"error": "no"})),
+                            );
+                        }
+                        writes.lock().unwrap().push((id, "meta".into()));
+                        (axum::http::StatusCode::OK, Json(json!({})))
+                    }
+                }),
+            )
+            .route(
+                "/api/jobs/{id}/steps/{sid}",
+                put(
+                    move |Path((id, _sid)): Path<(String, String)>, _b: Json<Value>| {
+                        let (reviewed, writes) = (reviewed_step.clone(), writes_step.clone());
+                        async move {
+                            writes.lock().unwrap().push((id.clone(), "review".into()));
+                            reviewed.lock().unwrap().insert(id);
+                            (axum::http::StatusCode::OK, Json(json!({})))
+                        }
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut c = cleanup_conductor(
+            "forgejo",
+            Box::new(FakeForge {
+                deleted: Arc::new(Mutex::new(Vec::new())),
+                fail_deletes: false,
+            }),
+        );
+        c.cfg.jobs = format!("http://{addr}");
+        let boarded = vec!["c1".to_string(), "c2".to_string(), "c3".to_string()];
+
+        // Pass 1: car 2's metadata write is refused — but c2's review PUT
+        // still lands first, so only its `meta` write is missing.
+        let pass1 = c
+            .close_boarded_cars("t1", &boarded, "abcdef123456", "https://forge/pulls/9")
+            .await;
+        assert_eq!(pass1, 1, "car 2 fails its metadata write on pass 1");
+
+        // Car 2 heals; retry.
+        *heal_c2.lock().unwrap() = true;
+        let pass2 = c
+            .close_boarded_cars("t1", &boarded, "abcdef123456", "https://forge/pulls/9")
+            .await;
+        assert_eq!(pass2, 0, "the retry recovers car 2 — nothing left orphaned");
+
+        let w = writes.lock().unwrap();
+        let review_writes = |id: &str| {
+            w.iter()
+                .filter(|(cid, ep)| cid == id && ep == "review")
+                .count()
+        };
+        assert_eq!(
+            review_writes("c1"),
+            1,
+            "car 1's review is written once — the retry must NOT re-close a done step"
+        );
+        assert_eq!(
+            review_writes("c3"),
+            1,
+            "car 3's review is written once — the retry is idempotent"
+        );
+        assert!(
+            w.contains(&("c2".to_string(), "meta".to_string())),
+            "car 2's close marker lands on the retry"
         );
     }
 }
