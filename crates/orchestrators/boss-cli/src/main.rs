@@ -517,8 +517,9 @@ enum PacketAction {
         /// docs). 0 skips the scan and reports those refs unknown.
         #[arg(long, default_value = "20000")]
         max_scan: usize,
-        /// Override the jobs-api URL. Defaults to BOSS_JOBS_URL or
-        /// http://127.0.0.1:7900.
+        /// The jobs-api URL. Falls back to BOSS_JOBS_URL; with neither
+        /// set the verb refuses rather than guess an instance —
+        /// boss-gcp's 127.0.0.1:7900 is a different, older deployment.
         #[arg(long)]
         jobs_url: Option<String>,
     },

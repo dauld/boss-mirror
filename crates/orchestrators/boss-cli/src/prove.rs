@@ -287,6 +287,53 @@ pub(crate) fn find_car<'a>(cars: &'a [Value], given: &str) -> Result<&'a Value> 
     }
 }
 
+/// Every `ship-a-change` car, paged on `total` so the target is
+/// reachable no matter how many closed cars precede it.
+///
+/// The read used to be a single `?kind=ship-a-change&limit=200`. As
+/// closed cars accumulate they fill that one page, so a legitimately
+/// open, unproven car sorting past row 200 vanishes from [`find_car`] —
+/// a false negative that grows with the pipeline's age. A `status=open`
+/// filter would not fix it: `--recheck` re-runs the proof on a CLOSED
+/// car, so the reader must read closed cars too and let `find_car`
+/// choose. Paging on `total` keeps every car reachable, open or closed.
+async fn all_ship_a_change_cars(http: &reqwest::Client, base: &str) -> Result<Vec<Value>> {
+    const PAGE: usize = 500;
+    let mut cars: Vec<Value> = Vec::new();
+    loop {
+        let body = crate::gate::api_at(
+            http,
+            base,
+            reqwest::Method::GET,
+            &format!(
+                "/api/jobs?kind=ship-a-change&limit={PAGE}&offset={}",
+                cars.len()
+            ),
+            None,
+        )
+        .await?;
+        let total = body
+            .as_ref()
+            .and_then(|v| v.get("total"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .max(0) as usize;
+        let got = {
+            let page = crate::gate::rows(body);
+            let n = page.len();
+            cars.extend(page);
+            n
+        };
+        // Stop when a page came back empty (offset past the data) or we
+        // have accumulated the whole population. Either guard alone
+        // terminates; both together survive a miscounted `total`.
+        if got == 0 || cars.len() >= total {
+            break;
+        }
+    }
+    Ok(cars)
+}
+
 /// The car's `proven` step, refusing unless it is actually reachable.
 ///
 /// `proven` is gated on `job.metadata.merged = "true"`, so a step still
@@ -488,15 +535,7 @@ pub(crate) async fn run(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
     let http = reqwest::Client::new();
-    let cars = crate::gate::rows(
-        crate::gate::api(
-            &http,
-            reqwest::Method::GET,
-            "/api/jobs?kind=ship-a-change&limit=200",
-            None,
-        )
-        .await?,
-    );
+    let cars = all_ship_a_change_cars(&http, &crate::gate::resolve_jobs_base(None)?).await?;
     let car = find_car(&cars, car_ref)?;
     let car_id = car
         .get("id")
@@ -1046,6 +1085,105 @@ mod tests {
                 .probe,
             "better-probe",
             "a replacement is what --recheck should be re-running"
+        );
+    }
+
+    /// THE FALSE NEGATIVE THAT GREW WITH THE PIPELINE'S AGE.
+    ///
+    /// The car read was one `?kind=ship-a-change&limit=200`. Once more
+    /// than 200 closed cars had accumulated, a legitimately open,
+    /// unproven car sorting after them fell off that single page, and
+    /// `find_car` reported "no open ship-a-change car" for a car that
+    /// plainly existed. Paging on `total` must reach it — and must keep
+    /// reading closed cars too, because `--recheck` proves a CLOSED one,
+    /// which is why the fix is not a `status=open` filter.
+    ///
+    /// The stub honours `limit`/`offset` and reports the true `total`,
+    /// so the reader is exercised across page boundaries with no
+    /// `BOSS_JOBS_URL` anywhere in the environment.
+    #[tokio::test]
+    async fn a_car_past_the_first_page_is_still_reachable() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Enough closed cars to overflow more than one page, then one
+        // OPEN car dead last — only a full paging read finds it.
+        let needle = "fix/needle-in-the-haystack";
+        let mut all: Vec<Value> = (0..1100)
+            .map(|i| {
+                json!({
+                    "id": format!("{i:08}-0000-0000-0000-0000000000cc"),
+                    "status": "closed",
+                    "title": format!("closed car {i}"),
+                    "metadata": {"branch": format!("fix/closed-{i}")},
+                })
+            })
+            .collect();
+        all.push(json!({
+            "id": "ffffffff-0000-0000-0000-0000000000ff",
+            "status": "open",
+            "title": "the open one",
+            "metadata": {"branch": needle},
+        }));
+        let total = all.len();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let served = all.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                loop {
+                    match sock.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf).into_owned();
+                let target = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let param = |k: &str| -> Option<usize> {
+                    target
+                        .split(['?', '&'])
+                        .find_map(|p| p.strip_prefix(&format!("{k}=")))
+                        .and_then(|v| v.parse().ok())
+                };
+                let limit = param("limit").unwrap_or(100).max(1);
+                let offset = param("offset").unwrap_or(0);
+                let page: Vec<Value> = served.iter().skip(offset).take(limit).cloned().collect();
+                let body = json!({"data": page, "total": served.len()}).to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let base = format!("http://{addr}");
+        let http = reqwest::Client::new();
+        let cars = all_ship_a_change_cars(&http, &base)
+            .await
+            .expect("paging read succeeds");
+        assert_eq!(
+            cars.len(),
+            total,
+            "every page must be read, not just the first {}",
+            cars.len()
+        );
+        let car = find_car(&cars, needle).expect("the open car past page 1 must be found");
+        assert_eq!(
+            car.get("metadata")
+                .and_then(|m| m.get("branch"))
+                .and_then(Value::as_str),
+            Some(needle)
         );
     }
 }

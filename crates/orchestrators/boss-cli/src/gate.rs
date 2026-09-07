@@ -470,6 +470,19 @@ impl ParkIntent {
     }
 }
 
+/// Whether a post-creation refusal in `run` must close the gate-run it
+/// just filed. True exactly when WE created the packet this run
+/// (`!reused`) AND it is not a dry run (`!dry`): a reused packet has its
+/// own life to close elsewhere, and a dry run never filed anything. The
+/// three post-creation guards (`running_gates`, the PVC guard,
+/// `crowd_refusal`) already gate their `close_refused` on this exact
+/// condition — and so must the park-intent PATCH, whose unguarded `?`
+/// used to abort `run` on a transient SoR blip and leave the packet
+/// open with no runner Job (an orphan the overdue alarm later finds).
+pub(crate) fn should_close_on_park_failure(reused: bool, dry: bool) -> bool {
+    !reused && !dry
+}
+
 /// Close a just-registered gate-run whose launch was REFUSED before any
 /// Job existed, so the refusal leaves no orphan (ed7f1355: the shared-
 /// workspace guard fired after the packet was filed, the packet sat
@@ -682,9 +695,29 @@ pub(crate) fn no_instance_message() -> String {
 /// and silently wrong on another IS the defect (packet aa783636), so a
 /// verb that cannot reach the right instance now reaches none.
 fn jobs_base() -> Result<String> {
-    std::env::var("BOSS_JOBS_URL")
-        .ok()
+    resolve_jobs_base(None)
+}
+
+/// Resolve the jobs-api base from an explicit `--jobs-url` flag, falling
+/// back to `BOSS_JOBS_URL`, and REFUSING (never defaulting) when neither
+/// is set. Every read verb — `gate`, `packet census`, `queue`, `prove` —
+/// resolves through here so not one of them can quietly re-grow the
+/// `http://127.0.0.1:7900` default that read boss-gcp's second, older
+/// stack (packet aa783636). A default that is right on one host and
+/// silently wrong on another IS the defect; a verb that cannot reach the
+/// right instance now reaches none.
+pub(crate) fn resolve_jobs_base(flag: Option<&str>) -> Result<String> {
+    resolve_jobs_base_from(flag, std::env::var("BOSS_JOBS_URL").ok())
+}
+
+/// The pure core of [`resolve_jobs_base`]: flag wins, then env, then
+/// refuse. Split out so a test can pin the precedence and the refusal
+/// without mutating process environment — env writes are `unsafe` under
+/// edition 2024, and racy across the parallel test runner.
+pub(crate) fn resolve_jobs_base_from(flag: Option<&str>, env: Option<String>) -> Result<String> {
+    flag.map(str::to_string)
         .filter(|v| !v.trim().is_empty())
+        .or_else(|| env.filter(|v| !v.trim().is_empty()))
         .ok_or_else(|| anyhow!("{}", no_instance_message()))
 }
 
@@ -694,8 +727,21 @@ pub(crate) async fn api(
     path: &str,
     payload: Option<Value>,
 ) -> Result<Option<Value>> {
+    api_at(http, &jobs_base()?, method, path, payload).await
+}
+
+/// Like [`api`], but against an explicit base rather than the resolved
+/// one. The seam a paginating reader tests through: a stub socket can
+/// answer without a `BOSS_JOBS_URL` anywhere in the environment.
+pub(crate) async fn api_at(
+    http: &reqwest::Client,
+    base: &str,
+    method: reqwest::Method,
+    path: &str,
+    payload: Option<Value>,
+) -> Result<Option<Value>> {
     let mut req = http
-        .request(method.clone(), format!("{}{path}", jobs_base()?))
+        .request(method.clone(), format!("{base}{path}"))
         .header("x-boss-user", boss_user())
         .header("content-type", "application/json");
     if let Some(p) = &payload {
@@ -895,14 +941,27 @@ pub async fn run(
     // can file the car verbatim on green. A PATCH so it works whether the
     // packet was just created or reused, and merges rather than replaces.
     if !park.is_empty() && !dry {
-        api(
+        // This PATCH is a SECOND round-trip AFTER the packet was filed,
+        // and the SoR rolls for tens of seconds on every train deploy
+        // (the very thing `wait_for_verdict` defends against). An
+        // unguarded `?` here used to abort `run` on a transient blip and
+        // leave the packet we just opened sitting open with no runner
+        // Job — an orphan. So close what we created before bailing, the
+        // same way the three post-creation guards below do (ed7f1355).
+        if let Err(e) = api(
             &http,
             reqwest::Method::PATCH,
             &format!("/api/jobs/{packet}/metadata"),
             Some(park.metadata_patch()),
         )
         .await
-        .context("stamping park intent onto the gate-run")?;
+        .context("stamping park intent onto the gate-run")
+        {
+            if should_close_on_park_failure(reused, dry) {
+                close_refused(&http, &packet, &format!("{e:#}")).await;
+            }
+            return Err(e);
+        }
         println!("boss gate: park intent stamped — this branch auto-parks on green");
     }
 
@@ -1362,6 +1421,26 @@ mod tests {
         assert_eq!(p.metadata_patch()["park_backlog_item"], "7c9e376d");
     }
 
+    /// A TRANSIENT SoR BLIP ON THE PARK-INTENT PATCH MUST NOT ORPHAN
+    /// THE PACKET. The park intent is a SECOND round-trip after the
+    /// gate-run packet was already filed, and the SoR rolls for tens of
+    /// seconds on every train deploy. If that PATCH blips, the packet we
+    /// just created has no runner Job and would sit open forever — so
+    /// `run` must close it, exactly as the three post-creation guards
+    /// (`running_gates`, the PVC guard, `crowd_refusal`) do. That
+    /// close-or-keep decision is `!reused && !dry`: close only a packet
+    /// WE created this run, and never a dry run (which filed nothing).
+    #[test]
+    fn a_park_blip_closes_the_packet_we_created_but_not_a_reused_or_dry_one() {
+        // We created the packet this run, real run → close the orphan.
+        assert!(should_close_on_park_failure(false, false));
+        // Reused packet: it has a life of its own; don't close it.
+        assert!(!should_close_on_park_failure(true, false));
+        // Dry run: nothing was ever filed to close.
+        assert!(!should_close_on_park_failure(false, true));
+        assert!(!should_close_on_park_failure(true, true));
+    }
+
     /// THE RACE THIS CLOSES. `boss gate` printed "`boss gate --wait`
     /// follows it", and following that advice created a SECOND Job
     /// against the same reused packet. Two Jobs then raced to report
@@ -1537,6 +1616,45 @@ mod tests {
                     .filter(|s| !s.trim().is_empty())
                     .is_none(),
                 "{v:?} must not count as a configured instance"
+            );
+        }
+    }
+
+    /// EVERY read verb resolves its instance through this one function,
+    /// so the `127.0.0.1` trap cannot re-grow in any single verb. Pin
+    /// the precedence (flag over env) and the refusal on the pure form,
+    /// so no test has to mutate process env (unsafe under edition 2024,
+    /// racy in parallel). `packet census` and `queue` mirror this from
+    /// their own modules to document that they wire it in.
+    #[test]
+    fn resolve_jobs_base_prefers_flag_then_env_then_refuses() {
+        assert_eq!(
+            resolve_jobs_base_from(Some("http://flag:7900"), Some("http://env:7900".into()))
+                .unwrap(),
+            "http://flag:7900",
+            "an explicit flag beats the env"
+        );
+        assert_eq!(
+            resolve_jobs_base_from(None, Some("http://env:7900".into())).unwrap(),
+            "http://env:7900",
+            "the env is used when there is no flag"
+        );
+        for (flag, env) in [
+            (None, None),
+            (Some("   "), None),
+            (None, Some(String::new())),
+            (Some(""), Some("\t".to_string())),
+        ] {
+            let m = resolve_jobs_base_from(flag, env)
+                .expect_err("neither a real flag nor a real env must refuse")
+                .to_string();
+            assert!(
+                m.contains("10.20.0.34:7900"),
+                "refusal must name the record: {m}"
+            );
+            assert!(
+                m.contains("127.0.0.1:7900"),
+                "refusal must warn of the trap: {m}"
             );
         }
     }

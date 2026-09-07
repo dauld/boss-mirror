@@ -559,9 +559,13 @@ pub async fn run(opts: Options, now: DateTime<Utc>) -> Result<()> {
 /// printing so a test can drive the whole collection against a stubbed
 /// jobs-api and assert on the findings.
 async fn collect(opts: Options, now: DateTime<Utc>) -> Result<Census> {
-    let base = opts
-        .jobs_url
-        .unwrap_or_else(|| crate::train::env_or("BOSS_JOBS_URL", "http://127.0.0.1:7900"));
+    // No default on purpose: with neither `--jobs-url` nor
+    // `BOSS_JOBS_URL` set, this refuses and names the system of record
+    // rather than silently reading boss-gcp's second, older stack at
+    // 127.0.0.1 and reporting conservation/orphan findings about the
+    // wrong deployment (packet aa783636). Shared with every read verb
+    // via gate::resolve_jobs_base.
+    let base = crate::gate::resolve_jobs_base(opts.jobs_url.as_deref())?;
     let base = base.trim_end_matches('/').to_string();
     let mut api = Api::new(base.clone());
     let mut notes: Vec<String> = Vec::new();
@@ -2149,6 +2153,24 @@ mod tests {
     fn envelope(data: Vec<Value>) -> Value {
         let total = data.len();
         json!({"data": data, "total": total})
+    }
+
+    /// The census used to default `BOSS_JOBS_URL` to
+    /// `http://127.0.0.1:7900`, so run on boss-gcp without an instance
+    /// set it read the SECOND, older stack and reported conservation and
+    /// orphan findings about the wrong deployment — then exited 0
+    /// (packet aa783636). It now resolves through
+    /// `gate::resolve_jobs_base(opts.jobs_url)`, which refuses when
+    /// neither the flag nor the env names an instance and points at the
+    /// system of record. `a_full_census_...` covers the flag path
+    /// end-to-end; this pins the refusal the census wires in.
+    #[test]
+    fn without_an_instance_the_census_refuses_and_names_the_record() {
+        let m = crate::gate::resolve_jobs_base_from(None, None)
+            .expect_err("no --jobs-url and no BOSS_JOBS_URL must refuse, not default")
+            .to_string();
+        assert!(m.contains("10.20.0.34:7900"), "must name the record: {m}");
+        assert!(m.contains("127.0.0.1:7900"), "must warn of the trap: {m}");
     }
 
     fn opts(base: &str) -> Options {
