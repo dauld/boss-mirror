@@ -941,3 +941,20 @@ name = "inspect-empty-decisions-sweep-on-step-ready"
 on_event = "step.ready.*"
 [[rule.do]]
 handler = "maintenance.sweep.inspect"
+
+# A merged pr-train fires the cluster converge event-driven, instead of
+# waiting up to ~10 min for the cluster-deploy-runner timer to poll forge
+# main. On the merged step (spec_slug = "merged"; the always-present
+# top-level slug that makes "which step" routable), spawn an ops-request
+# for host=forge verb=converge — the boss-ops-runner (~1-min poll) runs
+# it. Latency accelerator ONLY: the timer + cluster-watchdog remain the
+# independent floor, and the converge is idempotent + STAMP-guarded.
+# Seeded by 202609071700-converge-on-merge.sql; present here because
+# dispatcher_rules_seed_matches_toml compares BOTH directions.
+[[rule]]
+name = "converge-on-merge"
+on_event = "step.done.task"
+when = 'spec_slug = "merged"'
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"ops-request\"", subject_kind = "\"custom\"", subject = "\"forge\"", title = "\"converge on forge — a train merged to main\"", "metadata.host" = "\"forge\"", "metadata.verb" = "\"converge\"" }

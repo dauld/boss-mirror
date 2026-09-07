@@ -159,7 +159,19 @@ set -euo pipefail
 # no routing: it advances the very packet that fired it, spawns
 # nothing, and every write it makes lands back on that packet's own
 # steps.
-BASELINE=56  # +inspect-empty-decisions-sweep-on-step-ready: a cross-protocol reactor (a maintenance-sweep inspection driven by a step becoming ready), which a single Workflow definition cannot express
+# 55 -> 56 (2026-09-05): inspect-empty-decisions-sweep-on-step-ready — a
+# cross-protocol reactor (a maintenance-sweep inspection driven by a step
+# becoming ready), which a single Workflow definition cannot express.
+#
+# 56 -> 57 (2026-09-07, migration 202609071700): converge-on-merge — a
+# cross-protocol reactor. A pr-train's merged step (step.done.task,
+# spec_slug="merged") spawns an ops-request that starts the
+# cluster-deploy-runner oneshot on the forge host. External glue spanning
+# three protocols (pr-train -> ops-request -> deployment on the forge
+# host), which a single Workflow `on` consequence cannot express; it
+# retires the up-to-10-min converge poll latency behind the gcr.io DNS
+# flake that reddened #236 and #250.
+BASELINE=57
 RULES_FILE="infra/dispatcher/rules.toml"
 
 count=$(grep -c '^\[\[rule\]\]' "$RULES_FILE")
