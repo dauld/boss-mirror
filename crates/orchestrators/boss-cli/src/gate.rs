@@ -470,6 +470,19 @@ impl ParkIntent {
     }
 }
 
+/// Whether a post-creation refusal in `run` must close the gate-run it
+/// just filed. True exactly when WE created the packet this run
+/// (`!reused`) AND it is not a dry run (`!dry`): a reused packet has its
+/// own life to close elsewhere, and a dry run never filed anything. The
+/// three post-creation guards (`running_gates`, the PVC guard,
+/// `crowd_refusal`) already gate their `close_refused` on this exact
+/// condition — and so must the park-intent PATCH, whose unguarded `?`
+/// used to abort `run` on a transient SoR blip and leave the packet
+/// open with no runner Job (an orphan the overdue alarm later finds).
+pub(crate) fn should_close_on_park_failure(reused: bool, dry: bool) -> bool {
+    !reused && !dry
+}
+
 /// Close a just-registered gate-run whose launch was REFUSED before any
 /// Job existed, so the refusal leaves no orphan (ed7f1355: the shared-
 /// workspace guard fired after the packet was filed, the packet sat
@@ -895,14 +908,27 @@ pub async fn run(
     // can file the car verbatim on green. A PATCH so it works whether the
     // packet was just created or reused, and merges rather than replaces.
     if !park.is_empty() && !dry {
-        api(
+        // This PATCH is a SECOND round-trip AFTER the packet was filed,
+        // and the SoR rolls for tens of seconds on every train deploy
+        // (the very thing `wait_for_verdict` defends against). An
+        // unguarded `?` here used to abort `run` on a transient blip and
+        // leave the packet we just opened sitting open with no runner
+        // Job — an orphan. So close what we created before bailing, the
+        // same way the three post-creation guards below do (ed7f1355).
+        if let Err(e) = api(
             &http,
             reqwest::Method::PATCH,
             &format!("/api/jobs/{packet}/metadata"),
             Some(park.metadata_patch()),
         )
         .await
-        .context("stamping park intent onto the gate-run")?;
+        .context("stamping park intent onto the gate-run")
+        {
+            if should_close_on_park_failure(reused, dry) {
+                close_refused(&http, &packet, &format!("{e:#}")).await;
+            }
+            return Err(e);
+        }
         println!("boss gate: park intent stamped — this branch auto-parks on green");
     }
 
@@ -1360,6 +1386,26 @@ mod tests {
         p.backlog_item = Some("7c9e376d".into());
         assert!(p.require_complete().is_ok());
         assert_eq!(p.metadata_patch()["park_backlog_item"], "7c9e376d");
+    }
+
+    /// A TRANSIENT SoR BLIP ON THE PARK-INTENT PATCH MUST NOT ORPHAN
+    /// THE PACKET. The park intent is a SECOND round-trip after the
+    /// gate-run packet was already filed, and the SoR rolls for tens of
+    /// seconds on every train deploy. If that PATCH blips, the packet we
+    /// just created has no runner Job and would sit open forever — so
+    /// `run` must close it, exactly as the three post-creation guards
+    /// (`running_gates`, the PVC guard, `crowd_refusal`) do. That
+    /// close-or-keep decision is `!reused && !dry`: close only a packet
+    /// WE created this run, and never a dry run (which filed nothing).
+    #[test]
+    fn a_park_blip_closes_the_packet_we_created_but_not_a_reused_or_dry_one() {
+        // We created the packet this run, real run → close the orphan.
+        assert!(should_close_on_park_failure(false, false));
+        // Reused packet: it has a life of its own; don't close it.
+        assert!(!should_close_on_park_failure(true, false));
+        // Dry run: nothing was ever filed to close.
+        assert!(!should_close_on_park_failure(false, true));
+        assert!(!should_close_on_park_failure(true, true));
     }
 
     /// THE RACE THIS CLOSES. `boss gate` printed "`boss gate --wait`
