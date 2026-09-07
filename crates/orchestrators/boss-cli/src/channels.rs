@@ -260,34 +260,13 @@ pub async fn run() -> Result<()> {
     let _ = std::process::Command::new("git")
         .args(["fetch", "origin", "--quiet"])
         .status();
-    let cars = crate::gate::api(
-        &http,
-        reqwest::Method::GET,
-        "/api/jobs?kind=ship-a-change&status=open&limit=200",
-        None,
-    )
-    .await?;
-    let boardable: Vec<Value> = cars
-        .as_ref()
-        .and_then(|b| b.get("data"))
-        .and_then(Value::as_array)
-        .map(|rows| {
-            rows.iter()
-                .filter(|c| {
-                    c.get("steps")
-                        .and_then(Value::as_array)
-                        .map(|ss| {
-                            ss.iter().any(|st| {
-                                st.get("title").and_then(Value::as_str) == Some("Open for review")
-                                    && st.get("status").and_then(Value::as_str) == Some("ready")
-                            })
-                        })
-                        .unwrap_or(false)
-                })
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
+    // Every boardable car in the dock, not just page one: the dock
+    // builds past a page (in-flight + parked + landed-but-unclosed
+    // residue), and a bare `limit=` read undercounts the delivery mix
+    // silently (a-limit-is-not-a-filter). `gate::all_open_cars` pages on
+    // `total`.
+    let cars = crate::gate::all_open_cars(&http).await?;
+    let boardable = boardable_cars(cars);
 
     let mut dmix: std::collections::BTreeMap<DeliveryChannel, usize> =
         std::collections::BTreeMap::new();
@@ -341,6 +320,27 @@ pub async fn run() -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// A car is in the dock when its "Open for review" step is ready — the
+/// same predicate the conductor boards on.
+fn is_open_for_review(car: &Value) -> bool {
+    car.get("steps")
+        .and_then(Value::as_array)
+        .map(|steps| {
+            steps.iter().any(|st| {
+                st.get("title").and_then(Value::as_str) == Some("Open for review")
+                    && st.get("status").and_then(Value::as_str) == Some("ready")
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// The boardable cars among the fully-gathered open cars — pure, so the
+/// filter (and that it counts a car past page one, not just the first
+/// page) is testable without a live API.
+fn boardable_cars(cars: Vec<Value>) -> Vec<Value> {
+    cars.into_iter().filter(is_open_for_review).collect()
 }
 
 /// How a change ships — the delivery channel, ordered lightest to
@@ -621,5 +621,42 @@ mod tests {
     #[test]
     fn an_empty_change_is_data() {
         assert_eq!(delivery_channel(&[]), DeliveryChannel::Data);
+    }
+
+    /// A LIMIT IS NOT A FILTER (memory: a-limit-is-not-a-filter). Once
+    /// open cars fill more than a page, a boardable car sorts to the
+    /// tail and the old bare `limit=200` read dropped it from the
+    /// delivery mix silently. The read now pages on `total` (via
+    /// `train::list_all_pages`, whose page-two behaviour is pinned
+    /// there), so the boardable filter must count a car gathered from
+    /// page two.
+    #[tokio::test]
+    async fn a_boardable_car_on_page_two_is_counted() {
+        let mut all: Vec<Value> = (0..crate::train::PAGE_LIMIT + 40)
+            .map(|i| json!({ "id": i, "steps": [] }))
+            .collect();
+        all.push(json!({
+            "id": "tail",
+            "steps": [{ "title": "Open for review", "status": "ready" }]
+        }));
+        let all_ref = &all;
+        let gathered = crate::train::list_all_pages(|offset| async move {
+            let page: Vec<Value> = all_ref
+                .iter()
+                .skip(offset)
+                .take(crate::train::PAGE_LIMIT)
+                .cloned()
+                .collect();
+            anyhow::Ok(Some(json!({ "data": page, "total": all_ref.len() })))
+        })
+        .await
+        .unwrap();
+        let boardable = boardable_cars(gathered);
+        assert!(
+            boardable
+                .iter()
+                .any(|c| c.get("id").and_then(Value::as_str) == Some("tail")),
+            "the boardable car on page two must be counted, not dropped off page one"
+        );
     }
 }

@@ -137,14 +137,13 @@ pub async fn run(branch: &str, clone: Option<String>, remote: Option<String>) ->
     // BOSS_JOBS_URL has no default: a wrong instance does not error
     // here, it answers, which is worse.
     let http = reqwest::Client::new();
-    let body = crate::gate::api(
-        &http,
-        reqwest::Method::GET,
-        "/api/jobs?kind=ship-a-change&status=open&limit=100",
-        None,
-    )
-    .await?;
-    let facts = facts_from(body.as_ref(), branch, &clone, &remote);
+    // Read EVERY open car, not just page one. A limit is not a filter
+    // (a-limit-is-not-a-filter): with more than a page of open cars, the
+    // one we want can sit past the cap, and reading only page one called
+    // an existing car's receipt absent. `gate::all_open_cars` pages on
+    // `total`.
+    let cars = crate::gate::all_open_cars(&http).await?;
+    let facts = facts_from(&cars, branch, &clone, &remote);
 
     println!("boss receipt: {branch}");
     println!("  verdict  {}", facts.verdict.as_deref().unwrap_or("none"));
@@ -174,13 +173,10 @@ pub async fn run(branch: &str, clone: Option<String>, remote: Option<String>) ->
     Ok(())
 }
 
-/// Split out so the JSON walk is testable without a live API.
-fn facts_from(
-    packets: Option<&serde_json::Value>,
-    branch: &str,
-    clone: &str,
-    remote: &str,
-) -> ReceiptFacts {
+/// Split out so the JSON walk is testable without a live API. Takes the
+/// FULLY-GATHERED open cars (see `gate::all_open_cars`), not one page, so
+/// a car past the first page is not silently missed.
+fn facts_from(cars: &[serde_json::Value], branch: &str, clone: &str, remote: &str) -> ReceiptFacts {
     let ls = sh(&[
         "git",
         "-C",
@@ -200,33 +196,37 @@ fn facts_from(
         branch_head,
         ..Default::default()
     };
-    // PARSED, NOT SCANNED. The first version of this walked the raw
-    // body for `"head":` inside a window after the branch name, and it
-    // reported NO RECEIPT for a car that had one — the receipt lives on
-    // the gate STEP, past the window, and field order is not a contract.
-    // Writing an ad-hoc string scan inside the verb built to retire
-    // ad-hoc string scans is the joke this comment exists to prevent
-    // repeating.
-    if let Some(v) = packets {
-        for job in crate::gate::rows(Some(v.clone())) {
-            let is_ours = job
-                .pointer("/metadata/branch")
-                .and_then(|b| b.as_str())
-                .is_some_and(|b| b == branch);
-            if !is_ours {
-                continue;
-            }
-            if let Some(r) = select_receipt(&job) {
-                out.gated_head = r.get("head").and_then(|x| x.as_str()).map(str::to_string);
-                out.verdict = r
-                    .get("verdict")
-                    .and_then(|x| x.as_str())
-                    .map(str::to_string);
-                out.mode = r.get("mode").and_then(|x| x.as_str()).map(str::to_string);
-            }
-        }
+    if let Some(r) = receipt_for_branch(cars, branch) {
+        out.gated_head = r.get("head").and_then(|x| x.as_str()).map(str::to_string);
+        out.verdict = r
+            .get("verdict")
+            .and_then(|x| x.as_str())
+            .map(str::to_string);
+        out.mode = r.get("mode").and_then(|x| x.as_str()).map(str::to_string);
     }
     out
+}
+
+/// The receipt the car on `branch` carries, chosen from the gathered
+/// open cars — pure, so the walk (and that it reads a car past page one,
+/// not just the first page) is testable without git or a live API.
+///
+/// PARSED, NOT SCANNED. The first version of this walked the raw body
+/// for `"head":` inside a window after the branch name, and it reported
+/// NO RECEIPT for a car that had one — the receipt lives on the gate
+/// STEP, past the window, and field order is not a contract. `select_receipt`
+/// parses the packet (and prefers `regate_receipt` over the stale gate
+/// step); writing an ad-hoc string scan inside the verb built to retire
+/// ad-hoc string scans is the joke this comment exists to prevent
+/// repeating.
+fn receipt_for_branch(cars: &[serde_json::Value], branch: &str) -> Option<serde_json::Value> {
+    cars.iter()
+        .find(|job| {
+            job.pointer("/metadata/branch")
+                .and_then(|b| b.as_str())
+                .is_some_and(|b| b == branch)
+        })
+        .and_then(select_receipt)
 }
 
 /// The one receipt that describes the head this car would board, chosen
@@ -405,6 +405,43 @@ mod tests {
         });
         let r = select_receipt(&job).expect("gate step receipt");
         assert_eq!(r.get("head").and_then(|h| h.as_str()), Some("oldhead"));
+    }
+
+    /// A LIMIT IS NOT A FILTER (memory: a-limit-is-not-a-filter). Once
+    /// open cars fill more than a page, the car sorts to the tail of
+    /// `opened_on DESC`; the old bare `limit=100` read left it off page
+    /// one and `boss receipt` reported an existing car as carrying no
+    /// receipt. The read now pages on `total` (via
+    /// `train::list_all_pages`, whose page-two behaviour is pinned
+    /// there), so the packet walk must find a car gathered from page two.
+    #[tokio::test]
+    async fn a_receipt_on_page_two_is_found_not_left_off_page_one() {
+        use serde_json::json;
+        let mut all: Vec<serde_json::Value> = (0..crate::train::PAGE_LIMIT + 40)
+            .map(|i| json!({ "metadata": { "branch": format!("decoy-{i}") } }))
+            .collect();
+        all.push(json!({
+            "metadata": { "branch": "fix/tail-car" },
+            "steps": [{
+                "title": "Green, and observed working",
+                "metadata": { "receipt": "{\"head\":\"deadbeefcafe\",\"verdict\":\"green\",\"mode\":\"full\"}" }
+            }],
+        }));
+        let all_ref = &all;
+        let gathered = crate::train::list_all_pages(|offset| async move {
+            let page: Vec<serde_json::Value> = all_ref
+                .iter()
+                .skip(offset)
+                .take(crate::train::PAGE_LIMIT)
+                .cloned()
+                .collect();
+            anyhow::Ok(Some(json!({ "data": page, "total": all_ref.len() })))
+        })
+        .await
+        .unwrap();
+        let r = receipt_for_branch(&gathered, "fix/tail-car")
+            .expect("the car on page two must be found, not left off page one");
+        assert_eq!(r.get("head").and_then(|h| h.as_str()), Some("deadbeefcafe"));
     }
 }
 

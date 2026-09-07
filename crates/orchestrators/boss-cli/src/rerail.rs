@@ -51,14 +51,19 @@ fn git(dir: &str, args: &[&str]) -> Result<String> {
 /// The car packet for `given` (branch or 8+ chars of id), plus its
 /// branch. Reads open ship-a-change packets the same way park does.
 async fn find_car(http: &reqwest::Client, given: &str) -> Result<(Value, String)> {
-    let body = gate::api(
-        http,
-        reqwest::Method::GET,
-        "/api/jobs?kind=ship-a-change&status=open&limit=200",
-        None,
-    )
-    .await?;
-    let cars = gate::rows(body);
+    // Read EVERY open car, not just page one: a rerail target opened
+    // days ago sorts to the tail of `opened_on DESC`, and a bare
+    // `limit=` read left it off page one and reported it "not found"
+    // (a-limit-is-not-a-filter). `gate::all_open_cars` pages on `total`.
+    let cars = gate::all_open_cars(http).await?;
+    select_car(&cars, given)
+}
+
+/// The car for `given` (branch, or 8+ chars of id), plus its branch —
+/// pure, over the fully-gathered open cars, so branch-or-id resolution
+/// (and that it reaches a car past page one) is testable without a live
+/// API. Resolves the same way `park` does.
+fn select_car(cars: &[Value], given: &str) -> Result<(Value, String)> {
     let by_branch: Vec<&Value> = cars
         .iter()
         .filter(|c| c.pointer("/metadata/branch").and_then(Value::as_str) == Some(given))
@@ -66,7 +71,7 @@ async fn find_car(http: &reqwest::Client, given: &str) -> Result<(Value, String)
     let car = if let [one] = by_branch.as_slice() {
         (*one).clone()
     } else {
-        let id = park::resolve_job_id(&cars, given)?;
+        let id = park::resolve_job_id(cars, given)?;
         cars.iter()
             .find(|c| c.get("id").and_then(Value::as_str) == Some(id.as_str()))
             .cloned()
@@ -240,4 +245,40 @@ pub async fn run(given: &str, finish_only: bool, dry: bool) -> Result<()> {
     .await?;
 
     finish(&http, &car, &old_branch, &new_branch).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A LIMIT IS NOT A FILTER (memory: a-limit-is-not-a-filter). A
+    /// conflict-skipped car sits at the tail of `opened_on DESC` once
+    /// open cars fill more than a page; the old bare `limit=200` read
+    /// left it off page one and `boss rerail` reported it "not found".
+    /// The read now pages on `total` (via `train::list_all_pages`, whose
+    /// page-two behaviour is pinned there), so the branch lookup must
+    /// reach a car gathered from page two.
+    #[tokio::test]
+    async fn a_car_on_page_two_is_rerailable_not_not_found() {
+        let mut all: Vec<Value> = (0..crate::train::PAGE_LIMIT + 40)
+            .map(|i| json!({ "id": format!("decoy-{i}"), "metadata": { "branch": format!("decoy-{i}") } }))
+            .collect();
+        all.push(json!({ "id": "car-tail", "metadata": { "branch": "fix/tail-car" } }));
+        let all_ref = &all;
+        let gathered = crate::train::list_all_pages(|offset| async move {
+            let page: Vec<Value> = all_ref
+                .iter()
+                .skip(offset)
+                .take(crate::train::PAGE_LIMIT)
+                .cloned()
+                .collect();
+            anyhow::Ok(Some(json!({ "data": page, "total": all_ref.len() })))
+        })
+        .await
+        .unwrap();
+        let (car, branch) = select_car(&gathered, "fix/tail-car")
+            .expect("the car on page two must be found, not reported not-found");
+        assert_eq!(branch, "fix/tail-car");
+        assert_eq!(car.get("id").and_then(Value::as_str), Some("car-tail"));
+    }
 }

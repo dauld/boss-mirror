@@ -772,6 +772,37 @@ pub(crate) fn rows(v: Option<Value>) -> Vec<Value> {
     .unwrap_or_default()
 }
 
+/// Every open `ship-a-change` car, across ALL pages — the operator-verb
+/// counterpart to the conductor's `train::list_all_pages`, built on the
+/// `gate::api` client the CLI verbs speak through (a different client
+/// from the conductor's, which is why the boarding-pagination car could
+/// not fold these call sites into that helper directly).
+///
+/// A limit is not a filter (memory: a-limit-is-not-a-filter). Open cars
+/// build past a page — in-flight + parked + landed-but-unclosed residue —
+/// and the list is `ORDER BY opened_on DESC`, so a car opened days ago
+/// but touched today sorts to the tail. Read with a bare `limit=`, that
+/// car falls off page one and `boss receipt`/`rerail`/`channels` reported
+/// a car that exists as "not found" — a false negative that grows as
+/// closed cars accumulate. This pages on the response `total` via
+/// [`train::list_all_pages`] (whose page-two behaviour is pinned there)
+/// until every matching row is read.
+pub(crate) async fn all_open_cars(http: &reqwest::Client) -> Result<Vec<Value>> {
+    crate::train::list_all_pages(|offset| async move {
+        api(
+            http,
+            reqwest::Method::GET,
+            &format!(
+                "/api/jobs?kind=ship-a-change&status=open&limit={}&offset={offset}",
+                crate::train::PAGE_LIMIT
+            ),
+            None,
+        )
+        .await
+    })
+    .await
+}
+
 /// The instant a step completed, in the one format every verb writes.
 ///
 /// RFC3339, whole seconds, `Z`. Several verbs stamp `completed_at` — the
