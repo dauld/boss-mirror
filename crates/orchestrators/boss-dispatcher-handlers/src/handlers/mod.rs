@@ -33,6 +33,7 @@ pub mod jobs_auto_park;
 pub mod jobs_clear_waiting;
 pub mod jobs_complete_linked_step;
 pub mod jobs_complete_step;
+pub mod jobs_run_car_probes;
 pub mod jobs_subjob_resolve;
 pub mod ledger_bill_approve;
 pub mod ledger_keg_deposit_settle;

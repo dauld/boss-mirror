@@ -237,6 +237,43 @@ pub fn parked_car_for<'a>(cars: &'a [Value], branch: &str) -> Option<&'a Value> 
     })
 }
 
+/// Is this car ABOARD a train — an open car the conductor stamped with
+/// `metadata.train` and has not released?
+///
+/// The other half of `is_parked`: between them they cover every live
+/// car. Boarding stamps the train rather than completing the review
+/// step, and a cancelled train clears the stamp, so the stamp is the
+/// whole test — plus "not closed", because a closed car's train stamp
+/// is history (that is what `is_landed` reads).
+pub fn is_boarded(car: &Value) -> bool {
+    let md = car.get("metadata");
+    let branch = md
+        .and_then(|m| m.get("branch"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    !branch.is_empty() && is_open(car) && is_set(md.and_then(|m| m.get("train")))
+}
+
+/// The live car this branch already has — aboard a train if one is,
+/// otherwise the one parked at the dock. `None` means the branch has no
+/// car: a green may file one.
+///
+/// ONE PREDICATE, TWO CALLERS, ONE MEASURED BUG (backlog 02165b1d).
+/// 2026-09-08 20:30:54: car d08a6418 boarded train #274. 20:31:20: a
+/// duplicate gate-run went green and the auto-park handler filed car
+/// ad54e95c for the SAME branch, which then sat on the loading dock
+/// while the first rode — abandoned by hand. `parked_car_for` answered
+/// `None` (correctly: the first car was no longer parked), and "no
+/// parked car" was read as "no car". It is not. So both the handler and
+/// `boss gate`'s launch guard ask THIS question — is there a live car
+/// at all — from one definition (CLAUDE.md §9a).
+pub fn open_car_for<'a>(cars: &'a [Value], branch: &str) -> Option<&'a Value> {
+    let mine = |c: &&Value| c.pointer("/metadata/branch").and_then(Value::as_str) == Some(branch);
+    cars.iter()
+        .find(|c| mine(c) && is_boarded(c))
+        .or_else(|| cars.iter().find(|c| mine(c) && is_open(c) && is_parked(c)))
+}
+
 /// A car that already carried its branch to main: closed with
 /// `outcome=merged`, or stamped `merged` by the conductor's landing (the
 /// marker v3 ship-a-change gates its `merged` step on — the dispatcher
@@ -298,6 +335,14 @@ pub fn regate_patch(receipt: &Receipt, note: &str, delivery_channel: Option<&str
         patch["delivery_channel"] = json!(dc);
     }
     patch
+}
+
+/// Is this packet still open? Callers list `status=open`, so the field
+/// is usually redundant — and a fixture without one must still answer —
+/// but a list that also holds closed cars (the handler pages both) must
+/// not read a closed car as a live one.
+fn is_open(car: &Value) -> bool {
+    car.get("status").and_then(Value::as_str) != Some("closed")
 }
 
 /// A metadata stamp that is present: the conductor writes `train` as
@@ -602,5 +647,103 @@ mod landed_tests {
         });
         assert!(landed_car_for(&[parked], BRANCH).is_none());
         assert!(landed_car_for(&[landed()], "feat/other").is_none());
+    }
+}
+
+#[cfg(test)]
+mod open_car_tests {
+    use super::*;
+
+    const BRANCH: &str = "feat/a-human-only-step-refuses-an-agent";
+
+    /// Car d08a6418 as it stood at 20:31:20 UTC on 2026-09-08: gated
+    /// green, filed, and BOARDED train #274 twenty-six seconds earlier —
+    /// `metadata.train` stamped, its review step still waiting.
+    fn boarded() -> Value {
+        json!({
+            "id": "d08a6418-e7af-484b-82bf-ab043229bfd6",
+            "kind": "ship-a-change",
+            "status": "open",
+            "metadata": {
+                "branch": BRANCH,
+                "boarded_head": "cd0c4f7bdadf2306a589c922f240a7ff963f70a7",
+                "train": "d72ecdb9-c5a1-4d16-8a00-d934fd565002"
+            },
+            "steps": [
+                {"spec_slug": "gate", "title": GATE, "status": "completed"},
+                {"spec_slug": "review", "title": REVIEW, "status": "ready"},
+            ]
+        })
+    }
+
+    /// The twin the auto-park handler filed for the same branch 26
+    /// seconds later — parked at the dock while the first rode the
+    /// train, and abandoned by hand.
+    fn twin() -> Value {
+        json!({
+            "id": "ad54e95c-b48a-4a4c-87f8-7aa8e4e19eff",
+            "kind": "ship-a-change",
+            "status": "open",
+            "metadata": { "branch": BRANCH },
+            "steps": [
+                {"spec_slug": "gate", "title": GATE, "status": "completed"},
+                {"spec_slug": "review", "title": REVIEW, "status": "ready"},
+            ]
+        })
+    }
+
+    #[test]
+    fn a_train_stamp_is_what_makes_a_car_boarded() {
+        assert!(is_boarded(&boarded()));
+        assert!(!is_boarded(&twin()), "no train stamp is not boarded");
+        // A released car (the conductor nulls the stamp when a train is
+        // cancelled) is back at the dock, not aboard.
+        let mut released = boarded();
+        released["metadata"]["train"] = Value::Null;
+        assert!(!is_boarded(&released));
+        // A closed car is history, whatever it once carried.
+        let mut closed = boarded();
+        closed["status"] = json!("closed");
+        assert!(!is_boarded(&closed));
+    }
+
+    /// THE MEASURED CASE (02165b1d). With a car aboard a train the
+    /// branch already HAS its car: the boarded one answers, so nothing
+    /// files a second.
+    #[test]
+    fn a_boarded_car_is_the_open_car_for_its_branch() {
+        let aboard = [boarded()];
+        let got = open_car_for(&aboard, BRANCH).expect("a boarded car is an open car");
+        assert_eq!(got["id"], "d08a6418-e7af-484b-82bf-ab043229bfd6");
+        // Both shapes present: the boarded one wins, so "is this branch
+        // already in transit" answers the same whether or not a twin
+        // was already filed.
+        let both = [twin(), boarded()];
+        let got = open_car_for(&both, BRANCH).expect("a car answers");
+        assert_eq!(got["id"], "d08a6418-e7af-484b-82bf-ab043229bfd6");
+        assert!(is_boarded(got));
+    }
+
+    #[test]
+    fn a_parked_car_is_the_open_car_when_nothing_has_boarded() {
+        let dock = [twin()];
+        let got = open_car_for(&dock, BRANCH).expect("a parked car is an open car");
+        assert_eq!(got["id"], "ad54e95c-b48a-4a4c-87f8-7aa8e4e19eff");
+        assert!(is_parked(got));
+    }
+
+    #[test]
+    fn a_branch_with_no_live_car_has_none() {
+        assert!(open_car_for(&[], BRANCH).is_none());
+        assert!(open_car_for(&[boarded()], "feat/other").is_none());
+        // Past review with no train: spent history, not a live car.
+        let mut done = twin();
+        done["steps"][1]["status"] = json!("completed");
+        assert!(open_car_for(&[done], BRANCH).is_none());
+        // Closed, however it closed.
+        let mut abandoned = twin();
+        abandoned["status"] = json!("closed");
+        abandoned["metadata"]["abandoned"] = json!("true");
+        assert!(open_car_for(&[abandoned], BRANCH).is_none());
     }
 }

@@ -240,7 +240,7 @@ fn receipt_for_branch(cars: &[serde_json::Value], branch: &str) -> Option<serde_
 /// describing the OLD head. Reading only the step made `boss receipt`
 /// call a correctly re-gated car STALE and disagree with the head the
 /// conductor would board (7f20fb19 — the mirror of 64cae7e9's repair).
-fn select_receipt(job: &serde_json::Value) -> Option<serde_json::Value> {
+pub(crate) fn select_receipt(job: &serde_json::Value) -> Option<serde_json::Value> {
     job.pointer("/metadata/regate_receipt")
         .filter(|v| !v.is_null())
         .and_then(parse_receipt)

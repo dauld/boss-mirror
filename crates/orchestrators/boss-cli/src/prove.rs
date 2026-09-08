@@ -931,6 +931,46 @@ mod tests {
         assert!(e.contains("--verified is required"), "{e}");
     }
 
+    /// THE PROOF RECORD LIVES TWICE — here and in the forge's
+    /// run-car-probe.sh, which records the same shape in sh so the
+    /// arrival rule can prove a car on a host with no `boss` binary
+    /// (28ac45ab). Pinned (CLAUDE.md 9a): every key `proof_json` and
+    /// `proven_metadata` write must appear in the script's jq record,
+    /// and its stream cap must equal MAX_STREAM — or `--recheck` reads
+    /// a machine-written proof it cannot re-run.
+    #[test]
+    fn the_forge_runner_records_the_same_proof_shape() {
+        const SH: &str = include_str!("../../../../infra/forge/run-car-probe.sh");
+        let p = proof_json("true", Some("x"), &ok("x"), "h", "now");
+        for k in p.as_object().unwrap().keys() {
+            assert!(
+                SH.contains(&format!("{k}:${k}")),
+                "run-car-probe.sh does not record proof key `{k}`"
+            );
+        }
+        let at: chrono::DateTime<chrono::Utc> =
+            chrono::DateTime::parse_from_rfc3339("2026-09-08T18:00:00Z")
+                .unwrap()
+                .into();
+        let md = proven_metadata("v", "{}", None, at);
+        for k in md.as_object().unwrap().keys() {
+            assert!(
+                SH.contains(&format!("{k}:$")),
+                "run-car-probe.sh does not write proven key `{k}`"
+            );
+        }
+        for k in ["at", "exit", "output"] {
+            assert!(
+                SH.contains(&format!("{k}:${k}")),
+                "run-car-probe.sh's proof_attempt lacks `{k}`"
+            );
+        }
+        assert!(
+            SH.contains(&format!("MAX_STREAM={MAX_STREAM}")),
+            "the two stream caps differ"
+        );
+    }
+
     /// Guards the bug class that made a hand-rolled check lie on
     /// 2026-08-28: `grep -c || echo 0` prints "0\n0" on no match. Under
     /// this verb the same probe is refused, because grep's exit is 1.

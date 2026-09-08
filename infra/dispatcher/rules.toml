@@ -10,6 +10,24 @@
 # Loaded by boss-dispatcher at startup via the BOSS_DISPATCHER_RULES
 # env var. Hot-reload is not yet implemented; restart the dispatcher
 # to pick up edits.
+#
+# ADDING A RULE TOUCHES FOUR PLACES, and three of them refuse the gate
+# one at a time if you miss them — twice on 2026-09-08 a builder learned
+# the fourth from a red gate twenty minutes in, which is what this note
+# is for:
+#
+#   1. THIS FILE — the [[rule]] block itself.
+#   2. A timestamped migration under infra/postgres/schema/ that inserts
+#      the same row, so a fresh database has it (the registry is data;
+#      this file is how it is authored, not where it lives at runtime).
+#   3. The baseline count in infra/lint/dispatcher-rules-ratchet.sh,
+#      bumped with a one-line justification — the ratchet exists so a
+#      rule cannot appear without someone saying why.
+#   4. `handler_emits()` in crates/core/boss-dispatcher/src/cascade.rs,
+#      IF your `do` names a handler that is not already listed there.
+#      Its guard (cascade_handlers_match_rules) names the handler and the
+#      rule when you miss it; it is checking that every rule's cascade is
+#      declared, so a chain of rules cannot loop unseen.
 
 # ---------------------------------------------------------------------------
 # Reorder-threshold spawn — the canonical example.
@@ -999,3 +1017,26 @@ when = 'metadata.ops_verb = "publish-github-pr"'
 [[rule.do]]
 handler = "jobs.spawn"
 args = { kind = "\"ops-request\"", subject_kind = "\"custom\"", subject = "\"forge\"", title = "\"publish the mirror PR from the forge — a publish was approved\"", "metadata.host" = "\"forge\"", "metadata.verb" = "\"publish-github-pr\"" }
+
+# A train arriving runs each boarded car's recorded probe (backlog
+# 28ac45ab). On a pr-train closing `arrived` — converged AND ci, the
+# first moment every car aboard is both merged and rolled — the
+# jobs.run-car-probes handler files one ops-request per car that
+# recorded a `proof_probe` at park time (host=forge, verb=run-car-probe,
+# args=[car]); the root ops-runner runs infra/forge/run-car-probe.sh,
+# which runs the probe as david and completes `proven` with `boss
+# prove`'s proof record, or stamps `proof_attempt` and leaves `proven`
+# ready. Routed on the closed marker's always-present `kind`/`outcome`
+# (outcome null on a catch-all close reads false, never PredicateFailed).
+# A cross-protocol reactor (pr-train -> ship-a-change -> ops-request ->
+# a verb on the forge host), which no single Workflow `on` consequence
+# can express. Cars without a probe — event-bound ones included — stay
+# hand-proven. Seeded by 202609082215-arrival-runs-the-probe.sql;
+# present here because dispatcher_rules_seed_matches_toml compares BOTH
+# directions.
+[[rule]]
+name = "run-car-probes-on-train-arrived"
+on_event = "jobs.job.closed"
+when = 'kind = "pr-train" AND outcome = "arrived"'
+[[rule.do]]
+handler = "jobs.run-car-probes"

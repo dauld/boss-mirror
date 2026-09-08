@@ -183,7 +183,20 @@ set -euo pipefail
 # a single Workflow `on` consequence cannot express. It adds no routing
 # inside the protocol: the protocol row still owns measure -> review ->
 # approve -> open-pr; this only files the packet that runs one step.
-BASELINE=58
+#
+# 58 -> 59 (2026-09-08, migration 202609082130):
+# run-car-probes-on-train-arrived — a cross-protocol reactor, the same
+# shape as converge-on-merge. A pr-train closing `arrived` reads the
+# ship-a-change cars aboard it and spawns an ops-request per car that
+# recorded a probe at park time; the forge's ops-runner runs the probe
+# and writes the verdict back on the car's `proven` step. Spans three
+# protocols (pr-train -> ship-a-change -> ops-request -> a verb on the
+# forge host), which a single Workflow `on` consequence cannot express.
+# It adds no routing inside any protocol: ship-a-change still owns
+# review -> proven -> merged; this only files the packet that fills one
+# step by machine, for cars whose builder wrote the probe (28ac45ab:
+# 43 landed cars waited 2.5 days on hand-authored probes).
+BASELINE=59
 RULES_FILE="infra/dispatcher/rules.toml"
 
 count=$(grep -c '^\[\[rule\]\]' "$RULES_FILE")

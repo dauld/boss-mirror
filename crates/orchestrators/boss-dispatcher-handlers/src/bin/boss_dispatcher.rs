@@ -29,8 +29,8 @@ use boss_dispatcher_handlers::handlers::{
     inventory_po_place::InventoryPoPlace, inventory_receive::InventoryReceive,
     jobs_auto_park::JobsAutoPark, jobs_clear_waiting::JobsClearWaiting,
     jobs_complete_linked_step::JobsCompleteLinkedStep, jobs_complete_step::JobsCompleteStep,
-    jobs_subjob_resolve::JobsSubjobResolve, ledger_bill_approve::LedgerBillApprove,
-    ledger_keg_deposit_settle::LedgerKegDepositSettle,
+    jobs_run_car_probes::JobsRunCarProbes, jobs_subjob_resolve::JobsSubjobResolve,
+    ledger_bill_approve::LedgerBillApprove, ledger_keg_deposit_settle::LedgerKegDepositSettle,
     ledger_payroll_run_submit::LedgerPayrollRunSubmit, ledger_tax_accrue::LedgerTaxAccrue,
     ledger_tax_remit::LedgerTaxRemit, messages_expire_for_job::MessagesExpireForJob,
     messages_notify::MessagesNotify, messages_notify_job_terminal::MessagesNotifyJobTerminal,
@@ -157,6 +157,11 @@ async fn main() -> Result<()> {
             // A closed Job wakes its waiters: clears metadata.waiting_on
             // (the '*' job edge) so blocked steps re-evaluate (e9291570).
             handlers.register(JobsClearWaiting::new(cfg.jobs_api_url.clone()));
+            // A train arriving runs each boarded car's recorded probe:
+            // files one ops-request per probed car for the forge's
+            // ops-runner (28ac45ab). Inert until a rule on
+            // jobs.job.closed names it.
+            handlers.register(JobsRunCarProbes::new(cfg.jobs_api_url.clone()));
             // The empty-decisions sweep runs itself: on the sweep's
             // Inspect checklist becoming ready, scan open packets for
             // approval decisions that recorded nothing, complete the

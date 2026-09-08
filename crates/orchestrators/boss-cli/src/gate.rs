@@ -699,6 +699,103 @@ pub(crate) fn landed_guard(
     }
 }
 
+/// What `boss gate` does about a branch that is already gated green and
+/// already carries a car.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GatedGuard {
+    /// Nothing to stop: no live car, no current green, or a head that
+    /// has moved since the receipt was written.
+    Proceed,
+    /// Gating anyway, with the operator's reason — the note to print.
+    Forced(String),
+    /// The message, and no gate.
+    Refuse(String),
+}
+
+/// PURE: never re-gate a head that is ALREADY green and already has a
+/// car — unless told to, with a reason.
+///
+/// The measured failure (02165b1d): the builder session that owned
+/// feat/a-human-only-step-refuses-an-agent ended, but its detached retry
+/// loop kept gating. Car d08a6418 boarded train #274 at 20:30:54; at
+/// 20:31:20 the duplicate gate went green and auto-park filed twin car
+/// ad54e95c, which sat on the dock until it was abandoned by hand. The
+/// landed guard could not see it — the branch was green and in transit,
+/// not merged. Both halves are fixed: the handler files nothing for a
+/// branch with a live car, and this refuses the pointless launch that
+/// starts it, one step earlier and without spending a gate slot.
+///
+/// The receipt test is `boss receipt`'s, not a second one: the car's
+/// receipt (`regate_receipt` first, else the gate step) read against the
+/// head about to be gated. A moved head is a real re-gate and proceeds;
+/// a red or absent receipt proceeds; only "this exact head is already
+/// green, and a car already carries it" is refused.
+pub(crate) fn gated_car_guard(
+    branch: &str,
+    sha: &str,
+    cars: &[Value],
+    force_reason: Option<&str>,
+) -> GatedGuard {
+    let Some(car) = boss_jobs::car::open_car_for(cars, branch) else {
+        return GatedGuard::Proceed;
+    };
+    let Some(receipt) = crate::receipt::select_receipt(car) else {
+        return GatedGuard::Proceed;
+    };
+    let facts = crate::receipt::ReceiptFacts {
+        gated_head: receipt
+            .get("head")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        branch_head: Some(sha.to_string()),
+        // The head was resolved by the caller, so the ref is readable by
+        // construction; `standing` needs to know that to answer at all.
+        remote_readable: true,
+        verdict: receipt
+            .get("verdict")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        mode: receipt
+            .get("mode")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    };
+    if facts.verdict.as_deref() != Some("green")
+        || crate::receipt::standing(&facts) != crate::receipt::Standing::Current
+    {
+        return GatedGuard::Proceed;
+    }
+    let id = car.get("id").and_then(Value::as_str).unwrap_or("?");
+    let id = &id[..8.min(id.len())];
+    let train = car
+        .pointer("/metadata/train")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let where_it_is = if boss_jobs::car::is_boarded(car) {
+        format!("aboard train {}", &train[..8.min(train.len())])
+    } else {
+        "parked at the dock".to_string()
+    };
+    let short = &sha[..7.min(sha.len())];
+    match force_reason {
+        Some(reason) => GatedGuard::Forced(format!(
+            "boss gate: {branch}@{short} is already green and car {id} carries it \
+             ({where_it_is}) — gating anyway because: {reason}."
+        )),
+        None => GatedGuard::Refuse(format!(
+            "boss gate: REFUSED — {branch}@{short} already has a CURRENT green receipt, \
+             and car {id} ({where_it_is}) carries it.\n  \
+             Re-gating an unchanged head files nothing useful: the second green repeats \
+             the receipt the car already holds, and with park intent it files a TWIN car \
+             that sits on the dock while the first one rides (2026-09-08, cars \
+             d08a6418/ad54e95c, backlog 02165b1d).\n  \
+             Push a new head and gate that, or — to re-gate this exact head anyway \
+             (re-running a check that load-flaked, say) — pass \
+             --force-regate \"<reason>\"."
+        )),
+    }
+}
+
 /// Gather the landing signals: a quiet fetch of main so the local
 /// objects can answer the content comparison (a clone behind the forge
 /// is how 26b3d203's wrong answers were made), then `boss merged`'s
@@ -1177,6 +1274,18 @@ pub async fn run(
         LandedGuard::Proceed => {}
         LandedGuard::Forced(note) => println!("{note}"),
         LandedGuard::Refuse(why) => bail!("{why}"),
+    }
+
+    // NOR IS A HEAD THAT IS ALREADY GREEN AND ALREADY CARRIED. One step
+    // earlier than the landed guard, and the same shape: read the SoR,
+    // refuse before a packet or a gate slot is spent. An unreadable list
+    // is not a refusal — an unobservable signal proceeds, the way
+    // `observe_landing` does. See `gated_car_guard`.
+    let open_cars = all_open_cars(&http).await.unwrap_or_default();
+    match gated_car_guard(branch, &sha, &open_cars, force_regate.as_deref()) {
+        GatedGuard::Proceed => {}
+        GatedGuard::Forced(note) => println!("{note}"),
+        GatedGuard::Refuse(why) => bail!("{why}"),
     }
 
     // Reuse before filing. See `reusable_packet`.
@@ -1814,6 +1923,145 @@ mod tests {
             LandedGuard::Refuse(why) => assert!(why.contains("twin"), "{why}"),
             other => panic!("park intent on a landed branch is a twin: {other:?}"),
         }
+    }
+
+    const TWIN_BRANCH: &str = "feat/a-human-only-step-refuses-an-agent";
+    const TWIN_HEAD: &str = "cd0c4f7bdadf2306a589c922f240a7ff963f70a7";
+
+    /// Car d08a6418 as it stood when the duplicate gate launched at
+    /// 20:31:20 on 2026-09-08: green at TWIN_HEAD, aboard train #274.
+    fn carried(train: Option<&str>) -> Value {
+        let receipt = format!(
+            "{{\"verdict\": \"green\", \"head\": \"{TWIN_HEAD}\", \"mode\": \"full\", \"fails\": []}}"
+        );
+        json!({
+            "id": "d08a6418-e7af-484b-82bf-ab043229bfd6",
+            "kind": "ship-a-change",
+            "status": "open",
+            "metadata": { "branch": TWIN_BRANCH, "train": train },
+            "steps": [
+                {"spec_slug": "gate", "title": boss_jobs::car::GATE, "status": "completed",
+                 "metadata": {"receipt": receipt}},
+                {"spec_slug": "review", "title": boss_jobs::car::REVIEW, "status": "ready"},
+            ]
+        })
+    }
+
+    /// THE SECOND FRONT DOOR (02165b1d). A head that is already green
+    /// and already carried is not gated again: the refusal names the
+    /// car, where it is, and the door out.
+    #[test]
+    fn a_head_already_green_and_already_carried_is_refused() {
+        let aboard = [carried(Some("d72ecdb9-c5a1-4d16-8a00-d934fd565002"))];
+        match gated_car_guard(TWIN_BRANCH, TWIN_HEAD, &aboard, None) {
+            GatedGuard::Refuse(why) => {
+                assert!(why.contains("car d08a6418"), "names the car: {why}");
+                assert!(why.contains("aboard train d72ecdb9"), "says where: {why}");
+                assert!(why.contains("nothing useful"), "{why}");
+                assert!(why.contains("--force-regate"), "names the door: {why}");
+            }
+            other => panic!("a carried green head must be refused: {other:?}"),
+        }
+        // Parked rather than boarded: same refusal, different location.
+        let docked = [carried(None)];
+        match gated_car_guard(TWIN_BRANCH, TWIN_HEAD, &docked, None) {
+            GatedGuard::Refuse(why) => assert!(why.contains("parked at the dock"), "{why}"),
+            other => panic!("a parked car's green head is refused too: {other:?}"),
+        }
+    }
+
+    /// `--force-regate` keeps working: a reason gates the same head
+    /// anyway (unlike the landed guard, park intent is allowed — a
+    /// parked car has somewhere for the fresh receipt to go).
+    #[test]
+    fn a_forced_regate_of_a_carried_head_still_gates() {
+        let docked = [carried(None)];
+        match gated_car_guard(
+            TWIN_BRANCH,
+            TWIN_HEAD,
+            &docked,
+            Some("re-running a flaked check"),
+        ) {
+            GatedGuard::Forced(note) => {
+                assert!(note.contains("re-running a flaked check"), "{note}");
+                assert!(note.contains("d08a6418"), "{note}");
+            }
+            other => panic!("a reasoned force gates: {other:?}"),
+        }
+    }
+
+    /// A real re-gate proceeds. A moved head, no car, or a receipt that
+    /// is not green are all normal — the guard fires only on the exact
+    /// "nothing to gain" shape.
+    #[test]
+    fn a_moved_head_or_an_uncarried_branch_proceeds() {
+        let aboard = [carried(Some("d72ecdb9"))];
+        assert_eq!(
+            gated_car_guard(
+                TWIN_BRANCH,
+                "9999999999999999999999999999999999999999",
+                &aboard,
+                None
+            ),
+            GatedGuard::Proceed,
+            "a pushed head is a real re-gate"
+        );
+        assert_eq!(
+            gated_car_guard(TWIN_BRANCH, TWIN_HEAD, &[], None),
+            GatedGuard::Proceed,
+            "no car, nothing to twin"
+        );
+        assert_eq!(
+            gated_car_guard("feat/other", TWIN_HEAD, &aboard, None),
+            GatedGuard::Proceed,
+            "another branch's car does not answer"
+        );
+        // A spent car (past review, no train) is history, not a carrier.
+        let mut spent = carried(None);
+        spent["steps"][1]["status"] = json!("completed");
+        assert_eq!(
+            gated_car_guard(TWIN_BRANCH, TWIN_HEAD, &[spent], None),
+            GatedGuard::Proceed
+        );
+        // A red receipt on a car is not a green to repeat.
+        let mut red = carried(None);
+        red["steps"][0]["metadata"]["receipt"] = json!(format!(
+            "{{\"verdict\": \"failed\", \"head\": \"{TWIN_HEAD}\", \"mode\": \"full\"}}"
+        ));
+        assert_eq!(
+            gated_car_guard(TWIN_BRANCH, TWIN_HEAD, &[red], None),
+            GatedGuard::Proceed
+        );
+    }
+
+    /// The FRESH receipt decides. A re-gated car carries its current
+    /// receipt in `metadata.regate_receipt` while the frozen gate step
+    /// still names the old head — `boss receipt`'s rule, reused here, so
+    /// the guard cannot disagree with the verb operators read.
+    #[test]
+    fn the_regate_receipt_is_the_one_that_counts() {
+        let mut rerailed = carried(None);
+        rerailed["metadata"]["regate_receipt"] = json!(
+            "{\"verdict\": \"green\", \"head\": \"75e4d3c59387aaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \
+             \"mode\": \"full\", \"fails\": []}"
+        );
+        // The head the car actually stands on now: refused.
+        let cars = [rerailed];
+        assert!(matches!(
+            gated_car_guard(
+                TWIN_BRANCH,
+                "75e4d3c59387aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                &cars,
+                None
+            ),
+            GatedGuard::Refuse(_)
+        ));
+        // The stale gate step's head: that tree is gone, so gating it is
+        // not a repeat of anything.
+        assert_eq!(
+            gated_car_guard(TWIN_BRANCH, TWIN_HEAD, &cars, None),
+            GatedGuard::Proceed
+        );
     }
 
     #[test]

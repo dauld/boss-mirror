@@ -178,6 +178,73 @@ fn landed_skip(cars: &[Value], branch: &str) -> Option<Value> {
     }))
 }
 
+/// PURE: the record written on the gate-run INSTEAD of a car, when this
+/// branch's car is already ABOARD a train. `None` = nothing is riding;
+/// carry on.
+///
+/// A BRANCH IN TRANSIT GETS NO TWIN EITHER. Measured 2026-09-08
+/// (backlog 02165b1d): car d08a6418 for
+/// feat/a-human-only-step-refuses-an-agent boarded train #274 at
+/// 20:30:54, and at 20:31:20 a duplicate gate-run went green and this
+/// handler filed car ad54e95c for the same branch — the builder session
+/// that owned the branch had ended, but its detached retry loop kept
+/// re-gating. The twin sat on the loading dock while the real car rode,
+/// and was abandoned by hand. `parked_car_for` answered `None` — truly,
+/// the first car was no longer parked — and "no parked car" was read as
+/// "no car". The landed guard did not cover it: the branch was green and
+/// in transit, not yet merged. So the question asked here is the wider
+/// one, `open_car_for`.
+fn boarded_skip(cars: &[Value], branch: &str) -> Option<Value> {
+    let car = car::open_car_for(cars, branch).filter(|c| car::is_boarded(c))?;
+    let id = car.get("id").and_then(Value::as_str).unwrap_or("?");
+    let train = car
+        .pointer("/metadata/train")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    Some(json!({
+        "park_skipped": "boarded",
+        "park_skipped_note": format!(
+            "no car filed: car {} for {branch} is already aboard train {} — a second car \
+             for a branch in transit sits on the dock until someone abandons it by hand \
+             (2026-09-08, cars d08a6418/ad54e95c; backlog 02165b1d)",
+            &id[..8.min(id.len())],
+            &train[..8.min(train.len())],
+        ),
+    }))
+}
+
+/// PURE: what this green does about `branch` — the whole decision, in
+/// one place, so "does it ever file a second car" is a unit test rather
+/// than a live incident.
+///
+/// `open` is the branch's open cars; `all` adds the closed ones (a
+/// landing is usually closed). The order is the order the failures were
+/// measured in: landed first (610537b2 — the operator needs the merge
+/// ref), then boarded (02165b1d), then the parked refresh (d052afad),
+/// and only a branch with no live car at all files one.
+#[derive(Debug)]
+enum ParkAction<'a> {
+    /// File nothing; record this on the gate-run instead.
+    Skip(Value),
+    /// Refresh the car already at the dock with the fresh receipt.
+    Refresh(&'a Value),
+    /// No live car for this branch: file one.
+    File,
+}
+
+fn park_action<'a>(open: &'a [Value], all: &[Value], branch: &str) -> ParkAction<'a> {
+    if let Some(patch) = landed_skip(all, branch) {
+        return ParkAction::Skip(patch);
+    }
+    if let Some(patch) = boarded_skip(open, branch) {
+        return ParkAction::Skip(patch);
+    }
+    match car::parked_car_for(open, branch) {
+        Some(car) => ParkAction::Refresh(car),
+        None => ParkAction::File,
+    }
+}
+
 /// PURE: the car body, with the proof intent merged into its metadata.
 /// The shared builder owns the packet shape; the proof keys are added
 /// here rather than threaded through its signature because `boss park`
@@ -292,14 +359,17 @@ impl Handler for JobsAutoPark {
             return Ok(());
         };
 
-        // A RE-GATE REFRESHES THE PARKED CAR; IT DOES NOT FILE A TWIN.
-        // Measured 2026-09-05 (backlog d052afad): this handler filed a
-        // car per green gate, so the dock held 10 cars for 6 branches and
-        // each first car sat with a receipt for a vanished head, left
-        // behind by every train. The fresh receipt rides the existing
-        // car as `regate_receipt` — the rerail write, one builder in
-        // core — and the skip clears. A boarded or closed car is spent
-        // history; then, and only then, a new car.
+        // A RE-GATE NEVER FILES A TWIN. Measured 2026-09-05 (backlog
+        // d052afad): this handler filed a car per green gate, so the dock
+        // held 10 cars for 6 branches and each first car sat with a
+        // receipt for a vanished head, left behind by every train. A car
+        // still at the dock is refreshed instead — the fresh receipt
+        // rides it as `regate_receipt` (the rerail write, one builder in
+        // core) and the skip clears. A car already ABOARD a train is left
+        // alone entirely (02165b1d). Only a closed or past-review car is
+        // spent history; then, and only then, a new car.
+        //
+        // ONE READ OF THE OPEN CARS serves all three questions below.
         let open = get_json(
             &self.client,
             &format!(
@@ -342,19 +412,25 @@ impl Handler for JobsAutoPark {
                     .unwrap_or_default(),
             )
             .collect();
-        if let Some(patch) = landed_skip(&all, &inputs.branch) {
-            write_json(
-                &self.client,
-                reqwest::Method::PATCH,
-                &format!("{}/api/jobs/{}/metadata", self.base(), ev.job_id),
-                &patch,
-                &ctx.rule_name,
-            )
-            .await?;
-            return Ok(());
-        }
+        // ONE DECISION, taken on what the SoR holds: skip (landed, or
+        // aboard a train), refresh the car at the dock, or file.
+        let parked = match park_action(&cars, &all, &inputs.branch) {
+            ParkAction::Skip(patch) => {
+                write_json(
+                    &self.client,
+                    reqwest::Method::PATCH,
+                    &format!("{}/api/jobs/{}/metadata", self.base(), ev.job_id),
+                    &patch,
+                    &ctx.rule_name,
+                )
+                .await?;
+                return Ok(());
+            }
+            ParkAction::Refresh(car) => Some(car),
+            ParkAction::File => None,
+        };
 
-        if let Some(parked) = car::parked_car_for(&cars, &inputs.branch) {
+        if let Some(parked) = parked {
             let id = parked.get("id").and_then(Value::as_str).ok_or_else(|| {
                 HandlerError::Downstream("auto-park: parked car has no id".into())
             })?;
@@ -605,5 +681,126 @@ mod tests {
         let mut no_receipt = green_step_meta();
         no_receipt.remove("receipt");
         assert!(auto_park_inputs(&gr, &no_receipt).is_none());
+    }
+}
+
+#[cfg(test)]
+mod twin_tests {
+    use super::*;
+
+    const BRANCH: &str = "feat/a-human-only-step-refuses-an-agent";
+
+    /// Car d08a6418 at 20:31:20 UTC on 2026-09-08: boarded train #274
+    /// twenty-six seconds earlier, review still waiting.
+    fn boarded() -> Value {
+        json!({
+            "id": "d08a6418-e7af-484b-82bf-ab043229bfd6",
+            "kind": "ship-a-change",
+            "status": "open",
+            "metadata": {
+                "branch": BRANCH,
+                "boarded_head": "cd0c4f7bdadf2306a589c922f240a7ff963f70a7",
+                "train": "d72ecdb9-c5a1-4d16-8a00-d934fd565002"
+            },
+            "steps": [
+                {"spec_slug": "gate", "title": car::GATE, "status": "completed"},
+                {"spec_slug": "review", "title": car::REVIEW, "status": "ready"},
+            ]
+        })
+    }
+
+    /// Car ad54e95c — the twin this handler filed for the same branch,
+    /// as it looked on the dock before it was abandoned by hand.
+    fn parked() -> Value {
+        json!({
+            "id": "ad54e95c-b48a-4a4c-87f8-7aa8e4e19eff",
+            "kind": "ship-a-change",
+            "status": "open",
+            "metadata": { "branch": BRANCH },
+            "steps": [
+                {"spec_slug": "gate", "title": car::GATE, "status": "completed"},
+                {"spec_slug": "review", "title": car::REVIEW, "status": "ready"},
+            ]
+        })
+    }
+
+    /// THE MEASURED CASE (02165b1d). A car already aboard a train means
+    /// the branch has its car: nothing is filed, and the gate-run says
+    /// which car and which train.
+    #[test]
+    fn a_boarded_car_is_never_twinned() {
+        let open = vec![boarded()];
+        match park_action(&open, &open, BRANCH) {
+            ParkAction::Skip(patch) => {
+                assert_eq!(patch["park_skipped"], "boarded");
+                let note = patch["park_skipped_note"].as_str().unwrap();
+                assert!(note.contains("d08a6418"), "names the car: {note}");
+                assert!(note.contains("d72ecdb9"), "names the train: {note}");
+                assert!(note.contains(BRANCH), "names the branch: {note}");
+            }
+            other => panic!("a boarded branch must file nothing: {other:?}"),
+        }
+    }
+
+    /// A car still at the dock is REFRESHED — one car, a fresh receipt
+    /// on it. The behaviour that already held, pinned: whatever else
+    /// changes, this branch never ends with two cars.
+    #[test]
+    fn a_parked_car_is_refreshed_never_duplicated() {
+        let open = vec![parked()];
+        match park_action(&open, &open, BRANCH) {
+            ParkAction::Refresh(car) => {
+                assert_eq!(car["id"], "ad54e95c-b48a-4a4c-87f8-7aa8e4e19eff")
+            }
+            other => panic!("a parked car is refreshed, not twinned: {other:?}"),
+        }
+        // And with the twin already there beside the boarded car — the
+        // 20:31:20 state — the answer is still never `File`.
+        let both = vec![parked(), boarded()];
+        assert!(
+            !matches!(park_action(&both, &both, BRANCH), ParkAction::File),
+            "a branch with any live car never files a second one"
+        );
+    }
+
+    #[test]
+    fn a_branch_with_no_car_files_one() {
+        assert!(matches!(park_action(&[], &[], BRANCH), ParkAction::File));
+        let elsewhere = vec![boarded()];
+        assert!(matches!(
+            park_action(&elsewhere, &elsewhere, "feat/other"),
+            ParkAction::File
+        ));
+    }
+
+    /// The landed skip (610537b2) is asked FIRST: a branch already on
+    /// main is reported as landed, not as boarded, because the operator
+    /// needs the merge ref, not the train that carried it.
+    #[test]
+    fn a_landed_branch_is_still_reported_as_landed() {
+        let landed = json!({
+            "id": "670087f4-0000-0000-0000-000000000000",
+            "status": "open",
+            "metadata": {
+                "branch": BRANCH, "merged": "true", "merge_ref": "75e4d3c59387",
+                "train": "d72ecdb9-c5a1-4d16-8a00-d934fd565002"
+            },
+            "steps": [
+                {"spec_slug": "review", "title": car::REVIEW, "status": "ready"},
+            ]
+        });
+        let all = vec![landed];
+        match park_action(&all, &all, BRANCH) {
+            ParkAction::Skip(patch) => {
+                assert_eq!(patch["park_skipped"], "landed");
+                assert!(
+                    patch["park_skipped_note"]
+                        .as_str()
+                        .unwrap()
+                        .contains("75e4d3c59387")
+                );
+            }
+            other => panic!("a landed branch records the landing: {other:?}"),
+        }
     }
 }

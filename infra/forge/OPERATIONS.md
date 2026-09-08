@@ -104,7 +104,12 @@ No ssh from the pod. Three doors, all read-only:
   public mirror as a PR from the dauld fork; reads the dauld token at
   `/etc/boss-publish/github.token`, credentials registry
   `dauld-github-token`, and refuses loudly without it; `--check`
-  validates its inputs with no network). The verb list is the tree's,
+  validates its inputs with no network), and `run-car-probe <car-uuid>`
+  (the machine half of `boss prove`: runs the probe a landed car
+  recorded at park time — `boss gate --park-probe/--park-expect` — as
+  david, never root, and completes the car's `proven` step with the
+  proof record or stamps `proof_attempt`; filed per car by the
+  dispatcher when its train arrives). The verb list is the tree's,
   never the packet's.
 - **The Forgejo API** with the repo-scoped token at `/etc/forge/token`
   on the pod: runs at `/api/v1/repos/david/boss/actions/tasks`, a job's

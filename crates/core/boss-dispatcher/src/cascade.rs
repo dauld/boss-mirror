@@ -91,6 +91,11 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // Delegates to jobs.spawn per orphaned doc, so it emits
         // whatever that emits — and nothing of its own.
         ("docs.design.sweep", vec!["jobs.job.created"]),
+        // Files one ops-request per probed car aboard an arrived
+        // train (28ac45ab); the probe itself runs on the forge and
+        // writes back through the jobs API as its own actor, so the
+        // only emit this handler owns is the packet it creates.
+        ("jobs.run-car-probes", vec!["jobs.job.created"]),
         ("jobs.complete_step", vec!["jobs.step.completed"]),
         // Clears waiting_on via PUT /api/jobs — the update emits
         // jobs.job.updated (and wakes metadata-gated steps in the
