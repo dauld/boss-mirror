@@ -286,7 +286,7 @@ spec:
                     for H in /root /work/home; do
                     cat > $H/.bashrc <<'RC'
                     export HOME=/work/home
-                    export PATH=/work/tools/bin:/usr/local/cargo/bin:$PATH
+                    export PATH=/work/tools/bin:/work/home/.local/bin:/usr/local/cargo/bin:$PATH
                     export RUSTUP_HOME=/usr/local/rustup
                     export CARGO_TARGET_DIR=/scratch/target
                     cd /work/boss 2>/dev/null || true
@@ -305,7 +305,7 @@ spec:
                     cat > /work/dev-session.sh <<'LS'
                     #!/usr/bin/env bash
                     export HOME=/work/home
-                    export PATH=/work/tools/bin:/usr/local/cargo/bin:$PATH
+                    export PATH=/work/tools/bin:/work/home/.local/bin:/usr/local/cargo/bin:$PATH
                     export RUSTUP_HOME=/usr/local/rustup
                     export CARGO_TARGET_DIR=/scratch/target
                     cd /work/boss
@@ -322,6 +322,22 @@ spec:
                       curl -sfL -o /tmp/kubectl https://dl.k8s.io/release/v1.33.3/bin/linux/amd64/kubectl \
                         && echo "2fcf65c64f352742dc253a25a7c95617c2aba79843d1b74e585c69fe4884afb0  /tmp/kubectl" | sha256sum -c - \
                         && install -m 0755 /tmp/kubectl /work/tools/bin/kubectl || true
+                    fi
+                    # claude, native-installed onto the PVC home so it
+                    # survives a pod restart. Before this, claude lived
+                    # npm-global on the CONTAINER OVERLAY (/usr) - gone on
+                    # every converge / sizeLimit eviction / reclaim, which
+                    # left each restart with no claude until a human
+                    # re-installed it. The native installer puts the
+                    # (self-updating) binary under $HOME/.local/bin, so
+                    # HOME=/work/home lands it at /work/home/.local/bin/claude
+                    # on the durable PVC home this pod already chose for
+                    # claude state. That dir is on the PATH written above.
+                    # Best-effort like its siblings: a failed download
+                    # leaves no claude, never a broken pod. Downloads once;
+                    # the native binary self-updates thereafter.
+                    if [ ! -x /work/home/.local/bin/claude ]; then
+                      curl -fsSL https://claude.ai/install.sh | HOME=/work/home bash || true
                     fi
                     dropbear -r /work/ssh/dropbear_ed25519_host_key -p 22 -s
                     } > /work/ssh/postStart.log 2>&1 || true
@@ -378,7 +394,8 @@ spec:
           # Matches production's major (the `boss` StatefulSet runs
           # postgres:16). A dev database on a different major is a test
           # of something other than what ships.
-          image: postgres:16
+          # From the forge mirror (mirror-base-images.sh), not docker.io: a database that cannot re-pull during the DNS flake cannot restart, and the forge is already this pod's image source.
+          image: 10.20.0.15:3000/david/postgres:16
           securityContext:
             allowPrivilegeEscalation: false
             # NOT `drop: ALL`, and the exception is deliberate: this
@@ -414,6 +431,73 @@ spec:
           resources:
             requests: {cpu: 250m, memory: 512Mi}
             limits: {cpu: "2", memory: 4Gi}
+        # THE RECLAIM ACTUATOR. `scratch` is a node-local emptyDir with
+        # no sizeLimit and nothing that reclaims it; measured 2026-09-06,
+        # /scratch/target/debug had passed 136G and dozens of worktrees
+        # had piled up under .claude/worktrees/, pushing the build node
+        # into repeated "system low on memory" pressure. This sidecar is
+        # the SAFE half of that fix (backlog 94f8bf95): hourly, it runs
+        # dev-scratch-reclaim.sh — the cluster sibling of the forge's
+        # disk-floor-sweep — which measures each workspace and reclaims
+        # only REGENERABLE space below a floor (stale unlocked git
+        # worktrees on /work; incremental-compilation cache on /scratch,
+        # never while a build runs), stopping the moment the floor is
+        # met and exiting loud if it cannot. It NEVER discards work:
+        # `git worktree remove` runs without --force, so a dirty
+        # worktree is refused, and committed work lives in the object
+        # store regardless.
+        #
+        # The sizeLimit HALF is deliberately deferred: a scratch
+        # sizeLimit takes effect only on a pod restart (which kills the
+        # live session) and EVICTS rather than reclaims — a separate
+        # operator decision, not this container's job.
+        #
+        # A sidecar, not a CronJob, because the two things it cleans are
+        # pod-private: `scratch` is an emptyDir (invisible to any other
+        # pod) and `work` is ReadWriteOnce (mountable only where this
+        # pod holds it). Same image as `dev` so its tools cannot drift;
+        # it mostly sleeps, so its footprint is tiny. Loops in-process
+        # (the disk-floor-sweep.timer's hourly cadence) rather than
+        # crash-looping on a non-zero sweep — the loud log is the
+        # signal, visible in `kubectl logs -c reclaim`.
+        - name: reclaim
+          image: 10.20.0.15:3000/david/boss-ci:rust1.96
+          imagePullPolicy: Always
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              SCRIPT=/work/boss/infra/cluster/dev-scratch-reclaim.sh
+              # Let the pod's clone settle before the first pass.
+              sleep 300
+              while true; do
+                if [ -x "$SCRIPT" ] || [ -f "$SCRIPT" ]; then
+                  bash "$SCRIPT" || true
+                else
+                  echo "reclaim: $SCRIPT not present yet — waiting for the checkout"
+                fi
+                sleep 3600
+              done
+          env:
+            - {name: CARGO_TARGET_DIR, value: /scratch/target}
+            - {name: REPO_DIR, value: /work/boss}
+            # Floors: keep the node-local scratch fs above 50G free
+            # (a cold `cargo test --all-features` needs ~74G of target,
+            # so this reclaims well before a build is starved) and the
+            # 40Gi work PVC above 6G. Worktrees idle longer than 48h are
+            # eligible; anything newer, locked, or dirty is left alone.
+            - {name: BOSS_SCRATCH_FLOOR_GB, value: "50"}
+            - {name: BOSS_WORK_FLOOR_GB, value: "6"}
+            - {name: BOSS_WORKTREE_MAX_AGE_H, value: "48"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          volumeMounts:
+            - {name: work, mountPath: /work}
+            - {name: scratch, mountPath: /scratch}
       volumes:
         # THE READ TOKEN, and read is the whole point.
         #
