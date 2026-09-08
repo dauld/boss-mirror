@@ -43,7 +43,8 @@ formatting drift, syntax-level mistakes.
 - `cargo fmt -- --check` — formatting must match rustfmt.
 - `bun run typecheck` (svelte-check, strict TS) — frontend.
 
-**Where it runs:** every PR push (CI: `.github/workflows/ci.yml`)
+**Where it runs:** every gate and every train (CI:
+`.forgejo/workflows/ci.yml`, which invokes `infra/gate.sh`)
 + pre-commit locally.
 
 **Failure mode:** PR can't merge.
@@ -208,7 +209,8 @@ answer "yes" stops the search:
 
 ## What CI actually runs today
 
-`.github/workflows/ci.yml`:
+`.forgejo/workflows/ci.yml` (the forge; the GitHub mirror is a backup
+of source and runs no CI of ours):
 
 ```yaml
 - Apply schema (infra/postgres/migrate.sh — the schema/ manifest as an ordered migration list)
@@ -224,8 +226,8 @@ answer "yes" stops the search:
 - Web:    bun install + bun run typecheck + bun run build + bun run test:mocked
 ```
 
-`.github/workflows/release.yml` cuts cross-platform `boss` CLI
-binaries on tag push.
+Release binaries are not cut by the mirror; the CLI ships from the
+forge checkout on each host.
 
 Drift / build-coverage / replay-rebuild / integrity-check
 timers run continuously in production but are NOT yet wired into

@@ -7,17 +7,24 @@
 //! with full crate suites missed a shell lint only CI ran. CLAUDE.md
 //! §9a: collapse the pair, and pin what cannot collapse.
 //!
-//! The collapse: ci.yml's rust job invokes `infra/gate.sh` instead of
-//! inlining cargo commands and lint scripts, so CI and a local run are
-//! the same definition. What cannot collapse is pinned here:
-//! - ci.yml must actually call the script, and must not grow a second
-//!   inline definition beside it (a new `run: infra/lint/...` line in
-//!   the rust job is the pair reopening);
+//! The collapse: the CI workflow's test job invokes `infra/gate.sh`
+//! instead of inlining cargo commands and lint scripts, so CI and a
+//! local run are the same definition. What cannot collapse is pinned
+//! here:
+//! - the workflow must actually call the script, and must not grow a
+//!   second inline definition beside it (a new `run: infra/lint/...`
+//!   line in the test job is the pair reopening);
 //! - the script must keep covering the checks the gate exists to run —
 //!   a trimmed roster is exactly the under-covering gate that let both
 //!   #226 failures through.
 //!
-//! Both tests name the offending entry when they fail.
+//! There is ONE CI workflow now: `.forgejo/workflows/ci.yml`. The GitHub
+//! copy (`.github/workflows/ci.yml`) ran only on the public mirror —
+//! which is a backup of source, not part of CI/CD (design 7b59af2c,
+//! 2026-09-08) — and was deleted with it, so the pair it once formed
+//! with the forge file is gone rather than pinned.
+//!
+//! Every test names the offending entry when it fails.
 
 use std::path::PathBuf;
 
@@ -33,16 +40,6 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// The rust-job slice of ci.yml: from the `rust:` job key to the next
-/// top-level job key.
-fn rust_job() -> String {
-    let ci = read(".github/workflows/ci.yml");
-    let start = ci.find("\n  rust:").expect("ci.yml has a rust job");
-    let rest = &ci[start + 1..];
-    let end = rest.find("\n  web:").unwrap_or(rest.len());
-    rest[..end].to_string()
-}
-
 /// The `test`-job slice of the Forgejo workflow — the job that carries
 /// the Postgres service, and so the only one that can run the gate's
 /// DB-backed test phase. `test` is the last job in the file, so the
@@ -56,46 +53,13 @@ fn forge_test_job() -> String {
     ci[start + 1..].to_string()
 }
 
-#[test]
-fn ci_rust_job_invokes_the_gate_script() {
-    let job = rust_job();
-    assert!(
-        job.contains("infra/gate.sh"),
-        "ci.yml's rust job does not invoke infra/gate.sh — the gate's \
-         definition has forked away from the script"
-    );
-}
-
-#[test]
-fn ci_rust_job_has_no_inline_second_definition() {
-    let job = rust_job();
-    // Environment setup stays in ci.yml (toolchain, cache, schema
-    // apply); checks do not. An inline check line beside the script
-    // call is the two-definition state this test exists to prevent.
-    let inline_checks = [
-        "run: cargo clippy",
-        "run: cargo test",
-        "run: cargo fmt",
-        "run: infra/lint/",
-    ];
-    for needle in inline_checks {
-        assert!(
-            !job.contains(needle),
-            "ci.yml's rust job inlines `{needle}` beside infra/gate.sh — \
-             the gate now has two definitions again; move the check into \
-             the script"
-        );
-    }
-}
-
 /// The forge workflow is the one that actually gates a train — since
-/// the 2026-08-12 cutover, `.github/workflows/ci.yml` runs on the
-/// public mirror while every car lands through Forgejo. It ran
-/// locomotive + fmt + clippy + migrate + build + test and NOT the
-/// script, so the whole lint roster was unenforced in production for a
-/// day and thirteen trains landed green over a real `no-wallclock`
-/// violation. The pin above only ever knew about the GitHub file,
-/// which is why nothing caught it. It knows about both now.
+/// the 2026-08-12 cutover every car lands through Forgejo. For a day it
+/// ran locomotive + fmt + clippy + migrate + build + test and NOT the
+/// script, so the whole lint roster was unenforced in production and
+/// thirteen trains landed green over a real `no-wallclock` violation.
+/// The pin at the time only knew about the GitHub file, which is why
+/// nothing caught it.
 #[test]
 fn forge_test_job_invokes_the_gate_script() {
     let job = forge_test_job();
@@ -110,8 +74,8 @@ fn forge_test_job_invokes_the_gate_script() {
 #[test]
 fn forge_test_job_has_no_inline_second_definition() {
     let job = forge_test_job();
-    // Same rule as the GitHub job: environment setup (services, schema
-    // apply) stays in the workflow, checks live in the script. The
+    // Environment setup (services, schema apply) stays in the
+    // workflow, checks live in the script. The
     // `fast` job's fmt + clippy are deliberately outside this slice —
     // they are a duplicated fast-signal loop, not a second definition.
     let inline_checks = [

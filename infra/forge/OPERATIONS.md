@@ -90,7 +90,13 @@ No ssh from the pod. Three doors, all read-only:
   sweep, with a floor), `rollback-to <sha>` (roll deploy/boss to a
   named build, verified Ready), `hold-converge <reason>` and
   `release-converge` (the runner builds and rolls nothing while a
-  hold stands). The verb list is the tree's, never the packet's.
+  hold stands), `mirror-base-images`, and `publish-github-pr` (the
+  machine step of publish-to-github v6: snapshot forge main onto the
+  public mirror as a PR from the dauld fork; reads the dauld token at
+  `/etc/boss-publish/github.token`, credentials registry
+  `dauld-github-token`, and refuses loudly without it; `--check`
+  validates its inputs with no network). The verb list is the tree's,
+  never the packet's.
 - **The Forgejo API** with the repo-scoped token at `/etc/forge/token`
   on the pod: runs at `/api/v1/repos/david/boss/actions/tasks`, a job's
   log at `/api/v1/repos/david/boss/actions/jobs/<jobId>/logs`, a

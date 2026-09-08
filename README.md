@@ -284,10 +284,12 @@ infra/lint/conservation-invariants.sh
 infra/verify-replay.sh
 ```
 
-CI configuration: [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
-The `release.yml` workflow cuts versioned `boss` CLI binaries; the
-prod-deploy pipeline (cross-compile + scp + systemctl restart) is
-queued — see [TODO.md](TODO.md).
+CI configuration: [`.forgejo/workflows/ci.yml`](.forgejo/workflows/ci.yml),
+which runs on the internal forge and invokes the one gate definition,
+[`infra/gate.sh`](infra/gate.sh). The public GitHub mirror is a backup of
+source, not part of CI/CD: it carries only the CodeQL and Scorecard
+security scans. The prod-deploy pipeline (cross-compile + scp +
+systemctl restart) is queued — see [TODO.md](TODO.md).
 
 ## Founding ideas
 

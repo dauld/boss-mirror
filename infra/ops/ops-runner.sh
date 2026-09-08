@@ -56,7 +56,8 @@
 #   HOST_ID        (required) estate node id this runner answers for
 #   BOSS_JOBS_URL  (required, no default — see below) the SoR
 #   OPS_VERBS_FILE (default: verbs.json beside this script)
-#   OPS_TIMEOUT    (default 30) seconds before a verb is killed
+#   OPS_TIMEOUT    (default 30) seconds before a verb is killed, unless
+#                  the verb's allowlist entry declares its own `timeout`
 #   OPS_OUTPUT_CAP (default 102400) bytes of output kept
 #   BOSS_MACHINE_TOKEN (optional) forwarded as x-boss-machine-token
 #
@@ -184,7 +185,8 @@ while [ "$i" -lt "$n" ]; do
                             | if test("^\\{[0-9]+\\}$")
                               then . as $ph
                                    | $vals[($ph | ltrimstr("{") | rtrimstr("}") | tonumber) - 1].ok
-                              else . end ]}
+                              else . end ],
+                    timeout: ($spec.timeout // null)}
               end
           end' "$VERBS_FILE")
 
@@ -204,8 +206,13 @@ while [ "$i" -lt "$n" ]; do
         done <<ARGV
 $(printf '%s' "$decision" | jq -r '.argv[]')
 ARGV
+        # A verb may declare its own `timeout` in the allowlist (a
+        # reviewed number, like its argv); otherwise the runner's
+        # default applies. publish-github-pr's first push of the whole
+        # tree is minutes, not seconds.
+        verb_timeout=$(printf '%s' "$decision" | jq -r '.timeout // empty')
         rawf="$workdir/raw"
-        timeout "$OPS_TIMEOUT" "$@" > "$rawf" 2>&1 < /dev/null
+        timeout "${verb_timeout:-$OPS_TIMEOUT}" "$@" > "$rawf" 2>&1 < /dev/null
         rc=$?
         size=$(wc -c < "$rawf")
         if [ "$size" -gt "$OPS_OUTPUT_CAP" ]; then
@@ -216,7 +223,7 @@ ARGV
             cat "$rawf" > "$outf"
         fi
         if [ "$rc" -eq 124 ]; then
-            printf '\n[ops-runner: command killed at %ss timeout]\n' "$OPS_TIMEOUT" >> "$outf"
+            printf '\n[ops-runner: command killed at %ss timeout]\n' "${verb_timeout:-$OPS_TIMEOUT}" >> "$outf"
         fi
         disp="answered"; rc_str="$rc"
     fi

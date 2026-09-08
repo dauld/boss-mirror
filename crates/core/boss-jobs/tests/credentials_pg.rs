@@ -33,9 +33,11 @@ async fn the_seeded_credentials_are_readable_through_the_port() {
             "boss-credential-broker-root",
             "boss-dev-forge-token",
             "boss-machine-token",
+            "dauld-github-token",
             "dev-session-token",
         ],
-        "the four known credentials are seeded, ordered by id"
+        "the five known credentials are seeded, ordered by id (dauld-github-token: \
+         202609081230, the publish-github-pr verb's token — declared before it exists)"
     );
     for r in &rows {
         assert!(

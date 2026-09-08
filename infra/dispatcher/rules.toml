@@ -958,3 +958,25 @@ when = 'spec_slug = "merged"'
 [[rule.do]]
 handler = "jobs.spawn"
 args = { kind = "\"ops-request\"", subject_kind = "\"custom\"", subject = "\"forge\"", title = "\"converge on forge — a train merged to main\"", "metadata.host" = "\"forge\"", "metadata.verb" = "\"converge\"" }
+
+# publish-to-github v6's machine step (design 7b59af2c). When the
+# protocol's `open-pr` step becomes READY — David approved the publish —
+# spawn an ops-request for host=forge verb=publish-github-pr; the root
+# ops-runner runs the verb (snapshot commit on the mirror's main, push to
+# the dauld fork, `gh pr create`) and completes `open-pr` with `pr_url`.
+# Routed on the STEP's metadata marker, not its slug: `step.ready.*`
+# payloads carry the step's metadata_defaults but do not hoist spec_slug
+# the way step.done does. `metadata.ops_verb` is Absent on every other
+# task step, and Absent is UNEQUAL to the literal — false, not
+# PredicateFailed — so the shared topic never dead-letters. A cross-
+# protocol reactor (publish-to-github -> ops-request -> the forge host),
+# which no single Workflow `on` consequence can express. Seeded by
+# 202609081200-publish-github-pr-on-open-pr-ready.sql; present here
+# because dispatcher_rules_seed_matches_toml compares BOTH directions.
+[[rule]]
+name = "publish-github-pr-on-open-pr-ready"
+on_event = "step.ready.task"
+when = 'metadata.ops_verb = "publish-github-pr"'
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"ops-request\"", subject_kind = "\"custom\"", subject = "\"forge\"", title = "\"publish the mirror PR from the forge — a publish was approved\"", "metadata.host" = "\"forge\"", "metadata.verb" = "\"publish-github-pr\"" }

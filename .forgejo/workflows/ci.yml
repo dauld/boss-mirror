@@ -1,8 +1,9 @@
 # Forgejo CI — the validation half of the internalized loop.
 #
-# .github/workflows/ci.yml stays as-is for the public mirror; this is the
-# same gate running on our own iron, so a change is validated where it is
-# built and deployed rather than by someone else's infrastructure.
+# This is THE CI workflow: the gate running on our own iron, so a change
+# is validated where it is built and deployed rather than by someone
+# else's infrastructure. The public GitHub mirror is a backup of source
+# and runs none of it (its ci.yml was deleted 2026-09-08, design 7b59af2c).
 #
 # The container image is ours, from our registry, and carries node as
 # well as the Rust toolchain: Forgejo runs actions/checkout as a

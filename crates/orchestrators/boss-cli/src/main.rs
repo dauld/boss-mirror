@@ -701,7 +701,9 @@ enum WorkflowAction {
     Publish {
         /// Workflow kind, e.g. `ship-a-change`.
         kind: String,
-        /// JSON spec to publish.
+        /// The spec to publish: a JSON file, or a workflow bundle
+        /// (`*.toml`, e.g. infra/platform/workflows.toml) from which the
+        /// `kind` row is taken — one definition for seed and publish.
         spec: std::path::PathBuf,
         /// Lint and report without writing anything.
         #[arg(long)]

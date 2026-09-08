@@ -198,7 +198,7 @@ async fn main() -> Result<()> {
         info!(%people_url, "human job-owner resolution wired (Q7)");
         let stations: Arc<dyn boss_jobs::StationRegistry> =
             Arc::new(boss_jobs::PgStations::new(pool.clone()));
-        verify_station_viability(stations.as_ref(), jobs.as_ref(), &clock).await;
+        verify_station_viability(stations.as_ref()).await;
         return run_server(
             Some(
                 std::sync::Arc::new(boss_jobs::job_edges::PgJobEdges::new(pool.clone()))
@@ -486,39 +486,29 @@ async fn reconcile_platform_workflows<R: JobsRepository>(
 
 /// Boot-time viability check over the station registry — the sibling
 /// of [`verify_registry_viability`], for the queues rather than the
-/// protocols.
+/// protocols, under the same contract.
 ///
-/// Never exits. Station membership is derived from the predicate at read time and
-/// nothing is ever pinned to a station version, so retiring one
-/// strands nothing and there is no case that warrants refusing to
-/// start. A failure of the PASS itself is logged and start continues:
-/// the station registry is a read surface over packets, and losing the
-/// check is not a reason to take the jobs API down.
-async fn verify_station_viability<R: JobsRepository>(
-    stations: &dyn boss_jobs::StationRegistry,
-    jobs: &R,
-    clock: &Arc<dyn boss_clock_client::ClockClient>,
-) {
-    let actor = boss_core::actor::ActorId::Automation(
-        boss_jobs::station_quarantine::QUARANTINE_ACTOR.into(),
-    );
-    let now = boss_clock_client::now_from(clock).await;
-    match boss_jobs::station_quarantine::quarantine_unviable_active_stations(
-        stations, jobs, &actor, now,
-    )
-    .await
-    {
-        Ok(report) if !report.quarantined.is_empty() => {
+/// Never exits and never writes. Until 2026-09-08 this retired each
+/// unviable row at boot — a persisted write from a boot path, the
+/// same defect class that took the system of record down twice on
+/// 2026-09-07 through the Workflow check (packet 7752e636). A boot
+/// check reports; it does not act. A failure of the CHECK itself is
+/// logged and start continues: the station registry is a read surface
+/// over packets, and losing the check is not a reason to take the
+/// jobs API down. See `boss_jobs::station_quarantine`.
+async fn verify_station_viability(stations: &dyn boss_jobs::StationRegistry) {
+    match boss_jobs::station_quarantine::check_active_stations_viable(stations).await {
+        Ok(report) if !report.unviable.is_empty() => {
             tracing::error!(
-                quarantined = report.quarantined.len(),
+                unviable = report.unviable.len(),
                 active = report.checked,
-                "retired station(s) that failed the viability lint — those queues are \
-                 gone until a viable version is published; service is up"
+                "started with unviable active station(s) — each is named above; nothing was \
+                 retired, service is up"
             );
         }
         Ok(_) => {}
         Err(e) => {
-            tracing::error!(error = %e, "boot station viability check could not complete");
+            tracing::error!(error = %e, "boot station viability check could not complete; starting anyway");
         }
     }
 }

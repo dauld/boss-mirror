@@ -21,17 +21,31 @@
 # opens — so the sign-off still sits BEFORE the push, not before the
 # merge.
 #
+# THE MIRROR IS READ THROUGH A REMOTE NAMED `github`, read-only and
+# anonymous — the repo is public, so measuring needs no credential
+# anywhere. Add it once: `git remote add github https://github.com/algedonic-dev/boss.git`.
+#
+# A REF THAT DOES NOT RESOLVE IS A REFUSAL, NOT A MEASUREMENT. Until
+# 2026-09-08 a SOURCE_REF or mirror ref that did not exist made every
+# `git rev-list` fail silently under `|| echo 0`, and the script exited
+# 0 with `has_drift:false` — "the mirror is current" — while the mirror
+# was 211 commits behind (design 7b59af2c). On the protocol's measure
+# step that is the number that closes the packet nothing-to-publish. A
+# wrong target must error, not answer (CLAUDE.md §Doors), so both refs
+# are verified first and a miss exits 2 naming the ref.
+#
 # Usage:  infra/prep-github-publish.sh [--json]
 # Exit:   0 = safe to publish (or nothing to publish)
 #         1 = a blocking finding; do not publish
+#         2 = refused: a ref did not resolve; nothing was measured
 set -uo pipefail
 
-REMOTE="${GITHUB_REMOTE:-origin}"
+REMOTE="${GITHUB_REMOTE:-github}"
 BRANCH="${GITHUB_BRANCH:-main}"
-SOURCE="${SOURCE_REF:-gcp/forge-main}"
+SOURCE="${SOURCE_REF:-origin/main}"
 # Dated so each day's sync is its own reviewable PR rather than a
 # moving branch whose diff changes under the reviewer.
-PR_BRANCH="${PR_BRANCH:-mirror/$(date -u +%Y-%m-%d)}"
+PR_BRANCH="${PR_BRANCH:-publish/$(date -u +%Y-%m-%d)}"
 JSON=0
 [ "${1:-}" = "--json" ] && JSON=1
 
@@ -40,8 +54,26 @@ cd "$(git rev-parse --show-toplevel)" || exit 1
 say() { [ "$JSON" -eq 0 ] && echo "$@"; }
 say "prep-github-publish: $SOURCE -> $REMOTE/$BRANCH"
 
+# Refuse loudly. The JSON form carries the refusal too, so a caller that
+# parses stdout sees `refused` and never a drift verdict.
+refuse() {
+  echo "prep-github-publish: REFUSED — $1" >&2
+  echo "  nothing was measured; fix the target and run again" >&2
+  [ "$JSON" -eq 1 ] && printf '{"refused":"%s"}\n' "$1"
+  exit 2
+}
+
+if ! git remote get-url "$REMOTE" >/dev/null 2>&1; then
+  refuse "remote '$REMOTE' is not configured (the mirror ref $REMOTE/$BRANCH cannot resolve); add it: git remote add $REMOTE https://github.com/algedonic-dev/boss.git"
+fi
 git fetch -q "$REMOTE" "$BRANCH" 2>/dev/null
 TARGET="$REMOTE/$BRANCH"
+if ! git rev-parse --verify --quiet "$TARGET^{commit}" >/dev/null; then
+  refuse "mirror ref $TARGET does not resolve (remote $REMOTE = $(git remote get-url "$REMOTE" 2>/dev/null))"
+fi
+if ! git rev-parse --verify --quiet "$SOURCE^{commit}" >/dev/null; then
+  refuse "source ref $SOURCE does not resolve; set SOURCE_REF to a ref this clone has (e.g. origin/main after git fetch origin)"
+fi
 # owner/repo for `gh pr create --repo`, derived from the remote rather
 # than hardcoded so a fork or a renamed repo does not print a command
 # that quietly targets the wrong place.
@@ -51,9 +83,11 @@ SLUG=$(git remote get-url "$REMOTE" 2>/dev/null \
 # ---------------------------------------------------------------------
 # 1. DRIFT — what is on the source ref that the public mirror lacks.
 # ---------------------------------------------------------------------
-AHEAD=$(git rev-list --count "$TARGET".."$SOURCE" 2>/dev/null || echo 0)
-BEHIND=$(git rev-list --count "$SOURCE".."$TARGET" 2>/dev/null || echo 0)
-FILES=$(git diff --name-only "$TARGET" "$SOURCE" 2>/dev/null | wc -l | tr -d ' ')
+# No `|| echo 0` fallbacks: both refs were verified above, so a failure
+# here is a real git error and must surface, not read as "current".
+AHEAD=$(git rev-list --count "$TARGET".."$SOURCE") || refuse "git rev-list $TARGET..$SOURCE failed"
+BEHIND=$(git rev-list --count "$SOURCE".."$TARGET") || refuse "git rev-list $SOURCE..$TARGET failed"
+FILES=$(git diff --name-only "$TARGET" "$SOURCE" | wc -l | tr -d ' ')
 
 say "  commits ahead : $AHEAD"
 say "  commits behind: $BEHIND"
@@ -120,11 +154,8 @@ if [ -n "$BLOCKING" ]; then
 fi
 
 say ""
-say "  safe to publish. Opening the PR is yours to run:"
-say "      git push $REMOTE $SOURCE:refs/heads/$PR_BRANCH"
-say "      gh pr create --repo $(printf '%s' "$SLUG") --base $BRANCH --head $PR_BRANCH \\"
-say "        --title \"Mirror sync: $AHEAD commits from the forge\" \\"
-say "        --body \"Sync of the internal forge to the public mirror. \\"
-say "                $AHEAD commits, $FILES files. Secrets gate: $SECRETS. \\"
-say "                $SENS_COUNT newly-public file(s) touching runbooks/infra.\""
+say "  safe to publish. On approval the forge opens the PR by machine"
+say "  (ops verb publish-github-pr: a snapshot commit of $SOURCE on"
+say "  $(printf '%s' "$SLUG") main, pushed to dauld:$PR_BRANCH, then gh pr create)."
+say "  The merge on GitHub is yours."
 exit 0

@@ -1,5 +1,8 @@
-//! `boss workflow publish <kind> <spec.json>` — publish a protocol
-//! version without the footgun.
+//! `boss workflow publish <kind> <spec.json | bundle.toml>` — publish a
+//! protocol version without the footgun. A `.toml` path is a workflow
+//! bundle (infra/platform/workflows.toml, or a tenant's): the `kind`
+//! row is read with the platform seed's own loader, so the row a fresh
+//! database seeds and the row a live one publishes are one definition.
 //!
 //! WHY THIS IS A VERB. Publishing was a hand-assembled sequence, done
 //! three times in one day for ship-a-change v20/v21/v22 and again for
@@ -147,12 +150,46 @@ pub async fn discard(kind: &str, version: i32) -> Result<()> {
     Ok(())
 }
 
-pub async fn publish(kind: &str, path: &std::path::Path, dry: bool) -> Result<()> {
-    let http = reqwest::Client::new();
+/// Pick `kind` out of a parsed workflow bundle, as the JSON body the
+/// draft endpoint takes. Pure, so the choice is testable without a
+/// bundle on disk: a bundle that lacks the kind is a refusal naming
+/// what it does hold, never a publish of the wrong protocol.
+pub(crate) fn spec_from_bundle(
+    kind: &str,
+    specs: &[boss_jobs::registry::WorkflowSpec],
+) -> Result<Value> {
+    let spec = specs.iter().find(|s| s.kind == kind).with_context(|| {
+        format!(
+            "the bundle has no `{kind}`; it holds: {}",
+            specs
+                .iter()
+                .map(|s| s.kind.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    serde_json::to_value(spec).context("rendering the bundle row as JSON")
+}
+
+/// The spec to publish: a JSON body, or — when the path ends in
+/// `.toml` — the `kind` row of a workflow bundle read by the same
+/// loader the platform seed uses. So a bundled protocol has ONE
+/// definition: the seed inserts it on a fresh database, this verb
+/// publishes the identical row on a live one (CLAUDE.md §9a).
+fn load_spec(kind: &str, path: &std::path::Path) -> Result<Value> {
+    if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+        let specs = boss_jobs::seed_loader::load_workflows(path)
+            .with_context(|| format!("reading the bundle {}", path.display()))?;
+        return spec_from_bundle(kind, &specs);
+    }
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading the spec {}", path.display()))?;
-    let mut spec: Value =
-        serde_json::from_str(&raw).with_context(|| format!("{} is not JSON", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("{} is not JSON", path.display()))
+}
+
+pub async fn publish(kind: &str, path: &std::path::Path, dry: bool) -> Result<()> {
+    let http = reqwest::Client::new();
+    let mut spec = load_spec(kind, path)?;
 
     // The active row, for the fields a draft needs and for the
     // before/after comparison.
@@ -308,6 +345,65 @@ mod tests {
     fn a_clean_registry_has_no_blocker() {
         let versions = vec![json!({"version": 30, "status": "active"})];
         assert_eq!(blocking_draft(&versions, None), None);
+    }
+
+    /// A bundle path publishes the row of the kind asked for, rendered
+    /// as the JSON the draft endpoint takes — and a bundle without that
+    /// kind refuses by name rather than publishing a neighbour.
+    #[test]
+    fn a_bundle_row_is_selected_by_kind_or_refused_by_name() {
+        let specs = boss_jobs::seed_loader::parse_workflows(
+            r#"
+[[workflow]]
+kind = "one"
+label = "One"
+category = "platform"
+subject_kinds = ["custom"]
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+[[workflow.step]]
+title = "done"
+kind = "outcome"
+ready_when = "steps.opened.done"
+terminal = { outcome = "completed" }
+
+[[workflow]]
+kind = "two"
+label = "Two"
+category = "platform"
+subject_kinds = ["custom"]
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+[[workflow.step]]
+title = "done"
+kind = "outcome"
+ready_when = "steps.opened.done"
+terminal = { outcome = "completed" }
+"#,
+            "platform",
+            "inline",
+        )
+        .expect("the inline bundle parses and lints");
+
+        let two = spec_from_bundle("two", &specs).expect("kind two is in the bundle");
+        assert_eq!(two["kind"], json!("two"));
+        assert_eq!(two["label"], json!("Two"));
+        assert_eq!(
+            titles(&two),
+            vec!["opened".to_string(), "done".to_string()],
+            "the steps ride along as JSON"
+        );
+
+        let e = spec_from_bundle("three", &specs).unwrap_err().to_string();
+        assert!(e.contains("no `three`"), "{e}");
+        assert!(
+            e.contains("one, two"),
+            "the refusal names what the bundle holds: {e}"
+        );
     }
 
     /// CONFIRMATION COMPARES THE STEPS, NOT JUST THE NUMBER. v16 was a

@@ -171,7 +171,19 @@ set -euo pipefail
 # host), which a single Workflow `on` consequence cannot express; it
 # retires the up-to-10-min converge poll latency behind the gcr.io DNS
 # flake that reddened #236 and #250.
-BASELINE=57
+#
+# 57 -> 58 (2026-09-08, migration 202609081200):
+# publish-github-pr-on-open-pr-ready — a cross-protocol reactor, the
+# same shape as converge-on-merge one line up. publish-to-github v6's
+# `open-pr` step becoming ready (step.ready.task with the step's
+# `ops_verb` marker) spawns an ops-request that the root ops-runner on
+# the forge host executes: the mirror PR is opened by machine, as dauld,
+# and the merge on GitHub stays David's. Spans three protocols
+# (publish-to-github -> ops-request -> a verb on the forge host), which
+# a single Workflow `on` consequence cannot express. It adds no routing
+# inside the protocol: the protocol row still owns measure -> review ->
+# approve -> open-pr; this only files the packet that runs one step.
+BASELINE=58
 RULES_FILE="infra/dispatcher/rules.toml"
 
 count=$(grep -c '^\[\[rule\]\]' "$RULES_FILE")

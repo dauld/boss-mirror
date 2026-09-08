@@ -10,7 +10,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 python3 - "$repo" <<'PY' || exit 1
 import json,re,sys,os
 repo=sys.argv[1]; v=json.load(open(f"{repo}/infra/ops/verbs.json"))["verbs"]
-for name in ("rollback-to","hold-converge","release-converge"):
+for name in ("rollback-to","hold-converge","release-converge","publish-github-pr"):
     spec=v.get(name) or sys.exit(f"FAIL: verb {name} missing")
     script=spec["argv"][0].replace("/home/david/boss/", f"{repo}/")
     os.path.isfile(script) or sys.exit(f"FAIL: {name} points at a script not in the tree: {spec['argv'][0]}")
@@ -27,7 +27,16 @@ rb=v["rollback-to"]["params"][0]
 re.fullmatch(rb["pattern"],"2683908") or sys.exit("FAIL: a 7-char sha is refused")
 re.fullmatch(rb["pattern"],"b2814ef") or sys.exit("FAIL: a real short sha is refused")
 re.fullmatch(rb["pattern"],"latest") and sys.exit("FAIL: 'latest' passes as a sha")
-print("verbs: rollback-to, hold-converge, release-converge are bounded and authorized")
+# publish-github-pr takes NO packet-supplied argument (fixed repos, a
+# dated branch) and declares its own timeout, because a first push of
+# the whole tree exceeds the runner's 30s default — and the runner must
+# actually read that field, or the number is decoration.
+pub=v["publish-github-pr"]
+pub["params"] and sys.exit("FAIL: publish-github-pr must take no packet-supplied args")
+isinstance(pub.get("timeout"), int) and pub["timeout"] >= 120 or sys.exit("FAIL: publish-github-pr must declare a timeout of at least 120s")
+runner=open(f"{repo}/infra/ops/ops-runner.sh").read()
+"$spec.timeout" in runner and "verb_timeout" in runner or sys.exit("FAIL: ops-runner.sh does not honour a verb's declared timeout")
+print("verbs: rollback-to, hold-converge, release-converge, publish-github-pr are bounded and authorized")
 PY
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 export BOSS_CONVERGE_HOLD="$tmp/hold"
@@ -48,5 +57,37 @@ reason=$(converge_held "$tmp/hold") || fail "the runner's hold check did not see
 bash "$repo/infra/forge/converge-hold.sh" release >/dev/null || fail "release failed"
 converge_held "$tmp/hold" >/dev/null && fail "a released hold still holds"
 bash "$repo/infra/forge/converge-hold.sh" hold 2>/dev/null && fail "a hold with no reason was accepted"
-echo "the-controls-are-bounded-verbs: self-test ok — three bounded, authorized ops verbs; the hold round-trips through the file the runner reads, with no HOME in the environment; a hold needs a reason; a rollback needs a sha"
+
+# publish-github-pr: its --check validates inputs with no network, under
+# the runner's environment (no HOME), and a missing token is a refusal
+# that NAMES THE PATH — never a silent skip, never the value.
+pub="$repo/infra/forge/publish-github-pr.sh"
+env -i PATH="$PATH" bash -n "$pub" || fail "publish-github-pr.sh does not parse"
+grep -vE '^\s*#' "$pub" | grep -qE '\$HOME' && fail "publish-github-pr.sh reads \$HOME (the ops runner has none)"
+grep -vE '^\s*#' "$pub" | grep -qE '^\s*set .*-x|set -x' && fail "publish-github-pr.sh traces (set -x) — a trace would print the token's environment"
+mkdir -p "$tmp/bin" "$tmp/state" "$tmp/etc"
+# --check only asks that gh/jq/curl EXIST (this box may lack jq; the
+# forge and the gate image have it), so stubs stand in for all three.
+for t in gh jq curl; do printf '#!/bin/sh\nexit 0\n' > "$tmp/bin/$t"; chmod +x "$tmp/bin/$t"; done
+git init -q --bare "$tmp/forge.git"
+printf 'not-a-real-token\n' > "$tmp/etc/github.token"; chmod 600 "$tmp/etc/github.token"
+checkenv=(env -i PATH="$tmp/bin:$PATH" BOSS_PUBLISH_STATE_DIR="$tmp/state" BOSS_FORGE_REPO_PATH="$tmp/forge.git")
+out=$("${checkenv[@]}" BOSS_GITHUB_TOKEN_FILE="$tmp/etc/github.token" bash "$pub" --check 2>&1) \
+    || fail "publish-github-pr.sh --check refused a complete input set: $out"
+grep -q -- '--check ok' <<<"$out" || fail "--check did not report ok: $out"
+grep -q 'not-a-real-token' <<<"$out" && fail "--check printed the token"
+out=$("${checkenv[@]}" BOSS_GITHUB_TOKEN_FILE="$tmp/etc/absent.token" bash "$pub" --check 2>&1) \
+    && fail "--check passed with no token file"
+grep -q "$tmp/etc/absent.token" <<<"$out" || fail "the refusal does not name the token path: $out"
+grep -qi 'token admin' <<<"$out" || fail "the refusal does not say who provisions the token: $out"
+chmod 644 "$tmp/etc/github.token"
+"${checkenv[@]}" BOSS_GITHUB_TOKEN_FILE="$tmp/etc/github.token" bash "$pub" --check >/dev/null 2>&1 \
+    && fail "--check accepted a world-readable token file"
+chmod 600 "$tmp/etc/github.token"
+# A run (no --check) with no system of record refuses before touching
+# anything — the ops-runner rule, and the reason nothing here needs a
+# network to prove.
+"${checkenv[@]}" BOSS_GITHUB_TOKEN_FILE="$tmp/etc/github.token" bash "$pub" >/dev/null 2>&1 \
+    && fail "a run without BOSS_JOBS_URL did not refuse"
+echo "the-controls-are-bounded-verbs: self-test ok — four bounded, authorized ops verbs; the hold round-trips through the file the runner reads, with no HOME in the environment; a hold needs a reason; a rollback needs a sha; publish-github-pr --check passes on complete inputs, refuses by path without the token, refuses a world-readable token, and a run refuses without a system of record"
 exit 0

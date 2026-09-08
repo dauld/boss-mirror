@@ -76,11 +76,13 @@ pub const JOB_CLOSED: &str = "jobs.job.closed";
 /// problems that condemned the row, so the log answers "why is this
 /// kind gone?" without a re-lint. Rebuild ignores it.
 pub const WORKFLOW_QUARANTINED: &str = "jobs.kind.quarantined";
-/// Boot found an ACTIVE station that fails the viability lint
-/// (`station_quarantine`) and retired it. Same contract as
-/// [`WORKFLOW_QUARANTINED`]: the sibling state event is the
+/// A quarantine pass found an ACTIVE station that fails the viability
+/// lint and retired it. Boot no longer emits this: it checks and logs
+/// but never retires (`station_quarantine`, 2026-09-08). Same contract
+/// as [`WORKFLOW_QUARANTINED`]: the sibling state event is the
 /// registry's own `jobs.station.retired`, and this marker is the loud
-/// one carrying the problems that condemned the row. Rebuild ignores
+/// one carrying the problems that condemned the row. Declared in
+/// migration 120; nothing in the tree emits it today. Rebuild ignores
 /// it.
 pub const STATION_QUARANTINED: &str = "jobs.station.quarantined";
 /// One firing of the packet-loss census (packet-loss.md Q3): the
@@ -165,31 +167,6 @@ pub fn workflow_quarantined_event(
     boss_core::event::Event::new(
         "jobs",
         WORKFLOW_QUARANTINED,
-        payload,
-        boss_clock_client::wall_now(),
-    )
-}
-
-/// The loud marker for a station retired by the boot viability pass.
-/// Carries the problems that condemned the row so the log answers
-/// "why did this queue disappear?" without a re-lint.
-pub fn station_quarantined_event(
-    actor: &boss_core::actor::ActorId,
-    spec: &crate::stations::StationSpec,
-    problems: &[crate::station_lint::StationLintError],
-) -> boss_core::event::Event {
-    let payload = boss_core::publisher::inject_actor(
-        serde_json::json!({
-            "name": spec.name,
-            "version": spec.version,
-            "title": spec.title,
-            "problems": crate::station_lint::problems_json(problems),
-        }),
-        actor,
-    );
-    boss_core::event::Event::new(
-        "jobs",
-        STATION_QUARANTINED,
         payload,
         boss_clock_client::wall_now(),
     )

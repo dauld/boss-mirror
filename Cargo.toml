@@ -67,7 +67,7 @@ authors = ["Algedonic, LLC"]
 # Workspace-wide lint floor — opt-in via `[lints] workspace = true`
 # in each crate's Cargo.toml. As of 2026-05-05 every crate is at 0
 # clippy warnings under `cargo clippy --workspace --all-features`.
-# CI gates regressions via the clippy step in .github/workflows/ci.yml
+# CI gates regressions via the clippy step in infra/gate.sh
 # (`cargo clippy --workspace --all-features --tests -- -D warnings`);
 # this section is reserved as the single config point for future
 # ratchets without forcing local-dev shells to deny mid-refactor
