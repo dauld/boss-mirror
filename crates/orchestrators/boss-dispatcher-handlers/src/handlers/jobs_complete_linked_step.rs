@@ -37,6 +37,21 @@
 //! args = { link = "\"backlog_item\"", steps = "\"investigate,design-review,build\"" }
 //! ```
 //!
+//! ## Routing (v3, dda0713c)
+//!
+//! A car parked with `--park-backlog-item` names a `backlog-item`
+//! whose triage nobody has done — the route asks an operator to
+//! measure a claim, and a car that landed and was PROVEN (ship-a-
+//! change's `merged` terminal is `ready_when = "steps.proven.done"`,
+//! so this close is that moment) is the measurement. Five items were
+//! closed by hand that way in one night. The optional `route` arg is
+//! that routing as data: `{"kind", "step", "metadata"}` — the kind
+//! whose triage vocabulary it speaks, the routing step, and what that
+//! step requires at done. When none of `steps` is open and the
+//! routing step is, the handler completes it, re-reads the packet,
+//! and completes the branch the fork opened. Any other kind keeps the
+//! v2 answer (a noop note on the car): a filer's decision is theirs.
+//!
 //! ## Idempotence
 //!
 //! JetStream is at-least-once and the close marker is emitted from
@@ -387,68 +402,6 @@ impl Handler for JobsCompleteLinkedStep {
             return Ok(());
         }
 
-        // GUARD 2 — the open branch, or nothing. Exactly one of the
-        // named steps is open on a live packet (the fork's `ready_when`
-        // guarantees it: each branch gates on a different disposition
-        // value). A re-delivery finds the branch already `completed`
-        // and falls out here.
-        let Some(step) = allowed
-            .iter()
-            .filter_map(|slug| step_by_slug(&target, slug))
-            .find(|s| {
-                s.get("status")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|st| OPEN_STATUSES.contains(&st))
-            })
-        else {
-            // Silent on a redelivery; loud when the link pointed at a
-            // packet this obligation cannot act on. See `noop_reason`.
-            if let Some(why) = noop_reason(&target, &allowed) {
-                tracing::warn!(
-                    rule = %ctx.rule_name,
-                    car = %closing_id,
-                    packet = %target_id,
-                    "obligation completed nothing — {why}"
-                );
-                // A dispatcher log line is not something a car author
-                // reads, so the note also lands on the car — the side
-                // that made the claim, and the side a reviewer opens.
-                // Best-effort: failing to annotate must not fail the
-                // obligation, which has already done all it can.
-                if let Err(e) = self
-                    .note_on_car(closing_id, target_id, &why, &ctx.rule_name)
-                    .await
-                {
-                    tracing::warn!(rule = %ctx.rule_name, car = %closing_id,
-                        "could not record the no-op note: {e}");
-                }
-            }
-            return Ok(());
-        };
-        let Some(step_id) = step.get("id").and_then(|v| v.as_str()) else {
-            return Ok(());
-        };
-
-        // PATCH-on-PUT replaces top-level `metadata` wholesale, so the
-        // write merges into the step's existing keys — `authority_role`
-        // lives there and is what keeps the step gated.
-        let mut merged = match step.get("metadata").cloned() {
-            Some(serde_json::Value::Object(m)) => m,
-            _ => serde_json::Map::new(),
-        };
-
-        // GUARD 3 — already stamped by this same car. Cheap, and it
-        // makes the write self-describing about which delivery wrote
-        // it.
-        if merged
-            .get(evidence_key)
-            .and_then(|e| e.get("car"))
-            .and_then(|v| v.as_str())
-            == Some(closing_id)
-        {
-            return Ok(());
-        }
-
         // The rule row's translation of "this shipped" into the step
         // kind's own completion vocabulary (0ab5fa3a, accepted (a)).
         // user-feedback v11 makes design-review an `answer-question`
@@ -460,46 +413,251 @@ impl Handler for JobsCompleteLinkedStep {
         // values substitute {branch}/{car}/{title} from facts already
         // in hand. Fills ABSENT keys only — metadata a person already
         // wrote is their record, not this obligation's to overwrite.
-        if let Some(Value::String(tpl)) = arg(args, "done_metadata") {
-            match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(tpl) {
-                Ok(done) => {
-                    let branch = closing_meta
-                        .get("branch")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("(no branch recorded)");
-                    let title = closing.get("title").and_then(|v| v.as_str()).unwrap_or("");
-                    for (k, v) in done {
-                        if merged.contains_key(&k) {
-                            continue;
+        let done_metadata = template_arg(args, "done_metadata", &ctx.rule_name);
+        let route = parse_route(args, &ctx.rule_name);
+
+        // GUARD 2 — the open branch, the route to one, or nothing.
+        // Exactly one of the named steps is open on a live packet (the
+        // fork's `ready_when` guarantees it: each branch gates on a
+        // different disposition value). A re-delivery finds the branch
+        // already `completed` and falls out here.
+        let mut shipped: Option<Shipped> = None;
+        let step = match open_step(&target, &allowed).cloned() {
+            Some(step) => step,
+            None => {
+                // THE ROUTE (v3, dda0713c). No branch is open because
+                // nobody has triaged the packet — and for a kind the
+                // rule row names, a landed, proven car IS the
+                // measurement triage was waiting for. Complete the
+                // routing step with the row's disposition + evidence,
+                // re-read, and the fork's own `ready_when` has opened
+                // the branch this obligation completes. Scoped to
+                // `route.kind`: every other kind keeps the answer
+                // below — a filer's routing decision stays theirs.
+                let routable = route
+                    .as_ref()
+                    .filter(|r| {
+                        target.get("kind").and_then(|v| v.as_str()) == Some(r.kind.as_str())
+                    })
+                    .and_then(|r| {
+                        step_by_slug(&target, &r.step)
+                            .filter(|s| is_open(s))
+                            .map(|s| (r, s.clone()))
+                    });
+                let Some((route, routing_step)) = routable else {
+                    // Silent on a redelivery; loud when the link
+                    // pointed at a packet this obligation cannot act
+                    // on. See `noop_reason`.
+                    if let Some(why) = noop_reason(&target, &allowed) {
+                        tracing::warn!(
+                            rule = %ctx.rule_name,
+                            car = %closing_id,
+                            packet = %target_id,
+                            "obligation completed nothing — {why}"
+                        );
+                        // A dispatcher log line is not something a car
+                        // author reads, so the note also lands on the
+                        // car — the side that made the claim, and the
+                        // side a reviewer opens. Best-effort: failing
+                        // to annotate must not fail the obligation,
+                        // which has already done all it can.
+                        if let Err(e) = self
+                            .note_on_car(closing_id, target_id, &why, &ctx.rule_name)
+                            .await
+                        {
+                            tracing::warn!(rule = %ctx.rule_name, car = %closing_id,
+                                "could not record the no-op note: {e}");
                         }
-                        let v = match v {
-                            serde_json::Value::String(s) => serde_json::Value::String(
-                                s.replace("{branch}", branch)
-                                    .replace("{car}", closing_id)
-                                    .replace("{title}", title),
-                            ),
-                            other => other,
-                        };
-                        merged.insert(k, v);
+                    }
+                    return Ok(());
+                };
+                let facts = self.shipped(closing_id, &closing, &closing_meta, ctx).await;
+                self.complete_step(
+                    target_id,
+                    &routing_step,
+                    Some(&route.metadata),
+                    &facts,
+                    evidence_key,
+                    &ctx.rule_name,
+                )
+                .await?;
+                shipped = Some(facts);
+                let routed = self.get_job(target_id, &ctx.rule_name).await?;
+                match open_step(&routed, &allowed).cloned() {
+                    Some(step) => step,
+                    // The route wrote a disposition none of `steps`
+                    // answers to — rule authoring, pinned by
+                    // feedback_obligation_rules.rs, and not something
+                    // a redelivery fixes. The routing step's write is
+                    // a true record either way.
+                    None => {
+                        tracing::warn!(
+                            rule = %ctx.rule_name,
+                            car = %closing_id,
+                            packet = %target_id,
+                            "routed through `{}` but no branch in [{}] opened",
+                            route.step,
+                            allowed.join(", ")
+                        );
+                        return Ok(());
                     }
                 }
-                // Bad rule authoring is permanent — redelivery cannot
-                // fix a malformed template, and dying here would also
-                // kill the evidence write below.
-                Err(e) => {
-                    tracing::warn!(
-                        rule = %ctx.rule_name,
-                        "done_metadata is not a JSON object ({e}) — completing with evidence only"
-                    );
-                }
             }
+        };
+
+        // GUARD 3 — already stamped by this same car. Cheap, and it
+        // makes the write self-describing about which delivery wrote
+        // it.
+        if stamped_by(&step, evidence_key, closing_id) {
+            return Ok(());
         }
 
-        // The evidence. "The work you asked for shipped" is only worth
-        // saying if it names WHAT shipped — an id and a title a reader
-        // can go look at, plus the train that carried it and the
-        // generation that generation landed in when those are
-        // reachable. Absent facts are null, never invented.
+        let facts = match shipped {
+            Some(f) => f,
+            None => self.shipped(closing_id, &closing, &closing_meta, ctx).await,
+        };
+        self.complete_step(
+            target_id,
+            &step,
+            done_metadata.as_ref(),
+            &facts,
+            evidence_key,
+            &ctx.rule_name,
+        )
+        .await
+    }
+}
+
+/// What shipped, read once from the car (and its train) and written
+/// wherever the obligation completes a step: the substitution facts a
+/// template names, and the evidence object itself.
+struct Shipped {
+    car: String,
+    branch: String,
+    title: String,
+    evidence: serde_json::Value,
+}
+
+/// The routing a rule row may ask for (v3, dda0713c): when none of
+/// `steps` is open because the packet has not been triaged, complete
+/// `step` on a packet of `kind` with `metadata` — the step kind's
+/// required vocabulary, `{branch}`/`{car}`/`{title}` substituted — and
+/// let the fork open the branch `steps` then completes.
+struct Route {
+    kind: String,
+    step: String,
+    metadata: serde_json::Map<String, serde_json::Value>,
+}
+
+/// A rule-row arg holding a JSON object as a string (`done_metadata`,
+/// and the route's `metadata`). Bad rule authoring is permanent —
+/// redelivery cannot fix a malformed template, and dying on it would
+/// also kill the evidence write — so a malformed one is a warning and
+/// `None`, never an error.
+fn template_arg(
+    args: &[(String, Value)],
+    name: &str,
+    rule: &str,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let Some(Value::String(src)) = arg(args, name) else {
+        return None;
+    };
+    match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(src) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            tracing::warn!(
+                rule = %rule,
+                "{name} is not a JSON object ({e}) — completing with evidence only"
+            );
+            None
+        }
+    }
+}
+
+fn parse_route(args: &[(String, Value)], rule: &str) -> Option<Route> {
+    let Some(Value::String(src)) = arg(args, "route") else {
+        return None;
+    };
+    let route = serde_json::from_str::<serde_json::Value>(src)
+        .ok()
+        .and_then(|v| {
+            Some(Route {
+                kind: v.get("kind")?.as_str()?.to_string(),
+                step: v.get("step")?.as_str()?.to_string(),
+                metadata: v.get("metadata")?.as_object()?.clone(),
+            })
+        });
+    if route.is_none() {
+        tracing::warn!(
+            rule = %rule,
+            "route is not a JSON object with kind/step/metadata — completing without routing"
+        );
+    }
+    route
+}
+
+fn is_open(step: &serde_json::Value) -> bool {
+    step.get("status")
+        .and_then(|v| v.as_str())
+        .is_some_and(|st| OPEN_STATUSES.contains(&st))
+}
+
+/// The one open step among `allowed`, if any.
+fn open_step<'a>(job: &'a serde_json::Value, allowed: &[&str]) -> Option<&'a serde_json::Value> {
+    allowed
+        .iter()
+        .filter_map(|slug| step_by_slug(job, slug))
+        .find(|s| is_open(s))
+}
+
+/// Does this step already carry `car` under `evidence_key`?
+fn stamped_by(step: &serde_json::Value, evidence_key: &str, car: &str) -> bool {
+    step.get("metadata")
+        .and_then(|m| m.get(evidence_key))
+        .and_then(|e| e.get("car"))
+        .and_then(|v| v.as_str())
+        == Some(car)
+}
+
+/// Fill `merged` from a template: absent keys only — metadata a
+/// person already wrote is their record, not this obligation's to
+/// overwrite — with string values substituting the car's facts.
+fn fill(
+    merged: &mut serde_json::Map<String, serde_json::Value>,
+    template: &serde_json::Map<String, serde_json::Value>,
+    shipped: &Shipped,
+) {
+    for (k, v) in template {
+        if merged.contains_key(k) {
+            continue;
+        }
+        let v = match v {
+            serde_json::Value::String(s) => serde_json::Value::String(
+                s.replace("{branch}", &shipped.branch)
+                    .replace("{car}", &shipped.car)
+                    .replace("{title}", &shipped.title),
+            ),
+            other => other.clone(),
+        };
+        merged.insert(k.clone(), v);
+    }
+}
+
+impl JobsCompleteLinkedStep {
+    /// The evidence. "The work you asked for shipped" is only worth
+    /// saying if it names WHAT shipped — an id and a title a reader
+    /// can go look at, plus the train that carried it and the
+    /// generation it landed in when those are reachable. Absent facts
+    /// are null, never invented.
+    async fn shipped(
+        &self,
+        closing_id: &str,
+        closing: &serde_json::Value,
+        closing_meta: &serde_json::Value,
+        ctx: &InvocationContext,
+    ) -> Shipped {
+        let branch = closing_meta.get("branch").and_then(|v| v.as_str());
+        let title = closing.get("title").and_then(|v| v.as_str()).unwrap_or("");
         let train_id = closing_meta
             .get("train")
             .and_then(|v| v.as_str())
@@ -521,11 +679,13 @@ impl Handler for JobsCompleteLinkedStep {
                 .map(str::to_string),
             None => None,
         };
-        merged.insert(
-            evidence_key.to_string(),
-            json!({
+        Shipped {
+            car: closing_id.to_string(),
+            branch: branch.unwrap_or("(no branch recorded)").to_string(),
+            title: title.to_string(),
+            evidence: json!({
                 "car": closing_id,
-                "title": closing.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+                "title": title,
                 // The car's BRANCH, from its metadata — not its
                 // subject. Until 2026-08-17 this read `subject.id`, so
                 // the evidence on every closed packet named the wrong
@@ -538,14 +698,41 @@ impl Handler for JobsCompleteLinkedStep {
                 // believable evidence field is worse than a missing
                 // one: closing on evidence is supposed to save the
                 // next reader from re-deriving it.
-                "branch": closing_meta.get("branch").and_then(|v| v.as_str()),
+                "branch": branch,
                 "outcome": ctx.event_payload.get("outcome").and_then(|v| v.as_str()),
                 "closed_on": ctx.event_payload.get("closed_on").cloned(),
                 "train": train_id,
                 "generation": generation,
                 "by_rule": ctx.rule_name,
             }),
-        );
+        }
+    }
+
+    /// Complete `step` on `target_id`: the template's vocabulary
+    /// (absent keys only) plus the evidence under `evidence_key`,
+    /// merged into the step's existing metadata — PATCH-on-PUT
+    /// replaces top-level `metadata` wholesale, and `authority_role`
+    /// living there is what keeps the step gated.
+    async fn complete_step(
+        &self,
+        target_id: &str,
+        step: &serde_json::Value,
+        template: Option<&serde_json::Map<String, serde_json::Value>>,
+        shipped: &Shipped,
+        evidence_key: &str,
+        rule: &str,
+    ) -> Result<(), HandlerError> {
+        let Some(step_id) = step.get("id").and_then(|v| v.as_str()) else {
+            return Ok(());
+        };
+        let mut merged = match step.get("metadata").cloned() {
+            Some(serde_json::Value::Object(m)) => m,
+            _ => serde_json::Map::new(),
+        };
+        if let Some(template) = template {
+            fill(&mut merged, template, shipped);
+        }
+        merged.insert(evidence_key.to_string(), shipped.evidence.clone());
 
         let step_url = format!(
             "{}/api/jobs/{}/steps/{}",
@@ -561,7 +748,7 @@ impl Handler for JobsCompleteLinkedStep {
             .client
             .put(&step_url)
             .header("content-type", "application/json")
-            .header("x-boss-user", dispatcher_actor_header(&ctx.rule_name))
+            .header("x-boss-user", dispatcher_actor_header(rule))
             .header("x-sim-origin", sim_origin_value())
             .json(&body)
             .send()
@@ -696,26 +883,39 @@ mod tests {
 
     type Puts = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
 
-    /// Stand-in for jobs-api: serves the three Jobs by id, records
-    /// every step PUT, and records every job-metadata PATCH — the
-    /// noop-note write the first mock had no route for, which is how
-    /// a write that 422'd in production passed every test (c65110d6).
+    /// Stand-in for jobs-api: serves the Jobs by id, records every
+    /// step PUT, and records every job-metadata PATCH — the noop-note
+    /// write the first mock had no route for, which is how a write
+    /// that 422'd in production passed every test (c65110d6).
+    ///
+    /// STATEFUL since the route (v3): a step PUT lands on the stored
+    /// Job, and the mock plays the one `ready_when` the route depends
+    /// on — a `pending` `build` step becomes `ready` once `triage`
+    /// completes with `disposition = "build"` — standing in for
+    /// jobs-api's own re-evaluation on the write. The handler routes,
+    /// re-reads, and must find the branch it opened.
     async fn mock_jobs(jobs: Vec<serde_json::Value>) -> (String, Puts, Puts) {
         let patches: Puts = Arc::new(Mutex::new(Vec::new()));
         let puts: Puts = Arc::new(Mutex::new(Vec::new()));
-        let by_id: std::collections::HashMap<String, serde_json::Value> = jobs
-            .into_iter()
-            .map(|j| (j["id"].as_str().unwrap_or_default().to_string(), j))
-            .collect();
+        let by_id: Arc<Mutex<std::collections::HashMap<String, serde_json::Value>>> =
+            Arc::new(Mutex::new(
+                jobs.into_iter()
+                    .map(|j| (j["id"].as_str().unwrap_or_default().to_string(), j))
+                    .collect(),
+            ));
 
         let get_puts = puts.clone();
+        let get_jobs = by_id.clone();
+        let put_jobs = by_id.clone();
         let app = Router::new()
             .route(
                 "/api/jobs/{id}",
                 get(move |Path(id): Path<String>| {
-                    let by_id = by_id.clone();
+                    let by_id = get_jobs.clone();
                     async move {
                         by_id
+                            .lock()
+                            .unwrap()
                             .get(&id)
                             .cloned()
                             .map(Json)
@@ -726,11 +926,15 @@ mod tests {
             .route(
                 "/api/jobs/{id}/steps/{step_id}",
                 axum::routing::put(
-                    move |Path((_id, step_id)): Path<(String, String)>,
+                    move |Path((id, step_id)): Path<(String, String)>,
                           Json(body): Json<serde_json::Value>| {
                         let puts = get_puts.clone();
+                        let by_id = put_jobs.clone();
                         async move {
-                            puts.lock().unwrap().push((step_id, body));
+                            puts.lock().unwrap().push((step_id.clone(), body.clone()));
+                            if let Some(job) = by_id.lock().unwrap().get_mut(&id) {
+                                apply_step_put(job, &step_id, &body);
+                            }
                             Json(json!({ "ok": true }))
                         }
                     },
@@ -752,6 +956,55 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (format!("http://{addr}"), puts, patches)
+    }
+
+    /// The mock's PUT: overlay status + metadata on the stored step,
+    /// then re-evaluate the single predicate the route tests rely on.
+    fn apply_step_put(job: &mut serde_json::Value, step_id: &str, body: &serde_json::Value) {
+        let Some(steps) = job.get_mut("steps").and_then(|s| s.as_array_mut()) else {
+            return;
+        };
+        for step in steps.iter_mut() {
+            if step.get("id").and_then(|v| v.as_str()) == Some(step_id) {
+                if let Some(status) = body.get("status") {
+                    step["status"] = status.clone();
+                }
+                if let Some(metadata) = body.get("metadata") {
+                    step["metadata"] = metadata.clone();
+                }
+            }
+        }
+        let routed_to_build = steps.iter().any(|s| {
+            s.get("spec_slug").and_then(|v| v.as_str()) == Some("triage")
+                && s.get("status").and_then(|v| v.as_str()) == Some("completed")
+                && s.get("metadata")
+                    .and_then(|m| m.get("disposition"))
+                    .and_then(|v| v.as_str())
+                    == Some("build")
+        });
+        if routed_to_build {
+            for step in steps.iter_mut() {
+                if step.get("spec_slug").and_then(|v| v.as_str()) == Some("build")
+                    && step.get("status").and_then(|v| v.as_str()) == Some("pending")
+                {
+                    step["status"] = json!("ready");
+                }
+            }
+        }
+    }
+
+    /// v3 rule args (a-landed-car-advances-its-backlog-item): the
+    /// routing a proven car may make on an untriaged backlog item
+    /// rides as data too.
+    fn args_with_route() -> Vec<(String, Value)> {
+        let mut a = args_with_done_metadata();
+        a.push((
+            "route".to_string(),
+            Value::String(
+                r#"{"kind": "backlog-item", "step": "triage", "metadata": {"disposition": "build", "evidence": "shipped and proven: {branch} — {title} (car {car})"}}"#.into(),
+            ),
+        ));
+        a
     }
 
     fn close_marker() -> serde_json::Value {
@@ -823,6 +1076,175 @@ mod tests {
                 .contains("triage"),
             "the why names the open step a reader should look at"
         );
+    }
+
+    /// dda0713c — the route. A car parked with `--park-backlog-item`
+    /// lands, is proven, and closes `merged`; the backlog item it
+    /// names is still at triage because nobody measured a claim a
+    /// landed car has already settled. With a `route` on the rule row
+    /// the handler completes triage with `disposition = build` +
+    /// evidence naming the car, re-reads the packet, finds the `build`
+    /// branch the fork opened, and completes it with the same proof —
+    /// the two writes an operator made by hand on five items in one
+    /// night, in the same order, through the same door.
+    #[tokio::test]
+    async fn a_proven_car_routes_the_backlog_item_it_names_and_completes_the_build() {
+        let (base, puts, patches) = mock_jobs(vec![
+            car(json!({ "backlog_item": PACKET, "train": TRAIN, "branch": "fix/x" })),
+            untriaged_packet(),
+            train(),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        h.invoke(&args_with_route(), &ctx(close_marker()))
+            .await
+            .expect("runs");
+
+        let calls = puts.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2, "triage, then build: {calls:?}");
+
+        let (step_id, body) = &calls[0];
+        assert_eq!(step_id, "s-triage", "the routing step is completed FIRST");
+        assert_eq!(body["status"], "completed");
+        assert_eq!(body["metadata"]["disposition"], "build");
+        let evidence = body["metadata"]["evidence"].as_str().unwrap_or_default();
+        assert!(
+            evidence.contains("fix/x") && evidence.contains(CAR),
+            "the triage evidence names the branch and the car: {evidence}"
+        );
+        assert_eq!(
+            body["metadata"]["arrived_from"]["car"], CAR,
+            "the same proof object lands on triage — which car routed it"
+        );
+
+        let (step_id, body) = &calls[1];
+        assert_eq!(step_id, BRANCH_STEP, "the build branch the route opened");
+        assert_eq!(body["status"], "completed");
+        assert_eq!(body["metadata"]["arrived_from"]["car"], CAR);
+        assert_eq!(body["metadata"]["arrived_from"]["branch"], "fix/x");
+        assert_eq!(body["metadata"]["arrived_from"]["generation"], "abc1234");
+
+        assert!(
+            patches.lock().unwrap().is_empty(),
+            "nothing to apologise for on the car — the obligation acted"
+        );
+    }
+
+    /// The route is scoped to the kind it names. A user-feedback
+    /// packet at triage keeps the v2 answer: a filer's routing
+    /// decision is not made for them, and the noop note lands.
+    #[tokio::test]
+    async fn the_route_applies_only_to_the_kind_it_names() {
+        let mut feedback = untriaged_packet();
+        feedback["kind"] = json!("user-feedback");
+        let (base, puts, patches) = mock_jobs(vec![
+            car(json!({ "backlog_item": PACKET, "train": TRAIN, "branch": "fix/x" })),
+            feedback,
+            train(),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        h.invoke(&args_with_route(), &ctx(close_marker()))
+            .await
+            .expect("runs");
+
+        assert!(puts.lock().unwrap().is_empty(), "no step completed");
+        assert_eq!(patches.lock().unwrap().len(), 1, "the noop note lands");
+    }
+
+    /// An item already routed elsewhere is not re-routed. Triage chose
+    /// `verify`, so `measure` is the open step — not one this
+    /// obligation completes, and not one it may route around.
+    #[tokio::test]
+    async fn an_item_routed_elsewhere_is_left_where_its_triage_put_it() {
+        let (base, puts, patches) = mock_jobs(vec![
+            car(json!({ "backlog_item": PACKET, "train": TRAIN, "branch": "fix/x" })),
+            json!({
+                "id": PACKET,
+                "kind": "backlog-item",
+                "title": "A claim someone chose to re-measure",
+                "status": "open",
+                "metadata": {},
+                "steps": [
+                    { "id": "s-triage", "spec_slug": "triage", "status": "completed",
+                      "metadata": { "disposition": "verify", "evidence": "measured by hand" } },
+                    { "id": "s-measure", "spec_slug": "measure", "status": "ready", "metadata": {} },
+                    { "id": BRANCH_STEP, "spec_slug": "build", "status": "pending", "metadata": {} },
+                ],
+            }),
+            train(),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        h.invoke(&args_with_route(), &ctx(close_marker()))
+            .await
+            .expect("runs");
+
+        assert!(puts.lock().unwrap().is_empty(), "a person's route stands");
+        let patches = patches.lock().unwrap().clone();
+        assert_eq!(patches.len(), 1);
+        assert!(
+            patches[0].1["obligation_noop"]["why"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("measure"),
+            "the note names the step a reader should look at"
+        );
+    }
+
+    /// Idempotent: the second delivery finds triage routed and build
+    /// completed — by the first delivery, or by a person — and writes
+    /// nothing, says nothing.
+    #[tokio::test]
+    async fn a_redelivery_after_the_route_writes_nothing() {
+        let (base, puts, patches) = mock_jobs(vec![
+            car(json!({ "backlog_item": PACKET, "train": TRAIN, "branch": "fix/x" })),
+            json!({
+                "id": PACKET,
+                "kind": "backlog-item",
+                "title": "Already advanced",
+                // Still `open`: the `closed` outcome fires on the
+                // dispatcher's next tick, and a redelivery can land
+                // in that window.
+                "status": "open",
+                "metadata": {},
+                "steps": [
+                    { "id": "s-triage", "spec_slug": "triage", "status": "completed",
+                      "metadata": { "disposition": "build", "evidence": "shipped",
+                                    "arrived_from": { "car": CAR } } },
+                    { "id": BRANCH_STEP, "spec_slug": "build", "status": "completed",
+                      "metadata": { "arrived_from": { "car": CAR } } },
+                ],
+            }),
+            train(),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        h.invoke(&args_with_route(), &ctx(close_marker()))
+            .await
+            .expect("runs");
+
+        assert!(puts.lock().unwrap().is_empty());
+        assert!(patches.lock().unwrap().is_empty());
+    }
+
+    /// Bad rule authoring is permanent, so a malformed `route` must
+    /// not dead-letter the event — the obligation runs as v2 did.
+    #[tokio::test]
+    async fn a_malformed_route_is_a_warning_not_a_dead_letter() {
+        let (base, puts, patches) = mock_jobs(vec![
+            car(json!({ "backlog_item": PACKET, "train": TRAIN, "branch": "fix/x" })),
+            untriaged_packet(),
+            train(),
+        ])
+        .await;
+        let mut a = args_with_done_metadata();
+        a.push(("route".to_string(), Value::String("not json".into())));
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        h.invoke(&a, &ctx(close_marker())).await.expect("runs");
+
+        assert!(puts.lock().unwrap().is_empty());
+        assert_eq!(patches.lock().unwrap().len(), 1, "the v2 noop note lands");
     }
 
     /// The obligation itself: a merged car completes the branch its

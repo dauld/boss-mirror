@@ -497,12 +497,31 @@ name = "complete-feedback-branch-on-car-merged"
 # (verdict + answer required at done), and an evidence-only completion
 # would 400 there. String values substitute {branch}/{car}/{title};
 # absent keys only — a person's own written metadata always wins.
-version = 2
+#
+# Bumped by migration 202609082000: v3 adds `route` (dda0713c). The
+# trigger was already the right moment — ship-a-change's `merged`
+# terminal is `ready_when = "steps.proven.done"`, so this close IS the
+# car proven in production — but a `backlog-item` parked against the
+# car with `--park-backlog-item` sat untriaged: `build` was pending,
+# `triage` was the open step, and v2 wrote an `obligation_noop` on the
+# car instead ("triage is a routing decision an obligation must not
+# make"). For a backlog item that reasoning inverts: the route asks an
+# operator to measure a claim, and a car that landed and was proven IS
+# the measurement. Five items were closed by hand that way in one
+# night — triage `disposition=build` with the car as evidence, then
+# `build` with the proof. `route` is that routing as data: the KIND
+# whose triage vocabulary it speaks (user-feedback keeps the v2 answer
+# — a filer's decision is still theirs), the routing STEP, and the
+# METADATA that step requires at done. The handler completes the route
+# step, re-reads, and the fork's own `ready_when` opens `build`, which
+# `steps` then completes; the item's `closed` outcome does the rest.
+# Absent keys only, as with done_metadata.
+version = 3
 on_event = "jobs.job.closed"
 when = "kind = \"ship-a-change\" AND outcome = \"merged\""
 [[rule.do]]
 handler = "jobs.complete_linked_step"
-args = { link = "\"backlog_item\"", steps = "\"investigate,design-review,build\"", done_metadata = '"{\"verdict\": \"approved\", \"answer\": \"shipped: {branch} — {title}\"}"' }
+args = { link = "\"backlog_item\"", steps = "\"investigate,design-review,build\"", done_metadata = '"{\"verdict\": \"approved\", \"answer\": \"shipped: {branch} — {title}\"}"', route = '"{\"kind\": \"backlog-item\", \"step\": \"triage\", \"metadata\": {\"disposition\": \"build\", \"evidence\": \"shipped and proven: {branch} — {title} (car {car})\"}}"' }
 
 # …and the filer always hears how it ended (same ratification: "But, we
 # should always notify the filer with the terminal state"). ANY

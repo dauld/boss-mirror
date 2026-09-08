@@ -2621,3 +2621,188 @@ ready_when = "steps.opened.done AND job.metadata.superseded_by > \"\" AND job.me
 title_template = "Superseded by a newer packet"
 metadata_defaults = { outcome_kind = "withdrawn" }
 terminal = { outcome = "superseded" }
+
+# ---------------------------------------------------------------------
+# incident-post-mortem — a structured review of an incident, ordered to
+# force the questions that were actually missed.
+#
+# v1 was published live on 2026-08-13 and never authored here. v2 is
+# the same protocol with one predicate fixed: v1's `superseded`
+# terminal read `job.metadata.superseded_by != ""`, and a missing
+# metadata path is `Absent` — unequal to every literal — so the terminal
+# was READY the instant a packet opened and the dispatcher's
+# complete-on-ready rule closed every post-mortem as `superseded` before
+# a single step could be filled (backlog-item cb9661fe, reproduced live
+# 2026-09-07). `> ""` is the boss-expr idiom for "present and a
+# non-empty string": false while the marker is absent or empty, true
+# only once someone names the packet that supersedes this one — so the
+# terminal waits. The viability lint's Phase 6 refuses the v1 shape at
+# the publish gate; `every_bundled_workflow_is_viable` is what keeps it
+# out of this file.
+#
+# Step graph:
+#    0. opened          — trigger: the incident is declared
+#    1. timeline        — the facts, with timestamps, before any theory
+#    2. attribution     — did we cause it? ("did we just ship this?")
+#    3. detection       — how was it found, what should have found it
+#    4. simplification  — what can be REMOVED, before anything is added
+#    5. actions         — protocol changes, each filed as its own packet
+#    6. review          — a human reads the findings (an agent may run
+#                         every other step; a post-mortem it grades
+#                         itself on is not a review)
+#    7. closed          — outcome terminal (ready after 6)
+#   (x) superseded      — outcome terminal: a person sets
+#                         `job.metadata.superseded_by` to the packet
+#                         that replaces this one
+[[workflow]]
+kind = "incident-post-mortem"
+label = "Incident post-mortem"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "A structured review of an incident, modelled as a Job so the review is work the network can route, own and audit like any other. Ordered to force the questions that were actually missed rather than the ones that are comfortable: the timeline before the theory, `attribution` before `detection` (the 2026-08-13 SoR outage cost an hour because nobody asked 'did we just ship this?' first), and `simplification` before `actions` so the default reflex to ADD a check has to survive the question of what could be REMOVED instead. `review` is a human step by construction: an agent may run every other step end to end, but a post-mortem an agent grades itself on is not a review."
+
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+title_template = "Incident opened"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "incident-declared" }
+
+[[workflow.step]]
+title = "timeline"
+kind = "task"
+ready_when = "steps.opened.done"
+title_template = "Establish the timeline from evidence"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "first_symptom"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "symptom_at"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "cause_landed_at"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "detected_at"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "restored_at"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "detection_lag_minutes"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "attribution"
+kind = "task"
+ready_when = "steps.timeline.done"
+title_template = "Did we cause it?"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "self_inflicted"
+field_type = "yes|no|unknown"
+required = true
+[[workflow.step.fields]]
+name = "causing_change"
+field_type = "string"
+required = false
+[[workflow.step.fields]]
+name = "what_we_believed_first"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "evidence_contradicted"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "detection"
+kind = "task"
+ready_when = "steps.attribution.done"
+title_template = "How was it found, and what should have found it?"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "detected_by"
+field_type = "gate|ci|deploy|monitor|human|customer"
+required = true
+[[workflow.step.fields]]
+name = "earliest_possible_detection"
+field_type = "gate|ci|deploy|monitor|impossible-today"
+required = true
+[[workflow.step.fields]]
+name = "why_not_caught_earlier"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "blind_spot"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "simplification"
+kind = "task"
+ready_when = "steps.detection.done"
+title_template = "What can be REMOVED or collapsed?"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "simplification"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "facts_living_twice"
+field_type = "string"
+required = false
+[[workflow.step.fields]]
+name = "additions_considered_and_rejected"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "actions"
+kind = "task"
+ready_when = "steps.simplification.done"
+title_template = "Protocol changes, each as a packet"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "action_packets"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "shipped_in_this_review"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "review"
+kind = "task"
+ready_when = "steps.actions.done"
+title_template = "Human review of the findings"
+authority_role = "platform-admin"
+
+[[workflow.step]]
+title = "closed"
+kind = "outcome"
+ready_when = "steps.review.done"
+title_template = "Post-mortem closed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "closed" }
+
+[[workflow.step]]
+title = "superseded"
+kind = "outcome"
+# Gated on BOTH the DAG edge (opened — the lint rejects a terminal no
+# trigger can reach) AND a person-set marker. `> ""` and not `!= ""`:
+# the marker is absent on a fresh packet, and absent is unequal to
+# everything, so `!= ""` fired on create. See the header.
+ready_when = "steps.opened.done AND job.metadata.superseded_by > \"\""
+title_template = "Superseded by another post-mortem"
+metadata_defaults = { outcome_kind = "withdrawn" }
+terminal = { outcome = "superseded" }
