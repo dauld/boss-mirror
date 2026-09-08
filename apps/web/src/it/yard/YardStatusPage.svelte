@@ -159,6 +159,21 @@
       </ul>
     {/if}
 
+    <!-- 03b — HELD: greens deliberately kept off the dock, with the
+         operator's reason. Neutral, not amber: a brake on is not a gap. -->
+    {#if s.held.length > 0}
+      <div class="ys-section">03b — HELD GREENS</div>
+      <p class="ys-quiet">
+        Gated green and held off the dock on purpose — waiting for what the reason says.
+        Not stranded; nothing to rescue.
+      </p>
+      <ul class="ys-held">
+        {#each s.held as h (h.branch)}
+          <li><span class="ys-mono">{h.branch}</span> — held: {h.reason} <span class="ys-dim">(since {h.since})</span></li>
+        {/each}
+      </ul>
+    {/if}
+
     <!-- The thresholds this yard enforces, named from the policy row. -->
     <div class="ys-footnote">
       {#if s.policy.stall_hours != null || s.policy.max_red_trains != null}
@@ -224,5 +239,7 @@
   .ys-dim { color: var(--static, #7a838c); }
   .ys-stranded { list-style: none; padding: 0; margin: 6px 0; display: flex; flex-direction: column; gap: 4px; }
   .ys-stranded li { color: var(--warn, #d9a441); font-size: 13px; }
+  .ys-held { list-style: none; padding: 0; margin: 6px 0; display: flex; flex-direction: column; gap: 4px; }
+  .ys-held li { color: var(--static, #7a838c); font-size: 13px; }
   .ys-footnote { color: var(--static, #7a838c); font-size: 12px; margin-top: 24px; max-width: 70ch; }
 </style>

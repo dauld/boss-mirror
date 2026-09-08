@@ -193,6 +193,13 @@ enum Commands {
         /// --park-*.
         #[arg(long, value_name = "REASON")]
         force_regate: Option<String>,
+        /// Gate and deliberately do NOT park: stamp `hold: <reason>` on
+        /// the gate-run so its green reads HELD (in the yard, `boss
+        /// orient` and the stranded-green alarm) rather than stranded.
+        /// For a car that must land at a timed restart, or behind
+        /// another car. Never combines with --park-*.
+        #[arg(long, value_name = "REASON")]
+        hold: Option<String>,
     },
     /// Park a gated branch as a car, carrying its receipt.
     ///
@@ -1071,6 +1078,7 @@ async fn main() -> Result<()> {
             park_verified,
             park_backlog_item,
             force_regate,
+            hold,
         } => {
             let park = gate::ParkIntent {
                 summary: park_summary,
@@ -1088,6 +1096,7 @@ async fn main() -> Result<()> {
                 dry_run,
                 park,
                 force_regate,
+                hold,
             )
             .await
         }

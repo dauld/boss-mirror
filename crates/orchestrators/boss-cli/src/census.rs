@@ -1247,6 +1247,18 @@ pub(crate) fn stranded_gate_runs(
         {
             continue;
         }
+        // A gate-run `boss rerail --finish` stamped `rerailed_to` is
+        // spent: its car now rides the re-railed branch. Without the
+        // stamp the ORIGINAL branch's green read as stranded forever,
+        // even after the branch was deleted on the forge (69daaba2).
+        // The yard read-model (`boss_jobs::yard`) reads the same key.
+        if g.get("metadata")
+            .and_then(|m| m.get("rerailed_to"))
+            .and_then(Value::as_str)
+            .is_some_and(|b| !b.trim().is_empty())
+        {
+            continue;
+        }
         let green = g
             .get("steps")
             .and_then(Value::as_array)
@@ -1438,6 +1450,26 @@ mod tests {
         assert_eq!(
             stranded_gate_runs(&gate_runs, &BTreeSet::new()),
             vec!["fix/live".to_string()]
+        );
+    }
+
+    /// A green `boss rerail --finish` stamped `rerailed_to` is spent —
+    /// its car rides the new branch — so orient must not offer the
+    /// original branch as rescuable (69daaba2). Same rule as the yard
+    /// read-model's `stranded_greens`, pinned on both sides (§9a).
+    #[test]
+    fn a_rerailed_green_is_not_stranded() {
+        let gate_runs = vec![
+            json!({"metadata": {"branch": "fix/x", "rerailed_to": "fix/x-rerail"},
+                   "steps": [{"metadata": {"verdict": "green"}}]}),
+            json!({"metadata": {"branch": "fix/x-rerail", "rerailed_from": "fix/x"},
+                   "steps": [{"metadata": {"verdict": "green"}}]}),
+            json!({"metadata": {"branch": "fix/empty-stamp", "rerailed_to": ""},
+                   "steps": [{"metadata": {"verdict": "green"}}]}),
+        ];
+        assert_eq!(
+            stranded_gate_runs(&gate_runs, &BTreeSet::new()),
+            vec!["fix/empty-stamp".to_string(), "fix/x-rerail".to_string()]
         );
     }
 

@@ -484,6 +484,33 @@ impl ParkIntent {
     }
 }
 
+/// The HOLD a gate carries: `--hold <reason>` stamps `hold: <reason>`
+/// on the gate-run so its green reads HELD (a brake deliberately on)
+/// rather than stranded (a green someone forgot) — in `boss orient`,
+/// the stranded-green alarm and the yard, which all read that one key
+/// (69daaba2: a boss-dev manifest car waiting for a David-timed roll
+/// was indistinguishable from a forgotten one). A hold never combines
+/// with park intent: auto-park would file the car on green and board
+/// it, which is the opposite of holding it. An empty reason is refused
+/// — the marker IS the reason, and "held: (blank)" tells the next
+/// reader nothing.
+pub fn hold_guard(hold: Option<&str>, park: &ParkIntent) -> Result<Option<String>> {
+    let Some(reason) = hold else {
+        return Ok(None);
+    };
+    let reason = reason.trim();
+    if reason.is_empty() {
+        anyhow::bail!("--hold needs a reason: what is this green waiting for?");
+    }
+    if !park.is_empty() {
+        anyhow::bail!(
+            "--hold and --park-* cannot combine: a hold keeps the green off the dock, \
+             auto-park files a car for it on green. Pass one or the other."
+        );
+    }
+    Ok(Some(reason.to_string()))
+}
+
 /// Whether a post-creation refusal in `run` must close the gate-run it
 /// just filed. True exactly when WE created the packet this run
 /// (`!reused`) AND it is not a dry run (`!dry`): a reused packet has its
@@ -1068,6 +1095,7 @@ pub async fn run(
     dry: bool,
     park: ParkIntent,
     force_regate: Option<String>,
+    hold: Option<String>,
 ) -> Result<()> {
     let manifest_path =
         manifest.unwrap_or_else(|| PathBuf::from("infra/gate-runner/gate-runner.yaml"));
@@ -1079,6 +1107,7 @@ pub async fn run(
     // bound should cost a line of output, not a gate slot.
     let mode = normalize_mode(&mode.unwrap_or_default())?;
     park.require_complete()?;
+    let hold = hold_guard(hold.as_deref(), &park)?;
     let http = reqwest::Client::new();
     // The concurrency bound: env override > delivery policy > compiled.
     // Fetched here, before the packet, so a bad env override refuses
@@ -1174,6 +1203,26 @@ pub async fn run(
             return Err(e);
         }
         println!("boss gate: park intent stamped — this branch auto-parks on green");
+    }
+    // Stamp the hold the same way, for the same reasons: a PATCH that
+    // merges onto a created or reused packet, closing what we created
+    // if the round-trip fails.
+    if let Some(reason) = hold.as_deref().filter(|_| !dry) {
+        if let Err(e) = api(
+            &http,
+            reqwest::Method::PATCH,
+            &format!("/api/jobs/{packet}/metadata"),
+            Some(json!({ "hold": reason })),
+        )
+        .await
+        .context("stamping the hold onto the gate-run")
+        {
+            if should_close_on_park_failure(reused, dry) {
+                close_refused(&http, &packet, &format!("{e:#}")).await;
+            }
+            return Err(e);
+        }
+        println!("boss gate: hold stamped — a green here reads HELD ({reason}), not stranded");
     }
     // STALE INTENT DOES NOT SURVIVE A LANDING. A reused packet carries
     // whatever `park_*` keys its first launch stamped; on a forced
@@ -1762,6 +1811,31 @@ mod tests {
         p.backlog_item = Some("7c9e376d".into());
         assert!(p.require_complete().is_ok());
         assert_eq!(p.metadata_patch()["park_backlog_item"], "7c9e376d");
+    }
+
+    /// `--hold` marks a green as deliberately waiting. It needs a reason
+    /// (the marker is the reason), and never combines with park intent
+    /// (a hold keeps the green off the dock; auto-park boards it).
+    #[test]
+    fn a_hold_needs_a_reason_and_never_combines_with_park_intent() {
+        let plain = ParkIntent::default();
+        assert_eq!(hold_guard(None, &plain).unwrap(), None);
+        assert_eq!(
+            hold_guard(Some("  lands at the next dev-pod restart "), &plain).unwrap(),
+            Some("lands at the next dev-pod restart".to_string())
+        );
+        let err = hold_guard(Some("   "), &plain).unwrap_err().to_string();
+        assert!(err.contains("needs a reason"), "{err}");
+        let err = hold_guard(Some("waiting"), &park_full())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--hold and --park-* cannot combine"), "{err}");
+        // A partial park intent is still park intent.
+        let partial = ParkIntent {
+            summary: Some("x".into()),
+            ..Default::default()
+        };
+        assert!(hold_guard(Some("waiting"), &partial).is_err());
     }
 
     /// A TRANSIENT SoR BLIP ON THE PARK-INTENT PATCH MUST NOT ORPHAN

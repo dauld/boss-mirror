@@ -801,6 +801,19 @@
               {/each}
             </ul>
           {/if}
+          {#if statusData && statusData.held.length > 0}
+            <!-- Held greens: the brake deliberately on, with the operator's
+                 reason. Neutral colour — not the stranded amber. -->
+            <div class="yard-label">Held greens — kept off the dock on purpose; nothing to rescue</div>
+            <ul class="yard-garage">
+              {#each statusData.held as h (h.branch)}
+                <li class="yard-garage-row">
+                  <span class="yard-held-branch">{h.branch}</span>
+                  <span class="yard-stamp" title={`gated ${h.since} — held, not parked`}>held — {h.reason}</span>
+                </li>
+              {/each}
+            </ul>
+          {/if}
         {:else if sel.kind === 'arrivals'}
           <h2 class="yard-panel-h">Entity · arrivals</h2>
           <div class="yard-entity-title">{floor.machines.arrivals.label}</div>
@@ -1247,6 +1260,7 @@
   }
   .yard-link { background: transparent; border: 0; padding: 0; font: inherit; color: var(--signal, #5fd4a8); cursor: pointer; text-align: left; }
   .yard-stranded-branch { color: var(--warn, #d9a441); font-weight: 600; overflow-wrap: anywhere; }
+  .yard-held-branch { color: var(--static, #7a838c); font-weight: 600; overflow-wrap: anywhere; }
 
   .yard-section {
     font-family: var(--font-mono, ui-monospace, monospace);

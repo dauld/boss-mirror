@@ -88,6 +88,12 @@ export type RecentTrain = Readonly<{
 
 export type StrandedGreen = Readonly<{ branch: string }>;
 
+/** A green gate-run an operator HELD off the dock on purpose — the
+ *  other half of the stranded predicate (the Rust `HeldGreen`). It
+ *  carries its reason so the page can say "held — <why>" in a neutral
+ *  colour: a brake deliberately on is not an alarm. */
+export type HeldGreen = Readonly<{ branch: string; reason: string; since: string }>;
+
 /** One gate currently being assessed — an open gate-run with no verdict
  *  yet. The Approach draws these into its parallel gate SLOTS. */
 export type ActiveGate = Readonly<{
@@ -148,6 +154,8 @@ export type YardStatus = Readonly<{
   boarding: BoardingPredicate;
   recent: readonly RecentTrain[];
   stranded: readonly StrandedGreen[];
+  /** Empty on a server that predates the reading. */
+  held: readonly HeldGreen[];
   gates: Gates;
   garage: readonly GaragedCar[];
   policy: PolicyThresholds;
@@ -311,6 +319,15 @@ function parseConductor(raw: unknown): ConductorHealth | null {
   };
 }
 
+function parseHeldGreen(raw: unknown): HeldGreen {
+  const o = asObjectOrEmpty(raw);
+  return {
+    branch: String(o.branch ?? ''),
+    reason: typeof o.reason === 'string' && o.reason !== '' ? o.reason : 'no reason recorded',
+    since: String(o.since ?? ''),
+  };
+}
+
 export function parseYardStatus(raw: unknown): YardStatus {
   const o = asObject(raw, 'yard status');
   return {
@@ -321,6 +338,7 @@ export function parseYardStatus(raw: unknown): YardStatus {
     stranded: Array.isArray(o.stranded)
       ? o.stranded.map((s) => ({ branch: String(asObjectOrEmpty(s).branch ?? '') }))
       : [],
+    held: Array.isArray(o.held) ? o.held.map(parseHeldGreen) : [],
     gates: parseGates(o.gates),
     garage: Array.isArray(o.garage) ? o.garage.map(parseGaragedCar) : [],
     policy: parsePolicy(o.policy),

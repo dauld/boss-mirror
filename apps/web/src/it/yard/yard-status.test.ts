@@ -50,6 +50,13 @@ describe('parseYardStatus', () => {
       },
       recent: [{ id: 'r1', title: 'train #199', outcome: 'arrived', journey_seconds: 1800 }],
       stranded: [{ branch: 'feat/stranded' }],
+      held: [
+        {
+          branch: 'fix/the-pod-installs-claude-with-a-retry',
+          reason: 'rolls the dev pod — lands at a David-timed restart',
+          since: '2026-09-08T18:00:00Z',
+        },
+      ],
       gates: {
         capacity: 4,
         active: [{ branch: 'feat/gating', packet_id: 'p1', since: '2026-09-03' }],
@@ -71,6 +78,13 @@ describe('parseYardStatus', () => {
     expect(s.dock).toHaveLength(1);
     expect(s.recent[0]!.outcome).toBe('arrived');
     expect(s.stranded[0]!.branch).toBe('feat/stranded');
+    expect(s.held).toEqual([
+      {
+        branch: 'fix/the-pod-installs-claude-with-a-retry',
+        reason: 'rolls the dev pod — lands at a David-timed restart',
+        since: '2026-09-08T18:00:00Z',
+      },
+    ]);
     expect(s.gates.capacity).toBe(4);
     expect(s.gates.active[0]!.branch).toBe('feat/gating');
     expect(s.garage[0]!.failed_check).toBe('test');
@@ -83,6 +97,20 @@ describe('parseYardStatus', () => {
     expect(s.gates.capacity).toBe(0);
     expect(s.gates.active).toEqual([]);
     expect(s.garage).toEqual([]);
+    expect(s.held).toEqual([]);
+  });
+
+  // HELD is the other half of stranded (69daaba2): a green the operator
+  // gated and deliberately kept off the dock must not read as a green
+  // someone forgot. The list is separate from `stranded`, and a hold
+  // recorded without a reason still says so rather than reading blank.
+  test('a held green is its own list, never a stranded one, and a blank reason is named as such', () => {
+    const s = parseYardStatus({
+      stranded: [],
+      held: [{ branch: 'fix/held', reason: '', since: '2026-09-08' }],
+    });
+    expect(s.stranded).toEqual([]);
+    expect(s.held).toEqual([{ branch: 'fix/held', reason: 'no reason recorded', since: '2026-09-08' }]);
   });
 
   test('a garaged car with no named check keeps failed_check null', () => {

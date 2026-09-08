@@ -755,10 +755,44 @@ pub struct StrandedGreen {
     pub branch: String,
 }
 
-/// A gate-run is stranded when: it is not marked `superseded`, it is not
-/// marked `hold`, one of its steps recorded `verdict == "green"`, its
-/// branch is known, and no car claims that branch.
-fn gate_run_is_stranded(gate_run: &Job, steps: &[Step], car_branches: &[String]) -> Option<String> {
+/// A green gate-run no car claims: gated green, never parked. Held or
+/// stranded is decided by ONE predicate — whether the gate-run carries
+/// a `hold` reason — so the two lists cannot overlap or leave a gap
+/// between them. A `hold` written as `true` (no reason) is still a
+/// hold; the reason then reads "no reason recorded", the same words the
+/// web approach lens uses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldGreen {
+    pub branch: String,
+    /// Why the operator gated without parking — the `hold` marker text.
+    pub reason: String,
+    /// When the gate-run opened, as [`opened_since`] reads it.
+    pub since: String,
+}
+
+/// The hold marker on a gate-run, read with the same shape as
+/// `superseded`: `null`, `false` and `""` are no hold; `true` is a
+/// hold with no reason; a string is the reason.
+fn hold_reason(gate_run: &Job) -> Option<String> {
+    match gate_run.metadata.get("hold") {
+        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+        Some(Value::Bool(true)) => Some("no reason recorded".to_string()),
+        _ => None,
+    }
+}
+
+/// A green gate-run that never became a car — the one classification
+/// behind both `stranded` and `held`. `None` when: marked
+/// `superseded` (its green is dead); marked `rerailed_to` (its car now
+/// rides the re-railed branch — `boss rerail --finish` stamps this, and
+/// without it the original branch read as stranded forever, 69daaba2);
+/// no step recorded `verdict == "green"`; no branch; or a car claims
+/// the branch. Otherwise the branch and its hold reason, if any.
+fn unparked_green(
+    gate_run: &Job,
+    steps: &[Step],
+    car_branches: &[String],
+) -> Option<(String, Option<String>)> {
     if gate_run
         .metadata
         .get("superseded")
@@ -766,16 +800,7 @@ fn gate_run_is_stranded(gate_run: &Job, steps: &[Step], car_branches: &[String])
     {
         return None;
     }
-    // A gate-run an operator has marked `hold` is not stranded either —
-    // its green is deliberately waiting: gated on purpose without a park
-    // (a car that must land at a timed restart, or behind another car).
-    // The marker is the reason string, read with the same shape as
-    // `superseded`.
-    if gate_run
-        .metadata
-        .get("hold")
-        .is_some_and(|v| !v.is_null() && v.as_bool() != Some(false))
-    {
+    if meta_str(&gate_run.metadata, "rerailed_to").is_some_and(|b| !b.trim().is_empty()) {
         return None;
     }
     let green = steps
@@ -788,7 +813,18 @@ fn gate_run_is_stranded(gate_run: &Job, steps: &[Step], car_branches: &[String])
     if branch.is_empty() || car_branches.iter().any(|b| b == branch) {
         return None;
     }
-    Some(branch.to_string())
+    Some((branch.to_string(), hold_reason(gate_run)))
+}
+
+/// A gate-run is stranded when it is an unparked green WITHOUT a hold:
+/// gated on purpose but forgotten. A held green is deliberately
+/// waiting (a car that must land at a timed restart, or behind another
+/// car) and lists under [`held_greens`] instead.
+fn gate_run_is_stranded(gate_run: &Job, steps: &[Step], car_branches: &[String]) -> Option<String> {
+    match unparked_green(gate_run, steps, car_branches) {
+        Some((branch, None)) => Some(branch),
+        _ => None,
+    }
 }
 
 /// Every stranded green among `(gate_run, steps)` pairs, de-duped and
@@ -809,6 +845,27 @@ pub fn stranded_greens(
     out.into_iter()
         .map(|branch| StrandedGreen { branch })
         .collect()
+}
+
+/// Every HELD green among `(gate_run, steps)` pairs — unparked greens
+/// carrying a `hold` reason — de-duped by branch (first seen wins) and
+/// sorted. Rendered in its own list, in a neutral colour: a brake
+/// deliberately on is not an alarm.
+pub fn held_greens(gate_runs: &[(Job, Vec<Step>)], car_branches: &[String]) -> Vec<HeldGreen> {
+    let mut out: Vec<HeldGreen> = Vec::new();
+    for (g, steps) in gate_runs {
+        if let Some((branch, Some(reason))) = unparked_green(g, steps, car_branches)
+            && !out.iter().any(|h| h.branch == branch)
+        {
+            out.push(HeldGreen {
+                branch,
+                reason,
+                since: opened_since(g),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.branch.cmp(&b.branch));
+    out
 }
 
 /// The verdict a gate-run recorded, read off any of its steps'
@@ -1128,6 +1185,12 @@ pub struct YardStatus {
     pub recent: Vec<RecentTrain>,
     /// Green gate-runs no car claims — cheap stranded signal.
     pub stranded: Vec<StrandedGreen>,
+    /// Green gate-runs an operator HELD off the dock on purpose, with
+    /// the reason — the other half of the stranded predicate, so a
+    /// deliberate hold never reads as a forgotten green. Absent on an
+    /// older payload → empty.
+    #[serde(default)]
+    pub held: Vec<HeldGreen>,
     /// The parallel gate slots: capacity (from the policy) + the cars
     /// occupying them right now.
     pub gates: Gates,
@@ -1219,6 +1282,7 @@ pub fn build_status(
         boarding,
         recent,
         stranded: stranded_greens(gate_runs, car_branches),
+        held: held_greens(gate_runs, car_branches),
         gates: gates(gate_runs, capacity, now),
         garage: garage(gate_runs, settled_car_branches),
         policy: policy_thresholds(policy),
@@ -2309,6 +2373,73 @@ mod tests {
             vec![StrandedGreen {
                 branch: "feat/free".into()
             }]
+        );
+    }
+
+    /// `boss rerail --finish` repoints a car at `<branch>-rerail` and
+    /// stamps the ORIGINAL branch's gate-run `rerailed_to`. That green
+    /// is spent — its car rides another branch — so it is not stranded
+    /// (69daaba2: it read as stranded forever, even after the branch was
+    /// deleted on the forge). The `rerailed_from` stamp on the new
+    /// branch's gate-run is informational and changes nothing here.
+    #[test]
+    fn a_rerailed_green_is_not_stranded() {
+        let old = gate_run("fix/x", json!({ "rerailed_to": "fix/x-rerail" }));
+        let new = gate_run("fix/x-rerail", json!({ "rerailed_from": "fix/x" }));
+        let out = stranded_greens(&[(old, vec![green_step()]), (new, vec![green_step()])], &[]);
+        assert_eq!(
+            out,
+            vec![StrandedGreen {
+                branch: "fix/x-rerail".into()
+            }]
+        );
+        // An empty or null stamp is no stamp.
+        for v in [json!(""), Value::Null] {
+            let g = gate_run("fix/y", json!({ "rerailed_to": v }));
+            assert_eq!(stranded_greens(&[(g, vec![green_step()])], &[]).len(), 1);
+        }
+    }
+
+    /// The held list is the other half of the same predicate: a green
+    /// no car claims, with a `hold` reason. It carries the reason and
+    /// when the gate opened, so the surface can say "held — <why>" in
+    /// its own colour instead of amber. Superseded, rerailed, red and
+    /// car-claimed runs are not held any more than they are stranded.
+    #[test]
+    fn a_held_green_lists_as_held_with_its_reason_and_since() {
+        let mut held = gate_run("feat/held", json!({ "hold": "lands at the next restart" }));
+        held.metadata["opened_at"] = json!("2026-09-08T18:00:00Z");
+        let bare = gate_run("feat/bare", json!({ "hold": true }));
+        let claimed = gate_run("feat/claimed", json!({ "hold": "x" }));
+        let free = gate_run("feat/free", json!({}));
+        let rerailed = gate_run(
+            "feat/old",
+            json!({ "hold": "x", "rerailed_to": "feat/old-rerail" }),
+        );
+        let out = held_greens(
+            &[
+                (free, vec![green_step()]),
+                (held, vec![green_step()]),
+                (bare, vec![green_step()]),
+                (claimed, vec![green_step()]),
+                (rerailed, vec![green_step()]),
+            ],
+            &["feat/claimed".into()],
+        );
+        assert_eq!(
+            out,
+            vec![
+                HeldGreen {
+                    branch: "feat/bare".into(),
+                    reason: "no reason recorded".into(),
+                    since: "2026-09-03".into(),
+                },
+                HeldGreen {
+                    branch: "feat/held".into(),
+                    reason: "lands at the next restart".into(),
+                    since: "2026-09-08T18:00:00Z".into(),
+                },
+            ]
         );
     }
 

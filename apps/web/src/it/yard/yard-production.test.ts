@@ -30,6 +30,7 @@ const statusOf = (over: Partial<YardStatus> = {}): YardStatus => ({
   boarding: { dock_threshold: 1, cooldown_minutes: 45, at_times: [], dock_depth: 0, threshold_met: false, summary: '', held_because: null, cooldown_remaining_minutes: null, last_board_at: null, next_board: null },
   recent: [],
   stranded: [],
+  held: [],
   gates: { capacity: 3, active: [] },
   garage: [],
   policy: { stall_hours: 2, max_red_trains: 2 },

@@ -123,6 +123,36 @@ async fn repoint(
     Ok(())
 }
 
+/// The stamps that record a rerail on the gate-run packets, so the
+/// yard's stranded read (and `boss orient`'s) stop counting the
+/// original branch's green as a forgotten one (69daaba2: it read as
+/// stranded forever, even after the branch was deleted on the forge).
+/// Every gate-run naming `old_branch` gets `rerailed_to: <new>`; every
+/// gate-run naming `new_branch` gets `rerailed_from: <old>`. Pure —
+/// `(packet id, PATCH body)` pairs the caller merges via the metadata
+/// door. A packet with no id cannot be stamped and is skipped.
+pub(crate) fn rerail_stamps(
+    gate_runs: &[Value],
+    old_branch: &str,
+    new_branch: &str,
+) -> Vec<(String, Value)> {
+    gate_runs
+        .iter()
+        .filter_map(|g| {
+            let id = g.get("id").and_then(Value::as_str)?;
+            let branch = g.pointer("/metadata/branch").and_then(Value::as_str)?;
+            let patch = if branch == old_branch {
+                json!({ "rerailed_to": new_branch })
+            } else if branch == new_branch {
+                json!({ "rerailed_from": old_branch })
+            } else {
+                return None;
+            };
+            Some((id.to_string(), patch))
+        })
+        .collect()
+}
+
 /// The finishing half, standalone: the new branch exists and has a
 /// GREEN gate; transcribe its receipt and repoint the car. Split out
 /// so a conflict-interrupted rerail (human resolves, pushes, gates)
@@ -152,6 +182,25 @@ async fn finish(
     // the by-hand transcription kept getting wrong, in one call.
     let receipt = park::receipt_for(&gate_runs, new_branch, &head)?;
     repoint(http, car_id, new_branch, &receipt, old_branch).await?;
+    // Record the rerail on the gate-runs themselves, so the original
+    // branch's green stops reading as stranded. Best effort, after the
+    // repoint: the car is already correct, and a missed stamp costs one
+    // false amber row, not a car.
+    for (packet, patch) in rerail_stamps(&gate_runs, old_branch, new_branch) {
+        if let Err(e) = gate::api(
+            http,
+            reqwest::Method::PATCH,
+            &format!("/api/jobs/{packet}/metadata"),
+            Some(patch),
+        )
+        .await
+        {
+            eprintln!(
+                "boss rerail: could not stamp gate-run {}: {e:#}",
+                &packet[..8.min(packet.len())]
+            );
+        }
+    }
     println!(
         "boss rerail: {} repointed {old_branch} -> {new_branch} — receipt copied, \
          skip cleared; the next boarding takes it",
@@ -242,6 +291,7 @@ pub async fn run(given: &str, finish_only: bool, dry: bool) -> Result<()> {
         false,
         gate::ParkIntent::default(),
         None,
+        None,
     )
     .await?;
 
@@ -251,6 +301,35 @@ pub async fn run(given: &str, finish_only: bool, dry: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rerail stamps: the old branch's gate-runs (every one — a
+    /// branch gated twice has two) get `rerailed_to`, the new branch's
+    /// get `rerailed_from`, other branches are untouched, and a packet
+    /// without an id is skipped rather than PATCHed at an empty id.
+    #[test]
+    fn rerail_stamps_the_old_and_new_gate_runs_and_nothing_else() {
+        let gate_runs = vec![
+            json!({ "id": "old-1", "metadata": { "branch": "fix/x" } }),
+            json!({ "id": "old-2", "metadata": { "branch": "fix/x" } }),
+            json!({ "id": "new-1", "metadata": { "branch": "fix/x-rerail" } }),
+            json!({ "id": "other", "metadata": { "branch": "feat/other" } }),
+            json!({ "metadata": { "branch": "fix/x" } }),
+        ];
+        assert_eq!(
+            rerail_stamps(&gate_runs, "fix/x", "fix/x-rerail"),
+            vec![
+                (
+                    "old-1".to_string(),
+                    json!({ "rerailed_to": "fix/x-rerail" })
+                ),
+                (
+                    "old-2".to_string(),
+                    json!({ "rerailed_to": "fix/x-rerail" })
+                ),
+                ("new-1".to_string(), json!({ "rerailed_from": "fix/x" })),
+            ]
+        );
+    }
 
     /// A LIMIT IS NOT A FILTER (memory: a-limit-is-not-a-filter). A
     /// conflict-skipped car sits at the tail of `opened_on DESC` once
