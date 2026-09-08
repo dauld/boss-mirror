@@ -529,7 +529,7 @@ describe('journeyText', () => {
 });
 
 describe('gateSlots', () => {
-  const gate = (branch: string) => ({ branch, packet_id: `p-${branch}`, since: '2026-09-03' });
+  const gate = (branch: string) => ({ branch, packet_id: `p-${branch}`, since: '2026-09-03', stale: false });
 
   test('fills the first slots and leaves the rest empty', () => {
     const slots = gateSlots({ capacity: 3, active: [gate('feat/a')] });
@@ -555,5 +555,17 @@ describe('gateSlots', () => {
 
   test('zero capacity with no gates is no slots', () => {
     expect(gateSlots({ capacity: 0, active: [] })).toEqual([]);
+  });
+});
+
+describe('an active gate carries the server\'s stale flag', () => {
+  test('stale is read as sent; absent reads false, never a fabricated alarm', () => {
+    const s = parseYardStatus({
+      gates: { capacity: 3, active: [
+        { branch: 'feat/a', packet_id: 'p1', since: '2026-09-07', stale: true },
+        { branch: 'feat/b', packet_id: 'p2', since: '2026-09-07' },
+      ] },
+    });
+    expect(s.gates.active.map(g => g.stale)).toEqual([true, false]);
   });
 });

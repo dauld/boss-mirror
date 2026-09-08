@@ -726,7 +726,14 @@ impl JobsRepository for PgJobs {
               -- packets are simulated, so a post-fetch filter returns
               -- a nearly empty page and a wrong total.
               AND ($14::bool IS NULL OR simulated = $14)
-            ORDER BY opened_on DESC
+              -- opened_on is a DATE: a busy day is one big tie, and a
+              -- LIMIT over an arbitrary order returns an arbitrary
+              -- subset (2026-09-07 held 398 closed pr-trains; the
+              -- yard's window of 60 showed the morning and dropped
+              -- the evening). Admission instant, then id, makes the
+              -- page deterministic. The in-memory adapter sorts the
+              -- same way — pinned by tests on both sides.
+            ORDER BY opened_on DESC, created_at DESC, id
             LIMIT $5 OFFSET $6
         "#;
 
@@ -1209,7 +1216,10 @@ impl JobsRepository for PgJobs {
         // One indexed JOIN: open Jobs × their workable steps, filtered
         // to (assigned-to-me) OR (unassigned with a role I hold). The
         // `authority_role` lives in step metadata JSONB. Ordered by
-        // (opened_on, sort_order) for a stable executor queue.
+        // (opened_on, created_at, id, sort_order) for a stable
+        // executor queue: opened_on is a DATE, so without the
+        // admission-instant tiebreak the LIMIT cut a busy day at an
+        // arbitrary point (same defect as list_jobs, same fix).
         let rows = sqlx::query_as::<_, AssignmentRowSql>(
             "SELECT s.id, s.job_id, s.kind, s.title, s.spec_slug, s.assignee_id, s.status, \
                     s.sort_order, s.blocked_by, s.sign_offs_required, s.assurance_required, s.sign_offs, \
@@ -1227,7 +1237,7 @@ impl JobsRepository for PgJobs {
                   OR ( (s.metadata ->> 'authority_role') = ANY($2) \
                        AND (s.assignee_id IS NULL OR s.status = 'active') ) \
                ) \
-             ORDER BY j.opened_on, s.sort_order \
+             ORDER BY j.opened_on, j.created_at, j.id, s.sort_order \
              LIMIT $3",
         )
         .bind(assignee_id)
@@ -1273,7 +1283,7 @@ impl JobsRepository for PgJobs {
              WHERE j.status = 'open' \
                AND s.status IN ('ready', 'active') \
                AND s.assignee_id IS NOT NULL AND s.assignee_id <> '' \
-             ORDER BY j.opened_on, s.sort_order \
+             ORDER BY j.opened_on, j.created_at, j.id, s.sort_order \
              LIMIT $1",
         )
         .bind(limit)

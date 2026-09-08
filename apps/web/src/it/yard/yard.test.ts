@@ -172,7 +172,7 @@ describe('the dock from the station envelope', () => {
     expect(y.dock.map(c => c.id)).toEqual(['s1', 's2']);
     expect(y.dock[0]).toEqual({
       id: 's1', kind: 'ship-a-change', branch: 'feat/s1', title: 'car s1',
-      tags: ['hotfix'], sim: true, skipReason: 'CI red',
+      tags: ['hotfix'], sim: true, skipReason: 'CI red', head: null,
     });
     expect(y.dock[1]?.sim).toBe(false);
     expect(y.dock[1]?.skipReason).toBeNull();
@@ -804,6 +804,8 @@ describe('trainEta', () => {
       // 1800 - 600 elapsed = 1200 left on the leg, + 600 to deploy.
       atMs: now + 1_800_000,
       basis: 'median of last 4 arrivals',
+      // 600 of the 1800 s leg is behind it.
+      progress: 600 / 1800,
     });
   });
 
@@ -820,6 +822,7 @@ describe('trainEta', () => {
       phase: 'deploying',
       atMs: now + 300_000,
       basis: 'median of last 4 arrivals',
+      progress: 0.5,
     });
     // Overdue never runs backwards: the estimate is "any moment now".
     const late = train({
@@ -830,6 +833,8 @@ describe('trainEta', () => {
       phase: 'deploying',
       atMs: now,
       basis: 'median of last 4 arrivals',
+      // Overdue is clamped the same way: the leg is 100% behind it.
+      progress: 1,
     });
   });
 
@@ -884,6 +889,7 @@ describe('the yard wires ETAs onto trains in flight', () => {
       phase: 'merging',
       atMs: now + 1_800_000,
       basis: 'median of last 2 arrivals',
+      progress: 600 / 1800,
     });
     // An arrived train is not in flight and gets no estimate.
     expect(y.arrivals[0]?.eta).toEqual({ kind: 'phase', phase: 'arrived' });
@@ -1471,5 +1477,60 @@ describe('TrainRow carries the cancel stamps off the job metadata', () => {
       },
     });
     expect(toTrainRow(j, none, false).cancelRefused).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------
+// The yard floor's inputs (the-yard-is-a-floor-you-can-follow). A wagon
+// keeps its identity across stations only if the page can name the car
+// behind a gating branch, read a head to paint beside the branch, and
+// tell a lost verdict from a red one.
+// ---------------------------------------------------------------------
+
+describe('a car carries its head', () => {
+  test('boarded_head names it, shortened to seven', () => {
+    const j = ship('fix/x', { metadata: { branch: 'fix/x', boarded_head: '9fa9a19d4b7aac0a5a59c5de88b2a817df4b0889' } });
+    expect(assembleYard([], [j]).cars[0]?.head).toBe('9fa9a19');
+  });
+
+  test('before boarding, the gate receipt on the packet names it', () => {
+    const j = ship('fix/x', {
+      steps: [{ spec_slug: 'gate', title: 'Gate', status: 'completed',
+        metadata: { receipt: JSON.stringify({ verdict: 'green', head: 'e5aeec53a545151b99c985704070272c049c37ec' }) } }],
+    });
+    expect(assembleYard([], [j]).cars[0]?.head).toBe('e5aeec5');
+  });
+
+  test('no head on record is null — never a fabricated sha', () => {
+    const j = ship('fix/x', {
+      steps: [{ spec_slug: 'gate', title: 'Gate', status: 'completed', metadata: { receipt: 'not json' } }],
+    });
+    expect(assembleYard([], [j]).cars[0]?.head).toBeNull();
+    expect(assembleYard([], [ship('fix/y')]).cars[0]?.head).toBeNull();
+  });
+});
+
+describe('the yard names every open car', () => {
+  test('cars = every open ship-a-change with a branch, so a gating branch can be matched to its car', () => {
+    const open = ship('fix/a');
+    const closed = ship('fix/b', { status: 'closed' });
+    const branchless = ship('', { id: 'nobranch', metadata: {} });
+    const y = assembleYard([], [open, closed, branchless]);
+    expect(y.cars.map(c => c.id)).toEqual(['car-fix/a']);
+  });
+});
+
+describe('an approach row carries its verdict as recorded', () => {
+  test('a lost run is red on the approach AND says lost, so the floor can send it to the gate exit, not the garage', () => {
+    const rows = approach([gateRun({ status: 'closed', steps: [verdictStep('lost')] })], null, [], NOW);
+    expect(rows.map(r => [r.state, r.verdict])).toEqual([['gated-red', 'lost']]);
+    const red = approach([gateRun({ status: 'closed', steps: [verdictStep('failed')] })], null, [], NOW);
+    expect(red[0]?.verdict).toBe('failed');
+  });
+
+  test('a publish row has no verdict yet', () => {
+    const rows = approach([], publishEnv([{ id: 'p1', kind: 'publish-request', title: 'x', status: 'open',
+      opened_on: '2026-08-31', metadata: { branch: 'fix/p' } }]), [], NOW);
+    expect(rows[0]?.verdict).toBeNull();
   });
 });

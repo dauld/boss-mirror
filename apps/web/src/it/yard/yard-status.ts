@@ -90,6 +90,11 @@ export type ActiveGate = Readonly<{
   branch: string;
   packet_id: string;
   since: string;
+  /** The server's own reading that this run has outlived the runner's
+   *  usual duration — a Job that died without reporting looks exactly
+   *  like a slow one from here, and the bay must say so. Absent on an
+   *  older server → false: no fabricated alarm. */
+  stale: boolean;
 }>;
 
 /** The gate slots the Approach renders: `capacity` (from the delivery
@@ -257,6 +262,7 @@ function parseActiveGate(raw: unknown): ActiveGate {
     branch: String(o.branch ?? ''),
     packet_id: String(o.packet_id ?? ''),
     since: String(o.since ?? ''),
+    stale: o.stale === true,
   };
 }
 

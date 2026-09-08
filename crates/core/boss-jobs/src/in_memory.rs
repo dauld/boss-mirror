@@ -31,6 +31,13 @@ struct State {
     /// instant per step. The lens's labelled lower-bound fallback for
     /// steps that never passed through `Ready`.
     step_touched_at: HashMap<String, DateTime<Utc>>,
+    /// The in-memory mirror of `jobs.created_at`: the admission
+    /// instant, written once in `create_job_at` from the same `now`
+    /// the Pg adapter binds into that column. `list_jobs` breaks
+    /// same-day ties on it — `opened_on` is a DATE, so without a
+    /// tiebreak every windowed read of a busy day returned an
+    /// arbitrary subset.
+    job_created_at: HashMap<String, DateTime<Utc>>,
 }
 
 impl InMemoryJobs {
@@ -165,20 +172,25 @@ impl JobsRepository for InMemoryJobs {
     async fn create_job_at(
         &self,
         job: &Job,
-        _now: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
         // Mirror the Pg replay guard: an existing id is a no-op that
-        // records nothing.
+        // records nothing — and keeps its original admission instant.
         let inserted = {
             let mut state = self.inner.lock().expect("poisoned");
-            match state.jobs.entry(job_key(&job.id)) {
+            let key = job_key(&job.id);
+            let inserted = match state.jobs.entry(key.clone()) {
                 std::collections::hash_map::Entry::Occupied(_) => false,
                 std::collections::hash_map::Entry::Vacant(v) => {
                     v.insert(job.clone());
                     true
                 }
+            };
+            if inserted {
+                state.job_created_at.insert(key, now);
             }
+            inserted
         };
         if inserted {
             self.record_all(events);
@@ -347,7 +359,22 @@ impl JobsRepository for InMemoryJobs {
             .values()
             .filter(|j| matches_filter(j, filter))
             .collect();
-        jobs.sort_by_key(|j| std::cmp::Reverse(j.opened_on));
+        // Newest first, deterministically. `opened_on` is a DATE, so a
+        // busy day is one big tie; break it on the admission instant
+        // (desc), then on id (asc) — the same
+        // `ORDER BY opened_on DESC, created_at DESC, id` the Pg
+        // adapter's list_jobs runs, so a windowed read returns the
+        // same page from either store. `Uuid`'s Ord is its byte order,
+        // which is how Postgres orders a uuid column.
+        jobs.sort_by(|a, b| {
+            b.opened_on
+                .cmp(&a.opened_on)
+                .then_with(|| {
+                    let admitted = |j: &Job| state.job_created_at.get(&job_key(&j.id)).copied();
+                    admitted(b).cmp(&admitted(a))
+                })
+                .then_with(|| a.id.inner().as_uuid().cmp(b.id.inner().as_uuid()))
+        });
         let total = jobs.len() as i64;
         let page = jobs
             .into_iter()
@@ -873,7 +900,7 @@ pub fn compute_job_status(steps: &[Step]) -> JobStatus {
 #[cfg(test)]
 mod tests {
     use boss_core::job::{Priority, Subject};
-    use chrono::NaiveDate;
+    use chrono::{NaiveDate, TimeZone};
 
     use super::*;
 
@@ -988,6 +1015,91 @@ mod tests {
         let (jobs, total) = repo.list_jobs(&filter, 100, 0).await.unwrap();
         assert_eq!(total, 1);
         assert_eq!(jobs[0].kind, "refurb");
+    }
+
+    // `opened_on` is a DATE. On 2026-09-07 one day held 398 closed
+    // pr-trains, and every windowed read of it — the yard's recent
+    // trains, its stranded-green cross-ref, the page's arrival list —
+    // returned an arbitrary subset, because a DATE alone leaves a busy
+    // day one big tie. The tiebreak is the admission instant, then id,
+    // pinned here against the Pg adapter's
+    // `ORDER BY opened_on DESC, created_at DESC, id`; the Pg side of
+    // the pin is tests/a_day_of_jobs_lists_newest_first_pg.rs.
+
+    fn at(h: u32, m: u32, s: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 4, 16, h, m, s).unwrap()
+    }
+
+    async fn admit(repo: &InMemoryJobs, title: &str, now: DateTime<Utc>) {
+        let mut job = make_job("pr-train");
+        job.title = title.into();
+        repo.create_job_at(&job, now, &[]).await.unwrap();
+    }
+
+    fn titles(page: &[Job]) -> Vec<&str> {
+        page.iter().map(|j| j.title.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn same_day_jobs_list_the_later_admission_first() {
+        let repo = InMemoryJobs::new();
+        admit(&repo, "07:39", at(7, 39, 0)).await;
+        admit(&repo, "20:07", at(20, 7, 0)).await;
+
+        let (page, total) = repo.list_jobs(&JobFilter::default(), 10, 0).await.unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(titles(&page), ["20:07", "07:39"]);
+    }
+
+    #[tokio::test]
+    async fn a_day_of_jobs_lists_in_one_order_every_time() {
+        let repo = InMemoryJobs::new();
+        // Admitted out of clock order, so insertion order is not what
+        // the assertion accidentally passes on.
+        admit(&repo, "20:07", at(20, 7, 0)).await;
+        admit(&repo, "07:39", at(7, 39, 0)).await;
+        admit(&repo, "08:15", at(8, 15, 0)).await;
+
+        for _ in 0..10 {
+            let (page, total) = repo.list_jobs(&JobFilter::default(), 10, 0).await.unwrap();
+            assert_eq!(total, 3);
+            assert_eq!(titles(&page), ["20:07", "08:15", "07:39"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_window_of_one_on_a_same_day_set_is_the_newest() {
+        let repo = InMemoryJobs::new();
+        admit(&repo, "08:15", at(8, 15, 0)).await;
+        admit(&repo, "20:07", at(20, 7, 0)).await;
+        admit(&repo, "07:39", at(7, 39, 0)).await;
+
+        let (page, total) = repo.list_jobs(&JobFilter::default(), 1, 0).await.unwrap();
+        assert_eq!(total, 3, "the window narrows the page, not the total");
+        assert_eq!(titles(&page), ["20:07"]);
+
+        // And the next window continues where the first left off.
+        let (page, _) = repo.list_jobs(&JobFilter::default(), 1, 1).await.unwrap();
+        assert_eq!(titles(&page), ["08:15"]);
+    }
+
+    #[tokio::test]
+    async fn same_instant_ties_break_on_id_like_the_pg_order() {
+        let repo = InMemoryJobs::new();
+        let same = at(12, 0, 0);
+        for (title, id) in [
+            ("03", "00000000-0000-0000-0000-000000000003"),
+            ("01", "00000000-0000-0000-0000-000000000001"),
+            ("02", "00000000-0000-0000-0000-000000000002"),
+        ] {
+            let mut job = make_job("pr-train");
+            job.id = JobId::from_uuid(uuid::Uuid::parse_str(id).unwrap());
+            job.title = title.into();
+            repo.create_job_at(&job, same, &[]).await.unwrap();
+        }
+
+        let (page, _) = repo.list_jobs(&JobFilter::default(), 10, 0).await.unwrap();
+        assert_eq!(titles(&page), ["01", "02", "03"]);
     }
 
     #[tokio::test]

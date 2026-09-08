@@ -53,6 +53,10 @@ export type CarRow = Readonly<{
   tags: readonly string[];
   sim: boolean;
   skipReason?: string | null;
+  /** The head the packet names — `boarded_head` once boarded, else the
+   *  head the gate receipt recorded — shortened to seven, or null when
+   *  no record carries one. Painted beside the branch on the floor. */
+  head: string | null;
 }>;
 
 // The protocol palette + kind → hue hash + the sim predicate moved to
@@ -210,6 +214,11 @@ export type YardState = Readonly<{
    *  none of the yard's other three partitions, which is why seven of
    *  them were invisible on 2026-08-28. */
   awaitingProof: readonly CarRow[];
+  /** Every OPEN car that names a branch, wherever it is. The floor keys
+   *  a wagon by its car id so the same token slides from the gate bay
+   *  to the dock to the train; a gating branch is matched to its car
+   *  here, and only a branch with no car falls back to the gate packet. */
+  cars: readonly CarRow[];
   /** The car lifecycle upstream of the dock (f930cda2): publish-requests
    *  waiting, gates in flight, fresh verdicts whose branch no car has
    *  claimed. Empty when the approach is clear — or when the cluster
@@ -236,6 +245,12 @@ export type ApproachRow = Readonly<{
   /** The operator's reason for the hold — non-null exactly when `state`
    *  is `held`; a stock phrase when the marker carried no reason. */
   hold: string | null;
+  /** The verdict as the gate recorded it (`green` / `failed` / `lost`),
+   *  null on a publish row. `lost` folds into `gated-red` for the
+   *  approach (no evidence must not read as fine) but is a different
+   *  place on the floor: the environment died, the change was never
+   *  judged — the gate exit, not the garage. */
+  verdict: string | null;
 }>;
 
 /** A closed gate older than this is archaeology, not approach. An OPEN
@@ -291,6 +306,7 @@ export function approach(
         opened_on: j.opened_on,
         note: md.requested_by ?? null,
         hold: null,
+        verdict: null,
       };
     });
 
@@ -352,6 +368,7 @@ export function approach(
     if (!branch || seen.has(branch)) continue;
     if (g.status !== 'open' && liveBranches.has(branch)) continue;
     const md = (g.metadata ?? {}) as { sha?: string };
+    const verdict = verdictOf(g);
     const row = {
       id: g.id,
       branch,
@@ -359,6 +376,7 @@ export function approach(
       opened_on: g.opened_on,
       note: null,
       hold: null,
+      verdict: verdict ?? null,
     };
     if (g.status === 'open') {
       // A gate mid-run is the GATES view's row now (the server-computed
@@ -372,7 +390,6 @@ export function approach(
     // order is not insertion order, so the red may sort above the very
     // green that answered it — the green (or nothing) must get the row.
     if (annotatedSuperseded(g)) continue;
-    const verdict = verdictOf(g);
     if (
       (verdict === 'failed' || verdict === 'lost') &&
       (latestGreenDay.get(branch) ?? '') >= g.opened_on
@@ -448,7 +465,7 @@ export function trainOutcome(j: JobLite): TrainOutcome {
 }
 
 /** The conductor's RFC3339 stamp on a step, column or metadata. */
-function stampAt(s: StepLite | null): string | null {
+export function stampAt(s: StepLite | null): string | null {
   if (!s) return null;
   if (typeof s.completed_at === 'string' && s.completed_at !== '') return s.completed_at;
   const md = (s.metadata as { completed_at?: unknown } | null)?.completed_at;
@@ -665,7 +682,16 @@ export function etaPhase(status: TrainStatus, lamp: Lamp): EtaPhase {
 
 export type Eta =
   | Readonly<{ kind: 'phase'; phase: EtaPhase }>
-  | Readonly<{ kind: 'eta'; phase: EtaPhase; atMs: number; basis: string }>;
+  | Readonly<{
+      kind: 'eta';
+      phase: EtaPhase;
+      atMs: number;
+      basis: string;
+      /** How far along the median leg under way the train is, 0–1 —
+       *  the floor draws the locomotive this far between two signals.
+       *  Clamped: an overdue train sits at the far signal, never past. */
+      progress: number;
+    }>;
 
 export function trainEta(j: JobLite, medians: ArrivalMedians, nowMs: number): Eta {
   const phase = etaPhase(trainStatus(j), ciLamp(j));
@@ -681,8 +707,10 @@ export function trainEta(j: JobLite, medians: ArrivalMedians, nowMs: number): Et
     if (startedAt === null) return phaseOnly;
     const from = Date.parse(startedAt);
     if (Number.isNaN(from)) return phaseOnly;
-    const left = Math.max(legS - (nowMs - from) / 1000, 0) + restS;
-    return { kind: 'eta', phase, atMs: nowMs + Math.round(left * 1000), basis };
+    const elapsed = Math.max((nowMs - from) / 1000, 0);
+    const left = Math.max(legS - elapsed, 0) + restS;
+    const progress = legS > 0 ? Math.min(elapsed / legS, 1) : 1;
+    return { kind: 'eta', phase, atMs: nowMs + Math.round(left * 1000), basis, progress };
   };
 
   // Converging renders an elapsed "converging for …", not an ETA: there
@@ -919,6 +947,7 @@ export function toTrainRow(
       tags: car?.tags ?? [],
       sim: car ? isSim(car) : false,
       skipReason: cmd.skip_reason ?? null,
+      head: car ? headOf(car) : null,
     };
   });
   return {
@@ -943,6 +972,25 @@ export function toTrainRow(
   };
 }
 
+/** The first seven of a full sha, or null for anything that is not one. */
+const shortSha = (v: unknown): string | null =>
+  typeof v === 'string' && /^[0-9a-f]{7,40}$/i.test(v) ? v.slice(0, 7) : null;
+
+/** The head a car names: `boarded_head` once the conductor boarded it,
+ *  else the `head` inside the gate step's receipt (a JSON string the
+ *  runner wrote). No record, no sha — the floor paints a dash. */
+export function headOf(j: JobLite): string | null {
+  const boarded = shortSha((j.metadata as { boarded_head?: unknown } | null)?.boarded_head);
+  if (boarded) return boarded;
+  const receipt = (step(j, 'gate', 'Gate')?.metadata as { receipt?: unknown } | null)?.receipt;
+  if (typeof receipt !== 'string') return null;
+  try {
+    return shortSha((JSON.parse(receipt) as { head?: unknown }).head);
+  } catch {
+    return null;
+  }
+}
+
 // One packet → one card, whoever chose the packet. Both dock paths —
 // the station envelope and the local derivation — map through here,
 // so the card grammar cannot fork between them.
@@ -956,6 +1004,7 @@ function carRow(j: JobLite): CarRow {
     tags: j.tags ?? [],
     sim: isSim(j),
     skipReason: md.skip_reason ?? null,
+    head: headOf(j),
   };
 }
 
@@ -1030,6 +1079,10 @@ export function assembleYard(
     delivery: deliveryStats(report),
     awaitingProof: awaitingProof(ships).map(carRow),
     approach: approach(gateRuns, publishQueue, ships, nowMs),
+    cars: ships
+      .filter(j => j.status === 'open')
+      .map(carRow)
+      .filter(c => c.branch !== ''),
   };
 }
 

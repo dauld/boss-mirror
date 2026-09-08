@@ -27,6 +27,15 @@ describe('the yard page offers cancel only through the rule', () => {
     );
   });
 
+  test('a single selected train is rendered with its partition read off the same split', () => {
+    // The entity panel shows one train at a time; the cancel rule still
+    // needs WHICH side of the departure line it is on, and the only
+    // honest answer is the split the track view renders — not a
+    // partition retyped at the render site.
+    expect(code).toMatch(/\{@render trainBlock\(t, partitionOf\(t\)\)\}/);
+    expect(code).toMatch(/partitionOf = \(t: TrainRow\): YardPartition =>\s*split\.inYard\.some/);
+  });
+
   test('the button is guarded by canOfferCancel, with the partition and the viewer', () => {
     expect(code).toMatch(/from '\.\/yard'/);
     expect(code).toMatch(/canOfferCancel\(t,\s*partition,\s*viewerPrivileged\)/);
