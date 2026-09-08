@@ -22,6 +22,6 @@ Environment=JOBS_API=http://10.20.0.34:7900
 # (91ddebfb) and drop-in env wins over unit env - the first scheduled
 # firing died 400 registering its packet against a registry that has
 # never heard of this kind. env(1) on the Exec line outranks both.
-ExecStartPre=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-maintenance-wrap.sh maintenance-estate-observe-host "estate host observation"
+ExecStartPre=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-maintenance-wrap.sh maintenance-estate-observe-host "estate host observation"
 ExecStart=/opt/boss/infra/estate/observe-host.sh
 ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-step.sh maintenance-estate-observe-host run

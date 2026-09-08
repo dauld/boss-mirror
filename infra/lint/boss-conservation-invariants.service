@@ -8,9 +8,12 @@ Wants=postgresql.service
 Type=oneshot
 User=boss
 Environment=PGPASSWORD=boss
-ExecStartPre=/opt/boss/infra/boss-maintenance-wrap.sh maintenance-conservation-invariants "Conservation-invariant sweep"
+# Packet pinned to the system of record, best-effort: a bundle-only kind
+# that the local drop-in target has never heard of (400 every hour
+# until 2026-09-08; see boss-ml-inference-batch.service, e109f57e).
+ExecStartPre=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-maintenance-wrap.sh maintenance-conservation-invariants "Conservation-invariant sweep"
 ExecStart=/opt/boss/infra/lint/conservation-invariants.sh
-ExecStopPost=-/opt/boss/infra/boss-step.sh maintenance-conservation-invariants run
+ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-step.sh maintenance-conservation-invariants run
 StandardOutput=journal
 StandardError=journal
 

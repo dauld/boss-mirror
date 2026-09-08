@@ -6,9 +6,21 @@ Requires=boss-ml-api.service
 [Service]
 Type=oneshot
 User=boss
-ExecStartPre=/opt/boss/infra/boss-maintenance-wrap.sh maintenance-ml-inference-batch "ML inference batch"
+# The packet goes to the SYSTEM OF RECORD, pinned inline. deploy-services'
+# jobs-url.conf drop-in points this unit at boss-gcp's local instance,
+# which carries only the three kinds baked into registry.rs — this kind
+# lives in the platform bundle, seeded on the cluster alone — so the
+# wrap got `400 unknown or inactive job kind` every night from
+# 2026-08-17 to 2026-09-08 (backlog e109f57e), and the batch below never
+# ran. env(1) on the Exec line outranks the drop-in (the estate
+# observers' idiom, 91ddebfb). The `-` is the other half: the packet is
+# VISIBILITY, never a precondition — 23 nights of stale predictions
+# were the price of an ExecStartPre that could refuse the run.
+# The ML API itself stays local: it works this host's database
+# (/etc/boss-ml-api.toml, postgres://127.0.0.1/boss).
+ExecStartPre=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-maintenance-wrap.sh maintenance-ml-inference-batch "ML inference batch"
 ExecStart=/opt/boss/infra/ml/run-inference-batch.sh
-ExecStopPost=-/opt/boss/infra/boss-step.sh maintenance-ml-inference-batch run
+ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-step.sh maintenance-ml-inference-batch run
 Environment=BOSS_ML_API_URL=http://127.0.0.1:7070
 StandardOutput=journal
 StandardError=journal

@@ -31,6 +31,8 @@
 #   3. it calls boss-step.sh with the SAME kind (records the verdict)
 #   3b. that call is on ExecStopPost, the one phase that runs on failure
 #   4. that kind is a real Workflow in the platform bundle
+#   7. a boss-gcp unit whose kind only the bundle defines pins the
+#      system of record inline and opens its packet best-effort (`-`)
 #
 # (3) and (4) are the ones worth having. A unit that opens a Job and
 # never completes it leaves an open packet every run — worse than no
@@ -214,6 +216,83 @@ if ! verdict exit-code 1 result=floor-unmet | grep -q 'result=floor-unmet'; then
     echo "timers-leave-a-packet: boss-step.sh overrides a caller's explicit result=" >&2
     problems=$((problems + 1))
 fi
+
+# 7. A CHORE WHOSE KIND ONLY THE BUNDLE DEFINES FILES WHERE THE BUNDLE
+#    IS SEEDED — and its packet never blocks its run.
+#
+# Measured 2026-09-08 on boss-gcp (backlog e109f57e). deploy-services'
+# jobs-url.conf drop-in points every timer at the LOCAL instance
+# (127.0.0.1:7900, "a chore reports to the instance whose data it
+# maintains", 2026-08-19). That instance carries only the three kinds
+# baked into registry.rs — the platform bundle was never seeded there
+# and never will be (the-cluster-is-the-system retires it). So a
+# boss-gcp timer whose kind exists ONLY in the bundle gets
+# `400 unknown or inactive job kind` from its own ExecStartPre, and a
+# hard ExecStartPre turns that into a run that never starts:
+# boss-ml-inference-batch failed 23 nights in a row and the ML
+# predictions went three weeks stale, while boss-conservation-
+# invariants and boss-deploy-confirm (the deploy dead-man) did the
+# same. The estate observers had already met this bug and pinned the
+# system of record INLINE with env(1) on the Exec line, which outranks
+# the drop-in (91ddebfb); this check makes that the rule.
+#
+# WHICH UNITS. Kinds the bundle defines minus the baked-in three,
+# minus kinds a cluster CronJob already opens (a boss-gcp copy of
+# those is the vestige the-cluster-is-the-system retires: pinning it
+# to the SoR would file a second packet of a kind the cluster already
+# runs, and the wrap's reuse-the-open-packet recovery would then
+# "recover" the cluster's. Retirement is their fix, not a pin.)
+#
+# WHAT THEY MUST DO. Name the system of record on BOTH the wrap and
+# the boss-step lines (a packet opened on one instance and closed on
+# another is the split-brain) — the URL infra/deploy.env.example names
+# for boss-gcp, so the tree states it once — and prefix the packet-
+# opening ExecStartPre with `-`: the packet is visibility, never a
+# precondition (CLAUDE.md §Diagnosis, "an arm that needs the patient
+# is not an arm"; cluster-watchdog.service is the precedent).
+sor=$(grep -oE '^BOSS_JOBS_URL=http://[^ ]+' infra/deploy.env.example | head -1 | cut -d= -f2)
+if [ -z "$sor" ]; then
+    echo "timers-leave-a-packet: infra/deploy.env.example names no BOSS_JOBS_URL — check 7 cannot know the system of record" >&2
+    problems=$((problems + 1))
+fi
+baked=$(grep -oE '"maintenance-[a-z-]+"' crates/core/boss-jobs/src/registry.rs | tr -d '"' | sort -u)
+cluster_kinds=$(grep -ohE 'boss-maintenance-wrap\.sh maintenance-[a-z-]+' infra/cluster/manifests/*.yaml 2>/dev/null \
+    | awk '{print $2}' | sort -u)
+gcp_rows=$(sed -n '/^TIMERS=(/,/^)/p' "$DEPLOY" | grep -oE '"[a-z0-9-]+:[^"]+"' | tr -d '"')
+for row in $gcp_rows; do
+    name="${row%%:*}"; sub="${row##*:}"
+    [ "$sub" = "." ] && unit="infra/$name.service" || unit="infra/$sub/$name.service"
+    [ -f "$unit" ] || continue   # check 1 already named it
+    kind=$(grep -oE 'boss-maintenance-wrap\.sh [a-z-]+' "$unit" | awk '{print $2}' | head -1)
+    [ -n "$kind" ] || continue   # check 2 already named it
+    printf '%s\n' "$baked" | grep -qxF -- "$kind" && continue          # local instance knows it
+    printf '%s\n' "$cluster_kinds" | grep -qxF -- "$kind" && continue  # the cluster runs it; this copy is a vestige
+    pre=$(grep -E '^ExecStartPre=' "$unit" | grep 'boss-maintenance-wrap' | head -1)
+    post=$(grep -E '^ExecStopPost=' "$unit" | grep 'boss-step\.sh' | head -1)
+    if ! printf '%s' "$pre" | grep -qF -- "BOSS_JOBS_URL=$sor " \
+        || ! printf '%s' "$post" | grep -qF -- "BOSS_JOBS_URL=$sor "; then
+        echo "timers-leave-a-packet: $name opens '$kind', a kind only the platform bundle defines," >&2
+        echo "    but does not pin the system of record on both its Exec lines. deploy-services'" >&2
+        echo "    drop-in points it at the local instance, which has never heard of that kind:" >&2
+        echo "    every run dies 400 in ExecStartPre. Pin it inline, where env(1) outranks the" >&2
+        echo "    drop-in, on the wrap AND the boss-step call:" >&2
+        echo "      ExecStartPre=-/usr/bin/env BOSS_JOBS_URL=$sor /opt/boss/infra/boss-maintenance-wrap.sh $kind \"<label>\"" >&2
+        echo "      ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=$sor /opt/boss/infra/boss-step.sh $kind run" >&2
+        problems=$((problems + 1)); continue
+    fi
+    if ! printf '%s' "$pre" | grep -q '^ExecStartPre=-'; then
+        echo "timers-leave-a-packet: $name opens its packet from a HARD ExecStartPre. The packet is" >&2
+        echo "    visibility, not a precondition: an API that answers 400 must not stop the" >&2
+        echo "    chore (boss-ml-inference-batch lost 23 nights to exactly that). Prefix it:" >&2
+        echo "      ExecStartPre=-/usr/bin/env BOSS_JOBS_URL=$sor ..." >&2
+        problems=$((problems + 1)); continue
+    fi
+    if printf '%s\n%s' "$pre" "$post" | grep -qE '127\.0\.0\.1|localhost'; then
+        echo "timers-leave-a-packet: $name names a localhost jobs API on an Exec line — that is" >&2
+        echo "    boss-gcp's non-authoritative instance, never the system of record." >&2
+        problems=$((problems + 1))
+    fi
+done
 
 if [ "$problems" -gt 0 ]; then
     echo "" >&2

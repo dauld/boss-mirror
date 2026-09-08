@@ -193,6 +193,39 @@ pub fn parked_car_for<'a>(cars: &'a [Value], branch: &str) -> Option<&'a Value> 
     })
 }
 
+/// A car that already carried its branch to main: closed with
+/// `outcome=merged`, or stamped `merged` by the conductor's landing (the
+/// marker v3 ship-a-change gates its `merged` step on — the dispatcher
+/// closes the Job from it, so a car can be marked before it is closed).
+/// An abandoned or cancelled car is spent, not landed.
+pub fn is_landed(car: &Value) -> bool {
+    let md = car.get("metadata");
+    let closed_merged = car.get("status").and_then(Value::as_str) == Some("closed")
+        && md.and_then(|m| m.get("outcome")).and_then(Value::as_str) == Some("merged");
+    // The conductor writes the marker as the STRING "true"; a bool is
+    // accepted for the same meaning, and an explicit false is neither.
+    let marked = match md.and_then(|m| m.get("merged")) {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => s == "true",
+        _ => false,
+    };
+    closed_merged || marked
+}
+
+/// The car that already landed `branch`, if one has — the question both
+/// `boss gate` and the auto-park handler ask BEFORE filing. Measured
+/// 2026-09-08 (backlog 610537b2): a re-gate of a landed branch reused a
+/// gate-run that still carried park intent, and on green the handler
+/// filed a twin car for content already on main; it boarded, its train
+/// went red on an empty diff, and train and twin were cleaned up by
+/// hand. One test of "landed" here so the CLI and the dispatcher cannot
+/// disagree about it.
+pub fn landed_car_for<'a>(cars: &'a [Value], branch: &str) -> Option<&'a Value> {
+    cars.iter().find(|c| {
+        c.pointer("/metadata/branch").and_then(Value::as_str) == Some(branch) && is_landed(c)
+    })
+}
+
 /// The metadata patch that supersedes a parked car's gate receipt.
 ///
 /// A completed step is frozen, so a fresh receipt rides the JOB as
@@ -439,5 +472,76 @@ mod regate_tests {
             q.get("delivery_channel").is_none(),
             "no delivery_channel key when the diff could not be classified"
         );
+    }
+}
+
+#[cfg(test)]
+mod landed_tests {
+    use super::*;
+
+    const BRANCH: &str = "fix/boot-never-refuses-over-an-unviable-workflow";
+
+    /// The car that carried the branch on train #259, as the SoR holds it.
+    fn landed() -> Value {
+        json!({
+            "id": "670087f4-0000-0000-0000-000000000000",
+            "kind": "ship-a-change",
+            "status": "closed",
+            "metadata": {
+                "branch": BRANCH, "merged": "true", "merge_ref": "b641f3adcf47",
+                "outcome": "merged", "train": "3a476b50-7a3a-409f-a9bc-59266e44f331",
+                "boarded_head": "a56b4a9"
+            }
+        })
+    }
+
+    /// The twin auto-park filed for the same branch, abandoned by hand.
+    fn abandoned_twin() -> Value {
+        json!({
+            "id": "dfb98d07-0000-0000-0000-000000000000",
+            "kind": "ship-a-change",
+            "status": "closed",
+            "metadata": { "branch": BRANCH, "outcome": "abandoned", "abandoned": "true" }
+        })
+    }
+
+    #[test]
+    fn a_closed_merged_car_is_the_landing() {
+        let cars = vec![abandoned_twin(), landed()];
+        let got = landed_car_for(&cars, BRANCH).expect("the merged car answers");
+        assert_eq!(got["metadata"]["merge_ref"], "b641f3adcf47");
+    }
+
+    #[test]
+    fn an_abandoned_car_is_spent_not_landed() {
+        assert!(landed_car_for(&[abandoned_twin()], BRANCH).is_none());
+    }
+
+    /// The conductor stamps `merged` first and the dispatcher closes
+    /// the Job after — the marker alone is a landing.
+    #[test]
+    fn the_merged_marker_counts_before_the_close() {
+        let mut marked = landed();
+        marked["status"] = json!("open");
+        marked["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove("outcome");
+        assert!(is_landed(&marked));
+        marked["metadata"]["merged"] = json!(true);
+        assert!(is_landed(&marked));
+        marked["metadata"]["merged"] = json!("false");
+        assert!(!is_landed(&marked), "an explicit false is not a landing");
+    }
+
+    #[test]
+    fn a_parked_car_is_not_a_landing_and_another_branch_does_not_answer() {
+        let parked = json!({
+            "id": "p", "status": "open",
+            "metadata": { "branch": BRANCH },
+            "steps": [{"spec_slug": "review", "title": REVIEW, "status": "ready"}]
+        });
+        assert!(landed_car_for(&[parked], BRANCH).is_none());
+        assert!(landed_car_for(&[landed()], "feat/other").is_none());
     }
 }

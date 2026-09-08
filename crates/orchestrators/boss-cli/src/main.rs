@@ -185,6 +185,14 @@ enum Commands {
         /// Auto-park: the backlog item this change answers (optional).
         #[arg(long)]
         park_backlog_item: Option<String>,
+        /// Gate a branch whose content ALREADY landed on main, stating
+        /// why (e.g. to close a dead gate-run packet). Refused by
+        /// default: a landed branch's next step is deletion, and a
+        /// re-gate that inherits stale park intent files a twin car
+        /// that boards an empty diff (610537b2). Never combines with
+        /// --park-*.
+        #[arg(long, value_name = "REASON")]
+        force_regate: Option<String>,
     },
     /// Park a gated branch as a car, carrying its receipt.
     ///
@@ -1062,6 +1070,7 @@ async fn main() -> Result<()> {
             park_test,
             park_verified,
             park_backlog_item,
+            force_regate,
         } => {
             let park = gate::ParkIntent {
                 summary: park_summary,
@@ -1070,7 +1079,17 @@ async fn main() -> Result<()> {
                 verified: park_verified,
                 backlog_item: park_backlog_item,
             };
-            gate::run(&branch, mode, manifest, &namespace, wait, dry_run, park).await
+            gate::run(
+                &branch,
+                mode,
+                manifest,
+                &namespace,
+                wait,
+                dry_run,
+                park,
+                force_regate,
+            )
+            .await
         }
         Commands::Queue { column } => queue::run(&column).await,
         Commands::Packet { action } => match action {

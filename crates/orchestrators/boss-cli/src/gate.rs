@@ -468,6 +468,20 @@ impl ParkIntent {
         put("park_backlog_item", &self.backlog_item);
         Value::Object(m)
     }
+
+    /// The patch that REMOVES park intent from a gate-run: every
+    /// `park_*` key set to null, which the metadata door deletes. Applied
+    /// to a reused packet when its branch has landed, so intent stamped
+    /// before the landing cannot survive it (610537b2).
+    pub fn clear_patch() -> Value {
+        json!({
+            "park_summary": Value::Null,
+            "park_excludes": Value::Null,
+            "park_test": Value::Null,
+            "park_verified": Value::Null,
+            "park_backlog_item": Value::Null,
+        })
+    }
 }
 
 /// Whether a post-creation refusal in `run` must close the gate-run it
@@ -481,6 +495,156 @@ impl ParkIntent {
 /// open with no runner Job (an orphan the overdue alarm later finds).
 pub(crate) fn should_close_on_park_failure(reused: bool, dry: bool) -> bool {
     !reused && !dry
+}
+
+/// What is already known about a branch's landing, gathered BEFORE a
+/// gate-run is filed or reused: the git verdict (`boss merged`'s rules,
+/// called as a library — never re-derived here, see 26b3d203) and the
+/// system of record's landed car, when it has one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Landing {
+    /// Which signal answered, in words a refusal can print.
+    pub how: String,
+    /// `car <id8> merged as <ref> on train <id8>` from the landed car —
+    /// the name the operator needs to find where the change went.
+    pub landed_as: Option<String>,
+}
+
+/// PURE: has THIS head's content already landed on main?
+///
+/// Git answers first — ancestry, patch-id, or content, exactly as
+/// `boss merged` decides. The car is consulted for the name of the
+/// landing, and answers alone only when it boarded this exact head: a
+/// landed car whose boarded head differs is a branch reused after its
+/// landing, and the new commits are gateable. A stale clone that cannot
+/// see main's objects reads Unknown from git and the car fills in.
+pub(crate) fn landing(
+    v: &crate::merged::Verdict,
+    cars: &[Value],
+    branch: &str,
+    sha: &str,
+) -> Option<Landing> {
+    use crate::merged::{How, Verdict};
+    let car = boss_jobs::car::landed_car_for(cars, branch);
+    let md = |c: &Value, k: &str| {
+        c.pointer(&format!("/metadata/{k}"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let boarded_this_head = car.and_then(|c| md(c, "boarded_head")).is_some_and(|h| {
+        !h.is_empty() && !sha.is_empty() && (h.starts_with(sha) || sha.starts_with(&h))
+    });
+    let how = match v {
+        Verdict::Merged(How::Ancestor) => "its head is an ancestor of main",
+        Verdict::Merged(How::PatchesPresent) => "main already carries every patch on it",
+        Verdict::Merged(How::ContentPresent) => {
+            "main already holds its version of every file it changed"
+        }
+        _ if boarded_this_head => "its car boarded this exact head and merged",
+        _ => return None,
+    };
+    let landed_as = car.map(|c| {
+        let id = c.get("id").and_then(Value::as_str).unwrap_or("?");
+        let train = md(c, "train").unwrap_or_else(|| "?".into());
+        format!(
+            "car {} merged as {} on train {}",
+            &id[..8.min(id.len())],
+            md(c, "merge_ref").unwrap_or_else(|| "?".into()),
+            &train[..8.min(train.len())]
+        )
+    });
+    Some(Landing {
+        how: how.to_string(),
+        landed_as,
+    })
+}
+
+/// What `boss gate` does about a branch that already landed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LandedGuard {
+    /// Nothing landed (or the guard was forced on an unlanded branch,
+    /// which is harmless): gate as usual.
+    Proceed,
+    /// Landed, and the operator said why to gate it anyway — the note
+    /// to print. Park intent is never carried through this door.
+    Forced(String),
+    /// Landed: the message, and no gate.
+    Refuse(String),
+}
+
+/// PURE: never re-gate a branch whose content already landed — unless
+/// told to, with a reason, and never with park intent.
+///
+/// The measured failure (610537b2): re-gating a landed branch reused its
+/// old gate-run, which still carried park intent, and the green filed a
+/// twin car that boarded an empty diff. The re-gate had a purpose (to
+/// close a dead packet), so a reasoned `--force-regate` keeps that door;
+/// `--park-*` on a landed branch has no purpose at all and is refused
+/// outright. A landed branch's next step is deletion, and the refusal
+/// says so.
+pub(crate) fn landed_guard(
+    branch: &str,
+    sha: &str,
+    landing: Option<&Landing>,
+    force_reason: Option<&str>,
+    park: &ParkIntent,
+) -> LandedGuard {
+    let Some(l) = landing else {
+        return LandedGuard::Proceed;
+    };
+    let short = &sha[..7.min(sha.len())];
+    let landed_as = l
+        .landed_as
+        .as_deref()
+        .map(|a| format!("; {a}"))
+        .unwrap_or_default();
+    match force_reason {
+        None => LandedGuard::Refuse(format!(
+            "boss gate: REFUSED — {branch}@{short} already landed on main ({}{landed_as}).\n  \
+             Re-gating landed content files nothing useful and, with park intent, files a \
+             twin car that boards an empty diff (2026-09-08, train #261). Delete the branch \
+             instead: git push origin --delete {branch}\n  \
+             To gate it anyway (e.g. to close a dead gate-run packet), pass \
+             --force-regate \"<reason>\" — without any --park-* flag.",
+            l.how
+        )),
+        Some(_) if !park.is_empty() => LandedGuard::Refuse(format!(
+            "boss gate: REFUSED — {branch}@{short} already landed on main ({}{landed_as}), \
+             and --force-regate cannot carry park intent: a landed branch has nothing to \
+             park, and a car for it is a twin. Drop the --park-* flags.",
+            l.how
+        )),
+        Some(reason) => LandedGuard::Forced(format!(
+            "boss gate: {branch}@{short} already landed on main ({}{landed_as}) — gating \
+             anyway because: {reason}. Any park intent a reused packet carries is cleared, \
+             so this green cannot file a twin.",
+            l.how
+        )),
+    }
+}
+
+/// Gather the landing signals: a quiet fetch of main so the local
+/// objects can answer the content comparison (a clone behind the forge
+/// is how 26b3d203's wrong answers were made), then `boss merged`'s
+/// observation, then the SoR's closed cars for the branch. Every probe
+/// is allowed to fail; an unobservable signal is `None`, never a
+/// landing.
+async fn observe_landing(http: &reqwest::Client, branch: &str, sha: &str) -> Option<Landing> {
+    let _ = crate::git_auth::command()
+        .args(["fetch", "--quiet", "origin", "main"])
+        .status();
+    let v = crate::merged::verdict(&crate::merged::observe(".", "origin", branch));
+    let cars = rows(
+        api(
+            http,
+            reqwest::Method::GET,
+            &format!("/api/jobs?kind=ship-a-change&status=closed&subject_id={branch}&limit=20"),
+            None,
+        )
+        .await
+        .unwrap_or(None),
+    );
+    landing(&v, &cars, branch, sha)
 }
 
 /// Close a just-registered gate-run whose launch was REFUSED before any
@@ -903,6 +1067,7 @@ pub async fn run(
     wait: bool,
     dry: bool,
     park: ParkIntent,
+    force_regate: Option<String>,
 ) -> Result<()> {
     let manifest_path =
         manifest.unwrap_or_else(|| PathBuf::from("infra/gate-runner/gate-runner.yaml"));
@@ -920,6 +1085,21 @@ pub async fn run(
     // without side effects — the policy read never fails, it falls back.
     let max = max_concurrent(&http).await?;
     let sha = resolve_sha(branch);
+
+    // A LANDED BRANCH IS NOT GATED. Before any packet is filed or
+    // reused — a refusal here costs nothing to close. See `landed_guard`.
+    let landed = observe_landing(&http, branch, &sha).await;
+    match landed_guard(
+        branch,
+        &sha,
+        landed.as_ref(),
+        force_regate.as_deref(),
+        &park,
+    ) {
+        LandedGuard::Proceed => {}
+        LandedGuard::Forced(note) => println!("{note}"),
+        LandedGuard::Refuse(why) => bail!("{why}"),
+    }
 
     // Reuse before filing. See `reusable_packet`.
     let open = rows(
@@ -994,6 +1174,27 @@ pub async fn run(
             return Err(e);
         }
         println!("boss gate: park intent stamped — this branch auto-parks on green");
+    }
+    // STALE INTENT DOES NOT SURVIVE A LANDING. A reused packet carries
+    // whatever `park_*` keys its first launch stamped; on a forced
+    // re-gate of a landed branch those keys are the twin's trigger
+    // (610537b2), so they are removed before the runner starts. Best
+    // effort: the handler refuses a landed twin on its own too.
+    if reused && landed.is_some() && !dry {
+        match api(
+            &http,
+            reqwest::Method::PATCH,
+            &format!("/api/jobs/{packet}/metadata"),
+            Some(ParkIntent::clear_patch()),
+        )
+        .await
+        {
+            Ok(_) => println!(
+                "boss gate: park intent cleared from the reused packet — a landed branch \
+                 does not auto-park"
+            ),
+            Err(e) => eprintln!("boss gate: could not clear stale park intent: {e:#}"),
+        }
     }
 
     let job = render_job(&manifest_text, branch, &packet, &mode)?;
@@ -1400,6 +1601,117 @@ mod tests {
             verified: Some("observed working".into()),
             backlog_item: None,
         }
+    }
+
+    fn landed_car() -> Value {
+        json!({
+            "id": "670087f4-0000-0000-0000-000000000000",
+            "status": "closed",
+            "metadata": {
+                "branch": "fix/boot", "merged": "true", "merge_ref": "b641f3adcf47",
+                "outcome": "merged", "train": "3a476b50-7a3a-409f-a9bc-59266e44f331",
+                "boarded_head": "a56b4a9deadbeef"
+            }
+        })
+    }
+
+    fn landed_by_content() -> Landing {
+        landing(
+            &crate::merged::Verdict::Merged(crate::merged::How::ContentPresent),
+            &[landed_car()],
+            "fix/boot",
+            "a56b4a9deadbeef",
+        )
+        .expect("content on main is a landing")
+    }
+
+    /// THE FRONT DOOR (610537b2). A landed branch is refused, the
+    /// refusal names where it went and what to do instead.
+    #[test]
+    fn a_landed_branch_is_refused_and_told_to_delete_itself() {
+        let l = landed_by_content();
+        match landed_guard(
+            "fix/boot",
+            "a56b4a9deadbeef",
+            Some(&l),
+            None,
+            &ParkIntent::default(),
+        ) {
+            LandedGuard::Refuse(why) => {
+                assert!(why.contains("fix/boot@a56b4a9"), "{why}");
+                assert!(why.contains("b641f3adcf47"), "names the merge: {why}");
+                assert!(why.contains("train 3a476b50"), "names the train: {why}");
+                assert!(why.contains("--delete fix/boot"), "says to delete: {why}");
+                assert!(why.contains("--force-regate"), "names the door: {why}");
+            }
+            other => panic!("a landed branch must be refused: {other:?}"),
+        }
+    }
+
+    /// The re-gate that caused the incident had a purpose (closing a dead
+    /// packet); a reasoned force keeps that door, without park intent.
+    #[test]
+    fn a_forced_regate_proceeds_with_its_reason_but_never_with_park_intent() {
+        let l = landed_by_content();
+        match landed_guard(
+            "fix/boot",
+            "a56b4a9",
+            Some(&l),
+            Some("closing dead gate-run 57f49a80"),
+            &ParkIntent::default(),
+        ) {
+            LandedGuard::Forced(note) => assert!(note.contains("57f49a80"), "{note}"),
+            other => panic!("a reasoned force gates: {other:?}"),
+        }
+        match landed_guard("fix/boot", "a56b4a9", Some(&l), Some("why"), &park_full()) {
+            LandedGuard::Refuse(why) => assert!(why.contains("twin"), "{why}"),
+            other => panic!("park intent on a landed branch is a twin: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unlanded_branch_proceeds_even_when_forced() {
+        assert_eq!(
+            landed_guard("feat/new", "abc1234", None, Some("why"), &park_full()),
+            LandedGuard::Proceed
+        );
+    }
+
+    /// Git decides; the car names. A car that boarded THIS head answers
+    /// when git cannot; a car that boarded another head is a reused
+    /// branch with new, gateable commits.
+    #[test]
+    fn landing_reads_git_first_and_the_car_for_the_name() {
+        use crate::merged::{How, Verdict};
+        let l = landed_by_content();
+        assert_eq!(
+            l.landed_as.as_deref(),
+            Some("car 670087f4 merged as b641f3adcf47 on train 3a476b50")
+        );
+        assert!(l.how.contains("every file"), "{}", l.how);
+
+        // Ancestry, with no car in the SoR: still a landing, unnamed.
+        let anc = landing(&Verdict::Merged(How::Ancestor), &[], "fix/boot", "a56b4a9").unwrap();
+        assert_eq!(anc.landed_as, None);
+
+        // Git could not see (stale clone) but the car boarded this head.
+        let unknown = Verdict::Unknown("stale".into());
+        let by_car = landing(&unknown, &[landed_car()], "fix/boot", "a56b4a9deadbeef").unwrap();
+        assert!(by_car.how.contains("exact head"), "{}", by_car.how);
+
+        // New commits on a landed branch's name: not a landing.
+        assert!(landing(&Verdict::NotMerged, &[landed_car()], "fix/boot", "0000000").is_none());
+        assert!(landing(&unknown, &[], "fix/boot", "a56b4a9").is_none());
+    }
+
+    #[test]
+    fn clearing_stale_intent_nulls_every_park_key() {
+        let p = ParkIntent::clear_patch();
+        let stamped = park_full().metadata_patch();
+        for k in stamped.as_object().unwrap().keys() {
+            assert!(p[k].is_null(), "{k} must be nulled so the door deletes it");
+        }
+        assert_eq!(p.as_object().unwrap().len(), 5);
     }
 
     #[test]

@@ -131,6 +131,43 @@ fn auto_park_inputs(
     })
 }
 
+/// PURE: the record written on the gate-run INSTEAD of a car, when a car
+/// for this branch already carried it to main. `None` = nothing landed;
+/// file as usual.
+///
+/// A LANDED BRANCH GETS NO TWIN. Measured 2026-09-08 (backlog 610537b2):
+/// a re-gate of fix/boot-never-refuses-over-an-unviable-workflow — already
+/// on main via train #259 — reused gate-run 57f49a80, which still carried
+/// the park intent stamped before the landing. On green this handler
+/// filed twin car dfb98d07 for content already merged; the conductor
+/// boarded it as train #261, whose CI went red on an empty diff, and the
+/// train was cancelled and the twin abandoned by hand. Stale intent on a
+/// reused packet is real; the defence is here, at the one place a car is
+/// filed. The dispatcher runs without git, so "landed" is read from the
+/// system of record (`boss_jobs::car::landed_car_for`, the same test
+/// `boss gate` runs), not from ancestry.
+fn landed_skip(cars: &[Value], branch: &str) -> Option<Value> {
+    let car = car::landed_car_for(cars, branch)?;
+    let id = car.get("id").and_then(Value::as_str).unwrap_or("?");
+    let md = |k: &str| {
+        car.pointer(&format!("/metadata/{k}"))
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+    };
+    let train = md("train");
+    Some(json!({
+        "park_skipped": "landed",
+        "park_skipped_note": format!(
+            "no car filed: car {} already carried {branch} to main as {} (train {}) — \
+             this green re-gated landed content, and a twin would board an empty diff \
+             (backlog 610537b2)",
+            &id[..8.min(id.len())],
+            md("merge_ref"),
+            &train[..8.min(train.len())],
+        ),
+    }))
+}
+
 /// POST a body and return the response JSON — the create needs the new
 /// car's id back, which `common::post_json` (fire-and-forget) discards.
 /// Same header + 422-is-permanent contract as the shared helpers.
@@ -251,6 +288,45 @@ impl Handler for JobsAutoPark {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+
+        // A LANDED BRANCH GETS NO TWIN — checked before the parked-car
+        // refresh, because a still-parked car for a landed branch IS a
+        // twin and must not be kept fresh either. Closed cars are the
+        // usual landing; an open car with the `merged` marker is one
+        // the dispatcher has not closed yet (see `landed_skip`).
+        let closed = get_json(
+            &self.client,
+            &format!(
+                "{}/api/jobs?kind=ship-a-change&status=closed&subject_id={}&limit=50",
+                self.base(),
+                inputs.branch
+            ),
+            &ctx.rule_name,
+        )
+        .await?;
+        let all: Vec<Value> = cars
+            .iter()
+            .cloned()
+            .chain(
+                closed
+                    .get("data")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+            .collect();
+        if let Some(patch) = landed_skip(&all, &inputs.branch) {
+            write_json(
+                &self.client,
+                reqwest::Method::PATCH,
+                &format!("{}/api/jobs/{}/metadata", self.base(), ev.job_id),
+                &patch,
+                &ctx.rule_name,
+            )
+            .await?;
+            return Ok(());
+        }
+
         if let Some(parked) = car::parked_car_for(&cars, &inputs.branch) {
             let id = parked.get("id").and_then(Value::as_str).ok_or_else(|| {
                 HandlerError::Downstream("auto-park: parked car has no id".into())
@@ -395,6 +471,43 @@ mod tests {
         // A plain `boss gate` (manual) stamps no `park_*` keys.
         let gr = gate_run(json!({}));
         assert!(auto_park_inputs(&gr, &green_step_meta()).is_none());
+    }
+
+    /// THE TWIN (610537b2). A merged car for the branch means this green
+    /// re-gated landed content: no car, and the gate-run says why.
+    #[test]
+    fn a_landed_branch_records_a_skip_instead_of_a_twin() {
+        let landed = json!({
+            "id": "670087f4-0000-0000-0000-000000000000",
+            "status": "closed",
+            "metadata": {
+                "branch": "fix/x", "merged": "true", "merge_ref": "b641f3adcf47",
+                "outcome": "merged", "train": "3a476b50-7a3a-409f-a9bc-59266e44f331"
+            }
+        });
+        let patch = landed_skip(&[landed], "fix/x").expect("a landed branch is skipped");
+        assert_eq!(patch["park_skipped"], "landed");
+        let note = patch["park_skipped_note"].as_str().unwrap();
+        assert!(note.contains("670087f4"), "names the car: {note}");
+        assert!(note.contains("b641f3adcf47"), "names the merge: {note}");
+        assert!(note.contains("3a476b50"), "names the train: {note}");
+    }
+
+    /// An abandoned twin or a parked car is not a landing — the branch
+    /// still needs its car (a parked one is refreshed, not duplicated).
+    #[test]
+    fn spent_or_parked_cars_do_not_block_the_park() {
+        let abandoned = json!({
+            "id": "dfb98d07", "status": "closed",
+            "metadata": { "branch": "fix/x", "outcome": "abandoned" }
+        });
+        let parked = json!({
+            "id": "p", "status": "open",
+            "metadata": { "branch": "fix/x" },
+            "steps": [{"spec_slug": "review", "title": car::REVIEW, "status": "ready"}]
+        });
+        assert!(landed_skip(&[abandoned, parked], "fix/x").is_none());
+        assert!(landed_skip(&[], "fix/x").is_none());
     }
 
     #[test]
