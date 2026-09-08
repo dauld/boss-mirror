@@ -33,6 +33,9 @@
 #   4. that kind is a real Workflow in the platform bundle
 #   7. a boss-gcp unit whose kind only the bundle defines pins the
 #      system of record inline and opens its packet best-effort (`-`)
+#   8. and every CLUSTER CRONJOB does (2)–(4) too, because that is where
+#      the chores live since the 2026-09-04 cutover — the nightly backup
+#      ran unrecorded for twenty days inside this lint's blind spot
 #
 # (3) and (4) are the ones worth having. A unit that opens a Job and
 # never completes it leaves an open packet every run — worse than no
@@ -293,9 +296,121 @@ for row in $gcp_rows; do
     fi
 done
 
+# 8. AND SO MUST EVERY CLUSTER CRONJOB.
+#
+# Checks 1–7 read systemd units, because that is where the maintenance
+# chores lived when this lint was written. The 2026-09-04 cutover moved
+# most of them into cluster CronJobs, and this file could not see one of
+# them: boss-pg-backup replaced boss-backup.service and did NOT take the
+# service's ExecStartPre with it. The backups kept running and kept
+# succeeding — verified artefact, both offsite legs — while the system
+# of record's last backup packet stayed at 2026-08-19 for twenty days.
+# Nothing here noticed, because a CronJob is not a TIMERS row. Found by
+# hand (backlog 60095754), which is the definition of a gap in this
+# lint.
+#
+# The consequence is not tidiness. Once the silent-cadence sweep alarms
+# on `maintenance-backup`, its first alarm on a REAL stopped backup is
+# indistinguishable from this one — CLAUDE.md §Diagnosis, a check nobody
+# can read is a check that is not running.
+#
+# WHAT IT CHECKS, per manifest holding a CronJob: it calls
+# boss-maintenance-wrap.sh with a kind, calls boss-step.sh with the SAME
+# kind, and that kind is a real Workflow — or its name is listed below
+# with the reason it files its visibility some other way.
+#
+# WHAT IT DELIBERATELY DOES NOT CHECK YET: that the packet-opening call
+# cannot fail the chore. boss-backup.yaml swallows it (the packet is
+# visibility, never a precondition — check 7 states the same rule for
+# boss-gcp units), but the seven siblings open theirs inside
+# `set -euo pipefail`, so an API answering 400 would stop them. That is
+# the boss-ml-inference-batch shape one layer over, and fixing seven
+# working chores belongs in its own change rather than riding this one.
+CLUSTER_MANIFESTS="infra/cluster/manifests"
+# A CronJob whose visibility is its own, with the reason. Adding a name
+# here is a decision; the default is that a scheduled run leaves a
+# packet.
+CRONJOB_OWN_VISIBILITY=(
+    # Posts every run straight to /api/estate/observation — the
+    # observation IS the record, and a maintenance packet beside it
+    # would say less than the thing it wrapped.
+    "boss-estate-observe"
+)
+
+if [ -d "$CLUSTER_MANIFESTS" ]; then
+    cron_files=$(grep -lE '^kind: CronJob' "$CLUSTER_MANIFESTS"/*.yaml 2>/dev/null)
+    cron_count=$(printf '%s\n' "$cron_files" | grep -c . || true)
+    if [ "$cron_count" -lt 5 ]; then
+        echo "timers-leave-a-packet: only found $cron_count CronJob manifests under" >&2
+        echo "    $CLUSTER_MANIFESTS — the scrape broke, so a green result would mean nothing." >&2
+        problems=$((problems + 1))
+    fi
+    seen_exempt=""
+    for file in $cron_files; do
+        # The CronJob's own metadata.name, not the file's: the message
+        # has to name the thing an operator sees in `kubectl get cronjob`.
+        cname=$(awk '/^kind: CronJob/{f=1} f && /^  name: /{print $2; exit}' "$file")
+        [ -n "$cname" ] || cname="$(basename "$file" .yaml)"
+
+        case " ${CRONJOB_OWN_VISIBILITY[*]} " in
+            *" $cname "*)
+                seen_exempt="$seen_exempt $cname"
+                continue
+                ;;
+        esac
+
+        open_kind=$(grep -oE 'boss-maintenance-wrap\.sh [a-z-]+' "$file" | awk '{print $2}' | head -1)
+        done_kind=$(grep -oE 'boss-step\.sh [a-z-]+' "$file" | awk '{print $2}' | head -1)
+
+        if [ -z "$open_kind" ]; then
+            echo "timers-leave-a-packet: CronJob $cname ($file) runs with no packet." >&2
+            echo "    Add a boss-image container that calls" >&2
+            echo "      boss-maintenance-wrap.sh <kind> \"<label>\"   before the work, and" >&2
+            echo "      boss-step.sh <kind> run result=ok            after it," >&2
+            echo "    with BOSS_JOBS_URL pointing at the in-cluster jobs API. Seven siblings" >&2
+            echo "    under $CLUSTER_MANIFESTS show the shape; boss-backup.yaml shows it for a" >&2
+            echo "    multi-image Pod. A scheduled run the system of record cannot see is a" >&2
+            echo "    run whose silence means nothing." >&2
+            problems=$((problems + 1)); continue
+        fi
+        if [ -z "$done_kind" ]; then
+            echo "timers-leave-a-packet: CronJob $cname OPENS a packet ($open_kind) and never" >&2
+            echo "    completes it. Every run would leave an open packet, which is worse than" >&2
+            echo "    no packet: the fleet view fills with failures that did not happen." >&2
+            problems=$((problems + 1)); continue
+        fi
+        if [ "$open_kind" != "$done_kind" ]; then
+            echo "timers-leave-a-packet: CronJob $cname opens '$open_kind' but completes" >&2
+            echo "    '$done_kind' — one packet is left open and another is closed blind." >&2
+            problems=$((problems + 1)); continue
+        fi
+        if ! printf '%s\n' "$kinds" | grep -qxF -- "$open_kind"; then
+            echo "timers-leave-a-packet: CronJob $cname uses kind '$open_kind', which no" >&2
+            echo "    Workflow defines. The wrapper's spawn would fail at run time, on a" >&2
+            echo "    schedule nobody is watching." >&2
+            problems=$((problems + 1))
+        fi
+    done
+
+    # A stale exemption is not free: left standing, it holds a future
+    # CronJob of that name out of this check without anyone deciding so.
+    # Same refusal gate.sh applies to its own pre-flight roster.
+    for exempt in "${CRONJOB_OWN_VISIBILITY[@]}"; do
+        case " $seen_exempt " in
+            *" $exempt "*) ;;
+            *)
+                echo "timers-leave-a-packet: CRONJOB_OWN_VISIBILITY names '$exempt', which is" >&2
+                echo "    not a CronJob under $CLUSTER_MANIFESTS any more. Remove the entry —" >&2
+                echo "    a dead exemption silently covers the next CronJob to take that name." >&2
+                problems=$((problems + 1))
+                ;;
+        esac
+    done
+fi
+
 if [ "$problems" -gt 0 ]; then
     echo "" >&2
-    echo "  $problems timer(s) without working Job visibility." >&2
+    echo "  $problems scheduled run(s) without working Job visibility." >&2
     exit 1
 fi
-echo "timers-leave-a-packet: $count timers, each opens and completes a defined Job"
+echo "timers-leave-a-packet: $count timers and ${cron_count:-0} cluster CronJobs, each opens and completes a defined Job"

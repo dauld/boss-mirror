@@ -68,12 +68,57 @@ spec:
           # 442a6d3f); the same namespace Secret deploy/boss pulls with.
           imagePullSecrets:
             - {name: forgejo-registry}
-          # The dump runs as an initContainer so the two legs are
-          # ORDERED. Sibling containers in a Pod start together, so a
-          # second container could upload while pg_dump was still
-          # writing; an initContainer is the only thing that guarantees
-          # the dump finished first.
+          # THE LEGS ARE ORDERED BY BEING initContainers. Sibling
+          # containers in a Pod start together, so a second container
+          # could upload while pg_dump was still writing; an
+          # initContainer is the only thing that guarantees the dump
+          # finished first. Everything that DOES the backup lives here,
+          # in order, and the one main container below closes the
+          # packet — which is what makes `result=ok` a fact rather than
+          # a hope: Kubernetes stops the Pod at the first initContainer
+          # that fails, so the closer runs if and only if every leg
+          # before it passed.
           initContainers:
+            # THE PACKET. Backlog 60095754: this CronJob replaced the
+            # boss-gcp host timer at the 2026-09-04 cutover and did not
+            # take the timer's ExecStartPre with it, so the backups ran
+            # nightly and the system of record last saw one on
+            # 2026-08-19 — twenty days of a healthy backup that nothing
+            # could tell apart from a stopped one. Seven of the nine
+            # cluster CronJobs already call these two helpers; this is
+            # the eighth. The helpers are pure HTTP to the jobs API, so
+            # they need only the boss image and BOSS_JOBS_URL.
+            #
+            # IT CANNOT STOP THE BACKUP. The packet is visibility, never
+            # a precondition (CLAUDE.md §Diagnosis, "an arm that needs
+            # the patient is not an arm"): boss-ml-inference-batch lost
+            # 23 consecutive nights to a hard ExecStartPre that met a
+            # 400. So every failure here is logged and swallowed, and
+            # the dump runs regardless. A run with no packet is a run
+            # whose visibility was lost; a run that never happened
+            # because its packet could not open is an outage.
+            - name: open-packet
+              image: 10.20.0.15:3000/david/boss:latest
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -uo pipefail
+                  # Opens today's packet, or REUSES an open one: a run
+                  # that failed left its packet open, and today's
+                  # success completing it is the recovery. That is what
+                  # keeps the pile at one open Job per chore.
+                  /usr/local/bin/boss-maintenance-wrap.sh maintenance-backup "Nightly backup" \
+                    || echo "open-packet: the packet did not open (exit $?) — the backup runs anyway; only this run's visibility is lost" >&2
+                  exit 0
+              env:
+                - name: BOSS_JOBS_URL
+                  value: http://boss-jobs-internal.boss.svc.cluster.local:7900
+                - name: BOSS_MACHINE_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: boss-secrets
+                      key: machine-token
+                      optional: true
             - name: dump
               image: 10.20.0.15:3000/david/postgres:16-alpine
               command: ["/bin/sh", "-c"]
@@ -123,7 +168,13 @@ spec:
               volumeMounts:
                 - {name: backups, mountPath: /backup}
                 - {name: ship-key, mountPath: /keys, readOnly: true}
-          containers:
+            # SECOND OFFSITE LEG. This was the Pod's one main container
+            # until the packet wiring landed; it is an initContainer now
+            # for one reason — so a container that runs AFTER it can
+            # vouch for it. Its script, its image and its volumes are
+            # unchanged, and an initContainer that exits non-zero fails
+            # the Job exactly as a main container did (restartPolicy:
+            # Never), so a failed upload is still loud.
             - name: offsite-gcs
               image: google/cloud-sdk:alpine
               command: ["/bin/sh", "-c"]
@@ -152,6 +203,53 @@ spec:
               volumeMounts:
                 - {name: backups, mountPath: /backup, readOnly: true}
                 - {name: gcs-key, mountPath: /gcs, readOnly: true}
+          # THE VERDICT, and the only main container. It runs if and
+          # only if every initContainer above passed, so `result=ok` is
+          # the Pod's own structure saying so rather than a claim this
+          # script makes. A dump that dies, a ship that dies, an upload
+          # that dies: the Pod stops there, this never runs, and the
+          # packet stays OPEN — where the next successful run's wrap
+          # reuses it (recovery) and the silence sweep can see it
+          # meanwhile. A failed run must never close green; that is the
+          # whole point of putting the close last.
+          #
+          # AND IT NEVER FAILS THE JOB. The backup is finished and
+          # verified by the time this runs. If the jobs API is dark, a
+          # non-zero exit here would report a good backup as failed AND
+          # spend backoffLimit re-running the entire dump-and-ship for a
+          # lost HTTP call. So the close is best-effort and loud, like
+          # the open.
+          containers:
+            - name: close-packet
+              image: 10.20.0.15:3000/david/boss:latest
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -uo pipefail
+                  # What the run already printed, carried on the packet:
+                  # the dump this run produced (.latest is written by
+                  # the dump leg, so it cannot name yesterday's), its
+                  # size, and where the copies went.
+                  OUT=$(cat /backup/.latest 2>/dev/null || true)
+                  DUMP=$(basename "${OUT:-unknown}")
+                  SIZE=unknown
+                  if [ -n "$OUT" ] && [ -f "$OUT" ]; then SIZE=$(du -h "$OUT" | cut -f1); fi
+                  echo "close-packet: $DUMP ($SIZE), offsite boss-gcp + gcs"
+                  /usr/local/bin/boss-step.sh maintenance-backup run \
+                      result=ok dump="$DUMP" size="$SIZE" offsite="boss-gcp,gcs" \
+                    || echo "close-packet: the packet did not close (exit $?) — the dump is written, verified and shipped; only this run's visibility is lost" >&2
+                  exit 0
+              env:
+                - name: BOSS_JOBS_URL
+                  value: http://boss-jobs-internal.boss.svc.cluster.local:7900
+                - name: BOSS_MACHINE_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: boss-secrets
+                      key: machine-token
+                      optional: true
+              volumeMounts:
+                - {name: backups, mountPath: /backup, readOnly: true}
           volumes:
             - name: backups
               persistentVolumeClaim: {claimName: boss-backups}
