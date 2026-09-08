@@ -15,6 +15,11 @@
 //! 4. **The read is policy-scoped like every queue surface** — an
 //!    unreadable caller gets an empty, well-formed yard, not a 403 and
 //!    not a false-empty.
+//! 5. **The yard tells the time in instants, from the stamps the record
+//!    holds.** A gate's `since` is its `opened_at`; an open train carries
+//!    `boarded_at`; a closed train's `journey_seconds` reads the
+//!    terminal instant from the job's `closed_at` — the shape the server
+//!    actually writes, where the outcome step itself is never stamped.
 
 use std::sync::Arc;
 
@@ -244,6 +249,13 @@ async fn seed_full(jobs: &InMemoryJobs) {
     for s in [
         step(
             &train.id,
+            "collect",
+            "Collect what is ready to board",
+            StepStatus::Completed,
+            json!({ "completed_at": "2026-09-03T06:00:00Z" }),
+        ),
+        step(
+            &train.id,
             "merged",
             "Merged into main",
             StepStatus::Completed,
@@ -263,13 +275,18 @@ async fn seed_full(jobs: &InMemoryJobs) {
         jobs.add_step_at(&s, now, &[]).await.unwrap();
     }
 
-    // An arrived train (recent).
+    // An arrived train (recent), in the shape the server writes: the
+    // conductor stamps `collect`, the `arrived` OUTCOME step is completed
+    // bare by the terminal machinery, and the close instant lands on the
+    // job as `closed_at` (`close_job_on_terminal`). Measured 2026-09-08
+    // on every closed train; a fixture that stamped the step instead
+    // passed while the live board read null.
     let arrived = job(
         "pr-train",
         "33333333-3333-3333-3333-333333333333",
         "train #199",
         JobStatus::Closed,
-        json!({ "outcome": "arrived" }),
+        json!({ "outcome": "arrived", "closed_at": "2026-09-03T05:30:00+00:00" }),
     );
     jobs.create_job_at(&arrived, now, &[]).await.unwrap();
     for s in [
@@ -285,7 +302,7 @@ async fn seed_full(jobs: &InMemoryJobs) {
             "arrived",
             "Train arrived",
             StepStatus::Completed,
-            json!({ "completed_at": "2026-09-03T05:30:00Z" }),
+            json!({ "outcome_kind": "completed" }),
         ),
     ] {
         jobs.add_step_at(&s, now, &[]).await.unwrap();
@@ -333,13 +350,14 @@ async fn seed_full(jobs: &InMemoryJobs) {
     .await
     .unwrap();
 
-    // An IN-FLIGHT gate-run: open, no verdict yet — occupies a slot.
+    // An IN-FLIGHT gate-run: open, no verdict yet — occupies a slot. It
+    // carries the `opened_at` instant `boss gate` stamps.
     let gating = job(
         "gate-run",
         "66666666-6666-6666-6666-666666666666",
         "gate feat/gating",
         JobStatus::Open,
-        json!({ "branch": "feat/gating" }),
+        json!({ "branch": "feat/gating", "opened_at": "2026-09-03T11:40:00Z" }),
     );
     jobs.create_job_at(&gating, now, &[]).await.unwrap();
     jobs.add_step_at(
@@ -447,6 +465,8 @@ async fn the_status_names_the_buried_block_reason() {
     );
     assert_eq!(train["block"]["since"], "2026-09-03T06:46:00Z");
     assert_eq!(train["car_count"], 1);
+    // "Aboard since": the collect stamp, an instant, additive on the row.
+    assert_eq!(train["boarded_at"], "2026-09-03T06:00:00Z");
 }
 
 #[tokio::test]
@@ -637,7 +657,8 @@ async fn the_dock_recent_stranded_and_policy_all_read_from_the_record() {
     assert!(branches.contains(&"feat/a"));
     assert!(branches.contains(&"feat/b"));
 
-    // Recent: one arrived train with a journey time.
+    // Recent: one arrived train with a journey time — collect 05:00 to
+    // the job's `closed_at` 05:30, the outcome step itself unstamped.
     let recent = body["recent"].as_array().unwrap();
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0]["outcome"], "arrived");
@@ -675,7 +696,9 @@ async fn the_gate_slots_and_garage_read_from_the_gate_runs() {
         active[0]["packet_id"],
         "66666666-6666-6666-6666-666666666666"
     );
-    assert!(active[0]["since"].is_string());
+    // The instant the run opened, so a bay can draw elapsed time — not
+    // the day it opened on.
+    assert_eq!(active[0]["since"], "2026-09-03T11:40:00Z");
 
     // The garage holds the branch whose latest gate is red, named with
     // its failing check.

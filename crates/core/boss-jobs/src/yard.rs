@@ -72,6 +72,10 @@ const ARRIVED: StepKey = StepKey {
     slug: "arrived",
     title: "Train arrived",
 };
+const CANCELLED: StepKey = StepKey {
+    slug: "cancelled",
+    title: "Cancelled",
+};
 
 /// Find a step by its slug, falling back to its title — the same
 /// addressing the conductor's `find_step` uses, so the two ends agree on
@@ -110,8 +114,25 @@ fn completed_at(step: Option<&Step>) -> Option<&str> {
     step?.metadata.get("completed_at").and_then(Value::as_str)
 }
 
+/// The boarding instant: the `collect` step's `completed_at`. That is
+/// the stamp the conductor's arrival report reads as `boarded_at`
+/// (boss-cli `train::arrival_report`), so the yard and the report name
+/// one moment. `assemble` and `pr` complete in the same board pass and
+/// carry the same stamp, but `collect` is the step that MEANS boarded.
+fn boarded_at(steps: &[Step]) -> Option<&str> {
+    completed_at(find_step(steps, &COLLECT))
+}
+
 fn meta_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str)
+}
+
+/// An RFC3339 stamp as a UTC instant. `None` for anything that does not
+/// parse, so a malformed stamp reads as "no stamp", never as a guess.
+fn parse_instant(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc))
 }
 
 /// Where a train sits and, if it is stuck, why — the whole point.
@@ -199,6 +220,12 @@ pub struct TrainStatus {
     pub pr_url: Option<String>,
     /// How many cars boarded (from `metadata.boarded_jobs`).
     pub car_count: usize,
+    /// When the cars boarded — the `collect` step's `completed_at`, the
+    /// conductor's own RFC3339 stamp — so the page can say "aboard
+    /// since". `None` until the collect completes, or when it carries
+    /// no stamp. The same instant `journey_seconds` starts from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boarded_at: Option<String>,
 }
 
 /// The title of the first ready-or-active step — the exact place the
@@ -357,6 +384,7 @@ pub fn train_status(
             .and_then(|s| meta_str(&s.metadata, "pr_url"))
             .map(str::to_string),
         car_count,
+        boarded_at: boarded_at(steps).map(str::to_string),
     }
 }
 
@@ -636,7 +664,10 @@ pub struct RecentTrain {
     /// `arrived` / `cancelled` / `unknown` — from the terminal that
     /// completed (or `metadata.outcome`).
     pub outcome: String,
-    /// board → arrival, in seconds, when both stamps are present.
+    /// Boarding → terminal, in seconds: the `collect` stamp to the
+    /// instant the train arrived or was cancelled (see
+    /// [`journey_seconds`]). `None` when either instant is missing —
+    /// never estimated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub journey_seconds: Option<i64>,
 }
@@ -654,12 +685,39 @@ fn outcome_of(job: &Job, steps: &[Step]) -> String {
     "unknown".to_string()
 }
 
-fn journey_seconds(steps: &[Step]) -> Option<i64> {
-    let boarded = completed_at(find_step(steps, &COLLECT))?;
-    let arrived = completed_at(find_step(steps, &ARRIVED))?;
-    let b = chrono::DateTime::parse_from_rfc3339(boarded).ok()?;
-    let a = chrono::DateTime::parse_from_rfc3339(arrived).ok()?;
-    Some((a - b).num_seconds())
+/// The instant a closed train reached its terminal. The terminal step's
+/// own `completed_at` when some hand stamped one (`arrived`, else
+/// `cancelled`); otherwise the job's `metadata.closed_at`, which is
+/// where the server records the instant a declared terminal step
+/// completed (`close_job_on_terminal`, http/steps.rs — the same `now`
+/// that completed the step).
+///
+/// WHY THE FALLBACK. `arrived` is an OUTCOME step: the server's terminal
+/// machinery completes it, not the conductor's `complete_step`, and only
+/// the conductor stamps `completed_at`. Measured 2026-09-08 on every
+/// closed train the board had ever shown: `collect` stamped, `arrived`
+/// completed and bare, `closed_at` on the job — so a journey that
+/// demanded the step stamp read `null` on all of them. The instant was
+/// in the record the whole time, one level up.
+fn terminal_instant(job: &Job, steps: &[Step]) -> Option<chrono::DateTime<chrono::Utc>> {
+    let stamped = [ARRIVED, CANCELLED]
+        .iter()
+        .map(|key| find_step(steps, key))
+        .filter(|s| is_done(*s))
+        .find_map(completed_at);
+    stamped
+        .or_else(|| meta_str(&job.metadata, "closed_at"))
+        .and_then(parse_instant)
+}
+
+/// Boarding → terminal, in seconds. Both ends are read, never
+/// estimated: no boarding stamp (a train cancelled before it collected)
+/// or no terminal instant (a train still open, or closed by a path that
+/// stamped nothing) is `None`.
+fn journey_seconds(job: &Job, steps: &[Step]) -> Option<i64> {
+    let boarded = boarded_at(steps).and_then(parse_instant)?;
+    let terminal = terminal_instant(job, steps)?;
+    Some((terminal - boarded).num_seconds())
 }
 
 pub fn recent_train(job: &Job, steps: &[Step]) -> RecentTrain {
@@ -667,7 +725,7 @@ pub fn recent_train(job: &Job, steps: &[Step]) -> RecentTrain {
         id: job.id.to_string(),
         title: job.title.clone(),
         outcome: outcome_of(job, steps),
-        journey_seconds: journey_seconds(steps),
+        journey_seconds: journey_seconds(job, steps),
     }
 }
 
@@ -794,8 +852,11 @@ fn failing_check(steps: &[Step]) -> Option<String> {
 pub struct ActiveGate {
     pub branch: String,
     pub packet_id: String,
-    /// When the gate-run opened — date-level, its own `opened_on` stamp,
-    /// the finest instant a gate-run Job carries (like `DockCar`).
+    /// When the gate-run opened: the `opened_at` instant `boss gate`
+    /// stamps (RFC3339) when the packet carries one, else the row's
+    /// `opened_on` date (see [`opened_since`]). A string either way — a
+    /// reader that parses an instant gets the elapsed time a gate bay
+    /// needs; one that only knew the date keeps reading.
     pub since: String,
     /// True when this run has been "active" longer than a gate Job can
     /// physically live: it is not gating, it is a corpse holding a slot.
@@ -837,14 +898,28 @@ pub struct GaragedCar {
     /// check).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_check: Option<String>,
-    /// When the failing gate-run opened — date-level, as above.
+    /// When the failing gate-run opened — the instant when stamped, else
+    /// the date, as [`opened_since`] reads it.
     pub since: String,
+}
+
+/// When a gate-run opened, as finely as the record knows it: the
+/// `opened_at` instant `boss gate` stamps (RFC3339, whole seconds, `Z` —
+/// `car::stamp`) when it is present and parses, else the row's
+/// `opened_on` date. The date alone told a gate bay nothing about
+/// elapsed time: every run opened "today" for a whole day. A stamp that
+/// does not parse is no stamp.
+fn opened_since(g: &Job) -> String {
+    meta_str(&g.metadata, "opened_at")
+        .filter(|s| parse_instant(s).is_some())
+        .map_or_else(|| g.opened_on.to_string(), str::to_string)
 }
 
 /// The in-flight gates, sized to the policy's capacity. Active gate-runs
 /// (open, no verdict yet) are sorted by `since` then `branch` so slot
 /// assignment is deterministic — the same run lands in the same slot
-/// across polls.
+/// across polls. (`since` is a whole-second `Z` stamp or a date, so the
+/// string order is the time order.)
 pub fn gates(
     gate_runs: &[(Job, Vec<Step>)],
     capacity: i32,
@@ -857,23 +932,21 @@ pub fn gates(
         .filter(|(g, _)| g.status == JobStatus::Open)
         .filter(|(_, steps)| gate_run_verdict(steps).is_none())
         .filter_map(|(g, _)| {
-            meta_str(&g.metadata, "branch")
-                .filter(|b| !b.is_empty())
-                .map(|branch| ActiveGate {
-                    branch: branch.to_string(),
-                    packet_id: g.id.to_string(),
-                    since: g.opened_on.to_string(),
-                    // `opened_at` is the RFC3339 instant; `opened_on` is
-                    // only a date, too coarse to tell a long-running gate
-                    // from a dead one on the same day. No stamp or no
-                    // clock means no claim: absence is not evidence.
-                    stale: match (dead_before, meta_str(&g.metadata, "opened_at")) {
-                        (Some(cutoff), Some(at)) => chrono::DateTime::parse_from_rfc3339(at)
-                            .map(|t| t.with_timezone(&chrono::Utc) < cutoff)
-                            .unwrap_or(false),
-                        _ => false,
-                    },
-                })
+            let branch = meta_str(&g.metadata, "branch").filter(|b| !b.is_empty())?;
+            // `opened_at` is the RFC3339 instant; `opened_on` is only a
+            // date, too coarse to tell a long-running gate from a dead
+            // one on the same day. No stamp or no clock means no claim:
+            // absence is not evidence.
+            let opened_at = meta_str(&g.metadata, "opened_at").and_then(parse_instant);
+            Some(ActiveGate {
+                branch: branch.to_string(),
+                packet_id: g.id.to_string(),
+                since: opened_since(g),
+                stale: match (dead_before, opened_at) {
+                    (Some(cutoff), Some(at)) => at < cutoff,
+                    _ => false,
+                },
+            })
         })
         .collect();
     active.sort_by(|a, b| a.since.cmp(&b.since).then_with(|| a.branch.cmp(&b.branch)));
@@ -949,7 +1022,7 @@ pub fn garage(gate_runs: &[(Job, Vec<Step>)], settled_branches: &[String]) -> Ve
             (verdict == "failed").then(|| GaragedCar {
                 branch: branch.to_string(),
                 failed_check: failing_check(steps),
-                since: g.opened_on.to_string(),
+                since: opened_since(g),
             })
         })
         .collect();
@@ -2003,6 +2076,137 @@ mod tests {
         assert_eq!(recent_train(&job, &[]).outcome, "unknown");
     }
 
+    /// The live shape, measured 2026-09-08 on every closed train: the
+    /// conductor stamps `collect`, but `arrived` is an outcome step the
+    /// server completes, bare — the terminal instant is the job's
+    /// `closed_at`. This is why `journey_seconds` was null on every
+    /// train the board had ever shown.
+    #[test]
+    fn a_terminal_the_server_closed_reads_its_journey_from_the_job_closed_at() {
+        let steps = vec![
+            done(
+                "collect",
+                "Collect what is ready to board",
+                "2026-09-08T02:03:05Z",
+            ),
+            done("converged", "Cluster converged", "2026-09-08T02:30:24Z"),
+            step(
+                "arrived",
+                "Train arrived",
+                StepStatus::Completed,
+                json!({ "outcome_kind": "completed" }),
+            ),
+        ];
+        let job = train(
+            vec![],
+            json!({
+                "outcome": "arrived",
+                "closed_at": "2026-09-08T02:30:25.263551771+00:00",
+            }),
+        );
+        let r = recent_train(&job, &steps);
+        assert_eq!(r.outcome, "arrived");
+        assert_eq!(r.journey_seconds, Some(1640), "02:03:05 → 02:30:25");
+    }
+
+    #[test]
+    fn a_cancelled_train_measures_boarding_to_its_cancellation() {
+        // Cancelled AFTER boarding: the time it spent in the yard is a
+        // journey too, read from the cancelled terminal's own stamp.
+        let steps = vec![
+            done(
+                "collect",
+                "Collect what is ready to board",
+                "2026-09-08T01:18:00Z",
+            ),
+            done("cancelled", "Cancelled", "2026-09-08T01:46:42Z"),
+        ];
+        let job = train(vec![], json!({ "outcome": "cancelled" }));
+        let r = recent_train(&job, &steps);
+        assert_eq!(r.outcome, "cancelled");
+        assert_eq!(r.journey_seconds, Some(1722));
+    }
+
+    #[test]
+    fn a_train_that_never_boarded_has_no_journey() {
+        // Closed (stamped) but the collect never completed: nothing to
+        // measure from, so null — not zero, not opened_at.
+        let steps = vec![step(
+            "collect",
+            "Collect what is ready to board",
+            StepStatus::Skipped,
+            json!({}),
+        )];
+        let job = train(
+            vec![],
+            json!({ "outcome": "cancelled", "closed_at": "2026-09-08T01:46:42Z" }),
+        );
+        assert_eq!(recent_train(&job, &steps).journey_seconds, None);
+    }
+
+    #[test]
+    fn a_train_with_no_terminal_instant_has_no_journey() {
+        // Boarded, terminal completed, but nothing stamped the instant
+        // and the job carries no `closed_at`: no estimate.
+        let steps = vec![
+            done(
+                "collect",
+                "Collect what is ready to board",
+                "2026-09-08T02:03:05Z",
+            ),
+            step(
+                "arrived",
+                "Train arrived",
+                StepStatus::Completed,
+                json!({ "outcome_kind": "completed" }),
+            ),
+        ];
+        let job = train(vec![], json!({ "outcome": "arrived" }));
+        assert_eq!(recent_train(&job, &steps).journey_seconds, None);
+    }
+
+    // ---- boarding instant ----
+
+    #[test]
+    fn an_open_train_reads_its_boarding_instant_from_the_collect_stamp() {
+        let steps = vec![
+            done(
+                "collect",
+                "Collect what is ready to board",
+                "2026-09-08T02:03:05Z",
+            ),
+            done(
+                "assemble",
+                "Assemble the train branch",
+                "2026-09-08T02:03:05Z",
+            ),
+            step("pr", "Open the batched PR", StepStatus::Ready, json!({})),
+        ];
+        let job = train(vec![], json!({}));
+        let t = train_status(&job, &steps, None);
+        assert_eq!(t.phase, TrainPhase::Boarding);
+        assert_eq!(t.boarded_at.as_deref(), Some("2026-09-08T02:03:05Z"));
+        // Additive on the wire: present as a string when known.
+        let v = serde_json::to_value(&t).unwrap();
+        assert_eq!(v["boarded_at"], "2026-09-08T02:03:05Z");
+    }
+
+    #[test]
+    fn a_train_still_collecting_has_no_boarding_instant() {
+        let steps = vec![step(
+            "collect",
+            "Collect what is ready to board",
+            StepStatus::Ready,
+            json!({}),
+        )];
+        let job = train(vec![], json!({}));
+        let t = train_status(&job, &steps, None);
+        assert_eq!(t.boarded_at, None);
+        // And absent from the wire, like the other unknowns on the row.
+        let v = serde_json::to_value(&t).unwrap();
+        assert!(v.get("boarded_at").is_none());
+    }
+
     // ---- dock + policy ----
 
     #[test]
@@ -2292,6 +2496,36 @@ mod tests {
         assert!(!gates(&runs, 3, Some(soon)).active[0].stale);
         // No clock: no claim either way.
         assert!(!gates(&runs, 3, None).active[0].stale);
+    }
+
+    #[test]
+    fn an_active_gate_reads_since_as_the_opened_at_instant() {
+        // The gate bay needs an instant to draw elapsed time; the
+        // packet's `opened_at` is that instant, verbatim.
+        let mut g = gate_run_on("feat/x", 3);
+        g.metadata = json!({ "branch": "feat/x", "opened_at": "2026-09-03T11:40:00Z" });
+        let out = gates(&[(g, vec![in_flight_step()])], 3, None);
+        assert_eq!(out.active[0].since, "2026-09-03T11:40:00Z");
+
+        // A stamp that is not an instant is no stamp: the date stands.
+        let mut bad = gate_run_on("feat/y", 3);
+        bad.metadata = json!({ "branch": "feat/y", "opened_at": "yesterday-ish" });
+        let out = gates(&[(bad, vec![in_flight_step()])], 3, None);
+        assert_eq!(out.active[0].since, "2026-09-03");
+    }
+
+    #[test]
+    fn the_garage_reads_since_as_the_opened_at_instant_too() {
+        let mut g = gate_run_on("feat/broken", 3);
+        g.metadata = json!({ "branch": "feat/broken", "opened_at": "2026-09-03T11:40:00Z" });
+        let runs = vec![(
+            g,
+            vec![verdict_step(
+                "failed",
+                json!([{"name": "test", "result": "fail"}]),
+            )],
+        )];
+        assert_eq!(garage(&runs, &[])[0].since, "2026-09-03T11:40:00Z");
     }
 
     #[test]
