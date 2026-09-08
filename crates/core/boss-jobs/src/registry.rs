@@ -1082,8 +1082,19 @@ fn backlog_item_spec() -> WorkflowSpec {
         // the same step user-feedback's design route uses. A task here
         // reached David's queue as a title and two empty boxes
         // (2026-09-05, three items).
+        // The verdict vocabulary is authored on the step, not the
+        // kind bundle: the bundle is unversioned (steptype-bundle-
+        // ratchet), and a bare `string` there let `__probe__` complete
+        // a live design review (a305385b, backlog item cb9661fe).
         StepSpec {
             kind: "answer-question".into(),
+            fields: vec![boss_core::job::StepField {
+                name: "verdict".into(),
+                field_type: "approved|declined|answered".into(),
+                required: true,
+                filled_by: boss_core::job::FilledBy::Executor,
+                item_keys: Vec::new(),
+            }],
             ..branch("design-review", "Decide the design", "design")
         },
         branch("build", "Build the change", "build"),
@@ -4854,9 +4865,11 @@ mod tests {
             vec![
                 "Triage feedback.disposition".to_string(),
                 "Reproduce and investigate.disposition".to_string(),
+                "Decide the design.verdict".to_string(),
             ],
-            "the feedback flow collects a disposition at each deciding step and nothing \
-             else; anything else here is a step no surface can complete"
+            "the feedback flow collects a disposition at each deciding step and a \
+             verdict at the design review, nothing else; anything else here is a \
+             step no surface can complete"
         );
     }
 

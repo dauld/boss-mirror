@@ -970,10 +970,14 @@ fn check_item_keys_name_an_array(
 }
 
 fn is_placeholder_default(field_type: &str, value: &Value) -> bool {
-    matches!(
-        (field_type, value),
-        ("date" | "date-time" | "uri", Value::String(s)) if s.is_empty()
-    )
+    match (field_type, value) {
+        ("date" | "date-time" | "uri", Value::String(s)) => s.is_empty(),
+        // An empty string can never be a member of an enum, so on a
+        // pipe-shaped type it can only mean "not chosen yet" — the key
+        // a fork predicate needs present before the executor picks.
+        (t, Value::String(s)) if t.contains('|') => s.is_empty(),
+        _ => false,
+    }
 }
 
 /// Per-field type check shaped for the lint surface. Template tokens
@@ -1127,6 +1131,66 @@ mod tests {
         assert!(
             !errs.iter().any(|e| e.reason.contains("item_keys")),
             "an array field with item_keys is the intended shape: {errs:?}"
+        );
+    }
+
+    /// An empty string can never be a member of an enum, so `""` as a
+    /// metadata_default on an enum field is the unset placeholder the
+    /// executor overwrites — the reading `""` already gets on date /
+    /// date-time / uri. user-feedback's design-review step seeds
+    /// `verdict = ""` so boss-expr has a key to read before the step
+    /// completes; that default must not read as a type error once the
+    /// kind bundle declares the verdict vocabulary. A NON-empty value
+    /// outside the set is still a real default and still refused.
+    #[test]
+    fn an_empty_string_default_on_an_enum_field_is_a_placeholder() {
+        let reg = StepRegistry::v1();
+        let spec_with = |default: &str| {
+            WorkflowSpec::platform_seed(
+                "route",
+                "route",
+                "test",
+                vec!["custom".into()],
+                vec![
+                    StepSpec {
+                        title: "opened".into(),
+                        kind: "trigger".into(),
+                        ready_when: "true".into(),
+                        metadata_defaults: serde_json::json!({
+                            "trigger_kind": "operator", "trigger_name": "t"
+                        }),
+                        ..Default::default()
+                    },
+                    StepSpec {
+                        title: "decide".into(),
+                        kind: "task".into(),
+                        ready_when: "steps.opened.done".into(),
+                        fields: vec![boss_core::job::StepField {
+                            name: "route".into(),
+                            field_type: "ship|scrap".into(),
+                            required: true,
+                            filled_by: boss_core::job::FilledBy::Executor,
+                            item_keys: Vec::new(),
+                        }],
+                        metadata_defaults: serde_json::json!({ "route": default }),
+                        terminal: Some(Terminal {
+                            outcome: "decided".into(),
+                        }),
+                        ..Default::default()
+                    },
+                ],
+            )
+        };
+        let errs = validate_workflow(&spec_with(""), &reg);
+        assert!(
+            !errs.iter().any(|e| e.reason.contains("`route`")),
+            "an empty-string default on an enum field is the unset placeholder: {errs:?}"
+        );
+        let errs = validate_workflow(&spec_with("teleport"), &reg);
+        assert!(
+            errs.iter()
+                .any(|e| e.step == "decide" && e.reason.contains("`route`")),
+            "a non-empty default outside the set is still refused: {errs:?}"
         );
     }
 

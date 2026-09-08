@@ -351,10 +351,30 @@ fn validate_field_type(
         "date" => value.as_str().is_some_and(|s| s.len() == 10), // loose date check
         "date-time" => value.as_str().is_some_and(|s| s.len() >= 19),
         "uri" => value.is_string(),
-        // Enum types (pipe-separated values)
+        // Enum types (pipe-separated values). The refusal names the
+        // offending value and the whole set, because the caller who
+        // sent `verdict = "__probe__"` needs to know what would have
+        // been accepted, not only that a string was the wrong string.
         s if s.contains('|') => {
             let allowed: Vec<&str> = s.split('|').collect();
-            value.as_str().is_some_and(|v| allowed.contains(&v))
+            return match value.as_str() {
+                Some(v) if allowed.contains(&v) => Ok(()),
+                Some(v) => Err(ValidationError {
+                    field: name.to_string(),
+                    message: format!(
+                        "'{v}' is not one of the allowed values [{}]",
+                        allowed.join(", ")
+                    ),
+                }),
+                None => Err(ValidationError {
+                    field: name.to_string(),
+                    message: format!(
+                        "expected one of [{}], got {}",
+                        allowed.join(", "),
+                        value_type_name(value)
+                    ),
+                }),
+            };
         }
         _ => true, // unknown type spec — accept
     };
@@ -734,6 +754,115 @@ mod tests {
         let err = reg.validate_metadata("billing", &meta).unwrap_err();
         assert!(err.iter().any(|e| e.field == "amount_cents"));
         assert!(err.iter().any(|e| e.field == "currency"));
+    }
+
+    /// The completion contract of a design-review step, read from the
+    /// platform bundle: the union of the `answer-question` bundle's
+    /// fields and the step's own authored fields — exactly what
+    /// `PUT /api/jobs/{id}/steps/{step_id}` checks at `completed`.
+    fn design_review_contract(workflow: &str) -> Vec<boss_core::job::StepField> {
+        crate::seed_loader::load_workflows(crate::registry::platform_bundle_path())
+            .expect("the platform Workflow bundle parses")
+            .into_iter()
+            .find(|w| w.kind == workflow)
+            .unwrap_or_else(|| panic!("the bundle carries {workflow}"))
+            .steps
+            .into_iter()
+            .find(|s| s.title == "design-review")
+            .unwrap_or_else(|| panic!("{workflow} has a design-review step"))
+            .fields
+    }
+
+    fn complete_design_review(
+        workflow: &str,
+        meta: &serde_json::Value,
+    ) -> Result<(), Vec<ValidationError>> {
+        let reg = StepRegistry::v1();
+        reg.validate_metadata("answer-question", meta)
+            .and_then(|()| {
+                StepRegistry::validate_authored_fields(&design_review_contract(workflow), meta)
+            })
+    }
+
+    /// The live defect (backlog item cb9661fe, defect 2). backlog-item's
+    /// and user-feedback's design-review steps are `answer-question`
+    /// steps that authored no fields of their own, so only the kind
+    /// bundle applied at completion — and the bundle declares `verdict`
+    /// as a bare `string` with the vocabulary living in its description.
+    /// A PUT completing the step with `verdict = "__probe__"` returned
+    /// 204 (a305385b). The bundle cannot be tightened (it is unversioned
+    /// — steptype-bundle-ratchet), so the vocabulary is authored on the
+    /// workflow steps, the versioned path `approval` already uses, and
+    /// the refusal names the field, the offending value, and the set.
+    #[test]
+    fn a_design_review_verdict_outside_its_set_is_refused() {
+        for workflow in ["backlog-item", "user-feedback"] {
+            let meta = serde_json::json!({"verdict": "__probe__", "answer": "a placeholder"});
+            let err = match complete_design_review(workflow, &meta) {
+                Err(err) => err,
+                Ok(()) => panic!("{workflow} accepted __probe__"),
+            };
+            let e = err
+                .iter()
+                .find(|e| e.field == "verdict")
+                .expect("the refusal names the field");
+            for needle in ["'__probe__'", "approved", "declined", "answered"] {
+                assert!(
+                    e.message.contains(needle),
+                    "{workflow}: the refusal names the value and the allowed set: {}",
+                    e.message
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_design_review_verdict_in_its_set_is_accepted() {
+        for workflow in ["backlog-item", "user-feedback"] {
+            for v in ["approved", "declined", "answered"] {
+                let meta = serde_json::json!({"verdict": v, "answer": "why"});
+                assert!(
+                    complete_design_review(workflow, &meta).is_ok(),
+                    "{workflow}: {v} is in the set"
+                );
+            }
+        }
+    }
+
+    /// `answer` is free text; the enum check must not leak onto a plain
+    /// `string` field beside the enum.
+    #[test]
+    fn a_non_enum_string_field_beside_an_enum_is_untouched() {
+        let meta = serde_json::json!({"verdict": "approved", "answer": "__probe__"});
+        assert!(complete_design_review("backlog-item", &meta).is_ok());
+    }
+
+    /// Same contract on a step-authored field: the message carries the
+    /// field, the value, and the set, and a non-string says what it got.
+    #[test]
+    fn an_enum_refusal_names_field_value_and_set() {
+        let fields = vec![boss_core::job::StepField {
+            name: "disposition".into(),
+            field_type: "verify|design|build".into(),
+            required: true,
+            filled_by: Default::default(),
+            item_keys: Vec::new(),
+        }];
+        let meta = serde_json::json!({"disposition": "ship"});
+        let err = StepRegistry::validate_authored_fields(&fields, &meta).unwrap_err();
+        assert_eq!(err.len(), 1);
+        assert_eq!(err[0].field, "disposition");
+        for needle in ["'ship'", "verify", "design", "build"] {
+            assert!(err[0].message.contains(needle), "{}", err[0].message);
+        }
+
+        let meta = serde_json::json!({"disposition": 7});
+        let err = StepRegistry::validate_authored_fields(&fields, &meta).unwrap_err();
+        assert!(
+            err[0].message.contains("number"),
+            "a non-string on an enum field says what it got: {}",
+            err[0].message
+        );
     }
 
     #[test]
