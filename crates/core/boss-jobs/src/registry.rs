@@ -1788,6 +1788,8 @@ where
             sign_offs: Vec::new(),
             fields: spec_step.fields.clone(),
             completed_on: None,
+            completed_by: None,
+            completed_at: None,
             metadata,
             notes: None,
             // Snapshot is taken on INSERT in postgres::add_step.

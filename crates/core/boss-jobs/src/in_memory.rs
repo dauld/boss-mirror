@@ -323,6 +323,30 @@ impl JobsRepository for InMemoryJobs {
         Ok(rows)
     }
 
+    async fn events_for_job(
+        &self,
+        job_id: &JobId,
+        limit: i64,
+    ) -> Result<Vec<boss_core::event::Event>, JobsError> {
+        // Mirror the Pg read: newest `limit` rows of the job's slice,
+        // handed back oldest first. `recorded` is append-order, so
+        // "newest first" is a reverse, the limit is taken there, and
+        // the page is reversed again.
+        let want = job_id.to_string();
+        let mut rows: Vec<_> = self
+            .recorded_events()
+            .into_iter()
+            .rev()
+            .filter(|e| {
+                e.payload.get("job_id").and_then(|v| v.as_str()) == Some(want.as_str())
+                    || e.payload.get("id").and_then(|v| v.as_str()) == Some(want.as_str())
+            })
+            .take(limit.max(0) as usize)
+            .collect();
+        rows.reverse();
+        Ok(rows)
+    }
+
     async fn repin_workflow_version_at(
         &self,
         id: &JobId,
@@ -447,6 +471,8 @@ impl JobsRepository for InMemoryJobs {
         if matches!(existing.status, StepStatus::Completed | StepStatus::Skipped) {
             next.status = existing.status;
             next.completed_on = existing.completed_on;
+            next.completed_by = existing.completed_by.clone();
+            next.completed_at = existing.completed_at;
             next.metadata = existing.metadata.clone();
         }
         // The ready stamp is written once, at the write that lands the

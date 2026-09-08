@@ -403,7 +403,11 @@ pub(crate) fn gate_run_body(
 /// absent means a plain gate that will not auto-park. The four fields a
 /// receipt needs (summary/excludes/test/verified) are required together,
 /// so a stamped intent is always enough to file a valid car; a
-/// `backlog_item` edge is optional.
+/// `backlog_item` edge is optional, and so is the PROOF the car will
+/// carry: a `probe` + `expect` pair (the same shape `boss prove`
+/// records, run by `boss prove --from-car` or by the arrival rule once
+/// the car lands) or, for a car only an event can prove, a
+/// `proof_event` line saying which event and how (backlog 28ac45ab).
 #[derive(Debug, Clone, Default)]
 pub struct ParkIntent {
     pub summary: Option<String>,
@@ -411,7 +415,17 @@ pub struct ParkIntent {
     pub test: Option<String>,
     pub verified: Option<String>,
     pub backlog_item: Option<String>,
+    pub probe: Option<String>,
+    pub expect: Option<String>,
+    pub proof_event: Option<String>,
 }
+
+/// The gate-run key each proof flag stamps. The auto-park handler
+/// reads these and writes the car's `proof_*` keys
+/// (`boss_jobs::car::PROOF_*`).
+pub const PARK_PROBE: &str = "park_probe";
+pub const PARK_EXPECT: &str = "park_expect";
+pub const PARK_PROOF_EVENT: &str = "park_proof_event";
 
 impl ParkIntent {
     /// True when no `--park-*` flag was given: a plain gate.
@@ -421,15 +435,44 @@ impl ParkIntent {
             && self.test.is_none()
             && self.verified.is_none()
             && self.backlog_item.is_none()
+            && self.probe.is_none()
+            && self.expect.is_none()
+            && self.proof_event.is_none()
     }
 
     /// Refuse a PARTIAL intent. Auto-park files a car with a full
     /// receipt, so if any park flag is given the four a receipt needs
     /// must all be given — better a refusal here than a car filed with an
     /// empty boundary or an unproven `verified` line.
+    ///
+    /// The proof flags have their own two rules, checked first because
+    /// they are the cheaper mistake: `--park-probe` and `--park-expect`
+    /// go together (a probe with no expectation is `echo hi`, and
+    /// `boss prove` refuses that shape too), and a car is EITHER probed
+    /// or event-bound — a probe next to a `--park-proof-event` says the
+    /// builder did not decide which.
     pub fn require_complete(&self) -> Result<()> {
         if self.is_empty() {
             return Ok(());
+        }
+        match (&self.probe, &self.expect) {
+            (Some(_), None) => anyhow::bail!(
+                "--park-probe needs --park-expect '<string the probe must print>': a probe \
+                 asserting nothing is `echo hi`, which exits 0 too. Say what the probe \
+                 prints when the change is in production."
+            ),
+            (None, Some(_)) => anyhow::bail!(
+                "--park-expect without --park-probe: there is no command for that string \
+                 to come out of. Give --park-probe '<command run against production>'."
+            ),
+            _ => {}
+        }
+        if self.probe.is_some() && self.proof_event.is_some() {
+            anyhow::bail!(
+                "--park-probe and --park-proof-event together: a car is proven by a probe \
+                 the machine can run, OR it waits for an event only a person can observe. \
+                 Pick one — if the probe exists, the car is not event-bound."
+            );
         }
         let missing: Vec<&str> = [
             ("--park-summary", self.summary.is_none()),
@@ -466,6 +509,9 @@ impl ParkIntent {
         put("park_test", &self.test);
         put("park_verified", &self.verified);
         put("park_backlog_item", &self.backlog_item);
+        put(PARK_PROBE, &self.probe);
+        put(PARK_EXPECT, &self.expect);
+        put(PARK_PROOF_EVENT, &self.proof_event);
         Value::Object(m)
     }
 
@@ -480,6 +526,9 @@ impl ParkIntent {
             "park_test": Value::Null,
             "park_verified": Value::Null,
             "park_backlog_item": Value::Null,
+            PARK_PROBE: Value::Null,
+            PARK_EXPECT: Value::Null,
+            PARK_PROOF_EVENT: Value::Null,
         })
     }
 }
@@ -1648,7 +1697,7 @@ mod tests {
             excludes: Some("not that".into()),
             test: Some("ran the suite".into()),
             verified: Some("observed working".into()),
-            backlog_item: None,
+            ..Default::default()
         }
     }
 
@@ -1760,7 +1809,85 @@ mod tests {
         for k in stamped.as_object().unwrap().keys() {
             assert!(p[k].is_null(), "{k} must be nulled so the door deletes it");
         }
-        assert_eq!(p.as_object().unwrap().len(), 5);
+        // Every key a FULL intent can stamp — the four, the backlog
+        // edge, and the three proof keys — must be cleared, or a
+        // re-gate of a landed branch inherits a stale probe.
+        let mut everything = park_full();
+        everything.backlog_item = Some("7c9e376d".into());
+        everything.probe = Some("true".into());
+        everything.expect = Some("x".into());
+        for k in everything.metadata_patch().as_object().unwrap().keys() {
+            assert!(p[k].is_null(), "{k} must be nulled so the door deletes it");
+        }
+        assert!(p[PARK_PROOF_EVENT].is_null());
+        assert_eq!(p.as_object().unwrap().len(), 8);
+    }
+
+    /// THE CAR CARRIES ITS PROBE (28ac45ab). A complete intent may add
+    /// a probe + expect pair; both ride the gate-run under `park_*`
+    /// keys so the auto-park handler copies them onto the car.
+    #[test]
+    fn a_probe_and_its_expectation_ride_the_park_intent_together() {
+        let mut p = park_full();
+        p.probe = Some("kubectl -n boss-dev exec deploy/boss-conductor -- boss gate --help".into());
+        p.expect = Some("park-probe".into());
+        assert!(p.require_complete().is_ok());
+        let m = p.metadata_patch();
+        assert_eq!(
+            m[PARK_PROBE],
+            "kubectl -n boss-dev exec deploy/boss-conductor -- boss gate --help"
+        );
+        assert_eq!(m[PARK_EXPECT], "park-probe");
+        assert!(m.get(PARK_PROOF_EVENT).is_none());
+    }
+
+    /// A probe with no expectation is `echo hi`; an expectation with no
+    /// probe is a string from nowhere. Both refused, each naming the
+    /// missing half.
+    #[test]
+    fn half_a_probe_is_refused_naming_the_other_half() {
+        let mut p = park_full();
+        p.probe = Some("true".into());
+        let e = p.require_complete().unwrap_err().to_string();
+        assert!(e.contains("--park-expect"), "{e}");
+        assert!(e.contains("echo hi"), "{e}");
+
+        let mut p = park_full();
+        p.expect = Some("x".into());
+        let e = p.require_complete().unwrap_err().to_string();
+        assert!(e.contains("--park-probe"), "{e}");
+    }
+
+    /// A probe rides only with a full receipt: `--park-probe` alone is
+    /// the same partial intent as `--park-summary` alone.
+    #[test]
+    fn a_probe_without_a_receipt_is_a_partial_intent() {
+        let p = ParkIntent {
+            probe: Some("true".into()),
+            expect: Some("x".into()),
+            ..Default::default()
+        };
+        assert!(!p.is_empty());
+        let e = p.require_complete().unwrap_err().to_string();
+        assert!(e.contains("--park-summary"), "{e}");
+    }
+
+    /// An event-bound car records the event instead of a probe; the two
+    /// together mean the builder did not decide.
+    #[test]
+    fn an_event_bound_car_records_the_event_and_never_also_a_probe() {
+        let mut p = park_full();
+        p.proof_event = Some("event-bound — the next yard-button cancel".into());
+        assert!(p.require_complete().is_ok());
+        assert_eq!(
+            p.metadata_patch()[PARK_PROOF_EVENT],
+            "event-bound — the next yard-button cancel"
+        );
+
+        p.probe = Some("true".into());
+        p.expect = Some("x".into());
+        let e = p.require_complete().unwrap_err().to_string();
+        assert!(e.contains("Pick one"), "{e}");
     }
 
     #[test]

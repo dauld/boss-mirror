@@ -196,6 +196,8 @@ mod tests {
             fields: Vec::new(),
             metadata: serde_json::Value::Object(metadata),
             completed_on: None,
+            completed_by: None,
+            completed_at: None,
             notes: None,
             embedded_job: None,
             step_plugin_version: 0,

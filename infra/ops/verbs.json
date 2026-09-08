@@ -13,6 +13,10 @@
     "Shape: verbs.<name>.argv is the exact command, literal words plus {N} placeholders; {N} takes",
     "param N (1-based) AFTER pattern validation. A param without `default` is required; `max` is a",
     "numeric ceiling applied after the pattern has proven the value is digits.",
+    "A param may instead carry `one_of`: an exact list of reviewed literal WORDS the packet",
+    "selects among (no pattern — equality only). Because the word comes from this file and",
+    "never from the packet, a literal may lead with '-' (publish-github-pr's --check). With",
+    "`optional: true` an absent arg drops its {N} word from the argv instead of failing.",
     "",
     "Defense, stated once and relied on by ops-runner.sh: the runner never executes a",
     "packet-supplied string. It builds an argv ARRAY from this file — no shell -c, no eval, no",
@@ -101,9 +105,11 @@
       "params": []
     },
     "publish-github-pr": {
-      "about": "MUTATING — open the public mirror's pull request BY MACHINE: the machine step of publish-to-github v6 (design 7b59af2c, David 2026-09-08: the mirror is 'strictly a backup of source protocol' and the PR 'should open from our dauld GitHub account'). The dispatcher rule publish-github-pr-on-open-pr-ready files this when David signs the protocol's approve step. Runs infra/forge/publish-github-pr.sh with no arguments: finds the one open publish-to-github packet whose open-pr step is ready, fetches forge main from the Forgejo repository on this host (a path, no forge token) and the mirror's main anonymously, builds the dated SNAPSHOT commit (git commit-tree <forge tree> -p <mirror main> — the mirror's history is publish snapshots; a merge conflicts in hundreds of files), pushes it to the dauld fork as publish/<date> (forking once if the fork is gone), opens the PR against algedonic-dev/boss as dauld, and completes open-pr with pr_url. Bounded by construction: fixed repos and branch name, nothing packet-supplied; it never touches the mirror's main — the merge on GitHub stays David's. The dauld token is READ from /etc/boss-publish/github.token (credentials registry id dauld-github-token; provisioned by David's token admin) and never printed; a missing token is a loud refusal naming the path. Idempotent per day (force-updates the dated fork branch, reuses an open PR). Its own timeout: a first push of the whole tree exceeds the runner's 30s default. Authorized by David 2026-09-08 via the design packet, same explicit per-verb process as reclaim-disk / rollback-to / converge / mirror-base-images.",
-      "argv": ["/home/david/boss/infra/forge/publish-github-pr.sh"],
-      "params": [],
+      "about": "MUTATING — open the public mirror's pull request BY MACHINE: the machine step of publish-to-github v6 (design 7b59af2c, David 2026-09-08: the mirror is 'strictly a backup of source protocol' and the PR 'should open from our dauld GitHub account'). The dispatcher rule publish-github-pr-on-open-pr-ready files this when David signs the protocol's approve step. Runs infra/forge/publish-github-pr.sh with no packet-supplied text — the one arg it admits is the literal `--check`, the verb's own no-network input check (6964f9e8: without it the only way to exercise the verb through the runner was the real run). A run (no arg) finds the one open publish-to-github packet whose open-pr step is ready, fetches forge main from the Forgejo repository on this host (a path, no forge token) and the mirror's main anonymously, builds the dated SNAPSHOT commit (git commit-tree <forge tree> -p <mirror main> — the mirror's history is publish snapshots; a merge conflicts in hundreds of files), pushes it to the dauld fork as publish/<date> (forking once if the fork is gone), opens the PR against algedonic-dev/boss as dauld, and completes open-pr with pr_url. Bounded by construction: fixed repos and branch name, nothing packet-supplied; it never touches the mirror's main — the merge on GitHub stays David's. The dauld token is READ from /etc/boss-publish/github.token (credentials registry id dauld-github-token; provisioned by David's token admin) and never printed; a missing token is a loud refusal naming the path. Idempotent per day (force-updates the dated fork branch, reuses an open PR). Its own timeout: a first push of the whole tree exceeds the runner's 30s default. Authorized by David 2026-09-08 via the design packet, same explicit per-verb process as reclaim-disk / rollback-to / converge / mirror-base-images.",
+      "argv": ["/home/david/boss/infra/forge/publish-github-pr.sh", "{1}"],
+      "params": [
+        { "name": "mode", "one_of": ["--check"], "optional": true }
+      ],
       "timeout": 600
     }
   }

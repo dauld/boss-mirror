@@ -185,6 +185,24 @@ enum Commands {
         /// Auto-park: the backlog item this change answers (optional).
         #[arg(long)]
         park_backlog_item: Option<String>,
+        /// Auto-park: the probe that proves this change in production,
+        /// written now by the builder who knows what it does. Recorded
+        /// on the car as `proof_probe` and RUN — by `boss prove <car>
+        /// --from-car`, or by the arrival rule once the car lands — in
+        /// exactly the shape `boss prove` records. Needs --park-expect.
+        #[arg(long)]
+        park_probe: Option<String>,
+        /// Auto-park: the string the probe must print for the claim to
+        /// hold (`proof_expect` on the car). Required with --park-probe.
+        #[arg(long)]
+        park_expect: Option<String>,
+        /// Auto-park: for a change only an EVENT can prove (a stalled
+        /// train, a red gate, an operator's cancel) — say which event
+        /// and how to prove it when it fires. Recorded as `proof_event`;
+        /// the car stays hand-proven and the yard counts it as waiting.
+        /// Never with --park-probe.
+        #[arg(long)]
+        park_proof_event: Option<String>,
         /// Gate a branch whose content ALREADY landed on main, stating
         /// why (e.g. to close a dead gate-run packet). Refused by
         /// default: a landed branch's next step is deletion, and a
@@ -336,6 +354,12 @@ enum Commands {
         /// Run the probe and report, without recording anything.
         #[arg(long)]
         dry_run: bool,
+        /// Run the probe the car ITSELF recorded at park time
+        /// (`--park-probe` / `--park-expect` on `boss gate`, copied to
+        /// the car's `proof_probe` / `proof_expect`) instead of one
+        /// given here. `--verified` defaults to the car's summary.
+        #[arg(long, conflicts_with_all = ["probe", "expect", "exit_only"])]
+        from_car: bool,
     },
     /// Publish a branch to the forge, in one verb, and verify it.
     ///
@@ -1036,6 +1060,7 @@ async fn main() -> Result<()> {
             recheck,
             replace,
             dry_run,
+            from_car,
         } => {
             prove::run(
                 &car,
@@ -1047,6 +1072,7 @@ async fn main() -> Result<()> {
                 recheck,
                 replace,
                 dry_run,
+                from_car,
                 chrono::Utc::now(),
             )
             .await
@@ -1077,6 +1103,9 @@ async fn main() -> Result<()> {
             park_test,
             park_verified,
             park_backlog_item,
+            park_probe,
+            park_expect,
+            park_proof_event,
             force_regate,
             hold,
         } => {
@@ -1086,6 +1115,9 @@ async fn main() -> Result<()> {
                 test: park_test,
                 verified: park_verified,
                 backlog_item: park_backlog_item,
+                probe: park_probe,
+                expect: park_expect,
+                proof_event: park_proof_event,
             };
             gate::run(
                 &branch,

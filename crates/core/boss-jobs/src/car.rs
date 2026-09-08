@@ -138,6 +138,50 @@ pub fn step_fields(
 /// cancelled train can release the car by clearing the stamp).
 pub const REVIEW: &str = "Open for review";
 
+/// THE CAR CARRIES ITS PROBE. `boss prove` records a proof as a
+/// command that ran plus the string it had to print; until 2026-09-08
+/// that command was authored by an operator AFTER the car landed —
+/// 43 landed cars sat at `proven: ready` for 2.5 days waiting for one
+/// (backlog 28ac45ab). The builder who parks the car knows what the
+/// change does and can write the probe then, so the park intent
+/// carries it and the car records it under these keys, in exactly the
+/// shape `boss prove --from-car` and the arrival rule re-run. ONE
+/// definition of the key names, read by the gate verb, the auto-park
+/// handler and the prove verb, so the writer and the readers cannot
+/// drift (CLAUDE.md 9a).
+pub const PROOF_PROBE: &str = "proof_probe";
+/// The string the recorded probe must print — never optional: a probe
+/// with no expectation is `echo hi`, which exits 0 too.
+pub const PROOF_EXPECT: &str = "proof_expect";
+/// An EVENT-BOUND car has no mechanical probe: what proves it is a
+/// thing that has to happen (a stalled train, a red gate, an operator's
+/// cancel). Recorded as prose naming the event and how to prove it
+/// when it fires — the `proof_finding` vocabulary operators wrote by
+/// hand on 2026-09-08 — so the yard can count it as waiting rather
+/// than forgotten, and the arrival rule knows to leave it alone.
+pub const PROOF_EVENT: &str = "proof_event";
+
+/// The proof intent a car carries in its metadata: the probe + expect
+/// pair, or the event that stands in for one. Absent keys are omitted
+/// (never nulled), so merging this into a car body or a metadata
+/// PATCH adds what was stated and touches nothing else.
+pub fn proof_intent(
+    probe: Option<&str>,
+    expect: Option<&str>,
+    event: Option<&str>,
+) -> serde_json::Map<String, Value> {
+    let mut m = serde_json::Map::new();
+    let mut put = |k: &str, v: Option<&str>| {
+        if let Some(v) = v.filter(|s| !s.trim().is_empty()) {
+            m.insert(k.to_string(), json!(v));
+        }
+    };
+    put(PROOF_PROBE, probe);
+    put(PROOF_EXPECT, expect);
+    put(PROOF_EVENT, event);
+    m
+}
+
 /// A step by its registry slug, falling back to its title. The same
 /// lookup the conductor uses; one definition (CLAUDE.md 9a).
 pub fn find_step<'a>(job: &'a Value, slug: &str, title: &str) -> Option<&'a Value> {
@@ -277,6 +321,21 @@ mod tests {
 
     fn at(s: &str) -> chrono::DateTime<chrono::Utc> {
         chrono::DateTime::parse_from_rfc3339(s).unwrap().into()
+    }
+
+    /// The proof keys are written only when stated, so a car with no
+    /// probe carries no `proof_probe: null` for a reader to trip on.
+    #[test]
+    fn proof_intent_writes_only_what_was_stated() {
+        assert!(proof_intent(None, None, None).is_empty());
+        assert!(proof_intent(Some("  "), None, None).is_empty());
+        let p = proof_intent(Some("curl -s x | grep y"), Some("y"), None);
+        assert_eq!(p[PROOF_PROBE], "curl -s x | grep y");
+        assert_eq!(p[PROOF_EXPECT], "y");
+        assert!(!p.contains_key(PROOF_EVENT));
+        let e = proof_intent(None, None, Some("event-bound — the next yard cancel"));
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[PROOF_EVENT], "event-bound — the next yard cancel");
     }
 
     #[test]

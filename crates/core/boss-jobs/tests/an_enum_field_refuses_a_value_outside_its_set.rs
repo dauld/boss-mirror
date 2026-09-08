@@ -136,6 +136,8 @@ fn step(id: &str, kind: &str, fields: Vec<StepField>) -> Step {
         sign_offs: Vec::new(),
         fields,
         completed_on: None,
+        completed_by: None,
+        completed_at: None,
         metadata: serde_json::json!({}),
         notes: None,
         step_plugin_version: 0,

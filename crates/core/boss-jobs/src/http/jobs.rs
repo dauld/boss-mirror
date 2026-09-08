@@ -1038,30 +1038,94 @@ pub(super) async fn get_job<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
     Path(id): Path<String>,
 ) -> Response {
-    // The fast path: a full uuid, the id the whole system stores and
-    // every write holds. Untouched.
-    if let Some(job_id) = parse_job_id(&id) {
-        return job_detail_response(&state, &job_id).await;
+    match resolve_path_job_id(&state, &id).await {
+        Ok(job_id) => job_detail_response(&state, &job_id).await,
+        Err(refusal) => refusal,
     }
-    // Otherwise, resolve the id everyone actually holds — the 8-char
-    // prefix printed in journals, arrival reports and messages. Nothing
-    // matches → 404 (genuinely absent); more than one → 409 (the caller
-    // asked a two-answer question, and guessing is the wrong move on a
-    // lookup that precedes a write). True garbage stays 400.
+}
+
+/// The job a `{id}` path segment names.
+///
+/// The fast path: a full uuid, the id the whole system stores and
+/// every write holds. Otherwise, resolve the id everyone actually
+/// holds — the 8-char prefix printed in journals, arrival reports and
+/// messages. Nothing matches → 404 (genuinely absent); more than one →
+/// 409 (the caller asked a two-answer question, and guessing is the
+/// wrong move on a lookup that precedes a write). True garbage stays
+/// 400.
+async fn resolve_path_job_id<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &JobsApiState<R, B>,
+    id: &str,
+) -> Result<boss_core::job::JobId, Response> {
+    if let Some(job_id) = parse_job_id(id) {
+        return Ok(job_id);
+    }
     let prefix = id.to_ascii_lowercase();
     if !is_id_prefix(&prefix) {
-        return (StatusCode::BAD_REQUEST, "invalid job id").into_response();
+        return Err((StatusCode::BAD_REQUEST, "invalid job id").into_response());
     }
     match state.jobs.resolve_job_id_prefix(&prefix).await {
         Ok(matches) => match matches.as_slice() {
-            [] => (StatusCode::NOT_FOUND, "job not found").into_response(),
-            [one] => job_detail_response(&state, one).await,
-            _ => (
+            [] => Err((StatusCode::NOT_FOUND, "job not found").into_response()),
+            [one] => Ok(*one),
+            _ => Err((
                 StatusCode::CONFLICT,
                 "ambiguous id prefix: more than one job matches",
             )
-                .into_response(),
+                .into_response()),
         },
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()),
+    }
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+pub(super) struct JobEventsQuery {
+    /// Max rows. Clamped to [1, 1000]; default 200. The NEWEST rows of
+    /// the packet's history are kept, answered oldest first.
+    pub limit: Option<i64>,
+}
+
+/// `GET /api/jobs/{id}/events` — the packet's own slice of the audit
+/// log, oldest first (c17871fe).
+///
+/// The log has always held who flipped every step and when; nothing
+/// read it per packet, so on 2026-09-08 an operator session could not
+/// tell a human's approval from a rule copying a field, and had to
+/// ask. Each row hoists the four things that question needs — `kind`,
+/// `actor` (the `_actor` the event was signed with), `at`, `step_id`
+/// (null for job-level events) — beside the row's `event_id`,
+/// `source`, and its `payload` verbatim, so the hoist is a
+/// convenience and not a second instrument.
+pub(super) async fn list_job_events<R: JobsRepository + 'static, B: EventBus + 'static>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+    Path(id): Path<String>,
+    Query(q): Query<JobEventsQuery>,
+) -> Response {
+    let job_id = match resolve_path_job_id(&state, &id).await {
+        Ok(job_id) => job_id,
+        Err(refusal) => return refusal,
+    };
+    let limit = q.limit.unwrap_or(200).clamp(1, 1000);
+    match state.jobs.events_for_job(&job_id, limit).await {
+        Ok(rows) => {
+            let job = job_id.to_string();
+            let data: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "event_id": e.id,
+                        "kind": e.kind,
+                        "actor": e.payload.get("_actor").cloned().unwrap_or(serde_json::Value::Null),
+                        "at": e.timestamp,
+                        "job_id": job,
+                        "step_id": e.payload.get("step_id").cloned().unwrap_or(serde_json::Value::Null),
+                        "source": e.source,
+                        "payload": e.payload,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({ "data": data })).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

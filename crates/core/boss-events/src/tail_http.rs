@@ -254,6 +254,39 @@ pub async fn recent_by_kind(
     .map_err(|e| e.to_string())
 }
 
+/// Everything the log holds about ONE job, oldest first — the
+/// per-packet audit read behind boss-jobs' `GET /api/jobs/{id}/events`
+/// (c17871fe). Lives here for the same reason [`recent_by_kind`] does:
+/// the SQL against `audit_log` stays in the crate that owns the table.
+///
+/// A job's slice is every row whose payload names it: step events
+/// carry the job under `job_id`, the job's own lifecycle events carry
+/// it as `id`. Both are expression-indexed (migration 202609081700).
+///
+/// `limit` is applied to the NEWEST rows (`ORDER BY id DESC LIMIT`)
+/// and the page is then reversed, so a packet with a long history
+/// answers with its most recent `limit` events in the order they
+/// happened — not its first `limit`, which would hide the completion
+/// the reader came for.
+pub async fn recent_for_job(
+    pool: &PgPool,
+    job_id: &str,
+    limit: i64,
+) -> Result<Vec<AuditEntry>, String> {
+    let mut rows = sqlx::query_as::<_, AuditEntry>(
+        "SELECT event_id, timestamp, source, kind, payload FROM audit_log \
+         WHERE payload->>'job_id' = $1 OR payload->>'id' = $1 \
+         ORDER BY id DESC LIMIT $2",
+    )
+    .bind(job_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    rows.reverse();
+    Ok(rows)
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct TailQuery {
     /// Exact-match filter on the `source` column (e.g. "jobs").

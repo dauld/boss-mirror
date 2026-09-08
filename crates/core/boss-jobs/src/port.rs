@@ -571,6 +571,19 @@ pub trait JobsRepository: Send + Sync {
         limit: i64,
     ) -> Result<Vec<serde_json::Value>, JobsError>;
 
+    /// Everything the log holds about ONE job, oldest first: every
+    /// recorded event whose payload names the job (step events under
+    /// `job_id`, the job's own lifecycle events under `id`). The
+    /// per-packet audit read (c17871fe) — the provenance the log already
+    /// holds, one read from the step. `limit` keeps the NEWEST rows:
+    /// a long history answers with its most recent `limit` events in
+    /// the order they happened.
+    async fn events_for_job(
+        &self,
+        job_id: &JobId,
+        limit: i64,
+    ) -> Result<Vec<boss_core::event::Event>, JobsError>;
+
     /// Re-pin a packet to a different protocol version.
     ///
     /// A DELIBERATELY SEPARATE VERB, not a field on `update_job`.

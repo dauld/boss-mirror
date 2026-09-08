@@ -197,6 +197,8 @@ fn fixture_step(step_id: &str, job_id: &str, sort_order: i32, title: &str) -> St
         sign_offs: Vec::new(),
         fields: Vec::new(),
         completed_on: None,
+        completed_by: None,
+        completed_at: None,
         metadata: serde_json::json!({}),
         notes: None,
         step_plugin_version: 0,

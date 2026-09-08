@@ -188,6 +188,9 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
         .route("/api/jobs", post(create_job::<R, B>))
         .route("/api/jobs/{id}", get(get_job::<R, B>))
         .route("/api/jobs/{id}", put(update_job::<R, B>))
+        // The packet's own slice of the audit log — who flipped each
+        // step and when, one read from the step (c17871fe).
+        .route("/api/jobs/{id}/events", get(list_job_events::<R, B>))
         // Top-level metadata merge — the atomic alternative to the
         // GET → spread → full PUT read-modify-write. `null` removes.
         .route("/api/jobs/{id}/metadata", patch(patch_job_metadata::<R, B>))

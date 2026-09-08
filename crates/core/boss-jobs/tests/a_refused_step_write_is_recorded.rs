@@ -118,6 +118,8 @@ fn step(id: &str, status: StepStatus, metadata: serde_json::Value) -> Step {
             StepStatus::Completed => NaiveDate::from_ymd_opt(2026, 8, 20),
             _ => None,
         },
+        completed_by: None,
+        completed_at: None,
         metadata,
         notes: None,
         step_plugin_version: 0,

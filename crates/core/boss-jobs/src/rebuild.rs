@@ -218,9 +218,10 @@ async fn upsert_step(
         INSERT INTO steps (id, job_id, kind, title, spec_slug, assignee_id, status, sort_order,
                            blocked_by, sign_offs_required, assurance_required, sign_offs, fields,
                            completed_on, metadata, notes, step_plugin_version,
-                           embedded_job, created_at, updated_at, became_ready_at)
+                           embedded_job, created_at, updated_at, became_ready_at,
+                           completed_by, completed_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19,
-                CASE WHEN $7 = 'ready' THEN $19 END)
+                CASE WHEN $7 = 'ready' THEN $19 END, $20, $21)
         ON CONFLICT (id) DO UPDATE SET
             job_id = EXCLUDED.job_id,
             kind = EXCLUDED.kind,
@@ -247,7 +248,13 @@ async fn upsert_step(
             -- that PREDATE the column even get it backfilled here,
             -- which is the rebuilder doing its one job: reproducing
             -- truth from the log.
-            became_ready_at = COALESCE(steps.became_ready_at, EXCLUDED.became_ready_at)
+            became_ready_at = COALESCE(steps.became_ready_at, EXCLUDED.became_ready_at),
+            -- The completion stamps replay verbatim from the event
+            -- that carried them: the STEP_UPDATED payload is the whole
+            -- Step, so a rebuild reproduces who and when exactly as the
+            -- live write stamped them (c17871fe).
+            completed_by = EXCLUDED.completed_by,
+            completed_at = EXCLUDED.completed_at
         RETURNING (xmax = 0) AS inserted
         "#,
     )
@@ -277,6 +284,8 @@ async fn upsert_step(
     .bind(step.step_plugin_version)
     .bind(step.embedded_job.map(|j| *j.inner().as_uuid()))
     .bind(ts)
+    .bind(step.completed_by.as_ref().map(ToString::to_string))
+    .bind(step.completed_at)
     .fetch_one(&mut *conn)
     .await
     .map_err(|e| RebuildError::Storage(e.to_string()))?;

@@ -469,6 +469,21 @@ pub struct Step {
     pub sign_offs: Vec<SignOffStamp>,
     #[serde(default)]
     pub completed_on: Option<NaiveDate>,
+    /// Who completed the step: the actor the API signed the completing
+    /// write with. Server-stamped at the flip to `completed`, never
+    /// client-supplied — a body's value is overwritten — and frozen
+    /// with the row afterwards. A human session and a machine actor are
+    /// told apart by the id itself (`emp-…` vs `automation:…` vs
+    /// `<mode>:<model>`), which is the whole point: a decision a person
+    /// made must be distinguishable from a rule copying a field after
+    /// the fact (c17871fe). `None` on steps that predate the stamp or
+    /// have not completed.
+    #[serde(default)]
+    pub completed_by: Option<crate::actor::ActorId>,
+    /// The instant the step completed, from the same clock that dates
+    /// `completed_on`. Same ownership as `completed_by`.
+    #[serde(default)]
+    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default = "default_metadata")]
     pub metadata: serde_json::Value,
     #[serde(default)]
@@ -528,6 +543,8 @@ impl Step {
             sign_offs: Vec::new(),
             fields: Vec::new(),
             completed_on: None,
+            completed_by: None,
+            completed_at: None,
             metadata: serde_json::Value::Object(serde_json::Map::new()),
             notes: None,
             step_plugin_version: 0,

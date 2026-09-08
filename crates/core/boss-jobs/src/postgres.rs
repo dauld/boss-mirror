@@ -103,6 +103,8 @@ struct StepRow {
     notes: Option<String>,
     step_plugin_version: i32,
     embedded_job: Option<uuid::Uuid>,
+    completed_by: Option<String>,
+    completed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Joined row backing [`PgJobs::list_assignments`] — a `StepRow`
@@ -169,6 +171,15 @@ fn row_to_step(r: StepRow) -> Result<Step, JobsError> {
         sign_offs: serde_json::from_value(r.sign_offs).unwrap_or_default(),
         fields: serde_json::from_value(r.fields).unwrap_or_default(),
         completed_on: r.completed_on,
+        // `ActorId::from_str` is infallible: a stored id parses to the
+        // typed actor it was written from (bare → Human,
+        // `automation:` → Automation, `<mode>:<model>` → Agent).
+        completed_by: r
+            .completed_by
+            .as_deref()
+            .map(str::parse)
+            .and_then(Result::ok),
+        completed_at: r.completed_at,
         metadata: r.metadata,
         notes: r.notes,
         step_plugin_version: r.step_plugin_version,
@@ -597,6 +608,29 @@ impl JobsRepository for PgJobs {
             .collect()
     }
 
+    async fn events_for_job(
+        &self,
+        job_id: &JobId,
+        limit: i64,
+    ) -> Result<Vec<boss_core::event::Event>, JobsError> {
+        // Same ownership rule as `recent_events_by_kind`: the SQL
+        // against `audit_log` lives in boss-events. Rows come back
+        // oldest first, already the newest `limit` of the job's slice.
+        let rows = boss_events::tail_http::recent_for_job(&self.pool, &job_id.to_string(), limit)
+            .await
+            .map_err(JobsError::Storage)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| boss_core::event::Event {
+                id: r.event_id,
+                timestamp: r.timestamp,
+                source: r.source,
+                kind: r.kind,
+                payload: r.payload,
+            })
+            .collect())
+    }
+
     async fn repin_workflow_version_at(
         &self,
         id: &JobId,
@@ -839,13 +873,15 @@ impl JobsRepository for PgJobs {
             INSERT INTO steps (id, job_id, kind, title, spec_slug, assignee_id, status, sort_order,
                                blocked_by, sign_offs_required, assurance_required, sign_offs, fields,
                                completed_on, metadata, notes, step_plugin_version,
-                               embedded_job, created_at, updated_at, became_ready_at)
+                               embedded_job, created_at, updated_at, became_ready_at,
+                               completed_by, completed_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19,
                     -- Born ready IS the ready flip: a step materialized
                     -- straight into `ready` (the open-time readiness
                     -- pass) became an obligation at this INSERT. The
                     -- queue-age lens (2a0b034e) reads this stamp.
-                    CASE WHEN $7 = 'ready' THEN $19 END)
+                    CASE WHEN $7 = 'ready' THEN $19 END,
+                    $20, $21)
             ON CONFLICT (id) DO NOTHING
             "#,
         )
@@ -872,6 +908,8 @@ impl JobsRepository for PgJobs {
         .bind(version)
         .bind(step.embedded_job.map(|j| *j.inner().as_uuid()))
         .bind(now)
+        .bind(step.completed_by.as_ref().map(ToString::to_string))
+        .bind(step.completed_at)
         .execute(&mut *tx)
         .await
         .map_err(|e| JobsError::Storage(e.to_string()))?;
@@ -893,7 +931,7 @@ impl JobsRepository for PgJobs {
 
     async fn get_step(&self, id: &StepId) -> Result<Option<Step>, JobsError> {
         let row = sqlx::query_as::<_, StepRow>(
-            "SELECT id, job_id, kind, title, spec_slug, assignee_id, status, sort_order, blocked_by, sign_offs_required, assurance_required, sign_offs, fields, completed_on, metadata, notes, step_plugin_version, embedded_job FROM steps WHERE id = $1",
+            "SELECT id, job_id, kind, title, spec_slug, assignee_id, status, sort_order, blocked_by, sign_offs_required, assurance_required, sign_offs, fields, completed_on, metadata, notes, step_plugin_version, embedded_job, completed_by, completed_at FROM steps WHERE id = $1",
         )
         .bind(*id.inner().as_uuid())
         .fetch_optional(&self.pool)
@@ -957,6 +995,19 @@ impl JobsRepository for PgJobs {
                 fields = CASE
                     WHEN status IN ('completed', 'skipped') THEN fields
                     ELSE $13
+                END,
+                -- Who and when (c17871fe): the handler stamps both at
+                -- the flip to `completed`, and the row freezes them
+                -- with the status — the same CASE `completed_on` takes,
+                -- so a stale re-PUT can no more re-attribute a finished
+                -- step than it can demote one.
+                completed_by = CASE
+                    WHEN status IN ('completed', 'skipped') THEN completed_by
+                    ELSE $14
+                END,
+                completed_at = CASE
+                    WHEN status IN ('completed', 'skipped') THEN completed_at
+                    ELSE $15
                 END
             WHERE id = $1
             "#,
@@ -974,6 +1025,8 @@ impl JobsRepository for PgJobs {
         .bind(step.embedded_job.map(|j| *j.inner().as_uuid()))
         .bind(now)
         .bind(serde_json::to_value(&step.fields).unwrap_or_default())
+        .bind(step.completed_by.as_ref().map(ToString::to_string))
+        .bind(step.completed_at)
         .execute(&mut *tx)
         .await
         .map_err(|e| JobsError::Storage(e.to_string()))?;
@@ -1033,7 +1086,8 @@ impl JobsRepository for PgJobs {
             WHERE id = $1 AND status NOT IN ('completed', 'skipped')
             RETURNING id, job_id, kind, title, spec_slug, assignee_id, status, sort_order,
                       blocked_by, sign_offs_required, assurance_required, sign_offs, fields,
-                      completed_on, metadata, notes, step_plugin_version, embedded_job
+                      completed_on, metadata, notes, step_plugin_version, embedded_job,
+                      completed_by, completed_at
             "#,
         )
         .bind(*id.inner().as_uuid())
@@ -1198,7 +1252,7 @@ impl JobsRepository for PgJobs {
 
     async fn list_steps(&self, job_id: &JobId) -> Result<Vec<Step>, JobsError> {
         let rows = sqlx::query_as::<_, StepRow>(
-            "SELECT id, job_id, kind, title, spec_slug, assignee_id, status, sort_order, blocked_by, sign_offs_required, assurance_required, sign_offs, fields, completed_on, metadata, notes, step_plugin_version, embedded_job FROM steps WHERE job_id = $1 ORDER BY sort_order",
+            "SELECT id, job_id, kind, title, spec_slug, assignee_id, status, sort_order, blocked_by, sign_offs_required, assurance_required, sign_offs, fields, completed_on, metadata, notes, step_plugin_version, embedded_job, completed_by, completed_at FROM steps WHERE job_id = $1 ORDER BY sort_order",
         )
         .bind(*job_id.inner().as_uuid())
         .fetch_all(&self.pool)
@@ -1223,7 +1277,7 @@ impl JobsRepository for PgJobs {
         let rows = sqlx::query_as::<_, AssignmentRowSql>(
             "SELECT s.id, s.job_id, s.kind, s.title, s.spec_slug, s.assignee_id, s.status, \
                     s.sort_order, s.blocked_by, s.sign_offs_required, s.assurance_required, s.sign_offs, \
-                    s.fields, s.completed_on, s.metadata, s.notes, \
+                    s.fields, s.completed_on, s.metadata, s.notes, s.completed_by, s.completed_at, \
                     s.step_plugin_version, s.embedded_job, \
                     j.title AS job_title, j.due_on, j.kind AS workflow, j.workflow_version, \
                     j.subject_kind, j.subject_id, j.priority, \
@@ -1273,7 +1327,7 @@ impl JobsRepository for PgJobs {
         let rows = sqlx::query_as::<_, AssignmentRowSql>(
             "SELECT s.id, s.job_id, s.kind, s.title, s.spec_slug, s.assignee_id, s.status, \
                     s.sort_order, s.blocked_by, s.sign_offs_required, s.assurance_required, s.sign_offs, \
-                    s.fields, s.completed_on, s.metadata, s.notes, \
+                    s.fields, s.completed_on, s.metadata, s.notes, s.completed_by, s.completed_at, \
                     s.step_plugin_version, s.embedded_job, \
                     j.title AS job_title, j.due_on, j.kind AS workflow, j.workflow_version, \
                     j.subject_kind, j.subject_id, j.priority, \

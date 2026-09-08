@@ -26,7 +26,16 @@
 #   newline-split of jq's argv output below exact rather than hopeful.
 # - Anything else — unknown verb, wrong arg shape, pattern miss —
 #   drives the packet to its `refused` terminal with the reason in
-#   `output`. Refusing loudly in the SoR beats guessing.
+#   `output` AND, named, in `reason` — the same text the journal line
+#   carries, so a refusal never has to be re-derived from the host's
+#   journal (6964f9e8; CLAUDE.md §Diagnosis: a verdict must name what
+#   failed). Refusing loudly in the SoR beats guessing.
+# - A param may be a LITERAL LIST (`one_of`) instead of a pattern: the
+#   packet selects one of the reviewed words in the allowlist, and
+#   nothing packet-supplied reaches the argv — so a word there may
+#   lead with '-' (publish-github-pr's `--check`). With `optional`,
+#   an absent arg DROPS its placeholder word from the argv rather
+#   than passing an empty one.
 #
 # ## Behaviour
 #
@@ -172,7 +181,11 @@ while [ "$i" -lt "$n" ]; do
               | $args[$i] as $raw
               | if $raw == null then
                   (if $p | has("default") then {ok: $p.default}
+                   elif ($p.optional // false) == true then {omit: true}
                    else {err: "missing required arg \($p.name)"} end)
+                elif $p | has("one_of") then
+                  (if any($p.one_of[]; . == $raw) then {ok: $raw}
+                   else {err: "arg \($p.name) value \($raw) is not one of \($p.one_of | join(", "))"} end)
                 elif ($raw | test($p.pattern)) | not then
                   {err: "arg \($p.name) value \($raw) does not match \($p.pattern)"}
                 elif ($p | has("max")) and (($raw | tonumber) > $p.max) then
@@ -184,7 +197,8 @@ while [ "$i" -lt "$n" ]; do
               else {argv: [ $spec.argv[]
                             | if test("^\\{[0-9]+\\}$")
                               then . as $ph
-                                   | $vals[($ph | ltrimstr("{") | rtrimstr("}") | tonumber) - 1].ok
+                                   | $vals[($ph | ltrimstr("{") | rtrimstr("}") | tonumber) - 1]
+                                   | if has("omit") then empty else .ok end
                               else . end ],
                     timeout: ($spec.timeout // null)}
               end
@@ -229,12 +243,16 @@ ARGV
     fi
 
     # Merge, never replace (see header). The output rides --rawfile so
-    # arbitrary command output stays data.
+    # arbitrary command output stays data. A refusal also writes the
+    # reason under its own name: `output` on a refusal IS the reason
+    # (one source — the same string the journal line below prints),
+    # and a reader of the packet should not have to know that.
     merged=$(printf '%s' "$step" | jq -c --rawfile out "$outf" \
         --arg d "$disp" --arg rc "$rc_str" --arg h "$HOST_ID" '
         (.metadata // {})
         + {disposition: $d, output: $out, runner_host: $h}
-        + (if $rc == "" then {} else {exit_code: $rc} end)')
+        + (if $rc == "" then {} else {exit_code: $rc} end)
+        + (if $d == "refused" then {reason: $out} else {} end)')
     payloadf="$workdir/payload"
     printf '%s' "$merged" | jq -c '{status: "completed", metadata: .}' > "$payloadf"
 

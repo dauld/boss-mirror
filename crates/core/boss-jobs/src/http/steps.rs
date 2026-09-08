@@ -160,7 +160,7 @@ pub(super) async fn add_step<R: JobsRepository + 'static, B: EventBus + 'static>
             .ambient_actor()
             .unwrap_or_else(|| boss_core::actor::ActorId::Automation("platform".into())),
     };
-    let mut stamp = state.publisher.stamp_with_actor(actor).await;
+    let mut stamp = state.publisher.stamp_with_actor(actor.clone()).await;
     // Step events inherit the parent packet's admission-fixed
     // `simulated` flag (the packet, not the request's transport
     // context, is the source of truth). A step posted against a
@@ -168,6 +168,16 @@ pub(super) async fn add_step<R: JobsRepository + 'static, B: EventBus + 'static>
     // anyway.
     if let Ok(Some(job)) = state.jobs.get_job(&job_id).await {
         stamp = stamp.with_simulated(job.simulated);
+    }
+    // The completion stamps are server-owned here as on the PUT
+    // (c17871fe): a body cannot name who completed a step or when. A
+    // step born `completed` is a completion, and carries the same
+    // stamps the flip would have written; any other status has none.
+    step.completed_by = None;
+    step.completed_at = None;
+    if step.status == StepStatus::Completed {
+        step.completed_by = Some(actor);
+        step.completed_at = Some(stamp.timestamp);
     }
     let step_event = stamp.event(events::STEP_CREATED, events::step_state_payload(&step));
     if let Err(e) = state
@@ -343,6 +353,14 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // are materialization data — a PUT body controls neither.
     step.sign_offs = old.sign_offs.clone();
     step.sign_offs_required = old.sign_offs_required.clone();
+
+    // So are the completion stamps: `completed_by` / `completed_at`
+    // are the server's record of who flipped the step and when
+    // (c17871fe). Whatever the body says, the stored values ride
+    // through; the flip below overwrites them with the signing actor
+    // and the clock. A client cannot choose its own provenance.
+    step.completed_by = old.completed_by.clone();
+    step.completed_at = old.completed_at;
 
     // `authority_role` is immutable across PUTs. Carry the persisted
     // value forward so a body can neither raise nor lower the required
@@ -620,6 +638,18 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
             .ambient_actor()
             .unwrap_or_else(|| boss_core::actor::ActorId::Automation("platform".into())),
     };
+
+    // A COMPLETION NAMES ITS ACTOR (c17871fe). The step carries the
+    // same actor the event is signed with, and the same instant — so
+    // the row and the log agree, and a reader of the step does not
+    // have to go to the log to learn who flipped it. Stamped at the
+    // flip only; the carry-forward above keeps a finished step's
+    // stamps through every later write, and the adapters freeze them
+    // with the row.
+    if is_flipping_to_done {
+        step.completed_by = Some(actor.clone());
+        step.completed_at = Some(now);
+    }
 
     // In-process dispatch for the `workflow-publish` StepType. When a
     // step of this kind flips to Done, read `workflow_spec` from

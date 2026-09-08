@@ -16,6 +16,16 @@ for name in ("rollback-to","hold-converge","release-converge","publish-github-pr
     os.path.isfile(script) or sys.exit(f"FAIL: {name} points at a script not in the tree: {spec['argv'][0]}")
     os.access(script, os.X_OK) or sys.exit(f"FAIL: {name}'s script is not executable")
     for p in spec["params"]:
+        if "one_of" in p:
+            # A literal list is exact-match only, and each word is
+            # reviewed file content: whitespace-free, so the runner's
+            # newline-split argv stays exact. A leading dash is allowed
+            # HERE precisely because the packet cannot supply the word.
+            "pattern" in p and sys.exit(f"FAIL: {name}.{p['name']} mixes one_of with a pattern — a literal list is equality only")
+            words=p["one_of"]
+            (isinstance(words,list) and words and all(isinstance(w,str) and w and not re.search(r"\s",w) for w in words)) \
+                or sys.exit(f"FAIL: {name}.{p['name']}.one_of must be a non-empty list of whitespace-free words")
+            continue
         pat=p["pattern"]
         for bad in (" ", "\t", "\n"):
             re.fullmatch(pat, "a"+bad+"b") and sys.exit(f"FAIL: {name}.{p['name']} admits whitespace")
@@ -27,15 +37,24 @@ rb=v["rollback-to"]["params"][0]
 re.fullmatch(rb["pattern"],"2683908") or sys.exit("FAIL: a 7-char sha is refused")
 re.fullmatch(rb["pattern"],"b2814ef") or sys.exit("FAIL: a real short sha is refused")
 re.fullmatch(rb["pattern"],"latest") and sys.exit("FAIL: 'latest' passes as a sha")
-# publish-github-pr takes NO packet-supplied argument (fixed repos, a
-# dated branch) and declares its own timeout, because a first push of
-# the whole tree exceeds the runner's 30s default — and the runner must
-# actually read that field, or the number is decoration.
+# publish-github-pr takes NO packet-supplied TEXT (fixed repos, a dated
+# branch): its one param is a literal list the packet can only select
+# from, and the only literal is --check — the verb's own no-network
+# input check (6964f9e8), so the verb is exercisable through the runner
+# without the real run; optional, because the real run passes no arg.
+# It declares its own timeout, because a first push of the whole tree
+# exceeds the runner's 30s default — and the runner must actually read
+# that field, or the number is decoration.
 pub=v["publish-github-pr"]
-pub["params"] and sys.exit("FAIL: publish-github-pr must take no packet-supplied args")
+free=[p["name"] for p in pub["params"] if "one_of" not in p]
+free and sys.exit(f"FAIL: publish-github-pr must take no packet-supplied text (pattern params: {free})")
+lits=sorted(w for p in pub["params"] for w in p["one_of"])
+lits==["--check"] or sys.exit(f"FAIL: publish-github-pr must admit exactly the literal --check, got {lits}")
+all(p.get("optional") is True for p in pub["params"]) or sys.exit("FAIL: publish-github-pr's --check must be optional — the real run passes no arg")
 isinstance(pub.get("timeout"), int) and pub["timeout"] >= 120 or sys.exit("FAIL: publish-github-pr must declare a timeout of at least 120s")
 runner=open(f"{repo}/infra/ops/ops-runner.sh").read()
 "$spec.timeout" in runner and "verb_timeout" in runner or sys.exit("FAIL: ops-runner.sh does not honour a verb's declared timeout")
+"one_of" in runner and "optional" in runner or sys.exit("FAIL: ops-runner.sh does not read one_of/optional params — the literal allowlist is decoration")
 print("verbs: rollback-to, hold-converge, release-converge, publish-github-pr are bounded and authorized")
 PY
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
@@ -89,5 +108,50 @@ chmod 600 "$tmp/etc/github.token"
 # network to prove.
 "${checkenv[@]}" BOSS_GITHUB_TOKEN_FILE="$tmp/etc/github.token" bash "$pub" >/dev/null 2>&1 \
     && fail "a run without BOSS_JOBS_URL did not refuse"
-echo "the-controls-are-bounded-verbs: self-test ok — four bounded, authorized ops verbs; the hold round-trips through the file the runner reads, with no HOME in the environment; a hold needs a reason; a rollback needs a sha; publish-github-pr --check passes on complete inputs, refuses by path without the token, refuses a world-readable token, and a run refuses without a system of record"
+# THROUGH THE RUNNER: the allowed literal is exercised the way a packet
+# would — ops-runner.sh against a stubbed system of record (a GET serves
+# one open packet, a PUT records the completion) and the real allowlist
+# with its script path rewritten to this tree. `--check` must be
+# ANSWERED (the verb's own check ran and said ok); a word outside the
+# literal list must be REFUSED with the reason on the step, named,
+# and identical to the journal line (6964f9e8: the reason lived only
+# in the forge journal). The runner is sh + jq; this box may lack jq.
+runner_line="runner path not exercised here (no jq on this box; the gate image has it)"
+if command -v jq >/dev/null 2>&1; then
+    mkdir -p "$tmp/rbin" "$tmp/rstate"
+    printf '#!/bin/sh\nexit 0\n' > "$tmp/rbin/gh"; chmod +x "$tmp/rbin/gh"
+    cat > "$tmp/rbin/curl" <<'EOF'
+#!/bin/sh
+# The system of record, stubbed: a PUT records its payload; a GET serves the fixture.
+for a in "$@"; do case "$a" in @*) cp "${a#@}" "$STUB_PUT"; exit 0;; esac; done
+cat "$STUB_JOBS"
+EOF
+    chmod +x "$tmp/rbin/curl"
+    sed "s#/home/david/boss/#$repo/#g" "$repo/infra/ops/verbs.json" > "$tmp/verbs.json"
+    packet() { # $1 = args JSON array
+        printf '{"data":[{"id":"aaaaaaaa-0000-4000-8000-000000000000","status":"open","metadata":{"host":"forge","verb":"publish-github-pr","args":%s},"steps":[{"id":"s-execute","spec_slug":"execute","status":"ready","metadata":{"authority_role":"platform-admin"}}]}]}' "$1" > "$tmp/jobs.json"
+    }
+    run_runner() {
+        env -i PATH="$tmp/rbin:$PATH" HOST_ID=forge BOSS_JOBS_URL=http://sor.invalid \
+            OPS_VERBS_FILE="$tmp/verbs.json" STUB_JOBS="$tmp/jobs.json" STUB_PUT="$tmp/put.json" \
+            BOSS_PUBLISH_STATE_DIR="$tmp/rstate" BOSS_FORGE_REPO_PATH="$tmp/forge.git" \
+            BOSS_GITHUB_TOKEN_FILE="$tmp/etc/github.token" \
+            sh "$repo/infra/ops/ops-runner.sh" 2>&1
+    }
+    rm -f "$tmp/put.json"; packet '["--check"]'
+    out=$(run_runner) || fail "the runner failed on publish-github-pr --check: $out"
+    [[ -f "$tmp/put.json" ]] || fail "the runner completed no step for --check: $out"
+    [[ "$(jq -r .metadata.disposition "$tmp/put.json")" == answered ]] || fail "--check was not answered through the runner: $(cat "$tmp/put.json") / $out"
+    jq -r .metadata.output "$tmp/put.json" | grep -q -- '--check ok' || fail "--check through the runner did not report ok: $(cat "$tmp/put.json")"
+    rm -f "$tmp/put.json"; packet '["--force"]'
+    out=$(run_runner) || fail "the runner failed refusing --force: $out"
+    [[ "$(jq -r .metadata.disposition "$tmp/put.json")" == refused ]] || fail "--force was not refused: $(cat "$tmp/put.json")"
+    reason=$(jq -r '.metadata.reason // empty' "$tmp/put.json")
+    [[ -n "$reason" ]] || fail "the refusal wrote no reason on the step: $(cat "$tmp/put.json")"
+    [[ "$reason" == *"not one of --check"* ]] || fail "the reason does not name the literal list: $reason"
+    [[ "$reason" == "$(jq -r .metadata.output "$tmp/put.json")" ]] || fail "reason and output differ on a refusal"
+    grep -qF -- "refused aaaaaaaa — $reason" <<<"$out" || fail "the journal line does not carry the same reason: $out"
+    runner_line="through the runner, publish-github-pr --check is answered and --force is refused with the reason on the step"
+fi
+echo "the-controls-are-bounded-verbs: self-test ok — four bounded, authorized ops verbs; the hold round-trips through the file the runner reads, with no HOME in the environment; a hold needs a reason; a rollback needs a sha; publish-github-pr --check passes on complete inputs, refuses by path without the token, refuses a world-readable token, and a run refuses without a system of record; $runner_line"
 exit 0

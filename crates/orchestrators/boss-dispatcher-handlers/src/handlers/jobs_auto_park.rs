@@ -67,6 +67,11 @@ struct AutoParkInputs {
     backlog_item: Option<String>,
     delivery_channel: Option<String>,
     receipt: Receipt,
+    /// The car's proof intent, copied VERBATIM from the gate-run's
+    /// `park_probe` / `park_expect` / `park_proof_event` onto the car's
+    /// `proof_*` keys (28ac45ab) — the same copy-don't-rebuild rule the
+    /// receipt lives by. Empty for a car whose builder recorded none.
+    proof: serde_json::Map<String, Value>,
 }
 
 /// PURE: read the auto-park inputs from a gate-run packet and its
@@ -128,6 +133,11 @@ fn auto_park_inputs(
             .and_then(Value::as_str)
             .map(str::to_string),
         receipt,
+        proof: car::proof_intent(
+            md.get("park_probe").and_then(Value::as_str),
+            md.get("park_expect").and_then(Value::as_str),
+            md.get("park_proof_event").and_then(Value::as_str),
+        ),
     })
 }
 
@@ -166,6 +176,23 @@ fn landed_skip(cars: &[Value], branch: &str) -> Option<Value> {
             &train[..8.min(train.len())],
         ),
     }))
+}
+
+/// PURE: the car body, with the proof intent merged into its metadata.
+/// The shared builder owns the packet shape; the proof keys are added
+/// here rather than threaded through its signature because `boss park`
+/// (the hand verb auto-park replaces) has no probe to pass.
+fn car_body_with_proof(inputs: &AutoParkInputs) -> Value {
+    let mut body = car::car_body(
+        &inputs.branch,
+        &inputs.summary,
+        inputs.backlog_item.as_deref(),
+        inputs.delivery_channel.as_deref(),
+    );
+    if let Some(md) = body.get_mut("metadata").and_then(Value::as_object_mut) {
+        md.extend(inputs.proof.clone());
+    }
+    body
 }
 
 /// POST a body and return the response JSON — the create needs the new
@@ -338,11 +365,20 @@ impl Handler for JobsAutoPark {
                 &inputs.receipt.head[..12.min(inputs.receipt.head.len())],
                 ev.job_id
             );
+            // A re-gate carries the CURRENT proof intent too: the
+            // builder may have written (or fixed) the probe on the
+            // re-gate, and the parked car should carry what its
+            // latest green stamped, not what its first one did.
+            let mut patch =
+                car::regate_patch(&inputs.receipt, &note, inputs.delivery_channel.as_deref());
+            if let Some(m) = patch.as_object_mut() {
+                m.extend(inputs.proof.clone());
+            }
             write_json(
                 &self.client,
                 reqwest::Method::PATCH,
                 &format!("{}/api/jobs/{}/metadata", self.base(), id),
-                &car::regate_patch(&inputs.receipt, &note, inputs.delivery_channel.as_deref()),
+                &patch,
                 &ctx.rule_name,
             )
             .await?;
@@ -354,12 +390,7 @@ impl Handler for JobsAutoPark {
         // File the car: POST the packet, then complete its three steps
         // with the shared builder — the same sequence `boss park::run`
         // performs, receipt verbatim.
-        let body = car::car_body(
-            &inputs.branch,
-            &inputs.summary,
-            inputs.backlog_item.as_deref(),
-            inputs.delivery_channel.as_deref(),
-        );
+        let body = car_body_with_proof(&inputs);
         let created = post_json_return(
             &self.client,
             &format!("{}/api/jobs", self.base()),
@@ -456,6 +487,56 @@ mod tests {
         assert_eq!(got.receipt.head, "deadbeef");
         assert_eq!(got.receipt.mode, "full");
         assert!(got.receipt.raw.contains("\"fails\":[]"));
+    }
+
+    /// THE CAR CARRIES ITS PROBE (28ac45ab). The gate's `park_probe` /
+    /// `park_expect` land on the car as `proof_probe` / `proof_expect`,
+    /// verbatim, under the keys core defines — the pair `boss prove
+    /// --from-car` and the arrival rule read back.
+    #[test]
+    fn a_park_probe_rides_onto_the_car_verbatim() {
+        let gr = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+            "park_probe": "kubectl -n boss-dev exec deploy/boss-conductor -- boss gate --help | grep -m1 park-probe",
+            "park_expect": "park-probe",
+        }));
+        let got = auto_park_inputs(&gr, &green_step_meta()).expect("parks");
+        let body = car_body_with_proof(&got);
+        let md = &body["metadata"];
+        assert_eq!(
+            md[car::PROOF_PROBE],
+            "kubectl -n boss-dev exec deploy/boss-conductor -- boss gate --help | grep -m1 park-probe"
+        );
+        assert_eq!(md[car::PROOF_EXPECT], "park-probe");
+        assert!(md.get(car::PROOF_EVENT).is_none());
+        // The rest of the body is the shared builder's, untouched.
+        assert_eq!(md["branch"], "fix/x");
+        assert_eq!(body["kind"], "ship-a-change");
+    }
+
+    /// An event-bound car records the event; a car with no proof
+    /// intent records nothing (no `proof_probe: null` for a reader to
+    /// trip on).
+    #[test]
+    fn an_event_bound_or_unprobed_car_records_exactly_what_it_was_given() {
+        let gr = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+            "park_proof_event": "event-bound — needs a stalled train",
+        }));
+        let got = auto_park_inputs(&gr, &green_step_meta()).expect("parks");
+        let md = car_body_with_proof(&got)["metadata"].clone();
+        assert_eq!(md[car::PROOF_EVENT], "event-bound — needs a stalled train");
+        assert!(md.get(car::PROOF_PROBE).is_none());
+
+        let plain = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+        }));
+        let got = auto_park_inputs(&plain, &green_step_meta()).expect("parks");
+        assert!(got.proof.is_empty());
+        let md = car_body_with_proof(&got)["metadata"].clone();
+        for k in [car::PROOF_PROBE, car::PROOF_EXPECT, car::PROOF_EVENT] {
+            assert!(md.get(k).is_none(), "{k} must be absent, not null");
+        }
     }
 
     #[test]

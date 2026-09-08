@@ -485,6 +485,79 @@ fn read_proof(raw: &Value) -> Result<Recorded> {
     })
 }
 
+/// The probe a car recorded for itself at park time, read back as the
+/// pair `boss prove` would have been given by hand.
+///
+/// THE CAR CARRIES ITS PROBE (28ac45ab): `boss gate --park-probe/
+/// --park-expect` stamps the intent, the auto-park handler copies it
+/// onto the car under `boss_jobs::car::PROOF_*`, and this is the read
+/// side — `--from-car` here, and the arrival rule's runner. The keys
+/// are one definition in core so the three cannot drift.
+///
+/// Refuses, naming the door, when the car recorded nothing — and says
+/// so differently for an EVENT-BOUND car, whose builder decided a
+/// machine cannot prove it: running "no probe" as a probe would be the
+/// silent yes this verb exists to end.
+pub(crate) fn car_probe(car: &Value) -> Result<(String, String)> {
+    let md = |k: &str| {
+        car.get("metadata")
+            .and_then(|m| m.get(k))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    if let Some(event) = md(boss_jobs::car::PROOF_EVENT) {
+        bail!(
+            "this car is EVENT-BOUND, not probed: {event}\n\n\
+             Its builder recorded the event that proves it instead of a command, so there \
+             is nothing for --from-car to run. Prove it by hand when the event fires: \
+             boss prove <car> --probe '<what you observed>' --expect '<string>' --verified '<prose>'."
+        );
+    }
+    let Some(probe) = md(boss_jobs::car::PROOF_PROBE) else {
+        bail!(
+            "this car recorded no `{}`, so --from-car has nothing to run. The probe is \
+             written at park time — `boss gate --park-probe '<cmd>' --park-expect '<string>'` \
+             — by the builder who knows what the change does. Give one now with --probe \
+             and --expect instead.",
+            boss_jobs::car::PROOF_PROBE
+        );
+    };
+    let Some(expect) = md(boss_jobs::car::PROOF_EXPECT) else {
+        bail!(
+            "this car recorded a `{}` but no `{}` — a probe asserting nothing is `echo hi`. \
+             The gate verb refuses that pair, so the car was edited by hand; give --expect \
+             here or fix the car's metadata.",
+            boss_jobs::car::PROOF_PROBE,
+            boss_jobs::car::PROOF_EXPECT
+        );
+    };
+    Ok((probe, expect))
+}
+
+/// What a car-carried proof MEANS, when the operator did not say: the
+/// car's own summary — the claim the change makes, which is exactly
+/// what the probe checks in production. `verified` stays required in
+/// the record; it just has a source the builder already wrote.
+pub(crate) fn car_verified(car: &Value, given: Option<String>) -> Result<String> {
+    if let Some(v) = given {
+        return Ok(v);
+    }
+    car.get("metadata")
+        .and_then(|m| m.get("summary"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "--verified is required: the car has no summary to fall back on, so say \
+                 what the probe means, in prose, for a reader"
+            )
+        })
+}
+
 fn host() -> String {
     std::process::Command::new("hostname")
         .output()
@@ -529,6 +602,7 @@ pub(crate) async fn run(
     recheck: bool,
     replace: bool,
     dry: bool,
+    from_car: bool,
     // The operator's now, taken once at the CLI entry point and passed
     // in — the same shape `train::run` uses, so nothing down here reads
     // the wall clock on its own.
@@ -598,8 +672,21 @@ pub(crate) async fn run(
         };
     }
 
+    // --from-car: the probe the builder recorded at park time, and the
+    // car's summary as the default prose. The clap-level conflicts
+    // keep --probe/--expect/--exit-only off this path.
+    let (probe, expect, verified) = if from_car {
+        let (p, e) = car_probe(car)?;
+        println!("boss prove: {short} runs the probe it carried from park time");
+        (Some(p), Some(e), Some(car_verified(car, verified)?))
+    } else {
+        (probe, expect, verified)
+    };
     let probe = probe.ok_or_else(|| {
-        anyhow::anyhow!("--probe is required: proof is a command that ran, not a sentence")
+        anyhow::anyhow!(
+            "--probe is required: proof is a command that ran, not a sentence \
+             (or --from-car, to run the probe the car recorded at park time)"
+        )
     })?;
     let verified = verified.ok_or_else(|| {
         anyhow::anyhow!("--verified is required: say what the probe means, in prose, for a reader")
@@ -791,6 +878,57 @@ mod tests {
         assert_eq!(o.exit, 3);
         assert_eq!(o.stdout, "hello");
         assert_eq!(o.stderr, "oops");
+    }
+
+    /// THE CAR CARRIES ITS PROBE (28ac45ab). `--from-car` reads the
+    /// pair the auto-park handler copied from the gate's park intent,
+    /// under the one set of keys core defines.
+    #[test]
+    fn from_car_reads_the_probe_the_car_recorded() {
+        let car = serde_json::json!({
+            "id": "c1", "metadata": {
+                "summary": "The yard shows the probe count. And why.",
+                "proof_probe": "curl -s http://sor/api/yard | grep -c unproven",
+                "proof_expect": "unproven"
+            }
+        });
+        let (p, e) = car_probe(&car).unwrap();
+        assert_eq!(p, "curl -s http://sor/api/yard | grep -c unproven");
+        assert_eq!(e, "unproven");
+        // The prose defaults to the car's own claim, and an explicit
+        // --verified still wins.
+        assert_eq!(
+            car_verified(&car, None).unwrap(),
+            "The yard shows the probe count. And why."
+        );
+        assert_eq!(car_verified(&car, Some("seen".into())).unwrap(), "seen");
+    }
+
+    /// No probe recorded → a refusal that names the park-time door; an
+    /// event-bound car → a refusal that quotes the event, so nobody
+    /// runs "nothing" and records a yes.
+    #[test]
+    fn from_car_refuses_an_unprobed_or_event_bound_car() {
+        let bare = serde_json::json!({"id": "c1", "metadata": {"summary": "x"}});
+        let e = car_probe(&bare).unwrap_err().to_string();
+        assert!(e.contains("--park-probe"), "{e}");
+
+        let event = serde_json::json!({"id": "c1", "metadata": {
+            "proof_event": "event-bound — the next yard-button cancel"
+        }});
+        let e = car_probe(&event).unwrap_err().to_string();
+        assert!(e.contains("EVENT-BOUND"), "{e}");
+        assert!(e.contains("yard-button cancel"), "quotes the event: {e}");
+
+        // A probe with no expectation is refused here too — the gate
+        // refuses the pair, so this is a hand-edited car.
+        let half = serde_json::json!({"id": "c1", "metadata": {"proof_probe": "true"}});
+        let e = car_probe(&half).unwrap_err().to_string();
+        assert!(e.contains("echo hi"), "{e}");
+
+        // And with no summary there is no default prose to fall back on.
+        let e = car_verified(&half, None).unwrap_err().to_string();
+        assert!(e.contains("--verified is required"), "{e}");
     }
 
     /// Guards the bug class that made a hand-rolled check lie on

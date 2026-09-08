@@ -120,6 +120,8 @@ async fn seed_publish_step(
         sign_offs: Vec::new(),
         fields: Vec::new(),
         completed_on: None,
+        completed_by: None,
+        completed_at: None,
         metadata,
         notes: None,
         step_plugin_version: 0,
