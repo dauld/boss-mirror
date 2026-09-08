@@ -108,7 +108,7 @@ fn build_app() -> (Router, Arc<InMemoryJobs>) {
 /// The authored completion contract of `workflow`'s design-review
 /// step, read from the platform bundle a deployment actually seeds.
 fn design_review_fields(workflow: &str) -> Vec<StepField> {
-    boss_jobs::seed_loader::load_workflows("../../../infra/platform/workflows.toml")
+    boss_jobs::seed_loader::load_workflows(boss_jobs::registry::platform_bundle_path())
         .expect("the platform bundle parses")
         .into_iter()
         .find(|w| w.kind == workflow)

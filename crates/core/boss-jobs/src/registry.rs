@@ -436,7 +436,7 @@ fn workflow_design_spec() -> WorkflowSpec {
 // Kept only as the fidelity test's expected value — see
 // `the_platform_bundle_matches_the_specs_it_replaced`. Out of
 // `platform_workflows()`, so the lib build has no caller: the kind
-// now lives in infra/platform/workflows.toml and an operator edit
+// now lives in infra/platform/workflows/ and an operator edit
 // to it survives a boot, which is the whole point of the move.
 #[cfg(test)]
 fn ship_a_change_spec() -> WorkflowSpec {
@@ -1171,17 +1171,24 @@ fn backlog_item_spec() -> WorkflowSpec {
 /// never as TOML-loader exceptions, never as direct
 /// `INSERT INTO workflows` SQL.
 /// The path to the platform Workflow bundle, resolved from this crate.
+///
+/// A DIRECTORY, one `<kind>.toml` per protocol, read in file-name order
+/// by `seed_loader::load_workflows`. It was one file until 2026-09-08,
+/// when two protocol cars parked in one day and the second was left
+/// behind on the tail conflict — the same shape CLAUDE.md §9a records
+/// for `manifest.txt`, collapsed the same way: adding a kind is
+/// dropping a file in, touching no shared line.
 pub fn platform_bundle_path() -> &'static str {
     concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../../infra/platform/workflows.toml"
+        "/../../../infra/platform/workflows"
     )
 }
 
 /// EVERY kind a deployment has: the Rust roster PLUS the bundle.
 ///
 /// `platform_workflows()` alone stopped being that answer the moment
-/// kinds began moving to infra/platform/workflows.toml, and the gap is
+/// kinds began moving to infra/platform/workflows/, and the gap is
 /// silent in exactly the wrong way — a test that seeds only the roster
 /// still compiles, still runs, and gets `unknown or inactive job kind`
 /// at the first create, so the assertion it was written for never
@@ -1219,7 +1226,7 @@ pub fn platform_workflows() -> Vec<WorkflowSpec> {
         design_doc_review_spec(),
         // `workflow-design`, `regenerate-deployment`, `backlog-item`,
         // `ship-a-change`, `user-feedback` and `pr-train`
-        // are NOT missing — they moved to infra/platform/workflows.toml
+        // are NOT missing — they moved to infra/platform/workflows/
         // and are supplied by `boss-platform-workflow-seed`
         // (protocols-as-data, step 1: the kinds with no traffic first,
         // so a wrong loader can hurt nothing).
@@ -1363,7 +1370,7 @@ pub fn feedback_branch_for_disposition(disposition: &str) -> Option<FeedbackBran
     // READS THE BUNDLE, because that is where the protocol lives now.
     // The §9a point is unchanged — this still derives the mapping from
     // the protocol rather than restating it — but the source moved from
-    // a Rust function to `infra/platform/workflows.toml` (e332a320).
+    // a Rust function to `infra/platform/workflows/` (e332a320).
     // Parsed once: the bundle is a build-time artefact of the tree, not
     // something that changes under a running process.
     static SPEC: std::sync::OnceLock<Option<WorkflowSpec>> = std::sync::OnceLock::new();
@@ -3800,11 +3807,8 @@ mod tests {
     fn the_bundle_is_as_viable_as_the_code() {
         use crate::step_registry::StepRegistry;
         use crate::workflow_lint::validate_all;
-        let bundled = crate::seed_loader::load_workflows(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../infra/platform/workflows.toml"
-        ))
-        .expect("the platform bundle parses");
+        let bundled = crate::seed_loader::load_workflows(super::platform_bundle_path())
+            .expect("the platform bundle parses");
         let registry = StepRegistry::v1();
         let findings = validate_all(&bundled, &registry);
         assert!(
@@ -3815,10 +3819,7 @@ mod tests {
 
     #[test]
     fn the_platform_bundle_matches_the_specs_it_replaced() {
-        let bundle_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../infra/platform/workflows.toml"
-        );
+        let bundle_path = super::platform_bundle_path();
         let bundled =
             crate::seed_loader::load_workflows(bundle_path).expect("the platform bundle parses");
         let expected = [
@@ -5988,11 +5989,8 @@ mod tests {
         // about which file holds it, and a conversion that quietly
         // dropped this assertion would have removed the guard while
         // the flow it guards kept running.
-        let kinds = crate::seed_loader::load_workflows(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../infra/platform/workflows.toml"
-        ))
-        .expect("the platform bundle parses");
+        let kinds = crate::seed_loader::load_workflows(super::platform_bundle_path())
+            .expect("the platform bundle parses");
         let ship = kinds
             .iter()
             .find(|k| k.kind == "ship-a-change")
@@ -6035,7 +6033,7 @@ mod tests {
         // register, and this assertion is the half that enforces it.
         // The count only ever goes DOWN now: protocols-as-data.md's
         // direction of travel is that a kind leaves this roster for
-        // infra/platform/workflows.toml and never comes back, and a
+        // infra/platform/workflows/ and never comes back, and a
         // new protocol never touches Rust at all.
         assert_eq!(
             kinds.len(),
@@ -6111,11 +6109,8 @@ mod tests {
         // regenerate-deployment got below. A guarantee that stops being
         // checked because its subject changed file is a guarantee that
         // was never really held.
-        let bundled_kinds = crate::seed_loader::load_workflows(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../infra/platform/workflows.toml"
-        ))
-        .expect("the platform bundle parses");
+        let bundled_kinds = crate::seed_loader::load_workflows(super::platform_bundle_path())
+            .expect("the platform bundle parses");
         let ship = bundled_kinds
             .iter()
             .find(|k| k.kind == "ship-a-change")
@@ -6149,11 +6144,8 @@ mod tests {
         // assertions follow it there rather than lapsing. A guarantee
         // that stops being checked because its subject moved house is
         // a guarantee that was deleted quietly.
-        let bundled = crate::seed_loader::load_workflows(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../infra/platform/workflows.toml"
-        ))
-        .expect("the platform bundle parses");
+        let bundled = crate::seed_loader::load_workflows(super::platform_bundle_path())
+            .expect("the platform bundle parses");
         let regen = bundled
             .iter()
             .find(|k| k.kind == "regenerate-deployment")
@@ -6382,11 +6374,8 @@ mod tests {
         // asserted where the lifecycle lives. The alternative — dropping
         // the test with the kind — is how a four-step contract quietly
         // becomes whatever the TOML happens to say.
-        let kinds = crate::seed_loader::load_workflows(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../infra/platform/workflows.toml"
-        ))
-        .expect("the platform bundle parses");
+        let kinds = crate::seed_loader::load_workflows(super::platform_bundle_path())
+            .expect("the platform bundle parses");
         let design = kinds
             .iter()
             .find(|k| k.kind == "workflow-design")

@@ -49,7 +49,7 @@
 //! Tenants override `owning_team` to their tenant id. Pass `default_owner`
 //! into [`load_workflows_with_owning_team`] to set it for every row.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -150,7 +150,10 @@ struct TerminalToml {
     outcome: String,
 }
 
-/// Load a tenant's `workflows.toml` and materialize `WorkflowSpec`s.
+/// Load a Workflow bundle and materialize `WorkflowSpec`s. The bundle
+/// is either one file (`examples/<tenant>/seeds/workflows.toml`) or a
+/// DIRECTORY of kind files (`infra/platform/workflows/<kind>.toml`) —
+/// see [`load_workflows_with_owning_team`] for the directory rules.
 /// Owning team defaults to `"platform"` (matching `WorkflowSpec::platform_seed`).
 pub fn load_workflows(path: impl AsRef<Path>) -> Result<Vec<WorkflowSpec>, SeedLoaderError> {
     load_workflows_with_owning_team(path, "platform")
@@ -159,15 +162,85 @@ pub fn load_workflows(path: impl AsRef<Path>) -> Result<Vec<WorkflowSpec>, SeedL
 /// Same as [`load_workflows`] but stamps every spec with
 /// `owning_team = default_owner` (typically the tenant id, e.g.
 /// `"brewery"` or `"used-device-shop"`).
+///
+/// A DIRECTORY is a bundle too: every `*.toml` file in it, read in
+/// filename order, each holding exactly ONE `[[workflow]]` whose
+/// `kind` is the file's stem. The platform bundle is shaped this way
+/// so that adding a protocol is dropping a file in — two cars adding
+/// kinds touch no shared line (CLAUDE.md §9a; the same collapse
+/// `infra/postgres/schema/` had). The one-kind-per-file rule is what
+/// makes the listing the definition: `ls` answers "which kinds", and
+/// a file named for a kind it does not hold is refused, not read.
+/// Non-TOML files (a README) are ignored.
 pub fn load_workflows_with_owning_team(
     path: impl AsRef<Path>,
     default_owner: &str,
 ) -> Result<Vec<WorkflowSpec>, SeedLoaderError> {
     let path_ref = path.as_ref();
-    let path_str = path_ref.display().to_string();
-    let text = std::fs::read_to_string(path_ref)
+    if path_ref.is_dir() {
+        return load_workflow_dir(path_ref, default_owner);
+    }
+    load_workflow_file(path_ref, default_owner)
+}
+
+fn load_workflow_file(
+    path: &Path,
+    default_owner: &str,
+) -> Result<Vec<WorkflowSpec>, SeedLoaderError> {
+    let path_str = path.display().to_string();
+    let text = std::fs::read_to_string(path)
         .map_err(|e| SeedLoaderError::Io(path_str.clone(), e.to_string()))?;
     parse_workflows(&text, default_owner, &path_str)
+}
+
+/// The kind files of a bundle directory, in the order the loader
+/// reads them: every `*.toml` directly inside `dir`, sorted by file
+/// name. An empty listing is an error — a bundle directory with no
+/// kinds is a wrong path, not an empty bundle.
+pub fn bundle_files(dir: &Path) -> Result<Vec<PathBuf>, SeedLoaderError> {
+    let dir_str = dir.display().to_string();
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| SeedLoaderError::Io(dir_str.clone(), e.to_string()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("toml"))
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        return Err(SeedLoaderError::Io(
+            dir_str,
+            "no *.toml kind files in the bundle directory".into(),
+        ));
+    }
+    Ok(files)
+}
+
+fn load_workflow_dir(
+    dir: &Path,
+    default_owner: &str,
+) -> Result<Vec<WorkflowSpec>, SeedLoaderError> {
+    let mut specs = Vec::new();
+    for file in bundle_files(dir)? {
+        let file_str = file.display().to_string();
+        let stem = file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let loaded = load_workflow_file(&file, default_owner)?;
+        let kinds: Vec<&str> = loaded.iter().map(|s| s.kind.as_str()).collect();
+        if kinds != [stem.as_str()] {
+            return Err(SeedLoaderError::Parse(
+                file_str,
+                format!(
+                    "a kind file holds exactly one [[workflow]] named after the file \
+                     (expected kind `{stem}`, found {kinds:?})"
+                ),
+            ));
+        }
+        specs.extend(loaded);
+    }
+    Ok(specs)
 }
 
 /// Parse TOML text directly. Useful for inline tests; the file
@@ -750,5 +823,109 @@ title_template = "Open"
             errs.is_empty(),
             "used-device-shop Workflows failed Workflow lint: {errs:#?}"
         );
+    }
+
+    /// A directory is a bundle: every `*.toml` in it, in file-name
+    /// order regardless of the order they were written, one kind per
+    /// file, named for it. Anything that is not a kind file (a README)
+    /// is ignored.
+    #[test]
+    fn a_bundle_directory_loads_its_kind_files_in_name_order() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("zeta.toml"), viable_row("zeta")).unwrap();
+        std::fs::write(dir.path().join("alpha.toml"), viable_row("alpha")).unwrap();
+        std::fs::write(dir.path().join("README.md"), "# not a kind file\n").unwrap();
+        let specs = load_workflows_with_owning_team(dir.path(), "platform").unwrap();
+        let kinds: Vec<&str> = specs.iter().map(|s| s.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["alpha", "zeta"]);
+        assert!(specs.iter().all(|s| s.owning_team == "platform"));
+        let files = bundle_files(dir.path()).unwrap();
+        let names: Vec<_> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["alpha.toml", "zeta.toml"]);
+    }
+
+    /// The file name IS the kind list. A file named for a kind it does
+    /// not hold, or holding two, is refused by name — read wrong, it
+    /// would seed a protocol nobody can find by `ls`.
+    #[test]
+    fn a_kind_file_must_hold_exactly_the_kind_it_is_named_for() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("liar.toml"), viable_row("truth")).unwrap();
+        let e = load_workflows(dir.path()).unwrap_err().to_string();
+        assert!(e.contains("liar.toml"), "{e}");
+        assert!(e.contains("expected kind `liar`"), "{e}");
+        assert!(e.contains("[\"truth\"]"), "{e}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let two = format!("{}\n{}", viable_row("pair"), viable_row("other"));
+        std::fs::write(dir.path().join("pair.toml"), two).unwrap();
+        let e = load_workflows(dir.path()).unwrap_err().to_string();
+        assert!(
+            e.contains("pair.toml") && e.contains("exactly one [[workflow]]"),
+            "{e}"
+        );
+    }
+
+    /// A bundle directory with no kind files is a wrong path, not an
+    /// empty bundle — the seed must not report "nothing to do" over a
+    /// typo.
+    #[test]
+    fn an_empty_bundle_directory_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# nothing here\n").unwrap();
+        let e = load_workflows(dir.path()).unwrap_err().to_string();
+        assert!(e.contains("no *.toml kind files"), "{e}");
+    }
+
+    /// A lint failure inside a directory names the FILE, so the author
+    /// of a thirty-file bundle is not sent to grep for the row.
+    #[test]
+    fn a_directory_lint_failure_names_the_kind_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ok.toml"), viable_row("ok")).unwrap();
+        std::fs::write(
+            dir.path().join("broken.toml"),
+            r#"
+[[workflow]]
+kind = "broken"
+label = "Broken"
+category = "platform"
+subject_kinds = ["custom"]
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+"#,
+        )
+        .unwrap();
+        match load_workflows(dir.path()) {
+            Err(SeedLoaderError::LintFailed { file, .. }) => {
+                assert!(file.ends_with("broken.toml"), "{file}")
+            }
+            other => panic!("expected a lint failure naming broken.toml, got {other:?}"),
+        }
+    }
+
+    fn viable_row(kind: &str) -> String {
+        format!(
+            r#"[[workflow]]
+kind = "{kind}"
+label = "{kind}"
+category = "platform"
+subject_kinds = ["custom"]
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+[[workflow.step]]
+title = "done"
+kind = "outcome"
+ready_when = "steps.opened.done"
+terminal = {{ outcome = "completed" }}
+"#
+        )
     }
 }

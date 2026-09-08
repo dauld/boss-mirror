@@ -7500,7 +7500,7 @@ mod tests {
         // A consist refusal must name the check, not merely that one failed.
         let failed = vec![LintFailure {
             name: "a-kind-bundle-does-not-tighten".into(),
-            files: vec!["infra/platform/workflows.toml".into()],
+            files: vec!["crates/core/boss-jobs/seeds/step_types.toml".into()],
             output: "python3: command not found".into(),
         }];
         let reason = consist_refusal_reason(&failed, 200);

@@ -1,0 +1,121 @@
+# ---------------------------------------------------------------------
+# THE TWO MOST-EDITED PROTOCOLS, moved here from Rust (e332a320).
+#
+# user-feedback reached v13 and pr-train v16 through the API, and both
+# were ALSO maintained by hand in registry.rs so a fresh install seeded
+# the same thing — 453 lines of Rust kept equal to production by
+# somebody's diligence. There was no drift when this was measured, and
+# that is the point: the mechanism was a habit, and CLAUDE.md 9a is
+# explicit that a habit standing where a mechanism belongs is the thing
+# to fix. Nothing compared the two, because bootstrap_reconcile
+# correctly preserves operator-edited rows and therefore never looks.
+# The failure mode was silent and only reachable on a fresh install —
+# the one path with no operator to notice.
+#
+# These blocks were GENERATED from the live v13 and v16 specs and
+# verified to round-trip: emitted, parsed back, and compared
+# field-by-field against the live JSON before the Rust was deleted.
+# ---------------------------------------------------------------------
+
+[[workflow]]
+kind = "user-feedback"
+label = "User feedback"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Feedback a user sent from the chrome bar. The Subject is the surface it is about (a `custom` Subject whose id is the route path), so \"what have people said about this page\" is a Subject-history question rather than a report someone has to build. Modelled as a Job deliberately: feedback is work, and work that lives outside the Job model is work the system cannot route, own, or audit. Triage forks on a disposition, so routing an item is a recorded decision that opens the next step."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "submitted"
+kind = "trigger"
+ready_when = "true"
+title_template = "Feedback submitted"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "user-submits-feedback" }
+
+[[workflow.step]]
+title = "triage"
+kind = "task"
+ready_when = "steps.submitted.done"
+title_template = "Triage feedback"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "disposition"
+field_type = "reproduce|design|build|duplicate|needs-info|decline"
+required = true
+[[workflow.step.fields]]
+name = "finding"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "investigate"
+kind = "task"
+ready_when = "steps.triage.done AND steps.triage.metadata.disposition = \"reproduce\""
+title_template = "Reproduce and investigate"
+authority_role = "platform-admin"
+metadata_defaults = { disposition = "resolved" }
+[[workflow.step.fields]]
+name = "disposition"
+field_type = "resolved|design|build|needs-info|duplicate|decline"
+required = true
+[[workflow.step.fields]]
+name = "finding"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "design-review"
+kind = "answer-question"
+ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"design\") OR (steps.investigate.done AND steps.investigate.metadata.disposition = \"design\")"
+title_template = "Decide the design"
+authority_role = "platform-admin"
+metadata_defaults = { verdict = "" }
+# The verdict vocabulary the three outcome predicates below fork on,
+# authored on the step so it is enforced at completion (see the same
+# field on backlog-item's design-review for why not the bundle). The
+# `""` default above stays: it is the key boss-expr needs present
+# before the step completes, and an empty string can never be an enum
+# member, so the lint reads it as the unset placeholder.
+[[workflow.step.fields]]
+name = "verdict"
+field_type = "approved|declined|answered"
+required = true
+
+[[workflow.step]]
+title = "build"
+kind = "task"
+ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"build\") OR (steps.investigate.done AND steps.investigate.metadata.disposition = \"build\") OR (steps.design-review.done AND steps.design-review.metadata.verdict = \"approved\")"
+title_template = "Build the change"
+authority_role = "platform-admin"
+
+[[workflow.step]]
+title = "needs-info"
+kind = "task"
+ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"needs-info\") OR (steps.investigate.done AND steps.investigate.metadata.disposition = \"needs-info\")"
+title_template = "Waiting on the reporter"
+authority_role = "platform-admin"
+
+[[workflow.step]]
+title = "duplicate"
+kind = "outcome"
+ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"duplicate\") OR (steps.investigate.done AND steps.investigate.metadata.disposition = \"duplicate\")"
+title_template = "Closed as a duplicate"
+terminal = { outcome = "duplicate" }
+metadata_defaults = { outcome_kind = "withdrawn" }
+
+[[workflow.step]]
+title = "declined"
+kind = "outcome"
+ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"decline\") OR (steps.investigate.done AND steps.investigate.metadata.disposition = \"decline\") OR (steps.design-review.done AND steps.design-review.metadata.verdict = \"declined\")"
+title_template = "Closed without action"
+terminal = { outcome = "declined" }
+metadata_defaults = { outcome_kind = "aborted" }
+
+[[workflow.step]]
+title = "closed"
+kind = "outcome"
+ready_when = "(steps.investigate.done AND steps.investigate.metadata.disposition = \"resolved\") OR (steps.design-review.done AND steps.design-review.metadata.verdict = \"answered\") OR steps.build.done OR steps.needs-info.done"
+title_template = "Feedback closed"
+terminal = { outcome = "completed" }
+metadata_defaults = { outcome_kind = "completed" }

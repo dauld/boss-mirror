@@ -67,6 +67,7 @@ tower = { workspace = true }
 http-body-util = "0.1"
 sqlx = { version = "0.8", default-features = false, features = ["macros", "runtime-tokio", "postgres", "chrono", "json", "uuid"] }
 proptest = "1"
+tempfile = "3"
 
 [lints]
 workspace = true

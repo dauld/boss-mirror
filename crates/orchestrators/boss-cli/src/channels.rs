@@ -396,6 +396,7 @@ fn path_weight(path: &str) -> u8 {
     if p.starts_with("infra/postgres/schema/")
         || p.contains("/seeds/")
         || p.ends_with("workflows.toml")
+        || p.starts_with("infra/platform/workflows/")
         || p.ends_with("rules.toml")
         || p.ends_with("-registry.sql")
         || p.starts_with("docs/")
@@ -573,7 +574,7 @@ mod tests {
             DeliveryChannel::Data
         );
         assert_eq!(
-            delivery_channel(&["infra/platform/workflows.toml".into()]),
+            delivery_channel(&["infra/platform/workflows/ship-a-change.toml".into()]),
             DeliveryChannel::Data
         );
         assert_eq!(

@@ -272,7 +272,7 @@ COPY infra/postgres /opt/boss/infra/postgres
 COPY infra/operator-baseline /opt/boss/infra/operator-baseline
 # The platform Workflow bundle — protocols shipped as DATA
 # (protocols-as-data step 1). bootstrap-db.sh seeds it insert-if-
-# missing at ../platform/workflows.toml relative to itself, and until
+# missing at ../platform/workflows/ relative to itself, and until
 # this COPY existed that path was absent from the image, so the seed
 # SILENTLY SKIPPED on every cluster boot: ten bundle kinds (the eight
 # timer-maintenance protocols among them) never reached the SoR, and

@@ -165,8 +165,8 @@ BUILD_URL="postgres://$DB_USER:$DB_USER@127.0.0.1/$DB_NAME"
 # here is absent from platform_workflows(), so reconcile never
 # considers it.
 if PLATFORM_WF_BIN="$(find_boss_bin boss-platform-workflow-seed)"; then
-    PLATFORM_WF_TOML="$(dirname "$0")/../platform/workflows.toml"
-    if [ -f "$PLATFORM_WF_TOML" ]; then
+    PLATFORM_WF_DIR="$(dirname "$0")/../platform/workflows"
+    if [ -d "$PLATFORM_WF_DIR" ]; then
         echo "  seeding platform Workflow bundle"
         # Filter the happy path's noise but NEVER the failure: the old
         # `| grep ... || true` swallowed a failing seed's error text AND
@@ -175,7 +175,7 @@ if PLATFORM_WF_BIN="$(find_boss_bin boss-platform-workflow-seed)"; then
         # way. On failure everything the seed said is shown.
         if SEED_OUT="$("$PLATFORM_WF_BIN" \
             --database-url "$BUILD_URL" \
-            --seed-path "$PLATFORM_WF_TOML" 2>&1)"; then
+            --seed-path "$PLATFORM_WF_DIR" 2>&1)"; then
             printf '%s\n' "$SEED_OUT" | grep -E "inserted|already present|seed:" || true
         else
             echo "  WARNING: platform Workflow bundle seed FAILED — full output follows" >&2
@@ -188,7 +188,7 @@ if PLATFORM_WF_BIN="$(find_boss_bin boss-platform-workflow-seed)"; then
         # never reached the registry, and every timer unit posting one
         # of them died on a 400 nobody saw (2026-08-19). A missing
         # bundle is a packaging fault and must read like one.
-        echo "  WARNING: platform Workflow bundle NOT FOUND at $PLATFORM_WF_TOML — the seed" >&2
+        echo "  WARNING: platform Workflow bundle NOT FOUND at $PLATFORM_WF_DIR — the seed" >&2
         echo "  is being SKIPPED; bundle-supplied kinds will be missing from this deployment" >&2
     fi
 else
@@ -230,7 +230,7 @@ for kind in $REQUIRED_KINDS; do
         2>/dev/null || echo 0)
     if [ "${present:-0}" -lt 1 ]; then
         echo "  FATAL: workflow kind '$kind' is not active in the registry after seeding." >&2
-        echo "  It lives in infra/platform/workflows.toml, so one of these is true:" >&2
+        echo "  It lives in infra/platform/workflows/ship-a-change.toml, so one of these is true:" >&2
         echo "    - boss-platform-workflow-seed was not found (see the warning above)" >&2
         echo "    - infra/platform/ is missing from the image" >&2
         echo "    - the seed ran and failed" >&2

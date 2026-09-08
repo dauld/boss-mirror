@@ -1,7 +1,9 @@
-//! `boss workflow publish <kind> <spec.json | bundle.toml>` — publish a
-//! protocol version without the footgun. A `.toml` path is a workflow
-//! bundle (infra/platform/workflows.toml, or a tenant's): the `kind`
-//! row is read with the platform seed's own loader, so the row a fresh
+//! `boss workflow publish <kind> <spec.json | bundle.toml | bundle-dir>`
+//! — publish a protocol version without the footgun. A `.toml` path is
+//! a workflow bundle (a tenant's, or one platform kind file
+//! `infra/platform/workflows/<kind>.toml`) and a directory is the
+//! platform bundle itself (`infra/platform/workflows`): the `kind` row
+//! is read with the platform seed's own loader, so the row a fresh
 //! database seeds and the row a live one publishes are one definition.
 //!
 //! WHY THIS IS A VERB. Publishing was a hand-assembled sequence, done
@@ -172,12 +174,15 @@ pub(crate) fn spec_from_bundle(
 }
 
 /// The spec to publish: a JSON body, or — when the path ends in
-/// `.toml` — the `kind` row of a workflow bundle read by the same
-/// loader the platform seed uses. So a bundled protocol has ONE
-/// definition: the seed inserts it on a fresh database, this verb
-/// publishes the identical row on a live one (CLAUDE.md §9a).
+/// `.toml` or is a bundle DIRECTORY — the `kind` row of a workflow
+/// bundle read by the same loader the platform seed uses. So a bundled
+/// protocol has ONE definition: the seed inserts it on a fresh
+/// database, this verb publishes the identical row on a live one
+/// (CLAUDE.md §9a). The platform bundle is a directory of kind files,
+/// so `infra/platform/workflows` and
+/// `infra/platform/workflows/<kind>.toml` both name the same row.
 fn load_spec(kind: &str, path: &std::path::Path) -> Result<Value> {
-    if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+    if path.is_dir() || path.extension().and_then(|e| e.to_str()) == Some("toml") {
         let specs = boss_jobs::seed_loader::load_workflows(path)
             .with_context(|| format!("reading the bundle {}", path.display()))?;
         return spec_from_bundle(kind, &specs);
@@ -403,6 +408,61 @@ terminal = { outcome = "completed" }
         assert!(
             e.contains("one, two"),
             "the refusal names what the bundle holds: {e}"
+        );
+    }
+
+    /// The platform bundle is a DIRECTORY of kind files, and the verb
+    /// takes either name for the same row: the directory (the row is
+    /// picked by kind) or the one kind file (the row is the file). A
+    /// kind file whose name lies about its kind is refused by the
+    /// loader, not published under the wrong name.
+    #[test]
+    fn a_kind_file_and_its_directory_publish_the_same_row() {
+        let row = |kind: &str| {
+            format!(
+                r#"[[workflow]]
+kind = "{kind}"
+label = "{kind}"
+category = "platform"
+subject_kinds = ["custom"]
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+[[workflow.step]]
+title = "done"
+kind = "outcome"
+ready_when = "steps.opened.done"
+terminal = {{ outcome = "completed" }}
+"#
+            )
+        };
+        let dir = tempfile::tempdir().expect("a scratch bundle directory");
+        std::fs::write(dir.path().join("one.toml"), row("one")).unwrap();
+        std::fs::write(dir.path().join("two.toml"), row("two")).unwrap();
+        std::fs::write(dir.path().join("README.md"), "# not a kind file\n").unwrap();
+
+        // `platform_seed` stamps `created_at` at load time, so two loads
+        // differ there and nowhere else — which is the comparison.
+        let sans_stamp = |mut v: Value| {
+            v.as_object_mut().map(|o| o.remove("created_at"));
+            v
+        };
+        let from_dir = sans_stamp(load_spec("two", dir.path()).expect("the directory holds `two`"));
+        let from_file = sans_stamp(
+            load_spec("two", &dir.path().join("two.toml")).expect("the kind file IS `two`"),
+        );
+        assert_eq!(from_dir, from_file, "one definition, two names for it");
+        assert_eq!(from_dir["kind"], json!("two"));
+
+        let e = load_spec("three", dir.path()).unwrap_err().to_string();
+        assert!(e.contains("no `three`") && e.contains("one, two"), "{e}");
+
+        std::fs::write(dir.path().join("liar.toml"), row("truth")).unwrap();
+        let e = format!("{:#}", load_spec("truth", dir.path()).unwrap_err());
+        assert!(
+            e.contains("liar.toml") && e.contains("expected kind `liar`"),
+            "a file named for a kind it does not hold is refused by name: {e}"
         );
     }
 

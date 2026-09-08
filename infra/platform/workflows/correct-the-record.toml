@@ -1,0 +1,123 @@
+# correct-the-record — a published claim turned out to be false.
+#
+# WHY THIS EXISTS. On 2026-08-16 a design doc asserted, in writing and
+# in review, that the boss-dev pod "has never run". It had been running
+# for 25 hours. The claim was reasoned from real evidence — no script
+# applies the manifest, no kubectl on boss-gcp or the forge host — and
+# was wrong because the author generalised from the environments he
+# could see. David reviewed it and accepted five decisions resting on
+# that premise.
+#
+# Nothing in the protocol set could carry the fix. `design-doc` ends at
+# `published`; a terminal packet has no path back. `incident` is for
+# things that broke, and no service was down. `escalation` asks a
+# question rather than correcting an answer. So the only route was to
+# hand-edit prose — which is exactly the untracked, unreviewable motion
+# every other correction in this system stopped using.
+#
+# David, 2026-08-16: "this is exactly why we are using data-based
+# protocols. Let's make sure the actual job protocols are corrected
+# and/or designed and implemented if missing."
+#
+# THE `method` FIELD IS THE POINT. Every false claim this week shared
+# one shape: asserted from the wrong vantage and never checked against
+# the thing itself. Requiring how it was measured, not just what, is
+# the protocol refusing to accept a correction that is only better
+# reasoning. A correction with no method is a second guess.
+#
+# `corrects` in metadata names the packet or doc being fixed, so the
+# record of having been wrong is queryable rather than folded into a
+# git diff nobody reads.
+[[workflow]]
+kind = "correct-the-record"
+label = "Correct the record"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "A settled decision or published doc asserts something false. Carries the claim, the measurement that contradicts it, and how that measurement was taken; a human accepts the correction before it lands. Exists because design-doc terminates at `published` and nothing could reopen a premise."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "raised"
+kind = "trigger"
+ready_when = "true"
+title_template = "Correction raised"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "a-published-claim-is-false" }
+
+[[workflow.step]]
+title = "evidence"
+kind = "task"
+ready_when = "steps.raised.done"
+title_template = "Show the measurement"
+fields = [
+  { name = "claim", field_type = "string", required = true },
+  { name = "where", field_type = "string", required = true },
+  { name = "measured", field_type = "string", required = true },
+  { name = "method", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "review"
+# `correction-verdict`, not `task` — this step has a custom Step UX
+# (infra/step-plugins/correction-verdict.js, registered by migration
+# 146). David, with four of these parked in his queue: "The UX for the
+# corrections is hard for me to understand the question and trade-off."
+#
+# He was right, and structurally so. As a bare `task` the card read
+# "Accept the correction" and offered `verdict` with two enum values
+# whose names do not say what either causes — while the claim, the
+# measurement contradicting it, the method and the location all sat on
+# the PREVIOUS step, behind a modal and a metadata dump. The question
+# was on screen; the material to answer it was not.
+#
+# The kind is the only way to reach a plugin: plugins register by kind
+# and the SPA mounts by kind, so registering against `task` would
+# hijack every task step in the system. Nothing else about the gate
+# changes — the Rust StepRegistry is permissive for kinds it does not
+# know, and the completion contract still comes from the `fields` below.
+kind = "correction-verdict"
+ready_when = "steps.evidence.done"
+title_template = "Accept the correction"
+authority_role = "platform-admin"
+# `verdict` picks the terminal, the same shape `approval` uses. Two
+# defects in a row here, both caught by machinery rather than by me:
+#
+# v1 gated `unfounded` on `steps.evidence.done` alone, so the first
+# correction filed through this protocol auto-closed as unfounded the
+# instant its evidence landed, skipping the review it exists to
+# require. Found by using it, a minute after publishing.
+#
+# The fix to that made `verdict` a free-text fork, and the workflow
+# lint refused it: "fork over free-text `verdict` needs a fallback
+# successor". It is right — a typo'd verdict would strand the packet
+# with no reachable terminal. An enum makes the fork total, so every
+# value a reviewer can write leads somewhere.
+fields = [{ name = "verdict", field_type = "accepted|unfounded", required = true }]
+
+[[workflow.step]]
+title = "applied"
+kind = "task"
+ready_when = "steps.review.done AND steps.review.metadata.verdict = \"accepted\""
+title_template = "Land it where the claim lives"
+fields = [{ name = "landed", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "corrected"
+kind = "outcome"
+ready_when = "steps.applied.done"
+title_template = "Record corrected"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "corrected" }
+
+[[workflow.step]]
+title = "unfounded"
+kind = "outcome"
+ready_when = "steps.review.done AND steps.review.metadata.verdict = \"unfounded\""
+title_template = "The original claim held up"
+# `withdrawn`, not `cancelled` — the workflow lint enforces the
+# outcome_kind vocabulary (completed|skipped|aborted|withdrawn) and
+# caught the invented value before it reached the registry. Withdrawn
+# is also the honester word: nothing was cancelled, the correction was
+# taken back because measurement upheld the original claim.
+metadata_defaults = { outcome_kind = "withdrawn" }
+terminal = { outcome = "unfounded" }

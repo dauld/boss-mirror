@@ -414,7 +414,7 @@ pub(crate) fn recorded_probe_for(car: &Value, step: &Value) -> Result<Recorded> 
 /// Reads the step's OWN field spec — the one that arrived with the car
 /// we already fetched, from the workflow version this packet is pinned
 /// to. Deliberately not a constant in this file: the vocabulary already
-/// lives in `infra/platform/workflows.toml` and in the registry
+/// lives in `infra/platform/workflows/` and in the registry
 /// default, and a third copy here would be the drift CLAUDE.md 9a is
 /// about. Validating against the packet's own spec also means a
 /// workflow version that adds a variant needs no CLI release.

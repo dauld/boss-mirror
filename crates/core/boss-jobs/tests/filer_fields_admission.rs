@@ -10,7 +10,7 @@
 //! can: admission.
 //!
 //! These tests run the REAL platform bundle's `design-doc` row
-//! (infra/platform/workflows.toml) through the create handler, so the
+//! (infra/platform/workflows/) through the create handler, so the
 //! registry data and the mechanism are proven together — the shape
 //! the incident had, verbatim.
 

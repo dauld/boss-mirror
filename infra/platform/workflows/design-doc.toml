@@ -1,0 +1,123 @@
+# ---------------------------------------------------------------------
+# design-doc — the doc IS the packet until it settles.
+#
+# David, 2026-08-16: "Should we just have an MD payload in the packet?
+# It only writes to file when the job terminates?" Yes, and the reason
+# is that the current protocol cannot start a review until the thing
+# being reviewed has already shipped. review-design.js carries a 404
+# message apologising for exactly that — "review Jobs are instant data
+# but docs ride trains" — and every design-review bug this week lived
+# in the backflow that arrangement requires: the flusher pushing to the
+# wrong remote, duplicate flush jobs, an anchor-not-found message that
+# could not tell "already answered" from "wrong doc", and a spawn rule
+# that asks a level question on an edge.
+#
+# THIS DELETES THE BACKFLOW rather than repairing it. The prose and the
+# questions ride in step metadata, so there is nothing to index, nothing
+# to flush, and no round trip: the packet is reviewable the second it
+# exists. `review-design.js` reads `metadata.questions` when present and
+# falls back to the docs API when absent, so the ten in-flight
+# design-doc-review Jobs are untouched.
+#
+# It is NOT a rejection of markdown files. David's own Q6 on
+# design-docs-as-data settled the split — "file wins on prose, data wins
+# on questions" — and CLAUDE.md already says settled material folds into
+# architecture-decisions.md and the source doc is deleted. This only
+# moves WHERE the file appears: at the end, as the residue, rather than
+# at the start as a precondition. A doc under discussion has no business
+# in git; git's value is review and history over things that have
+# stopped moving.
+#
+# `publish` is deliberately a plain terminal that records the path
+# rather than a step that writes the file. Writing it is a car's job —
+# David's answer to design-docs-as-data Q4, twice: "the docs car that
+# carries the flush through a train".
+[[workflow]]
+kind = "design-doc"
+label = "Design doc"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "A design doc while it is still being decided. The prose and the open questions ride in the packet, so it is reviewable the moment it exists rather than after it ships; the markdown lands as a file only when the packet terminates. Replaces the index-and-flush round trip that made a review possible only after its doc reached deployed main."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "drafted"
+kind = "trigger"
+ready_when = "true"
+title_template = "Draft written"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "author-drafts-a-design-doc" }
+
+# `title`, `markdown` and `questions` are FILER fields: the review is
+# not doable without the doc under review and the questions it asks,
+# so their absence is refused at admission — where the filer is still
+# on the line — rather than detonating required-at-done on the
+# reviewer mid-review (packet 27de796e; it happened twice on one
+# hand-filed packet, 2026-09-03). The metadata_defaults bind them from
+# the Job's own metadata, which is where `boss design` (and any hand
+# filing worth admitting) puts them; an unbound `{metadata.…}` token
+# stays literal and admission reads that literal as missing.
+#
+# `questions` also declares its SHAPE. The tracker renders
+# `[{anchor, title, proposal}]` and nothing else; a protocol that
+# stated only "questions: array" admitted eight title-less packets in
+# one session (2026-09-04/05, packet 2e136a67) that each dead-ended
+# at "nothing to review". `item_keys` is the registry saying what an
+# element is, so admission refuses the malformed draft by element and
+# key instead of the reviewer discovering an empty screen. An EMPTY
+# array admits: it is `boss design --no-questions` — a doc that
+# records a decision and asks nothing — and `no_open_questions` on
+# the Job carries that intent explicitly.
+[[workflow.step]]
+title = "review"
+kind = "review-design"
+ready_when = "steps.drafted.done"
+title_template = "Answer the open questions"
+authority_role = "platform-admin"
+metadata_defaults = { title = "{metadata.title}", markdown = "{metadata.markdown}", questions = "{metadata.questions}" }
+
+[[workflow.step.fields]]
+name = "title"
+field_type = "string"
+required = true
+filled_by = "filer"
+
+[[workflow.step.fields]]
+name = "markdown"
+field_type = "string"
+required = true
+filled_by = "filer"
+
+[[workflow.step.fields]]
+name = "questions"
+field_type = "array"
+required = true
+filled_by = "filer"
+item_keys = ["anchor", "title", "proposal"]
+
+# The fold is where a settled doc pays into current truth. Published
+# live as design-doc v4 (2026-09-05) before it reached this bundle;
+# the step text here is that row's, verbatim.
+[[workflow.step]]
+title = "fold"
+kind = "task"
+ready_when = "steps.review.done"
+title_template = "Fold it into current truth"
+metadata_defaults = { procedure = """State what CURRENT TRUTH gains from this doc now that its questions are answered, and where. 'Nothing' is a legitimate answer and still has to be written down with its reason — that is the whole point of the step existing.
+
+The fold is the current-truth reading, assembled per topic, with the decision history beside it rather than inlined (Q2). Today that is docs/architecture-decisions.md, maintained by hand because merging prose has nuance a generator cannot judge. This step does not automate that judgement; it makes skipping it visible.
+
+Do NOT flush decisions into a per-doc markdown file. Q4 settled that the decisions live on the packet and the fold reads them from there; writing them back into files is work in the direction we are abandoning.""" }
+
+[[workflow.step.fields]]
+name = "fold_change"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "published"
+kind = "outcome"
+ready_when = "steps.fold.done"
+title_template = "Settled"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "published" }

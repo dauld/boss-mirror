@@ -1,0 +1,120 @@
+[[workflow]]
+kind = "backlog-item"
+label = "Backlog item"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "One piece of engineering backlog, modelled as work rather than a line in a markdown file. The Subject is the area it touches, so \"what is outstanding against the ledger\" answers from Subject history. Triage requires the evidence behind the routing decision, because the failure mode of a backlog is not neglect but confident wrong answers read off its own text \u2014 an internal claim about the codebase decays every time the codebase moves. `stale` exists for the items that die without anyone doing them, and `verify` for the ones whose claim needs re-measuring before anyone acts."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "filed"
+kind = "trigger"
+ready_when = "true"
+title_template = "Filed to the backlog"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "item-enters-the-backlog" }
+
+[[workflow.step]]
+title = "triage"
+kind = "task"
+ready_when = "steps.filed.done"
+title_template = "Measure the claim, choose a route"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "disposition"
+field_type = "verify|design|build|duplicate|stale|decline"
+required = true
+[[workflow.step.fields]]
+name = "evidence"
+field_type = "string"
+required = true
+# The decider's brief, written at routing time by whoever chose
+# `design`: what they must READ (markdown — the measurement, the
+# options, the artifact) and the answer you would give. Optional here
+# because only the design route needs them; the decide step's surface
+# says loudly when they are absent. They live on THIS step so the
+# route and its brief are one write — 2026-09-05, three items reached
+# David's queue as "Decide the design" with nothing to read, because
+# the brief had gone onto the triage evidence and the decide step was
+# a bare task.
+[[workflow.step.fields]]
+name = "context_md"
+field_type = "string"
+required = false
+[[workflow.step.fields]]
+name = "proposed"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "measure"
+kind = "task"
+ready_when = "steps.triage.done AND steps.triage.metadata.disposition = \"verify\""
+title_template = "Re-measure the claim"
+authority_role = "platform-admin"
+
+[[workflow.step]]
+title = "design-review"
+# answer-question, not task: the decision surface (question, the
+# asker's markdown context, a proposed answer to copy, verdict +
+# answer) — the same step user-feedback's design route already uses.
+# A bare task showed a title and two empty boxes, so the person
+# deciding had nothing to decide FROM. The plugin reads context_md
+# and proposed from this step, then the packet, then the triage step
+# that routed here.
+kind = "answer-question"
+ready_when = "steps.triage.done AND steps.triage.metadata.disposition = \"design\""
+title_template = "Decide the design"
+authority_role = "platform-admin"
+# The verdict vocabulary, authored HERE rather than on the
+# `answer-question` bundle. The bundle declares `verdict` as a bare
+# `string` (its three values live in prose), and a field-discovery
+# probe completing this step with `verdict = "__probe__"` got 204
+# (a305385b; backlog item cb9661fe, defect 2). Tightening the bundle
+# is refused by steptype-bundle-ratchet — it is unversioned, so every
+# in-flight step would retighten at the next restart. This is the
+# versioned path `approval` already uses: packets admitted under this
+# version carry the enum; earlier ones keep the contract they had.
+[[workflow.step.fields]]
+name = "verdict"
+field_type = "approved|declined|answered"
+required = true
+
+[[workflow.step]]
+title = "build"
+kind = "task"
+ready_when = "steps.triage.done AND steps.triage.metadata.disposition = \"build\""
+title_template = "Build the change"
+authority_role = "platform-admin"
+
+[[workflow.step]]
+title = "duplicate"
+kind = "outcome"
+ready_when = "steps.triage.done AND steps.triage.metadata.disposition = \"duplicate\""
+title_template = "Closed as a duplicate"
+metadata_defaults = { outcome_kind = "withdrawn" }
+terminal = { outcome = "duplicate" }
+
+[[workflow.step]]
+title = "stale"
+kind = "outcome"
+ready_when = "steps.triage.done AND steps.triage.metadata.disposition = \"stale\""
+title_template = "Closed \u2014 the claim no longer holds"
+metadata_defaults = { outcome_kind = "withdrawn" }
+terminal = { outcome = "stale" }
+
+[[workflow.step]]
+title = "declined"
+kind = "outcome"
+ready_when = "steps.triage.done AND steps.triage.metadata.disposition = \"decline\""
+title_template = "Closed without action"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "declined" }
+
+[[workflow.step]]
+title = "closed"
+kind = "outcome"
+ready_when = "steps.measure.done OR steps.design-review.done OR steps.build.done"
+title_template = "Backlog item closed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }

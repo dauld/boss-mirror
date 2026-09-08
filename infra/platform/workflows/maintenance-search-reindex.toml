@@ -1,0 +1,45 @@
+# boss-search-reindex.service
+[[workflow]]
+kind = "maintenance-search-reindex"
+label = "search_index rebuild"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Rebuilds the global search projection. It has no incremental form - events are capped per Subject, so an append cannot be correct - and outside boss-rebuild-all nothing refreshed it."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "systemd-timer" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Run to completion"
+authority_role = "platform-admin"
+fields = [{ name = "result", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
+title_template = "Maintenance completed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }

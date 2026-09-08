@@ -56,7 +56,7 @@ change most often are the only ones we cannot change cheaply.**
 
 Not a new mechanism — the existing one, applied to twelve more rows.
 Platform workflows become a seed bundle in-tree
-(`infra/platform/workflows.toml`, beside `operator-baseline/`), loaded
+(`infra/platform/workflows/`, beside `operator-baseline/`), loaded
 at bootstrap through `POST /api/workflows` by a seed binary, exactly as
 `boss-operator-baseline-seed` loads the operator hires and as the
 tenant bundles load their 25.

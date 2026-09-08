@@ -1,0 +1,118 @@
+# ---------------------------------------------------------------------
+# post-mortem — an incident, analyzed, into the countermeasures it earns.
+#
+# A retrospective is NOT a backlog item. One was filed on `backlog-item`
+# and the shape routed the ENTIRE analysis into the operator's
+# design-decision queue as a single "Decide the design" step
+# (`answer-question`) — collapsing a whole retrospective, which produces
+# MANY corrective actions, into one verdict a person must render. That is
+# the wrong protocol: a post-mortem is IT-worked ANALYSIS whose product
+# is a set of countermeasures, each of which becomes its OWN packet.
+#
+# So this protocol has NO step that hands the whole thing to the operator
+# to decide. The genuine judgement a single countermeasure may need
+# becomes its own design-decision packet, filed BY the countermeasures
+# step — not a fork in this Workflow. The post-mortem DOCUMENTS the
+# countermeasures; it does not build them, and it does not decide them
+# in bulk.
+#
+# The Subject is the incident — a `custom` Subject whose id names what
+# failed (an area, a service, a boot path), so "what has gone wrong with
+# the forge disk, and what did we do about it" answers from Subject
+# history rather than a grep of old chat.
+#
+# Step graph:
+#    0. recorded         — trigger: the incident + its timeline open the Job
+#    1. analysis         — IT work: 5 Whys, root-cause chains (ready after 0)
+#    2. countermeasures  — IT work: file each corrective action as its OWN
+#                          packet, record the refs here (ready after 1)
+#    3. complete         — sign-off terminal: analysis signed off,
+#                          countermeasures filed (ready after 2)
+#   (x) abandoned        — outcome terminal: analyzed, then judged not to
+#                          warrant countermeasures; a person sets
+#                          `job.metadata.abandoned` (ready after 1)
+[[workflow]]
+kind = "post-mortem"
+label = "Post-mortem"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "An incident retrospective, modelled as the analysis it is rather than a single decision. The Subject is the incident (a custom Subject naming what failed), so \"what has gone wrong here, and what did we do about it\" answers from Subject history. It is deliberately NOT `backlog-item`: that protocol's triage routes a whole item to the operator's design-decision queue as one verdict, and a post-mortem produces MANY countermeasures, each of which must become its own packet. `analysis` is IT work (5 Whys, root-cause chains); `countermeasures` files each corrective action as its own car, design item, or lever and records the refs here; `complete` is the sign-off that the analysis holds and the countermeasures are filed. The genuine judgement a countermeasure needs becomes its OWN design-decision packet, filed by the countermeasures step — never a step that collapses the whole retrospective into one operator decision. `abandoned` is the incident analyzed and then judged not to warrant countermeasures."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "recorded"
+kind = "trigger"
+ready_when = "true"
+title_template = "Incident recorded"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "incident-recorded" }
+
+[[workflow.step]]
+title = "analysis"
+kind = "task"
+ready_when = "steps.recorded.done"
+title_template = "Analyze the incident (5 Whys, root-cause chains)"
+# Human-gated for the reason every platform task is: `task` declares no
+# required role, so an ungated ready step gets role-matched and
+# "completed" by the simulated workforce. Analysis nobody did is worse
+# than no analysis step, because the audit trail then says someone did.
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "root_causes"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "timeline"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "countermeasures"
+kind = "task"
+ready_when = "steps.analysis.done"
+title_template = "File the countermeasures"
+authority_role = "platform-admin"
+# Required, and an ARRAY, because the whole point is plurality: a
+# retrospective earns MULTIPLE corrective actions and each is filed as
+# its own packet (a car, a design item, a lever). This field records the
+# refs of what was filed — the post-mortem documents them, it does not
+# build them. Also the constraint that keeps the `complete` sign-off from
+# arriving blind (viability lint Phase 4: required metadata is checked at
+# completion, so it lives on the step the sign-off depends on).
+[[workflow.step.fields]]
+name = "countermeasures"
+field_type = "array"
+required = true
+[[workflow.step.fields]]
+name = "summary"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "complete"
+kind = "sign-off"
+ready_when = "steps.countermeasures.done"
+title_template = "Post-mortem complete — analysis signed off, countermeasures filed"
+authority_role = "platform-admin"
+sign_offs_required = ["platform-admin"]
+metadata_defaults = { authority_role = "platform-admin" }
+# `decision` required on the sign-off itself, so completion cannot lose
+# the judgement (viability lint Phase 5: 62 of 100 sign-offs once closed
+# carrying nothing). The sign-off IS the happy terminal — reaching it
+# closes the Job "completed".
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
+terminal = { outcome = "completed" }
+
+[[workflow.step]]
+title = "abandoned"
+kind = "outcome"
+# Gated on BOTH the DAG edge (analysis done — the viability lint rejects
+# a terminal no trigger can reach) AND a person-set marker. The marker is
+# load-bearing: an escape-hatch terminal ready on step state alone is one
+# the dispatcher auto-completes the instant it becomes ready, which shut
+# a ship-a-change Job seconds after it opened. Abandoning is an act
+# someone performs, and it can only happen after the incident is analyzed.
+ready_when = "steps.analysis.done AND job.metadata.abandoned = \"true\""
+title_template = "Post-mortem abandoned"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "abandoned" }

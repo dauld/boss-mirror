@@ -88,7 +88,7 @@ All five questions were resolved by David in the design review, 2026-08-22
 
 Per Q3 there is no experiment table: the record is an open packet of
 kind `protocol-experiment` (shipped as bundle data in
-`infra/platform/workflows.toml`), and the split declaration is that
+`infra/platform/workflows/`), and the split declaration is that
 packet's JOB metadata — `kind_under_test`, `control_version`,
 `candidate_version`, `split` (candidate share percent, default 50).
 The window is the packet's open interval; both edges are already in

@@ -160,7 +160,7 @@ the binaries don't exist yet; we'll re-run after the build.
 `boss-platform-workflow-seed` — a real, load-bearing binary that
 `bootstrap-db.sh` invokes here, and that the compose install's
 init runs as its `[2/4]` step — loads the platform Workflow
-bundle shipped as data in `infra/platform/workflows.toml`,
+bundle shipped as data in `infra/platform/workflows/`,
 insert-if-missing; `boss-jobs-api` additionally reconciles its
 code-defined platform meta-kinds on every startup; and tenant
 Workflows load via the per-tenant prepare step —

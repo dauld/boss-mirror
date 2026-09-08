@@ -50,17 +50,16 @@ DEPLOY="infra/deploy-services.sh"
 # timers of its own and neither was covered. reap-dead-ci-jobs was
 # committed and never installed anywhere as a result.
 FORGE_INSTALL="infra/forge/install.sh"
-BUNDLE="infra/platform/workflows.toml"
-for f in "$DEPLOY" "$BUNDLE"; do
-    [ -f "$f" ] || { echo "timers-leave-a-packet: $f not found" >&2; exit 1; }
-done
+BUNDLE="infra/platform/workflows"   # a directory: one <kind>.toml per protocol
+[ -f "$DEPLOY" ] || { echo "timers-leave-a-packet: $DEPLOY not found" >&2; exit 1; }
+[ -d "$BUNDLE" ] || { echo "timers-leave-a-packet: $BUNDLE not found" >&2; exit 1; }
 
 # The kinds a Workflow actually defines: the bundle, plus the three
 # still baked into platform_workflows() in registry.rs. Both are read,
 # because a kind in either place is a real protocol — and the tree is
 # mid-migration from the second to the first.
 kinds=$(
-    { grep -oE '^kind = "maintenance-[a-z-]+"' "$BUNDLE" | sed -E 's/kind = "(.*)"/\1/'
+    { cat "$BUNDLE"/*.toml | grep -oE '^kind = "maintenance-[a-z-]+"' | sed -E 's/kind = "(.*)"/\1/'
       grep -oE '"maintenance-[a-z-]+"' crates/core/boss-jobs/src/registry.rs | tr -d '"'
     } | sort -u
 )

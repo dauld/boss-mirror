@@ -1,0 +1,156 @@
+# ---------------------------------------------------------------------
+# publish-to-github — the public mirror is a BACKUP OF SOURCE, fed by a
+# pull request the machine opens and David merges.
+#
+# v6 (design packet 7b59af2c, David 2026-09-08). v1–v5 were published
+# live and never seeded; v5 was retired by the boot guard on 2026-09-07
+# because its `superseded` terminal read `job.metadata.superseded_by !=
+# ""`, which is TRUE over an absent marker, so every fresh packet closed
+# as superseded the instant it opened. This row is the first seeded
+# version, and it carries the four decided changes:
+#
+#   1. `superseded` is gated on marker PRESENCE (`> ""`), so it holds
+#      until a person sets the marker. Pinned by
+#      platform_bundle.rs::publish_to_github_v6_keeps_its_decided_shape.
+#   2. `open-pr` is a MACHINE step. It nominates nobody (no
+#      authority_role — the gate-run `record-verdict` precedent) and
+#      carries `ops_verb = "publish-github-pr"`; the dispatcher rule
+#      `publish-github-pr-on-open-pr-ready` (202609081200) spawns an
+#      ops-request for the forge on `step.ready.task` with that marker,
+#      the root ops-runner runs the verb (fetch forge main, build the
+#      dated snapshot commit on the mirror's main, push it to the dauld
+#      fork, `gh pr create`), and the verb completes this step with
+#      `pr_url`. The merge on GitHub stays David's — the second gate.
+#   3. The measure step's instrument, infra/prep-github-publish.sh,
+#      refuses (non-zero, naming the ref) when a ref does not resolve
+#      instead of answering `has_drift:false`.
+#   4. The GitHub-side workflows are not our CI/CD: ci/install-smoke/
+#      release and dependabot were deleted from the tree; codeql and
+#      scorecard stay as free security scans nothing on our side reads.
+#
+# Cadence: the daily `publish-to-github-daily` rule (129/149) spawns one
+# packet per day, guarded to one open packet per mirror; most days land
+# on `nothing-to-publish`, which is the measurement that the mirror is
+# current.
+#
+# Seeding: this row lands on a FRESH database through the platform seed
+# (insert-if-missing). On the live system of record, where v1–v5 exist,
+# the seed leaves the kind alone and v6 goes live through
+# `boss workflow publish publish-to-github infra/platform/workflows`,
+# which reads this same entry — one definition.
+# ---------------------------------------------------------------------
+[[workflow]]
+kind = "publish-to-github"
+label = "Publish to the public GitHub mirror"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Measure what a push to the public GitHub mirror would publish, prove it carries no credential material, and put the newly-public surface in front of a human before any of it leaves the network. Runs daily; most days it will find nothing and close on the nothing-to-publish terminal, which is the measurement that says the mirror is current. On approval the forge opens the pull request by machine (the publish-github-pr ops verb, as dauld); the merge on GitHub is the second, human gate."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+title_template = "Mirror publish check due"
+authority_role = "platform-admin"
+
+[[workflow.step]]
+title = "measure"
+kind = "checklist"
+ready_when = "steps.opened.done"
+title_template = "Measure drift and scan for secrets"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "commits_ahead"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "files_changed"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "secrets_scan"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "newly_public"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "has_drift"
+field_type = "true|false"
+required = true
+
+[[workflow.step]]
+title = "nothing-to-publish"
+kind = "outcome"
+ready_when = "steps.measure.done AND steps.measure.metadata.has_drift = \"false\""
+title_template = "Mirror is current"
+authority_role = "platform-admin"
+terminal = { outcome = "nothing-to-publish" }
+
+[[workflow.step]]
+title = "review"
+kind = "checklist"
+ready_when = "steps.measure.done AND steps.measure.metadata.has_drift != \"false\""
+title_template = "Review the newly-public surface"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "newly_public_review"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "approve"
+kind = "sign-off"
+ready_when = "steps.review.done"
+title_template = "Approve publishing to the public mirror"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "decision"
+field_type = "pending|approved|rejected|changes-requested"
+required = true
+
+# The machine step (2). No authority_role: nobody is nominated; the
+# forge ops-runner's actor (platform-admin) completes it. `ops_verb` is
+# the routing marker the dispatcher rule reads off the step.ready
+# payload — step.ready does not hoist spec_slug the way step.done does.
+[[workflow.step]]
+title = "open-pr"
+kind = "task"
+ready_when = "steps.approve.done AND steps.approve.metadata.decision = \"approved\""
+title_template = "Open a pull request on the public mirror (by machine, from the forge)"
+metadata_defaults = { ops_verb = "publish-github-pr" }
+[[workflow.step.fields]]
+name = "pr_url"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "pr-opened"
+kind = "outcome"
+ready_when = "steps.open-pr.done"
+title_template = "Pull request opened"
+authority_role = "platform-admin"
+terminal = { outcome = "pr-opened" }
+
+[[workflow.step]]
+title = "declined"
+kind = "outcome"
+ready_when = "steps.approve.done AND steps.approve.metadata.decision != \"approved\""
+title_template = "Not published"
+authority_role = "platform-admin"
+terminal = { outcome = "declined" }
+
+# (1) PRESENCE, not inequality. `> ""` is false for an absent marker,
+# false for the empty string, true only for a set one — so this holds
+# until a person supersedes the packet. `!= ""` reads true over Absent
+# and closed every v5 packet at open (workflow_lint Phase 6).
+[[workflow.step]]
+title = "superseded"
+kind = "outcome"
+ready_when = "steps.opened.done AND job.metadata.superseded_by > \"\" AND job.metadata.supersession_translation > \"\""
+title_template = "Superseded by a newer packet"
+metadata_defaults = { outcome_kind = "withdrawn" }
+terminal = { outcome = "superseded" }

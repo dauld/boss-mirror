@@ -301,7 +301,7 @@ path_map() {
            -e 's|^infra/lint/.*|boss-testing|p' \
            -e 's|^\.forgejo/workflows/ci\.yml$|boss-testing|p' \
            -e 's|^infra/dispatcher/rules\.toml$|boss-dispatcher|p' \
-           -e 's|^infra/platform/workflows\.toml$|boss-jobs|p' \
+           -e 's|^infra/platform/workflows/[^/]*\.toml$|boss-jobs|p' \
            | sort -u | tr '\n' ' '
 }
 
@@ -332,7 +332,7 @@ scope_self_test() {
     # the bundle lint caught a free-text fork with no fallback, and the
     # gate would not have run that lint at all.
     _case "a protocol-only car still has a crate" "boss-jobs" \
-        "infra/platform/workflows.toml"
+        "infra/platform/workflows/ship-a-change.toml"
     _case "two files, one crate" "boss-cli" \
         "crates/orchestrators/boss-cli/src/train.rs" \
         "crates/orchestrators/boss-cli/src/docs.rs"
