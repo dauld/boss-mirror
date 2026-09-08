@@ -68,6 +68,13 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         ),
         ("ledger.bill.payment_batch", vec!["ledger.bill.paid"]),
         ("ledger.tax.accrue", vec!["ledger.tax.accrued"]),
+        // One POST, two facts: the settlement endpoint records the
+        // charge and release legs in one transaction, each with its
+        // own audit event for the rebuild bridge (93f936b9).
+        (
+            "ledger.keg_deposit.settle",
+            vec!["ledger.keg_deposit.charged", "ledger.keg_deposit.released"],
+        ),
         // Two emits: the handler POSTs the filing (which records
         // `ledger.tax.filing.created` — the event `tax_filings` is
         // projected from) and then, when `remit=true`, follows with the
@@ -89,6 +96,10 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // jobs.job.updated (and wakes metadata-gated steps in the
         // same write, aa9980c8).
         ("jobs.clear_waiting", vec!["jobs.job.updated"]),
+        (
+            "maintenance.sweep.inspect",
+            vec!["jobs.step.completed", "jobs.job.updated"],
+        ),
         ("jobs.subjob_resolve", vec!["jobs.step.completed"]),
         // Completes the open branch on the Job a declared edge names
         // (a merged car answering its feedback packet). The completion
@@ -105,6 +116,22 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // not for the cascade — so the loop terminates here by design
         // (packet-loss.md Q2: report first, raise later).
         ("network.census", vec!["jobs.network.census"]),
+        // The estate comparison (59ef456a): fires on each
+        // `jobs.estate.observed`, reads the registry through the jobs
+        // API, and lands one `jobs.estate.compared` event via the
+        // comparison door. No rule listens on that topic — the series
+        // is for lenses and for calibrating the eventual raiser, so
+        // the loop terminates here by design, same as the census.
+        ("estate.compare", vec!["jobs.estate.compared"]),
+        // The credential broker (7ee101aa): fires on a rotation
+        // packet's scope step, speaks to the forge admin API + the
+        // k8s Secret store, and records issue/install/verify/revoke
+        // by completing that same packet's steps — so its only
+        // in-system emission is `jobs.step.completed`, same as the
+        // other step-completing executors above. Deliberately NOT
+        // `step.done.credential-rotation`: the steps it completes are
+        // `task` kind, so the loop cannot re-enter its own trigger.
+        ("credential.rotate.forgejo", vec!["jobs.step.completed"]),
         ("messages.notify", vec![]),
         // Tells the filer how their packet ended. A sink, like every
         // other notifier — the message is the end of the cascade, not

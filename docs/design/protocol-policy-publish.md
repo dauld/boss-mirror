@@ -1,6 +1,6 @@
 # Design: Protocol, Policy, Publish — the network's API
 
-**Status:** draft — open questions tracked at `/system/design`
+**Status**: decided — all 6 questions resolved 2026-08-12 via the in-app tracker; see Decisions.
 **Origin:** David, 2026-08-12 (verbatim, feedback `63bf89d1`): "whether
 we should have a Protocol, Policy, and Publish service that is
 essentially the API for the network. It can evaluate the payload

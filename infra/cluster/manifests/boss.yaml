@@ -184,15 +184,25 @@ spec:
   # retiring the pod holding the volume. A stuck rollout beats a
   # two-minute outage only in the sense that it lasts longer.
   #
-  # Two things genuinely gate zero-downtime here, and both are real
-  # work rather than a strategy field:
-  #   1. `boss-auth` (RWO) — the break-glass credential store. Two pods
-  #      cannot mount it. idm-kanidm.md keeps local auth deliberately,
-  #      so moving it (to a Secret, or RWX) is an auth-design call.
-  #   2. infra/postgres/migrate.sh takes no advisory lock, so two
-  #      pods starting together race the schema converge.
-  # Until both are answered, `Recreate` is the correct strategy and the
-  # window is shortened rather than removed (see readinessProbe below).
+  # Two things gated zero-downtime here; one is answered and the other
+  # is half-answered, so `Recreate` still stands:
+  #   1. `boss-auth` (RWO) held TWO files. session.key — the HMAC
+  #      signing key for session cookies — has moved to the read-only
+  #      `boss-session-key` Secret mounted below: it is read, never
+  #      written (load_or_create_session_key only generates when the
+  #      file is ABSENT), so a Secret projecting identical bytes into
+  #      every pod is a perfect fit AND is what makes a rolling pair
+  #      sign cookies the same (the cross-pod mass-signout, 2026-08-26).
+  #      credentials.toml STILL lives on this RWO PVC — it is written at
+  #      runtime by the break-glass path — so the volume, its multi-
+  #      attach block, and therefore this `Recreate` all remain until
+  #      the WebAuthn RP retires credentials.toml (packet e9703d8f).
+  #   2. ANSWERED: infra/postgres/migrate.sh now takes a pg_advisory
+  #      lock (MIG_LOCK_KEY), so two pods starting together no longer
+  #      race the schema converge.
+  # RollingUpdate cannot flip until the PVC is gone (credentials.toml),
+  # so `Recreate` is still correct here; the window is shortened rather
+  # than removed (see readinessProbe below). DO NOT change `strategy`.
   #
   # Not a gate, though it is the usual objection: boss-dispatcher binds
   # durable PULL consumers (crates/core/boss-nats/src/durable.rs), and
@@ -204,6 +214,13 @@ spec:
     metadata:
       labels: {app: boss}
     spec:
+      # The SoR app rides its data: control-plane nodes only, never a
+      # flaky worker. Unpinned, this Deployment landed on w-1 and was
+      # evicted when w-1 shed pods — :7900 went dark for minutes on a
+      # Multi-Attach stall (90932d98). Its StatefulSets were already
+      # pinned; the app was not.
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
       # The image runs as uid/gid 1500 (boss), but a freshly provisioned
       # Longhorn volume mounts root:root 0755 — so the credential store
       # was unwritable and boss-auth failed on the temp file. fsGroup
@@ -213,15 +230,41 @@ spec:
       imagePullSecrets:
         - {name: forgejo-registry}
       volumes:
-        # NOT emptyDir. boss-init skips provisioning once the schema
-        # exists (ours came from the GCP migration), so credentials.toml
-        # is written at most once — on an emptyDir it is empty on every
+        # The break-glass credential store, credentials.toml. NOT
+        # emptyDir: boss-init skips provisioning once the schema exists
+        # (ours came from the GCP migration), so credentials.toml is
+        # written at most once — on an emptyDir it is empty on every
         # restart, which makes the documented break-glass path a fiction.
         # idm-kanidm.md keeps local auth precisely so an IdP outage
         # cannot lock operators out; that requires it to persist.
+        #
+        # This volume USED to also hold session.key; that moved to the
+        # read-only `boss-session-key` Secret below. credentials.toml is
+        # the only file left here, and the last thing keeping this RWO
+        # PVC (and `strategy: Recreate`) alive until WebAuthn retires it
+        # (packet e9703d8f).
         - name: boss-auth
           persistentVolumeClaim:
             claimName: boss-auth
+        # The session-cookie HMAC key, read-only, projected from a
+        # Secret so every pod reads the SAME bytes — the fix for the
+        # cross-pod mass-signout (2026-08-26) and step 1 toward a
+        # RollingUpdate. NOT created here: David mints `boss-session-key`
+        # at cutover from the CURRENT key on the boss-auth PVC (the exact
+        # hex bytes of /var/lib/boss/auth/session.key) — a fresh random
+        # key would invalidate every live session on the roll. No
+        # `optional`: a missing Secret must wedge the pod in
+        # ContainerCreating (loud, recoverable), NOT fall through to
+        # load_or_create_session_key minting a new key (silent signout).
+        # defaultMode 0400 + the pod fsGroup (1500) lands the file
+        # root:1500; the kubelet OR's group-read onto a read-only secret
+        # volume, so the boss uid can read it (matches boss-conductor).
+        - name: boss-session-key
+          secret:
+            secretName: boss-session-key
+            defaultMode: 0400
+            items:
+              - {key: session.key, path: session.key}
         # StepPlugin JS bundles (step-plugins.yaml). The `step_plugins`
         # rows were seeded but the bundles they point at were never
         # deployed, so every plugin-backed step rendered "No plugin
@@ -231,6 +274,15 @@ spec:
         - name: step-plugins
           configMap:
             name: step-plugins
+        # Break-glass PUBLIC credential records (boss-break-glass-
+        # credentials.yaml — the manifest header is the ceremony doc).
+        # `optional` so a deployment that has not adopted the ceremony
+        # still boots; the gateway answers 409 "no credential enrolled"
+        # rather than failing to mount.
+        - name: break-glass-credentials
+          configMap:
+            name: boss-break-glass-credentials
+            optional: true
       initContainers:
         # Converges the schema (infra/postgres/migrate.sh, manifest order)
         # on EVERY start — an existing database gets the migrations it is
@@ -278,6 +330,14 @@ spec:
             # events were being written 17 months in the past, leaving
             # 33,042 entries stamped before their predecessor.
             - {name: BOSS_CLOCK_MODE, value: wall}
+            # The clock answers the cluster, not only its own pod. The
+            # `boss-clock-internal` Service (boss-clock-internal.yaml)
+            # targets 7060 so the conductor can ask the clock instead of
+            # falling back to wallclock — and a loopback bind refuses it.
+            # Widened here, declared in the manifest, the way the jobs
+            # API already listens on 0.0.0.0 behind boss-jobs-internal;
+            # no LoadBalancer exposes 7060, so the reach is the cluster.
+            - {name: BOSS_CLOCK_HTTP_BIND, value: "0.0.0.0:7060"}
             - {name: BOSS_DEFAULT_USER_EMAIL, value: david@algedonic.dev}
             - {name: BOSS_BOOTSTRAP_ADMIN_EMAIL, value: david@algedonic.dev}
             - {name: BOSS_STATIC_DIR, value: /opt/boss/spa}
@@ -291,32 +351,42 @@ spec:
             - {name: BOSS_TENANT_MANIFEST_TOML, value: /opt/boss/examples/brewery/seeds/tenant.toml}
             # A PATH, NOT A KEY — the name is a trap and this comment is
             # the guard rail. boss-gateway reads this variable as a
-            # filename and loads the key from it, generating one if the
-            # file is absent.
+            # filename and loads the key from it, generating one only if
+            # the file is ABSENT — a present file is read, never rewritten.
             #
-            # This used to be `valueFrom: secretKeyRef` pointing at
-            # boss-secrets/session-key. The 64 hex characters in that
-            # secret were taken as a RELATIVE PATH, resolved against the
-            # container's working directory, found to be missing, and a
-            # fresh random key was minted and written to a file named
-            # after the secret on the ephemeral overlay filesystem.
-            # Nothing errored. Every deploy silently issued a new signing
-            # key, so every session cookie stopped verifying and every
-            # operator was signed out — three times on 2026-08-26 alone,
-            # reported as the site being down when it was up throughout.
+            # It must NEVER be `valueFrom: secretKeyRef`. That form once
+            # pointed at boss-secrets/session-key, and the 64 hex
+            # characters in that secret were taken as a RELATIVE PATH,
+            # resolved against the container's working directory, found
+            # missing, and a fresh random key was minted onto the
+            # ephemeral overlay. Nothing errored; every deploy silently
+            # issued a new signing key, so every session cookie stopped
+            # verifying and every operator was signed out — three times on
+            # 2026-08-26 alone, reported as the site being down when it
+            # was up. (session-key-persists.sh pins both halves.)
             #
-            # /var/lib/boss/auth is the boss-auth PVC, mounted below and
-            # kept for exactly this class of reason: the volume comment
-            # already argues that a credential which does not survive a
-            # restart makes the break-glass path a fiction. A session key
-            # that does not survive a restart is the same fiction with a
-            # shorter fuse.
-            - {name: BOSS_SESSION_KEY, value: /var/lib/boss/auth/session.key}
+            # The file now comes from the read-only `boss-session-key`
+            # Secret mounted at /etc/boss/session-key (volume + mount
+            # below), NOT the boss-auth PVC. A Secret projects the SAME
+            # bytes into every pod — what lets two pods overlap on a roll
+            # without signing each other's cookies out — and survives a
+            # restart the same as the PVC did. The Secret MUST be minted
+            # with the CURRENT key bytes (see the volume comment); a new
+            # key signs everyone out on the roll.
+            - {name: BOSS_SESSION_KEY, value: /etc/boss/session-key/session.key}
             # Collections loop: dispatcher pushes step.done.<kind> to the
             # sim's webhook on the same loopback host:port. Both must agree
             # or zero collections fire and AR balloons.
             - {name: BOSS_EVENT_WEBHOOK_URL, value: "http://127.0.0.1:7099/callback"}
             - {name: BOSS_SIM_CALLBACK_BIND, value: "127.0.0.1:7099"}
+            # PARKED: the brewery sim tick daemon is off on the cluster
+            # (2026-09-05, park packet 59f063de — the sim is paused behind
+            # IT delivery reliability). The tenant is still published, so
+            # the app keeps its brewery data; only the packet generator is
+            # stopped. Flip to "true" (or delete this line) to resume; the
+            # 791 already-parked packets unblock separately (their
+            # parked_batch=brewery-sim-2026-09-05).
+            - {name: BOSS_SIM_ENABLED, value: "false"}
             - {name: BOSS_DISPATCH_STRATEGY, value: spread}
             # Decides-vs-executes (291a73a7, option c): decision-shaped
             # steps go to the role's human holder; executable platform
@@ -327,6 +397,26 @@ spec:
             - {name: BOSS_DISPATCH_EXECUTOR_ID, value: "claude@algedonic.dev"}
             - {name: BOSS_DISPATCH_EXECUTOR_ROLES, value: "platform-admin"}
             - {name: BOSS_DISPATCHER_RULES, value: /opt/boss/infra/dispatcher/rules.toml}
+            # Widen the dispatcher off loopback so its machine door
+            # (boss-dispatcher-internal.yaml, backlog a757b72a) can serve
+            # reads to in-cluster automation — the sanctioned knob named in
+            # crates/core/boss-dispatcher/src/config.rs. In-cluster only;
+            # the gateway stays the human trust boundary. docs and jobs
+            # already bind 0.0.0.0 (generate-configs.sh), so only the
+            # dispatcher needs this.
+            - {name: BOSS_DISPATCHER_BIND, value: "0.0.0.0:7950"}
+            # The credential broker's root credential + issuer endpoint
+            # (7ee101aa; RBAC + the credential's declaration live in
+            # boss-credential-broker.yaml). The Secret is minted ONCE by
+            # David with a passkey-authorized ceremony and referenced by
+            # name only. `optional: true` deliberately: a deployment
+            # without the Secret still boots, and a rotation rule firing
+            # there dead-letters naming this variable instead of taking
+            # the pod down. A VALUE, not a path — the handler reads env
+            # directly (contrast the BOSS_SESSION_KEY trap above).
+            - name: BOSS_BROKER_FORGEJO_TOKEN
+              valueFrom: {secretKeyRef: {name: boss-credential-broker-root, key: forgejo-token, optional: true}}
+            - {name: BOSS_BROKER_FORGE_URL, value: "http://10.20.0.15:3000"}
             # Bind all interfaces so the Service can reach the gateway;
             # the default 127.0.0.1 is right for systemd+Caddy, wrong here.
             - {name: BOSS_LISTEN, value: "0.0.0.0:4443"}
@@ -350,6 +440,19 @@ spec:
             - {name: BOSS_AUTH_MAIL_FROM, value: "auth@send.algedonic.dev"}
             - name: BOSS_MAIL_API_TOKEN
               valueFrom: {secretKeyRef: {name: resend, key: api-key}}
+            # Break-glass hardware-key ceremony (break-glass-is-a-key-
+            # you-hold.md; store + ceremony doc in
+            # boss-break-glass-credentials.yaml). The DIR is the
+            # ConfigMap mount below — public records, re-read per
+            # ceremony so a committed record propagates without a
+            # restart. The TOKEN arms the one-time bootstrap
+            # enrollment window; the Secret exists only for the
+            # duration of David's enrollment ceremony (`optional` —
+            # absent means the window is closed, which is the steady
+            # state). A VALUE, not a path.
+            - {name: BOSS_BREAK_GLASS_DIR, value: /etc/boss/break-glass}
+            - name: BOSS_BREAK_GLASS_ENROLL_TOKEN
+              valueFrom: {secretKeyRef: {name: boss-break-glass-enroll, key: token, optional: true}}
             - {name: RUST_LOG, value: info}
           ports:
             - {containerPort: 4443, name: gateway}
@@ -376,13 +479,25 @@ spec:
             requests: {cpu: "2", memory: 4Gi}
             limits: {memory: 12Gi}
           volumeMounts:
-            # Writable, not :ro as the compose file has it. boss-auth
-            # ships in this image and is the sanctioned way to rotate the
-            # break-glass credential; read-only means the only way to
-            # provision one is a scale-down dance during an outage —
-            # exactly when you cannot afford it.
+            # credentials.toml, writable — not :ro as the compose file
+            # has it. boss-auth ships in this image and is the sanctioned
+            # way to rotate the break-glass credential; read-only means
+            # the only way to provision one is a scale-down dance during
+            # an outage — exactly when you cannot afford it. (session.key
+            # used to share this mount; it is now the read-only Secret
+            # below, and credentials.toml is all that is left here.)
             - {name: boss-auth, mountPath: /var/lib/boss/auth}
+            # The session-cookie HMAC key, read-only, from the Secret.
+            # Its own mount at a NEW path — deliberately NOT overlaying
+            # /var/lib/boss/auth, so the writable credential store and
+            # the read-only key stay separate volumes. BOSS_SESSION_KEY
+            # points at the session.key file inside it.
+            - {name: boss-session-key, mountPath: /etc/boss/session-key, readOnly: true}
             - {name: step-plugins, mountPath: /var/lib/boss/step-plugins, readOnly: true}
+            # Public break-glass credential records; the gateway only
+            # ever reads them (enrollment emits records for a commit,
+            # never a write here — the manifest header explains why).
+            - {name: break-glass-credentials, mountPath: /etc/boss/break-glass, readOnly: true}
 ---
 apiVersion: v1
 kind: Service

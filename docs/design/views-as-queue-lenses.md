@@ -1,6 +1,6 @@
 # Design: views as queue lenses — the view layer joins the network
 
-**Status:** in-review — open questions tracked at `/system/design`
+**Status**: decided — every question answered by David in review `6f33df26`, 2026-08-19; see Decision history.
 **Origin:** David, 2026-08-12 (verbatim): "I think we need to rebuild
 some of our views to reflect the nature of the network, job packets
 operating under specific protocols, and heavy use of data-defined

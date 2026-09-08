@@ -16,6 +16,16 @@
 //! as a child of this same binary. systemd is demoted to what an OS
 //! is for: keeping this process alive (infra/train/boss-train.service).
 //!
+//! ALL OF THAT RIDES `/api/cadence/*` — the jobs API is the loop's
+//! one door for rules, last-firings, claims and outcomes
+//! (protocol-cadence.md, sequencing step 3; backlog a516f1f1). The
+//! loop used to open its own sqlx pool, and BOSS_POSTGRES_URL on the
+//! conductor's host named a DIFFERENT database than the system of
+//! record — so `/api/cadence/rules/{name}/last-firing` answered
+//! `null` ("never fired") for every rule while the loop fired on
+//! schedule. One door, one database: the firings the loop records are
+//! the firings the operator reads.
+//!
 //! Exactly-once, restated as data: the firing id is a pure function
 //! of (rule, window), so a re-evaluated tick, a restarted loop, or a
 //! second cadence instance all compute the same id and the
@@ -51,18 +61,162 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use boss_clock_client::{ClockClient, ReqwestClockClient};
-use chrono::{DateTime, Duration, NaiveTime, Timelike, Utc};
+use boss_jobs::cadence::{CadenceRuleRow, ClaimResult, LastFiring, NewFiring};
+use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use serde_json::{Value, json};
-use sqlx::Row;
-use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
 use tokio::task::JoinHandle;
 
 use crate::train;
+use boss_core::calendar::{BusinessCalendar, Cadence, fires_on_with_calendar};
 
 /// The `boss train` verbs a cadence rule may fire — the same set the
 /// CLI exposes. Pinned here so a hand-edited registry row cannot make
 /// the loop spawn arbitrary arguments.
 const VERBS: &[&str] = &["preflight", "reconcile", "board", "run"];
+
+/// How far a calendar rule looks back for its most recent elapsed
+/// firing day. Comfortably covers a month, so monthly rules resolve;
+/// beyond that a rule that has not fired is simply waiting, and an
+/// unbounded search would walk the calendar on every tick forever for
+/// a rule anchored in the future.
+const MAX_LOOKBACK_DAYS: u32 = 40;
+
+/// What a rule fires. Two BOUNDED shapes, never arbitrary argv.
+///
+/// WHY THIS EXISTS. `cadence_rules` is a live, editable table and the
+/// loader says so — "the registry is editable data". But until
+/// 2026-08-28 every rule could only ever run `boss train <verb>`, so
+/// the schedule was data and the thing being scheduled was not. All
+/// three rules on record drove the conductor, and no other protocol
+/// could be put on a schedule without a deploy.
+///
+/// That is the leak CLAUDE.md names: "a protocol that cannot be
+/// replaced without a deploy has leaked into the substrate, and that
+/// leak is the defect to hunt." The clock belongs in the substrate;
+/// *what to run* is the operating model and belongs in data.
+///
+/// THE ALLOWLIST STAYS, in a different shape. The point of pinning
+/// `VERBS` was that a hand-edited row must not spawn arbitrary
+/// arguments — so `OpenPacket` does not spawn a process at all. It
+/// files a packet through the jobs API, which means policy and the
+/// audit log see it like any other write, and the worst a bad row can
+/// do is name a workflow kind that does not exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Action {
+    /// `boss train <verb>` — the conductor's verbs, allowlisted.
+    Train(String),
+    /// Open a packet of this workflow kind. Written `open:<kind>`.
+    OpenPacket(String),
+}
+
+/// Read a registry row's `verb` column into what it will actually do.
+///
+/// Refuses rather than guesses, and the refusal names both shapes —
+/// a row is edited by a person, and "unknown verb" without the
+/// alternatives is the kind of message that sends someone to the source.
+/// The verbs that put a train on the track. `board` assembles and
+/// departs one; `run` is reconcile-then-board. Serialization holds
+/// exactly these — a reconcile or a packet-open never needs a clear
+/// track, and holding them would be a second, wrong cooldown.
+pub(crate) fn departs_a_train(verb: &str) -> bool {
+    matches!(verb, "board" | "run")
+}
+
+/// The outcome code recorded for a departing board that RAN CLEANLY yet
+/// boarded nothing — an idle firing. Negative on purpose, like
+/// `run_verb`'s `-1` "could not start": the recorded `rc` is the loop's
+/// assessment of the firing's effect, not only the child's raw exit
+/// code, and no real process exit is negative. `due_window` reads it as
+/// "did no work" via the same `rc != 0` release the failed-firing case
+/// already takes.
+pub(crate) const IDLE_BOARD_RC: i32 = -2;
+
+/// Did a departing board actually board a car? A boarded car takes the
+/// `train` stamp before `board()` returns, so it stops being
+/// `parked_ready` and the dock the loop probes FALLS. An idle window
+/// (nothing genuinely boardable — the reported bug: a car counted at
+/// probe time but held or branch-missing by the time boarding ran) and
+/// a consist that skipped every car both leave the dock where it was.
+///
+/// `after < before` is the whole test. New cars arriving mid-board only
+/// raise `after`, so the answer can misread a productive board as idle
+/// (never the reverse) — harmless: that board departed a train, so the
+/// track is occupied and the next window holds regardless.
+pub(crate) fn board_reduced_the_dock(before: u32, after: u32) -> bool {
+    after < before
+}
+
+/// What the loop RECORDS as a firing's `rc`. The child's exit code
+/// verbatim in every case but one: a departing board that exited 0 yet
+/// boarded nothing is an idle firing (`IDLE_BOARD_RC`), so the
+/// queue-depth cooldown does not hold it and a car that parks moments
+/// later boards at the next tick instead of waiting out the window. A
+/// board that DID board keeps `rc = 0` and starts the cooldown — the
+/// anti-thrash guard is untouched; only the zero-boarded case changes.
+pub(crate) fn recorded_rc(verb: &str, process_rc: i32, boarded_a_car: bool) -> i32 {
+    if departs_a_train(verb) && process_rc == 0 && !boarded_a_car {
+        IDLE_BOARD_RC
+    } else {
+        process_rc
+    }
+}
+
+pub(crate) fn parse_action(verb: &str) -> Result<Action> {
+    if let Some(kind) = verb.strip_prefix("open:") {
+        let kind = kind.trim();
+        if kind.is_empty() {
+            bail!(
+                "verb \"open:\" names no workflow kind — write open:<kind>, e.g. open:protocol-retro"
+            );
+        }
+        // Kinds are kebab-case by convention everywhere in the
+        // registry. Pinning that here keeps the value safe to put in a
+        // URL query and a JSON body without escaping games.
+        if !kind
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            bail!(
+                "workflow kind {kind:?} is not kebab-case (lowercase, digits, hyphens). \
+                 This value goes into a query string and a JSON body; a kind that needs \
+                 escaping is a kind that is wrong."
+            );
+        }
+        return Ok(Action::OpenPacket(kind.to_string()));
+    }
+    if !VERBS.contains(&verb) {
+        bail!(
+            "unknown verb {verb:?}. A rule fires either a conductor verb ({}) or \
+             `open:<kind>` to file a packet.",
+            VERBS.join(" | ")
+        );
+    }
+    Ok(Action::Train(verb.to_string()))
+}
+
+/// The packet a scheduled rule files.
+///
+/// Deliberately the SAME SHAPE `infra/boss-maintenance-wrap.sh` has
+/// filed since the maintenance family existed — subject `infra/<kind>`,
+/// the bootstrap admin as owner, one packet per day. Two mechanisms
+/// filing the same kind with different shapes would be a fact living
+/// twice (CLAUDE.md §9a), and the wrapper's shape is the one with
+/// months of packets behind it.
+pub(crate) fn packet_body(kind: &str, rule: &str, now: DateTime<Utc>) -> Value {
+    json!({
+        "kind": kind,
+        "subject": {"subject_kind": "custom", "id": format!("infra/{kind}")},
+        "title": format!("{kind} — {}", now.format("%Y-%m-%d")),
+        "owner_id": "emp-bootstrap-admin",
+        "priority": "standard",
+        "status": "open",
+        // trigger_kind/trigger_name is the convention the registry
+        // already uses for "who opened this", so a scheduled packet is
+        // attributable to its rule rather than to a mystery actor.
+        "metadata": {"trigger_kind": "cadence", "trigger_name": rule, "chore": kind},
+        "tags": ["cadence"],
+    })
+}
 
 fn log(msg: impl std::fmt::Display) {
     println!("cadence: {msg}");
@@ -94,6 +248,23 @@ pub(crate) enum Basis {
         min_depth: u32,
         cooldown_minutes: u32,
     },
+    /// Fire on the days a CALENDAR recurrence selects, at `at`.
+    ///
+    /// The recurrence and its business-day handling are
+    /// `boss_core::calendar`'s (design a02b01e0) — this basis owns only
+    /// "which day, and at what time", never a second definition of what
+    /// "weekly" means. Before it existed a week was inexpressible here:
+    /// `Clock` fires every day, and `Wall` re-anchors at midnight so
+    /// 10080 minutes floors to zero and fires daily too.
+    Calendar {
+        cadence: Cadence,
+        anchor: NaiveDate,
+        at: NaiveTime,
+        /// Absent = every day is a business day. Per-schedule and not
+        /// global, because deferring maintenance to the next working
+        /// day is right and deferring a ten-minute reconcile is not.
+        business_calendar: Option<BusinessCalendar>,
+    },
 }
 
 impl Basis {
@@ -102,17 +273,15 @@ impl Basis {
             Basis::Wall { .. } => "wall",
             Basis::Clock { .. } => "clock",
             Basis::QueueDepth { .. } => "queue-depth",
+            Basis::Calendar { .. } => "calendar",
         }
     }
 }
 
-/// The most recent recorded firing of a rule — what evaluation
-/// compares the candidate window against.
-#[derive(Debug, Clone)]
-pub(crate) struct LastFiring {
-    pub firing_id: String,
-    pub fired_at: DateTime<Utc>,
-}
+// What evaluation compares a candidate window against is
+// `boss_jobs::cadence::LastFiring` — the WIRE type, imported rather
+// than restated. The loop reads it from the same surface an operator
+// does, so a second local definition would be a fact living twice.
 
 // ---------------------------------------------------------------------------
 // Evaluation — pure functions of (rule, boss-clock now, last firing,
@@ -173,6 +342,39 @@ pub(crate) fn due_window(
                 .filter(|w| *w <= now)
                 .max()?
         }
+        Basis::Calendar {
+            cadence,
+            anchor,
+            at,
+            business_calendar,
+        } => {
+            // The most recent elapsed firing day, at `at`. Same shape as
+            // Clock — "today's window if reached, else the previous
+            // one" — except which days qualify is the calendar's
+            // decision, not every day.
+            //
+            // BOUNDED LOOK-BACK, not "search until found". A rule whose
+            // anchor is in the future, or an annual rule ten months
+            // from its day, must not walk the calendar forever on every
+            // tick. MAX_LOOKBACK_DAYS covers a month comfortably; past
+            // that the honest answer is "no elapsed window", and the
+            // rule simply waits. Catch-up is at most one window, which
+            // matches every other basis here.
+            let today = now.date_naive();
+            let mut day = today;
+            let mut found = None;
+            for _ in 0..=MAX_LOOKBACK_DAYS {
+                if fires_on_with_calendar(*cadence, *anchor, business_calendar.as_ref(), day) {
+                    let w = day.and_time(*at).and_utc();
+                    if w <= now {
+                        found = Some(w);
+                        break;
+                    }
+                }
+                day = day.pred_opt()?;
+            }
+            found?
+        }
         Basis::QueueDepth {
             min_depth,
             cooldown_minutes,
@@ -185,7 +387,34 @@ pub(crate) fn due_window(
             // The cooldown is the re-fire guard: a dock that stays
             // deep (cars skipped on conflicts) re-fires at most once
             // per cooldown instead of every tick.
+            //
+            // It guards a firing that DID WORK — a board that boarded a
+            // car. A firing that boarded nothing has nothing to re-fire
+            // against, so holding the window only postpones useful work.
+            // Two ways a firing boards nothing, both released here:
+            //
+            //   - It FAILED (rc != 0). 2026-09-04: a board fired against
+            //     a conductor whose clone was broken, exited rc=1 in 0s,
+            //     and left a threshold-met dock parked the full two hours
+            //     behind a conductor healthy again within minutes.
+            //
+            //   - It RAN CLEANLY but was IDLE (rc == IDLE_BOARD_RC). The
+            //     dock met the threshold at probe time, but by the time
+            //     boarding ran nothing was genuinely boardable — a car
+            //     held or branch-missing between the two. 2026-09-06: an
+            //     idle board burned the full 45-minute cooldown, and four
+            //     green cars that parked minutes later waited it out. The
+            //     loop records that boarded-nothing outcome as
+            //     IDLE_BOARD_RC (see `recorded_rc`), which is `!= 0` and
+            //     so releases here by the same test as a failure.
+            //
+            // `rc == None` is deliberately held, not released: no outcome
+            // recorded means the run is still in flight or was cut off
+            // mid-verb, and re-firing under it would double-board. Only a
+            // KNOWN boarded-nothing outcome opens the window early.
+            let last_did_no_work = last.is_some_and(|l| l.rc.is_some_and(|rc| rc != 0));
             if let Some(last) = last
+                && !last_did_no_work
                 && now - last.fired_at < Duration::minutes(i64::from(*cooldown_minutes))
             {
                 return None;
@@ -225,21 +454,50 @@ pub(crate) enum Decision {
     /// so in the journal. The elapsed time is the run's, not the
     /// window's: it is the number an operator wants.
     StillRunning(std::time::Duration),
+    /// Due, and this rule would depart a train, but one is already on
+    /// the track (that many open pr-train packets are still before
+    /// their merge). The window is NOT claimed: the moment the track
+    /// clears — the previous train merges, arrives OR cancels — the
+    /// next tick fires against the dock as it stands. Single-track
+    /// railway (a8c6773b), for the merge only: a merged train waiting
+    /// to converge holds nothing (`train::holds_the_track`).
+    TrackOccupied(u32),
+    /// Due, would depart a train, and the track could not be read. A
+    /// failed probe never boards — the same rule the dock probe keeps.
+    TrackUnknown,
 }
 
 /// The whole per-tick scheduling decision for one rule, as a pure
-/// function of (rule, boss-clock now, last firing, dock depth,
-/// what this loop already has in flight).
+/// function of (rule, boss-clock now, last firing, dock depth, open
+/// trains, what this loop already has in flight).
+///
+/// `open_trains` is the track: how many open pr-train packets are still
+/// before their merge (`probe_open_trains`). It gates only the verbs
+/// that depart a train, and it gates them BEFORE the window is claimed,
+/// so a held boarding leaves no firing behind and no cooldown starts
+/// from the hold. That is the
+/// difference between "the next train departs when the previous one
+/// lands" and "the next train departs 45 minutes after we noticed the
+/// previous one had not landed yet". Two trains on one main is a
+/// stale-base merge and a double deploy; before this nothing checked.
 pub(crate) fn decide(
     rule: &CadenceRule,
     now: DateTime<Utc>,
     last: Option<&LastFiring>,
     dock_depth: Option<u32>,
+    open_trains: Option<u32>,
     running: &[RunSnapshot],
 ) -> Decision {
     let Some(window) = due_window(rule, now, last, dock_depth) else {
         return Decision::Hold;
     };
+    if departs_a_train(&rule.verb) {
+        match open_trains {
+            None => return Decision::TrackUnknown,
+            Some(n) if n > 0 => return Decision::TrackOccupied(n),
+            Some(_) => {}
+        }
+    }
     // Per rule, deliberately: a long reconcile must not gag the
     // boarding window or the queue-depth board. Overlap between
     // rules is the conductor's flock to arbitrate, not this loop's.
@@ -260,6 +518,20 @@ pub(crate) fn runtime_secs(elapsed: std::time::Duration) -> u64 {
 /// journalled by the spawned task with its true elapsed time.
 pub(crate) fn completion_line(rule: &str, verb: &str, rc: i32, runtime_secs: u64) -> String {
     format!("{rule} verb={verb} rc={rc} in {runtime_secs}s")
+}
+
+/// The held-track line: a due departure that waits for the previous
+/// train. Journalled every tick it holds, because a boarding that
+/// silently does not happen is indistinguishable from a dead loop.
+pub(crate) fn track_occupied_line(rule: &str, open_trains: u32) -> String {
+    let s = if open_trains == 1 { "" } else { "s" };
+    format!("{rule} held — track occupied ({open_trains} open train{s}) — departs when it clears")
+}
+
+/// The blind-track line: the departure holds because the track could
+/// not be read, and says which probe failed rather than boarding anyway.
+pub(crate) fn track_unknown_line(rule: &str) -> String {
+    format!("{rule} held — open-train probe failed, not departing blind")
 }
 
 /// The skipped-window line. A window that does not fire must say why;
@@ -331,6 +603,31 @@ pub(crate) fn next_due(rules: &[CadenceRule], now: DateTime<Utc>) -> Option<Date
                     })
                     .min()
             }
+            Basis::Calendar {
+                cadence,
+                anchor,
+                at,
+                business_calendar,
+            } => {
+                // The NEXT firing day at or after today whose window is
+                // still ahead. Same bounded walk as `due_window`, in
+                // the other direction — the heartbeat's "next due" is a
+                // convenience, so a rule with nothing in range reports
+                // None rather than guessing.
+                let mut day = now.date_naive();
+                for _ in 0..=MAX_LOOKBACK_DAYS {
+                    if fires_on_with_calendar(*cadence, *anchor, business_calendar.as_ref(), day) {
+                        let w = day.and_time(*at).and_utc();
+                        if w > now {
+                            return Some(w);
+                        }
+                    }
+                    day = day.succ_opt()?;
+                }
+                None
+            }
+            // A queue-depth rule has no clock: it fires when the dock
+            // fills, which no schedule can predict.
             Basis::QueueDepth { .. } => None,
         })
         .min()
@@ -359,88 +656,195 @@ pub(crate) fn parse_at_times(v: &Value) -> Result<Vec<NaiveTime>> {
 }
 
 // ---------------------------------------------------------------------------
-// Registry + measurement I/O — thin adapters over cadence_rules /
-// cadence_firings. Timestamps are always bound from boss-clock time,
-// never SQL NOW().
+// Registry + measurement I/O — the four cadence calls, over the jobs
+// API's /api/cadence/* door (protocol-cadence.md, sequencing step 3).
+//
+// The loop used to open its own sqlx pool here, and that pool was a
+// recorded defect: BOSS_POSTGRES_URL on the conductor's host is NOT
+// the database behind the system of record, so every firing the loop
+// recorded was invisible to /api/cadence/rules/{name}/last-firing —
+// the surface answered "never fired" for every rule while the loop
+// fired on schedule (backlog a516f1f1; 123-cadence-registry-
+// reconcile.sql measured the same split for rules: 244 firing rows
+// local, 0 on the cluster). One door, one database: what the loop
+// obeys is what the operator reads. Timestamps are still bound from
+// boss-clock time — the API stores the caller's fired_at, never NOW().
 // ---------------------------------------------------------------------------
 
-fn rule_from_row(row: &PgRow) -> Result<CadenceRule> {
-    let name: String = row.try_get("name")?;
-    let verb: String = row.try_get("verb")?;
-    if !VERBS.contains(&verb.as_str()) {
-        bail!("unknown verb {verb:?}");
+/// The jobs API base the whole loop talks to — rules, firings and the
+/// dock probe alike. **Unset is a refusal, not a default.** A default
+/// that is right on one host and silently wrong on another is exactly
+/// how the old pool's firings spent weeks invisible to the last-firing
+/// surface; a loop that cannot reach the right instance must reach
+/// none. The box that really does schedule against its local stack
+/// says so explicitly in its unit drop-in.
+fn jobs_base() -> Result<String> {
+    let raw = std::env::var("BOSS_JOBS_URL").unwrap_or_default();
+    let base = raw.trim().trim_end_matches('/');
+    if base.is_empty() {
+        bail!(
+            "BOSS_JOBS_URL is unset, so there is no system of record to schedule against. \
+             Refusing rather than defaulting: the loop's rules and firings must live in the \
+             database operators read, and a local fallback is how every cadence firing spent \
+             weeks answering `null` from /api/cadence/rules/{{name}}/last-firing. Set it in \
+             the boss-train unit drop-in (jobs-sor.conf), e.g. \
+             BOSS_JOBS_URL=http://10.20.0.34:7900."
+        );
     }
-    let basis: String = row.try_get("basis")?;
-    let positive = |field: &str| -> Result<u32> {
-        let v: Option<i32> = row.try_get(field)?;
+    Ok(base.to_string())
+}
+
+fn rule_from_row(row: &CadenceRuleRow) -> Result<CadenceRule> {
+    // Validate at LOAD, not at fire. A malformed row is skipped loudly
+    // every tick (see `load_rules`); discovering it only when the rule
+    // is due would hide a typo until the moment it matters.
+    parse_action(&row.verb)?;
+    let basis = &row.basis;
+    let positive = |field: &str, v: Option<i32>| -> Result<u32> {
         v.ok_or_else(|| anyhow!("{field} is required for basis {basis:?}"))?
             .try_into()
             .with_context(|| format!("{field} must be positive"))
     };
-    let basis = match basis.as_str() {
+    let basis = match row.basis.as_str() {
         "wall" => Basis::Wall {
-            every_minutes: positive("every_minutes")?,
+            every_minutes: positive("every_minutes", row.every_minutes)?,
         },
         "clock" => {
-            let at: Option<Value> = row.try_get("at_times")?;
-            let at = at.ok_or_else(|| anyhow!("at_times is required for basis \"clock\""))?;
+            let at = row
+                .at_times
+                .as_ref()
+                .ok_or_else(|| anyhow!("at_times is required for basis \"clock\""))?;
             Basis::Clock {
-                at: parse_at_times(&at)?,
+                at: parse_at_times(at)?,
             }
         }
         "queue-depth" => Basis::QueueDepth {
-            min_depth: positive("min_dock_depth")?,
-            cooldown_minutes: positive("cooldown_minutes")?,
+            min_depth: positive("min_dock_depth", row.min_dock_depth)?,
+            cooldown_minutes: positive("cooldown_minutes", row.cooldown_minutes)?,
         },
+        "calendar" => {
+            let raw = row
+                .cadence
+                .as_deref()
+                .ok_or_else(|| anyhow!("cadence is required for basis \"calendar\""))?;
+            // Parsed by boss_core::calendar, not re-implemented here —
+            // the whole point of the move (design a02b01e0) is that
+            // "weekly" has one definition in this tree.
+            let cadence = Cadence::parse(raw)
+                .ok_or_else(|| anyhow!("unknown cadence {raw:?} — see boss_core::calendar"))?;
+            let anchor = row
+                .anchor_date
+                .ok_or_else(|| anyhow!("anchor_date is required for basis \"calendar\""))?;
+            let at = row
+                .at_times
+                .as_ref()
+                .ok_or_else(|| anyhow!("at_times is required for basis \"calendar\""))?;
+            let times = parse_at_times(at)?;
+            // The DB check pins exactly one, but a reader that trusts a
+            // constraint it cannot see is how a silent wrong-window bug
+            // gets in: a weekly rule with two times is a clock rule
+            // that was mislabelled.
+            let [at] = times[..] else {
+                bail!(
+                    "basis \"calendar\" takes exactly one time-of-day, got {} — the cadence \
+                     chooses the DAYS and at_times chooses WHEN on them",
+                    times.len()
+                );
+            };
+            // BUSINESS CALENDARS ARE NOT RESOLVABLE HERE YET, and this
+            // REFUSES rather than pretending.
+            //
+            // The column exists because design a02b01e0 Q3 decided the
+            // calendar is per-schedule, and the firing math already
+            // takes an Option<&BusinessCalendar>. What is missing is the
+            // resolution from a CODE ("us-banking") to the closed days,
+            // which lives in the calendar service — and this loop must
+            // not acquire a network dependency to decide whether to
+            // fire, or a scheduler stops scheduling when another service
+            // is down.
+            //
+            // Constructing an empty BusinessCalendar from the code would
+            // compile and be WORSE than refusing: a rule naming a
+            // calendar would fire on every holiday while its row claimed
+            // otherwise. A silent half-feature is the failure this same
+            // car found in the verb CHECK an hour earlier.
+            if let Some(code) = &row.business_calendar {
+                bail!(
+                    "business_calendar {code:?} cannot be resolved by the cadence loop yet — \
+                     the code-to-closed-days lookup lives in the calendar service, and this \
+                     loop deliberately holds no dependency on it. Leave the column NULL until \
+                     that resolution exists; a rule that names a calendar it cannot read would \
+                     fire on holidays while claiming not to."
+                );
+            }
+            Basis::Calendar {
+                cadence,
+                anchor,
+                at,
+                business_calendar: None,
+            }
+        }
         other => bail!("unknown basis {other:?}"),
     };
-    Ok(CadenceRule { name, verb, basis })
+    Ok(CadenceRule {
+        name: row.name.clone(),
+        verb: row.verb.clone(),
+        basis,
+    })
 }
 
-async fn load_rules(pool: &PgPool) -> Result<Vec<CadenceRule>> {
-    let rows = sqlx::query(
-        "SELECT name, verb, basis, every_minutes, at_times, min_dock_depth, cooldown_minutes \
-         FROM cadence_rules WHERE status = 'active' ORDER BY name",
-    )
-    .fetch_all(pool)
-    .await
-    .context("loading cadence_rules")?;
+async fn load_rules(http: &reqwest::Client, base: &str) -> Result<Vec<CadenceRule>> {
+    // EVERY COLUMN rule_from_row READS MUST BE SERVED. The columns
+    // live behind the API now (PgCadence::active_rules carries the
+    // widening scar: the calendar basis landed without its columns
+    // being selected, and the loop skipped protocol-retro-daily on
+    // every tick — the rule was in the table the whole time).
+    let v = api(http, reqwest::Method::GET, base, "/api/cadence/rules", None)
+        .await
+        .context("loading cadence rules")?
+        .unwrap_or(Value::Null);
+    let rows: Vec<CadenceRuleRow> =
+        serde_json::from_value(v).context("parsing /api/cadence/rules")?;
     let mut out = Vec::new();
     for row in &rows {
-        let name: String = row.try_get("name")?;
         match rule_from_row(row) {
             Ok(rule) => out.push(rule),
             // A malformed row is skipped LOUDLY every tick, not
             // dropped once at startup: the registry is editable data.
-            Err(e) => log(format!("skipping unreadable rule {name}: {e:#}")),
+            Err(e) => log(format!("skipping unreadable rule {}: {e:#}", row.name)),
         }
     }
     Ok(out)
 }
 
-async fn last_firing(pool: &PgPool, rule: &str) -> Result<Option<LastFiring>> {
-    let row = sqlx::query(
-        "SELECT firing_id, fired_at FROM cadence_firings WHERE rule_name = $1 \
-         ORDER BY fired_at DESC LIMIT 1",
+async fn last_firing(http: &reqwest::Client, base: &str, rule: &str) -> Result<Option<LastFiring>> {
+    // The endpoint answers `null` for "never fired" — an ANSWER, not
+    // an absence: it means every window is a candidate.
+    let v = api(
+        http,
+        reqwest::Method::GET,
+        base,
+        &format!("/api/cadence/rules/{rule}/last-firing"),
+        None,
     )
-    .bind(rule)
-    .fetch_optional(pool)
     .await
     .context("reading the last cadence firing")?;
-    match row {
-        None => Ok(None),
-        Some(r) => Ok(Some(LastFiring {
-            firing_id: r.try_get("firing_id")?,
-            fired_at: r.try_get("fired_at")?,
-        })),
+    match v {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => Ok(Some(
+            serde_json::from_value(v).context("parsing the last cadence firing")?,
+        )),
     }
 }
 
 /// Claim a firing id. `false` = the window was already claimed (a
 /// concurrent instance, or a re-run after a crash mid-verb) — the
-/// caller must not run the verb.
+/// caller must not run the verb. Exactly-once still rests on the
+/// firing_id primary key; the API reports a losing claim as 200 +
+/// `{"claimed": false}` so a race never looks like a failure.
 async fn claim_firing(
-    pool: &PgPool,
+    http: &reqwest::Client,
+    base: &str,
     id: &str,
     rule: &CadenceRule,
     now: DateTime<Utc>,
@@ -450,47 +854,72 @@ async fn claim_firing(
         (Basis::QueueDepth { .. }, Some(d)) => json!({"dock_depth": d}),
         _ => json!({}),
     };
-    let res = sqlx::query(
-        "INSERT INTO cadence_firings (firing_id, rule_name, verb, basis, fired_at, detail) \
-         VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (firing_id) DO NOTHING",
+    let new = NewFiring {
+        firing_id: id.to_string(),
+        rule_name: rule.name.clone(),
+        verb: rule.verb.clone(),
+        basis: rule.basis.as_str().to_string(),
+        fired_at: now, // boss-clock time, bound — never the DB's wallclock
+        detail,
+    };
+    let v = api(
+        http,
+        reqwest::Method::POST,
+        base,
+        "/api/cadence/firings",
+        Some(&serde_json::to_value(&new)?),
     )
-    .bind(id)
-    .bind(&rule.name)
-    .bind(&rule.verb)
-    .bind(rule.basis.as_str())
-    .bind(now) // boss-clock time, bound — never the DB's wallclock
-    .bind(detail)
-    .execute(pool)
     .await
-    .context("claiming the cadence firing")?;
-    Ok(res.rows_affected() == 1)
+    .context("claiming the cadence firing")?
+    .ok_or_else(|| anyhow!("POST /api/cadence/firings returned no body"))?;
+    let res: ClaimResult = serde_json::from_value(v).context("parsing the claim result")?;
+    Ok(res.claimed)
 }
 
 /// Merge the verb's outcome into the firing row — the runtime and
 /// exit code are what make "what did the cadence cost" a query.
-async fn record_outcome(pool: &PgPool, id: &str, rc: i32, runtime_secs: u64) -> Result<()> {
-    sqlx::query("UPDATE cadence_firings SET detail = detail || $2 WHERE firing_id = $1")
-        .bind(id)
-        .bind(json!({"rc": rc, "runtime_secs": runtime_secs}))
-        .execute(pool)
-        .await
-        .context("recording the cadence outcome")?;
+async fn record_outcome(
+    http: &reqwest::Client,
+    base: &str,
+    id: &str,
+    rc: i32,
+    runtime_secs: u64,
+) -> Result<()> {
+    api(
+        http,
+        reqwest::Method::POST,
+        base,
+        &format!("/api/cadence/firings/{id}/outcome"),
+        Some(&json!({"rc": rc, "runtime_secs": runtime_secs})),
+    )
+    .await
+    .context("recording the cadence outcome")?;
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// The dock probe — parked ready cars, counted from the jobs API with
-// the same predicate boarding itself collects by (train::parked_ready).
+// The jobs-API door itself, and the dock probe — parked ready cars,
+// counted with the same predicate boarding itself collects by
+// (train::parked_ready).
 // ---------------------------------------------------------------------------
 
-/// The probe reads the same system of record the conductor does, and
-/// the same pod roll hits it: on 2026-08-13 a `Connection refused`
-/// here held the queue-depth rules for a tick. Same blip guard, same
-/// classifier — journalled in this loop's idiom (`cadence: `).
-async fn get_json(http: &reqwest::Client, base: &str, path: &str) -> Result<Option<Value>> {
+/// Every call the loop makes reads the same system of record the
+/// conductor does, and the same pod roll hits it: on 2026-08-13 a
+/// `Connection refused` here held the queue-depth rules for a tick.
+/// Same blip guard, same classifier — journalled in this loop's idiom
+/// (`cadence: `). A POST re-sends only on a refused connection
+/// (nothing was received); an ambiguous claim is settled by the next
+/// tick re-evaluating the window, never by re-sending blind.
+async fn api(
+    http: &reqwest::Client,
+    method: reqwest::Method,
+    base: &str,
+    path: &str,
+    body: Option<&Value>,
+) -> Result<Option<Value>> {
     train::retrying(
         &train::JOBS_API_RETRY,
-        &reqwest::Method::GET,
+        &method,
         // The cadence loop is not a train and resolves no delivery
         // policy — it decides only WHEN to spawn a verb. Its journal
         // keeps the compiled cause budget, which is the same number the
@@ -498,71 +927,124 @@ async fn get_json(http: &reqwest::Client, base: &str, path: &str) -> Result<Opti
         // the line that changes.
         crate::delivery_policy::COMPILED_BLIP_CAUSE_BUDGET,
         &|m| log(m),
-        || get_json_once(http, base, path),
+        || api_once(http, &method, base, path, body),
     )
     .await
 }
 
-async fn get_json_once(
+async fn api_once(
     http: &reqwest::Client,
+    method: &reqwest::Method,
     base: &str,
     path: &str,
+    body: Option<&Value>,
 ) -> std::result::Result<Option<Value>, train::ApiFailure> {
-    let resp = http
-        .get(format!("{base}{path}"))
+    let mut req = http
+        .request(method.clone(), format!("{base}{path}"))
         .header("content-type", "application/json")
-        .header("x-boss-user", train::boss_user())
+        .header("x-boss-user", train::boss_user());
+    if let Some(b) = body {
+        req = req.json(b);
+    }
+    let resp = req
         .send()
         .await
-        .map_err(|e| train::ApiFailure::transport(e, format!("GET {path}")))?;
+        .map_err(|e| train::ApiFailure::transport(e, format!("{method} {path}")))?;
     let status = resp.status();
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| train::ApiFailure::transport(e, format!("reading GET {path} response")))?;
+    let text = resp.text().await.map_err(|e| {
+        train::ApiFailure::transport(e, format!("reading {method} {path} response"))
+    })?;
     if !status.is_success() {
         return Err(train::ApiFailure {
             kind: train::Failure::Http(status.as_u16()),
-            cause: anyhow!("GET {path}: HTTP {status}: {}", body.trim()),
+            cause: anyhow!("{method} {path}: HTTP {status}: {}", text.trim()),
         });
     }
-    if body.trim().is_empty() {
+    if text.trim().is_empty() {
         return Ok(None);
     }
-    serde_json::from_str(&body)
+    serde_json::from_str(&text)
         .map(Some)
         .map_err(|e| train::ApiFailure {
             kind: train::Failure::Malformed,
-            cause: anyhow::Error::new(e).context(format!("parsing GET {path} response")),
+            cause: anyhow::Error::new(e).context(format!("parsing {method} {path} response")),
         })
 }
 
-async fn probe_dock_depth() -> Result<u32> {
-    let jobs = train::env_or("BOSS_JOBS_URL", "http://127.0.0.1:7900");
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?;
-    let listed = train::rows(
-        get_json(
-            &http,
-            &jobs,
-            "/api/jobs?kind=ship-a-change&status=open&limit=100",
+async fn probe_dock_depth(http: &reqwest::Client, base: &str) -> Result<u32> {
+    // Every open car, not just page one. A limit is not a filter: the
+    // dock builds past a page (in-flight + parked + landed-but-unclosed
+    // residue), and a page-one read under-counts it, so the depth-driven
+    // board never fires exactly when the backlog most needs draining.
+    let listed = train::list_all_pages(|offset| async move {
+        api(
+            http,
+            reqwest::Method::GET,
+            base,
+            &format!("/api/jobs?kind=ship-a-change&status=open&limit=100&offset={offset}"),
+            None,
         )
-        .await?,
-    )?;
+        .await
+    })
+    .await?;
     let mut depth = 0u32;
     for j in listed {
         let Some(id) = j.get("id").and_then(Value::as_str) else {
             continue;
         };
-        let job = get_json(&http, &jobs, &format!("/api/jobs/{id}"))
-            .await?
-            .ok_or_else(|| anyhow!("job {id} came back empty"))?;
+        let job = api(
+            http,
+            reqwest::Method::GET,
+            base,
+            &format!("/api/jobs/{id}"),
+            None,
+        )
+        .await?
+        .ok_or_else(|| anyhow!("job {id} came back empty"))?;
         if train::parked_ready(&job) {
             depth += 1;
         }
     }
     Ok(depth)
+}
+
+/// How many trains hold the track: open pr-train packets still BEFORE
+/// their merge (`train::holds_the_track`). A merged train waiting to
+/// deploy or converge is open but holds nothing — the next consist
+/// merges on top of its content and converges it by ancestry; counting
+/// it deadlocked delivery twice on 2026-09-07 (f3796323), the fix-forward
+/// car held out by the very train it would have converged.
+///
+/// Read across every page, not off `total`: the predicate needs each
+/// row's `steps` (the list enriches them), and the one pre-merge train
+/// that matters may sit behind merged ones — a limit is not a filter.
+/// The paginator errors on a body without `total`, never reads it as
+/// zero — zero is what a wrong deployment answers.
+async fn probe_open_trains(http: &reqwest::Client, base: &str) -> Result<u32> {
+    let listed = train::list_all_pages(|offset| async move {
+        api(
+            http,
+            reqwest::Method::GET,
+            base,
+            &format!(
+                "/api/jobs?kind=pr-train&status=open&limit={}&offset={offset}",
+                train::PAGE_LIMIT
+            ),
+            None,
+        )
+        .await
+    })
+    .await?;
+    Ok(track_holders(&listed))
+}
+
+/// The pure count behind the probe: the open trains that hold the track.
+pub(crate) fn track_holders(open_trains: &[Value]) -> u32 {
+    let n = open_trains
+        .iter()
+        .filter(|t| train::holds_the_track(t))
+        .count();
+    u32::try_from(n).unwrap_or(u32::MAX)
 }
 
 // ---------------------------------------------------------------------------
@@ -573,17 +1055,77 @@ async fn probe_dock_depth() -> Result<u32> {
 /// return its exit code. The conductor's own flock makes an overlap
 /// with a manually-started run exit clean, and a preflight exit 3
 /// lands here as data instead of killing the loop.
-async fn run_verb(verb: &str) -> Result<i32> {
-    if !VERBS.contains(&verb) {
-        bail!("refusing to run unknown verb {verb:?}");
+async fn run_verb(verb: &str, rule: &str, now: DateTime<Utc>) -> Result<i32> {
+    match parse_action(verb)? {
+        Action::Train(v) => {
+            let exe = std::env::current_exe().context("resolving the boss binary path")?;
+            let status = tokio::process::Command::new(exe)
+                .args(["train", &v])
+                .status()
+                .await
+                .with_context(|| format!("spawning boss train {v}"))?;
+            Ok(status.code().unwrap_or(-1))
+        }
+        Action::OpenPacket(kind) => open_packet(&kind, rule, now).await,
     }
-    let exe = std::env::current_exe().context("resolving the boss binary path")?;
-    let status = tokio::process::Command::new(exe)
-        .args(["train", verb])
-        .status()
-        .await
-        .with_context(|| format!("spawning boss train {verb}"))?;
-    Ok(status.code().unwrap_or(-1))
+}
+
+/// File one packet of `kind`, or reuse the open one.
+///
+/// SINGLE-OPEN, the same contract `boss-maintenance-wrap.sh` keeps: if
+/// an open packet of this kind already exists, today's firing does not
+/// add a second. A failed run leaves its packet open on purpose — the
+/// timer is the executor, the Job is the visibility — and piling up a
+/// packet per firing would turn one unfinished chore into a wall of
+/// them.
+async fn open_packet(kind: &str, rule: &str, now: DateTime<Utc>) -> Result<i32> {
+    // WHERE THE PACKET GOES IS NOT A DEFAULT, IT IS A DECISION.
+    //
+    // `boss-maintenance-wrap.sh` learned this the expensive way: it
+    // read `${BOSS_JOBS_URL:-http://127.0.0.1:7900}`, and on a box
+    // whose local instance is not the system of record that fallback
+    // is a silent redirect. It ran for weeks — the backup,
+    // audit-integrity and ledger-replay timers each left 7 packets on
+    // boss-gcp's demo instance and ZERO on the cluster, while firing
+    // exactly on schedule and passing every check. So: no fallback
+    // here either. An unset variable is a refusal.
+    let base = std::env::var("BOSS_JOBS_URL").unwrap_or_default();
+    if base.trim().is_empty() {
+        bail!(
+            "BOSS_JOBS_URL is unset, so there is no deployment to file a {kind} packet with. \
+             Refusing rather than defaulting: a default here is a silent redirect to whichever \
+             instance happens to be local, and that has already cost weeks of packets landing \
+             on the wrong one."
+        );
+    }
+
+    let http = reqwest::Client::new();
+    let open = crate::gate::rows(
+        crate::gate::api(
+            &http,
+            reqwest::Method::GET,
+            &format!("/api/jobs?kind={kind}&status=open&limit=2"),
+            None,
+        )
+        .await?,
+    );
+    if !open.is_empty() {
+        log(format!(
+            "{rule}: an open {kind} packet exists — leaving it to be completed rather than \
+             filing a second"
+        ));
+        return Ok(0);
+    }
+
+    crate::gate::api(
+        &http,
+        reqwest::Method::POST,
+        "/api/jobs",
+        Some(packet_body(kind, rule, now)),
+    )
+    .await?;
+    log(format!("{rule}: filed a {kind} packet"));
+    Ok(0)
 }
 
 /// A spawned verb the loop is still tracking.
@@ -649,13 +1191,28 @@ impl Runs {
     /// rc + runtime into the claimed row, and journalling the
     /// completion line — so none of it depends on the loop being
     /// free, and the loop is free immediately.
-    fn spawn_verb(&mut self, pool: &PgPool, rule: &CadenceRule, firing_id: String) {
-        let pool = pool.clone();
+    ///
+    /// `dock_depth` is the parked-ready count the firing was claimed
+    /// against (queue-depth rules only). It is the "before" the tail
+    /// compares a fresh probe against to tell a board that boarded a car
+    /// from an idle one — see `recorded_rc`.
+    fn spawn_verb(
+        &mut self,
+        http: &reqwest::Client,
+        base: &str,
+        rule: &CadenceRule,
+        firing_id: String,
+        now: DateTime<Utc>,
+        dock_depth: Option<u32>,
+    ) {
+        let http = http.clone();
+        let base = base.to_string();
         let name = rule.name.clone();
         let verb = rule.verb.clone();
+        let rule_name = rule.name.clone();
         let started = Instant::now();
         let handle = tokio::spawn(async move {
-            let rc = match run_verb(&verb).await {
+            let process_rc = match run_verb(&verb, &rule_name, now).await {
                 Ok(rc) => rc,
                 Err(e) => {
                     // The verb never started. Say so, then record it
@@ -666,7 +1223,28 @@ impl Runs {
                 }
             };
             let secs = runtime_secs(started.elapsed());
-            if let Err(e) = record_outcome(&pool, &firing_id, rc, secs).await {
+            // Did this board board a car? Only a departing verb that
+            // exited cleanly can be idle; anything else keeps its own rc.
+            // A boarded car takes the `train` stamp before the child
+            // returns, so a fresh dock probe FALLS iff at least one car
+            // boarded. A probe we cannot read leaves `boarded_a_car`
+            // true — the conservative reading holds the cooldown, exactly
+            // as before this fix.
+            let boarded_a_car = if departs_a_train(&verb) && process_rc == 0 {
+                match (dock_depth, probe_dock_depth(&http, &base).await) {
+                    (Some(before), Ok(after)) => board_reduced_the_dock(before, after),
+                    _ => true,
+                }
+            } else {
+                true
+            };
+            let rc = recorded_rc(&verb, process_rc, boarded_a_car);
+            if rc == IDLE_BOARD_RC {
+                log(format!(
+                    "{name}: board boarded nothing — idle firing, cooldown not held"
+                ));
+            }
+            if let Err(e) = record_outcome(&http, &base, &firing_id, rc, secs).await {
                 log(format!(
                     "{name}: recording the firing outcome failed: {e:#}"
                 ));
@@ -685,7 +1263,8 @@ struct TickSummary {
 }
 
 async fn tick(
-    pool: &PgPool,
+    http: &reqwest::Client,
+    base: &str,
     clock: &dyn ClockClient,
     dry: bool,
     runs: &mut Runs,
@@ -694,7 +1273,7 @@ async fn tick(
     // the no-wallclock invariant). In the wall-mode production deploy
     // it IS wall time — served by the one authoritative clock.
     let now = clock.now().await.now;
-    let rules = load_rules(pool).await?;
+    let rules = load_rules(http, base).await?;
     // Release the guards of runs that finished since the last tick,
     // then read the survivors once — every rule this tick is judged
     // against the same picture of what is in flight.
@@ -707,17 +1286,49 @@ async fn tick(
         .iter()
         .any(|r| matches!(r.basis, Basis::QueueDepth { .. }))
     {
-        match probe_dock_depth().await {
+        match probe_dock_depth(http, base).await {
             Ok(d) => dock_depth = Some(d),
             Err(e) => log(format!("dock probe failed — queue-depth rules hold: {e:#}")),
         }
     }
+    // The track is read once per tick, and only when a rule could
+    // depart a train — a loop with no departing rule never asks.
+    let mut open_trains: Option<u32> = None;
+    if rules.iter().any(|r| departs_a_train(&r.verb)) {
+        match probe_open_trains(http, base).await {
+            Ok(n) => open_trains = Some(n),
+            Err(e) => log(format!("open-train probe failed — departures hold: {e:#}")),
+        }
+    }
     for rule in &rules {
-        let last = last_firing(pool, &rule.name).await?;
-        let window = match decide(rule, now, last.as_ref(), dock_depth, &running) {
+        // PER-RULE ISOLATION. Cadence rules are independent; one rule's
+        // failed read or claim must not abort the tick and starve every
+        // rule behind it in the list — the same "one bad element freezes
+        // the batch" shape that froze reconcile for ~8h on 2026-09-06.
+        // A failure holds THIS rule for this tick (retried next), exactly
+        // like the dock/open-train probes above.
+        let last = match last_firing(http, base, &rule.name).await {
+            Ok(l) => l,
+            Err(e) => {
+                log(format!(
+                    "cadence: last-firing read failed for {} — rule held this tick: {e:#}",
+                    rule.name
+                ));
+                continue;
+            }
+        };
+        let window = match decide(rule, now, last.as_ref(), dock_depth, open_trains, &running) {
             Decision::Hold => continue,
             Decision::StillRunning(elapsed) => {
                 log(still_running_line(&rule.name, elapsed));
+                continue;
+            }
+            Decision::TrackOccupied(n) => {
+                log(track_occupied_line(&rule.name, n));
+                continue;
+            }
+            Decision::TrackUnknown => {
+                log(track_unknown_line(&rule.name));
                 continue;
             }
             Decision::Fire(window) => window,
@@ -730,7 +1341,17 @@ async fn tick(
             ));
             continue;
         }
-        if !claim_firing(pool, &id, rule, now, dock_depth).await? {
+        let claimed = match claim_firing(http, base, &id, rule, now, dock_depth).await {
+            Ok(c) => c,
+            Err(e) => {
+                log(format!(
+                    "cadence: firing claim failed for {} ({id}) — rule held this tick: {e:#}",
+                    rule.name
+                ));
+                continue;
+            }
+        };
+        if !claimed {
             continue; // someone else holds this window
         }
         let depth_note = match (&rule.basis, dock_depth) {
@@ -744,8 +1365,10 @@ async fn tick(
             rule.basis.as_str()
         ));
         // Spawn and move on. The tick that fires a 30-minute deploy
-        // ends in milliseconds like any other.
-        runs.spawn_verb(pool, rule, id);
+        // ends in milliseconds like any other. `dock_depth` rides along
+        // as the "before" the tail probes against to tell an idle board
+        // from one that boarded a car.
+        runs.spawn_verb(http, base, rule, id, now, dock_depth);
     }
     Ok(TickSummary {
         rules: rules.len(),
@@ -787,15 +1410,17 @@ async fn shut_down(runs: &mut Runs, signal: &str, budget: std::time::Duration) {
 /// (infra/train/boss-train.service) or, with `once`, a single
 /// evaluated tick for an operator or a test.
 pub async fn run(once: bool, dry: bool) -> Result<()> {
-    let pg_url = train::env_or("BOSS_POSTGRES_URL", "postgres://boss:boss@127.0.0.1/boss");
-    let pool = PgPoolOptions::new()
-        // The loop's own queries plus a connection for each spawned
-        // verb's closing `record_outcome` — with verbs beside the
-        // loop rather than inside it, those can now coincide.
-        .max_connections(4)
-        .connect(&pg_url)
-        .await
-        .context("connecting to Postgres for cadence_rules")?;
+    // One address does the loop's whole job — rules, last-firings,
+    // claims, outcomes and the dock probe all ride the jobs API
+    // (protocol-cadence.md, sequencing step 3). The private sqlx pool
+    // that used to live here is gone WITH the split-brain it carried:
+    // it wrote firings to whatever database BOSS_POSTGRES_URL named,
+    // which on the conductor's host was not the system of record.
+    let base = jobs_base()?;
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("building the jobs API client")?;
     let clock_url = train::env_or("BOSS_CLOCK_URL", &boss_ports::url("clock"));
     let clock: Arc<dyn ClockClient> = Arc::new(ReqwestClockClient::new(clock_url.clone()));
     let tick_secs: u64 = train::env_or("BOSS_TRAIN_CADENCE_TICK_SECONDS", "60")
@@ -820,7 +1445,7 @@ pub async fn run(once: bool, dry: bool) -> Result<()> {
             .unwrap_or(30),
     );
     log(format!(
-        "loop starting — rules from cadence_rules, clock at {clock_url}, tick {tick_secs}s{}",
+        "loop starting — rules from {base}/api/cadence/rules, clock at {clock_url}, tick {tick_secs}s{}",
         if dry { ", DRY" } else { "" }
     ));
     let mut runs = Runs::default();
@@ -829,7 +1454,7 @@ pub async fn run(once: bool, dry: bool) -> Result<()> {
         // it wants the verb's result, and a detached child would die
         // with this process. Wait it out; only the supervised loop
         // gets to move on while a verb runs.
-        let outcome = tick(&pool, clock.as_ref(), dry, &mut runs).await;
+        let outcome = tick(&http, &base, clock.as_ref(), dry, &mut runs).await;
         runs.drain(None).await;
         return outcome.map(|_| ());
     }
@@ -844,7 +1469,7 @@ pub async fn run(once: bool, dry: bool) -> Result<()> {
     let mut seen = TickSummary::default();
     loop {
         tick_n += 1;
-        match tick(&pool, clock.as_ref(), dry, &mut runs).await {
+        match tick(&http, &base, clock.as_ref(), dry, &mut runs).await {
             // The loop survives a bad tick — supervision is systemd's
             // job, coordination is this loop's; a transient jobs-api
             // or Postgres outage must not kill the schedule.
@@ -896,6 +1521,191 @@ mod tests {
         Utc.with_ymd_and_hms(y, mo, d, h, mi, s).unwrap()
     }
 
+    // -- what a rule may fire ------------------------------------------
+
+    #[test]
+    fn a_conductor_verb_still_parses() {
+        for v in VERBS {
+            assert_eq!(parse_action(v).unwrap(), Action::Train((*v).to_string()));
+        }
+    }
+
+    #[test]
+    fn open_names_a_workflow_kind() {
+        assert_eq!(
+            parse_action("open:protocol-retro").unwrap(),
+            Action::OpenPacket("protocol-retro".into())
+        );
+    }
+
+    /// THE SAFETY PROPERTY THE ALLOWLIST EXISTED FOR: a hand-edited row
+    /// must not be able to spawn arbitrary arguments. `OpenPacket`
+    /// keeps it by not spawning a process at all, and the kind is
+    /// pinned to kebab-case so it is safe in a query string and a JSON
+    /// body without escaping.
+    #[test]
+    fn a_kind_that_would_need_escaping_is_refused() {
+        for bad in [
+            "open:foo bar",
+            "open:foo/../bar",
+            "open:foo;rm -rf /",
+            "open:Foo",
+            "open:foo?status=open",
+            "open:foo&x=1",
+            "open:",
+            "open:   ",
+        ] {
+            assert!(parse_action(bad).is_err(), "should refuse {bad:?}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_verb_names_both_shapes_in_its_refusal() {
+        let e = parse_action("deploy").unwrap_err().to_string();
+        assert!(e.contains("unknown verb"), "{e}");
+        assert!(
+            e.contains("open:<kind>") && e.contains("reconcile"),
+            "the refusal must show a person editing a row what IS allowed: {e}"
+        );
+    }
+
+    /// The packet a scheduled rule files must match what
+    /// `boss-maintenance-wrap.sh` has always filed — two mechanisms
+    /// filing one kind with different shapes is a fact living twice.
+    #[test]
+    fn a_scheduled_packet_matches_the_wrappers_shape() {
+        let now = utc(2026, 8, 28, 6, 5, 0);
+        let b = packet_body("protocol-retro", "retro-weekly", now);
+        assert_eq!(b["kind"], "protocol-retro");
+        assert_eq!(b["subject"]["subject_kind"], "custom");
+        assert_eq!(b["subject"]["id"], "infra/protocol-retro");
+        assert_eq!(b["owner_id"], "emp-bootstrap-admin");
+        assert_eq!(b["status"], "open");
+        assert!(
+            b["title"].as_str().unwrap().contains("2026-08-28"),
+            "the title carries the firing day so two packets are distinguishable: {}",
+            b["title"]
+        );
+        // Attributable to its rule, not to a mystery actor.
+        assert_eq!(b["metadata"]["trigger_kind"], "cadence");
+        assert_eq!(b["metadata"]["trigger_name"], "retro-weekly");
+    }
+
+    /// The title must come from the clock that was passed in — the
+    /// no-wallclock invariant. A sim deploy advancing its clock must
+    /// see the sim date here, not the host's.
+    #[test]
+    fn the_packet_title_uses_the_clock_it_was_given() {
+        let a = packet_body("x-kind", "r", utc(2020, 1, 2, 0, 0, 0));
+        let b = packet_body("x-kind", "r", utc(2031, 12, 25, 0, 0, 0));
+        assert!(a["title"].as_str().unwrap().contains("2020-01-02"));
+        assert!(b["title"].as_str().unwrap().contains("2031-12-25"));
+    }
+
+    // -- the calendar basis: the reason this whole thread exists -------
+
+    fn cal_rule(c: Cadence, anchor: (i32, u32, u32), at_h: u32, at_m: u32) -> CadenceRule {
+        CadenceRule {
+            name: "protocol-retro-daily".into(),
+            verb: "open:protocol-retro".into(),
+            basis: Basis::Calendar {
+                cadence: c,
+                anchor: NaiveDate::from_ymd_opt(anchor.0, anchor.1, anchor.2).unwrap(),
+                at: at(at_h, at_m),
+                business_calendar: None,
+            },
+        }
+    }
+
+    /// WEEKLY IS THE CASE THAT WAS INEXPRESSIBLE. `Clock` fires every
+    /// day and `Wall` re-anchors at midnight, so a week could not be
+    /// written as a row at all.
+    #[test]
+    fn a_weekly_rule_fires_on_the_anchors_weekday_and_not_the_others() {
+        // 2026-08-28 is a Friday.
+        let rule = cal_rule(Cadence::Weekly, (2026, 8, 28), 6, 10);
+        // The following Friday, after the window: due.
+        let friday = utc(2026, 9, 4, 6, 30, 0);
+        assert_eq!(
+            due_window(&rule, friday, None, None),
+            Some(utc(2026, 9, 4, 6, 10, 0)),
+            "a weekly rule must fire on its anchor weekday"
+        );
+        // Thursday: the most recent elapsed window is the PREVIOUS
+        // Friday, not today — and if that already fired, nothing is due.
+        let thursday = utc(2026, 9, 3, 23, 0, 0);
+        assert_eq!(
+            due_window(&rule, thursday, None, None),
+            Some(utc(2026, 8, 28, 6, 10, 0))
+        );
+    }
+
+    /// Before the window on a firing day, the due window is the PREVIOUS
+    /// occurrence — never today's, which has not happened yet.
+    #[test]
+    fn a_window_not_yet_reached_today_does_not_count_as_elapsed() {
+        let rule = cal_rule(Cadence::Weekly, (2026, 8, 28), 6, 10);
+        let early = utc(2026, 9, 4, 5, 59, 0); // Friday, before 06:10
+        assert_eq!(
+            due_window(&rule, early, None, None),
+            Some(utc(2026, 8, 28, 6, 10, 0))
+        );
+    }
+
+    /// Once a window has fired, it is not due again — the same
+    /// exactly-once guard every other basis gets.
+    #[test]
+    fn a_calendar_window_fires_once() {
+        let rule = cal_rule(Cadence::Weekly, (2026, 8, 28), 6, 10);
+        let now = utc(2026, 9, 4, 6, 30, 0);
+        let w = due_window(&rule, now, None, None).unwrap();
+        assert_eq!(due_window(&rule, now, Some(&fired(&rule, w)), None), None);
+    }
+
+    /// A rule anchored in the FUTURE has no elapsed window, and the
+    /// bounded look-back must return None rather than walking the
+    /// calendar forever on every tick.
+    #[test]
+    fn a_future_anchor_is_not_due_and_terminates() {
+        let rule = cal_rule(Cadence::Weekly, (2027, 1, 1), 6, 10);
+        assert_eq!(
+            due_window(&rule, utc(2026, 9, 4, 12, 0, 0), None, None),
+            None
+        );
+    }
+
+    /// Monthly resolves within the look-back; the anchor day is clamped
+    /// into short months by boss_core::calendar, which is why this
+    /// basis borrows that math instead of restating it.
+    #[test]
+    fn a_monthly_rule_resolves_and_clamps_short_months() {
+        let rule = cal_rule(Cadence::Monthly, (2026, 1, 31), 6, 10);
+        // April has 30 days: the fire lands on the 30th.
+        assert_eq!(
+            due_window(&rule, utc(2026, 4, 30, 7, 0, 0), None, None),
+            Some(utc(2026, 4, 30, 6, 10, 0))
+        );
+    }
+
+    /// The heartbeat's "next due" must look FORWARD, and a queue-depth
+    /// rule still has no predictable next.
+    #[test]
+    fn next_due_reports_the_coming_calendar_window() {
+        let rule = cal_rule(Cadence::Weekly, (2026, 8, 28), 6, 10);
+        assert_eq!(
+            next_due(&[rule], utc(2026, 9, 4, 6, 30, 0)),
+            Some(utc(2026, 9, 11, 6, 10, 0)),
+            "after today's window has passed, the next is a week out"
+        );
+    }
+
+    /// A calendar rule names its basis in the journal like any other.
+    #[test]
+    fn the_calendar_basis_names_itself() {
+        let rule = cal_rule(Cadence::Weekly, (2026, 8, 28), 6, 10);
+        assert_eq!(rule.basis.as_str(), "calendar");
+    }
+
     fn wall_rule(every: u32) -> CadenceRule {
         CadenceRule {
             name: "train-reconcile".into(),
@@ -928,9 +1738,14 @@ mod tests {
     }
 
     fn fired(rule: &CadenceRule, window: DateTime<Utc>) -> LastFiring {
+        fired_rc(rule, window, Some(0))
+    }
+
+    fn fired_rc(rule: &CadenceRule, window: DateTime<Utc>, rc: Option<i32>) -> LastFiring {
         LastFiring {
             firing_id: firing_id(&rule.name, window),
             fired_at: window,
+            rc,
         }
     }
 
@@ -1077,6 +1892,104 @@ mod tests {
         );
     }
 
+    /// 2026-09-04: the 15:28 board fired while the conductor's clone was
+    /// broken, boarded nothing, and exited rc=1 in 0s — and still burned
+    /// the whole 120-minute window. The dock sat at its threshold for two
+    /// hours behind a healthy conductor. The cooldown guards against
+    /// re-firing when a board SUCCEEDED but skipped its cars on conflicts;
+    /// a board that never ran is not that case.
+    #[test]
+    fn a_failed_firing_does_not_hold_the_cooldown() {
+        let rule = depth_rule(4, 120);
+        let failed = fired_rc(&rule, utc(2026, 8, 12, 11, 0, 0), Some(1));
+        // 30 minutes after a FAILED firing, a deep dock fires again.
+        assert_eq!(
+            due_window(&rule, utc(2026, 8, 12, 11, 30, 0), Some(&failed), Some(8)),
+            Some(utc(2026, 8, 12, 11, 30, 0)),
+            "a firing that failed must not hold the window it never used"
+        );
+    }
+
+    /// The other half, and the reason this is not simply "ignore the
+    /// cooldown on any non-success": a firing with NO recorded outcome is
+    /// either still running or was cut off mid-verb. Re-firing under it
+    /// would double-board. Only a KNOWN failure releases the window.
+    #[test]
+    fn a_firing_still_in_flight_holds_the_cooldown() {
+        let rule = depth_rule(4, 120);
+        let in_flight = fired_rc(&rule, utc(2026, 8, 12, 11, 0, 0), None);
+        assert_eq!(
+            due_window(
+                &rule,
+                utc(2026, 8, 12, 11, 30, 0),
+                Some(&in_flight),
+                Some(8)
+            ),
+            None,
+            "no recorded rc means unfinished, not failed — hold"
+        );
+    }
+
+    /// A boarded car takes the `train` stamp before `board()` returns, so
+    /// the dock the loop probes FALLS iff at least one car boarded.
+    #[test]
+    fn board_reduced_the_dock_reads_the_fall() {
+        // The dock fell — cars left it, so the board boarded them.
+        assert!(board_reduced_the_dock(4, 1));
+        assert!(board_reduced_the_dock(1, 0));
+        // The dock held — an idle window (nothing genuinely boardable) or
+        // a consist that skipped every car. New cars arriving mid-board
+        // only raise `after`, so a rise still reads as "boarded nothing".
+        assert!(!board_reduced_the_dock(4, 4));
+        assert!(!board_reduced_the_dock(1, 1));
+        assert!(!board_reduced_the_dock(1, 5));
+    }
+
+    /// 2026-09-06 ~16:19: `train-board-on-dock-depth` (min 1, cooldown 45)
+    /// fired when the only thing at the dock was a car counted at probe
+    /// time but held / branch-missing by the time boarding ran. The board
+    /// boarded NOTHING, exited rc=0, and still burned the full 45-minute
+    /// cooldown — so four green cars that parked ~16:29 waited until ~17:04
+    /// to board. An idle board must be a no-op for the cooldown; a board
+    /// that DID board a car must still start it.
+    #[test]
+    fn an_idle_board_does_not_hold_the_cooldown() {
+        // The recording contract: a departing board that ran cleanly
+        // (rc 0) yet boarded nothing is recorded as an idle firing, NOT
+        // the success rc that holds the cooldown...
+        assert_eq!(recorded_rc("board", 0, false), IDLE_BOARD_RC);
+        assert_eq!(recorded_rc("run", 0, false), IDLE_BOARD_RC);
+        // ...while a board that boarded a car keeps rc 0 and holds it.
+        assert_eq!(recorded_rc("board", 0, true), 0);
+        // A real failure is recorded verbatim (the 2026-09-04 case
+        // stands), and a non-departing verb is never an "idle board".
+        assert_eq!(recorded_rc("board", 1, false), 1);
+        assert_eq!(recorded_rc("reconcile", 0, false), 0);
+
+        // End to end at the cooldown: the idle firing releases the window,
+        // so cars that parked minutes later board at the next tick...
+        let rule = depth_rule(1, 45);
+        let fired_at = utc(2026, 9, 6, 16, 19, 0);
+        let idle = fired_rc(&rule, fired_at, Some(recorded_rc("board", 0, false)));
+        assert_eq!(
+            due_window(&rule, utc(2026, 9, 6, 16, 29, 0), Some(&idle), Some(4)),
+            Some(utc(2026, 9, 6, 16, 29, 0)),
+            "cars that park after an idle board must board next tick, not wait out the cooldown"
+        );
+        // ...whereas a productive board (rc 0) still holds the window.
+        let productive = fired_rc(&rule, fired_at, Some(recorded_rc("board", 0, true)));
+        assert_eq!(
+            due_window(
+                &rule,
+                utc(2026, 9, 6, 16, 29, 0),
+                Some(&productive),
+                Some(4)
+            ),
+            None,
+            "a board that boarded a car must still start the 45-minute cooldown"
+        );
+    }
+
     #[test]
     fn queue_depth_never_fires_blind() {
         // Depth unknown (probe failed / not probed): hold, never fire.
@@ -1179,7 +2092,14 @@ mod tests {
         let rule = wall_rule(10);
         let last = fired(&rule, utc(2026, 8, 13, 10, 0, 0));
         assert_eq!(
-            decide(&rule, utc(2026, 8, 13, 10, 10, 0), Some(&last), None, &[]),
+            decide(
+                &rule,
+                utc(2026, 8, 13, 10, 10, 0),
+                Some(&last),
+                None,
+                None,
+                &[]
+            ),
             Decision::Fire(utc(2026, 8, 13, 10, 10, 0))
         );
     }
@@ -1197,6 +2117,7 @@ mod tests {
                 utc(2026, 8, 13, 10, 10, 0),
                 Some(&last),
                 None,
+                None,
                 &[running("train-reconcile", 612)],
             ),
             Decision::StillRunning(std::time::Duration::from_secs(612))
@@ -1212,7 +2133,14 @@ mod tests {
         let rule = clock_rule(); // train-window
         let now = utc(2026, 8, 13, 18, 0, 0);
         assert_eq!(
-            decide(&rule, now, None, None, &[running("train-reconcile", 1_800)]),
+            decide(
+                &rule,
+                now,
+                None,
+                None,
+                Some(0),
+                &[running("train-reconcile", 1_800)]
+            ),
             Decision::Fire(now)
         );
     }
@@ -1228,10 +2156,149 @@ mod tests {
             vec![running("train-window", 300)],
         ] {
             assert_eq!(
-                decide(&rule, mid_bucket, Some(&last), None, &r),
+                decide(&rule, mid_bucket, Some(&last), None, None, &r),
                 Decision::Hold
             );
         }
+    }
+
+    // -- the track: one train at a time ------------------------------------
+
+    #[test]
+    fn a_due_departure_holds_while_a_train_is_on_the_track() {
+        // Dock deep, cooldown long past, nothing in flight: due. But a
+        // train is open, so the window is NOT claimed — the next tick
+        // after it closes departs against the dock as it stands then.
+        let rule = depth_rule(1, 45);
+        let now = utc(2026, 9, 5, 8, 0, 0);
+        assert_eq!(
+            decide(&rule, now, None, Some(3), Some(1), &[]),
+            Decision::TrackOccupied(1)
+        );
+        assert_eq!(
+            decide(&rule, now, None, Some(3), Some(0), &[]),
+            Decision::Fire(now),
+            "the track clears the moment the previous train merges, or closes — arrived or cancelled alike"
+        );
+    }
+
+    #[test]
+    fn a_departure_never_leaves_blind() {
+        // The probe failed: hold, exactly as a failed dock probe holds.
+        let rule = depth_rule(1, 45);
+        assert_eq!(
+            decide(&rule, utc(2026, 9, 5, 8, 0, 0), None, Some(3), None, &[]),
+            Decision::TrackUnknown
+        );
+    }
+
+    #[test]
+    fn the_clock_window_waits_for_the_track_too() {
+        // 18:05 is a `run` (reconcile then board). A train in flight at
+        // the window holds it; the window is not lost — it stays due
+        // and fires on the first clear tick — so serialization is a
+        // property of departing, not of one cadence basis.
+        let rule = clock_rule(); // 06:00 and 18:00
+        let window = utc(2026, 9, 5, 18, 0, 0);
+        assert_eq!(
+            decide(&rule, window, None, None, Some(2), &[]),
+            Decision::TrackOccupied(2)
+        );
+        assert_eq!(
+            decide(&rule, utc(2026, 9, 5, 18, 40, 0), None, None, Some(0), &[]),
+            Decision::Fire(window),
+            "the same 18:00 window fires once the track is clear"
+        );
+    }
+
+    #[test]
+    fn a_rule_that_departs_nothing_ignores_the_track() {
+        // reconcile must run WHILE a train is in flight — it is what
+        // lands the train. Holding it on the track would deadlock.
+        let rule = wall_rule(10);
+        let now = utc(2026, 9, 5, 8, 10, 0);
+        assert_eq!(
+            decide(&rule, now, None, None, Some(1), &[]),
+            Decision::Fire(now)
+        );
+        assert_eq!(
+            decide(&rule, now, None, None, None, &[]),
+            Decision::Fire(now),
+            "an unread track is no reason to skip a reconcile"
+        );
+        assert!(departs_a_train("board") && departs_a_train("run"));
+        assert!(!departs_a_train("reconcile") && !departs_a_train("open:protocol-retro"));
+    }
+
+    /// The probe's count is `train::holds_the_track` over every open
+    /// train (the predicate itself is pinned in train.rs `track_tests`;
+    /// the whole-list read is `list_all_pages`, pinned below). A merged
+    /// train waiting to converge is open but holds nothing — counting it
+    /// is the deadlock of 2026-09-07 (f3796323).
+    #[test]
+    fn the_track_count_skips_a_merged_train() {
+        let merged = json!({"id": "t1", "steps": [
+            {"spec_slug": "merged", "title": "Merged into main", "status": "completed"},
+            {"spec_slug": "converged", "title": "Cluster converged", "status": "ready"}
+        ]});
+        let pre_merge = json!({"id": "t2", "steps": [
+            {"spec_slug": "merged", "title": "Merged into main", "status": "ready"}
+        ]});
+        let unread = json!({"id": "t3"});
+        assert_eq!(track_holders(std::slice::from_ref(&merged)), 0);
+        assert_eq!(track_holders(&[merged, pre_merge, unread]), 2);
+        assert_eq!(track_holders(&[]), 0);
+    }
+
+    /// `probe_dock_depth` counts the dock through the shared paginator,
+    /// so a dock deeper than one page is counted whole rather than
+    /// clipped at 100 — otherwise the depth-driven board never fires
+    /// when the backlog most needs draining. This pins the read the
+    /// probe depends on (its per-job `parked_ready` fetch is HTTP-bound;
+    /// `parked_ready` itself is tested in train.rs).
+    #[tokio::test]
+    async fn probe_dock_depth_reads_the_whole_dock() {
+        let all: Vec<Value> = (0..150)
+            .map(|i| json!({"id": format!("car-{i}")}))
+            .collect();
+        let all_ref = &all;
+        let listed = train::list_all_pages(|offset| async move {
+            let page: Vec<Value> = all_ref
+                .iter()
+                .skip(offset)
+                .take(train::PAGE_LIMIT)
+                .cloned()
+                .collect();
+            anyhow::Ok(Some(json!({
+                "data": page,
+                "total": all_ref.len(),
+                "offset": offset,
+                "limit": train::PAGE_LIMIT,
+            })))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            listed.len(),
+            150,
+            "the dock must be read past page one or the depth board never fires"
+        );
+    }
+
+    #[test]
+    fn the_held_track_lines_say_why() {
+        assert_eq!(
+            track_occupied_line("train-board-on-dock-depth", 1),
+            "train-board-on-dock-depth held — track occupied (1 open train) — departs when it clears"
+        );
+        assert_eq!(
+            track_occupied_line("train-window", 2),
+            "train-window held — track occupied (2 open trains) — departs when it clears"
+        );
+        assert_eq!(
+            track_unknown_line("train-window"),
+            "train-window held — open-train probe failed, not departing blind"
+        );
     }
 
     #[test]
@@ -1382,10 +2449,18 @@ mod db_tests {
     /// confident wrong answer about why a train had not boarded. The
     /// assertion below is now the same number in both places, and it
     /// fails if they diverge again.
+    ///
+    /// Loading rides the real `/api/cadence/*` router here, so this
+    /// test is also the cross-crate pin that the API serves every
+    /// column the parser reads: an unserved calendar column makes
+    /// `by_name("protocol-retro-daily")` panic "seed rule missing",
+    /// which is the skipping-unreadable-rule scar made loud in CI.
     #[tokio::test(flavor = "multi_thread")]
     async fn seeded_rules_load_and_parse() {
         let db = boss_testing::TestDb::new().await;
-        let rules = load_rules(&db.pool).await.unwrap();
+        let base = serve_cadence_api(db.pool.clone()).await;
+        let http = reqwest::Client::new();
+        let rules = load_rules(&http, &base).await.unwrap();
         let by_name = |n: &str| {
             rules
                 .iter()
@@ -1411,40 +2486,92 @@ mod db_tests {
                 ],
             }
         );
+        // THE CALENDAR RULE, AND THE REASON THIS ASSERTION EXISTS.
+        //
+        // This test passed while the loop could not read a calendar
+        // rule at all. Every seeded rule was wall / clock / queue-depth,
+        // so `rule_from_row`'s new branch was never exercised against a
+        // real row — and `load_rules`' SELECT had not been widened to
+        // fetch `cadence`, `anchor_date` or `business_calendar`. In
+        // production the loader logged, every tick:
+        //
+        //     skipping unreadable rule protocol-retro-daily:
+        //     no column found for name: cadence
+        //
+        // The rule was in the table and served over the API the whole
+        // time; only the loop could not see it. A DB-backed test that
+        // covers three of four bases is a test that covers the three
+        // that already worked.
+        let retro = by_name("protocol-retro-daily");
+        assert_eq!(retro.verb, "open:protocol-retro");
+        assert_eq!(
+            retro.basis,
+            Basis::Calendar {
+                cadence: boss_core::calendar::Cadence::Daily,
+                anchor: chrono::NaiveDate::from_ymd_opt(2026, 8, 28).unwrap(),
+                at: NaiveTime::from_hms_opt(6, 10, 0).unwrap(),
+                business_calendar: None,
+            }
+        );
+
         let depth = by_name("train-board-on-dock-depth");
         assert_eq!(depth.verb, "board");
-        // 4 since 147-board-on-four.sql, back where 114 started. The
-        // 8 and 12 raises were made when a train was expensive; the
-        // forge runner now cycles build-image, locomotive, web and fast
-        // in about three minutes, and a dock that never exceeds 3-5
-        // made 12 unreachable — four consecutive trains opened and
-        // cancelled "nothing to board" on 2026-08-17 while three
-        // mergeable cars sat parked. `cooldown_minutes` is the setting
-        // that protects the single-concurrency runner, not the depth.
+        // 3 since 202609032030-cadence-supersede-by-name.sql. The
+        // history: 114 started at 4, raised to 8 then 12 when a train
+        // was expensive, dropped back to 4 (147) when a dock that never
+        // exceeds 3-5 made 12 unreachable, and now 3 — finished work
+        // should not wait for eleven friends (David 2026-09-03).
         //
-        // This assertion is why the number lives in exactly two places
-        // and both must move together: the migration seeds the row, and
-        // boss-gcp's LOCAL copy is what the boarding loop actually
-        // reads (131 and 147 both say so). Note that `--auto` gates a
-        // schema-only change with "fixture + lints only" and SKIPS the
-        // tests, so editing the migration alone leaves this red and you
-        // will not find out until a crate change drags boss-cli back
-        // into scope.
+        // WHY THIS ASSERTION MOVED TWICE-REMOVED. board-on-three
+        // (202609031515) tried to set 3 and SILENTLY NO-OP'd: its
+        // version-keyed retire missed the real active row against a
+        // diverged version history (123), so the live value stayed 4
+        // and this test kept asserting 4 — documenting the breakage
+        // rather than catching it. The supersede-by-name migration
+        // retires the active row BY NAME and this pin now asserts the
+        // value that actually took: 3.
+        //
+        // This is why the number lives in exactly two places that must
+        // move together — the migration seeds the row, this test pins
+        // it (§9a). Note `--auto` gates a schema-only change with
+        // "fixture + lints only" and SKIPS the tests, so editing the
+        // migration alone leaves this red until a crate change drags
+        // boss-cli back into scope. CAVEAT still live: this is the
+        // CLUSTER SoR value; whether the boarding loop reads it depends
+        // on resolving the conductor's cadence source (the-cluster-is-
+        // the-system Q2) — the conductor move makes it moot.
         assert_eq!(
             depth.basis,
             Basis::QueueDepth {
-                min_depth: 4,
-                cooldown_minutes: 120,
+                // 1 / 45 since 202609042110-a-lone-car-still-ships.sql.
+                // The threshold stopped being a batch SIZE and became a
+                // latency BOUND: at 3, a car whose neighbours had not
+                // arrived waited for one of two daily clock windows, and
+                // on 2026-09-04 two green cars sat with the next window
+                // nine hours out. Boarding is now "whatever is waiting,
+                // at most every 45 minutes" — batching still happens
+                // opportunistically, it is simply no longer required.
+                //
+                // The cooldown is now the real control, and it is safe
+                // to lean on: since
+                // fix/a-failed-board-does-not-hold-the-window a firing
+                // that FAILED no longer consumes its window, so a bad
+                // board costs one tick instead of 45 minutes.
+                min_depth: 1,
+                cooldown_minutes: 45,
             }
         );
     }
 
     /// One window, one firing: the second claim of the same id loses,
     /// and the recorded firing holds the window on re-evaluation —
-    /// the restart / second-instance idempotence contract end to end.
+    /// the restart / second-instance idempotence contract end to end,
+    /// through the same door the deployed loop uses.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_window_claims_exactly_once() {
         let db = boss_testing::TestDb::new().await;
+        let base = serve_cadence_api(db.pool.clone()).await;
+        let http = reqwest::Client::new();
         let rule = CadenceRule {
             name: "train-window".into(),
             verb: "run".into(),
@@ -1456,19 +2583,30 @@ mod db_tests {
         let window = due_window(&rule, now, None, None).expect("window due");
         let id = firing_id(&rule.name, window);
 
-        assert!(claim_firing(&db.pool, &id, &rule, now, None).await.unwrap());
+        assert!(
+            claim_firing(&http, &base, &id, &rule, now, None)
+                .await
+                .unwrap()
+        );
         // A concurrent instance (or a restart mid-verb) computes the
         // same id and must lose the claim.
-        assert!(!claim_firing(&db.pool, &id, &rule, now, None).await.unwrap());
+        assert!(
+            !claim_firing(&http, &base, &id, &rule, now, None)
+                .await
+                .unwrap()
+        );
 
         // The recorded firing is what evaluation sees next tick.
-        let last = last_firing(&db.pool, &rule.name).await.unwrap().unwrap();
+        let last = last_firing(&http, &base, &rule.name)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(last.firing_id, id);
         assert_eq!(last.fired_at, now);
         assert_eq!(due_window(&rule, now, Some(&last), None), None);
 
         // The outcome merges into the claim's detail row.
-        record_outcome(&db.pool, &id, 0, 42).await.unwrap();
+        record_outcome(&http, &base, &id, 0, 42).await.unwrap();
         let detail: Value =
             sqlx::query_scalar("SELECT detail FROM cadence_firings WHERE firing_id = $1")
                 .bind(&id)
@@ -1492,5 +2630,158 @@ mod db_tests {
         .execute(&db.pool)
         .await;
         assert!(dup.is_err(), "second active train-reconcile row accepted");
+    }
+
+    /// The SAFE supersede idiom (202609032030): retire the active row
+    /// BY NAME, insert the next version as MAX(version)+1. This must
+    /// land the new depth from a DIVERGENT state — an active row whose
+    /// version is NOT the one a version-keyed migration would name.
+    /// That divergence (measured in 123) is exactly why board-on-three
+    /// silently no-op'd: its `retire WHERE version = 3` missed the real
+    /// active row, so depth 3 never took and the API kept serving 4.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn supersede_by_name_lands_the_new_depth_from_a_divergent_state() {
+        let db = boss_testing::TestDb::new().await;
+        let name = "test-supersede-divergent";
+        // The divergent state: the active row is version 7 — a version
+        // NOT the one a version-keyed migration would try to retire.
+        // This is the shape that silently no-op'd board-on-three: a
+        // `retire WHERE version = 3` would miss version 7, leave it
+        // active, and the new insert would be refused or skipped.
+        sqlx::query(
+            "INSERT INTO cadence_rules \
+             (name, version, status, verb, basis, min_dock_depth, cooldown_minutes) \
+             VALUES ($1, 7, 'active', 'board', 'queue-depth', 4, 120)",
+        )
+        .bind(name)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        // The SAFE idiom — retire by name, insert at MAX+1 — the exact
+        // shape of migration 202609032030.
+        sqlx::query(
+            "UPDATE cadence_rules SET status = 'retired' WHERE name = $1 AND status = 'active'",
+        )
+        .bind(name)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO cadence_rules \
+             (name, version, status, verb, basis, every_minutes, at_times, min_dock_depth, cooldown_minutes) \
+             SELECT $1, COALESCE(MAX(version),0)+1, 'active', 'board', 'queue-depth', NULL, NULL, 3, 120 \
+             FROM cadence_rules WHERE name = $1",
+        )
+        .bind(name)
+        .execute(&db.pool)
+        .await
+        .expect("safe supersede must not be refused by the partial index");
+
+        // Exactly one active row, version 8, depth 3 — the change took
+        // from a state a version-keyed retire would have missed.
+        let rows: Vec<(i32, i32)> = sqlx::query_as(
+            "SELECT version, min_dock_depth FROM cadence_rules WHERE name = $1 AND status = 'active'",
+        )
+        .bind(name)
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1, "exactly one active row after supersede");
+        assert_eq!(rows[0].0, 8, "new version is MAX(7)+1");
+        assert_eq!(rows[0].1, 3, "the live depth is the new 3, not the stale 4");
+    }
+
+    /// Serve the REAL `/api/cadence/*` router over a TestDb — the same
+    /// wire, handlers and Pg adapter production mounts, on an
+    /// ephemeral port. What these tests call "the surface" is not a
+    /// lookalike.
+    async fn serve_cadence_api(pool: sqlx::PgPool) -> String {
+        let repo: std::sync::Arc<dyn boss_jobs::cadence::CadenceRepository> =
+            std::sync::Arc::new(boss_jobs::cadence::PgCadence::new(pool));
+        let app =
+            boss_jobs::cadence::http::router(boss_jobs::cadence::http::CadenceApiState { repo });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    /// THE PACKET'S CLAIM, AS A TEST (backlog a516f1f1): the loop
+    /// fires on schedule, and `/api/cadence/rules/{name}/last-firing`
+    /// on the system of record must report that firing — not `null`.
+    ///
+    /// `null` from that surface means "never fired", and the conductor,
+    /// an operator, and every "why has the train not boarded" question
+    /// read it exactly that way. A firing the surface cannot see is a
+    /// firing recorded somewhere the system of record is not.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_observability_surface_reports_what_the_loop_records() {
+        // The system of record: the database behind /api/cadence/*.
+        let sor = boss_testing::TestDb::new().await;
+        let base = serve_cadence_api(sor.pool.clone()).await;
+        let http = reqwest::Client::new();
+
+        // The loop fires a wall rule on schedule and records the
+        // firing THE WAY THE LOOP RECORDS IT.
+        let rule = CadenceRule {
+            name: "train-reconcile".into(),
+            verb: "reconcile".into(),
+            basis: Basis::Wall { every_minutes: 10 },
+        };
+        let now = Utc.with_ymd_and_hms(2026, 8, 31, 6, 7, 0).unwrap();
+        let window = due_window(&rule, now, None, None).expect("window due");
+        let id = firing_id(&rule.name, window);
+        // The RED run of this test recorded the firing the way the
+        // loop did at origin/main — through its own BOSS_POSTGRES_URL
+        // pool, a DIFFERENT database than the one behind the surface
+        // (123-cadence-registry-reconcile.sql measured it: 244 firing
+        // rows local, 0 on the system of record) — and the surface
+        // answered null. The loop now has exactly one way to record a
+        // firing: the same door the surface serves.
+        assert!(
+            claim_firing(&http, &base, &id, &rule, now, None)
+                .await
+                .unwrap()
+        );
+
+        // The operator's read: the public observability surface.
+        let body: Value = http
+            .get(format!(
+                "{base}/api/cadence/rules/{}/last-firing",
+                rule.name
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            body.get("firing_id").and_then(Value::as_str),
+            Some(id.as_str()),
+            "the surface answered {body} for a rule that just fired — null here \
+             reads as 'never fired' while the loop fires on schedule"
+        );
+    }
+
+    /// The other half of honesty: a rule that truly never fired stays
+    /// `null`. The fix must make the surface see real firings, never
+    /// invent one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rule_that_never_fired_stays_null() {
+        let sor = boss_testing::TestDb::new().await;
+        let base = serve_cadence_api(sor.pool.clone()).await;
+        let body = reqwest::Client::new()
+            .get(format!("{base}/api/cadence/rules/train-window/last-firing"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "null", "never-fired must stay null");
     }
 }

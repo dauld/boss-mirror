@@ -102,21 +102,27 @@ pub struct TenantManifest {
 /// missing or unparseable file falls back to that all-enabled default
 /// rather than blanking the UI.
 pub async fn tenant_manifest() -> Response {
+    Json(tenant_manifest_now()).into_response()
+}
+
+/// The manifest as a value — what `/api/tenant/manifest` answers, and
+/// what the static server inlines into `index.html` so the first
+/// paint already knows the tenant (5578e42d). One reader of
+/// tenant.toml, two doors.
+pub fn tenant_manifest_now() -> TenantManifest {
     match load_tenant_toml() {
-        Some(parsed) => Json(TenantManifest {
+        Some(parsed) => TenantManifest {
             display_name: parsed.meta.display_name,
             tenant_id: parsed.meta.tenant_id,
             modules: parsed.modules,
             labels: parsed.labels,
-        })
-        .into_response(),
-        None => Json(TenantManifest {
+        },
+        None => TenantManifest {
             display_name: None,
             tenant_id: None,
             modules: Default::default(),
             labels: Default::default(),
-        })
-        .into_response(),
+        },
     }
 }
 

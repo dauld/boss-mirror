@@ -7,6 +7,11 @@
 #
 # Usage:
 #   infra/gate.sh                 # full gate — exactly what CI runs
+#   infra/gate.sh --quick         # PRE-FLIGHT only: fmt + the lints
+#                                 # that need no build, ~17s. Not a
+#                                 # gate — nothing compiles. Run it
+#                                 # before spending 17 minutes of
+#                                 # cluster time on a formatting slip.
 #   infra/gate.sh --auto          # car mode, scope DERIVED from the
 #                                 # tree. Skips cargo entirely when
 #                                 # nothing changed implies a crate —
@@ -28,14 +33,29 @@ set -u
 
 cd "$(dirname "$0")/.."
 
+# Incremental compilation helps REPEATED local builds; a gate build is
+# cold and one-shot, so incremental only writes an incremental/ dir that
+# is pure disk cost here — part of the ~80GB target/ that exhausted the
+# forge CI disk and blocked trains (2026-09-04;
+# docs/design/the-build-plane-manages-itself.md). Off for the gate and CI
+# (this script IS the CI rust job); a human's own `cargo build` outside
+# this script is untouched and keeps incremental.
+export CARGO_INCREMENTAL=0
+
 SCOPE=()
 NAMED=()
 AUTO=0
+QUICK=0
+LINT=0
+ROSTER=0
 while [ $# -gt 0 ]; do
     case "$1" in
         -p) shift; SCOPE+=(-p "${1:?-p needs a crate name}"); NAMED+=("$1"); shift ;;
         --auto) AUTO=1; shift ;;
-        *) echo "gate.sh: unknown arg: $1 (accepts -p <crate> and --auto)" >&2; exit 2 ;;
+        --quick) QUICK=1; shift ;;
+        --lint) LINT=1; shift ;;
+        --roster) ROSTER=1; shift ;;
+        *) echo "gate.sh: unknown arg: $1 (accepts -p <crate>, --auto, --quick, --lint and --roster)" >&2; exit 2 ;;
     esac
 done
 # Alternatives, not companions: --auto derives exactly what -p states,
@@ -123,6 +143,32 @@ require_headroom() {
     echo "    du -sh */target | sort -hr        # the usual culprits" >&2
     echo "    rm -rf <landed-worktree>/target" >&2
     echo "  Better: build in the dev pod, which has 188GB of scratch." >&2
+    # A REFUSAL IS NOT A FAILURE, and the receipt has to say which.
+    #
+    # The distinction already lived in the exit code — `exit 1` after
+    # `write_receipt "failed"` means "I ran the checks and the branch is
+    # bad"; `exit 2` means "I declined to run" — but a refusal wrote no
+    # receipt at all, so every reader downstream saw only a dead run and
+    # guessed. On 2026-09-02 that guess cost two trains: CI reported a
+    # plain failure, the conductor recorded it as a verdict on the
+    # consist, and the cars aboard were one auto-cancel away from taking
+    # strikes for a full disk on the host. Two strikes hold a car out of
+    # the queue until a human looks.
+    #
+    # `refused` is deliberately its own word, not a flavour of failed: a
+    # reader that only knows green/failed must not silently round this
+    # to either. Written before exiting so the reason survives the
+    # process.
+    GATE_REFUSAL="${avail}GB free, need ${gate_min_free_gb}GB (${when})"
+    # The startup call happens before `write_receipt` and GATE_RECEIPT
+    # exist — nothing has run yet, so there is no receipt to write and
+    # the exit code is the whole signal. The mid-run calls (one before
+    # every phase) are the ones a reader needs, and by then both are
+    # defined. Guarding on the function keeps that honest instead of
+    # emitting a half-built receipt.
+    if declare -F write_receipt >/dev/null 2>&1; then
+        write_receipt "refused"
+    fi
     exit 2
 }
 
@@ -160,8 +206,8 @@ require_headroom "to start"
 #     infra/gate.sh, infra/lint/*, .forgejo/workflows/ci.yml
 #         -> boss-testing, which owns gate_sh.rs. That test pins that
 #            ci.yml invokes this script, that this script runs every
-#            check, and that every executable in infra/lint/ appears
-#            here. Omitting these would let `--auto` skip the only
+#            check, and that every infra/lint/*.sh either runs in the
+#            pre-flight or is named in its exclusion set. Omitting these would let `--auto` skip the only
 #            test guarding the file being edited — which this very car
 #            would have done to itself.
 #     infra/dispatcher/rules.toml -> boss-dispatcher, which owns
@@ -467,8 +513,16 @@ write_receipt() {
             unver_count=$((unver_count + 1))
         done
     fi
+    # Only a refusal sets this; it names WHY the gate declined, which is
+    # the fact a reader needs to tell "the host was unfit" from "the
+    # branch was bad".
+    local refusal_json=""
+    if [ -n "${GATE_REFUSAL:-}" ]; then
+        refusal_json="\"refused_because\": \"${GATE_REFUSAL}\","
+    fi
     cat > "${GATE_RECEIPT}" <<RECEIPT
 {
+  ${refusal_json}
   "verdict": "${verdict}",
   "mode": "${mode}",
   "scope": "${NAMED[*]:-}",
@@ -507,6 +561,178 @@ check() {
     fi
 }
 
+# ---------------------------------------------------------------------
+# The pre-flight set: every check that needs no build
+# ---------------------------------------------------------------------
+# `cargo fmt -- --check` and the lint roster are repo-wide greps and
+# audits. Together they take ~17 SECONDS on a cold tree. They used to
+# run near the END of the gate, behind clippy, the full test suite and
+# the bun web suite.
+#
+# That ordering is not a bug — `check()` deliberately runs every check
+# even after one fails, "a red gate should report every failure it can
+# see, not make the author fix serially", and reordering saves a red
+# gate nothing because it runs everything regardless.
+#
+# The cost lands somewhere else: there was no way to run the cheap
+# checks WITHOUT the expensive ones. So the only way to find a
+# formatting slip was to spend a gate. On 2026-08-27 a car did exactly
+# that — 17 minutes of cluster time, a scheduled pod and a clone, to
+# learn that `cargo fmt` had been run on one crate and not another.
+# 17 seconds of local work, discovered 60x more slowly.
+#
+# Hence `--quick`, and hence this list existing ONCE. Two rosters would
+# drift (CLAUDE.md §9a) and would drift in the worst direction: a check
+# quietly missing from the local pre-flight still passes locally and
+# still reds a full gate, which is precisely the failure being fixed.
+#
+# The roster is the DIRECTORY. Until 2026-09-05 it was a hand-listed
+# array here, and every car that added a lint edited the same tail
+# line: four cars collided on it in one day, and the fourth was left
+# behind by train #218 ("conflict: infra/gate.sh"). That is the
+# manifest.txt lesson (CLAUDE.md §9a) one level up — a list holding no
+# information its source does not is a merge conflict waiting to
+# happen. Adding a lint is now dropping a file in infra/lint/; this
+# file does not change. The conductor's consist check discovers its
+# lints the same way (train.rs `cheap_lints`: every infra/lint/*.sh,
+# sorted, minus the delivery policy's exclusions), so the two readers
+# agree by construction rather than by being kept in step.
+#
+# What is NOT run here is written down once, with its reason. Each
+# needs something a bare tree cannot answer in seconds. The set is
+# pinned by boss-testing's gate_sh.rs, which asks this script (via
+# `--roster`) rather than re-parsing it.
+PREFLIGHT_EXCLUDES=(
+    # live-DB sweeps on systemd timers, not static checks
+    "infra/lint/audit-ordering.sh"
+    "infra/lint/conservation-invariants.sh"
+    # needs a built workspace (boss-ports-list); CI builds, then runs it
+    "infra/lint/no-snapshot-arrays.sh"
+    # installs packages — minutes, not seconds; the web phase below runs it
+    "infra/lint/svelte-check.sh"
+)
+
+# FIRST on purpose: it says what this workspace cannot cover, which
+# frames every result below it. A green pre-flight on a machine with
+# no Postgres is 118 database-backed test targets unrun, and saying
+# so before the rest is the difference between confidence and a
+# gate failure eleven minutes later (design 775f0b35 Q3).
+PREFLIGHT_FIRST="infra/lint/workspace-declares-what-it-runs.sh"
+
+# One `<name> <path>` line per lint, in the order they run: the pinned
+# first, then the directory in C-locale order, so two hosts ask the
+# same questions in the same sequence. An exclusion naming a file that
+# no longer exists is refused: left standing, it would keep a future
+# lint of that name out of the gate without anyone deciding so.
+#
+# `cargo-advisories` is the one lint allowed a network fetch: it is
+# report-only (always exits 0) and soft-skips when the tool or the
+# advisory DB is absent, so it cannot red a gate — only add a line.
+preflight_roster() {
+    local path
+    for path in "${PREFLIGHT_EXCLUDES[@]}" "$PREFLIGHT_FIRST"; do
+        if [ ! -f "$path" ]; then
+            echo "gate.sh: the pre-flight roster names a lint that does not exist: $path" >&2
+            return 1
+        fi
+    done
+    echo "$(basename "$PREFLIGHT_FIRST" .sh) $PREFLIGHT_FIRST"
+    for path in $(LC_ALL=C ls infra/lint/*.sh); do
+        [ "$path" = "$PREFLIGHT_FIRST" ] && continue
+        case " ${PREFLIGHT_EXCLUDES[*]} " in *" $path "*) continue ;; esac
+        echo "$(basename "$path" .sh) $path"
+    done
+}
+
+if [ "$ROSTER" -eq 1 ]; then
+    preflight_roster
+    exit $?
+fi
+
+run_preflight() {
+    check "fmt" cargo fmt -- --check
+    local roster name path
+    if ! roster=$(preflight_roster); then
+        echo "GATE FAIL: preflight-roster" >&2
+        FAILED+=("preflight-roster")
+        RAN+=("preflight-roster:fail")
+        return
+    fi
+    # `bash <path>` rather than executing it, as the consist check does:
+    # a checkout may not carry the executable bit, and a lint that
+    # quietly could not run is the under-covering gate this roster
+    # exists to prevent.
+    while read -r name path; do
+        check "$name" bash "$path"
+    done <<< "$roster"
+}
+
+# `--quick` stops here. It is a PRE-FLIGHT, not a gate, and says so:
+# nothing compiles, so it cannot see a clippy error, a failing test or a
+# broken build. Its whole claim is "you will not lose a gate to a lint
+# or a formatting slip", which is the class of red it is answering.
+if [ "$QUICK" -eq 1 ]; then
+    run_preflight
+    echo ""
+    if [ "${#FAILED[@]}" -gt 0 ]; then
+        echo "pre-flight: ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
+        echo "pre-flight: fix these before spending a gate on them." >&2
+        exit 1
+    fi
+    echo "pre-flight: clean — no build ran, so this is NOT a gate."
+    echo "pre-flight: clippy, build and the test suites are still unproven."
+    exit 0
+fi
+
+# `--lint` is `--quick` plus the one compiled check that pays for
+# itself. It exists because of a measured waste: on 2026-08-28 a car
+# went red on `clippy` alone, costing a gate and a re-gate — about 22
+# minutes of cluster time — for two unused imports. The pre-flight had
+# passed and was right to: it says in its own output that clippy is
+# still unproven.
+#
+# David, 2026-08-28: "Inherent slowness is fine. That just incentivizes
+# us to squeeze out errors around those steps to ensure they are never
+# wasted." A gate takes ~11 minutes and train CI ~15; a scoped clippy
+# takes seconds on a warm tree. Trading the second for the first is the
+# whole argument.
+#
+# SCOPED, NOT WORKSPACE. It clippies exactly the crates the tree
+# changed, derived by the same `crates_from_paths` the `-p` refusal
+# uses — so there is one definition of "which crates did this touch",
+# not two. A change that maps to no crate (docs, infra, apps) skips
+# clippy and says so, because there is nothing to compile.
+#
+# STILL NOT A GATE. The build and the test suites remain unproven, and
+# a DB-backed test cannot run here at all. This narrows the red-gate
+# classes by one; it does not replace the gate.
+if [ "$LINT" -eq 1 ]; then
+    run_preflight
+    LINT_CRATES=$(crates_from_paths)
+    if [ -n "$LINT_CRATES" ]; then
+        LINT_SCOPE=()
+        for c in $LINT_CRATES; do LINT_SCOPE+=(-p "$c"); done
+        echo ""
+        echo "pre-flight: clippy on ${LINT_CRATES//$'\n'/ }"
+        # The SAME invocation the gate runs in car mode — a second
+        # spelling here would be a check that disagrees with the check
+        # it is meant to predict.
+        check "clippy" cargo clippy "${LINT_SCOPE[@]}" --all-features --tests -- -D warnings
+    else
+        echo ""
+        echo "pre-flight: no crate implied by the tree — skipping clippy (nothing to compile)"
+    fi
+    echo ""
+    if [ "${#FAILED[@]}" -gt 0 ]; then
+        echo "pre-flight: ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
+        echo "pre-flight: fix these before spending a gate on them." >&2
+        exit 1
+    fi
+    echo "pre-flight: clean, and clippy saw the crates this tree changed."
+    echo "pre-flight: the build and the test suites are still unproven — this is NOT a gate."
+    exit 0
+fi
+
 # The shared fixture, checked in BOTH modes and named before anything
 # else. Measured across the forge's CI history on 2026-08-15 (106 runs,
 # 36 trains): 79% of train reds surfaced only in `test`, the slowest
@@ -541,19 +767,36 @@ else
     check "test"    cargo test "${SCOPE[@]}" --all-features
 fi
 
-# THE WEB SUITE, when the web moved. Train #86 went red on three
-# mocked Playwright specs this gate never ran: its web coverage was
-# svelte-check alone, while CI's web job runs typecheck + unit + build
-# + the mocked suite — a car could pass here and red the train on a
-# check it never saw (§9a: this block and ci.yml's web job are two
-# copies of one definition; this one now matches it). Scoped to
-# web-touching changes because the suite needs Playwright's browser
-# and ~a minute — a docs car should not pay that, and CI still runs it
-# unconditionally.
+# THE WEB SUITE. CI's web job runs typecheck + unit + build + the
+# mocked Playwright suite; before this gate ran svelte-check alone, so
+# a car could pass here and red the train on a check it never saw
+# (§9a: this block and ci.yml's web job are two copies of one
+# definition, kept in sync).
+#
+# FULL MODE RUNS IT UNCONDITIONALLY, matching CI — the full gate is the
+# authoritative one and must not be narrower than the train it feeds.
+# It used to be gated to `--auto` as well (`AUTO -eq 1 && web_touched`),
+# which is exactly why `boss gate` runs full mode, skipped the suite,
+# and let mocked-spec reds through: trains #160 (route crawl missed the
+# estate page) and #161 (~35 specs after the IT consolidation moved
+# surfaces) both died that way — ade5d82b. --auto keeps the old
+# scoping, because a docs or Rust car iterating locally should not pay
+# the suite unless it touched the web; CI and the full gate are the
+# unconditional backstops. The browser is baked into boss-ci at
+# /opt/ms-playwright (the keystone), so this needs no run-time download
+# — the gate-runner points PLAYWRIGHT_BROWSERS_PATH there.
 web_touched() {
     if changed_paths | grep -qE '^(apps/web|apps/simulator|libs/web-kit)/'; then echo yes; else echo no; fi
 }
-if [ "$AUTO" -eq 1 ] && [ "$(web_touched)" = "yes" ]; then
+if [ "$AUTO" -eq 0 ] || [ "$(web_touched)" = "yes" ]; then
+    # A clean install FIRST, with puppeteer's postinstall skipped. bun
+    # aborts the WHOLE install on a failed postinstall, and puppeteer's
+    # browser download is the flaky one — the exact reason ci.yml's web
+    # job and svelte-check.sh both set PUPPETEER_SKIP_DOWNLOAD. The
+    # gate-runner's run.sh does a best-effort warm-up install (|| true),
+    # so the suite cannot trust node_modules to be complete and does its
+    # own. Cached after the warm-up, so this is seconds, not minutes.
+    check "web install" bash -c 'cd apps/web && PUPPETEER_SKIP_DOWNLOAD=1 bun install --frozen-lockfile'
     # web-kit FIRST: its 7 test files existed for weeks and ran in no
     # job at all - not here, not in ci.yml. One of them could not even
     # load, because it imported a module whose top-level `$state` made
@@ -563,36 +806,8 @@ if [ "$AUTO" -eq 1 ] && [ "$(web_touched)" = "yes" ]; then
     check "web-suite (unit+build+mocked)" bash -c 'cd apps/web && bun run test:unit && bun run build && bun run test:mocked'
 fi
 
-check "fmt" cargo fmt -- --check
+run_preflight
 
-# The lint roster. These are repo-wide greps and audits — fast in car
-# mode too, and a car's diff can trip any of them (both #226 red runs
-# were exactly this class).
-check "seed-bypass-smell"        infra/lint/seed-bypass-smell.sh
-check "no-todo-citation"         infra/lint/no-todo-citation.sh
-check "no-step-kind-match"       infra/lint/no-step-kind-match.sh
-check "api-path-bypass-smell"    infra/lint/api-path-bypass-smell.sh
-check "dispatcher-actor-stamp"   infra/lint/dispatcher-actor-stamp.sh
-check "sim-boundary-audit"       infra/lint/sim-boundary-audit.sh
-check "tier-import-audit"        infra/lint/tier-import-audit.sh
-check "layer-order-audit"        infra/lint/layer-order-audit.sh
-check "no-wallclock"             infra/lint/no-wallclock.sh
-check "outbox-migration-ratchet" infra/lint/outbox-migration-ratchet.sh
-check "idempotence-ratchet"      infra/lint/idempotence-ratchet.sh
-check "dispatcher-rules-ratchet" infra/lint/dispatcher-rules-ratchet.sh
-check "schema-converge"          infra/lint/schema-converge.sh
-check "migrations-append-only"   infra/lint/migrations-append-only.sh
-check "migration-numbers-unique"  infra/lint/migration-numbers-unique.sh
-check "no-secrets"               infra/lint/no-secrets.sh
-check "no-session-paths"         infra/lint/no-session-paths.sh
-check "session-key-persists"     infra/lint/session-key-persists.sh
-check "invariant-register"       infra/lint/invariant-register.sh
-check "crate-counts-fresh"       infra/lint/crate-counts-fresh.sh
-check "registry-bump-order"      infra/lint/registry-bump-retires-first.sh
-check "ci-tools-declared"        infra/lint/ci-tools-declared.sh
-check "timers-leave-a-packet"    infra/lint/timers-leave-a-packet.sh
-check "step-plugin-bundle"       infra/lint/step-plugin-bundle-exists.sh
-check "one-palette"              infra/lint/one-palette.sh
 
 # The frontend type gate. Last, because it is the only check that
 # installs anything, and a Rust-only car should learn about its Rust

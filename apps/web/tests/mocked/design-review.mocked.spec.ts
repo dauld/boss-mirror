@@ -1,4 +1,4 @@
-// Design review list (/system/design) — content-level guard for the
+// Design review list (/it/design) — content-level guard for the
 // docs-review surface: the table must show each indexed doc with its
 // LIVE open-question count (a doc with 3 unresolved `### Qn:` anchors
 // must not read "0" — the pre-2026-07-06 page showed pending_count,
@@ -42,7 +42,7 @@ test.beforeEach(async ({ page }) => {
   // spec that does not mock it renders chrome and nothing else, and
   // every content assertion below fails with "element not found".
   //
-  // That is exactly how this suite rotted. `/system/design` grew a
+  // That is exactly how this suite rotted. `/it/design` grew a
   // station-lens read on 2026-08-15; these specs were never updated,
   // and eight of ten went red on main without anyone noticing,
   // because NOTHING RUNS THEM — not gate.sh, not ci.yml. Thirteen
@@ -122,7 +122,7 @@ test.describe('Design review list', () => {
   test('shows live open-question counts, not pending decisions', async ({
     page,
   }) => {
-    await mountPage(page, '/system/design', { titleMatch: /design review/i });
+    await mountPage(page, '/it/design', { titleMatch: /design review/i });
 
     const row = page.locator('tr', {
       hasText: 'Inventory value conservation',
@@ -139,7 +139,7 @@ test.describe('Design review list', () => {
   test('splits docs under discussion from living references', async ({
     page,
   }) => {
-    await mountPage(page, '/system/design', { titleMatch: /design review/i });
+    await mountPage(page, '/it/design', { titleMatch: /design review/i });
     // The doc with open questions sits in the section that wants a
     // decision; the living reference sits in the settled corpus with a
     // reopen affordance — the pre-2026-07-08 page showed both as
@@ -169,7 +169,7 @@ test.describe('Design review list', () => {
   test('docs without an open review offer the review-Job entry point', async ({
     page,
   }) => {
-    await mountPage(page, '/system/design', { titleMatch: /design review/i });
+    await mountPage(page, '/it/design', { titleMatch: /design review/i });
     // One doc is under discussion ("Open review Job"), one is a living
     // reference ("Reopen discussion") — every doc gets exactly one
     // affordance, worded for its state.
@@ -188,7 +188,7 @@ test.describe('Design review list', () => {
     page,
   }) => {
     await installJobCreateMock(page);
-    await mountPage(page, '/system/design', { titleMatch: /design review/i });
+    await mountPage(page, '/it/design', { titleMatch: /design review/i });
     const row = page.locator('tr', {
       hasText: 'Inventory value conservation',
     });
@@ -216,7 +216,7 @@ test.describe('Design review list', () => {
         ],
       }),
     );
-    await mountPage(page, '/system/design', { titleMatch: /design review/i });
+    await mountPage(page, '/it/design', { titleMatch: /design review/i });
     await expect(
       page.getByRole('heading', { name: /not indexed \(1\)/i }),
     ).toBeVisible();
@@ -279,7 +279,7 @@ test.describe('Design review list', () => {
         },
       }),
     );
-    await mountPage(page, '/system/design', { titleMatch: /design review/i });
+    await mountPage(page, '/it/design', { titleMatch: /design review/i });
     // Asserted through NAVIGATION, not an href. The column used to
     // fork — a link when a Job existed, a button when it did not — and
     // David killed that on 2026-08-14: "that link should just
@@ -293,7 +293,7 @@ test.describe('Design review list', () => {
     // where Back should go, and guessing from the Job's kind would put
     // a per-workflow branch in core routing. Only the lens that sent
     // the operator here knows, so it says.
-    await expect(page).toHaveURL(/from=%2Fsystem%2Fdesign/);
+    await expect(page).toHaveURL(/from=%2Fit%2Fdesign/);
     await expect(page).toHaveURL(/from_label=Design(%20|\+)Review/);
   });
 
@@ -322,7 +322,7 @@ test.describe('Design review list', () => {
         },
       }),
     );
-    await mountPage(page, '/system/design', { titleMatch: /design review/i });
+    await mountPage(page, '/it/design', { titleMatch: /design review/i });
     await page.getByRole('button', { name: /review/i }).first().click();
     // No step id to link to, so the job page — never a step id we
     // invented.
@@ -339,7 +339,7 @@ test.describe('Design review list', () => {
     await page.route('**/api/design/rejections', (route) =>
       route.fulfill({ status: 500, body: 'boom' }),
     );
-    await mountPage(page, '/system/design', { titleMatch: /design review/i });
+    await mountPage(page, '/it/design', { titleMatch: /design review/i });
     await expect(
       page.locator('tr', { hasText: 'Inventory value conservation' }),
     ).toHaveCount(1);
@@ -370,7 +370,7 @@ test('a doc whose status drifted is reported, with what it claims', async ({ pag
       ],
     }),
   );
-  await mountPage(page, '/system/design');
+  await mountPage(page, '/it/design');
 
   await expect(page.getByText('Status drifted (1)')).toBeVisible();
   await expect(page.getByText('docs/design/stations.md')).toBeVisible();
@@ -384,7 +384,7 @@ test('a doc whose status drifted is reported, with what it claims', async ({ pag
 // empty table. A panel that is always present teaches people to skip
 // the region it lives in.
 test('a corpus with no drift shows no panel at all', async ({ page }) => {
-  await mountPage(page, '/system/design');
+  await mountPage(page, '/it/design');
   await expect(page.getByText(/Status drifted/)).toHaveCount(0);
 });
 

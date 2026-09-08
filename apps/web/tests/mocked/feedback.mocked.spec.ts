@@ -33,7 +33,7 @@ test.describe('feedback control', () => {
   // reports the first failure without saying which navigation was
   // slow, and re-navigating three times in a single test made this
   // the flakiest thing in the suite.
-  for (const path of ['/ux/jobs', '/system', '/ux/views']) {
+  for (const path of ['/ux/jobs', '/it', '/ux/views']) {
     test(`is in the chrome on ${path}`, async ({ page }) => {
       await mountPage(page, path);
       await expect(chromeFeedback(page)).toBeVisible();

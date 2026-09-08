@@ -189,6 +189,33 @@ FROM debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf8
 # Runtime deps: ca-certs for outbound HTTPS (the gateway), libssl
 # for rustls's native bridge, postgresql-client for the init
 # script's psql calls, tini as PID 1 so signal forwarding works.
+# git: the cluster-resident train conductor (`boss train cadence`)
+# clones the repo and asks `git merge-base --is-ancestor` to verify a
+# train's merge is in the running commit. It used to run on boss-gcp,
+# which had host git; moved into this image by the 2026-09-04 cutover,
+# it silently lost git — exact-match convergence still worked (a string
+# compare) but ancestry did not, so every superseded train wedged at
+# `converged`. Named by the conductor's own log once ensure_clone
+# stopped swallowing the error.
+#
+# python3: the SAME LOSS, found the same way one cutover later. The
+# conductor runs the consist check — the 34 cheap lints, against the
+# assembled tree — before it opens a PR, and
+# `a-kind-bundle-does-not-tighten.sh` parses the platform manifest with
+# a small inline python3 (deliberately hand-rolled rather than tomllib,
+# which is 3.11+). On a box without python3 that lint cannot RUN, and
+# the conductor reported the result as "1 of 34 checks disagree with
+# the assembled tree" — refusing to board, striking no car, and
+# blocking every train behind an infrastructure gap dressed as a
+# consist failure (CLAUDE.md: an infrastructure refusal is not a
+# consist failure).
+#
+# It hid until 2026-09-04 21:15 because every earlier board that day
+# ran from the dev pod, which has python3; that firing was the first
+# time the CONDUCTOR boarded from its own container since the cutover.
+# The lesson both entries share: a component moved into this image
+# loses every host tool it never declared, and it discovers which ones
+# only when it next needs them.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \
@@ -198,6 +225,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
     jq \
+    git \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # BOSS runs as a non-root user. UID 1500 matches the systemd-deploy
@@ -277,11 +306,20 @@ COPY infra/seed-brewery-tenant.sh /opt/boss/infra/seed-brewery-tenant.sh
 # Quickstart launcher + init scripts.
 COPY infra/oss-quickstart/init.sh /usr/local/bin/boss-init
 COPY infra/oss-quickstart/services-launcher.sh /usr/local/bin/boss-launch
+# What the launcher SOURCES must land beside it: services-launcher.sh
+# reads tenant-launch.sh from its own directory, which in this image is
+# /usr/local/bin, not infra/oss-quickstart. On 2026-09-05 the launcher
+# landed without this line and the pod crash-looped on "No such file"
+# before any API started — the system of record was dark for the
+# duration of a rollback. The gate cannot see the image's file set
+# (it never builds the image), so infra/lint/the-image-carries-what-
+# the-launcher-sources.sh pins this pairing instead.
+COPY infra/oss-quickstart/tenant-launch.sh /usr/local/bin/tenant-launch.sh
 # The maintenance-packet wrap scripts, so in-cluster CronJob chores
 # (boss-search-reindex first) open and complete their packets the same
 # way the boss-gcp timers do — one script pair, both hosts (jq above
 # is theirs).
-COPY infra/boss-maintenance-wrap.sh infra/boss-step.sh /usr/local/bin/
+COPY infra/boss-maintenance-wrap.sh infra/boss-step.sh infra/boss-api-curl.sh /usr/local/bin/
 COPY infra/oss-quickstart/generate-configs.sh /usr/local/bin/boss-generate-configs
 RUN chmod +x /usr/local/bin/boss-init /usr/local/bin/boss-launch \
     /usr/local/bin/boss-generate-configs \

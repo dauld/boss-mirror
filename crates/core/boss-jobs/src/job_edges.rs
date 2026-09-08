@@ -71,6 +71,12 @@ impl JobEdgesRegistry for InMemoryJobEdges {
                 "job_id",
                 "The pr-train Job this change boarded",
             ),
+            mk(
+                "design-doc",
+                "translated_from",
+                "job_id",
+                "The design-doc packet this one revises — the previous link in the chain",
+            ),
         ])
     }
 }
@@ -122,6 +128,49 @@ mod pg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// THE PAIR THIS MODULE'S HEADER CLAIMS IS PINNED.
+    ///
+    /// The doc comment on `InMemoryJobEdges` says the list is "kept in
+    /// deliberate agreement with migration 104's seeds (the pg test
+    /// asserts the table matches this shape)". No such test was in the
+    /// tree — the comment was standing where the mechanism belonged,
+    /// which is the exact thing CLAUDE.md §9a says not to do.
+    ///
+    /// This pins the edge added for design-doc revision chains against
+    /// the migration that seeds it, by READING the migration rather than
+    /// restating it. Narrow on purpose: the older edges are seeded across
+    /// four migrations (104 seeds, 105 defaults, 125 normalizes, 136
+    /// backfills), and parsing all of them would be a fragile test
+    /// pretending to be a general one.
+    #[tokio::test]
+    async fn the_translation_edge_matches_the_migration_that_seeds_it() {
+        const MIGRATION: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../infra/postgres/schema/",
+            "202608291430-a-design-doc-can-name-what-it-revises.sql"
+        ));
+        let edges = InMemoryJobEdges.list().await.expect("list");
+        let edge = edges
+            .iter()
+            .find(|e| e.source_kind == "design-doc" && e.field_path == "translated_from")
+            .expect("design-doc.translated_from must be in the in-memory defaults");
+
+        assert_eq!(
+            edge.field_kind, "job_id",
+            "a revision revises exactly one packet"
+        );
+        assert!(
+            MIGRATION.contains("'design-doc', 'translated_from', 'job_id'"),
+            "the migration must seed the same triple the in-memory list serves"
+        );
+        assert!(
+            MIGRATION.contains(&edge.description),
+            "the migration's description must match the in-memory one, or the two \
+             registries disagree about what the edge means: {}",
+            edge.description
+        );
+    }
 
     /// The wire shape the Links panel reads — a rename is breaking.
     #[tokio::test]

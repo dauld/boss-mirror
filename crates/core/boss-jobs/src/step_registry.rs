@@ -560,10 +560,40 @@ mod tests {
     fn registry_has_43_types() {
         // Test name predates the count bumps; leaving the name alone
         // keeps blame-diff churn down. Count is just "length of
-        // seeded types", not any load-bearing invariant. 45 since
-        // `answer-question` (the approval Workflow's decide step).
+        // seeded types", not any load-bearing invariant. 48 since
+        // `credential-rotation` (the rotation packet's dedicated scope
+        // kind, so the credential broker's rule can target
+        // `step.done.credential-rotation` instead of firing on every
+        // `task` — the same reasoning as `gate-verdict` before it).
         let reg = StepRegistry::v1();
-        assert_eq!(reg.all().len(), 45);
+        assert_eq!(reg.all().len(), 48);
+    }
+
+    /// The reason `scope-declaration` is registered at all.
+    ///
+    /// The dispatcher decides DECIDES vs EXECUTES from this registry
+    /// and defaults an UNKNOWN kind to decision-shaped
+    /// (dispatcher.rs, `unwrap_or(true)`). So leaving this kind
+    /// unregistered is not neutral: the moment ship-a-change points
+    /// its `scope` step at it, every new car's boundary step becomes a
+    /// "decision", gets nominated to the single human holder of
+    /// `platform-admin`, and lands in that person's queue — moments
+    /// before `boss park` fills it anyway.
+    ///
+    /// A count assertion cannot catch that. This pins the property the
+    /// entry exists for, so deleting the flag or the block fails here
+    /// with the reason rather than as an off-by-one.
+    #[test]
+    fn declaring_a_boundary_is_work_not_a_verdict() {
+        let reg = StepRegistry::v1();
+        let scope = reg
+            .get("scope-declaration")
+            .expect("scope-declaration registered — an unregistered kind reads as a decision");
+        assert!(
+            !scope.decision_shaped,
+            "declaring what a change contains is executable work; marking it \
+             decision-shaped routes every car's scope step to a human queue"
+        );
     }
 
     #[test]
@@ -759,8 +789,8 @@ mod tests {
         let v = all_v1_types();
         assert_eq!(
             v.len(),
-            45,
-            "step_types.toml should have 45 [[step_type]] blocks"
+            48,
+            "step_types.toml should have 48 [[step_type]] blocks"
         );
     }
 
@@ -772,11 +802,15 @@ mod tests {
                 name: "counter_offer_cents".into(),
                 field_type: "integer".into(),
                 required: true,
+                filled_by: boss_core::job::FilledBy::Executor,
+                item_keys: Vec::new(),
             },
             StepField {
                 name: "notes".into(),
                 field_type: "string".into(),
                 required: false,
+                filled_by: boss_core::job::FilledBy::Executor,
+                item_keys: Vec::new(),
             },
         ];
         // Missing required authored field → error naming it.

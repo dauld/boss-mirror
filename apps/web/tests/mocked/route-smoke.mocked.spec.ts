@@ -27,41 +27,51 @@ const ROUTES: ReadonlyArray<string> = [
   '/ux/marketing-assets', '/ux/marketing-assets/ma-1', '/ux/calendar', '/ux/calendar/me',
   '/ux/support', '/ux/service', '/ux/refurb', '/ux/qa', '/ux/hr', '/ux/sales',
   '/ux/shop', '/ux/manual',
-  // System Model perspective — the "read the running model" surfaces.
-  //
-  // CANONICAL PATHS ARE `/it/*`, which is what ROUTE_CATALOG registers
-  // and what a browser's address bar holds. `/system/*` still answers:
-  // router.ts rewrites the `/it` prefix to `/system` before matching,
-  // so an old bookmark keeps working. This list crawled the `/system/*`
-  // alias for three releases and therefore never rendered a single
-  // canonical URL, while the drift test below reported all twenty as
-  // uncovered. Both halves of that were true at once, which is why the
-  // fix is to crawl what the catalog declares. The alias itself is
-  // pinned in src/router.test.ts, where it costs one line instead of a
-  // browser.
-  '/it', '/it/subjects', '/it/dispatcher', '/it/dispatcher/rules',
-  '/it/monitoring/perf', '/it/monitoring/events',
-  '/it/monitoring/atlas', '/it/step-plugins', '/it/kb', '/it/design',
-  '/it/experiments',
+  // The IT department — six surfaces, families as tabs (1f6d55e0).
+  // /system is GONE (David's Q1/Q4: no legacy users, no redirects), so
+  // this list crawls exactly what the catalog declares and nothing
+  // else answers.
+  '/it', '/it/registry/subjects', '/it/registry/dispatcher', '/it/registry/rules',
+  '/it/operate/perf',
+  '/it/operate/atlas', '/it/registry/step-plugins', '/it/kb', '/it/design',
+  '/it/design/experiments',
   // Modeling + admin surfaces (System Model).
-  '/it/workflows', '/it/workflows/new',
-  '/it/workflows/seasonal-release', '/it/policy', '/it/auth-admin',
+  '/it/registry', '/it/registry/new',
+  '/it/registry/seasonal-release', '/it/registry/policy', '/it/auth-admin',
   // IT surfaces added since the app split. They were absent for three
   // releases and the crawl reported success the whole time — see the
   // drift test at the bottom of this file for why that can no longer
   // happen quietly.
-  '/it/feedback', '/it/flow', '/it/yard',
-  // Incidents renders both panels' empty states under the mock's `[]`
-  // catch-all (an array where the {data} envelope should be reads as
-  // zero packets) — chrome + empty states, no crash.
-  '/it/incidents',
-  // The network map under the mock's `[]` catch-all: an array where
-  // the {data} envelope should be reads as zero stations — chrome +
-  // empty state, no crash.
-  '/it/map',
-  // Fleet renders its no-Workflows empty state under the mock's
-  // empty /api/workflows — a real crawl of the page chrome + picker.
-  '/it/fleet',
+  '/it/design/feedback',
+  '/it/design/backlog',
+  // Incidents (the Operate landing) renders both panels' empty states
+  // under the mock's `[]` catch-all — chrome + empty states, no crash.
+  '/it/operate',
+  // Bottlenecks (was Fleet) renders its no-Workflows empty state under
+  // the mock's empty /api/workflows — page chrome + picker. The map
+  // and flow pages died into the Atlas tab (already crawled above).
+  '/it/operate/bottlenecks',
+  // Yard status renders the empty yard under the mock's `[]` catch-all
+  // for /api/yard/status — chrome + "no trains / no cars", no crash.
+  '/it/operate/yard-status',
+  // The risk watchlist. Since CAR-6 it HAS a catalog entry, so the
+  // drift test at the bottom of this file now enforces its presence
+  // here instead of this line being the whole of its coverage.
+  '/watchlist',
+  // HR and the operator manual joined the catalog with the watchlist
+  // (CAR-6): HR renders its empty-roster states under the mock's `[]`
+  // catch-all; the manual renders its docs chrome with the fetch
+  // failing honestly. Both pin chrome + no-crash, same bar as every
+  // other row.
+  '/hr',
+  '/manual',
+  // The estate page under the mock's catch-all: every /api/estate/*
+  // fetch fails or reads empty, and the page's whole design is that
+  // absence renders as bordered failure notices, never an empty
+  // estate - chrome + three honest failure states, no crash. Its own
+  // unit suite pins the failed-never-empty arms; this crawl pins that
+  // the route actually mounts.
+  '/it/estate',
 ];
 
 // DEFERRED, group 1 — aggregation dashboards that read OBJECT-shaped
@@ -69,7 +79,23 @@ const ROUTES: ReadonlyArray<string> = [
 // can't fake; they need faithful per-endpoint fixtures before they can be
 // gated without false positives:
 //   /ux/finance (statements .reduce) · /ux/warehouse (summary.below_reorder_count)
-//   /ux/exec (.find/.length) · /ux/watchlist (.length) · /system/monitoring (snapshot .length)
+//   /ux/exec (.find/.length) · /it/operate/audit (snapshot .length)
+//
+// The watchlist LEFT THIS GROUP on 2026-08-28: its `.length` crash was
+// not a fixture problem but a CAST — the page read
+// `(await r.json()) as { accounts: RiskScore[] }` and a payload without
+// `accounts` made the value undefined. It now parses through
+// RiskScoreListSchema and renders its error state on a wrong shape, so
+// no faithful fixture is needed to gate it (feedback 2fe1c8c1).
+//
+// THAT COMMENT WAS TRUE AND THE PAGE WAS STILL NOT CRAWLED, for a full
+// day, because it named `/ux/watchlist` and the route is `/watchlist`
+// (router.ts:251). It was in neither ROUTES nor DEFERRED, and the drift
+// test could not catch the omission because the page has no
+// nav-catalog entry and that test only walks ROUTE_CATALOG. So the
+// deferral was lifted in prose while the coverage it described never
+// existed — a green suite reporting on a page it never opened. The
+// route is now in ROUTES above, spelled the way the router spells it.
 //
 // Resolved: the marketing-assets no-shell this harness first caught was a
 // real effect_update_depth_exceeded loop in loadClasses() called from a
@@ -150,7 +176,7 @@ test.describe('route smoke — every surface renders without a runtime crash', (
     const errors: string[] = [];
     page.on('pageerror', (e) => errors.push(e.message));
 
-    await page.goto(`/system/workflows/authoring/${JOB_ID}`, { timeout: 20_000 });
+    await page.goto(`/it/registry/authoring/${JOB_ID}`, { timeout: 20_000 });
     await expect(page.locator('.app-shell')).toBeVisible({ timeout: 10_000 });
     // Wait for the lazy graph + the step-authoring surface (which mounts
     // StepDagEditor) to render the seeded spec.
@@ -161,8 +187,8 @@ test.describe('route smoke — every surface renders without a runtime crash', (
 });
 
 // A crawl that silently omits a surface reports success for a page it
-// never loaded. That is not hypothetical: `/system/feedback`,
-// `/system/os-map` and `/system/flow` were each added to the app, each
+// never loaded. That is not hypothetical: `/it/design/feedback`,
+// `/system/os-map` and `/it/operate/atlas` were each added to the app, each
 // wired into the sidebar, and none of them appeared here — the harness
 // stayed green across all three because a hardcoded list cannot know
 // what it is missing.
@@ -175,7 +201,7 @@ test.describe('the crawl covers every registered surface', () => {
   /// Routes the crawl cannot cover yet, each with why. Shrinking this
   /// list is the work; adding to it is a decision.
   const DEFERRED: ReadonlyMap<string, string> = new Map([
-    ['/it/monitoring', 'aggregation dashboard: snapshot .length needs a faithful fixture'],
+    ['/it/operate/audit', 'aggregation dashboard: snapshot .length needs a faithful fixture'],
     ['/ux/finance', 'statements .reduce needs object-shaped fixtures'],
     ['/ux/warehouse', 'summary.below_reorder_count needs a faithful fixture'],
     ['/ux/exec', '.find/.length over object-shaped summaries'],

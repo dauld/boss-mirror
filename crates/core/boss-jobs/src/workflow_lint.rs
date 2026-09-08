@@ -14,10 +14,24 @@
 //!   declared terminal.
 //! - **Phase 2 — reachability.** Every step is reachable forward from
 //!   some trigger and backward from some terminal — no dead code.
+//! - **Phase 4 — a sign-off cannot arrive blind.** A `sign-off` step
+//!   asks a PERSON to approve something, and the UI renders the step
+//!   the reader is on — so a sign-off whose context is nowhere is an
+//!   empty screen with an Approve button. Either the step declares its
+//!   own required fields or a procedure, or some step it depends on
+//!   REQUIRES a field, which is what guarantees the context exists
+//!   before the packet can reach a human.
 //! - **Phase 3 — fork coverage.** Where a step is a fork point (≥2
 //!   successors discriminate on its outcome), every value of the
 //!   discriminating enum is handled by some successor, or a wildcard
 //!   fallback covers the open-ended case.
+//! - **Phase 6 — a terminal cannot fire on create.** A terminal gated
+//!   on a job-metadata MARKER must read false while that marker is
+//!   absent — otherwise the dispatcher's complete-on-ready rule closes
+//!   the Job at that outcome the instant it opens. Catches the
+//!   `job.metadata.x != ""` / `NOT job.metadata.x` footgun over an
+//!   `Absent` field that auto-superseded `incident-post-mortem` packets
+//!   on create (cb9661fe).
 //!
 //! Runs at author time (`POST /api/workflows/_validate`), publish
 //! time (every registry path that can set a row ACTIVE — see
@@ -27,7 +41,7 @@
 //! exactly how the 2026-08-13 outage happened — `_validate` could
 //! name the problem the whole time, and publish never asked it.
 
-use crate::registry::{StepSpec, WorkflowSpec, predicate_step_refs};
+use crate::registry::{StepSpec, WorkflowSpec, predicate_refs_job_metadata, predicate_step_refs};
 use crate::step_registry::StepRegistry;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -62,10 +76,195 @@ pub fn validate_workflow(spec: &WorkflowSpec, registry: &StepRegistry) -> Vec<Wo
     // Phase 0 — metadata default value shapes.
     for step in &spec.steps {
         check_metadata_defaults_values(spec, step, registry, &mut errs);
+        check_item_keys_name_an_array(spec, step, &mut errs);
     }
     // Phases 1–3 — viability of the predicate graph.
     check_viability(spec, registry, &mut errs);
+    // Phase 4 — a human decision point must arrive with its context.
+    // Platform workflows only; see the function's note.
+    if spec.category == "platform" {
+        check_sign_offs_are_not_blind(spec, registry, &mut errs);
+    }
+    // Phase 5 — a human decision point must leave a record.
+    check_decisions_leave_a_record(spec, registry, &mut errs);
+    // Phase 6 — a job-metadata-gated terminal must hold on create.
+    check_terminals_hold_on_create(spec, &mut errs);
     errs
+}
+
+/// Phase 5: a decision must leave a record.
+///
+/// Phase 4 guarantees a human decision point ARRIVES with context;
+/// this guarantees it LEAVES with one. They bind different moments:
+/// context is a readiness concern and lives on a predecessor, but
+/// required metadata is validated at COMPLETION — so the record
+/// constraint belongs on the step itself (or its kind's bundle), and
+/// a predecessor requirement satisfies Phase 4 while recording
+/// nothing of the judgement.
+///
+/// WHY THIS IS A HARD ERROR. David, 2026-08-29: "Let's try to make
+/// sure we can't lose my decisions again in the future. Data loss is
+/// a real concern." Measured that day (cdfe2e1a): 62 of 100 completed
+/// sign-off steps across every active workflow carried NOTHING — no
+/// authored metadata, no notes. Not rare; the majority case, and
+/// silent for nine days at a stretch. The remedy was settled by
+/// experiment rather than escalation: among keys completers actually
+/// write, `decision` (already the sign-off bundle's enum) dominates.
+///
+/// THE ORDER WAS FIX, THEN GATE. The fifteen affected workflows were
+/// moved to require `decision` first (new versions, 2026-08-29/30,
+/// registry writes), the seed bundles in the same change as this
+/// rule — because a lint the seed corpus fails breaks startup rather
+/// than preventing a defect.
+///
+/// UNSCOPED to category, unlike Phase 4, deliberately: Phase 4's
+/// remedy (authoring real context) needs domain knowledge and so
+/// left tenant workflows to someone who has it, but this phase's
+/// remedy is one field the bundle already declares. The live corpus
+/// carries it in every category and the seed bundles were brought
+/// along in the same change.
+fn check_decisions_leave_a_record(
+    spec: &WorkflowSpec,
+    registry: &StepRegistry,
+    errs: &mut Vec<WorkflowLintError>,
+) {
+    // The same property Phase 4 keys on, for the same reason: ask the
+    // registry, never compare a kind name (CLAUDE.md §9,
+    // infra/lint/no-step-kind-match.sh).
+    let is_approval = |step: &StepSpec| {
+        registry
+            .get(&step.kind)
+            .is_some_and(|t| t.surface == "approval")
+    };
+    for step in spec.steps.iter().filter(|s| is_approval(s)) {
+        let own_required = step.fields.iter().any(|f| f.required);
+        let bundle_required = registry
+            .get(&step.kind)
+            .is_some_and(|t| t.fields.iter().any(|f| f.required));
+        if own_required || bundle_required {
+            continue;
+        }
+        errs.push(WorkflowLintError {
+            workflow: spec.kind.clone(),
+            step: step.title.clone(),
+            reason: "is a decision point that can complete EMPTY: neither the step nor its \
+                     kind's bundle requires any field, so what was decided is recorded only \
+                     if the approver volunteers it — measured at 62 of 100 completed \
+                     sign-offs carrying nothing (cdfe2e1a). Require `decision` on the step \
+                     (the corpus' own shape, a new workflow version) so completion cannot \
+                     lose the judgement. Context arriving is Phase 4's concern; the record \
+                     leaving is this one's."
+                .into(),
+        });
+    }
+}
+
+/// Phase 4: every `sign-off` step must be guaranteed some context.
+///
+/// WHY THIS IS A HARD ERROR AND NOT ADVICE. On 2026-08-28 the same
+/// protocol-retro packet reached David EMPTY three times running: its
+/// work steps carried 6,654 characters and the `review` sign-off
+/// carried 14 — just `authority_role`. Each time it was hand-patched
+/// and nothing structural changed, which is precisely why it recurred.
+/// An audit that day found the shape everywhere: of 16 active
+/// workflows with a sign-off, 12 had one that could be reached with
+/// nothing on it, including every human decision point in the brewery
+/// tenant — a CFO approving a tax filing, an owner approving a tap
+/// launch.
+///
+/// David, 2026-08-28: *"All the expected info is a constraint on it
+/// reaching that point in the protocol."*
+///
+/// THE CONSTRAINT IS SATISFIED BY THE PREDECESSOR, and that is the
+/// load-bearing part. Required metadata is validated AT COMPLETION, so
+/// a required field on the sign-off itself would refuse only after the
+/// approver had already been shown an empty screen. A required field
+/// on a step the sign-off DEPENDS ON means the packet cannot reach the
+/// human until the context exists.
+///
+/// Deliberately narrow, in two directions.
+///
+/// SCOPED TO `sign-off` STEPS, because those are the ones a person is
+/// blocked on. 69 agent-facing steps were still arriving blind when
+/// this shipped (filed 1671bece), and failing those here would
+/// quarantine most of the system at boot.
+///
+/// SCOPED TO `category = "platform"` WORKFLOWS — the ones this
+/// deployment actually operates. The two worked-example tenants carry
+/// 33 more blind sign-offs between them (brewery 11, used-device-shop
+/// 22), and they are a real gap in the product story rather than an
+/// internal one: `refurb-used/qa-certification` and
+/// `support-rma/approve-rma` ask a person to approve with nothing on
+/// the screen, exactly as `protocol-retro/review` did.
+///
+/// They are excluded on purpose rather than overlooked. Fixing them
+/// means authoring what a QA certifier or an RMA approver needs to see,
+/// which is domain knowledge; a generic placeholder field would satisfy
+/// this lint while teaching a reader nothing, and a lint that can be
+/// satisfied without solving the problem is worse than no lint. David,
+/// 2026-08-28, chose this scope deliberately. Widening it is the right
+/// move once someone who knows those domains fills them in.
+fn check_sign_offs_are_not_blind(
+    spec: &WorkflowSpec,
+    registry: &StepRegistry,
+    errs: &mut Vec<WorkflowLintError>,
+) {
+    let by_title: HashMap<&str, &StepSpec> =
+        spec.steps.iter().map(|s| (s.title.as_str(), s)).collect();
+    // ASK THE REGISTRY FOR THE PROPERTY, never compare a kind name.
+    // `surface = "approval"` is what makes a step a human decision
+    // point, and it is declared in step_types.toml — so a new kind that
+    // renders an approval surface is covered the day it is added, with
+    // no edit here. Comparing the step's kind against a literal kind
+    // name would be exactly what `infra/lint/no-step-kind-match.sh`
+    // refuses and CLAUDE.md §9 explains: step-kind names are data, and
+    // core code dispatches on properties. (That lint greps text, so it
+    // flags the offending shape even inside a comment — which is how
+    // this note came to be phrased the long way round.)
+    //
+    // The obvious alternative — a non-empty `sign_offs_required` — was
+    // measured and REJECTED: 5 of 16 sign-off steps declare none,
+    // including `protocol-retro/review`, the exact packet that reached
+    // David empty three times. A discriminator that misses the
+    // motivating case is the wrong discriminator.
+    let is_approval = |step: &StepSpec| {
+        registry
+            .get(&step.kind)
+            .is_some_and(|t| t.surface == "approval")
+    };
+    for step in spec.steps.iter().filter(|s| is_approval(s)) {
+        let own_required = step.fields.iter().any(|f| f.required);
+        let own_procedure = step
+            .metadata_defaults
+            .get("procedure")
+            .is_some_and(|v| !v.is_null());
+        // A dependency that REQUIRES something cannot complete without
+        // it, and this step cannot become ready until it completes.
+        let dep_required = predicate_step_refs(&step.ready_when)
+            .iter()
+            .filter_map(|slug| by_title.get(slug.as_str()))
+            .any(|dep| dep.fields.iter().any(|f| f.required));
+        if own_required || own_procedure || dep_required {
+            continue;
+        }
+        errs.push(WorkflowLintError {
+            workflow: spec.kind.clone(),
+            step: step.title.clone(),
+            reason: format!(
+                "is a sign-off that can be reached with no context: it declares no required \
+                 fields and no `procedure`, and no step it depends on ({}) requires a field. \
+                 A person opening this sees an empty screen with an Approve button. Add a \
+                 required field to the step it depends on — required metadata is checked at \
+                 COMPLETION, so putting it on the predecessor is what stops the packet \
+                 reaching a human incomplete.",
+                if predicate_step_refs(&step.ready_when).is_empty() {
+                    "none".to_string()
+                } else {
+                    predicate_step_refs(&step.ready_when).join(", ")
+                }
+            ),
+        });
+    }
 }
 
 /// Validate every WorkflowSpec in a list. One call, every error
@@ -586,6 +785,100 @@ fn eval_pred(src: &str, payload: &Value) -> Option<bool> {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 6 — a job-metadata-gated terminal must hold on create
+// ---------------------------------------------------------------------------
+
+/// A terminal that is READY the instant the Job opens is completed by
+/// the dispatcher's complete-on-ready rule before any step can be
+/// filled — the Job closes at that outcome on create. That is fine for
+/// a terminal gated on real work (its step dependencies are not done
+/// yet), but a terminal gated on a JOB-METADATA MARKER exists precisely
+/// to WAIT until a person or agent sets the marker; if it is ready while
+/// the marker is absent, the gate is a no-op.
+///
+/// The footgun is `job.metadata.x != ""` / `!= "y"` / `NOT
+/// job.metadata.x`. A missing path resolves to `Absent`, which is
+/// UNEQUAL to every literal and FALSE in boolean position (boss-expr,
+/// design 7b756357) — so each of those reads TRUE over an absent
+/// marker. `incident-post-mortem` v1 shipped `superseded_by != ""` on
+/// its `superseded` terminal and auto-superseded every packet the
+/// instant it opened, before any step could be filled (cb9661fe,
+/// reproduced live 2026-09-07). It is the same shape the `abandoned`,
+/// `cancelled` and `proven` terminals were each hand-fixed against
+/// (registry.rs) — now caught for every workflow, at the author-time
+/// dry run and the publish gate, so no new version can ship it.
+///
+/// Scoped to terminals that reference `job.metadata`: one gated purely
+/// on step completions holds on its own here (its steps are not done at
+/// create), and a `result != "ok"` failure branch reads a step's OWN
+/// required-at-done metadata, not the Job's — neither is a broken
+/// marker gate.
+fn check_terminals_hold_on_create(spec: &WorkflowSpec, errs: &mut Vec<WorkflowLintError>) {
+    let payload = synth_fresh_job_payload(spec);
+    for step in spec.steps.iter().filter(|s| s.terminal.is_some()) {
+        if !predicate_refs_job_metadata(&step.ready_when) {
+            continue;
+        }
+        if eval_pred(&step.ready_when, &payload) == Some(true) {
+            errs.push(err(
+                spec,
+                &step.title,
+                format!(
+                    "is a terminal gated on a job-metadata marker that is READY on a \
+                     freshly-created Job (ready_when = `{}`): the marker is absent at create, \
+                     yet the predicate reads true, so the dispatcher's complete-on-ready rule \
+                     closes the Job at this outcome before any step is filled. A missing \
+                     metadata path is `Absent` — unequal to every literal and false in \
+                     boolean position — so `!= \"\"`, `!= \"x\"` and `NOT job.metadata.x` all \
+                     read true when the marker is unset. Test a present, non-empty marker \
+                     with `job.metadata.<field> > \"\"`, or an exact value with `= \"<value>\"`; \
+                     both read false when the marker is absent, so the terminal waits until it \
+                     is set.",
+                    step.ready_when
+                ),
+            ));
+        }
+    }
+}
+
+/// A freshly-created Job as the dispatcher first reconciles it: trigger
+/// steps are `Completed` at materialization (they describe a
+/// job-creation condition and have no work of their own), every other
+/// step is still pending, and `job.metadata` is empty — a Job opened
+/// with no metadata is the minimal case the gate must survive. Each
+/// step's metadata carries its `metadata_defaults` (stamped at
+/// materialization, present even while pending) plus, on the done
+/// triggers, its declared fields as null, mirroring what a materialized
+/// step actually looks like so a predicate evaluates here as it does at
+/// run time.
+fn synth_fresh_job_payload(spec: &WorkflowSpec) -> Value {
+    let mut steps = serde_json::Map::new();
+    for s in &spec.steps {
+        let done = s.ready_when.trim() == "true";
+        let mut metadata = serde_json::Map::new();
+        if let Value::Object(defaults) = &s.metadata_defaults {
+            for (k, v) in defaults {
+                metadata.insert(k.clone(), v.clone());
+            }
+        }
+        if done {
+            for f in s.fields.iter().map(|f| f.name.to_string()) {
+                metadata.entry(f).or_insert(Value::Null);
+            }
+        }
+        steps.insert(
+            s.title.clone(),
+            serde_json::json!({ "done": done, "metadata": Value::Object(metadata) }),
+        );
+    }
+    serde_json::json!({
+        "subject": {},
+        "job": { "metadata": {} },
+        "steps": Value::Object(steps),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Phase 0 — metadata default value shapes (carried over from v1)
 // ---------------------------------------------------------------------------
 
@@ -653,6 +946,29 @@ fn check_metadata_defaults_values(
 /// True when the value is an obvious placeholder rather than a real
 /// default (e.g. `""` for a date field a downstream step populates at
 /// completion time).
+/// `item_keys` describes the elements of an ARRAY field; on any other
+/// type it describes nothing, and admission would silently never check
+/// it. Refuse the spec instead of storing a shape nobody reads.
+fn check_item_keys_name_an_array(
+    spec: &WorkflowSpec,
+    step: &StepSpec,
+    errs: &mut Vec<WorkflowLintError>,
+) {
+    for field in &step.fields {
+        if !field.item_keys.is_empty() && field.field_type != "array" {
+            errs.push(WorkflowLintError {
+                workflow: spec.kind.clone(),
+                step: step.title.clone(),
+                reason: format!(
+                    "field '{}' declares item_keys {:?} but is a '{}', not an array — \
+                     item_keys describes array elements and would never be checked",
+                    field.name, field.item_keys, field.field_type
+                ),
+            });
+        }
+    }
+}
+
 fn is_placeholder_default(field_type: &str, value: &Value) -> bool {
     matches!(
         (field_type, value),
@@ -756,6 +1072,62 @@ mod tests {
     fn minimal_viable_jobkind_passes() {
         let reg = StepRegistry::v1();
         assert!(validate_workflow(&viable_spec("ok"), &reg).is_empty());
+    }
+
+    #[test]
+    fn item_keys_on_a_non_array_field_is_refused() {
+        // `item_keys` is the registry stating an element shape. On a
+        // string field there are no elements, so the declaration
+        // would be stored and never checked — the exact "prose that
+        // cannot enforce" a shape declaration exists to replace.
+        let reg = StepRegistry::v1();
+        let field = |field_type: &str| boss_core::job::StepField {
+            name: "questions".into(),
+            field_type: field_type.into(),
+            required: true,
+            filled_by: boss_core::job::FilledBy::Filer,
+            item_keys: vec!["anchor".into(), "title".into()],
+        };
+        let spec_with = |field_type: &str| {
+            WorkflowSpec::platform_seed(
+                "doc",
+                "doc",
+                "test",
+                vec!["custom".into()],
+                vec![
+                    StepSpec {
+                        title: "drafted".into(),
+                        kind: "trigger".into(),
+                        ready_when: "true".into(),
+                        metadata_defaults: serde_json::json!({
+                            "trigger_kind": "operator", "trigger_name": "t"
+                        }),
+                        ..Default::default()
+                    },
+                    StepSpec {
+                        title: "review".into(),
+                        kind: "task".into(),
+                        ready_when: "steps.drafted.done".into(),
+                        fields: vec![field(field_type)],
+                        terminal: Some(Terminal {
+                            outcome: "published".into(),
+                        }),
+                        ..Default::default()
+                    },
+                ],
+            )
+        };
+        let errs = validate_workflow(&spec_with("string"), &reg);
+        assert!(
+            errs.iter()
+                .any(|e| e.step == "review" && e.reason.contains("item_keys")),
+            "a string field with item_keys is refused by name: {errs:?}"
+        );
+        let errs = validate_workflow(&spec_with("array"), &reg);
+        assert!(
+            !errs.iter().any(|e| e.reason.contains("item_keys")),
+            "an array field with item_keys is the intended shape: {errs:?}"
+        );
     }
 
     #[test]
@@ -889,6 +1261,8 @@ mod tests {
                         name: "route".into(),
                         field_type: "ship|scrap|investigate".into(),
                         required: true,
+                        filled_by: boss_core::job::FilledBy::Executor,
+                        item_keys: Vec::new(),
                     }],
                     ..Default::default()
                 },
@@ -900,6 +1274,8 @@ mod tests {
                         name: "route".into(),
                         field_type: "ship|scrap".into(),
                         required: true,
+                        filled_by: boss_core::job::FilledBy::Executor,
+                        item_keys: Vec::new(),
                     }],
                     // Stamped at materialization, so the step carries the
                     // key from the moment it exists — which is why the
@@ -945,11 +1321,15 @@ mod tests {
         //
         // `ship` is reachable only via a clause reading `watch`'s
         // `flag`, and `watch` has neither run nor declared a default —
-        // so at run time `steps.watch.metadata.flag` is ABSENT, boss-expr
-        // errors, and `ship` never becomes ready. Seeding every declared
-        // field as null regardless of state would make `!=` read true
-        // here and error there: the gate would pass a workflow with a
-        // branch that can never be taken.
+        // so at run time `steps.watch.metadata.flag` is ABSENT. Since
+        // 7b756357 boss-expr resolves that to `Absent`, which compares
+        // FALSE against a literal, so `= "go"` is false in both the lint
+        // synth and the engine: `ship` never becomes ready and route
+        // "ship" is a genuine orphan. (A `!=` clause would read TRUE
+        // over the same absent field — reachable, correctly not an
+        // orphan — which is the semantics change; this test keeps the
+        // `=` case, the one that stays unreachable, so it still proves
+        // the lint is never more permissive than the engine.)
         let reg = StepRegistry::v1();
         let spec = WorkflowSpec::platform_seed(
             "unrun",
@@ -965,6 +1345,8 @@ mod tests {
                         name: "route".into(),
                         field_type: "ship|scrap".into(),
                         required: true,
+                        filled_by: boss_core::job::FilledBy::Executor,
+                        item_keys: Vec::new(),
                     }],
                     ..Default::default()
                 },
@@ -976,14 +1358,15 @@ mod tests {
                         name: "flag".into(),
                         field_type: "string".into(),
                         required: false,
+                        filled_by: boss_core::job::FilledBy::Executor,
+                        item_keys: Vec::new(),
                     }],
                     ..Default::default()
                 },
                 StepSpec {
                     title: "ship".into(),
                     kind: "task".into(),
-                    ready_when: "steps.decide.done AND steps.watch.metadata.flag != \"stop\""
-                        .into(),
+                    ready_when: "steps.decide.done AND steps.watch.metadata.flag = \"go\"".into(),
                     terminal: Some(Terminal {
                         outcome: "shipped".into(),
                     }),
@@ -1032,6 +1415,8 @@ mod tests {
                         name: "outcome".into(),
                         field_type: "package|skip".into(),
                         required: false,
+                        filled_by: boss_core::job::FilledBy::Executor,
+                        item_keys: Vec::new(),
                     }],
                     ..Default::default()
                 },
@@ -1082,6 +1467,8 @@ mod tests {
                         name: "outcome".into(),
                         field_type: "package|skip".into(),
                         required: false,
+                        filled_by: boss_core::job::FilledBy::Executor,
+                        item_keys: Vec::new(),
                     }],
                     ..Default::default()
                 },
@@ -1141,6 +1528,359 @@ mod tests {
                 .iter()
                 .any(|e| e.reason.contains("metadata_defaults")),
             "{{subject.id}} is a valid string template"
+        );
+    }
+
+    // ----- Phase 4: a sign-off cannot arrive blind -----
+
+    /// Trigger -> work -> sign-off -> terminal. The sign-off depends on
+    /// `work`, so `work` is where the constraint belongs.
+    fn signoff_spec(kind: &str) -> WorkflowSpec {
+        // category MUST be "platform" — Phase 4 is scoped to the
+        // workflows this deployment operates, so a "test"-category
+        // fixture would silently skip the very check under test.
+        WorkflowSpec::platform_seed(
+            kind,
+            kind,
+            "platform",
+            vec!["asset".into()],
+            vec![
+                StepSpec {
+                    title: "start".into(),
+                    kind: "trigger".into(),
+                    ready_when: "true".into(),
+                    ..Default::default()
+                },
+                StepSpec {
+                    title: "work".into(),
+                    kind: "task".into(),
+                    ready_when: "steps.start.done".into(),
+                    ..Default::default()
+                },
+                StepSpec {
+                    title: "approve".into(),
+                    kind: "sign-off".into(),
+                    ready_when: "steps.work.done".into(),
+                    ..Default::default()
+                },
+                StepSpec {
+                    title: "done".into(),
+                    kind: "task".into(),
+                    ready_when: "steps.approve.done".into(),
+                    terminal: Some(Terminal {
+                        outcome: "done".into(),
+                    }),
+                    ..Default::default()
+                },
+            ],
+        )
+    }
+
+    fn required(name: &str) -> boss_core::job::StepField {
+        boss_core::job::StepField {
+            name: name.into(),
+            field_type: "string".into(),
+            required: true,
+            filled_by: boss_core::job::FilledBy::Executor,
+            item_keys: Vec::new(),
+        }
+    }
+
+    /// THE DEFECT: a sign-off reachable with nothing on it. Shipped to
+    /// David three times before this lint existed.
+    #[test]
+    fn a_sign_off_with_no_guaranteed_context_fails() {
+        let reg = StepRegistry::v1();
+        let errs = validate_workflow(&signoff_spec("blind"), &reg);
+        let hit = errs.iter().find(|e| e.step == "approve");
+        let hit = hit.expect("a blind sign-off must be refused");
+        assert!(hit.reason.contains("no context"), "{}", hit.reason);
+        // The refusal must name what to fix and where.
+        assert!(hit.reason.contains("predecessor"), "{}", hit.reason);
+        assert!(
+            hit.reason.contains("work"),
+            "must name the dependency: {}",
+            hit.reason
+        );
+    }
+
+    /// THE FIX DAVID SPECIFIED: the constraint on the step BEFORE.
+    #[test]
+    fn a_required_field_on_the_predecessor_satisfies_it() {
+        let reg = StepRegistry::v1();
+        let mut spec = signoff_spec("guarded");
+        spec.steps[1].fields.push(required("sign_off_context"));
+        // Phase 5 still (correctly) wants a record on the step itself,
+        // so filter to THIS phase's concern rather than any error on
+        // the step.
+        assert!(
+            validate_workflow(&spec, &reg)
+                .iter()
+                .all(|e| e.step != "approve" || !e.reason.contains("no context")),
+            "a required field on the dependency guarantees the context exists"
+        );
+    }
+
+    /// An OPTIONAL field on the predecessor does NOT satisfy it — it can
+    /// complete without ever being filled, which is the whole failure.
+    #[test]
+    fn an_optional_field_on_the_predecessor_does_not_satisfy_it() {
+        let reg = StepRegistry::v1();
+        let mut spec = signoff_spec("optional");
+        spec.steps[1].fields.push(boss_core::job::StepField {
+            name: "sign_off_context".into(),
+            field_type: "string".into(),
+            required: false,
+            filled_by: boss_core::job::FilledBy::Executor,
+            item_keys: Vec::new(),
+        });
+        assert!(
+            validate_workflow(&spec, &reg)
+                .iter()
+                .any(|e| e.step == "approve"),
+            "optional means it can arrive empty, which is the defect"
+        );
+    }
+
+    /// A step that carries its own procedure or its own required field
+    /// is fine too — the rule asks that context be GUARANTEED, not that
+    /// it arrive from any particular direction.
+    #[test]
+    fn a_sign_off_carrying_its_own_context_passes() {
+        let reg = StepRegistry::v1();
+        let mut own_proc = signoff_spec("own-proc");
+        own_proc.steps[2].metadata_defaults = json!({"procedure": "what to check"});
+        // A procedure satisfies Phase 4 (context) but not Phase 5 (a
+        // record) — filter to this phase's reason.
+        assert!(
+            validate_workflow(&own_proc, &reg)
+                .iter()
+                .all(|e| e.step != "approve" || !e.reason.contains("no context"))
+        );
+
+        let mut own_field = signoff_spec("own-field");
+        own_field.steps[2].fields.push(required("decision"));
+        assert!(
+            validate_workflow(&own_field, &reg)
+                .iter()
+                .all(|e| e.step != "approve")
+        );
+    }
+
+    // ----- Phase 5: a decision must leave a record -----
+
+    /// THE DEFECT (cdfe2e1a): 62 of 100 completed sign-offs recorded
+    /// nothing, because nothing required anything at completion.
+    #[test]
+    fn a_decision_that_can_complete_empty_fails() {
+        let reg = StepRegistry::v1();
+        let errs = validate_workflow(&signoff_spec("empty-ok"), &reg);
+        let hit = errs
+            .iter()
+            .find(|e| e.step == "approve" && e.reason.contains("complete EMPTY"))
+            .expect("a recordless decision point must be refused");
+        // The refusal must name the remedy the corpus settled on.
+        assert!(hit.reason.contains("`decision`"), "{}", hit.reason);
+    }
+
+    /// A required field on the step itself is the fix — completion
+    /// validates required metadata, so the record cannot be lost.
+    #[test]
+    fn a_decision_with_its_own_required_field_passes_phase_five() {
+        let reg = StepRegistry::v1();
+        let mut spec = signoff_spec("records");
+        spec.steps[2].fields.push(required("decision"));
+        assert!(
+            validate_workflow(&spec, &reg)
+                .iter()
+                .all(|e| !e.reason.contains("complete EMPTY")),
+        );
+    }
+
+    /// THE DISTINGUISHING CASE: a predecessor requirement satisfies
+    /// Phase 4 and does nothing for Phase 5 — the packet still reaches
+    /// the approver with context and leaves with no judgement recorded.
+    /// This is precisely how 4e0e42b2 arrived full and 188d79ea left
+    /// empty on the same day.
+    #[test]
+    fn a_predecessor_requirement_does_not_make_a_decision_recorded() {
+        let reg = StepRegistry::v1();
+        let mut spec = signoff_spec("dep-only");
+        spec.steps[1].fields.push(required("sign_off_context"));
+        assert!(
+            validate_workflow(&spec, &reg)
+                .iter()
+                .any(|e| e.step == "approve" && e.reason.contains("complete EMPTY")),
+            "context arriving is not the same as a record leaving"
+        );
+    }
+
+    /// Unscoped to category, unlike Phase 4: a tenant CFO's empty
+    /// sign-off loses a judgement exactly as a platform one does, and
+    /// the remedy needs no domain knowledge.
+    #[test]
+    fn phase_five_judges_tenant_workflows_too() {
+        let reg = StepRegistry::v1();
+        let mut spec = signoff_spec("tenant");
+        spec.category = "operations".into();
+        assert!(
+            validate_workflow(&spec, &reg)
+                .iter()
+                .any(|e| e.step == "approve" && e.reason.contains("complete EMPTY")),
+        );
+    }
+
+    /// Scoped to sign-offs on purpose: 69 agent-facing steps were still
+    /// arriving blind when this shipped, and failing those here would
+    /// quarantine most of the system at boot.
+    #[test]
+    fn a_blind_task_step_is_not_failed_by_this_phase() {
+        let reg = StepRegistry::v1();
+        let mut spec = signoff_spec("task-blind");
+        spec.steps[2].kind = "task".into();
+        assert!(
+            validate_workflow(&spec, &reg)
+                .iter()
+                .all(|e| e.step != "approve"),
+            "this phase judges human decision points only"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 6 — a job-metadata-gated terminal must not fire on create.
+    // -----------------------------------------------------------------
+
+    /// A retrospective/incident shape: a trigger, an analysis step, a
+    /// happy terminal, and a `superseded` terminal gated on a
+    /// job-metadata marker. The marker's whole job is to HOLD the
+    /// terminal until a person sets it.
+    fn incident_shape(superseded_ready_when: &str) -> WorkflowSpec {
+        WorkflowSpec::platform_seed(
+            "incident-post-mortem",
+            "Incident post-mortem",
+            "test",
+            vec!["custom".into()],
+            vec![
+                StepSpec {
+                    title: "recorded".into(),
+                    kind: "trigger".into(),
+                    ready_when: "true".into(),
+                    metadata_defaults: json!({
+                        "trigger_kind": "operator", "trigger_name": "incident-recorded"
+                    }),
+                    ..Default::default()
+                },
+                StepSpec {
+                    title: "analysis".into(),
+                    kind: "task".into(),
+                    ready_when: "steps.recorded.done".into(),
+                    ..Default::default()
+                },
+                StepSpec {
+                    title: "complete".into(),
+                    kind: "outcome".into(),
+                    ready_when: "steps.analysis.done".into(),
+                    metadata_defaults: json!({ "outcome_kind": "completed" }),
+                    terminal: Some(Terminal {
+                        outcome: "completed".into(),
+                    }),
+                    ..Default::default()
+                },
+                StepSpec {
+                    title: "superseded".into(),
+                    kind: "outcome".into(),
+                    ready_when: superseded_ready_when.into(),
+                    metadata_defaults: json!({ "outcome_kind": "aborted" }),
+                    terminal: Some(Terminal {
+                        outcome: "superseded".into(),
+                    }),
+                    ..Default::default()
+                },
+            ],
+        )
+    }
+
+    /// THE BUG (backlog-item cb9661fe, reproduced live 2026-09-07).
+    /// `job.metadata.superseded_by != ""` over an ABSENT field is TRUE:
+    /// a missing path resolves to `Absent`, which is unequal to every
+    /// literal (boss-expr, design 7b756357). The trigger auto-completes
+    /// at materialization, so the terminal is ready the instant the Job
+    /// opens, and the dispatcher's complete-on-ready rule closes it as
+    /// `superseded` before any step can be filled. The marker gate is a
+    /// no-op — exactly the shape the `abandoned`/`cancelled` terminals
+    /// were hand-fixed against, now caught for every workflow.
+    #[test]
+    fn a_metadata_marker_terminal_that_fires_when_the_marker_is_absent_is_refused() {
+        let reg = StepRegistry::v1();
+        let spec = incident_shape("steps.recorded.done AND job.metadata.superseded_by != \"\"");
+        let errs = validate_workflow(&spec, &reg);
+        assert!(
+            errs.iter()
+                .any(|e| e.step == "superseded" && e.reason.contains("freshly-created Job")),
+            "a terminal that fires while its metadata marker is absent must be refused: {errs:?}"
+        );
+    }
+
+    /// A bare `NOT job.metadata.<flag>` over an absent flag is TRUE in
+    /// boolean position — the same footgun in its negated form, and it
+    /// closes the Job on create just as surely.
+    #[test]
+    fn a_bare_not_metadata_terminal_is_refused() {
+        let reg = StepRegistry::v1();
+        let spec = incident_shape("steps.recorded.done AND NOT job.metadata.superseded_by");
+        let errs = validate_workflow(&spec, &reg);
+        assert!(
+            errs.iter()
+                .any(|e| e.step == "superseded" && e.reason.contains("freshly-created Job")),
+            "a `NOT job.metadata.x` terminal fires on create over an absent flag: {errs:?}"
+        );
+    }
+
+    /// THE FIX. `field > ""` is the boss-expr idiom for "present and a
+    /// non-empty string": an absent path orders against nothing (false),
+    /// `"" > ""` is false, and any non-empty string is greater. So the
+    /// marker gate now HOLDS until a person sets `superseded_by`, and
+    /// the workflow is otherwise viable.
+    #[test]
+    fn the_present_and_nonempty_idiom_holds_the_terminal() {
+        let reg = StepRegistry::v1();
+        let spec = incident_shape("steps.recorded.done AND job.metadata.superseded_by > \"\"");
+        let errs = validate_workflow(&spec, &reg);
+        assert!(
+            errs.is_empty(),
+            "`superseded_by > \"\"` holds until the marker is set — no finding: {errs:?}"
+        );
+    }
+
+    /// The `= "true"` marker idiom (used by every `abandoned` terminal)
+    /// already holds correctly: `Absent = "true"` is false, so the
+    /// terminal waits. Phase 6 must not flag it.
+    #[test]
+    fn an_equality_marker_terminal_is_not_flagged() {
+        let reg = StepRegistry::v1();
+        let spec = incident_shape("steps.recorded.done AND job.metadata.superseded_by = \"true\"");
+        assert!(
+            validate_workflow(&spec, &reg)
+                .iter()
+                .all(|e| e.step != "superseded"),
+            "an `= \"value\"` marker gate holds when the marker is absent"
+        );
+    }
+
+    /// A terminal gated only on step completions (no job-metadata
+    /// marker) is out of scope: the minimal viable workflow's terminal
+    /// fires off the trigger by design, and a `result != "ok"` failure
+    /// branch reads a step's OWN required-at-done metadata. Phase 6 keys
+    /// on a job-metadata reference so it touches neither.
+    #[test]
+    fn a_step_gated_terminal_is_not_flagged() {
+        let reg = StepRegistry::v1();
+        let spec = incident_shape("steps.analysis.done");
+        assert!(
+            validate_workflow(&spec, &reg)
+                .iter()
+                .all(|e| e.step != "superseded"),
+            "a terminal with no job-metadata marker is out of Phase 6's scope"
         );
     }
 }

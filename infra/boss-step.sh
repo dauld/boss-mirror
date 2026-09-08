@@ -51,6 +51,34 @@ fi
 WORKFLOW="$1"; shift
 STEP_TITLE="$1"; shift
 
+# A VERDICT FOR THE RUN THAT JUST ENDED. systemd hands every
+# ExecStopPost= process $SERVICE_RESULT (success / exit-code / timeout /
+# signal / ...) and $EXIT_STATUS, and ExecStopPost runs whether ExecStart
+# succeeded or not — unlike ExecStartPost, which systemd SKIPS when
+# ExecStart fails. Until 2026-09-05 every timer completed its packet
+# from ExecStartPost, so a failed run recorded nothing: the disk-floor
+# sweep's 16:10 packet sat open through two FLOOR UNMET runs looking
+# exactly like a run in progress, and forge-converge's 17:39 failure
+# (exit 1) was closed "ok" by the next run's recovery. A packet that
+# cannot say "failed" is not the record of the run.
+#
+# So when the caller passes no result of its own, the result IS the
+# service result: `ok` for success (the word the outcome predicates
+# route on), otherwise systemd's word for how it died, with the exit
+# status beside it. An explicit result= pair still wins.
+if [ -n "${SERVICE_RESULT:-}" ] && ! printf '%s\n' "$@" | grep -q '^result='; then
+    if [ "$SERVICE_RESULT" = "success" ]; then
+        set -- "$@" "result=ok"
+    else
+        set -- "$@" "result=$SERVICE_RESULT" "exit_status=${EXIT_STATUS:-unknown}"
+    fi
+fi
+# The lint's self-test reads the pairs this run would record, and stops.
+if [ -n "${BOSS_STEP_DRY_RUN:-}" ]; then
+    printf '%s\n' "$@"
+    exit 0
+fi
+
 # WHERE THE PACKET GOES IS NOT A DEFAULT, IT IS A DECISION.
 #
 # This read `${BOSS_JOBS_URL:-http://127.0.0.1:7900}` until 2026-08-17.
@@ -86,7 +114,13 @@ BASE="${BOSS_JOBS_URL}"
 ACTOR="${BOSS_STEP_ACTOR:-automation:boss-step}"
 BOSS_USER="{\"id\":\"$ACTOR\",\"role\":\"platform-admin\",\"access_tier\":\"operator\",\"territory_account_ids\":[],\"direct_report_ids\":[],\"department\":\"platform\"}"
 
-if ! jobs_json=$(curl -fsS -H "x-boss-user: $BOSS_USER" \
+# Transport-retry curl (25e518c0) — same resolution as
+# boss-maintenance-wrap.sh: next-to-self (repo checkout and image
+# both keep the pair together), PATH as the fallback.
+API_CURL="$(dirname "$0")/boss-api-curl.sh"
+[ -x "$API_CURL" ] || API_CURL=boss-api-curl.sh
+
+if ! jobs_json=$("$API_CURL" -fsS -H "x-boss-user: $BOSS_USER" \
         "$BASE/api/jobs?kind=$WORKFLOW&status=open&limit=50" 2>/dev/null); then
     echo "boss-step: jobs-api unreachable at $BASE — '$STEP_TITLE' not recorded" >&2
     exit 1
@@ -149,7 +183,7 @@ done
 payload=$(printf '%s' "$merged" | jq -c '{status: "completed", metadata: .}')
 step_id=$(printf '%s' "$step" | jq -r '.id')
 url="$BASE/api/jobs/$job_id/steps/$step_id"
-if ! put_err=$(curl -fsS -X PUT -H "content-type: application/json" \
+if ! put_err=$("$API_CURL" -fsS -X PUT -H "content-type: application/json" \
         -H "x-boss-user: $BOSS_USER" \
         ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
         -d "$payload" "$url" 2>&1 >/dev/null); then

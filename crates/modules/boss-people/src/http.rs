@@ -55,50 +55,6 @@ pub fn router<R: PeopleRepository + 'static>(state: PeopleApiState<R>) -> Router
         .with_state(shared)
 }
 
-/// SubjectKind validator. Mirrors
-/// `boss_jobs::http::check_custom_subject`. Returns `Ok(())` when:
-/// - `subject` is one of the closed core variants (always valid), OR
-/// - `subject` is Custom and either the registry isn't configured
-///   (opt-in) or the registry confirms the kind exists.
-///
-/// Returns a 400 Response when the registry says the kind doesn't
-/// exist; 502 on registry-call failure rather than dropping the
-/// write silently.
-///
-/// The boss-people HTTP surface only accepts closed Subject variants
-/// (Account / Employee / Vendor / Campaign / etc.), so the Custom
-/// branch is currently unreachable and the function is `dead_code`;
-/// it's a one-line gate for any write path that starts accepting
-/// Custom subjects.
-#[allow(dead_code)]
-async fn check_custom_subject(
-    registry: Option<&Arc<dyn boss_subject_kinds_client::SubjectKindsClient>>,
-    subject: &boss_core::job::Subject,
-) -> Result<(), Response> {
-    // The SubjectKind registry is the single source of truth for the
-    // noun vocabulary; core enumerates no kinds. When wired, every kind
-    // is validated against it; when unwired (tests) all pass.
-    let Some(reg) = registry else {
-        return Ok(());
-    };
-    let kind = subject.kind.as_str();
-    match reg.subject_kind_exists(kind).await {
-        Ok(true) => Ok(()),
-        Ok(false) => Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "unknown subject kind `{kind}` — register it in the subject_kinds registry first",
-            ),
-        )
-            .into_response()),
-        Err(e) => Err((
-            StatusCode::BAD_GATEWAY,
-            format!("subject-kinds registry unreachable: {e}"),
-        )
-            .into_response()),
-    }
-}
-
 /// Lightweight existence check used by cross-service write guards
 /// (boss-assets's actor_id validation, etc). Returns `{"exists": bool}`
 /// instead of the full employee record so the caller doesn't pay for

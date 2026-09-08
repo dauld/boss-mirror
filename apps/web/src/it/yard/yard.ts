@@ -53,6 +53,10 @@ export type CarRow = Readonly<{
   tags: readonly string[];
   sim: boolean;
   skipReason?: string | null;
+  /** The head the packet names — `boarded_head` once boarded, else the
+   *  head the gate receipt recorded — shortened to seven, or null when
+   *  no record carries one. Painted beside the branch on the floor. */
+  head: string | null;
 }>;
 
 // The protocol palette + kind → hue hash + the sim predicate moved to
@@ -63,7 +67,7 @@ export type CarRow = Readonly<{
 import { isSim } from '@boss/web-kit/ui/packet-card';
 export { isSim, PROTOCOL_PALETTE, protocolHue } from '@boss/web-kit/ui/packet-card';
 
-export type TrainStatus = 'BOARDING' | 'BOARDED' | 'DEPARTED' | 'ARRIVED';
+export type TrainStatus = 'BOARDING' | 'BOARDED' | 'DEPARTED' | 'CONVERGING' | 'ARRIVED';
 export type Lamp = 'green' | 'failing' | 'pending';
 
 export type TrainRow = Readonly<{
@@ -74,6 +78,10 @@ export type TrainRow = Readonly<{
   lamp: Lamp;
   mergeRef?: string | null;
   deployed?: string | null;
+  /** When the converge wait began (the deploy's instant), so the board
+   *  can show an elapsed "converging for …". Non-null only while the
+   *  train is CONVERGING — deployed, cluster not yet converged. */
+  convergingSince?: string | null;
   cars: readonly CarRow[];
   live: boolean;
   /** Why the train closed — `unknown` for one still in flight. */
@@ -82,6 +90,16 @@ export type TrainRow = Readonly<{
   arrivedAt: ArrivalStamp;
   /** An estimate, or the phase alone when there is nothing honest to say. */
   eta: Eta;
+  /** Non-null when the train is in trouble the board must show. */
+  trouble: TrainTrouble | null;
+  /** An operator's standing request that the conductor cancel this
+   *  train (`metadata.cancel_requested`), read back off the Job so a
+   *  reload shows the pending state. */
+  cancelRequested: CancelRequest | null;
+  /** The conductor stamped `cancel_refused` — the train had already
+   *  merged when it looked. A refused request must never render as a
+   *  pending one. */
+  cancelRefused: boolean;
 }>;
 
 // The `GET /api/stations/{name}/queue` envelope (stations.md; the
@@ -189,7 +207,220 @@ export type YardState = Readonly<{
   /** Closed without arriving. Kept visible — a train that cancelled is
    *  a fact about the day, it just isn't an arrival. */
   cancelled: readonly TrainRow[];
+  /** The scoreboard. Empty when the report is unavailable or has
+   *  resolved nothing — the yard renders nothing rather than zeros. */
+  delivery: readonly DeliveryStat[];
+  /** Merged, deployed, awaiting an in-production check. These belong to
+   *  none of the yard's other three partitions, which is why seven of
+   *  them were invisible on 2026-08-28. */
+  awaitingProof: readonly CarRow[];
+  /** Every OPEN car that names a branch, wherever it is. The floor keys
+   *  a wagon by its car id so the same token slides from the gate bay
+   *  to the dock to the train; a gating branch is matched to its car
+   *  here, and only a branch with no car falls back to the gate packet. */
+  cars: readonly CarRow[];
+  /** The car lifecycle upstream of the dock (f930cda2): publish-requests
+   *  waiting, gates in flight, fresh verdicts whose branch no car has
+   *  claimed. Empty when the approach is clear — or when the cluster
+   *  cannot serve the feeds, which must read the same way: additive,
+   *  never a reason the yard fails to render. */
+  approach: readonly ApproachRow[];
 }>;
+
+/** Where an inbound branch stands, ordered by distance from the dock.
+ *  `held` is a gated-green car an operator is deliberately NOT parking
+ *  (`metadata.hold` on the gate-run) — brake on, not forgotten. */
+export type ApproachState = 'publishing' | 'gated-red' | 'gated-green' | 'held';
+
+export type ApproachRow = Readonly<{
+  /** The packet behind the row — a publish-request or gate-run Job. */
+  id: string;
+  branch: string;
+  /** The head the packet named, when it named one. */
+  sha: string | null;
+  state: ApproachState;
+  opened_on: string;
+  /** Requester on publish rows; nothing yet on gate rows. */
+  note: string | null;
+  /** The operator's reason for the hold — non-null exactly when `state`
+   *  is `held`; a stock phrase when the marker carried no reason. */
+  hold: string | null;
+  /** The verdict as the gate recorded it (`green` / `failed` / `lost`),
+   *  null on a publish row. `lost` folds into `gated-red` for the
+   *  approach (no evidence must not read as fine) but is a different
+   *  place on the floor: the environment died, the change was never
+   *  judged — the gate exit, not the garage. */
+  verdict: string | null;
+}>;
+
+/** A closed gate older than this is archaeology, not approach. An OPEN
+ *  gate-run stays visible at any age — a live gate is live activity. */
+const APPROACH_FRESH_DAYS = 2;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** The approach to the dock — everything inbound that the dock's own
+ *  queue cannot see yet. Pure; the fetches live in fetchYard.
+ *
+ *  Latest-gate-per-branch trusts the server's newest-first order, the
+ *  same authority contract the dock envelope already leans on: a
+ *  client re-sort would need an instant the day-granular `opened_on`
+ *  cannot give. */
+export function approach(
+  gateRuns: readonly JobLite[],
+  publishQueue: StationQueueEnvelope | null,
+  ships: readonly JobLite[],
+  nowMs: number = Date.now(),
+): readonly ApproachRow[] {
+  const branchOf = (j: JobLite): string =>
+    String((j.metadata as { branch?: unknown } | null)?.branch ?? '');
+  // A branch any car names has entered the yard proper (parked, riding,
+  // or landed) — green rows about it would double-report the dock. A
+  // MERGED car buries every verdict; a still-open car does not bury a
+  // red one, because that red is exactly the work outstanding.
+  const carClaimed = new Set(ships.map(branchOf).filter(Boolean));
+  const mergedCarClaimed = new Set(
+    ships
+      .filter(
+        j =>
+          j.status === 'closed' &&
+          (j.metadata as { outcome?: unknown } | null)?.outcome === 'merged',
+      )
+      .map(branchOf)
+      .filter(Boolean),
+  );
+
+  const publishing: ApproachRow[] = (publishQueue?.data ?? [])
+    .filter(j => j.status === 'open')
+    .map(j => {
+      const md = (j.metadata ?? {}) as {
+        branch?: string;
+        head_sha?: string;
+        requested_by?: string;
+      };
+      return {
+        id: j.id,
+        branch: md.branch ?? j.title,
+        sha: md.head_sha ?? null,
+        state: 'publishing' as const,
+        opened_on: j.opened_on,
+        note: md.requested_by ?? null,
+        hold: null,
+        verdict: null,
+      };
+    });
+
+  const red: ApproachRow[] = [];
+  const green: ApproachRow[] = [];
+  // HELD: a green the operator gated and deliberately did not park —
+  // waiting on another change, or on a David-timed restart. Without
+  // the marker a hold is indistinguishable from a stranded green, and a
+  // brake that looks like a gap gets "rescued" onto a train.
+  const held: ApproachRow[] = [];
+  const holdOf = (g: JobLite): string | null => {
+    const v = (g.metadata as { hold?: unknown } | null)?.hold;
+    if (typeof v === 'string') return v.trim() !== '' ? v : null;
+    return v === true ? 'no reason recorded' : null;
+  };
+  // A live gate outranks every same-day verdict for its branch: server
+  // order within a day is NOT insertion order (measured 2026-08-31 —
+  // two refused-launch packets sorted above the gates that ran), and
+  // the verdict steps carry no instant to order by. An open packet is
+  // deterministic; among closed ones the lens shows *a* same-day
+  // verdict and `boss park` stays the enforcement layer.
+  const liveBranches = new Set(
+    gateRuns.filter(g => g.status === 'open').map(branchOf).filter(Boolean),
+  );
+  const verdictOf = (g: JobLite): string | undefined =>
+    (g.steps ?? [])
+      .map(s => (s.metadata as { verdict?: unknown } | null)?.verdict)
+      .find((v): v is string => typeof v === 'string');
+  // A red with a green answer is SUPERSEDED — the question it raised is
+  // closed, and an alarm that stays on after the condition clears
+  // teaches the operator to ignore alarms (David misread the yard twice
+  // on 2026-08-31 for exactly this). Two forms, view-folded only — the
+  // packet keeps the record:
+  //   - DERIVED: a closed green exists for the same branch dated the
+  //     same day or later. Day-granular `opened_on` cannot order
+  //     same-day runs (server order within a day is not insertion
+  //     order), so a same-day green is read as the answer — the gate +
+  //     park layer, not this lens, is what enforces a current receipt.
+  //     A red strictly NEWER by day than every green stays red: that is
+  //     a regression, not an answered question.
+  //   - ANNOTATED: `metadata.superseded` on the gate-run, for the
+  //     git-only facts (branch deleted; change landed via another
+  //     branch) an operator records because no API row shows them.
+  const latestGreenDay = new Map<string, string>();
+  for (const g of gateRuns) {
+    if (g.status === 'open' || verdictOf(g) !== 'green') continue;
+    const b = branchOf(g);
+    if (!b) continue;
+    const prev = latestGreenDay.get(b);
+    if (!prev || g.opened_on > prev) latestGreenDay.set(b, g.opened_on);
+  }
+  const annotatedSuperseded = (g: JobLite): boolean => {
+    const v = (g.metadata as { superseded?: unknown } | null)?.superseded;
+    return v != null && v !== false;
+  };
+  const seen = new Set<string>();
+  for (const g of gateRuns) {
+    const branch = branchOf(g);
+    if (!branch || seen.has(branch)) continue;
+    if (g.status !== 'open' && liveBranches.has(branch)) continue;
+    const md = (g.metadata ?? {}) as { sha?: string };
+    const verdict = verdictOf(g);
+    const row = {
+      id: g.id,
+      branch,
+      sha: md.sha ?? null,
+      opened_on: g.opened_on,
+      note: null,
+      hold: null,
+      verdict: verdict ?? null,
+    };
+    if (g.status === 'open') {
+      // A gate mid-run is the GATES view's row now (the server-computed
+      // slots), not one here — the redundancy David flagged. It still
+      // CLAIMS its branch, so a stale same-day verdict for that branch
+      // cannot draw a red/green row beneath the live gate.
+      seen.add(branch);
+      continue;
+    }
+    // A superseded run does NOT claim its branch's row: same-day server
+    // order is not insertion order, so the red may sort above the very
+    // green that answered it — the green (or nothing) must get the row.
+    if (annotatedSuperseded(g)) continue;
+    if (
+      (verdict === 'failed' || verdict === 'lost') &&
+      (latestGreenDay.get(branch) ?? '') >= g.opened_on
+    ) {
+      continue;
+    }
+    seen.add(branch);
+    if (nowMs - Date.parse(g.opened_on) > APPROACH_FRESH_DAYS * DAY_MS) continue;
+    if (mergedCarClaimed.has(branch)) continue;
+    // The verdict is data on whichever step recorded it, not a slug
+    // this lens hardcodes (CLAUDE.md §9: data-keyed, not kind-keyed).
+    if (verdict === 'green') {
+      // A branch a car claims is the yard's row already. Otherwise a
+      // hold reads HELD; only an unheld green is the stranded gap.
+      const hold = holdOf(g);
+      if (carClaimed.has(branch)) {
+        // in the yard proper — the dock or a train reports it
+      } else if (hold !== null) {
+        held.push({ ...row, state: 'held', hold });
+      } else {
+        green.push({ ...row, state: 'gated-green' });
+      }
+    } else if (verdict === 'failed' || verdict === 'lost') {
+      // `lost` reads as red on purpose: the environment died before
+      // saying anything, and "we don't know" must not read as fine.
+      red.push({ ...row, state: 'gated-red' });
+    }
+  }
+  // Held last: a car with its brake on is the furthest from boarding.
+  return [...publishing, ...red, ...green, ...held];
+}
 
 function step(j: WithSteps, slug: string, titleFallback: string): StepLite | null {
   return (
@@ -234,7 +465,7 @@ export function trainOutcome(j: JobLite): TrainOutcome {
 }
 
 /** The conductor's RFC3339 stamp on a step, column or metadata. */
-function stampAt(s: StepLite | null): string | null {
+export function stampAt(s: StepLite | null): string | null {
   if (!s) return null;
   if (typeof s.completed_at === 'string' && s.completed_at !== '') return s.completed_at;
   const md = (s.metadata as { completed_at?: unknown } | null)?.completed_at;
@@ -424,12 +655,21 @@ export function arrivalMedians(
   };
 }
 
-export type EtaPhase = 'boarding' | 'ci' | 'merging' | 'deploying' | 'blocked' | 'arrived';
+export type EtaPhase =
+  | 'boarding'
+  | 'ci'
+  | 'merging'
+  | 'deploying'
+  | 'converging'
+  | 'blocked'
+  | 'arrived';
 
 export function etaPhase(status: TrainStatus, lamp: Lamp): EtaPhase {
   switch (status) {
     case 'ARRIVED':
       return 'arrived';
+    case 'CONVERGING':
+      return 'converging';
     case 'DEPARTED':
       return 'deploying';
     case 'BOARDED':
@@ -442,7 +682,16 @@ export function etaPhase(status: TrainStatus, lamp: Lamp): EtaPhase {
 
 export type Eta =
   | Readonly<{ kind: 'phase'; phase: EtaPhase }>
-  | Readonly<{ kind: 'eta'; phase: EtaPhase; atMs: number; basis: string }>;
+  | Readonly<{
+      kind: 'eta';
+      phase: EtaPhase;
+      atMs: number;
+      basis: string;
+      /** How far along the median leg under way the train is, 0–1 —
+       *  the floor draws the locomotive this far between two signals.
+       *  Clamped: an overdue train sits at the far signal, never past. */
+      progress: number;
+    }>;
 
 export function trainEta(j: JobLite, medians: ArrivalMedians, nowMs: number): Eta {
   const phase = etaPhase(trainStatus(j), ciLamp(j));
@@ -458,9 +707,19 @@ export function trainEta(j: JobLite, medians: ArrivalMedians, nowMs: number): Et
     if (startedAt === null) return phaseOnly;
     const from = Date.parse(startedAt);
     if (Number.isNaN(from)) return phaseOnly;
-    const left = Math.max(legS - (nowMs - from) / 1000, 0) + restS;
-    return { kind: 'eta', phase, atMs: nowMs + Math.round(left * 1000), basis };
+    const elapsed = Math.max((nowMs - from) / 1000, 0);
+    const left = Math.max(legS - elapsed, 0) + restS;
+    const progress = legS > 0 ? Math.min(elapsed / legS, 1) : 1;
+    return { kind: 'eta', phase, atMs: nowMs + Math.round(left * 1000), basis, progress };
   };
+
+  // Converging renders an elapsed "converging for …", not an ETA: there
+  // is no merge→converge median in `medians`, and inventing a converge
+  // duration would read as a promise. The board reads `convergingSince`
+  // (carried on the row by `toTrainRow`) for the elapsed instead — the
+  // same choice the server model makes (boss-jobs/src/yard.rs, which
+  // surfaces convergence as elapsed time, never a projection).
+  if (phase === 'converging') return phaseOnly;
 
   if (phase === 'ci' || phase === 'merging') {
     if (boardToMergeS === null || mergeToDeployS === null) return phaseOnly;
@@ -477,12 +736,179 @@ export function trainEta(j: JobLite, medians: ArrivalMedians, nowMs: number): Et
   return phaseOnly;
 }
 
+/** Why a train is in trouble, or `null` when it is simply moving.
+ *
+ * TROUBLE IS ORTHOGONAL TO PHASE, deliberately. `TrainStatus` answers
+ * "how far along" and its four values have no way to say "and it has
+ * been stuck there for six hours" — the comment on `splitAtDeparture`
+ * even calls transit "boring, as transit should be". On 2026-09-02
+ * that assumption broke in the open: a train sat at `converged` for
+ * four hours with an urgent overdue packet already filed against it,
+ * and rendered exactly like a healthy two-minute transit. Two more sat
+ * at a step they could never complete, because a red PR does not
+ * merge. David, seeing the board: *"1 stuck in transit still that is
+ * pretending to be green when it should be in some sort of error
+ * state."*
+ *
+ * Every signal here is one the conductor already wrote down. This
+ * function invents no thresholds of its own — it surfaces alarms that
+ * were raised elsewhere and were only ever visible in a packet nobody
+ * had reason to open. An arrived or closed train is never troubled:
+ * its history is not a live problem.
+ */
+export type TrainTrouble =
+  | { readonly kind: 'ci-red' }
+  | { readonly kind: 'converge-overdue' }
+  | { readonly kind: 'stalled' };
+
+export function trainTrouble(j: JobLite): TrainTrouble | null {
+  const status = trainStatus(j);
+  if (status === 'ARRIVED' || j.status === 'closed') return null;
+  const md = (j.metadata ?? {}) as {
+    converge_alarm_filed?: unknown;
+    stalled_since?: unknown;
+  };
+  // The conductor filed an urgent packet about this train's
+  // convergence and then had nowhere to show it.
+  if (md.converge_alarm_filed === true || md.converge_alarm_filed === 'true')
+    return { kind: 'converge-overdue' };
+  // `note_stall` stamped it past the delivery policy's threshold.
+  if (typeof md.stalled_since === 'string' && md.stalled_since !== '')
+    return { kind: 'stalled' };
+  // A returned red verdict is trouble until the train leaves — after
+  // the merge the content has landed and the lamp is history.
+  if (ciLamp(j) === 'failing' && status !== 'DEPARTED') return { kind: 'ci-red' };
+  return null;
+}
+
+/** The badge text — short, because it sits beside the phase chip. */
+export function troubleLabel(t: TrainTrouble): string {
+  switch (t.kind) {
+    case 'ci-red':
+      return 'CI RED';
+    case 'converge-overdue':
+      return 'CONVERGE OVERDUE';
+    case 'stalled':
+      return 'STALLED';
+  }
+}
+
+// Mirrors `phase_of` in boss-jobs/src/yard.rs — the authoritative
+// server model. The `deployed` step completes in seconds, but the real
+// ~10-minute wait is the `converged` step ("Cluster converged"). A
+// deployed-but-unconverged train used to read as ARRIVED and vanish
+// from the board mid-converge (2026-09-02); CONVERGING keeps it live.
 export function trainStatus(j: JobLite): TrainStatus {
-  if (done(step(j, 'deployed', 'Deployed to the playground')) || j.status === 'closed')
+  if (j.status === 'closed') return 'ARRIVED';
+  const deployedDone = done(step(j, 'deployed', 'Deployed to the playground'));
+  const converged = step(j, 'converged', 'Cluster converged');
+  const hasConverged = converged !== null;
+  // ARRIVED when the terminal fired, OR a pre-converged workflow version
+  // (no `converged` step — its finish line is `deployed`, so its absence
+  // is arrival, not a stuck train), OR the cluster has converged.
+  if (
+    done(step(j, 'arrived', 'Train arrived')) ||
+    (deployedDone && !hasConverged) ||
+    (hasConverged && done(converged))
+  )
     return 'ARRIVED';
+  // Deployed, but the cluster has not converged on the merge yet.
+  if (deployedDone) return 'CONVERGING';
   if (done(step(j, 'merged', 'Merged into main'))) return 'DEPARTED';
   if (done(step(j, 'pr', 'Open the batched PR'))) return 'BOARDED';
   return 'BOARDING';
+}
+
+/** The departure line is the MERGE (0bba59f7, ratified 2026-08-31):
+ *  everything before it is revisable — repair pushes, re-signals,
+ *  stall-cancel returning cars to the dock — so red there is work in
+ *  progress, not a breakdown en route. Everything after it is
+ *  irreversible and green by construction. This splits the open trains
+ *  on that line so the page can render IN THE YARD (red = status)
+ *  apart from DEPARTED / IN TRANSIT (boring, as transit should be).
+ *  Red is NOT softened anywhere — the change is where red lives, not
+ *  whether it shows. */
+export function splitAtDeparture(trains: readonly TrainRow[]): Readonly<{
+  inYard: readonly TrainRow[];
+  inTransit: readonly TrainRow[];
+}> {
+  const departed = (t: TrainRow) =>
+    t.status === 'DEPARTED' || t.status === 'CONVERGING' || t.status === 'ARRIVED';
+  return {
+    inYard: trains.filter(t => !departed(t)),
+    inTransit: trains.filter(departed),
+  };
+}
+
+// ---------------------------------------------------------------------
+// The cancel request — the yard's one write (backlog 7a24caf3).
+//
+// Cancelling a red or stalled train used to be a classifier-gated CLI
+// verb (`boss train cancel`). The page gains no verb of its own: it
+// leaves a REQUEST STAMP on the train's Job through the metadata merge
+// (`PATCH /api/jobs/{id}/metadata` merges top-level keys; a null value
+// deletes one), and the conductor's reconcile — every ≤10 min — honours
+// it on an open, not-yet-merged train: closes the PR, releases the cars
+// to the dock, no strike. A train that had already merged is stamped
+// `cancel_refused` instead. The effect is asynchronous by design, and
+// the chip that replaces the button says so.
+// ---------------------------------------------------------------------
+
+/** The stamp. `by` is the viewer's employee id; `at` is RFC3339 UTC. */
+export type CancelRequest = Readonly<{ by: string; reason: string; at: string }>;
+
+/** Which side of the departure line a train block is rendered on — the
+ *  page names it at the render site, because the snippet cannot know. */
+export type YardPartition = 'in-yard' | 'in-transit';
+
+/** The one role the page offers the button to. Affordance, not the
+ *  gate: the gate is the API's `job:update`, which an audit-readonly
+ *  guest does not hold. Spelled as `boss_core::roles::PLATFORM_ADMIN_ROLE`
+ *  spells it. */
+export const CANCEL_ROLE = 'platform-admin';
+
+/** The exact PATCH body, or null when it would carry no reason or no
+ *  actor. The reason is read by a human later ("why was this train
+ *  pulled?"), so an empty one is refused here, before any request. */
+export function cancelRequestBody(
+  by: string,
+  reason: string,
+  at: string,
+): Readonly<{ cancel_requested: CancelRequest }> | null {
+  const trimmed = reason.trim();
+  if (by === '' || trimmed === '') return null;
+  return { cancel_requested: { by, reason: trimmed, at } };
+}
+
+/** The button appears only where every guard holds: the train is on
+ *  the yard side of the departure line (post-merge is irreversible), it
+ *  is in trouble the board already shows, the viewer holds the role,
+ *  and nobody has asked already. */
+export function canOfferCancel(
+  row: TrainRow,
+  partition: YardPartition,
+  viewerPrivileged: boolean,
+): boolean {
+  return (
+    partition === 'in-yard' &&
+    row.trouble !== null &&
+    viewerPrivileged &&
+    row.cancelRequested === null
+  );
+}
+
+function readCancelRequest(j: JobLite): CancelRequest | null {
+  const v = (j.metadata as { cancel_requested?: unknown } | null)?.cancel_requested;
+  if (typeof v !== 'object' || v === null) return null;
+  const o = v as { by?: unknown; reason?: unknown; at?: unknown };
+  const str = (x: unknown): string => (typeof x === 'string' ? x : '');
+  return { by: str(o.by), reason: str(o.reason), at: str(o.at) };
+}
+
+/** Presence only: the refusal's shape belongs to the conductor. */
+function readCancelRefused(j: JobLite): boolean {
+  const v = (j.metadata as { cancel_refused?: unknown } | null)?.cancel_refused;
+  return v !== undefined && v !== null;
 }
 
 export function ciLamp(j: JobLite): Lamp {
@@ -506,6 +932,7 @@ export function toTrainRow(
   const pr = step(j, 'pr', 'Open the batched PR');
   const merged = step(j, 'merged', 'Merged into main');
   const deployed = step(j, 'deployed', 'Deployed to the playground');
+  const status = trainStatus(j);
   const cars: CarRow[] = (md.boarded_jobs ?? []).map(id => {
     const car = shipById.get(id);
     const cmd = (car?.metadata ?? {}) as {
@@ -520,22 +947,48 @@ export function toTrainRow(
       tags: car?.tags ?? [],
       sim: car ? isSim(car) : false,
       skipReason: cmd.skip_reason ?? null,
+      head: car ? headOf(car) : null,
     };
   });
   return {
     id: j.id,
     title: j.title,
     prUrl: ((pr?.metadata ?? {}) as { pr_url?: string }).pr_url ?? null,
-    status: trainStatus(j),
+    status,
     lamp: ciLamp(j),
     mergeRef: ((merged?.metadata ?? {}) as { merge_ref?: string }).merge_ref ?? null,
     deployed: ((deployed?.metadata ?? {}) as { deployed?: string }).deployed ?? null,
+    // Converging began when the deploy landed — the honest start of the
+    // wait. Only carried while the train is actually converging.
+    convergingSince: status === 'CONVERGING' ? stampAt(deployed) : null,
     cars,
     live,
     outcome: trainOutcome(j),
     arrivedAt: arrivalStamp(j),
     eta: trainEta(j, medians, nowMs),
+    trouble: trainTrouble(j),
+    cancelRequested: readCancelRequest(j),
+    cancelRefused: readCancelRefused(j),
   };
+}
+
+/** The first seven of a full sha, or null for anything that is not one. */
+const shortSha = (v: unknown): string | null =>
+  typeof v === 'string' && /^[0-9a-f]{7,40}$/i.test(v) ? v.slice(0, 7) : null;
+
+/** The head a car names: `boarded_head` once the conductor boarded it,
+ *  else the `head` inside the gate step's receipt (a JSON string the
+ *  runner wrote). No record, no sha — the floor paints a dash. */
+export function headOf(j: JobLite): string | null {
+  const boarded = shortSha((j.metadata as { boarded_head?: unknown } | null)?.boarded_head);
+  if (boarded) return boarded;
+  const receipt = (step(j, 'gate', 'Gate')?.metadata as { receipt?: unknown } | null)?.receipt;
+  if (typeof receipt !== 'string') return null;
+  try {
+    return shortSha((JSON.parse(receipt) as { head?: unknown }).head);
+  } catch {
+    return null;
+  }
 }
 
 // One packet → one card, whoever chose the packet. Both dock paths —
@@ -551,6 +1004,7 @@ function carRow(j: JobLite): CarRow {
     tags: j.tags ?? [],
     sim: isSim(j),
     skipReason: md.skip_reason ?? null,
+    head: headOf(j),
   };
 }
 
@@ -578,6 +1032,12 @@ export function assembleYard(
   ships: readonly JobLite[],
   dockQueue: StationQueueEnvelope | null = null,
   nowMs: number = Date.now(),
+  // LAST on purpose: 22 call sites pass `nowMs` as the fourth argument,
+  // and inserting ahead of it would silently reinterpret a timestamp as
+  // a report. Additive parameters go on the end.
+  report: TerminalReport | null = null,
+  gateRuns: readonly JobLite[] = [],
+  publishQueue: StationQueueEnvelope | null = null,
 ): YardState {
   const shipById = new Map(ships.map(j => [j.id, j]));
   const open = trains.filter(t => t.status === 'open');
@@ -616,6 +1076,13 @@ export function assembleYard(
       .filter(c => c.outcome !== 'arrived')
       .slice(0, CANCELLED_SHOWN)
       .map(c => toTrainRow(c.t, shipById, false, medians, nowMs)),
+    delivery: deliveryStats(report),
+    awaitingProof: awaitingProof(ships).map(carRow),
+    approach: approach(gateRuns, publishQueue, ships, nowMs),
+    cars: ships
+      .filter(j => j.status === 'open')
+      .map(carRow)
+      .filter(c => c.branch !== ''),
   };
 }
 
@@ -625,9 +1092,9 @@ export function assembleYard(
 // fall back to deriving the dock locally. Never an error the yard
 // surfaces; the fallback costs nothing because the ships list is
 // fetched anyway for the consist join.
-async function fetchDockQueue(): Promise<StationQueueEnvelope | null> {
+async function fetchStationQueue(name: string): Promise<StationQueueEnvelope | null> {
   try {
-    const r = await fetch('/api/stations/loading-dock/queue');
+    const r = await fetch(`/api/stations/${name}/queue`);
     if (!r.ok) return null;
     const env = (await r.json()) as StationQueueEnvelope;
     return Array.isArray(env?.data) && Array.isArray(env?.discipline) ? env : null;
@@ -637,17 +1104,186 @@ async function fetchDockQueue(): Promise<StationQueueEnvelope | null> {
 }
 
 export async function fetchYard(): Promise<YardState | null> {
-  const [tr, sr, dockQueue] = await Promise.all([
+  const [tr, sr, dockQueue, report, gateRuns, publishQueue] = await Promise.all([
     // 40, not 20: the window has to hold the open trains, the five
     // arrivals the board shows, AND the arrivals the ETA medians are
     // taken over — cancelled trains sit in the same list and would
     // otherwise crowd the samples out.
     fetch('/api/jobs?kind=pr-train&limit=40'),
     fetch('/api/jobs?kind=ship-a-change&limit=200'),
-    fetchDockQueue(),
+    fetchStationQueue('loading-dock'),
+    // The scoreboard is ADDITIVE: a yard that cannot show its stats is
+    // still a yard, so this resolves to null rather than failing the
+    // whole page. The stats are the thing you read second; the trains
+    // are the thing you came for.
+    fetch('/api/workflows/ship-a-change/terminal-report')
+      .then((r) => (r.ok ? (r.json() as Promise<TerminalReport>) : null))
+      .catch(() => null),
+    // The approach feeds are additive the same way: 60 gate-runs is
+    // two days of heavy gating, and the freshness bound in approach()
+    // drops the tail anyway.
+    fetch('/api/jobs?kind=gate-run&limit=60')
+      .then((r) => (r.ok ? (r.json() as Promise<{ data?: JobLite[] }>) : null))
+      .then((b) => b?.data ?? [])
+      .catch(() => [] as JobLite[]),
+    fetchStationQueue('publish-dock'),
   ]);
   if (!tr.ok || !sr.ok) return null;
   const trains = ((await tr.json()) as { data?: JobLite[] }).data ?? [];
   const ships = ((await sr.json()) as { data?: JobLite[] }).data ?? [];
-  return assembleYard(trains, ships, dockQueue);
+  return assembleYard(trains, ships, dockQueue, Date.now(), report, gateRuns, publishQueue);
+}
+
+// ---------------------------------------------------------------------
+// Delivery stats — the yard's scoreboard.
+// ---------------------------------------------------------------------
+
+/** One version's row from `/api/workflows/{kind}/terminal-report`. */
+export type TerminalVersion = Readonly<{
+  version: number;
+  total: number;
+  by_status?: Readonly<Record<string, number>> | null;
+  outcomes?: Readonly<Record<string, number>> | null;
+  cycle_time_days?: Readonly<{
+    median: number | null;
+    p90: number | null;
+    samples: number;
+  }> | null;
+}>;
+
+export type TerminalReport = Readonly<{
+  kind: string;
+  versions?: readonly TerminalVersion[] | null;
+}>;
+
+/** What the yard shows at the top: a number, and the direction it moved. */
+export type DeliveryStat = Readonly<{
+  label: string;
+  value: string;
+  /** The comparison version's value, or null when there is nothing to compare. */
+  previous: string | null;
+  /** How many packets the CURRENT value is computed from. */
+  samples: number;
+  /** true when `samples` is too small to read as a trend. */
+  provisional: boolean;
+}>;
+
+/** Below this, a rate is noise dressed as a measurement. */
+export const MIN_SAMPLES = 5;
+
+function resolved(v: TerminalVersion): number {
+  const o = v.outcomes ?? {};
+  return Object.values(o).reduce((a, b) => a + b, 0);
+}
+
+function abandonRate(v: TerminalVersion): number | null {
+  const n = resolved(v);
+  if (n === 0) return null;
+  return ((v.outcomes?.abandoned ?? 0) / n) * 100;
+}
+
+/**
+ * The most recent version that has RESOLVED anything, and the most
+ * recent one before it that also has.
+ *
+ * A version with packets still in flight reports no rate at all — which
+ * is the common case for the version published an hour ago, and is
+ * exactly when a naive "latest version" reading would print 0% and look
+ * like a triumph. On 2026-08-28 v24 and v25 held 8 packets between them
+ * with zero resolved.
+ */
+export function comparableVersions(
+  report: TerminalReport | null,
+): { current: TerminalVersion | null; previous: TerminalVersion | null } {
+  const withOutcomes = (report?.versions ?? [])
+    .filter((v) => resolved(v) > 0)
+    .slice()
+    .sort((a, b) => b.version - a.version);
+  return { current: withOutcomes[0] ?? null, previous: withOutcomes[1] ?? null };
+}
+
+function pct(n: number | null): string {
+  return n === null ? '—' : `${Math.round(n)}%`;
+}
+
+/**
+ * Cycle medians carry sub-day precision now that packets are stamped
+ * with precise open/close instants: under a day reads in hours, a day
+ * or longer in days, both to one decimal. A same-day close used to
+ * render `0d`, which hid exactly the improvement the scoreboard
+ * exists to show.
+ */
+function days(v: TerminalVersion): string {
+  const m = v.cycle_time_days?.median;
+  if (m === null || m === undefined) return '—';
+  const round1 = (n: number) => Math.round(n * 10) / 10;
+  const hours = m * 24;
+  // Sub-hour medians in MINUTES (b4c1b53a): at today's cadence a cycle
+  // is often under an hour, and `0.8h` makes the reader do arithmetic
+  // the scoreboard exists to have already done.
+  if (hours < 1) return `${Math.round(hours * 60)}m`;
+  // The day boundary compares the ROUNDED hours: 23.98h displays as
+  // 24h, and "24h" reads as a day, not as hours (the pin this line
+  // briefly broke on the way in).
+  const h1 = round1(hours);
+  return h1 < 24 ? `${h1}h` : `${round1(m)}d`;
+}
+
+/**
+ * The yard's headline numbers.
+ *
+ * WHY ABANDON RATE LEADS. David, 2026-08-28: "We should have these stats
+ * at the top of the Train Yard if they are what matter." Abandon rate is
+ * the one that moves for protocol reasons rather than luck — a car
+ * abandoned is a change that was written, gated and then thrown away
+ * with its history. Cycle time sits beside it because a rate that
+ * improves by shipping slower is not an improvement.
+ *
+ * EVERY NUMBER CARRIES ITS SAMPLE COUNT, and is marked provisional below
+ * MIN_SAMPLES. A 50% abandon rate over two packets is not a trend, and a
+ * scoreboard that cannot say so invites exactly the wrong reaction.
+ */
+export function deliveryStats(report: TerminalReport | null): readonly DeliveryStat[] {
+  const { current, previous } = comparableVersions(report);
+  if (!current) return [];
+  const n = resolved(current);
+  return [
+    {
+      label: 'abandon rate',
+      value: pct(abandonRate(current)),
+      previous: previous ? pct(abandonRate(previous)) : null,
+      samples: n,
+      provisional: n < MIN_SAMPLES,
+    },
+    {
+      label: 'median cycle',
+      value: days(current),
+      previous: previous ? days(previous) : null,
+      samples: current.cycle_time_days?.samples ?? 0,
+      provisional: (current.cycle_time_days?.samples ?? 0) < MIN_SAMPLES,
+    },
+    {
+      label: 'delivered',
+      value: String(current.outcomes?.merged ?? 0),
+      previous: previous ? String(previous.outcomes?.merged ?? 0) : null,
+      samples: n,
+      provisional: false,
+    },
+  ];
+}
+
+/**
+ * Cars that merged and are waiting on an in-production check.
+ *
+ * These appear NOWHERE in the yard today: it partitions into open
+ * trains, arrived trains and the dock, and a merged-but-unproven car is
+ * none of those. Seven were invisible on 2026-08-28, which is the state
+ * we had agreed was the bottleneck.
+ */
+export function awaitingProof(cars: readonly JobLite[]): readonly JobLite[] {
+  return cars.filter((c) => {
+    if (c.status !== 'open') return false;
+    const step = (c.steps ?? []).find((s) => s.status === 'ready' || s.status === 'active');
+    return step?.spec_slug === 'proven';
+  });
 }

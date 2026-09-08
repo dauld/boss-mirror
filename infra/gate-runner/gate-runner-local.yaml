@@ -1,0 +1,167 @@
+# gate-runner-local — a full gate on a PER-POD disk, so gates can
+# run concurrently. The sibling of gate-runner.yaml; everything
+# below is identical except the workspace volume and the pinned
+# build width. Use THIS one unless you need the workspace to
+# outlive the Job.
+#
+# Born 2026-08-23 from a day of gates dying deaths that were not
+# theirs: pod replacements, exec-scope reaping, shared-disk exhaustion,
+# cold-start timeouts (the history is in run.sh's header and
+# post-mortem #2). The shape that ended it:
+#
+#   - OWN CLONE from the forge — no dependency on the boss-dev
+#     workspace PVC, and therefore no requirement to run on cp-2,
+#     the node that also carries etcd and the SoR's Longhorn
+#     replicas. Selected by boss.dev/purpose=build, not by hostname:
+#     the gate belongs to whichever machine holds the build role, so
+#     replacing that machine is a label move rather than a car. Today
+#     that is w-1 - 32 cores and 64Gi, more CPU than all three control
+#     planes together, and not a control plane at all, so a gate
+#     cannot starve etcd however hard it runs. The ceiling below is
+#     sized for that box.
+#   - OWN DISK, wiped per run. One job gates one branch; a cold
+#     workspace build needs ~74G and two branches' targets do not
+#     fit in one 100Gi volume (measured the hard way, twice).
+#   - DATABASE SIDECAR with the 1Gi /dev/shm the dev pod's sidecar
+#     earned on 2026-08-22.
+#   - SELF-REPORTING: run.sh completes the gate-run packet with the
+#     verdict (green/failed/lost). A runner that dies anyway leaves
+#     an overdue packet — the alarm the protocol already provides.
+#
+# USAGE (a Job is one-shot; names must be fresh — use kubectl create
+# with generateName, never apply):
+#
+#   kubectl -n boss-dev create -f - <<EOF
+#   $(sed -e 's/\$GATE_BRANCH/fix\/my-branch/' \
+#         -e 's/\$GATE_RUN_JOB_ID/<packet-uuid>/' \
+#         -e 's/\$GATE_MODE//' gate-runner.yaml)
+#   EOF
+#
+# or template the three env values by hand. Register the gate-run
+# packet FIRST (kind gate-run, due_on a few hours out); the packet is
+# the record, the Job is just the muscle.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: gate-
+  namespace: boss-dev
+  labels: {app: gate-runner}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 10800
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels: {app: gate-runner}
+    spec:
+      restartPolicy: Never
+      # The roomiest node, and deliberately not the one carrying etcd
+      # and the system of record's replicas — post-mortem #2's open
+      # question (b), answered for gates.
+      # PREFER the build node, do not require it. A hard nodeSelector
+      # here means the build role is a single point of failure: when
+      # w-1 was cordoned for an NVMe thermal fault, a hard pin would
+      # have left this with no schedulable node and stopped gating
+      # entirely. Preferred affinity degrades to a slower build on a
+      # control plane instead of no build at all.
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - {key: boss.dev/purpose, operator: In, values: ["build"]}
+      imagePullSecrets:
+        - {name: forgejo-registry}
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1500
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: gate
+          image: 10.20.0.15:3000/david/boss-ci:rust1.96
+          command: ["bash", "/repo-script/run.sh"]
+          env:
+            - {name: GATE_BRANCH, value: "$GATE_BRANCH"}
+            - {name: GATE_RUN_JOB_ID, value: "$GATE_RUN_JOB_ID"}
+            - {name: GATE_MODE, value: "$GATE_MODE"}
+            - {name: PLAYWRIGHT_BROWSERS_PATH, value: /gate-target/ms-playwright}
+            # Pinned, not inferred. Reading the cgroup quota here would
+            # select 20 (the CPU limit below) and a 20-wide build was
+            # measured 16% SLOWER than 4-wide on this very node — the
+            # pipeline is I/O-bound, so extra rustc processes queue
+            # against each other rather than working (db127cb4).
+            - {name: CARGO_BUILD_JOBS, value: "4"}
+            - {name: BOSS_TEST_POSTGRES_ADMIN_URL, value: "postgres://boss:boss@127.0.0.1:5432/postgres"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+          resources:
+            requests: {cpu: "4", memory: 8Gi}
+            limits: {cpu: "20", memory: 32Gi}
+          volumeMounts:
+            - {name: gate-runner-disk, mountPath: /gate-target}
+            - {name: run-script, mountPath: /repo-script}
+            - {name: forge-token, mountPath: /etc/forge, readOnly: true}
+        - name: postgres
+          image: postgres:16
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["NET_RAW"]}
+          env:
+            - {name: POSTGRES_USER, value: boss}
+            - {name: POSTGRES_PASSWORD, value: boss}
+            - {name: POSTGRES_DB, value: postgres}
+            - {name: PGDATA, value: /pgdata/data}
+          volumeMounts:
+            - {name: pgdata, mountPath: /pgdata}
+            # The 64Mi container default dies under parallel pg suites
+            # ("could not resize shared memory segment"); same fix the
+            # dev pod's sidecar carries.
+            - {name: pg-shm, mountPath: /dev/shm}
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: "2", memory: 4Gi}
+      volumes:
+        - name: gate-runner-disk
+          # LOCAL, NOT CLAIMED — this is the whole difference from
+          # gate-runner.yaml, and it is what makes concurrent gates
+          # possible. Two gates sharing one PVC is not slow, it is
+          # WRONG: each `git checkout -f -B` yanks the tree from under
+          # the other and both write the same receipt path, so on
+          # 2026-08-24 the verdicts came back crossed and all three
+          # results were discarded. An emptyDir is created per pod, so
+          # six gates ran side by side on 2026-08-26 and every receipt
+          # was independent and correct.
+          #
+          # The receipt does not need to outlive the pod: run.sh reports
+          # the verdict onto the gate-run packet before it exits, and
+          # the packet is the record. The Job is just the muscle.
+          #
+          # Concurrency past ~3 is bounded by the NODE, not by
+          # correctness. Measured on w-1 with five concurrent gates:
+          # /proc/pressure/io full avg60=57%, cpu pressure 0.00, and
+          # per-gate wall time ~35min -> ~93min. Still better throughput
+          # than running them one at a time; just not free.
+          emptyDir: {sizeLimit: 200Gi}
+        - name: pgdata
+          emptyDir: {}
+        - name: pg-shm
+          emptyDir: {medium: Memory, sizeLimit: 1Gi}
+        # run.sh ships in the repo and reaches the pod through this
+        # ConfigMap, because run.sh is what performs the clone and so
+        # cannot come FROM the clone. Regenerate it from the tree with
+        #   ./infra/gate-runner/apply-script-configmap.sh
+        # and ask whether it has drifted with --check. This used to be
+        # a kubectl command in a comment; on 2026-08-26 the live copy
+        # turned out to hold an unlanded branch is script, and ten gates
+        # issued receipts from a gate that is not in this repository.
+        - name: run-script
+          configMap: {name: gate-runner-script, defaultMode: 0755}
+        # Read-only forge credential. NOT optional: without it the clone
+        # prompts for a username and the Job fails before it gates
+        # anything, which is how this rig sat broken while every gate
+        # ran in the dev pod instead.
+        - name: forge-token
+          secret: {secretName: forge-read, defaultMode: 0400}

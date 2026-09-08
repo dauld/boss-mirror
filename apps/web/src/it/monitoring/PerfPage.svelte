@@ -1,5 +1,5 @@
 <script lang="ts">
-  // Gateway latency dashboard — sub-page of /system/monitoring.
+  // Gateway latency dashboard — sub-page of /it/operate/audit.
 
   import Link from '@boss/web-kit/ui/Link.svelte';
   import { href } from '../../router';
@@ -145,7 +145,7 @@
       </p>
     </div>
     <div style="display:flex; gap:12px; align-items:center">
-      <Link to={href('/system/monitoring')} className="btn">
+      <Link to={href('/it/operate/audit')} className="btn">
         ← CTO
       </Link>
       <button type="button" class="btn" onclick={() => (paused = !paused)}>

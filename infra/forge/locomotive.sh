@@ -19,7 +19,19 @@
 set -uo pipefail
 
 fail=0
-say() { printf '%s\n' "$*"; }
+# The FIRST refusal, kept for the commit status below. Every red this
+# script raises is the runner declining to run — nothing here judges
+# the tree — and the conductor must be able to tell that from a check
+# that ran and failed: three times a locomotive refusal was recorded as
+# a plain red and struck every car aboard (2026-08-22, 09-02, 09-05
+# train #204). The status is how the word "refused" reaches the rollup.
+refusal=""
+say() {
+  printf '%s\n' "$*"
+  case "$*" in
+    "LOCOMOTIVE RED: "*) [ -n "$refusal" ] || refusal="${*#LOCOMOTIVE RED: }" ;;
+  esac
+}
 
 # 1. Toolchain — every binary the gate invokes, from the one manifest.
 while IFS= read -r tool; do
@@ -141,5 +153,31 @@ fi
 # so the growth that caused 1b63456b is visible in the log of every
 # run before it is a failure in one of them.
 say "locomotive: nproc=$(nproc) loadavg=$(cut -d' ' -f1-3 /proc/loadavg) stamp=$have free=${avail_gb:-?}GB"
+
+# 6. Say "refused" where the conductor reads. A refusal exits 1 like any
+# red, and Forgejo's own status for this job says only that it failed.
+# So the job posts a SECOND status on the same commit — context
+# "CI / locomotive refusal", description "refused: <why>" — and the
+# conductor's strike rule spares every car aboard a train whose failing
+# check says refused (train.rs verdict_strikes_cars). Best-effort by
+# design: a missing token or a refused POST is one line here and the
+# old behaviour (a strike) — never a second failure mode.
+if [ "$fail" -ne 0 ] && [ -n "$refusal" ]; then
+  if [ -n "${FORGE_TOKEN:-}" ] && [ -n "${GITHUB_SHA:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
+    api="${GITHUB_API_URL:-http://10.20.0.15:3000/api/v1}"
+    desc="refused: $(printf '%s' "$refusal" | cut -c1-200)"
+    body=$(printf '{"state":"failure","context":"CI / locomotive refusal","description":%s,"target_url":%s}' \
+      "$(printf '%s' "$desc" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '"%s"' "refused: see the locomotive log")" \
+      "$(printf '"%s"' "${GITHUB_SERVER_URL:-http://10.20.0.15:3000}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID:-}")")
+    if curl -fsS -o /dev/null -X POST -H "Authorization: token $FORGE_TOKEN" -H 'Content-Type: application/json' \
+         "$api/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -d "$body"; then
+      say "locomotive: refusal posted as a commit status (context 'CI / locomotive refusal') — the conductor will spare the cars"
+    else
+      say "locomotive: could not post the refusal status — the conductor will read this as a plain red"
+    fi
+  else
+    say "locomotive: no FORGE_TOKEN/GITHUB_SHA/GITHUB_REPOSITORY in the environment — refusal not posted, the conductor will read a plain red"
+  fi
+fi
 
 exit "$fail"

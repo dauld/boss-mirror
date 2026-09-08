@@ -83,3 +83,25 @@ All five questions were resolved by David in the design review, 2026-08-22
 - **Q4: Who may experiment on what?** — IT department + platform-admins only for now; experimental protocols supporting other actors can come later.
 
 - **Q5: Does the sim learn paired demand?** — No. "The sim should be entirely independent from any experimentation capabilities in the network." Unpaired splits; the sim is load, never a participant.
+
+## Tier 2 as landed (packet 6ea5a12a)
+
+Per Q3 there is no experiment table: the record is an open packet of
+kind `protocol-experiment` (shipped as bundle data in
+`infra/platform/workflows.toml`), and the split declaration is that
+packet's JOB metadata — `kind_under_test`, `control_version`,
+`candidate_version`, `split` (candidate share percent, default 50).
+The window is the packet's open interval; both edges are already in
+the log. Admission (`boss-jobs/src/experiments.rs` +
+`http/jobs.rs::create_job`) hash-splits each new packet of the kind
+under test by its own job id (fixed FNV-1a — replay-deterministic),
+pins it to the arm's version (the candidate is ordinarily a draft:
+this is the sanctioned way a draft meets traffic), and stamps
+`experiment_arm` / `experiment_id` into job metadata before
+`JOB_CREATED` is built, so rebuilders replay the recorded choice. The
+Tier-1 terminal report groups by (version, arm); unstamped bystanders
+ride a null arm. Fail-safe throughout: a malformed declaration or a
+missing arm version admits under the active version, unstamped — an
+experiment must never break the kind it measures. Promote/retire
+remain registry verbs an operator runs at the packet's terminals;
+nothing publishes automatically.

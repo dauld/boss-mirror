@@ -84,6 +84,8 @@ fn build_app(registry: Arc<dyn WorkflowRegistry>) -> Router {
         subject_existence: None,
         roster: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
+        cadence: None,
+        delivery: None,
     };
     router(state)
 }

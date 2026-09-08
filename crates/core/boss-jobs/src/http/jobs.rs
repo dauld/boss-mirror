@@ -518,6 +518,74 @@ fn edge_guidance(msg: String) -> String {
     }
 }
 
+/// The envelope fields `POST /api/jobs` requires on the wire, with a
+/// hint per field a filer can act on. Serde's derive reports the FIRST
+/// missing field and stops, so filing a packet was a guessing loop —
+/// measured at three rejected rounds for one packet, twice in one
+/// session (f5dd5167). One 422 now names every missing field at once.
+///
+/// This list is NOT a second contract to keep in sync by diligence:
+/// `required_wire_fields_are_derived_from_the_job_struct` below
+/// re-derives the required set from `Job` itself on every test run and
+/// fails if this list drifts. (`opened_on` is required by the struct
+/// but injected by the handler, which the test accounts for.)
+const REQUIRED_WIRE_FIELDS: &[(&str, &str)] = &[
+    ("kind", "the workflow kind this packet is admitted under"),
+    (
+        "subject",
+        r#"what the packet is about: {"id": ..., "subject_kind": ...}"#,
+    ),
+    ("title", "one line; every lens leads with it"),
+    (
+        "owner_id",
+        "who answers for this packet, e.g. `agent` or an employee id",
+    ),
+    ("status", "`open` on filing"),
+    ("priority", "`standard` unless it genuinely is not"),
+    (
+        "opened_on",
+        "omit it — the server stamps the authoritative clock",
+    ),
+    ("tags", "`[]` is fine, but the key must be present"),
+    ("metadata", "`{}` is fine, but the key must be present"),
+];
+
+/// Every required envelope key absent from the body, each with its
+/// hint — the whole answer in one 422 instead of one field per round.
+fn envelope_problems(raw: &serde_json::Value) -> Vec<String> {
+    REQUIRED_WIRE_FIELDS
+        .iter()
+        // The handler injects `opened_on` before deserializing, so its
+        // absence is never a problem — the hint exists for the case a
+        // caller sends an explicit null and reads this list.
+        .filter(|(f, _)| *f != "opened_on")
+        .filter(|(f, _)| raw.get(f).is_none_or(serde_json::Value::is_null))
+        .map(|(f, why)| format!("missing `{f}` ({why})"))
+        .collect()
+}
+
+/// One 422 body carrying everything wrong with the envelope: every
+/// missing field, plus serde's own message when it complains about
+/// something the missing-field scan cannot see (a type mismatch).
+fn job_body_rejection(raw: &serde_json::Value, serde_err: &str) -> String {
+    let mut problems = envelope_problems(raw);
+    let already_named = serde_err.starts_with("missing field")
+        && problems.iter().any(|p| {
+            serde_err
+                .strip_prefix("missing field `")
+                .and_then(|r| r.split('`').next())
+                .is_some_and(|f| p.contains(&format!("`{f}`")))
+        });
+    if !already_named {
+        problems.push(serde_err.to_string());
+    }
+    format!(
+        "invalid job body: {} problem(s): {}",
+        problems.len(),
+        problems.join("; ")
+    )
+}
+
 pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
     CurrentUser(user): CurrentUser,
@@ -530,21 +598,39 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
     // historical sim-dates. Inject the default before deser since the
     // shared `Job` type requires the field.
     let now = boss_clock_client::now_from(&state.clock).await;
-    if raw.get("opened_on").is_none_or(|v| v.is_null())
-        && let Some(obj) = raw.as_object_mut()
-    {
+    let opened_by_clock = raw.get("opened_on").is_none_or(|v| v.is_null());
+    if opened_by_clock && let Some(obj) = raw.as_object_mut() {
         obj.insert("opened_on".to_string(), serde_json::json!(now.date_naive()));
     }
-    let mut job: Job = match serde_json::from_value(raw) {
+    let mut job: Job = match serde_json::from_value(raw.clone()) {
         Ok(j) => j,
         Err(e) => {
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
-                format!("invalid job body: {e}"),
+                job_body_rejection(&raw, &e.to_string()),
             )
                 .into_response();
         }
     };
+
+    // The precise instant behind the defaulted date. `opened_on` has
+    // one-day resolution by construction; the metadata stamp is what
+    // lets the terminal report measure a same-day close in hours
+    // (`cycle_days_sample`, port.rs — paired with `closed_at` from the
+    // close hooks). Only written when the clock owns the date: an
+    // explicit (backdated, sim-historical) `opened_on` names a
+    // different instant than `now`, and a stamp that disagreed with
+    // the date beside it would override that date in the cycle-time
+    // preference. Merges into the caller's metadata; an existing
+    // `opened_at` key wins.
+    if opened_by_clock {
+        if let serde_json::Value::Object(map) = &mut job.metadata {
+            map.entry("opened_at")
+                .or_insert_with(|| serde_json::json!(now.to_rfc3339()));
+        } else if job.metadata.is_null() {
+            job.metadata = serde_json::json!({ "opened_at": now.to_rfc3339() });
+        }
+    }
 
     // Admission decides sim-vs-real ONCE, here, and the flag never
     // moves again (03-jobs.sql: the epoch trim leans on a Job's rows
@@ -559,7 +645,7 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
     // is plumbed (older tests) we accept any kind string. We capture
     // the active spec here so the step-materialization pass below
     // doesn't need a second registry lookup.
-    let kind_spec = if let Some(ref reg) = state.kind_registry {
+    let mut kind_spec = if let Some(ref reg) = state.kind_registry {
         match reg.get_active(&job.kind).await {
             Ok(spec) => Some(spec),
             Err(crate::registry::WorkflowError::NotFound(_)) => {
@@ -577,12 +663,88 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
         None
     };
 
+    // Split admission — Tier 2 of the experiments program
+    // (docs/design/network-experiments.md Q1+Q3; packet 6ea5a12a). An
+    // OPEN `protocol-experiment` packet whose metadata declares a
+    // split over this kind governs its admission: the new packet's
+    // own id hash-splits it into an arm, the arm's version becomes
+    // the spec the packet pins to AND materializes steps from, and
+    // the `experiment_arm` / `experiment_id` stamps land in job
+    // metadata BEFORE the JOB_CREATED event below is built — so the
+    // rebuilder replays the recorded choice, never the coin, and the
+    // terminal report's arm dimension reads cohorts off the log.
+    //
+    // Fail-safe is the contract: no governing experiment, a malformed
+    // declaration, an unreadable experiment list, or an arm version
+    // the registry cannot produce (someone discarded the candidate
+    // draft mid-window) all leave admission exactly as it stood —
+    // active version, no stamp. An experiment must never break the
+    // kind it measures.
+    // (Gating on the registry alone is enough: when it is plumbed,
+    // `kind_spec` is Some or the handler already returned above.)
+    if let Some(reg) = state.kind_registry.as_ref() {
+        let experiments_filter = crate::port::JobFilter {
+            kind: Some(crate::experiments::EXPERIMENT_KIND.to_string()),
+            status: Some(JobStatus::Open),
+            ..Default::default()
+        };
+        match state.jobs.list_jobs(&experiments_filter, 200, 0).await {
+            Ok((experiments, _)) => {
+                if let Some(split) =
+                    crate::experiments::governing_experiment(&experiments, &job.kind)
+                {
+                    let arm = crate::experiments::arm_for(&job.id, split.split);
+                    let version = split.version_for(arm);
+                    // The candidate is usually a DRAFT (it stays draft
+                    // history if the experiment retires), so this is
+                    // get_version, not get_active — the experiment is
+                    // exactly the sanctioned way a draft meets traffic.
+                    match reg.get_version(&job.kind, version).await {
+                        Ok(arm_spec) => {
+                            if let serde_json::Value::Object(map) = &mut job.metadata {
+                                // Server-assigned, like the version pin
+                                // below: a client-supplied arm is a
+                                // forged cohort and is overwritten.
+                                map.insert(
+                                    crate::experiments::ARM_KEY.to_string(),
+                                    serde_json::json!(arm),
+                                );
+                                map.insert(
+                                    crate::experiments::EXPERIMENT_ID_KEY.to_string(),
+                                    serde_json::json!(split.experiment_id.to_string()),
+                                );
+                            }
+                            kind_spec = Some(arm_spec);
+                        }
+                        Err(e) => tracing::warn!(
+                            kind = %job.kind,
+                            experiment = %split.experiment_id,
+                            arm,
+                            version,
+                            error = %e,
+                            "experiment names a version the registry cannot produce; \
+                             admitting under the active version, unstamped",
+                        ),
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(
+                kind = %job.kind,
+                error = %e,
+                "cannot consult open experiments; admitting under the active version",
+            ),
+        }
+    }
+
     // Pin the Job to the kind's active version — the version it opens
     // under. Per docs/architecture-decisions.md §Jobs, Workflows, Steps:
     // in-flight Jobs pin to the version they opened under, and creation
     // is blocked against draft/retired kinds (enforced by get_active
     // above, which 400s on an inactive kind). Server-assigned —
-    // overrides any value a client put on the wire.
+    // overrides any value a client put on the wire. Under a governing
+    // experiment `kind_spec` is the ARM's spec by this point, so the
+    // pin is the arm's version — cohort membership fixed at admission,
+    // per the packet model.
     if let Some(ref spec) = kind_spec {
         job.workflow_version = spec.version;
     }
@@ -659,6 +821,80 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
 
     let job_id = job.id;
 
+    // Materialize the Workflow's steps BEFORE anything persists. Job
+    // kinds with no steps (`ad-hoc`, where the user defines work as
+    // they go) materialize into zero steps.
+    //
+    // The brewery engine sets ?materialize_steps=false because it
+    // emits its own deterministic-UUID step creates via
+    // POST /api/jobs/{id}/steps; without the opt-out, every Job
+    // would carry 2× the spec's step count.
+    //
+    // Materialization is pure, so running it ahead of the job insert
+    // costs nothing — and it is what lets the filer-field gate below
+    // refuse a packet while NOTHING has been written yet: a refused
+    // admission leaves no half-created Job behind (conservation).
+    let materialized_steps: Option<Vec<Step>> = if q.materialize_steps {
+        kind_spec.as_ref().map(|spec| {
+            // Live-API path stamps `{day}` tokens against the
+            // clock-api's current day so payroll / period-end
+            // metadata derives from the system clock (sim or wall
+            // depending on the deploy's clock mode), matching what
+            // the sim engine does with its own day cursor.
+            crate::registry::materialize_steps_at(
+                spec,
+                &job.subject,
+                job_id,
+                &job.metadata,
+                boss_core::job::StepId::new,
+                Some(now.date_naive()),
+                // Resolve trigger provenance at materialization: the firing
+                // trigger (named by `metadata.trigger_name`) is born
+                // `Completed`, its alternatives `Skipped`. Every production
+                // Job — dispatcher-spawned, sim, operator — flows through
+                // here, so this is the single point that makes triggers
+                // honest.
+                Some(state.step_registry.as_ref()),
+            )
+        })
+    } else {
+        None
+    };
+
+    // Filer fields validate at ADMISSION — the flip side of
+    // required-at-done. A field the Workflow declares
+    // `filled_by = "filer"` (registry data, §9 — never a kind match
+    // here) is one the work is not doable without; deferring its
+    // absence to completion detonates the refusal on the executor
+    // mid-work, the party least able to fix it (packet 27de796e: a
+    // reviewer hit that 400 twice on one hand-filed design doc). The
+    // fields stay required-at-done as well; admission just catches
+    // them first, against the party who can supply them.
+    if let Some(ref steps) = materialized_steps {
+        let missing = crate::registry::missing_filer_fields(steps);
+        if !missing.is_empty() {
+            let problems: Vec<String> = missing
+                .iter()
+                .map(|(step, field)| {
+                    format!(
+                        "filer field '{field}' missing on step '{step}' — \
+                         supplied at filing, not by the executor"
+                    )
+                })
+                .collect();
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "cannot admit this `{}` job: {} problem(s): {}",
+                    job.kind,
+                    problems.len(),
+                    problems.join("; ")
+                ),
+            )
+                .into_response();
+        }
+    }
+
     // OUTBOX (phase 2): JOB_CREATED records on the transactional
     // outbox INSIDE the job-insert transaction — the log and the
     // projection commit or fail together, which subsumes the old
@@ -693,37 +929,9 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
         return persist_error_response(e);
     }
 
-    // Materialize the Workflow's steps into actual `steps` rows. Job
-    // kinds with no steps (`ad-hoc`, where the user defines work as
-    // they go) materialize into zero steps.
-    //
-    // The brewery engine sets ?materialize_steps=false because it
-    // emits its own deterministic-UUID step creates via
-    // POST /api/jobs/{id}/steps; without the opt-out, every Job
-    // would carry 2× the spec's step count.
-    if q.materialize_steps
-        && let Some(spec) = kind_spec
-    {
-        // Live-API path stamps `{day}` tokens against the
-        // clock-api's current day so payroll / period-end
-        // metadata derives from the system clock (sim or wall
-        // depending on the deploy's clock mode), matching what
-        // the sim engine does with its own day cursor.
-        let steps = crate::registry::materialize_steps_at(
-            &spec,
-            &job.subject,
-            job_id,
-            &job.metadata,
-            boss_core::job::StepId::new,
-            Some(now.date_naive()),
-            // Resolve trigger provenance at materialization: the firing
-            // trigger (named by `metadata.trigger_name`) is born
-            // `Completed`, its alternatives `Skipped`. Every production
-            // Job — dispatcher-spawned, sim, operator — flows through
-            // here, so this is the single point that makes triggers
-            // honest.
-            Some(state.step_registry.as_ref()),
-        );
+    // Persist the steps materialized above (pre-insert, so the
+    // filer-field gate could refuse before the Job existed).
+    if let Some(steps) = materialized_steps {
         // Materialization is ATOMIC from an observer's view. A consumer
         // that reacts to a `step.ready` event — the dispatcher's marker
         // auto-complete, a delegate-subjob fork — must see the COMPLETE
@@ -803,21 +1011,57 @@ pub(super) struct JobDetail {
     steps: Vec<Step>,
 }
 
+/// An 8..=36-char run of hex and hyphens — the canonical id text minus
+/// its tail. Below 8 is too little to resolve safely; anything with a
+/// non-hex, non-hyphen character is not an id at all. A full uuid also
+/// satisfies this, but the caller tries `parse_job_id` first, so this
+/// only ever judges genuine prefixes.
+fn is_id_prefix(s: &str) -> bool {
+    (8..=36).contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+}
+
+async fn job_detail_response<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &JobsApiState<R, B>,
+    job_id: &boss_core::job::JobId,
+) -> Response {
+    match state.jobs.get_job(job_id).await {
+        Ok(Some(job)) => {
+            let steps = state.jobs.list_steps(job_id).await.unwrap_or_default();
+            Json(JobDetail { job, steps }).into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, "job not found").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 pub(super) async fn get_job<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
     Path(id): Path<String>,
 ) -> Response {
-    let job_id = match parse_job_id(&id) {
-        Some(id) => id,
-        None => return (StatusCode::BAD_REQUEST, "invalid job id").into_response(),
-    };
-
-    match state.jobs.get_job(&job_id).await {
-        Ok(Some(job)) => {
-            let steps = state.jobs.list_steps(&job_id).await.unwrap_or_default();
-            Json(JobDetail { job, steps }).into_response()
-        }
-        Ok(None) => (StatusCode::NOT_FOUND, "job not found").into_response(),
+    // The fast path: a full uuid, the id the whole system stores and
+    // every write holds. Untouched.
+    if let Some(job_id) = parse_job_id(&id) {
+        return job_detail_response(&state, &job_id).await;
+    }
+    // Otherwise, resolve the id everyone actually holds — the 8-char
+    // prefix printed in journals, arrival reports and messages. Nothing
+    // matches → 404 (genuinely absent); more than one → 409 (the caller
+    // asked a two-answer question, and guessing is the wrong move on a
+    // lookup that precedes a write). True garbage stays 400.
+    let prefix = id.to_ascii_lowercase();
+    if !is_id_prefix(&prefix) {
+        return (StatusCode::BAD_REQUEST, "invalid job id").into_response();
+    }
+    match state.jobs.resolve_job_id_prefix(&prefix).await {
+        Ok(matches) => match matches.as_slice() {
+            [] => (StatusCode::NOT_FOUND, "job not found").into_response(),
+            [one] => job_detail_response(&state, one).await,
+            _ => (
+                StatusCode::CONFLICT,
+                "ambiguous id prefix: more than one job matches",
+            )
+                .into_response(),
+        },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -1190,9 +1434,371 @@ pub(super) async fn patch_job_metadata<R: JobsRepository + 'static, B: EventBus 
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// `POST /api/jobs/{id}/convert` — pull a packet forward to a newer
+/// protocol version, if where it stands allows it.
+///
+/// THE DOOR IS NARROW ON PURPOSE. `workflow_version` is excluded from
+/// `update_job`'s SET list, so no ordinary PUT can re-pin a packet by
+/// accident; conversion is an explicit act that must first pass
+/// [`crate::protocol_conversion::convertibility_for_packet`]. A refusal
+/// returns the obstacles rather than a bare no, because each one names
+/// the step it concerns and an operator's next question is always
+/// "which step, and what changed".
+pub(super) async fn convert_job<R: JobsRepository + 'static, B: EventBus + 'static>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+    Path(id): Path<String>,
+    CurrentUser(user): CurrentUser,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let Some(job_id) = parse_job_id(&id) else {
+        return (StatusCode::BAD_REQUEST, "invalid job id").into_response();
+    };
+    let existing = match state.jobs.get_job(&job_id).await {
+        Ok(Some(j)) => j,
+        Ok(None) => return (StatusCode::NOT_FOUND, "job not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    // Same gate as any other job write.
+    let decision = match state
+        .policy
+        .check(&user, Action::Update, Resource::job())
+        .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("policy check failed: {e}"),
+            )
+                .into_response();
+        }
+    };
+    let scope = match decision {
+        Decision::Deny { reason } => return (StatusCode::FORBIDDEN, reason).into_response(),
+        Decision::Allow { scope } => scope,
+    };
+    if !scope_matches(&user, &scope, &existing) {
+        return (StatusCode::FORBIDDEN, "job is outside your scope").into_response();
+    }
+
+    let Some(ref reg) = state.kind_registry else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no workflow registry: conversion cannot be judged without both specs",
+        )
+            .into_response();
+    };
+    let from = match reg
+        .get_version(&existing.kind, existing.workflow_version)
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::CONFLICT,
+                format!(
+                    "cannot read the version this packet is pinned to ({} v{}): {e}",
+                    existing.kind, existing.workflow_version
+                ),
+            )
+                .into_response();
+        }
+    };
+    let want = body.get("to_version").and_then(serde_json::Value::as_i64);
+    let to = match want {
+        Some(v) => reg.get_version(&existing.kind, v as i32).await,
+        None => reg.get_active(&existing.kind).await,
+    };
+    let to = match to {
+        Ok(s) => s,
+        Err(e) => {
+            return (StatusCode::CONFLICT, format!("no such target version: {e}")).into_response();
+        }
+    };
+    if to.version == existing.workflow_version {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "converted": false,
+                "reason": "already pinned to that version",
+                "workflow_version": existing.workflow_version,
+            })),
+        )
+            .into_response();
+    }
+
+    // Where the packet actually stands: the slugs it has completed.
+    let steps = match state.jobs.list_steps(&job_id).await {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let done: std::collections::BTreeSet<String> = steps
+        .iter()
+        .filter(|s| s.status == boss_core::job::StepStatus::Completed)
+        .filter_map(|s| s.spec_slug.clone())
+        .collect();
+
+    let verdict = crate::protocol_conversion::convertibility_for_packet(&from, &to, &done);
+    if !verdict.is_automatic() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "converted": false,
+                "from": from.version,
+                "to": to.version,
+                "obstacles": verdict.obstacles().iter().map(|o| serde_json::json!({
+                    "step": o.step, "reason": o.reason,
+                })).collect::<Vec<_>>(),
+            })),
+        )
+            .into_response();
+    }
+
+    let actor = user
+        .ambient_actor()
+        .unwrap_or_else(|| boss_core::actor::ActorId::Automation("platform".into()));
+    let stamp = state
+        .publisher
+        .stamp_with_actor(actor)
+        .await
+        .with_simulated(existing.simulated);
+    match state
+        .jobs
+        .repin_workflow_version_at(&job_id, to.version, &stamp)
+        .await
+    {
+        Ok(job) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "converted": true,
+                "from": from.version,
+                "to": job.workflow_version,
+            })),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// `GET /api/estate/nodes` — the machines BOSS declares it runs on.
+///
+/// The estate tables have existed since `144-estate-subjects.sql` and
+/// nothing has ever served them, so "what hardware is running" was
+/// unanswerable from inside BOSS. Every answer had to be re-derived by
+/// shelling into machines, and on 2026-08-30 three separate accounts of
+/// the estate — the registry, a prose inventory, and an operator's
+/// recollection — were wrong in the same direction because none was
+/// connected to the machines (59ef456a).
+///
+/// Read-only on purpose: declaring a machine is a schema migration that
+/// converges, not an API write.
+pub(super) async fn list_estate_nodes<R: JobsRepository + 'static, B: EventBus + 'static>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+    CurrentUser(_user): CurrentUser,
+) -> Response {
+    match state.jobs.list_estate_nodes().await {
+        Ok(nodes) => Json(serde_json::json!({ "data": nodes })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+pub(super) struct EstateEventsQuery {
+    /// Exact-match filter on the payload's top-level `scope`, e.g.
+    /// `codebase` or `kubernetes-nodes`. Absent reads every series.
+    scope: Option<String>,
+    limit: Option<i64>,
+}
+
+/// `GET /api/estate/observations` and `/api/estate/comparisons` — the
+/// read half of the estate loop's event series (d471a8ce).
+///
+/// The observe and compare doors above record these as events, and
+/// until this pair existed the series was readable only through an
+/// in-pod port-forward to the events service: the loop went live on
+/// 2026-08-30 with its first observation and comparison recorded, and
+/// the two cars that built it had proven arbiters that were SATISFIED
+/// yet unprobeable from any exposed surface. These are also the IT
+/// page's data source — David has asked repeatedly for the running
+/// hardware rendered from the registry, declared beside observed.
+///
+/// Guest-readable like `/api/estate/nodes`, and rows verbatim as
+/// recorded: a reader that reshapes its instrument is a second
+/// instrument. Small default, hard cap — this is a status surface,
+/// not an export (the events service's export door owns bulk).
+///
+/// `?scope=` is what makes that small cap honest. One kind carries
+/// many series at different cadences, and a page taken across all of
+/// them is spent by whichever ticks fastest: measured 2026-09-02, the
+/// 50-row ceiling held 49 `kubernetes-nodes` rows and 1 `host` and
+/// covered only 04:30Z–17:30Z, so the nightly `codebase` observation
+/// could not be read through the one door that serves it. Asking for
+/// a scope answers about THAT scope — 50 rows of a nightly series is
+/// fifty nights, not half a day.
+pub(super) async fn list_estate_observations<R: JobsRepository + 'static, B: EventBus + 'static>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+    CurrentUser(_user): CurrentUser,
+    Query(q): Query<EstateEventsQuery>,
+) -> Response {
+    estate_events(&state, crate::events::ESTATE_OBSERVED, &q).await
+}
+
+pub(super) async fn list_estate_comparisons<R: JobsRepository + 'static, B: EventBus + 'static>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+    CurrentUser(_user): CurrentUser,
+    Query(q): Query<EstateEventsQuery>,
+) -> Response {
+    estate_events(&state, crate::events::ESTATE_COMPARED, &q).await
+}
+
+async fn estate_events<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &Arc<JobsApiState<R, B>>,
+    kind: &str,
+    q: &EstateEventsQuery,
+) -> Response {
+    let limit = q.limit.unwrap_or(5).clamp(1, 50);
+    // The scope reaches the repository, which pushes it to the WHERE
+    // clause. Narrowing the page after it comes back would leave the
+    // slow series exactly as unreadable as it was.
+    match state
+        .jobs
+        .recent_events_by_kind(kind, q.scope.as_deref(), limit)
+        .await
+    {
+        Ok(rows) => Json(serde_json::json!({ "data": rows })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::edge_guidance;
+    use super::{REQUIRED_WIRE_FIELDS, edge_guidance, envelope_problems, job_body_rejection};
+    use serde_json::json;
+
+    fn full_body() -> serde_json::Value {
+        json!({
+            "kind": "backlog-item",
+            "subject": {"id": "bosspipeline", "subject_kind": "custom"},
+            "title": "a complete envelope",
+            "owner_id": "agent",
+            "status": "open",
+            "priority": "standard",
+            "opened_on": "2026-08-31",
+            "tags": [],
+            "metadata": {}
+        })
+    }
+
+    /// THE DRIFT KILLER. The required-field list is only honest while
+    /// it matches what serde actually demands of `Job`, so this test
+    /// re-derives the demanded set: take a body that deserializes,
+    /// remove one key at a time, and record which removals fail with
+    /// `missing field`. That set — no more, no less — must be the
+    /// const. A field gaining `#[serde(default)]`, or a new required
+    /// field, fails HERE instead of resurrecting the guessing loop.
+    #[test]
+    fn required_wire_fields_are_derived_from_the_job_struct() {
+        let body = full_body();
+        serde_json::from_value::<boss_core::job::Job>(body.clone())
+            .expect("the fixture body must deserialize, or every assertion below is vacuous");
+
+        let mut demanded: Vec<String> = body
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|k| {
+                let mut probe = body.clone();
+                probe.as_object_mut().unwrap().remove(*k);
+                match serde_json::from_value::<boss_core::job::Job>(probe) {
+                    Err(e) => e.to_string().starts_with("missing field"),
+                    Ok(_) => false,
+                }
+            })
+            .cloned()
+            .collect();
+        demanded.sort();
+
+        let mut declared: Vec<String> = REQUIRED_WIRE_FIELDS
+            .iter()
+            .map(|(f, _)| f.to_string())
+            .collect();
+        declared.sort();
+
+        assert_eq!(
+            declared, demanded,
+            "REQUIRED_WIRE_FIELDS drifted from what Job's deserialization demands"
+        );
+    }
+
+    /// The packet's measured failure: three missing fields cost three
+    /// rejected rounds. One 422 must now name all three.
+    #[test]
+    fn a_body_missing_three_fields_gets_all_three_in_one_422() {
+        let mut body = full_body();
+        let obj = body.as_object_mut().unwrap();
+        obj.remove("owner_id");
+        obj.remove("status");
+        obj.remove("tags");
+
+        let msg = job_body_rejection(&body, "missing field `owner_id`");
+        for f in ["`owner_id`", "`status`", "`tags`"] {
+            assert!(msg.contains(f), "422 must name {f}: {msg}");
+        }
+        assert!(
+            msg.contains("3 problem(s)"),
+            "serde's duplicate first-field message must not inflate the count: {msg}"
+        );
+    }
+
+    /// A type mismatch is invisible to the missing-key scan, so
+    /// serde's own complaint rides alongside the missing fields
+    /// rather than being swallowed.
+    #[test]
+    fn a_type_error_rides_alongside_missing_fields() {
+        let mut body = full_body();
+        let obj = body.as_object_mut().unwrap();
+        obj.remove("owner_id");
+        obj.insert("tags".into(), json!("not-a-list"));
+
+        let serde_msg = "invalid type: string \"not-a-list\", expected a sequence";
+        let msg = job_body_rejection(&body, serde_msg);
+        assert!(
+            msg.contains("`owner_id`"),
+            "missing field still named: {msg}"
+        );
+        assert!(
+            msg.contains(serde_msg),
+            "the type complaint must survive: {msg}"
+        );
+        assert!(
+            msg.contains("2 problem(s)"),
+            "one missing + one type = 2: {msg}"
+        );
+    }
+
+    /// A complete envelope has nothing to complain about — the happy
+    /// path's behavior (201, create) is covered by every HTTP create
+    /// test in this crate and is deliberately untouched here.
+    #[test]
+    fn a_complete_envelope_raises_no_problems() {
+        assert!(envelope_problems(&full_body()).is_empty());
+    }
+
+    /// An explicit null is as useless to the reader as an absent key,
+    /// and is reported the same way.
+    #[test]
+    fn an_explicit_null_counts_as_missing() {
+        let mut body = full_body();
+        body.as_object_mut()
+            .unwrap()
+            .insert("owner_id".into(), json!(null));
+        let problems = envelope_problems(&body);
+        assert!(
+            problems.iter().any(|p| p.contains("`owner_id`")),
+            "null owner_id must be reported: {problems:?}"
+        );
+    }
 
     /// The guard's own text is the valuable part and must survive
     /// verbatim — an author reads WHICH edge and WHICH id was refused

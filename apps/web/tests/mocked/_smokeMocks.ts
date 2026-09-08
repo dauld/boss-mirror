@@ -73,6 +73,18 @@ export async function installSmokeMocks(page: Page): Promise<void> {
   // Live job state (objects, not lists — the catch-all `[]` would break these).
   await page.route(/\/api\/jobs\/live$/, (r) => json(r, { counts: {}, open_total: 0, recent: [], sim_clock: {} }));
   await page.route(/\/api\/jobs\/summary(\?|$)/, (r) => json(r, { counts: {}, total: 0 }));
+  // The yard status read-model (object, not a list). An empty-but-well-
+  // formed payload so the page renders its "no trains / no cars" states.
+  await page.route(/\/api\/yard\/status$/, (r) =>
+    json(r, {
+      trains: [], dock: [], recent: [], stranded: [],
+      boarding: { dock_threshold: null, cooldown_minutes: null, at_times: [], dock_depth: 0, threshold_met: null, summary: 'No boarding cadence is configured.' },
+      gates: { capacity: 3, active: [] },
+      garage: [],
+      policy: { stall_hours: null, max_red_trains: null },
+      now: '2026-09-03T12:00:00Z',
+    }),
+  );
 
   // Workflow registry + the adversarial kind (omitted-terminal step).
   await page.route(/\/api\/workflows$/, (r) => json(r, [WORKFLOW]));

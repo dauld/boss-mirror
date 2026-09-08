@@ -198,11 +198,12 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                // user-feedback v11's design-review (0ab5fa3a): the
-                // decision steps of the feedback protocol became a
-                // constraint queue of their own the moment their kind
-                // stopped being generic `task` — which is the docket.
-                "q.platform-admin.answer-question",
+                // `answer-question` left this list when user-feedback
+                // moved to the platform bundle (e332a320). It is NOT a
+                // lost queue: production derives stations from the LIVE
+                // registry, as the comment above says, and the live
+                // registry is roster PLUS bundle. This fixture is the
+                // code-seeded half only.
                 "q.platform-admin.review-design",
                 "q.platform-admin.task",
             ],

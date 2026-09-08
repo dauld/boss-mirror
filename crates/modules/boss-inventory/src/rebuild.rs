@@ -351,10 +351,13 @@ async fn upsert_vendor(
     vendor: &Vendor,
     ts: DateTime<Utc>,
 ) -> Result<(), RebuildError> {
+    // `behavior` rides the vendor.created/.updated payloads but was
+    // never reproduced here, so a rebuild silently wiped every
+    // vendor's behavior profile (packet d7b8158e).
     sqlx::query(
         "INSERT INTO vendors (id, name, contact_name, contact_email, city, state, \
-                              lead_time_days, payment_terms, category, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+                              lead_time_days, payment_terms, category, behavior, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
          ON CONFLICT (id) DO UPDATE SET \
              name = EXCLUDED.name, \
              contact_name = EXCLUDED.contact_name, \
@@ -363,7 +366,8 @@ async fn upsert_vendor(
              state = EXCLUDED.state, \
              lead_time_days = EXCLUDED.lead_time_days, \
              payment_terms = EXCLUDED.payment_terms, \
-             category = EXCLUDED.category",
+             category = EXCLUDED.category, \
+             behavior = EXCLUDED.behavior",
     )
     .bind(&vendor.id)
     .bind(&vendor.name)
@@ -374,6 +378,12 @@ async fn upsert_vendor(
     .bind(vendor.lead_time_days as i16)
     .bind(&vendor.payment_terms)
     .bind(&vendor.category)
+    .bind(
+        vendor
+            .behavior
+            .as_ref()
+            .map(|b| serde_json::to_value(b).unwrap_or_default()),
+    )
     .bind(ts)
     .execute(&mut *tx)
     .await

@@ -1,6 +1,6 @@
 # Design: the internal forge — Git, CI, and maintenance come inside
 
-**Status:** draft — open questions tracked at `/system/design`
+**Status**: decided — all 7 questions resolved 2026-08-12 via the in-app tracker; see Decisions.
 **Origin:** David, 2026-08-10 (`4bff901a`): "We are going to
 internalize Git and CI" — plus, in the same breath: "develop a
 better sense of the building up of commits into PRs pushed onto

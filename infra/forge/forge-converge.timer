@@ -1,0 +1,11 @@
+[Unit]
+Description=Converge the forge host on its own units from forge main every 10 minutes
+
+[Timer]
+# Offset from cluster-deploy-runner (OnBootSec=3min) so the two forge
+# timers do not fetch main in the same instant on boot.
+OnBootSec=4min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target

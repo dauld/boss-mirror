@@ -25,6 +25,7 @@ mod bank_settlements;
 mod bills;
 mod entries;
 mod facts;
+mod keg_deposits;
 mod payroll;
 mod periods;
 mod revenue;
@@ -35,6 +36,7 @@ use bank_settlements::*;
 use bills::*;
 use entries::*;
 use facts::*;
+use keg_deposits::*;
 use payroll::*;
 use periods::*;
 use revenue::*;
@@ -231,6 +233,10 @@ pub fn router(state: LedgerApiState) -> Router {
         .route(
             "/api/ledger/tax-accruals",
             axum::routing::post(create_tax_accrual),
+        )
+        .route(
+            "/api/ledger/keg-deposit-settlements",
+            axum::routing::post(create_keg_deposit_settlement),
         )
         // Graduated excise rates as registry data (brewery-fidelity Q4):
         // jurisdiction-keyed, effective-dated tier schedules the accrual

@@ -59,14 +59,46 @@ jobs:
   # read:repository + write:package. The conductor's
   # /etc/boss-train/forge.token is NOT it — that one is repo-scoped and
   # the package registry rejects it (verified: 401 on a blob upload).
+  #
+  # TAGGED BY COMMIT, NOT JUST :rust1.96. The downstream jobs pin
+  # boss-ci:${{ github.sha }} — the exact image THIS run produced —
+  # because a floating :rust1.96 is served from the runner's local
+  # cache, and that cache lagged the registry: build-image pushed a
+  # fresh image but locomotive ran the runner's stale one, whose stamp
+  # no longer matched the tree, redding the browser-bake keystone with
+  # build-image green and locomotive red (6aa603ef). A per-commit tag
+  # cannot be served stale — the runner has never seen it, so it pulls
+  # the one build-image just pushed. Layers dedupe in the registry, so
+  # this is a manifest ref, not a second copy of the image.
   build-image:
     runs-on: docker
     container:
-      image: gcr.io/kaniko-project/executor:v1.23.2-debug
+      # FROM THE FORGE, NOT gcr.io. This executor, and the two bases the
+      # Dockerfile FROMs, are copies in our own registry, put there by
+      # infra/forge/mirror-base-images.sh (the `mirror-base-images` ops
+      # verb; its IMAGES list is the one source of truth for the tags).
+      # `lookup gcr.io ... no such host` redded trains #236 and #250
+      # with every car clean, because fetching this image resolved a
+      # public name through a resolver with no redundancy. Now the
+      # runner pulls it the way every job below pulls boss-ci — same
+      # registry, same credential — and a healthy build-image resolves
+      # no public name at all. infra/lint/the-build-pulls-only-mirrored-
+      # bases.sh pins the pair: an image here, or a FROM in the
+      # Dockerfile, that is not a tag the mirror list carries fails the
+      # pre-flight.
+      image: 10.20.0.15:3000/david/kaniko-executor:v1.23.2-debug
     steps:
       - name: Build and push the runner image
         env:
           TOKEN: ${{ secrets.FORGE_PACKAGE_TOKEN }}
+          # The job's own repo-scoped credential, the same one locomotive
+          # passes to post ITS refusal status. FORGE_PACKAGE_TOKEN above is
+          # read:repository + write:package and cannot write a commit
+          # status; this can. Used ONLY on the exhausted-transient path
+          # below, to post a `refused:` status so the conductor's strike
+          # rule spares the innocent cars aboard (train.rs
+          # verdict_strikes_cars / any_failing_check_refused).
+          FORGE_TOKEN: ${{ github.token }}
           # Kaniko resolves a git:// context over HTTPS by default and
           # the forge speaks plain HTTP on 3000, so the first run died
           # with "server gave HTTP response to HTTPS client". This is
@@ -86,18 +118,126 @@ jobs:
           printf '{"auths":{"10.20.0.15:3000":{"auth":"%s"}}}' \
             "$(printf 'david:%s' "$TOKEN" | base64 | tr -d '\n')" \
             > /kaniko/.docker/config.json
-          # No --build-arg for the stamp: the Dockerfile hashes its own
-          # build context. This job has no checkout, so any `cat
-          # Dockerfile` here would have hashed empty input and stamped
-          # the image with a value locomotive could never match.
-          /kaniko/executor \
-            --context "git://david:${TOKEN}@10.20.0.15:3000/david/boss.git#${GITHUB_SHA}" \
-            --context-sub-path infra/forge/boss-ci \
-            --dockerfile Dockerfile \
-            --destination 10.20.0.15:3000/david/boss-ci:rust1.96 \
-            --insecure --skip-tls-verify \
-            --cache=true \
-            --cache-repo 10.20.0.15:3000/david/boss-ci-cache
+          # RETRIED, BECAUSE ONE DROPPED LOOKUP USED TO COST A TRAIN.
+          #
+          # Run 248 (2026-08-26) died here with `lookup
+          # production.cloudfront.docker.com on 127.0.0.11:53: no such
+          # host` while fetching a BLOB — kaniko had already cached the
+          # manifest, so a warm cache does not protect this path. The
+          # other four jobs were skipped, a six-car train went red with
+          # no car at fault, and because the forge has no rerun API the
+          # only recovery was cancel-and-reboard: every car back to the
+          # dock and two hours of gate time queued again.
+          #
+          # Container DNS here has no redundancy at any hop —
+          # 127.0.0.11 to the host's systemd-resolved stub to a single
+          # upstream with no secondary — so a single dropped answer
+          # fails the build outright.
+          #
+          # SINCE THE BASES MOVED TO THE FORGE (this job's container image
+          # above, and the Dockerfile's FROMs), a healthy build resolves
+          # no public name: executor and bases alike come from
+          # 10.20.0.15:3000. The loop stays as the safety net for that
+          # registry path, and for what the Dockerfile's RUN layers still
+          # fetch on a cache miss — apt, nodesource, playwright's CDN —
+          # which the mirror does not cover.
+          #
+          # ONLY TRANSIENT FAILURES ARE RETRIED. Retrying everything
+          # would turn a broken Dockerfile into three identical
+          # failures and triple the time before the real message is
+          # visible. This is the same line boss-testing draws for the
+          # database: a closed socket is weather, a rejected statement
+          # is a defect in the change under test and must fail loudly
+          # on the first try.
+          # Output is captured in a VARIABLE, not a file. The kaniko
+          # executor image is minimal and has no /tmp: redirecting to
+          # /tmp/kaniko.log fails with "nonexistent directory" and takes
+          # the whole build with it (caught on train #121, 2026-08-27 —
+          # a fix for a 2% DNS flake that became a 100% break, because
+          # the gate does not run build-image and could not see it).
+          MAX_ATTEMPTS=3
+          attempt=1
+          while :; do
+            # IDEMPOTENT RETRY. Kaniko clones the git:// --context into
+            # /kaniko/buildcontext (config.BuildContextDir, v1.23.2), and
+            # go-git's PlainClone refuses a directory that already holds a
+            # repo. So attempt 1's clone made attempt 2 die with "error
+            # resolving source context: repository already exists" — a
+            # message the network-fault classifier below does NOT match,
+            # so the loop bailed hard ("not a network fault, not
+            # retrying") and a single DNS flake on attempt 1 became a
+            # guaranteed red the retry could never clear (run 469, job
+            # 2041, train #236). Removing the clone restores the exact
+            # precondition of attempt 1 — a nonexistent context dir kaniko
+            # re-clones from scratch — so a real transient gets a real
+            # second try. No-op on attempt 1 (the dir does not exist yet);
+            # touches only the git-context clone, never kaniko's layer
+            # cache (/cache) or the remote --cache-repo.
+            rm -rf /kaniko/buildcontext
+            set +e
+            OUT="$(/kaniko/executor \
+                --context "git://david:${TOKEN}@10.20.0.15:3000/david/boss.git#${GITHUB_SHA}" \
+                --context-sub-path infra/forge/boss-ci \
+                --dockerfile Dockerfile \
+                --destination 10.20.0.15:3000/david/boss-ci:rust1.96 \
+                --destination "10.20.0.15:3000/david/boss-ci:${GITHUB_SHA}" \
+                --insecure --skip-tls-verify \
+                --cache=true \
+                --cache-repo 10.20.0.15:3000/david/boss-ci-cache 2>&1)"
+            rc=$?
+            set -e
+            printf '%s\n' "$OUT"
+            [ "$rc" -eq 0 ] && break
+            if ! printf '%s' "$OUT" | grep -qiE 'no such host|i/o timeout|dial tcp|connection refused|TLS handshake timeout|temporary failure in name resolution'; then
+              echo "build-image: failure is not a network fault, not retrying."
+              echo "  The message above is the real one; read it rather than the retry count."
+              exit 1
+            fi
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "build-image: transient network fault persisted across ${MAX_ATTEMPTS} attempts."
+              echo "  This is no longer weather. Check DNS on the runner host:"
+              echo "    resolvectl status        # is there still only one upstream?"
+              echo "    docker run --rm alpine:3 getent hosts production.cloudfront.docker.com"
+              # SAY "refused" WHERE THE CONDUCTOR READS — symmetric with
+              # locomotive.sh. We reach here ONLY after the classifier above
+              # deemed the fault TRANSIENT on every attempt: a real break
+              # (a broken Dockerfile, a compile error) matched none of the
+              # network patterns and already exited at "not a network fault,
+              # not retrying" WITHOUT reaching this branch. So a `refused:`
+              # status posted here can never mask a broken car — the guard
+              # is the wrapper's own transient determination, never a bare
+              # failure. The job still exits 1 (a red); the extra commit
+              # status is what tells the conductor's strike rule to spare
+              # the cars aboard, exactly as locomotive's disk-floor refusal
+              # does — train.rs any_failing_check_refused matches a FAILING
+              # check whose description starts with "refused". Best-effort:
+              # no token or a rejected POST is one line and the old
+              # behaviour (a plain red that strikes) — never a second
+              # failure mode. The description is a FIXED string, so there is
+              # nothing to JSON-escape and no need for python3 (absent from
+              # kaniko's busybox); the POST uses busybox wget.
+              if [ -n "${FORGE_TOKEN:-}" ] && [ -n "${GITHUB_SHA:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
+                api="${GITHUB_API_URL:-http://10.20.0.15:3000/api/v1}"
+                body="$(printf '{"state":"failure","context":"CI / build-image refusal","description":"refused: build-image infra fault (registry/DNS unreachable)","target_url":"%s"}' \
+                  "${GITHUB_SERVER_URL:-http://10.20.0.15:3000}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID:-}")"
+                if wget -q -O /dev/null \
+                     --header="Authorization: token ${FORGE_TOKEN}" \
+                     --header="Content-Type: application/json" \
+                     --post-data="$body" \
+                     "${api}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}"; then
+                  echo "build-image: refusal posted as a commit status (context 'CI / build-image refusal') — the conductor will spare the cars."
+                else
+                  echo "build-image: could not post the refusal status — the conductor will read this as a plain red."
+                fi
+              else
+                echo "build-image: no FORGE_TOKEN/GITHUB_SHA/GITHUB_REPOSITORY in the environment — refusal not posted, the conductor will read a plain red."
+              fi
+              exit 1
+            fi
+            echo "build-image: transient network fault, retrying (${attempt}/${MAX_ATTEMPTS})."
+            attempt=$((attempt + 1))
+            sleep $((attempt * 5))
+          done
 
   # The locomotive goes first. On 2026-08-12 forge train #1 burned five
   # red rounds and every cause was environment, not car code — so the
@@ -112,11 +252,33 @@ jobs:
     runs-on: docker
     needs: [build-image]
     container:
-      image: 10.20.0.15:3000/david/boss-ci:rust1.96
+      image: 10.20.0.15:3000/david/boss-ci:${{ github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out from the forge, not github.com
+        # actions/checkout is a JavaScript action the runner pulls from
+        # github.com before the job starts; the runner's container DNS
+        # has no redundancy (see build-image's retry note), so one
+        # dropped lookup there reds the whole train with no car at fault
+        # — d9a34560. The repo is on the forge at a LAN IP, so a git
+        # clone by IP resolves no name. github.token is the job's own
+        # repo-scoped credential, the same one locomotive passes below.
+        env:
+          FORGE_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          git init -q .
+          git remote add origin \
+            "http://x-access-token:${FORGE_TOKEN}@10.20.0.15:3000/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth=1 origin "${GITHUB_REF}"
+          git checkout -q --force FETCH_HEAD
 
       - name: Locomotive check
+        # The job token, so a REFUSAL (disk floor, stale runner image,
+        # wrong uid — the runner declining to run, not a check failing)
+        # can be posted as a commit status the conductor reads; without
+        # it a refusal is a plain red that strikes every car aboard.
+        env:
+          FORGE_TOKEN: ${{ github.token }}
         run: bash infra/forge/locomotive.sh
 
   # THE FRONTEND JOB THAT WAS ONLY EVER ON GITHUB.
@@ -147,12 +309,25 @@ jobs:
     runs-on: docker
     needs: [locomotive]
     container:
-      image: 10.20.0.15:3000/david/boss-ci:rust1.96
-    defaults:
-      run:
-        working-directory: apps/web
+      image: 10.20.0.15:3000/david/boss-ci:${{ github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out from the forge, not github.com
+        # actions/checkout is a JavaScript action the runner pulls from
+        # github.com before the job starts; the runner's container DNS
+        # has no redundancy (see build-image's retry note), so one
+        # dropped lookup there reds the whole train with no car at fault
+        # — d9a34560. The repo is on the forge at a LAN IP, so a git
+        # clone by IP resolves no name. github.token is the job's own
+        # repo-scoped credential, the same one locomotive passes below.
+        env:
+          FORGE_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          git init -q .
+          git remote add origin \
+            "http://x-access-token:${FORGE_TOKEN}@10.20.0.15:3000/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth=1 origin "${GITHUB_REF}"
+          git checkout -q --force FETCH_HEAD
 
       - name: Install dependencies
         # PUPPETEER_SKIP_DOWNLOAD for the same reason svelte-check.sh
@@ -160,42 +335,81 @@ jobs:
         # browser download fails in this container, and bun aborts the
         # WHOLE install on a failed postinstall — so nothing installs
         # and the failure reads as a missing tool.
+        working-directory: apps/web
         run: PUPPETEER_SKIP_DOWNLOAD=1 bun install --frozen-lockfile
 
       - name: Typecheck
+        working-directory: apps/web
         run: bun run typecheck
 
+      - name: web-kit unit tests
+        # RUN FIRST, and from libs/web-kit, because the step below does
+        # NOT cover it: this job sets `working-directory: apps/web` and
+        # `test:unit` there is `bun test src/` — apps/web's own src.
+        # web-kit's 7 test files were executed by NO ci job at all, and
+        # `infra/gate.sh` only reaches them on an `--auto` gate, so a
+        # full gate skipped them too (feedback 80be8359). A test nothing
+        # runs is not a test.
+        #
+        # No extra install: `libs/*` is a workspace member, so the root
+        # `bun install` above already resolved it, and these tests need
+        # only `bun:test` — no browser, no Playwright. 56 assertions in
+        # ~130ms, which is why this runs unconditionally rather than
+        # being scoped to web-touching changes like the mocked suite.
+        working-directory: libs/web-kit
+        run: bun run test:unit
+
       - name: Unit tests
+        working-directory: apps/web
         run: bun run test:unit
 
       - name: Build
+        working-directory: apps/web
         run: bun run build
-
-      - name: Install Playwright browser
-        # `bun x`, NOT `bunx`. The image copies a single file from
-        # oven/bun — `COPY --from=bun /usr/local/bin/bun` — and `bunx`
-        # is a separate symlink that does not come with it. Locally
-        # both work, so this passed every check on a developer's box
-        # and exited 127 on train 52's first run. `bun x` is the same
-        # command with no second binary to depend on.
-        #
-        # --with-deps pulls the shared libraries chromium needs on
-        # slim-bookworm; the job container runs as root and the
-        # Dockerfile's own apt-get proves the base can reach a mirror.
-        run: bun x playwright install --with-deps chromium
 
       - name: Frontend smoke (mocked backend)
         # Every /api call is intercepted in-browser, so there is no
         # backend and no seeding — 61 assertions in ~40s.
+        #
+        # NO BROWSER INSTALL STEP, on purpose. The CI image bakes
+        # chromium and its system libraries at PLAYWRIGHT_BROWSERS_PATH
+        # (infra/forge/boss-ci/Dockerfile, pinned to the workspace's
+        # @playwright/test 1.61.0), so the `bun x playwright install
+        # --with-deps chromium` that used to sit here downloaded a
+        # browser the image already had — from cdn.playwright.dev,
+        # which resolved to an unroutable IPv6 address and redded
+        # train #162 (a700d3a4) — and ran apt for libraries already
+        # present. A step that fetches from the public internet on
+        # every run is a network dependency the image was built to
+        # remove; the suite finds the baked browser through the
+        # image's own env. Moving the pin in package.json means
+        # moving it in the Dockerfile in the same car.
+        working-directory: apps/web
         run: bun run test:mocked
 
   fast:
     runs-on: docker
     needs: [locomotive]
     container:
-      image: 10.20.0.15:3000/david/boss-ci:rust1.96
+      image: 10.20.0.15:3000/david/boss-ci:${{ github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out from the forge, not github.com
+        # actions/checkout is a JavaScript action the runner pulls from
+        # github.com before the job starts; the runner's container DNS
+        # has no redundancy (see build-image's retry note), so one
+        # dropped lookup there reds the whole train with no car at fault
+        # — d9a34560. The repo is on the forge at a LAN IP, so a git
+        # clone by IP resolves no name. github.token is the job's own
+        # repo-scoped credential, the same one locomotive passes below.
+        env:
+          FORGE_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          git init -q .
+          git remote add origin \
+            "http://x-access-token:${FORGE_TOKEN}@10.20.0.15:3000/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth=1 origin "${GITHUB_REF}"
+          git checkout -q --force FETCH_HEAD
 
       - name: Format check
         run: cargo fmt --all -- --check
@@ -208,7 +422,7 @@ jobs:
     runs-on: docker
     needs: [locomotive]
     container:
-      image: 10.20.0.15:3000/david/boss-ci:rust1.96
+      image: 10.20.0.15:3000/david/boss-ci:${{ github.sha }}
     services:
       postgres:
         image: postgres:16
@@ -266,16 +480,29 @@ jobs:
       # This is the disposable-server case the guard's own message names.
       BOSS_TEST_ALLOW_PRODUCTION_SERVER: "1"
     steps:
-      # fetch-depth: 0 because the gate's migrations-append-only check
-      # asks git whether this branch modified a migration that already
-      # exists on the trunk. checkout@v4 defaults to a depth-1 clone,
-      # where there is no trunk to compare against — and that check
-      # refuses to run rather than pass silently, so a shallow clone
-      # would red every train instead of quietly under-covering. The
-      # extra history is cheap; the repo's .git is ~20M.
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      # THE FORGE IS THE TRUNK, AND IT IS ON THE LAN.
+      #
+      # Replaces actions/checkout@v4 (a github.com fetch — d9a34560, and
+      # the shape of the 2026-08-26 build-image DNS flake) with a git
+      # clone from the forge by IP, which resolves no name. Full history,
+      # not a single-ref shallow clone, because migrations-append-only
+      # asks git whether this branch touched a migration already on the
+      # trunk and resolves that trunk as origin/main: `git fetch origin`
+      # brings it, the second fetch brings the ref under test. checkout@v4
+      # gave this the same depth via fetch-depth: 0; the extra history is
+      # cheap, the repo's .git is ~20M. github.token is the job's own
+      # repo-scoped credential (locomotive below passes the same one).
+      - name: Check out from the forge, not github.com
+        env:
+          FORGE_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          git init -q .
+          git remote add origin \
+            "http://x-access-token:${FORGE_TOKEN}@10.20.0.15:3000/${GITHUB_REPOSITORY}.git"
+          git fetch -q origin
+          git fetch -q origin "${GITHUB_REF}"
+          git checkout -q --force FETCH_HEAD
 
       - name: Apply schema
         run: infra/postgres/migrate.sh -- psql "$DATABASE_URL"

@@ -148,7 +148,7 @@ pub async fn rebuild_people(pool: &PgPool) -> Result<RebuildReport, RebuildError
                                 return Ok(Applied::Skipped);
                             }
                         };
-                    crate::requisitions::upsert_requisition(&mut *conn, &req)
+                    crate::requisitions::upsert_requisition(&mut *conn, &req, ev.ts)
                         .await
                         .map_err(|e| e.to_string())?;
                     report.requisitions_upserted += 1;

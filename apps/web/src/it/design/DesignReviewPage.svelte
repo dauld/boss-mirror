@@ -1,5 +1,5 @@
 <script lang="ts">
-  // /system/design — the design-review station, rendered.
+  // /it/design — the design-review station, rendered.
   //
   // This page is a LENS: the packets are the `design-review` station's
   // evaluated queue, and the page's own identity (header, panel set)
@@ -361,8 +361,8 @@
           <code>docs/architecture-decisions.md</code>, the one
           current-truth record;
           <a
-            href={href('/system/kb')}
-            onclick={(e) => { e.preventDefault(); navigate(href('/system/kb')); }}
+            href={href('/it/kb')}
+            onclick={(e) => { e.preventDefault(); navigate(href('/it/kb')); }}
           >the IT Knowledge Base</a>
           is the in-app entry point.
         </p>

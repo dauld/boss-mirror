@@ -261,6 +261,51 @@ pub struct StepField {
     pub field_type: String,
     #[serde(default)]
     pub required: bool,
+    /// Which party supplies this field's value. `serde(default)` so
+    /// every field authored before this existed reads as `Executor` —
+    /// required-at-done, exactly the contract it already had.
+    #[serde(default)]
+    pub filled_by: FilledBy,
+    /// For an `array` field: the keys every element must carry, each
+    /// with a non-empty string value. Registry data, so a protocol can
+    /// state the SHAPE of its structured input and not only its
+    /// presence — a design doc's `questions` are `[{anchor, title,
+    /// proposal}]`, and eight packets in one session (2026-09-04/05)
+    /// were admitted with no `title` on any element and dead-ended at
+    /// "nothing to review". Empty (the default) means any element
+    /// shape is accepted, which is what every field authored before
+    /// this existed already meant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub item_keys: Vec<String>,
+}
+
+/// Who supplies a step field's value — the enforcement point follows
+/// the party who can actually fix an omission.
+///
+/// Required-at-done is correct for fields the EXECUTOR fills while
+/// doing the work (`scheduled_at`, `decision`): they cannot exist at
+/// create, so validating them there would be wrong. It is wrong for
+/// fields the FILER must supply for the work to be doable at all (a
+/// design review's `markdown`): deferring those to completion detonates
+/// the 400 on the executor mid-work — the party least able to fix it.
+/// A `Filer` field is validated at admission (job create), where the
+/// filer is still on the line; completion validation is unchanged.
+///
+/// Protocol data, not a code path (§9): which fields a step's filer
+/// owes is declared on the Workflow row (`filled_by = "filer"` in the
+/// bundle TOML), never matched on kind in core. The default keeps
+/// every existing spec byte-for-byte unchanged in meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilledBy {
+    /// Filled in during the work; validated when the step completes.
+    /// Today's behaviour, and the default so every field authored
+    /// before this existed keeps its current meaning.
+    #[default]
+    Executor,
+    /// Supplied by whoever files the Job; validated at admission so a
+    /// missing value refuses the packet before anyone claims it.
+    Filer,
 }
 
 /// One sign-off stamp (architecture-decisions.md §Step types are
@@ -658,6 +703,48 @@ mod tests {
         assert!(step.assignee_id.is_none());
         assert!(step.blocked_by.is_empty());
         assert_eq!(step.metadata, serde_json::json!({}));
+    }
+
+    #[test]
+    fn step_field_filled_by_defaults_to_executor_when_absent() {
+        // Every StepField written before `filled_by` existed — TOML
+        // seeds, JSON registry rows, STEP_CREATED payloads in the
+        // audit log — reads as Executor: required-at-done, today's
+        // contract, unchanged.
+        let f: StepField = serde_json::from_value(serde_json::json!({
+            "name": "scheduled_at",
+            "field_type": "date-time",
+            "required": true,
+        }))
+        .unwrap();
+        assert_eq!(f.filled_by, FilledBy::Executor);
+        assert_eq!(FilledBy::default(), FilledBy::Executor);
+    }
+
+    #[test]
+    fn step_field_filled_by_round_trips_kebab_case() {
+        let f = StepField {
+            name: "markdown".into(),
+            field_type: "string".into(),
+            required: true,
+            filled_by: FilledBy::Filer,
+            item_keys: Vec::new(),
+        };
+        let json = serde_json::to_value(&f).unwrap();
+        assert_eq!(json["filled_by"], serde_json::json!("filer"));
+        let back: StepField = serde_json::from_value(json).unwrap();
+        assert_eq!(back, f);
+
+        // And the default serializes explicitly, so a registry row
+        // says what it means rather than leaning on a reader's
+        // default.
+        let exec = StepField {
+            filled_by: FilledBy::Executor,
+            item_keys: Vec::new(),
+            ..f
+        };
+        let json = serde_json::to_value(&exec).unwrap();
+        assert_eq!(json["filled_by"], serde_json::json!("executor"));
     }
 
     #[test]

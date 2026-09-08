@@ -258,3 +258,47 @@ fn proof_total_debits_plus_credits_never_panics() {
     let c = draft.total_credits();
     assert_eq!(draft.is_balanced(), d == c);
 }
+
+// ---------------------------------------------------------------------------
+// Shape 5: keg-deposit release split (one debit, remainder-absorbing
+// credit pair)
+//
+// Matches keg_deposit_released: DR 2400 deposit; CR 1000 refund =
+// deposit × returned / out (integer floor); CR 4150 forfeited =
+// deposit − refund. Balance holds by construction (the two credits
+// are defined to sum to the debit); the load-bearing facts to prove
+// are that BOTH credits are non-negative under the rule's
+// preconditions — a negative line would trip the DB's per-line CHECK
+// — and that the i128 intermediate keeps the product from wrapping.
+// Arithmetic-only on purpose: the heap-building proofs above are
+// parked on CBMC allocation blowup, and the vec adds nothing here.
+// ---------------------------------------------------------------------------
+
+#[kani::proof]
+fn proof_keg_deposit_release_split_conserves() {
+    let deposit: i64 = kani::any();
+    let out: i64 = kani::any();
+    let returned: i64 = kani::any();
+    // Rule preconditions (keg_deposit_released rejects everything
+    // else): positive deposit, positive fleet, returned within the
+    // fleet (lost = out − returned makes conservation implicit).
+    kani::assume(deposit > 0 && deposit <= 1_000_000_000_000);
+    kani::assume(out > 0 && out <= 1_000_000);
+    kani::assume(returned >= 0 && returned <= out);
+
+    let refund = ((deposit as i128 * returned as i128) / out as i128) as i64;
+    let forfeited = deposit - refund;
+
+    // The floor keeps the refund inside the deposit…
+    assert!(refund >= 0);
+    assert!(refund <= deposit);
+    // …so the remainder credit can never go negative…
+    assert!(forfeited >= 0);
+    // …and the two credits drain the debit exactly.
+    assert_eq!(refund + forfeited, deposit);
+    // Edge honesty: full return refunds everything, so no forfeiture
+    // line survives the zero-line filter.
+    if returned == out {
+        assert_eq!(forfeited, 0);
+    }
+}

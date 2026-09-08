@@ -24,12 +24,20 @@
 #
 # Two properties are pinned, and the second is the one that matters:
 #
-#   1. the variable is not fed from a Secret — a secret VALUE here is
-#      silently read as a filename, which is the whole bug;
+#   1. the variable is not fed from a Secret — a secret VALUE handed to
+#      the ENV is silently read as a filename, which is the whole bug;
 #   2. the path it names lives under a mountPath backed by a
-#      persistentVolumeClaim — because a key written to the container
-#      filesystem is a new key on every restart, which is the same
-#      outage wearing a different hat.
+#      persistentVolumeClaim OR a Secret volume — because a key written
+#      to the container filesystem is a new key on every restart, which
+#      is the same outage wearing a different hat.
+#
+# Note the two senses of "secret" here, which are opposite: property (1)
+# forbids a secret VALUE on the ENV (secretKeyRef — the value lands as a
+# nonexistent filename); property (2) ALLOWS a secret VOLUME (a real
+# file the key is read from). session.key moved from the boss-auth PVC
+# to the read-only `boss-session-key` Secret, which projects identical
+# bytes into every pod — the RollingUpdate-correct form of persistence,
+# not just restart-safe but same-across-pods.
 #
 # The default in main.rs (/var/lib/boss-gateway/session.key) satisfies
 # neither in this deployment: nothing is mounted there. So "just unset
@@ -75,17 +83,22 @@ case "$value" in
         exit 1 ;;
 esac
 
-# (2) Which mountPaths are actually backed by a claim?
-pvc_volumes=$(awk '
+# (2) Which mountPaths are actually backed by a volume that survives a
+# restart with the SAME bytes — a persistentVolumeClaim, or a Secret
+# volume (projected identically into every pod). The `secret:` match is
+# anchored to `{` or end-of-line so it catches the volume key and NOT
+# `secretKeyRef`/`secretName`/`imagePullSecrets`.
+persisted_volumes=$(awk '
     /^[[:space:]]*-[[:space:]]*name:[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*$/ {
         sub(/^[^:]*:[[:space:]]*/, ""); gsub(/[[:space:]]/, "");
         cur = $0; next
     }
     /persistentVolumeClaim/ { if (cur != "") { print cur; cur = "" } }
+    /^[[:space:]]*secret:[[:space:]]*(\{|$)/ { if (cur != "") { print cur; cur = "" } }
 ' "$MANIFEST" | sort -u)
 
 persisted=""
-for v in $pvc_volumes; do
+for v in $persisted_volumes; do
     # `head -1` BEFORE stripping whitespace, not after: a volume can be
     # mounted by more than one container (boss-auth is mounted twice
     # here), and a whitespace strip across a two-line stream deletes the
@@ -96,7 +109,7 @@ for v in $pvc_volumes; do
 done
 
 if [ -z "$persisted" ]; then
-    echo "session-key-persists: no PVC-backed mountPath found in $MANIFEST." >&2
+    echo "session-key-persists: no PVC- or Secret-backed mountPath found in $MANIFEST." >&2
     echo "    Either the volumes moved or this lint's parse is stale; fix" >&2
     echo "    the lint rather than deleting it — the failure it guards is" >&2
     echo "    silent." >&2

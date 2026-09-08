@@ -148,9 +148,12 @@ fn take_chars(s: &str, n: usize) -> String {
 }
 
 pub async fn run(want: &str) -> Result<()> {
-    // jobs-api. Port from boss-ports (`name: "jobs", prod: 7900`); the
-    // infra scripts hardcode it the same way.
-    let base = std::env::var("BOSS_JOBS_URL").unwrap_or_else(|_| "http://127.0.0.1:7900".into());
+    // jobs-api base, resolved once. No default on purpose: with
+    // `BOSS_JOBS_URL` unset this refuses and names the system of record
+    // rather than defaulting to 127.0.0.1, which on boss-gcp is a
+    // second, older stack holding different data (packet aa783636).
+    // Shared with the other read verbs via gate::resolve_jobs_base.
+    let base = crate::gate::resolve_jobs_base(None)?;
     let url = format!("{base}/api/jobs?kind=user-feedback&limit=200");
     let client = reqwest::Client::new();
     let resp = client
@@ -239,4 +242,33 @@ pub async fn run(want: &str) -> Result<()> {
         println!();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// `boss queue` used to default `BOSS_JOBS_URL` to
+    /// `http://127.0.0.1:7900`, so run on boss-gcp without an instance
+    /// set it read the SECOND, older stack — a confident answer about
+    /// the wrong deployment (packet aa783636). It now resolves through
+    /// `gate::resolve_jobs_base(None)`, which refuses when the env names
+    /// no instance and points at the system of record. `queue` has no
+    /// `--jobs-url` flag, so `None` is the whole input; this pins the
+    /// refusal it now wires in.
+    #[test]
+    fn without_an_instance_the_queue_refuses_and_names_the_record() {
+        let m = crate::gate::resolve_jobs_base_from(None, None)
+            .expect_err("no BOSS_JOBS_URL must refuse, not default to 127.0.0.1")
+            .to_string();
+        assert!(m.contains("10.20.0.34:7900"), "must name the record: {m}");
+        assert!(m.contains("127.0.0.1:7900"), "must warn of the trap: {m}");
+    }
+
+    #[test]
+    fn an_instance_env_gives_the_queue_its_base() {
+        assert_eq!(
+            crate::gate::resolve_jobs_base_from(None, Some("http://sor:7900".into())).unwrap(),
+            "http://sor:7900",
+            "BOSS_JOBS_URL, when set, is used verbatim"
+        );
+    }
 }

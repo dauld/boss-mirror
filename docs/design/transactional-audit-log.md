@@ -1,6 +1,6 @@
 # Transactional audit log — the event write path
 
-**Status:** approved — the contract below is settled and in force (the
+**Status**: approved — the contract below is settled and in force (the
 arc that established it completed 2026-07-29; earlier decision history
 folded into [docs/architecture-decisions.md](../architecture-decisions.md)
 §Correctness protocol & the audit log). Q2 and Q6, the two questions

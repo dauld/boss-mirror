@@ -157,10 +157,16 @@ title = "validate"
 kind = "task"
 ready_when = "steps.author.done"
 title_template = "Validate spec"
+# The next step is a sign-off, and required metadata is checked at
+# COMPLETION — so the constraint that guarantees the approver has
+# something to read lives HERE, not there. Phase 4 of the viability
+# lint refuses the alternative.
+fields = [{ name = "sign_off_context", field_type = "string", required = true }]
 
 [[workflow.step]]
 title = "approve"
 kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
 ready_when = "steps.validate.done"
 title_template = "Approve spec"
 authority_role = "workflow-approver"
@@ -204,6 +210,23 @@ required = true
 name = "evidence"
 field_type = "string"
 required = true
+# The decider's brief, written at routing time by whoever chose
+# `design`: what they must READ (markdown — the measurement, the
+# options, the artifact) and the answer you would give. Optional here
+# because only the design route needs them; the decide step's surface
+# says loudly when they are absent. They live on THIS step so the
+# route and its brief are one write — 2026-09-05, three items reached
+# David's queue as "Decide the design" with nothing to read, because
+# the brief had gone onto the triage evidence and the decide step was
+# a bare task.
+[[workflow.step.fields]]
+name = "context_md"
+field_type = "string"
+required = false
+[[workflow.step.fields]]
+name = "proposed"
+field_type = "string"
+required = false
 
 [[workflow.step]]
 title = "measure"
@@ -214,7 +237,14 @@ authority_role = "platform-admin"
 
 [[workflow.step]]
 title = "design-review"
-kind = "task"
+# answer-question, not task: the decision surface (question, the
+# asker's markdown context, a proposed answer to copy, verdict +
+# answer) — the same step user-feedback's design route already uses.
+# A bare task showed a title and two empty boxes, so the person
+# deciding had nothing to decide FROM. The plugin reads context_md
+# and proposed from this step, then the packet, then the triage step
+# that routed here.
+kind = "answer-question"
 ready_when = "steps.triage.done AND steps.triage.metadata.disposition = \"design\""
 title_template = "Decide the design"
 authority_role = "platform-admin"
@@ -308,18 +338,77 @@ ready_when = "true"
 title_template = "Draft written"
 metadata_defaults = { trigger_kind = "operator", trigger_name = "author-drafts-a-design-doc" }
 
+# `title`, `markdown` and `questions` are FILER fields: the review is
+# not doable without the doc under review and the questions it asks,
+# so their absence is refused at admission — where the filer is still
+# on the line — rather than detonating required-at-done on the
+# reviewer mid-review (packet 27de796e; it happened twice on one
+# hand-filed packet, 2026-09-03). The metadata_defaults bind them from
+# the Job's own metadata, which is where `boss design` (and any hand
+# filing worth admitting) puts them; an unbound `{metadata.…}` token
+# stays literal and admission reads that literal as missing.
+#
+# `questions` also declares its SHAPE. The tracker renders
+# `[{anchor, title, proposal}]` and nothing else; a protocol that
+# stated only "questions: array" admitted eight title-less packets in
+# one session (2026-09-04/05, packet 2e136a67) that each dead-ended
+# at "nothing to review". `item_keys` is the registry saying what an
+# element is, so admission refuses the malformed draft by element and
+# key instead of the reviewer discovering an empty screen. An EMPTY
+# array admits: it is `boss design --no-questions` — a doc that
+# records a decision and asks nothing — and `no_open_questions` on
+# the Job carries that intent explicitly.
 [[workflow.step]]
 title = "review"
 kind = "review-design"
 ready_when = "steps.drafted.done"
 title_template = "Answer the open questions"
 authority_role = "platform-admin"
+metadata_defaults = { title = "{metadata.title}", markdown = "{metadata.markdown}", questions = "{metadata.questions}" }
+
+[[workflow.step.fields]]
+name = "title"
+field_type = "string"
+required = true
+filled_by = "filer"
+
+[[workflow.step.fields]]
+name = "markdown"
+field_type = "string"
+required = true
+filled_by = "filer"
+
+[[workflow.step.fields]]
+name = "questions"
+field_type = "array"
+required = true
+filled_by = "filer"
+item_keys = ["anchor", "title", "proposal"]
+
+# The fold is where a settled doc pays into current truth. Published
+# live as design-doc v4 (2026-09-05) before it reached this bundle;
+# the step text here is that row's, verbatim.
+[[workflow.step]]
+title = "fold"
+kind = "task"
+ready_when = "steps.review.done"
+title_template = "Fold it into current truth"
+metadata_defaults = { procedure = """State what CURRENT TRUTH gains from this doc now that its questions are answered, and where. 'Nothing' is a legitimate answer and still has to be written down with its reason — that is the whole point of the step existing.
+
+The fold is the current-truth reading, assembled per topic, with the decision history beside it rather than inlined (Q2). Today that is docs/architecture-decisions.md, maintained by hand because merging prose has nuance a generator cannot judge. This step does not automate that judgement; it makes skipping it visible.
+
+Do NOT flush decisions into a per-doc markdown file. Q4 settled that the decisions live on the packet and the fold reads them from there; writing them back into files is work in the direction we are abandoning.""" }
+
+[[workflow.step.fields]]
+name = "fold_change"
+field_type = "string"
+required = true
 
 [[workflow.step]]
 title = "published"
 kind = "outcome"
-ready_when = "steps.review.done"
-title_template = "Settled — carry it to a file"
+ready_when = "steps.fold.done"
+title_template = "Settled"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "published" }
 
@@ -452,10 +541,11 @@ terminal = { outcome = "unfounded" }
 #
 # boss-maintenance-wrap.sh states the contract already: "the timer is
 # the EXECUTOR, the Job is the VISIBILITY". ExecStartPre opens (or
-# reuses) a Job, ExecStartPost completes it, and a FAILED run completes
-# nothing — so the Job stays open on the fleet view until a later run
-# succeeds or a human closes it. Three chores were wired that way:
-# backup, audit-integrity, ledger-replay.
+# reuses) a Job and ExecStopPost records its verdict — `ok` closes it
+# "Maintenance completed", anything else "Maintenance failed" (since
+# 2026-09-05; before that a failed run recorded nothing and its Job sat
+# open looking like a run in progress). Three chores were wired that
+# way: backup, audit-integrity, ledger-replay.
 #
 # Five were not, and had no packet, no findings, no event-log trace and
 # nobody's queue. A silent failure in any of them looks exactly like a
@@ -502,10 +592,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # boss-ledger-recognize.service
 [[workflow]]
@@ -538,10 +641,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # boss-ml-inference-batch.service
 [[workflow]]
@@ -574,10 +690,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # boss-messages-events-purge.service
 [[workflow]]
@@ -610,10 +739,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # boss-files-gc.service
 [[workflow]]
@@ -646,10 +788,115 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
+
+# boss-estate-observe-host.service
+[[workflow]]
+kind = "maintenance-estate-observe-host"
+label = "estate host observation"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "The 10:25Z host half of the estate observation loop (boss-estate-observe-host): the hosts the cluster observer cannot see, recorded so 'nothing watches it' stops being true (a5d14977)."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "systemd-timer" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Run to completion"
+authority_role = "platform-admin"
+fields = [{ name = "result", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
+title_template = "Maintenance completed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
+
+# boss-estate-observe-units.service
+[[workflow]]
+kind = "maintenance-estate-observe-units"
+label = "estate unit observation"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "The five-minute unit half of the host observation loop (boss-estate-observe-units): non-cluster hosts report their own unit health, so 'is boss-train.service alive' is a SoR read instead of a human on the host (729329c6)."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "systemd-timer" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Run to completion"
+authority_role = "platform-admin"
+fields = [{ name = "result", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
+title_template = "Maintenance completed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # boss-views-catchup.service
 [[workflow]]
@@ -679,10 +926,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # boss-search-reindex.service
 [[workflow]]
@@ -712,10 +972,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # boss-deploy-confirm.service
 [[workflow]]
@@ -745,10 +1018,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 
 # THE FORGE HOST'S OWN CHORES.
@@ -791,10 +1077,23 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # cluster-deploy-runner.service (forge host)
 [[workflow]]
@@ -824,10 +1123,168 @@ fields = [{ name = "result", field_type = "string", required = true }]
 [[workflow.step]]
 title = "completed"
 kind = "outcome"
-ready_when = "steps.run.done"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
 title_template = "Maintenance completed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
+
+# disk-floor-sweep.service (forge host)
+[[workflow]]
+kind = "maintenance-disk-floor-sweep"
+label = "Forge disk floor sweep"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Hourly: below BOSS_DISK_FLOOR_GB free on the forge host's root volume, reclaims regenerable docker caches in a fixed order (build cache, dangling images, registry-verified old tags) and stops at the floor. Never volumes, never non-docker paths. A run that cannot meet the floor fails the unit and leaves this packet open - the alarm. Exists because cluster-deploy-runner's cleanup only runs when forge main moves, which needs CI, which needs disk (2026-09-02: every train blocked)."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "systemd-timer" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Run to completion"
+authority_role = "platform-admin"
+fields = [{ name = "result", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
+title_template = "Maintenance completed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
+
+# forge-converge.service (forge host)
+[[workflow]]
+kind = "maintenance-forge-converge"
+label = "Forge host self-converge"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Runs infra/forge/install.sh from forge main on a timer, so a unit that lands on main installs itself on the next tick instead of waiting for a hand-run over ssh. The fix for the 'landed but never installed' class - disk-floor-sweep sat uninstalled through the 2026-09-03 fill because nothing ran install.sh."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "systemd-timer" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Run to completion"
+authority_role = "platform-admin"
+fields = [{ name = "result", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
+title_template = "Maintenance completed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
+
+# maintenance-cluster-watchdog — the loop that knows the cluster is
+# working from OUTSIDE it (infra/forge/cluster-watchdog.sh, every five
+# minutes on the forge). Reads /api/jobs/health, compares what the
+# deployment serves with the build the converge last stamped as good,
+# and rolls to that build by name when the API has been dark longer
+# than a deploy; the packet is this loop's visibility on days it can
+# reach the API, never its precondition (2026-09-05: four hours dark
+# because every loop that could act needed the API it watched).
+[[workflow]]
+kind = "maintenance-cluster-watchdog"
+label = "Cluster watchdog"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Every five minutes the forge reads the cluster's jobs API from outside it and compares what the deployment serves with the last converged build. Dark past a deploy's worth of checks on a non-converged image, it rolls the deployment to the converged build by name; dark on the converged build itself, it says hands are needed. The packet records the run when the API can take it; the run never waits for the packet."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "systemd-timer" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Run to completion"
+authority_role = "platform-admin"
+fields = [{ name = "result", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
+title_template = "Maintenance completed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
 
 # ---------------------------------------------------------------------------
 # ship-a-change — the delivery protocol itself, and the last of the
@@ -953,3 +1410,1034 @@ ready_when = "steps.scope.done AND job.metadata.abandoned = \"true\""
 title_template = "Abandoned"
 terminal = { outcome = "abandoned" }
 metadata_defaults = { outcome_kind = "aborted" }
+
+# ---------------------------------------------------------------------
+# rotate-a-credential — one credential rotation, scope to revoke.
+#
+# The in-tree source of the protocol the credential broker executes
+# (packet 7ee101aa). v1 and v2 were authored live via the workflow
+# API and had NO in-tree source; this row is the spec as of v3, so a
+# fresh deployment seeds the same protocol the live one runs and the
+# protocol is reviewable in a diff. LIVE PUBLISH IS SEPARATE: on the
+# system of record, registry rows publish via the API (a new version
+# superseding v2) — the bundle seeds fresh deployments only and never
+# overwrites a live registry.
+#
+# The Subject is the credential's REGISTRY id (the `credentials`
+# table row, e.g. boss-dev-forge-token) — the durable identity that
+# survives rotation. Completing `scope` (the dedicated
+# `credential-rotation` StepType) hands the rotation to the machine:
+# the broker rule fires on `step.done.credential-rotation`, mints,
+# installs, verifies by effect, revokes what the scoper named, and
+# records each phase twice — as the packet's own machine steps below
+# AND as `credential.minted` / `.installed` / `.verified` /
+# `.revoked` events on the audit log (the maiden rotation recorded
+# only step metadata, findable by archaeology, not by kind).
+#
+# v3 changes, from David's review of the maiden rotation:
+#   - `old_token` surfaced inline on the scope step (optional): the
+#     scoper names the kill target so the machine can revoke
+#     end-to-end. Absent, the broker leaves `revoke` to its assignee.
+#   - `revoke` carries its human runbook as a `procedure`, for the
+#     packet where no old_token was named.
+#
+# NO FIELD EVER CARRIES A CREDENTIAL VALUE — identifiers (a token
+# name or numeric id) and observed effects only, on steps and events
+# alike.
+[[workflow]]
+kind = "rotate-a-credential"
+label = "Rotate a credential"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Replace one credential's value end-to-end: scope why and where, mint the replacement, install it where its consumers read it, verify it by effect, then — and only then — revoke the old one. The Subject is the credential's registry id (see /api/credentials), so \"when was this last rotated, and why\" is a Subject-history question. A human completes `scope`; the credential broker executes the four machine phases and records each as the packet's own steps plus a credential.* event on the audit log. The destructive step runs LAST, after the new credential is proven working — order is the protocol. No field ever carries a credential value: identifiers and observed effects only."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "requested"
+kind = "trigger"
+ready_when = "true"
+title_template = "Rotation requested"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "operator-requests-a-rotation" }
+
+[[workflow.step]]
+title = "scope"
+kind = "credential-rotation"
+ready_when = "steps.requested.done"
+title_template = "Scope the rotation"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+# Inline on the workflow (v3) as well as on the kind bundle: the
+# scoper names the OLD token's identifier at the issuer so the broker
+# can revoke end-to-end. Optional — absent means the revoke step
+# waits for its assignee. NEVER the value.
+name = "old_token"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "issue"
+kind = "task"
+ready_when = "steps.scope.done"
+title_template = "Mint the replacement"
+[[workflow.step.fields]]
+name = "issued"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "issuer"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "install"
+kind = "task"
+ready_when = "steps.issue.done"
+title_template = "Install into the declared storage"
+[[workflow.step.fields]]
+name = "installed"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "permissions"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "verify"
+kind = "task"
+ready_when = "steps.install.done"
+title_template = "Verify by effect"
+[[workflow.step.fields]]
+name = "verified"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "method"
+field_type = "browser|api|log"
+required = false
+
+[[workflow.step]]
+title = "revoke"
+kind = "task"
+ready_when = "steps.verify.done"
+title_template = "Revoke the old credential"
+metadata_defaults = { procedure = "If the broker revoked automatically (the scope step named old_token), this step is already completed with evidence — nothing to do. Otherwise: identify the OLD token in the forge UI by name — the issue step's recorded evidence names the NEW token (secret-name plus the packet id's first eight), so the old one is the same credential's instance WITHOUT this packet's suffix; confirm nothing still consumes it (the registry row's consumers list), delete it in the forge UI or via the admin API, and record the identifier you deleted. NEVER touch boss-credential-broker-root — it is the root credential the broker mints WITH, not a rotation product." }
+[[workflow.step.fields]]
+name = "revoked"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "confirmed_dead"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "rotated"
+kind = "outcome"
+ready_when = "steps.revoke.done"
+title_template = "Rotated"
+terminal = { outcome = "rotated" }
+metadata_defaults = { outcome_kind = "completed" }
+
+[[workflow.step]]
+title = "abandoned"
+kind = "outcome"
+ready_when = "steps.scope.done AND job.metadata.abandoned = \"true\""
+title_template = "Abandoned"
+terminal = { outcome = "abandoned" }
+metadata_defaults = { outcome_kind = "aborted" }
+
+# ---------------------------------------------------------------------
+# maintenance-forge-token-audit — the recurring half of the credential
+# hygiene David asked for on 2026-08-27, after a disclosed forge token
+# took a database query to identify because nothing recorded which
+# process held which credential.
+#
+# It SURFACES and never prunes. Deleting a token is administration and
+# stays with a human, the same way `issue` and `revoke` are the human
+# steps of rotate-a-credential. What this removes is the excuse: after
+# it runs, "which of these may I delete" has a written answer.
+[[workflow]]
+kind = "maintenance-forge-token-audit"
+label = "Forge token audit"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Compare the forge's live access tokens against the declared inventory in infra/platform/forge-tokens.toml and report the difference. Four kinds of drift: a token on the forge that no one declared (an unattributable credential, which in practice is one nobody dares revoke), a declared token missing from the forge (a revocation nobody wrote down, and a consumer about to fail), a scope that widened behind our back, and a token unused past the staleness window. A declaration entry whose consumer is still UNKNOWN counts as debt in its own right, so a forge that matches the declaration perfectly does NOT pass while any consumer is unidentified. The check is read-only against the forge's SQLite database and never reads the credential columns; the only credential-shaped value it prints is the last eight characters, which is what the forge's own UI shows."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "systemd-timer" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Run to completion"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "result"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
+title_template = "Maintenance completed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
+
+# ---------------------------------------------------------------------
+# THE TWO MOST-EDITED PROTOCOLS, moved here from Rust (e332a320).
+#
+# user-feedback reached v13 and pr-train v16 through the API, and both
+# were ALSO maintained by hand in registry.rs so a fresh install seeded
+# the same thing — 453 lines of Rust kept equal to production by
+# somebody's diligence. There was no drift when this was measured, and
+# that is the point: the mechanism was a habit, and CLAUDE.md 9a is
+# explicit that a habit standing where a mechanism belongs is the thing
+# to fix. Nothing compared the two, because bootstrap_reconcile
+# correctly preserves operator-edited rows and therefore never looks.
+# The failure mode was silent and only reachable on a fresh install —
+# the one path with no operator to notice.
+#
+# These blocks were GENERATED from the live v13 and v16 specs and
+# verified to round-trip: emitted, parsed back, and compared
+# field-by-field against the live JSON before the Rust was deleted.
+# ---------------------------------------------------------------------
+
+[[workflow]]
+kind = "user-feedback"
+label = "User feedback"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Feedback a user sent from the chrome bar. The Subject is the surface it is about (a `custom` Subject whose id is the route path), so \"what have people said about this page\" is a Subject-history question rather than a report someone has to build. Modelled as a Job deliberately: feedback is work, and work that lives outside the Job model is work the system cannot route, own, or audit. Triage forks on a disposition, so routing an item is a recorded decision that opens the next step."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "submitted"
+kind = "trigger"
+ready_when = "true"
+title_template = "Feedback submitted"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "user-submits-feedback" }
+
+[[workflow.step]]
+title = "triage"
+kind = "task"
+ready_when = "steps.submitted.done"
+title_template = "Triage feedback"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "disposition"
+field_type = "reproduce|design|build|duplicate|needs-info|decline"
+required = true
+[[workflow.step.fields]]
+name = "finding"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "investigate"
+kind = "task"
+ready_when = "steps.triage.done AND steps.triage.metadata.disposition = \"reproduce\""
+title_template = "Reproduce and investigate"
+authority_role = "platform-admin"
+metadata_defaults = { disposition = "resolved" }
+[[workflow.step.fields]]
+name = "disposition"
+field_type = "resolved|design|build|needs-info|duplicate|decline"
+required = true
+[[workflow.step.fields]]
+name = "finding"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "design-review"
+kind = "answer-question"
+ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"design\") OR (steps.investigate.done AND steps.investigate.metadata.disposition = \"design\")"
+title_template = "Decide the design"
+authority_role = "platform-admin"
+metadata_defaults = { verdict = "" }
+
+[[workflow.step]]
+title = "build"
+kind = "task"
+ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"build\") OR (steps.investigate.done AND steps.investigate.metadata.disposition = \"build\") OR (steps.design-review.done AND steps.design-review.metadata.verdict = \"approved\")"
+title_template = "Build the change"
+authority_role = "platform-admin"
+
+[[workflow.step]]
+title = "needs-info"
+kind = "task"
+ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"needs-info\") OR (steps.investigate.done AND steps.investigate.metadata.disposition = \"needs-info\")"
+title_template = "Waiting on the reporter"
+authority_role = "platform-admin"
+
+[[workflow.step]]
+title = "duplicate"
+kind = "outcome"
+ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"duplicate\") OR (steps.investigate.done AND steps.investigate.metadata.disposition = \"duplicate\")"
+title_template = "Closed as a duplicate"
+terminal = { outcome = "duplicate" }
+metadata_defaults = { outcome_kind = "withdrawn" }
+
+[[workflow.step]]
+title = "declined"
+kind = "outcome"
+ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"decline\") OR (steps.investigate.done AND steps.investigate.metadata.disposition = \"decline\") OR (steps.design-review.done AND steps.design-review.metadata.verdict = \"declined\")"
+title_template = "Closed without action"
+terminal = { outcome = "declined" }
+metadata_defaults = { outcome_kind = "aborted" }
+
+[[workflow.step]]
+title = "closed"
+kind = "outcome"
+ready_when = "(steps.investigate.done AND steps.investigate.metadata.disposition = \"resolved\") OR (steps.design-review.done AND steps.design-review.metadata.verdict = \"answered\") OR steps.build.done OR steps.needs-info.done"
+title_template = "Feedback closed"
+terminal = { outcome = "completed" }
+metadata_defaults = { outcome_kind = "completed" }
+
+[[workflow]]
+kind = "pr-train"
+label = "PR train"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "The twice-daily release train: collects branches whose ship-a-change Jobs are ready for review, assembles them into one batched PR, and closes each step on evidence — the CI verdict, the observed merge, the deploys that carried it out. Driven by infra/train/conductor.sh from a systemd timer."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Train window opened"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "pr-train-window" }
+
+[[workflow.step]]
+title = "collect"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Collect what is ready to board"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "boarded"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "assemble"
+kind = "task"
+ready_when = "steps.collect.done"
+title_template = "Assemble the train branch"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "train_ref"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "pr"
+kind = "task"
+ready_when = "steps.assemble.done"
+title_template = "Open the batched PR"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "pr_url"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "ci"
+kind = "task"
+ready_when = "steps.pr.done"
+title_template = "CI verdict"
+authority_role = "platform-admin"
+metadata_defaults = { notify_on_done = true }
+[[workflow.step.fields]]
+name = "result"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "merged"
+kind = "task"
+ready_when = "steps.pr.done"
+title_template = "Merged into main"
+authority_role = "platform-admin"
+metadata_defaults = { notify_on_done = true }
+[[workflow.step.fields]]
+name = "merge_ref"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "deployed"
+kind = "task"
+ready_when = "steps.merged.done"
+title_template = "Deployed to the playground"
+authority_role = "platform-admin"
+metadata_defaults = { notify_on_done = true }
+[[workflow.step.fields]]
+name = "deployed"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "converged"
+kind = "task"
+ready_when = "steps.deployed.done"
+title_template = "Cluster converged"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "cluster_commit"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "verified"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "arrived"
+kind = "outcome"
+ready_when = "steps.converged.done AND steps.ci.done"
+title_template = "Train arrived"
+terminal = { outcome = "arrived" }
+metadata_defaults = { outcome_kind = "completed" }
+
+[[workflow.step]]
+title = "cancelled"
+kind = "outcome"
+ready_when = "steps.collect.done AND job.metadata.empty = \"true\""
+title_template = "Cancelled"
+terminal = { outcome = "cancelled" }
+metadata_defaults = { outcome_kind = "aborted" }
+
+
+# ---------------------------------------------------------------------
+# protocol-experiment — the experiment IS a packet (6ea5a12a).
+#
+# Q3 of network-experiments.md, as David answered it (574c2adf,
+# 2026-08-22): "let's make experiments packets with promoted / retired
+# terminal states" — so there is no experiments table and no
+# experiments registry; the network's own machinery carries its own
+# A/Bs. The protocol below was authored and iterated LIVE (v1→v5,
+# 2026-08-26) through the registry, and real experiments have run
+# through it; this entry is the residue, carried here so a fresh
+# deployment ships the protocol at all. The seed binary inserts only
+# when the kind is absent, so live registries that have already moved
+# past this body are never touched. The body is the live v5 row,
+# verbatim.
+#
+# Q4 (same review): experimenting is limited to the IT department +
+# platform-admins for now — enforced the way every platform protocol
+# is gated, `authority_role = "platform-admin"` on each acting step.
+#
+# SPLIT ADMISSION (Tier 2) reads an OPEN packet of this kind whose JOB
+# metadata declares, on top of the steps below:
+#
+#   kind_under_test    — the workflow kind whose admission splits
+#   control_version    — version pinned to the control arm
+#   candidate_version  — version pinned to the candidate arm (a draft,
+#                        until a promote publishes it)
+#   split              — candidate share in percent, 0-100 (default 50)
+#
+# While the packet is open, every new packet of that kind hash-splits
+# by its own job id into an arm, pins to that arm's version, and is
+# stamped `experiment_arm` / `experiment_id` — the window is the
+# packet's open interval, and the per-kind terminal report groups by
+# (version, arm). The keys live in job metadata rather than step
+# fields because v5 deliberately widened the STEP fields (`control` /
+# `candidate`) to free text for non-workflow experiments; a
+# workflow-version A/B declares the machine-readable half up here.
+# boss-jobs/src/experiments.rs owns the contract.
+
+[[workflow]]
+kind = "protocol-experiment"
+label = "Experiment"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = """
+An A/B between two things, with the hypothesis stated BEFORE the result is known.
+
+THE ORDERING IS THE POINT. `state` cannot be skipped and `measure` cannot open until it closes, so the prediction, the metric and the decision rule are on the record with an audit timestamp that precedes the numbers. That is what makes the prediction falsifiable rather than a story told afterwards. Three changes on 2026-08-26 were predicted confidently and all three were wrong - more cores would speed the gate (it was bound at 4, not 20), the cgroup fix would help (16% slower), the node resets were thermal (a boot-stage timer, at 40C and idle). None needed statistics to catch; they needed the claim written down first.
+
+v5 WIDENS THE ARMS FROM PROTOCOL VERSIONS TO ANYTHING. Until now `control_version` and `candidate_version` were workflow versions and the measurement source was fixed as the per-version terminal report. That made the protocol unable to hold the experiments actually worth running: gate concurrency, build width, a test-harness change, a scheduling policy. Every one of those is a control, a candidate, a metric and a rule stated in advance - the same discipline over a different subject. The fields are now `control` and `candidate`, free text naming whatever the two arms are, and `source` on `measure` says where the numbers came from. A workflow-version A/B still fits: name the versions in the arms and the terminal report as the source.
+
+v5 ALSO MAKES CHEAPNESS A MEASUREMENT RATHER THAN A CLAIM. `decide` now requires `elapsed` - the wall clock from starting the run to writing the verdict. If the argument for empirical testing is that it is cheap, every experiment should carry its own price tag, and the distribution of that field should settle the argument one way or the other without anybody having to be persuaded. An experiment that took ten minutes and overturned a confident belief is the case for the practice; one that took three days to return inconclusive is evidence against, and should be just as visible.
+
+ACCEPTANCE IS DELIBERATELY WEAK FOR NOW. `decision_rule` is free text, so 'candidate is not worse on cycle time' is a legitimate rule at current volume. The machinery does not change when the threshold tightens to a real significance test - only the sentence in that field does. `sample_floor` is where you say how little data you are willing to decide on, in advance, so that stopping when you like the answer is visible as a departure from your own rule rather than as a judgement call.
+
+n IS OFTEN 1 HERE, AND THAT IS NOT AUTOMATICALLY A FLAW. Much of what gets tested is a deterministic build-and-test workload, not a stochastic process; the threat to validity is systematic - contention, caching, a stale artefact - rather than sampling noise. Which is why `confounds` is required on `decide` and is usually the field that matters most. A confidently-stated n of 1 with the confounds named beats n of 5 with them ignored.
+
+v2 made the terminals EXCLUSIVE. In v1 `promoted` and `retired` shared `ready_when: steps.decide.done`, so closing `decide` made both ready and an actor could complete both - which happened on the first real experiment (cf832288): a confirmed hypothesis recorded with both terminals complete, job outcome landing on whichever was written last. A fork needs a discriminator, not two doors with the same lock.
+
+The publish gate then refused THAT: a fork over a free-text field needs a fallback successor, or a typo in `verdict` strands the packet with no reachable terminal. The fallback is `inconclusive` - not a workaround, but the honest outcome for most experiments at this volume. A protocol offering only promote or retire quietly pressures every result into one. v4 closed the verdict set for the same reason the learning protocol did: a free-text fork needs a catch-all, and a catch-all whose predicate is merely 'the deciding step closed' fires alongside the specific branch and steals the outcome."""
+
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+title_template = "Experiment: {metadata.protocol}"
+authority_role = "platform-admin"
+
+[[workflow.step]]
+title = "state"
+kind = "task"
+ready_when = "steps.opened.done"
+title_template = "Hypothesis for {metadata.protocol}"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "hypothesis"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "metric"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "control"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "candidate"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "decision_rule"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "sample_floor"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.state.done"
+title_template = "Running: {metadata.protocol}"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "started_at"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "method"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "measure"
+kind = "task"
+ready_when = "steps.run.done"
+title_template = "Measure {metadata.protocol}"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "control_result"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "candidate_result"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "samples"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "source"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "decide"
+kind = "task"
+ready_when = "steps.measure.done"
+title_template = "Decide {metadata.protocol}"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "verdict"
+field_type = "promote|retire|inconclusive"
+required = true
+[[workflow.step.fields]]
+name = "decision"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "against_stated_rule"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "confounds"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "elapsed"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "promoted"
+kind = "outcome"
+ready_when = "steps.decide.done AND steps.decide.metadata.verdict = \"promote\""
+title_template = "Promoted: {metadata.protocol}"
+authority_role = "platform-admin"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "promoted" }
+
+[[workflow.step]]
+title = "retired"
+kind = "outcome"
+ready_when = "steps.decide.done AND steps.decide.metadata.verdict = \"retire\""
+title_template = "Retired: {metadata.protocol}"
+authority_role = "platform-admin"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "retired" }
+
+[[workflow.step]]
+title = "inconclusive"
+kind = "outcome"
+ready_when = "steps.decide.done AND steps.decide.metadata.verdict = \"inconclusive\""
+title_template = "Inconclusive: {metadata.protocol}"
+authority_role = "platform-admin"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "inconclusive" }
+
+[[workflow.step]]
+title = "abandoned"
+kind = "outcome"
+ready_when = "steps.state.done AND job.metadata.abandoned = \"true\""
+title_template = "Abandoned: {metadata.protocol}"
+authority_role = "platform-admin"
+metadata_defaults = { outcome_kind = "withdrawn" }
+terminal = { outcome = "abandoned" }
+[[workflow.step.fields]]
+name = "reason"
+field_type = "string"
+required = true
+
+# ---------------------------------------------------------------------
+# emergency-merge — the sanctioned lane when the system of record is down.
+#
+# WHY THIS EXISTS. Every pipeline door routes through the jobs API: gate
+# filing, boarding, parking, publishing, packet annotation. So an outage
+# of the system of record locks the very pipeline that would ship its
+# fix, and a hand-hotfix to the cluster is stomped by converge within
+# seconds (a hand-built image survived five seconds on 2026-09-02). That
+# day an improvised lane worked — a full local gate on the builder pod,
+# David's approval, a fast-forward merge to forge main, converge
+# self-deploying it — and it was written into a memory and a runbook
+# line, which is prose. Prose cannot enforce (packet 2e136a67). This is
+# the lane as protocol: each step names its precondition and the
+# evidence it must carry before the next can become ready, and the one
+# trust decision in it — bypassing the train — is a sign-off owed by a
+# platform-admin, never an engineering call an agent makes alone.
+#
+# THE ROLLBACK LEVER COMES FIRST. On 2026-09-02 the merge lane ran for
+# 55 minutes while `kubectl rollout undo` to a named last-good revision
+# sat available: the unnamed `auth can-i patch deployment` answered no,
+# the name-scoped grant answers yes only when asked by name. "Roll back"
+# is a target, not a verb — `last_good` must NAME the revision or image
+# rolled to, or say why none exists, and only `no-good-revision` opens
+# the merge lane. A restored service ends the packet there.
+#
+# THE EVIDENCE IS A RECEIPT, NOT A CLAIM. `gate-locally` carries the
+# sha the local `infra/gate.sh` run stamped in `.gate-receipt.json` and
+# its verdict; a green receipt on the branch about to bypass the train
+# is the whole basis on which the approver signs. `converged` carries
+# the commit `/api/jobs/health` reports once the fix is live — the
+# system of record answering on the fix is what "restored" means, not
+# the merge landing. `retro` is required, not optional: an emergency
+# lane that never files its retro is a lane that will be improvised
+# again next time. Cross-step equalities (health_commit = merge_sha)
+# are the reviewer's to check; the row cannot express them yet.
+#
+# NOT the credential break-glass. `break-glass-is-a-key-you-hold.md`
+# is the hardware-key door for a locked-out operator; this is the
+# delivery lane for a fix the pipeline cannot carry. Different doors,
+# and the name here is chosen so the two never read as one.
+[[workflow]]
+kind = "emergency-merge"
+label = "Emergency merge"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "The sanctioned lane for a fix the pipeline cannot carry because the system of record is down. Rollback to a NAMED last-good revision is tried first and ends the packet if it restores service; otherwise the fix is gated locally for a real receipt, a platform-admin signs the train bypass, the branch fast-forwards onto main, the system of record is read answering on the fix, and the retro is filed. Each step carries the evidence the next needs to become ready, so the lane cannot be improvised twice the same way."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "declared"
+kind = "trigger"
+ready_when = "true"
+title_template = "System of record down: {metadata.outage}"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "operator-declares-the-sor-down" }
+
+# `outage` is a FILER field: what is down and how it was measured (the
+# health URL and its answer, the crash-loop line). Bound from the Job so
+# the filer supplies it at admission or the packet is refused.
+[[workflow.step]]
+title = "undo-first"
+kind = "task"
+ready_when = "steps.declared.done"
+title_template = "Try the rollback lever first"
+authority_role = "platform-admin"
+metadata_defaults = { outage = "{metadata.outage}", procedure = "Before any merge lane: is there a last-known-good artifact to roll to? Ask the NAMED form — `kubectl auth can-i patch deployment/boss -n boss` (the unnamed form answers no for a name-scoped grant) — then read `kubectl rollout history deployment/boss -n boss` and map revisions to IMAGE TAGS: two revisions can carry the same broken image, and undoing between them is a no-op that reads as a rollback. Record in `last_good` the revision and image you rolled to, or why none exists. `restored` means the system of record answers on that artifact; then this packet is done." }
+
+[[workflow.step.fields]]
+name = "outage"
+field_type = "string"
+required = true
+filled_by = "filer"
+
+[[workflow.step.fields]]
+name = "last_good"
+field_type = "string"
+required = true
+
+[[workflow.step.fields]]
+name = "undo_result"
+field_type = "restored|no-good-revision"
+required = true
+
+# The approver's read is REQUIRED here (phase 4 of the viability lint):
+# the sign-off that follows renders this step's fields, and a bypass
+# approved off an empty screen is the thing this protocol exists to end.
+[[workflow.step]]
+title = "gate-locally"
+kind = "task"
+ready_when = "steps.undo-first.done AND steps.undo-first.metadata.undo_result = \"no-good-revision\""
+title_template = "Gate the fix locally — a real receipt"
+authority_role = "platform-admin"
+metadata_defaults = { procedure = "Branch from origin/main. Run the FULL `infra/gate.sh` on the builder pod — not --quick, not --auto — and read `.gate-receipt.json`: `receipt_sha` is the sha it stamped and must be the branch head you will merge; `receipt_verdict` must be green. Never test against the production database. Write `sign_off_context` for the approver: what the change is, why the train cannot carry it, and the receipt." }
+
+[[workflow.step.fields]]
+name = "branch"
+field_type = "string"
+required = true
+
+[[workflow.step.fields]]
+name = "receipt_sha"
+field_type = "string"
+required = true
+
+[[workflow.step.fields]]
+name = "receipt_verdict"
+field_type = "green"
+required = true
+
+[[workflow.step.fields]]
+name = "sign_off_context"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "approve"
+kind = "sign-off"
+ready_when = "steps.gate-locally.done"
+title_template = "Approve the train bypass — the operator's call"
+authority_role = "platform-admin"
+sign_offs_required = ["platform-admin"]
+metadata_defaults = { authority_role = "platform-admin" }
+
+[[workflow.step.fields]]
+name = "decision"
+field_type = "approved|rejected"
+required = true
+
+[[workflow.step]]
+title = "merge"
+kind = "task"
+ready_when = "steps.approve.done AND steps.approve.metadata.decision = \"approved\""
+title_template = "Fast-forward the fix onto main"
+authority_role = "platform-admin"
+metadata_defaults = { procedure = "`git merge-base --is-ancestor origin/main <branch>` must hold — a branch on an old base merges clean and reverts the trains. Then `git push origin <branch>:main`, never --force. `merge_sha` is the sha main now points at, read from `git ls-remote origin main`, never typed. Converge on the forge host deploys main on its next tick; the image build is the wait." }
+
+[[workflow.step.fields]]
+name = "merge_sha"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "converged"
+kind = "task"
+ready_when = "steps.merge.done"
+title_template = "The system of record answers on the fix"
+authority_role = "platform-admin"
+metadata_defaults = { procedure = "Read `/api/jobs/health` on the system of record (10.20.0.34:7900) and record `capabilities.commit` as `health_commit`. It must equal `merge_sha`; a service that is up on a different commit is not restored on this fix." }
+
+[[workflow.step.fields]]
+name = "health_commit"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "retro"
+kind = "task"
+ready_when = "steps.converged.done"
+title_template = "File the retro"
+authority_role = "platform-admin"
+metadata_defaults = { procedure = "File the retro packet (protocol-retro or a post-mortem backlog item) naming what the pipeline could not do and which door is missing, and record its id or title here. The lane is closed only with its retro on the board." }
+
+[[workflow.step.fields]]
+name = "retro_packet"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "rolled-back"
+kind = "outcome"
+ready_when = "steps.undo-first.done AND steps.undo-first.metadata.undo_result = \"restored\""
+title_template = "Restored by rollback — no merge lane needed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "rolled-back" }
+
+[[workflow.step]]
+title = "refused"
+kind = "outcome"
+ready_when = "steps.approve.done AND steps.approve.metadata.decision = \"rejected\""
+title_template = "Bypass refused — the fix waits for the pipeline"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "refused" }
+
+[[workflow.step]]
+title = "merged"
+kind = "outcome"
+ready_when = "steps.retro.done"
+title_template = "Restored by emergency merge — retro filed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "merged" }
+
+# ops-request — a host-side debug read is a packet (729329c6, PULL half).
+#
+# David: "I am really tired of the copy pasting after sshing." The
+# operator was the transport: ssh to the host, run the command, paste
+# the output back to whoever asked. This kind deletes the middle hop.
+# The requester files a packet naming a host and an ALLOWLISTED
+# read-only verb; a runner ON that host (infra/ops/ops-runner.sh, on a
+# ~1-minute timer) polls the SoR for its own host's open packets,
+# executes the verb, and completes `execute` with stdout/stderr and the
+# exit code. The answer lands in the system of record with provenance,
+# and "what has been asked of this host" is a Subject-history question.
+#
+# THE ALLOWLIST IS THE AUTHORITY. The packet carries only a verb NAME
+# and pattern-validated args; the command words live in
+# infra/ops/verbs.json — in-tree, reviewed, versioned. The runner never
+# executes a packet-supplied string, only allowlisted argv templates.
+# Phase 1 is read-only; mutating verbs are phase 2, behind per-verb
+# policy, and are deliberately absent.
+#
+# FILING CONVENTION. Subject: custom/<host id> (the estate node id).
+# Job metadata carries the request:
+#   host — estate node id (boss-gcp, forge); the runner acts only on
+#          an exact match, so a packet for a host with no runner sits
+#          open and VISIBLY unanswered rather than being guessed at
+#   verb — a key of infra/ops/verbs.json
+#   args — JSON array of strings, positional; each validated against
+#          its param's pattern before anything runs
+#
+# The fork on `execute` is a closed enum — the correct-the-record
+# lesson, "an enum makes the fork total": every disposition a runner
+# can write leads to exactly one terminal. `exit_code` is authored
+# OPTIONAL because field requiredness cannot depend on the
+# disposition, and a refusal has no exit code — nothing ran. The
+# runner (in-tree, reviewed code) always writes it on the answered
+# path; `output` is required on both paths, so an answer always
+# carries its text and a refusal always carries its reason.
+
+[[workflow]]
+kind = "ops-request"
+label = "Ops request"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "A host-side debug read, as a packet instead of an ssh session. The requester names a host (the Subject: custom/<estate node id>) and an allowlisted read-only verb in job metadata (`host`, `verb`, `args`); the runner on that host polls about once a minute, executes the verb from infra/ops/verbs.json — never a packet-supplied string — and completes `execute` with the output and exit code. `answered` is the output arriving in the system of record with provenance; `refused` is the runner declining a verb outside the allowlist or an arg outside its pattern, with the reason in `output`. Phase 1 is read-only; mutating verbs are phase 2, behind per-verb policy. The operator stops being the transport."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "filed"
+kind = "trigger"
+ready_when = "true"
+title_template = "Host read requested: {metadata.verb} on {metadata.host}"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "operator-requests-a-host-read" }
+
+[[workflow.step]]
+title = "execute"
+kind = "task"
+ready_when = "steps.filed.done"
+title_template = "Run {metadata.verb} on {metadata.host}"
+# Gated the way the maintenance kinds gate `run`: the simulated
+# workforce must not role-match onto a real host read. The runner's
+# actor presents platform-admin.
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "disposition"
+field_type = "answered|refused"
+required = true
+[[workflow.step.fields]]
+name = "output"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "exit_code"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "answered"
+kind = "outcome"
+ready_when = "steps.execute.done AND steps.execute.metadata.disposition = \"answered\""
+title_template = "Answered"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "answered" }
+
+[[workflow.step]]
+title = "refused"
+kind = "outcome"
+ready_when = "steps.execute.done AND steps.execute.metadata.disposition = \"refused\""
+title_template = "Refused — outside the allowlist"
+# `aborted`, matching backlog-item's `declined`: the request was turned
+# down, not taken back by its filer.
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "refused" }
+
+# ---------------------------------------------------------------------
+# post-mortem — an incident, analyzed, into the countermeasures it earns.
+#
+# A retrospective is NOT a backlog item. One was filed on `backlog-item`
+# and the shape routed the ENTIRE analysis into the operator's
+# design-decision queue as a single "Decide the design" step
+# (`answer-question`) — collapsing a whole retrospective, which produces
+# MANY corrective actions, into one verdict a person must render. That is
+# the wrong protocol: a post-mortem is IT-worked ANALYSIS whose product
+# is a set of countermeasures, each of which becomes its OWN packet.
+#
+# So this protocol has NO step that hands the whole thing to the operator
+# to decide. The genuine judgement a single countermeasure may need
+# becomes its own design-decision packet, filed BY the countermeasures
+# step — not a fork in this Workflow. The post-mortem DOCUMENTS the
+# countermeasures; it does not build them, and it does not decide them
+# in bulk.
+#
+# The Subject is the incident — a `custom` Subject whose id names what
+# failed (an area, a service, a boot path), so "what has gone wrong with
+# the forge disk, and what did we do about it" answers from Subject
+# history rather than a grep of old chat.
+#
+# Step graph:
+#    0. recorded         — trigger: the incident + its timeline open the Job
+#    1. analysis         — IT work: 5 Whys, root-cause chains (ready after 0)
+#    2. countermeasures  — IT work: file each corrective action as its OWN
+#                          packet, record the refs here (ready after 1)
+#    3. complete         — sign-off terminal: analysis signed off,
+#                          countermeasures filed (ready after 2)
+#   (x) abandoned        — outcome terminal: analyzed, then judged not to
+#                          warrant countermeasures; a person sets
+#                          `job.metadata.abandoned` (ready after 1)
+[[workflow]]
+kind = "post-mortem"
+label = "Post-mortem"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "An incident retrospective, modelled as the analysis it is rather than a single decision. The Subject is the incident (a custom Subject naming what failed), so \"what has gone wrong here, and what did we do about it\" answers from Subject history. It is deliberately NOT `backlog-item`: that protocol's triage routes a whole item to the operator's design-decision queue as one verdict, and a post-mortem produces MANY countermeasures, each of which must become its own packet. `analysis` is IT work (5 Whys, root-cause chains); `countermeasures` files each corrective action as its own car, design item, or lever and records the refs here; `complete` is the sign-off that the analysis holds and the countermeasures are filed. The genuine judgement a countermeasure needs becomes its OWN design-decision packet, filed by the countermeasures step — never a step that collapses the whole retrospective into one operator decision. `abandoned` is the incident analyzed and then judged not to warrant countermeasures."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "recorded"
+kind = "trigger"
+ready_when = "true"
+title_template = "Incident recorded"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "incident-recorded" }
+
+[[workflow.step]]
+title = "analysis"
+kind = "task"
+ready_when = "steps.recorded.done"
+title_template = "Analyze the incident (5 Whys, root-cause chains)"
+# Human-gated for the reason every platform task is: `task` declares no
+# required role, so an ungated ready step gets role-matched and
+# "completed" by the simulated workforce. Analysis nobody did is worse
+# than no analysis step, because the audit trail then says someone did.
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "root_causes"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "timeline"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "countermeasures"
+kind = "task"
+ready_when = "steps.analysis.done"
+title_template = "File the countermeasures"
+authority_role = "platform-admin"
+# Required, and an ARRAY, because the whole point is plurality: a
+# retrospective earns MULTIPLE corrective actions and each is filed as
+# its own packet (a car, a design item, a lever). This field records the
+# refs of what was filed — the post-mortem documents them, it does not
+# build them. Also the constraint that keeps the `complete` sign-off from
+# arriving blind (viability lint Phase 4: required metadata is checked at
+# completion, so it lives on the step the sign-off depends on).
+[[workflow.step.fields]]
+name = "countermeasures"
+field_type = "array"
+required = true
+[[workflow.step.fields]]
+name = "summary"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "complete"
+kind = "sign-off"
+ready_when = "steps.countermeasures.done"
+title_template = "Post-mortem complete — analysis signed off, countermeasures filed"
+authority_role = "platform-admin"
+sign_offs_required = ["platform-admin"]
+metadata_defaults = { authority_role = "platform-admin" }
+# `decision` required on the sign-off itself, so completion cannot lose
+# the judgement (viability lint Phase 5: 62 of 100 sign-offs once closed
+# carrying nothing). The sign-off IS the happy terminal — reaching it
+# closes the Job "completed".
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
+terminal = { outcome = "completed" }
+
+[[workflow.step]]
+title = "abandoned"
+kind = "outcome"
+# Gated on BOTH the DAG edge (analysis done — the viability lint rejects
+# a terminal no trigger can reach) AND a person-set marker. The marker is
+# load-bearing: an escape-hatch terminal ready on step state alone is one
+# the dispatcher auto-completes the instant it becomes ready, which shut
+# a ship-a-change Job seconds after it opened. Abandoning is an act
+# someone performs, and it can only happen after the incident is analyzed.
+ready_when = "steps.analysis.done AND job.metadata.abandoned = \"true\""
+title_template = "Post-mortem abandoned"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "abandoned" }

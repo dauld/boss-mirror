@@ -13,6 +13,7 @@
   import { isPending, isTerminal as _isTerminal, type StepStatus } from '../jobs/types';
   import type { Employee } from '../people/types';
   import { putStep } from './stepWrite';
+  import { formatMoney } from '@boss/web-kit/ui/money';
 
   type LineItem = {
     sku?: string;
@@ -115,10 +116,7 @@
 
   function fmtMoney(cents: number | undefined): string {
     if (cents === undefined || cents === 0) return '';
-    return `$${(cents / 100).toLocaleString('en-US', {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    })}`;
+    return formatMoney({ amount_cents: cents, currency: 'USD' }, { precision: 'cents' });
   }
 </script>
 

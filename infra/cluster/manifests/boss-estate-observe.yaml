@@ -1,0 +1,194 @@
+# Look at the estate, and write down what was there.
+#
+# `nodes` (144-estate-subjects.sql) says what machines we MEANT to
+# have. Nothing has ever recorded what is ACTUALLY there, so the two
+# could not be compared — and on 2026-08-30 three separate accounts of
+# the estate were wrong in the same direction, because none of them was
+# connected to the machines. w-1, the 32-core node that compiles this
+# repository, was missing from the registry for five days (59ef456a).
+#
+# WHY A CRONJOB AND NOT A DISPATCHER HANDLER. Handlers speak HTTP to
+# the jobs API and own no private view — that is a deliberate property,
+# and it means a handler can COMPARE but cannot OBSERVE. Only something
+# inside the cluster can list nodes without a credential being placed
+# somewhere it does not belong. So the split is: this observes and
+# posts, the API records, and a handler on cadence compares the
+# observation against the registry and opens a packet on the difference.
+#
+# IT DOES NOT WRITE THE REGISTRY, and must not. If the observer updated
+# `nodes` directly, the cluster would become the source of truth for its
+# own declaration and nothing could ever be found MISSING — only
+# silently added. Declared and observed stay apart; the difference is
+# the finding.
+#
+# Pins: reads nodes cluster-wide (read-only), posts to the jobs API by
+# service DNS. Secrets are referenced by name only.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: estate-observer
+  namespace: boss
+---
+# Node listing is cluster-scoped, so this is the one ClusterRole in the
+# tree — and it is `get,list` on nodes and nothing else. An observer
+# that could change anything would be a different kind of thing.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: estate-observer
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: estate-observer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: estate-observer
+subjects:
+  - kind: ServiceAccount
+    name: estate-observer
+    namespace: boss
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: boss-estate-observe
+  namespace: boss
+spec:
+  # Daily, an hour after the backup, so a quiet window stays quiet.
+  # Every 15 minutes, not daily: this series feeds the estate ALARM
+  # (estate.alarm raises after 3 consecutive findings), and a daily
+  # reading makes that a 3-DAY alarm — the 2026-08-27 outage lasted 25
+  # minutes. 15min x 3 = a condition raises in ~30-45min (a5adfb99).
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: estate-observer
+          containers:
+            - name: observe
+              image: alpine/k8s:1.33.3
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  # Transport-retry curl, INLINE. This pod runs the
+                  # alpine/k8s image, which does NOT carry
+                  # /usr/local/bin/boss-api-curl.sh (that script is baked
+                  # only into the all-in-one boss image). Wiring the
+                  # shared script in here (25e518c0) therefore broke the
+                  # observer with exit 127 — no kubernetes-nodes
+                  # observation landed, and the estate ALARM correctly
+                  # raised on the silence. A container that cannot source
+                  # the shared helper inlines its contract instead: retry
+                  # only transport-level curl exits (6/7/28/35/52/55/56 —
+                  # DNS/refused/timeout/TLS/empty/send/recv) under a 150s
+                  # deadline (well under the 15-min schedule), so a deploy
+                  # roll reads as a wait, not an Error pod. An HTTP answer
+                  # is a real result and returns as curl wrote it. Kept
+                  # byte-faithful to infra/boss-api-curl.sh.
+                  api_curl() {
+                    local deadline=150 start delay=5 rc out now left sleep_for
+                    start=$(date +%s)
+                    while :; do
+                      rc=0; out=$(curl "$@") || rc=$?
+                      case "$rc" in
+                        0) printf '%s' "$out"; return 0 ;;
+                        6|7|28|35|52|55|56) ;;
+                        *) return "$rc" ;;
+                      esac
+                      now=$(date +%s); left=$((deadline - (now - start)))
+                      [ "$left" -le 0 ] && { echo "api_curl: transport failure past ${deadline}s (curl $rc)" >&2; return "$rc"; }
+                      sleep_for=$((delay < left ? delay : left))
+                      echo "api_curl: transport error (curl $rc) — retry in ${sleep_for}s" >&2
+                      sleep "$sleep_for"; delay=$((delay * 2))
+                    done
+                  }
+                  # In-cluster credentials: the ServiceAccount token is
+                  # mounted, so kubectl needs no kubeconfig.
+                  kubectl get nodes -o json > /tmp/nodes.json
+                  # jq, not python: directive 26d61c97 retired python
+                  # from the estate's shell, and infra/estate/observe-host.sh
+                  # (the host-scope sibling) is the shape to match.
+                  # Kubernetes reports Ki/Mi; the registry declares GiB.
+                  # Capacity rounds to the NEAREST GiB, ties half-UP
+                  # (add half a GiB, then floor) — THE one stated
+                  # rounding rule, shared with observe-host.sh. The
+                  # python this replaces used round-half-even, so an
+                  # exact .5-GiB tie now rounds up instead of to the
+                  # nearest even integer.
+                  jq '
+                    def gib:
+                      if . == null then null
+                      elif endswith("Ki") then (((rtrimstr("Ki") | tonumber) + 524288) / 1048576 | floor)
+                      elif endswith("Mi") then (((rtrimstr("Mi") | tonumber) + 512) / 1024 | floor)
+                      else null end;
+                    {
+                      observed_at: (now | todate),
+                      observer: "boss-estate-observe",
+                      scope: "kubernetes-nodes",
+                      nodes: ([ (.items // [])[]
+                        | (.metadata // {}) as $md
+                        | (.status // {}) as $st
+                        | ($md.labels // {}) as $labels
+                        | {
+                            id: $md.name,
+                            address: ([($st.addresses // [])[] | select(.type == "InternalIP") | .address] | .[0]),
+                            cpu: (($st.capacity.cpu // "0" | tonumber) | if . == 0 then null else . end),
+                            memory_gb: ($st.capacity.memory | gib),
+                            disk_gb: ($st.capacity["ephemeral-storage"] | gib),
+                            purpose: $labels["boss.dev/purpose"],
+                            control_plane: ($labels | has("node-role.kubernetes.io/control-plane")),
+                            ready: (([($st.conditions // [])[] | select(.type == "Ready") | .status] | (.[0] // "Unknown")) == "True")
+                          }
+                      ] | sort_by(.id // ""))
+                    }' /tmp/nodes.json > /tmp/observation.json
+                  echo "observed $(jq -r '.nodes | length' /tmp/observation.json) node(s)"
+                  # The door refuses an observation that saw nothing, so a
+                  # denied or broken probe fails loudly here rather than
+                  # recording an empty estate.
+                  # `set -e` + a bare command substitution swallowed the
+                  # first real failure without a word: curl exited 6 on a
+                  # dead DNS name and the script died before its own
+                  # report line (3ddd8333). Failing is fine; failing
+                  # SILENTLY in a script that promises to fail loudly is
+                  # not — so curl's own exit is caught and spoken, with
+                  # the real exit code and the real target in the
+                  # message. The response body rides the same capture as
+                  # the status code (body, newline, code) instead of a
+                  # tempfile.
+                  # api_curl (inlined above) retries transport errors
+                  # for up to 150s (25e518c0): a deploy roll takes the
+                  # API away for ~45s and must read as a wait, not an
+                  # Error pod. The capture-and-speak contract below is
+                  # unchanged — api_curl owns only connection-level
+                  # exits; stdout still carries body+code exactly as
+                  # curl wrote them.
+                  resp=$(api_curl -s -w '\n%{http_code}' -X POST \
+                    -H "content-type: application/json" \
+                    -H "x-boss-user: {\"id\":\"automation:estate-observer\",\"role\":\"platform-admin\",\"access_tier\":\"operator\"}" \
+                    --data-binary @/tmp/observation.json \
+                    "$JOBS_API/api/estate/observation") \
+                    || { rc=$?; echo "curl failed (exit $rc, target $JOBS_API/api/estate/observation)"; exit 1; }
+                  code=$(printf '%s\n' "$resp" | tail -n 1)
+                  body=$(printf '%s\n' "$resp" | sed '$d')
+                  echo "jobs api: $code $body"
+                  test "$code" = "202"
+              env:
+                - name: JOBS_API
+                  # boss-jobs-internal is the in-cluster door; ns boss has
+                  # no Service named `boss` — the original value resolved
+                  # to nothing and no observation could ever land.
+                  value: "http://boss-jobs-internal.boss.svc.cluster.local:7900"

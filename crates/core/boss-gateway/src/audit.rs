@@ -46,6 +46,9 @@ use serde_json::json;
 pub enum AuthMethod {
     Password,
     Oidc,
+    /// The hardware-key WebAuthn ceremony at the gateway's own
+    /// verifier (docs/design/break-glass-is-a-key-you-hold.md).
+    BreakGlass,
 }
 
 impl AuthMethod {
@@ -53,6 +56,7 @@ impl AuthMethod {
         match self {
             Self::Password => "password",
             Self::Oidc => "oidc",
+            Self::BreakGlass => "break-glass",
         }
     }
 }
@@ -165,6 +169,21 @@ impl AuthAudit {
     /// The unauthenticated read-only guest capability was exercised.
     pub fn guest_session(&self, email: &str) {
         self.emit("auth.session.guest", json!({ "email": email }));
+    }
+
+    /// A break-glass hardware credential passed the enrollment
+    /// ceremony. Enrolling an emergency key is an auth-administration
+    /// act; it gets its own kind rather than riding `login.succeeded`
+    /// because no session is minted by it.
+    pub fn break_glass_enrolled(&self, label: &str, credential_id: &str, aaguid: &str) {
+        self.emit(
+            "auth.break-glass.enrolled",
+            json!({
+                "label": label,
+                "credential_id": credential_id,
+                "aaguid": aaguid,
+            }),
+        );
     }
 
     fn emit(&self, kind: &'static str, payload: serde_json::Value) {

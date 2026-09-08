@@ -3,7 +3,7 @@
   //
   // In the three-axis IA, Workflows is the *what* —
   // every active Workflow in the registry, browseable like a
-  // catalog. Editing Workflows happens at /system/workflows (the
+  // catalog. Editing Workflows happens at /it/registry (the
   // Surface for the platform-eng role). This page is the
   // read-only KB view non-admin operators land on when they
   // want to understand "what kinds of work does this brewery
@@ -25,6 +25,7 @@
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
   import Link from '@boss/web-kit/ui/Link.svelte';
+  import StatusChip from '@boss/web-kit/ui/StatusChip.svelte';
   import type { WorkflowSpec } from '../workflows/workflowTypes';
   import { href } from '../router';
 
@@ -123,8 +124,8 @@
     />
     <!-- Authoring entry point. Workflows is the single UI surface for
          Workflows (the "Job kinds" sidebar entry was retired); the
-         authoring routes (/system/workflows*) are reached from here. -->
-    <Link to={href('/system/workflows/new')} className="wf-new">+ New workflow</Link>
+         authoring routes (/it/registry*) are reached from here. -->
+    <Link to={href('/it/registry/new')} className="wf-new">+ New workflow</Link>
   </div>
 
   <div class="tab-grid">
@@ -135,7 +136,7 @@
             {#each rows as k (k.kind)}
               <li class="kb-workflow-row">
                 <div class="kb-workflow-header">
-                  <Link to={href(`/system/workflows/${encodeURIComponent(k.kind)}`)}>
+                  <Link to={href(`/it/registry/${encodeURIComponent(k.kind)}`)}>
                     <span class="kb-workflow-kind mono">{k.kind}</span>
                   </Link>
                   <span class="kb-workflow-label">{k.label}</span>
@@ -151,7 +152,7 @@
                 <div class="kb-workflow-meta">
                   Subject:
                   {#each k.subject_kinds as s (s)}
-                    <span class="chip chip-stage chip-stage-muted" style="margin-right:4px">{s}</span>
+                    <span style="margin-right:4px"><StatusChip value={s} tone="muted" /></span>
                   {/each}
                   {#if k.owning_team !== 'platform'}
                     · owning team: <span class="mono">{k.owning_team}</span>

@@ -11,6 +11,7 @@
 
   import { navigate, href } from '../router';
   import { entityHref } from '@boss/web-kit/ui/entity-href';
+  import { formatMoney } from '@boss/web-kit/ui/money';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import FilterGroup from '@boss/web-kit/ui/FilterGroup.svelte';
   import FilterButton from '@boss/web-kit/ui/FilterButton.svelte';
@@ -278,7 +279,7 @@
                 {#if hasAnyOpenAr}
                   <td class="num">
                     {#if r.openArCents > 0}
-                      <strong>${(r.openArCents / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })}</strong>
+                      <strong>{formatMoney({ amount_cents: r.openArCents, currency: 'USD' }, { precision: 'whole' })}</strong>
                     {:else}
                       —
                     {/if}

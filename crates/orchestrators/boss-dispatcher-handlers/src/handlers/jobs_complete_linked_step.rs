@@ -92,10 +92,15 @@ impl JobsCompleteLinkedStep {
     }
 
     /// Record on the CAR that its `backlog_item` pointed somewhere the
-    /// obligation could not act. PATCH-on-PUT replaces `metadata`
-    /// wholesale, so this re-reads and merges rather than writing a
-    /// bare object — the car's `branch`, `summary` and the rest have to
-    /// survive a note.
+    /// obligation could not act.
+    ///
+    /// The write goes through `PATCH /api/jobs/{id}/metadata` — the
+    /// door built for a partial metadata write, merge semantics, and
+    /// it works on a closed packet (the car always IS closed here).
+    /// The first version PUT `/api/jobs/{id}` with a metadata-only
+    /// body, which `Json<Job>` 422s at the extractor for its ten
+    /// missing required fields — so the note never landed once, and
+    /// the failure drowned in a dispatcher warn (c65110d6).
     async fn note_on_car(
         &self,
         car_id: &str,
@@ -103,45 +108,42 @@ impl JobsCompleteLinkedStep {
         why: &str,
         rule: &str,
     ) -> Result<(), HandlerError> {
-        let car = self.get_job(car_id, rule).await?;
-        let mut merged = match car.get("metadata").cloned() {
-            Some(serde_json::Value::Object(m)) => m,
-            _ => serde_json::Map::new(),
-        };
         // Idempotent under redelivery: the same car, the same packet,
-        // the same note. Writing it twice is harmless but noisy.
-        if merged
-            .get("obligation_noop")
+        // the same note. The PATCH merge would write the same value
+        // harmlessly, but each write is an audit event — one is truth,
+        // three are noise.
+        let car = self.get_job(car_id, rule).await?;
+        if car
+            .get("metadata")
+            .and_then(|m| m.get("obligation_noop"))
             .and_then(|n| n.get("packet"))
             .and_then(|v| v.as_str())
             == Some(packet_id)
         {
             return Ok(());
         }
-        merged.insert(
-            "obligation_noop".to_string(),
-            json!({ "packet": packet_id, "rule": rule, "why": why }),
-        );
         let url = format!(
-            "{}/api/jobs/{}",
+            "{}/api/jobs/{}/metadata",
             self.jobs_base.trim_end_matches('/'),
             car_id
         );
         let resp = self
             .client
-            .put(&url)
+            .patch(&url)
             .header("content-type", "application/json")
             .header("x-boss-user", dispatcher_actor_header(rule))
             .header("x-sim-origin", sim_origin_value())
-            .json(&json!({ "metadata": serde_json::Value::Object(merged) }))
+            .json(&json!({
+                "obligation_noop": { "packet": packet_id, "rule": rule, "why": why }
+            }))
             .send()
             .await
-            .map_err(|e| HandlerError::Downstream(format!("PUT {url}: {e}")))?;
+            .map_err(|e| HandlerError::Downstream(format!("PATCH {url}: {e}")))?;
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             return Err(HandlerError::Downstream(format!(
-                "PUT {url} returned {status}: {text}"
+                "PATCH {url} returned {status}: {text}"
             )));
         }
         Ok(())
@@ -694,9 +696,12 @@ mod tests {
 
     type Puts = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
 
-    /// Stand-in for jobs-api: serves the three Jobs by id and records
-    /// every step PUT so a test can assert what an operator would see.
-    async fn mock_jobs(jobs: Vec<serde_json::Value>) -> (String, Puts) {
+    /// Stand-in for jobs-api: serves the three Jobs by id, records
+    /// every step PUT, and records every job-metadata PATCH — the
+    /// noop-note write the first mock had no route for, which is how
+    /// a write that 422'd in production passed every test (c65110d6).
+    async fn mock_jobs(jobs: Vec<serde_json::Value>) -> (String, Puts, Puts) {
+        let patches: Puts = Arc::new(Mutex::new(Vec::new()));
         let puts: Puts = Arc::new(Mutex::new(Vec::new()));
         let by_id: std::collections::HashMap<String, serde_json::Value> = jobs
             .into_iter()
@@ -730,11 +735,23 @@ mod tests {
                         }
                     },
                 ),
-            );
+            )
+            .route("/api/jobs/{id}/metadata", {
+                let patches = patches.clone();
+                axum::routing::patch(
+                    move |Path(id): Path<String>, Json(body): Json<serde_json::Value>| {
+                        let patches = patches.clone();
+                        async move {
+                            patches.lock().unwrap().push((id, body));
+                            axum::http::StatusCode::NO_CONTENT
+                        }
+                    },
+                )
+            });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        (format!("http://{addr}"), puts)
+        (format!("http://{addr}"), puts, patches)
     }
 
     fn close_marker() -> serde_json::Value {
@@ -747,11 +764,72 @@ mod tests {
         })
     }
 
+    /// A live packet nobody has triaged: the routing step is open and
+    /// every branch this obligation may complete is still `pending`.
+    fn untriaged_packet() -> serde_json::Value {
+        json!({
+            "id": PACKET,
+            "kind": "backlog-item",
+            "title": "A defect a car claims to fix",
+            "status": "open",
+            "metadata": {},
+            "steps": [
+                { "id": "s-triage", "spec_slug": "triage", "status": "ready", "metadata": {} },
+                { "id": "s-investigate", "spec_slug": "investigate", "status": "pending",
+                  "metadata": {} },
+                { "id": BRANCH_STEP, "spec_slug": "build", "status": "pending", "metadata": {} },
+            ],
+        })
+    }
+
+    /// c65110d6: the note saying "this obligation completed nothing"
+    /// must actually LAND on the car. It never did — the first
+    /// `note_on_car` PUT `/api/jobs/{id}` with a metadata-only body,
+    /// which the real extractor 422s for ten missing Job fields, and
+    /// the first mock had no job-PUT route, so no test watched the
+    /// write fail. The note rides the metadata PATCH door now, and
+    /// this test is the route's first witness.
+    #[tokio::test]
+    async fn an_untriaged_packet_notes_the_noop_on_the_car() {
+        let (base, puts, patches) = mock_jobs(vec![
+            car(json!({ "backlog_item": PACKET, "train": TRAIN, "branch": "fix/x" })),
+            untriaged_packet(),
+            train(),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        h.invoke(&args(), &ctx(close_marker())).await.expect("runs");
+
+        assert!(
+            puts.lock().unwrap().is_empty(),
+            "no step completed — triage is a routing decision an obligation must not make"
+        );
+        let patches = patches.lock().unwrap().clone();
+        assert_eq!(
+            patches.len(),
+            1,
+            "the noop note lands exactly once: {patches:?}"
+        );
+        let (id, body) = &patches[0];
+        assert_eq!(
+            id, CAR,
+            "the note lands on the CAR — the side that made the claim"
+        );
+        assert_eq!(body["obligation_noop"]["packet"], PACKET);
+        assert!(
+            body["obligation_noop"]["why"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("triage"),
+            "the why names the open step a reader should look at"
+        );
+    }
+
     /// The obligation itself: a merged car completes the branch its
     /// packet's triage opened, carrying evidence that names the car.
     #[tokio::test]
     async fn a_merged_car_completes_the_open_branch_with_its_evidence() {
-        let (base, puts) = mock_jobs(vec![
+        let (base, puts, _) = mock_jobs(vec![
             car(json!({ "backlog_item": PACKET, "train": TRAIN, "branch": "feat/feedback-obligation" })),
             packet("ready"),
             train(),
@@ -794,7 +872,7 @@ mod tests {
     /// an evidence-only completion.
     #[tokio::test]
     async fn done_metadata_fills_the_kinds_vocabulary_with_the_cars_facts() {
-        let (base, puts) = mock_jobs(vec![
+        let (base, puts, _) = mock_jobs(vec![
             car(json!({ "backlog_item": PACKET, "train": TRAIN, "branch": "feat/feedback-obligation" })),
             packet("ready"),
             train(),
@@ -830,7 +908,7 @@ mod tests {
                 s["metadata"]["verdict"] = json!("declined");
             }
         }
-        let (base, puts) = mock_jobs(vec![
+        let (base, puts, _) = mock_jobs(vec![
             car(json!({ "backlog_item": PACKET, "train": TRAIN, "branch": "feat/x" })),
             p,
             train(),
@@ -859,7 +937,7 @@ mod tests {
     /// exactly as it did before.
     #[tokio::test]
     async fn a_merged_car_with_no_linked_packet_is_a_no_op() {
-        let (base, puts) = mock_jobs(vec![
+        let (base, puts, _) = mock_jobs(vec![
             car(json!({ "backlog_text": "David asked for this in chat" })),
             packet("ready"),
         ])
@@ -878,7 +956,7 @@ mod tests {
     async fn an_already_terminal_packet_is_untouched() {
         let mut closed = packet("ready");
         closed["status"] = json!("closed");
-        let (base, puts) = mock_jobs(vec![car(json!({ "backlog_item": PACKET })), closed]).await;
+        let (base, puts, _) = mock_jobs(vec![car(json!({ "backlog_item": PACKET })), closed]).await;
         let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
         h.invoke(&args(), &ctx(close_marker())).await.expect("runs");
         assert!(puts.lock().unwrap().is_empty(), "a closed packet is done");
@@ -890,7 +968,7 @@ mod tests {
     /// marker, no second re-evaluation.
     #[tokio::test]
     async fn a_rerun_against_a_completed_branch_writes_nothing() {
-        let (base, puts) = mock_jobs(vec![
+        let (base, puts, _) = mock_jobs(vec![
             car(json!({ "backlog_item": PACKET })),
             packet("completed"),
         ])
@@ -910,7 +988,8 @@ mod tests {
     async fn a_branch_already_stamped_by_this_car_writes_nothing() {
         let mut stamped = packet("ready");
         stamped["steps"][2]["metadata"]["arrived_from"] = json!({ "car": CAR });
-        let (base, puts) = mock_jobs(vec![car(json!({ "backlog_item": PACKET })), stamped]).await;
+        let (base, puts, _) =
+            mock_jobs(vec![car(json!({ "backlog_item": PACKET })), stamped]).await;
         let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
         h.invoke(&args(), &ctx(close_marker())).await.expect("runs");
         assert!(puts.lock().unwrap().is_empty(), "already stamped by us");
@@ -923,7 +1002,7 @@ mod tests {
     async fn a_pending_branch_is_never_completed() {
         let mut nothing_open = packet("pending");
         nothing_open["status"] = json!("open");
-        let (base, puts) =
+        let (base, puts, _) =
             mock_jobs(vec![car(json!({ "backlog_item": PACKET })), nothing_open]).await;
         let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
         h.invoke(&args(), &ctx(close_marker())).await.expect("runs");
@@ -938,7 +1017,7 @@ mod tests {
     #[tokio::test]
     async fn an_unreachable_train_still_completes_the_branch() {
         // The train Job is simply absent from the mock's roster.
-        let (base, puts) = mock_jobs(vec![
+        let (base, puts, _) = mock_jobs(vec![
             car(json!({ "backlog_item": PACKET, "train": TRAIN })),
             packet("ready"),
         ])

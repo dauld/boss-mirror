@@ -45,22 +45,22 @@ pub(super) async fn add_step<R: JobsRepository + 'static, B: EventBus + 'static>
         None => return (StatusCode::BAD_REQUEST, "invalid job id").into_response(),
     };
 
-    // A JOB'S STEP SET IS FIXED AT ADMISSION. Step predicates are not
-    // stored on steps (the table has no ready_when column) — readiness
-    // is recomputed by pairing spec steps with job steps positionally,
-    // so one appended step misaligns every pair after it and
-    // `registry::reevaluate` refuses to advance anything. The job is
-    // then frozen: no step moves again, including its terminal, so it
-    // never closes and never leaves its owner's queue.
+    // A JOB'S STEP SET IS FIXED AT ADMISSION, because a step is
+    // PROTOCOL — not because appending one breaks the engine. It used
+    // to do both. Readiness was recomputed by pairing spec steps with
+    // job steps positionally, so one appended step misaligned every
+    // pair after it and `registry::reevaluate` refused to advance
+    // anything; the job froze with its terminal pending and never left
+    // its owner's queue. Design review 32a4e70d did exactly that on
+    // 2026-08-13, producing feedback 55c92985: "I finished the top
+    // design review and it still shows the same metadata and is in the
+    // same queue." The divergence was logged at warn the whole time,
+    // and a warn in a log nobody reads is not a signal.
     //
-    // That is not hypothetical. Design review 32a4e70d gained a
-    // per-question step on 2026-08-13, sat in David's queue with its
-    // review COMPLETED and its terminal pending, and produced feedback
-    // 55c92985: "I finished the top design review and it still shows
-    // the same metadata and is in the same queue." The divergence was
-    // logged at warn by `reevaluate_and_persist` the whole time; a warn
-    // in a log nobody is reading is not a signal, so the job looked
-    // exactly like one waiting on its owner.
+    // Steps now pair by `spec_slug` (`registry::pair_steps`), so an
+    // extra row is ignored and the job keeps moving. The freezing
+    // consequence is gone; the refusal below is not, and the paragraph
+    // after this one is now its whole justification.
     //
     // Refusing here is the honest boundary: a new step is a change to
     // the WORKFLOW, and the registry is where that belongs — publish a
@@ -80,11 +80,11 @@ pub(super) async fn add_step<R: JobsRepository + 'static, B: EventBus + 'static>
             StatusCode::CONFLICT,
             format!(
                 "refusing to add a step to job {job_id}: it already has {} step(s), \
-                 matching workflow {} v{}. Appending would diverge the job from its \
-                 spec, and readiness is computed by pairing the two positionally — \
-                 the job would freeze and never reach a terminal. Add the step to the \
-                 workflow and publish a new version instead; in-flight jobs stay \
-                 pinned to the version they were admitted under.",
+                 matching workflow {} v{}. A step is PROTOCOL, so adding one is a \
+                 change to the WORKFLOW, not to a single in-flight job: add it to the \
+                 workflow and publish a new version, and new packets are admitted \
+                 under it. In-flight jobs stay pinned to the version they were \
+                 admitted under, which is the whole point of the versioning.",
                 existing.len(),
                 job.kind,
                 job.workflow_version
@@ -706,17 +706,32 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
                     "subject_id": subject_id,
                     "completed_on": step.completed_on,
                     "metadata": step.metadata,
-                    // ALWAYS present, defaulting false: the dispatcher
-                    // expr binder resolves flat identifiers only, and an
-                    // absent identifier is a PredicateFailed → Retry →
-                    // dead-letter storm, not a quiet false. The
+                    // `notify_on_done` and `spec_slug` are BOTH hoisted
+                    // to the payload root, and BOTH always present, for
+                    // one reason: the dispatcher expr binder resolves
+                    // flat top-level identifiers only, and an absent
+                    // identifier is a PredicateFailed → Retry →
+                    // dead-letter storm, not a quiet false.
+                    //
+                    // `notify_on_done` defaults false; the
                     // notify-on-step-done-marked rule (migration 106)
-                    // matches this field.
+                    // matches it.
+                    //
+                    // `spec_slug` is the step's stable slug, defaulting
+                    // to "" when the step has none (an ad-hoc step, or
+                    // one materialized before the column existed). It is
+                    // WHICH step of a kind completed: every step of a
+                    // pr-train is `kind = "task"`, so `step.done.task`
+                    // alone cannot tell `merged` from `deployed` from
+                    // `ci`, and a rule that must — `spec_slug ==
+                    // "merged"` — reads it here rather than digging into
+                    // the nested `metadata` the binder cannot reach.
                     "notify_on_done": step
                         .metadata
                         .get("notify_on_done")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false),
+                    "spec_slug": step.spec_slug.clone().unwrap_or_default(),
                 }),
             ));
         }
@@ -865,6 +880,15 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
                 // clock's date only if the step somehow lacks one.
                 let job_now = boss_clock_client::now_from(&state.clock).await;
                 job.closed_on = step.completed_on.or(Some(job_now.date_naive()));
+                // The precise instant beside the date — `closed_on` has
+                // one-day resolution by construction, and the terminal
+                // report prefers the `opened_at` / `closed_at` metadata
+                // stamps (`cycle_days_sample`, port.rs). First close
+                // wins; a Job closes once.
+                if let serde_json::Value::Object(map) = &mut job.metadata {
+                    map.entry("closed_at")
+                        .or_insert_with(|| serde_json::json!(job_now.to_rfc3339()));
+                }
             }
             // OUTBOX (phase 2): the state event (full row state for
             // the rebuild) + status markers record in the SAME
@@ -947,6 +971,171 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
                 .update_job_at(&job, close_stamp.timestamp, &close_events)
                 .await;
         }
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `PATCH /api/jobs/{id}/steps/{step_id}/metadata` — merge top-level
+/// metadata keys into the Step, atomically, server-side. The step-side
+/// twin of `PATCH /api/jobs/{id}/metadata`, and the same contract: the
+/// body is a JSON object of top-level keys, a `null` value REMOVES the
+/// key, every other value replaces that key wholesale. Status,
+/// assignee, and every other step field are untouchable through this
+/// route — a `status` key in the body is just a metadata key named
+/// "status", exactly as it is on the job merge.
+///
+/// WHY IT EXISTS: the same lost-update race the job merge retired.
+/// With only the overlay PUT, every caller that wanted to set one
+/// metadata key ran GET → spread → PUT client-side, and PUT metadata
+/// is replaced wholesale — so a concurrent writer's keys were erased
+/// by whichever write landed second. The merge now happens inside one
+/// adapter transaction against the row as it stands.
+///
+/// A terminal step is refused with the PUT's own 409 shape (job
+/// 903e6b90: the caller is TOLD, never 204'd into believing a frozen
+/// write landed), and the hint points at the job metadata merge — the
+/// door that works, because a completed step is a record of what
+/// happened. Unlike the PUT there is no idempotent-re-send carve-out:
+/// nothing redelivers through this route, and a no-op "change" to a
+/// terminal step still has a better answer the message names.
+///
+/// Policy: the same coarse `(Update, step)` gate as the step PUT.
+pub(super) async fn patch_step_metadata<R: JobsRepository + 'static, B: EventBus + 'static>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+    Path((id, step_id_str)): Path<(String, String)>,
+    CurrentUser(user): CurrentUser,
+    Json(patch): Json<serde_json::Value>,
+) -> Response {
+    let job_id = match parse_job_id(&id) {
+        Some(id) => id,
+        None => return (StatusCode::BAD_REQUEST, "invalid job id").into_response(),
+    };
+    let step_id = match parse_step_id(&step_id_str) {
+        Some(id) => id,
+        None => return (StatusCode::BAD_REQUEST, "invalid step id").into_response(),
+    };
+    let serde_json::Value::Object(mut patch) = patch else {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "metadata patch must be a JSON object of top-level keys",
+        )
+            .into_response();
+    };
+
+    match state
+        .policy
+        .check(&user, Action::Update, Resource::step())
+        .await
+    {
+        Ok(Decision::Deny { reason }) => {
+            return (StatusCode::FORBIDDEN, reason).into_response();
+        }
+        Ok(_) => {}
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("policy check failed: {e}"),
+            )
+                .into_response();
+        }
+    }
+
+    let old = match state.jobs.get_step(&step_id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return (StatusCode::NOT_FOUND, "step not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    // Same containment rule as the claim route: a step addressed
+    // through a job it does not belong to is not found THERE.
+    if old.job_id != job_id {
+        return (StatusCode::NOT_FOUND, "step not on this job").into_response();
+    }
+
+    // `authority_role` is immutable across writes, same rule as the
+    // PUT: the persisted value wins, so a body can neither raise nor
+    // lower the required sign-off authority — nor shed it with null.
+    patch.remove("authority_role");
+
+    // The parent packet: the event stamp inherits its admission-fixed
+    // `simulated` flag, and the re-evaluator runs against it.
+    let parent_job = state.jobs.get_job(&job_id).await.ok().flatten();
+
+    let actor = user
+        .ambient_actor()
+        .unwrap_or_else(|| boss_core::actor::ActorId::Automation("platform".into()));
+    let mut stamp = state.publisher.stamp_with_actor(actor.clone()).await;
+    if let Some(j) = &parent_job {
+        stamp = stamp.with_simulated(j.simulated);
+    }
+    let stamp = stamp;
+
+    let merged = match state
+        .jobs
+        .merge_step_metadata_at(&step_id, &patch, &stamp)
+        .await
+    {
+        Ok(step) => step,
+        // The adapter's row-riding check wins over our `old` fetch —
+        // it saw the step at write time — so both the pre-known and
+        // the raced terminal case land here, in the PUT's 409 shape.
+        Err(crate::port::JobsError::TerminalStep { status, .. }) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "step is terminal — these fields are immutable",
+                    "step_id": step_id.to_string(),
+                    "step_status": status,
+                    "refused_fields": ["metadata"],
+                    "hint": "a completed step is a record of what happened. To correct or \
+                             annotate it, write to the parent job's metadata \
+                             (PATCH /api/jobs/{id}/metadata) instead.",
+                })),
+            )
+                .into_response();
+        }
+        Err(crate::port::JobsError::StepNotFound(_)) => {
+            return (StatusCode::NOT_FOUND, "step not found").into_response();
+        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    // Loud invalidation, same contract as the PUT: a merge that
+    // changed the step's completion-relevant shape makes existing
+    // stamps stale. Computed from the ACTUAL post-merge row and
+    // recorded through the outbox's standalone path (the marker is
+    // informational — the rebuild ignores it — so it rides its own
+    // small transaction, like the post-materialization ready pass).
+    if !old.sign_offs.is_empty()
+        && boss_core::job::step_shape_hash(&old.title, &old.metadata)
+            != boss_core::job::step_shape_hash(&merged.title, &merged.metadata)
+    {
+        let stale_roles: Vec<String> = merged.sign_offs.iter().map(|st| st.role.clone()).collect();
+        let event = stamp.event(
+            events::STEP_STAMPS_INVALIDATED,
+            serde_json::json!({
+                "job_id": job_id.to_string(),
+                "step_id": step_id.to_string(),
+                "stale_roles": stale_roles,
+                "required_roles": merged.sign_offs_required,
+            }),
+        );
+        if let Err(e) = state.jobs.record_events(std::slice::from_ref(&event)).await {
+            tracing::warn!(step_id = %step_id, error = %e, "metadata merge: failed to record stamps-invalidated marker");
+        }
+    }
+
+    // Same wake as the job metadata patch: a step-metadata write can
+    // flip a metadata-gated `ready_when` (`steps.<slug>.metadata.<field>`
+    // is in the predicate language — the backlog-item disposition
+    // terminals are built on it). Without this, a fact recorded
+    // through the merge would sit invisible to readiness until some
+    // unrelated status write happened by. Closed/cancelled Jobs stay
+    // untouched.
+    if let Some(job) = &parent_job
+        && job.status == JobStatus::Open
+    {
+        reevaluate_and_persist(&state, job, &actor).await;
     }
 
     StatusCode::NO_CONTENT.into_response()
@@ -1391,14 +1580,22 @@ async fn close_job_on_terminal<R: JobsRepository + 'static, B: EventBus + 'stati
     job.status = JobStatus::Closed;
     job.closed_on = Some(now.date_naive());
     // Stamp the terminal outcome onto the Job metadata so projections
-    // / the SPA can render *why* the Job closed.
+    // / the SPA can render *why* the Job closed — and the precise
+    // close instant beside the one-day-resolution `closed_on`, which
+    // the terminal report prefers (`cycle_days_sample`, port.rs).
+    // First close wins on `closed_at`; a Job closes once.
     if let serde_json::Value::Object(map) = &mut job.metadata {
         map.insert(
             "outcome".to_string(),
             serde_json::Value::String(outcome.to_string()),
         );
+        map.entry("closed_at")
+            .or_insert_with(|| serde_json::json!(now.to_rfc3339()));
     } else {
-        job.metadata = serde_json::json!({ "outcome": outcome });
+        job.metadata = serde_json::json!({
+            "outcome": outcome,
+            "closed_at": now.to_rfc3339(),
+        });
     }
 
     // OUTBOX (phase 2): the close's state event + markers record in

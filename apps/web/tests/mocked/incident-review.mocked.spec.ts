@@ -142,6 +142,11 @@ test('the findings render as one document: job metadata + what each step found',
 test('completing the review PUTs status=completed and refreshes', async ({ page }) => {
   await installIncidentReviewMocks(page, REVIEW_STEP);
   const puts: Array<Record<string, unknown>> = [];
+  // The plugin reads the row back before completing (the completion
+  // PUT replaces metadata wholesale, so it must carry the row as it
+  // stands, never the page-load snapshot) — the job's steps list is
+  // the read the API offers.
+  await page.route('**/api/jobs/job-ipm-1/steps', (r) => r.fulfill({ json: [REVIEW_STEP] }));
   await page.route('**/api/jobs/job-ipm-1/steps/step-review', (r) => {
     if (r.request().method() !== 'PUT') return r.fallback();
     const body = JSON.parse(r.request().postData() ?? '{}') as Record<string, unknown>;

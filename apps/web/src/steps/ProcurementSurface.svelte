@@ -1,6 +1,7 @@
 <script lang="ts">
   import { isPending, isTerminal as _isTerminal, type StepStatus } from '../jobs/types';
   import { putStep } from './stepWrite';
+  import { formatMoney } from '@boss/web-kit/ui/money';
   // Procurement step surface — place a purchase order with a
   // vendor. The ingredient-restock Workflow opens with this step
   // (parts-buyer fires off an order to the malt-supplier or
@@ -76,10 +77,7 @@
 
   function fmtMoney(cents: number): string {
     if (cents === 0) return '';
-    return `$${(cents / 100).toLocaleString('en-US', {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    })}`;
+    return formatMoney({ amount_cents: cents, currency: 'USD' }, { precision: 'cents' });
   }
 
   async function persist(status?: string): Promise<void> {

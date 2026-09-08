@@ -1,11 +1,13 @@
 <script lang="ts">
-  // /system/workflows/:slug — port of
+  // /it/registry/:slug — port of
   // apps/web/src/admin/WorkflowDetailPage.tsx.
 
   import Breadcrumb from '@boss/web-kit/ui/Breadcrumb.svelte';
+  import { formatDate } from '@boss/web-kit/ui/date';
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
+  import StatusChip from '@boss/web-kit/ui/StatusChip.svelte';
   import type { WorkflowSpec, StepSpec } from './workflowTypes';
   import { href, navigate } from '../router';
   import StepDag from '../jobs/StepDag.svelte';
@@ -46,7 +48,7 @@
         appToday(),
         { title: `Edit ${spec.kind}`, previousVersion: spec.version },
       );
-      navigate(href(`/system/workflows/authoring/${encodeURIComponent(jobId)}`));
+      navigate(href(`/it/registry/authoring/${encodeURIComponent(jobId)}`));
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
       action = null;
@@ -123,7 +125,10 @@
     }
   }
 
-  function statusChipClass(status: WorkflowSpec['status']): string {
+  // active = the published, live version → ok; retired → muted;
+  // draft → warn (an unpublished draft is attention, and must read
+  // differently from both the live and the retired rows).
+  function statusTone(status: WorkflowSpec['status']): 'ok' | 'warn' | 'muted' {
     return status === 'active' ? 'ok' : status === 'retired' ? 'muted' : 'warn';
   }
 
@@ -202,7 +207,7 @@
     : null}
 
   <div class="catalog theme-exec">
-    <Breadcrumb to={href('/system/workflows')}>
+    <Breadcrumb to={href('/it/registry')}>
       ← All job kinds
     </Breadcrumb>
     <PageHeader
@@ -233,7 +238,7 @@
       <button
         type="button"
         class="wb-btn"
-        onclick={() => navigate(href(`/system/workflows/new?fork=${encodeURIComponent(spec.kind)}`))}
+        onclick={() => navigate(href(`/it/registry/new?fork=${encodeURIComponent(spec.kind)}`))}
         title="Create a new kind pre-populated from this one"
       >
         Fork…
@@ -256,9 +261,7 @@
               <tr>
                 <td style="color:#888">Status</td>
                 <td>
-                  <span class="chip chip-stage chip-stage-{statusChipClass(spec.status)}">
-                    {spec.status}
-                  </span>
+                  <StatusChip value={spec.status} tone={statusTone(spec.status)} />
                 </td>
               </tr>
               <tr><td style="color:#888">Version</td><td>{spec.version}</td></tr>
@@ -266,7 +269,7 @@
                 <td style="color:#888">Subject kinds</td>
                 <td>
                   {#each spec.subject_kinds as s (s)}
-                    <span class="chip chip-stage chip-stage-muted" style="margin-right:4px">{s}</span>
+                    <span style="margin-right:4px"><StatusChip value={s} tone="muted" /></span>
                   {/each}
                 </td>
               </tr>
@@ -283,7 +286,7 @@
               </tr>
               <tr>
                 <td style="color:#888">Created</td>
-                <td>{new Date(spec.created_at).toISOString().slice(0, 10)}</td>
+                <td>{formatDate(spec.created_at)}</td>
               </tr>
               {#if spec.description}
                 <tr><td style="color:#888">Description</td><td>{spec.description}</td></tr>
@@ -421,9 +424,7 @@
                 <tr>
                   <td class="num">{v.version}</td>
                   <td>
-                    <span class="chip chip-stage chip-stage-{statusChipClass(v.status)}">
-                      {v.status}
-                    </span>
+                    <StatusChip value={v.status} tone={statusTone(v.status)} />
                   </td>
                   <td>{v.owning_team}</td>
                   <td>{new Date(v.created_at).toISOString().slice(0, 19).replace('T', ' ')}</td>

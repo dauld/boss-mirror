@@ -151,21 +151,20 @@ fn gate_script_covers_the_checks() {
         );
     }
 
-    // The lint roster used to be hand-listed here, and by 2026-08-13 it
-    // had drifted to a strict subset: dispatcher-rules-ratchet,
-    // schema-converge and no-secrets all ran in gate.sh while this test
-    // said nothing about them, so any of the three — including the
-    // secret scanner — could have been deleted from the gate silently.
-    // That is the same under-covering shape PR #226 shipped twice, just
-    // one level up, so the roster is derived instead of restated
-    // (CLAUDE.md §9a).
+    // The lint roster used to be hand-listed in gate.sh, and by
+    // 2026-08-13 this test had drifted to a strict subset of it. It was
+    // pinned then; on 2026-09-05 the list itself was collapsed — four
+    // cars collided on its tail line in one day and train #218 left one
+    // behind — so gate.sh now derives the pre-flight roster from
+    // infra/lint/ minus a named exclusion set (CLAUDE.md §9a, the
+    // manifest.txt lesson one level up).
     //
-    // Every executable check in infra/lint/ must appear in gate.sh
-    // unless it is listed below with a reason. The directory does hold
-    // legitimate non-gate scripts — that was the original objection to
-    // globbing — but "which ones and why" is a decision that should be
-    // written down once, here, rather than expressed as absence.
-    let not_gated: &[(&str, &str)] = &[
+    // Under-covering can therefore arrive only one way now: a lint
+    // slipping into that exclusion set. So the exclusion set is what is
+    // pinned. It is asked of the script itself (`--roster`), not
+    // re-parsed from its text — a second parser of the array would be
+    // the pair reopening.
+    let not_preflighted: &[(&str, &str)] = &[
         (
             "conservation-invariants.sh",
             "live-DB sweep on a systemd timer, not a static check",
@@ -180,7 +179,34 @@ fn gate_script_covers_the_checks() {
              proposed separately; it is the check that would have caught \
              the stale _generated/ports.ts",
         ),
+        (
+            "svelte-check.sh",
+            "installs packages — minutes, not seconds; the gate's web phase \
+             runs it, and that is asserted below",
+        ),
     ];
+
+    let out = std::process::Command::new("bash")
+        .arg(repo_root().join("infra/gate.sh"))
+        .arg("--roster")
+        .current_dir(repo_root())
+        .output()
+        .expect("run gate.sh --roster");
+    assert!(
+        out.status.success(),
+        "infra/gate.sh --roster refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let roster = String::from_utf8_lossy(&out.stdout);
+    let preflighted: Vec<&str> = roster
+        .lines()
+        .filter_map(|l| l.split_once(' ').map(|(_, path)| path))
+        .collect();
+    assert_eq!(
+        preflighted.first().copied(),
+        Some("infra/lint/workspace-declares-what-it-runs.sh"),
+        "the pre-flight must open by saying what the workspace cannot cover"
+    );
 
     let mut missing = Vec::new();
     for entry in std::fs::read_dir(repo_root().join("infra/lint")).expect("read infra/lint") {
@@ -189,19 +215,25 @@ fn gate_script_covers_the_checks() {
             Some(n) if n.ends_with(".sh") => n.to_string(),
             _ => continue,
         };
-        if not_gated.iter().any(|(n, _)| *n == name) {
-            continue;
-        }
-        if !gate.contains(&name) {
+        let excluded = not_preflighted.iter().any(|(n, _)| *n == name);
+        let runs = preflighted
+            .iter()
+            .any(|p| *p == format!("infra/lint/{name}"));
+        if excluded == runs {
             missing.push(name);
         }
     }
     missing.sort();
     assert!(
         missing.is_empty(),
-        "infra/lint/ holds check(s) that infra/gate.sh does not run: {missing:?}. \
-         Either add them to the gate, or add them to `not_gated` in this test \
-         with the reason they are exempt."
+        "infra/lint/ and gate.sh's pre-flight disagree on: {missing:?}. A lint \
+         listed here as not-preflighted must be in gate.sh's PREFLIGHT_EXCLUDES, \
+         and one excluded there must be listed here with the reason it is exempt."
+    );
+    assert!(
+        gate.contains("infra/lint/svelte-check.sh"),
+        "svelte-check.sh is kept out of the pre-flight for cost, not for coverage: \
+         the gate's web phase must still run it"
     );
 }
 
@@ -424,5 +456,151 @@ fn the_receipt_names_what_only_a_database_could_have_judged() {
         script.contains("if ! db_checks_passed; then"),
         "the list must be gated on the DB checks NOT passing, so it \
          stays silent on changes a database has nothing to say about"
+    );
+}
+
+/// `--quick` must stop BEFORE anything compiles, or it is not quick.
+///
+/// The mode exists because the cheap checks were unreachable without the
+/// expensive ones: on 2026-08-27 a car spent 17 minutes of cluster time,
+/// a scheduled pod and a clone to discover a `cargo fmt` slip that
+/// `--quick` now finds in 13 seconds. The property that makes it worth
+/// running is that it does not build — so this asserts by POSITION,
+/// which is the only thing that can actually go wrong here: move the
+/// early exit below the cargo phases and `--quick` silently becomes a
+/// full gate that lies about its name.
+#[test]
+fn quick_mode_exits_before_the_first_compile() {
+    let gate = read("infra/gate.sh");
+
+    // BY LINE, AND ONLY REAL INVOCATIONS. gate.sh is more comment than
+    // code, and two earlier drafts of this test compared byte offsets
+    // against `cargo build` and `check "fixture"` as they appear in
+    // PROSE — 25k and 9k bytes above any real call. A needle that can
+    // match a comment tests the comment. A `check` invocation is a line
+    // whose first non-space characters are `check "`; a comment's are `#`.
+    let lines: Vec<&str> = gate.lines().collect();
+    let is_invocation = |l: &str| l.trim_start().starts_with("check \"");
+
+    let quick_at = lines
+        .iter()
+        .position(|l| l.contains("if [ \"$QUICK\" -eq 1 ]; then"))
+        .expect("infra/gate.sh no longer has a --quick early exit");
+
+    // The three that COMPILE, named rather than matched on "cargo ".
+    // `cargo fmt` is a cargo command that builds nothing and is part of
+    // the pre-flight itself, so a broad needle finds it and reports the
+    // mode failing to exit before a check it is supposed to run.
+    let builds = |l: &str| {
+        ["cargo clippy", "cargo build", "cargo test"]
+            .iter()
+            .any(|c| l.contains(c))
+    };
+    let first_compile = lines
+        .iter()
+        .enumerate()
+        .find(|(_, l)| is_invocation(l) && builds(l))
+        .map(|(i, l)| (i, l.trim().to_string()))
+        .expect("gate.sh no longer compiles anything through check()");
+
+    assert!(
+        quick_at < first_compile.0,
+        "`--quick` exits at line {} but the first compiling check is at line {} ({}) — \
+         the early exit must come FIRST or --quick compiles, which is the one thing \
+         it promises not to do",
+        quick_at + 1,
+        first_compile.0 + 1,
+        first_compile.1
+    );
+}
+
+/// The full gate must still run the pre-flight set.
+///
+/// `run_preflight` holds fmt plus the whole lint roster. If it were only
+/// ever called from the `--quick` branch, a normal gate would stop
+/// linting entirely and stay green while doing less — the exact
+/// under-covering shape `gate_script_covers_the_checks` was written for,
+/// one level up. So it has to be invoked somewhere the QUICK branch is
+/// not.
+#[test]
+fn the_full_gate_still_runs_the_preflight_set() {
+    let gate = read("infra/gate.sh");
+    let calls = gate.matches("\nrun_preflight").count();
+    assert!(
+        calls >= 2,
+        "`run_preflight` is invoked {calls} time(s); the full gate and --quick must \
+         BOTH call it, or one of them silently skips fmt and every lint"
+    );
+}
+
+/// The pre-push hook exists, is executable, and actually runs the
+/// pre-flight.
+///
+/// A hook that is documented but not installed is advice, and advice is
+/// what failed: `--quick` existed on 2026-08-28 and a push still went out
+/// with a formatting slip, because the pre-flight had been chained with
+/// `;` instead of `&&`. The cost is a full gate — ~40 minutes of cluster
+/// time and a scheduled pod — for something answerable in 11 seconds.
+///
+/// Asserting the file merely exists would pass on an empty one, so this
+/// checks the three properties that make it a check rather than a
+/// gesture: it is executable, it invokes the pre-flight, and it exits
+/// non-zero when the pre-flight fails.
+#[test]
+fn the_pre_push_hook_runs_the_preflight_and_refuses_on_failure() {
+    let path = repo_root().join("infra/git-hooks/pre-push");
+    let hook = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path)
+            .expect("stat the hook")
+            .permissions()
+            .mode();
+        assert!(
+            mode & 0o111 != 0,
+            "infra/git-hooks/pre-push is not executable — git will ignore it silently"
+        );
+    }
+
+    // Match the INVOCATION, not the prose. This asserted
+    // `hook.contains("--quick")` anywhere in the file until 2026-08-28,
+    // when the hook moved to `--lint` and the assertion kept passing on
+    // the word "--quick" left behind in a comment. A test satisfied by
+    // its own documentation is not testing anything.
+    let invokes_preflight = hook.lines().any(|l| {
+        let l = l.trim();
+        !l.starts_with('#')
+            && l.contains("gate.sh")
+            && (l.contains("--quick") || l.contains("--lint"))
+    });
+    assert!(
+        invokes_preflight,
+        "no non-comment line invokes gate.sh with --quick or --lint — the hook is \
+         a file that does nothing"
+    );
+    assert!(
+        hook.contains("exit 1"),
+        "the hook must REFUSE the push when the pre-flight fails; a hook that \
+         only prints is the advice this replaces"
+    );
+    assert!(
+        hook.contains("BOSS_SKIP_PREFLIGHT"),
+        "there must be a deliberate escape hatch — a check with no way out \
+         gets disabled wholesale the first time it is wrong"
+    );
+}
+
+/// The install is one command and it has to be written down somewhere a
+/// new clone will look, or the hook ships switched off.
+#[test]
+fn the_bootstrap_says_how_to_install_the_hook() {
+    let doc = read("docs/runbooks/dev-environment-bootstrap.md");
+    assert!(
+        doc.contains("core.hooksPath") && doc.contains("infra/git-hooks"),
+        "dev-environment-bootstrap.md does not say to set core.hooksPath — \
+         a tracked hooks directory that nobody points git at is inert"
     );
 }

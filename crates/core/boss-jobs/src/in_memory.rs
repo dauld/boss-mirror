@@ -7,6 +7,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use boss_core::job::{Job, JobId, JobStatus, Step, StepId, StepStatus};
+use chrono::{DateTime, Utc};
 
 use crate::port::{JobFilter, JobScope, JobsError, JobsRepository, LaunchCalendarRow};
 
@@ -14,12 +15,29 @@ use crate::port::{JobFilter, JobScope, JobsError, JobsRepository, LaunchCalendar
 pub struct InMemoryJobs {
     inner: Mutex<State>,
     recorded: Mutex<Vec<boss_core::event::Event>>,
+    refusals: Mutex<Vec<crate::refusals::RecordedRefusal>>,
 }
 
 #[derive(Default)]
 struct State {
     jobs: HashMap<String, Job>,
     steps: HashMap<String, Step>,
+    /// The in-memory mirror of `steps.became_ready_at`: the instant a
+    /// step FIRST landed in `Ready`, written once and never moved by a
+    /// later write — which is exactly the property the queue-age lens
+    /// needs and `updated_at` cannot have (packet 2a0b034e).
+    step_ready_at: HashMap<String, DateTime<Utc>>,
+    /// The in-memory mirror of `steps.updated_at`: the last write
+    /// instant per step. The lens's labelled lower-bound fallback for
+    /// steps that never passed through `Ready`.
+    step_touched_at: HashMap<String, DateTime<Utc>>,
+    /// The in-memory mirror of `jobs.created_at`: the admission
+    /// instant, written once in `create_job_at` from the same `now`
+    /// the Pg adapter binds into that column. `list_jobs` breaks
+    /// same-day ties on it — `opened_on` is a DATE, so without a
+    /// tiebreak every windowed read of a busy day returned an
+    /// arbitrary subset.
+    job_created_at: HashMap<String, DateTime<Utc>>,
 }
 
 impl InMemoryJobs {
@@ -154,20 +172,25 @@ impl JobsRepository for InMemoryJobs {
     async fn create_job_at(
         &self,
         job: &Job,
-        _now: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
         // Mirror the Pg replay guard: an existing id is a no-op that
-        // records nothing.
+        // records nothing — and keeps its original admission instant.
         let inserted = {
             let mut state = self.inner.lock().expect("poisoned");
-            match state.jobs.entry(job_key(&job.id)) {
+            let key = job_key(&job.id);
+            let inserted = match state.jobs.entry(key.clone()) {
                 std::collections::hash_map::Entry::Occupied(_) => false,
                 std::collections::hash_map::Entry::Vacant(v) => {
                     v.insert(job.clone());
                     true
                 }
+            };
+            if inserted {
+                state.job_created_at.insert(key, now);
             }
+            inserted
         };
         if inserted {
             self.record_all(events);
@@ -178,6 +201,20 @@ impl JobsRepository for InMemoryJobs {
     async fn get_job(&self, id: &JobId) -> Result<Option<Job>, JobsError> {
         let state = self.inner.lock().expect("poisoned");
         Ok(state.jobs.get(&job_key(id)).cloned())
+    }
+
+    async fn resolve_job_id_prefix(&self, prefix: &str) -> Result<Vec<JobId>, JobsError> {
+        // The map is keyed by the canonical id string (`job_key`), so a
+        // prefix match on the key is the same match the Pg adapter makes
+        // on `id::text`. Capped at two, like the SQL's LIMIT 2.
+        let state = self.inner.lock().expect("poisoned");
+        Ok(state
+            .jobs
+            .values()
+            .filter(|j| j.id.to_string().starts_with(prefix))
+            .take(2)
+            .map(|j| j.id)
+            .collect())
     }
 
     async fn update_job_at(
@@ -240,6 +277,76 @@ impl JobsRepository for InMemoryJobs {
         Ok(merged)
     }
 
+    async fn list_estate_nodes(&self) -> Result<Vec<crate::port::EstateNode>, JobsError> {
+        // The estate is seeded by schema migration, so an in-memory
+        // registry genuinely has none — and saying so is better than
+        // inventing fixtures a test would then assert against.
+        Ok(Vec::new())
+    }
+
+    async fn recent_events_by_kind(
+        &self,
+        kind: &str,
+        scope: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>, JobsError> {
+        // `recorded` is append-order, so newest-first is a reverse —
+        // the same ordering contract the Pg impl gets from
+        // `ORDER BY timestamp DESC`.
+        //
+        // ORDER MATTERS: both filters run BEFORE `take`, mirroring a
+        // WHERE clause preceding its LIMIT. Taking first and filtering
+        // after would reproduce the very defect this argument exists to
+        // fix, and would do it only in this adapter — a divergence the
+        // Pg pairing test in estate_readers_pg.rs is there to catch.
+        let rows = self
+            .recorded_events()
+            .into_iter()
+            .rev()
+            .filter(|e| e.kind == kind)
+            .filter(|e| {
+                scope.is_none_or(|want| {
+                    e.payload.get("scope").and_then(|s| s.as_str()) == Some(want)
+                })
+            })
+            .take(limit.max(0) as usize)
+            .map(|e| {
+                serde_json::json!({
+                    "event_id": e.id,
+                    "timestamp": e.timestamp,
+                    "source": e.source,
+                    "kind": e.kind,
+                    "payload": e.payload,
+                })
+            })
+            .collect();
+        Ok(rows)
+    }
+
+    async fn repin_workflow_version_at(
+        &self,
+        id: &JobId,
+        to_version: i32,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<Job, JobsError> {
+        // One column, under the lock, and the event carries the row as
+        // it stands afterwards — same shape as the metadata merge above.
+        let repinned = {
+            let mut state = self.inner.lock().expect("poisoned");
+            let Some(job) = state.jobs.get_mut(&job_key(id)) else {
+                return Err(JobsError::NotFound(*id));
+            };
+            job.workflow_version = to_version;
+            job.clone()
+        };
+        let event = stamp.event(
+            crate::events::JOB_UPDATED,
+            serde_json::to_value(&repinned).unwrap_or_default(),
+        );
+        self.record_all(&[event]);
+        Ok(repinned)
+    }
+
     async fn list_jobs(
         &self,
         filter: &JobFilter,
@@ -252,7 +359,22 @@ impl JobsRepository for InMemoryJobs {
             .values()
             .filter(|j| matches_filter(j, filter))
             .collect();
-        jobs.sort_by_key(|j| std::cmp::Reverse(j.opened_on));
+        // Newest first, deterministically. `opened_on` is a DATE, so a
+        // busy day is one big tie; break it on the admission instant
+        // (desc), then on id (asc) — the same
+        // `ORDER BY opened_on DESC, created_at DESC, id` the Pg
+        // adapter's list_jobs runs, so a windowed read returns the
+        // same page from either store. `Uuid`'s Ord is its byte order,
+        // which is how Postgres orders a uuid column.
+        jobs.sort_by(|a, b| {
+            b.opened_on
+                .cmp(&a.opened_on)
+                .then_with(|| {
+                    let admitted = |j: &Job| state.job_created_at.get(&job_key(&j.id)).copied();
+                    admitted(b).cmp(&admitted(a))
+                })
+                .then_with(|| a.id.inner().as_uuid().cmp(b.id.inner().as_uuid()))
+        });
         let total = jobs.len() as i64;
         let page = jobs
             .into_iter()
@@ -266,20 +388,30 @@ impl JobsRepository for InMemoryJobs {
     async fn add_step_at(
         &self,
         step: &Step,
-        _now: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
         // Mirror the Pg replay guard: an existing id is a no-op that
         // records nothing.
         let inserted = {
             let mut state = self.inner.lock().expect("poisoned");
-            match state.steps.entry(step_key(&step.id)) {
+            let key = step_key(&step.id);
+            let inserted = match state.steps.entry(key.clone()) {
                 std::collections::hash_map::Entry::Occupied(_) => false,
                 std::collections::hash_map::Entry::Vacant(v) => {
                     v.insert(step.clone());
                     true
                 }
+            };
+            if inserted {
+                // Born ready IS the ready flip — same rule as the
+                // INSERT's CASE in the Pg adapter.
+                if step.status == StepStatus::Ready {
+                    state.step_ready_at.insert(key.clone(), now);
+                }
+                state.step_touched_at.insert(key, now);
             }
+            inserted
         };
         if inserted {
             self.record_all(events);
@@ -295,7 +427,7 @@ impl JobsRepository for InMemoryJobs {
     async fn update_step_at(
         &self,
         step: &Step,
-        _now: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
         let mut state = self.inner.lock().expect("poisoned");
@@ -317,17 +449,71 @@ impl JobsRepository for InMemoryJobs {
             next.completed_on = existing.completed_on;
             next.metadata = existing.metadata.clone();
         }
+        // The ready stamp is written once, at the write that lands the
+        // step in Ready, and no later write moves it — the COALESCE in
+        // the Pg adapter's UPDATE.
+        if next.status == StepStatus::Ready {
+            state.step_ready_at.entry(key.clone()).or_insert(now);
+        }
+        state.step_touched_at.insert(key.clone(), now);
         state.steps.insert(key, next);
         drop(state);
         self.record_all(events);
         Ok(())
     }
 
+    async fn merge_step_metadata_at(
+        &self,
+        id: &StepId,
+        patch: &serde_json::Map<String, serde_json::Value>,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<Step, JobsError> {
+        // Mirror the Pg adapter: merge under the lock against the row
+        // as it stands, null removes, no other field moves, a terminal
+        // row refuses rather than silently freezing, and the
+        // STEP_UPDATED event is built from the post-merge row.
+        let merged = {
+            let mut state = self.inner.lock().expect("poisoned");
+            let key = step_key(id);
+            let Some(step) = state.steps.get_mut(&key) else {
+                return Err(JobsError::StepNotFound(*id));
+            };
+            if matches!(step.status, StepStatus::Completed | StepStatus::Skipped) {
+                return Err(JobsError::TerminalStep {
+                    id: *id,
+                    status: format!("{:?}", step.status).to_lowercase(),
+                });
+            }
+            let mut md = match &step.metadata {
+                serde_json::Value::Object(m) => m.clone(),
+                _ => serde_json::Map::new(),
+            };
+            for (k, v) in patch {
+                if v.is_null() {
+                    md.remove(k);
+                } else {
+                    md.insert(k.clone(), v.clone());
+                }
+            }
+            step.metadata = serde_json::Value::Object(md);
+            let merged = step.clone();
+            // Mirrors the SQL's `updated_at = stamp.timestamp`.
+            state.step_touched_at.insert(key, stamp.timestamp);
+            merged
+        };
+        let event = stamp.event(
+            crate::events::STEP_UPDATED,
+            crate::events::step_state_payload(&merged),
+        );
+        self.record_all(&[event]);
+        Ok(merged)
+    }
+
     async fn claim_step_at(
         &self,
         step_id: &StepId,
         actor: &str,
-        _now: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<Step, JobsError> {
         let claimed = {
@@ -348,7 +534,11 @@ impl JobsRepository for InMemoryJobs {
             }
             existing.assignee_id = Some(actor.to_string());
             existing.status = StepStatus::Active;
-            existing.clone()
+            let claimed = existing.clone();
+            // A claim bumps `updated_at` in the Pg adapter; the ready
+            // stamp, already written at the flip, stays put.
+            state.step_touched_at.insert(key, now);
+            claimed
         };
         self.record_all(events);
         Ok(claimed)
@@ -358,7 +548,7 @@ impl JobsRepository for InMemoryJobs {
         &self,
         step_id: &StepId,
         stamp: &boss_core::job::SignOffStamp,
-        _now: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
         {
@@ -368,6 +558,8 @@ impl JobsRepository for InMemoryJobs {
                 return Err(JobsError::StepNotFound(*step_id));
             };
             existing.sign_offs.push(stamp.clone());
+            // Mirrors the sign-off UPDATE's `updated_at = $3`.
+            state.step_touched_at.insert(key, now);
         }
         self.record_all(events);
         Ok(())
@@ -389,6 +581,67 @@ impl JobsRepository for InMemoryJobs {
             .collect();
         steps.sort_by_key(|s| s.sort_order);
         Ok(steps)
+    }
+
+    async fn queue_age(
+        &self,
+        scope: &crate::port::JobScope,
+    ) -> Result<Vec<crate::port::QueueAgeRow>, JobsError> {
+        // Scope + open-status through `matches_filter`, so the lens
+        // and `list_jobs` cannot disagree about whose packets these
+        // are (CLAUDE.md §9a — one definition of the scope rule).
+        let filter = JobFilter {
+            status: Some(JobStatus::Open),
+            scope: scope.clone(),
+            ..Default::default()
+        };
+        let state = self.inner.lock().expect("poisoned");
+        let mut rows: Vec<crate::port::QueueAgeRow> = state
+            .steps
+            .values()
+            .filter(|s| matches!(s.status, StepStatus::Ready | StepStatus::Active))
+            .filter_map(|s| {
+                let job = state.jobs.get(&job_key(&s.job_id))?;
+                if !matches_filter(job, &filter) {
+                    return None;
+                }
+                let key = step_key(&s.id);
+                // Ready flip when recorded; last-write lower bound
+                // otherwise — COALESCE(became_ready_at, updated_at).
+                let (since, exact) = match (
+                    state.step_ready_at.get(&key),
+                    state.step_touched_at.get(&key),
+                ) {
+                    (Some(at), _) => (*at, true),
+                    (None, Some(at)) => (*at, false),
+                    // Unreachable through the port: every step write
+                    // stamps `step_touched_at`. A step with neither
+                    // stamp has no honest age, so it has no row.
+                    (None, None) => return None,
+                };
+                Some(crate::port::QueueAgeRow {
+                    job_id: s.job_id,
+                    job_kind: job.kind.clone(),
+                    job_title: job.title.clone(),
+                    step_id: s.id,
+                    spec_slug: s.spec_slug.clone(),
+                    step_title: s.title.clone(),
+                    status: s.status,
+                    assignee_id: s.assignee_id.clone(),
+                    simulated: job.simulated,
+                    since,
+                    exact,
+                })
+            })
+            .collect();
+        // Longest-waiting first; step id as the deterministic
+        // tiebreak, matching the SQL's `ORDER BY since, s.id`.
+        rows.sort_by(|a, b| {
+            a.since
+                .cmp(&b.since)
+                .then_with(|| a.step_id.to_string().cmp(&b.step_id.to_string()))
+        });
+        Ok(rows)
     }
 
     async fn count_in_flight_steps_by_kind(&self, step_kind: &str) -> Result<i64, JobsError> {
@@ -577,6 +830,36 @@ impl JobsRepository for InMemoryJobs {
         }
         Ok(results)
     }
+
+    async fn record_step_write_refusal_at(
+        &self,
+        refusal: &crate::refusals::StepWriteRefusal,
+        now: DateTime<Utc>,
+    ) -> Result<(), JobsError> {
+        let mut refusals = self.refusals.lock().expect("poisoned");
+        // BIGSERIAL starts at 1, so the in-memory ids match what a
+        // caller reading either adapter would see.
+        let id = refusals.len() as i64 + 1;
+        refusals.push(crate::refusals::RecordedRefusal {
+            id,
+            refused_at: now,
+            refusal: refusal.clone(),
+        });
+        Ok(())
+    }
+
+    async fn step_write_refusals(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::refusals::RecordedRefusal>, JobsError> {
+        let refusals = self.refusals.lock().expect("poisoned");
+        Ok(refusals
+            .iter()
+            .rev()
+            .take(limit.max(0) as usize)
+            .cloned()
+            .collect())
+    }
 }
 
 /// Check if all blockers for a step are satisfied (done or skipped).
@@ -617,7 +900,7 @@ pub fn compute_job_status(steps: &[Step]) -> JobStatus {
 #[cfg(test)]
 mod tests {
     use boss_core::job::{Priority, Subject};
-    use chrono::NaiveDate;
+    use chrono::{NaiveDate, TimeZone};
 
     use super::*;
 
@@ -732,6 +1015,91 @@ mod tests {
         let (jobs, total) = repo.list_jobs(&filter, 100, 0).await.unwrap();
         assert_eq!(total, 1);
         assert_eq!(jobs[0].kind, "refurb");
+    }
+
+    // `opened_on` is a DATE. On 2026-09-07 one day held 398 closed
+    // pr-trains, and every windowed read of it — the yard's recent
+    // trains, its stranded-green cross-ref, the page's arrival list —
+    // returned an arbitrary subset, because a DATE alone leaves a busy
+    // day one big tie. The tiebreak is the admission instant, then id,
+    // pinned here against the Pg adapter's
+    // `ORDER BY opened_on DESC, created_at DESC, id`; the Pg side of
+    // the pin is tests/a_day_of_jobs_lists_newest_first_pg.rs.
+
+    fn at(h: u32, m: u32, s: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 4, 16, h, m, s).unwrap()
+    }
+
+    async fn admit(repo: &InMemoryJobs, title: &str, now: DateTime<Utc>) {
+        let mut job = make_job("pr-train");
+        job.title = title.into();
+        repo.create_job_at(&job, now, &[]).await.unwrap();
+    }
+
+    fn titles(page: &[Job]) -> Vec<&str> {
+        page.iter().map(|j| j.title.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn same_day_jobs_list_the_later_admission_first() {
+        let repo = InMemoryJobs::new();
+        admit(&repo, "07:39", at(7, 39, 0)).await;
+        admit(&repo, "20:07", at(20, 7, 0)).await;
+
+        let (page, total) = repo.list_jobs(&JobFilter::default(), 10, 0).await.unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(titles(&page), ["20:07", "07:39"]);
+    }
+
+    #[tokio::test]
+    async fn a_day_of_jobs_lists_in_one_order_every_time() {
+        let repo = InMemoryJobs::new();
+        // Admitted out of clock order, so insertion order is not what
+        // the assertion accidentally passes on.
+        admit(&repo, "20:07", at(20, 7, 0)).await;
+        admit(&repo, "07:39", at(7, 39, 0)).await;
+        admit(&repo, "08:15", at(8, 15, 0)).await;
+
+        for _ in 0..10 {
+            let (page, total) = repo.list_jobs(&JobFilter::default(), 10, 0).await.unwrap();
+            assert_eq!(total, 3);
+            assert_eq!(titles(&page), ["20:07", "08:15", "07:39"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_window_of_one_on_a_same_day_set_is_the_newest() {
+        let repo = InMemoryJobs::new();
+        admit(&repo, "08:15", at(8, 15, 0)).await;
+        admit(&repo, "20:07", at(20, 7, 0)).await;
+        admit(&repo, "07:39", at(7, 39, 0)).await;
+
+        let (page, total) = repo.list_jobs(&JobFilter::default(), 1, 0).await.unwrap();
+        assert_eq!(total, 3, "the window narrows the page, not the total");
+        assert_eq!(titles(&page), ["20:07"]);
+
+        // And the next window continues where the first left off.
+        let (page, _) = repo.list_jobs(&JobFilter::default(), 1, 1).await.unwrap();
+        assert_eq!(titles(&page), ["08:15"]);
+    }
+
+    #[tokio::test]
+    async fn same_instant_ties_break_on_id_like_the_pg_order() {
+        let repo = InMemoryJobs::new();
+        let same = at(12, 0, 0);
+        for (title, id) in [
+            ("03", "00000000-0000-0000-0000-000000000003"),
+            ("01", "00000000-0000-0000-0000-000000000001"),
+            ("02", "00000000-0000-0000-0000-000000000002"),
+        ] {
+            let mut job = make_job("pr-train");
+            job.id = JobId::from_uuid(uuid::Uuid::parse_str(id).unwrap());
+            job.title = title.into();
+            repo.create_job_at(&job, same, &[]).await.unwrap();
+        }
+
+        let (page, _) = repo.list_jobs(&JobFilter::default(), 10, 0).await.unwrap();
+        assert_eq!(titles(&page), ["01", "02", "03"]);
     }
 
     #[tokio::test]

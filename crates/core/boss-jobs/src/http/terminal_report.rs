@@ -10,6 +10,11 @@
 //! state, one query. This is the surface that replaces the ad-hoc SQL
 //! the week's brewery protocol iterations (tasting-panel v1→v2,
 //! keg-return v1→v4, morning-brew v1→v2) were measured with.
+//!
+//! Tier 2 (packet 6ea5a12a) added the ARM dimension: cohorts group by
+//! (version, `experiment_arm` stamp), so a split experiment's control
+//! and candidate — and the unstamped bystanders on the same versions —
+//! report as separate rows. See `crate::experiments`.
 
 use super::*;
 

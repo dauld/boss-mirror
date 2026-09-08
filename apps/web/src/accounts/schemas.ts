@@ -128,3 +128,31 @@ export const NextActionSchema = z
     link: a.deep_link.length > 0 ? a.deep_link : undefined,
   }));
 export const NextActionListSchema = z.array(NextActionSchema);
+
+/// The watchlist's risk scores (`GET /api/accounts/risk-scores`).
+///
+/// WHY THIS EXISTS. WatchlistPage cast the payload —
+/// `(await r.json()) as { accounts: RiskScore[] }` — and then read
+/// `.length` off the result. A response without an `accounts` key made
+/// `scores` undefined and the page died with "Cannot read properties of
+/// undefined (reading 'length')", which is precisely the failure
+/// parseResponse.ts was written about (feedback 2fe1c8c1). The page's
+/// own old comment had predicted it.
+///
+/// `factors` is permissive on purpose: the page reads a handful of keys
+/// off it and tolerates absent ones, so pinning every field here would
+/// turn a harmless backend addition into a hard parse failure. The
+/// shape that MATTERS is `accounts` being an array of objects each
+/// carrying an id and a numeric score — that is what the table indexes,
+/// sorts and counts.
+export const RiskScoreSchema = z.object({
+  account_id: z.string(),
+  account_name: z.string(),
+  score: z.number(),
+  top_factor: z.string(),
+  factors: z.record(z.string(), z.unknown()).optional(),
+});
+
+export const RiskScoreListSchema = z.object({
+  accounts: z.array(RiskScoreSchema),
+});

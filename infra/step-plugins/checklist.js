@@ -105,19 +105,55 @@
       saving = true;
       renderActions();
       try {
-        const nextStatus = autoComplete && allChecked()
-          ? 'done'
-          : (step.status === 'pending' ? 'active' : step.status);
-        await fetch(`/api/jobs/${jobId}/steps/${step.id}`, {
-          method: 'PUT',
+        const completing = autoComplete && allChecked();
+        // Merge ONLY the key this surface owns. The old idiom PUT
+        // `{ ...step.metadata, items }` — the page-load snapshot plus
+        // our key — and PUT metadata is replaced WHOLESALE, so any key
+        // another writer added after this page loaded was silently
+        // erased (the lost update the step metadata PATCH exists to
+        // retire). The server merges against the row as it stands and
+        // preserves every key this body does not name.
+        const pr = await fetch(`/api/jobs/${jobId}/steps/${step.id}/metadata`, {
+          method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ...step,
-            job_id: jobId,
-            status: nextStatus,
-            metadata: { ...step.metadata, items },
-          }),
+          body: JSON.stringify({ items }),
         });
+        // The old single PUT went unchecked; with two writes the
+        // follow-up must not fire when the merge it depends on failed,
+        // or a failed save could still move the status. The host
+        // refresh below still runs either way, so a silent failure
+        // shows server truth — exactly what it showed before.
+        if (pr.ok) {
+          if (completing) {
+            // The PATCH answers 204 with no body, and the completion
+            // PUT replaces metadata wholesale — read the post-merge
+            // row back and complete with the true final shape, never
+            // the snapshot. (No single-step GET exists; the job's
+            // steps list is the read the API offers.)
+            const lr = await fetch(`/api/jobs/${jobId}/steps`);
+            const stepsNow = lr.ok ? await lr.json() : null;
+            const fresh = Array.isArray(stepsNow)
+              ? stepsNow.find((s) => s.id === step.id)
+              : null;
+            if (fresh) {
+              await fetch(`/api/jobs/${jobId}/steps/${step.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ...fresh, job_id: jobId, status: 'done' }),
+              });
+            }
+          } else if (step.status === 'pending') {
+            // A save still flips a pending step active. Status cannot
+            // travel through the metadata PATCH, and the step PUT
+            // overlays — every field this body omits keeps its current
+            // value, the just-merged metadata included.
+            await fetch(`/api/jobs/${jobId}/steps/${step.id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ job_id: jobId, status: 'active' }),
+            });
+          }
+        }
         onUpdate();
       } finally {
         saving = false;

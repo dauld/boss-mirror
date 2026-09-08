@@ -83,6 +83,24 @@ SERVICES=(
     "boss-gateway"
 )
 
+# The files this launcher sources from its own directory — ONE list,
+# read by the source lines and by `--check` (CLAUDE.md §9a: a fact that
+# lives twice drifts). The image build copies them beside the launcher;
+# `--check` is how the converge proves it did before rolling the
+# cluster (2026-09-05: it had not, and the pod crash-looped for hours).
+HERE="$(dirname "${BASH_SOURCE[0]}")"
+SOURCED=(tenant-launch.sh)
+if [[ "${1:-}" == "--check" ]]; then
+    missing=0
+    for f in "${SOURCED[@]}"; do
+        [[ -f "$HERE/$f" ]] || { echo "launcher check: $HERE/$f is missing — the image did not copy it beside the launcher"; missing=1; }
+    done
+    for svc in "${SERVICES[@]}"; do
+        command -v "$svc" >/dev/null 2>&1 || echo "launcher check: note — $svc not on PATH (it would be SKIPped at launch)"
+    done
+    [[ "$missing" -eq 0 ]] && echo "launcher check: ok — ${#SOURCED[@]} sourced file(s) present"
+    exit "$missing"
+fi
 PIDS=()
 
 # Generate /etc/boss-*.toml configs at container start. The API
@@ -113,10 +131,17 @@ trap cleanup TERM INT
 # before the sim opens its first Job. operator-baseline FIRST so the
 # platform-admin login + emp-audit exist before the brewery seed + sim.
 # Shared with bare-metal bootstrap-local.sh.
-publish_brewery_tenant() {
-    /opt/boss/infra/seed-operator-baseline.sh
-    /opt/boss/infra/seed-brewery-tenant.sh
-}
+#
+# A FAILED PREPARE DEGRADES THE POD, IT DOES NOT END IT. The publish and
+# the sim start live in tenant-launch.sh: on failure the APIs stay up,
+# the gateway (later in this list) still starts, the sim stays down and
+# prepare retries in a background child that becomes the sim when it
+# succeeds. On 2026-09-02 the seed's exit 1 met this file's `set -e`
+# and took the jobs API down for 65 minutes over a one-field 400.
+for f in "${SOURCED[@]}"; do
+    # shellcheck source=/dev/null
+    . "$HERE/$f"
+done
 
 echo "==> boss-launch starting ${#SERVICES[@]} services"
 for svc in "${SERVICES[@]}"; do
@@ -124,29 +149,17 @@ for svc in "${SERVICES[@]}"; do
     # brewery Workflows + policy grants exist (the jobs-api it needs is up
     # by now, having been started earlier in this loop).
     if [[ "$svc" == "boss-brewery-sim" ]]; then
-        publish_brewery_tenant
-        # The sim posts jobs the moment it starts, and their side
-        # effects (invoices, COGS, shipping) fire only if the
-        # dispatcher's consumers are BOUND — a process that answers
-        # /health can still be seconds from consuming (823fcb22
-        # mechanism 1: nothing gated on it; the flake profile is
-        # closed_jobs climbing while invoices stay 0 forever). Gate on
-        # /api/dispatcher/readyz, which flips only when both consumer
-        # loops are live. Bounded and loud: past the budget we start
-        # the sim anyway and say so, because a wedged gate hiding the
-        # whole stack is worse than a diagnosable race.
-        echo "    waiting for dispatcher readyz before the sim"
-        for i in $(seq 1 60); do
-            if curl -fsS -m 2 "http://127.0.0.1:7950/api/dispatcher/readyz" 2>/dev/null \
-                | grep -q '"ready":[[:space:]]*true'; then
-                echo "    dispatcher ready after ${i}s"
-                break
-            fi
-            if [[ "$i" == "60" ]]; then
-                echo "    WARN: dispatcher not ready after 60s — starting the sim anyway (side effects may lag or dead-air; check /api/dispatcher/readyz)"
-            fi
-            sleep 1
-        done
+        if ! command -v "$svc" >/dev/null 2>&1; then
+            echo "    SKIP: $svc (binary not in image)"
+            continue
+        fi
+        # Publishes the tenant, gates on the dispatcher's readyz, and
+        # starts the sim as a background child — or degrades and
+        # retries. Never returns non-zero; the launch goes on.
+        echo "    starting $svc (after the tenant publish)"
+        launch_tenant_and_sim PIDS
+        sleep 0.1
+        continue
     fi
     if ! command -v "$svc" >/dev/null 2>&1; then
         echo "    SKIP: $svc (binary not in image)"

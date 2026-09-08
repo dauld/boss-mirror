@@ -93,6 +93,8 @@ fn app_with_clock(
         subject_existence: None,
         roster: None,
         clock,
+        cadence: None,
+        delivery: None,
     };
     (router(state), jobs)
 }

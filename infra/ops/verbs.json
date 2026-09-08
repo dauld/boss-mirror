@@ -1,0 +1,104 @@
+{
+  "_about": [
+    "BOSS ops-request verb allowlist — THE authority for what a host runner will execute.",
+    "In-tree, reviewed, versioned: changing what a host runs for a packet is a PR, never a packet.",
+    "Phase 1 was READ-ONLY. reclaim-disk (below) is the FIRST MUTATING verb — authorized by",
+    "David, 2026-09-03, after the forge disk filled and blocked CI for every train. Its bound is",
+    "by construction of the ONE script it calls (infra/forge/disk-floor-sweep.sh, the same",
+    "definition the hourly timer runs — §9a): regenerable docker caches only, in a fixed order,",
+    "stopping at the floor, never volumes or non-docker paths, loud non-zero exit when the floor",
+    "stays unmet rather than deleting harder. Any further mutating verb needs the same explicit",
+    "authorization — this entry is a precedent for the PROCESS, not a loosened default.",
+    "",
+    "Shape: verbs.<name>.argv is the exact command, literal words plus {N} placeholders; {N} takes",
+    "param N (1-based) AFTER pattern validation. A param without `default` is required; `max` is a",
+    "numeric ceiling applied after the pattern has proven the value is digits.",
+    "",
+    "Defense, stated once and relied on by ops-runner.sh: the runner never executes a",
+    "packet-supplied string. It builds an argv ARRAY from this file — no shell -c, no eval, no",
+    "interpolation into program text. The patterns admit no whitespace and no leading '-', so a",
+    "validated arg can neither split into extra words nor be parsed as an option; unit-status also",
+    "passes `--` so even a future pattern loosening cannot turn an arg into a flag there.",
+    "",
+    "JSON rather than TOML because the runner is sh + jq (directive 26d61c97: no python) and jq",
+    "reads JSON natively — a hand-rolled TOML parser in sh is exactly the fragile string handling",
+    "this protocol exists to ban."
+  ],
+  "verbs": {
+    "rollback-to": {
+      "about": "MUTATING — roll deploy/boss to a NAMED build and verify it Ready (infra/forge/rollback-to.sh). The lever the 2026-09-05 outage needed a human's shell for: the classifier blocks the agent's kubectl, the converge's own rollback had rolled to the wrong image, and David was asleep. Authorized by David, 2026-09-05: 'it is obvious we need a lot more ad hoc controls while we are still learning'. The sha names an image the registry holds — read it from `rollout history` or the converge's stamp, never guess. Leaves the stamp and main untouched: a rollback buys time for a fix.",
+      "argv": ["/home/david/boss/infra/forge/rollback-to.sh", "{1}"],
+      "params": [{"name": "sha", "pattern": "^[0-9a-f]{7,40}$"}]
+    },
+    "hold-converge": {
+      "about": "MUTATING — an operator's hold on the cluster converge: writes the hold file the runner reads before it builds or rolls anything (infra/forge/converge-hold.sh). Same authorization as rollback-to (David, 2026-09-05). The reason is one token (no spaces; use dashes) and rides on the packet.",
+      "argv": ["/home/david/boss/infra/forge/converge-hold.sh", "hold", "{1}"],
+      "params": [{"name": "reason", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$"}]
+    },
+    "release-converge": {
+      "about": "MUTATING — lifts the converge hold (infra/forge/converge-hold.sh release). Same authorization as rollback-to (David, 2026-09-05).",
+      "argv": ["/home/david/boss/infra/forge/converge-hold.sh", "release"],
+      "params": []
+    },
+    "unit-status": {
+      "about": "systemctl status of one unit",
+      "argv": ["systemctl", "status", "--no-pager", "--", "{1}"],
+      "params": [
+        { "name": "unit", "pattern": "^[A-Za-z0-9@._][A-Za-z0-9@._-]*$" }
+      ]
+    },
+    "journal-tail": {
+      "about": "last N journal lines of one unit (default 100, max 200)",
+      "argv": ["journalctl", "-u", "{1}", "-n", "{2}", "--no-pager"],
+      "params": [
+        { "name": "unit", "pattern": "^[A-Za-z0-9@._][A-Za-z0-9@._-]*$" },
+        { "name": "lines", "pattern": "^[0-9]{1,3}$", "default": "100", "max": 200 }
+      ]
+    },
+    "df": {
+      "about": "filesystem usage, human units",
+      "argv": ["df", "-h"],
+      "params": []
+    },
+    "uptime": {
+      "about": "uptime and load averages",
+      "argv": ["uptime"],
+      "params": []
+    },
+    "timer-list": {
+      "about": "systemd timers and when they fire next",
+      "argv": ["systemctl", "list-timers", "--no-pager"],
+      "params": []
+    },
+    "reclaim-disk": {
+      "about": "MUTATING — the first, and the only one (David, 2026-09-03; see _about). Runs the forge host's disk-floor-sweep.sh: reclaims regenerable docker caches (builder cache, dangling images, registry-verified old tags) until floor_gb free on the root volume, stopping at the floor; never volumes or non-docker paths, by construction of the script. floor_gb defaults to 25, mirroring BOSS_DISK_FLOOR_GB's default in the script. Path is the forge checkout (/home/david/boss, where install.sh's units point); on any other host the exec fails and the packet records it. A run killed at OPS_TIMEOUT is safe: every remediation already applied stays applied, and the hourly disk-floor-sweep.timer finishes the job.",
+      "argv": ["/home/david/boss/infra/forge/disk-floor-sweep.sh", "{1}"],
+      "params": [
+        { "name": "floor_gb", "pattern": "^[0-9]{1,3}$", "default": "25" }
+      ]
+    },
+    "disk-report": {
+      "about": "READ-ONLY: what is consuming this host's disk — df, BOTH docker daemons (system: the CI jobs; rootless: the converge builds), and a fixed list of directories largest-first. No arguments, nothing mutated; sudo -n is tried where root is needed and each line says when it was refused. Added 2026-09-05 after the locomotive refused #204 at 65GB and the bounded reclaim stopped at the floor with nobody able to say what held the rest (David: 'I want to understand what is consuming disk first').",
+      "argv": ["/home/david/boss/infra/forge/disk-report.sh"],
+      "params": []
+    },
+    "reach": {
+      "about": "READ-ONLY: can this host open a TCP connection to <ip>:<port>? A LAN/tunnel-side vantage the cluster pod lacks (no CAP_NET_RAW, no route into the WireGuard overlay). First use 2026-09-07: is the WireGuard hub 10.99.0.1 reachable over wg0 (the bastion route into the LAN); also the gateway-vs-ISP question for the 1.1.1.0/24 blackhole. Read-only in the phase-1 sense: a TCP connect, nothing sent, nothing mutated. Runs infra/forge/reach.sh: one line, open (<N>ms) / closed (<reason>) / timeout (4s), exit 0 only when open. IPv4 literal only — no hostname, so the host never resolves a name on a packet's behalf.",
+      "argv": ["/home/david/boss/infra/forge/reach.sh", "{1}", "{2}"],
+      "params": [
+        { "name": "ip", "pattern": "^[0-9]{1,3}(\\.[0-9]{1,3}){3}$" },
+        { "name": "port", "pattern": "^[0-9]{1,5}$", "max": 65535 }
+      ]
+    },
+    "converge": {
+      "about": "MUTATING — trigger ONE cluster converge NOW by starting the existing cluster-deploy-runner oneshot: the same unit the 10-minute timer runs (same User=david, same $HOME/env, same maintenance-wrap, same build+push+roll). The event-driven fast path — a dispatcher rule spawns this on a pr-train's merged-step-done, so the cluster converges ~1 minute after merge instead of waiting up to 10 minutes for the timer tick. It only ACCELERATES: cluster-deploy-runner.timer and cluster-watchdog remain the independent floor (they owe nothing to NATS/SoR, which this fast path does — so a cluster-down event path costs latency, never a missed converge). Idempotent and self-guarding by construction of the script it starts: exits 0 if forge main has not moved vs the stamp, honors the converge hold file and the bricked-boot quarantine, so a redundant fire is a safe no-op. --no-block returns immediately (systemd owns the run), so the ~1-minute ops-runner does not block on or time out the build. Authorized by David 2026-09-07 — same explicit per-verb process as reclaim-disk / rollback-to (this entry is a precedent for the PROCESS, not a loosened default).",
+      "argv": ["systemctl", "start", "--no-block", "cluster-deploy-runner.service"],
+      "params": []
+    },
+    "mirror-base-images": {
+      "about": "MUTATING — mirror the CI build's external base images (the kaniko executor from gcr.io, plus the boss-ci Dockerfile's oven/bun and rust bases from docker.io) into the forge registry, so build-image resolves NO public DNS. Runs infra/forge/mirror-base-images.sh, which pulls a FIXED in-tree list and pushes it to 10.20.0.15:3000/david — bounded by construction like reclaim-disk (no packet-supplied image name). The gcr.io/docker.io DNS flake reddened trains #236 and #250; this moves that lookup off the every-train hot path onto an occasional, retryable job. Idempotent (re-mirrors the same tags). Authorized by David 2026-09-07, same explicit per-verb process as reclaim-disk / rollback-to / converge. Backlog 7f408b99.",
+      "argv": ["/home/david/boss/infra/forge/mirror-base-images.sh"],
+      "params": []
+    }
+  }
+}

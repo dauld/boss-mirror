@@ -7,7 +7,7 @@ Type=oneshot
 Environment=RUST_LOG=info
 ExecStartPre=/opt/boss/infra/boss-maintenance-wrap.sh maintenance-files-gc "file_refs garbage collection"
 ExecStart=/usr/local/bin/boss-files-gc --config /etc/boss-content-api.toml
-ExecStartPost=/opt/boss/infra/boss-step.sh maintenance-files-gc run result=ok
+ExecStopPost=-/opt/boss/infra/boss-step.sh maintenance-files-gc run
 # Inherits the same elevated-on-bare-metal posture as the other
 # Boss timer-driven binaries. The Postgres connection authenticates
 # via the `boss` role baked into postgres_url; file bytes live under

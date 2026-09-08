@@ -88,6 +88,57 @@ spec:
       # is NOT here — see the emptyDir below.
       storage: 40Gi
 ---
+# The gate credential (0b1b32f9, greenlit 2026-08-31). The dev session
+# earns exactly the verbs `boss gate` uses and nothing else: gate
+# runner Jobs live in THIS namespace (infra/gate-runner), so the Role
+# is namespace-scoped and the blast radius is "can run and watch gate
+# Jobs here" — not the cluster. Reads of other namespaces, secrets,
+# or RBAC objects are deliberately absent; widening this Role is a
+# David-reviewed change like any credential (token admin is his).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dev-session
+  namespace: boss-dev
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dev-session-gates
+  namespace: boss-dev
+rules:
+  # The runner Job: created per gate, previous one deleted first
+  # (gate.rs), watched to a verdict.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # The runner's pod, for status + logs while the gate runs.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # gate-runner.yaml's PVC document rides `kubectl apply`, which
+  # needs read-modify-write on the one object it manages.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "create", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dev-session-gates
+  namespace: boss-dev
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dev-session-gates
+subjects:
+  - kind: ServiceAccount
+    name: dev-session
+    namespace: boss-dev
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -135,10 +186,21 @@ spec:
                   - {key: boss.dev/purpose, operator: In, values: ["build"]}
       imagePullSecrets:
         - {name: forgejo-registry}
-      # No ServiceAccount token: nothing in here talks to the Kubernetes
-      # API, and a dev shell with cluster credentials is a bigger blast
-      # radius than a dev shell without them.
-      automountServiceAccountToken: false
+      # The dev session holds ONE cluster credential: the dev-session
+      # ServiceAccount, bound to the gates Role above — create/watch
+      # gate Jobs in this namespace, nothing else. The blast-radius
+      # argument that kept this false still governs the ROLE's size;
+      # the greenlit trade (0b1b32f9) is that pod-launched gates beat
+      # a hand-carried gate verb on another machine.
+      serviceAccountName: dev-session
+      automountServiceAccountToken: true
+      # PID 1 must reap. The dev container's entrypoint is `sleep`,
+      # which never wait()s, so daemonized children became unkillable
+      # zombies during the ssh door's first bring-up (2026-08-30).
+      # Sharing the process namespace makes pause PID 1, and pause
+      # reaps. Costs process visibility between dev and postgres,
+      # which nothing here minds.
+      shareProcessNamespace: true
       securityContext:
         # The workspace volume is group-owned so a non-root build can
         # write to it, matching boss.yaml's posture for boss-auth.
@@ -171,7 +233,98 @@ spec:
           command: ["sleep", "infinity"]
           securityContext:
             allowPrivilegeEscalation: false
-            capabilities: {drop: ["ALL"]}
+            # SETGID/SETUID and nothing else: the ssh door (02f4a2ee,
+            # David 2026-08-30: "I just want to do the ssh link") needs
+            # to spawn a session as the connecting user. Dropbear over
+            # OpenSSH precisely because sshd's mandatory preauth chroot
+            # would ALSO need SYS_CHROOT — measured on the live pod:
+            # sshd failed chroot(), dropbear failed only setgid, and
+            # this pair is the whole difference.
+            capabilities:
+              drop: ["ALL"]
+              add: ["SETGID", "SETUID"]
+          ports:
+            - {name: ssh, containerPort: 22}
+          # The ssh door + session env, declared. Everything in here
+          # was first done by hand on 2026-08-30 and then transcribed,
+          # not invented: the systemd postinst neuter (its postinst
+          # cannot run in a container and a dependency drags it in),
+          # the apt cache redirect (the image's /var cache refuses
+          # writes), and the .bashrc (the very first attach failed
+          # because a plain exec shell had no PATH to the tools).
+          # BEST-EFFORT by design: a bootstrap failure leaves the door
+          # closed and the pod healthy — kubectl exec still works and
+          # /work/ssh/postStart.log holds the evidence. Accepted debt:
+          # apt runs on every pod start (network dependency); the
+          # upgrade is baking dropbear into boss-ci, worth doing only
+          # if boot flakiness is ever actually observed.
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - bash
+                  - -c
+                  - |
+                    {
+                    set -x
+                    export DEBIAN_FRONTEND=noninteractive
+                    printf '#!/bin/sh\nexit 0\n' > /var/lib/dpkg/info/systemd.postinst 2>/dev/null || true
+                    printf 'APT::Sandbox::User "root";\n' > /etc/apt/apt.conf.d/99-pod-no-sandbox
+                    mkdir -p /tmp/apt /work/ssh /root/.ssh /work/home
+                    apt-get -o Dir::Cache::archives=/tmp/apt update -qq || true
+                    apt-get -o Dir::Cache::archives=/tmp/apt install -y --no-install-recommends dropbear-bin openssh-sftp-server || true
+                    [ -f /work/ssh/dropbear_ed25519_host_key ] || dropbearkey -t ed25519 -f /work/ssh/dropbear_ed25519_host_key
+                    cp /etc/ssh-authorized/authorized_keys /root/.ssh/authorized_keys || true
+                    chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys || true
+                    # BOTH homes: sessions arrive with HOME=/work/home
+                    # (the durable home this design chose for claude
+                    # state), so ~/.profile resolves on the PVC - the
+                    # first door probe found login shells with the bare
+                    # image PATH because these lived only in /root
+                    # (3cca8c4d). Which home a session gets depends on
+                    # its entry path, so write both.
+                    for H in /root /work/home; do
+                    cat > $H/.bashrc <<'RC'
+                    export HOME=/work/home
+                    export PATH=/work/tools/bin:/usr/local/cargo/bin:$PATH
+                    export RUSTUP_HOME=/usr/local/rustup
+                    export CARGO_TARGET_DIR=/scratch/target
+                    cd /work/boss 2>/dev/null || true
+                    RC
+                    cat > $H/.profile <<'PR'
+                    [ -f ~/.bashrc ] && . ~/.bashrc
+                    # Interactive logins exec into the durable tmux session
+                    # (dev-session.sh): without this, ssh lands in a bare
+                    # login shell and a dropped connection HUPs whatever it
+                    # was running - the exact outage this pod exists to
+                    # prevent. Non-interactive shells (scp, ssh -T, harness
+                    # subshells) skip it.
+                    case $- in *i*) [ -t 0 ] && [ -z "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1 && exec /work/dev-session.sh;; esac
+                    PR
+                    done
+                    cat > /work/dev-session.sh <<'LS'
+                    #!/usr/bin/env bash
+                    export HOME=/work/home
+                    export PATH=/work/tools/bin:/usr/local/cargo/bin:$PATH
+                    export RUSTUP_HOME=/usr/local/rustup
+                    export CARGO_TARGET_DIR=/scratch/target
+                    cd /work/boss
+                    exec tmux new-session -A -s dev
+                    LS
+                    chmod +x /work/dev-session.sh
+                    # kubectl for `boss gate`, pinned by sha so CDN
+                    # weather cannot ship a different binary (the
+                    # a700d3a4 lesson). Best-effort: a failed download
+                    # leaves gating impossible, never the pod broken.
+                    # Lands on the PVC, so it downloads once, not per
+                    # restart. Version matches the cluster line (1.33).
+                    if [ ! -x /work/tools/bin/kubectl ]; then
+                      curl -sfL -o /tmp/kubectl https://dl.k8s.io/release/v1.33.3/bin/linux/amd64/kubectl \
+                        && echo "2fcf65c64f352742dc253a25a7c95617c2aba79843d1b74e585c69fe4884afb0  /tmp/kubectl" | sha256sum -c - \
+                        && install -m 0755 /tmp/kubectl /work/tools/bin/kubectl || true
+                    fi
+                    dropbear -r /work/ssh/dropbear_ed25519_host_key -p 22 -s
+                    } > /work/ssh/postStart.log 2>&1 || true
           workingDir: /work
           env:
             # The sidecar, by name rather than by luck. TestDb would
@@ -219,6 +372,8 @@ spec:
             - {name: work, mountPath: /work}
             - {name: scratch, mountPath: /scratch}
             - {name: forge-token, mountPath: /etc/forge, readOnly: true}
+            - {name: forge-write-token, mountPath: /etc/boss-train, readOnly: true}
+            - {name: ssh-authorized, mountPath: /etc/ssh-authorized, readOnly: true}
         - name: postgres
           # Matches production's major (the `boss` StatefulSet runs
           # postgres:16). A dev database on a different major is a test
@@ -284,6 +439,36 @@ spec:
         #     --from-literal=token=<a read:repository token>
         - name: forge-token
           secret: {secretName: forge-read, optional: true, defaultMode: 0400}
+        # THE WRITE TOKEN, mounted rather than hand-placed (7ee101aa).
+        #
+        # The pod became publisher on 2026-08-31 and its push
+        # credential was placed BY HAND: a file at
+        # /etc/boss-train/forge.token on the container's ephemeral
+        # overlay (dies with the pod) and the token INLINE in the
+        # repo-local git credential helper (where `git config -l`
+        # prints it — the transcript exposure that opened 7ee101aa).
+        # This mount replaces both: `boss train` verbs read the file
+        # directly (BOSS_TRAIN_FORGE_TOKEN_FILE's default), the git
+        # helper points at the file after `boss credential pull
+        # forge`, and when the credential broker rotates the Secret
+        # (credential.rotate.forgejo, name-scoped RBAC in
+        # boss-credential-broker.yaml) the kubelet re-syncs this mount
+        # with NO pod-side action — distribution by pull, not paste.
+        #
+        # `items` maps the Secret's `token` key onto the filename the
+        # train verbs already expect. `optional: true`, same posture
+        # as forge-read: an absent Secret is a closed door, not a
+        # stuck pod. The Secret is pre-created empty out-of-band
+        # (boss-credential-broker.yaml documents why create is not
+        # the broker's to do) and filled by the broker's first
+        # rotation.
+        - name: forge-write-token
+          secret:
+            secretName: boss-dev-forge-token
+            optional: true
+            defaultMode: 0400
+            items:
+              - {key: token, path: forge.token}
         - name: work
           persistentVolumeClaim: {claimName: boss-dev-work}
         - name: scratch
@@ -292,3 +477,34 @@ spec:
           emptyDir: {}
         - name: pg-shm
           emptyDir: {medium: Memory, sizeLimit: 1Gi}
+        # David's PUBLIC key, by name only (same posture as forge-read:
+        # values never live in the tree). Public key material, so any
+        # operator can load it:
+        #   kubectl create secret generic boss-dev-ssh-authorized-keys \
+        #     -n boss-dev --from-file=authorized_keys=<his id_ed25519.pub>
+        # `optional: true` for the same reason as forge-read — an
+        # absent Secret means a closed door, not a stuck pod.
+        - name: ssh-authorized
+          secret: {secretName: boss-dev-ssh-authorized-keys, optional: true, defaultMode: 0400}
+---
+# The ssh door's address: ssh://root@10.20.0.35 — macOS opens Terminal
+# on that URL natively, which is the "launch my terminal from the
+# website" answer (02f4a2ee) without any browser-terminal machinery.
+# Reachable on the LAN directly; off-LAN via the boss-gcp WireGuard
+# jump. Auth is David's ed25519 key only: no passwords, root key login.
+apiVersion: v1
+kind: Service
+metadata:
+  name: boss-dev-ssh
+  namespace: boss-dev
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: "10.20.0.35"
+spec:
+  type: LoadBalancer
+  loadBalancerIP: 10.20.0.35
+  selector:
+    app: boss-dev
+  ports:
+    - name: ssh
+      port: 22
+      targetPort: 22

@@ -87,6 +87,13 @@
     const o = (j.metadata as Record<string, unknown> | undefined)?.outcome;
     return typeof o === 'string' ? o : '';
   };
+
+  /// v5 widened the arms from workflow versions to anything: the
+  /// `state` fields are now `control` / `candidate` (free text). The
+  /// `*_version` names survive only on packets stated under v1–v4, so
+  /// they are the fallback, not the field.
+  const armOf = (j: Job, which: 'control' | 'candidate'): string =>
+    field(j, 'state', which) || field(j, 'state', `${which}_version`);
 </script>
 
 <PageHeader
@@ -126,7 +133,7 @@
               <dt>Metric</dt>
               <dd>{field(j, 'state', 'metric')}</dd>
               <dt>Arms</dt>
-              <dd>{field(j, 'state', 'control_version')} vs {field(j, 'state', 'candidate_version')}</dd>
+              <dd>{armOf(j, 'control')} vs {armOf(j, 'candidate')}</dd>
               <dt>Decision rule</dt>
               <dd>{field(j, 'state', 'decision_rule')}</dd>
             </dl>

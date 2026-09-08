@@ -53,6 +53,35 @@ pub struct Obstacle {
     pub step: Option<String>,
     /// What got stricter, in words.
     pub reason: String,
+    /// WHEN this obstacle actually bites a real packet. `convertibility`
+    /// answers for every packet at once and must assume the worst, so it
+    /// reports all of them; `convertibility_for_packet` uses this to ask
+    /// whether THIS packet, at ITS position, is actually affected.
+    pub bites: Bites,
+}
+
+/// When an obstacle bites, given where a packet actually stands.
+///
+/// The two questions this splits are the ones that make "back compat"
+/// feel dragon-infested when they are conflated (bfc74b3a):
+/// THE PAST — does the new version retroactively demand evidence this
+/// packet never collected? Only a step already COMPLETED can be a lie.
+/// THE FUTURE — can the engine still walk what is left? Only a step
+/// NOT yet taken can change under the packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bites {
+    /// Retroactive evidence. A completed step would be claiming work
+    /// that was never done; a step still ahead simply collects it.
+    IfDone,
+    /// Only affects work the packet has not reached yet.
+    IfNotDone,
+    /// An inserted step. It bites only if the packet has already moved
+    /// BEYOND that position, where the new step would sit behind the
+    /// packet and never become workable. Appending a terminal to a
+    /// protocol is the common harmless case.
+    IfPacketPast,
+    /// Structural: the packet cannot be walked either way.
+    Always,
 }
 
 impl Obstacle {
@@ -60,12 +89,37 @@ impl Obstacle {
         Self {
             step: None,
             reason: reason.into(),
+            bites: Bites::Always,
         }
     }
+    /// Structural — bites wherever the packet stands.
     fn step(slug: &str, reason: impl Into<String>) -> Self {
         Self {
             step: Some(slug.to_string()),
             reason: reason.into(),
+            bites: Bites::Always,
+        }
+    }
+    /// Retroactive evidence: harmless until the step is completed.
+    fn step_if_done(slug: &str, reason: impl Into<String>) -> Self {
+        Self {
+            bites: Bites::IfDone,
+            ..Self::step(slug, reason)
+        }
+    }
+    /// Changes work the packet has not reached; a step already done is
+    /// past caring.
+    fn step_if_pending(slug: &str, reason: impl Into<String>) -> Self {
+        Self {
+            bites: Bites::IfNotDone,
+            ..Self::step(slug, reason)
+        }
+    }
+    /// An inserted step: harmless unless the packet is already past it.
+    fn step_past(slug: &str, reason: impl Into<String>) -> Self {
+        Self {
+            bites: Bites::IfPacketPast,
+            ..Self::step(slug, reason)
         }
     }
 }
@@ -123,6 +177,62 @@ fn required_fields(s: &StepSpec) -> BTreeSet<&str> {
 ///
 /// Steps are matched by `title`, which is the stable slug within a
 /// workflow (the same identifier `ready_when` predicates reference).
+/// Can THIS packet be re-pinned, given where it actually stands?
+///
+/// THE REFRAME (bfc74b3a). [`convertibility`] answers for a version
+/// PAIR — every in-flight packet at once — so it must assume the worst
+/// about all of them: any step might be completed, any might not.
+/// A real packet has a position, and most obstacles only bite one side
+/// of it. A newly required field is a lie only on a step already
+/// COMPLETED; an authority change only matters for a step still ahead;
+/// an inserted step only strands a packet that has already moved past
+/// it. Deciding per step-state rather than per version pair is what
+/// makes conversion routine instead of dragon-infested.
+///
+/// `done` holds the slugs of steps this packet has already completed.
+/// Structural obstacles and workflow-level ones bite regardless — this
+/// filters, it never overrides.
+pub fn convertibility_for_packet(
+    from: &WorkflowSpec,
+    to: &WorkflowSpec,
+    done: &BTreeSet<String>,
+) -> Convertibility {
+    // Position in `to`, so an inserted step can be compared against how
+    // far the packet has actually walked.
+    let order: BTreeMap<&str, usize> = to
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.title.as_str(), i))
+        .collect();
+    let past = |slug: &str| -> bool {
+        let Some(&at) = order.get(slug) else {
+            return true; // cannot place it — do not claim it is harmless
+        };
+        done.iter()
+            .any(|d| order.get(d.as_str()).is_some_and(|&i| i > at))
+    };
+
+    let biting: Vec<Obstacle> = convertibility(from, to)
+        .obstacles()
+        .iter()
+        .filter(|o| match (&o.step, o.bites) {
+            // Workflow-level, and anything structural, always bites.
+            (None, _) | (_, Bites::Always) => true,
+            (Some(slug), Bites::IfDone) => done.contains(slug),
+            (Some(slug), Bites::IfNotDone) => !done.contains(slug),
+            (Some(slug), Bites::IfPacketPast) => past(slug),
+        })
+        .cloned()
+        .collect();
+
+    if biting.is_empty() {
+        Convertibility::Automatic
+    } else {
+        Convertibility::NeedsReview(biting)
+    }
+}
+
 pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility {
     let mut obstacles = Vec::new();
 
@@ -173,7 +283,7 @@ pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility 
     // terminal — and which of those is true depends on the packet.
     for slug in to_steps.keys() {
         if !from_steps.contains_key(slug) {
-            obstacles.push(Obstacle::step(
+            obstacles.push(Obstacle::step_past(
                 slug,
                 "step added — packets past this point in the flow would \
                  gain work they have already moved beyond",
@@ -181,10 +291,101 @@ pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility 
         }
     }
 
+    // ORDER IS PART OF THE CONTRACT, because the runtime does not match
+    // steps the way this function does.
+    //
+    // Everything above compares steps BY TITLE, through a BTreeMap. The
+    // engine pairs them POSITIONALLY: step predicates are not stored on
+    // the step row (there is no `ready_when` column), so readiness is
+    // recomputed by zipping the spec's steps against the job's steps in
+    // order (http/steps.rs, `A JOB'S STEP SET IS FIXED AT ADMISSION`).
+    //
+    // So a version that merely REORDERS the same steps is invisible to
+    // every check above — same titles, same specs, same sets — and this
+    // function would call it Automatic. Re-pinning on that verdict
+    // misaligns every pair, and `registry::reevaluate` then refuses to
+    // advance anything: the packet freezes with its terminal pending,
+    // never closes, and never leaves its owner's queue.
+    //
+    // That is not hypothetical, and it is why this compares sequences
+    // rather than sets. Design review 32a4e70d gained a step on
+    // 2026-08-13 and froze exactly this way, producing feedback
+    // 55c92985 — "I finished the top design review and it still shows
+    // the same metadata and is in the same queue." A conversion path
+    // acting on a wrong Automatic would do that to every in-flight
+    // packet at once, and the divergence is only logged at warn.
+    //
+    // Compares the RELATIVE order of steps present in both specs, so it
+    // stays meaningful when steps were also added or removed (each of
+    // which is reported above on its own terms).
+    let from_common: Vec<&str> = from
+        .steps
+        .iter()
+        .map(|s| s.title.as_str())
+        .filter(|t| to_steps.contains_key(t))
+        .collect();
+    let to_common: Vec<&str> = to
+        .steps
+        .iter()
+        .map(|s| s.title.as_str())
+        .filter(|t| from_steps.contains_key(t))
+        .collect();
+    if from_common != to_common {
+        obstacles.push(Obstacle::workflow(format!(
+            "steps reordered ({} -> {}) — readiness is recomputed by pairing \
+             spec steps to job steps POSITIONALLY, so re-pinning would \
+             misalign every pair and freeze the packet",
+            from_common.join(", "),
+            to_common.join(", ")
+        )));
+    }
+
     for (slug, f) in &from_steps {
         let Some(t) = to_steps.get(slug) else {
             continue;
         };
+
+        // A STEP'S KIND CARRIES A COMPLETION CONTRACT THIS FUNCTION
+        // CANNOT SEE.
+        //
+        // `required_fields` below reads `StepSpec.fields` — the fields
+        // the WORKFLOW author wrote. That is not the whole contract:
+        // the completion validator checks the UNION of those and the
+        // field bundle the step's KIND brings from the StepType
+        // registry (http/steps.rs, "the union of the kind bundle's
+        // fields and the step's own authored fields"). So changing a
+        // step's kind can add a required field without touching
+        // `fields` at all, and every check here would miss it.
+        //
+        // THIS ALMOST SHIPPED A WRONG VERDICT. backlog-item v2,
+        // published 2026-08-29, changed `design-review` from kind
+        // `task` to kind `answer-question` — which requires `verdict`
+        // and `answer`. Nothing else about the step moved, so before
+        // this check the pair read Automatic. A conversion path acting
+        // on it would have re-pinned every in-flight backlog-item onto
+        // a protocol demanding two fields they never collected: the
+        // exact failure this module's header calls the one we cannot
+        // afford.
+        //
+        // REFERRED, NOT RESOLVED. Deciding what the new kind actually
+        // requires means resolving it against the StepType registry,
+        // which this function deliberately does not take — it compares
+        // two specs and nothing else. Referring costs a human one
+        // glance; guessing costs a completed step's honesty. Same
+        // reasoning as `ready_when` below, and a kind change is rare
+        // enough that the referral is cheap.
+        if f.kind != t.kind {
+            obstacles.push(Obstacle::step_if_done(
+                slug,
+                format!(
+                    "step kind changed (`{}` -> `{}`) — the kind carries a \
+                     field bundle that is part of the completion contract, \
+                     and this check does not resolve it against the StepType \
+                     registry, so it refers rather than assumes",
+                    f.kind, t.kind
+                ),
+            ));
+        }
 
         // The predicate decides when a step becomes ready. Editing it
         // can un-ready a ready step or re-ready a completed one. A
@@ -206,7 +407,7 @@ pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility 
         // Authority. Widening is the loosening we expect most often:
         // `Some(role)` -> `None` opens a step to any authorized actor.
         match (f.authority_role.as_deref(), t.authority_role.as_deref()) {
-            (Some(a), Some(b)) if a != b => obstacles.push(Obstacle::step(
+            (Some(a), Some(b)) if a != b => obstacles.push(Obstacle::step_if_pending(
                 slug,
                 format!("authority changed `{a}` -> `{b}` — neither contains the other"),
             )),
@@ -224,14 +425,14 @@ pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility 
         let f_signs: BTreeSet<&str> = f.sign_offs_required.iter().map(String::as_str).collect();
         let t_signs: BTreeSet<&str> = t.sign_offs_required.iter().map(String::as_str).collect();
         for added in t_signs.difference(&f_signs) {
-            obstacles.push(Obstacle::step(
+            obstacles.push(Obstacle::step_if_done(
                 slug,
                 format!("sign-off `{added}` added — completed steps would be missing a stamp"),
             ));
         }
 
         if assurance_rank(t.assurance_required) > assurance_rank(f.assurance_required) {
-            obstacles.push(Obstacle::step(
+            obstacles.push(Obstacle::step_if_done(
                 slug,
                 "assurance raised — stamps already collected were produced \
                  under a weaker bar and cannot be upgraded after the fact",
@@ -241,7 +442,7 @@ pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility 
         // Required completion fields. Adding one asks for evidence that
         // a completed step never collected.
         for added in required_fields(t).difference(&required_fields(f)) {
-            obstacles.push(Obstacle::step(
+            obstacles.push(Obstacle::step_if_done(
                 slug,
                 format!("required field `{added}` added — completed steps never collected it"),
             ));
@@ -250,7 +451,7 @@ pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility 
         // Terminals name the outcome stamped on close. Changing or
         // removing one changes what a closed packet means.
         match (&f.terminal, &t.terminal) {
-            (Some(a), Some(b)) if a.outcome != b.outcome => obstacles.push(Obstacle::step(
+            (Some(a), Some(b)) if a.outcome != b.outcome => obstacles.push(Obstacle::step_if_done(
                 slug,
                 format!(
                     "terminal outcome changed `{}` -> `{}` — closed packets \
@@ -258,7 +459,7 @@ pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility 
                     a.outcome, b.outcome
                 ),
             )),
-            (Some(a), None) => obstacles.push(Obstacle::step(
+            (Some(a), None) => obstacles.push(Obstacle::step_if_done(
                 slug,
                 format!("terminal `{}` removed — a packet closed here has an outcome the protocol no longer declares", a.outcome),
             )),
@@ -292,6 +493,8 @@ mod tests {
             sign_offs_required: Vec::new(),
             assurance_required: None,
             duration_hours: None,
+            labor_hours: None,
+            wall_clock_hours: None,
             fields: Vec::new(),
             authority_role: None,
             claimable: None,
@@ -314,6 +517,8 @@ mod tests {
             name: name.to_string(),
             field_type: "string".to_string(),
             required,
+            filled_by: boss_core::job::FilledBy::Executor,
+            item_keys: Vec::new(),
         }
     }
 
@@ -337,6 +542,110 @@ mod tests {
         assert!(
             v.is_automatic(),
             "opening a step to more actors cannot invalidate a packet: {:?}",
+            v.obstacles()
+        );
+    }
+
+    /// THE VERDICT THIS FUNCTION ALMOST GAVE ABOUT A REAL PUBLISH.
+    ///
+    /// backlog-item v2 (2026-08-29) changed `design-review` from kind
+    /// `task` to kind `answer-question`, which brings required
+    /// `verdict` and `answer` from the StepType bundle. `fields` on the
+    /// spec did not move, so every other check saw an identical step
+    /// and the pair read Automatic — a conversion acting on it would
+    /// have demanded two fields no in-flight packet had collected.
+    #[test]
+    fn changing_a_steps_kind_needs_review() {
+        let before = step("design-review");
+        let mut after = step("design-review");
+        after.kind = "answer-question".to_string();
+
+        let v = convertibility(&wf(vec![before]), &wf(vec![after]));
+        assert!(
+            !v.is_automatic(),
+            "a kind change can add required fields without touching \
+             StepSpec.fields, which is the only place required_fields looks"
+        );
+        let o = &v.obstacles()[0];
+        assert_eq!(o.step.as_deref(), Some("design-review"));
+        assert!(
+            o.reason.contains("field bundle"),
+            "the reason must say WHY a kind change matters, not just that it \
+             happened: {:?}",
+            o.reason
+        );
+    }
+
+    /// ...and an unchanged kind must stay silent, or every loosening
+    /// would be referred and Automatic would stop meaning anything.
+    #[test]
+    fn keeping_the_kind_stays_automatic() {
+        let mut before = step("review");
+        before.kind = "sign-off".to_string();
+        let mut after = step("review");
+        after.kind = "sign-off".to_string();
+        after.authority_role = None;
+        assert!(convertibility(&wf(vec![before]), &wf(vec![after])).is_automatic());
+    }
+
+    /// THE CASE EVERY OTHER CHECK IS BLIND TO.
+    ///
+    /// Same titles, same specs, same sets — only the sequence moved.
+    /// Every comparison in this function goes through a BTreeMap keyed
+    /// by title, so before this check the verdict was Automatic. The
+    /// engine pairs spec steps to job steps positionally, so acting on
+    /// that verdict would misalign every pair and freeze the packet
+    /// with its terminal pending (the 32a4e70d / 55c92985 failure).
+    #[test]
+    fn reordering_the_same_steps_is_not_automatic() {
+        let forward = wf(vec![step("triage"), step("review"), step("closed")]);
+        let swapped = wf(vec![step("review"), step("triage"), step("closed")]);
+
+        let v = convertibility(&forward, &swapped);
+        assert!(
+            !v.is_automatic(),
+            "a pure reorder changes which spec step each job step is paired \
+             with; nothing else in this function can see it"
+        );
+        let o = &v.obstacles()[0];
+        assert_eq!(o.step, None, "reordering is a workflow-level fact");
+        assert!(
+            o.reason.contains("reordered") && o.reason.contains("POSITIONALLY"),
+            "the reason must name the pairing that breaks: {:?}",
+            o.reason
+        );
+    }
+
+    /// ...and the check must not fire on an unchanged sequence, or every
+    /// ordinary loosening would be referred for review and the
+    /// Automatic verdict would stop meaning anything.
+    #[test]
+    fn keeping_the_order_stays_automatic() {
+        let before = wf(vec![step("triage"), step("review"), step("closed")]);
+        let after = wf(vec![step("triage"), step("review"), step("closed")]);
+        assert!(convertibility(&before, &after).is_automatic());
+    }
+
+    /// A step added or removed is already reported on its own terms.
+    /// The order check compares only the steps present in BOTH specs,
+    /// so it stays quiet about a sequence that did not actually move —
+    /// otherwise every add/remove would carry a second, misleading
+    /// "reordered" obstacle naming steps nobody touched.
+    #[test]
+    fn inserting_a_step_does_not_also_report_a_phantom_reorder() {
+        let before = wf(vec![step("triage"), step("review")]);
+        let after = wf(vec![step("triage"), step("measure"), step("review")]);
+
+        let v = convertibility(&before, &after);
+        assert!(
+            !v.is_automatic(),
+            "an added step is work a packet may have passed"
+        );
+        assert!(
+            v.obstacles()
+                .iter()
+                .all(|o| !o.reason.contains("reordered")),
+            "triage and review kept their relative order: {:?}",
             v.obstacles()
         );
     }
@@ -492,5 +801,93 @@ mod tests {
         tight.fields = vec![field("evidence", true)];
         let v = convertibility(&wf(vec![bare]), &wf(vec![tight]));
         assert_eq!(v.obstacles().len(), 3, "{:?}", v.obstacles());
+    }
+
+    // -----------------------------------------------------------------
+    // Per-packet conversion: decide on where the packet stands.
+    // -----------------------------------------------------------------
+
+    fn done(slugs: &[&str]) -> BTreeSet<String> {
+        slugs.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// THE CASE THIS WAS BUILT FOR. ship-a-change v31 appends a third
+    /// terminal (`settled`) so operational work stops closing as an
+    /// abort. Appending is invisible to every packet that has not
+    /// reached the end — but the PAIR check must still refuse, because
+    /// it speaks for packets that HAVE.
+    #[test]
+    fn appending_a_terminal_converts_a_packet_that_has_not_finished() {
+        let before = wf(vec![step("scope"), step("build"), step("merged")]);
+        let after = wf(vec![
+            step("scope"),
+            step("build"),
+            step("merged"),
+            step("settled"),
+        ]);
+        assert!(
+            !convertibility(&before, &after).is_automatic(),
+            "the version pair must stay cautious — it speaks for every packet"
+        );
+        assert_eq!(
+            convertibility_for_packet(&before, &after, &done(&["scope", "build"])),
+            Convertibility::Automatic,
+            "a packet standing at build is not affected by a terminal appended after it"
+        );
+    }
+
+    /// ...and the same append DOES bite a packet that already walked
+    /// past the insertion point, which is what the obstacle warns about.
+    #[test]
+    fn an_inserted_step_bites_a_packet_already_past_it() {
+        let before = wf(vec![step("scope"), step("build"), step("merged")]);
+        let after = wf(vec![
+            step("scope"),
+            step("inspection"),
+            step("build"),
+            step("merged"),
+        ]);
+        assert!(
+            !convertibility_for_packet(&before, &after, &done(&["scope", "build"])).is_automatic(),
+            "a step inserted behind a packet would never become workable"
+        );
+    }
+
+    /// RETROACTIVE EVIDENCE IS ABOUT THE PAST ONLY. A newly required
+    /// field is a lie on a step already completed, and simply the
+    /// contract on a step still ahead.
+    #[test]
+    fn a_new_required_field_bites_only_a_step_already_completed() {
+        let before = wf(vec![step("scope"), step("build")]);
+        let mut tighter = step("build");
+        tighter.fields = vec![field("test", true)];
+        let after = wf(vec![step("scope"), tighter]);
+
+        assert!(!convertibility(&before, &after).is_automatic());
+        assert_eq!(
+            convertibility_for_packet(&before, &after, &done(&["scope"])),
+            Convertibility::Automatic,
+            "build is still ahead — the field will simply be collected"
+        );
+        assert!(
+            !convertibility_for_packet(&before, &after, &done(&["scope", "build"])).is_automatic(),
+            "build is done — claiming it collected a field it never did is the lie"
+        );
+    }
+
+    /// STRUCTURE IS NOT NEGOTIABLE BY POSITION. A removed step orphans a
+    /// materialized step wherever the packet stands, so no step-state
+    /// makes it automatic. This is the guard against the filter
+    /// becoming a way to wave things through.
+    #[test]
+    fn a_removed_step_is_never_convertible_whatever_the_position() {
+        let before = wf(vec![step("scope"), step("build")]);
+        let after = wf(vec![step("scope")]);
+        for at in [&done(&[]), &done(&["scope"]), &done(&["scope", "build"])] {
+            assert!(
+                !convertibility_for_packet(&before, &after, at).is_automatic(),
+                "removal must bite at every position"
+            );
+        }
     }
 }

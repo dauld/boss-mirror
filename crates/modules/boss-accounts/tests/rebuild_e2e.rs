@@ -43,6 +43,10 @@ struct ContactRow {
     email: String,
     phone: Option<String>,
     is_primary: bool,
+    // Included in the byte-identity check: before packet d7b8158e
+    // this column fell to the DEFAULT NOW() on both the live insert
+    // and the replay, so a rebuild silently re-dated every contact.
+    created_at: chrono::DateTime<chrono::Utc>,
 }
 
 async fn snapshot_accounts(pool: &PgPool) -> Vec<AccountRow> {
@@ -51,7 +55,7 @@ async fn snapshot_accounts(pool: &PgPool) -> Vec<AccountRow> {
 }
 
 async fn snapshot_contacts(pool: &PgPool) -> Vec<ContactRow> {
-    sqlx::query_as("SELECT id, account_id, name, role, email, phone, is_primary FROM account_contacts ORDER BY id")
+    sqlx::query_as("SELECT id, account_id, name, role, email, phone, is_primary, created_at FROM account_contacts ORDER BY id")
         .fetch_all(pool).await.unwrap()
 }
 
@@ -247,4 +251,197 @@ async fn rebuild_handles_account_delete() {
         .await
         .unwrap();
     assert_eq!(count.0, 0, "rebuild should reproduce post-delete state");
+}
+
+// ---------------------------------------------------------------------------
+// Children byte-identity (packet d7b8158e): account_notes,
+// account_team_members and support_cases each carry a `created_at`
+// that used to fall to the DEFAULT NOW() on both the live insert and
+// the replay — so a rebuild silently re-dated every child row.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+struct NoteRow {
+    id: String,
+    account_id: String,
+    actor_id: String,
+    kind: String,
+    body: String,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+struct TeamRow {
+    id: String,
+    account_id: String,
+    employee_id: String,
+    role: String,
+    assigned_on: NaiveDate,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+struct CaseRow {
+    id: String,
+    account_id: String,
+    channel: String,
+    category: String,
+    subject: String,
+    status: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+async fn build_full_app(pool: PgPool) -> Router {
+    let clock: Arc<dyn boss_clock_client::ClockClient> =
+        Arc::new(boss_clock_client::WallClockClient);
+    accounts_router(
+        pool.clone(),
+        None,
+        Arc::new(FakeAssetsClient::with_count(0)),
+        clock.clone(),
+        None,
+    )
+    .merge(boss_accounts::account_notes::account_notes_router(
+        pool.clone(),
+        None,
+        clock.clone(),
+        None,
+    ))
+    .merge(boss_accounts::account_team_members::account_team_router(
+        pool.clone(),
+        None,
+        clock.clone(),
+        None,
+    ))
+    .merge(boss_accounts::support_cases::support_cases_router(
+        pool, None, clock,
+    ))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rebuild_reproduces_account_children_byte_identical() {
+    let db = TestDb::new().await;
+    seed_employee(&db.pool, "emp-rep-001").await;
+    let app = build_full_app(db.pool.clone()).await;
+
+    TestRequest::post("/api/people/accounts")
+        .json(&body(
+            "acc-kids",
+            "Kids & Co",
+            "wholesale-distributor",
+            serde_json::json!([contact("ct-kid-1", "acc-kids", "buyer", true)]),
+        ))
+        .send(&app)
+        .await
+        .assert_status(StatusCode::CREATED);
+
+    TestRequest::post("/api/people/accounts/acc-kids/notes")
+        .json(&serde_json::json!({
+            "kind": "call",
+            "body": "Quarterly pricing call",
+            "actor_id": "emp-rep-001",
+        }))
+        .send(&app)
+        .await
+        .assert_status(StatusCode::CREATED);
+
+    TestRequest::post("/api/people/accounts/acc-kids/account-team")
+        .json(&serde_json::json!({
+            "employee_id": "emp-rep-001",
+            "role": "customer-success",
+            "actor_id": "emp-rep-001",
+        }))
+        .send(&app)
+        .await
+        .assert_status(StatusCode::CREATED);
+
+    TestRequest::post("/api/people/support-cases")
+        .json(&serde_json::json!({
+            "id": "sc-kids-1",
+            "account_id": "acc-kids",
+            "channel": "phone",
+            "category": "billing",
+            "subject": "Disputed invoice",
+            "body": "Customer disputes the latest invoice line item.",
+            "opened_on": "2026-05-04",
+            "assignee_id": null,
+            "status": "open",
+        }))
+        .send(&app)
+        .await
+        .assert_status(StatusCode::CREATED);
+
+    drain_outbox(&db.pool).await;
+
+    let notes_before: Vec<NoteRow> = sqlx::query_as(
+        "SELECT id, account_id, actor_id, kind, body, occurred_at, created_at \
+         FROM account_notes ORDER BY id",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    let team_before: Vec<TeamRow> = sqlx::query_as(
+        "SELECT id, account_id, employee_id, role, assigned_on, created_at \
+         FROM account_team_members ORDER BY id",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    let cases_before: Vec<CaseRow> = sqlx::query_as(
+        "SELECT id, account_id, channel, category, subject, status, created_at \
+         FROM support_cases ORDER BY id",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    let contacts_before = snapshot_contacts(&db.pool).await;
+    // note posted directly + interaction note auto-posted by the
+    // team assign; team has territory-rep mirror + customer-success.
+    assert_eq!(notes_before.len(), 2);
+    assert_eq!(team_before.len(), 2);
+    assert_eq!(cases_before.len(), 1);
+    assert_eq!(contacts_before.len(), 1);
+
+    rebuild_accounts(&db.pool).await.expect("rebuild");
+
+    let notes_after: Vec<NoteRow> = sqlx::query_as(
+        "SELECT id, account_id, actor_id, kind, body, occurred_at, created_at \
+         FROM account_notes ORDER BY id",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    let team_after: Vec<TeamRow> = sqlx::query_as(
+        "SELECT id, account_id, employee_id, role, assigned_on, created_at \
+         FROM account_team_members ORDER BY id",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    let cases_after: Vec<CaseRow> = sqlx::query_as(
+        "SELECT id, account_id, channel, category, subject, status, created_at \
+         FROM support_cases ORDER BY id",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    let contacts_after = snapshot_contacts(&db.pool).await;
+
+    assert_eq!(
+        notes_before, notes_after,
+        "account_notes must replay byte-identical (created_at included)"
+    );
+    assert_eq!(
+        team_before, team_after,
+        "account_team_members must replay byte-identical (created_at included)"
+    );
+    assert_eq!(
+        cases_before, cases_after,
+        "support_cases must replay byte-identical (created_at included)"
+    );
+    assert_eq!(
+        contacts_before, contacts_after,
+        "account_contacts must replay byte-identical (created_at included)"
+    );
 }

@@ -9,11 +9,12 @@
   import Meta from '@boss/web-kit/ui/Meta.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
   import { formatMoney } from '@boss/web-kit/ui/money';
-  import StatusChip from './StatusChip.svelte';
+  import StatusChip from '@boss/web-kit/ui/StatusChip.svelte';
   import {
     collectParts,
     kindFromSku,
     stockStatus,
+    stockTone,
     type CatalogPart,
     type DeviceModel,
     type InventoryItem,
@@ -259,7 +260,7 @@
       <div>
         <div class="detail-eyebrow">
           <EntityLink kind="part" id={sku} /> · {part.kind} ·
-          <StatusChip {status} />
+          <StatusChip value={status} tone={stockTone(status)} />
         </div>
         <h1 class="detail-title">{part.part.name}</h1>
         <div class="detail-tagline">{part.part.description}</div>

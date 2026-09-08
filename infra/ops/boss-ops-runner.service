@@ -1,0 +1,35 @@
+# The ops-request runner (packet 729329c6, PULL half): answers
+# host-side debug reads filed as packets, so nobody sshes and pastes.
+# Installed BY HAND per host, mirroring boss-estate-observe-host's
+# notes, until the config-not-in-repo debt is paid:
+#
+# boss-gcp (conductor VM; unit's HOST_ID default is boss-gcp):
+#   sudo install -m644 /opt/boss/infra/ops/boss-ops-runner.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now boss-ops-runner.timer
+#
+# forge host (override HOST_ID via drop-in):
+#   sudo install -m644 /opt/boss/infra/ops/boss-ops-runner.{service,timer} /etc/systemd/system/
+#   sudo mkdir -p /etc/systemd/system/boss-ops-runner.service.d
+#   printf '[Service]\nEnvironment=HOST_ID=forge\n' | sudo tee /etc/systemd/system/boss-ops-runner.service.d/host.conf
+#   sudo systemctl daemon-reload && sudo systemctl enable --now boss-ops-runner.timer
+[Unit]
+Description=BOSS ops: answer ops-request packets filed against this host
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HOST_ID=boss-gcp
+# BOSS_JOBS_URL pinned INLINE on the Exec line, exactly like
+# boss-estate-observe-host.service and for the same reason:
+# deploy-services' shared jobs-url.conf drop-in points the timer fleet
+# at the legacy 127.0.0.1 instance (91ddebfb) and drop-in env wins over
+# unit env — env(1) on the Exec line outranks both. The script itself
+# refuses to run without an explicit BOSS_JOBS_URL (no default; the
+# boss-step.sh lesson, 2026-08-17).
+#
+# No boss-maintenance-wrap pair, deliberately: this fires every minute
+# and a packet per firing would drown the board. Its product IS
+# packets — the ops-requests it answers — and its failure modes are
+# this unit going red plus a filed packet aging visibly unanswered.
+ExecStart=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/ops/ops-runner.sh

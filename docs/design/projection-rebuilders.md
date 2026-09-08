@@ -1,6 +1,6 @@
 # Projection rebuilders — making `audit_log` the source of truth
 
-**Status:** shipped across every domain service in v1. Per-service
+**Status**: shipped across every domain service in v1. Per-service
 rebuild functions live in `crates/{core,modules}/boss-<domain>/src/rebuild.rs`;
 the orchestrator is `boss-rebuild-all`.
 

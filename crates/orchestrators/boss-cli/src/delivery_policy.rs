@@ -91,6 +91,30 @@ pub(crate) const COMPILED_SKIP_REASON_FILE_BUDGET: usize = 96;
 /// Character budget for a jobs-API blip's cause in the journal.
 pub(crate) const COMPILED_BLIP_CAUSE_BUDGET: usize = 80;
 
+/// GB of free disk the CI host's latest host-scope estate observation
+/// must show before boarding assembles a consist (2026-09-03: two
+/// consists boarded onto a full CI host and each burned a whole CI
+/// cycle discovering it). Unlike its siblings this constant has no
+/// pre-registry ancestor in `train.rs` — the check is new — so the
+/// number is derived rather than carried over: gate.sh's disk-floor
+/// note measured a COLD workspace build at ~74GB on the forge host,
+/// and the locomotive's run-START floor of 70 passed that night while
+/// the run still died mid-flight, because a start floor cannot see the
+/// consist's mid-run consumption. 90 is the measured cold build plus
+/// headroom for exactly that growth.
+pub(crate) const COMPILED_CI_HOST_FLOOR_GB: i64 = 40;
+
+/// How many gates `boss gate` admits at once before it refuses. Unlike
+/// most of its siblings this constant DID have a pre-registry ancestor —
+/// `gate.rs`'s `DEFAULT_MAX_CONCURRENT`, kept there now only as the
+/// ultimate fallback when neither the env override nor a policy row can
+/// be read. Three is the measured comfort zone on the build node (w-1):
+/// at FIVE concurrent gates I/O pressure hit 65% and a ~35-minute gate
+/// took ~93, so per-verdict latency degraded past two gates' worth of
+/// queueing (2026-08-26). Raising it to 4 is a policy edit, not a
+/// deploy — which is the whole point of moving it here.
+pub(crate) const COMPILED_GATE_MAX_CONCURRENT: i64 = 3;
+
 /// The lints the consist check does not run, each with its reason. All
 /// four need something the assembled TREE does not contain — a cargo
 /// build, a package manager, or a live database — and a question the
@@ -148,6 +172,10 @@ pub(crate) struct DeliveryPolicy {
     pub(crate) consist_files_named: usize,
     pub(crate) skip_reason_file_budget: usize,
     pub(crate) blip_cause_budget: usize,
+    pub(crate) ci_host_floor_gb: i64,
+    /// The concurrency bound `boss gate` enforces. Read here so the
+    /// number the CLI obeys and the number the yard draws are one.
+    pub(crate) gate_max_concurrent: i64,
 }
 
 impl DeliveryPolicy {
@@ -169,6 +197,8 @@ impl DeliveryPolicy {
             consist_files_named: COMPILED_CONSIST_FILES_NAMED,
             skip_reason_file_budget: COMPILED_SKIP_REASON_FILE_BUDGET,
             blip_cause_budget: COMPILED_BLIP_CAUSE_BUDGET,
+            ci_host_floor_gb: COMPILED_CI_HOST_FLOOR_GB,
+            gate_max_concurrent: COMPILED_GATE_MAX_CONCURRENT,
         }
     }
 
@@ -244,6 +274,8 @@ pub(crate) fn parse(row: DeliveryPolicyRow) -> Result<DeliveryPolicy> {
             row.skip_reason_file_budget,
         )?,
         blip_cause_budget: positive_usize("blip_cause_budget", row.blip_cause_budget)?,
+        ci_host_floor_gb: positive_i64("ci_host_floor_gb", row.ci_host_floor_gb)?,
+        gate_max_concurrent: positive_i64("gate_max_concurrent", row.gate_max_concurrent)?,
     })
 }
 
@@ -334,6 +366,16 @@ mod tests {
         assert_eq!(p.skip_reason_file_budget, 96);
         assert_eq!(p.blip_cause_budget, 80);
         assert_eq!(
+            p.ci_host_floor_gb, 40,
+            "policy v3 (approval d99b198d, 2026-09-05): the forge runs lean CI green at \
+             60-70GB free and the locomotive's own door is 70, so the boarding floor sits \
+             under it; the old 90 measured a FULL gate build that now runs in-cluster"
+        );
+        assert_eq!(
+            p.gate_max_concurrent, 3,
+            "gate.rs DEFAULT_MAX_CONCURRENT — the measured comfort zone on w-1"
+        );
+        assert_eq!(
             scripts(&p),
             vec![
                 "audit-ordering.sh".to_string(),
@@ -366,6 +408,8 @@ mod tests {
             consist_files_named: 2,
             skip_reason_file_budget: 50,
             blip_cause_budget: 40,
+            ci_host_floor_gb: 120,
+            gate_max_concurrent: 4,
         }
     }
 
@@ -380,6 +424,8 @@ mod tests {
         assert_eq!(p.consist_files_named, 2);
         assert_eq!(p.skip_reason_file_budget, 50);
         assert_eq!(p.blip_cause_budget, 40);
+        assert_eq!(p.ci_host_floor_gb, 120);
+        assert_eq!(p.gate_max_concurrent, 4);
         assert_eq!(scripts(&p), vec!["svelte-check.sh".to_string()]);
         assert!(p.excludes("svelte-check.sh"));
         assert!(!p.excludes("migration-numbers-unique.sh"));
@@ -428,6 +474,33 @@ mod tests {
         assert!(
             format!("{e}").contains("consist_files_named"),
             "the complaint names the field so the fix is obvious: {e}"
+        );
+    }
+
+    #[test]
+    fn a_non_positive_ci_host_floor_is_refused() {
+        // A zero floor would wave every boarding through and read as
+        // "the check ran"; that is worse than no check at all.
+        let mut r = row();
+        r.ci_host_floor_gb = 0;
+        let e = parse(r).expect_err("zero is not a floor");
+        assert!(
+            format!("{e}").contains("ci_host_floor_gb"),
+            "the complaint names the field: {e}"
+        );
+    }
+
+    #[test]
+    fn a_non_positive_gate_max_concurrent_is_refused() {
+        // Zero would refuse every gate forever, which is a
+        // misconfiguration, not a policy — the parse rejects it the same
+        // way the CLI's env-var parser rejects BOSS_GATE_MAX_CONCURRENT=0.
+        let mut r = row();
+        r.gate_max_concurrent = 0;
+        let e = parse(r).expect_err("zero admits no gates");
+        assert!(
+            format!("{e}").contains("gate_max_concurrent"),
+            "the complaint names the field: {e}"
         );
     }
 
@@ -509,6 +582,23 @@ mod tests {
     }
 
     // -- pinning -------------------------------------------------------
+
+    /// §9a pin across crates: the yard read-model draws its gate slots
+    /// at `boss_jobs::yard::COMPILED_GATE_MAX_CONCURRENT` when no policy
+    /// answers, and `boss gate` refuses at THIS crate's
+    /// `COMPILED_GATE_MAX_CONCURRENT` on the same no-policy path. If the
+    /// two drifted the page would draw a different number of slots than a
+    /// gate would honour — the exact folklore this car retires. They
+    /// cannot be one constant (different crates), so equality is the
+    /// mechanism.
+    #[test]
+    fn the_yard_no_policy_capacity_equals_the_cli_compiled_bound() {
+        assert_eq!(
+            i64::from(boss_jobs::yard::COMPILED_GATE_MAX_CONCURRENT),
+            COMPILED_GATE_MAX_CONCURRENT,
+            "the yard's no-policy slot count drifted from the gate CLI's compiled bound"
+        );
+    }
 
     #[test]
     fn a_departing_train_carries_the_version_it_left_under() {

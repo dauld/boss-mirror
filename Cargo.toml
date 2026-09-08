@@ -112,3 +112,16 @@ async-nats = "0.49"
 futures = "0.3"
 toml = "1"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+
+# Build efficiency. The default dev profile emits FULL DWARF debuginfo on
+# every crate and every test binary, which for this ~40-crate workspace is
+# an ~80GB debug target/ — it exhausted the forge CI disk and blocked
+# trains (2026-09-04; docs/design/the-build-plane-manages-itself.md). Full
+# debuginfo is for interactive debugging that CI never does.
+# `line-tables-only` keeps panic backtraces (file:line, the part that
+# matters) while dropping the bulk of the DWARF — typically halving the
+# debug target/. Applies to `test` too (it inherits dev). Incremental
+# artifacts are the other CI waster, dropped via CARGO_INCREMENTAL=0 in
+# gate.sh (CI/gate scope only, so local iterative rebuilds keep it).
+[profile.dev]
+debug = "line-tables-only"

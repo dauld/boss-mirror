@@ -177,10 +177,12 @@ pub(super) async fn list_stations<R: JobsRepository + 'static, B: EventBus + 'st
 /// implied: the age of the oldest MEMBER PACKET, from its `opened_on`.
 /// That is packet age, not time-in-this-queue — a packet that spent
 /// eight days in review before arriving here reads as eight days old
-/// on arrival. Time-in-queue needs a `ready_at` on the step, which
-/// does not exist; `opened_on` is the honest available proxy and
-/// over-reports rather than under-reports, which is the safer
-/// direction for a congestion signal.
+/// on arrival. Station membership is a packet-level predicate, so a
+/// packet-level age is the honest per-station figure; it over-reports
+/// rather than under-reports, which is the safer direction for a
+/// congestion signal. The STEP-level answer — how long has this
+/// obligation waited, from the `became_ready_at` stamp — is the
+/// queue-age lens, `GET /api/jobs/queue-age` (2a0b034e).
 ///
 /// OPEN PACKETS ONLY. Stations with a `terminal_window_days` also hold
 /// recently-departed packets so a filer can see an outcome; those are

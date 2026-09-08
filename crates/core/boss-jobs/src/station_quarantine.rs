@@ -9,8 +9,8 @@
 //!
 //! **Why retiring is safe here, and why this is simpler than the
 //! Workflow pass.** A Workflow row cannot be auto-retired when open Jobs
-//! are pinned to it — retiring would strand live work, so that case
-//! refuses to start. Stations have no such case *by construction*:
+//! are pinned to it — retiring would strand live work — which is why the
+//! Workflow pass only reports. Stations have no such case *by construction*:
 //! membership is DERIVED, evaluated from the predicate at read time
 //! against open Jobs, with no station field on the packet
 //! (`116-stations.sql`). Nothing is ever pinned to a station version, so

@@ -33,19 +33,25 @@ mod census;
 mod jobs;
 mod kinds;
 mod plugins;
+mod queue_age;
+mod refusals;
 mod sim_clock;
 mod stations;
 mod steps;
 mod terminal_report;
+mod yard;
 
 use census::*;
 use jobs::*;
 use kinds::*;
 use plugins::*;
+use queue_age::*;
+use refusals::*;
 use sim_clock::*;
 use stations::*;
 use steps::*;
 use terminal_report::*;
+use yard::*;
 
 const DEFAULT_LIMIT: i64 = 100;
 const MAX_LIMIT: i64 = 1000;
@@ -103,6 +109,17 @@ pub struct JobsApiState<R: JobsRepository, B: EventBus> {
     pub roster: Option<Arc<dyn crate::owner_resolution::RosterLookup>>,
     /// Authoritative clock. See `boss-clock-client`.
     pub clock: Arc<dyn boss_clock_client::ClockClient>,
+    /// Cadence registry (read-only here). Wired so the yard-status
+    /// read-model can render the boarding predicate from the same rows
+    /// the conductor boards on — computed server-side, because the
+    /// `/api/cadence/*` door is operator-only and a browser cannot reach
+    /// it. `None` skips the predicate (tests / in-memory spike).
+    pub cadence: Option<Arc<dyn crate::cadence::CadenceRepository>>,
+    /// Delivery-policy registry (read-only here). Same reason as
+    /// `cadence`: the yard status names the stall / red-train thresholds
+    /// the conductor enforces, read from the live policy row rather than
+    /// a constant.
+    pub delivery: Option<Arc<dyn crate::delivery::DeliveryPolicyRepository>>,
 }
 
 /// `GET /api/jobs/job-edges` — the declared job-to-job link fields.
@@ -129,8 +146,18 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
     state: JobsApiState<R, B>,
 ) -> Router {
     let shared = Arc::new(state);
+    // One layer over the whole router rather than a call at each of
+    // `steps.rs`'s ~15 refusal sites, so a refusal added later cannot
+    // silently go uncounted. It passes everything that is not a step
+    // WRITE straight through without buffering. See http/refusals.rs.
+    let refusals =
+        axum::middleware::from_fn_with_state(shared.clone(), record_step_write_refusals::<R, B>);
     Router::new()
         .route("/api/jobs/health", get(health))
+        .route(
+            "/api/jobs/step-write-refusals",
+            get(list_step_write_refusals::<R, B>),
+        )
         .route("/api/jobs/summary", get(jobs_summary::<R, B>))
         .route("/api/jobs/live", get(jobs_live::<R, B>))
         .route("/api/jobs/sim-clock/pause", post(sim_clock_pause::<R, B>))
@@ -146,6 +173,17 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
         )
         .route("/api/jobs/launch-calendar", get(launch_calendar::<R, B>))
         .route("/api/jobs/assignments", get(list_assignments::<R, B>))
+        // The queue-age lens (2a0b034e): how long every outstanding
+        // obligation — ready/active step on an open packet — has
+        // waited. Read-only, own row shape; Job and Step untouched.
+        .route("/api/jobs/queue-age", get(list_queue_age::<R, B>))
+        // The yard status read-model (the-cluster-is-the-system.md
+        // Phase 0): "what is the yard doing, and why?" answered from the
+        // SoR in one payload — in-flight trains and their block reasons,
+        // the dock, the boarding predicate computed from the live cadence
+        // rows, recent arrivals. Read-only, own row shape; Job and Step
+        // untouched, `terminal-report` and `queue-age` the precedents.
+        .route("/api/yard/status", get(yard_status::<R, B>))
         .route("/api/jobs", get(list_jobs::<R, B>))
         .route("/api/jobs", post(create_job::<R, B>))
         .route("/api/jobs/{id}", get(get_job::<R, B>))
@@ -153,6 +191,24 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
         // Top-level metadata merge — the atomic alternative to the
         // GET → spread → full PUT read-modify-write. `null` removes.
         .route("/api/jobs/{id}/metadata", patch(patch_job_metadata::<R, B>))
+        .route("/api/jobs/{id}/convert", post(convert_job::<R, B>))
+        .route("/api/estate/nodes", get(list_estate_nodes::<R, B>))
+        .route(
+            "/api/estate/observations",
+            get(list_estate_observations::<R, B>),
+        )
+        .route(
+            "/api/estate/comparisons",
+            get(list_estate_comparisons::<R, B>),
+        )
+        .route(
+            "/api/estate/observation",
+            post(record_estate_observation::<R, B>),
+        )
+        .route(
+            "/api/estate/comparison",
+            post(record_estate_comparison::<R, B>),
+        )
         .route("/api/jobs/{id}/stream", get(job_stream::<R, B>))
         .route("/api/jobs/step-types", get(list_step_types::<R, B>))
         // Station registry — data-defined priority queues over
@@ -191,6 +247,13 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
         .route("/api/jobs/{id}/steps", get(list_steps::<R, B>))
         .route("/api/jobs/{id}/steps", post(add_step::<R, B>))
         .route("/api/jobs/{id}/steps/{step_id}", put(update_step::<R, B>))
+        // Top-level metadata merge — the step-side twin of the job
+        // route above, and the same contract: `null` removes; status
+        // and assignee are untouchable through it.
+        .route(
+            "/api/jobs/{id}/steps/{step_id}/metadata",
+            patch(patch_step_metadata::<R, B>),
+        )
         .route(
             "/api/jobs/{id}/steps/{step_id}/claim",
             post(claim_step::<R, B>),
@@ -220,7 +283,7 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
         )
         .route(
             "/api/workflows/{kind}/versions/{version}",
-            get(get_kind_version::<R, B>),
+            get(get_kind_version::<R, B>).delete(discard_kind_version::<R, B>),
         )
         // Experiments Tier 1 (docs/design/network-experiments.md):
         // the per-version terminal report — measurement of what
@@ -263,6 +326,7 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
             get(in_flight_plugin_count::<R, B>),
         )
         .with_state(shared)
+        .layer(refusals)
 }
 
 // ---------------------------------------------------------------------------

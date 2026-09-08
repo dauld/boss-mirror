@@ -55,7 +55,7 @@ async function mocks(page: Page) {
 
 test('a doc claiming in-review with nothing open is in the library, not your queue', async ({ page }) => {
   await mocks(page);
-  await page.goto('/system/design');
+  await page.goto('/it/design');
 
   const needs = page.locator('section', { has: page.getByText(/^Needs you/) });
   const library = page.locator('section', { has: page.getByText(/^Design library/) });
@@ -91,7 +91,7 @@ test('a doc claiming in-review with nothing open is in the library, not your que
 
 test('design page screenshot', async ({ page }, testInfo) => {
   await mocks(page);
-  await page.goto('/system/design');
+  await page.goto('/it/design');
   await page.waitForTimeout(1200);
   await page.screenshot({ path: testInfo.outputPath('design.png'), fullPage: true });
 });

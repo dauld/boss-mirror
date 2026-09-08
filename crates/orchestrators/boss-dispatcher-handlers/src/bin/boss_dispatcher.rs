@@ -20,21 +20,25 @@ use boss_dispatcher::rules::runner::RulesRunner;
 use boss_dispatcher::rules::schedule_runner::{DEFAULT_CATCHUP_CAP, ScheduleRunner};
 use boss_dispatcher_handlers::handlers::{
     bill_payment_batch::BillPaymentBatch, commerce_invoice_issue::CommerceInvoiceIssue,
+    credential_issuer, credential_rotate_forgejo::CredentialRotateForgejo,
     docs_design_sweep::DocsDesignSweep, docs_flush_queue::DocsFlushQueue,
-    gate_resolve::GateResolve, inventory_bill_approve::InventoryBillApprove,
+    estate_alarm::EstateAlarm, estate_compare::EstateCompare, gate_resolve::GateResolve,
+    inventory_bill_approve::InventoryBillApprove,
     inventory_overhead_absorb::InventoryOverheadAbsorb,
     inventory_parts_consume::InventoryPartsConsume, inventory_parts_produce::InventoryPartsProduce,
     inventory_po_place::InventoryPoPlace, inventory_receive::InventoryReceive,
-    jobs_clear_waiting::JobsClearWaiting, jobs_complete_linked_step::JobsCompleteLinkedStep,
-    jobs_complete_step::JobsCompleteStep, jobs_subjob_resolve::JobsSubjobResolve,
-    ledger_bill_approve::LedgerBillApprove, ledger_payroll_run_submit::LedgerPayrollRunSubmit,
-    ledger_tax_accrue::LedgerTaxAccrue, ledger_tax_remit::LedgerTaxRemit,
-    messages_expire_for_job::MessagesExpireForJob, messages_notify::MessagesNotify,
-    messages_notify_job_terminal::MessagesNotifyJobTerminal, network_census::NetworkCensus,
-    packaging_allocate::PackagingAllocate, people_hire::PeopleHire,
+    jobs_auto_park::JobsAutoPark, jobs_clear_waiting::JobsClearWaiting,
+    jobs_complete_linked_step::JobsCompleteLinkedStep, jobs_complete_step::JobsCompleteStep,
+    jobs_subjob_resolve::JobsSubjobResolve, ledger_bill_approve::LedgerBillApprove,
+    ledger_keg_deposit_settle::LedgerKegDepositSettle,
+    ledger_payroll_run_submit::LedgerPayrollRunSubmit, ledger_tax_accrue::LedgerTaxAccrue,
+    ledger_tax_remit::LedgerTaxRemit, messages_expire_for_job::MessagesExpireForJob,
+    messages_notify::MessagesNotify, messages_notify_job_terminal::MessagesNotifyJobTerminal,
+    network_census::NetworkCensus, packaging_allocate::PackagingAllocate, people_hire::PeopleHire,
     people_terminate::PeopleTerminate, products_consume::ProductsConsume,
     products_consume_from_invoice::ProductsConsumeFromInvoice, products_produce::ProductsProduce,
-    shipping_create::ShippingCreate, webhook_notify::WebhookNotify,
+    shipping_create::ShippingCreate, sweep_empty_decisions::MaintenanceSweepInspect,
+    webhook_notify::WebhookNotify,
 };
 use tokio::net::TcpListener;
 use tracing::{info, warn};
@@ -130,12 +134,35 @@ async fn main() -> Result<()> {
             );
             let mut handlers = HandlerRegistry::new();
             handlers.register(JobsSpawn::new(cfg.jobs_api_url.clone()));
+            // Auto-park: on a gate-run's green `gate-verdict` step, file
+            // the car the `--park-*` intent describes, so a gate-green
+            // branch never strands unparked. Needs the clock for a
+            // precise gate-step stamp (dock-queue-time). Inert until a
+            // rule on `step.done.gate-verdict` is published.
+            // The raiser the estate series was recorded for: a HARD
+            // finding persisting N consecutive comparisons becomes an
+            // urgent packet (a5adfb99). Inert until a rule on
+            // jobs.estate.compared is published.
+            handlers.register(EstateAlarm::new(
+                cfg.jobs_api_url.clone(),
+                cfg.clock_api_url.clone(),
+            ));
+            handlers.register(JobsAutoPark::new(
+                cfg.jobs_api_url.clone(),
+                cfg.clock_api_url.clone(),
+            ));
             // D7 delegate-subjob write-back: on a child Job's
             // close, resolve the parent delegate-subjob step.
             handlers.register(JobsSubjobResolve::new(cfg.jobs_api_url.clone()));
             // A closed Job wakes its waiters: clears metadata.waiting_on
             // (the '*' job edge) so blocked steps re-evaluate (e9291570).
             handlers.register(JobsClearWaiting::new(cfg.jobs_api_url.clone()));
+            // The empty-decisions sweep runs itself: on the sweep's
+            // Inspect checklist becoming ready, scan open packets for
+            // approval decisions that recorded nothing, complete the
+            // checklist, and route (action_needed) to Remediate or Clear
+            // (ee8ec68a — mechanical inspections become automation).
+            handlers.register(MaintenanceSweepInspect::new(cfg.jobs_api_url.clone()));
             // A closing Job completes the open step it was authorized
             // by, on the Job its declared edge names — the merged car
             // → feedback-packet obligation (2c4ae549). Generic: which
@@ -161,6 +188,39 @@ async fn main() -> Result<()> {
                 cfg.products_api_url.clone(),
                 ctx.registry.clone(),
             ));
+            // The credential broker's Forgejo rotation (7ee101aa first
+            // leg): on a rotation packet's scope step
+            // (step.done.credential-rotation), mint→install→verify→
+            // revoke via the issuer's admin API + a name-scoped k8s
+            // Secret write, recording each phase on the packet itself.
+            // Both dependencies degrade to Unconfigured — the handler
+            // stays registered (an UnknownHandler aborts EVERY co-fired
+            // rule's dispatch) and a firing rule dead-letters naming
+            // the missing knob instead.
+            {
+                use credential_issuer::{
+                    ForgeTokenIssuer, ForgejoAdmin, KubeSecretStore, SecretStore, Unconfigured,
+                };
+                let issuer: Arc<dyn ForgeTokenIssuer> = match &cfg.broker_forgejo_token {
+                    Some(root) => ForgejoAdmin::new(cfg.broker_forge_url.clone(), root.clone()),
+                    None => Arc::new(Unconfigured(
+                        "credential broker unconfigured: BOSS_BROKER_FORGEJO_TOKEN unset \
+                         (secret boss-credential-broker-root, key forgejo-token)"
+                            .to_string(),
+                    )),
+                };
+                let secrets: Arc<dyn SecretStore> = match KubeSecretStore::in_cluster() {
+                    Ok(s) => s,
+                    Err(e) => Arc::new(Unconfigured(format!(
+                        "credential broker has no in-cluster k8s credential: {e}"
+                    ))),
+                };
+                handlers.register(CredentialRotateForgejo::new(
+                    cfg.jobs_api_url.clone(),
+                    issuer,
+                    secrets,
+                ));
+            }
             // Packaging allocation — splits a brewed batch across formats by
             // demand and writes the packaged quantities, so the whole batch
             // always packages (WIP → FG, never dumped).
@@ -224,6 +284,14 @@ async fn main() -> Result<()> {
             // federal beer excise liability accrues at packaging time,
             // drained quarterly by the excise-tax-filing Workflow.
             handlers.register(LedgerTaxAccrue::new(cfg.ledger_api_url.clone()));
+            // A reconciled keg-return packet settles its deposit:
+            // DR 1000 / CR 2400 at the fleet-out date, DR 2400 /
+            // CR 1000 refund + CR 4150 forfeiture at the return date
+            // (93f936b9, the full balance-sheet keg model).
+            handlers.register(LedgerKegDepositSettle::new(
+                cfg.jobs_api_url.clone(),
+                cfg.ledger_api_url.clone(),
+            ));
             handlers.register(LedgerPayrollRunSubmit::new(cfg.ledger_api_url.clone()));
             // General AP bills (rent/utilities/…) → ledger subledger.
             handlers.register(LedgerBillApprove::new(cfg.ledger_api_url.clone()));
@@ -254,6 +322,11 @@ async fn main() -> Result<()> {
             // Report first — no raiser, no threshold; the series this
             // accumulates is what calibrates one later.
             handlers.register(NetworkCensus::new(cfg.jobs_api_url.clone()));
+            // The estate comparison (59ef456a): declared vs observed,
+            // fired by each jobs.estate.observed event, recorded as one
+            // jobs.estate.compared event per observation. Report first
+            // — the raiser comes later, calibrated on this series.
+            handlers.register(EstateCompare::new(cfg.jobs_api_url.clone()));
             handlers.register(MessagesNotify::new(
                 cfg.people_api_url.clone(),
                 cfg.messages_api_url.clone(),

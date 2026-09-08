@@ -324,16 +324,32 @@
     root.appendChild(body);
 
     function meta(key) {
-      // Step first, Job second: the step's brief is written for THIS
-      // decision; the Job's fields are the packet-wide fallback.
+      // Step first, Job second, the routing step third: the step's
+      // brief is written for THIS decision; the Job's fields are the
+      // packet-wide fallback; and on a triaged packet (backlog-item,
+      // user-feedback) the brief is written by whoever chose the
+      // `design` route, in the same write as the disposition — so it
+      // sits on that completed step, not on this one. Reading it here
+      // is what lets the route and its brief be one act (2026-09-05:
+      // three items reached the decider with the brief a step away).
       const own =
         step.metadata && typeof step.metadata[key] === 'string'
           ? step.metadata[key].trim()
           : '';
       if (own) return own;
-      return job && job.metadata && typeof job.metadata[key] === 'string'
-        ? job.metadata[key].trim()
-        : '';
+      const packet =
+        job && job.metadata && typeof job.metadata[key] === 'string'
+          ? job.metadata[key].trim()
+          : '';
+      if (packet) return packet;
+      const steps = (job && Array.isArray(job.steps)) ? job.steps : [];
+      const router = steps.find(
+        (s) =>
+          s && s.id !== step.id && s.status === 'completed' &&
+          s.metadata && typeof s.metadata.disposition === 'string' &&
+          typeof s.metadata[key] === 'string' && s.metadata[key].trim(),
+      );
+      return router ? router.metadata[key].trim() : '';
     }
 
     function render() {
@@ -467,11 +483,37 @@
     async function submit() {
       saving = true; error = null; refreshActions();
       try {
-        const merged = { ...(step.metadata || {}), verdict, answer };
+        // 1. Merge ONLY the keys this surface owns. The old idiom sent
+        //    the page-load snapshot plus these two through the PUT, and
+        //    PUT metadata is replaced WHOLESALE — any key another
+        //    writer added after this page loaded was silently erased
+        //    (the lost update the step metadata PATCH exists to
+        //    retire). The server merges against the row as it stands
+        //    and preserves every key this body does not name.
+        const pr = await fetch(`/api/jobs/${jobId}/steps/${step.id}/metadata`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ verdict, answer }),
+        });
+        if (!pr.ok) throw new Error(`metadata merge HTTP ${pr.status}: ${await pr.text()}`);
+        // 2. The PATCH answers 204 with no body, and the completion PUT
+        //    below still replaces metadata wholesale — so read the
+        //    post-merge row back and complete with THAT, never the
+        //    snapshot. (No single-step GET exists; the job's steps
+        //    list is the read the API offers.)
+        const lr = await fetch(`/api/jobs/${jobId}/steps`);
+        if (!lr.ok) throw new Error(`step read-back HTTP ${lr.status}: ${await lr.text()}`);
+        const stepsNow = await lr.json();
+        const fresh = Array.isArray(stepsNow)
+          ? stepsNow.find((s) => s.id === step.id)
+          : null;
+        if (!fresh) throw new Error('step read-back: step missing from its own job');
+        // 3. Complete with the true final shape — the fresh row's
+        //    metadata rides the body verbatim.
         const r = await fetch(`/api/jobs/${jobId}/steps/${step.id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...step, job_id: jobId, status: 'completed', metadata: merged }),
+          body: JSON.stringify({ ...fresh, job_id: jobId, status: 'completed' }),
         });
         if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
         if (typeof onUpdate === 'function') onUpdate();

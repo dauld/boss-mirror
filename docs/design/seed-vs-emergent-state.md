@@ -1,6 +1,6 @@
 # Seeds vs. emergent state — what belongs in seed data and what doesn't
 
-**Status:** living guidance. Treat any seed file that violates this as a known stop-gap, not a target.
+**Status**: living guidance. Treat any seed file that violates this as a known stop-gap, not a target.
 
 ## Frame
 

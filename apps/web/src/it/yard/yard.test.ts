@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
+  awaitingProof,
+  splitAtDeparture,
+  comparableVersions,
+  deliveryStats,
   arrivalMedians,
   arrivalReport,
   arrivalStamp,
@@ -12,6 +16,8 @@ import {
   trainStatus,
   ciLamp,
   isSim,
+  type TerminalReport,
+  type TerminalVersion,
   protocolHue,
   wipAdvisory,
   dockUpstream,
@@ -19,6 +25,13 @@ import {
   PROTOCOL_PALETTE,
   type JobLite,
   type StationQueueEnvelope,
+  trainTrouble,
+  troubleLabel,
+  toTrainRow,
+  cancelRequestBody,
+  canOfferCancel,
+  CANCEL_ROLE,
+  type TrainRow,
 } from './yard';
 
 function train(over: Partial<JobLite>): JobLite {
@@ -32,16 +45,41 @@ const s = (slug: string, status: string, metadata: Record<string, unknown> = {})
   ({ spec_slug: slug, title: slug, status, metadata });
 
 describe('trainStatus', () => {
-  test('walks BOARDING → BOARDED → DEPARTED → ARRIVED', () => {
+  test('walks BOARDING → BOARDED → DEPARTED → CONVERGING → ARRIVED', () => {
     expect(trainStatus(train({ steps: [s('pr', 'ready')] }))).toBe('BOARDING');
     expect(trainStatus(train({ steps: [s('pr', 'completed')] }))).toBe('BOARDED');
     expect(
       trainStatus(train({ steps: [s('pr', 'completed'), s('merged', 'completed')] })),
     ).toBe('DEPARTED');
+    // Deployed, but the cluster has not converged on the merge yet — the
+    // real ~10-minute wait. Still live, not arrived.
     expect(
       trainStatus(
-        train({ steps: [s('merged', 'completed'), s('deployed', 'completed')] }),
+        train({
+          steps: [
+            s('merged', 'completed'),
+            s('deployed', 'completed'),
+            s('converged', 'ready'),
+          ],
+        }),
       ),
+    ).toBe('CONVERGING');
+    // Both deployed AND converged done → arrived.
+    expect(
+      trainStatus(
+        train({
+          steps: [
+            s('merged', 'completed'),
+            s('deployed', 'completed'),
+            s('converged', 'completed'),
+          ],
+        }),
+      ),
+    ).toBe('ARRIVED');
+    // A pre-converged train has no `converged` step; its finish line is
+    // `deployed`, so its absence is arrival, not a stuck train.
+    expect(
+      trainStatus(train({ steps: [s('merged', 'completed'), s('deployed', 'completed')] })),
     ).toBe('ARRIVED');
     expect(trainStatus(train({ status: 'closed' }))).toBe('ARRIVED');
   });
@@ -134,7 +172,7 @@ describe('the dock from the station envelope', () => {
     expect(y.dock.map(c => c.id)).toEqual(['s1', 's2']);
     expect(y.dock[0]).toEqual({
       id: 's1', kind: 'ship-a-change', branch: 'feat/s1', title: 'car s1',
-      tags: ['hotfix'], sim: true, skipReason: 'CI red',
+      tags: ['hotfix'], sim: true, skipReason: 'CI red', head: null,
     });
     expect(y.dock[1]?.sim).toBe(false);
     expect(y.dock[1]?.skipReason).toBeNull();
@@ -224,12 +262,12 @@ describe('the upstream button', () => {
     const y = assembleYard(
       [],
       [],
-      envelope({ upstream: { label: 'FEEDBACK', href: '/system/feedback' } }),
+      envelope({ upstream: { label: 'FEEDBACK', href: '/it/design/feedback' } }),
     );
     const b = dockUpstream(y.dockStation);
     expect(b).not.toBeNull();
     expect(b!.label).toBe('↑ UPSTREAM: FEEDBACK');
-    expect(b!.href).toBe('/system/feedback');
+    expect(b!.href).toBe('/it/design/feedback');
     // The tooltip says what the button does, not what it is.
     expect(b!.title).toContain('feeds this station');
   });
@@ -238,7 +276,7 @@ describe('the upstream button', () => {
     const y = assembleYard(
       [],
       [],
-      envelope({ upstream: { label: 'design docs', href: '/system/design' } }),
+      envelope({ upstream: { label: 'design docs', href: '/it/design' } }),
     );
     expect(dockUpstream(y.dockStation)?.label).toBe('↑ UPSTREAM: DESIGN DOCS');
   });
@@ -257,7 +295,7 @@ describe('the upstream button', () => {
     const noLabel = assembleYard(
       [],
       [],
-      envelope({ upstream: { label: '', href: '/system/feedback' } }),
+      envelope({ upstream: { label: '', href: '/it/design/feedback' } }),
     );
     expect(dockUpstream(noLabel.dockStation)).toBeNull();
   });
@@ -385,6 +423,66 @@ const on = (slug: string, completedOn: string) => ({
   status: 'completed',
   metadata: {},
   completed_on: completedOn,
+});
+
+// The converge-wait window (2026-09-02): `deployed` completes in
+// seconds, but the cluster takes ~10 minutes to converge on the merge.
+// A train there is deployed=completed, converged=ready, job open. It
+// must stay a LIVE, in-transit train — not vanish as an inert ARRIVED
+// row — until the cluster actually converges.
+describe('a converging train stays live, not arrived', () => {
+  const converging = () =>
+    train({
+      id: 'conv',
+      status: 'open',
+      steps: [
+        at('pr', '2026-09-07T08:00:00Z'),
+        s('ci', 'completed', { result: 'green' }),
+        at('merged', '2026-09-07T08:05:00Z'),
+        at('deployed', '2026-09-07T08:06:00Z'),
+        s('converged', 'ready'),
+      ],
+    });
+
+  test('trainStatus is CONVERGING while the converged step is not done', () => {
+    expect(trainStatus(converging())).toBe('CONVERGING');
+  });
+
+  test('it is in transit, keeps the live dot, and shows the converging phase', () => {
+    const now = Date.parse('2026-09-07T08:10:00Z');
+    const y = assembleYard([converging()], [], null, now);
+    // Open trains are in flight; the split puts it in transit, not the yard.
+    const { inTransit, inYard } = splitAtDeparture(y.inFlight);
+    expect(inTransit.map(t => t.id)).toEqual(['conv']);
+    expect(inYard).toEqual([]);
+    const row = y.inFlight[0]!;
+    expect(row.status).toBe('CONVERGING');
+    // The one live train — it keeps the pulsing dot.
+    expect(row.live).toBe(true);
+    expect(row.eta.phase).toBe('converging');
+    // Not an arrival: it is still open, the cluster has not converged.
+    expect(y.arrivals).toEqual([]);
+    // The converge-start instant (the deploy's) is surfaced for the
+    // elapsed "converging for …" chip.
+    expect(row.convergingSince).toBe('2026-09-07T08:06:00Z');
+  });
+
+  test('once the converged step completes, it is ARRIVED', () => {
+    const arrived = train({
+      id: 'conv',
+      status: 'open',
+      steps: [
+        at('deployed', '2026-09-07T08:06:00Z'),
+        s('converged', 'completed'),
+      ],
+    });
+    expect(trainStatus(arrived)).toBe('ARRIVED');
+    // And it is no longer live.
+    const now = Date.parse('2026-09-07T08:20:00Z');
+    const y = assembleYard([arrived], [], null, now);
+    expect(y.inFlight[0]?.live).toBe(false);
+    expect(y.inFlight[0]?.convergingSince).toBeNull();
+  });
 });
 
 describe('trainOutcome', () => {
@@ -688,6 +786,7 @@ describe('etaPhase', () => {
     expect(etaPhase('BOARDED', 'failing')).toBe('blocked');
     expect(etaPhase('DEPARTED', 'green')).toBe('deploying');
     expect(etaPhase('DEPARTED', 'failing')).toBe('deploying');
+    expect(etaPhase('CONVERGING', 'green')).toBe('converging');
     expect(etaPhase('ARRIVED', 'green')).toBe('arrived');
   });
 });
@@ -705,6 +804,8 @@ describe('trainEta', () => {
       // 1800 - 600 elapsed = 1200 left on the leg, + 600 to deploy.
       atMs: now + 1_800_000,
       basis: 'median of last 4 arrivals',
+      // 600 of the 1800 s leg is behind it.
+      progress: 600 / 1800,
     });
   });
 
@@ -721,6 +822,7 @@ describe('trainEta', () => {
       phase: 'deploying',
       atMs: now + 300_000,
       basis: 'median of last 4 arrivals',
+      progress: 0.5,
     });
     // Overdue never runs backwards: the estimate is "any moment now".
     const late = train({
@@ -731,6 +833,8 @@ describe('trainEta', () => {
       phase: 'deploying',
       atMs: now,
       basis: 'median of last 4 arrivals',
+      // Overdue is clamped the same way: the leg is 100% behind it.
+      progress: 1,
     });
   });
 
@@ -785,8 +889,648 @@ describe('the yard wires ETAs onto trains in flight', () => {
       phase: 'merging',
       atMs: now + 1_800_000,
       basis: 'median of last 2 arrivals',
+      progress: 600 / 1800,
     });
     // An arrived train is not in flight and gets no estimate.
     expect(y.arrivals[0]?.eta).toEqual({ kind: 'phase', phase: 'arrived' });
+  });
+});
+
+
+// ---------------------------------------------------------------------
+// Delivery stats — the yard's scoreboard (feedback 898761cb).
+// ---------------------------------------------------------------------
+
+function ver(
+  version: number,
+  merged: number,
+  abandoned: number,
+  median: number | null = 0,
+  samples = merged + abandoned,
+): TerminalVersion {
+  const outcomes: Record<string, number> = {};
+  if (merged) outcomes.merged = merged;
+  if (abandoned) outcomes.abandoned = abandoned;
+  return {
+    version,
+    total: merged + abandoned,
+    outcomes,
+    cycle_time_days: { median, p90: null, samples },
+  };
+}
+
+describe('deliveryStats', () => {
+  test('reports abandon rate, cycle time and delivered count for the latest resolved version', () => {
+    const report: TerminalReport = { kind: 'ship-a-change', versions: [ver(18, 8, 2, 0)] };
+    const stats = deliveryStats(report);
+    expect(stats).toHaveLength(3);
+    const [abandon, cycle, delivered] = stats as [
+      (typeof stats)[0],
+      (typeof stats)[0],
+      (typeof stats)[0],
+    ];
+    expect(abandon.label).toBe('abandon rate');
+    expect(abandon.value).toBe('20%'); // 2 of 10 resolved
+    expect(cycle.value).toBe('0m');
+    expect(delivered.value).toBe('8');
+  });
+
+  /**
+   * Sub-day medians exist now that packets carry precise open/close
+   * stamps — a same-day close used to be `0d`, which hid exactly the
+   * improvement this scoreboard exists to show.
+   */
+  test('renders a sub-hour median in minutes, sub-day in hours', () => {
+    // Sub-hour reads in MINUTES (feedback b4c1b53a): at a 2-hour train
+    // cadence, cycles land under an hour and `0.5h` makes the reader
+    // do the arithmetic the scoreboard exists to have done.
+    const halfHour: TerminalReport = {
+      kind: 'ship-a-change',
+      versions: [ver(18, 8, 2, 1800 / 86400)],
+    };
+    expect(deliveryStats(halfHour)[1]!.value).toBe('30m');
+
+    const halfDay: TerminalReport = { kind: 'ship-a-change', versions: [ver(18, 8, 2, 0.5)] };
+    expect(deliveryStats(halfDay)[1]!.value).toBe('12h');
+  });
+
+  test('keeps day-or-longer medians in days, to one decimal when fractional', () => {
+    const whole: TerminalReport = { kind: 'ship-a-change', versions: [ver(18, 8, 2, 3)] };
+    expect(deliveryStats(whole)[1]!.value).toBe('3d');
+
+    const fractional: TerminalReport = { kind: 'ship-a-change', versions: [ver(18, 8, 2, 3.44)] };
+    expect(deliveryStats(fractional)[1]!.value).toBe('3.4d');
+
+    // 0.999 days rounds to 24h — that reads as a day, not as hours.
+    const nearlyADay: TerminalReport = { kind: 'ship-a-change', versions: [ver(18, 8, 2, 0.999)] };
+    expect(deliveryStats(nearlyADay)[1]!.value).toBe('1d');
+  });
+
+  test('puts the previous version beside it so the direction is visible', () => {
+    const report: TerminalReport = {
+      kind: 'ship-a-change',
+      versions: [ver(14, 20, 5), ver(18, 8, 2)],
+    };
+    const abandon = deliveryStats(report)[0]!;
+    expect(abandon.value).toBe('20%'); // v18: 2/10
+    expect(abandon.previous).toBe('20%'); // v14: 5/25
+  });
+
+  /**
+   * THE TRAP THIS EXISTS FOR. The newest version usually has packets
+   * still in flight and NOTHING resolved — reading it naively prints 0%
+   * and looks like a triumph. On 2026-08-28 v24 and v25 held 8 packets
+   * between them with zero resolved.
+   */
+  test('skips versions that have resolved nothing rather than reporting 0%', () => {
+    const inflight: TerminalVersion = {
+      version: 25,
+      total: 3,
+      by_status: { open: 3 },
+      outcomes: {},
+      cycle_time_days: { median: null, p90: null, samples: 0 },
+    };
+    const report: TerminalReport = { kind: 'ship-a-change', versions: [inflight, ver(18, 8, 2)] };
+    const { current } = comparableVersions(report);
+    expect(current?.version).toBe(18);
+    expect(deliveryStats(report)[0]!.value).toBe('20%');
+  });
+
+  test('marks a small sample provisional so it is not read as a trend', () => {
+    const report: TerminalReport = { kind: 'ship-a-change', versions: [ver(19, 1, 1)] };
+    const abandon = deliveryStats(report)[0]!;
+    expect(abandon.value).toBe('50%');
+    expect(abandon.samples).toBe(2);
+    expect(abandon.provisional).toBe(true);
+  });
+
+  test('has no previous when only one version has resolved anything', () => {
+    const report: TerminalReport = { kind: 'ship-a-change', versions: [ver(18, 8, 2)] };
+    expect(deliveryStats(report)[0]!.previous).toBeNull();
+  });
+
+  test('returns nothing at all rather than fake numbers when the report is empty', () => {
+    expect(deliveryStats(null)).toEqual([]);
+    expect(deliveryStats({ kind: 'ship-a-change', versions: [] })).toEqual([]);
+  });
+});
+
+describe('awaitingProof', () => {
+  const car = (id: string, status: string, slug: string, stepStatus = 'ready') => ({
+    id,
+    kind: 'ship-a-change',
+    title: id,
+    status,
+    steps: [{ spec_slug: slug, status: stepStatus, title: slug }],
+  });
+
+  test('finds merged cars parked at proven — the ones the yard shows nowhere', () => {
+    const cars = [
+      car('a', 'open', 'proven'),
+      car('b', 'open', 'review'),
+      car('c', 'closed', 'proven'),
+    ];
+    expect(awaitingProof(cars as never).map((c) => c.id)).toEqual(['a']);
+  });
+
+  test('ignores a car whose proven step is already completed', () => {
+    expect(awaitingProof([car('a', 'open', 'proven', 'completed')] as never)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------
+// The approach — the car lifecycle upstream of the dock (f930cda2).
+// ---------------------------------------------------------------------
+
+import { approach } from './yard';
+
+const NOW = Date.parse('2026-08-31T21:00:00Z');
+
+function gateRun(over: Partial<JobLite>): JobLite {
+  return {
+    id: 'g1', kind: 'gate-run', title: 'Gate: x', status: 'open',
+    opened_on: '2026-08-31', metadata: { branch: 'fix/x', sha: 'a'.repeat(40) },
+    steps: [], ...over,
+  };
+}
+
+const verdictStep = (verdict: string, head = 'a'.repeat(40)) =>
+  ({ title: 'Record the receipt', status: 'completed',
+     metadata: { verdict, receipt: JSON.stringify({ verdict, head, mode: 'full' }) } });
+
+function ship(branch: string, over: Partial<JobLite> = {}): JobLite {
+  return {
+    id: `car-${branch}`, kind: 'ship-a-change', title: branch, status: 'open',
+    opened_on: '2026-08-31', metadata: { branch }, steps: [], ...over,
+  };
+}
+
+const publishEnv = (jobs: readonly JobLite[]): StationQueueEnvelope => ({
+  station: 'publish-dock', kind: 'batch', discipline: ['priority', 'age'],
+  over_limit: false, total: jobs.length, data: jobs,
+});
+
+describe('approach', () => {
+  test('an open gate-run is the GATES view, not an approach row', () => {
+    // The gate mid-run lives in the server-computed slots the page
+    // renders beside the approach; drawing it here too was the
+    // redundancy David flagged (feedback 3771438f).
+    expect(approach([gateRun({})], null, [ship('fix/x')], NOW)).toEqual([]);
+  });
+
+  test('a green gate with no car anywhere is the gap the dock cannot see', () => {
+    const rows = approach(
+      [gateRun({ status: 'closed', steps: [verdictStep('green')] })], null, [], NOW,
+    );
+    expect(rows.map(r => r.state)).toEqual(['gated-green']);
+  });
+
+  test('a green gate whose branch any car names has entered the yard — no row', () => {
+    const rows = approach(
+      [gateRun({ status: 'closed', steps: [verdictStep('green')] })],
+      null, [ship('fix/x')], NOW,
+    );
+    expect(rows).toEqual([]);
+  });
+
+  test('a red gate stays visible until a merged car buries it', () => {
+    const red = gateRun({ status: 'closed', steps: [verdictStep('failed')] });
+    expect(approach([red], null, [ship('fix/x')], NOW).map(r => r.state))
+      .toEqual(['gated-red']);
+    const merged = ship('fix/x', { status: 'closed', metadata: { branch: 'fix/x', outcome: 'merged' } });
+    expect(approach([red], null, [merged], NOW)).toEqual([]);
+  });
+
+  test('a lost verdict reads as red — no evidence must not read as fine', () => {
+    const rows = approach(
+      [gateRun({ status: 'closed', steps: [verdictStep('lost')] })], null, [], NOW,
+    );
+    expect(rows.map(r => r.state)).toEqual(['gated-red']);
+  });
+
+  test('a same-day green answers a red — the green gets the row (754b01b5)', () => {
+    // Same-day server order is NOT insertion order, so the red may sort
+    // above the very green that answered it; an alarm that stays on
+    // after the condition clears teaches the operator to ignore alarms
+    // (misread twice on 2026-08-31). The green claims the branch's row.
+    const red = gateRun({ id: 'g2', status: 'closed', steps: [verdictStep('failed')] });
+    const green = gateRun({ id: 'g1', status: 'closed', steps: [verdictStep('green')] });
+    expect(approach([red, green], null, [], NOW).map(r => ({ id: r.id, state: r.state })))
+      .toEqual([{ id: 'g1', state: 'gated-green' }]);
+    // ...and a merged car buries the whole branch, red included.
+    const merged = ship('fix/x', { status: 'closed', metadata: { branch: 'fix/x', outcome: 'merged' } });
+    expect(approach([red, green], null, [merged], NOW)).toEqual([]);
+  });
+
+  test('a red strictly newer by day than every green is a REGRESSION — stays red', () => {
+    const red = gateRun({
+      id: 'g2', status: 'closed', opened_on: '2026-08-31', steps: [verdictStep('failed')],
+    });
+    const green = gateRun({
+      id: 'g1', status: 'closed', opened_on: '2026-08-30', steps: [verdictStep('green')],
+    });
+    expect(approach([red, green], null, [], NOW).map(r => r.state))
+      .toEqual(['gated-red']);
+  });
+
+  test('an operator-annotated superseded red is folded from the view', () => {
+    // The git-only cases — branch deleted, change landed via another
+    // branch — arrive as an annotation; the record keeps the packet.
+    const red = gateRun({
+      status: 'closed',
+      metadata: { branch: 'fix/x', sha: 'a'.repeat(40), superseded: true },
+      steps: [verdictStep('failed')],
+    });
+    expect(approach([red], null, [], NOW)).toEqual([]);
+    // Explicit false is not an annotation.
+    const kept = gateRun({
+      status: 'closed',
+      metadata: { branch: 'fix/x', sha: 'a'.repeat(40), superseded: false },
+      steps: [verdictStep('failed')],
+    });
+    expect(approach([kept], null, [], NOW).map(r => r.state)).toEqual(['gated-red']);
+  });
+
+  // HELD cars. An operator holds a car by gating it without parking;
+  // until the hold marker existed that rendered as a stranded green —
+  // a car someone forgot — and the two must read differently: a hold
+  // is a brake deliberately on, a stranded green is a gap.
+  test('a green gate-run an operator HELD reads held, with its reason — not stranded', () => {
+    const held = gateRun({
+      status: 'closed',
+      metadata: { branch: 'fix/x', sha: 'a'.repeat(40), hold: 'waiting for #240 to land first' },
+      steps: [verdictStep('green')],
+    });
+    expect(approach([held], null, [], NOW).map(r => ({ state: r.state, hold: r.hold }))).toEqual([
+      { state: 'held', hold: 'waiting for #240 to land first' },
+    ]);
+  });
+
+  test('a green without a hold is unchanged — gated-green, hold null', () => {
+    const rows = approach(
+      [gateRun({ status: 'closed', steps: [verdictStep('green')] })], null, [], NOW,
+    );
+    expect(rows.map(r => ({ state: r.state, hold: r.hold }))).toEqual([
+      { state: 'gated-green', hold: null },
+    ]);
+    // An empty, false or null marker is not a hold.
+    for (const hold of ['', false, null]) {
+      const r = approach(
+        [gateRun({
+          status: 'closed',
+          metadata: { branch: 'fix/x', hold },
+          steps: [verdictStep('green')],
+        })],
+        null, [], NOW,
+      );
+      expect(r.map(x => x.state)).toEqual(['gated-green']);
+    }
+  });
+
+  test('a bare `hold: true` is still a hold — with no reason recorded', () => {
+    const held = gateRun({
+      status: 'closed',
+      metadata: { branch: 'fix/x', hold: true },
+      steps: [verdictStep('green')],
+    });
+    const rows = approach([held], null, [], NOW);
+    expect(rows[0]?.state).toBe('held');
+    expect(rows[0]?.hold).toBe('no reason recorded');
+  });
+
+  test('a hold does not soften a red, and a superseded hold stays folded', () => {
+    // Red is work outstanding whatever the operator wrote; and dead
+    // (superseded) beats waiting (held) — the earlier `continue` wins.
+    const red = gateRun({
+      status: 'closed',
+      metadata: { branch: 'fix/x', hold: 'brake on' },
+      steps: [verdictStep('failed')],
+    });
+    expect(approach([red], null, [], NOW).map(r => r.state)).toEqual(['gated-red']);
+    const dead = gateRun({
+      status: 'closed',
+      metadata: { branch: 'fix/x', hold: 'brake on', superseded: true },
+      steps: [verdictStep('green')],
+    });
+    expect(approach([dead], null, [], NOW)).toEqual([]);
+  });
+
+  test("a held branch a car already claims is the yard's row, not the approach's", () => {
+    const held = gateRun({
+      status: 'closed',
+      metadata: { branch: 'fix/x', hold: 'brake on' },
+      steps: [verdictStep('green')],
+    });
+    expect(approach([held], null, [ship('fix/x')], NOW)).toEqual([]);
+  });
+
+  test('held rows sit behind the greens — furthest from the dock', () => {
+    const green = gateRun({
+      id: 'g-green', status: 'closed',
+      metadata: { branch: 'fix/g' }, steps: [verdictStep('green')],
+    });
+    const held = gateRun({
+      id: 'g-held', status: 'closed',
+      metadata: { branch: 'fix/h', hold: 'brake on' }, steps: [verdictStep('green')],
+    });
+    expect(approach([held, green], null, [], NOW).map(r => r.state)).toEqual([
+      'gated-green', 'held',
+    ]);
+  });
+
+  test('a stale closed gate is archaeology, not approach', () => {
+    const old = gateRun({
+      status: 'closed', opened_on: '2026-08-27', steps: [verdictStep('green')],
+    });
+    expect(approach([old], null, [], NOW)).toEqual([]);
+    // An OPEN gate-run is live activity at any age — but it lives in the
+    // GATES slots, so it is never an approach row.
+    expect(approach([gateRun({ opened_on: '2026-08-27' })], null, [], NOW)).toEqual([]);
+  });
+
+  test('open publish-requests ride in front, with the requester on the row', () => {
+    const pr = gateRun({
+      id: 'p1', kind: 'publish-request', title: 'Publish fix/y',
+      metadata: { branch: 'fix/y', head_sha: 'b'.repeat(40), requested_by: 'pod' },
+    });
+    const rows = approach([], publishEnv([pr]), [], NOW);
+    expect(rows.map(r => ({ state: r.state, note: r.note }))).toEqual([
+      { state: 'publishing', note: 'pod' },
+    ]);
+  });
+
+  test('rows group by distance from the dock: publishing, red, green (gating is the slots)', () => {
+    const rows = approach(
+      [
+        gateRun({ id: 'g1', metadata: { branch: 'fix/a' } }),
+        gateRun({ id: 'g2', status: 'closed', metadata: { branch: 'fix/b' }, steps: [verdictStep('green')] }),
+        gateRun({ id: 'g3', status: 'closed', metadata: { branch: 'fix/c' }, steps: [verdictStep('failed')] }),
+      ],
+      publishEnv([gateRun({ id: 'p1', kind: 'publish-request', metadata: { branch: 'fix/d' } })]),
+      [], NOW,
+    );
+    // fix/a is mid-gate — it is a GATES slot, not an approach row.
+    expect(rows.map(r => r.state)).toEqual(['publishing', 'gated-red', 'gated-green']);
+  });
+
+  test('assembleYard without the new feeds still assembles, approach empty', () => {
+    const y = assembleYard([], [], null, NOW, null);
+    expect(y.approach).toEqual([]);
+  });
+});
+
+describe('approach — a live gate suppresses its branch\'s stale verdict', () => {
+  test('a live re-gate hides a same-day closed green for its branch', () => {
+    // Server order within a day is not insertion order (measured
+    // 2026-08-31: two refused-launch packets sorted above the gates
+    // that ran). A closed green served FIRST must not draw a green
+    // approach row while the branch is being re-gated — the live gate
+    // is the GATES slot, and no stale verdict rides beneath it.
+    const closedGreen = gateRun({ id: 'g-old', status: 'closed', steps: [verdictStep('green')] });
+    const liveRegate = gateRun({ id: 'g-live' });
+    expect(approach([closedGreen, liveRegate], null, [], NOW)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------
+// The departure line is the merge (0bba59f7, ratified 2026-08-31).
+// ---------------------------------------------------------------------
+
+describe('splitAtDeparture', () => {
+  const row = (id: string, status: string) =>
+    ({ id, status }) as unknown as Parameters<typeof splitAtDeparture>[0][number];
+  test('pre-merge trains are yard work; post-merge (converging included) is transit', () => {
+    const { inYard, inTransit } = splitAtDeparture([
+      row('a', 'BOARDING'), row('b', 'BOARDED'), row('c', 'DEPARTED'),
+      row('e', 'CONVERGING'), row('d', 'ARRIVED'),
+    ]);
+    expect(inYard.map(t => t.id)).toEqual(['a', 'b']);
+    expect(inTransit.map(t => t.id)).toEqual(['c', 'e', 'd']);
+  });
+  test('a red-CI train still assembling is YARD — red is status, not a wreck', () => {
+    // Placement only: nothing about the lamp changes, only which
+    // section holds the train (the honesty note on 0bba59f7).
+    const { inYard } = splitAtDeparture([row('r', 'BOARDED')]);
+    expect(inYard.length).toBe(1);
+  });
+});
+
+describe('a troubled train looks troubled', () => {
+  const train = (over: Record<string, unknown> = {}) => ({
+    id: 't1',
+    kind: 'pr-train',
+    title: 'PR train',
+    status: 'open',
+    steps: [{ title: 'Open the batched PR', status: 'completed', metadata: {} }],
+    ...over,
+  }) as never;
+
+  test('surfaces a converge alarm the conductor already filed', () => {
+    const t = train({ metadata: { converge_alarm_filed: true } });
+    expect(trainTrouble(t)?.kind).toBe('converge-overdue');
+    expect(troubleLabel(trainTrouble(t)!)).toBe('CONVERGE OVERDUE');
+  });
+
+  test('surfaces a stall stamp', () => {
+    const t = train({ metadata: { stalled_since: '2026-09-02T17:00:00Z' } });
+    expect(trainTrouble(t)?.kind).toBe('stalled');
+  });
+
+  test('an arrived or closed train is never troubled', () => {
+    // Its history is not a live problem.
+    const closed = train({ status: 'closed', metadata: { converge_alarm_filed: true } });
+    expect(trainTrouble(closed)).toBeNull();
+    const arrived = train({
+      status: 'open',
+      metadata: { converge_alarm_filed: true },
+      steps: [{ title: 'Deployed to the playground', status: 'completed', metadata: {} }],
+    });
+    expect(trainTrouble(arrived)).toBeNull();
+  });
+
+  test('a healthy in-flight train is not troubled', () => {
+    expect(trainTrouble(train({ metadata: {} }))).toBeNull();
+    // An empty stall stamp is not a stall.
+    expect(trainTrouble(train({ metadata: { stalled_since: '' } }))).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------
+// The yard's cancel button (backlog 7a24caf3). The page writes ONE
+// stamp — `cancel_requested` — through the metadata merge, and the
+// conductor's reconcile honours it. Everything the button may or may
+// not do is a pure rule here, so the page carries no judgement of its
+// own.
+// ---------------------------------------------------------------------
+
+describe('cancelRequestBody', () => {
+  const at = '2026-09-07T21:00:00.000Z';
+
+  test('is exactly the stamp the conductor reads', () => {
+    expect(cancelRequestBody('emp-007', 'CI red on a flaky test, re-gate the cars', at)).toEqual({
+      cancel_requested: { by: 'emp-007', reason: 'CI red on a flaky test, re-gate the cars', at },
+    });
+  });
+
+  test('refuses an empty or whitespace-only reason', () => {
+    // A stamp with no reason answers nothing when someone asks later
+    // why the train was pulled.
+    expect(cancelRequestBody('emp-007', '', at)).toBeNull();
+    expect(cancelRequestBody('emp-007', '   \n', at)).toBeNull();
+  });
+
+  test('trims the reason it stamps', () => {
+    expect(cancelRequestBody('emp-007', '  stalled 4h  ', at)?.cancel_requested.reason).toBe(
+      'stalled 4h',
+    );
+  });
+
+  test('refuses a stamp with no actor — provenance is not optional', () => {
+    expect(cancelRequestBody('', 'stalled', at)).toBeNull();
+  });
+});
+
+describe('canOfferCancel', () => {
+  const row = (over: Partial<TrainRow> = {}): TrainRow =>
+    ({
+      id: 't1',
+      title: 'PR train',
+      status: 'BOARDED',
+      lamp: 'failing',
+      cars: [],
+      live: false,
+      outcome: 'unknown',
+      arrivedAt: { ms: 0, at: '', basis: 'opened_on' },
+      eta: { kind: 'phase', phase: 'blocked' },
+      trouble: { kind: 'ci-red' },
+      cancelRequested: null,
+      cancelRefused: false,
+      ...over,
+    }) as TrainRow;
+
+  test('in the yard, troubled, privileged, not yet requested → offered', () => {
+    expect(canOfferCancel(row(), 'in-yard', true)).toBe(true);
+    expect(canOfferCancel(row({ trouble: { kind: 'stalled' } }), 'in-yard', true)).toBe(true);
+    expect(canOfferCancel(row({ trouble: { kind: 'converge-overdue' } }), 'in-yard', true)).toBe(
+      true,
+    );
+  });
+
+  test('never in transit — past the merge is irreversible (the departure line)', () => {
+    expect(canOfferCancel(row({ status: 'DEPARTED' }), 'in-transit', true)).toBe(false);
+  });
+
+  test('never on a train that is not in trouble', () => {
+    expect(canOfferCancel(row({ trouble: null, lamp: 'green' }), 'in-yard', true)).toBe(false);
+  });
+
+  test('never for an unprivileged viewer', () => {
+    expect(canOfferCancel(row(), 'in-yard', false)).toBe(false);
+  });
+
+  test('never twice — a pending request hides the button', () => {
+    const pending = row({
+      cancelRequested: { by: 'emp-007', reason: 'stalled', at: '2026-09-07T21:00:00Z' },
+    });
+    expect(canOfferCancel(pending, 'in-yard', true)).toBe(false);
+  });
+
+  test('the privileged role is platform-admin, spelled the way boss_core spells it', () => {
+    expect(CANCEL_ROLE).toBe('platform-admin');
+  });
+});
+
+describe('TrainRow carries the cancel stamps off the job metadata', () => {
+  const none = new Map<string, JobLite>();
+
+  test('a pending request is read back so a reload shows it', () => {
+    const j = train({
+      metadata: {
+        cancel_requested: { by: 'emp-007', reason: 'stalled', at: '2026-09-07T21:00:00Z' },
+      },
+    });
+    const r = toTrainRow(j, none, false);
+    expect(r.cancelRequested).toEqual({
+      by: 'emp-007',
+      reason: 'stalled',
+      at: '2026-09-07T21:00:00Z',
+    });
+    expect(r.cancelRefused).toBe(false);
+  });
+
+  test('no stamp, no request', () => {
+    expect(toTrainRow(train({ metadata: {} }), none, false).cancelRequested).toBeNull();
+    expect(toTrainRow(train({ metadata: null }), none, false).cancelRequested).toBeNull();
+  });
+
+  test('a malformed stamp is not a request', () => {
+    expect(
+      toTrainRow(train({ metadata: { cancel_requested: 'yes' } }), none, false).cancelRequested,
+    ).toBeNull();
+  });
+
+  test("the conductor's refusal is read back too — the chip must not claim a cancel that was refused", () => {
+    const j = train({
+      metadata: {
+        cancel_requested: { by: 'emp-007', reason: 'stalled', at: '2026-09-07T21:00:00Z' },
+        cancel_refused: { reason: 'already merged', at: '2026-09-07T21:04:00Z' },
+      },
+    });
+    expect(toTrainRow(j, none, false).cancelRefused).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------
+// The yard floor's inputs (the-yard-is-a-floor-you-can-follow). A wagon
+// keeps its identity across stations only if the page can name the car
+// behind a gating branch, read a head to paint beside the branch, and
+// tell a lost verdict from a red one.
+// ---------------------------------------------------------------------
+
+describe('a car carries its head', () => {
+  test('boarded_head names it, shortened to seven', () => {
+    const j = ship('fix/x', { metadata: { branch: 'fix/x', boarded_head: '9fa9a19d4b7aac0a5a59c5de88b2a817df4b0889' } });
+    expect(assembleYard([], [j]).cars[0]?.head).toBe('9fa9a19');
+  });
+
+  test('before boarding, the gate receipt on the packet names it', () => {
+    const j = ship('fix/x', {
+      steps: [{ spec_slug: 'gate', title: 'Gate', status: 'completed',
+        metadata: { receipt: JSON.stringify({ verdict: 'green', head: 'e5aeec53a545151b99c985704070272c049c37ec' }) } }],
+    });
+    expect(assembleYard([], [j]).cars[0]?.head).toBe('e5aeec5');
+  });
+
+  test('no head on record is null — never a fabricated sha', () => {
+    const j = ship('fix/x', {
+      steps: [{ spec_slug: 'gate', title: 'Gate', status: 'completed', metadata: { receipt: 'not json' } }],
+    });
+    expect(assembleYard([], [j]).cars[0]?.head).toBeNull();
+    expect(assembleYard([], [ship('fix/y')]).cars[0]?.head).toBeNull();
+  });
+});
+
+describe('the yard names every open car', () => {
+  test('cars = every open ship-a-change with a branch, so a gating branch can be matched to its car', () => {
+    const open = ship('fix/a');
+    const closed = ship('fix/b', { status: 'closed' });
+    const branchless = ship('', { id: 'nobranch', metadata: {} });
+    const y = assembleYard([], [open, closed, branchless]);
+    expect(y.cars.map(c => c.id)).toEqual(['car-fix/a']);
+  });
+});
+
+describe('an approach row carries its verdict as recorded', () => {
+  test('a lost run is red on the approach AND says lost, so the floor can send it to the gate exit, not the garage', () => {
+    const rows = approach([gateRun({ status: 'closed', steps: [verdictStep('lost')] })], null, [], NOW);
+    expect(rows.map(r => [r.state, r.verdict])).toEqual([['gated-red', 'lost']]);
+    const red = approach([gateRun({ status: 'closed', steps: [verdictStep('failed')] })], null, [], NOW);
+    expect(red[0]?.verdict).toBe('failed');
+  });
+
+  test('a publish row has no verdict yet', () => {
+    const rows = approach([], publishEnv([{ id: 'p1', kind: 'publish-request', title: 'x', status: 'open',
+      opened_on: '2026-08-31', metadata: { branch: 'fix/p' } }]), [], NOW);
+    expect(rows[0]?.verdict).toBeNull();
   });
 });

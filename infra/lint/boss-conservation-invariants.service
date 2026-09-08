@@ -10,7 +10,7 @@ User=boss
 Environment=PGPASSWORD=boss
 ExecStartPre=/opt/boss/infra/boss-maintenance-wrap.sh maintenance-conservation-invariants "Conservation-invariant sweep"
 ExecStart=/opt/boss/infra/lint/conservation-invariants.sh
-ExecStartPost=/opt/boss/infra/boss-step.sh maintenance-conservation-invariants run result=ok
+ExecStopPost=-/opt/boss/infra/boss-step.sh maintenance-conservation-invariants run
 StandardOutput=journal
 StandardError=journal
 

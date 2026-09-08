@@ -90,6 +90,8 @@ fn app_with_bus() -> (axum::Router, Arc<InMemoryJobs>) {
         subject_existence: None,
         roster: Some(Arc::new(AdminRoster)),
         clock: Arc::new(boss_clock_client::WallClockClient),
+        cadence: None,
+        delivery: None,
     };
     (router(state), jobs)
 }

@@ -1,33 +1,8 @@
 //! SimOutput trait — pluggable destination for simulator events.
 
-use boss_assets::types::{AssetEvent, AssetEventKind};
+use boss_assets::types::AssetEvent;
 use boss_commerce::types::Invoice;
 use boss_shipping::types::Shipment;
-
-/// Map AssetEventKind to the SQL `kind` column value (matches Rust kind_tag in boss-assets).
-pub fn kind_column_tag(kind: &AssetEventKind) -> &'static str {
-    match kind {
-        AssetEventKind::Registered { .. } => "Registered",
-        AssetEventKind::Identified { .. } => "Identified",
-        AssetEventKind::Received { .. } => "Received",
-        AssetEventKind::PutAway { .. } => "PutAway",
-        AssetEventKind::TriageCompleted { .. } => "TriageCompleted",
-        AssetEventKind::RefurbStarted { .. } => "RefurbStarted",
-        AssetEventKind::PartReplaced { .. } => "PartReplaced",
-        AssetEventKind::RefurbCompleted => "RefurbCompleted",
-        AssetEventKind::QaPassed { .. } => "QAPassed",
-        AssetEventKind::Sold { .. } => "Sold",
-        AssetEventKind::Shipped { .. } => "Shipped",
-        AssetEventKind::Installed { .. } => "Installed",
-        AssetEventKind::WarrantyStarted { .. } => "WarrantyStarted",
-        AssetEventKind::WarrantyExpired => "WarrantyExpired",
-        AssetEventKind::OwnershipTransferred { .. } => "OwnershipTransferred",
-        AssetEventKind::ServiceJobOpened { .. } => "ServiceJobOpened",
-        AssetEventKind::ServiceJobClosed { .. } => "ServiceJobClosed",
-        AssetEventKind::WarrantyClaimed { .. } => "WarrantyClaimed",
-        AssetEventKind::Decommissioned { .. } => "Decommissioned",
-    }
-}
 
 /// The agreement-snapshot payload `SimOutput::emit_agreement`
 /// accepts.

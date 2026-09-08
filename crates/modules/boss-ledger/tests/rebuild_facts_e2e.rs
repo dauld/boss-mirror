@@ -393,3 +393,90 @@ async fn inventory_item_received_rebuilds_gl_inert_fact() {
 // payment.received/settled pair. The `finance.invoice.paid` fact is
 // emitted directly via `record_fact_in_tx`, never auto-projected from
 // the audit_log.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn projects_keg_deposit_events_to_both_fact_kinds() {
+    // The keg-deposit settlement endpoint emits one audit event per
+    // fact, payload verbatim (93f936b9). These two registry rows are
+    // what let a TRUNCATE-then-replay rebuild reproduce the charge and
+    // release facts — and through them the DR 1000 / CR 2400 and
+    // DR 2400 / CR 1000 + CR 4150 entries — from audit_log alone.
+    let db = TestDb::new().await;
+
+    let charge_payload = serde_json::json!({
+        "charge_id": "keg-charge-job-9",
+        "job_id": "job-9",
+        "account_id": "account-00042",
+        "kegs_out": 10,
+        "deposit_cents": 30000,
+        "shipped_on": "2026-04-01",
+    });
+    insert_audit_event(
+        &db,
+        "ledger.keg_deposit.charged",
+        "2026-04-15T12:00:00Z".parse().unwrap(),
+        "ledger",
+        &charge_payload,
+    )
+    .await;
+    let release_payload = serde_json::json!({
+        "release_id": "keg-release-job-9",
+        "job_id": "job-9",
+        "account_id": "account-00042",
+        "kegs_out": 10,
+        "kegs_returned": 7,
+        "kegs_lost": 3,
+        "deposit_cents": 30000,
+        "returned_on": "2026-04-15",
+    });
+    insert_audit_event(
+        &db,
+        "ledger.keg_deposit.released",
+        "2026-04-15T12:00:01Z".parse().unwrap(),
+        "ledger",
+        &release_payload,
+    )
+    .await;
+
+    let report = rebuild_facts(&db.pool).await.unwrap();
+    assert_eq!(report.events_scanned, 2);
+    assert_eq!(report.facts_written, 2);
+
+    for (source_id, want_kind, want_date, want_payload) in [
+        (
+            "keg-charge-job-9",
+            "finance.keg_deposit.charged",
+            "2026-04-01",
+            &charge_payload,
+        ),
+        (
+            "keg-release-job-9",
+            "finance.keg_deposit.released",
+            "2026-04-15",
+            &release_payload,
+        ),
+    ] {
+        let row = sqlx::query(
+            "SELECT kind, happened_on, source_table, payload \
+             FROM financial_facts WHERE source_id = $1",
+        )
+        .bind(source_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let kind: String = row.get("kind");
+        let source_table: String = row.get("source_table");
+        let happened_on: chrono::NaiveDate = row.get("happened_on");
+        let stored_payload: Value = row.get("payload");
+        assert_eq!(kind, want_kind);
+        assert_eq!(source_table, "keg_deposit_settlements");
+        // happened_on comes from the payload's own date path
+        // (/shipped_on resp. /returned_on), NOT the event timestamp —
+        // both legs post at reconciliation but carry their own dates.
+        assert_eq!(happened_on.to_string(), want_date);
+        assert_eq!(
+            &stored_payload, want_payload,
+            "fact payload is event payload verbatim"
+        );
+    }
+}

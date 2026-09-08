@@ -9,6 +9,14 @@
 
 import { defineConfig } from '@playwright/test';
 
+// The normal entrypoint is `bun run test:mocked` → tests/run-mocked.ts,
+// which starts the dev-server, waits for a genuinely-served `/` under a
+// generous timeout it controls, then invokes Playwright with
+// PWTEST_SKIP_DEVSERVER=1 — so the webServer block below is DORMANT on
+// the gated path. It stays as the fallback for a direct
+// `playwright test -c playwright.mocked.config.ts` (debugging, --ui,
+// --headed, a single spec). See tests/run-mocked.ts for why readiness
+// moved out of Playwright's own url-probe (the 30s-capped race).
 const skipDevServer = process.env['PWTEST_SKIP_DEVSERVER'] === '1';
 
 export default defineConfig({
@@ -69,7 +77,10 @@ export default defineConfig({
     : {
         command: 'bun src/dev-server.ts',
         url: 'http://127.0.0.1:5174/',
-        reuseExistingServer: true,
+        // false under CI so a stale/occupied port fails loudly instead
+        // of silently reusing a possibly-broken server; true locally for
+        // fast re-runs against a `bun run dev` already up.
+        reuseExistingServer: !process.env['CI'],
         timeout: 180_000,
         stdout: 'pipe',
         stderr: 'pipe',

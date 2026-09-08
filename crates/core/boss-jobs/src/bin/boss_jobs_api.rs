@@ -184,6 +184,11 @@ async fn main() -> Result<()> {
         // (docs/design/delivery-as-protocol.md).
         let delivery: Arc<dyn boss_jobs::delivery::DeliveryPolicyRepository> =
             Arc::new(boss_jobs::delivery::PgDeliveryPolicy::new(pool.clone()));
+        // The credentials registry: knowledge about credentials —
+        // scopes, storage locations, consumers — never values
+        // (packet 7ee101aa, second leg).
+        let credentials: Arc<dyn boss_jobs::credentials::CredentialsRegistry> =
+            Arc::new(boss_jobs::credentials::PgCredentials::new(pool.clone()));
         // Q7: human job-owner resolution over the people roster.
         let people_url =
             std::env::var("BOSS_PEOPLE_URL").unwrap_or_else(|_| boss_ports::url("people"));
@@ -208,6 +213,7 @@ async fn main() -> Result<()> {
             Some(scheduling),
             Some(cadence),
             Some(delivery),
+            Some(credentials),
             calendar,
             subject_kinds,
             subject_existence,
@@ -244,6 +250,7 @@ async fn main() -> Result<()> {
         None,
         None,
         None,
+        None,
         calendar,
         subject_kinds,
         subject_existence,
@@ -269,6 +276,7 @@ async fn run_server<R: JobsRepository + 'static>(
     scheduling: Option<Arc<dyn boss_jobs::scheduling::SchedulingRepository>>,
     cadence: Option<Arc<dyn boss_jobs::cadence::CadenceRepository>>,
     delivery: Option<Arc<dyn boss_jobs::delivery::DeliveryPolicyRepository>>,
+    credentials: Option<Arc<dyn boss_jobs::credentials::CredentialsRegistry>>,
     calendar: Option<Arc<dyn boss_calendar_client::CalendarClient>>,
     subject_kinds: Option<Arc<dyn boss_subject_kinds_client::SubjectKindsClient>>,
     subject_existence: Option<Arc<dyn boss_jobs::subject_existence::SubjectExistenceCheck>>,
@@ -329,6 +337,12 @@ async fn run_server<R: JobsRepository + 'static>(
         subject_existence,
         roster,
         clock: clock.clone(),
+        // The yard-status read-model reads these registries directly (the
+        // /api/cadence and /api/delivery doors are operator-only, so the
+        // browser cannot). Clone the Arc — the same repos back both the
+        // operator doors below and this read-model.
+        cadence: cadence.clone(),
+        delivery: delivery.clone(),
     };
     let mut app = router(state);
     if let Some(repo) = scheduling {
@@ -351,6 +365,12 @@ async fn run_server<R: JobsRepository + 'static>(
         info!("delivery policy routes mounted at /api/delivery/policy/*");
         app = app.merge(boss_jobs::delivery::http::router(
             boss_jobs::delivery::http::DeliveryPolicyApiState { repo },
+        ));
+    }
+    if let Some(registry) = credentials {
+        info!("credentials registry routes mounted at /api/credentials (locations, never values)");
+        app = app.merge(boss_jobs::credentials::http::router(
+            boss_jobs::credentials::http::CredentialsApiState { registry },
         ));
     }
     // Sim-origin middleware: extract x-sim-origin header and set the
@@ -461,16 +481,14 @@ async fn reconcile_platform_workflows<R: JobsRepository>(
             tracing::warn!(error = %e, "platform Workflow reconcile failed");
         }
     }
-    verify_registry_viability(registry, jobs, clock).await;
+    verify_registry_viability(registry, jobs).await;
 }
 
 /// Boot-time viability check over the station registry — the sibling
 /// of [`verify_registry_viability`], for the queues rather than the
 /// protocols.
 ///
-/// Never exits. A Workflow quarantine can be forced to refuse (open
-/// Jobs pinned to the bad row would be stranded by an auto-retire);
-/// station membership is derived from the predicate at read time and
+/// Never exits. Station membership is derived from the predicate at read time and
 /// nothing is ever pinned to a station version, so retiring one
 /// strands nothing and there is no case that warrants refusing to
 /// start. A failure of the PASS itself is logged and start continues:
@@ -510,42 +528,31 @@ async fn verify_station_viability<R: JobsRepository>(
 /// spec can become invalid if an upstream StepType's enum domain
 /// changes.
 ///
-/// This used to `exit(1)` on the first bad row, which made one
-/// registry row a whole-service outage (2026-08-13). It now
-/// quarantines — see `boss_jobs::workflow_quarantine` for the
-/// semantics and the one case that still refuses to start.
+/// Never exits and never writes. This used to `exit(1)` on the first
+/// bad row — one registry row, whole-service outage (2026-08-13) —
+/// and then to auto-retire unpinned rows and refuse to start over
+/// pinned ones, which on 2026-09-07 crash-looped the system of record
+/// over one pinned `incident-post-mortem` Job and silently retired a
+/// live `publish-to-github`. A boot check reports; it does not act.
+/// See `boss_jobs::workflow_quarantine`.
 async fn verify_registry_viability<R: JobsRepository>(
     registry: &dyn boss_jobs::WorkflowRegistry,
     jobs: &R,
-    clock: &Arc<dyn boss_clock_client::ClockClient>,
 ) {
-    let actor = boss_core::actor::ActorId::Automation(
-        boss_jobs::workflow_quarantine::QUARANTINE_ACTOR.into(),
-    );
-    let now = boss_clock_client::now_from(clock).await;
-    let report = match boss_jobs::workflow_quarantine::quarantine_unviable_active_workflows(
-        registry, jobs, &actor, now,
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            // The pass itself failed, so we can't tell whether the
-            // registry is sound. Same rule as before: don't open for
-            // writes we can't reason about.
-            tracing::error!(error = %e, "refusing to start: boot viability check could not complete");
-            std::process::exit(1);
+    match boss_jobs::workflow_quarantine::check_active_workflows_viable(registry, jobs).await {
+        Ok(report) if !report.unviable.is_empty() => {
+            tracing::error!(
+                unviable = report.unviable.len(),
+                active = report.checked,
+                "started with unviable active Workflow(s) — each is named above; nothing was \
+                 retired, service is up"
+            );
         }
-    };
-    if let Some(msg) = report.refusal_message() {
-        tracing::error!("{msg}");
-        std::process::exit(1);
-    }
-    if !report.quarantined.is_empty() {
-        tracing::error!(
-            quarantined = report.quarantined.len(),
-            active = report.checked,
-            "started with quarantined Workflow(s) — retired and marked, service is up"
-        );
+        Ok(_) => {}
+        Err(e) => {
+            // The check itself could not run. Losing the check is not
+            // a reason to take the system of record down.
+            tracing::error!(error = %e, "boot viability check could not complete; starting anyway");
+        }
     }
 }

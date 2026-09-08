@@ -1,5 +1,5 @@
 <script lang="ts">
-  // /system/feedback — the feedback queue.
+  // /it/design/feedback — the feedback queue.
   //
   // Everything structural lives in `TriageBoard`: the columns, the
   // agent hand-off, completing the gated step. This file is what is

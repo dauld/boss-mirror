@@ -540,7 +540,12 @@ args = { recipient_key = "\"submitted_by\"" }
 # "disk full") and put three machines at 100% on 2026-08-13.
 [[rule]]
 name = "maintenance-sweep-disk-daily"
+version = 2
 schedule = { cadence = "daily", anchor_date = "2026-08-14" }
+# One outstanding packet per target (0517387b): yesterday's sweep
+# still open means today has nothing new to say - spawning a twin
+# duplicates the obligation, it does not discharge it.
+when = 'NOT open_job_exists("maintenance-sweep", "disk-headroom")'
 [[rule.do]]
 handler = "jobs.spawn"
 args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"disk-headroom\"", title = "\"Disk headroom sweep\"", "metadata.target" = "\"disk-headroom\"", "metadata.area" = "\"infra\"" }
@@ -594,7 +599,12 @@ args = { kind = "\"ship-a-change\"", subject_kind = "\"custom\"", subject = "id"
 # invisible the first time.
 [[rule]]
 name = "maintenance-sweep-build-caches-daily"
+version = 2
 schedule = { cadence = "daily", anchor_date = "2026-08-14" }
+# One outstanding packet per target (0517387b): yesterday's sweep
+# still open means today has nothing new to say - spawning a twin
+# duplicates the obligation, it does not discharge it.
+when = 'NOT open_job_exists("maintenance-sweep", "stale-build-caches")'
 [[rule.do]]
 handler = "jobs.spawn"
 args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"stale-build-caches\"", title = "\"Stale build cache sweep\"", "metadata.target" = "\"stale-build-caches\"", "metadata.area" = "\"infra\"" }
@@ -608,7 +618,12 @@ args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = 
 # green or red against an image nobody is looking at.
 [[rule]]
 name = "maintenance-sweep-image-freshness-daily"
+version = 2
 schedule = { cadence = "daily", anchor_date = "2026-08-14" }
+# One outstanding packet per target (0517387b): yesterday's sweep
+# still open means today has nothing new to say - spawning a twin
+# duplicates the obligation, it does not discharge it.
+when = 'NOT open_job_exists("maintenance-sweep", "image-freshness")'
 [[rule.do]]
 handler = "jobs.spawn"
 args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"image-freshness\"", title = "\"CI image freshness sweep\"", "metadata.target" = "\"image-freshness\"", "metadata.area" = "\"ci\"" }
@@ -621,7 +636,12 @@ args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = 
 # of record telling you about a commit that is no longer true.
 [[rule]]
 name = "maintenance-sweep-converge-lag-daily"
+version = 2
 schedule = { cadence = "daily", anchor_date = "2026-08-14" }
+# One outstanding packet per target (0517387b): yesterday's sweep
+# still open means today has nothing new to say - spawning a twin
+# duplicates the obligation, it does not discharge it.
+when = 'NOT open_job_exists("maintenance-sweep", "deploy-convergence")'
 [[rule.do]]
 handler = "jobs.spawn"
 args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"deploy-convergence\"", title = "\"Deploy convergence sweep\"", "metadata.target" = "\"deploy-convergence\"", "metadata.area" = "\"deploy\"" }
@@ -645,10 +665,35 @@ args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = 
 # around scripts or system timers elsewhere."
 [[rule]]
 name = "maintenance-sweep-cluster-conformance-daily"
+version = 2
 schedule = { cadence = "daily", anchor_date = "2026-08-17" }
+# One outstanding packet per target (0517387b): yesterday's sweep
+# still open means today has nothing new to say - spawning a twin
+# duplicates the obligation, it does not discharge it.
+when = 'NOT open_job_exists("maintenance-sweep", "cluster-conformance")'
 [[rule.do]]
 handler = "jobs.spawn"
 args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"cluster-conformance\"", title = "\"Cluster conformance sweep\"", "metadata.target" = "\"cluster-conformance\"", "metadata.area" = "\"cluster\"" }
+
+# EMPTY DECISIONS. A completed decision that recorded nothing is a
+# human judgement lost silently — 62 of 100 completed sign-offs carried
+# neither authored metadata nor notes when first measured (cdfe2e1a),
+# and three sat unnoticed for nine days. The lint (workflow_lint
+# Phase 5) stops NEW versions from shipping the gap; this sweep is for
+# packets already in flight on old pinned versions, whose completion
+# contract is frozen. Detector first, per the packet: it is what makes
+# the fix verifiable — the count staying zero is how we know it worked.
+[[rule]]
+name = "maintenance-sweep-empty-decisions-daily"
+version = 2
+schedule = { cadence = "daily", anchor_date = "2026-09-01" }
+# One outstanding packet per target (0517387b): yesterday's sweep
+# still open means today has nothing new to say - spawning a twin
+# duplicates the obligation, it does not discharge it.
+when = 'NOT open_job_exists("maintenance-sweep", "empty-decisions")'
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"empty-decisions\"", title = "\"Empty decision sweep\"", "metadata.target" = "\"empty-decisions\"", "metadata.area" = "\"protocols\"", "metadata.procedure" = "\"Count completed steps of approval-surface kinds (ask the step registry for surface, never a kind name) that carry neither authored metadata content nor notes, completed since the previous sweep. Materialization keys (authority_role, context_md, procedure, outcome_kind, started_at, completed_at, sign_off_context) are not content. Zero new: clear, record the count. Any new: action_needed - each one is a human judgement that was recorded nowhere, and the packet it belongs to may still be warm enough to ask. Baseline at first firing: 62 of 100 historical sign-offs are empty (cdfe2e1a); count NEW ones only.\"" }
 
 # 6. DOC STATUS DRIFT. A design doc's `**Status**:` line is
 # hand-written and nothing ever updates it. Answering a question is a
@@ -671,7 +716,12 @@ args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = 
 # A sweep puts it in front of someone who can tell the difference.
 [[rule]]
 name = "maintenance-sweep-doc-status-daily"
+version = 2
 schedule = { cadence = "daily", anchor_date = "2026-08-17" }
+# One outstanding packet per target (0517387b): yesterday's sweep
+# still open means today has nothing new to say - spawning a twin
+# duplicates the obligation, it does not discharge it.
+when = 'NOT open_job_exists("maintenance-sweep", "doc-status")'
 [[rule.do]]
 handler = "jobs.spawn"
 args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"doc-status\"", title = "\"Design doc status sweep\"", "metadata.target" = "\"doc-status\"", "metadata.area" = "\"docs\"" }
@@ -791,3 +841,120 @@ name = "network-census-daily"
 schedule = { cadence = "daily", anchor_date = "2026-08-21" }
 [[rule.do]]
 handler = "network.census"
+
+# A reconciled keg fleet settles its deposit (93f936b9, David's Q1
+# decision: the full balance-sheet keg model). The keg-return
+# protocol's field-bearing steps (log-fleet-out, receive-returns) are
+# plain `task` kind, so the honest trigger is the packet's terminal
+# close — `step.done.task` would wake on every task step in every
+# workflow and lean on a `when` to discard almost all of them (the
+# spawn-car-on-sweep-remediated reasoning). The handler reads
+# kegs_out + deposit_cents and kegs_returned + kegs_lost from the
+# closed job's own steps and POSTs one settlement to the ledger,
+# which books DR 1000 / CR 2400 at the fleet-out date and
+# DR 2400 / CR 1000 refund + CR 4150 forfeiture at the return date.
+# `outcome = "completed"` keeps aborted/withdrawn packets off the
+# books; both keys are always present on the close marker (null when
+# unanswered), so the predicate can't dead-letter on an absent
+# identifier. Seeded live by
+# 202609021400-a-keg-deposit-is-a-liability.sql.
+[[rule]]
+name = "keg-deposit-settle-on-keg-return-closed"
+on_event = "jobs.job.closed"
+when = "kind = \"keg-return\" AND outcome = \"completed\""
+[[rule.do]]
+handler = "ledger.keg_deposit.settle"
+
+# The estate comparison (59ef456a): the compare half of the
+# declared/observed split. Fires on each `jobs.estate.observed` event
+# — the observation rides in the payload, so there is no tail read and
+# no second clock; the comparison inherits the observer's own daily
+# cadence. The handler reads GET /api/estate/nodes, applies the scope
+# rule (only `talos-*` declared rows participate — the forge host and
+# boss-gcp can never appear in a kubernetes-nodes observation), and
+# lands one `jobs.estate.compared` event via the comparison door.
+# The raiser (`estate.alarm`, calibrated on this series) listens on
+# that topic: hard findings that persist across consecutive same-series
+# comparisons become urgent packets, and its silence sweep raises when
+# an expected observation series stops arriving. Details in the module
+# docs (boss-dispatcher-handlers handlers/estate_compare.rs and
+# estate_alarm.rs).
+#
+# Seeded by 202608302200-the-estate-is-compared.sql; present here
+# because `dispatcher_rules_seed_matches_toml` compares in BOTH
+# directions.
+[[rule]]
+name = "estate-compare-on-observation"
+on_event = "jobs.estate.observed"
+[[rule.do]]
+handler = "estate.compare"
+
+# ---------------------------------------------------------------------
+# The credential broker rotates the boss-dev forge write token
+# (7ee101aa, first leg). THIS RULE ROW IS THE CREDENTIAL'S REGISTRY
+# DECLARATION: one credential = one rule row whose args say which
+# issuer account mints it, which k8s Secret its consumers mount, what
+# scopes it carries, and which repo proves it works — data, not code.
+# The Subject id (`boss-dev-forge-token`) is the credential's identity,
+# same convention as 5fc9310a's `forge-read`, so "when was this last
+# rotated and why" stays a Subject-history question.
+#
+# Fires when the SCOPE step of a rotate-a-credential packet whose
+# Subject is this credential completes — `credential-rotation` is a
+# dedicated StepType (the gate-verdict precedent) so this never wakes
+# on an ordinary task, and the `when` gates on `subject_id`, a field
+# every step.done payload carries (an absent identifier would
+# dead-letter). The handler then executes issue → install → verify →
+# revoke as machine steps of that same packet: mint via
+# POST /api/v1/admin/users/david/tokens with the broker root
+# credential, PATCH the value into Secret boss-dev/boss-dev-forge-token
+# (name-scoped RBAC, boss-credential-broker.yaml), verify by effect
+# (the new token reads david/boss), revoke the old token the scope
+# step named in `old_token`, and complete each packet step with
+# identifier-only evidence. Consumers pick the new value up from the
+# Secret's mounts (boss-dev.yaml) or `boss credential pull forge`.
+#
+# Seeded by 202609021500-the-broker-rotates-the-forge-token.sql;
+# present here because `dispatcher_rules_seed_matches_toml` compares
+# in BOTH directions.
+[[rule]]
+name = "broker-rotates-the-boss-dev-forge-token"
+on_event = "step.done.credential-rotation"
+when = 'subject_id = "boss-dev-forge-token"'
+[[rule.do]]
+handler = "credential.rotate.forgejo"
+args = { forge_user = "\"david\"", secret_namespace = "\"boss-dev\"", secret_name = "\"boss-dev-forge-token\"", secret_key = "\"token\"", scopes = "\"write:repository\"", verify_repo = "\"david/boss\"" }
+
+# The empty-decisions sweep inspects itself. A cross-protocol reactor:
+# the daily `maintenance-sweep-empty-decisions-daily` spawn files a
+# sweep whose `Inspect: empty-decisions` checklist nothing was
+# completing, so it piled up. This rides the shared `step.ready.*`
+# subscription (like the marker completer) and self-filters to that one
+# checklist: it counts the approval decisions that completed empty in
+# the window, completes the checklist, and stamps action_needed so the
+# packet routes to Remediate or Clear. Seeded by
+# 202609052030-the-empty-decisions-sweep-inspects-itself.sql; present
+# here because dispatcher_rules_seed_matches_toml compares BOTH
+# directions.
+[[rule]]
+name = "inspect-empty-decisions-sweep-on-step-ready"
+on_event = "step.ready.*"
+[[rule.do]]
+handler = "maintenance.sweep.inspect"
+
+# A merged pr-train fires the cluster converge event-driven, instead of
+# waiting up to ~10 min for the cluster-deploy-runner timer to poll forge
+# main. On the merged step (spec_slug = "merged"; the always-present
+# top-level slug that makes "which step" routable), spawn an ops-request
+# for host=forge verb=converge — the boss-ops-runner (~1-min poll) runs
+# it. Latency accelerator ONLY: the timer + cluster-watchdog remain the
+# independent floor, and the converge is idempotent + STAMP-guarded.
+# Seeded by 202609071700-converge-on-merge.sql; present here because
+# dispatcher_rules_seed_matches_toml compares BOTH directions.
+[[rule]]
+name = "converge-on-merge"
+on_event = "step.done.task"
+when = 'spec_slug = "merged"'
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"ops-request\"", subject_kind = "\"custom\"", subject = "\"forge\"", title = "\"converge on forge — a train merged to main\"", "metadata.host" = "\"forge\"", "metadata.verb" = "\"converge\"" }

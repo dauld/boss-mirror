@@ -79,7 +79,7 @@
               {#each byCategory.get(cat) ?? [] as p (p.kind)}
                 <tr>
                   <td>
-                    <Link to={href(`/system/step-plugins/${encodeURIComponent(p.kind)}`)}>
+                    <Link to={href(`/it/registry/step-plugins/${encodeURIComponent(p.kind)}`)}>
                       <span class="mono">{p.kind}</span>
                     </Link>
                   </td>

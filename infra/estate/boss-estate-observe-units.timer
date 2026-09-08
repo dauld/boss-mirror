@@ -1,0 +1,18 @@
+# Five minutes, the boss-views-catchup cadence: the detection delay
+# for a quiet conductor is bounded by this number, and the motivating
+# incident (729329c6) was 2+ HOURS of a CI-green train sitting
+# unmerged with no signal anywhere. Unlike the daily host observer
+# there is no calendar slot to land beside — a liveness watch wants a
+# short leash, not a quiet window.
+[Unit]
+Description=Observe this host's units every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+# A missed window needs no catch-up (no Persistent=): the next firing
+# IS the catch-up — the series measures now, not the past.
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

@@ -481,7 +481,7 @@
                   </div>
                   {#each stop.entries as entry (entry.card.id)}
                     <div class="watch-stop-card">
-                      <PacketCard card={entry.card} />
+                      <PacketCard card={entry.card} onDismiss={dismiss} />
                     </div>
                   {:else}
                     <p class="watch-stop-empty">—</p>
@@ -494,7 +494,7 @@
                 <span class="watch-offtrack-h">Read, not taken up</span>
                 {#each track.offTrack as entry (entry.card.id)}
                   <div class="watch-row">
-                    <PacketCard card={entry.card} />
+                    <PacketCard card={entry.card} onDismiss={dismiss} />
                     {#if entry.outcome}
                       <span class="watch-outcome watch-{entry.outcome.tone}">
                         {entry.outcome.label}
@@ -508,7 +508,7 @@
           <div class="myday-jobs-list">
             {#each watchlist.entries.filter((e) => !dismissing.has(e.card.id)) as entry (entry.card.id)}
               <div class="watch-row">
-                <PacketCard card={entry.card} />
+                <PacketCard card={entry.card} onDismiss={dismiss} />
                 {#if entry.outcome}
                   <!-- The terminal state IS the information this
                        section exists for, so it sits beside the card
@@ -518,12 +518,6 @@
                     {entry.outcome.label}
                   </span>
                 {/if}
-                <button
-                  type="button"
-                  class="watch-dismiss"
-                  title="Stop watching this packet"
-                  aria-label="Stop watching {entry.card.title}"
-                  onclick={() => dismiss(entry.card.id)}>×</button>
               </div>
             {/each}
           </div>
@@ -711,29 +705,15 @@
     margin-bottom: 8px;
   }
   .watch-row {
-    /* Third column for the dismiss control. It keeps its cell whether
-       or not the packet has an outcome chip, so the × sits on one
-       vertical line down the list instead of jittering per row. */
+    /* Card, then its outcome chip. The dismiss × now lives inside the
+       card itself (PacketCard's opt-in onDismiss), so it rides along
+       wherever the card is drawn — the flat list here, the track's
+       stop cards, and the off-track rows alike — instead of being a
+       sibling only this one list carried. */
     display: grid;
-    grid-template-columns: 1fr auto auto;
+    grid-template-columns: 1fr auto;
     gap: 8px;
     align-items: center;
-  }
-  .watch-dismiss {
-    background: none;
-    border: none;
-    cursor: pointer;
-    padding: 0 4px;
-    font-size: 16px;
-    line-height: 1;
-    color: var(--static, #7a838c);
-    opacity: 0.55;
-    transition: opacity 0.12s ease;
-  }
-  .watch-dismiss:hover,
-  .watch-dismiss:focus-visible {
-    opacity: 1;
-    color: var(--text, #1b1f23);
   }
   .watch-window {
     font-size: 12px;

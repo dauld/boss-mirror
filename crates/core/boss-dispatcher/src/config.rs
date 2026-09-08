@@ -86,6 +86,17 @@ pub struct DispatcherConfig {
     /// document, and the strategy enum is intentionally not `Deserialize`.
     #[serde(skip)]
     pub assignment_strategy: AssignmentStrategy,
+    /// The credential broker's issuer endpoint — the forge whose
+    /// tokens the `credential.rotate.forgejo` handler mints and
+    /// revokes. Defaults to the deployment's own forge.
+    pub broker_forge_url: String,
+    /// The broker's Forgejo root credential (admin token). Sourced
+    /// from the `boss-credential-broker-root` k8s Secret via env;
+    /// `None` leaves the handler registered but unconfigured, so a
+    /// rotation rule firing without it dead-letters with the knob's
+    /// name instead of tripping UnknownHandler. Never logged.
+    #[serde(skip)]
+    pub broker_forgejo_token: Option<String>,
 }
 
 impl Default for DispatcherConfig {
@@ -126,6 +137,12 @@ impl Default for DispatcherConfig {
             assignment_strategy: AssignmentStrategy::parse(
                 &std::env::var("BOSS_DISPATCH_STRATEGY").unwrap_or_default(),
             ),
+            broker_forge_url: std::env::var("BOSS_BROKER_FORGE_URL")
+                .unwrap_or_else(|_| "http://10.20.0.15:3000".to_string()),
+            broker_forgejo_token: std::env::var("BOSS_BROKER_FORGEJO_TOKEN")
+                .ok()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty()),
         }
     }
 }

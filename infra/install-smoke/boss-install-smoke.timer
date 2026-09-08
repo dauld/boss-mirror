@@ -1,0 +1,12 @@
+# Nightly at 09:30Z (~2:30am PT): the quietest window — after any late
+# evening trains, before the morning's first builds, and clear of the
+# estate observers' 10:2xZ slots so the journals stay attributable.
+[Unit]
+Description=Nightly BOSS install-smoke
+
+[Timer]
+OnCalendar=*-*-* 09:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

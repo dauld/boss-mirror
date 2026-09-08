@@ -128,6 +128,11 @@ struct StepToml {
     /// "the kind's typical duration". See `StepSpec::duration_hours`.
     #[serde(default)]
     duration_hours: Option<f64>,
+    /// The labor / wall-clock split — see `StepSpec::labor_hours`.
+    #[serde(default)]
+    labor_hours: Option<f64>,
+    #[serde(default)]
+    wall_clock_hours: Option<f64>,
     #[serde(default)]
     fields: Vec<boss_core::job::StepField>,
     #[serde(default)]
@@ -210,6 +215,8 @@ fn workflow_toml_to_spec(toml: WorkflowToml, default_owner: &str) -> WorkflowSpe
             kind: s.kind,
             assurance_required: s.assurance_required,
             duration_hours: s.duration_hours,
+            labor_hours: s.labor_hours,
+            wall_clock_hours: s.wall_clock_hours,
             ready_when: s.ready_when,
             terminal: s.terminal.map(|t| Terminal { outcome: t.outcome }),
             title_template: s.title_template,
@@ -360,6 +367,54 @@ terminal = { outcome = "brewed" }
         assert_eq!(step.metadata_defaults["mash_temp_f"], 152);
         assert_eq!(step.metadata_defaults["mash_minutes"], 60);
         assert_eq!(specs[0].owning_team, "brewery");
+    }
+
+    #[test]
+    fn carries_field_filled_by_through_and_defaults_it_to_executor() {
+        // The filer-field TOML shape: `filled_by = "filer"` on a
+        // `[[workflow.step.fields]]` row marks a field admission
+        // validates against the FILER. Absent, the field keeps the
+        // executor's required-at-done contract — every seed authored
+        // before the key existed parses unchanged.
+        let text = r#"
+[[workflow]]
+kind = "with-filer-field"
+label = "With Filer Field"
+category = "platform"
+subject_kinds = ["custom"]
+
+[[workflow.step]]
+title = "start"
+kind = "task"
+ready_when = "true"
+title_template = "Open"
+
+[[workflow.step]]
+title = "review"
+kind = "task"
+ready_when = "steps.start.done"
+title_template = "Review it"
+terminal = { outcome = "done" }
+
+[[workflow.step.fields]]
+name = "markdown"
+field_type = "string"
+required = true
+filled_by = "filer"
+
+[[workflow.step.fields]]
+name = "decision"
+field_type = "string"
+required = true
+"#;
+        let specs = parse_workflows(text, "platform", "<test>").unwrap();
+        let fields = &specs[0].steps[1].fields;
+        assert_eq!(fields[0].filled_by, boss_core::job::FilledBy::Filer);
+        assert_eq!(
+            fields[1].filled_by,
+            boss_core::job::FilledBy::Executor,
+            "an unmarked field stays executor-filled — required-at-done, unchanged"
+        );
     }
 
     #[test]

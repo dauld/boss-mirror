@@ -149,6 +149,76 @@ pub fn default_rules() -> Vec<Rule> {
     // ------------------------------------------------------------------
     rules.push(Rule::new("guest", Resource::workflow(), Read, Scope::All));
 
+    // ------------------------------------------------------------------
+    // Break-glass — the emergency session minted by the gateway's
+    // hardware-key ceremony (docs/design/break-glass-is-a-key-you-
+    // hold.md, Q4: NARROW). Exactly three levers, mapped onto the
+    // resources that express them today:
+    //
+    // - **Deploy rollback** → Create/Update/Close on `job` +
+    //   Update on `step`: file and drive a rollback / regenerate-
+    //   deployment packet, claim and complete its steps, cancel a
+    //   wedged train. (The kube-apiserver half of this lever is the
+    //   PIV applet on the same key — outside BOSS policy by design.)
+    // - **Merge approval** → SignOff on `step-signoff:platform-admin`:
+    //   the platform-authority stamp an emergency merge-approval step
+    //   requires. Honestly noted: this is the nearest real resource
+    //   and is wider than merge-only — it satisfies ANY step whose
+    //   sign-off names platform-admin authority. There is no
+    //   narrower merge-approval resource today; minting a dead
+    //   `step-signoff:break-glass` no workflow requires would grant
+    //   nothing.
+    // - **Auth administration** → Create/Update on `policy-rule`:
+    //   repair a broken grant that caused the lockout. The gateway-
+    //   side half (onboard credentials, issue resets) is
+    //   `boss_core::roles::can_administer_auth`, which names this
+    //   role explicitly.
+    //
+    // Reads are the working set for those three verbs and nothing
+    // more: job/step (the packets being driven), workflow (what the
+    // packets instantiate), event (the audit trail during an
+    // incident), policy-rule (what auth administration edits). No
+    // ledger, no accounts, no employees — an emergency key is a door
+    // key, not a data key.
+    // ------------------------------------------------------------------
+    for r in [
+        Resource::job(),
+        Resource::step(),
+        Resource::workflow(),
+        Resource::event(),
+        Resource::policy_rule(),
+    ] {
+        rules.push(Rule::new("break-glass", r, Read, Scope::All));
+    }
+    for action in [Create, Update, Close] {
+        rules.push(Rule::new(
+            "break-glass",
+            Resource::job(),
+            action,
+            Scope::All,
+        ));
+    }
+    rules.push(Rule::new(
+        "break-glass",
+        Resource::step(),
+        Update,
+        Scope::All,
+    ));
+    rules.push(Rule::new(
+        "break-glass",
+        Resource::new("step-signoff:platform-admin"),
+        SignOff,
+        Scope::All,
+    ));
+    for action in [Create, Update] {
+        rules.push(Rule::new(
+            "break-glass",
+            Resource::policy_rule(),
+            action,
+            Scope::All,
+        ));
+    }
+
     rules
 }
 
@@ -234,6 +304,69 @@ mod tests {
             assert!(
                 leak.is_empty(),
                 "tenant role `{role}` leaked into core defaults — move to tenant seed"
+            );
+        }
+    }
+
+    /// Q4 (break-glass-is-a-key-you-hold): the emergency role's grant
+    /// set is EXACTLY the three levers plus their working-set reads.
+    /// This is an equality pin, not a floor — a new grant sneaking in
+    /// here is precisely the drift the narrow-role decision exists to
+    /// prevent, so the test names the full set.
+    #[test]
+    fn break_glass_grants_are_exactly_the_three_levers() {
+        let rules = default_rules();
+        let mut got: Vec<String> = rules
+            .iter()
+            .filter(|r| r.role == "break-glass")
+            .map(|r| format!("{}:{}", r.resource.as_str(), r.action.as_str()))
+            .collect();
+        got.sort();
+        let mut want = vec![
+            // working-set reads
+            "job:read".to_string(),
+            "step:read".to_string(),
+            "workflow:read".to_string(),
+            "event:read".to_string(),
+            "policy-rule:read".to_string(),
+            // deploy rollback
+            "job:create".to_string(),
+            "job:update".to_string(),
+            "job:close".to_string(),
+            "step:update".to_string(),
+            // merge approval
+            "step-signoff:platform-admin:sign-off".to_string(),
+            // auth administration
+            "policy-rule:create".to_string(),
+            "policy-rule:update".to_string(),
+        ];
+        want.sort();
+        assert_eq!(got, want, "break-glass grants drifted from Q4's narrow set");
+        for r in rules.iter().filter(|r| r.role == "break-glass") {
+            assert_eq!(r.scope, Scope::All, "break-glass scopes are All: {}", r.id);
+        }
+    }
+
+    /// The narrow role must never touch the data surfaces: no ledger,
+    /// no accounts, no employees, and no Delete anywhere. A break-
+    /// glass key opens doors; it does not read the books.
+    #[test]
+    fn break_glass_never_reaches_data_surfaces_or_delete() {
+        let rules = default_rules();
+        for r in rules.iter().filter(|r| r.role == "break-glass") {
+            for banned in ["ledger", "account", "employee", "invoice", "subject"] {
+                assert_ne!(
+                    r.resource.as_str(),
+                    banned,
+                    "break-glass gained a data-surface grant: {}",
+                    r.id
+                );
+            }
+            assert_ne!(
+                r.action,
+                Action::Delete,
+                "break-glass must never Delete: {}",
+                r.id
             );
         }
     }

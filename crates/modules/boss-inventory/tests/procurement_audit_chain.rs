@@ -255,3 +255,85 @@ async fn vendor_crm_writes_survive_rebuild() {
     assert_eq!(post_team, pre_team);
     assert_eq!(post_contracts, pre_contracts);
 }
+
+/// Soft-deleted interactions must replay byte-identical, `deleted_at`
+/// included. The live path used to stamp `deleted_at = NOW()` at the
+/// database while the event payload carried the stamp's timestamp —
+/// two different instants for one recorded fact, so the rebuilt row
+/// never matched the live one (packet d7b8158e).
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+struct InteractionRow {
+    id: String,
+    vendor_id: String,
+    actor_id: String,
+    kind: String,
+    body: String,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    deleted_by: Option<String>,
+}
+
+async fn snapshot_interactions(pool: &PgPool) -> Vec<InteractionRow> {
+    sqlx::query_as(
+        "SELECT id, vendor_id, actor_id, kind, body, occurred_at, created_at, \
+                deleted_at, deleted_by \
+         FROM vendor_interactions ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn soft_deleted_interaction_replays_byte_identical() {
+    let db = TestDb::new().await;
+    seed_vendor_and_employee(&db.pool).await;
+    let app = build_app(db.pool.clone());
+
+    for id in ["vi-keep", "vi-gone"] {
+        TestRequest::post("/api/inventory/vendors/vnd-acme/interactions")
+            .json(&json!({
+                "id": id, "vendor_id": "vnd-acme",
+                "vendor_contact_id": null,
+                "actor_id": "emp-buyer-1",
+                "kind": "email",
+                "body": "Delivery window confirmed",
+                "commitments": [],
+                "linked_po_id": null, "linked_part_sku": null,
+                "linked_job_id": null,
+                "occurred_at": "2026-05-06T09:00:00Z",
+            }))
+            .send(&app)
+            .await
+            .assert_status(StatusCode::OK);
+    }
+
+    TestRequest::delete("/api/inventory/vendors/vnd-acme/interactions/vi-gone")
+        .json(&json!({"deleted_by": "emp-buyer-1"}))
+        .send(&app)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    let bus = RecordingEventBus::new();
+    drain_outbox_once(&db.pool, &(bus as Arc<dyn EventBus>), 100)
+        .await
+        .expect("relay drain");
+
+    let before = snapshot_interactions(&db.pool).await;
+    assert_eq!(before.len(), 2);
+    assert!(
+        before
+            .iter()
+            .any(|r| r.id == "vi-gone" && r.deleted_at.is_some()),
+        "soft delete stamped"
+    );
+
+    rebuild_inventory(&db.pool).await.expect("rebuild");
+
+    let after = snapshot_interactions(&db.pool).await;
+    assert_eq!(
+        before, after,
+        "vendor_interactions must replay byte-identical (deleted_at included)"
+    );
+}

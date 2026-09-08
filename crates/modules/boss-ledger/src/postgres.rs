@@ -187,7 +187,15 @@ pub const OPEN_PERIOD_FACTS_SQL: &str = "SELECT f.id, f.kind, f.happened_on, f.p
        AND f.happened_on BETWEEN p.starts_on AND p.ends_on \
      WHERE (p.id IS NULL OR p.status = 'open') \
        AND f.supersede_reason IS NULL \
-     ORDER BY f.happened_on, f.recorded_at";
+     ORDER BY f.happened_on, f.recorded_at, f.id";
+// ^ `f.id` is the total-order tie-break. Facts written in ONE
+// transaction share a recorded_at (DEFAULT NOW() is
+// transaction-fixed), so without it two same-day, same-tx facts —
+// e.g. a keg-deposit settlement's charge + release pair — replay in
+// unspecified relative order, and the determinism property
+// (correctness-protocol.md) wants two rebuilds of the same log to be
+// the same computation. Ids are UUIDv5 over the fact's natural key,
+// so the tie-break is stable across rebuilds and machines.
 
 /// Calendar bounds of the period that owns `posted_on`, for the given
 /// period kind.

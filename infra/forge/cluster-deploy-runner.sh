@@ -56,6 +56,10 @@ REPO="${BOSS_FORGE_REPO_DIR:-$HOME/boss}"
 REGISTRY="${BOSS_FORGE_REGISTRY:-10.20.0.15:3000/david/boss}"
 KUBECONFIG_PATH="${BOSS_FORGE_KUBECONFIG:-$HOME/kc.yaml}"
 STAMP_FILE="${BOSS_FORGE_LAST_BUILT:-$HOME/.boss-last-built}"
+# The quarantine stamp for a head whose BOOT failed (rollout never went
+# Ready and was rolled back). Distinct from STAMP_FILE — that one means
+# "converged", this one means "proven unbootable; do not re-roll it".
+FAILED_FILE="${BOSS_FORGE_LAST_FAILED:-$HOME/.boss-last-failed}"
 export DOCKER_HOST="${DOCKER_HOST:-unix:///run/user/1000/docker.sock}"
 
 cd "$REPO"
@@ -68,6 +72,25 @@ if [ "$HEAD" = "$LAST" ]; then
     exit 0
 fi
 
+# A head that bricked its boot stays quarantined until main moves.
+# Without this, the 2026-09-02 shape loops forever: rollout fails,
+# set -e kills the run before the stamp, and the next tick rebuilds
+# and re-rolls the SAME brick every ten minutes — which is exactly
+# what the runner spent the 20:15-21:10 outage doing. Exit NONZERO:
+# a held converge is a failed unit somebody can see, not a quiet pass.
+if [ "$HEAD" = "$(cat "$FAILED_FILE" 2>/dev/null || echo none)" ]; then
+    echo "cluster-deploy-runner: $HEAD bricked its boot on a previous converge — holding until main moves (rm $FAILED_FILE to retry it)" >&2
+    exit 1
+fi
+
+# An operator's hold (converge-hold.sh, the hold-converge ops verb)
+# stops the roll before the build: main has moved, and a human said not
+# yet. Loud on every tick, exit 0 — a hold is a decision, not a failure.
+. "$REPO/infra/forge/cluster-deploy-lib.sh"
+if reason=$(converge_held "${BOSS_CONVERGE_HOLD:-/var/tmp/boss-converge-hold}"); then
+    echo "cluster-deploy-runner: converge HELD — $reason — main at $HEAD not built or rolled (release-converge lifts it)" >&2
+    exit 0
+fi
 echo "cluster-deploy-runner: forge main moved $LAST -> $HEAD; building"
 git checkout -q "$HEAD" 2>/dev/null || git checkout -qf "$HEAD"
 
@@ -99,6 +122,52 @@ docker build -q -f infra/oss-quickstart/Dockerfile \
     -t "$REGISTRY:$HEAD" .
 docker push "$REGISTRY:$HEAD"
 
+# The image proves it can boot before it goes anywhere near the cluster
+# (cluster-deploy-lib.sh image_boots): its own launcher checks that
+# every file it sources is beside it. A head that fails here is
+# quarantined like a head that failed on the cluster — with no dark
+# window at all, because nothing was applied.
+. "$REPO/infra/forge/cluster-deploy-lib.sh"
+if ! image_boots docker "$REGISTRY:$HEAD"; then
+    echo "$HEAD" > "$FAILED_FILE"
+    echo "cluster-deploy-runner: $HEAD fails its own boot check — not rolling it; quarantined (rm $FAILED_FILE to retry it)" >&2
+    exit 1
+fi
+
+# THE CONVERGE CLEANS UP AFTER ITSELF.
+#
+# Every run builds a 1.07 GB image and pushes it, and nothing ever
+# removed the local copy. MEASURED 2026-08-29 on the minipc: 42 boss
+# tags resident, ~45 GB, on a 228 G disk that had reached 93% full —
+# the host that also serves the forge, the OCI registry and the CI
+# runner, so image growth competes with the registry it feeds. The
+# daily disk-headroom and stale-build-cache sweeps had each been
+# opening a packet about it for three days (`0e62f404`, `b99e9627`).
+#
+# AFTER THE PUSH, DELIBERATELY. The push is what makes a local copy
+# redundant, so cleanup that ran before it could delete the only copy
+# of something. `set -e` means a failed push never reaches this.
+#
+# The deletion loop itself — keep the N newest, VERIFY a candidate is
+# present in the registry before rmi, never touch `latest` — is the
+# SHARED definition in prune-registry-tags.lib.sh, sourced from the
+# checked-out HEAD (we cd'd to $REPO above). disk-floor-sweep.sh runs
+# the identical loop below the disk floor; two copies of a loop that
+# deletes images is the drifting pair §9a bans, so the rationale for
+# why verification is load-bearing lives in the lib's header now.
+# Checked while extracting this: all 42 resident tags were in the
+# registry, so this is hygiene rather than recovery from a divergence.
+. "$REPO/infra/forge/prune-registry-tags.lib.sh"
+prune_registry_verified_tags "$REGISTRY" "${BOSS_RUNNER_KEEP_IMAGES:-5}" cluster-deploy-runner
+
+# Build cache is regenerable by definition, so the only cost of being
+# wrong here is a slower next build. Age-filtered rather than emptied:
+# a week keeps the layers a rebuild actually reuses and drops the rest.
+# `--keep-storage` is gone in Docker 29; `--filter until=` is the
+# supported spelling.
+docker builder prune -f --filter until=168h >/dev/null 2>&1 || true
+echo "cluster-deploy-runner: build cache pruned (older than 168h)"
+
 K="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
 
 # Cluster config converges with the code: apply the tree's manifests
@@ -108,8 +177,15 @@ K="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro alpine/k8s:1.3
 # on. A failed apply aborts here (set -e): no stamp is written, the
 # next timer run retries.
 KM="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro -v $REPO/infra/cluster/manifests:/manifests:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
-echo "cluster-deploy-runner: applying infra/cluster/manifests"
+# The applied copy carries the build that is ALREADY converged (the
+# stamp), not the manifest's placeholder tag: the apply must never
+# change what runs. Rolling to $HEAD is roll_deployment's job below.
+APPLY_DIR="$(mktemp -d -t cluster-deploy-manifests.XXXXXX)"
+manifests_with_image "$REPO/infra/cluster/manifests" "$APPLY_DIR" "$REGISTRY" "$LAST"
+KM="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro -v $APPLY_DIR:/manifests:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
+echo "cluster-deploy-runner: applying infra/cluster/manifests (boss image pinned to the converged $LAST)"
 $KM apply -f /manifests
+rm -rf "$APPLY_DIR"
 
 # StepPlugin bundles converge from the tree too (job d35aec77).
 # Code converges in the image, config in the manifests above, schema
@@ -157,18 +233,93 @@ else
     echo "cluster-deploy-runner: no bundles in infra/step-plugins — leaving the ConfigMap alone"
 fi
 
-$K set image -n boss deploy/boss "boss=$REGISTRY:$HEAD"
-$K patch deploy boss -n boss --type=json \
-    -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/initContainers/0/image\",\"value\":\"$REGISTRY:$HEAD\"}]"
-# CronJob chores run the same build as the deployment. `set image` on
-# a deploy does not touch CronJobs, so the whole labeled set is pinned
-# here — a chore running a stale image is exactly the split this repo
-# keeps paying for. The chore contract (boss-chore=true label +
-# container named `chore`) is what makes this one selector instead of
-# a per-chore list that drifts. `|| true`: a cluster with no chores
-# applied yet must not fail the whole converge.
+# THE GATE RUNNER'S SCRIPT IS THE SECOND INSTANCE OF THE BUG ABOVE.
+#
+# infra/gate-runner/run.sh reaches the cluster only as the ConfigMap
+# gate-runner-script, and that ConfigMap was built by a kubectl command
+# written in a COMMENT in gate-runner.yaml and run by hand — so, exactly
+# like step-plugins before it, it converged with nothing. Landing a
+# train that changes run.sh delivered NOTHING, silently: the gate kept
+# running the old script and no error appeared anywhere.
+#
+# Measured 2026-08-30: car e6f55a36 merged, deployed and arrived, and
+# the string it adds appeared twice in the merged run.sh and zero times
+# in the live ConfigMap. It sat at `Proven in prod` unprovable, because
+# the behaviour it claims was not running (2b69220a).
+#
+# Same cure as step-plugins, and deliberately NOT a committed manifest:
+# it is a derived artifact whose source is already in tree, and a
+# committed copy would be the second definition that drifts (§9a).
+KG="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro -v $REPO/infra/gate-runner:/gate:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
+if [ -f "$REPO/infra/gate-runner/run.sh" ]; then
+    echo "cluster-deploy-runner: converging the gate-runner-script ConfigMap"
+    $KG create configmap gate-runner-script -n boss-dev \
+        --from-file=run.sh=/gate/run.sh \
+        --dry-run=client -o yaml | $KAPPLY apply -f -
+else
+    echo "cluster-deploy-runner: infra/gate-runner/run.sh missing — leaving the ConfigMap alone" >&2
+fi
+
+# ONE patch, ONE revision. This used to be `set image` (main container)
+# followed by a separate init-container patch — kubectl's `set image`
+# cannot reach initContainers — which minted TWO revisions per roll,
+# the first carrying a MIXED template (new main, old init). A
+# rollback that steps back one revision lands on exactly that
+# intermediate; the 2026-09-02 RS table shows the same mixed-template
+# class minted by hand during the firefight. Both images move in one
+# json patch so every revision in history is a coherent template and
+# every rollback target is real.
+# Roll to $HEAD; on a boot failure roll back to the last CONVERGED build
+# by image name (cluster-deploy-lib.sh roll_deployment) — never to
+# "the previous revision", which on 2026-09-05 was the placeholder the
+# apply had just created and could not boot.
+if ! roll_deployment "$K" "$REGISTRY" "$HEAD" "$LAST" "$FAILED_FILE"; then
+    exit 1
+fi
 $K set image -n boss cronjobs -l boss-chore=true "chore=$REGISTRY:$HEAD" || true
-$K rollout status deploy/boss -n boss --timeout=420s
+
+# THE CLUSTER-RESIDENT CONDUCTOR runs the same boss image and converges
+# its tag here, exactly like the boss deployment above — the manifest
+# (boss-conductor.yaml) commits a :latest placeholder and this is where
+# the real :$HEAD replaces it. It is a Deployment in boss-dev, so the
+# `boss -n boss` patch and the CronJob selector both miss it; it gets its
+# own one-line patch. No `rollout status` follows: the conductor SHIPS
+# DORMANT (replicas 0) and stays there until an operator's explicit
+# cutover, so there is no rollout to wait on and a Ready-check would hang
+# on a deployment with no pods. `|| true`: a cluster where this manifest
+# has not applied yet (or a scaled-to-0 conductor) must not fail the
+# converge. When an operator scales it to 1, it is already pinned to the
+# HEAD this converge built.
+$K set image -n boss-dev deploy/boss-conductor "conductor=$REGISTRY:$HEAD" || true
 
 echo "$HEAD" > "$STAMP_FILE"
+rm -f "$FAILED_FILE"
 echo "cluster-deploy-runner: cluster on $REGISTRY:$HEAD"
+
+# THE CONVERGE VERIFIES WHAT IT APPLIED (60690755). Everything above
+# is a write; nothing above reads back whether the cluster now holds
+# what the tree says. infra/cluster/check-manifests-applied.sh is that
+# read — every named object present, and for the kinds where
+# present-but-wrong is the realistic failure, contents matching — and
+# it was running nowhere with a credential that could see the 41
+# objects (the dev-session credential reports 39 unreadable). This is
+# the one place with both the tree and the admin kubeconfig, so it
+# runs here, AFTER the stamp: the deploy above is real either way, and
+# a drift is a finding about it, not a reason to roll it back.
+#
+# A failure — drift (exit 1) or cannot-verify (exit 2, which is
+# 'unknown', not 'clean') — fails this unit, so ExecStopPost closes
+# the converge packet "Maintenance failed" with the exit status
+# (timers-leave-a-packet): the alarm channel that already exists,
+# carrying the check's own report in the journal. It does not retry on
+# its own; the next converge — the next main move — re-applies and
+# re-checks, which is the honest cadence for a drift.
+echo "cluster-deploy-runner: verifying infra/cluster/manifests against the cluster"
+check_rc=0
+KUBECONFIG="$KUBECONFIG_PATH" "$REPO/infra/cluster/check-manifests-applied.sh" || check_rc=$?
+if [ "$check_rc" -ne 0 ]; then
+    rc=$check_rc
+    echo "cluster-deploy-runner: MANIFESTS CHECK FAILED (rc=$rc) — the tree and the cluster disagree, or the check could not verify; the converge packet stays open until a converge passes it" >&2
+    exit 1
+fi
+echo "cluster-deploy-runner: manifests verified — the cluster holds what the tree declares"

@@ -75,3 +75,137 @@ pub(super) async fn record_network_census<R: JobsRepository + 'static, B: EventB
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
+
+/// `POST /api/estate/observation` — what machines were actually there.
+///
+/// THE OTHER HALF OF THE ESTATE REGISTRY. `nodes` says what we MEANT to
+/// have; this records what a look at the cluster FOUND. The difference
+/// between the two is the finding, and keeping them apart is the whole
+/// design: if the observer wrote the registry directly, the cluster
+/// would become the source of truth for its own declaration and nothing
+/// could ever be found MISSING — only silently added (59ef456a).
+///
+/// DELIBERATELY A DUMB DOOR, the same posture as the census above. It
+/// validates shape and trust and records what it was handed. It does
+/// not compare against the registry, because comparison is a different
+/// job with a different cadence, and a door that second-guesses its
+/// instrument is a second instrument.
+///
+/// It exists because a dispatcher handler cannot observe the cluster:
+/// handlers speak HTTP to this API and own no private view, so the
+/// looking has to be done by something INSIDE the cluster with API
+/// access — a CronJob — and posted here.
+pub(super) async fn record_estate_observation<
+    R: JobsRepository + 'static,
+    B: EventBus + 'static,
+>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+    CurrentUser(user): CurrentUser,
+    Json(observation): Json<serde_json::Value>,
+) -> Response {
+    if user.access_tier != AccessTier::Operator {
+        return (
+            StatusCode::FORBIDDEN,
+            "the estate door is operator machinery — operator tier required",
+        )
+            .into_response();
+    }
+    let Some(obj) = observation.as_object() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "an estate observation must be a JSON object",
+        )
+            .into_response();
+    };
+    // AN OBSERVATION THAT SAW NOTHING IS NOT AN OBSERVATION. A probe
+    // whose credential was denied, or that failed to reach the API,
+    // produces an empty list — and recording that as "the estate is
+    // empty" is the same failure as a forbidden `kubectl get` counting
+    // as zero, which cost a wrong measurement on 2026-08-30.
+    let saw_nodes = obj
+        .get("nodes")
+        .and_then(|n| n.as_array())
+        .is_some_and(|a| !a.is_empty());
+    if !saw_nodes {
+        return (
+            StatusCode::BAD_REQUEST,
+            "the observation lists no nodes — an observer that saw nothing is a \
+             failed probe, not an empty estate, and recording it would be a \
+             measurement of the credential rather than of the hardware",
+        )
+            .into_response();
+    }
+
+    let actor = user
+        .ambient_actor()
+        .unwrap_or_else(|| boss_core::actor::ActorId::Automation("platform".into()));
+    let event = events::estate_observed_event(&actor, observation);
+    match state.jobs.record_events(std::slice::from_ref(&event)).await {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "recorded": true })),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// `POST /api/estate/comparison` — what the comparison found.
+///
+/// THE THIRD ESTATE DOOR. The observation door above records what a
+/// look FOUND; this one records what the dispatcher's `estate.compare`
+/// handler measured against the registry — one `jobs.estate.compared`
+/// event per observation, the series the eventual raiser will be
+/// calibrated on (59ef456a, report first, raise later).
+///
+/// Same dumb-door posture: validate shape and trust, record verbatim,
+/// never recompute. It refuses a body that cannot name its `scope` or
+/// carry a `findings` object — a comparison without those is a number
+/// with no instrument attached, and recording it would launder a
+/// broken comparator into a clean-looking series.
+pub(super) async fn record_estate_comparison<R: JobsRepository + 'static, B: EventBus + 'static>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+    CurrentUser(user): CurrentUser,
+    Json(comparison): Json<serde_json::Value>,
+) -> Response {
+    if user.access_tier != AccessTier::Operator {
+        return (
+            StatusCode::FORBIDDEN,
+            "the estate door is operator machinery — operator tier required",
+        )
+            .into_response();
+    }
+    let Some(obj) = comparison.as_object() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "an estate comparison must be a JSON object",
+        )
+            .into_response();
+    };
+    let names_scope = obj
+        .get("scope")
+        .and_then(|s| s.as_str())
+        .is_some_and(|s| !s.is_empty());
+    let carries_findings = obj.get("findings").is_some_and(|f| f.is_object());
+    if !names_scope || !carries_findings {
+        return (
+            StatusCode::BAD_REQUEST,
+            "a comparison names its scope and carries a findings object — \
+             refusing a shapeless one",
+        )
+            .into_response();
+    }
+
+    let actor = user
+        .ambient_actor()
+        .unwrap_or_else(|| boss_core::actor::ActorId::Automation("platform".into()));
+    let event = events::estate_compared_event(&actor, comparison);
+    match state.jobs.record_events(std::slice::from_ref(&event)).await {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "recorded": true })),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}

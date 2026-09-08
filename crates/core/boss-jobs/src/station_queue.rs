@@ -1078,6 +1078,44 @@ mod tests {
         assert_eq!(serde_json::to_value(&p).unwrap(), json);
     }
 
+    #[test]
+    fn a_dismissed_packet_leaves_its_filers_watchlist() {
+        // The production `my-watchlist` predicate as 130-watchlist-dismiss.sql
+        // writes it: filed by me AND not dismissed. Dismissing writes the
+        // `watchlist_dismissed` key onto the packet (through the metadata
+        // merge), and this `metadata_absent` clause is what makes the row
+        // vanish from the list — no per-actor table, no new route.
+        let p = StationPredicate {
+            metadata_equals: BTreeMap::from([("submitted_by".into(), "emp-7".to_string())]),
+            metadata_absent: vec!["watchlist_dismissed".into()],
+            ..Default::default()
+        };
+
+        // A packet I filed and have not dismissed is on my list.
+        assert!(p.matches(&filed_by("emp-7"), &[]));
+
+        // Once I dismiss it, the same packet drops out — and it is
+        // idempotent: the flag is only ever "set", so a second dismiss
+        // writes the same value and the packet stays gone.
+        let dismissed = job("user-feedback", Priority::Standard, 1).with_metadata(
+            serde_json::json!({ "submitted_by": "emp-7", "watchlist_dismissed": "true" }),
+        );
+        assert!(!p.matches(&dismissed, &[]));
+
+        // A single shared flag is safe here precisely because membership
+        // is already narrowed to the packet's own filer: no second actor
+        // ever sees this packet through this station, so there is no
+        // "dismissed by someone else, still shows for me" case to model —
+        // someone else's packet is not mine to begin with, dismissed or
+        // not. (An array of per-actor ids would be the answer on a station
+        // several actors shared; here it would be dead weight.)
+        assert!(!p.matches(&filed_by("emp-9"), &[]));
+        let theirs_dismissed = job("user-feedback", Priority::Standard, 1).with_metadata(
+            serde_json::json!({ "submitted_by": "emp-9", "watchlist_dismissed": "true" }),
+        );
+        assert!(!p.matches(&theirs_dismissed, &[]));
+    }
+
     // ------------------------------------------------------------
     // Recency discipline
     // ------------------------------------------------------------

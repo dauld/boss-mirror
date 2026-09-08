@@ -562,9 +562,10 @@ sql_is_file_allowed() {
     crates/core/boss-policy-client/src/predicates.rs) return 0 ;;
     crates/core/boss-policy-client/src/seed_loader.rs) return 0 ;;
     crates/core/boss-policy-client/src/defaults.rs) return 0 ;;
-    # Internal scheduling lifecycle: claim/assignment status timestamps.
-    crates/core/boss-jobs/src/scheduling/rebuild.rs) return 0 ;;
-    crates/core/boss-jobs/src/scheduling/postgres.rs) return 0 ;;
+    # scheduling/postgres.rs + scheduling/rebuild.rs left this list
+    # 2026-09-02 (packet d7b8158e): assignment status + calendar-token
+    # writes now bind stamp.timestamp / ev.ts, so replay reproduces
+    # the rows byte-identically. Any new NOW() there is a leak.
     # Registry row-creation timestamps (reference data, not audit).
     crates/core/boss-jobs/src/registry.rs) return 0 ;;
     # Messages-events purge daemon — operates on the mutable

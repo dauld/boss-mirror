@@ -86,6 +86,41 @@ fn a_failed_report_does_not_promise_an_alarm_that_cannot_fire() {
     );
 }
 
+/// The reporting step is found by its spec KEY, never by title prose.
+///
+/// 48bed517: the selector used to grep the rendered title for
+/// "Record", which worked by coincidence of wording. A protocol is
+/// registry data we retitle freely and on purpose — and `gate-run`
+/// lives ONLY as registry data on the deployment, so no repo-side pin
+/// can hold the prose equal. What a repo test CAN hold is the
+/// selector's contract: it keys on `spec_slug == "record-verdict"`,
+/// the same identity advancement pairs steps by, and it must refuse
+/// aloud on zero or many matches rather than index whatever the API
+/// ordered first.
+#[test]
+fn the_reporting_step_is_selected_by_slug_not_prose() {
+    let sh = run_sh();
+    let printed: String = sh
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        printed.contains("spec_slug\") == \"record-verdict\""),
+        "run.sh must select the reporting step by spec_slug == record-verdict"
+    );
+    assert!(
+        !printed.contains("\"Record\" in"),
+        "run.sh must not match the reporting step by its rendered title — that fact lives in \
+         the registry and a retitle would silently orphan every verdict"
+    );
+    assert!(
+        printed.contains("len(hits) != 1"),
+        "zero and many matches must both refuse: zero orphans the verdict, many reports it \
+         onto whichever step the API happened to order first"
+    );
+}
+
 /// Failing to RECORD a green gate must not turn it into a red one.
 ///
 /// The sibling half of cf0021ae is that the Job status already lies

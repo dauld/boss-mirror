@@ -79,6 +79,28 @@ fi
 
 fail() { echo "migrate.sh: $*" >&2; exit 1; }
 
+# TWO RUNNERS, ONE LEDGER. Two pods booting together race this script
+# — named as RollingUpdate blocker #2 in boss.yaml's strategy comment,
+# and the expand half of getting off Recreate. The WHOLE RUN holds a
+# session advisory lock on a dedicated connection, taken before the
+# first read: the losing run blocks on the SELECT below, and when it
+# proceeds it computes its pending set against the winner's COMMITTED
+# bookkeeping and applies nothing. Serializing at any finer grain
+# (per-migration) would let the loser re-apply files it listed as
+# pending before the winner finished.
+#
+# The lock tag includes the database OID, so TestDb's per-test scratch
+# databases never serialize on each other — only real contenders for
+# one schema do. The lock dies with this process's connection; there
+# is no unlock to forget. The key is an arbitrary fixed 64-bit id
+# unique to this runner.
+MIG_LOCK_KEY=477201126
+coproc MIGLOCK { "${PSQL[@]}" -X -q -A -t; }
+printf 'SELECT pg_advisory_lock(%d);\n' "$MIG_LOCK_KEY" >&"${MIGLOCK[1]}" \
+    || fail "could not reach the database to take the migration lock"
+IFS= read -r _ <&"${MIGLOCK[0]}" \
+    || fail "taking the migration advisory lock failed (is the database reachable?)"
+
 # One shape for bookkeeping statements; migration files themselves go
 # through apply() below so BEGIN/…/COMMIT arrives as a single stream.
 q() { "${PSQL[@]}" -X -q -A -t -v ON_ERROR_STOP=1 -c "$1"; }

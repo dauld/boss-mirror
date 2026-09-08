@@ -1,5 +1,5 @@
 <script lang="ts">
-  // /system/workflows/authoring/:jobId — the graphical authoring surface
+  // /it/registry/authoring/:jobId — the graphical authoring surface
   // for a `workflow-design` Job (decision D6). The working spec lives in
   // the design Job's publish-step `metadata.workflow_spec`; edits persist
   // there (debounced) as ordinary STEP_UPDATED events — no `workflows`
@@ -12,6 +12,7 @@
   import Breadcrumb from '@boss/web-kit/ui/Breadcrumb.svelte';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
+  import StatusChip from '@boss/web-kit/ui/StatusChip.svelte';
   import StepAuthoringSurface from './StepAuthoringSurface.svelte';
   import type { WorkflowSpec } from './workflowTypes';
   import type { Job, Step, StepStatus } from '../jobs/types';
@@ -216,18 +217,21 @@
         );
       }
       await completeStep(jobId, publishStep.id);
-      navigate(href(`/system/workflows/${encodeURIComponent(slug)}`));
+      navigate(href(`/it/registry/${encodeURIComponent(slug)}`));
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
       acting = null;
     }
   }
 
-  function chipClass(status: StepStatus): string {
+  // completed → ok; ready/active = the rail position being worked
+  // right now → active (the tone that exists for in-progress);
+  // pending/skipped → muted.
+  function stepTone(status: StepStatus): 'ok' | 'active' | 'muted' {
     return status === 'completed'
       ? 'ok'
       : status === 'ready' || status === 'active'
-        ? 'warn'
+        ? 'active'
         : 'muted';
   }
 
@@ -240,7 +244,7 @@
 </script>
 
 <div class="catalog theme-exec">
-  <Breadcrumb to={href('/system/workflows')}>← All job kinds</Breadcrumb>
+  <Breadcrumb to={href('/it/registry')}>← All job kinds</Breadcrumb>
 
   {#if loadState.kind === 'loading'}
     <p class="empty">Loading…</p>
@@ -258,9 +262,10 @@
         {#each RAIL as r (r.title)}
           {@const step = steps.find((s) => s.title === r.title)}
           <div class="wf-step">
-            <span class="chip chip-stage chip-stage-{step ? chipClass(step.status) : 'muted'}">
-              {r.label}{step ? ` · ${step.status}` : ''}
-            </span>
+            <StatusChip
+              value={step ? `${r.label} · ${step.status}` : r.label}
+              tone={step ? stepTone(step.status) : 'muted'}
+            />
           </div>
         {/each}
       </div>

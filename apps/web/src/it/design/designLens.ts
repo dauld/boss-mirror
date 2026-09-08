@@ -1,4 +1,4 @@
-// The design-review lens — /system/design as a view onto a station's
+// The design-review lens — /it/design as a view onto a station's
 // queue rather than a page with its own idea of what that queue is.
 //
 // Origin (David, feedback 3f5f7f63): "the Design Review page should
@@ -156,7 +156,7 @@ export const REVIEW_STEP_KIND = 'review-design';
 /** Where Back returns to from the review surface. Without it the step
  *  surface fell back to the job page — the one place the reviewer was
  *  deliberately not sent (David, feedback 40fe7291). */
-export const BACK_HERE = `from=${encodeURIComponent('/system/design')}&from_label=${encodeURIComponent('Design Review')}`;
+export const BACK_HERE = `from=${encodeURIComponent('/it/design')}&from_label=${encodeURIComponent('Design Review')}`;
 
 /** The route into a review.
  *

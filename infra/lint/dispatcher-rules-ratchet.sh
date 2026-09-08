@@ -120,7 +120,58 @@ set -euo pipefail
 # is a standing state of the network — what is NOT moving — which no
 # Workflow definition can declare, because no packet causes it; a
 # census's whole point is to run when no event fired.
-BASELINE=51
+# 51 -> 52 (2026-08-30, migration 202608302200).
+# `estate-compare-on-observation`. EXTERNAL INGRESS under the
+# exemption above: `jobs.estate.observed` is posted by a CronJob
+# looking at the cluster — no packet causes an observation, so no
+# Workflow definition can declare the reaction to one. It adds no
+# routing: one firing reads the estate registry and writes one
+# `jobs.estate.compared` event, the compare half of the
+# declared/observed split (59ef456a).
+#
+# 52 -> 53 (2026-08-31): maintenance-sweep-empty-decisions-daily — a
+# TIMER, the ratchet's own first carve-out. No protocol can declare
+# "notice that a completed decision recorded nothing" because the
+# packets it watches are pinned to OLD versions whose contracts are
+# frozen; a clock has to look. One firing spawns one maintenance-sweep
+# packet, no routing (cdfe2e1a).
+#
+# 53 -> 54 (2026-09-02, migration 202609021400).
+# `keg-deposit-settle-on-keg-return-closed` — a CROSS-PROTOCOL
+# REACTOR under the exemption above: it advances the LEDGER from a
+# `keg-return` packet's close (93f936b9, the full balance-sheet keg
+# model), the same protocol→ledger shape as the step-done ledger
+# rules (invoice-issue, excise-accrue). The keg-return Workflow
+# cannot declare it: its field-bearing steps are plain `task` kind
+# (no per-kind topic), and a protocol row cannot POST a double-entry
+# settlement. It adds no routing — one firing books one settlement.
+#
+# 54 -> 55 (2026-09-02, migration 202609021500).
+# `broker-rotates-the-boss-dev-forge-token` — EXTERNAL GLUE under the
+# exemption above, the same class the census kept for "reactions
+# whose effect lives outside the system": the credential broker
+# (7ee101aa) speaks to the FORGE's admin API and the k8s Secret
+# store, neither of which a Workflow definition can address. The
+# rotate-a-credential protocol row declares the ORDER (issue →
+# install → verify → revoke); this rule is the machine executor for
+# one credential, and its args are that credential's registry
+# declaration (issuer account, Secret, scopes, proving repo). It adds
+# no routing: it advances the very packet that fired it, spawns
+# nothing, and every write it makes lands back on that packet's own
+# steps.
+# 55 -> 56 (2026-09-05): inspect-empty-decisions-sweep-on-step-ready — a
+# cross-protocol reactor (a maintenance-sweep inspection driven by a step
+# becoming ready), which a single Workflow definition cannot express.
+#
+# 56 -> 57 (2026-09-07, migration 202609071700): converge-on-merge — a
+# cross-protocol reactor. A pr-train's merged step (step.done.task,
+# spec_slug="merged") spawns an ops-request that starts the
+# cluster-deploy-runner oneshot on the forge host. External glue spanning
+# three protocols (pr-train -> ops-request -> deployment on the forge
+# host), which a single Workflow `on` consequence cannot express; it
+# retires the up-to-10-min converge poll latency behind the gcr.io DNS
+# flake that reddened #236 and #250.
+BASELINE=57
 RULES_FILE="infra/dispatcher/rules.toml"
 
 count=$(grep -c '^\[\[rule\]\]' "$RULES_FILE")

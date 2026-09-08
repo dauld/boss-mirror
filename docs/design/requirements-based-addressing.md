@@ -1,6 +1,6 @@
 # Design: requirements-based addressing — queues as predicates, protocols as data
 
-**Status:** in-review — open questions tracked at `/system/design`
+**Status**: decided — all 6 questions resolved 2026-08-14 via the in-app tracker; see Decisions.
 **Origin:** David, 2026-08-11: "we let people define addresses based on
 requirements instead of a known destination, and then the protocol
 (defined now as a workflow) facilitates the movements of the payload."

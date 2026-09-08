@@ -116,12 +116,32 @@ check_against() {
 }
 
 self_test() {
+    # The whole self-test runs in one subshell that first DROPS any
+    # inherited git context. A pre-push hook exports GIT_DIR — and with
+    # GIT_DIR set, the fixture's `git init` in a tmp dir re-targets the
+    # INVOKING repo and the tmp dir becomes its work tree, so the
+    # fixture commits landed on the real repo, reset its `main`, and
+    # created its branches (5b65c2a8; reproduced 2026-08-30 with a
+    # victim repo: base/edit/del/add all appeared in the victim's log).
+    # A self-test that can write to the repo under test is strictly
+    # worse than no self-test, so this boundary fails closed below.
+    (
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
     local tmp rc fails=0 out
     tmp=$(mktemp -d) || return 1
 
     (
         set -e
         cd "$tmp"
+        # Tripwire BEFORE the first mutating command: with no repo here
+        # yet, git must see NO repository at all. If it answers with
+        # one, inherited context is aiming the fixture at somebody
+        # else's repo — refuse before touching anything. This catches
+        # vectors the unset above doesn't know about yet.
+        if leaked=$(git rev-parse --absolute-git-dir 2>/dev/null); then
+            echo "fixture would operate on $leaked — inherited git context" >&2
+            exit 90
+        fi
         git init -q .
         git config user.email t@t; git config user.name t
         mkdir -p "$SCHEMA_DIR"
@@ -162,12 +182,36 @@ self_test() {
         echo "SELF-TEST FAIL: a deleted migration was not caught"; fails=$((fails+1))
     fi
 
+    # Fixture 4: the hook environment itself. Re-run this script's
+    # self-test with GIT_DIR aimed at a decoy repo — as a pre-push
+    # hook aims it at the real one — and assert the decoy never moves.
+    # This is the regression test for the incident: without the unset
+    # and tripwire above, this exact shape committed fixture garbage
+    # onto the invoking repo and reset its main. Guarded against
+    # recursing into itself via MIGRATIONS_LINT_INNER.
+    if [ -z "${MIGRATIONS_LINT_INNER:-}" ]; then
+        ( set -e; mkdir "$tmp/decoy"; cd "$tmp/decoy"; git init -q .
+          git config user.email t@t; git config user.name t
+          printf 'x\n' > f; git add -A; git commit -qm seed ) >/dev/null 2>&1 \
+            || { echo "SELF-TEST FAIL: decoy repo setup"; fails=$((fails+1)); }
+        before=$(git -C "$tmp/decoy" rev-parse HEAD 2>/dev/null)
+        MIGRATIONS_LINT_INNER=1 GIT_DIR="$tmp/decoy/.git" \
+            bash "${BASH_SOURCE[0]}" --self-test >/dev/null 2>&1 || true
+        after=$(git -C "$tmp/decoy" rev-parse HEAD 2>/dev/null)
+        refs=$(git -C "$tmp/decoy" for-each-ref | wc -l | tr -d ' ')
+        if [ "$before" != "$after" ] || [ "$refs" != "1" ]; then
+            echo "SELF-TEST FAIL: an inherited GIT_DIR reached the fixture (decoy $before -> $after, refs=$refs)"
+            fails=$((fails+1))
+        fi
+    fi
+
     rm -rf "$tmp"
     if [ "$fails" -eq 0 ]; then
-        echo "self-test: 3/3 fixtures behaved as specified"
+        echo "self-test: fixtures behaved as specified"
         return 0
     fi
     return 1
+    )
 }
 
 if [ "${1:-}" = "--self-test" ]; then

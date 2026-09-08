@@ -4,7 +4,7 @@
 // must carry whatever the server said about why.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { describeWriteFailure, putStep, writeStep } from './stepWrite';
+import { WRITE_RETRY, describeWriteFailure, putStep, writeStep } from './stepWrite';
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -14,6 +14,10 @@ afterEach(() => {
 function stubFetch(fn: (url: string, init?: RequestInit) => Promise<Response>) {
   globalThis.fetch = fn as unknown as typeof fetch;
 }
+
+// The retry backoff must not be spent in tests — the same no_wait
+// policy the CLI's retry tests use.
+const noWait = { sleep: async () => {} };
 
 describe('describeWriteFailure', () => {
   test('uses the JSON error field when the server sent one', () => {
@@ -69,9 +73,94 @@ describe('writeStep', () => {
     stubFetch(async () => {
       throw new TypeError('Failed to fetch');
     });
-    const res = await writeStep('/api/x', { method: 'PUT' });
+    const res = await writeStep('/api/x', { method: 'PUT' }, noWait);
     expect(res.kind).toBe('failed');
     if (res.kind === 'failed') expect(res.error).toContain('Failed to fetch');
+  });
+});
+
+describe('writeStep — deploy-roll retry (packet 04cc82ab)', () => {
+  test('a 503 on an idempotent PUT is retried and then succeeds', async () => {
+    let calls = 0;
+    stubFetch(async () => {
+      calls += 1;
+      return calls < 3
+        ? new Response('rolling', { status: 503 })
+        : new Response('{}', { status: 200 });
+    });
+    const res = await writeStep('/api/x', { method: 'PUT' }, noWait);
+    expect(res.kind).toBe('ok');
+    expect(calls).toBe(3);
+  });
+
+  test('a refused connection on a PUT is retried across the roll', async () => {
+    let calls = 0;
+    stubFetch(async () => {
+      calls += 1;
+      if (calls < 2) throw new TypeError('Failed to fetch');
+      return new Response('{}', { status: 200 });
+    });
+    const res = await writeStep('/api/x', { method: 'PUT' }, noWait);
+    expect(res.kind).toBe('ok');
+    expect(calls).toBe(2);
+  });
+
+  test('a 503 that outlasts the budget surfaces the failure, bounded', async () => {
+    let calls = 0;
+    stubFetch(async () => {
+      calls += 1;
+      return new Response('still down', { status: 503 });
+    });
+    const res = await writeStep('/api/x', { method: 'PUT' }, noWait);
+    expect(res.kind).toBe('failed');
+    if (res.kind === 'failed') expect(res.error).toContain('503');
+    expect(calls).toBe(WRITE_RETRY.attempts);
+  });
+
+  test('a 4xx is an answer, never retried', async () => {
+    let calls = 0;
+    stubFetch(async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ error: 'bad shape' }), { status: 400 });
+    });
+    const res = await writeStep('/api/x', { method: 'PUT' }, noWait);
+    expect(res).toEqual({ kind: 'failed', error: 'HTTP 400 — bad shape' });
+    expect(calls).toBe(1);
+  });
+
+  test('a 500 is an application answer — surfaced now, not after a backoff', async () => {
+    // The app RAN and failed (db down). Retrying it would only hide the
+    // error behind the roll budget; a roll is a 502/503/504, not a 500.
+    let calls = 0;
+    stubFetch(async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ error: 'db down' }), { status: 500 });
+    });
+    const res = await writeStep('/api/x', { method: 'PUT' }, noWait);
+    expect(res).toEqual({ kind: 'failed', error: 'HTTP 500 — db down' });
+    expect(calls).toBe(1);
+  });
+
+  test('a non-idempotent POST is NOT retried — one blip must not become two creates', async () => {
+    let calls = 0;
+    stubFetch(async () => {
+      calls += 1;
+      return new Response('rolling', { status: 503 });
+    });
+    const res = await writeStep('/api/x', { method: 'POST' }, noWait);
+    expect(res.kind).toBe('failed');
+    expect(calls).toBe(1);
+  });
+
+  test('a POST that throws is NOT retried either — the send may have landed', async () => {
+    let calls = 0;
+    stubFetch(async () => {
+      calls += 1;
+      throw new TypeError('Failed to fetch');
+    });
+    const res = await writeStep('/api/x', { method: 'POST' }, noWait);
+    expect(res.kind).toBe('failed');
+    expect(calls).toBe(1);
   });
 });
 

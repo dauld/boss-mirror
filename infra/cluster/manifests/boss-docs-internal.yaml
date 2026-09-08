@@ -1,0 +1,26 @@
+# Machine door for the BOSS docs API — the design-doc corpus at
+# /api/design/*. Same posture as boss-jobs-internal: an infrastructure
+# door for in-cluster machinery (proof-in-prod probes, rebuilders, the
+# durable dev pod), never a human door — humans read the corpus through
+# the gateway at playground.algedonic.dev.
+#
+# boss-docs already binds 0.0.0.0:7050 (infra/oss-quickstart/generate-configs.sh),
+# so this Service just names the port; no app change is needed for docs.
+# ClusterIP, not LoadBalancer: only in-cluster automation needs it, so it
+# is NOT exposed on the LAN the way the jobs door is (the jobs door is a
+# LoadBalancer because the off-cluster conductor on boss-gcp needs it;
+# nothing off-cluster reads the corpus).
+#
+# Born 2026-09-01 (backlog a757b72a) closing the gap where the dev pod
+# could read jobs directly but not the docs corpus, so three landed cars
+# could not be proven in production.
+apiVersion: v1
+kind: Service
+metadata:
+  name: boss-docs-internal
+  namespace: boss
+spec:
+  type: ClusterIP
+  selector: {app: boss}
+  ports:
+    - {port: 7050, targetPort: 7050, name: docs}

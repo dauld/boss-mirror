@@ -1,4 +1,4 @@
-// sign-off.js v2 — the surface for a step that needs someone's name on
+// sign-off.js v3 — the surface for a step that needs someone's name on
 // a DECISION, showing them what they are deciding.
 //
 // v1 (car 884b85f4's train) rendered the stamp ceremony — the role
@@ -375,6 +375,7 @@
         }
         if (!res.ok) {
           error = `Could not record the ${role} signature (${res.status}). ${await res.text()}`;
+          return false;
         } else {
           // Re-read rather than assume: the server decides attribution
           // and the shape hash the stamp pins.
@@ -382,9 +383,11 @@
           const s = fresh && (fresh.steps || []).find((x) => x.id === step.id);
           if (s) stamps = Array.isArray(s.sign_offs) ? s.sign_offs : [];
           if (typeof onUpdate === 'function') onUpdate();
+          return true;
         }
       } catch (e) {
         error = `Could not record the ${role} signature: ${e}`;
+        return false;
       } finally {
         busy = false;
         renderAll();
@@ -398,36 +401,58 @@
       try {
         // 1. The decision and the declared fields land in metadata
         //    FIRST — a stamp attests the step's shape, so the content
-        //    being signed must already be in it.
-        const metadata = { ...(step.metadata || {}) };
+        //    being signed must already be in it. They travel through
+        //    the step metadata PATCH, which merges ONLY the keys this
+        //    surface owns against the row as it stands. The old idiom
+        //    spread the page-load snapshot into a metadata PUT, which
+        //    replaces wholesale — so any key another writer added
+        //    after this page loaded was silently erased (the lost
+        //    update that reverted a review's title/markdown on
+        //    2026-09-02).
+        const patch = {};
         declared.forEach((f) => {
-          if (nonEmptyString(fieldValues[f.name])) metadata[f.name] = fieldValues[f.name];
+          if (nonEmptyString(fieldValues[f.name])) patch[f.name] = fieldValues[f.name];
         });
-        metadata.decision = d;
-        metadata.decided_at = new Date().toISOString();
-        if (commentTa.value.trim()) metadata.comment = commentTa.value.trim();
-        const saved = await fetch(`/api/jobs/${jobId}/steps/${step.id}`, {
-          method: 'PUT',
+        patch.decision = d;
+        patch.decided_at = new Date().toISOString();
+        if (commentTa.value.trim()) patch.comment = commentTa.value.trim();
+        const saved = await fetch(`/api/jobs/${jobId}/steps/${step.id}/metadata`, {
+          method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ metadata }),
+          body: JSON.stringify(patch),
         });
         if (!saved.ok) {
           error = `Could not record the decision (${saved.status}): ${await saved.text()}`;
           return;
         }
-        step.metadata = metadata;
+        // Fold the merged keys into the local cache the same way the
+        // server just did; keys other writers own stay as loaded.
+        step.metadata = Object.assign(step.metadata || {}, patch);
         if (d === 'changes-requested') {
           if (typeof onUpdate === 'function') onUpdate();
           return;
         }
-        // 2. The user's own signature, for any still-unsigned required
-        //    role. The server enforces who may actually stamp what;
-        //    offering only the missing ones keeps the ceremony honest.
-        //    (Per-role sign buttons remain for multi-party steps.)
+        // 2. The user's own signature, in the SAME gesture when exactly
+        //    one role is outstanding — the single-signer case, which is
+        //    most decisions. It runs AFTER the decision landed, because
+        //    a stamp attests the step's shape (metadata included):
+        //    on 2026-09-05 David signed first, this flow re-saved the
+        //    decision with a fresh decided_at two seconds later, and the
+        //    completion answered 409 stale — his own signature undone by
+        //    the surface that asked for it. Nothing below writes
+        //    metadata again. The server still enforces who may stamp;
+        //    a refusal shows as the signature error and the decision
+        //    stays recorded. (Per-role sign buttons remain for
+        //    multi-party steps, where the ceremony is not this user's.)
+        let left = outstanding();
+        if (left.length === 1) {
+          const signed = await sign(left[0]);
+          if (!signed) return;
+          left = outstanding();
+        }
         // 3. Complete — unless other signatures are outstanding, in
         //    which case the decision is recorded and the roster says
         //    plainly what everyone is waiting on.
-        const left = outstanding();
         if (left.length > 0) {
           error = null;
           renderAll();

@@ -129,16 +129,20 @@ pub async fn rebuild_shipping(pool: &PgPool) -> Result<RebuildReport, RebuildErr
                         .execute(&mut *conn)
                         .await
                         .map_err(|e| e.to_string())?;
+                    // created_at = ev.ts mirrors the live scan insert
+                    // (which binds the stamp's instant) — without it
+                    // the column fell to DEFAULT NOW() at replay time.
                     let inserted = sqlx::query(
                         "INSERT INTO shipment_tracking_events \
-                            (shipment_id, status, occurred_on, stage_index) \
-                         VALUES ($1, $2, $3, $4) \
+                            (shipment_id, status, occurred_on, stage_index, created_at) \
+                         VALUES ($1, $2, $3, $4, $5) \
                          ON CONFLICT (shipment_id, status, occurred_on) DO NOTHING",
                     )
                     .bind(&shipment_id)
                     .bind(&status)
                     .bind(occurred_on)
                     .bind(stage_index)
+                    .bind(ev.ts)
                     .execute(&mut *conn)
                     .await;
                     match inserted {

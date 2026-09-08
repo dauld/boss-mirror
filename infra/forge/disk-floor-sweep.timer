@@ -1,0 +1,12 @@
+# Hourly, not the converge's 10min: above the floor this is a no-op,
+# and below it the sweep frees tens of GB per pass — an hour of
+# cadence is plenty ahead of the ~1GB-per-converge growth rate.
+[Unit]
+Description=BOSS forge disk floor sweep (hourly)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target

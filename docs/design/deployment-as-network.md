@@ -1,6 +1,6 @@
 # Design: deployment as a network — generations, confirms, waves
 
-**Status:** draft — open questions tracked at `/system/design`
+**Status**: decided — all 5 questions resolved 2026-08-12 via the in-app tracker; see Decisions.
 **Origin:** David, 2026-08-10 (`8b508f95`): "I think we should model
 our deployment around networking principles" — following the
 discussion of how networks patch at scale.

@@ -182,12 +182,34 @@ impl Handler for JobsCompleteStep {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            if needs_a_person(status.as_u16(), &text) {
+                // A marker that declares a required field is the
+                // "marker a person sets" the viability tests protect
+                // (an escape-hatch terminal must not auto-complete on
+                // step state alone): user-feedback's `satisfied`
+                // outcome owes `evidence`. The machine cannot fill it,
+                // so this is not a downstream failure to retry — eight
+                // NAKs and a dead letter on 2026-09-05 said nothing a
+                // person could act on. Say what it needs, once, and ack.
+                tracing::info!(
+                    job_id = %ev.job_id, step_id = %ev.step_id, kind = %ev.kind,
+                    "complete_step: this marker needs a person — {text}"
+                );
+                return Ok(());
+            }
             return Err(HandlerError::Downstream(format!(
                 "PUT {url} returned {status}: {text}"
             )));
         }
         Ok(())
     }
+}
+
+/// A 400 naming a missing required field is a step that owes a value
+/// only a person can supply — not a fault to retry. Pure, so the shape
+/// of the refusal this reads is pinned by a test.
+pub(crate) fn needs_a_person(status: u16, text: &str) -> bool {
+    status == 400 && text.contains("required field") && text.contains("is missing")
 }
 
 #[cfg(test)]
@@ -237,12 +259,41 @@ mod tests {
         assert!(h.is_marker("milestone"));
         // `task`: no role but real work (unset duration) — NOT a marker.
         assert!(!h.is_marker("task"));
+        // `gate-verdict`: no role AND the runner completes it via the
+        // API — it must stay off the marker shape (duration None, the
+        // same escape `task` uses), or this handler would complete every
+        // gate's verdict EMPTY the moment it goes Ready, freezing the
+        // step against the runner's real write and breaking every gate.
+        // The §9a equality test between this property-classification and
+        // the StepType declaration in step_types.toml.
+        assert!(!h.is_marker("gate-verdict"));
+        assert!(!h.should_auto_complete("gate-verdict"));
         // Role-bearing / nonzero-duration work — NOT markers.
         assert!(!h.is_marker("demand-gate"));
         assert!(!h.is_marker("bill-approval"));
         assert!(!h.is_marker("production-consume"));
         // Unknown kind — conservatively not a marker.
         assert!(!h.is_marker("not-a-real-kind"));
+    }
+
+    #[test]
+    fn a_required_field_refusal_means_a_person_not_a_retry() {
+        assert!(needs_a_person(
+            400,
+            "invalid step metadata: evidence: required field 'evidence' is missing"
+        ));
+        assert!(
+            !needs_a_person(500, "required field 'evidence' is missing"),
+            "a 500 is a fault"
+        );
+        assert!(
+            !needs_a_person(400, "invalid step id"),
+            "another 400 is still a fault to surface"
+        );
+        assert!(
+            !needs_a_person(409, "sign-offs incomplete"),
+            "a 409 is not this"
+        );
     }
 
     #[tokio::test]

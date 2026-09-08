@@ -8,7 +8,7 @@ Type=oneshot
 User=boss
 ExecStartPre=/opt/boss/infra/boss-maintenance-wrap.sh maintenance-ml-inference-batch "ML inference batch"
 ExecStart=/opt/boss/infra/ml/run-inference-batch.sh
-ExecStartPost=/opt/boss/infra/boss-step.sh maintenance-ml-inference-batch run result=ok
+ExecStopPost=-/opt/boss/infra/boss-step.sh maintenance-ml-inference-batch run
 Environment=BOSS_ML_API_URL=http://127.0.0.1:7070
 StandardOutput=journal
 StandardError=journal

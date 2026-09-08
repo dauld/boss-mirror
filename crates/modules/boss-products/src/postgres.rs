@@ -70,9 +70,13 @@ impl ProductsRepository for PgProducts {
         )
         .await
         .map_err(ProductsError::Storage)?;
+        // Timestamps bind the stamp's instant (= the event's
+        // audit_log.timestamp) instead of falling to the column
+        // DEFAULT NOW() — the rebuilder binds ev.ts for the same
+        // columns, so live and replayed rows agree byte-for-byte.
         sqlx::query(
-            "INSERT INTO products (sku, name, product_kind, package_unit, description, metadata, active) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) \
+            "INSERT INTO products (sku, name, product_kind, package_unit, description, metadata, active, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8) \
              ON CONFLICT (sku) DO UPDATE SET \
                 name = EXCLUDED.name, \
                 product_kind = EXCLUDED.product_kind, \
@@ -80,7 +84,7 @@ impl ProductsRepository for PgProducts {
                 description = EXCLUDED.description, \
                 metadata = EXCLUDED.metadata, \
                 active = EXCLUDED.active, \
-                updated_at = NOW()",
+                updated_at = EXCLUDED.updated_at",
         )
         .bind(&product.sku)
         .bind(&product.name)
@@ -89,6 +93,7 @@ impl ProductsRepository for PgProducts {
         .bind(&product.description)
         .bind(&product.metadata)
         .bind(product.active)
+        .bind(stamp.timestamp)
         .execute(&mut *tx)
         .await
         .map_err(|e| ProductsError::Storage(e.to_string()))?;
@@ -130,21 +135,24 @@ impl ProductsRepository for PgProducts {
             .begin()
             .await
             .map_err(|e| ProductsError::Storage(e.to_string()))?;
+        // updated_at = stamp.timestamp (the event's recorded instant),
+        // not NOW() — the rebuilder binds ev.ts for the same column.
         sqlx::query(
             "INSERT INTO finished_product_inventory \
-                (product_sku, location_id, on_hand, reserved, value_cents) \
-             VALUES ($1, $2, $3, $4, $5) \
+                (product_sku, location_id, on_hand, reserved, value_cents, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
              ON CONFLICT (product_sku, location_id) DO UPDATE SET \
                 on_hand = EXCLUDED.on_hand, \
                 reserved = EXCLUDED.reserved, \
                 value_cents = EXCLUDED.value_cents, \
-                updated_at = NOW()",
+                updated_at = EXCLUDED.updated_at",
         )
         .bind(&row.product_sku)
         .bind(&row.location_id)
         .bind(row.on_hand)
         .bind(row.reserved)
         .bind(row.value_cents)
+        .bind(stamp.timestamp)
         .execute(&mut *tx)
         .await
         .map_err(|e| ProductsError::Storage(e.to_string()))?;
@@ -295,36 +303,42 @@ impl ProductsRepository for PgProducts {
             });
         }
 
+        // updated_at binds the stamp's instant on both arms — the
+        // `products.inventory.upserted` event this write emits is
+        // replayed with ev.ts (= stamp.timestamp) in the same column,
+        // so live and rebuilt rows agree byte-for-byte.
         let row: InventoryRow = match total_cost_cents {
             Some(total) if total > 0 => sqlx::query_as(
                 "INSERT INTO finished_product_inventory \
-                    (product_sku, location_id, on_hand, reserved, value_cents) \
-                 VALUES ($1, $2, $3, 0, $4) \
+                    (product_sku, location_id, on_hand, reserved, value_cents, updated_at) \
+                 VALUES ($1, $2, $3, 0, $4, $5) \
                  ON CONFLICT (product_sku, location_id) DO UPDATE SET \
                     on_hand = finished_product_inventory.on_hand + EXCLUDED.on_hand, \
                     value_cents = finished_product_inventory.value_cents \
                                   + EXCLUDED.value_cents, \
-                    updated_at = NOW() \
+                    updated_at = EXCLUDED.updated_at \
                  RETURNING product_sku, location_id, on_hand, reserved, \
                            value_cents, production_cost_cents, updated_at",
             )
             .bind(sku)
             .bind(location_id)
             .bind(qty)
-            .bind(total),
+            .bind(total)
+            .bind(stamp.timestamp),
             _ => sqlx::query_as(
                 "INSERT INTO finished_product_inventory \
-                    (product_sku, location_id, on_hand, reserved) \
-                 VALUES ($1, $2, $3, 0) \
+                    (product_sku, location_id, on_hand, reserved, updated_at) \
+                 VALUES ($1, $2, $3, 0, $4) \
                  ON CONFLICT (product_sku, location_id) DO UPDATE SET \
                     on_hand = finished_product_inventory.on_hand + EXCLUDED.on_hand, \
-                    updated_at = NOW() \
+                    updated_at = EXCLUDED.updated_at \
                  RETURNING product_sku, location_id, on_hand, reserved, \
                            value_cents, production_cost_cents, updated_at",
             )
             .bind(sku)
             .bind(location_id)
-            .bind(qty),
+            .bind(qty)
+            .bind(stamp.timestamp),
         }
         .fetch_one(&mut *tx)
         .await
@@ -482,11 +496,14 @@ impl ProductsRepository for PgProducts {
                 )));
             }
         };
+        // updated_at = stamp.timestamp: same instant the emitted
+        // `products.inventory.upserted` event records, same instant
+        // the rebuilder binds at replay.
         let updated: Option<InventoryRow> = sqlx::query_as(
             "UPDATE finished_product_inventory \
                 SET on_hand = on_hand - $3, \
                     value_cents = value_cents - $4, \
-                    updated_at = NOW() \
+                    updated_at = $5 \
               WHERE product_sku = $1 AND location_id = $2 \
               RETURNING product_sku, location_id, on_hand, reserved, \
                         value_cents, production_cost_cents, updated_at",
@@ -495,6 +512,7 @@ impl ProductsRepository for PgProducts {
         .bind(location_id)
         .bind(qty)
         .bind(drained_cents)
+        .bind(stamp.timestamp)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| ProductsError::Storage(e.to_string()))?;

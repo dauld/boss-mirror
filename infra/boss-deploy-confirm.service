@@ -11,7 +11,7 @@ WorkingDirectory=/opt/boss
 # symlinks and restarts the prod fleet (deploy-services.sh revert).
 ExecStartPre=/opt/boss/infra/boss-maintenance-wrap.sh maintenance-deploy-confirm "Deploy confirm"
 ExecStart=/opt/boss/infra/deploy-confirm.sh
-ExecStartPost=/opt/boss/infra/boss-step.sh maintenance-deploy-confirm run result=ok
+ExecStopPost=-/opt/boss/infra/boss-step.sh maintenance-deploy-confirm run
 # Probes are seconds; a revert (flip + fleet restart) is minutes. Set
 # explicitly so the dead-man can never be SIGTERMed mid-revert by the
 # 90s default — the same kill-the-thing-doing-the-work class as the

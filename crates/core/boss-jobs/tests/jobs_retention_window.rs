@@ -90,6 +90,8 @@ fn app_at(today: NaiveDate) -> (Router, Arc<InMemoryJobs>) {
         subject_existence: None,
         roster: None,
         clock,
+        cadence: None,
+        delivery: None,
     };
     (router(state), jobs)
 }
