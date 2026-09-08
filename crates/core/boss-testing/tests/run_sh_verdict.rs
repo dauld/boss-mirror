@@ -43,7 +43,7 @@ fn the_verdict_is_echoed_before_it_is_reported() {
         .find("echo \"gate-runner: receipt")
         .expect("run.sh must echo the receipt summary to stdout");
     let report = sh
-        .find("if ! report \"$VERDICT\"")
+        .find("if report \"$VERDICT\"")
         .expect("run.sh must still report the verdict to the packet");
     assert!(
         echo < report,
@@ -121,29 +121,60 @@ fn the_reporting_step_is_selected_by_slug_not_prose() {
     );
 }
 
-/// Failing to RECORD a green gate must not turn it into a red one.
+/// An unreported verdict is a failed RUN — distinct from a red gate.
 ///
-/// The sibling half of cf0021ae is that the Job status already lies
-/// about green gates whose pods die. Exiting non-zero here because a
-/// packet write failed would manufacture the same lie from the other
-/// direction.
+/// This pin used to say the opposite: that a failed packet write must
+/// not change the exit status, because "reporting a green gate as red
+/// is the confusion cf0021ae is about". The night of 2026-09-07 showed
+/// the cost of that reading (backlog 23188cc5): four gates finished
+/// during a SoR roll, each exited 0, each Job read Complete beside a
+/// packet that never closed — and nothing on any surface looked wrong
+/// until a human noticed the auto-park had not fired. A Job that could
+/// not record its result did not finish its job, and Complete says it
+/// did.
+///
+/// The two truths are kept apart by the exit CODE and the log: exit 75
+/// (EX_TEMPFAIL) is not a red gate's 1, and the `gate-runner:
+/// UNREPORTED` line carries the verdict the packet should have had.
+/// `boss gate --wait` already reads "failed Job, silent packet" as
+/// "read the log, this is NOT a red gate" — so a green is found, not
+/// mistaken for red, and never re-proven.
 #[test]
-fn the_exit_status_still_follows_the_gate_not_the_report() {
+fn an_unreported_verdict_fails_the_run_with_its_own_exit_code() {
     let sh = run_sh();
-    let tail = sh
+    let printed: String = sh
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tail = printed
         .rfind("[ \"$VERDICT\" = green ]")
         .expect("run.sh must end by exiting on the gate verdict");
-    let report = sh
-        .find("if ! report \"$VERDICT\"")
+    let report = printed
+        .find("if report \"$VERDICT\"")
         .expect("report block present");
     assert!(
         tail > report,
-        "the final exit must be decided by the gate verdict, after the reporting block"
+        "a REPORTED verdict still exits on the gate verdict, after the reporting block"
     );
-    let block = &sh[report..tail];
+    let block = &printed[report..tail];
     assert!(
-        !block.contains("\nexit 1"),
-        "the reporting-failure branch must not exit non-zero: that would report a green gate \
-         as a failed run, which is the confusion cf0021ae is about"
+        !block.contains("\nexit 1") && !block.contains(" exit 1\n"),
+        "an unreported verdict must not exit 1 — that is a red gate's code, and the two \
+         must stay distinguishable from the Job alone"
+    );
+    let unreported = block
+        .find("gate-runner: UNREPORTED verdict=$VERDICT packet=$GATE_RUN_JOB_ID")
+        .expect("the unreported branch prints one greppable line naming verdict and packet");
+    let exit = block
+        .find("exit 75")
+        .expect("the unreported branch exits 75 (EX_TEMPFAIL)");
+    assert!(
+        unreported < exit,
+        "the UNREPORTED line must be printed before the run exits"
+    );
+    assert!(
+        block[unreported..exit].contains("receipt $SUMMARY"),
+        "the UNREPORTED line carries the receipt summary, so the log alone can re-report it"
     );
 }

@@ -26,24 +26,70 @@ FORGE_URL="${FORGE_URL:-http://10.20.0.15:3000/david/boss.git}"
 JOBS_API="${JOBS_API:-http://10.20.0.34:7900}"
 ACTOR='{"id":"automation:gate-runner","role":"platform-admin","access_tier":"operator"}'
 
-report() { # verdict, note
-    local step_id
+# --- report-back (begin) ---
+# THE REPORT RETRIES, because the system of record rolls.
+#
+# This used to be one call. A gate ends 10-40 minutes after it starts,
+# the SoR Recreate-rolls for 30-90s on every train converge, and every
+# merge now converges within a minute of landing - so any gate whose
+# last minute overlapped a roll made its single report into a dark API,
+# printed a WARN, and exited 0. Four greens were lost that way on the
+# night of 2026-09-07 (backlog 23188cc5), each re-proven by hand at ~10
+# minutes of cluster time. The verdict existed the whole time, in this
+# pod's log; nothing was retrying the one call that mattered.
+#
+# So: `report` is a loop over `report_once`, sleeping GATE_REPORT_BACKOFF
+# between attempts (~5 minutes in all, several times a roll), and it
+# tells the two failure shapes apart. NOBODY ANSWERED (connection
+# refused, timeout, empty reply, 5xx) is a roll and is retried. A REFUSAL
+# (any other 4xx, or a step-selection disagreement) is about the write
+# itself - a frozen step, a packet this runner does not understand - and
+# retrying it for five minutes would only delay the terminal-packet
+# branch below. Every attempt is logged, so a reader of the Job log sees
+# the roll the runner rode out.
+#
+# The block is bracketed so boss-testing's gate_runner_report_retry test
+# can lift it verbatim and run it against a stub SoR; the pod receives
+# exactly one file, so the code cannot live anywhere else.
+GATE_REPORT_BACKOFF="${GATE_REPORT_BACKOFF:-5 10 20 30 45 60 60 60}"
+
+# Did curl fail because nobody answered? (6 resolve, 7 refused, 28 timed
+# out, 35 TLS, 52 empty reply, 55 send, 56 recv.) Those are what a roll
+# looks like from a client.
+report_transient_curl() { case "$1" in 6|7|28|35|52|55|56) return 0 ;; *) return 1 ;; esac; }
+
+# One attempt. Exit 0 recorded; 75 nobody answered (retry); 1 refused.
+report_once() { # verdict, note
+    local rc out code body step_id
     # The reporting step is selected by its spec KEY, never its
     # rendered title: the title is prose a registry edit may change
     # on purpose, and matching it kept one fact in two places with
-    # nothing holding them together (48bed517 — the old selector
+    # nothing holding them together (48bed517 - the old selector
     # grepped for "Record"). `spec_slug` is the same key advancement
     # pairs steps by, exposed on every materialized step row.
     # Exactly one match or refuse LOUDLY: zero means the protocol and
     # this runner disagree, two means the report would land somewhere
-    # arbitrary — either way the disagreement goes to the Job log and
+    # arbitrary - either way the disagreement goes to the Job log and
     # the packet goes overdue, which is the alarm this rig already
     # defines; silence is the only wrong answer.
-    step_id=$(curl -sf -H "x-boss-user: $ACTOR" \
-        "$JOBS_API/api/jobs/$GATE_RUN_JOB_ID" \
-        | python3 -c '
+    rc=0
+    out=$(curl -s --max-time 20 -w '\n%{http_code}' -H "x-boss-user: $ACTOR" \
+        "$JOBS_API/api/jobs/$GATE_RUN_JOB_ID") || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "gate-runner: report: GET packet failed (curl exit $rc)"
+        report_transient_curl "$rc" && return 75
+        return 1
+    fi
+    code=${out##*$'\n'}; body=${out%$'\n'*}
+    case "$code" in
+        2??) ;;
+        5??|000) echo "gate-runner: report: GET packet answered HTTP $code"; return 75 ;;
+        *) echo "gate-runner: report: GET packet answered HTTP $code"; return 1 ;;
+    esac
+    step_id=$(printf '%s' "$body" | python3 -c '
 import sys, json
 j = json.load(sys.stdin)
+j = j.get("data", j)
 hits = [s["id"] for s in j["steps"] if s.get("spec_slug") == "record-verdict"]
 if len(hits) != 1:
     sys.stderr.write(
@@ -57,10 +103,46 @@ import json, sys
 print(json.dumps({"status": "completed",
                   "metadata": {"verdict": sys.argv[1], "receipt": sys.argv[2]}}))
 PY
-    curl -sf -o /dev/null -X PUT -H "x-boss-user: $ACTOR" \
-        -H "Content-Type: application/json" -d @/tmp/verdict.json \
-        "$JOBS_API/api/jobs/$GATE_RUN_JOB_ID/steps/$step_id"
+    rc=0
+    out=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -X PUT \
+        -H "x-boss-user: $ACTOR" -H "Content-Type: application/json" \
+        -d @/tmp/verdict.json \
+        "$JOBS_API/api/jobs/$GATE_RUN_JOB_ID/steps/$step_id") || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "gate-runner: report: PUT verdict failed (curl exit $rc)"
+        report_transient_curl "$rc" && return 75
+        return 1
+    fi
+    case "$out" in
+        2??) return 0 ;;
+        5??|000) echo "gate-runner: report: PUT verdict answered HTTP $out"; return 75 ;;
+        *) echo "gate-runner: report: PUT verdict answered HTTP $out"; return 1 ;;
+    esac
 }
+
+report() { # verdict, note
+    local attempt=0 rc delay t0=$SECONDS
+    for delay in $GATE_REPORT_BACKOFF end; do
+        attempt=$((attempt + 1))
+        rc=0
+        report_once "$1" "$2" || rc=$?
+        if [ "$rc" -eq 0 ]; then
+            echo "gate-runner: verdict $1 recorded on packet $GATE_RUN_JOB_ID (attempt $attempt, $((SECONDS - t0))s)"
+            return 0
+        fi
+        if [ "$rc" -ne 75 ]; then
+            echo "gate-runner: report attempt $attempt refused outright - not a roll, not retrying"
+            return 1
+        fi
+        if [ "$delay" = end ]; then
+            echo "gate-runner: report attempt $attempt could not reach the system of record - out of retries after $((SECONDS - t0))s"
+            return 1
+        fi
+        echo "gate-runner: report attempt $attempt could not reach the system of record - retrying in ${delay}s (a deploy rolls it for ~30-90s)"
+        sleep "$delay"
+    done
+}
+# --- report-back (end) ---
 
 # The run itself is guarded so ANY failure below still reports `lost`
 # with the reason, rather than leaving the packet to go overdue.
@@ -262,7 +344,10 @@ PY
 # it without mounting anything.
 echo "gate-runner: receipt $SUMMARY"
 
-if ! report "$VERDICT" "$SUMMARY"; then
+REPORTED=0
+if report "$VERDICT" "$SUMMARY"; then
+    REPORTED=1
+else
     # THE OLD FALLBACK CLAIMED AN ALARM THAT CANNOT ALWAYS FIRE.
     #
     # It said "packet will go overdue (the alarm still works)". That
@@ -470,4 +555,19 @@ refresh_seed || true
 
 tail -5 /gate-target/gate.log || true
 echo "gate-runner: $GATE_BRANCH@${HEAD_SHA:0:10} -> $VERDICT"
+# AN UNREPORTED VERDICT IS A FAILED RUN. This used to exit on the gate
+# verdict alone, so a green gate whose report never landed left a Job
+# reading Complete beside a packet that never closed - the exact shape
+# a reader mistakes for "nothing happened here" (2026-09-07: four such
+# Jobs, each hand-re-gated). The Job status is a claim about the RUN,
+# and a run that could not record its result did not finish its job.
+# Exit 75 (EX_TEMPFAIL), distinct from a red gate's 1, and one greppable
+# line carrying everything the packet should have received. `boss gate
+# --wait` already reads a failed Job with a silent packet as "read the
+# log, this is NOT a red gate" - so the verdict is not mistaken for red,
+# it is found.
+if [ "$REPORTED" != 1 ]; then
+    echo "gate-runner: UNREPORTED verdict=$VERDICT packet=$GATE_RUN_JOB_ID head=$HEAD_SHA receipt $SUMMARY"
+    exit 75
+fi
 [ "$VERDICT" = green ]

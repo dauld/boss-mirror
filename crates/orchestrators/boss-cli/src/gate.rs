@@ -1446,11 +1446,13 @@ pub(crate) fn silent_packet_verdict(job_finished: bool, job_failed: bool) -> Opt
     }
     if job_failed {
         return Some(
-            "the gate Job failed without the packet ever reporting a verdict.\n               That is NOT the same as a red gate: the run died, and the code may well have \
-             passed. The workspace was per-run and died with the pod, so the surviving copy \
-             of the receipt is the pod log — `kubectl logs job/<job>` (the `gate-runner: \
-             receipt` line), kept for a day after the Job ends. Read it rather than \
-             re-running 40 minutes of gate on the assumption this was a failure."
+            "the gate Job failed without the packet ever reporting a verdict.\n               That is NOT the same as a red gate: the run died, or it finished and could not \
+             record its verdict (exit 75 — the `gate-runner: UNREPORTED verdict=…` line), \
+             and the code may well have passed. The workspace was per-run and died with the \
+             pod, so the surviving copy of the receipt is the pod log — `kubectl logs \
+             job/<job>` (the `gate-runner: receipt` line), kept for a day after the Job \
+             ends. Read it rather than re-running 40 minutes of gate on the assumption this \
+             was a failure."
                 .to_string(),
         );
     }
@@ -1459,6 +1461,59 @@ pub(crate) fn silent_packet_verdict(job_finished: bool, job_failed: bool) -> Opt
          `kubectl logs job/<job>` (the `gate-runner: receipt` line) holds the answer; \
          the reporting call is what went missing."
             .to_string(),
+    )
+}
+
+/// The verdict recorded on THIS packet, or `None` while it is silent.
+///
+/// Refuses, by name, a body that belongs to another packet. The poller
+/// asks the SoR for one id and has always trusted whatever came back;
+/// a wrong target answers instead of erroring (CLAUDE.md §Doors), so
+/// the id is checked when the body carries one. A body with no id is
+/// read as before — absence is not evidence of a mix-up.
+///
+/// Backlog 9dd9993b: under three parallel gates a builder's console
+/// showed a neighbour's `failed` beside its own `green`. The poll was
+/// pinned to its packet the whole time (this verb creates the packet
+/// and the Job and reads both by id/name); what was missing was any
+/// mark on the verdict line saying whose it was — see [`verdict_line`].
+pub(crate) fn own_verdict(packet: &str, body: &Value) -> Result<Option<String>> {
+    if let Some(id) = body.get("id").and_then(Value::as_str)
+        && id != packet
+    {
+        bail!(
+            "asked the system of record for gate-run {} and it answered with {} — refusing \
+             to read another packet's verdict as this one's",
+            &packet[..8.min(packet.len())],
+            &id[..8.min(id.len())]
+        );
+    }
+    Ok(body
+        .get("steps")
+        .and_then(Value::as_array)
+        .and_then(|steps| {
+            steps
+                .iter()
+                .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some("record-verdict"))
+        })
+        .and_then(|s| s.get("metadata"))
+        .and_then(|m| m.get("verdict"))
+        .and_then(Value::as_str)
+        .map(str::to_string))
+}
+
+/// One verdict line, self-identifying: `boss gate: green  (packet
+/// f451af16, fix/branch)`. Two `--wait` pollers sharing a console — the
+/// normal case since gates run in parallel — must never print a line
+/// the reader has to guess the owner of.
+pub(crate) fn verdict_line(verdict: &str, packet: &str, body: &Value) -> String {
+    let branch = body
+        .pointer("/metadata/branch")
+        .and_then(Value::as_str)
+        .unwrap_or("<branch unrecorded>");
+    format!(
+        "boss gate: {verdict}  (packet {}, {branch})",
+        &packet[..8.min(packet.len())]
     )
 }
 
@@ -1551,23 +1606,17 @@ async fn wait_for_verdict(
             continue;
         };
         let job = job.get("data").unwrap_or(&job).clone();
-        let verdict = job
-            .get("steps")
-            .and_then(Value::as_array)
-            .and_then(|steps| {
-                steps
-                    .iter()
-                    .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some("record-verdict"))
-            })
-            .and_then(|s| s.get("metadata"))
-            .and_then(|m| m.get("verdict"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        if let Some(v) = verdict {
+        if let Some(v) = own_verdict(packet, &job)? {
             record_gated_head(http, packet, &job).await;
-            println!("boss gate: {v}");
+            println!("{}", verdict_line(&v, packet, &job));
             if v != "green" {
-                bail!("gate verdict: {v}");
+                bail!(
+                    "gate verdict: {v}  (packet {}, {})",
+                    &packet[..8.min(packet.len())],
+                    job.pointer("/metadata/branch")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<branch unrecorded>")
+                );
             }
             return Ok(());
         }
@@ -2688,6 +2737,97 @@ kind: Job\n\
     /// down mid-gate on 2026-08-30 while the boss Deployment rolled;
     /// the poller died with this, and the gate it was watching went
     /// green on its own (de5f22b6).
+    /// TWO GATES, ONE CONSOLE (backlog 9dd9993b). On 2026-09-08 a
+    /// builder's `boss gate <branch> --wait` console showed `boss gate:
+    /// failed` for a NEIGHBOURING gate that red-lit at the same moment
+    /// (three ran in parallel), then its own `green`. The poller was
+    /// pinned to its packet all along — the bare verdict line was what
+    /// could not be told apart. So: the verdict is read off the packet
+    /// this poller filed, a body for any other packet is refused by
+    /// name, and every verdict line carries the packet and branch.
+    #[test]
+    fn the_poller_reads_its_own_packet_while_a_neighbour_fails_first() {
+        const MINE: &str = "f451af16-0000-4000-8000-000000000001";
+        const THEIRS: &str = "6de49582-0000-4000-8000-000000000002";
+        let mine_silent = json!({
+            "id": MINE,
+            "metadata": {"branch": "fix/an-enum-field-refuses-a-value-outside-its-set"},
+            "steps": [
+                {"spec_slug": "gate", "status": "active"},
+                {"spec_slug": "record-verdict", "status": "ready", "metadata": {}},
+            ]
+        });
+        let theirs_failed = json!({
+            "id": THEIRS,
+            "metadata": {"branch": "fix/incident-post-mortem-v2"},
+            "steps": [
+                {"spec_slug": "record-verdict", "status": "completed",
+                 "metadata": {"verdict": "failed"}},
+            ]
+        });
+        // The neighbour red-lights first. Our packet is still silent, and
+        // silence is what the poller must read — never the newest verdict
+        // in the namespace.
+        assert_eq!(
+            own_verdict(MINE, &mine_silent).expect("our own body"),
+            None,
+            "a silent packet stays silent whatever a neighbour recorded"
+        );
+        let refused = own_verdict(MINE, &theirs_failed)
+            .expect_err("a body for another packet must be refused, not read");
+        let msg = format!("{refused:#}");
+        assert!(
+            msg.contains("f451af16") && msg.contains("6de49582"),
+            "the refusal names both packets: {msg}"
+        );
+        // Then ours reports.
+        let mine_green = json!({
+            "id": MINE,
+            "metadata": {"branch": "fix/an-enum-field-refuses-a-value-outside-its-set"},
+            "steps": [
+                {"spec_slug": "record-verdict", "status": "completed",
+                 "metadata": {"verdict": "green"}},
+            ]
+        });
+        assert_eq!(
+            own_verdict(MINE, &mine_green)
+                .expect("our own body")
+                .as_deref(),
+            Some("green")
+        );
+        let line = verdict_line("green", MINE, &mine_green);
+        assert!(
+            line.starts_with("boss gate: green"),
+            "the verdict leads the line: {line}"
+        );
+        assert!(
+            line.contains("packet f451af16")
+                && line.contains("fix/an-enum-field-refuses-a-value-outside-its-set"),
+            "every verdict line names its packet and branch, so two pollers sharing a \
+             console cannot be confused for each other: {line}"
+        );
+        let red = verdict_line("failed", THEIRS, &theirs_failed);
+        assert!(
+            red.contains("packet 6de49582") && red.contains("fix/incident-post-mortem-v2"),
+            "{red}"
+        );
+    }
+
+    /// A body without an id (an older API shape) is read, not refused:
+    /// the pin is against a WRONG id, and absence is not evidence.
+    #[test]
+    fn a_body_without_an_id_is_still_read() {
+        let body = json!({
+            "steps": [{"spec_slug": "record-verdict", "metadata": {"verdict": "lost"}}]
+        });
+        assert_eq!(
+            own_verdict("f451af16-0000-4000-8000-000000000001", &body)
+                .expect("no id, no refusal")
+                .as_deref(),
+            Some("lost")
+        );
+    }
+
     #[test]
     fn a_restart_looks_transient() {
         for msg in [

@@ -62,6 +62,12 @@ spec:
       template:
         spec:
           restartPolicy: Never
+          # The dump image comes from the forge registry, like every
+          # other postgres in the estate since #265/#266 (the mirror
+          # verb put postgres:16-alpine there on 2026-09-08, ops-request
+          # 442a6d3f); the same namespace Secret deploy/boss pulls with.
+          imagePullSecrets:
+            - {name: forgejo-registry}
           # The dump runs as an initContainer so the two legs are
           # ORDERED. Sibling containers in a Pod start together, so a
           # second container could upload while pg_dump was still
@@ -69,7 +75,7 @@ spec:
           # the dump finished first.
           initContainers:
             - name: dump
-              image: postgres:16-alpine
+              image: 10.20.0.15:3000/david/postgres:16-alpine
               command: ["/bin/sh", "-c"]
               args:
                 - |
