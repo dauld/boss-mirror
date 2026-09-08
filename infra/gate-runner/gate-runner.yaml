@@ -148,7 +148,12 @@ spec:
         # beside it, and the kubelet tears it down when the gate exits.
         # Per-pod, so every concurrent gate gets its own database.
         - name: postgres
-          image: postgres:16
+          # From the forge, not docker.io — the last public pull on a
+          # gate's path. The pod-level imagePullSecrets (forgejo-registry)
+          # applies to every container in the pod, initContainers
+          # included, so this pulls the way the gate container's boss-ci
+          # does. Pinned by infra/lint/the-build-pulls-only-mirrored-bases.sh.
+          image: 10.20.0.15:3000/david/postgres:16
           restartPolicy: Always
           securityContext:
             allowPrivilegeEscalation: false

@@ -425,7 +425,19 @@ jobs:
       image: 10.20.0.15:3000/david/boss-ci:${{ github.sha }}
     services:
       postgres:
-        image: postgres:16
+        # FROM THE FORGE, like every image above. This was the last
+        # public pull on a train's hot path: the runner resolved
+        # docker.io for it on every run, through the resolver whose
+        # dropped lookups redded #236 and #250 with every car clean.
+        # The copy is put there by infra/forge/mirror-base-images.sh
+        # (postgres:16 is on its IMAGES list), and the lint that pins
+        # the container: images above covers services: too. No
+        # credentials: block, because none of the container: images
+        # carry one either — the forge's david/* packages pull
+        # anonymously (verified 2026-09-08: an unauthenticated
+        # /v2/token fetches this manifest with 200), and the runner
+        # pulls a service image exactly as it pulls a job's container.
+        image: 10.20.0.15:3000/david/postgres:16
         env:
           POSTGRES_USER: boss
           POSTGRES_PASSWORD: boss

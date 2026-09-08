@@ -63,9 +63,21 @@ spec:
       # a plain nodeSelector is enough.
       nodeSelector:
         node-role.kubernetes.io/control-plane: ""
+      imagePullSecrets:
+        - {name: forgejo-registry}
       containers:
         - name: postgres
-          image: postgres:16
+          # From the forge registry, not docker.io. The LAN resolver
+          # flakes (2026-09-07), and #252/#256 already moved CI's base
+          # pulls onto the forge for that reason (#258 put postgres:16
+          # on the mirror list). A database that cannot re-pull its
+          # image during a flake cannot restart. The forge is already
+          # a dependency of the boss image below, so this removes a
+          # dependency rather than adding one. Needs the
+          # imagePullSecrets above, the same one deploy/boss uses — a
+          # private image without it is ImagePullBackOff, which is a
+          # dead database.
+          image: 10.20.0.15:3000/david/postgres:16
           # ~24 API services each hold an sqlx pool (default max 10), which
           # blows past PG's default max_connections=100 and makes services
           # fail-closed mid-startup. 400 matches infra/deploy-services.sh.
