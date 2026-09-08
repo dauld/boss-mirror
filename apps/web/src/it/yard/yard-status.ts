@@ -44,6 +44,10 @@ export type TrainStatus = Readonly<{
   ci_result: string | null;
   pr_url: string | null;
   car_count: number;
+  /** When the train boarded (RFC3339, the collect step's stamp). Null
+   *  on a server that does not send it; the floor then reads the
+   *  boarding minute off the title. */
+  boarded_at: string | null;
 }>;
 
 export type DockCar = Readonly<{
@@ -89,6 +93,10 @@ export type StrandedGreen = Readonly<{ branch: string }>;
 export type ActiveGate = Readonly<{
   branch: string;
   packet_id: string;
+  /** An RFC3339 instant when the packet carries `opened_at`, else the
+   *  bare opened_on date. Readers treat it as an instant only when it
+   *  contains a `T` and parses — a bare date parses as midnight and
+   *  would draw hours of elapsed that never happened. */
   since: string;
   /** The server's own reading that this run has outlived the runner's
    *  usual duration — a Job that died without reporting looks exactly
@@ -205,6 +213,7 @@ function parseTrain(raw: unknown): TrainStatus {
     ci_result: typeof o.ci_result === 'string' ? o.ci_result : null,
     pr_url: typeof o.pr_url === 'string' ? o.pr_url : null,
     car_count: Number(o.car_count ?? 0),
+    boarded_at: typeof o.boarded_at === 'string' ? o.boarded_at : null,
   };
 }
 

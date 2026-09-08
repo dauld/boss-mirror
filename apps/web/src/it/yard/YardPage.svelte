@@ -19,6 +19,13 @@
   // `job:update`, which an audit-readonly guest does not hold: a guest
   // who reaches the endpoint by hand is refused there, and the page
   // shows that refusal in the server's own words.
+  //
+  // Two reads come from OUTSIDE the yard's read models (Car 2a): the
+  // converge ops-request packets, which drive the deploy-runner shed,
+  // and this browser's own read of /api/jobs/health, which drives the
+  // cluster tower — the system of record observed from outside, the
+  // reading the 2026-09-05 outage wanted a page to show. Both are
+  // "no reading" until the first poll, never idle or healthy by default.
   import { onMount } from 'svelte';
   import {
     CANCEL_ROLE,
@@ -33,6 +40,7 @@
     type CancelRequest,
     type Eta,
     type EtaPhase,
+    type JobLite,
     type TrainRow,
     type YardPartition,
     type YardState,
@@ -54,15 +62,31 @@
   import {
     journeyStops,
     parseSelection,
-    prNumber,
     scene as sceneOf,
     sinceText,
     STAGES,
+    type Feeds,
     type Scene,
   } from './yard-floor';
+  import {
+    CONVERGE_USUAL_MINUTES,
+    clusterLabel,
+    clusterReading,
+    fetchHealth,
+    fetchOpsRequests,
+    runnerLabel,
+    runnerMachine,
+    runnerPacketId,
+    type ClusterMachine,
+  } from './yard-machines';
+  import { yardAlerts, type Alert } from './yard-alerts';
+  import { yardSignals } from './yard-signals';
+  import { production as productionOf } from './yard-production';
   import YardMap from './YardMap.svelte';
   import DepartureBoard from './DepartureBoard.svelte';
   import ArrivalReport from './ArrivalReport.svelte';
+  import ProductionPanel from './ProductionPanel.svelte';
+  import SignalsPanel from './SignalsPanel.svelte';
   import type { Remote } from '../../data/remote';
   import PacketCard from '@boss/web-kit/ui/PacketCard.svelte';
   import PacketModal, { type PacketJob } from '@boss/web-kit/ui/PacketModal.svelte';
@@ -91,8 +115,16 @@
   const gatesFree = $derived(Math.max(gateCapacity - gatesInUse, 0));
   const waitingToGate = $derived(yard ? yard.approach.filter(a => a.state === 'publishing').length : 0);
 
+  // THE TWO OUTSIDE READS. The converge ops-requests (null before the
+  // first read, or when the read failed — the shed then says "no
+  // reading") and the tower's reading, which keeps its `since` across
+  // polls while its state holds (yard-machines.ts).
+  let opsRequests = $state<readonly JobLite[] | null>(null);
+  let cluster = $state<ClusterMachine>({ kind: 'unknown' });
+  const feeds = $derived<Feeds>({ runner: runnerMachine(opsRequests, nowMs), cluster });
+
   // THE FLOOR: the pure scene both the map and the board draw.
-  const floor = $derived<Scene | null>(yard ? sceneOf(yard, statusData, nowMs) : null);
+  const floor = $derived<Scene | null>(yard ? sceneOf(yard, statusData, nowMs, feeds) : null);
   const wagonById = $derived(new Map((floor?.wagons ?? []).map(w => [w.id, w])));
   const whereById = $derived(new Map((floor?.boardRows ?? []).map(r => [r.id, r.where])));
   const locoById = $derived(new Map((floor?.locos ?? []).map(l => [l.id, l])));
@@ -125,29 +157,25 @@
     return row ? convergingFor(row) : null;
   }
 
-  // THE ALERTS STRIP: the trouble the page already knows — a train the
-  // conductor recorded a block or the board a trouble badge for, and a
-  // silent conductor. Each is a button that selects its subject.
-  type Alert = Readonly<{ key: string; sev: 'err' | 'warn'; text: string; since: string | null }>;
-  const trainName = (t: TrainRow): string => {
-    const n = prNumber(t.prUrl);
-    return n !== null ? `#${n}` : t.title;
-  };
-  const alerts = $derived.by((): readonly Alert[] => {
-    if (!yard) return [];
-    const trains = yard.inFlight.flatMap((t): Alert[] => {
-      const st = serverTrainById.get(t.id) ?? null;
-      const why = blockLabel(st?.block ?? null) ?? (t.trouble ? troubleLabel(t.trouble) : null);
-      if (why === null) return [];
-      const b = st?.block ?? null;
-      const since = b && (b.kind === 'deploy-blocked' || b.kind === 'stalled') ? b.since : null;
-      return [{ key: `train:${t.id}`, sev: 'err', text: `${trainName(t)} · ${why}`, since }];
-    });
-    const silent: Alert[] = conductor?.silent
-      ? [{ key: 'conductor', sev: 'err', text: `conductor ${liveness.text}`, since: conductor.last_seen }]
-      : [];
-    return [...trains, ...silent];
+  // THE ALERTS STRIP: what is wrong on the floor right now, derived
+  // from the scene (yard-alerts.ts) — each a button to its subject.
+  const alerts = $derived<readonly Alert[]>(floor ? yardAlerts(floor, statusData, nowMs) : []);
+
+  // THE LOWER DECK: what the floor produced today, and what fired what,
+  // both read off the packets the page already holds plus the
+  // ops-requests it now fetches.
+  const signalRows = $derived(yard ? yardSignals(yard.packets.trains, yard.packets.gateRuns, opsRequests ?? []) : []);
+
+  // The last merged train — an in-flight train past the merge (the
+  // trains are served newest first), else the newest arrival — so the
+  // tower can say whether the cluster is on its merge yet. A merge_ref
+  // is a prefix of the full sha the health endpoint reports.
+  const lastMerged = $derived.by((): Readonly<{ ref: string; title: string }> | null => {
+    if (!yard) return null;
+    const t = yard.inFlight.find(x => x.mergeRef) ?? yard.arrivals.find(x => x.mergeRef) ?? null;
+    return t && t.mergeRef ? { ref: t.mergeRef, title: t.title } : null;
   });
+  const shasMatch = (a: string, b: string): boolean => a.startsWith(b) || b.startsWith(a);
 
   // THE SELECTION — one string the map, the board and the alerts all
   // speak. The track by default: the thing most often worth watching.
@@ -209,7 +237,8 @@
   function select(key: string): void {
     selected = key;
     const s = parseSelection(key);
-    const id = s.kind === 'car' || s.kind === 'train' ? s.id : null;
+    const id =
+      s.kind === 'car' || s.kind === 'train' ? s.id : s.kind === 'runner' ? runnerPacketId(feeds.runner) : null;
     if (id !== null && isPacket(id)) {
       if (entityJobFor !== id) entityJob = null;
       void loadEntityJob(id);
@@ -339,14 +368,25 @@
   onMount(() => {
     let cancelled = false;
     async function tick() {
-      const [y, s] = await Promise.all([fetchYard(), fetchYardStatus()]);
+      const [y, s, ops, health] = await Promise.all([
+        fetchYard(),
+        fetchYardStatus(),
+        fetchOpsRequests(),
+        fetchHealth(),
+      ]);
       if (cancelled) return;
       if (y) yard = y;
       status = s;
-      nowMs = Date.now();
+      opsRequests = ops;
+      const now = Date.now();
+      cluster = clusterReading(cluster, health, now);
+      nowMs = now;
       loading = false;
-      // The selected packet's steps move too.
-      if (entityJobFor !== null) void loadEntityJob(entityJobFor);
+      // The selected packet's steps move too; the runner's packet may
+      // be a newer one than the panel was opened on.
+      const runnerId = sel.kind === 'runner' ? runnerPacketId(feeds.runner) : null;
+      if (runnerId !== null && runnerId !== entityJobFor) void loadEntityJob(runnerId);
+      else if (entityJobFor !== null) void loadEntityJob(entityJobFor);
     }
     tick();
     const t = setInterval(tick, 10_000);
@@ -448,12 +488,13 @@
   {:else if !yard || !floor}
     <div class="yard-empty">The yard is unreachable right now.</div>
   {:else}
+    {@const prod = productionOf(yard, statusData, nowMs)}
     <!-- THE ALERTS STRIP: what is wrong right now, each a button to
          its subject. Quiet when every machine is working or idle by
          design. -->
     <div class="yard-alerts" aria-live="polite">
-      {#each alerts as a (a.key)}
-        <button type="button" class="yard-alert {a.sev}" onclick={() => select(a.key)}>
+      {#each alerts as a (a.id)}
+        <button type="button" class="yard-alert {a.sev}" onclick={() => select(a.subject)}>
           <span class="yard-lamp-dot {a.sev}"></span>
           <span>{a.text}</span>
           {#if a.since}<time class="yard-mono">since {clockOf(a.since)}</time>{/if}
@@ -844,14 +885,115 @@
             {/if}
           </div>
         {:else if sel.kind === 'runner'}
+          {@const r = floor.machines.runner}
+          {@const rid = runnerPacketId(r)}
           <h2 class="yard-panel-h">Entity · deploy runner</h2>
-          <div class="yard-entity-title">no reading</div>
-          <div class="yard-entity-sub">The shed will read the latest converge ops-request — what it is building, rolling, or holding — once the page fetches it. Until then it is dark, not idle.</div>
+          <!-- THE SHED reads the newest converge ops-request: the packet
+               the dispatcher files when a train merges and the forge's
+               ops-runner answers by starting cluster-deploy-runner. The
+               packet proves the unit was STARTED; whether the cluster
+               moved is the tower's reading, beside it. -->
+          <div class="yard-entity-title" class:is-silent={r.kind === 'failed'}>{runnerLabel(r, nowMs)}</div>
+          <div class="yard-entity-sub">cluster-deploy-runner on the forge — started by the ops-request the dispatcher files when a train merges (rule converge-on-merge); builds the image, pushes it, rolls the cluster, waits for Ready</div>
+          <dl class="yard-kv">
+            {#if r.kind === 'requested'}
+              <dt>requested</dt>
+              <dd>{r.at ? `${clockOf(r.at)} · ${sinceText(r.at, nowMs)} ago` : '—'} · waiting for the ops-runner on forge (polls every minute)</dd>
+            {:else if r.kind === 'running'}
+              <dt>started</dt>
+              <dd>{r.since ? `${clockOf(r.since)} · ${sinceText(r.since, nowMs)} ago` : '—'}{r.host ? ` on ${r.host}` : ''}</dd>
+            {:else if r.kind === 'failed'}
+              <dt>failed</dt>
+              <dd>{r.at ? clockOf(r.at) : '—'} · <span class="yard-trouble">{r.reason}</span></dd>
+            {:else if r.kind === 'idle' && r.last}
+              <dt>last converge</dt>
+              <dd>{clockOf(r.last.at)} · {sinceText(r.last.at, nowMs)} ago{r.last.host ? ` on ${r.last.host}` : ''}</dd>
+            {/if}
+            <dt>cluster</dt>
+            <dd>{clusterLabel(floor.machines.cluster)}</dd>
+            <dt>usual</dt>
+            <dd class="yard-since-muted">~{CONVERGE_USUAL_MINUTES} min build → push → roll → Ready — a drawing scale, not a reading</dd>
+          </dl>
+          {#if rid !== null}
+            <div class="yard-label">The packet's steps</div>
+            <div class="yard-steps">
+              {#each entityStops as s, i (i)}
+                <div class="yard-step">
+                  <span class="yard-lamp-dot {s.lamp}"></span>
+                  <span>{s.what}</span>
+                  <span class="yard-when yard-mono">{s.when ? clockOf(s.when) : ''}{s.note ? ` · ${s.note}` : ''}</span>
+                </div>
+              {/each}
+              {#if entityJobError}
+                <span class="yard-empty">{entityJobError}</span>
+              {:else if entityJob === null}
+                <span class="yard-empty">reading the packet…</span>
+              {:else if entityStops.length === 0}
+                <span class="yard-empty">no steps on record</span>
+              {/if}
+            </div>
+            <div class="yard-verbs">
+              <button type="button" onclick={() => openPacket(rid)}>open packet</button>
+              <button type="button" onclick={() => navigate(entityHref('job', rid))}>open job page</button>
+            </div>
+          {:else if r.kind === 'unknown'}
+            <div class="yard-empty">No reading — the page has not read the converge ops-requests yet, or the read failed.</div>
+          {:else}
+            <div class="yard-empty">No converge packet in the window.</div>
+          {/if}
         {:else if sel.kind === 'cluster'}
+          {@const c = floor.machines.cluster}
           <h2 class="yard-panel-h">Entity · cluster</h2>
-          <div class="yard-entity-title">no reading</div>
-          <div class="yard-entity-sub">The tower's lamp will be the system of record observed from outside — green when it answers, red when it does not — once the page reads it. Until then the lamp is off.</div>
+          <!-- THE TOWER: this browser's own read of /api/jobs/health —
+               the build the running jobs API reports, the same field
+               the conductor verifies convergence against. Dark when it
+               does not answer: the system of record observed from
+               outside, not from inside. -->
+          <div class="yard-entity-title" class:is-silent={c.kind === 'dark'}>{clusterLabel(c)}</div>
+          <div class="yard-entity-sub">the system of record observed from outside — what this browser gets from /api/jobs/health: the build the running jobs API was made from</div>
+          <dl class="yard-kv">
+            <dt>reachable</dt>
+            <dd>
+              {#if c.kind === 'ready'}yes{:else if c.kind === 'dark'}<span class="yard-trouble">no — {c.error}</span>{:else}not read yet{/if}
+            </dd>
+            {#if c.kind === 'ready'}
+              <dt>build</dt>
+              <dd class="yard-mono">{c.commit ?? 'not reported'}</dd>
+              <dt>last merge</dt>
+              <dd>
+                {#if !lastMerged}
+                  no merged train in the window
+                {:else if c.commit !== null && shasMatch(c.commit, lastMerged.ref)}
+                  <span class="yard-mono">{lastMerged.ref.slice(0, 7)}</span> ({lastMerged.title}) — the cluster is on it
+                {:else}
+                  <span class="yard-mono">{lastMerged.ref.slice(0, 7)}</span> ({lastMerged.title}) — <span class="yard-trouble">the cluster is not on it</span>
+                {/if}
+              </dd>
+            {/if}
+            {#if c.kind !== 'unknown'}
+              <dt>since</dt>
+              <dd>{clockOf(c.since)} · {sinceText(c.since, nowMs)}</dd>
+            {/if}
+          </dl>
         {/if}
+      </div>
+    </div>
+
+    <!-- THE LOWER DECK: what the floor produced today, and what fired
+         what — both from the packets the page already holds. -->
+    <div class="yard-deck yard-deck-lower">
+      <div class="yard-panel">
+        <ProductionPanel
+          production={prod}
+          {alerts}
+          dockHold={floor.machines.dock.parked > 0 && floor.machines.dock.held
+            ? { text: floor.machines.dock.held, since: statusData?.boarding.last_board_at ?? null }
+            : null}
+          {nowMs}
+          onselect={select} />
+      </div>
+      <div class="yard-panel">
+        <SignalsPanel signals={signalRows} onopen={openPacket} />
       </div>
     </div>
 
@@ -1344,6 +1486,8 @@
     border-top: 1px solid var(--hairline, #2A3138); margin-top: 28px; padding-top: 12px; }
   .yard-flow em { color: var(--signal, #5FD4A8); font-style: normal; }
 
+  .yard-deck-lower { grid-template-columns: 1fr 1fr; }
+  .yard-since-muted { color: var(--static, #7a838c); }
   @media (max-width: 1000px) { .yard-deck { grid-template-columns: 1fr; } }
   @media (prefers-reduced-motion: reduce) {
     .yard-dot, .yard-lamp-dot { animation: none; }

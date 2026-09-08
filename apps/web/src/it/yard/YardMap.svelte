@@ -12,7 +12,8 @@
   // Space on) any of them selects it, and the page's entity panel shows
   // its facts and the verbs that apply. The map draws; it never decides.
   import { fade } from 'svelte/transition';
-  import { STAGES, wagonTag, type Bay, type Loco, type Scene, type Wagon } from './yard-floor';
+  import { ARRIVALS_DRAWN, STAGES, drawnWagons, type Bay, type Loco, type Scene, type Wagon } from './yard-floor';
+  import { clusterLabel, runnerLabel, runnerProgress } from './yard-machines';
 
   type Props = Readonly<{
     scene: Scene;
@@ -34,10 +35,24 @@
   const bayY = (i: number): number => 70 + i * BAY_H;
   const nBays = $derived(scene.bays.length);
   const mainY = $derived(Math.max(250, 70 + nBays * BAY_H + 24));
-  const landedCount = $derived(scene.wagons.filter(w => w.station === 'arrivals').length);
-  // The arrivals stack starts under its sign and grows the map downward.
+  // The arrivals stack starts under its sign and grows the map downward
+  // — to the newest ARRIVALS_DRAWN landed wagons; the rest are one plate.
   const ARRIVALS_Y = 66;
-  const height = $derived(Math.max(mainY + 150, mainY + ARRIVALS_Y + Math.ceil(landedCount / 2) * 40 + 10));
+  const drawn = $derived(drawnWagons(scene.wagons));
+  const stackRows = $derived(Math.ceil(Math.min(drawn.drawn.filter(w => w.station === 'arrivals').length, ARRIVALS_DRAWN) / 2));
+  const plateY = $derived(mainY + ARRIVALS_Y + stackRows * 40 + 2);
+  const height = $derived(Math.max(mainY + 150, plateY + (drawn.hidden > 0 ? 18 : 8)));
+  // The machines the page feeds from outside the yard status, and the
+  // clock their elapsed readings run on (the scene's — the server's
+  // when the status served).
+  const nowMs = $derived(Date.parse(scene.now));
+  const runner = $derived(scene.machines.runner);
+  const cluster = $derived(scene.machines.cluster);
+  const runnerText = $derived(runnerLabel(runner, nowMs));
+  const runnerBar = $derived(runnerProgress(runner, nowMs));
+  /** The shed is 130 wide; a long reason is cut on the map and whole in
+   *  the aria-label and the entity panel. */
+  const runnerShort = $derived(runnerText.length > 26 ? `${runnerText.slice(0, 25)}…` : runnerText);
   const limboY = $derived((nBays > 0 ? bayY(nBays - 1) : 70) + 48);
   const locoById = $derived(new Map(scene.locos.map(l => [l.id, l])));
 
@@ -71,7 +86,7 @@
   function bayLabel(b: Bay): string {
     if (!b.busy || b.branch === null) return `bay ${b.index + 1} · idle`;
     const tail = b.stale ? `${b.elapsed ?? '—'} · STALE` : (b.elapsed ?? '—');
-    return `bay ${b.index + 1} · ${wagonTag(b.branch)} · ${tail}`;
+    return `bay ${b.index + 1} · ${b.tag ?? b.branch} · ${tail}`;
   }
 
   // The conductor's clock shows the server's clock, in UTC.
@@ -165,43 +180,55 @@
       {/each}
     </g>
 
-    <!-- the deploy-runner shed: dark until the page reads the converge
-         ops-request; it says so rather than looking idle -->
+    <!-- the deploy-runner shed: read off the newest converge ops-request
+         (yard-machines.ts). It smokes while the converge runs; dark and
+         "no reading" until the page has read the packets -->
     <g
       class="machine"
       class:selected={selected === 'runner'}
       role="button"
       tabindex="0"
-      aria-label="deploy runner"
+      aria-label="deploy runner · {runnerText}"
       onclick={pick('runner')}
       onkeydown={pickKey('runner')}>
-      <rect x="790" y="100" width="130" height="46" class="shed" />
+      <rect
+        x="790"
+        y="100"
+        width="130"
+        height="46"
+        class="shed"
+        class:busy={runner.kind === 'running'}
+        class:warn={runner.kind === 'requested'}
+        class:err={runner.kind === 'failed'} />
       <rect x="800" y="80" width="10" height="22" class="shed" />
-      <circle cx="805" cy="76" r="5" class="smoke" />
-      <circle cx="805" cy="76" r="5" class="smoke" />
-      <circle cx="805" cy="76" r="5" class="smoke" />
+      <circle cx="805" cy="76" r="5" class="smoke" class:on={runner.kind === 'running'} />
+      <circle cx="805" cy="76" r="5" class="smoke" class:on={runner.kind === 'running'} />
+      <circle cx="805" cy="76" r="5" class="smoke" class:on={runner.kind === 'running'} />
       <text x="798" y="116" class="big">deploy runner</text>
-      {#if scene.machines.runner.kind === 'unknown'}
-        <text x="798" y="130" class="tiny">no reading</text>
-      {/if}
+      <text x="798" y="130" class="tiny" class:err={runner.kind === 'failed'} class:warn={runner.kind === 'requested'}>{runnerShort}</text>
       <rect x="798" y="136" width="112" height="3" class="barbg" />
+      <rect x="798" y="136" width={Math.round(112 * runnerBar)} height="3" class="barfill" />
     </g>
 
     <!-- the cluster tower: its lamp is the system of record observed
-         from outside; off until the page reads it -->
+         from outside — this browser's read of /api/jobs/health; off
+         until the page has read it, red when it does not answer -->
     <g
       class="machine"
       class:selected={selected === 'cluster'}
       role="button"
       tabindex="0"
-      aria-label="cluster"
+      aria-label="cluster · {clusterLabel(cluster)}"
       onclick={pick('cluster')}
       onkeydown={pickKey('cluster')}>
-      <rect x="950" y="70" width="60" height="76" class="shed" />
-      <circle cx="980" cy="92" r="9" class="tower-lamp" />
+      <rect x="950" y="70" width="60" height="76" class="shed" class:err={cluster.kind === 'dark'} />
+      <circle cx="980" cy="92" r="9" class="tower-lamp" class:ok={cluster.kind === 'ready'} class:err={cluster.kind === 'dark'} />
       <text x="980" y="118" text-anchor="middle" class="big">cluster</text>
-      {#if scene.machines.cluster.kind === 'unknown'}
-        <text x="980" y="134" text-anchor="middle" class="tiny">no reading</text>
+      <!-- two short lines fit the tower: the state, then the build -->
+      <text x="980" y="132" text-anchor="middle" class="tiny" class:err={cluster.kind === 'dark'}
+        >{cluster.kind === 'ready' ? 'ready' : clusterLabel(cluster)}</text>
+      {#if cluster.kind === 'ready' && cluster.commit !== null}
+        <text x="980" y="143" text-anchor="middle" class="tiny">{cluster.commit.slice(0, 7)}</text>
       {/if}
     </g>
 
@@ -274,12 +301,17 @@
       <rect x="1062" y={mainY - 50} width={VIEW_W - 1070} height={height - mainY + 40} class="hit" />
       <text x="1066" y={mainY + 32}>Arrivals</text>
       <text x="1066" y={mainY + 44} class="tiny">{scene.machines.arrivals.label}</text>
+      {#if drawn.hidden > 0}
+        <!-- the stack is capped; the departure board lists every landed car -->
+        <rect x="1080" y={plateY - 2} width="144" height="14" class="plate" />
+        <text x="1152" y={plateY + 8} text-anchor="middle" class="tiny">+{drawn.hidden} more landed · see the board</text>
+      {/if}
     </g>
 
     <!-- tokens: keyed by id, moved by transform, so a station change
          slides the same node -->
     <g class="tokens">
-      {#each scene.wagons as w (w.id)}
+      {#each drawn.drawn as w (w.id)}
         {@const [x, y] = wagonXY(w)}
         <g
           class="token wagon {w.tone}"
@@ -377,8 +409,15 @@
   .sig-lamp.err { fill: var(--err, #e2685c); animation: blink 1s steps(2) infinite; }
   .gear { transform-origin: center; transform-box: fill-box; fill: var(--static, #7a838c); font-size: 14px; }
   .gear.spin { animation: spin 2.4s linear infinite; fill: var(--signal, #5fd4a8); }
-  .smoke { fill: var(--static, #7a838c); opacity: 0; }
+  .smoke { fill: var(--static, #7a838c); opacity: 0; transform-box: fill-box; transform-origin: center; }
+  .smoke.on { animation: puff 2.2s ease-out infinite; }
+  .smoke.on:nth-of-type(2) { animation-delay: 0.7s; }
+  .smoke.on:nth-of-type(3) { animation-delay: 1.4s; }
   .tower-lamp { fill: var(--border-strong, #3a434d); }
+  .tower-lamp.ok { fill: var(--ok, #4fb98a); filter: drop-shadow(0 0 5px var(--ok, #4fb98a)); }
+  .tower-lamp.err { fill: var(--err, #e2685c); filter: drop-shadow(0 0 6px var(--err, #e2685c)); animation: blink 1s steps(2) infinite; }
+  .plate { fill: var(--ink, #12161c); stroke: var(--hairline, #2a3138); }
+  .yard text.warn { fill: var(--warn, #d9a441); }
   .hand { stroke: var(--fog, #e8ecef); stroke-width: 2; stroke-linecap: round; }
   .hand.min { stroke: var(--signal, #5fd4a8); }
   /* The small lamps: the conductor's centre dot wears its liveness. */
@@ -417,6 +456,10 @@
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
   @keyframes blink { 50% { opacity: 0.25; } }
   @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes puff {
+    0% { opacity: 0.5; transform: translate(0, 0) scale(0.6); }
+    100% { opacity: 0; transform: translate(6px, -28px) scale(1.6); }
+  }
 
   /* A viewer who asked for less motion keeps the layout and the lamps'
      colours; the loops and the slide are dropped. */

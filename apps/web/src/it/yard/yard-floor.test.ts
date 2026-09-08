@@ -1,12 +1,15 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  ARRIVALS_DRAWN,
   STAGES,
   boardedAtFromTitle,
+  drawnWagons,
   journeyStops,
   parseSelection,
   prNumber,
   scene,
   sinceText,
+  uniqueTags,
   wagonTag,
 } from './yard-floor';
 import type { ApproachRow, CarRow, TrainRow, YardState } from './yard';
@@ -30,6 +33,7 @@ const yardOf = (over: Partial<YardState> = {}): YardState => ({
   awaitingProof: [],
   approach: [],
   cars: [],
+  packets: { trains: [], gateRuns: [] },
   ...over,
 });
 
@@ -154,6 +158,39 @@ describe('wagonTag — the short name painted on a wagon', () => {
   });
 });
 
+describe('uniqueTags — one nameplate per branch on the floor', () => {
+  const says = 'feat/the-conductor-says-why-it-is-not-boarding';
+  const honours = 'feat/the-conductor-honours-a-cancel-request';
+
+  test('two branches that share a base part on their second word, both renamed, deterministic in any order', () => {
+    expect(wagonTag(says)).toBe(wagonTag(honours));
+    const t = uniqueTags([says, honours]);
+    expect(t.get(says)).toBe('conduc-says');
+    expect(t.get(honours)).toBe('con-honours');
+    expect(uniqueTags([honours, says])).toEqual(t);
+    for (const tag of t.values()) expect(tag.length).toBeLessThanOrEqual(11);
+  });
+
+  test('an uncontested base keeps its name, and a replacement never takes one', () => {
+    const t = uniqueTags([says, honours, 'feat/conduc-says-x', 'fix/a-day-of-jobs-lists-newest-first']);
+    expect(t.get('fix/a-day-of-jobs-lists-newest-first')).toBe('day-jobs');
+    expect(t.get('feat/conduc-says-x')).toBe('conduc-says');
+    expect(t.get(says)).toBe('conduct-why');
+    expect(new Set(t.values()).size).toBe(4);
+  });
+
+  test('the floor paints the unique names on the wagons and the bay labels', () => {
+    const s = scene(
+      yardOf({ dock: [car('c1', says)], cars: [car('c1', says), car('c2', honours)] }),
+      statusOf({ gates: { capacity: 3, active: [gate(honours, 'g1')] } }),
+      NOW,
+    );
+    expect(wagon(s, 'c1').tag).toBe('conduc-says');
+    expect(wagon(s, 'c2').tag).toBe('con-honours');
+    expect(s.bays[0]?.tag).toBe('con-honours');
+  });
+});
+
 describe('prNumber + boardedAtFromTitle', () => {
   test('reads the PR number off the forge URL, either spelling', () => {
     expect(prNumber('http://10.20.0.15:3000/david/boss/pulls/259')).toBe(259);
@@ -201,6 +238,17 @@ describe('the gate bays', () => {
     const s = scene(yardOf(), statusOf({ gates: { capacity: 3, active: [gate('feat/y', 'g9')] } }), NOW);
     expect(wagon(s, 'g9').station).toBe('gate');
     expect(wagon(s, 'g9').tag).toBe('y');
+  });
+
+  test("a gate's since as a bare date draws no elapsed and no progress; as an instant it draws both", () => {
+    const dated = scene(yardOf(), statusOf({ gates: { capacity: 3, active: [{ ...gate('feat/y', 'g9'), since: '2026-09-07' }] } }), NOW);
+    expect(dated.bays[0]).toMatchObject({ elapsed: 'Sep 7, 2026', progress: 0 });
+    expect(wagon(dated, 'g9').status).toBe('gating · Sep 7, 2026');
+    const timed = scene(yardOf(), statusOf({ gates: { capacity: 3, active: [{ ...gate('feat/y', 'g9'), since: '2026-09-07T23:14:00Z' }] } }), NOW);
+    expect(timed.bays[0]).toMatchObject({ elapsed: '6m' });
+    expect(timed.bays[0]?.progress).toBeCloseTo(6 / 12, 5);
+    // Past the usual it is full, not over: the bar is a drawing scale.
+    expect(scene(yardOf(), statusOf({ gates: { capacity: 3, active: [gate('feat/y', 'g9')] } }), NOW).bays[0]?.progress).toBe(1);
   });
 
   test('a stale gate warns — a dead Job looks like a slow one from here, and the bay says so', () => {
@@ -372,7 +420,7 @@ describe('the track — wagons behind a locomotive', () => {
       }),
       statusOf({
         trains: [
-          { id: 't1', title: 'PR train 2026-09-07 23:37', phase: 'awaiting-ci', at_step: 'CI', block: { kind: 'ci-red', checks: 'clippy' }, ci_result: 'failing', pr_url: null, car_count: 1 },
+          { id: 't1', title: 'PR train 2026-09-07 23:37', phase: 'awaiting-ci', at_step: 'CI', block: { kind: 'ci-red', checks: 'clippy' }, ci_result: 'failing', pr_url: null, car_count: 1, boarded_at: null },
         ],
       }),
       NOW,
@@ -391,8 +439,16 @@ describe('the track — wagons behind a locomotive', () => {
     expect(s.boardRows[0]?.where).toBe('Track · PR train 2026-09-07 23:37 at PR');
   });
 
-  test("a car aboard is 'since' the conductor's boarding minute, read off the train title", () => {
+  test("a car aboard is 'since' the server's boarded_at, else the conductor's boarding minute read off the train title", () => {
     expect(wagon(aboard('BOARDED'), 'c1').since).toBe('2026-09-07T23:37:00.000Z');
+    const served = scene(
+      yardOf({ inFlight: [trainRow('t1', 'BOARDED', { cars: [car('c1', 'fix/a')] })] }),
+      statusOf({
+        trains: [{ id: 't1', title: 'PR train 2026-09-07 23:37', phase: 'awaiting-ci', at_step: 'ci', block: null, ci_result: null, pr_url: null, car_count: 1, boarded_at: '2026-09-07T23:37:12Z' }],
+      }),
+      NOW,
+    );
+    expect(wagon(served, 'c1').since).toBe('2026-09-07T23:37:12Z');
   });
 });
 
@@ -456,6 +512,23 @@ describe('the arrivals yard', () => {
     expect(s.machines.arrivals.label).toBe('1 landed · 24h');
   });
 
+  test('the map draws the newest few landed wagons and counts the rest; the board keeps them all', () => {
+    const arrivals = Array.from({ length: ARRIVALS_DRAWN + 5 }, (_, i) =>
+      landed(`t${i}`, new Date(Date.parse('2026-09-07T23:00:00Z') - i * 60_000).toISOString()),
+    );
+    const s = scene(yardOf({ arrivals }), statusOf(), NOW);
+    expect(s.wagons.filter(w => w.station === 'arrivals')).toHaveLength(ARRIVALS_DRAWN + 5);
+    const { drawn, hidden } = drawnWagons(s.wagons);
+    expect(drawn.filter(w => w.station === 'arrivals').map(w => w.id)).toEqual(
+      Array.from({ length: ARRIVALS_DRAWN }, (_, i) => `t${i}-c`),
+    );
+    expect(hidden).toBe(5);
+    expect(s.boardRows.filter(r => r.landed)).toHaveLength(ARRIVALS_DRAWN + 5);
+    // Nothing in flight is ever hidden.
+    const busy = scene(yardOf({ dock: [car('d1', 'fix/a')], arrivals }), statusOf(), NOW);
+    expect(drawnWagons(busy.wagons).drawn.some(w => w.id === 'd1')).toBe(true);
+  });
+
   test("a cancelled train's cars are not placed — they are back on the dock if anywhere", () => {
     const s = scene(
       yardOf({ cancelled: [trainRow('tx', 'ARRIVED', { outcome: 'cancelled', cars: [car('cx', 'fix/x')] })] }),
@@ -515,12 +588,20 @@ describe('the machines', () => {
     );
     expect(held.machines.dock).toMatchObject({ parked: 1, held: 'track occupied (1 open train)', next: 'boards on the next tick once the track clears', cooldownMinutes: 29 });
     expect(held.machines.dock.label).toBe('1 parked · held: track occupied (1 open train)');
-    const cooling = scene(yardOf(), statusOf({ boarding: { ...statusOf().boarding, cooldown_remaining_minutes: 12 } }), NOW);
-    expect(cooling.machines.dock.label).toBe('0 parked · cooldown 12 min');
+    // An empty dock is not held — nothing is there to hold. It says
+    // what the next car would meet.
+    const cooling = scene(yardOf(), statusOf({ boarding: { ...statusOf().boarding, cooldown_remaining_minutes: 12, held_because: 'cooldown — 12 min left' } }), NOW);
+    expect(cooling.machines.dock.label).toBe('empty · cooldown 12 min');
     const free = scene(yardOf(), statusOf({ boarding: { ...statusOf().boarding, next_board: 'boards on the next tick' } }), NOW);
-    expect(free.machines.dock.label).toBe('0 parked · boards on the next tick');
+    expect(free.machines.dock.label).toBe('empty · boards on the next tick');
+    const below = scene(yardOf(), statusOf({ boarding: { ...statusOf().boarding, held_because: 'below threshold (0/1)', next_board: 'boards on the next tick once the dock reaches 1' } }), NOW);
+    expect(below.machines.dock.label).toBe('empty');
+    // Cars parked with nothing keeping them depart on the next tick.
+    const ready = scene(yardOf({ dock: [car('d1', 'x')] }), statusOf({ boarding: { ...statusOf().boarding, next_board: 'boards on the next tick' } }), NOW);
+    expect(ready.machines.dock.label).toBe('1 parked · departs next tick');
     // An older server that sends no hold: the count, and no guess.
-    expect(scene(yardOf(), statusOf(), NOW).machines.dock.label).toBe('0 parked');
+    expect(scene(yardOf(), statusOf(), NOW).machines.dock.label).toBe('empty');
+    expect(scene(yardOf({ dock: [car('d1', 'x')] }), statusOf(), NOW).machines.dock.label).toBe('1 parked');
   });
 
   test("the conductor's clock: last seen, the next tick from its own heartbeat, silence as an alarm", () => {
@@ -547,10 +628,16 @@ describe('the machines', () => {
     expect(none.machines.conductor.label).toBe('no reading');
   });
 
-  test('the runner shed and the cluster tower have no reading yet — that is what they say', () => {
+  test('the runner shed and the cluster tower have no reading until the page feeds one — that is what they say', () => {
     const s = scene(yardOf(), statusOf(), NOW);
     expect(s.machines.runner).toEqual({ kind: 'unknown' });
     expect(s.machines.cluster).toEqual({ kind: 'unknown' });
+    const fed = scene(yardOf(), statusOf(), NOW, {
+      runner: { kind: 'idle', last: null },
+      cluster: { kind: 'ready', commit: '0d8c37d', since: NOW_ISO },
+    });
+    expect(fed.machines.runner).toEqual({ kind: 'idle', last: null });
+    expect(fed.machines.cluster).toEqual({ kind: 'ready', commit: '0d8c37d', since: NOW_ISO });
   });
 
   test('the scene carries the server clock, or the local one when the status is absent', () => {

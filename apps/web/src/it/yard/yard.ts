@@ -225,6 +225,10 @@ export type YardState = Readonly<{
    *  cannot serve the feeds, which must read the same way: additive,
    *  never a reason the yard fails to render. */
   approach: readonly ApproachRow[];
+  /** The raw packets the signals panel reads its stamps from — every
+   *  train in the window (open and closed, as served: newest first)
+   *  and the gate-runs. Held as fetched; nothing here is derived. */
+  packets: Readonly<{ trains: readonly JobLite[]; gateRuns: readonly JobLite[] }>;
 }>;
 
 /** Where an inbound branch stands, ordered by distance from the dock.
@@ -1024,8 +1028,8 @@ export function dockRows(ships: readonly JobLite[]): CarRow[] {
 }
 
 /** How many arrivals the board shows, and how many cancellations. */
-const ARRIVALS_SHOWN = 5;
-const CANCELLED_SHOWN = 3;
+export const ARRIVALS_SHOWN = 5;
+export const CANCELLED_SHOWN = 3;
 
 export function assembleYard(
   trains: readonly JobLite[],
@@ -1079,6 +1083,7 @@ export function assembleYard(
     delivery: deliveryStats(report),
     awaitingProof: awaitingProof(ships).map(carRow),
     approach: approach(gateRuns, publishQueue, ships, nowMs),
+    packets: { trains, gateRuns },
     cars: ships
       .filter(j => j.status === 'open')
       .map(carRow)

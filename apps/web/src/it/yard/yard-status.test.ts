@@ -36,6 +36,7 @@ describe('parseYardStatus', () => {
           ci_result: 'green',
           pr_url: 'https://forge/pr/1',
           car_count: 3,
+          boarded_at: '2026-09-03T06:30:00Z',
         },
       ],
       dock: [{ id: 'c1', title: 'A fix', branch: 'feat/a', parked_since: '2026-09-03' }],
@@ -64,6 +65,7 @@ describe('parseYardStatus', () => {
       reason: 'deploy tree busy — will retry',
       since: '2026-09-03T06:46:00Z',
     });
+    expect(s.trains[0]!.boarded_at).toBe('2026-09-03T06:30:00Z');
     expect(s.boarding.dock_threshold).toBe(4);
     expect(s.boarding.at_times).toEqual(['06:00', '18:00']);
     expect(s.dock).toHaveLength(1);
@@ -508,6 +510,7 @@ describe('trainTone', () => {
     ci_result: null,
     pr_url: null,
     car_count: 0,
+    boarded_at: null,
   };
   test('a blocked train is an error tone', () => {
     expect(trainTone({ ...base, block: { kind: 'converge-overdue' } })).toBe('err');

@@ -26,6 +26,8 @@
 // this page pretends to know.
 
 import { formatDate } from '@boss/web-kit/ui/date';
+import type { ClusterMachine, RunnerMachine } from './yard-machines';
+export type { ClusterMachine, RunnerMachine } from './yard-machines';
 import { stampAt, troubleLabel, type CarRow, type TrainRow, type WithSteps, type YardState } from './yard';
 import {
   blockLabel,
@@ -101,6 +103,8 @@ export type Bay = Readonly<{
   packetId: string | null;
   /** The wagon standing in this bay (the car's id when known). */
   wagonId: string | null;
+  /** Its nameplate — the same tag the wagon wears, unique on the floor. */
+  tag: string | null;
   since: string | null;
   elapsed: string | null;
   stale: boolean;
@@ -123,13 +127,13 @@ export type ConductorMachine = Readonly<{
   label: string;
 }>;
 
-/** The deploy-runner shed. `unknown` until the page reads the latest
- *  converge ops-request; the map draws it dark and says "no reading". */
-export type RunnerMachine = Readonly<{ kind: 'unknown' }>;
-
-/** The cluster tower. `unknown` until the page reads /api/jobs/health
- *  from outside; the map draws its lamp off and says "no reading". */
-export type ClusterMachine = Readonly<{ kind: 'unknown' }>;
+/** What the page reads from OUTSIDE the two yard read models: the
+ *  deploy-runner shed (the converge ops-requests) and the cluster tower
+ *  (/api/jobs/health) — both derived in yard-machines.ts and fed in.
+ *  `NO_FEEDS` before the first read: the map draws both dark and says
+ *  "no reading", never idle. */
+export type Feeds = Readonly<{ runner: RunnerMachine; cluster: ClusterMachine }>;
+export const NO_FEEDS: Feeds = { runner: { kind: 'unknown' }, cluster: { kind: 'unknown' } };
 
 export type Machines = Readonly<{
   approach: Readonly<{ label: string; stranded: number; publishing: number; held: number }>;
@@ -178,10 +182,7 @@ const FILLER = new Set([
  *  most three words. A first word longer than eleven is cut. Pure and
  *  deterministic: the same branch always paints the same nameplate. */
 export function wagonTag(branch: string): string {
-  const bare = branch.replace(/^[^/]+\//, '');
-  const all = bare.split(/[-_./]+/).filter(w => w !== '');
-  const kept = all.filter(w => !FILLER.has(w.toLowerCase()));
-  const words = kept.length > 0 ? kept : all;
+  const words = tagWords(branch);
   const first = words[0];
   if (first === undefined) return '';
   let tag = first.slice(0, TAG_MAX);
@@ -194,6 +195,66 @@ export function wagonTag(branch: string): string {
     used += 1;
   }
   return tag;
+}
+
+/** The words of a branch that carry identity: the prefix and the
+ *  filler dropped, or every word when nothing else is left. */
+function tagWords(branch: string): readonly string[] {
+  const bare = branch.replace(/^[^/]+\//, '');
+  const all = bare.split(/[-_./]+/).filter(w => w !== '');
+  const kept = all.filter(w => !FILLER.has(w.toLowerCase()));
+  return kept.length > 0 ? kept : all;
+}
+
+/** The nameplates a branch can wear when its base tag is already
+ *  taken, in the order they are tried: the first word cut to make room
+ *  for each later word in turn — `conduc-says`, `con-honours` — so two
+ *  branches that share a first word part on their second. A later word
+ *  too long to leave three letters of the first is itself cut. */
+function tagCandidates(branch: string): readonly string[] {
+  const words = tagWords(branch);
+  const first = words[0];
+  if (first === undefined) return [''];
+  const base = wagonTag(branch);
+  const rest = words.slice(1).map(w => {
+    const room = TAG_MAX - 1 - w.length;
+    return room >= 3 ? `${first.slice(0, room)}-${w}` : `${first.slice(0, 3)}-${w.slice(0, TAG_MAX - 4)}`;
+  });
+  return [base, ...rest.filter(c => c !== base)];
+}
+
+/** One nameplate per branch, unique across the floor. On 2026-09-08
+ *  `feat/the-conductor-says-why-it-is-not-boarding` and
+ *  `feat/the-conductor-honours-a-cancel-request` both painted
+ *  `conductor`. A base tag two branches share is replaced, for EVERY
+ *  branch in the clash, by that branch's first free candidate, taken
+ *  in branch order — so the same floor always paints the same names,
+ *  and no clashing branch keeps the ambiguous base. Uncontested bases
+ *  are settled first so a replacement never takes one. */
+export function uniqueTags(branches: readonly string[]): ReadonlyMap<string, string> {
+  const byBase = [...new Set(branches)].sort().reduce<Map<string, string[]>>((m, b) => {
+    const base = wagonTag(b);
+    return m.set(base, [...(m.get(base) ?? []), b]);
+  }, new Map());
+  const taken = new Set<string>();
+  const out = new Map<string, string>();
+  for (const [base, bs] of byBase) {
+    const only = bs.length === 1 ? bs[0] : undefined;
+    if (only !== undefined) {
+      out.set(only, base);
+      taken.add(base);
+    }
+  }
+  for (const [base, bs] of byBase) {
+    if (bs.length === 1) continue;
+    for (const b of bs) {
+      const candidates = tagCandidates(b);
+      const pick = candidates.slice(1).find(c => !taken.has(c)) ?? candidates.find(c => !taken.has(c)) ?? base;
+      out.set(b, pick);
+      taken.add(pick);
+    }
+  }
+  return out;
 }
 
 /** The PR number at the end of a forge URL (`/pulls/259`, `/pull/12`). */
@@ -235,6 +296,18 @@ const holdReason = (hold: string | null): string =>
 
 const shortSha = (v: unknown): string | null =>
   typeof v === 'string' && /^[0-9a-f]{7,40}$/i.test(v) ? v.slice(0, 7) : null;
+
+/** How many landed wagons the map stacks before a "+N more" plate. On
+ *  2026-09-08 eleven landed cars in two columns outgrew the map. */
+export const ARRIVALS_DRAWN = 6;
+
+/** The wagons the map draws: everything in flight, and the newest
+ *  `ARRIVALS_DRAWN` landed; `hidden` is how many landed wagons the
+ *  plate stands for. The departure board lists them all. */
+export function drawnWagons(wagons: readonly Wagon[]): Readonly<{ drawn: readonly Wagon[]; hidden: number }> {
+  const drawn = wagons.filter(w => w.station !== 'arrivals' || w.slot < ARRIVALS_DRAWN);
+  return { drawn, hidden: wagons.length - drawn.length };
+}
 
 // ---------------------------------------------------------------------
 // The selection — one string the map, the board and the alerts speak.
@@ -393,8 +466,19 @@ function conductorMachine(c: ConductorHealth | null): ConductorMachine {
  *  same inputs, same scene. `status` is null when the status endpoint
  *  has not served — then there are no bays (unknown, not zero) and the
  *  machines say so. */
-export function scene(yard: YardState, status: YardStatus | null, nowMs: number): Scene {
+export function scene(yard: YardState, status: YardStatus | null, nowMs: number, feeds: Feeds = NO_FEEDS): Scene {
   const carByBranch = new Map(yard.cars.map(c => [c.branch, c]));
+  // Every branch that can stand on the floor names its wagon once.
+  const tags = uniqueTags([
+    ...yard.cars.map(c => c.branch),
+    ...yard.dock.map(c => c.branch),
+    ...yard.inFlight.flatMap(t => t.cars.map(c => c.branch)),
+    ...yard.arrivals.flatMap(t => t.cars.map(c => c.branch)),
+    ...(status?.gates.active ?? []).map(g => g.branch),
+    ...yard.approach.map(r => r.branch),
+    ...(status?.garage ?? []).map(g => g.branch),
+  ]);
+  const tagOf = (branch: string): string => tags.get(branch) ?? wagonTag(branch);
   const claimedIds = new Set<string>();
   const claimedBranches = new Set<string>();
   const wagons: Wagon[] = [];
@@ -404,7 +488,7 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number)
     if (w.branch !== '') claimedBranches.add(w.branch);
   };
   const base = (c: CarRow) => ({
-    tag: wagonTag(c.branch),
+    tag: tagOf(c.branch),
     title: c.title,
     branch: c.branch,
     head: c.head,
@@ -433,7 +517,9 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number)
   yard.inFlight.forEach(t => {
     const l = locoById.get(t.id);
     if (!l) return;
-    const boardedAt = boardedAtFromTitle(t.title);
+    // The server's boarded_at when it sends one, else the boarding
+    // minute the conductor wrote into the title.
+    const boardedAt = serverTrain.get(t.id)?.boarded_at ?? boardedAtFromTitle(t.title);
     t.cars.forEach((c, i) => {
       if (claimedIds.has(c.id)) return;
       place({
@@ -482,7 +568,7 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number)
   const slots = status ? gateSlots(status.gates) : [];
   const bays: Bay[] = slots.map((s, i) => {
     if (s.kind !== 'occupied') {
-      return { index: i, busy: false, branch: null, packetId: null, wagonId: null, since: null, elapsed: null, stale: false, progress: 0 };
+      return { index: i, busy: false, branch: null, packetId: null, wagonId: null, tag: null, since: null, elapsed: null, stale: false, progress: 0 };
     }
     const g = s.gate;
     const car = carByBranch.get(g.branch);
@@ -495,7 +581,7 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number)
     if (!claimedBranches.has(g.branch)) {
       place({
         id,
-        tag: wagonTag(g.branch),
+        tag: tagOf(g.branch),
         title: car?.title ?? g.branch,
         branch: g.branch,
         head: car?.head ?? null,
@@ -518,6 +604,7 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number)
       branch: g.branch,
       packetId: g.packet_id,
       wagonId: id,
+      tag: tagOf(g.branch),
       since: g.since,
       elapsed,
       stale: g.stale,
@@ -559,7 +646,7 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number)
     const id = car && !claimedIds.has(car.id) ? car.id : row.id;
     const shared = {
       id,
-      tag: wagonTag(row.branch),
+      tag: tagOf(row.branch),
       title: car?.title ?? row.branch,
       branch: row.branch,
       head: car?.head ?? shortSha(row.sha),
@@ -637,7 +724,7 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number)
     if (claimedBranches.has(g.branch)) continue;
     place({
       id: `garage:${g.branch}`,
-      tag: wagonTag(g.branch),
+      tag: tagOf(g.branch),
       title: g.branch,
       branch: g.branch,
       head: null,
@@ -709,14 +796,25 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number)
   const b = status?.boarding ?? null;
   const parked = yard.dock.length;
   const cooldown = b?.cooldown_remaining_minutes ?? null;
+  // An empty dock is not held — there is nothing to hold — so it says
+  // what the next car would meet; a dock with cars says what keeps
+  // them, in the server's words, or that they depart on the next tick.
+  const dockHeld = b?.held_because ?? null;
+  const cooling = cooldown !== null && cooldown > 0;
   const dockLabel =
-    b?.held_because !== null && b?.held_because !== undefined
-      ? `${parked} parked · held: ${b.held_because}`
-      : cooldown !== null && cooldown > 0
-        ? `${parked} parked · cooldown ${cooldown} min`
+    parked === 0
+      ? cooling
+        ? `empty · cooldown ${cooldown} min`
+        : dockHeld === null && b?.next_board
+          ? 'empty · boards on the next tick'
+          : 'empty'
+      : dockHeld !== null
+        ? `${parked} parked · held: ${dockHeld}`
         : b?.next_board
-          ? `${parked} parked · ${b.next_board}`
-          : `${parked} parked`;
+          ? `${parked} parked · departs next tick`
+          : cooling
+            ? `${parked} parked · cooldown ${cooldown} min`
+            : `${parked} parked`;
   const garageCount = wagons.filter(w => w.station === 'garage').length;
 
   return {
@@ -736,7 +834,7 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number)
       dock: {
         label: dockLabel,
         parked,
-        held: b?.held_because ?? null,
+        held: dockHeld,
         next: b?.next_board ?? null,
         cooldownMinutes: cooldown,
         lamp: parked > 0 ? 'ok' : 'off',
@@ -744,8 +842,8 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number)
       garage: { label: garageCount > 0 ? `${garageCount} gated red` : 'empty', count: garageCount },
       arrivals: { label: `${landedRecently} landed · 24h`, landed: landedRecently },
       conductor: conductorMachine(status?.conductor ?? null),
-      runner: { kind: 'unknown' },
-      cluster: { kind: 'unknown' },
+      runner: feeds.runner,
+      cluster: feeds.cluster,
     },
   };
 }

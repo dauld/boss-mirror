@@ -9,7 +9,8 @@ import { join } from 'node:path';
 // protocol order itself — approach → gates → dock → track → arrivals is
 // the map's geometry, tested in yard-floor.test.ts — and the page reads:
 // the alerts strip, the map, the deck (departure board + entity panel),
-// then the sections the map does not draw: the delivery scoreboard,
+// then the lower deck (production and signals), then the sections the
+// map does not draw: the delivery scoreboard,
 // recent arrivals, awaiting proof, and the flow line. The regions are
 // still hand-ordered in the template, so this pins their sequence; a
 // region moved out of order is a wrong page, not a style choice.
@@ -23,6 +24,8 @@ describe('the yard page flows in protocol order', () => {
       '<YardMap',
       '<DepartureBoard',
       'class="yard-panel yard-entity"',
+      '<ProductionPanel',
+      '<SignalsPanel',
       'DELIVERY</div>',
       'RECENT ARRIVALS</div>',
       'AWAITING PROOF',
