@@ -50,9 +50,36 @@ if [ -z "${BOSS_RUNNER_SNAPSHOT:-}" ]; then
     cat "$0" > "$snap"
     BOSS_RUNNER_SNAPSHOT="$snap" exec bash "$snap" "$@"
 fi
-trap 'rm -f "$BOSS_RUNNER_SNAPSHOT" ${BOSS_RUNNER_SNAPSHOT2:+"$BOSS_RUNNER_SNAPSHOT2"}' EXIT
 
 REPO="${BOSS_FORGE_REPO_DIR:-$HOME/boss}"
+
+# THE RUN ENDS BY SAYING HOW IT ENDED — to the ops-request that started
+# it, when one did (cluster-deploy-lib.sh answer_converge_requests;
+# backlog d66f92b2). STAGE names where the run is, so a death anywhere
+# below reads `converge_failed: <stage> (exit N)` on the packet that
+# asked, instead of the clean `answered` that `systemctl start
+# --no-block` returned before the unit had done anything. OUTCOME is set
+# by the exits that are not failures (unchanged, held, converged). The
+# trap also cleans both snapshots: exec replaces the process, so only
+# the stage that actually exits runs it.
+STAGE="start"
+OUTCOME=""
+_finish() {
+    local rc=$?
+    rm -f "$BOSS_RUNNER_SNAPSHOT" ${BOSS_RUNNER_SNAPSHOT2:+"$BOSS_RUNNER_SNAPSHOT2"}
+    if [ -n "$OUTCOME" ]; then
+        answer_converge_requests "$REPO" "${OUTCOME%%=*}" "${OUTCOME#*=}" || true
+    elif [ "$rc" -ne 0 ]; then
+        answer_converge_requests "$REPO" converge_failed "$STAGE (exit $rc)" || true
+    fi
+    exit "$rc"
+}
+trap _finish EXIT
+# Sourced from the PRE-checkout copy here, and again from HEAD after
+# the stage-2 exec; both copies must carry the functions the trap
+# uses, which is why they live in the lib and not in this file.
+. "$REPO/infra/forge/cluster-deploy-lib.sh"
+take_converge_requests "$REPO" || true
 REGISTRY="${BOSS_FORGE_REGISTRY:-10.20.0.15:3000/david/boss}"
 KUBECONFIG_PATH="${BOSS_FORGE_KUBECONFIG:-$HOME/kc.yaml}"
 STAMP_FILE="${BOSS_FORGE_LAST_BUILT:-$HOME/.boss-last-built}"
@@ -63,12 +90,21 @@ FAILED_FILE="${BOSS_FORGE_LAST_FAILED:-$HOME/.boss-last-failed}"
 export DOCKER_HOST="${DOCKER_HOST:-unix:///run/user/1000/docker.sock}"
 
 cd "$REPO"
-git fetch -q forgejo main
+# ONE LOCK for every git user of this checkout (checkout-lock.sh):
+# forge-converge fetches on the same tick and the merge-triggered
+# `converge` starts this unit a second after any merge. On 2026-09-07
+# the fetch below died on `cannot lock ref` and the retry ten minutes
+# later on a stale index.lock — two converge cycles lost to the same
+# checkout being shared without a lock (backlog d66f92b2).
+. "$REPO/infra/forge/checkout-lock.sh"
+STAGE="fetch"
+checkout_git "$REPO" fetch -q forgejo main
 HEAD=$(git rev-parse --short forgejo/main)
 LAST=$(cat "$STAMP_FILE" 2>/dev/null || echo none)
 
 if [ "$HEAD" = "$LAST" ]; then
     echo "cluster-deploy-runner: forge main unchanged ($HEAD)"
+    OUTCOME="converged=$HEAD (unchanged)"
     exit 0
 fi
 
@@ -80,19 +116,21 @@ fi
 # a held converge is a failed unit somebody can see, not a quiet pass.
 if [ "$HEAD" = "$(cat "$FAILED_FILE" 2>/dev/null || echo none)" ]; then
     echo "cluster-deploy-runner: $HEAD bricked its boot on a previous converge — holding until main moves (rm $FAILED_FILE to retry it)" >&2
+    STAGE="quarantined $HEAD"
     exit 1
 fi
 
 # An operator's hold (converge-hold.sh, the hold-converge ops verb)
 # stops the roll before the build: main has moved, and a human said not
 # yet. Loud on every tick, exit 0 — a hold is a decision, not a failure.
-. "$REPO/infra/forge/cluster-deploy-lib.sh"
 if reason=$(converge_held "${BOSS_CONVERGE_HOLD:-/var/tmp/boss-converge-hold}"); then
     echo "cluster-deploy-runner: converge HELD — $reason — main at $HEAD not built or rolled (release-converge lifts it)" >&2
+    OUTCOME="converge_held=$reason"
     exit 0
 fi
 echo "cluster-deploy-runner: forge main moved $LAST -> $HEAD; building"
-git checkout -q "$HEAD" 2>/dev/null || git checkout -qf "$HEAD"
+STAGE="checkout"
+checkout_git "$REPO" checkout -q "$HEAD" 2>/dev/null || checkout_git "$REPO" checkout -qf "$HEAD"
 
 # STAGE 2: converge on HEAD's OWN driver (David accepted (a) on
 # d0b5efd4, through the v11 decision surface). The stage-0 snapshot is
@@ -117,9 +155,11 @@ fi
 # conductor's `converged` step can verify the running pod serves this
 # exact merge — the short tag stays the image name, the full sha is
 # the attestation (prefix-compared, so either length matches).
+STAGE="build $HEAD"
 docker build -q -f infra/oss-quickstart/Dockerfile \
     --build-arg BOSS_BUILD_COMMIT="$(git rev-parse HEAD)" \
     -t "$REGISTRY:$HEAD" .
+STAGE="push $HEAD"
 docker push "$REGISTRY:$HEAD"
 
 # The image proves it can boot before it goes anywhere near the cluster
@@ -128,6 +168,7 @@ docker push "$REGISTRY:$HEAD"
 # quarantined like a head that failed on the cluster — with no dark
 # window at all, because nothing was applied.
 . "$REPO/infra/forge/cluster-deploy-lib.sh"
+STAGE="boot check $HEAD"
 if ! image_boots docker "$REGISTRY:$HEAD"; then
     echo "$HEAD" > "$FAILED_FILE"
     echo "cluster-deploy-runner: $HEAD fails its own boot check — not rolling it; quarantined (rm $FAILED_FILE to retry it)" >&2
@@ -158,6 +199,7 @@ fi
 # Checked while extracting this: all 42 resident tags were in the
 # registry, so this is hygiene rather than recovery from a divergence.
 . "$REPO/infra/forge/prune-registry-tags.lib.sh"
+STAGE="prune images"
 prune_registry_verified_tags "$REGISTRY" "${BOSS_RUNNER_KEEP_IMAGES:-5}" cluster-deploy-runner
 
 # Build cache is regenerable by definition, so the only cost of being
@@ -180,6 +222,7 @@ KM="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro -v $REPO/infr
 # The applied copy carries the build that is ALREADY converged (the
 # stamp), not the manifest's placeholder tag: the apply must never
 # change what runs. Rolling to $HEAD is roll_deployment's job below.
+STAGE="apply manifests"
 APPLY_DIR="$(mktemp -d -t cluster-deploy-manifests.XXXXXX)"
 manifests_with_image "$REPO/infra/cluster/manifests" "$APPLY_DIR" "$REGISTRY" "$LAST"
 KM="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro -v $APPLY_DIR:/manifests:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
@@ -220,6 +263,7 @@ KP="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro -v $REPO/infr
 # actually runs through.
 KAPPLY="sudo docker run --rm -i --network host -v $KUBECONFIG_PATH:/kc:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
 echo "cluster-deploy-runner: converging the step-plugins ConfigMap"
+STAGE="configmaps"
 PLUGIN_ARGS=""
 for f in "$REPO"/infra/step-plugins/*.js; do
     [ -e "$f" ] || continue
@@ -273,6 +317,7 @@ fi
 # by image name (cluster-deploy-lib.sh roll_deployment) — never to
 # "the previous revision", which on 2026-09-05 was the placeholder the
 # apply had just created and could not boot.
+STAGE="roll $HEAD"
 if ! roll_deployment "$K" "$REGISTRY" "$HEAD" "$LAST" "$FAILED_FILE"; then
     exit 1
 fi
@@ -295,6 +340,11 @@ $K set image -n boss-dev deploy/boss-conductor "conductor=$REGISTRY:$HEAD" || tr
 echo "$HEAD" > "$STAMP_FILE"
 rm -f "$FAILED_FILE"
 echo "cluster-deploy-runner: cluster on $REGISTRY:$HEAD"
+# The roll is real from here; a failed verification below is a finding
+# about it, not a failed converge — the request reads converged either
+# way, and the maintenance packet carries the verification verdict.
+OUTCOME="converged=$HEAD"
+STAGE="verify manifests"
 
 # THE CONVERGE VERIFIES WHAT IT APPLIED (60690755). Everything above
 # is a write; nothing above reads back whether the cluster now holds

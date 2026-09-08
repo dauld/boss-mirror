@@ -1,4 +1,4 @@
-// sign-off.js v2 against the real bundle, stubbed host — the
+// sign-off.js (v2, then v3) against the real bundle, stubbed host — the
 // correctionVerdictPlugin posture. The shapes pinned here are the two
 // David hit blind on 2026-08-19 (19db52de): a decision sign-off whose
 // case and contract never rendered, and a required-at-done field whose
@@ -104,7 +104,7 @@ function loadBundle(routes: (url: string, init?: RequestInit) => unknown) {
 }
 
 async function settled() {
-  for (let i = 0; i < 12; i++) await Promise.resolve();
+  for (let i = 0; i < 48; i++) await Promise.resolve();
 }
 
 // The publish approval's exact shape: sign-off kind, one required
@@ -255,5 +255,220 @@ describe('sign-off v2', () => {
     expect(patches.length).toBe(1);
     expect((patches[0]!.body as Record<string, unknown>).decision).toBe('changes-requested');
     expect(calls.filter((x) => x.method === 'PUT').length).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------
+// v3 — the signature follows the decision (feedback 221b4b5c).
+//
+// Measured on 2026-09-05 15:40 in the gateway log, on the emergency
+// merge's "Approve the train bypass" step: POST …/sign-offs 200 →
+// PATCH …/metadata 204 (the surface re-saved decision=approved with a
+// NEW decided_at) → PUT complete 409 {missing_or_stale_roles:
+// [platform-admin]}. The server binds a stamp to step_shape_hash(title,
+// metadata) — values included — so the surface's own save made its own
+// signature stale two seconds after taking it. David: "I tried to
+// approve the emergency merge, but it doesn't appear to have taken."
+//
+// The stub below enforces exactly that server rule, so the suite can
+// replay the measured sequence and refuse the inversion.
+
+const META = '/api/jobs/job-1/steps/step-1/metadata';
+const SIGN = '/api/jobs/job-1/steps/step-1/sign-offs';
+const STEP = '/api/jobs/job-1/steps/step-1';
+
+type Stamp = { role: string; authority_id: string; stamped_at: string; shape_hash: string };
+
+// The server's stamp contract, in miniature: a stamp pins the shape
+// (title + metadata, canonical) at the instant of signing; completion
+// refuses while any required role's stamp is missing or pinned to an
+// older shape. Metadata is the server's OWN copy — the surface's local
+// cache must never be what the stub hashes.
+function signingServer(step: ReturnType<typeof publishStep>) {
+  const server = {
+    title: step.title,
+    metadata: JSON.parse(JSON.stringify(step.metadata)) as Record<string, unknown>,
+  };
+  const canonical = (m: Record<string, unknown>) =>
+    JSON.stringify(Object.fromEntries(Object.entries(m).sort(([a], [b]) => (a < b ? -1 : 1))));
+  const shape = () => `${server.title}|${canonical(server.metadata)}`;
+  const stamps: Stamp[] = [];
+  const puts: number[] = [];
+  const stampAs = (role: string) => {
+    stamps.push({
+      role,
+      authority_id: 'emp-david',
+      stamped_at: '2026-09-05T15:40:20Z',
+      shape_hash: shape(),
+    });
+  };
+  const routes = (url: string, init?: RequestInit) => {
+    const m = init?.method ?? 'GET';
+    if (url === META && m === 'PATCH') {
+      Object.assign(server.metadata, JSON.parse(String(init?.body)));
+      return {};
+    }
+    if (url === SIGN && m === 'POST') {
+      stampAs((JSON.parse(String(init?.body)) as { role: string }).role);
+      return { ...step, metadata: server.metadata, sign_offs: stamps.slice() };
+    }
+    if (url === '/api/jobs/job-1' && m === 'GET') {
+      return {
+        metadata: {},
+        steps: [{ ...step, metadata: server.metadata, sign_offs: stamps.slice() }],
+      };
+    }
+    if (url === STEP && m === 'PUT') {
+      const current = shape();
+      const missing = step.sign_offs_required.filter(
+        (r) => !stamps.some((s) => s.role === r && s.shape_hash === current),
+      );
+      if (missing.length > 0) {
+        puts.push(409);
+        return {
+          __status: 409,
+          __text: JSON.stringify({ error: 'sign-offs incomplete', missing_or_stale_roles: missing }),
+        };
+      }
+      puts.push(200);
+      return {};
+    }
+    return undefined;
+  };
+  return { routes, stamps, puts, shape, stampAs };
+}
+
+// The emergency merge's approval as David found it at 15:40: one
+// required role (his own), the decision already recorded by the 14:21
+// attempts, no signature yet.
+const bypassStep = () => {
+  const step = publishStep();
+  step.title = 'Approve the train bypass';
+  step.sign_offs_required = ['platform-admin'];
+  (step.metadata as Record<string, unknown>).approved = 'true';
+  (step.metadata as Record<string, unknown>).decision = 'approved';
+  (step.metadata as Record<string, unknown>).decided_at = '2026-09-05T14:21:53Z';
+  return step;
+};
+
+const methods = (calls: FetchCall[]) => calls.map((c) => c.method);
+
+describe('sign-off v3 — the signature follows the decision', () => {
+  test('the stub refuses the measured sequence and accepts the corrected one', () => {
+    const bad = signingServer(bypassStep());
+    bad.routes(META, { method: 'PATCH', body: JSON.stringify({ decision: 'approved', decided_at: 't1' }) });
+    bad.routes(SIGN, { method: 'POST', body: JSON.stringify({ role: 'platform-admin' }) });
+    bad.routes(META, { method: 'PATCH', body: JSON.stringify({ decision: 'approved', decided_at: 't2' }) });
+    const refused = bad.routes(STEP, { method: 'PUT', body: JSON.stringify({ status: 'completed' }) }) as {
+      __status: number;
+      __text: string;
+    };
+    expect(refused.__status).toBe(409);
+    expect(refused.__text).toContain('"missing_or_stale_roles":["platform-admin"]');
+
+    const good = signingServer(bypassStep());
+    good.routes(META, { method: 'PATCH', body: JSON.stringify({ decision: 'approved', decided_at: 't1' }) });
+    good.routes(SIGN, { method: 'POST', body: JSON.stringify({ role: 'platform-admin' }) });
+    good.routes(STEP, { method: 'PUT', body: JSON.stringify({ status: 'completed' }) });
+    expect(good.puts).toEqual([200]);
+  });
+
+  test('2026-09-05 replayed: sign, then Approve — no metadata write after the signature, and it completes', async () => {
+    const step = bypassStep();
+    const srv = signingServer(step);
+    const { mount, calls } = loadBundle(srv.routes);
+    const c = new FakeNode();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+
+    buttonNamed(c, 'Sign off as platform-admin')!.fire('click');
+    await settled();
+    expect(srv.stamps.length).toBe(1);
+    const shapeWhenSigned = srv.stamps[0]!.shape_hash;
+
+    buttonNamed(c, 'Approve')!.fire('click');
+    await settled();
+
+    const seq = methods(calls);
+    const signedAt = seq.indexOf('POST');
+    expect(signedAt).toBeGreaterThanOrEqual(0);
+    // The decision it already carried is what was signed: nothing
+    // re-saves it, so the signature's shape is the completion's shape.
+    expect(seq.slice(signedAt)).not.toContain('PATCH');
+    expect(srv.shape()).toBe(shapeWhenSigned);
+    expect(srv.puts).toEqual([200]);
+    expect(allText(c)).toContain('Completed');
+  });
+
+  test('one tap for a single signer: decision saved, then signed, then completed — each stage visible', async () => {
+    const step = bypassStep();
+    delete (step.metadata as Record<string, unknown>).decision;
+    delete (step.metadata as Record<string, unknown>).decided_at;
+    const srv = signingServer(step);
+    const { mount, calls } = loadBundle(srv.routes);
+    const c = new FakeNode();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+
+    buttonNamed(c, 'Approve')!.fire('click');
+    await settled();
+
+    const seq = methods(calls);
+    const patchAt = seq.indexOf('PATCH');
+    const postAt = seq.indexOf('POST');
+    const putAt = seq.indexOf('PUT');
+    expect(patchAt).toBeGreaterThanOrEqual(0);
+    expect(patchAt).toBeLessThan(postAt);
+    expect(postAt).toBeLessThan(putAt);
+    expect(seq.filter((m) => m === 'PATCH').length).toBe(1);
+    // The stamp pinned the shape WITH the decision in it, and that
+    // shape held through completion.
+    expect(srv.stamps[0]!.shape_hash).toBe(srv.shape());
+    expect(srv.shape()).toContain('"decision":"approved"');
+    expect(srv.puts).toEqual([200]);
+
+    const text = allText(c);
+    expect(text).toContain('Decision saved');
+    expect(text).toContain('Signed as platform-admin');
+    expect(text).toContain('Completed');
+  });
+
+  test('changing a signed decision re-saves BEFORE re-signing, then completes', async () => {
+    const step = bypassStep();
+    const srv = signingServer(step);
+    srv.stampAs('platform-admin');
+    (step as { sign_offs: Stamp[] }).sign_offs = srv.stamps.slice();
+    const { mount, calls } = loadBundle(srv.routes);
+    const c = new FakeNode();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+
+    buttonNamed(c, 'Reject')!.fire('click');
+    await settled();
+
+    const seq = methods(calls);
+    expect(seq.indexOf('PATCH')).toBeLessThan(seq.indexOf('POST'));
+    expect(seq.indexOf('POST')).toBeLessThan(seq.indexOf('PUT'));
+    expect(seq.slice(seq.indexOf('POST'))).not.toContain('PATCH');
+    expect(srv.shape()).toContain('"decision":"rejected"');
+    expect(srv.stamps.length).toBe(2);
+    expect(srv.puts).toEqual([200]);
+  });
+
+  test('a completion 409 is shown verbatim and the named role is offered its signature again', async () => {
+    const step = bypassStep();
+    const srv = signingServer(step);
+    srv.stampAs('platform-admin');
+    (step as { sign_offs: Stamp[] }).sign_offs = srv.stamps.slice();
+    const body = '{"error":"sign-offs incomplete","missing_or_stale_roles":["platform-admin"]}';
+    const { mount } = loadBundle((url, init) =>
+      url === STEP && init?.method === 'PUT' ? { __status: 409, __text: body } : srv.routes(url, init),
+    );
+    const c = new FakeNode();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+    expect(buttonNamed(c, 'Sign off as platform-admin')).toBeUndefined();
+
+    buttonNamed(c, 'Approve')!.fire('click');
+    await settled();
+
+    expect(allText(c)).toContain(`409: ${body}`);
+    expect(buttonNamed(c, 'Sign off as platform-admin')).toBeDefined();
   });
 });

@@ -48,7 +48,15 @@ OWNER="${BOSS_FORGE_REPO_OWNER:-david}"
 # the sha (like cluster-deploy-runner) rather than a tracking branch, so
 # the host holds no branch state of its own to diverge. --ff-only is
 # implicit in a detached checkout of the fetched sha: no merge is made.
-runuser -l "$OWNER" -c "cd '$REPO' && git fetch -q forgejo main && git checkout -qf \"\$(git rev-parse forgejo/main)\""
+#
+# Through the checkout's ONE lock (checkout-lock.sh, sourced inside the
+# owner's shell so the lock file is the owner's): cluster-deploy-runner
+# fetches this same checkout on this same tick, and its merge-triggered
+# start lands a second after any merge. On 2026-09-07 22:01 this fetch
+# held `refs/remotes/forgejo/main` while the runner's fetch died on it
+# (backlog d66f92b2). The helper is read whole at source time, so the
+# checkout it then performs cannot rewrite the code running it.
+runuser -l "$OWNER" -c "cd '$REPO' && . infra/forge/checkout-lock.sh && checkout_git '$REPO' fetch -q forgejo main && checkout_git '$REPO' checkout -qf \"\$(git rev-parse forgejo/main)\""
 
 # install.sh needs root (writes /etc/systemd/system). This script runs
 # as root; git already finished above, so install.sh's bytes are stable

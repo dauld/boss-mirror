@@ -36,15 +36,24 @@ the only filesystem that matters, and every consumer below shares it.
 
 All BOSS units run from the host's checkout at `/home/david/boss` (a
 detached checkout of forge `main`, never `git pull`), and every one is
-installed by `infra/forge/install.sh`. Since 2026-09-04 `forge-converge`
+installed by `infra/forge/install.sh`. **Every git user of that
+checkout takes one lock first** — `.git/boss-converge.lock`, via
+`infra/forge/checkout-lock.sh` (`checkout_git`), which also sweeps a
+stale `index.lock` nobody holds and retries the two git lock errors
+with a short backoff (5 tries, 6 s apart). Two units fetch the same
+checkout on the same tick, and the merge-triggered `converge` starts
+one of them a second after any merge; without the lock they collided
+on 2026-09-07 22:01 (failure mode 8 below). A hand-run git in the
+checkout should take the same lock:
+`flock /home/david/boss/.git/boss-converge.lock git fetch -q forgejo main`. Since 2026-09-04 `forge-converge`
 runs that installer every ten minutes, so a unit that lands on main is
 installed on its next tick — the "landed but never installed" class is
 closed for everything in the installer's `UNITS` list.
 
 | unit | cadence | does | fails loudly how |
 |---|---|---|---|
-| `forge-converge` | 10 min (boot +4) | fetch forge main, check it out, run `install.sh` — the host adopts its own units | journal; a broken install leaves the previous units running |
-| `cluster-deploy-runner` | 10 min (boot +3) | build the cluster image on the rootless daemon, push it to the registry, roll the cluster, then verify every manifest under `infra/cluster/manifests` is applied and not drifted | exit 1 on drift or an unreadable manifest; the conductor's converge step reads the result |
+| `forge-converge` | 10 min (boot +4) | fetch forge main and check it out under the checkout lock (as the owner), run `install.sh` — the host adopts its own units | journal; a broken install leaves the previous units running |
+| `cluster-deploy-runner` | 10 min (boot +3), and on every merge via the `converge` ops verb | fetch and check out forge main under the checkout lock, build the cluster image on the rootless daemon, push it to the registry, roll the cluster, then verify every manifest under `infra/cluster/manifests` is applied and not drifted | exit 1 on drift or an unreadable manifest; the conductor's converge step reads the result; a run started by a `converge` ops-request PATCHes that packet with `converged: <sha>`, `converge_held: <reason>` or `converge_failed: <stage> (exit N)` when it ends |
 | `disk-floor-sweep` | hourly (boot +5) | keep free disk above the floor, `BOSS_DISK_FLOOR_GB=100` in the service; prunes the **system** daemon's CI images first (`until=24h`), then the rootless caches, in a fixed order; regenerable caches only, never volumes | exits non-zero with `FLOOR UNMET — a human decides next` rather than deleting harder |
 | `reap-dead-ci-jobs` | daily (boot +15) | remove the containers and volumes of crashed CI jobs | journal |
 | `estate-observe-host` | 15 min (boot +3) | record this host's disk, load and units into the estate as observations; the conductor's boarding refuses on a positive "host is short" reading | journal; a stale series reads as unverifiable, and boarding proceeds with one loud line |
@@ -231,8 +240,10 @@ The lever, by name, if it is ever needed by hand again:
 alpine/k8s:1.33.3 kubectl --kubeconfig=/kc -n boss rollout undo
 deployment/boss --to-revision=<revision whose image is the last converged
 sha>`; read the revision from `rollout history --revision=N`. And the
-converge by hand, bypassing its packet step:
-`cd /home/david/boss && git fetch -q forgejo main && git checkout -qf
+converge by hand, bypassing its packet step (the runner takes the
+checkout lock itself; only the git you run by hand needs the `flock`):
+`cd /home/david/boss && flock .git/boss-converge.lock git fetch -q
+forgejo main && flock .git/boss-converge.lock git checkout -qf
 forgejo/main && infra/forge/cluster-deploy-runner.sh`.
 
 ### 6. The cluster is dark and nobody is awake
@@ -252,6 +263,36 @@ A unit authored in the tree but never on the host. Closed for the
 installer's `UNITS` list by `forge-converge`; `timer-list` shows the
 five timers and when each fires next, and an absent timer is the
 symptom. The two hand-installed pieces below are still open.
+
+### 8. Two converges collide in the shared checkout
+
+2026-09-07 22:01: train #257 merged at 22:01:22, the `converge`
+ops-request fired within a second and `cluster-deploy-runner` started at
+22:01:23 — on the same tick as `forge-converge`'s fetch of the same
+checkout. The runner died on `error: cannot lock ref
+'refs/remotes/forgejo/main': is at 1994077 but expected 77152b8` (exit
+1); the 22:11 timer retry died on a stale `.git/index.lock` the first
+death had left (exit 128); the 22:21 retry built. Two lost cycles, a
+twenty-minute converge lag nine minutes short of the 30-minute alarm,
+and the next board held on an occupied track. The ops-request read
+`answered` throughout, because `systemctl start --no-block` returns 0
+when systemd accepts the job, not when the run ends (backlog d66f92b2).
+
+Now: every git user of the checkout goes through
+`infra/forge/checkout-lock.sh` — one `flock` on
+`.git/boss-converge.lock`, a stale-`index.lock` sweep that removes the
+file only when `/proc` shows no live `git` in the checkout (and logs
+the removal), and a 5 × 6 s retry on the two lock errors; any other git
+error is a verdict and is not retried. The symptom to read in
+`journal-tail cluster-deploy-runner` is a `checkout-lock:` line — `hit
+a git lock (try N of 5)`, `removed stale …/index.lock`, or `could not
+take … within 600s`, the last meaning something outside the protocol
+holds the checkout (a hand-run git; `unit-status forge-converge` and
+the journal say which). And a run that a `converge` ops-request
+started now ends on that packet: `converge_failed: <stage> (exit N)`
+on the request's metadata, beside the maintenance packet's
+*Maintenance failed*. A request whose run was already active when it
+arrived is answered by the next run, usually `converged: <sha>`.
 
 ## Residue (measured 2026-09-05)
 

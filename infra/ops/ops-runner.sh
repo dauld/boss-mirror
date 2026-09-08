@@ -226,7 +226,13 @@ ARGV
         # tree is minutes, not seconds.
         verb_timeout=$(printf '%s' "$decision" | jq -r '.timeout // empty')
         rawf="$workdir/raw"
-        timeout "${verb_timeout:-$OPS_TIMEOUT}" "$@" > "$rawf" 2>&1 < /dev/null
+        # The packet's id rides in the verb's ENVIRONMENT, never its
+        # argv: a verb that starts a longer-running unit (converge-now)
+        # can leave the unit a note saying which packet asked, so the
+        # unit's outcome lands back on that packet instead of the
+        # `answered` that `systemctl start --no-block` earns by merely
+        # being accepted (backlog d66f92b2). Data, not program text.
+        OPS_REQUEST_ID="$job_id" timeout "${verb_timeout:-$OPS_TIMEOUT}" "$@" > "$rawf" 2>&1 < /dev/null
         rc=$?
         size=$(wc -c < "$rawf")
         if [ "$size" -gt "$OPS_OUTPUT_CAP" ]; then

@@ -17,7 +17,11 @@
 //!   AND `payload.assignee_id` is null/empty, look up active Employees
 //!   matching the Step's `authority_role` (falling back to the
 //!   StepType's `required_roles`) and PUT one onto the Step via
-//!   `PUT /api/jobs/{job_id}/steps/{step_id}`.
+//!   `PUT /api/jobs/{job_id}/steps/{step_id}` — unless the step's
+//!   metadata declares `claimable` (the protocol asked for a role
+//!   queue) or `human_only` (the protocol asked for a person —
+//!   c17871fe), in which case it is left unassigned for a holder of
+//!   its `authority_role` to claim.
 //! - Which eligible holder gets the step is chosen by a **data-selected
 //!   distribution strategy** (`BOSS_DISPATCH_STRATEGY`, default `spread`),
 //!   per the registries/data-over-hardcoded-paths rule — the algorithm is

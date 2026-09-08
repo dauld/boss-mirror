@@ -91,3 +91,57 @@ converge_held() {
     [ -f "$f" ] || return 1
     cat "$f"
 }
+
+# THE RUN ANSWERS THE PACKET THAT ASKED FOR IT (backlog d66f92b2).
+#
+# The `converge` ops verb (converge-now.sh) starts this unit with
+# `systemctl start --no-block`, which returns 0 the moment systemd
+# accepts the job — so the ops-request closed `answered` on 2026-09-07
+# 22:01 while the run it started died a second later on a git lock.
+# The verb now leaves the requesting packet's id in an inbox in the
+# checkout; the runner takes the inbox when it starts and, when it
+# ends, PATCHes each request with the outcome. Best-effort, never
+# fatal: visibility must not block the executor (the-executor-never-
+# waits-on-its-visibility), and the maintenance packet's ExecStopPost
+# verdict is the record either way.
+
+# take_converge_requests REPO — move every id in the inbox into this
+# run's file. Idempotent (the stage-2 re-exec runs it again and finds
+# the inbox already taken).
+take_converge_requests() {
+    local inbox="$1/.git/boss-converge-requests" mine="$1/.git/boss-converge-requests.run"
+    [ -f "$inbox" ] || return 0
+    cat "$inbox" >> "$mine" && rm -f "$inbox"
+}
+
+# answer_converge_requests REPO KEY VALUE — PATCH {KEY: VALUE} onto the
+# metadata of every ops-request this run was started for, then forget
+# them. Only well-formed job ids are sent (a malformed line is logged
+# and dropped); a missing BOSS_JOBS_URL or an unreachable API is one
+# loud line, and the run's exit status is untouched.
+answer_converge_requests() {
+    local repo="$1" key="$2" value="$3" mine="$1/.git/boss-converge-requests.run" id body code
+    [ -f "$mine" ] || return 0
+    if [ -z "${BOSS_JOBS_URL:-}" ]; then
+        echo "cluster-deploy-runner: BOSS_JOBS_URL unset — cannot annotate the request(s) that started this run ($key: $value)" >&2
+        rm -f "$mine"; return 0
+    fi
+    value=$(printf '%s' "$value" | tr -d '"\\' | tr '\n' ' ')
+    body=$(printf '{"%s":"%s"}' "$key" "$value")
+    while IFS= read -r id; do
+        case "$id" in
+            "") continue ;;
+            *[!0-9a-fA-F-]*)
+                echo "cluster-deploy-runner: ignoring a malformed request id in $mine" >&2; continue ;;
+        esac
+        code=$(printf '%s' "$body" | curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+            -X PATCH -H 'content-type: application/json' \
+            -H 'x-boss-user: {"id":"automation:cluster-deploy-runner","role":"platform-admin","access_tier":"operator"}' \
+            --data-binary @- "$BOSS_JOBS_URL/api/jobs/$id/metadata") || code="unreachable"
+        case "$code" in
+            2*) echo "cluster-deploy-runner: request ${id:0:8} annotated $key: $value" ;;
+            *)  echo "cluster-deploy-runner: could not annotate request ${id:0:8} ($key: $value) — API said $code; its maintenance packet still carries the verdict" >&2 ;;
+        esac
+    done < "$mine"
+    rm -f "$mine"
+}

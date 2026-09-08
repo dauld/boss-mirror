@@ -29,12 +29,20 @@
 //      collected per role, the step cannot complete while one is
 //      outstanding, and a 409 surfaces the server's stale-roles text.
 //
-// Order on Approve/Reject: metadata lands first (a stamp attests the
-// step's current shape, so the decision must be IN the shape), then
-// the user's own stamp if their role is required and unsigned, then
-// the completion — skipped, with a plain explanation, while other
-// roles' signatures are still outstanding. Request changes records
-// without completing.
+// Order on Approve/Reject (v3, feedback 221b4b5c): metadata lands
+// first (a stamp attests the step's current shape, so the decision
+// must be IN the shape), then the user's own stamp if their role is
+// required and unsigned, then the completion — skipped, with a plain
+// explanation, while other roles' signatures are still outstanding.
+// Request changes records without completing. NOTHING writes metadata
+// after a signature exists: on 2026-09-05 15:40 David signed, then
+// this surface re-saved his unchanged decision with a fresh
+// decided_at, and the completion answered 409 stale two seconds after
+// his signature. A decision that a signature already covers is not
+// re-saved; one that changes is saved BEFORE the (re-)signature, and
+// the roster says which stamps that made stale. Each stage of the
+// gesture is shown as it lands — saved, signed, completed — and any
+// refusal verbatim, so a tap never looks like it did nothing.
 //
 // Plugin contract: window.__boss_register_step_plugin(kind, mount);
 // mount(container, { step, jobId, onUpdate, currentUser }).
@@ -84,6 +92,14 @@
     const isDone = step.status === 'completed' || step.status === 'skipped';
     let busy = false;
     let error = null;
+    // Roles whose recorded stamp no longer matches the step's shape —
+    // the server's rule (a stamp pins step_shape_hash; a completion-
+    // relevant write after it records STEP_STAMPS_INVALIDATED and the
+    // stamp stays for provenance). Tracked here so the roster tells
+    // the truth between a change and the next read of the step.
+    const stale = new Set();
+    // The stages of the current gesture, in the order they landed.
+    let progress = [];
 
     const declared = (Array.isArray(step.fields) ? step.fields : []).filter(
       (f) => f && f.name && !TRIO.includes(f.name),
@@ -97,7 +113,7 @@
     });
 
     const stampFor = (role) => stamps.find((s) => s && s.role === role);
-    const outstanding = () => required.filter((r) => !stampFor(r));
+    const outstanding = () => required.filter((r) => !stampFor(r) || stale.has(r));
     const missingRequired = () =>
       declared.filter((f) => f.required && !nonEmptyString(fieldValues[f.name]));
 
@@ -106,6 +122,7 @@
     const rolesDiv = h('div', { className: 'step-signoff-roles' });
     const actionsDiv = h('div', { className: 'step-actions' });
     const errorDiv = h('div', { className: 'step-signoff-error' });
+    const progressDiv = h('div', { className: 'step-signoff-progress' });
     const commentTa = h('textarea', {
       className: 'step-signoff-comment',
       rows: '2',
@@ -197,18 +214,23 @@
       }
       required.forEach((role) => {
         const stamp = stampFor(role);
+        const isStale = Boolean(stamp) && stale.has(role);
         const row = h(
           'div',
-          { className: `step-signoff-role ${stamp ? 'is-signed' : 'is-outstanding'}` },
+          {
+            className: `step-signoff-role ${stamp && !isStale ? 'is-signed' : 'is-outstanding'}`,
+          },
           h('span', { className: 'step-signoff-rolename' }, role),
           stamp
             ? h(
                 'span',
-                { className: 'step-signoff-stamp' },
-                `signed by ${stamp.authority_id || 'unknown'} · ${when(stamp.stamped_at)}`,
+                { className: isStale ? 'step-signoff-stale' : 'step-signoff-stamp' },
+                `signed by ${stamp.authority_id || 'unknown'} · ${when(stamp.stamped_at)}${
+                  isStale ? ' — stale: the step changed after signing; sign again' : ''
+                }`,
               )
             : h('span', { className: 'step-signoff-await' }, 'awaiting signature'),
-          !stamp && !isDone
+          (!stamp || isStale) && !isDone
             ? h(
                 'button',
                 { className: 'step-btn', disabled: busy, onClick: () => sign(role) },
@@ -277,10 +299,19 @@
       errorDiv.appendChild(h('p', { className: 'step-error' }, error));
     }
 
+    function renderProgress() {
+      progressDiv.replaceChildren();
+      if (progress.length === 0) return;
+      progressDiv.appendChild(
+        h('p', { className: 'step-signoff-stages' }, progress.join(' · ')),
+      );
+    }
+
     function renderAll() {
       renderFields();
       renderRoles();
       renderActions();
+      renderProgress();
       renderError();
     }
 
@@ -347,6 +378,7 @@
     }
 
     async function sign(role) {
+      const wasBusy = busy;
       busy = true;
       error = null;
       renderAll();
@@ -382,6 +414,8 @@
           const fresh = await fetch(`/api/jobs/${jobId}`).then((r) => (r.ok ? r.json() : null));
           const s = fresh && (fresh.steps || []).find((x) => x.id === step.id);
           if (s) stamps = Array.isArray(s.sign_offs) ? s.sign_offs : [];
+          stale.delete(role);
+          progress.push(`Signed as ${role}`);
           if (typeof onUpdate === 'function') onUpdate();
           return true;
         }
@@ -389,7 +423,7 @@
         error = `Could not record the ${role} signature: ${e}`;
         return false;
       } finally {
-        busy = false;
+        busy = wasBusy;
         renderAll();
       }
     }
@@ -397,6 +431,7 @@
     async function decide(d) {
       busy = true;
       error = null;
+      progress = [];
       renderAll();
       try {
         // 1. The decision and the declared fields land in metadata
@@ -414,20 +449,35 @@
           if (nonEmptyString(fieldValues[f.name])) patch[f.name] = fieldValues[f.name];
         });
         patch.decision = d;
-        patch.decided_at = new Date().toISOString();
         if (commentTa.value.trim()) patch.comment = commentTa.value.trim();
-        const saved = await fetch(`/api/jobs/${jobId}/steps/${step.id}/metadata`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(patch),
-        });
-        if (!saved.ok) {
-          error = `Could not record the decision (${saved.status}): ${await saved.text()}`;
-          return;
+        // A signature already on the step covers exactly what is in
+        // it. When this gesture would change none of that, it is NOT
+        // re-saved — a fresh decided_at alone would move the shape the
+        // stamp pins and make the stamp stale (2026-09-05, 15:40:22).
+        // The decided_at that stands is the one that was signed.
+        const current = step.metadata || {};
+        const unchanged = Object.keys(patch).every((k) => current[k] === patch[k]);
+        if (stamps.length > 0 && unchanged) {
+          progress.push(`Decision already recorded: ${d}`);
+        } else {
+          patch.decided_at = new Date().toISOString();
+          const saved = await fetch(`/api/jobs/${jobId}/steps/${step.id}/metadata`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(patch),
+          });
+          if (!saved.ok) {
+            error = `Could not record the decision (${saved.status}): ${await saved.text()}`;
+            return;
+          }
+          // Fold the merged keys into the local cache the same way the
+          // server just did; keys other writers own stay as loaded.
+          step.metadata = Object.assign(step.metadata || {}, patch);
+          progress.push(`Decision saved: ${d}`);
+          // Every stamp attested the shape before this write; the
+          // server has just marked them stale, and so does the roster.
+          stamps.forEach((st) => st && stale.add(st.role));
         }
-        // Fold the merged keys into the local cache the same way the
-        // server just did; keys other writers own stay as loaded.
-        step.metadata = Object.assign(step.metadata || {}, patch);
         if (d === 'changes-requested') {
           if (typeof onUpdate === 'function') onUpdate();
           return;
@@ -455,6 +505,7 @@
         //    plainly what everyone is waiting on.
         if (left.length > 0) {
           error = null;
+          progress.push(`Waiting on: ${left.join(', ')}`);
           renderAll();
           if (typeof onUpdate === 'function') onUpdate();
           return;
@@ -470,9 +521,22 @@
           // sibling swallowed these, which is how a click could
           // silently do nothing). 409: stale stamps; the server's own
           // text names which roles.
-          error = `${done.status}: ${await done.text()}`;
+          const text = await done.text();
+          error = `${done.status}: ${text}`;
+          // The 409 names the roles whose stamps the server will not
+          // accept; the roster offers those signatures again rather
+          // than showing them as signed.
+          try {
+            const body = JSON.parse(text);
+            (Array.isArray(body.missing_or_stale_roles) ? body.missing_or_stale_roles : []).forEach(
+              (r) => stale.add(r),
+            );
+          } catch (_) {
+            // Not JSON: the text itself is the whole explanation.
+          }
           return;
         }
+        progress.push('Completed');
         if (typeof onUpdate === 'function') onUpdate();
       } catch (e) {
         error = `Could not record the decision: ${e}`;
@@ -490,6 +554,7 @@
       h('div', { className: 'step-signoff-head' }, 'Signatures'),
       rolesDiv,
       h('div', { className: 'step-field' }, commentTa),
+      progressDiv,
       errorDiv,
       actionsDiv,
     );

@@ -320,16 +320,21 @@ async fn handle_event(
     // this only decides whether the packet arrives pre-nominated or
     // waits in a queue. It is protocol data, so making a step
     // claimable is a Workflow edit rather than a deploy (§9).
-    if step
-        .metadata
-        .as_ref()
-        .and_then(|m| m.get("claimable"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    //
+    // HUMAN-ONLY is the same shape with a stronger reason (c17871fe).
+    // The protocol asked for a PERSON, and every nomination below —
+    // the executor pick, the owner pick, the hash pick — can name an
+    // agent: the executor is one by definition, and the roster's
+    // `platform-admin` holders have included the agent session. On
+    // 2026-09-08 `Kill the old one` (destructive, human_only) reached
+    // the executor that way. So a human-only step is never nominated:
+    // it waits in its role queue, and the jobs API refuses any
+    // non-person who tries to take it. Read off the step's metadata
+    // because that is where materialisation put the declaration.
+    if let Some(reason) = left_for_role_queue(step.metadata.as_ref()) {
         debug!(
             job_id,
-            step_id, "step is claimable — leaving it for its role queue"
+            step_id, reason, "step is left for its role queue, not nominated"
         );
         return Ok(());
     }
@@ -500,6 +505,25 @@ async fn handle_event(
 /// role the executor is declared to execute for — a brewery `brewer`
 /// step must not land on the platform agent just because the agent
 /// exists.
+/// Why a ready step is left in its role queue instead of being
+/// nominated to one actor, or `None` to nominate as usual. Two
+/// declarations on the materialized step say so: `claimable` (the
+/// protocol asked for a queue) and `human_only` (the protocol asked
+/// for a person — c17871fe; read through the one reader for that key,
+/// `boss_jobs::human_only::declared`, in both spellings the live
+/// registry carries). Pure so the rule is testable without an event.
+fn left_for_role_queue(metadata: Option<&Value>) -> Option<&'static str> {
+    let metadata = metadata?;
+    if boss_jobs::human_only::declared(metadata) {
+        return Some("human-only");
+    }
+    metadata
+        .get("claimable")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        .then_some("claimable")
+}
+
 fn executor_for(
     simulated: bool,
     decision_shaped: bool,
@@ -865,12 +889,45 @@ async fn assign(ctx: &DispatcherCtx, job_id: &str, step_id: &str, emp_id: &str) 
 #[cfg(test)]
 mod tests {
     use super::{
-        eligible_candidates, event_is_simulated, executor_for, is_active_holder, owner_assignee,
-        owner_id_from_job_body, partition_permits, pick_index, pick_index_for, stable_hash,
+        eligible_candidates, event_is_simulated, executor_for, is_active_holder,
+        left_for_role_queue, owner_assignee, owner_id_from_job_body, partition_permits, pick_index,
+        pick_index_for, stable_hash,
     };
     use crate::config::AssignmentStrategy;
     use boss_jobs::step_registry::StepRegistry;
     use std::collections::HashMap;
+
+    /// A human-only step is never nominated — not to the executor, not
+    /// by the hash pick — it waits in its role queue for a person to
+    /// claim (c17871fe). Read off the materialized step's metadata, the
+    /// same way `claimable` is, in both spellings the live registry
+    /// carries.
+    #[test]
+    fn a_human_only_step_is_left_for_its_role_queue() {
+        use serde_json::json;
+        assert_eq!(
+            left_for_role_queue(Some(&json!({ "human_only": "true" }))),
+            Some("human-only")
+        );
+        assert_eq!(
+            left_for_role_queue(Some(&json!({ "human_only": true }))),
+            Some("human-only")
+        );
+        assert_eq!(
+            left_for_role_queue(Some(&json!({ "claimable": true }))),
+            Some("claimable")
+        );
+        // Neither declared: the step is nominated as before.
+        assert_eq!(
+            left_for_role_queue(Some(&json!({ "human_only": false }))),
+            None
+        );
+        assert_eq!(
+            left_for_role_queue(Some(&json!({ "authority_role": "platform-admin" }))),
+            None
+        );
+        assert_eq!(left_for_role_queue(None), None);
+    }
 
     /// FNV-1a is a fixed function of the input bytes — the SAME bytes hash to
     /// the SAME value on every call, host, and process (no per-process seed).

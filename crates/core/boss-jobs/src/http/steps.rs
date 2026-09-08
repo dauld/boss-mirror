@@ -96,6 +96,25 @@ pub(super) async fn add_step<R: JobsRepository + 'static, B: EventBus + 'static>
     // Ensure the step belongs to this job.
     step.job_id = job_id;
 
+    // A step born human-only with a non-human assignee is the same
+    // assignment the PUT refuses (c17871fe), one door earlier.
+    if crate::human_only::declared(&step.metadata)
+        && let Some(assignee) = step.assignee_id.as_deref()
+        && let Err(why) = crate::human_only::person_check(state.roster.as_deref(), assignee).await
+    {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(crate::human_only::refusal_body(
+                &step.id.to_string(),
+                &step.title,
+                step.metadata.get("authority_role").and_then(|v| v.as_str()),
+                assignee,
+                &why,
+            )),
+        )
+            .into_response();
+    }
+
     // Schema validation runs only when the step is being marked done —
     // required fields represent what must be true for the work to count
     // as complete, not what must be true for it to exist. A brand-new
@@ -373,6 +392,39 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     {
         obj.insert("authority_role".into(), auth);
     }
+    // So is `human_only` (c17871fe): the protocol's requirement for a
+    // person is materialisation data, and a metadata PUT that omits it
+    // must not turn a human-only step into one an agent can take.
+    if let Some(old_obj) = old.metadata.as_object()
+        && let Some(flag) = old_obj.get(crate::human_only::KEY).cloned()
+        && let Some(obj) = step.metadata.as_object_mut()
+    {
+        obj.insert(crate::human_only::KEY.into(), flag);
+    }
+
+    // A HUMAN-ONLY STEP REFUSES A NON-HUMAN ASSIGNEE (c17871fe). Checked
+    // when the assignee actually changes — an idempotent re-send of the
+    // same assignee is not an assignment — against the employee
+    // registry, because the actor model cannot tell a login from a
+    // person and the roster can. The dispatcher no longer nominates
+    // such a step at all; this is the boundary for every other caller.
+    if crate::human_only::declared(&step.metadata)
+        && let Some(assignee) = step.assignee_id.as_deref()
+        && old.assignee_id.as_deref() != Some(assignee)
+        && let Err(why) = crate::human_only::person_check(state.roster.as_deref(), assignee).await
+    {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(crate::human_only::refusal_body(
+                &step_id.to_string(),
+                &step.title,
+                step.metadata.get("authority_role").and_then(|v| v.as_str()),
+                assignee,
+                &why,
+            )),
+        )
+            .into_response();
+    }
 
     // A TERMINAL ROW IS FROZEN, AND SAYING SO IS THE POINT.
     //
@@ -571,6 +623,26 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     let stamps_invalidated = !old.sign_offs.is_empty()
         && boss_core::job::step_shape_hash(&old.title, &old.metadata)
             != boss_core::job::step_shape_hash(&step.title, &step.metadata);
+
+    // HOW an answer-question was decided (c17871fe): at the flip the
+    // server compares the answer to the packet's `proposed` text and
+    // stamps `accepted_as_proposed`; off the flip the stored value
+    // rides through and a body's own claim is dropped. After the
+    // shape-hash reads above so the stamp neither stales a sign-off
+    // nor counts as an edit; the required-at-done validation already
+    // passed on the same metadata.
+    if step.kind == crate::decision_record::KIND {
+        let proposed = parent_job
+            .as_ref()
+            .and_then(|j| j.metadata.get("proposed"))
+            .and_then(|v| v.as_str());
+        crate::decision_record::stamp(
+            &mut step.metadata,
+            &old.metadata,
+            is_flipping_to_done,
+            proposed,
+        );
+    }
 
     // Calendar reservation hook — runs BEFORE the persistence
     // write so a hard-conflict 409 doesn't leave the step in the
@@ -1237,6 +1309,26 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
     };
     if old.job_id != job_id {
         return (StatusCode::NOT_FOUND, "step not on this job").into_response();
+    }
+
+    // A HUMAN-ONLY STEP REFUSES A NON-HUMAN CLAIMANT (c17871fe) — the
+    // same rule the PUT enforces, at the other door an actor takes a
+    // step through. Before the station gate and the CAS: a claim that
+    // is not allowed must not enter the race.
+    if crate::human_only::declared(&old.metadata)
+        && let Err(why) = crate::human_only::person_check(state.roster.as_deref(), &user.id).await
+    {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(crate::human_only::refusal_body(
+                &step_id.to_string(),
+                &old.title,
+                old.metadata.get("authority_role").and_then(|v| v.as_str()),
+                &user.id,
+                &why,
+            )),
+        )
+            .into_response();
     }
 
     let actor = user
