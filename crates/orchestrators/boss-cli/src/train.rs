@@ -1059,14 +1059,44 @@ where
 // jobs-api helpers
 // ---------------------------------------------------------------------------
 
-/// The list body, whether or not the endpoint wrapped it in
-/// `{"data": [...]}`.
+/// Does this open train hold the single track? Only while it is
+/// PRE-MERGE — its `merged` step not yet completed. A merged train's
+/// content is already on main: the next consist merges on top of it,
+/// and the earlier train's `converged` step is designed to arrive by
+/// ANCESTRY (`convergence_verdict` accepts a running commit that is a
+/// descendant of its merge), so a later train landing first is what
+/// converges it, not what strands it. Holding the track for a merged
+/// train deadlocked delivery twice on 2026-09-07 (f3796323): a merged
+/// train whose sha bricked its boot sat at `converged` forever, and the
+/// fix-forward car could not board because the track was "occupied"
+/// by the very train it would have converged.
+///
+/// Fails closed: a row with no `steps`, or no `merged` step, is
+/// pre-merge and holds — unknown is not "clear".
+///
+/// Twin: `boss_jobs::yard::holds_the_track` reads the same rule off
+/// typed steps for the yard board. The typed read model and this JSON
+/// cannot share one signature, so each test names its twin
+/// (CLAUDE.md §9a).
+pub(crate) fn holds_the_track(train: &Value) -> bool {
+    // `is_none_or`: no step, or no readable status, holds (fail closed);
+    // only a `completed` merge releases.
+    find_step(train, "merged", "Merged into main")
+        .and_then(|s| s.get("status"))
+        .and_then(Value::as_str)
+        .is_none_or(|s| s != "completed")
+}
+
 /// The train holding the track, named for the journal, or None when
-/// the track is clear. Any open pr-train packet occupies it: arrived
-/// and cancelled trains are closed, so both clear the track — a red
-/// train that stall-cancels never blocks the next one.
+/// the track is clear. Only a PRE-MERGE open train occupies it
+/// (`holds_the_track`): a second consist assembled while the first is
+/// still merging would merge onto a main the first is about to change
+/// (a8c6773b); once the first has merged, the next consist merges on
+/// top of it and converges it by ancestry. Arrived and cancelled trains
+/// are closed, so both clear the track — a red train that stall-cancels
+/// never blocks the next one. Names the first holder.
 pub(crate) fn track_occupied_by(open_trains: &[Value]) -> Option<String> {
-    open_trains.first().map(|t| {
+    open_trains.iter().find(|t| holds_the_track(t)).map(|t| {
         let title = t
             .get("title")
             .and_then(Value::as_str)
@@ -1076,6 +1106,8 @@ pub(crate) fn track_occupied_by(open_trains: &[Value]) -> Option<String> {
     })
 }
 
+/// The list body, whether or not the endpoint wrapped it in
+/// `{"data": [...]}`.
 pub(crate) fn rows(resp: Option<Value>) -> Result<Vec<Value>> {
     let resp = resp.ok_or_else(|| anyhow!("empty response for a list call"))?;
     let list = match resp {
@@ -6566,23 +6598,33 @@ impl Conductor {
         let window = now.format("%Y-%m-%d %H:%M").to_string();
         let train_branch = format!("train/{}", now.format("%Y%m%d-%H%M"));
 
-        // THE TRACK — one train at a time. The cadence loop holds a
-        // departure before it claims a window (cadence::decide), so
-        // this is the backstop for a hand-run `boss train board` and
-        // for two conductors racing: an open pr-train packet means the
-        // previous train has not arrived or cancelled, and a second
-        // consist assembled now would merge onto a main the first is
-        // about to change (a8c6773b). No packet is opened for a hold —
-        // it is not a refusal, the yard is not empty, and the next tick
-        // after the track clears departs.
-        let on_track = rows(
+        // THE TRACK — one train MERGING at a time. The cadence loop
+        // holds a departure before it claims a window (cadence::decide),
+        // so this is the backstop for a hand-run `boss train board` and
+        // for two conductors racing: an open PRE-MERGE pr-train packet
+        // means the previous consist has not landed on main, and a
+        // second consist assembled now would merge onto a main the
+        // first is about to change (a8c6773b). A MERGED train waiting
+        // to deploy or converge does not hold it (`holds_the_track`):
+        // the next consist merges on top of its content and converges
+        // it by ancestry — holding for it deadlocked delivery twice on
+        // 2026-09-07 (f3796323). No packet is opened for a hold — it is
+        // not a refusal, the yard is not empty, and the next tick after
+        // the track clears departs.
+        //
+        // Every page: the list rows carry `steps` (http/jobs.rs enriches
+        // each row), which is what the predicate reads, and the one
+        // pre-merge train that matters may sit behind merged ones
+        // waiting to converge — a limit is not a filter.
+        let on_track = list_all_pages(|offset| async move {
             self.api(
                 Method::GET,
-                "/api/jobs?kind=pr-train&status=open&limit=5",
+                &format!("/api/jobs?kind=pr-train&status=open&limit={PAGE_LIMIT}&offset={offset}"),
                 None,
             )
-            .await?,
-        )?;
+            .await
+        })
+        .await?;
         if let Some(occupant) = track_occupied_by(&on_track) {
             log(format!("BOARDING HELD — track occupied by {occupant}"));
             return Ok(());
@@ -11592,16 +11634,30 @@ mod tests {
 
 #[cfg(test)]
 mod track_tests {
-    use super::track_occupied_by;
-    use serde_json::json;
+    use super::{holds_the_track, track_occupied_by};
+    use serde_json::{Value, json};
+
+    /// An open train whose `merged` step sits at `status`.
+    fn train(id: &str, title: &str, merged: &str) -> Value {
+        json!({
+            "id": id,
+            "title": title,
+            "status": "open",
+            "steps": [
+                {"spec_slug": "collect", "title": "Collect what is ready to board", "status": "completed"},
+                {"spec_slug": "merged", "title": "Merged into main", "status": merged},
+                {"spec_slug": "converged", "title": "Cluster converged", "status": "pending"}
+            ]
+        })
+    }
 
     #[test]
     fn an_open_train_occupies_the_track_and_is_named() {
-        let open = vec![json!({
-            "id": "48b67f2e-9970-456f-817a-d085975b915f",
-            "title": "PR train 2026-09-05 07:26",
-            "status": "open"
-        })];
+        let open = vec![train(
+            "48b67f2e-9970-456f-817a-d085975b915f",
+            "PR train 2026-09-05 07:26",
+            "ready",
+        )];
         assert_eq!(
             track_occupied_by(&open).as_deref(),
             Some("PR train 2026-09-05 07:26 (48b67f2e)")
@@ -11613,6 +11669,66 @@ mod track_tests {
         // The caller lists status=open only; an arrived or cancelled
         // train is closed and never reaches this list.
         assert_eq!(track_occupied_by(&[]), None);
+    }
+
+    /// Twin of boss-jobs `yard::tests::a_merged_train_waiting_to_converge_does_not_hold_the_track`
+    /// — the board counts the track by the same rule off typed steps.
+    #[test]
+    fn a_merged_train_waiting_to_converge_does_not_hold_the_track() {
+        // 2026-09-07 (f3796323), twice: a merged train whose sha bricked
+        // its boot sat at `converged`, and the fix-forward car could not
+        // board because the track was "occupied" by the very train it
+        // would have converged. Its content is on main; the next consist
+        // merges on top and converges it by ancestry.
+        let mut merged = train(
+            "a1b2c3d4-0000-0000-0000-000000000000",
+            "PR train 2026-09-07 21:00",
+            "completed",
+        );
+        merged["steps"][2]["status"] = json!("ready");
+        assert!(!holds_the_track(&merged));
+        assert_eq!(track_occupied_by(&[merged]), None);
+    }
+
+    /// Twin of boss-jobs `yard::tests::only_the_pre_merge_train_counts_as_the_track`.
+    #[test]
+    fn the_pre_merge_train_is_named_when_a_merged_one_is_also_open() {
+        let merged = train(
+            "a1b2c3d4-0000-0000-0000-000000000000",
+            "PR train 2026-09-07 21:00",
+            "completed",
+        );
+        let pre_merge = train(
+            "e5f6a7b8-0000-0000-0000-000000000000",
+            "PR train 2026-09-07 22:51",
+            "ready",
+        );
+        assert_eq!(
+            track_occupied_by(&[merged, pre_merge]).as_deref(),
+            Some("PR train 2026-09-07 22:51 (e5f6a7b8)")
+        );
+    }
+
+    #[test]
+    fn a_train_with_no_steps_fails_closed_as_pre_merge() {
+        // Unknown is not "clear": a row the list did not enrich, or a
+        // train with no merged step at all, holds the track.
+        let bare = json!({
+            "id": "48b67f2e-9970-456f-817a-d085975b915f",
+            "title": "PR train 2026-09-05 07:26",
+            "status": "open"
+        });
+        assert!(holds_the_track(&bare));
+        assert_eq!(
+            track_occupied_by(&[bare]).as_deref(),
+            Some("PR train 2026-09-05 07:26 (48b67f2e)")
+        );
+        let no_merged = json!({
+            "id": "48b67f2e-9970-456f-817a-d085975b915f",
+            "title": "PR train 2026-09-05 07:26",
+            "steps": [{"spec_slug": "collect", "title": "Collect what is ready to board", "status": "ready"}]
+        });
+        assert!(holds_the_track(&no_merged));
     }
 }
 

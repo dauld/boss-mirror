@@ -455,10 +455,12 @@ pub(crate) enum Decision {
     /// window's: it is the number an operator wants.
     StillRunning(std::time::Duration),
     /// Due, and this rule would depart a train, but one is already on
-    /// the track (that many pr-train packets are open). The window is
-    /// NOT claimed: the moment the track clears — the previous train
-    /// arrives OR cancels, both close its packet — the next tick fires
-    /// against the dock as it stands. Single-track railway (a8c6773b).
+    /// the track (that many open pr-train packets are still before
+    /// their merge). The window is NOT claimed: the moment the track
+    /// clears — the previous train merges, arrives OR cancels — the
+    /// next tick fires against the dock as it stands. Single-track
+    /// railway (a8c6773b), for the merge only: a merged train waiting
+    /// to converge holds nothing (`train::holds_the_track`).
     TrackOccupied(u32),
     /// Due, would depart a train, and the track could not be read. A
     /// failed probe never boards — the same rule the dock probe keeps.
@@ -469,10 +471,11 @@ pub(crate) enum Decision {
 /// function of (rule, boss-clock now, last firing, dock depth, open
 /// trains, what this loop already has in flight).
 ///
-/// `open_trains` is the track: how many pr-train packets are open
-/// right now. It gates only the verbs that depart a train, and it
-/// gates them BEFORE the window is claimed, so a held boarding leaves
-/// no firing behind and no cooldown starts from the hold. That is the
+/// `open_trains` is the track: how many open pr-train packets are still
+/// before their merge (`probe_open_trains`). It gates only the verbs
+/// that depart a train, and it gates them BEFORE the window is claimed,
+/// so a held boarding leaves no firing behind and no cooldown starts
+/// from the hold. That is the
 /// difference between "the next train departs when the previous one
 /// lands" and "the next train departs 45 minutes after we noticed the
 /// previous one had not landed yet". Two trains on one main is a
@@ -1005,31 +1008,43 @@ async fn probe_dock_depth(http: &reqwest::Client, base: &str) -> Result<u32> {
     Ok(depth)
 }
 
-/// How many trains are on the track: open pr-train packets, read off
-/// the list's `total` rather than its page — a limit is not a filter,
-/// and one open train is already one too many for a departure.
+/// How many trains hold the track: open pr-train packets still BEFORE
+/// their merge (`train::holds_the_track`). A merged train waiting to
+/// deploy or converge is open but holds nothing — the next consist
+/// merges on top of its content and converges it by ancestry; counting
+/// it deadlocked delivery twice on 2026-09-07 (f3796323), the fix-forward
+/// car held out by the very train it would have converged.
+///
+/// Read across every page, not off `total`: the predicate needs each
+/// row's `steps` (the list enriches them), and the one pre-merge train
+/// that matters may sit behind merged ones — a limit is not a filter.
+/// The paginator errors on a body without `total`, never reads it as
+/// zero — zero is what a wrong deployment answers.
 async fn probe_open_trains(http: &reqwest::Client, base: &str) -> Result<u32> {
-    let body = api(
-        http,
-        reqwest::Method::GET,
-        base,
-        "/api/jobs?kind=pr-train&status=open&limit=1",
-        None,
-    )
-    .await?
-    .ok_or_else(|| anyhow!("the pr-train list came back empty"))?;
-    open_train_count(&body)
+    let listed = train::list_all_pages(|offset| async move {
+        api(
+            http,
+            reqwest::Method::GET,
+            base,
+            &format!(
+                "/api/jobs?kind=pr-train&status=open&limit={}&offset={offset}",
+                train::PAGE_LIMIT
+            ),
+            None,
+        )
+        .await
+    })
+    .await?;
+    Ok(track_holders(&listed))
 }
 
-/// The count a list response carries. `total` is authoritative; a
-/// body without it is an error, never zero — zero is what a wrong
-/// deployment answers, and this number decides whether a train departs.
-pub(crate) fn open_train_count(body: &Value) -> Result<u32> {
-    let total = body
-        .get("total")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| anyhow!("the pr-train list carries no `total`: {body}"))?;
-    u32::try_from(total).context("open-train total does not fit a u32")
+/// The pure count behind the probe: the open trains that hold the track.
+pub(crate) fn track_holders(open_trains: &[Value]) -> u32 {
+    let n = open_trains
+        .iter()
+        .filter(|t| train::holds_the_track(t))
+        .count();
+    u32::try_from(n).unwrap_or(u32::MAX)
 }
 
 // ---------------------------------------------------------------------------
@@ -2163,7 +2178,7 @@ mod tests {
         assert_eq!(
             decide(&rule, now, None, Some(3), Some(0), &[]),
             Decision::Fire(now),
-            "the track clears the moment the previous packet closes — arrived or cancelled alike"
+            "the track clears the moment the previous train merges, or closes — arrived or cancelled alike"
         );
     }
 
@@ -2215,17 +2230,24 @@ mod tests {
         assert!(!departs_a_train("reconcile") && !departs_a_train("open:protocol-retro"));
     }
 
+    /// The probe's count is `train::holds_the_track` over every open
+    /// train (the predicate itself is pinned in train.rs `track_tests`;
+    /// the whole-list read is `list_all_pages`, pinned below). A merged
+    /// train waiting to converge is open but holds nothing — counting it
+    /// is the deadlock of 2026-09-07 (f3796323).
     #[test]
-    fn the_open_train_count_reads_total_not_the_page() {
-        // limit=1 in the probe: the page is one row even with three
-        // trains open. `total` is the number; a body without it errors.
-        let body = serde_json::json!({"data": [{"id": "t1"}], "limit": 1, "offset": 0, "total": 3});
-        assert_eq!(open_train_count(&body).unwrap(), 3);
-        let bare = serde_json::json!({"data": []});
-        assert!(
-            open_train_count(&bare).is_err(),
-            "no total is an error, never zero"
-        );
+    fn the_track_count_skips_a_merged_train() {
+        let merged = json!({"id": "t1", "steps": [
+            {"spec_slug": "merged", "title": "Merged into main", "status": "completed"},
+            {"spec_slug": "converged", "title": "Cluster converged", "status": "ready"}
+        ]});
+        let pre_merge = json!({"id": "t2", "steps": [
+            {"spec_slug": "merged", "title": "Merged into main", "status": "ready"}
+        ]});
+        let unread = json!({"id": "t3"});
+        assert_eq!(track_holders(std::slice::from_ref(&merged)), 0);
+        assert_eq!(track_holders(&[merged, pre_merge, unread]), 2);
+        assert_eq!(track_holders(&[]), 0);
     }
 
     /// `probe_dock_depth` counts the dock through the shared paginator,

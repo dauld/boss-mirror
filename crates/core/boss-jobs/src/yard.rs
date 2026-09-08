@@ -86,6 +86,23 @@ fn is_done(step: Option<&Step>) -> bool {
     step.is_some_and(|s| s.status == StepStatus::Completed)
 }
 
+/// Does this open train hold the single track? Only while it is
+/// PRE-MERGE — its `merged` step not completed. A merged train's content
+/// is on main: the next consist merges on top of it and the earlier
+/// train converges by ancestry, so a train the board already renders as
+/// deploying or CONVERGING must not also read as a track hold. That
+/// double reading is how a merged train whose boot failed held the
+/// fix-forward car out of the yard, twice, on 2026-09-07 (f3796323).
+/// Fails closed: no `merged` step is pre-merge.
+///
+/// Twin: the conductor's `train::holds_the_track` (boss-cli) reads the
+/// same rule off the API's JSON — the typed read model and that JSON
+/// cannot share one signature, so each side's test names the other
+/// (CLAUDE.md §9a).
+fn holds_the_track(steps: &[Step]) -> bool {
+    !is_done(find_step(steps, &MERGED))
+}
+
 /// A step's `completed_at` metadata stamp — the conductor writes it on
 /// completion. Not `completed_on` (date-only); the RFC3339 instant is
 /// what makes journey timings derivable.
@@ -411,7 +428,9 @@ pub struct BoardingPredicate {
 /// one for precedence) and the HTTP cases in `tests/yard_status_http.rs`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoardHold {
-    /// The hold in force — `"track occupied (N open train(s))"`,
+    /// The hold in force — `"track occupied (N open train(s))"` (N
+    /// counts the open trains still before their merge — a merged train
+    /// awaiting deploy or converge holds nothing, see `holds_the_track`),
     /// `"cooldown — M min left"`, or `"below threshold (depth D of T)"`
     /// — or `None` when the dock would board on the conductor's next
     /// tick. When several apply the line names one, in the order the
@@ -458,11 +477,13 @@ fn at_times_of(rule: Option<&CadenceRuleRow>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// `on_track` is the number of open trains still before their merge —
+/// the ones that hold the track (`holds_the_track`).
 pub fn boarding_predicate(
     rules: &[CadenceRuleRow],
     dock_depth: usize,
     last_board: Option<&LastFiring>,
-    open_trains: usize,
+    on_track: usize,
     now: Option<chrono::DateTime<chrono::Utc>>,
 ) -> BoardingPredicate {
     let depth = depth_rule(rules);
@@ -508,7 +529,7 @@ pub fn boarding_predicate(
         dock_depth,
         threshold_met,
         summary,
-        hold: boarding_hold(rules, last_board, dock_depth, open_trains, now),
+        hold: boarding_hold(rules, last_board, dock_depth, on_track, now),
     }
 }
 
@@ -524,7 +545,8 @@ fn cooldown_released(last: &LastFiring) -> bool {
 /// The boarding decision for the queue-depth rule, as the conductor
 /// would make it on its next tick — see [`BoardHold`].
 ///
-/// Pure: (rules, the board rule's last firing, dock depth, open trains,
+/// Pure: (rules, the board rule's last firing, dock depth, trains on the
+/// track — open and still before their merge, see `holds_the_track` —
 /// now) in, the hold out. The cooldown needs a clock: no clock, no
 /// cooldown reading — the rule `build_status` keeps for stalls. Only the
 /// clockless empty status takes that path, and it carries no firing.
@@ -532,7 +554,7 @@ pub fn boarding_hold(
     rules: &[CadenceRuleRow],
     last_board: Option<&LastFiring>,
     dock_depth: usize,
-    open_trains: usize,
+    on_track: usize,
     now: Option<chrono::DateTime<chrono::Utc>>,
 ) -> BoardHold {
     let depth = depth_rule(rules);
@@ -564,10 +586,10 @@ pub fn boarding_hold(
         };
     }
     let mut holds: Vec<(String, String)> = Vec::new();
-    if open_trains > 0 {
-        let s = if open_trains == 1 { "" } else { "s" };
+    if on_track > 0 {
+        let s = if on_track == 1 { "" } else { "s" };
         holds.push((
-            format!("track occupied ({open_trains} open train{s})"),
+            format!("track occupied ({on_track} open train{s})"),
             "the track clears".to_string(),
         ));
     }
@@ -1057,7 +1079,8 @@ pub const RECENT_LIMIT: usize = 8;
 
 /// Assemble the full status from the rows the handler fetched.
 ///
-/// - `open_trains` — open pr-train Jobs with their steps.
+/// - `open_trains` — open pr-train Jobs with their steps. Only those
+///   still before their merge count as the track hold (`holds_the_track`).
 /// - `closed_trains` — recently-closed pr-train Jobs with their steps,
 ///   already ordered newest-first by the caller (the adapter orders by
 ///   `opened_on desc`, which for a batch of same-day trains is close
@@ -1099,7 +1122,14 @@ pub fn build_status(
         .map(|(j, s)| train_status(j, s, stall_before))
         .collect();
     let dock: Vec<DockCar> = dock_cars.iter().map(dock_car).collect();
-    let boarding = boarding_predicate(rules, dock.len(), last_board, open_trains.len(), now);
+    // The track: open trains still before their merge. A merged train
+    // waiting to deploy or converge is rendered as such above and holds
+    // nothing — the next consist merges on top of it.
+    let on_track = open_trains
+        .iter()
+        .filter(|(_, s)| holds_the_track(s))
+        .count();
+    let boarding = boarding_predicate(rules, dock.len(), last_board, on_track, now);
     let recent = closed_trains
         .iter()
         .take(RECENT_LIMIT)
@@ -1760,6 +1790,118 @@ mod tests {
         assert_eq!(
             one.next_board,
             "boards on the next tick once the track clears"
+        );
+    }
+
+    /// Twin of boss-cli `track_tests::a_merged_train_waiting_to_converge_does_not_hold_the_track`
+    /// — the conductor reads the same rule off the API's JSON.
+    #[test]
+    fn a_merged_train_waiting_to_converge_does_not_hold_the_track() {
+        // 2026-09-07 (f3796323), twice: a merged train whose sha bricked
+        // its boot sat at `converged`, and the board said the fix-forward
+        // car was held by the track — the very train it would have
+        // converged. Merged content is on main; the next consist merges
+        // on top and converges it by ancestry. A CONVERGING train must
+        // not also read as a track hold.
+        let converging = vec![
+            done("merged", "Merged into main", "2026-09-07T20:00:00Z"),
+            done(
+                "deployed",
+                "Deployed to the playground",
+                "2026-09-07T20:05:00Z",
+            ),
+            step(
+                "converged",
+                "Cluster converged",
+                StepStatus::Ready,
+                json!({}),
+            ),
+        ];
+        let open = vec![(train(vec![], json!({})), converging)];
+        let dock: Vec<Job> = (0..5)
+            .map(|i| {
+                let mut car = train(vec![], json!({ "branch": format!("fix/{i}") }));
+                car.kind = "ship-a-change".into();
+                car
+            })
+            .collect();
+        let rules = vec![board_rule(4, 45)];
+
+        let status = build_status(
+            &open,
+            &[],
+            &dock,
+            &rules,
+            None,
+            None,
+            &[],
+            &[],
+            &[],
+            fixed_now(),
+        );
+        assert_eq!(status.trains[0].phase, TrainPhase::Converging);
+        assert_eq!(status.boarding.hold.held_because, None);
+        assert_eq!(status.boarding.hold.next_board, "boards on the next tick");
+    }
+
+    /// Twin of boss-cli `track_tests::the_pre_merge_train_is_named_when_a_merged_one_is_also_open`.
+    #[test]
+    fn only_the_pre_merge_train_counts_as_the_track() {
+        // Two open trains: one converging (merged), one still awaiting
+        // its merge. The track is held by exactly one — the count says
+        // so, not "2 open trains".
+        let converging = vec![
+            done("merged", "Merged into main", "2026-09-07T20:00:00Z"),
+            done(
+                "deployed",
+                "Deployed to the playground",
+                "2026-09-07T20:05:00Z",
+            ),
+            step(
+                "converged",
+                "Cluster converged",
+                StepStatus::Ready,
+                json!({}),
+            ),
+        ];
+        let pre_merge = vec![
+            done(
+                "collect",
+                "Collect what is ready to board",
+                "2026-09-07T20:30:00Z",
+            ),
+            done("pr", "Open the batched PR", "2026-09-07T20:31:00Z"),
+            step("ci", "CI verdict", StepStatus::Ready, json!({})),
+            step("merged", "Merged into main", StepStatus::Ready, json!({})),
+        ];
+        let open = vec![
+            (train(vec![], json!({})), converging),
+            (train(vec![], json!({})), pre_merge),
+        ];
+        let dock: Vec<Job> = (0..5)
+            .map(|i| {
+                let mut car = train(vec![], json!({ "branch": format!("fix/{i}") }));
+                car.kind = "ship-a-change".into();
+                car
+            })
+            .collect();
+        let rules = vec![board_rule(4, 45)];
+
+        let status = build_status(
+            &open,
+            &[],
+            &dock,
+            &rules,
+            None,
+            None,
+            &[],
+            &[],
+            &[],
+            fixed_now(),
+        );
+        assert_eq!(
+            status.boarding.hold.held_because.as_deref(),
+            Some("track occupied (1 open train)")
         );
     }
 

@@ -518,15 +518,56 @@ async fn a_recent_board_firing_reads_as_a_cooldown_hold_with_the_minutes_left() 
     );
 }
 
-/// The single track is the hold the conductor checks first: the seed's
-/// one open train (mid-deploy) holds the dock before its depth does, and
-/// the sentence still names the depth that has to follow.
+/// The single track is the hold the conductor checks first: a train
+/// still before its merge holds the dock before its depth does, and the
+/// sentence still names the depth that has to follow. The seed's own
+/// open train is merged (mid-deploy) and does NOT count — two trains are
+/// open, the track reads one.
 #[tokio::test]
 async fn an_open_train_reads_as_track_occupied_before_anything_else() {
     let (app, jobs) = app_with(vec![depth_rule(), clock_rule()], vec![policy_row()]);
     seed_full(&jobs).await;
+    let now = t(NOW);
+    // A fresh id: `seed_full` already owns 1111…7777, and the in-memory
+    // `create_job_at` mirrors the Pg replay guard — an existing id is a
+    // silent no-op, which is how a first draft of this test seeded
+    // nothing and read one train.
+    let pre_merge = job(
+        "pr-train",
+        "88888888-8888-8888-8888-888888888888",
+        "train #201",
+        JobStatus::Open,
+        json!({}),
+    );
+    jobs.create_job_at(&pre_merge, now, &[]).await.unwrap();
+    for s in [
+        step(
+            &pre_merge.id,
+            "pr",
+            "Open the batched PR",
+            StepStatus::Completed,
+            json!({ "completed_at": "2026-09-03T11:00:00Z" }),
+        ),
+        step(
+            &pre_merge.id,
+            "ci",
+            "CI verdict",
+            StepStatus::Ready,
+            json!({}),
+        ),
+        step(
+            &pre_merge.id,
+            "merged",
+            "Merged into main",
+            StepStatus::Ready,
+            json!({}),
+        ),
+    ] {
+        jobs.add_step_at(&s, now, &[]).await.unwrap();
+    }
     let (_, body) = get(&app, "operator").await;
 
+    assert_eq!(body["trains"].as_array().map(Vec::len), Some(2));
     let b = &body["boarding"];
     assert_eq!(b["held_because"], "track occupied (1 open train)");
     assert!(b["cooldown_remaining_minutes"].is_null());
@@ -534,6 +575,27 @@ async fn an_open_train_reads_as_track_occupied_before_anything_else() {
     assert_eq!(
         b["next_board"],
         "boards on the next tick once the track clears and the dock reaches 4"
+    );
+}
+
+/// 2026-09-07 (f3796323), twice: a merged train whose sha bricked its
+/// boot sat at `converged`, and the board said the fix-forward car was
+/// held by the track — the very train it would have converged. A merged
+/// train's content is on main; the next consist merges on top of it and
+/// converges it by ancestry, so it holds nothing. The seed's one open
+/// train is merged and mid-deploy: the dock reads its depth, not a track.
+#[tokio::test]
+async fn a_merged_train_waiting_to_deploy_does_not_hold_the_track() {
+    let (app, jobs) = app_with(vec![depth_rule(), clock_rule()], vec![policy_row()]);
+    seed_full(&jobs).await;
+    let (_, body) = get(&app, "operator").await;
+
+    assert_eq!(body["trains"][0]["phase"], "deploying");
+    let b = &body["boarding"];
+    assert_eq!(b["held_because"], "below threshold (depth 2 of 4)");
+    assert_eq!(
+        b["next_board"],
+        "boards on the next tick once the dock reaches 4"
     );
 }
 
