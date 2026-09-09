@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext};
 use boss_jobs::car::{self, Receipt};
 
-use super::common::{StepEvent, api_client, dispatcher_actor_header, get_json};
+use super::common::{StepEvent, api_client, dispatcher_actor_header, get_json, write_json};
 
 pub struct JobsAutoPark {
     client: reqwest::Client,
@@ -292,38 +292,6 @@ async fn post_json_return(
     resp.json()
         .await
         .map_err(|e| HandlerError::Downstream(format!("POST {url} not JSON: {e}")))
-}
-
-/// PUT or PATCH a body, mapping non-2xx the same way. Completing a car
-/// step is a PUT and refreshing a parked car's receipt is a PATCH on
-/// the metadata door; the shared POST helper covers neither.
-async fn write_json(
-    client: &reqwest::Client,
-    method: reqwest::Method,
-    url: &str,
-    body: &Value,
-    rule_name: &str,
-) -> Result<(), HandlerError> {
-    let verb = method.to_string();
-    let resp = client
-        .request(method, url)
-        .header("content-type", "application/json")
-        .header("x-boss-user", dispatcher_actor_header(rule_name))
-        .header("x-sim-origin", super::common::sim_origin_value())
-        .json(body)
-        .send()
-        .await
-        .map_err(|e| HandlerError::Downstream(format!("{verb} {url}: {e}")))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
-            HandlerError::Permanent(format!("{verb} {url} returned {status}: {text}"))
-        } else {
-            HandlerError::Downstream(format!("{verb} {url} returned {status}: {text}"))
-        });
-    }
-    Ok(())
 }
 
 #[async_trait]

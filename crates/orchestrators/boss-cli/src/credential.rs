@@ -286,7 +286,10 @@ async fn list() -> Result<()> {
     let url = format!("{base}/api/credentials");
     let resp = reqwest::Client::new()
         .get(&url)
-        .header("x-boss-user", crate::train::boss_user())
+        .header(
+            "x-boss-user",
+            crate::identity::header(&crate::identity::reader()),
+        )
         .send()
         .await
         .with_context(|| format!("GET {url}"))?;

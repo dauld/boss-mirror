@@ -293,12 +293,18 @@ pub async fn file(
         ),
         None => None,
     };
+    // The packet is owned by whoever filed it. This used to stamp the
+    // train conductor's id on every hand-filed packet — the same
+    // mis-attribution `completed_by` exposed on steps (backlog
+    // 5083d6f5). Resolved BEFORE the POST so an unnamed caller is
+    // refused with the fix rather than filing under automation.
+    let owner = crate::identity::sign(&reqwest::Method::POST, "/api/jobs")?;
     let body = envelope(
         kind,
         title,
         priority.as_deref(),
         subject_id.as_deref(),
-        crate::train::actor_id(),
+        &owner,
         &now.format("%Y-%m-%d").to_string(),
         md,
     );

@@ -32,12 +32,38 @@
 //! What remains bounded is the NODE, not correctness. Five parallel
 //! gates put w-1 at 65% I/O pressure with CPU pressure at 0.00 and
 //! stretched a 35-minute gate to 93 minutes — so this verb counts live
-//! gate Jobs and refuses politely at [`DEFAULT_MAX_CONCURRENT`]
-//! (override: BOSS_GATE_MAX_CONCURRENT), naming the running gates. The
-//! count is best-effort against a race (two verbs counting at once can
-//! both see N-1), which is acceptable now that over-admission costs
-//! minutes, not verdicts; the scheduler's ephemeral-storage accounting
-//! is the hard backstop on the disk.
+//! gate Jobs and holds at [`DEFAULT_MAX_CONCURRENT`] (override:
+//! BOSS_GATE_MAX_CONCURRENT). The count is best-effort against a race
+//! (two verbs counting at once can both see N-1), which is acceptable
+//! now that over-admission costs minutes, not verdicts; the scheduler's
+//! ephemeral-storage accounting is the hard backstop on the disk.
+//!
+//! ON THE BOUND: IT QUEUES, AND A REFUSAL FILES NOTHING (fd217c65).
+//! Measured 2026-09-08: 24 green gates, 6 red — and 21 launches refused
+//! at the bound. Each refusal had ALREADY filed its gate-run packet, so
+//! it closed the packet with the only terminal the protocol offers a run
+//! that produced no verdict: `lost`, whose label is "Gate lost
+//! (environment died)". Nothing died; the node was busy. Twenty-one
+//! phantom runs polluted the day's history and the yard's counts, and
+//! five builders each hand-rolled a five-minute retry loop — two
+//! collided on a shared script, and one outlived the session that made
+//! it and re-gated an already-green branch into a twin car.
+//!
+//! Both halves are fixed here, and they are the same fix seen twice: a
+//! station holds, it does not drop. [`admission`] decides Launch / Queue
+//! / Refuse from observations taken BEFORE any packet exists, so a
+//! refusal files nothing; and at the bound a `--wait` caller takes a
+//! place in line ([`QUEUED_AT`]) that this process holds by heartbeat
+//! until a slot frees, oldest first. The launcher is this verb, not the
+//! conductor and not a dispatcher rule: creating a gate Job needs the
+//! Kubernetes credential and the runner manifest, and the conductor
+//! holds neither by design (`infra/cluster/manifests/boss-conductor.yaml`
+//! — "RBAC: NONE"). "A slot is free" is also a CLUSTER fact that no BOSS
+//! event announces — a gate Job can die without reporting — so an
+//! event-driven launcher would stall the line permanently on exactly the
+//! failure the queue exists to survive, where a poll re-derives it every
+//! time. And a place held by a live process cannot outlive its
+//! session, which is the second defect above, structurally.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -45,7 +71,7 @@ use std::process::Stdio;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 
-use crate::train::boss_user;
+use crate::identity;
 
 /// The COMPILED fallback for how many gates run at once — the last
 /// resort when neither the env override nor the delivery policy can be
@@ -301,6 +327,242 @@ pub(crate) fn crowd_refusal(live: &[String], max: usize) -> Option<String> {
     ))
 }
 
+/// How many gate-runs may hold a place in line at once.
+///
+/// Four waves at the measured median: the last place in a full line is
+/// about 90 minutes out. Past that the queue would be promising a slot
+/// the node will not reach before the builder's session ends, and a
+/// refusal that says "come back" is kinder than a place that quietly
+/// expires. A full queue REFUSES and files nothing, the same discipline
+/// as every other refusal here.
+const QUEUE_CAP: usize = 12;
+
+/// How long a place in line survives without a heartbeat, in seconds.
+///
+/// THE POINT OF THE WHOLE MECHANISM. A place is held by a LIVE process:
+/// the waiting `boss gate` refreshes it every poll. On 2026-09-08 a
+/// builder's session ended and its DETACHED retry loop kept running,
+/// re-gating an already-green branch into a twin car. A place that stops
+/// being refreshed is skipped, so the line behind a dead holder moves
+/// instead of waiting on a ghost. Ten poll intervals of slack, which
+/// comfortably absorbs an SoR roll.
+const QUEUE_PLACE_TTL_SECS: i64 = 300;
+
+/// How often a waiting gate re-reads the line and the cluster.
+const QUEUE_POLL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The median gate, in whole minutes — measured 2026-09-08 across the
+/// day's 30 completed runs (median 18.2, p90 24.5, max 27.1). Used for
+/// exactly one thing: telling a waiting builder what a place costs, so
+/// the choice to wait or come back is made on a number.
+const MEDIAN_GATE_MINUTES: u64 = 18;
+
+/// The instant a place in line was taken — the queue's ordering key.
+///
+/// Defined in `boss_jobs::yard` and re-exported here because BOTH sides
+/// need it and a fact that lives twice drifts (§9a): this verb writes it
+/// and the yard reads it to keep a waiting run out of the gate bays.
+pub(crate) use boss_jobs::yard::QUEUED_AT;
+
+/// The heartbeat the holder of a place refreshes while it waits. Written
+/// and read only here — the yard cares whether a run is queued, never
+/// how recently its holder said so.
+pub(crate) const QUEUE_HEARTBEAT_AT: &str = "queue_heartbeat_at";
+
+/// An RFC3339 stamp as an instant. `None` for anything that does not
+/// parse: a stamp that cannot be read is no stamp, never a guess into
+/// the head of the line.
+fn parse_instant(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&chrono::Utc))
+}
+
+/// What the pre-flight observations say happens next.
+///
+/// EVERY REFUSAL IS A VALUE COMPUTED HERE, from observations taken
+/// before any packet is filed — the whole of part 1 of fd217c65. The
+/// alternative fix, a `refused` terminal on the gate-run, needs a new
+/// workflow version: the protocol's `verdict` field is the closed enum
+/// `green|failed|lost` and each terminal is an `outcome` step keyed on
+/// it. That is a registry change to record a state that should not be
+/// recorded at all — a refusal is not an outcome of a run, it is the
+/// absence of one. So: no packet until there is a Job to attach it to,
+/// or a place in line for a live process to hold.
+#[derive(Debug)]
+pub(crate) enum Admission {
+    /// A slot is free: file the packet and create the Job.
+    Launch,
+    /// At the bound, with a live process to hold the place: file the
+    /// packet, mark it queued, launch when the line reaches it.
+    Queue,
+    /// NOTHING IS FILED. The reason is the operator's whole answer.
+    Refuse(String),
+}
+
+/// Launch, queue, or refuse — decided before a packet exists.
+pub(crate) fn admission(
+    live: &[String],
+    max: usize,
+    pvc_workspace: bool,
+    manifest: &str,
+    wait: bool,
+    queue_depth: usize,
+    queue_cap: usize,
+) -> Admission {
+    // LEGACY-MANIFEST GUARD, and it never queues. If the runner's
+    // /gate-target is still a PVC (a stale checkout, or `--manifest` at
+    // the pre-parallel runner), the old law holds absolutely: one gate
+    // per shared workspace, because two on one disk cross their receipts
+    // (2026-08-24: a receipt naming one branch's head reported under
+    // another; all three results discarded). Queueing that would only
+    // postpone the crossing to when the place comes due.
+    if pvc_workspace && !live.is_empty() {
+        return Admission::Refuse(format!(
+            "{n} gate(s) already running ({names}) and {manifest} mounts a SHARED \
+             workspace at /gate-target — the pre-parallel runner shape.\n  Two gates \
+             on one disk cross their receipts (2026-08-24: a receipt naming one \
+             branch's head reported under another; all three results discarded).\n  \
+             Wait for the running gate, or update the checkout so the manifest's \
+             workspace is a per-run emptyDir seeded from /gate-seed.",
+            n = live.len(),
+            names = live.join(", "),
+        ));
+    }
+    let Some(crowd) = crowd_refusal(live, max) else {
+        return Admission::Launch;
+    };
+    // WITHOUT `--wait` THERE IS NO LAUNCHER. A queued packet is started
+    // by the process holding its place; a caller that exits leaves one
+    // nothing would ever start — the orphan in different clothes. So the
+    // bound still refuses here, and names the flag that queues.
+    if !wait {
+        return Admission::Refuse(format!(
+            "{crowd}\n  Or hold a place in line: `--wait` QUEUES at the bound \
+             ({queue_depth} waiting now) and launches when a slot frees, oldest first — \
+             one call, no retry loop. Without it there is no process to start a queued \
+             run, so this refuses rather than filing a packet nothing would ever launch."
+        ));
+    }
+    if queue_depth >= queue_cap {
+        return Admission::Refuse(queue_full_refusal(queue_depth, queue_cap, max));
+    }
+    Admission::Queue
+}
+
+/// The refusal when the line is at its cap. Files nothing, and says how
+/// far out the back of the line already is.
+pub(crate) fn queue_full_refusal(depth: usize, cap: usize, max: usize) -> String {
+    format!(
+        "the gate queue is full: {depth} run(s) waiting for a slot, cap {cap}.\n  \
+         The back of a full line is about {mins} min out at the measured median gate \
+         ({MEDIAN_GATE_MINUTES} min, 2026-09-08) — longer than this refusal costs to \
+         repeat.\n  Nothing was filed. Come back when the line is shorter, or raise \
+         BOSS_GATE_MAX_CONCURRENT if the node has grown.",
+        mins = estimated_wait_minutes(depth, max),
+    )
+}
+
+/// The line, oldest place first, dead places dropped.
+///
+/// THE ORDER BELONGS TO THE SYSTEM OF RECORD, not to whichever builder
+/// polled first. Five hand-rolled retry loops on 2026-09-08 were five
+/// different orderings racing, and two of them shared a script file and
+/// logged one builder's attempts under another's.
+pub(crate) fn queue_order(
+    open: &[Value],
+    now: chrono::DateTime<chrono::Utc>,
+    ttl_secs: i64,
+) -> Vec<String> {
+    let mut places: Vec<(chrono::DateTime<chrono::Utc>, String)> = open
+        .iter()
+        .filter_map(|j| {
+            let md = j.get("metadata")?;
+            let taken = md
+                .get(QUEUED_AT)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .and_then(parse_instant)?;
+            // No heartbeat yet means the place was just taken: the stamp
+            // that ordered it is also the first proof it is held.
+            let beat = md
+                .get(QUEUE_HEARTBEAT_AT)
+                .and_then(Value::as_str)
+                .and_then(parse_instant)
+                .unwrap_or(taken);
+            if (now - beat).num_seconds() > ttl_secs {
+                return None;
+            }
+            let id = j.get("id").and_then(Value::as_str)?;
+            Some((taken, id.to_string()))
+        })
+        .collect();
+    // By instant, then id: two places taken in the same second still
+    // order the same way for every reader.
+    places.sort();
+    places.into_iter().map(|(_, id)| id).collect()
+}
+
+/// How many places are ahead of this caller, given the line and the
+/// packet it would reuse.
+///
+/// A PACKET ALREADY IN THE LINE IS NOT AHEAD OF ITSELF. A builder whose
+/// session died and who runs the verb again reuses the packet still
+/// holding their place; counting it would refuse them at the cap over
+/// their own place, which is a cap that cannot tell a newcomer from a
+/// returner.
+pub(crate) fn places_ahead(order: &[String], reuse: Option<&str>) -> usize {
+    order.iter().filter(|id| Some(id.as_str()) != reuse).count()
+}
+
+/// May the place at 0-based `position` take a slot now?
+///
+/// Oldest first, and only into a slot that is actually free: second in
+/// line waits for the second slot, so two waiters released by one
+/// finishing gate do not both launch onto a node with room for one.
+pub(crate) const fn may_launch(live: usize, max: usize, position: usize) -> bool {
+    live + position < max
+}
+
+/// Roughly what a place costs, a gate at a time. Arithmetic on the
+/// measured median — a number to decide on, not a promise.
+pub(crate) const fn estimated_wait_minutes(position: usize, max: usize) -> u64 {
+    let per_wave = if max == 0 { 1 } else { max };
+    (position / per_wave + 1) as u64 * MEDIAN_GATE_MINUTES
+}
+
+/// The line a waiting builder reads. It NAMES ITS PACKET, for the same
+/// reason [`verdict_line`] does: gates run in parallel, waiters share a
+/// console, and a line whose owner has to be guessed is no line.
+pub(crate) fn queued_line(
+    packet: &str,
+    branch: &str,
+    position: usize,
+    depth: usize,
+    max: usize,
+) -> String {
+    format!(
+        "boss gate: QUEUED {} of {depth}  (packet {}, {branch}) — ~{} min at the measured \
+         median; this process holds the place, nothing else has to poll",
+        position + 1,
+        &packet[..8.min(packet.len())],
+        estimated_wait_minutes(position, max),
+    )
+}
+
+/// Take (or retake) a place: the ordering key and the first heartbeat
+/// written together, so a place is never ordered without being held.
+pub(crate) fn queue_place_patch(now: chrono::DateTime<chrono::Utc>) -> Value {
+    json!({ QUEUED_AT: stamp(now), QUEUE_HEARTBEAT_AT: stamp(now) })
+}
+
+/// Release the place. `null` DELETES the key on a metadata PATCH, and
+/// that matters: a blank string reads as a queued run, which would hide
+/// a genuinely running gate from the yard's bays.
+pub(crate) fn queue_clear_patch() -> Value {
+    json!({ QUEUED_AT: Value::Null, QUEUE_HEARTBEAT_AT: Value::Null })
+}
+
 /// Substitute the runner manifest's placeholders and return the single
 /// document that is the Job.
 ///
@@ -309,18 +571,18 @@ pub(crate) fn crowd_refusal(live: &[String], max: usize) -> Option<String> {
 /// `kubectl apply` rejects — so the Job has to be separated out and
 /// `create`-ed. Doing that with `sed` and a hand-written splitter is
 /// four of the seven steps this verb replaces.
-pub(crate) fn render_job(
-    manifest: &str,
-    branch: &str,
-    packet_id: &str,
-    mode: &str,
-) -> Result<String> {
-    // VALIDATE BEFORE SUBSTITUTING, because substitution destroys the
-    // evidence. `$GATE_MODE` is a prefix of `$GATE_MODE_OVERRIDE`, so a
-    // plain replace would rewrite the first half of an unknown
-    // placeholder and leave something that no longer looks wrong —
-    // the manifest would render "cleanly" and the Job would run with a
-    // mangled value. Checking first is the only order that can catch it.
+/// Refuse a manifest carrying a `$GATE_*` placeholder this verb cannot
+/// fill — BEFORE substituting, because substitution destroys the
+/// evidence. `$GATE_MODE` is a prefix of `$GATE_MODE_OVERRIDE`, so a
+/// plain replace would rewrite the first half of an unknown placeholder
+/// and leave something that no longer looks wrong: the manifest would
+/// render "cleanly" and the Job would run with a mangled value.
+///
+/// Split out of [`render_job`] so `run` can refuse a bad manifest in its
+/// pre-flight, where a refusal costs a line of output rather than a
+/// filed packet (fd217c65). Same order as always — validate before
+/// acting — one step earlier.
+pub(crate) fn check_placeholders(manifest: &str) -> Result<()> {
     let known = [
         BRANCH_PLACEHOLDER,
         PACKET_PLACEHOLDER,
@@ -336,19 +598,39 @@ pub(crate) fn render_job(
             );
         }
     }
+    Ok(())
+}
 
+/// The `kind: Job` document of the multi-document runner manifest.
+///
+/// Split out of [`render_job`] for the same reason as
+/// [`check_placeholders`]: the workspace-shape guard now runs before a
+/// packet exists, so it has no packet id to substitute — and it needs
+/// none. Substitution fills values inside `generateName` and `args`; it
+/// never touches a volume or a mount, which is all
+/// [`pvc_backed_workspace`] reads. ONE splitter, so the guard and the
+/// launch cannot disagree about which document is the Job (§9a).
+pub(crate) fn job_document(manifest: &str) -> Result<String> {
+    manifest
+        .split("\n---")
+        .find(|doc| doc.contains("kind: Job"))
+        .map(str::to_string)
+        .context("runner manifest contains no `kind: Job` document")
+}
+
+pub(crate) fn render_job(
+    manifest: &str,
+    branch: &str,
+    packet_id: &str,
+    mode: &str,
+) -> Result<String> {
+    check_placeholders(manifest)?;
     let filled = manifest
         .replace(BRANCH_PLACEHOLDER, branch)
         .replace(PACKET_PLACEHOLDER, packet_id)
         .replace(HINT_PLACEHOLDER, &name_hint(branch))
         .replace(MODE_PLACEHOLDER, mode);
-
-    let job = filled
-        .split("\n---")
-        .find(|doc| doc.contains("kind: Job"))
-        .map(str::to_string)
-        .context("runner manifest contains no `kind: Job` document")?;
-    Ok(job)
+    job_document(&filled)
 }
 
 /// The body that files a gate-run packet.
@@ -560,15 +842,19 @@ pub fn hold_guard(hold: Option<&str>, park: &ParkIntent) -> Result<Option<String
     Ok(Some(reason.to_string()))
 }
 
-/// Whether a post-creation refusal in `run` must close the gate-run it
+/// Whether a post-creation failure in `run` must close the gate-run it
 /// just filed. True exactly when WE created the packet this run
 /// (`!reused`) AND it is not a dry run (`!dry`): a reused packet has its
-/// own life to close elsewhere, and a dry run never filed anything. The
-/// three post-creation guards (`running_gates`, the PVC guard,
-/// `crowd_refusal`) already gate their `close_refused` on this exact
-/// condition — and so must the park-intent PATCH, whose unguarded `?`
-/// used to abort `run` on a transient SoR blip and leave the packet
-/// open with no runner Job (an orphan the overdue alarm later finds).
+/// own life to close elsewhere, and a dry run never filed anything.
+///
+/// ONLY SoR ROUND-TRIPS REACH THIS NOW. The three guards that used to
+/// share it (`running_gates`, the PVC guard, `crowd_refusal`) moved
+/// ahead of the packet into [`admission`], because a bounded refusal
+/// recorded as `lost` is a lie about what happened (fd217c65). What is
+/// left is the park-intent / queue-place PATCH, whose unguarded `?` used
+/// to abort `run` on a transient blip and leave a packet open with no
+/// runner Job — and for THAT, `lost` ("environment died") is the honest
+/// verdict, because the environment is exactly what failed.
 pub(crate) fn should_close_on_park_failure(reused: bool, dry: bool) -> bool {
     !reused && !dry
 }
@@ -820,14 +1106,21 @@ async fn observe_landing(http: &reqwest::Client, branch: &str, sha: &str) -> Opt
     landing(&v, &cars, branch, sha)
 }
 
-/// Close a just-registered gate-run whose launch was REFUSED before any
-/// Job existed, so the refusal leaves no orphan (ed7f1355: the shared-
-/// workspace guard fired after the packet was filed, the packet sat
-/// open with no runner to ever complete it, closing it honestly meant
-/// hand-writing a receipt, and that hand-written head then shadowed the
-/// real green in `boss park`). Machine-written `lost` with an empty
-/// head — the launch never resolved one, and an empty head is exactly
-/// what keeps this receipt from ever matching a real one.
+/// Close a just-registered gate-run whose setup FAILED after the packet
+/// was filed, so the failure leaves no orphan (ed7f1355: a guard fired
+/// after the packet was filed, the packet sat open with no runner to
+/// ever complete it, closing it honestly meant hand-writing a receipt,
+/// and that hand-written head then shadowed the real green in `boss
+/// park`). Machine-written `lost` with an empty head — the launch never
+/// resolved one, and an empty head is exactly what keeps this receipt
+/// from ever matching a real one.
+///
+/// REACHED ONLY BY A GENUINE ENVIRONMENT FAILURE, since fd217c65: the
+/// bound, the queue cap and the shared-workspace law are decided by
+/// [`admission`] before a packet exists and file nothing. `lost` is the
+/// truthful terminal for what is left here — a system of record that
+/// went away mid-setup — and it was a lie for the 21 bounded refusals it
+/// recorded on 2026-09-08.
 ///
 /// Best-effort by design: the refusal is the primary fact and must
 /// surface either way; a failed close is reported beside it rather than
@@ -1070,6 +1363,13 @@ pub(crate) async fn api(
 /// Like [`api`], but against an explicit base rather than the resolved
 /// one. The seam a paginating reader tests through: a stub socket can
 /// answer without a `BOSS_JOBS_URL` anywhere in the environment.
+///
+/// EVERY operator verb — `gate`, `prove`, `park`, `job`, `orient`,
+/// `rerail`, `docs` — writes through here, which is why this is where
+/// the caller gets signed. A write carries the actor RUNNING the
+/// command or is refused; a read carries them if known and says so
+/// once if not. Neither is ever signed as the conductor: that is
+/// backlog 5083d6f5, measured on the step a `boss prove` completed.
 pub(crate) async fn api_at(
     http: &reqwest::Client,
     base: &str,
@@ -1077,9 +1377,28 @@ pub(crate) async fn api_at(
     path: &str,
     payload: Option<Value>,
 ) -> Result<Option<Value>> {
+    let signature = identity::signature_for(&method, path, identity::caller());
+    api_at_signed(http, base, method, path, payload, signature).await
+}
+
+/// [`api_at`] with the signing decision already made. The seam the
+/// wire tests go through: WHO signs is a pure function of the
+/// environment (`identity::signature_for`), and this is the half that
+/// puts it on the socket — so a test can prove the header carries the
+/// caller, and that a refused write never reaches the network, without
+/// mutating the process's environment.
+pub(crate) async fn api_at_signed(
+    http: &reqwest::Client,
+    base: &str,
+    method: reqwest::Method,
+    path: &str,
+    payload: Option<Value>,
+    signature: identity::Signature,
+) -> Result<Option<Value>> {
+    let signer = identity::apply(signature)?;
     let mut req = http
         .request(method.clone(), format!("{base}{path}"))
-        .header("x-boss-user", boss_user())
+        .header("x-boss-user", identity::header(&signer))
         .header("content-type", "application/json");
     if let Some(p) = &payload {
         req = req.json(p);
@@ -1242,6 +1561,7 @@ pub async fn run(
     park: ParkIntent,
     force_regate: Option<String>,
     hold: Option<String>,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
     let manifest_path =
         manifest.unwrap_or_else(|| PathBuf::from("infra/gate-runner/gate-runner.yaml"));
@@ -1298,8 +1618,80 @@ pub async fn run(
         )
         .await?,
     );
+    let reuse = reusable_packet(&open, branch, &sha);
+
+    // A REUSED PACKET MAY ALREADY BE GATING — and attaching to it is
+    // neither a launch nor a refusal, so it is settled before admission.
+    // This verb's own closing line used to send the operator straight
+    // into the failure: run `boss gate <branch>`, then `boss gate
+    // <branch> --wait` as instructed, and the second invocation reused
+    // the open packet and created a SECOND Job against it. Both raced on
+    // one gate-target, one died, and the survivor's green verdict was
+    // recorded as `lost`. Attaching is what the advice always meant.
+    if let Some(id) = reuse.as_deref()
+        && !dry
+        && let Some(name) = live_gate_for_packet(namespace, id)?
+    {
+        println!("boss gate: packet {id} is already being gated by {name}");
+        if wait {
+            println!("boss gate: attaching to it — a second Job would race it");
+            return wait_for_verdict(&http, id, namespace, &name).await;
+        }
+        println!(
+            "boss gate: not starting a second Job. Follow this one with \
+             `boss gate {branch} --wait`, which attaches."
+        );
+        return Ok(());
+    }
+
+    // EVERY REFUSAL IS DECIDED HERE, BEFORE A PACKET EXISTS (fd217c65).
+    // The bound, the queue cap, the legacy-workspace law and an
+    // unfillable manifest all used to fire AFTER the packet was filed
+    // and had to close what they had just opened — as `lost`, the only
+    // terminal the gate-run protocol offers a run with no verdict, whose
+    // label is "environment died". On 2026-09-08 that recorded 21
+    // bounded refusals as catastrophes. `admission` answers from
+    // observations alone; a Refuse from here files nothing at all.
+    //
+    // The count FAILS CLOSED (`running_gates` bails on an unreadable
+    // cluster) and that is a plain `?` now: there is no packet to
+    // orphan, and a cluster too sick to answer was never going to run
+    // the gate either.
+    check_placeholders(&manifest_text)?;
+    let live = running_gates(namespace)?;
+    // How many places are ahead of us. A packet we would REUSE that is
+    // already in the line is not ahead of itself — counting it would
+    // refuse a builder whose own place is what filled the last slot,
+    // which is the failure mode of a cap that cannot tell a newcomer
+    // from a returner.
+    let ahead = places_ahead(
+        &queue_order(&open, now, QUEUE_PLACE_TTL_SECS),
+        reuse.as_deref(),
+    );
+    let queued = match admission(
+        &live,
+        max,
+        pvc_backed_workspace(&job_document(&manifest_text)?),
+        &manifest_path.display().to_string(),
+        wait,
+        ahead,
+        QUEUE_CAP,
+    ) {
+        Admission::Refuse(why) => bail!("{why}"),
+        Admission::Queue => true,
+        Admission::Launch => false,
+    };
+    if !queued && !live.is_empty() {
+        println!(
+            "boss gate: {} gate(s) already running ({}) — workspaces are per-run, \
+             verdicts stay independent; launching alongside",
+            live.len(),
+            live.join(", ")
+        );
+    }
+
     let mut reused = false;
-    let packet = match reusable_packet(&open, branch, &sha) {
+    let packet = match reuse {
         Some(id) => {
             println!(
                 "boss gate: reusing open gate-run packet {}",
@@ -1344,8 +1736,9 @@ pub async fn run(
         // (the very thing `wait_for_verdict` defends against). An
         // unguarded `?` here used to abort `run` on a transient blip and
         // leave the packet we just opened sitting open with no runner
-        // Job — an orphan. So close what we created before bailing, the
-        // same way the three post-creation guards below do (ed7f1355).
+        // Job — an orphan. So close what we created before bailing
+        // (ed7f1355); an SoR that went away IS an environment failure,
+        // which is what `lost` truthfully means.
         if let Err(e) = api(
             &http,
             reqwest::Method::PATCH,
@@ -1404,89 +1797,60 @@ pub async fn run(
         }
     }
 
-    let job = render_job(&manifest_text, branch, &packet, &mode)?;
-
-    // A REUSED PACKET MAY ALREADY BE GATING. This verb's own closing
-    // line used to send the operator straight into the failure: run
-    // `boss gate <branch>`, then `boss gate <branch> --wait` as
-    // instructed, and the second invocation reused the open packet and
-    // created a SECOND Job against it. Both raced on one gate-target,
-    // one died, and the survivor's green verdict was recorded as `lost`.
-    // Attaching is what the advice always meant, so do that instead.
-    if reused
-        && !dry
-        && let Some(name) = live_gate_for_packet(namespace, &packet)?
-    {
-        println!("boss gate: packet {packet} is already being gated by {name}");
-        if wait {
-            println!("boss gate: attaching to it — a second Job would race it");
-            return wait_for_verdict(&http, &packet, namespace, &name).await;
-        }
-        println!(
-            "boss gate: not starting a second Job. Follow this one with \
-             `boss gate {branch} --wait`, which attaches."
-        );
-        return Ok(());
-    }
-
-    // The concurrency bound. Workspaces are per-run (pinned by
-    // boss-testing's gate_runner_parallel_workspace tests), so a
-    // second gate is SAFE — the bound protects the build node's disk
-    // and I/O, not any verdict. A refusal from here on happens AFTER
-    // the packet was filed — close what we just opened so the refusal
-    // leaves no orphan (ed7f1355), then surface it.
-    let live = match running_gates(namespace) {
-        Ok(l) => l,
-        Err(e) => {
-            let e = e.context(
-                "cannot count running gates, so the concurrency bound cannot be \
-                 enforced — refusing rather than assuming the build node is free",
-            );
-            if !reused && !dry {
+    // THE PLACE IN LINE. At the bound the packet is filed as a QUEUED
+    // gate-run — an honest open packet for work that has been requested
+    // and is waiting — and this process holds its place by heartbeat
+    // until the line reaches it. That is the one implementation of the
+    // retry loop five builders wrote by hand on 2026-09-08, with the
+    // order kept by the system of record rather than by whoever polled
+    // first, and with no way to outlive the session that made it.
+    if queued && !dry {
+        if let Err(e) = api(
+            &http,
+            reqwest::Method::PATCH,
+            &format!("/api/jobs/{packet}/metadata"),
+            Some(queue_place_patch(now)),
+        )
+        .await
+        .context("taking a place in the gate queue")
+        {
+            if should_close_on_park_failure(reused, dry) {
                 close_refused(&http, &packet, &format!("{e:#}")).await;
             }
             return Err(e);
         }
-    };
-    // LEGACY-MANIFEST GUARD. If the rendered Job's /gate-target is
-    // still a PVC (a stale checkout, or --manifest at the pre-parallel
-    // runner), the old law holds absolutely: one gate per shared
-    // workspace, because two on one disk cross their receipts
-    // (2026-08-24). The bounded rule below only applies to per-run
-    // workspaces.
-    if pvc_backed_workspace(&job) && !live.is_empty() {
-        let why = format!(
-            "{n} gate(s) already running ({names}) and {manifest} mounts a SHARED \
-             workspace at /gate-target — the pre-parallel runner shape.\n  Two gates \
-             on one disk cross their receipts (2026-08-24: a receipt naming one \
-             branch's head reported under another; all three results discarded).\n  \
-             Wait for the running gate, or update the checkout so the manifest's \
-             workspace is a per-run emptyDir seeded from /gate-seed.",
-            n = live.len(),
-            names = live.join(", "),
-            manifest = manifest_path.display(),
-        );
-        if !reused && !dry {
-            close_refused(&http, &packet, &why).await;
+        println!("{}", queued_line(&packet, branch, ahead, ahead + 1, max));
+        if let Slot::Gating(name) =
+            wait_for_slot(&http, &packet, branch, namespace, max, now).await?
+        {
+            println!("boss gate: packet {packet} was launched as {name} while it waited");
+            return wait_for_verdict(&http, &packet, namespace, &name).await;
         }
-        bail!("{why}");
-    }
-    if let Some(why) = crowd_refusal(&live, max) {
-        if !reused && !dry {
-            close_refused(&http, &packet, &why).await;
-        }
-        bail!("{why}");
-    }
-    if !live.is_empty() {
-        println!(
-            "boss gate: {} gate(s) already running ({}) — workspaces are per-run, \
-             verdicts stay independent; launching alongside",
-            live.len(),
-            live.join(", ")
-        );
+        // The place is spent the moment a Job exists, and a run still
+        // marked queued would be missing from the yard's gate bays.
+        // Cleared BEFORE the Job is created: a failure here costs
+        // nothing (the place is still held, the packet still reusable),
+        // where a failure after it would hide a running gate.
+        api(
+            &http,
+            reqwest::Method::PATCH,
+            &format!("/api/jobs/{packet}/metadata"),
+            Some(queue_clear_patch()),
+        )
+        .await
+        .context("releasing the queue place before launching")?;
     }
 
+    let job = render_job(&manifest_text, branch, &packet, &mode)?;
+
     if dry {
+        if queued {
+            println!(
+                "boss gate: DRY the node is at the bound — this would QUEUE at place {} of {}",
+                ahead + 1,
+                ahead + 1
+            );
+        }
         println!("boss gate: DRY would create a Job for {branch} (packet {packet})");
         return Ok(());
     }
@@ -1735,6 +2099,158 @@ async fn wait_for_verdict(
         let (finished, failed) = job_state(namespace, job_name);
         if let Some(why) = silent_packet_verdict(finished, failed) {
             bail!("{why}\n  Job: {job_name} (namespace {namespace}), packet: {packet}");
+        }
+    }
+}
+
+/// What ended a wait in the gate queue.
+enum Slot {
+    /// The line reached this place and a slot is free: launch.
+    Free,
+    /// Another actor reused this packet and launched it while we waited.
+    /// Attaching is right; a second Job would race it.
+    Gating(String),
+}
+
+/// Hold a place in the gate queue until the line reaches it.
+///
+/// THIS IS THE LAUNCHER, and it lives here — not in the conductor's
+/// cadence loop and not in a dispatcher rule — for three reasons, in
+/// order of how hard they are to work around:
+///
+///  1. **Only this verb can create a gate Job.** It needs the Kubernetes
+///     credential and the runner manifest. The conductor holds neither
+///     on purpose (`infra/cluster/manifests/boss-conductor.yaml`: "RBAC:
+///     NONE. The conductor holds no Kubernetes credential"), and the
+///     dispatcher is no better placed. Either would mean granting a
+///     resident service the right to create Jobs so it could do what the
+///     process already standing here can do.
+///  2. **"A slot is free" is a CLUSTER fact that no BOSS event
+///     announces.** A gate Job that dies without reporting emits
+///     nothing, so an event-driven rule would stall the line
+///     permanently on exactly the failure the queue exists to survive. A
+///     poll re-derives the truth from the cluster every time and is
+///     self-healing by construction.
+///  3. **A place held by a live process cannot outlive its session.**
+///     That is the second half of fd217c65 as a structural property
+///     rather than a promise: on 2026-09-08 a builder's session ended
+///     and its detached retry loop kept gating, re-gating an
+///     already-green branch into a twin car. Here the loop IS the
+///     caller; when the caller dies the heartbeat stops, the place
+///     expires after [`QUEUE_PLACE_TTL_SECS`], and the line behind it
+///     moves.
+///
+/// The order is read from the system of record on every pass, so five
+/// waiters agree on who is next without any of them coordinating — the
+/// thing five hand-rolled retry loops could not do.
+async fn wait_for_slot(
+    http: &reqwest::Client,
+    packet: &str,
+    branch: &str,
+    namespace: &str,
+    max: usize,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Slot> {
+    let started = std::time::Instant::now();
+    let mut absent_since: Option<std::time::Instant> = None;
+    let mut reported: Option<usize> = None;
+    loop {
+        tokio::time::sleep(QUEUE_POLL).await;
+        // `now` is minted once at the CLI boundary (the no-wallclock
+        // lint's rule); elapsed monotonic time carries it forward.
+        let at = now
+            + chrono::Duration::from_std(started.elapsed())
+                .unwrap_or_else(|_| chrono::Duration::zero());
+        // The heartbeat is what keeps the place. BEST-EFFORT: the TTL is
+        // ten polls wide, so a blip costs nothing, and failing hard here
+        // would drop a place that is genuinely still held.
+        let _ = api(
+            http,
+            reqwest::Method::PATCH,
+            &format!("/api/jobs/{packet}/metadata"),
+            Some(json!({ QUEUE_HEARTBEAT_AT: stamp(at) })),
+        )
+        .await;
+        // A MOMENTARY ABSENCE IS NOT A FAILURE — same tolerance as
+        // `wait_for_verdict`, and for the same reason: every train
+        // deploy rolls the SoR for tens of seconds, and a waiter that
+        // died there would send its builder back to a retry loop.
+        let open = match api(
+            http,
+            reqwest::Method::GET,
+            "/api/jobs?kind=gate-run&status=open&limit=100",
+            None,
+        )
+        .await
+        {
+            Ok(v) => {
+                absent_since = None;
+                rows(v)
+            }
+            Err(e) if is_transient(&format!("{e:#}")) => {
+                let since = *absent_since.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() > ABSENCE_TOLERANCE {
+                    bail!(
+                        "the system of record has been unreachable for over {}s, which is \
+                         longer than a deploy takes — giving up on the QUEUE, not on the \
+                         place.\n  Gate-run {packet} still holds it until the heartbeat \
+                         ages out ({QUEUE_PLACE_TTL_SECS}s); re-running `boss gate {branch} \
+                         --wait` reuses that packet rather than filing a second.\n  Last \
+                         error: {e:#}",
+                        ABSENCE_TOLERANCE.as_secs()
+                    );
+                }
+                eprintln!(
+                    "boss gate: system of record unreachable ({}s) — a deploy rolls it \
+                     briefly; still holding the place",
+                    since.elapsed().as_secs()
+                );
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        // Did another actor reuse this packet and launch it meanwhile?
+        if let Some(name) = live_gate_for_packet(namespace, packet)? {
+            return Ok(Slot::Gating(name));
+        }
+        let order = queue_order(&open, at, QUEUE_PLACE_TTL_SECS);
+        let live = running_gates(namespace)?;
+        match order.iter().position(|id| id == packet) {
+            Some(pos) if may_launch(live.len(), max, pos) => {
+                println!(
+                    "boss gate: a slot freed after {}m — launching {branch} (packet {})",
+                    started.elapsed().as_secs() / 60,
+                    &packet[..8.min(packet.len())]
+                );
+                return Ok(Slot::Free);
+            }
+            Some(pos) => {
+                // Only when the place MOVES, so an hour in line is a
+                // handful of lines rather than a hundred.
+                if reported != Some(pos) {
+                    println!("{}", queued_line(packet, branch, pos, order.len(), max));
+                    reported = Some(pos);
+                }
+            }
+            None => {
+                // Our place is gone: the marker was cleared, or the
+                // record was unreachable past the TTL. Retake it at the
+                // BACK rather than launch out of turn — jumping the line
+                // is how the hand-rolled loops collided.
+                eprintln!(
+                    "boss gate: this packet's place in line is gone (marker cleared, or the \
+                     record was unreachable past {QUEUE_PLACE_TTL_SECS}s) — retaking it at \
+                     the back rather than launching out of turn"
+                );
+                api(
+                    http,
+                    reqwest::Method::PATCH,
+                    &format!("/api/jobs/{packet}/metadata"),
+                    Some(queue_place_patch(at)),
+                )
+                .await?;
+                reported = None;
+            }
         }
     }
 }
@@ -2320,6 +2836,301 @@ mod tests {
             live_gates(rows),
             vec!["gate-feat-x-ab1".to_string(), "gate-fix-y-ef3".to_string()]
         );
+    }
+
+    // ---------------------------------------------------------------
+    // THE QUEUE (backlog fd217c65). Measured 2026-09-08: 24 green
+    // gates, 6 red — and 21 launches REFUSED at the bound, each of
+    // which filed a gate-run packet and closed it `lost` ("environment
+    // died"). Nothing died. Five builders then hand-rolled five
+    // five-minute retry loops; two collided on a shared script and one
+    // outlived the session that made it and re-gated an already-green
+    // branch. Both halves of the fix are pinned below.
+    // ---------------------------------------------------------------
+
+    /// A manifest whose /gate-target is a per-run emptyDir — the shipped
+    /// shape — with the placeholders still in place.
+    fn parallel_manifest() -> String {
+        [
+            "apiVersion: v1",
+            "kind: PersistentVolumeClaim",
+            "metadata: {name: gate-seed}",
+            "---",
+            "apiVersion: batch/v1",
+            "kind: Job",
+            "metadata: {generateName: gate-$GATE_NAME_HINT-}",
+            "spec:",
+            "  template:",
+            "    spec:",
+            "      containers:",
+            "        - name: gate",
+            "          args: [$GATE_BRANCH, $GATE_RUN_JOB_ID, $GATE_MODE]",
+            "          volumeMounts:",
+            "            - {name: workspace, mountPath: /gate-target}",
+            "            - {name: seed, mountPath: /gate-seed}",
+            "      volumes:",
+            "        - name: workspace",
+            "          emptyDir: {}",
+            "        - name: seed",
+            "          persistentVolumeClaim: {claimName: gate-seed}",
+        ]
+        .join("\n")
+    }
+
+    /// PART 1, THE STRUCTURAL HALF: every refusal is a value computed
+    /// from observations taken BEFORE a packet is filed. There is no
+    /// `Admission` arm that means "file a packet, then close it" — which
+    /// is what produced 21 phantom `lost` gate-runs in one day.
+    #[test]
+    fn a_free_slot_admits_a_launch() {
+        assert!(matches!(
+            admission(
+                &["gate-a".to_string()],
+                3,
+                false,
+                "infra/gate-runner/gate-runner.yaml",
+                true,
+                0,
+                QUEUE_CAP
+            ),
+            Admission::Launch
+        ));
+    }
+
+    /// PART 2: THE BOUND QUEUES. A caller that will wait takes a place
+    /// in line instead of being turned away to write its own retry loop.
+    #[test]
+    fn the_bound_queues_a_waiting_caller_instead_of_refusing() {
+        let live = vec!["gate-a".to_string(), "gate-b".into(), "gate-c".into()];
+        assert!(
+            matches!(
+                admission(&live, 3, false, "m.yaml", true, 0, QUEUE_CAP),
+                Admission::Queue
+            ),
+            "at the bound with --wait the gate takes a place in line"
+        );
+    }
+
+    /// WITHOUT `--wait` NOTHING WOULD EVER LAUNCH THE QUEUED RUN, so
+    /// queueing it would file a packet that sits open forever — the
+    /// orphan in different clothes. It refuses, files nothing, and names
+    /// the flag that queues.
+    #[test]
+    fn the_bound_refuses_a_caller_that_cannot_hold_its_place() {
+        let live = vec!["gate-a".to_string(), "gate-b".into(), "gate-c".into()];
+        let Admission::Refuse(why) = admission(&live, 3, false, "m.yaml", false, 0, QUEUE_CAP)
+        else {
+            panic!("without --wait there is no process to launch the queued run")
+        };
+        assert!(
+            why.contains("--wait"),
+            "the refusal must name the flag that queues: {why}"
+        );
+        assert!(why.contains("gate-a"), "and still name the gates: {why}");
+    }
+
+    /// THE CAP. A queue that grows without bound is a promise the node
+    /// cannot keep: at the cap the last place waits four gates, past an
+    /// hour. Full refuses — files nothing — and says how long the line
+    /// already is.
+    #[test]
+    fn a_full_queue_refuses_rather_than_growing_without_bound() {
+        let live = vec!["gate-a".to_string(), "gate-b".into(), "gate-c".into()];
+        let Admission::Refuse(why) =
+            admission(&live, 3, false, "m.yaml", true, QUEUE_CAP, QUEUE_CAP)
+        else {
+            panic!("a full queue refuses")
+        };
+        assert!(why.contains(&QUEUE_CAP.to_string()), "name the cap: {why}");
+        assert!(
+            why.contains("min"),
+            "a full queue must say how long the wait already is: {why}"
+        );
+        // One below the cap still queues.
+        assert!(matches!(
+            admission(&live, 3, false, "m.yaml", true, QUEUE_CAP - 1, QUEUE_CAP),
+            Admission::Queue
+        ));
+    }
+
+    /// THE LEGACY SHARED WORKSPACE NEVER QUEUES. Queueing it would only
+    /// postpone the receipt-crossing of 2026-08-24 to when the place
+    /// comes due; the old law is absolute, so it refuses outright.
+    #[test]
+    fn a_shared_workspace_refuses_and_is_never_queued() {
+        let Admission::Refuse(why) = admission(
+            &["gate-a".to_string()],
+            3,
+            true,
+            "old-runner.yaml",
+            true,
+            0,
+            QUEUE_CAP,
+        ) else {
+            panic!("a shared workspace beside a live gate refuses")
+        };
+        assert!(why.contains("old-runner.yaml"), "{why}");
+        assert!(why.contains("2026-08-24"), "{why}");
+        // Alone, the legacy shape still gates.
+        assert!(matches!(
+            admission(&[], 3, true, "old-runner.yaml", true, 0, QUEUE_CAP),
+            Admission::Launch
+        ));
+    }
+
+    fn queued_run(id: &str, at: &str, heartbeat: Option<&str>) -> Value {
+        let mut md = json!({ "branch": "feat/x", QUEUED_AT: at });
+        if let Some(h) = heartbeat {
+            md[QUEUE_HEARTBEAT_AT] = json!(h);
+        }
+        json!({ "id": id, "metadata": md })
+    }
+
+    fn at(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .expect("test stamp")
+            .with_timezone(&chrono::Utc)
+    }
+
+    /// THE ORDER IS THE SYSTEM OF RECORD'S, NOT EACH BUILDER'S. Oldest
+    /// place first, and a run that is actually gating (no `queued_at`)
+    /// is not in the line at all.
+    #[test]
+    fn the_queue_is_oldest_first_and_holds_only_waiting_runs() {
+        let now = at("2026-09-08T20:00:00Z");
+        let open = vec![
+            queued_run("later", "2026-09-08T19:59:00Z", None),
+            json!({ "id": "gating", "metadata": { "branch": "feat/y" } }),
+            queued_run("earlier", "2026-09-08T19:58:00Z", None),
+        ];
+        assert_eq!(
+            queue_order(&open, now, QUEUE_PLACE_TTL_SECS),
+            vec!["earlier".to_string(), "later".to_string()]
+        );
+    }
+
+    /// A PLACE HELD BY A DEAD SESSION EXPIRES. This is the orphan the
+    /// detached retry loops made: a builder's model ran out of credits
+    /// and its loop kept gating. A place in line is held by a LIVE
+    /// process — it heartbeats, and when the heartbeat stops the place
+    /// is skipped so the queue behind it moves.
+    #[test]
+    fn a_place_whose_holder_stopped_heartbeating_is_skipped() {
+        let now = at("2026-09-08T20:00:00Z");
+        let open = vec![
+            queued_run("dead", "2026-09-08T18:00:00Z", Some("2026-09-08T18:02:00Z")),
+            queued_run(
+                "alive",
+                "2026-09-08T19:50:00Z",
+                Some("2026-09-08T19:59:40Z"),
+            ),
+        ];
+        assert_eq!(
+            queue_order(&open, now, QUEUE_PLACE_TTL_SECS),
+            vec!["alive".to_string()],
+            "the dead place must not hold the head of the queue forever"
+        );
+    }
+
+    /// A LONG BUT LIVE WAIT KEEPS ITS PLACE. Fourth in line is over an
+    /// hour; the heartbeat, not the age of the place, is what keeps it.
+    #[test]
+    fn a_fresh_heartbeat_keeps_an_hours_long_wait_in_line() {
+        let now = at("2026-09-08T21:00:00Z");
+        let open = vec![queued_run(
+            "patient",
+            "2026-09-08T19:00:00Z",
+            Some("2026-09-08T20:59:30Z"),
+        )];
+        assert_eq!(
+            queue_order(&open, now, QUEUE_PLACE_TTL_SECS),
+            vec!["patient".to_string()]
+        );
+    }
+
+    /// A stamp that does not parse is no stamp — the place is not
+    /// counted rather than guessed into the head of the line.
+    #[test]
+    fn an_unparseable_place_is_not_in_the_queue() {
+        let now = at("2026-09-08T20:00:00Z");
+        let open = vec![queued_run("bad", "yesterday", None)];
+        assert!(queue_order(&open, now, QUEUE_PLACE_TTL_SECS).is_empty());
+    }
+
+    /// A RETURNING BUILDER IS NOT REFUSED BY THEIR OWN PLACE. The
+    /// packet a re-run would reuse is already in the line; counted
+    /// against the cap it could refuse the one caller whose place is
+    /// already held — the shape of the dead-session re-run this whole
+    /// mechanism exists to make safe.
+    #[test]
+    fn a_reused_place_is_not_counted_ahead_of_itself() {
+        let order = vec!["a".to_string(), "mine".to_string(), "b".to_string()];
+        assert_eq!(places_ahead(&order, Some("mine")), 2);
+        assert_eq!(
+            places_ahead(&order, None),
+            3,
+            "a newcomer is behind all three"
+        );
+        assert_eq!(places_ahead(&order, Some("gone")), 3);
+    }
+
+    /// OLDEST FIRST, AND ONLY INTO A SLOT THAT IS ACTUALLY FREE. Second
+    /// in line waits for the second free slot, so two waiters released
+    /// by one finishing gate do not both launch.
+    #[test]
+    fn the_head_of_the_queue_launches_into_the_first_free_slot() {
+        assert!(!may_launch(3, 3, 0), "no slot free");
+        assert!(may_launch(2, 3, 0), "head takes the one free slot");
+        assert!(!may_launch(2, 3, 1), "second in line waits its turn");
+        assert!(may_launch(1, 3, 1), "two free slots release two places");
+        assert!(may_launch(0, 3, 2));
+        assert!(!may_launch(0, 3, 3));
+    }
+
+    /// The estimate is arithmetic on the measured median (2026-09-08:
+    /// median 18.2 min over 30 runs), a gate at a time — a number the
+    /// waiting builder can decide on, not a promise.
+    #[test]
+    fn the_estimated_wait_grows_one_gate_per_wave() {
+        assert_eq!(estimated_wait_minutes(0, 3), MEDIAN_GATE_MINUTES);
+        assert_eq!(estimated_wait_minutes(2, 3), MEDIAN_GATE_MINUTES);
+        assert_eq!(estimated_wait_minutes(3, 3), 2 * MEDIAN_GATE_MINUTES);
+        assert_eq!(
+            estimated_wait_minutes(0, 0),
+            MEDIAN_GATE_MINUTES,
+            "no divide by zero"
+        );
+    }
+
+    /// THE LINE THE BUILDER READS NAMES THE PACKET IT IS WAITING ON —
+    /// the same discipline as `verdict_line`: two waiters share a
+    /// console, so a line whose owner has to be guessed is no line.
+    #[test]
+    fn the_queued_line_names_its_packet_its_branch_and_its_place() {
+        let l = queued_line("f451af16-0000-0000-0000-000000000000", "feat/x", 1, 4, 3);
+        assert!(l.contains("f451af16"), "{l}");
+        assert!(l.contains("feat/x"), "{l}");
+        assert!(
+            l.contains("2 of 4"),
+            "one-based place, of the whole line: {l}"
+        );
+        assert!(l.contains("min"), "and what the wait costs: {l}");
+    }
+
+    /// The workspace-shape guard runs BEFORE a packet exists, which
+    /// means it reads the manifest rather than the rendered Job. Same
+    /// answer either way — substitution never touches a mount.
+    #[test]
+    fn the_workspace_shape_reads_the_same_before_and_after_substitution() {
+        let m = parallel_manifest();
+        let doc = job_document(&m).expect("the manifest has a Job");
+        let rendered = render_job(&m, "feat/x", "packet-1", "--auto").expect("renders");
+        assert_eq!(pvc_backed_workspace(&doc), pvc_backed_workspace(&rendered));
+        assert!(
+            !pvc_backed_workspace(&doc),
+            "the shipped shape is an emptyDir"
+        );
+        assert!(!doc.contains("kind: PersistentVolumeClaim"));
     }
 
     /// THE BOUND, below and at. Below: silence (None), because gates in
@@ -3116,5 +3927,126 @@ kind: Job\n\
             ABSENCE_TOLERANCE.as_secs() <= 600,
             "a gate takes ~11 minutes"
         );
+    }
+}
+
+#[cfg(test)]
+mod signing_tests {
+    use super::*;
+    use crate::identity::Signature;
+
+    /// A one-shot HTTP stub that hands back the request head it read.
+    /// The head is where the answer lives: `x-boss-user` is what the
+    /// system of record stamps into `completed_by`.
+    async fn one_request(body: &'static str) -> (String, tokio::task::JoinHandle<Option<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.ok()?;
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 2048];
+            loop {
+                match sock.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                }
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+            Some(String::from_utf8_lossy(&buf).into_owned())
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// Backlog 5083d6f5, at the wire: the step PUT a `boss prove`
+    /// makes must arrive carrying the operator who ran it.
+    #[tokio::test]
+    async fn a_write_arrives_signed_as_its_caller() {
+        let (base, stub) = one_request("{}").await;
+        let http = reqwest::Client::new();
+        api_at_signed(
+            &http,
+            &base,
+            reqwest::Method::PUT,
+            "/api/jobs/x/steps/y",
+            Some(json!({"status": "completed"})),
+            Signature::As("claude@algedonic.dev".into()),
+        )
+        .await
+        .expect("the stub answers 200");
+        let head = stub.await.unwrap().expect("the stub read a request");
+        assert!(
+            head.contains(r#""id":"claude@algedonic.dev""#),
+            "the write must name its caller; head was:\n{head}"
+        );
+        assert!(
+            !head.contains(crate::identity::CONDUCTOR),
+            "an operator's write must not be signed as the train automation; head was:\n{head}"
+        );
+    }
+
+    /// The loud case. A write nobody named does not go out at all —
+    /// and in particular does not go out as automation, which is the
+    /// whole defect.
+    #[tokio::test]
+    async fn an_unnamed_write_never_reaches_the_network() {
+        let (base, stub) = one_request("{}").await;
+        let http = reqwest::Client::new();
+        let refusal = crate::identity::refusal("POST", "/api/jobs");
+        let err = api_at_signed(
+            &http,
+            &base,
+            reqwest::Method::POST,
+            "/api/jobs",
+            Some(json!({"kind": "backlog-item"})),
+            Signature::Refused(refusal.clone()),
+        )
+        .await
+        .expect_err("an unnamed write is refused");
+        assert_eq!(err.to_string(), refusal);
+        assert!(
+            err.to_string().contains(crate::identity::ACTOR_ENV),
+            "{err}"
+        );
+        // The stub finishes only once it has ACCEPTED a connection, so
+        // an unfinished stub is proof nothing was sent.
+        assert!(
+            !stub.is_finished(),
+            "a refused write must not reach the socket"
+        );
+        stub.abort();
+    }
+
+    /// A read attributes nothing, so it proceeds — but marked, never
+    /// as an automation slug the server would read as a process.
+    #[tokio::test]
+    async fn an_unnamed_read_arrives_marked() {
+        let (base, stub) = one_request(r#"{"data":[]}"#).await;
+        let http = reqwest::Client::new();
+        api_at_signed(
+            &http,
+            &base,
+            reqwest::Method::GET,
+            "/api/jobs",
+            None,
+            Signature::Unidentified,
+        )
+        .await
+        .expect("a read still works");
+        let head = stub.await.unwrap().expect("the stub read a request");
+        assert!(
+            head.contains(crate::identity::UNIDENTIFIED),
+            "an unnamed read must say so; head was:\n{head}"
+        );
+        assert!(!head.contains(crate::identity::CONDUCTOR), "{head}");
     }
 }

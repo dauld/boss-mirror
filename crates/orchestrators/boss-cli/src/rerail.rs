@@ -209,7 +209,12 @@ async fn finish(
     Ok(())
 }
 
-pub async fn run(given: &str, finish_only: bool, dry: bool) -> Result<()> {
+pub async fn run(
+    given: &str,
+    finish_only: bool,
+    dry: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
     let http = reqwest::Client::new();
     let (car, old_branch) = find_car(&http, given).await?;
     let new_branch = format!("{old_branch}-rerail");
@@ -292,6 +297,7 @@ pub async fn run(given: &str, finish_only: bool, dry: bool) -> Result<()> {
         gate::ParkIntent::default(),
         None,
         None,
+        now,
     )
     .await?;
 

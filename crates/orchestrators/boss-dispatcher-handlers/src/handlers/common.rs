@@ -264,6 +264,42 @@ pub(crate) async fn get_json(
         .map_err(|e| HandlerError::Downstream(format!("GET {url} not JSON: {e}")))
 }
 
+/// PUT or PATCH a body, mapping non-2xx the same way [`post_json`]
+/// does. Completing a step is a PUT and merging job metadata is a
+/// PATCH on the metadata door; the shared POST helper covers neither.
+///
+/// Lived in `jobs_auto_park` until `cadence.silence.sweep` needed the
+/// same two verbs — one definition rather than a second copy
+/// (CLAUDE.md 9a: collapse it if you can).
+pub(crate) async fn write_json(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: &str,
+    body: &Value,
+    rule_name: &str,
+) -> Result<(), HandlerError> {
+    let verb = method.to_string();
+    let resp = client
+        .request(method, url)
+        .header("content-type", "application/json")
+        .header("x-boss-user", dispatcher_actor_header(rule_name))
+        .header("x-sim-origin", sim_origin_value())
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| HandlerError::Downstream(format!("{verb} {url}: {e}")))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+            HandlerError::Permanent(format!("{verb} {url} returned {status}: {text}"))
+        } else {
+            HandlerError::Downstream(format!("{verb} {url} returned {status}: {text}"))
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

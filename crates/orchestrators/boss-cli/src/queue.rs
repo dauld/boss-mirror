@@ -52,10 +52,13 @@ use serde_json::Value;
 
 use crate::train::truthy;
 
-/// Reads are policy-gated; an unheadered call lands as `guest`, which
-/// holds Workflow read and nothing else. Reading is all this does —
-/// the module doc above is the reason writes are not added here.
-const BOSS_USER: &str = r#"{"id":"it-triage-queue","role":"platform-admin","access_tier":"operator","territory_account_ids":[],"direct_report_ids":[],"department":"platform"}"#;
+// Reads are policy-gated; an unheadered call lands as `guest`, which
+// holds Workflow read and nothing else. Reading is all this does —
+// the module doc above is the reason writes are not added here. The
+// header comes from `identity` like every other verb's: the id names
+// whoever ran the command (it used to be the fixed slug
+// `it-triage-queue`), and the shape has one definition rather than a
+// copy per module (CLAUDE.md §9a).
 
 /// The agent hand-off record, from whichever step carries it.
 fn agent_request(job: &Value) -> Option<&Value> {
@@ -158,7 +161,10 @@ pub async fn run(want: &str) -> Result<()> {
     let client = reqwest::Client::new();
     let resp = client
         .get(&url)
-        .header("x-boss-user", BOSS_USER)
+        .header(
+            "x-boss-user",
+            crate::identity::header(&crate::identity::reader()),
+        )
         .send()
         .await
         .with_context(|| format!("GET {url}"))?;

@@ -19,11 +19,11 @@ use boss_dispatcher::rules::registry::{
 use boss_dispatcher::rules::runner::RulesRunner;
 use boss_dispatcher::rules::schedule_runner::{DEFAULT_CATCHUP_CAP, ScheduleRunner};
 use boss_dispatcher_handlers::handlers::{
-    bill_payment_batch::BillPaymentBatch, commerce_invoice_issue::CommerceInvoiceIssue,
-    credential_issuer, credential_rotate_forgejo::CredentialRotateForgejo,
-    docs_design_sweep::DocsDesignSweep, docs_flush_queue::DocsFlushQueue,
-    estate_alarm::EstateAlarm, estate_compare::EstateCompare, gate_resolve::GateResolve,
-    inventory_bill_approve::InventoryBillApprove,
+    bill_payment_batch::BillPaymentBatch, cadence_silence::CadenceSilenceSweep,
+    commerce_invoice_issue::CommerceInvoiceIssue, credential_issuer,
+    credential_rotate_forgejo::CredentialRotateForgejo, docs_design_sweep::DocsDesignSweep,
+    docs_flush_queue::DocsFlushQueue, estate_alarm::EstateAlarm, estate_compare::EstateCompare,
+    gate_resolve::GateResolve, inventory_bill_approve::InventoryBillApprove,
     inventory_overhead_absorb::InventoryOverheadAbsorb,
     inventory_parts_consume::InventoryPartsConsume, inventory_parts_produce::InventoryPartsProduce,
     inventory_po_place::InventoryPoPlace, inventory_receive::InventoryReceive,
@@ -144,6 +144,18 @@ async fn main() -> Result<()> {
             // urgent packet (a5adfb99). Inert until a rule on
             // jobs.estate.compared is published.
             handlers.register(EstateAlarm::new(
+                cfg.jobs_api_url.clone(),
+                cfg.clock_api_url.clone(),
+            ));
+            // A DECLARED cadence with no packet files an alarm
+            // (ecca2f43). The estate alarm hears a host that stopped
+            // being observed; this hears a CHORE that stopped running —
+            // the ML batch dead 23 nights (e109f57e) and the
+            // five-minute unit observer quiet four days (408c81f6),
+            // both found by hand. Its roster of declared intervals
+            // rides its own rule row's args, so a cadence changes as
+            // registry data. Needs the clock for the ages it measures.
+            handlers.register(CadenceSilenceSweep::new(
                 cfg.jobs_api_url.clone(),
                 cfg.clock_api_url.clone(),
             ));

@@ -382,7 +382,10 @@ async fn check_step_plugins_mount() -> Check {
         async move {
             reqwest::Client::new()
                 .get(url)
-                .header("x-boss-user", crate::train::boss_user())
+                .header(
+                    "x-boss-user",
+                    crate::identity::header(&crate::identity::reader()),
+                )
                 .send()
                 .await
                 .ok()?

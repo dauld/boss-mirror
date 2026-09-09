@@ -16,6 +16,7 @@ mod doctor;
 mod gate;
 mod git_auth;
 mod host_readiness;
+mod identity;
 mod inspect;
 mod job;
 mod merged;
@@ -143,9 +144,11 @@ enum Commands {
     /// Replaces the seven-step by-hand sequence recorded in 51ca3405.
     /// Gates run in PARALLEL: every workspace is a per-run emptyDir
     /// seeded from a warm target, so verdicts are independent by
-    /// construction. Refuses politely at the concurrency bound
-    /// (BOSS_GATE_MAX_CONCURRENT, default 3), naming the running
-    /// gates — the build node, not correctness, is the constraint.
+    /// construction. At the concurrency bound (BOSS_GATE_MAX_CONCURRENT,
+    /// default 3) `--wait` QUEUES — the gate-run takes a place in line
+    /// and launches when a slot frees, oldest first, so one call
+    /// replaces a hand-rolled retry loop. Without `--wait` the bound
+    /// refuses, naming the running gates and filing nothing.
     Gate {
         /// Branch to gate.
         branch: String,
@@ -1051,7 +1054,7 @@ async fn main() -> Result<()> {
             car,
             finish,
             dry_run,
-        } => rerail::run(&car, finish, dry_run).await,
+        } => rerail::run(&car, finish, dry_run, chrono::Utc::now()).await,
         Commands::Prove {
             car,
             probe,
@@ -1131,6 +1134,12 @@ async fn main() -> Result<()> {
                 park,
                 force_regate,
                 hold,
+                // Wall-clock at the CLI boundary, minted once: the queue's
+                // ordering key and its heartbeat are real elapsed time on
+                // a real build node, not a business date. The waiting loop
+                // carries this forward with monotonic elapsed time rather
+                // than reading the clock again.
+                chrono::Utc::now(),
             )
             .await
         }

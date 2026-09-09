@@ -75,7 +75,11 @@ use serde_json::{Map, Value, json};
 use crate::delivery_policy::{self, DeliveryPolicy};
 use crate::host_readiness;
 
-const ACTOR: &str = "automation:train-conductor";
+/// The conductor's own id, for the rows a train OWNS (its Job's
+/// `owner_id`, the `actor` stamp on it). One definition, in
+/// `identity` — aliased here rather than re-spelled, because a
+/// constant cannot drift from itself (CLAUDE.md §9a).
+const ACTOR: &str = crate::identity::CONDUCTOR;
 
 /// The registry row an `/api/delivery/policy/*` response carries. Both
 /// endpoints answer `null` for "no such policy" — an ANSWER, not an
@@ -89,19 +93,17 @@ fn row_of_policy(body: Option<Value>) -> Result<Option<DeliveryPolicyRow>> {
     }
 }
 
-/// The identity every verb acts as — for callers that need the bare
-/// id (e.g. `boss job file` stamping `owner_id`) rather than the
-/// serialized header.
-pub(crate) fn actor_id() -> &'static str {
-    ACTOR
-}
-
+/// The `x-boss-user` the CONDUCTOR's own calls carry.
+///
+/// This is the conductor's loop, so the conductor is the actor —
+/// unless something named a different one (`BOSS_ACTOR`), which is
+/// how a human running `boss train cancel` by hand signs as
+/// themselves and how the unit states its automation identity out
+/// loud. Every OTHER verb signs its caller instead and refuses to
+/// guess: see `identity`, and backlog 5083d6f5 for what guessing
+/// recorded.
 pub(crate) fn boss_user() -> String {
-    json!({
-        "id": ACTOR, "role": "platform-admin", "access_tier": "operator",
-        "territory_account_ids": [], "direct_report_ids": [], "department": "platform",
-    })
-    .to_string()
+    crate::identity::header(&crate::identity::conductor())
 }
 
 /// Which slice of the conductor to run. `Run` is the timer entry

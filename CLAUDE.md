@@ -655,6 +655,18 @@ a door that stops being true is a defect worth a car.
   systemd unit sets `BOSS_JOBS_URL` explicitly for this reason; a verb
   run by hand inherits no unit.
 
+- **Who a verb signs as — `BOSS_ACTOR`.** Every `boss` verb signs its
+  jobs-API calls as the actor RUNNING it, read from `BOSS_ACTOR` or,
+  failing that, `$HOME/.config/boss/actor` (one line, the id). Name
+  yourself once per box. Unnamed, a WRITE is refused — it names both
+  fixes — and a read goes out marked `operator:unidentified`; neither
+  is ever signed as the conductor. The conductor's own `boss train …`
+  verbs still sign `automation:train-conductor`, which its unit sets
+  explicitly. This exists because the opposite was true until
+  2026-09-08: every CLI write carried the conductor, so the first read
+  of the new `completed_by` column showed an operator's `boss prove`
+  credited to the train automation (backlog 5083d6f5).
+
 - **Before pushing — `infra/gate.sh --quick`.** fmt plus every
   build-free lint, ~11s. It is not a gate and says so. Skipping it once
   cost 17 minutes of cluster time to learn that `cargo fmt` had been run

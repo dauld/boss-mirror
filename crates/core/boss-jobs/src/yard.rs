@@ -926,6 +926,30 @@ pub struct ActiveGate {
     pub stale: bool,
 }
 
+/// The metadata key a gate-run carries while it is WAITING for a
+/// concurrency slot rather than running in one.
+///
+/// ONE DEFINITION, because two readers need it (CLAUDE.md §9a):
+/// `boss gate` stamps it when the build node is at the bound and clears
+/// it the instant it creates the runner Job, and this module reads it to
+/// keep a waiting run out of the gate bays. A queued run has no Job, no
+/// pod and no workspace — counted as active it would fill a bay that is
+/// genuinely free, and past [`GATE_MAX_ACTIVE_HOURS`] it would render
+/// `stale`, reporting a corpse for a run that never started. The value
+/// is the RFC3339 instant the place in line was taken, which is also the
+/// queue's ordering key: oldest first.
+pub const QUEUED_AT: &str = "queued_at";
+
+/// Is this gate-run waiting for a slot rather than holding one?
+///
+/// A BLANK marker is no marker: `queued_at: ""` is what a metadata merge
+/// that wrote an empty string instead of deleting the key leaves behind,
+/// and reading that as "queued" would hide a genuinely running gate from
+/// the bays.
+fn queued_for_a_slot(g: &Job) -> bool {
+    meta_str(&g.metadata, QUEUED_AT).is_some_and(|s| !s.is_empty())
+}
+
 /// How long a gate-run may legitimately stay active before the surface
 /// calls it dead. This is the gate Job's own `activeDeadlineSeconds`
 /// (10800 = 3h) from `infra/gate-runner/gate-runner.yaml`: past it,
@@ -988,6 +1012,8 @@ pub fn gates(
         .iter()
         .filter(|(g, _)| g.status == JobStatus::Open)
         .filter(|(_, steps)| gate_run_verdict(steps).is_none())
+        // A run WAITING for a slot is not occupying one. See [`QUEUED_AT`].
+        .filter(|(g, _)| !queued_for_a_slot(g))
         .filter_map(|(g, _)| {
             let branch = meta_str(&g.metadata, "branch").filter(|b| !b.is_empty())?;
             // `opened_at` is the RFC3339 instant; `opened_on` is only a
@@ -2513,6 +2539,43 @@ mod tests {
             !g.active[0].packet_id.is_empty(),
             "the slot names its packet"
         );
+    }
+
+    /// A QUEUED gate-run HOLDS NO SLOT. `boss gate` files the packet
+    /// when it is waiting for a slot (so the queue has an order the
+    /// system of record owns, not a per-builder retry loop), and a
+    /// waiting run has no Job, no pod and no workspace. Counted as
+    /// active it would fill a gate bay that is genuinely free, and past
+    /// [`GATE_MAX_ACTIVE_HOURS`] it would render `stale` — the surface
+    /// reporting a corpse for a run that has not started. This is the
+    /// same defect the refusal-as-`lost` packet was, one shape along.
+    #[test]
+    fn a_queued_gate_run_holds_no_slot() {
+        let mut waiting = gate_run_on("feat/waiting", 2);
+        waiting.metadata[QUEUED_AT] = json!("2026-09-02T01:00:00Z");
+        let runs = vec![
+            (gate_run_on("feat/running", 2), vec![in_flight_step()]),
+            (waiting, vec![in_flight_step()]),
+        ];
+        let g = gates(&runs, 3, None);
+        let branches: Vec<&str> = g.active.iter().map(|a| a.branch.as_str()).collect();
+        assert_eq!(
+            branches,
+            vec!["feat/running"],
+            "a run waiting for a slot is not occupying one"
+        );
+    }
+
+    /// An EMPTY marker is not a queued run. A `queued_at: ""` is the
+    /// shape a cleared key leaves behind on a metadata merge that wrote
+    /// a blank instead of deleting, and reading it as "queued" would
+    /// hide a real running gate from the bays.
+    #[test]
+    fn a_blank_queued_marker_still_occupies_its_slot() {
+        let mut launched = gate_run_on("feat/launched", 2);
+        launched.metadata[QUEUED_AT] = json!("");
+        let g = gates(&[(launched, vec![in_flight_step()])], 3, None);
+        assert_eq!(g.active.len(), 1, "a blank marker is no marker");
     }
 
     #[test]

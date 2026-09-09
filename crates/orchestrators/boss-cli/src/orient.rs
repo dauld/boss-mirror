@@ -122,9 +122,26 @@ pub async fn run() -> Result<()> {
         )
         .await?,
     );
-    println!("\n  GATING — {} run(s)", gating.len());
-    for g in &gating {
+    // A QUEUED run is not gating: it is waiting for a slot and has no
+    // Job at all (boss_jobs::yard::QUEUED_AT). Reporting it as GATING
+    // would overstate what the node is doing by exactly the number of
+    // builders standing in line.
+    let (waiting, running): (Vec<&Value>, Vec<&Value>) = gating
+        .iter()
+        .partition(|g| !md_str(g, boss_jobs::yard::QUEUED_AT).is_empty());
+    println!("\n  GATING — {} run(s)", running.len());
+    for g in &running {
         println!("    {}", md_str(g, "branch"));
+    }
+    if !waiting.is_empty() {
+        println!("\n  QUEUED FOR A SLOT — {} run(s)", waiting.len());
+        for g in &waiting {
+            println!(
+                "    {}  since {}",
+                md_str(g, "branch"),
+                md_str(g, boss_jobs::yard::QUEUED_AT)
+            );
+        }
     }
 
     // Stranded greens: gated, never parked — the census cross-ref, not a

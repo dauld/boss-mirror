@@ -196,7 +196,21 @@ set -euo pipefail
 # review -> proven -> merged; this only files the packet that fills one
 # step by machine, for cars whose builder wrote the probe (28ac45ab:
 # 43 landed cars waited 2.5 days on hand-authored probes).
-BASELINE=59
+
+# 59 -> 60 (2026-09-08, migration 202609082300):
+# cadence-silence-sweep-daily — a TIMER, the standing exemption, and
+# the purest case of it in this file: the condition it watches is the
+# packets that did NOT arrive. Two silences were measured by hand on
+# 2026-09-08 that nothing in the system of record spoke about — the ML
+# inference batch dead 23 nights (e109f57e, zero packets of its kind
+# ever filed) and the five-minute unit observer quiet four days
+# (408c81f6). No Workflow definition can declare "a day passed and this
+# kind filed nothing", because no packet causes it. It adds no routing:
+# one firing reads the newest packet of each declared kind and files,
+# refreshes, or closes ONE alarm packet per silent kind. Its `args` are
+# the cadence declarations themselves, so retuning an interval is a
+# rule-row edit rather than a deploy.
+BASELINE=60
 RULES_FILE="infra/dispatcher/rules.toml"
 
 count=$(grep -c '^\[\[rule\]\]' "$RULES_FILE")

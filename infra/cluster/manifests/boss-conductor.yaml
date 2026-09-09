@@ -151,6 +151,16 @@ data:
   # address, so BOSS_TRAIN_ALLOW_LOCAL_JOBS stays unset and preflight's
   # loopback guard stays armed.
   BOSS_JOBS_URL: "http://boss-jobs-internal.boss.svc.cluster.local:7900"
+  # WHO THE CONDUCTOR SIGNS AS. Every jobs-API write this loop makes
+  # carries this id, and the system of record stamps it into the
+  # audit log and the step's `completed_by`. It is the conductor's
+  # default in code too (boss-cli `identity::CONDUCTOR`); stating it
+  # here makes the automation identity a declared fact rather than a
+  # fallback, which is the whole point of backlog 5083d6f5 — an
+  # operator's own `boss prove` used to land under this same id
+  # because the CLI had only one header. It no longer does: an
+  # operator verb signs whoever runs it, and refuses to guess.
+  BOSS_ACTOR: "automation:train-conductor"
   # The clock, by its in-cluster door (boss-clock-internal.yaml). Unset,
   # the cadence loop defaulted to the single-host 127.0.0.1:7060 and
   # warned "clock-api unreachable; falling back to wallclock" on every

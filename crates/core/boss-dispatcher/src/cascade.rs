@@ -128,6 +128,26 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // is for lenses and for calibrating the eventual raiser, so
         // the loop terminates here by design, same as the census.
         ("estate.compare", vec!["jobs.estate.compared"]),
+        // The cadence silence sweep (ecca2f43): a daily clock rule
+        // that reconciles each DECLARED cadence against the newest
+        // ACTUAL packet of that kind. Three writes, all through the
+        // jobs API — it FILES an alarm (`jobs.job.created`), REFRESHES
+        // a standing one's metadata (`jobs.job.updated`), and CLOSES
+        // its own alarm when the kind comes back by completing the
+        // packet's triage step (`jobs.step.completed`, which carries
+        // the backlog-item to its `stale` terminal). Every one of them
+        // is a backlog-item write, so the only rule that can re-enter
+        // on them is the backlog-item advance rule, and none of that
+        // reaches a maintenance kind: the sweep cannot make the
+        // cadences it watches look busier.
+        (
+            "cadence.silence.sweep",
+            vec![
+                "jobs.job.created",
+                "jobs.job.updated",
+                "jobs.step.completed",
+            ],
+        ),
         // The credential broker (7ee101aa): fires on a rotation
         // packet's scope step, speaks to the forge admin API + the
         // k8s Secret store, and records issue/install/verify/revoke

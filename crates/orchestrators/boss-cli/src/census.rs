@@ -69,11 +69,13 @@ use boss_jobs::job_edges::{InMemoryJobEdges, JobEdgeSpec, JobEdgesRegistry};
 use boss_jobs::registry::WorkflowStatus;
 use boss_jobs::stations::StationSpec;
 
-/// Reads are policy-gated. The census claims operator scope because
-/// its subject IS the whole instance — a scoped read would report
-/// "orphan" for every packet the reader merely cannot see. Read-only:
-/// this module issues GETs and nothing else.
-const CENSUS_USER: &str = r#"{"id":"automation:packet-census","role":"platform-admin","access_tier":"operator","territory_account_ids":[],"direct_report_ids":[],"department":"platform"}"#;
+// Reads are policy-gated. The census claims operator scope because
+// its subject IS the whole instance — a scoped read would report
+// "orphan" for every packet the reader merely cannot see. Read-only:
+// this module issues GETs and nothing else, so the id it presents
+// names whoever ran `boss packet census` rather than the old fixed
+// `automation:packet-census` slug — the scope that matters is the
+// role, which `identity::header` carries for every verb alike.
 
 /// Job statuses that mean "still in the network". Terminal is the
 /// complement: closed + cancelled.
@@ -494,7 +496,10 @@ impl Api {
         let resp = self
             .client
             .get(&url)
-            .header("x-boss-user", CENSUS_USER)
+            .header(
+                "x-boss-user",
+                crate::identity::header(&crate::identity::reader()),
+            )
             .send()
             .await
             .with_context(|| format!("GET {url}"))?;

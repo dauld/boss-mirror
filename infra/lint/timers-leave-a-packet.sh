@@ -36,6 +36,15 @@
 #   8. and every CLUSTER CRONJOB does (2)–(4) too, because that is where
 #      the chores live since the 2026-09-04 cutover — the nightly backup
 #      ran unrecorded for twenty days inside this lint's blind spot
+
+#   9. its cadence is declared, with the same number, to the
+#      cadence-silence sweep that notices when its packets stop
+#      arriving (CLAUDE.md 9a — the interval lives twice)
+#
+# (9) is the one that closes the loop. Checks 1-7 all describe a unit;
+# none of them can tell whether its packet ever ARRIVES, so a unit that
+# is uninstalled, masked, or failing before ExecStart leaves this file
+# green while filing nothing — 23 nights of it, measured (e109f57e).
 #
 # (3) and (4) are the ones worth having. A unit that opens a Job and
 # never completes it leaves an open packet every run — worse than no
@@ -407,6 +416,134 @@ if [ -d "$CLUSTER_MANIFESTS" ]; then
         esac
     done
 fi
+
+
+
+# 9. AND A TIMER'S CADENCE MUST BE DECLARED WHERE THE SILENCE SWEEP
+#    READS IT — with the same number.
+#
+# Checks 1-7 prove a timer opens and completes a packet of a real kind
+# on the right instance. None of them can tell whether the packet ever
+# ARRIVES: a unit that is uninstalled, masked, failing before ExecStart,
+# or pointed at a host nobody converges leaves this whole file green
+# while filing nothing. Measured 2026-09-08, both by a human looking:
+# boss-ml-inference-batch had been dead 23 nights (e109f57e — check 7
+# was written for the cause; this is the missing detector for the
+# effect) and the five-minute estate-observe-units observer had been
+# quiet four days (408c81f6).
+#
+# The detector is the `cadence-silence-sweep-daily` dispatcher rule
+# (migration 202609082300): it compares each DECLARED cadence against
+# the newest ACTUAL packet of that kind and files one alarm per silent
+# kind. Its declarations ride its own rule row's args, which is registry
+# data an operator can retune without a deploy — and which means the
+# interval now lives twice, here and in the .timer file that executes
+# the chore. CLAUDE.md §9a: a fact that lives twice gets an equality
+# test, and this is it.
+#
+# WHAT IT ASSERTS, for every rostered timer that has a SCHEDULE:
+#   * its kind appears in the sweep's roster, and
+#   * the declared minutes equal the LOOSEST rostered timer for that
+#     kind (maintenance-estate-observe-host is opened by a 15-minute
+#     forge timer AND a daily boss-gcp one; the SoR can only honestly
+#     expect the daily).
+# A timer whose schedule shape this cannot read FAILS rather than being
+# skipped — the same fail-closed posture the sweep itself takes for a
+# declaration it cannot parse. A timer with no schedule directive at
+# all (boss-deploy-confirm is armed by `systemctl restart`, not by the
+# clock) is not a cadence and is not checked. A DECLARED kind with no
+# rostered timer is left alone: it may be a cluster CronJob or a
+# dispatcher-driven kind, neither of which this file can see.
+RULES_TOML="infra/dispatcher/rules.toml"
+
+# The schedule of one .timer, in minutes. Echoes NONE for a unit with no
+# clock schedule and UNPARSED:<text> for a shape this cannot read.
+timer_interval_minutes() {
+    local unit="$1" oua oc n
+    oua=$(grep -oE '^OnUnitActiveSec=[^ ]+' "$unit" 2>/dev/null | head -1 | cut -d= -f2)
+    if [ -n "$oua" ]; then
+        case "$oua" in
+            *min) n="${oua%min}"; [ "$n" -gt 0 ] 2>/dev/null && { echo "$n"; return; } ;;
+            *h)   n="${oua%h}";   [ "$n" -gt 0 ] 2>/dev/null && { echo $((n * 60)); return; } ;;
+            *d)   n="${oua%d}";   [ "$n" -gt 0 ] 2>/dev/null && { echo $((n * 1440)); return; } ;;
+        esac
+        echo "UNPARSED:OnUnitActiveSec=$oua"; return
+    fi
+    oc=$(grep -E '^OnCalendar=' "$unit" 2>/dev/null | head -1 | cut -d= -f2-)
+    if [ -z "$oc" ]; then echo NONE; return; fi
+    case "$oc" in
+        hourly)  echo 60 ;;
+        daily)   echo 1440 ;;
+        weekly)  echo 10080 ;;
+        # `*-*-* HH:MM:SS [TZ]` — every day at a fixed time.
+        '*-*-* '*) echo 1440 ;;
+        # `Mon *-*-* HH:MM:SS` — one named weekday.
+        [A-Z][a-z][a-z]' *-*-* '*) echo 10080 ;;
+        *) echo "UNPARSED:OnCalendar=$oc" ;;
+    esac
+}
+
+# The sweep's declared roster, as `<kind> <minutes>` lines. Read off the
+# rule row mirrored in rules.toml — the same text the migration seeds
+# and dispatcher_rules_seed_matches_toml pins to the live table.
+declared=$(grep -oE '"interval_minutes\.[a-z0-9-]+" = "[0-9]+"' "$RULES_TOML" \
+    | sed -E 's/"interval_minutes\.([a-z0-9-]+)" = "([0-9]+)"/\1 \2/')
+if [ -z "$declared" ]; then
+    echo "timers-leave-a-packet: $RULES_TOML declares no cadence intervals for the" >&2
+    echo "    cadence-silence-sweep-daily rule. A silence sweep with an empty roster" >&2
+    echo "    watches nothing, which is the defect it was built to end (ecca2f43)." >&2
+    problems=$((problems + 1))
+fi
+
+# The loosest rostered timer per kind — the number the sweep must carry.
+# Same row shapes checks 1-7 already walk: boss-gcp's TIMERS plus the
+# forge installer's UNITS.
+expected=""
+for row in $rows; do
+    name="${row%%:*}"; sub="${row##*:}"
+    if [ "$sub" = "." ]; then unit="infra/$name.service"; timer="infra/$name.timer"
+    else unit="infra/$sub/$name.service"; timer="infra/$sub/$name.timer"; fi
+    [ -f "$unit" ] || continue
+    [ -f "$timer" ] || continue
+    kind=$(grep -oE 'boss-maintenance-wrap\.sh [a-z-]+' "$unit" | awk '{print $2}' | head -1)
+    [ -n "$kind" ] || continue
+    mins=$(timer_interval_minutes "$timer")
+    case "$mins" in
+        NONE) continue ;;
+        UNPARSED:*)
+            echo "timers-leave-a-packet: $name's schedule (${mins#UNPARSED:}) is a shape this" >&2
+            echo "    check cannot read, so it cannot prove the cadence-silence sweep expects" >&2
+            echo "    the right interval for '$kind'. Teach timer_interval_minutes the shape" >&2
+            echo "    rather than leaving the cadence unpinned — an interval nobody checks is" >&2
+            echo "    how a retuned timer starts a daily false alarm." >&2
+            problems=$((problems + 1)); continue ;;
+    esac
+    expected="${expected}${kind} ${mins}
+"
+done
+
+# Reduce to the maximum per kind, then compare with the declaration.
+for kind in $(printf '%s' "$expected" | awk '{print $1}' | sort -u); do
+    want=$(printf '%s' "$expected" | awk -v k="$kind" '$1 == k {print $2}' | sort -n | tail -1)
+    got=$(printf '%s\n' "$declared" | awk -v k="$kind" '$1 == k {print $2}' | head -1)
+    if [ -z "$got" ]; then
+        echo "timers-leave-a-packet: a timer opens '$kind' every $want minutes, but the" >&2
+        echo "    cadence-silence-sweep-daily rule does not declare it — so nothing notices" >&2
+        echo "    when its packets stop arriving, which is exactly how the ML inference batch" >&2
+        echo "    went 23 nights unmissed (e109f57e). Add to the rule's args in" >&2
+        echo "    $RULES_TOML AND to its seeding migration:" >&2
+        echo "      \"interval_minutes.$kind\" = \"$want\"" >&2
+        problems=$((problems + 1)); continue
+    fi
+    if [ "$got" != "$want" ]; then
+        echo "timers-leave-a-packet: '$kind' is executed every $want minutes by its timer but" >&2
+        echo "    declared every $got to the cadence-silence sweep. The two must agree or the" >&2
+        echo "    sweep alarms on a healthy chore (declared too tight) or stays quiet on a" >&2
+        echo "    dead one (too loose). Fix $RULES_TOML and its seeding migration, or the" >&2
+        echo "    timer — whichever states the wrong number." >&2
+        problems=$((problems + 1))
+    fi
+done
 
 if [ "$problems" -gt 0 ]; then
     echo "" >&2

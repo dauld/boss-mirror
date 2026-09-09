@@ -33,6 +33,17 @@ Wants=network-online.target
 #       BOSS_TRAIN_ALLOW_LOCAL_JOBS=1 is set — the deliberate
 #       test/demo-box escape hatch; never set it on a box whose
 #       system of record lives elsewhere.
+#   BOSS_ACTOR=automation:train-conductor — WHO THIS LOOP SIGNS AS.
+#       Every jobs-API write it makes carries this id, and the system
+#       of record stamps it into the audit log and the step's
+#       `completed_by`. The conductor's verbs default to this id in
+#       code (boss-cli `identity::CONDUCTOR`), so an unset var is
+#       still correct here; setting it states the automation identity
+#       instead of inheriting it. Every OTHER verb — `boss gate`,
+#       `boss prove`, `boss job` — signs the actor RUNNING it and
+#       refuses a write when nothing names them, because signing an
+#       operator's act as this automation is what backlog 5083d6f5
+#       measured on a step.
 #   (BOSS_TRAIN_AUTO_MERGE=1, BOSS_TRAIN_DEPLOY_REMOTE, … ride the
 #   same drop-ins.)
 #
