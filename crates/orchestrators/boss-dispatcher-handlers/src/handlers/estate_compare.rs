@@ -46,6 +46,36 @@
 //! - **A failed read fails the firing.** No partial comparison is
 //!   recorded; the schedule of the series makes the missing datapoint
 //!   visible, and the runner logs the failure loudly.
+//!
+//! RETAINED WHEN THE RECORD CANNOT TAKE IT (packet 6bf34846). Both the
+//! reads and the write above go to the jobs API, which is the thing
+//! this stage is part of watching — CLAUDE.md §Diagnosis, *an alarm
+//! that reports through its subject dies with it*. A failing firing
+//! NAKs for redelivery, but that budget is 8 deliveries across a ~98
+//! second backoff (`boss-nats::durable`), so an outage of any real
+//! length dead-lettered the observation and the comparison was simply
+//! never made — a hole in the series, and with it a hole in the
+//! evidence `estate.alarm` reads back to decide whether a hard finding
+//! has persisted.
+//!
+//! So a firing the record refuses now RETAINS the observation and
+//! replays it on the next firing the record answers, oldest first
+//! (`super::spool`, the Rust half of the mechanism the host observer
+//! already has in `infra/estate/observe-lib.sh`). What is kept is the
+//! OBSERVATION, not the comparison: during an outage the declared-nodes
+//! read fails too, so there is no comparison yet to keep, and replay
+//! re-runs this same code over it. The replayed comparison carries the
+//! observation's ORIGINAL `observed_at`, so the series afterwards shows
+//! readings that arrived late rather than readings that never were.
+//!
+//! `estate.alarm` needs no spool of its own, and that is a conclusion
+//! from its code rather than an omission: it holds no state (`the SoR
+//! is the state; the handler stays stateless`), re-derives every
+//! finding from this series on each firing, and fires on every
+//! comparison. Give it back the comparisons and its raise re-derives
+//! itself; a raise it could not file during an outage is re-computed
+//! and filed on the next comparison after it, deduped by
+//! `estate_finding` the way a re-raise always is.
 
 use std::sync::Arc;
 
@@ -56,6 +86,7 @@ use boss_dispatcher::rules::expr::Value;
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext};
 
 use super::common::{api_client, get_json, post_json};
+use super::spool::{PostFuture, Spool};
 
 /// The cluster scope this comparator understands. The observer stamps
 /// it; anything else known is routed below, and the rest is recorded
@@ -393,21 +424,138 @@ pub(crate) fn compare_units(observation: &Json) -> Json {
     })
 }
 
+/// The stage name, and therefore the subdirectory the retained
+/// observations wait in under the one estate spool.
+const STAGE: &str = "estate.compare";
+
+/// Compare one observation and record the result — the whole of this
+/// handler's work, as a free function so a REPLAYED observation goes
+/// through exactly the same path a fresh one does. There is no
+/// second, replay-shaped code path to drift from this one.
+///
+/// Both reads and the write go to the system of record, so any of them
+/// failing is the same condition: the record cannot take this
+/// observation right now.
+async fn compare_and_record(
+    client: &reqwest::Client,
+    base: &str,
+    rule: &str,
+    observation: &Json,
+) -> Result<(), HandlerError> {
+    let scope = observation
+        .get("scope")
+        .and_then(Json::as_str)
+        .unwrap_or("")
+        .to_string();
+    let envelope = |body: Json| {
+        let mut obj = body;
+        if let Some(o) = obj.as_object_mut() {
+            o.insert("scope".into(), json!(scope));
+            // The observation's OWN stamp, never the clock: a
+            // comparison replayed after an outage must say when the
+            // reading was taken, so the series shows a gap that filled
+            // in late rather than one that never happened.
+            o.insert(
+                "observed_at".into(),
+                observation
+                    .get("observed_at")
+                    .cloned()
+                    .unwrap_or(Json::Null),
+            );
+            o.insert(
+                "observer".into(),
+                observation.get("observer").cloned().unwrap_or(Json::Null),
+            );
+        }
+        obj
+    };
+
+    let declared = async {
+        let nodes = get_json(client, &format!("{base}/api/estate/nodes"), rule).await?;
+        nodes
+            .get("data")
+            .and_then(Json::as_array)
+            .cloned()
+            .ok_or_else(|| {
+                HandlerError::Downstream(
+                    "GET /api/estate/nodes: response carries no data array".into(),
+                )
+            })
+    };
+
+    let body = if scope == KNOWN_SCOPE {
+        envelope(compare(&declared.await?, observation))
+    } else if scope == HOST_SCOPE {
+        // Self-scoped: one host posting its own /proc (49a8d842 —
+        // until this branch, every host observation dead-ended as
+        // unknown_scope and boss-gcp's 48G disk could fill with the
+        // comparison still answering shrug).
+        envelope(compare_host(&declared.await?, observation))
+    } else if scope == UNITS_SCOPE {
+        // Self-scoped like HOST_SCOPE, and simpler: no registry
+        // read — the observation itself carries both what was
+        // watched and what the observer concluded about it.
+        envelope(compare_units(observation))
+    } else {
+        // An observation from an instrument this comparator does
+        // not understand. Guessing which declared rows it should
+        // have seen would manufacture findings; saying so is the
+        // honest record.
+        envelope(json!({
+            "counts": {},
+            "findings": { "unknown_scope": scope },
+        }))
+    };
+
+    post_json(
+        client,
+        &format!("{base}/api/estate/comparison"),
+        &body,
+        rule,
+    )
+    .await
+}
+
 pub struct EstateCompare {
     client: reqwest::Client,
     jobs_base: String,
+    spool: Spool,
 }
 
 impl EstateCompare {
     pub fn new(jobs_base: impl Into<String>) -> Arc<Self> {
+        Self::with_spool(jobs_base, Spool::for_stage(STAGE))
+    }
+
+    /// The same handler with an explicit spool — the seam a test binds
+    /// so its retained observations go somewhere it owns instead of the
+    /// host's one estate spool.
+    pub(crate) fn with_spool(jobs_base: impl Into<String>, spool: Spool) -> Arc<Self> {
         Arc::new(Self {
             client: api_client(),
             jobs_base: jobs_base.into(),
+            spool,
         })
     }
 
     fn base(&self) -> &str {
         self.jobs_base.trim_end_matches('/')
+    }
+
+    /// A post function bound to this handler's client and record, for
+    /// [`Spool::replay`] to drive over the retained observations.
+    fn replayer(&self, rule: &str) -> impl FnMut(Json) -> PostFuture + use<> {
+        let client = self.client.clone();
+        let base = self.base().to_string();
+        let rule = rule.to_string();
+        move |observation: Json| {
+            let (client, base, rule) = (client.clone(), base.clone(), rule.clone());
+            Box::pin(async move {
+                compare_and_record(&client, &base, &rule, &observation)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+        }
     }
 }
 
@@ -424,91 +572,60 @@ impl Handler for EstateCompare {
     ) -> Result<(), HandlerError> {
         let rule = &ctx.rule_name;
         let observation = &ctx.event_payload;
-        let scope = observation
-            .get("scope")
-            .and_then(Json::as_str)
-            .unwrap_or("")
-            .to_string();
-        let envelope = |body: Json| {
-            let mut obj = body;
-            if let Some(o) = obj.as_object_mut() {
-                o.insert("scope".into(), json!(scope));
-                o.insert(
-                    "observed_at".into(),
-                    observation
-                        .get("observed_at")
-                        .cloned()
-                        .unwrap_or(Json::Null),
-                );
-                o.insert(
-                    "observer".into(),
-                    observation.get("observer").cloned().unwrap_or(Json::Null),
-                );
+
+        // The record could not take this observation. RETAIN it, so
+        // the outage shows up afterwards as a comparison that arrived
+        // late instead of one that never existed at all — the file is
+        // named by the observation's own `observed_at`, so a NAK'd
+        // redelivery of the same observation lands on itself rather
+        // than piling up. Returning the error keeps the redelivery
+        // budget as the fast path; the spool is what is left when that
+        // budget runs out (~98s) and the outage does not.
+        if let Err(e) = compare_and_record(&self.client, self.base(), rule, observation).await {
+            let observed_at = observation
+                .get("observed_at")
+                .and_then(Json::as_str)
+                .unwrap_or_default();
+            match self.spool.put(observed_at, observation) {
+                Ok(()) => tracing::warn!(
+                    spool = %self.spool.dir().display(),
+                    waiting = self.spool.waiting(),
+                    observed_at,
+                    error = %e,
+                    "estate.compare: the system of record could not take this observation — retained for replay"
+                ),
+                // A spool that cannot write is the pre-fix behaviour,
+                // not a new failure: say so and let the error stand.
+                Err(io) => tracing::error!(
+                    spool = %self.spool.dir().display(),
+                    error = %io,
+                    "estate.compare: could not retain the observation — this reading is lost"
+                ),
             }
-            obj
-        };
+            return Err(e);
+        }
 
-        let body = if scope == KNOWN_SCOPE {
-            let nodes = get_json(
-                &self.client,
-                &format!("{}/api/estate/nodes", self.base()),
-                rule,
-            )
-            .await?;
-            let declared: Vec<Json> = nodes
-                .get("data")
-                .and_then(Json::as_array)
-                .cloned()
-                .ok_or_else(|| {
-                    HandlerError::Downstream(
-                        "GET /api/estate/nodes: response carries no data array".into(),
-                    )
-                })?;
-            envelope(compare(&declared, observation))
-        } else if scope == HOST_SCOPE {
-            // Self-scoped: one host posting its own /proc (49a8d842 —
-            // until this branch, every host observation dead-ended as
-            // unknown_scope and boss-gcp's 48G disk could fill with the
-            // comparison still answering shrug).
-            let nodes = get_json(
-                &self.client,
-                &format!("{}/api/estate/nodes", self.base()),
-                rule,
-            )
-            .await?;
-            let declared: Vec<Json> = nodes
-                .get("data")
-                .and_then(Json::as_array)
-                .cloned()
-                .ok_or_else(|| {
-                    HandlerError::Downstream(
-                        "GET /api/estate/nodes: response carries no data array".into(),
-                    )
-                })?;
-            envelope(compare_host(&declared, observation))
-        } else if scope == UNITS_SCOPE {
-            // Self-scoped like HOST_SCOPE, and simpler: no registry
-            // read — the observation itself carries both what was
-            // watched and what the observer concluded about it.
-            envelope(compare_units(observation))
-        } else {
-            // An observation from an instrument this comparator does
-            // not understand. Guessing which declared rows it should
-            // have seen would manufacture findings; saying so is the
-            // honest record.
-            envelope(json!({
-                "counts": {},
-                "findings": { "unknown_scope": scope },
-            }))
-        };
-
-        post_json(
-            &self.client,
-            &format!("{}/api/estate/comparison", self.base()),
-            &body,
-            rule,
-        )
-        .await
+        // The record answered, so anything retained during an outage
+        // can go in now — oldest first, stopping at the first refusal
+        // with the rest kept.
+        let replayed = self.spool.replay(self.replayer(rule)).await;
+        if let Some(stopped) = replayed.stopped {
+            return Err(HandlerError::Downstream(format!(
+                "estate.compare: this observation was recorded, but the replay of {} retained one(s) \
+                 stopped after {} with {} still waiting in {}: {stopped}",
+                replayed.posted + replayed.waiting,
+                replayed.posted,
+                replayed.waiting,
+                self.spool.dir().display(),
+            )));
+        }
+        if replayed.posted > 0 {
+            tracing::info!(
+                replayed = replayed.posted,
+                "estate.compare: replayed retained observations — the gap in the series is filled, stamped when the readings were taken"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -835,5 +952,213 @@ mod tests {
             body["findings"]["units_unhealthy"][0]["unit"],
             "forgejo.service"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Retain and replay, at the handler (packet 6bf34846). The unit
+    // tests in `super::spool` pin the mechanism; these pin that THIS
+    // stage uses it — measured at the consuming layer, against a stub
+    // system of record that can be taken down and brought back.
+    // -----------------------------------------------------------------
+
+    /// A stub system of record: serves the declared-nodes read and the
+    /// comparison write, refuses everything while `down`, and keeps
+    /// every comparison it accepted.
+    #[derive(Clone)]
+    struct StubRecord {
+        down: Arc<std::sync::atomic::AtomicBool>,
+        recorded: Arc<std::sync::Mutex<Vec<Json>>>,
+    }
+
+    impl StubRecord {
+        async fn start() -> (Self, String) {
+            use axum::extract::State;
+            use axum::response::IntoResponse;
+            use axum::routing::{get, post};
+            use axum::{Json as AxJson, Router};
+            let me = Self {
+                down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
+            };
+            fn refuse() -> axum::response::Response {
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "the system of record is down",
+                )
+                    .into_response()
+            }
+            let app = Router::new()
+                .route(
+                    "/api/estate/nodes",
+                    get(|State(s): State<StubRecord>| async move {
+                        if s.is_down() {
+                            return refuse();
+                        }
+                        AxJson(json!({ "data": declared_fixture() })).into_response()
+                    }),
+                )
+                .route(
+                    "/api/estate/comparison",
+                    post(
+                        |State(s): State<StubRecord>, AxJson(body): AxJson<Json>| async move {
+                            if s.is_down() {
+                                return refuse();
+                            }
+                            s.recorded.lock().expect("recorded lock").push(body);
+                            axum::http::StatusCode::ACCEPTED.into_response()
+                        },
+                    ),
+                )
+                .with_state(me.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            tokio::spawn(async move {
+                let _ = axum::serve(listener, app).await;
+            });
+            (me, format!("http://{addr}"))
+        }
+
+        fn is_down(&self) -> bool {
+            self.down.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn set_down(&self, down: bool) {
+            self.down.store(down, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn stamps(&self) -> Vec<String> {
+            self.recorded
+                .lock()
+                .expect("recorded lock")
+                .iter()
+                .map(|c| c["observed_at"].as_str().unwrap_or_default().to_string())
+                .collect()
+        }
+    }
+
+    fn firing(observation: Json) -> InvocationContext {
+        InvocationContext {
+            rule_name: "estate-compare-on-observation".into(),
+            triggering_event_id: "evt-test".into(),
+            triggering_topic: "jobs.estate.observed".into(),
+            event_payload: observation,
+        }
+    }
+
+    fn host_observation(at: &str) -> Json {
+        json!({
+            "scope": HOST_SCOPE,
+            "observed_at": at,
+            "observer": "automation:estate-observer-host",
+            "nodes": [{"id":"forge","cpu":16,"memory_gb":30,"address":"10.20.0.15","disk_gb":437,"disk_free_gb":300,"ready":true}],
+        })
+    }
+
+    struct SpoolDir(std::path::PathBuf);
+    impl SpoolDir {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "boss-estate-compare-test-{tag}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&p);
+            Self(p)
+        }
+    }
+    impl Drop for SpoolDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_observation_the_record_could_not_compare_is_retained_not_lost() {
+        let (record, base) = StubRecord::start().await;
+        let dir = SpoolDir::new("retain");
+        let handler = EstateCompare::with_spool(&base, Spool::at(&dir.0, 10));
+
+        record.set_down(true);
+        let out = handler
+            .invoke(&[], &firing(host_observation("2026-09-05T08:00:00Z")))
+            .await;
+
+        assert!(
+            out.is_err(),
+            "a firing the record refused must still fail, so the redelivery budget is spent first"
+        );
+        assert_eq!(
+            handler.spool.waiting(),
+            1,
+            "the observation was dropped — the comparison series keeps a hole nobody can tell from a timer that never fired"
+        );
+        assert!(record.stamps().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_next_firing_replays_the_gap_oldest_first_with_original_stamps() {
+        let (record, base) = StubRecord::start().await;
+        let dir = SpoolDir::new("replay");
+        let handler = EstateCompare::with_spool(&base, Spool::at(&dir.0, 10));
+
+        // Three observations arrive while the record is down. Each
+        // fails and is retained.
+        record.set_down(true);
+        for at in [
+            "2026-09-05T08:00:00Z",
+            "2026-09-05T08:15:00Z",
+            "2026-09-05T08:30:00Z",
+        ] {
+            assert!(
+                handler
+                    .invoke(&[], &firing(host_observation(at)))
+                    .await
+                    .is_err(),
+                "a firing during the outage must fail"
+            );
+        }
+        assert_eq!(handler.spool.waiting(), 3);
+
+        // The record comes back and the next observation fires.
+        record.set_down(false);
+        handler
+            .invoke(&[], &firing(host_observation("2026-09-05T08:45:00Z")))
+            .await
+            .expect("the firing the record answered");
+
+        assert_eq!(
+            record.stamps(),
+            vec![
+                // The live one is recorded first — it is what the
+                // firing was for; the retained ones follow, oldest
+                // first.
+                "2026-09-05T08:45:00Z",
+                "2026-09-05T08:00:00Z",
+                "2026-09-05T08:15:00Z",
+                "2026-09-05T08:30:00Z",
+            ],
+            "the gap was not filled in the order the readings were taken"
+        );
+        assert_eq!(
+            handler.spool.waiting(),
+            0,
+            "the spool did not drain once the record answered"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_redelivery_of_the_same_observation_retains_it_once() {
+        // The runner NAKs a failed firing and JetStream redelivers it
+        // up to MAX_DELIVER times. Eight redeliveries of one reading
+        // must not become eight retained readings.
+        let (record, base) = StubRecord::start().await;
+        let dir = SpoolDir::new("redeliver");
+        let handler = EstateCompare::with_spool(&base, Spool::at(&dir.0, 10));
+
+        record.set_down(true);
+        let ctx = firing(host_observation("2026-09-05T08:00:00Z"));
+        for _ in 0..8 {
+            let _ = handler.invoke(&[], &ctx).await;
+        }
+        assert_eq!(handler.spool.waiting(), 1);
     }
 }

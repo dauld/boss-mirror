@@ -26,6 +26,15 @@
 # one field this file reads out of a reading, observed_at, is read
 # with sed so the spool needs nothing the observer does not.
 
+# THESE TWO LINES ARE THE DEFINITION FOR BOTH HALVES of this mechanism.
+# The Rust stage downstream of this observer (`estate.compare`, packet
+# 6bf34846) retains and replays the same way, into the same spool, under
+# the same cap — and derives both values from HERE at build time rather
+# than restating them (CLAUDE.md §9a: prefer collapsing;
+# crates/orchestrators/boss-dispatcher-handlers/build.rs). It parses
+# exactly this `NAME="${NAME:-VALUE}"` idiom and fails the build, naming
+# the variable, if it stops finding it. Change the value freely; keep
+# the shape, or move the definition on purpose.
 SPOOL_DIR="${SPOOL_DIR:-/var/tmp/boss-estate-spool}"
 SPOOL_MAX="${SPOOL_MAX:-200}"
 
