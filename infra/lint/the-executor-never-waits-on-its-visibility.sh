@@ -36,7 +36,7 @@ if command -v jq >/dev/null 2>&1; then
     [[ "$rc" -eq 0 ]] && grep -q "spawned" "$tmp/out" || fail "a fresh packet was not spawned"
     healthy="healthy paths unchanged (reuse and spawn)"
 else
-    healthy="healthy paths not exercised here (no jq on this box; the gate image has it)"
+    healthy="healthy paths not exercised here (no jq on this box)"
 fi
 echo "the-executor-never-waits-on-its-visibility: self-test ok — an unreachable API lets the chore run with a loud line, an API error still aborts it; $healthy"
 exit 0

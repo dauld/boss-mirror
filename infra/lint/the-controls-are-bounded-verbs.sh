@@ -116,7 +116,7 @@ chmod 600 "$tmp/etc/github.token"
 # literal list must be REFUSED with the reason on the step, named,
 # and identical to the journal line (6964f9e8: the reason lived only
 # in the forge journal). The runner is sh + jq; this box may lack jq.
-runner_line="runner path not exercised here (no jq on this box; the gate image has it)"
+runner_line="runner path not exercised here (no jq on this box)"
 if command -v jq >/dev/null 2>&1; then
     mkdir -p "$tmp/rbin" "$tmp/rstate"
     printf '#!/bin/sh\nexit 0\n' > "$tmp/rbin/gh"; chmod +x "$tmp/rbin/gh"

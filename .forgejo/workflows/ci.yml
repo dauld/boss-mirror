@@ -293,13 +293,24 @@ jobs:
   # route-smoke drift test sat red and unseen, and the crawl was
   # exercising a legacy alias instead of the twenty canonical paths.
   #
-  # infra/gate.sh deliberately does NOT grow a `test:mocked` check: the
-  # gate runs inside boss-ci and there is no browser in it. The browser
-  # is installed per job instead, which costs ~1 min and keeps the
-  # image free of a 400 MB dependency only one job wants. `playwright`
-  # is absent from required-tools.txt for the same reason — that
-  # manifest lists what must exist in the IMAGE, and this arrives at
-  # run time.
+  # THIS PARAGRAPH USED TO SAY the gate deliberately does not run
+  # `test:mocked`, that boss-ci has no browser, and that playwright is
+  # absent from required-tools.txt because it arrives at run time. All
+  # three stopped being true and the words stayed, which is the worst
+  # kind of comment: a reader checking whether the gate covers the
+  # mocked suite would have been told, in the file that gates trains,
+  # that it does not.
+  #
+  # What is true, read on 2026-09-09: infra/gate.sh runs the suite as
+  # the `web-suite (unit+build+mocked)` check, unconditionally in full
+  # mode — `boss gate` skipping it is exactly how trains #160 and #161
+  # died — and only `--auto` still scopes it to web-touching changes.
+  # The browser is BAKED INTO boss-ci at /opt/ms-playwright, pinned to
+  # the workspace's @playwright/test, and the gate-runner points
+  # PLAYWRIGHT_BROWSERS_PATH there; nothing is downloaded per job.
+  # `playwright` stays out of required-tools.txt because that manifest
+  # lists binaries the gate INVOKES by name and the suite reaches the
+  # browser through bun, not because it arrives at run time.
   #
   # The image DOES now carry Node 20 (nodesource, not bookworm's 18),
   # because Playwright 1.61 refuses to start below 20 and that is not
