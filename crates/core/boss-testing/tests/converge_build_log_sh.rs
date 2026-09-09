@@ -128,6 +128,52 @@ fn a_failed_build_prints_what_the_build_said() {
     );
 }
 
+/// The half I got wrong first, so it is pinned rather than remembered.
+///
+/// BuildKit prints its epilogue — the whole failing RUN's Dockerfile
+/// context — AFTER the step's own output, so a `tail` of the captured
+/// log shows the recipe and hides the compiler. Measured 2026-09-09
+/// 05:12 on the very first failure the capture ever saw: the last 80
+/// lines were Dockerfile dump and one ERROR line, and the cargo error
+/// was further up. That is the defect CLAUDE.md's Diagnosis section
+/// names, committed inside the fix for it.
+#[test]
+fn the_failure_is_shown_even_when_the_epilogue_buries_it() {
+    let s = scratch("buried");
+    let mut out = String::from("error[E0433]: failed to resolve: use of undeclared crate\n");
+    for i in 0..200 {
+        out.push_str(&format!("Dockerfile epilogue line {i}\n"));
+    }
+    let (rc, _o, err) = run(&s.0, 2, &out);
+    assert_ne!(rc, 0);
+    assert!(
+        err.contains("E0433"),
+        "the compiler's error survives an epilogue longer than the window: {}",
+        &err[err.len().saturating_sub(400)..]
+    );
+    assert!(
+        err.contains("the failure, with context"),
+        "and the reader is told it is the failure rather than a tail: {err}"
+    );
+}
+
+/// The honest fallback: when nothing in the log names a failure, a
+/// tail is all there is — and it must say so rather than imply a
+/// diagnosis.
+#[test]
+fn a_log_with_no_marker_says_it_is_a_tail_not_a_diagnosis() {
+    let s = scratch("nomarker");
+    let mut out = String::new();
+    for i in 0..50 {
+        out.push_str(&format!("just some progress {i}\n"));
+    }
+    let (_rc, _o, err) = run(&s.0, 2, &out);
+    assert!(
+        err.contains("not a diagnosis"),
+        "a tail presented as a tail: {err}"
+    );
+}
+
 #[test]
 fn a_failed_build_stamps_the_head_so_a_repeat_is_legible() {
     let s = scratch("stamp");

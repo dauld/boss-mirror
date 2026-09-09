@@ -196,8 +196,29 @@ if docker build -f infra/oss-quickstart/Dockerfile \
 else
     build_rc=$?
     echo "$HEAD" > "$BUILD_FAILED_FILE"
-    echo "cluster-deploy-runner: BUILD FAILED for $HEAD (exit $build_rc, $BUILD_ATTEMPT) — the last ${BOSS_BUILD_LOG_TAIL:-80} lines of the build follow" >&2
-    tail -n "${BOSS_BUILD_LOG_TAIL:-80}" "$BUILD_LOG" >&2
+    # THE FAILURE, NOT THE TAIL. Capturing the log was half the fix and
+    # the half I got wrong first: BuildKit prints its epilogue — the
+    # whole failing RUN's Dockerfile context, some 35 lines — AFTER the
+    # step's own output, so `tail` showed the recipe and hid the
+    # compiler. Measured 2026-09-09 05:12, on the first failure this
+    # capture ever saw. That is precisely the defect CLAUDE.md's
+    # Diagnosis section names, committed inside the fix for it.
+    #
+    # So scan for what a failure actually prints and show the window
+    # around the FIRST one, falling back to the tail only when nothing
+    # matches — and say which of the two is on screen, because a tail
+    # presented as a diagnosis is how this started.
+    lines="${BOSS_BUILD_LOG_TAIL:-80}"
+    marker=$(grep -nEm1 'error\[E|^error:|error: could not compile|panicked at|cannot find|No space left|Killed|signal: 9|FATAL:' \
+                 "$BUILD_LOG" 2>/dev/null | cut -d: -f1 || true)
+    if [ -n "$marker" ]; then
+        start=$(( marker > 20 ? marker - 20 : 1 ))
+        echo "cluster-deploy-runner: BUILD FAILED for $HEAD (exit $build_rc, $BUILD_ATTEMPT) — the failure, with context, from line $marker of the build log" >&2
+        sed -n "${start},$(( start + lines ))p" "$BUILD_LOG" >&2
+    else
+        echo "cluster-deploy-runner: BUILD FAILED for $HEAD (exit $build_rc, $BUILD_ATTEMPT) — nothing in the log named a failure, so this is the last $lines lines, not a diagnosis" >&2
+        tail -n "$lines" "$BUILD_LOG" >&2
+    fi
     echo "cluster-deploy-runner: (full build log kept at $BUILD_LOG)" >&2
     exit "$build_rc"
 fi
