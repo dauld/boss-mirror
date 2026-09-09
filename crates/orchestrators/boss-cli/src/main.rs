@@ -197,6 +197,9 @@ enum Commands {
         park_probe: Option<String>,
         /// Auto-park: the string the probe must print for the claim to
         /// hold (`proof_expect` on the car). Required with --park-probe.
+        /// Make it a unique token, not a count: a number is compared as
+        /// a whole token, but `test $(...) -eq 1 && echo claim:ok`
+        /// asserts what you mean and cannot pass on the wrong number.
         #[arg(long)]
         park_expect: Option<String>,
         /// Auto-park: for a change only an EVENT can prove (a stalled
@@ -286,7 +289,13 @@ enum Commands {
         /// The car: its branch, or 8+ characters of its id.
         car: String,
         /// Skip straight to transcription + repoint — the branch is
-        /// already pushed and gated (the post-conflict path).
+        /// already pushed and gated (the post-conflict path). With no
+        /// `<branch>-rerail` on the forge there is nothing to rerail
+        /// to, so this REFRESHES the car where it stands: the current
+        /// green receipt is copied on and the stale skip cleared. That
+        /// is the way to fix "gated, then changed" on an already
+        /// re-railed or rebased car, and it refuses unless a green
+        /// gate-run vouches for the branch's head right now.
         #[arg(long)]
         finish: bool,
         /// Report what would happen without writing anything.
@@ -330,7 +339,10 @@ enum Commands {
         /// the evidence; it is recorded so it can be re-run later.
         #[arg(long)]
         probe: Option<String>,
-        /// String the probe must print for the claim to hold.
+        /// String the probe must print for the claim to hold. A bare
+        /// number is compared as a WHOLE token (so `1` is not matched
+        /// by `10`) and warns: have the probe assert internally and
+        /// print a unique token instead.
         #[arg(long)]
         expect: Option<String>,
         /// Assert on the exit code alone, when the command IS the test

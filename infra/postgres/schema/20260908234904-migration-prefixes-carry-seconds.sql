@@ -1,0 +1,30 @@
+-- The first seconds-resolution migration prefix, and a no-op on purpose.
+--
+-- WHY THE PREFIX GREW. `202608241600-migration-prefixes-are-timestamps`
+-- replaced the `NNN-` counter because a counter is allocated from a
+-- shared name, and two branches that each pick "the next free number"
+-- against their own tree are both right until a train assembles them.
+-- A UTC timestamp is allocated from nothing, so that class was gone
+-- except for one survivor named in that file: two authors writing in
+-- the same minute.
+--
+-- That survivor arrived on 2026-09-08. Two builders both stamped
+-- `202609082130` for unrelated migrations, the conductor's consist
+-- check refused the assembly naming both files, and the unapplied one
+-- had to be renumbered and re-gated. Parallel builders working one
+-- queue write migrations minutes apart, so a minute is not a narrow
+-- enough name here. Backlog bc7cac00.
+--
+-- SECONDS COST NOTHING. The ordering rule is a NUMERIC sort on the
+-- leading digits (`sort -t- -k1,1n` in migrate.sh, the matching
+-- sort_by_key in boss-testing's build.rs, both reading the directory
+-- that IS the list), and 2.0e13 exceeds every minute stamp exactly as
+-- every minute stamp exceeds every legacy `NNN-`. This file proves all
+-- three widths coexist. Take the stamp with `date -u +%Y%m%d%H%M%S`
+-- when you WRITE the file, not when the work starts: the collision
+-- window is the gap between the two.
+--
+-- Existing migrations keep the prefixes they were applied with.
+-- migrate.sh records a checksum per file, and renaming an applied one
+-- is what took the system of record down for an hour on 2026-08-13.
+SELECT 1;

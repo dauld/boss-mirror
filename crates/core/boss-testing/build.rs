@@ -52,7 +52,7 @@ fn main() {
     // prefix decides, and a file without one sorts last rather than
     // silently landing in the middle of the run.
     entries.sort_by_key(|n| {
-        // u64, not u32: a `YYYYMMDDHHMM-` prefix is ~2.0e11 and would
+        // u64, not u32: a `YYYYMMDDHHMMSS-` prefix is ~2.0e13 and would
         // overflow a u32 into the no-prefix arm. That arm happens to
         // sort timestamps last and, being a string tiebreak on equal
         // widths, happens to keep them chronological — accidentally

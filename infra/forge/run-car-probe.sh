@@ -12,7 +12,8 @@
 # unless the car has MERGED and recorded a probe and still has its
 # `proven` step open, runs the probe, and judges it by the two rules
 # `boss prove` applies: exit 0, and the expected string printed (on
-# either stream). On green it completes `proven` with the SAME proof
+# either stream) — a numeric expectation as a whole token, never as a
+# substring, so 10 is not proof of 1 (421b3032). On green it completes `proven` with the SAME proof
 # record `boss prove` writes — probe, expect, exit, stdout, stderr,
 # host, cwd, at, as a JSON string under `proof`, with `verified`
 # defaulting to the car's summary — so `boss prove <car> --recheck`
@@ -142,10 +143,34 @@ stderr=$(clip "$workdir/errs")
 at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 host=$(hostname 2>/dev/null || echo unknown)
 
+# --- expectation-match: mirrors prove.rs `observed` (421b3032) ---
+# printed_expectation <expect> <file>... — did any of the files print it?
+# A token expectation is a substring test, which is what every good
+# probe relies on. A NUMERIC one must appear as a WHOLE token: a
+# substring test accepted 10 as proof of 1, so the proof checked
+# nothing. The Rust side and this one are pinned equal by a test.
+printed_expectation() {
+    local want="$1" f re
+    shift
+    if [[ "$want" =~ ^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$ ]]; then
+        # Only digits . + - e can be here, so escaping . and + is enough.
+        re=$(printf '%s' "$want" | sed 's/[.+]/\\&/g')
+        for f in "$@"; do
+            grep -qE -- "(^|[^[:alnum:]._])${re}([^[:alnum:]._]|\$)" "$f" && return 0
+        done
+        return 1
+    fi
+    for f in "$@"; do
+        grep -qF -- "$want" "$f" && return 0
+    done
+    return 1
+}
+# --- end expectation-match ---
+
 # 3. Judge — the two rules `boss prove` applies, and no third.
 ok=1
 [[ "$rc" -eq 0 ]] || ok=0
-if [[ "$ok" -eq 1 ]] && ! grep -qF -- "$expect" "$workdir/out" && ! grep -qF -- "$expect" "$workdir/errs"; then
+if [[ "$ok" -eq 1 ]] && ! printed_expectation "$expect" "$workdir/out" "$workdir/errs"; then
     ok=0
 fi
 

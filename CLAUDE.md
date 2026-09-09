@@ -236,9 +236,9 @@ file still had a contended tail line, so any two cars carrying a
 migration still conflicted on merge — two more were stranded on
 2026-08-14 ("left for the next train"). The second collapse deleted
 `manifest.txt` outright: the ordered list is `schema/*.sql` sorted by
-the `NNN-` prefix, which every reader derives independently. Adding a
-migration is now dropping a file in a directory, touching no shared
-line at all. The lesson to carry: when a collapse leaves one
+its leading numeric prefix, which every reader derives independently.
+Adding a migration is now dropping a file in a directory, touching no
+shared line at all. The lesson to carry: when a collapse leaves one
 authoritative copy that everyone still has to *edit*, ask whether that
 copy holds any information its source does not. This one held none.
 

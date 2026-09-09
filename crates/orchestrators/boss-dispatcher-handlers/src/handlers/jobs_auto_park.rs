@@ -245,6 +245,35 @@ fn park_action<'a>(open: &'a [Value], all: &[Value], branch: &str) -> ParkAction
     }
 }
 
+/// How many cars one page of the open-car read asks for. The dock and
+/// the trains together hold 22 open cars today, so one page answers —
+/// but a page is still a page, and the read below walks `total`
+/// (a-limit-is-not-a-filter).
+const CARS_PAGE: usize = 200;
+
+/// PURE: the listing query for the open cars a park decision reads.
+///
+/// KEYED ON THE BRANCH, NOT THE SUBJECT — and that is the whole of the
+/// third measured twin (backlog 02165b1d, 2026-09-08 21:53 UTC). This
+/// read used to narrow server-side with `subject_id={branch}`, on the
+/// assumption that a car's subject IS its branch. It is only its
+/// FILING branch: `boss rerail` repoints `metadata.branch` at the
+/// re-railed branch and leaves the subject where the car was filed, so
+/// car 538775dd (subject `feat/arrival-runs-the-probe`, branch
+/// `feat/arrival-runs-the-probe-rerail`) never answered the narrowed
+/// query. The parked car was invisible, "no parked car" read as "no
+/// car" for the third time, and the handler filed twin ef4eff3c for a
+/// branch that already had one.
+///
+/// So the query asks the wide question and the shared
+/// `metadata.branch` predicates in `boss_jobs::car` decide — the same
+/// way `boss gate`'s own launch guard already reads the dock
+/// (`gate::all_open_cars`). One question, one answer, no field that
+/// can drift out from under it (CLAUDE.md §9a).
+fn open_cars_url(base: &str, offset: usize) -> String {
+    format!("{base}/api/jobs?kind=ship-a-change&status=open&limit={CARS_PAGE}&offset={offset}")
+}
+
 /// PURE: the car body, with the proof intent merged into its metadata.
 /// The shared builder owns the packet shape; the proof keys are added
 /// here rather than threaded through its signature because `boss park`
@@ -338,27 +367,53 @@ impl Handler for JobsAutoPark {
         // spent history; then, and only then, a new car.
         //
         // ONE READ OF THE OPEN CARS serves all three questions below.
-        let open = get_json(
-            &self.client,
-            &format!(
-                "{}/api/jobs?kind=ship-a-change&status=open&subject_id={}&limit=50",
-                self.base(),
-                inputs.branch
-            ),
-            &ctx.rule_name,
-        )
-        .await?;
-        let cars: Vec<Value> = open
-            .get("data")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        // Every open car, paged — see `open_cars_url` for why it does
+        // not narrow by subject.
+        let mut cars: Vec<Value> = Vec::new();
+        let mut offset = 0usize;
+        loop {
+            let page = get_json(
+                &self.client,
+                &open_cars_url(self.base(), offset),
+                &ctx.rule_name,
+            )
+            .await?;
+            let rows: Vec<Value> = page
+                .get("data")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let got = rows.len();
+            cars.extend(rows);
+            let total = page
+                .get("total")
+                .and_then(Value::as_u64)
+                .unwrap_or(cars.len() as u64) as usize;
+            // Stop on a short page as well as on the count: a `total`
+            // that never shrinks would otherwise spin forever.
+            if got == 0 || cars.len() >= total {
+                break;
+            }
+            offset += CARS_PAGE;
+        }
 
         // A LANDED BRANCH GETS NO TWIN — checked before the parked-car
         // refresh, because a still-parked car for a landed branch IS a
         // twin and must not be kept fresh either. Closed cars are the
         // usual landing; an open car with the `merged` marker is one
         // the dispatcher has not closed yet (see `landed_skip`).
+        //
+        // THIS read stays narrowed by subject, and deliberately: 807
+        // ship-a-change packets are closed (measured 2026-09-08), so
+        // reading them all per green gate is not a trade worth making
+        // for a hole the open read now covers. What it leaves: a
+        // RE-RAILED car that has both landed AND been closed answers
+        // neither `subject_id={branch}` nor the open read, so a stray
+        // re-gate of that branch could still file one twin. The window
+        // is minutes wide — the conductor stamps `merged` on the car
+        // while it is still open, and `landed_car_for` reads that
+        // marker off the open page above — and it has not been
+        // measured. Say so rather than pay for it.
         let closed = get_json(
             &self.client,
             &format!(
@@ -770,5 +825,151 @@ mod twin_tests {
             }
             other => panic!("a landed branch records the landing: {other:?}"),
         }
+    }
+}
+
+/// THE THIRD SHAPE (02165b1d, annotation `third_instance_2026_09_08_2200Z`):
+/// a PARKED car whose branch head MOVED. The operator's documented
+/// recovery for "gate receipt is for X but the branch boards Y" is to
+/// re-gate with `--park-*`, and that re-gate filed a second car instead
+/// of refreshing the first — for the third time, by a route the two
+/// landed guards do not cover.
+#[cfg(test)]
+mod a_moved_head_tests {
+    use super::*;
+
+    /// The branch of the re-railed car, measured 2026-09-08 21:53 UTC.
+    const BRANCH: &str = "feat/arrival-runs-the-probe-rerail";
+    /// Its SUBJECT — the branch it was FILED under, before `boss rerail`
+    /// repointed `metadata.branch`. The two disagree, and the read that
+    /// trusted them to agree is the defect.
+    const SUBJECT: &str = "feat/arrival-runs-the-probe";
+    /// The head its receipt vouched for, and the head the branch moved
+    /// to when a colliding migration prefix was renumbered and pushed.
+    const OLD_HEAD: &str = "fb973bd0d1d0da9c25fd64a22263de3f4baa1fef";
+    const NEW_HEAD: &str = "0ec4521fd4a5c632e01d6e6ed9926b1bf300fe6e";
+
+    /// Car 538775dd as it stood when the re-gate went green: parked at
+    /// the dock, receipt for a head the branch had left, boarding
+    /// refusing it with a `skip_reason` — and its subject still the
+    /// pre-rerail branch.
+    fn rerailed_parked_car() -> Value {
+        json!({
+            "id": "538775dd-64ee-4897-b9d6-b49137eb6512",
+            "kind": "ship-a-change",
+            "status": "open",
+            "subject": { "subject_kind": "custom", "id": SUBJECT },
+            "metadata": {
+                "branch": BRANCH,
+                "regate_receipt": format!(
+                    "{{\"verdict\": \"green\", \"head\": \"{OLD_HEAD}\", \"mode\": \"full\", \"fails\": []}}"
+                ),
+                "skip_reason":
+                    "gate receipt is for fb973bd0 but the branch boards 0ec4521f — gated, then changed",
+            },
+            "steps": [
+                {"spec_slug": "gate", "title": car::GATE, "status": "completed"},
+                {"spec_slug": "review", "title": car::REVIEW, "status": "ready"},
+            ]
+        })
+    }
+
+    /// Another branch's car, so the page proves a branch FILTER and not
+    /// merely "the one row we asked the server for".
+    fn someone_elses_car() -> Value {
+        json!({
+            "id": "aaaaaaaa-0000-0000-0000-000000000000",
+            "kind": "ship-a-change",
+            "status": "open",
+            "subject": { "subject_kind": "custom", "id": "feat/other" },
+            "metadata": { "branch": "feat/other" },
+            "steps": [
+                {"spec_slug": "gate", "title": car::GATE, "status": "completed"},
+                {"spec_slug": "review", "title": car::REVIEW, "status": "ready"},
+            ]
+        })
+    }
+
+    /// THE MEASURED CASE. Given the whole open page, the car whose head
+    /// moved is REFRESHED. This is the ordinary state of affairs after
+    /// a rebase, a re-rail, or a renumbered migration — not an edge.
+    #[test]
+    fn a_parked_car_whose_head_moved_is_refreshed_not_twinned() {
+        let page = [someone_elses_car(), rerailed_parked_car()];
+        match park_action(&page, &page, BRANCH) {
+            ParkAction::Refresh(car) => assert_eq!(
+                car["id"], "538775dd-64ee-4897-b9d6-b49137eb6512",
+                "the moved-head car at the dock is the one refreshed"
+            ),
+            other => panic!("a re-gate after the head moved refreshes the parked car: {other:?}"),
+        }
+    }
+
+    /// WHAT THE HANDLER USED TO SEE, and why it filed twin ef4eff3c.
+    /// The open read was narrowed server-side by `subject_id`, which a
+    /// re-railed car does not answer to. The narrowed page is empty,
+    /// "no parked car" reads as "no car", and a second car is filed.
+    #[test]
+    fn the_subject_keyed_read_is_what_filed_the_twin() {
+        let page = [someone_elses_car(), rerailed_parked_car()];
+        let subject_keyed: Vec<Value> = page
+            .iter()
+            .filter(|c| c.pointer("/subject/id").and_then(Value::as_str) == Some(BRANCH))
+            .cloned()
+            .collect();
+        assert!(
+            subject_keyed.is_empty(),
+            "a re-railed car does not answer subject_id={BRANCH} — that is the miss"
+        );
+        assert!(
+            matches!(
+                park_action(&subject_keyed, &subject_keyed, BRANCH),
+                ParkAction::File
+            ),
+            "the subject-narrowed page files a twin — which is what happened at 21:53"
+        );
+    }
+
+    /// So the query must not narrow by subject, and must page.
+    #[test]
+    fn the_open_car_query_is_keyed_on_the_branch_not_the_subject() {
+        let url = open_cars_url("http://jobs", 0);
+        assert!(
+            !url.contains("subject_id"),
+            "the open-car read must not narrow by subject: {url}"
+        );
+        assert!(url.contains("kind=ship-a-change"), "{url}");
+        assert!(url.contains("status=open"), "{url}");
+        assert!(url.contains("offset=0"), "{url}");
+        assert!(
+            open_cars_url("http://jobs", CARS_PAGE).contains(&format!("offset={CARS_PAGE}")),
+            "a dock deeper than one page is still read whole (a-limit-is-not-a-filter)"
+        );
+    }
+
+    /// The refresh writes the CURRENT receipt and DELETES the stale
+    /// skip — `skip_reason` present-and-null, which the metadata door
+    /// removes. Without both, the car keeps refusing to board for a
+    /// reason that stopped being true.
+    #[test]
+    fn the_refresh_supersedes_the_receipt_and_clears_the_skip() {
+        let fresh = Receipt {
+            raw: format!(
+                "{{\"verdict\": \"green\", \"head\": \"{NEW_HEAD}\", \"mode\": \"full\", \"fails\": []}}"
+            ),
+            head: NEW_HEAD.to_string(),
+            mode: "full".to_string(),
+        };
+        let patch = car::regate_patch(&fresh, "re-gated in place", None);
+        assert_eq!(patch["regate_receipt"], fresh.raw);
+        assert!(
+            patch["regate_receipt"].as_str().unwrap().contains(NEW_HEAD),
+            "the fresh head, not {OLD_HEAD}"
+        );
+        assert_eq!(
+            patch["skip_reason"],
+            Value::Null,
+            "a null key is deleted by the metadata door — the stale skip goes with the stale receipt"
+        );
     }
 }

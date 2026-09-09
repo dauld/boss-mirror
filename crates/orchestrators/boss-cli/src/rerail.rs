@@ -24,6 +24,17 @@
 //! The verb stops for a human at exactly one place — a real conflict
 //! hunk — and hands back the worktree with the remaining sequence
 //! printed, finishable with `--finish` once the branch is pushed.
+//!
+//! `--finish` RUNS AS OFTEN AS THE HEAD MOVES (02165b1d). It used to
+//! derive `<car branch>-rerail` unconditionally, which meant it worked
+//! exactly once per car: run again on an already-re-railed branch it
+//! hunted for `…-rerail-rerail` and refused, leaving no designed way to
+//! put a fresh receipt on a car whose head had moved — and the
+//! improvised way (re-gate with `--park-*`) filed a twin car. It now
+//! asks the forge: a rerail in flight is finished onto its branch, and
+//! with no such branch `--finish` REFRESHES the car where it stands.
+//! Either way the receipt comes from `park::receipt_for`, so it refuses
+//! unless a green vouches for the branch's head right now.
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
@@ -85,10 +96,79 @@ fn select_car(cars: &[Value], given: &str) -> Result<(Value, String)> {
     Ok((car, branch))
 }
 
+/// Does the forge already carry this branch? The one probe both the
+/// rebase path (refusing to cut over an in-flight rerail) and the
+/// finish path (deciding whether there IS a rerail to finish) ask.
+fn on_forge(branch: &str) -> Result<bool> {
+    Ok(git(
+        ".",
+        &["ls-remote", "origin", &format!("refs/heads/{branch}")],
+    )?
+    .lines()
+    .any(|l| !l.is_empty()))
+}
+
+/// PURE: which branch `--finish` finishes.
+///
+/// WHY IT IS NOT ALWAYS THE DERIVED ONE (backlog 02165b1d,
+/// `third_instance_2026_09_08_2200Z`). `--finish` used to always look
+/// for `<car branch>-rerail`, so it could be run exactly once per car:
+/// on an already-re-railed car it went hunting for
+/// `feat/…-rerail-rerail`, found nothing, and refused. Car 538775dd hit
+/// that on 2026-09-08 — its branch head had moved for a renumbered
+/// migration, its receipt was stale, boarding correctly refused it, and
+/// there was NO designed way to put the fresh receipt on it. The
+/// operator re-gated instead, the auto-park handler filed a twin, and
+/// the good car was retired by hand.
+///
+/// So the question is asked of the forge, not of the string: if the
+/// derived branch EXISTS, a rerail is in flight and that is what gets
+/// finished (the post-conflict path, unchanged). If it does not, there
+/// is nothing to rerail to and `--finish` means what the operator
+/// needs it to mean — put this car's CURRENT branch's current green
+/// receipt on it and clear the skip. That second reading is also the
+/// answer for a plain rebase, so one verb covers both and there is no
+/// second one to pick wrong.
+///
+/// It cannot invent a green: the caller transcribes through
+/// `park::receipt_for`, which refuses unless a green gate-run vouches
+/// for the branch's head RIGHT NOW.
+fn finish_target<'a>(car_branch: &'a str, derived: &'a str, derived_on_forge: bool) -> &'a str {
+    if derived_on_forge {
+        derived
+    } else {
+        car_branch
+    }
+}
+
+/// PURE: the note a repoint writes, which differs by what happened.
+/// A rerail moved the car to a new branch; a refresh left it where it
+/// was and only superseded the receipt. Saying "rerailed from X" on a
+/// car that did not move would be a false record.
+fn repoint_note(old_branch: &str, new_branch: &str) -> String {
+    if old_branch == new_branch {
+        format!(
+            "receipt refreshed in place by boss rerail --finish: {new_branch}'s head moved \
+             (rebase, re-rail or a renumbered migration), so the current green gate-run's \
+             receipt was machine-copied to regate_receipt and the stale skip cleared (the \
+             frozen gate step stays as the original head's record)"
+        )
+    } else {
+        format!(
+            "rerailed from {old_branch} by boss rerail: new branch cut from \
+             origin/main, re-gated, receipt machine-copied to regate_receipt \
+             (the frozen gate step stays as the original head's record)"
+        )
+    }
+}
+
 /// Repoint the car at the re-gated branch: `branch` moves, the fresh
 /// receipt rides `regate_receipt` VERBATIM, and the skip_reason is
 /// deleted (a PATCH key set to null is removed — the metadata door's
 /// documented contract) so the next boarding no longer sees a skip.
+///
+/// `old_branch == new_branch` is the refresh-in-place case: the branch
+/// write is a no-op and only the receipt and the skip move.
 async fn repoint(
     http: &reqwest::Client,
     car_id: &str,
@@ -105,11 +185,7 @@ async fn repoint(
     let dc = crate::channels::delivery_channel_for(new_branch);
     let mut patch = boss_jobs::car::regate_patch(
         receipt,
-        &format!(
-            "rerailed from {old_branch} by boss rerail: new branch cut from \
-             origin/main, re-gated, receipt machine-copied to regate_receipt \
-             (the frozen gate step stays as the original head's record)"
-        ),
+        &repoint_note(old_branch, new_branch),
         dc.as_deref(),
     );
     patch["branch"] = json!(new_branch);
@@ -131,11 +207,20 @@ async fn repoint(
 /// gate-run naming `new_branch` gets `rerailed_from: <old>`. Pure —
 /// `(packet id, PATCH body)` pairs the caller merges via the metadata
 /// door. A packet with no id cannot be stamped and is skipped.
+///
+/// A REFRESH IN PLACE STAMPS NOTHING. When the branch did not move
+/// (`--finish` on an already-re-railed car), there is no old branch
+/// whose green went stranded and no new one to point at — stamping
+/// `rerailed_to: <itself>` would be a fabricated record, and the yard
+/// would then read the branch's own live green as superseded.
 pub(crate) fn rerail_stamps(
     gate_runs: &[Value],
     old_branch: &str,
     new_branch: &str,
 ) -> Vec<(String, Value)> {
+    if old_branch == new_branch {
+        return Vec::new();
+    }
     gate_runs
         .iter()
         .filter_map(|g| {
@@ -201,11 +286,18 @@ async fn finish(
             );
         }
     }
-    println!(
-        "boss rerail: {} repointed {old_branch} -> {new_branch} — receipt copied, \
-         skip cleared; the next boarding takes it",
-        &car_id[..8.min(car_id.len())]
-    );
+    let id = &car_id[..8.min(car_id.len())];
+    if old_branch == new_branch {
+        println!(
+            "boss rerail: {id} refreshed {new_branch} in place — current green receipt \
+             copied, skip cleared; the next boarding takes it"
+        );
+    } else {
+        println!(
+            "boss rerail: {id} repointed {old_branch} -> {new_branch} — receipt copied, \
+             skip cleared; the next boarding takes it"
+        );
+    }
     Ok(())
 }
 
@@ -220,18 +312,23 @@ pub async fn run(
     let new_branch = format!("{old_branch}-rerail");
 
     if finish_only {
-        return finish(&http, &car, &old_branch, &new_branch).await;
+        // A rerail in flight is finished onto its new branch; with no
+        // such branch on the forge there is nothing to rerail TO, and
+        // `--finish` refreshes the car where it stands. See
+        // `finish_target` for the car this was measured on.
+        let target = finish_target(&old_branch, &new_branch, on_forge(&new_branch)?).to_string();
+        if target == old_branch {
+            println!(
+                "boss rerail: no {new_branch} on the forge — refreshing {old_branch}'s car \
+                 from its current green receipt instead"
+            );
+        }
+        return finish(&http, &car, &old_branch, &target).await;
     }
 
     // The rebase, in a disposable worktree cut from the CURRENT trunk.
     git(".", &["fetch", "origin"])?;
-    if git(
-        ".",
-        &["ls-remote", "origin", &format!("refs/heads/{new_branch}")],
-    )?
-    .lines()
-    .any(|l| !l.is_empty())
-    {
+    if on_forge(&new_branch)? {
         bail!(
             "{new_branch} already exists on the forge — a previous rerail is in \
              flight. Finish it (`boss rerail {given} --finish`) or delete the \
@@ -366,5 +463,75 @@ mod tests {
             .expect("the car on page two must be found, not reported not-found");
         assert_eq!(branch, "fix/tail-car");
         assert_eq!(car.get("id").and_then(Value::as_str), Some("car-tail"));
+    }
+
+    /// `--finish` RUNS TWICE (02165b1d, third instance). Car 538775dd
+    /// was already on `…-rerail` when its head moved again; the old
+    /// suffix-deriving finish looked for `…-rerail-rerail`, refused,
+    /// and left the operator with no designed way to refresh the
+    /// receipt — so they re-gated and got a twin car instead.
+    ///
+    /// The forge answers the question now: a rerail in flight is
+    /// finished onto its branch; with no such branch, the car is
+    /// refreshed where it stands.
+    #[test]
+    fn finish_targets_the_rerail_branch_only_when_one_exists() {
+        // The post-conflict path: the human pushed feat/x-rerail.
+        assert_eq!(
+            finish_target("feat/x", "feat/x-rerail", true),
+            "feat/x-rerail"
+        );
+        // Car 538775dd: already re-railed, head moved again. There is no
+        // feat/…-rerail-rerail and there never will be — refresh in
+        // place rather than refuse.
+        assert_eq!(
+            finish_target(
+                "feat/arrival-runs-the-probe-rerail",
+                "feat/arrival-runs-the-probe-rerail-rerail",
+                false
+            ),
+            "feat/arrival-runs-the-probe-rerail"
+        );
+        // The same reading covers a car that was never re-railed at all
+        // and simply had a rebase — one verb, no second one to pick
+        // wrong.
+        assert_eq!(finish_target("fix/y", "fix/y-rerail", false), "fix/y");
+    }
+
+    /// A refresh in place did not move the branch, so it stamps no
+    /// gate-run: `rerailed_to: <itself>` would be a fabricated record
+    /// and would make the yard read the branch's own live green as
+    /// superseded.
+    #[test]
+    fn a_refresh_in_place_stamps_no_gate_run() {
+        let gate_runs = vec![
+            json!({ "id": "g1", "metadata": { "branch": "feat/x-rerail" } }),
+            json!({ "id": "g2", "metadata": { "branch": "feat/x-rerail" } }),
+        ];
+        assert!(
+            rerail_stamps(&gate_runs, "feat/x-rerail", "feat/x-rerail").is_empty(),
+            "the branch did not move — nothing was superseded"
+        );
+    }
+
+    /// And the note the car carries says which of the two happened. A
+    /// refresh that claimed "rerailed from X" would put a move in the
+    /// record that never occurred.
+    #[test]
+    fn the_note_records_a_refresh_as_a_refresh() {
+        let moved = repoint_note("feat/x", "feat/x-rerail");
+        assert!(moved.contains("rerailed from feat/x"), "{moved}");
+
+        let in_place = repoint_note("feat/x-rerail", "feat/x-rerail");
+        assert!(in_place.contains("refreshed in place"), "{in_place}");
+        assert!(
+            !in_place.contains("rerailed from"),
+            "a car that did not move was not rerailed: {in_place}"
+        );
+        // Both say where the receipt came from — the copy contract is
+        // the same either way.
+        for n in [&moved, &in_place] {
+            assert!(n.contains("regate_receipt"), "{n}");
+        }
     }
 }

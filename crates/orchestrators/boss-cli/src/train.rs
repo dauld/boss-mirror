@@ -10604,6 +10604,40 @@ mod tests {
         );
     }
 
+    /// THE COLLISION THAT SURVIVED THE TIMESTAMP (bc7cac00). Two
+    /// builders picked `202609082130` in the same minute on
+    /// 2026-09-08, so the prefix carries SECONDS now. The lint is the
+    /// backstop, and a backstop that only says "you collided" makes
+    /// the reader derive the fix: it must name the file to renumber
+    /// and the stamp to renumber it to.
+    #[test]
+    fn the_refusal_names_the_renumber_it_implies() {
+        let mut migrations = twelve_migrations();
+        migrations.push("20260908213000-sign-off-plugin-v3.sql".to_string());
+        migrations.push("20260908213000-arrival-runs-the-probe.sql".to_string());
+        let (_g, tree) = consist_fixture("dupe-same-second", &migrations);
+
+        let verdict = consist_check(&tree, &policy());
+        let ConsistVerdict::Refuse { failed, .. } = &verdict else {
+            panic!("a duplicated timestamp must refuse the consist: {verdict:?}");
+        };
+        let out = &failed[0].output;
+        assert!(
+            out.contains("%Y%m%d%H%M%S"),
+            "the fix is a fresh SECONDS stamp, and the message must hand over the \
+             command that takes one: {out}"
+        );
+        assert!(
+            out.contains("20260908213000"),
+            "the message must name the prefix a fresh stamp has to beat, which is \
+             the latest one in the tree: {out}"
+        );
+        assert!(
+            out.contains("has NOT been applied"),
+            "and which of the two to rename: {out}"
+        );
+    }
+
     /// A broken preflight must not become a new way to block every
     /// train. A lint that cannot be run is a logged warning and the
     /// train departs — the check is an accelerant, never a gate.

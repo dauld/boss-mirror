@@ -28,6 +28,14 @@
 //! unless the expected string is actually present. What lands on the
 //! step is what happened, not what was hoped.
 //!
+//! A NUMERIC EXPECTATION IS COMPARED AS A WHOLE TOKEN. `--expect "1"`
+//! once accepted a probe that printed `10`, because the comparison was
+//! a plain substring test (421b3032): the claim was true and the proof
+//! checked nothing, which is the one failure this verb exists to
+//! prevent. Numbers now have to stand alone, and recording a bare
+//! number warns and names the shape that cannot lie — assert inside the
+//! probe and print a unique token.
+//!
 //! AND THE PROOF STAYS RE-RUNNABLE. The command is recorded alongside
 //! its output, so `boss prove <car> --recheck` re-executes it later and
 //! says whether the claim still holds. A proof that has silently
@@ -104,13 +112,67 @@ pub(crate) fn execute_in(probe: &str, cwd: Option<&Path>) -> Result<Outcome> {
     })
 }
 
+/// Is this expectation a bare number?
+///
+/// `inf` and `nan` parse as floats and are not what anyone means by a
+/// numeric expectation, so a digit is required as well.
+pub(crate) fn is_bare_number(want: &str) -> bool {
+    want.chars().any(|c| c.is_ascii_digit()) && want.parse::<f64>().is_ok()
+}
+
+/// Could this character be part of the same number token?
+fn joins_a_token(c: char) -> bool {
+    c.is_alphanumeric() || c == '.' || c == '_'
+}
+
+/// Did the probe print what was expected?
+///
+/// A token expectation is a substring test, which is what every good
+/// probe relies on (`claim:ok` inside a longer line). A NUMERIC one is
+/// a whole-token test, because a substring test accepted `10` as proof
+/// of `1` (421b3032) — the claim was true and the proof checked
+/// nothing. One definition, used by the record path and by `--recheck`.
+pub(crate) fn observed(printed: &str, want: &str) -> bool {
+    if !is_bare_number(want) {
+        return printed.contains(want);
+    }
+    printed.match_indices(want).any(|(i, _)| {
+        let before = printed[..i]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !joins_a_token(c));
+        let after = printed[i + want.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !joins_a_token(c));
+        before && after
+    })
+}
+
+/// A bare number is a weak expectation even when it matches, so say so
+/// at record time and name the shape that cannot lie. Returns the
+/// warning text, or `None` when the expectation is already a token.
+pub(crate) fn bare_number_warning(want: &str) -> Option<String> {
+    is_bare_number(want).then(|| {
+        format!(
+            "boss prove: WEAK EXPECTATION — --expect {want:?} is a bare number, so the proof \
+             rests on the probe's output being read correctly by a human later.\n  \
+             It is compared as a whole token (a substring test would accept 10 as proof of 1), \
+             but a number still says nothing about WHICH number was meant.\n  \
+             The shape that cannot lie asserts inside the probe and prints a unique token:\n    \
+             $ test $({want} …) -eq {want} && echo claim:ok    --expect 'claim:ok'"
+        )
+    })
+}
+
 /// Decide whether an outcome is evidence, or refuse and say why.
 ///
 /// This is the whole gate, and it is deliberately only two rules: the
 /// probe must have exited zero, and — unless the caller downgraded to
 /// `exit_only` — the expected string must actually appear in what it
-/// printed. Both refusals quote the streams, because a refusal that
-/// hides the output makes the reader go hunting for it.
+/// printed (see `observed` for what "appear" means). Both refusals
+/// quote the streams, because a refusal that hides the output makes
+/// the reader go hunting for it.
 pub(crate) fn judge(o: &Outcome, expect: Option<&str>) -> Result<()> {
     if o.exit != 0 {
         bail!(
@@ -134,14 +196,25 @@ pub(crate) fn judge(o: &Outcome, expect: Option<&str>) -> Result<()> {
     }
     if let Some(want) = expect {
         // Both streams count: plenty of real probes report on stderr.
-        if !o.stdout.contains(want) && !o.stderr.contains(want) {
+        if !observed(&o.stdout, want) && !observed(&o.stderr, want) {
             bail!(
                 "the probe exited 0 but never printed {want:?}, so it did not \
-                 observe what was claimed.\n\
+                 observe what was claimed.{}\n\
                  \n  stdout: {}\n  stderr: {}\n\n\
                  An exit code alone is a weak assertion — `echo hi` exits 0 too. \
                  Either the change is not in prod, or the probe is looking in the \
                  wrong place.",
+                if is_bare_number(want) {
+                    format!(
+                        "\n  {want:?} is a number, so it is compared as a whole token: a \
+                         substring test would accept 10 as proof of 1, which is how a proof \
+                         passes for the wrong reason (421b3032). If the number IS in the \
+                         output as part of a longer one, assert it inside the probe instead: \
+                         `test $(…) -eq {want} && echo claim:ok`."
+                    )
+                } else {
+                    String::new()
+                },
                 if o.stdout.trim().is_empty() {
                     "(empty)"
                 } else {
@@ -713,6 +786,13 @@ pub(crate) async fn run(
         check_enum_field(target, "method", m)?;
     }
 
+    // A bare number is legal but weak, so say so BEFORE the probe runs
+    // — the reader is looking at the output right then, which is the
+    // only moment the better shape is cheap to adopt.
+    if let Some(w) = expect.as_deref().and_then(bare_number_warning) {
+        eprintln!("{w}");
+    }
+
     println!("boss prove: {short}  $ {probe}");
     let o = execute(&probe)?;
     judge(&o, expect.as_deref())?;
@@ -870,6 +950,63 @@ mod tests {
         assert!(judge(&ok("MARKER present"), Some("MARKER")).is_ok());
     }
 
+    /// THE BUG (421b3032): `--expect "1"` accepted a probe that printed
+    /// `10`, because the comparison was a substring test. The claim was
+    /// true; the proof did not check what was meant. A numeric
+    /// expectation must appear as a WHOLE token or it is not evidence.
+    #[test]
+    fn a_number_does_not_match_a_longer_number() {
+        for printed in ["10", "21", "100", "0.15", "v1.2.3", "step_1a"] {
+            let e = judge(&ok(printed), Some("1")).unwrap_err().to_string();
+            assert!(
+                e.contains("never printed"),
+                "expect \"1\" must not match {printed:?}: {e}"
+            );
+            assert!(
+                e.contains("whole"),
+                "the refusal must say the number is compared as a whole token: {e}"
+            );
+        }
+    }
+
+    /// ...and it still matches when it really is the number printed.
+    #[test]
+    fn a_number_matches_when_it_stands_alone() {
+        for printed in ["1", "1 rule", "count=1", "rules: 1", "1\n", "(1)"] {
+            assert!(
+                judge(&ok(printed), Some("1")).is_ok(),
+                "expect \"1\" must match {printed:?}"
+            );
+        }
+    }
+
+    /// Only NUMERIC expectations tighten. A token expectation is still
+    /// a substring test, which is what every good probe relies on.
+    #[test]
+    fn a_non_numeric_expectation_is_still_a_substring() {
+        assert!(judge(&ok("prefix-claim:ok-suffix"), Some("claim:ok")).is_ok());
+        assert!(judge(&ok("unprovenX"), Some("unproven")).is_ok());
+    }
+
+    /// The stronger rider: a bare number is a weak expectation even
+    /// when it matches, so recording one warns and names the shape
+    /// that cannot lie.
+    #[test]
+    fn a_bare_number_expectation_warns_at_record_time() {
+        let w = bare_number_warning("1").expect("a bare number must warn");
+        assert!(w.contains("WEAK"), "the warning must be loud: {w}");
+        assert!(
+            w.contains("-eq 1 && echo claim:ok"),
+            "the warning must name the shape that cannot lie: {w}"
+        );
+        assert!(bare_number_warning("0.15").is_some());
+        assert!(
+            bare_number_warning("claim:ok").is_none(),
+            "a token expectation is the good shape and must not warn"
+        );
+        assert!(bare_number_warning("1 rule").is_none());
+    }
+
     /// The probe is actually EXECUTED, not parsed — this is what makes
     /// the recorded output evidence rather than transcription.
     #[test]
@@ -929,6 +1066,66 @@ mod tests {
         // And with no summary there is no default prose to fall back on.
         let e = car_verified(&half, None).unwrap_err().to_string();
         assert!(e.contains("--verified is required"), "{e}");
+    }
+
+    /// A FACT THAT LIVES TWICE GETS AN EQUALITY TEST (CLAUDE.md 9a).
+    /// The arrival path judges probes in sh, not in Rust, so the
+    /// whole-token rule has to hold there too — otherwise the machine
+    /// half still accepts 10 as proof of 1. This lifts the script's
+    /// own matcher out and runs both sides against one table.
+    #[test]
+    fn the_forge_runner_judges_an_expectation_the_same_way() {
+        const SH: &str = include_str!("../../../../infra/forge/run-car-probe.sh");
+        const START: &str = "# --- expectation-match";
+        const END: &str = "# --- end expectation-match";
+        let a = SH
+            .find(START)
+            .expect("run-car-probe.sh lost its matcher block");
+        let b = SH
+            .find(END)
+            .expect("run-car-probe.sh lost its matcher end marker");
+        let matcher = &SH[a..b];
+
+        for (printed, expect, want) in [
+            ("10", "1", false),
+            ("100", "1", false),
+            ("0.15", "1", false),
+            ("v1.2.3", "1", false),
+            ("1", "1", true),
+            ("1 rule", "1", true),
+            ("count=1", "1", true),
+            ("rules: 1", "1", true),
+            ("0 errors", "0", true),
+            ("10 errors", "0", false),
+            ("prefix-claim:ok-suffix", "claim:ok", true),
+            ("nothing here", "claim:ok", false),
+        ] {
+            assert_eq!(
+                observed(printed, expect),
+                want,
+                "prove.rs: {expect:?} against {printed:?}"
+            );
+            let script = format!(
+                "{matcher}\nf=$(mktemp)\nprintf '%s\\n' \"$1\" > \"$f\"\n\
+                 if printed_expectation \"$2\" \"$f\"; then echo MATCH; else echo NOMATCH; fi\n\
+                 rm -f \"$f\"\n"
+            );
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(&script)
+                .arg("pin")
+                .arg(printed)
+                .arg(expect)
+                .output()
+                .expect("bash runs the lifted matcher");
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert_eq!(
+                said.trim() == "MATCH",
+                want,
+                "run-car-probe.sh disagrees with prove.rs on {expect:?} against {printed:?} \
+                 (it said {said:?}) — the two comparisons must stay one rule"
+            );
+        }
     }
 
     /// THE PROOF RECORD LIVES TWICE — here and in the forge's

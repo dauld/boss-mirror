@@ -1573,6 +1573,17 @@ pub async fn run(
     // bound should cost a line of output, not a gate slot.
     let mode = normalize_mode(&mode.unwrap_or_default())?;
     park.require_complete()?;
+    // The park expectation is the one the MACHINE will judge at
+    // arrival, so it never passes through `boss prove`'s own
+    // warning. Say it here instead, while the flag is still being
+    // typed (421b3032).
+    if let Some(w) = park
+        .expect
+        .as_deref()
+        .and_then(crate::prove::bare_number_warning)
+    {
+        eprintln!("{w}");
+    }
     let hold = hold_guard(hold.as_deref(), &park)?;
     let http = reqwest::Client::new();
     // The concurrency bound: env override > delivery policy > compiled.
