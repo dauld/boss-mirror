@@ -476,6 +476,35 @@ export function stampAt(s: StepLite | null): string | null {
   return typeof md === 'string' && md !== '' ? md : null;
 }
 
+/** The checks a gate receipt says did not pass, in the order it ran them.
+ *
+ *  TWO SHAPES, BOTH REAL. The gate runner used to reduce `infra/gate.sh`'s
+ *  account of a run to `{verdict, head, mode, fails}` before reporting it
+ *  — 101 characters on the packet — and everything else died with the
+ *  pod. It now reports the whole receipt, whose `checks` array carries
+ *  every check with its result AND its duration, and carries no derived
+ *  `fails` beside it, because a summary living twice in one document is
+ *  a fact that can drift (CLAUDE.md §9a).
+ *
+ *  Old receipts are on every landed car and are not going to be
+ *  rewritten, so `fails` stays readable forever. `checks` wins when both
+ *  are present: it is the primary record and `fails` was derived from it.
+ *
+ *  ONE definition, imported by every surface that renders a receipt —
+ *  the failing-check line existed twice and would have silently gone
+ *  blank in one of the two places when the receipt widened. */
+export function failedChecks(receipt: unknown): readonly string[] {
+  const r = receipt as { checks?: unknown; fails?: unknown } | null;
+  if (Array.isArray(r?.checks)) {
+    return r.checks
+      .filter((c): c is { name: unknown; result: unknown } => typeof c === 'object' && c !== null)
+      .filter(c => c.result !== 'pass')
+      .map(c => c.name)
+      .filter((n): n is string => typeof n === 'string');
+  }
+  return Array.isArray(r?.fails) ? r.fails.filter((f): f is string => typeof f === 'string') : [];
+}
+
 export type ArrivalBasis = 'completed_at' | 'completed_on' | 'opened_on';
 export type ArrivalStamp = Readonly<{ ms: number; at: string; basis: ArrivalBasis }>;
 

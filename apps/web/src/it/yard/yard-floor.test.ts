@@ -778,4 +778,45 @@ describe("journeyStops — a packet's completed steps as a journey", () => {
     ]);
     expect(journeyStops(null)).toEqual([]);
   });
+
+  // THE WIDE RECEIPT. The gate runner used to reduce gate.sh's account
+  // of a run to {verdict, head, mode, fails} before reporting it; it now
+  // reports the whole receipt, whose `checks` array carries every check
+  // with its result and duration and has no derived `fails` beside it
+  // (a summary living twice in one document is a fact that can drift —
+  // CLAUDE.md §9a). Both shapes are on real cars right now: old receipts
+  // sit on every landed car and must keep reading.
+  test('a wide receipt names what failed from `checks`', () => {
+    const receipt = JSON.stringify({
+      verdict: 'failed', head: 'abcdef0', mode: 'full', dirty: false, free_gb: 91,
+      checks: [
+        { name: 'fmt', result: 'pass', seconds: 3 },
+        { name: 'clippy', result: 'fail', seconds: 44 },
+        { name: 'test', result: 'fail', seconds: 812 },
+      ],
+    });
+    const job = { steps: [{ spec_slug: 'gate', title: 'Gate', status: 'completed', completed_at: '2026-09-09T10:00:00Z', metadata: { receipt } }] };
+    expect(journeyStops(job)).toEqual([
+      { lamp: 'err', what: 'Gate', when: '2026-09-09T10:00:00Z', note: 'failed · abcdef0 · clippy, test' },
+    ]);
+  });
+
+  test('an old four-field receipt still reads — landed cars carry them', () => {
+    const receipt = JSON.stringify({ verdict: 'failed', head: 'abcdef0', mode: 'full', fails: ['clippy'] });
+    const job = { steps: [{ spec_slug: 'gate', title: 'Gate', status: 'completed', completed_at: '2026-09-09T10:00:00Z', metadata: { receipt } }] };
+    expect(journeyStops(job)).toEqual([
+      { lamp: 'err', what: 'Gate', when: '2026-09-09T10:00:00Z', note: 'failed · abcdef0 · clippy' },
+    ]);
+  });
+
+  test('a green wide receipt names no failure', () => {
+    const receipt = JSON.stringify({
+      verdict: 'green', head: 'b4f38151234',
+      checks: [{ name: 'fmt', result: 'pass', seconds: 3 }],
+    });
+    const job = { steps: [{ spec_slug: 'gate', title: 'Gate', status: 'completed', completed_at: '2026-09-09T10:00:00Z', metadata: { receipt } }] };
+    expect(journeyStops(job)).toEqual([
+      { lamp: 'ok', what: 'Gate', when: '2026-09-09T10:00:00Z', note: 'green · b4f3815' },
+    ]);
+  });
 });

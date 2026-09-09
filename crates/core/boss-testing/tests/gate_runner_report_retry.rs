@@ -376,3 +376,104 @@ fn the_block_is_lifted_from_run_sh_not_copied() {
         "run.sh carries exactly one begin and one end marker"
     );
 }
+
+/// THE REPORT-BACK MUST RECORD ITS OWN STORY.
+///
+/// The retry loop above prints every attempt, every wait and every
+/// transient failure — to the pod log, which is reaped with the Job. So
+/// the fact that a gate rode out a dark system of record survives
+/// exactly as long as `kubectl logs` does, and the packet, which is the
+/// record, says only "green".
+///
+/// That gap has already cost a diagnosis: during train #282's converge
+/// two gates reported cleanly across a dark SoR and there is no record
+/// that it happened. §Diagnosis: "an alarm that reports through its
+/// subject dies with it" — the runner cannot fix that, but it CAN carry
+/// its own account in the payload it finally lands, so the roll is
+/// visible afterwards instead of only during.
+#[test]
+fn the_landed_receipt_records_the_report_backs_own_story() {
+    if skip() {
+        return;
+    }
+    let stub = start_stub("story", "503:3", 0.0);
+    let (lines, ok) = run_report(&stub, "0 0 0 0 0", "green");
+    let joined = lines.join("\n");
+    assert!(ok, "the report must land once the SoR is back:\n{joined}");
+    let puts = stub.puts();
+    assert_eq!(puts.len(), 1, "exactly one write lands: {puts:?}");
+
+    let body = puts[0]
+        .split_once(' ')
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_else(|| panic!("the logged PUT has a body: {}", puts[0]));
+    let put: serde_json::Value =
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("PUT body is JSON ({e}): {body}"));
+    let raw = put
+        .pointer("/metadata/receipt")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("the write carries a receipt: {body}"));
+    let receipt: serde_json::Value = serde_json::from_str(raw)
+        .unwrap_or_else(|e| panic!("the receipt is a JSON string ({e}): {raw}"));
+
+    // The gate's own findings are untouched by the reporting story.
+    assert_eq!(
+        receipt.get("verdict").and_then(|v| v.as_str()),
+        Some("green"),
+        "the verdict must survive the annotation: {raw}"
+    );
+    let report = receipt
+        .get("report")
+        .unwrap_or_else(|| panic!("the receipt must carry the report-back's own story: {raw}"));
+    assert_eq!(
+        report.get("attempts").and_then(serde_json::Value::as_u64),
+        Some(4),
+        "three refusals and the write that landed is four attempts: {raw}"
+    );
+    assert_eq!(
+        report
+            .get("sor_unreachable")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "a report that had to ride out a dark SoR must say so on the packet: {raw}"
+    );
+    assert!(
+        report
+            .get("waited_s")
+            .and_then(serde_json::Value::as_u64)
+            .is_some(),
+        "the seconds spent waiting are the size of the outage this run saw: {raw}"
+    );
+}
+
+/// ...and a report that landed first time says so plainly, so `report`
+/// present is not itself read as trouble.
+#[test]
+fn a_first_attempt_report_records_a_clean_story() {
+    if skip() {
+        return;
+    }
+    let stub = start_stub("clean", "503:0", 0.0);
+    let (lines, ok) = run_report(&stub, "0 0 0", "green");
+    let joined = lines.join("\n");
+    assert!(ok, "the report must land:\n{joined}");
+    let puts = stub.puts();
+    assert_eq!(puts.len(), 1, "one write: {puts:?}");
+    let body = puts[0].split_once(' ').expect("body").1.to_string();
+    let put: serde_json::Value = serde_json::from_str(&body).expect("PUT body is JSON");
+    let raw = put
+        .pointer("/metadata/receipt")
+        .and_then(|v| v.as_str())
+        .expect("receipt present");
+    let receipt: serde_json::Value = serde_json::from_str(raw).expect("receipt is JSON");
+    assert_eq!(
+        receipt.pointer("/report/attempts"),
+        Some(&serde_json::json!(1)),
+        "one attempt: {raw}"
+    );
+    assert_eq!(
+        receipt.pointer("/report/sor_unreachable"),
+        Some(&serde_json::json!(false)),
+        "a clean report must say the SoR was reachable, not stay silent: {raw}"
+    );
+}

@@ -588,6 +588,35 @@ mod tests {
         assert!(got.receipt.raw.contains("\"fails\":[]"));
     }
 
+    /// THE WIDE RECEIPT PARKS THE SAME WAY.
+    ///
+    /// The gate runner reduced `infra/gate.sh`'s account of a run to
+    /// `{verdict, head, mode, fails}` before reporting it until
+    /// 2026-09-09; it now reports the whole receipt. Auto-park copies it
+    /// VERBATIM onto the car and reads only `head` and `mode` out, so the
+    /// widening must be a no-op here — a claim worth a test, because this
+    /// handler and `boss park` are the two verbs that parse the receipt
+    /// on the way to a train.
+    #[test]
+    fn a_wide_receipt_parks_verbatim_like_the_four_field_one() {
+        const WIDE: &str = "{\"verdict\":\"green\",\"mode\":\"auto\",\"scope\":\"\",\
+            \"head\":\"deadbeef\",\"dirty\":false,\"host\":\"gate-runner-abc\",\"ci\":true,\
+            \"free_gb\":91,\"unverifiable\":[],\
+            \"report\":{\"attempts\":4,\"waited_s\":63,\"sor_unreachable\":true},\
+            \"checks\":[{\"name\":\"fmt\",\"result\":\"pass\",\"seconds\":3}]}";
+        let meta = json!({ "verdict": "green", "receipt": WIDE })
+            .as_object()
+            .unwrap()
+            .clone();
+        let gr = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+        }));
+        let got = auto_park_inputs(&gr, &meta).expect("a wide green receipt still parks");
+        assert_eq!(got.receipt.raw, WIDE, "verbatim, never rebuilt from parts");
+        assert_eq!(got.receipt.head, "deadbeef");
+        assert_eq!(got.receipt.mode, "auto");
+    }
+
     /// THE CAR CARRIES ITS PROBE (28ac45ab). The gate's `park_probe` /
     /// `park_expect` land on the car as `proof_probe` / `proof_expect`,
     /// verbatim, under the keys core defines — the pair `boss prove

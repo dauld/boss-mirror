@@ -858,24 +858,40 @@ fn gate_run_verdict(steps: &[Step]) -> Option<&str> {
         .filter(|v| !v.is_empty())
 }
 
-/// The failing check a red gate-run named, from its receipt's `checks`
-/// array — the entries whose `result` is not `pass`, joined `a, b`. The
-/// receipt is a JSON STRING in the `record-verdict` step's
-/// `metadata.receipt` (the same encoding `boss receipt` parses), so it
-/// needs a second parse; a runner that died before a receipt leaves
-/// prose there, which fails the parse and correctly reads as "no named
-/// check". `None` when nothing was named.
+/// The failing check a red gate-run named, from its receipt — the
+/// entries whose `result` is not `pass`, joined `a, b`. The receipt is a
+/// JSON STRING in the `record-verdict` step's `metadata.receipt` (the
+/// same encoding `boss receipt` parses), so it needs a second parse; a
+/// runner that died before a receipt leaves prose there, which fails the
+/// parse and correctly reads as "no named check". `None` when nothing
+/// was named.
+///
+/// TWO SHAPES, BOTH REAL. `infra/gate.sh` writes `checks` — every check
+/// with its result and its duration — but until 2026-09-09 the runner
+/// reduced its receipt to `{verdict, head, mode, fails}` before
+/// reporting, so no receipt reaching a packet HAD a `checks` array and
+/// this reader was silent on every real gate-run. It now reports the
+/// whole receipt. `checks` is the primary record and wins; `fails` is
+/// read for the receipts already sitting on landed cars, which nothing
+/// will rewrite.
 fn failing_check(steps: &[Step]) -> Option<String> {
     let raw = steps
         .iter()
         .find_map(|s| meta_str(&s.metadata, "receipt"))?;
     let receipt: Value = serde_json::from_str(raw).ok()?;
-    let checks = receipt.get("checks").and_then(Value::as_array)?;
-    let failed: Vec<String> = checks
-        .iter()
-        .filter(|c| c.get("result").and_then(Value::as_str) != Some("pass"))
-        .filter_map(|c| c.get("name").and_then(Value::as_str).map(str::to_string))
-        .collect();
+    let failed: Vec<String> = match receipt.get("checks").and_then(Value::as_array) {
+        Some(checks) => checks
+            .iter()
+            .filter(|c| c.get("result").and_then(Value::as_str) != Some("pass"))
+            .filter_map(|c| c.get("name").and_then(Value::as_str).map(str::to_string))
+            .collect(),
+        None => receipt
+            .get("fails")
+            .and_then(Value::as_array)?
+            .iter()
+            .filter_map(|f| f.as_str().map(str::to_string))
+            .collect(),
+    };
     (!failed.is_empty()).then(|| failed.join(", "))
 }
 
@@ -3416,5 +3432,64 @@ mod tests {
             .collect();
         let status = build_status(&[], &many, &[], &[], None, None, &[], &[], &[], fixed_now());
         assert_eq!(status.recent.len(), RECENT_LIMIT);
+    }
+
+    /// BOTH RECEIPT SHAPES, because both are on real cars.
+    ///
+    /// The gate runner used to reduce `infra/gate.sh`'s account of a run
+    /// to `{verdict, head, mode, fails}` before reporting it, so every
+    /// receipt written before 2026-09-09 names its failures in `fails`
+    /// and carries no `checks` at all — which means this reader, written
+    /// against `checks`, returned None for every gate-run that ever ran.
+    /// The runner now reports the whole receipt and `checks` is the
+    /// primary record (it carries each check's result AND its duration);
+    /// `fails` stays readable because landed cars are not rewritten.
+    #[test]
+    fn a_four_field_receipt_still_names_its_failing_checks() {
+        let raw = serde_json::to_string(&json!({
+            "verdict": "failed",
+            "head": "e16708f69bc5b0a0a3f4bd1572f9db6dec76e7c8",
+            "mode": "full",
+            "fails": ["clippy", "test"],
+        }))
+        .unwrap();
+        let steps = vec![step(
+            "record-verdict",
+            "Record the receipt",
+            StepStatus::Completed,
+            json!({ "verdict": "failed", "receipt": raw }),
+        )];
+        assert_eq!(failing_check(&steps).as_deref(), Some("clippy, test"));
+    }
+
+    /// A wide receipt names them from `checks`, ignoring the durations
+    /// and every other field it now carries.
+    #[test]
+    fn a_wide_receipt_names_its_failing_checks_from_checks() {
+        let raw = serde_json::to_string(&json!({
+            "verdict": "failed",
+            "mode": "full",
+            "scope": "",
+            "head": "e16708f69bc5b0a0a3f4bd1572f9db6dec76e7c8",
+            "dirty": false,
+            "host": "gate-runner-abc",
+            "ci": true,
+            "free_gb": 91,
+            "unverifiable": [],
+            "report": { "attempts": 4, "waited_s": 63, "sor_unreachable": true },
+            "checks": [
+                { "name": "fmt", "result": "pass", "seconds": 3 },
+                { "name": "clippy", "result": "fail", "seconds": 44 },
+                { "name": "test", "result": "fail", "seconds": 812 },
+            ],
+        }))
+        .unwrap();
+        let steps = vec![step(
+            "record-verdict",
+            "Record the receipt",
+            StepStatus::Completed,
+            json!({ "verdict": "failed", "receipt": raw }),
+        )];
+        assert_eq!(failing_check(&steps).as_deref(), Some("clippy, test"));
     }
 }

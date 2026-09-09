@@ -178,3 +178,155 @@ fn an_unreported_verdict_fails_the_run_with_its_own_exit_code() {
         "the UNREPORTED line carries the receipt summary, so the log alone can re-report it"
     );
 }
+
+// ---------------------------------------------------------------------
+// The receipt the packet KEEPS
+// ---------------------------------------------------------------------
+// `infra/gate.sh` writes a rich account of the run — mode, scope, head,
+// dirty, host, ci, free_gb, unverifiable[], every check with its result
+// and duration, and `refused_because` when it declined. The runner then
+// REDUCED it to `{verdict, head, mode, fails}` before reporting, and the
+// full account died on the pod's emptyDir with `gate.log`. Measured on a
+// live gate-run packet (86553d4f, 2026-09-09): the receipt stored on the
+// packet was 101 characters.
+//
+// Everything the reduction dropped is evidence someone later had to go
+// and re-derive, which is the defect class §Diagnosis names first: "a
+// verdict someone must go re-derive is not a verdict". `boss-jobs`'
+// yard already reads `receipt.checks` to name a red gate's failing check
+// and got nothing, because the field never reached the packet.
+
+const SUM_BEGIN: &str = "# --- receipt summary (begin) ---";
+const SUM_END: &str = "# --- receipt summary (end) ---";
+
+/// The summary block, lifted out of `run.sh` exactly as it ships, so the
+/// test exercises the reduction rather than asserting it was written.
+fn summary_block() -> String {
+    let src = run_sh();
+    let start = src.find(SUM_BEGIN).unwrap_or_else(|| {
+        panic!(
+            "run.sh has no `{SUM_BEGIN}` marker — the block that decides what the packet \
+             keeps must be bracketed so it can be run as it ships"
+        )
+    });
+    let end = src
+        .find(SUM_END)
+        .unwrap_or_else(|| panic!("run.sh has no `{SUM_END}` marker"));
+    assert!(start < end, "receipt-summary markers are out of order");
+    src[start..end].to_string()
+}
+
+/// Run the lifted block over a receipt file and return what it produced.
+fn summarize(tag: &str, receipt_body: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("boss-gate-summary-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let receipt = dir.join("receipt.json");
+    std::fs::write(&receipt, receipt_body).expect("write receipt");
+    let harness = dir.join("harness.sh");
+    std::fs::write(
+        &harness,
+        format!(
+            "set -euo pipefail\nRECEIPT={r}\nHEAD_SHA=deadbeefdeadbeef\n{block}\nprintf '%s' \"$SUMMARY\"\n",
+            r = receipt.display(),
+            block = summary_block(),
+        ),
+    )
+    .expect("write harness");
+    let out = std::process::Command::new("bash")
+        .arg(&harness)
+        .output()
+        .expect("bash runs");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "the summary block failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// A receipt in the shape `infra/gate.sh` writes today.
+const WIDE_RECEIPT: &str = r#"{
+  "verdict": "green",
+  "mode": "full",
+  "scope": "",
+  "head": "c8ccb133770f6507422a7d2438261213e9e897ce",
+  "dirty": false,
+  "host": "gate-runner-abc123",
+  "ci": true,
+  "free_gb": 91,
+  "unverifiable": ["infra/postgres/schema/0123_x.sql"],
+  "checks": [{"name":"fmt","result":"pass","seconds":3},
+             {"name":"test","result":"fail","seconds":812}]
+}"#;
+
+/// THE ONE THIS CAR EXISTS FOR: the packet keeps the whole receipt.
+#[test]
+fn the_reported_receipt_is_the_whole_receipt() {
+    let summary = summarize("wide", WIDE_RECEIPT);
+    let got: serde_json::Value = serde_json::from_str(&summary)
+        .unwrap_or_else(|e| panic!("the summary must be JSON ({e}): {summary}"));
+    let want: serde_json::Value = serde_json::from_str(WIDE_RECEIPT).expect("fixture parses");
+
+    for key in [
+        "verdict",
+        "mode",
+        "scope",
+        "head",
+        "dirty",
+        "host",
+        "ci",
+        "free_gb",
+        "unverifiable",
+        "checks",
+    ] {
+        assert_eq!(
+            got.get(key),
+            want.get(key),
+            "`{key}` must survive to the packet — the runner reduced the gate's account to \
+             four fields and the rest died with the pod:\n{summary}"
+        );
+    }
+    // The durations are the half a reader needs to tell a starved check
+    // from a broken one, and they are nested inside `checks`.
+    assert_eq!(
+        got.pointer("/checks/1/seconds"),
+        Some(&serde_json::json!(812)),
+        "per-check durations must reach the packet:\n{summary}"
+    );
+}
+
+/// The summary is ONE line, because the log copy is one `echo`.
+///
+/// `gate-runner: receipt $SUMMARY` is the third copy of the verdict —
+/// the one that survives when the PVC and the packet do not (cf0021ae).
+/// A pretty-printed receipt turns that greppable line into twelve.
+#[test]
+fn the_summary_stays_one_line() {
+    let summary = summarize("oneline", WIDE_RECEIPT);
+    assert_eq!(
+        summary.lines().count(),
+        1,
+        "the receipt summary must be a single line: {summary}"
+    );
+}
+
+/// A receipt gate.sh never managed to write must still produce a verdict
+/// naming the head — the case where the run died before the receipt.
+#[test]
+fn an_unreadable_receipt_still_names_the_head() {
+    let summary = summarize("unreadable", "not json at all");
+    let got: serde_json::Value = serde_json::from_str(&summary)
+        .unwrap_or_else(|e| panic!("the fallback must still be JSON ({e}): {summary}"));
+    assert_eq!(
+        got.get("verdict").and_then(|v| v.as_str()),
+        Some("unreadable"),
+        "an unreadable receipt is its own verdict, never a silent green: {summary}"
+    );
+    assert_eq!(
+        got.get("head").and_then(|v| v.as_str()),
+        Some("deadbeefdeadbeef"),
+        "the fallback falls back to the head the runner knows: {summary}"
+    );
+}

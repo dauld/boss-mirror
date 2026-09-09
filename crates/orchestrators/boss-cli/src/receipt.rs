@@ -367,6 +367,39 @@ mod tests {
         assert_eq!(r.get("head").and_then(|h| h.as_str()), Some("oldhead"));
     }
 
+    /// BOTH RECEIPT SHAPES ANSWER THE VERB'S THREE QUESTIONS.
+    ///
+    /// The gate runner reduced `infra/gate.sh`'s account of a run to
+    /// `{verdict, head, mode, fails}` before reporting it until
+    /// 2026-09-09, so every landed car carries that four-field shape and
+    /// nothing will rewrite them; new ones carry the whole receipt. This
+    /// verb reads `head`, `verdict` and `mode` and must find all three in
+    /// either — the extra keys ignored, the missing `fails` unmissed.
+    #[test]
+    fn a_wide_receipt_and_a_four_field_one_both_answer_the_verb() {
+        let old = serde_json::json!({
+            "steps": [{ "title": "Green, and observed working", "metadata": { "receipt":
+                "{\"verdict\":\"green\",\"head\":\"oldhead\",\"mode\":\"full\",\"fails\":[]}" } }]
+        });
+        let wide = serde_json::json!({
+            "steps": [{ "title": "Green, and observed working", "metadata": { "receipt":
+                "{\"verdict\":\"green\",\"mode\":\"auto\",\"scope\":\"\",\"head\":\"newhead\",\
+                  \"dirty\":false,\"host\":\"gate-runner-abc\",\"ci\":true,\"free_gb\":91,\
+                  \"unverifiable\":[],\"report\":{\"attempts\":1,\"waited_s\":0,\"sor_unreachable\":false},\
+                  \"checks\":[{\"name\":\"fmt\",\"result\":\"pass\",\"seconds\":3}]}" } }]
+        });
+        for (job, head, mode) in [(old, "oldhead", "full"), (wide, "newhead", "auto")] {
+            let r = select_receipt(&job).expect("a receipt in either shape");
+            assert_eq!(r.get("head").and_then(|h| h.as_str()), Some(head));
+            assert_eq!(r.get("verdict").and_then(|v| v.as_str()), Some("green"));
+            assert_eq!(r.get("mode").and_then(|m| m.as_str()), Some(mode));
+            assert!(
+                !coverage(r.get("mode").and_then(|m| m.as_str())).contains("cannot be read"),
+                "coverage must still be readable off either shape"
+            );
+        }
+    }
+
     /// THE 7f20fb19 CASE. After a re-rail the gate step still holds the
     /// OLD head's receipt while `regate_receipt` holds the fresh one; the
     /// boarding logic prefers regate, so `boss receipt` must too or it

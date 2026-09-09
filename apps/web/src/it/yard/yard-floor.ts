@@ -28,7 +28,7 @@
 import { formatDate } from '@boss/web-kit/ui/date';
 import type { ClusterMachine, RunnerMachine } from './yard-machines';
 export type { ClusterMachine, RunnerMachine } from './yard-machines';
-import { stampAt, troubleLabel, type CarRow, type TrainRow, type WithSteps, type YardState } from './yard';
+import { failedChecks, stampAt, troubleLabel, type CarRow, type TrainRow, type WithSteps, type YardState } from './yard';
 import {
   blockLabel,
   clockText,
@@ -373,7 +373,7 @@ export type JourneyStop = Readonly<{
   note: string | null;
 }>;
 
-/** The receipt a gate step carries, as one line: verdict · head · fails. */
+/** The receipt a gate step carries, as one line: verdict · head · what failed. */
 function receiptNote(md: Record<string, unknown> | null | undefined): Readonly<{
   note: string;
   verdict: string;
@@ -381,10 +381,10 @@ function receiptNote(md: Record<string, unknown> | null | undefined): Readonly<{
   const raw = md?.receipt;
   if (typeof raw !== 'string') return null;
   try {
-    const r = JSON.parse(raw) as { verdict?: unknown; head?: unknown; fails?: unknown };
+    const r = JSON.parse(raw) as { verdict?: unknown; head?: unknown };
     const verdict = typeof r.verdict === 'string' ? r.verdict : 'unknown';
     const head = shortSha(r.head);
-    const fails = Array.isArray(r.fails) ? r.fails.filter((f): f is string => typeof f === 'string') : [];
+    const fails = failedChecks(r);
     const parts = [verdict, ...(head ? [head] : []), ...(fails.length > 0 ? [fails.join(', ')] : [])];
     return { note: parts.join(' · '), verdict };
   } catch {

@@ -20,7 +20,7 @@
 // soften.
 
 import { prNumber } from './yard-floor';
-import { stampAt, type JobLite, type StepLite } from './yard';
+import { failedChecks, stampAt, type JobLite, type StepLite } from './yard';
 
 /** How many signals the panel shows. */
 export const SIGNALS_SHOWN = 10;
@@ -124,9 +124,12 @@ function gateSignals(j: JobLite): Signal[] {
   const raw = m.receipt;
   if (typeof raw === 'string') {
     try {
-      const r = JSON.parse(raw) as { verdict?: unknown; fails?: unknown };
+      const r = JSON.parse(raw) as { verdict?: unknown };
       verdict = str(r.verdict) ?? verdict;
-      fails = Array.isArray(r.fails) ? r.fails.filter((f): f is string => typeof f === 'string') : [];
+      // `checks` on a whole receipt, `fails` on the four-field digests
+      // the runner used to report — both live on real cars. One reader,
+      // so the two surfaces that render this line cannot disagree.
+      fails = [...failedChecks(r)];
     } catch {
       // A receipt the page cannot read leaves the step's own verdict.
     }

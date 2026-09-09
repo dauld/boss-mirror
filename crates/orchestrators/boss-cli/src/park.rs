@@ -459,6 +459,25 @@ mod tests {
         assert_eq!(r.mode, "full");
     }
 
+    /// THE WIDE RECEIPT, alongside the four-field one above.
+    ///
+    /// The gate runner reduced `infra/gate.sh`'s account of a run to
+    /// `{verdict, head, mode, fails}` before reporting it until
+    /// 2026-09-09; it now reports the whole thing. `boss park` copies the
+    /// receipt VERBATIM onto the car's gate step and reads only `head`
+    /// and `mode` out of it, so the widening must change nothing here —
+    /// which is exactly the sort of claim worth a test rather than a
+    /// reading.
+    #[test]
+    fn a_wide_receipt_is_copied_verbatim_too() {
+        const WIDE: &str = r#"{"verdict":"green","mode":"auto","scope":"","head":"e16708f69bc5b0a0a3f4bd1572f9db6dec76e7c8","dirty":false,"host":"gate-runner-abc","ci":true,"free_gb":91,"unverifiable":[],"report":{"attempts":4,"waited_s":63,"sor_unreachable":true},"checks":[{"name":"fmt","result":"pass","seconds":3}]}"#;
+        let ps = vec![packet("feat/x", Some("green"), Some(WIDE))];
+        let r = receipt_for(&ps, "feat/x", HEAD).unwrap();
+        assert_eq!(r.raw, WIDE, "the whole receipt rides the car, unrebuilt");
+        assert_eq!(r.head, "e16708f69bc5b0a0a3f4bd1572f9db6dec76e7c8");
+        assert_eq!(r.mode, "auto");
+    }
+
     #[test]
     fn a_branch_with_no_gate_is_refused() {
         let ps = vec![packet("other", Some("green"), Some(GREEN))];

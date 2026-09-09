@@ -572,3 +572,96 @@ fn the_bootstrap_says_how_to_install_the_hook() {
          a tracked hooks directory that nobody points git at is inert"
     );
 }
+
+/// EVERY CHECK CARRIES ITS DURATION, so a stall reads as a stall.
+///
+/// The receipt's `checks` array recorded `{name, result}` and nothing
+/// else, which makes the two failure shapes that matter look identical:
+/// a check that failed on the code, and a check that failed because it
+/// was starved. A web unit test stalling ~8s under two parallel gates
+/// once reddened a car that had nothing wrong with it; the receipt
+/// could not say so, and the only way to learn it was to read a pod log
+/// that no longer existed. A duration is one number per check and it is
+/// the number that tells those two apart.
+///
+/// Driven through the real script — a text pin would assert that the
+/// arithmetic was WRITTEN, not that the receipt CARRIES it. `--quick`
+/// plus a fake `df` that goes tiny after the first check is the cheapest
+/// path to a written receipt: nothing compiles, `fmt` runs, and the
+/// mid-run headroom refusal writes the receipt with one real, timed
+/// check in it.
+#[test]
+fn the_receipt_times_every_check() {
+    let root = repo_root();
+    let dir = std::env::temp_dir().join("boss-gate-check-timing");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let counter = dir.join("calls");
+    let fake = dir.join("df");
+    let receipt = dir.join("receipt.json");
+    // Calls 1 (startup) and 2 (before `fmt`) see plenty; call 3 (before
+    // the first lint) trips, which is what makes the gate write a
+    // receipt holding exactly one, real, timed check.
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/usr/bin/env bash\n\
+             n=$(cat {c} 2>/dev/null || echo 0)\n\
+             echo $((n+1)) > {c}\n\
+             echo 'Filesystem 1024-blocks Used Available Capacity Mounted on'\n\
+             if [ \"$n\" -lt 2 ]; then echo '/dev/fake 1 1 943718400 1% /'; \
+             else echo '/dev/fake 1 1 1048576 99% /'; fi\n",
+            c = counter.display()
+        ),
+    )
+    .expect("write fake df");
+    std::fs::set_permissions(
+        &fake,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+    )
+    .expect("chmod");
+
+    let out = std::process::Command::new("bash")
+        .arg(root.join("infra/gate.sh"))
+        .arg("--quick")
+        .env("BOSS_GATE_DF_CMD", fake.to_str().expect("utf8"))
+        .env("BOSS_GATE_MIN_FREE_GB", "12")
+        .env("BOSS_GATE_RECEIPT", receipt.to_str().expect("utf8"))
+        .current_dir(&root)
+        .output()
+        .expect("run gate.sh");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let body = std::fs::read_to_string(&receipt).unwrap_or_else(|e| {
+        panic!("a mid-run refusal must still write a receipt ({e}).\nstderr: {stderr}")
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("receipt is not JSON ({e}): {body}"));
+    let checks = parsed
+        .get("checks")
+        .and_then(|c| c.as_array())
+        .unwrap_or_else(|| panic!("receipt carries no checks array: {body}"))
+        .clone();
+    assert!(
+        !checks.is_empty(),
+        "`fmt` ran before the refusal, so the receipt must hold it: {body}"
+    );
+    for c in &checks {
+        assert!(
+            c.get("name").and_then(|n| n.as_str()).is_some(),
+            "every check keeps its name: {body}"
+        );
+        assert!(
+            c.get("result").and_then(|r| r.as_str()).is_some(),
+            "every check keeps its result: {body}"
+        );
+        assert!(
+            c.get("seconds")
+                .and_then(serde_json::Value::as_u64)
+                .is_some(),
+            "every check must record how long it took — without it a starved \
+             check and a broken one read the same: {body}"
+        );
+    }
+}

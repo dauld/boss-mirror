@@ -275,7 +275,7 @@ db_backed_paths() {
 db_checks_passed() {
     local entry name result seen=0
     for entry in ${RAN+"${RAN[@]}"}; do
-        name="${entry%:*}"; result="${entry##*:}"
+        name="$(ran_name "$entry")"; result="$(ran_result "$entry")"
         case "$name" in
             fixture|test) seen=1; [ "$result" = "pass" ] || return 1 ;;
         esac
@@ -466,9 +466,24 @@ fi
 
 
 FAILED=()
-# Every check and how it went, so the receipt can say what RAN rather
-# than only what broke.
+# Every check, how it went, and HOW LONG IT TOOK, so the receipt can say
+# what RAN rather than only what broke — and can tell a starved check
+# from a broken one.
+#
+# One entry is `name:result:seconds`. The duration is the field that was
+# missing: a web unit test stalling ~8s under two parallel gates reddened
+# a car that had nothing wrong with it, and the receipt could not say so.
+# Without a number, "slow" and "wrong" are the same observation.
+#
+# The FORMAT is parsed in two places (`db_checks_passed` and
+# `write_receipt`), so it gets accessors rather than two copies of the
+# same parameter expansion (CLAUDE.md §9a). They peel from the RIGHT, so
+# a check name containing a colon still reads correctly — which is what
+# the two-field version did, and is worth not losing.
 RAN=()
+ran_name() { local e="$1"; printf '%s' "${e%:*:*}"; }
+ran_result() { local e="${1%:*}"; printf '%s' "${e##*:}"; }
+ran_secs() { printf '%s' "${1##*:}"; }
 
 # ---------------------------------------------------------------------
 # The receipt
@@ -489,15 +504,17 @@ RAN=()
 GATE_RECEIPT="${BOSS_GATE_RECEIPT:-.gate-receipt.json}"
 
 write_receipt() {
-    local verdict="$1" mode checks="" first=1 entry name result
+    local verdict="$1" mode checks="" first=1 entry name result secs
     if [ "$AUTO" -eq 1 ]; then mode="auto"
     elif [ ${#NAMED[@]} -gt 0 ]; then mode="scoped"
     else mode="full"; fi
     for entry in ${RAN+"${RAN[@]}"}; do
-        name="${entry%:*}"; result="${entry##*:}"
+        name="$(ran_name "$entry")"
+        result="$(ran_result "$entry")"
+        secs="$(ran_secs "$entry")"
         [ "$first" -eq 1 ] || checks="${checks},"
         first=0
-        checks="${checks}{\"name\":\"${name}\",\"result\":\"${result}\"}"
+        checks="${checks}{\"name\":\"${name}\",\"result\":\"${result}\",\"seconds\":${secs}}"
     done
     # `ci` is the fact that keeps mattering: a gate run where no CI
     # marker is set cannot have exercised anything those markers gate.
@@ -550,14 +567,18 @@ check() {
     # reading taken before this phase is the one that counts.
     require_headroom "to continue before '${name}'"
     echo "::group::gate: ${name}"
+    # TIMED, and the timing starts AFTER the headroom poll: the number
+    # has to be what the check cost, not what the gate's own bookkeeping
+    # cost around it.
+    local t0=$SECONDS
     if "$@"; then
         echo "::endgroup::"
-        RAN+=("${name}:pass")
+        RAN+=("${name}:pass:$((SECONDS - t0))")
     else
         echo "::endgroup::"
-        echo "GATE FAIL: ${name}" >&2
+        echo "GATE FAIL: ${name} (after $((SECONDS - t0))s)" >&2
         FAILED+=("${name}")
-        RAN+=("${name}:fail")
+        RAN+=("${name}:fail:$((SECONDS - t0))")
     fi
 }
 
@@ -655,7 +676,7 @@ run_preflight() {
     if ! roster=$(preflight_roster); then
         echo "GATE FAIL: preflight-roster" >&2
         FAILED+=("preflight-roster")
-        RAN+=("preflight-roster:fail")
+        RAN+=("preflight-roster:fail:0")
         return
     fi
     # `bash <path>` rather than executing it, as the consist check does:

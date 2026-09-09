@@ -156,9 +156,51 @@ fi
 # exact merge — the short tag stays the image name, the full sha is
 # the attestation (prefix-compared, so either length matches).
 STAGE="build $HEAD"
-docker build -q -f infra/oss-quickstart/Dockerfile \
+# A FAILED CONVERGE SAYS WHY.
+#
+# This ran `docker build -q`. On 2026-09-09 train 283 merged at 03:40
+# and its converge failed four times — 03:46, 03:55, 04:04, 04:14 —
+# and the record held the Dockerfile context dump, a one-line ERROR,
+# and NOTHING the compiler said. Establishing even the exit code meant
+# reading an untruncated journal line by hand; ruling out a compile
+# error and a full disk took a workspace check on another box and a
+# disk-report ops-request, and neither question should have needed
+# asking. The build knew the answer and was told not to speak
+# (backlog ddb0f7bd).
+#
+# `-q` suppresses OUTPUT, not work: it saves no build time, so the
+# only thing it was buying was a quiet journal. Capturing to a file
+# buys that too, and keeps the evidence. So the build always runs
+# verbose into a log, the log is printed ONLY on failure, and the
+# first failure is readable instead of the second.
+#
+# The stamp is the other half. The runner is stateless across timer
+# firings, so without it a head that fails four times looks like four
+# unrelated failures; with it the log says which attempt this is. It
+# is deliberately NOT a quarantine — unlike FAILED_FILE, which holds
+# an unbootable head out, a build that failed is retried, because the
+# common causes here (a registry fetch losing a DNS race on this LAN,
+# memory contention with a concurrent CI job) are transient and a
+# retry that PASSES is itself the finding.
+BUILD_FAILED_FILE="${BOSS_FORGE_LAST_BUILD_FAILED:-$HOME/.boss-last-build-failed}"
+BUILD_ATTEMPT="first attempt"
+if [ "$HEAD" = "$(cat "$BUILD_FAILED_FILE" 2>/dev/null || echo none)" ]; then
+    BUILD_ATTEMPT="RETRY — this head already failed to build at least once"
+fi
+BUILD_LOG="$(mktemp -t boss-converge-build.XXXXXX)"
+echo "cluster-deploy-runner: building $HEAD ($BUILD_ATTEMPT)"
+if docker build -f infra/oss-quickstart/Dockerfile \
     --build-arg BOSS_BUILD_COMMIT="$(git rev-parse HEAD)" \
-    -t "$REGISTRY:$HEAD" .
+    -t "$REGISTRY:$HEAD" . > "$BUILD_LOG" 2>&1; then
+    rm -f "$BUILD_FAILED_FILE" "$BUILD_LOG"
+else
+    build_rc=$?
+    echo "$HEAD" > "$BUILD_FAILED_FILE"
+    echo "cluster-deploy-runner: BUILD FAILED for $HEAD (exit $build_rc, $BUILD_ATTEMPT) — the last ${BOSS_BUILD_LOG_TAIL:-80} lines of the build follow" >&2
+    tail -n "${BOSS_BUILD_LOG_TAIL:-80}" "$BUILD_LOG" >&2
+    echo "cluster-deploy-runner: (full build log kept at $BUILD_LOG)" >&2
+    exit "$build_rc"
+fi
 STAGE="push $HEAD"
 docker push "$REGISTRY:$HEAD"
 

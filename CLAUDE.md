@@ -551,6 +551,37 @@ new surface against.
   dropping the check's name one layer below the code that wanted it.
   A verdict someone must go re-derive is not a verdict.
 
+- **Quiet is not free — it is a loan against the next diagnosis.** On
+  2026-09-09 the same defect was found three times before lunch, and
+  each instance was a deliberate reduction that discarded the only
+  copy. A red train's alert carried the last forty lines of a 778 KB
+  log — svelte warnings printed five minutes *after* the failure —
+  because only the last 16 KB was ever fetched, and the panic was at
+  byte 460,000. The gate writes a ten-field receipt naming every check
+  and the runner reduced it to 101 characters before the packet saw
+  it, while the full log died with the Job's per-run disk. The converge
+  built with `docker build -q`, so four consecutive failures left the
+  Dockerfile context, one ERROR line, and nothing the compiler said;
+  establishing even the exit code meant reading an untruncated journal
+  line by hand, and ruling out a compile error and a full disk took two
+  separate investigations on two other machines.
+  **`-q`, a tail, and a digest suppress OUTPUT, not work.** None of them
+  saves time; they buy a quiet log. Capturing to a file and printing it
+  only on failure buys the same quiet and keeps the evidence, so prefer
+  that every time — and treat any code that reduces a record *before*
+  storing it as throwing away the only copy. The cost is never paid by
+  the person who writes the reduction; it is paid by whoever is next in
+  front of the failure, usually at speed, usually with something
+  stopped.
+
+- **Detection is not diagnosis, and they fail separately.** The same
+  incident had a working alarm: the 30-minute convergence arm fired on
+  time, named the train and the elapsed minutes, and was correct. It
+  carried no cause, though four failures had already been logged where
+  it could read them. An alarm that reports a symptom sends a human to
+  re-derive what the system already recorded. When you add an arm, ask
+  what it will carry, not only when it will fire.
+
 - **An infrastructure refusal is not a consist failure.** The gate's
   disk floor refuses *before any check runs* — a correct refusal that
   says nothing about the branch. Recorded as a plain CI failure it

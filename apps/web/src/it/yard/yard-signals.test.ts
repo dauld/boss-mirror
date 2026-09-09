@@ -158,6 +158,29 @@ describe("yardSignals — what fired what, in the packets' own stamps", () => {
     ]);
   });
 
+  // The runner now reports gate.sh's WHOLE receipt rather than a
+  // four-field digest of it, so what failed is read off `checks` — the
+  // array that also carries each check's duration. Old receipts, on
+  // every landed car, still carry the derived `fails` and must keep
+  // reading; the test above is that half.
+  test('a wide receipt names what failed from its `checks`', () => {
+    const wide = gateRun('g3', 'fix/z', 'failed', '2026-09-08T00:06:03Z');
+    const verdictStep = wide.steps?.[1];
+    if (verdictStep) {
+      (verdictStep.metadata as Record<string, unknown>).receipt = JSON.stringify({
+        verdict: 'failed', head: '1af0a1d2e0e8', mode: 'full', dirty: false,
+        checks: [
+          { name: 'fmt', result: 'pass', seconds: 3 },
+          { name: 'clippy', result: 'fail', seconds: 44 },
+          { name: 'test', result: 'fail', seconds: 812 },
+        ],
+      });
+    }
+    expect(yardSignals([], [wide], []).map(x => x.what)).toEqual([
+      'gate fix/z failed · clippy, test',
+    ]);
+  });
+
   test("a converge ops-request is the dispatcher's request and the ops-runner's answer", () => {
     const s = yardSignals([], [], [opsRequest('o1')]);
     expect(s.map(x => [x.at, x.who, x.sev, x.what])).toEqual([

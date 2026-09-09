@@ -53,6 +53,26 @@ ACTOR='{"id":"automation:gate-runner","role":"platform-admin","access_tier":"ope
 # exactly one file, so the code cannot live anywhere else.
 GATE_REPORT_BACKOFF="${GATE_REPORT_BACKOFF:-5 10 20 30 45 60 60 60}"
 
+# THE REPORT-BACK RECORDS ITS OWN STORY, on the receipt the packet keeps.
+#
+# Everything the loop below knows about the roll it rode out - how many
+# attempts, how many seconds, whether the system of record went dark at
+# all - it prints to the pod log, and the pod log is reaped with the Job.
+# The packet, which is the record, said only "green". During train #282's
+# converge two gates reported cleanly across a dark SoR and there is no
+# record anywhere that it happened.
+#
+# §Diagnosis: "an alarm that reports through its subject dies with it".
+# The runner cannot report an outage THROUGH the API that is out - but
+# it can carry its own account inside the payload it finally lands, so
+# the outage is visible afterwards instead of only while it is happening.
+# These three are set by `report` and read by `report_once` at the moment
+# of the write, because the story is only true as of the attempt making
+# it.
+REPORT_ATTEMPT=1
+REPORT_WAITED=0
+REPORT_UNREACHABLE=false
+
 # Did curl fail because nobody answered? (6 resolve, 7 refused, 28 timed
 # out, 35 TLS, 52 empty reply, 55 send, 56 recv.) Those are what a roll
 # looks like from a client.
@@ -98,16 +118,40 @@ if len(hits) != 1:
         % (len(hits), [s.get("spec_slug") for s in j["steps"]]))
     sys.exit(1)
 print(hits[0])') || return 1
-    python3 - "$1" "$2" <<'PY' > /tmp/verdict.json
+    # A PER-INVOCATION file, not a fixed /tmp path: the block is lifted
+    # verbatim by boss-testing's gate_runner_report_retry and run
+    # concurrently there, where a shared name is a race that empties one
+    # test's payload under another.
+    local payload
+    payload=$(mktemp) || return 1
+    python3 - "$1" "$2" "$REPORT_ATTEMPT" "$REPORT_WAITED" "$REPORT_UNREACHABLE" <<'PY' > "$payload"
 import json, sys
+verdict, receipt, attempt, waited, unreachable = sys.argv[1:6]
+# The receipt is a JSON STRING on the step (the encoding every reader
+# already parses). Annotate it as an object and re-serialize, so the
+# report-back's own story rides WITH the gate's findings rather than
+# beside them - one document, one parse, and a reader that only wants
+# the verdict is unaffected. A receipt that will not parse is passed
+# through untouched: an unreadable receipt is evidence too, and wrapping
+# it would destroy the only copy.
+try:
+    body = json.loads(receipt)
+    if not isinstance(body, dict):
+        raise ValueError("receipt is not an object")
+    body["report"] = {"attempts": int(attempt), "waited_s": int(waited),
+                      "sor_unreachable": unreachable == "true"}
+    receipt = json.dumps(body, separators=(",", ":"))
+except Exception:
+    pass
 print(json.dumps({"status": "completed",
-                  "metadata": {"verdict": sys.argv[1], "receipt": sys.argv[2]}}))
+                  "metadata": {"verdict": verdict, "receipt": receipt}}))
 PY
     rc=0
     out=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -X PUT \
         -H "x-boss-user: $ACTOR" -H "Content-Type: application/json" \
-        -d @/tmp/verdict.json \
+        -d @"$payload" \
         "$JOBS_API/api/jobs/$GATE_RUN_JOB_ID/steps/$step_id") || rc=$?
+    rm -f "$payload"
     if [ "$rc" -ne 0 ]; then
         echo "gate-runner: report: PUT verdict failed (curl exit $rc)"
         report_transient_curl "$rc" && return 75
@@ -122,8 +166,11 @@ PY
 
 report() { # verdict, note
     local attempt=0 rc delay t0=$SECONDS
+    REPORT_UNREACHABLE=false
     for delay in $GATE_REPORT_BACKOFF end; do
         attempt=$((attempt + 1))
+        REPORT_ATTEMPT=$attempt
+        REPORT_WAITED=$((SECONDS - t0))
         rc=0
         report_once "$1" "$2" || rc=$?
         if [ "$rc" -eq 0 ]; then
@@ -134,6 +181,11 @@ report() { # verdict, note
             echo "gate-runner: report attempt $attempt refused outright - not a roll, not retrying"
             return 1
         fi
+        # 75 is "nobody answered", which is the roll. Latch it: the
+        # attempt that eventually LANDS is the one carrying the story,
+        # and what it has to say is that the SoR was dark for a while -
+        # not that it was reachable at the moment of the write.
+        REPORT_UNREACHABLE=true
         if [ "$delay" = end ]; then
             echo "gate-runner: report attempt $attempt could not reach the system of record - out of retries after $((SECONDS - t0))s"
             return 1
@@ -321,18 +373,45 @@ else
 fi
 trap - ERR
 
+# --- receipt summary (begin) ---
+# THE PACKET KEEPS THE WHOLE RECEIPT.
+#
+# `infra/gate.sh` writes a rich account of the run — mode, scope, head,
+# dirty, host, ci, free_gb, unverifiable[], every check with its result
+# and its duration, and `refused_because` when it declined. Each of
+# those fields exists because some reader once had to go and re-derive
+# it, and its own comment says so.
+#
+# This block used to REDUCE that to {verdict, head, mode, fails} before
+# reporting, and the rest died on /gate-target with gate.log when the
+# Job was reaped. Measured on a live gate-run packet (86553d4f): the
+# receipt the packet kept was 101 characters. So `boss-jobs`' yard,
+# which reads `receipt.checks` to name a red gate's failing check, found
+# nothing to read; `dirty`, which train.rs refuses to board on, never
+# arrived; and "which check was slow" was unanswerable from the record.
+#
+# §Diagnosis: a verdict someone must go re-derive is not a verdict. The
+# whole receipt costs a few hundred bytes on the packet, which is the
+# cheapest evidence in this pipeline.
+#
+# COMPACT, one line: `gate-runner: receipt $SUMMARY` below is the third
+# copy of the verdict — the one `kubectl logs` serves when the PVC and
+# the packet do not (cf0021ae) — and a greppable line has to stay one
+# line. `fails` is NOT re-derived here: `checks` carries every name with
+# its result, and a derived duplicate inside the same document is a fact
+# living twice with nothing holding the two equal (CLAUDE.md §9a).
 SUMMARY=$(python3 - "$RECEIPT" "$HEAD_SHA" <<'PY'
 import json, sys
 try:
-    r = json.load(open(sys.argv[1]))
-    fails = [c["name"] for c in r["checks"] if c["result"] != "pass"]
-    print(json.dumps({"verdict": r["verdict"], "head": r["head"],
-                      "mode": r.get("mode"), "fails": fails}))
+    print(json.dumps(json.load(open(sys.argv[1])), separators=(",", ":")))
 except Exception as e:
+    # gate.sh died before writing a receipt, or wrote something
+    # unparseable. That is its own verdict, never a silent green.
     print(json.dumps({"verdict": "unreadable", "head": sys.argv[2],
-                      "error": str(e)}))
+                      "error": str(e)}, separators=(",", ":")))
 PY
 )
+# --- receipt summary (end) ---
 # THE VERDICT GOES IN THE LOG BEFORE IT GOES ANYWHERE ELSE.
 #
 # It used to live in exactly two places, and on 2026-08-25 both were

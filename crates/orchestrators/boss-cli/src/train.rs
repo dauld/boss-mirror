@@ -8537,6 +8537,63 @@ mod tests {
         assert_eq!(receipt_skip_reason(&obj, Some("abc12345")), None);
     }
 
+    /// BOTH RECEIPT SHAPES BOARD, because both are on real cars.
+    ///
+    /// Until 2026-09-09 the gate runner reduced `infra/gate.sh`'s account
+    /// of a run to `{verdict, head, mode, fails}` before reporting it, so
+    /// every receipt on a landed car has exactly those four keys and this
+    /// check's `dirty` clause never had a value to read. The runner now
+    /// reports the whole receipt — mode, scope, dirty, host, ci, free_gb,
+    /// unverifiable, every check with its duration, and the report-back's
+    /// own story. Widening a record two verbs already parse is where this
+    /// breaks, so the two shapes are pinned side by side: the extra keys
+    /// must be ignored, and the four-field receipts already on the dock
+    /// must keep boarding.
+    #[test]
+    fn a_wide_receipt_and_a_four_field_one_both_board() {
+        const HEAD: &str = "abcdef1234567890abcdef1234567890abcdef12";
+        let old = car_with_receipt(json!({
+            "verdict": "green", "head": HEAD, "mode": "full", "fails": [],
+        }));
+        assert_eq!(
+            receipt_skip_reason(&old, Some(HEAD)),
+            None,
+            "a receipt recorded before the runner stopped reducing must still board"
+        );
+        let wide = car_with_receipt(json!({
+            "verdict": "green", "mode": "full", "scope": "", "head": HEAD,
+            "dirty": false, "host": "gate-runner-abc", "ci": true, "free_gb": 91,
+            "unverifiable": [],
+            "report": {"attempts": 4, "waited_s": 63, "sor_unreachable": true},
+            "checks": [{"name": "fmt", "result": "pass", "seconds": 3},
+                       {"name": "test", "result": "pass", "seconds": 812}],
+        }));
+        assert_eq!(
+            receipt_skip_reason(&wide, Some(HEAD)),
+            None,
+            "the fields the whole receipt adds must be ignored, not refused"
+        );
+    }
+
+    /// ...and the clause the widening WAKES UP still refuses.
+    ///
+    /// `dirty` has been in gate.sh's receipt from the start and has never
+    /// once reached this function, because the runner dropped it. It
+    /// arrives now, so the refusal it was written for becomes live for
+    /// the first time on a real car — pinned here deliberately rather
+    /// than discovered on a train.
+    #[test]
+    fn a_wide_receipt_taken_on_a_dirty_tree_is_still_refused() {
+        const HEAD: &str = "abcdef1234567890abcdef1234567890abcdef12";
+        let dirty = car_with_receipt(json!({
+            "verdict": "green", "mode": "full", "head": HEAD, "dirty": true,
+            "checks": [{"name": "fmt", "result": "pass", "seconds": 3}],
+        }));
+        let reason = receipt_skip_reason(&dirty, Some(HEAD))
+            .expect("a receipt taken on a dirty tree must not board");
+        assert!(reason.contains("dirty tree"), "{reason}");
+    }
+
     // -- the conductor reads all its cars, not just page one -----------
 
     #[test]
