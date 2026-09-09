@@ -79,17 +79,54 @@ with_checkout_lock() {
 # REPO (cwd inside it, or the path on its command line). Reads /proc;
 # a `git` whose cwd AND command line are both unreadable counts as
 # holding it — the sweep must never guess in favour of deleting.
+# Is this /proc entry still a live process?
+#
+# Extracted so the rule can be TESTED. The race it settles cannot be
+# driven from fixtures — it needs a pid to disappear between one read
+# and the next inside a single loop iteration — so the decision itself
+# is what a test can hold onto, and a test that cannot reach the branch
+# it claims to cover is worse than none.
+pid_is_present() { [ -d "$1" ]; }
+
 git_holds_checkout() {
     local repo p comm cwd cmd
     repo=$(cd "$1" 2>/dev/null && pwd -P) || return 1
-    for p in /proc/[0-9]*; do
-        read -r comm < "$p/comm" 2>/dev/null || continue
+    # The process table's root, overridable ONLY so the race below can
+    # be tested with planted fixtures: a real /proc cannot be made to
+    # drop a pid at a chosen instant, and a rule this subtle should not
+    # rest on a comment.
+    for p in "${PROC_ROOT:-/proc}"/[0-9]*; do
+        # `2>/dev/null` BEFORE the input redirect, not after. Redirects
+        # are applied left to right, so with the old order a vanished
+        # pid printed `/proc/N/comm: No such file or directory` to the
+        # real stderr on every scan — noise that a caller could not
+        # silence and that made a clean sweep look like a fault.
+        { read -r comm < "$p/comm"; } 2>/dev/null || continue
         [ "$comm" = "git" ] || continue
         cwd=$(readlink "$p/cwd" 2>/dev/null) || cwd=""
         case "$cwd" in "$repo" | "$repo"/*) return 0 ;; esac
-        cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || cmd=""
+        cmd=$({ tr '\0' ' ' < "$p/cmdline"; } 2>/dev/null) || cmd=""
         case "$cmd" in *"$repo"*) return 0 ;; esac
-        [ -z "$cwd" ] && [ -z "$cmd" ] && return 0
+        # BOTH UNREADABLE MEANS ONE OF TWO THINGS, and only one of them
+        # is a reason to keep the lock. A LIVE git we cannot inspect is
+        # genuinely unknown, and the sweep must never guess in favour of
+        # deleting. A git that EXITED between the `comm` read above and
+        # these two reads holds nothing at all — it is not there any
+        # more. The two are told apart by asking whether the process
+        # still exists, which is what /proc/<pid> being gone means.
+        #
+        # Conflating them was a race, and it fired: on 2026-09-09 at
+        # 05:20 the CI box was busy enough that some git exited mid-scan
+        # and `a_stale_index_lock_is_removed_only_when_no_git_process_
+        # holds_the_checkout` failed, reporting a live holder for a lock
+        # 0 seconds old with nothing holding it. On the forge the same
+        # race leaves a genuinely stale index.lock in place — the exact
+        # condition this sweep exists to clear, and the one that cost
+        # two converge cycles on 2026-09-07.
+        if [ -z "$cwd" ] && [ -z "$cmd" ]; then
+            pid_is_present "$p" || continue   # it exited; holds nothing
+            return 0                          # there, and unreadable
+        fi
     done
     return 1
 }

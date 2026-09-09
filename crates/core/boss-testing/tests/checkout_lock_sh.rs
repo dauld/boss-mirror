@@ -565,3 +565,83 @@ fn the_runner_answers_its_request_through_the_exit_trap() {
         "the fetch went through the checkout lock"
     );
 }
+
+/// The rule that settles the mid-scan race, tested where it can be.
+///
+/// `git_holds_checkout` reads `comm` first, then `cwd` and `cmdline`.
+/// A process can vanish between those reads, and the old code counted
+/// "both unreadable" as a live holder on the reasoning that the sweep
+/// must never guess in favour of deleting. That is right for a LIVE
+/// git it cannot inspect and wrong for one that is simply gone, and
+/// the two are told apart by whether the /proc entry still exists.
+/// It fired on 2026-09-09 at 05:20: a busy CI box, some git exiting
+/// mid-scan, and a lock 0 seconds old reported as held by a live
+/// process. On the forge the same race leaves a genuinely stale
+/// index.lock in place, which is the condition the sweep exists for.
+///
+/// The race itself cannot be driven from fixtures — it needs a pid to
+/// disappear between two reads inside one loop iteration — so the
+/// DECISION is extracted as `pid_is_present` and pinned here. An
+/// earlier version of this test removed the whole fixture directory
+/// and asserted the outcome, which proved nothing: the glob then
+/// matches no entry and the old code answered the same way.
+#[test]
+fn a_vanished_proc_entry_is_not_a_live_process() {
+    let (_guard, dir) = scratch("pidpresent");
+    let live = dir.join("4242");
+    std::fs::create_dir_all(&live).unwrap();
+
+    let present = |path: &std::path::Path| -> bool {
+        Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                ". {lib}\npid_is_present {p}\n",
+                lib = repo_root().join("infra/forge/checkout-lock.sh").display(),
+                p = path.display()
+            ))
+            .output()
+            .expect("bash runs")
+            .status
+            .success()
+    };
+
+    assert!(present(&live), "an entry that exists is a live process");
+    std::fs::remove_dir_all(&live).unwrap();
+    assert!(
+        !present(&live),
+        "an entry that is gone is a process that exited, and it holds nothing"
+    );
+}
+
+/// A live git the sweep CANNOT inspect still holds the checkout —
+/// unknown must keep the lock, which is the half that must not change.
+#[test]
+fn a_live_but_unreadable_git_still_holds_the_checkout() {
+    let (_guard, dir) = scratch("unreadable");
+    let proc = dir.join("proc");
+    let repo = dir.join("work");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let pid = proc.join("4242");
+    std::fs::create_dir_all(&pid).unwrap();
+    std::fs::write(pid.join("comm"), "git\n").unwrap();
+
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            ". {lib}\nPROC_ROOT={proc} git_holds_checkout {repo}\n",
+            lib = repo_root().join("infra/forge/checkout-lock.sh").display(),
+            proc = proc.display(),
+            repo = repo.display()
+        ))
+        .output()
+        .expect("bash runs");
+    assert!(
+        out.status.success(),
+        "a git whose cwd and cmdline cannot be read, but which is THERE, keeps the lock"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).is_empty(),
+        "and the scan is silent: a vanished pid used to print No such file to the real stderr, because 2>/dev/null came after the input redirect: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

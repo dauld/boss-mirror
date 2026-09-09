@@ -29,3 +29,23 @@
 # over HTTP, the forge journal, the checkout) or recorded as
 # `--park-proof-event`.
 kubectl
+
+# boss — measured 2026-09-09 05:5x, from a live arrival probe on the
+# forge, recorded verbatim on the ops-request the arrival rule filed:
+#
+#   run-car-probe: 235157a5  $ boss rerail --help
+#   NOT PROVEN 235157a5 — the probe exited 127
+#   stderr: bash: line 1: boss: command not found
+#
+# The forge host runs the probe as david in the converged checkout; it
+# has git, grep and the rest of a working tree, and no BOSS binary.
+# A probe that wants a verb's own answer belongs on the pod, run by
+# `boss prove` by hand, or is rewritten against the checkout the forge
+# does have.
+#
+# NOT listed, deliberately: `boss-api`. It is almost certainly absent
+# too — it is a wrapper that ships to the Mac and the pod, not to the
+# forge — but nothing here has MEASURED it, and this file's own rule
+# is that a guess which refuses a builder's gate is worse than the
+# failure it prevents. Add it the first time a probe proves it.
+boss

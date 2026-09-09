@@ -2788,6 +2788,48 @@ mod tests {
         assert!(p.require_complete().is_ok(), "{:?}", p.require_complete());
     }
 
+    /// `boss` joined the absent list on 2026-09-09, and the risk it
+    /// brings is that the forge's checkout LIVES at /home/david/boss —
+    /// so nearly every honest probe names that path as an ARGUMENT.
+    /// Command position is what keeps those legal; if this ever
+    /// regresses, the refusal lands on almost every probe anyone
+    /// writes, which is far worse than the arrival failure it exists
+    /// to prevent.
+    #[test]
+    fn the_forge_checkout_path_is_an_argument_not_a_command() {
+        for probe in [
+            "grep -m1 -o \"one run in twenty-five\" /home/david/boss/crates/core/boss-jobs/tests/station_boot_log.rs",
+            "grep -c '^COPY infra/estate' /home/david/boss/infra/oss-quickstart/Dockerfile",
+            "test -f /home/david/boss/infra/forge/checkout-lock.sh && echo claim-ok",
+            "/home/david/boss/infra/lint/a-boot-check-cannot-fail-the-boot.sh",
+        ] {
+            assert_eq!(
+                probe_needs_absent_tool(probe),
+                None,
+                "the checkout path is not an invocation: {probe}"
+            );
+        }
+    }
+
+    /// And the invocation it was added for is still caught. Measured
+    /// on the forge the same day: `boss rerail --help` exited 127 with
+    /// `bash: line 1: boss: command not found`, on a car the arrival
+    /// rule had probed unattended.
+    #[test]
+    fn invoking_the_boss_binary_on_the_forge_is_refused() {
+        for probe in [
+            "boss rerail --help",
+            "cd /home/david/boss && boss receipt main",
+            "echo x $(boss orient)",
+        ] {
+            assert_eq!(
+                probe_needs_absent_tool(probe),
+                Some("boss"),
+                "the forge has no boss binary: {probe}"
+            );
+        }
+    }
+
     /// An absent tool is caught wherever it sits in the pipeline, and
     /// through a path or an `env` prefix — the ways the same mistake
     /// gets written.
