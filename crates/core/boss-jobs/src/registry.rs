@@ -366,10 +366,35 @@ fn workflow_design_spec() -> WorkflowSpec {
         StepSpec {
             title: "publish".into(),
             kind: "workflow-publish".into(),
-            ready_when: "steps.approve.done".into(),
+            // 8686485c, 2026-09-09: this read `steps.approve.done` and
+            // nothing else, so a REJECTED spec reached the publish step
+            // exactly as an approved one did. `approve` has declared a
+            // required `decision` enum since the note above; nothing
+            // read it. Rides through BOTH copies for the reason that
+            // note gives.
+            ready_when: "steps.approve.done AND steps.approve.metadata.decision = \"approved\""
+                .into(),
             title_template: "Publish to registry".into(),
             terminal: Some(Terminal {
                 outcome: "published".into(),
+            }),
+            ..Default::default()
+        },
+        StepSpec {
+            title: "not-published".into(),
+            kind: "outcome".into(),
+            // Where a rejection goes — until now, nowhere: four steps,
+            // one terminal. Stated as the NEGATIVE of `approved` so a
+            // value outside the enum, or an absent one, still reaches a
+            // terminal instead of wedging the packet open. Leads with
+            // `.done` so it is not ready on a freshly created Job.
+            // The bundle row carries the full reasoning.
+            ready_when:
+                "steps.approve.done AND NOT (steps.approve.metadata.decision = \"approved\")".into(),
+            title_template: "Closed without publishing".into(),
+            metadata_defaults: serde_json::json!({ "outcome_kind": "aborted" }),
+            terminal: Some(Terminal {
+                outcome: "not-published".into(),
             }),
             ..Default::default()
         },
@@ -6163,8 +6188,19 @@ mod tests {
         );
     }
 
+    /// WAS `..._in_four_steps`, and the count was the wrong pin.
+    ///
+    /// It held a real contract — the alternative, dropping the test with
+    /// the kind, is how a lifecycle quietly becomes whatever the TOML
+    /// says — but it stated that contract as a LENGTH, which is
+    /// satisfied by the wrong four steps and broken by a right fifth.
+    /// 8686485c added that fifth: a rejected spec reached `publish`
+    /// exactly as an approved one did, and had no terminal of its own.
+    /// So the assertions below name the lifecycle, the gate on the
+    /// decision, and the second terminal — the things that would
+    /// actually be wrong if this kind drifted.
     #[test]
-    fn platform_workflows_steps_run_design_to_publish_in_four_steps() {
+    fn platform_workflows_steps_run_design_to_publish_or_to_a_rejection() {
         // `workflow-design` is bundle-supplied now, so the lifecycle is
         // asserted where the lifecycle lives. The alternative — dropping
         // the test with the kind — is how a four-step contract quietly
@@ -6178,22 +6214,47 @@ mod tests {
         // v2: flat steps, DAG implicit in ready_when. The lifecycle is
         // author → validate → approve(sign-off) → publish(terminal).
         let steps = &design.steps;
-        assert_eq!(steps.len(), 4, "design lifecycle has 4 steps");
-        assert_eq!(steps[0].kind, "task"); // author
-        assert_eq!(steps[1].kind, "task"); // validate
-        assert_eq!(steps[2].kind, "sign-off"); // approve
+        let step = |slug: &str| {
+            steps
+                .iter()
+                .find(|s| s.title == slug)
+                .unwrap_or_else(|| panic!("workflow-design has a `{slug}` step"))
+        };
+        assert_eq!(step("author").kind, "task");
+        assert_eq!(step("validate").kind, "task");
+        assert_eq!(step("approve").kind, "sign-off");
         assert_eq!(
-            steps[2].sign_offs_required,
+            step("approve").sign_offs_required,
             vec!["workflow-approver".to_string()]
         );
         assert_eq!(
-            steps[2].authority_role.as_deref(),
+            step("approve").authority_role.as_deref(),
             Some("workflow-approver"),
             "approval is the operational-leader `workflow-approver` authority, \
              not platform-admin alone"
         );
-        assert_eq!(steps[3].kind, "workflow-publish"); // publish
-        assert!(steps[3].terminal.is_some(), "publish is the terminal step");
+        assert_eq!(step("publish").kind, "workflow-publish");
+        assert!(
+            step("publish").terminal.is_some(),
+            "publish is a terminal step"
+        );
+        // THE DECISION IS READ. A bare `steps.approve.done` here is the
+        // defect 8686485c measured: it published whatever the approver
+        // decided, rejections included.
+        assert!(
+            step("publish")
+                .ready_when
+                .contains("steps.approve.metadata.decision"),
+            "publish must read the approver's decision, not merely wait for the \
+             step: ready_when = `{}`",
+            step("publish").ready_when
+        );
+        // …AND A REJECTION HAS SOMEWHERE TO GO. Gating publish without
+        // this leaves a rejected packet open forever.
+        assert!(
+            step("not-published").terminal.is_some(),
+            "a decision that is not `approved` needs its own terminal"
+        );
 
         // design-doc-review is still code-supplied, so it is asserted
         // against the code — this test now reads both registries, which

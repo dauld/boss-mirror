@@ -253,12 +253,49 @@ fn bootstrap_kind(
     steps.sort_by_key(|s| s.get("sort_order").and_then(|v| v.as_i64()).unwrap_or(0));
 
     // 3. Walk each step to done.
+    //
+    // THE STATUS IS RE-READ, NOT TAKEN FROM THE LIST ABOVE, because
+    // this protocol now FORKS. `workflow-design` gained a
+    // `not-published` terminal (8686485c) which is Skipped the moment
+    // `approve` completes carrying `decision = "approved"` — the
+    // decision this walk itself writes. The step API refuses a write
+    // to a resolved step, and `walk_step` bails on any non-success, so
+    // a walk that assumed every step was completable would fail the
+    // bootstrap of EVERY tenant Workflow on the first boot after that
+    // version went live.
+    //
+    // The snapshot cannot answer this: at list time `not-published` is
+    // still Pending, and it becomes Skipped several requests later.
+    // Only a fresh read at the moment of the write is true.
+    //
+    // Written for the general case rather than for this one step: any
+    // future version of this kind that branches is safe here without a
+    // second visit. The two 2026-09-02 boot-bricks are the reason that
+    // matters — production boot must not be where a protocol change
+    // first meets this walker.
     for step in &steps {
         let step_id = step
             .get("id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("step missing id"))?;
         let step_kind = step.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        let current = current_step(client, api_base, headers, &job_id, step_id)?;
+        let status = current
+            .as_ref()
+            .and_then(|s| s.get("status"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if already_resolved(status) {
+            info!(
+                kind = %target.kind, step_id, step_kind, status,
+                "step already resolved by the fork; not walking it"
+            );
+            continue;
+        }
+        // The re-read is also the freshest view of the step's own
+        // fields and metadata, which is what the completion contract is
+        // validated against.
+        let step = current.as_ref().unwrap_or(step);
         walk_step(
             client, api_base, headers, &job_id, step_id, step_kind, step, target, dev,
         )
@@ -390,6 +427,60 @@ fn walk_completion_metadata(
     out
 }
 
+/// A step the walk must not write to, because something else already
+/// decided it. A fork skips the branch not taken, and the step API
+/// refuses a write to a resolved step — correctly, since a completed
+/// or skipped step is a fact, not a draft.
+///
+/// The vocabulary is the wire's, lowercase, as `StepStatus` serializes.
+/// Anything else — `pending`, `ready`, `active`, or a status this build
+/// does not know — is walkable: the walk's job is to drive the packet
+/// forward, and refusing an unfamiliar status would strand a bootstrap
+/// on a value someone added later.
+fn already_resolved(status: &str) -> bool {
+    matches!(status, "completed" | "skipped")
+}
+
+/// Re-read one step. `None` when it cannot be read, which the caller
+/// treats as "use the snapshot" rather than as a failure — the write
+/// that follows reports its own refusal loudly, so falling back here
+/// cannot hide anything, while bailing would brick a bootstrap on a
+/// single flaky GET.
+fn current_step(
+    client: &Client,
+    api_base: &str,
+    headers: &reqwest::header::HeaderMap,
+    job_id: &str,
+    step_id: &str,
+) -> Result<Option<Value>> {
+    let url = jobs_url(api_base, &format!("/api/jobs/{job_id}/steps"));
+    let resp = match client.get(&url).headers(headers.clone()).send() {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(%url, error = %e, "re-reading steps failed; falling back to the snapshot");
+            return Ok(None);
+        }
+    };
+    if !resp.status().is_success() {
+        warn!(
+            %url,
+            status = %resp.status(),
+            "re-reading steps failed; falling back to the snapshot"
+        );
+        return Ok(None);
+    }
+    let rows: Vec<Value> = match resp.json() {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(%url, error = %e, "step list did not parse; falling back to the snapshot");
+            return Ok(None);
+        }
+    };
+    Ok(rows
+        .into_iter()
+        .find(|s| s.get("id").and_then(Value::as_str) == Some(step_id)))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn walk_step(
     client: &Client,
@@ -480,7 +571,12 @@ fn walk_step(
             })
         }
         other => {
-            if !matches!(other, "task") {
+            // `outcome` joined `task` here when the kind gained its
+            // `not-published` terminal (8686485c). It is normally
+            // SKIPPED and never reaches this arm at all; it is named so
+            // the warning keeps meaning "a kind nobody expected here"
+            // rather than firing on a step the protocol declares.
+            if !matches!(other, "task" | "outcome") {
                 warn!(step_kind = %other, "unrecognized step kind on workflow-design; flipping to done");
             }
             let md = walk_completion_metadata(other, step, None);
@@ -632,6 +728,56 @@ mod walker_tests {
         });
         let md = walk_completion_metadata("sign-off", &step, None);
         assert_eq!(md.get("decision"), Some(&json!("changes-requested")));
+    }
+
+    /// The walk must not write to a step a FORK already resolved.
+    ///
+    /// `workflow-design` gained a `not-published` terminal (8686485c),
+    /// which is Skipped the moment `approve` completes carrying
+    /// `decision = "approved"` — the decision this very walk writes. The
+    /// step API refuses a write to a resolved step and `walk_step` bails
+    /// on any non-success, so without this guard the first boot after
+    /// that version went live would fail the bootstrap of every tenant
+    /// Workflow.
+    ///
+    /// Only `completed` and `skipped` are resolved. An unfamiliar
+    /// status is walkable on purpose: refusing one would strand a
+    /// bootstrap on a value added after this build shipped.
+    #[test]
+    fn only_a_resolved_step_is_skipped_by_the_walk() {
+        assert!(already_resolved("completed"));
+        assert!(already_resolved("skipped"));
+        for walkable in ["pending", "ready", "active", "", "some-future-status"] {
+            assert!(
+                !already_resolved(walkable),
+                "`{walkable}` must still be walked"
+            );
+        }
+    }
+
+    /// …and the kind actually declares a step that can be skipped, so
+    /// the guard above is load-bearing rather than decorative. If a
+    /// later version flattens the fork this reads as a prompt to check
+    /// whether the guard is still earning its place, not as a failure
+    /// to route around.
+    #[test]
+    fn workflow_design_has_a_branch_the_walk_can_meet_skipped() {
+        let specs = crate::seed_loader::load_workflows(crate::registry::platform_bundle_path())
+            .expect("platform bundle loads");
+        let design = specs
+            .iter()
+            .find(|s| s.kind == "workflow-design")
+            .expect("workflow-design present in the bundle");
+        let terminals: Vec<&str> = design
+            .steps
+            .iter()
+            .filter(|s| s.terminal.is_some())
+            .map(|s| s.title.as_str())
+            .collect();
+        assert!(
+            terminals.len() >= 2,
+            "a rejection needs somewhere to go: terminals are {terminals:?}"
+        );
     }
 
     /// A sign-off with no declared fields still carries the
