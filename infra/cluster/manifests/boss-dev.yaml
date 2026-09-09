@@ -336,10 +336,38 @@ spec:
                     # Best-effort like its siblings: a failed download
                     # leaves no claude, never a broken pod. Downloads once;
                     # the native binary self-updates thereafter.
-                    if [ ! -x /work/home/.local/bin/claude ]; then
-                      curl -fsSL https://claude.ai/install.sh | HOME=/work/home bash || true
-                    fi
+                    #
+                    # Best-effort ONCE was not best-effort: on this block's
+                    # first live run (the #266 converge, 2026-09-08 05:55
+                    # UTC) apt had resolved deb.debian.org seconds earlier
+                    # and the single curl still died on `Could not resolve
+                    # host: claude.ai` - a transient resolver miss - so the
+                    # pod came up 3/3 Ready with no claude and a human
+                    # installed it by hand, the exact start this block
+                    # exists to end (backlog 56ac2a36). Two changes: the
+                    # download lands in a FILE first (with `curl | bash` a
+                    # failed curl hands bash empty input, which exits 0 and
+                    # reads as success), and the whole install is retried
+                    # until the binary exists - ten attempts six seconds
+                    # apart, each failure named in this log. It runs after
+                    # dropbear so ssh never waits on the WAN.
                     dropbear -r /work/ssh/dropbear_ed25519_host_key -p 22 -s
+                    # The pod's fsGroup (1500) re-modes files on the PVC at
+                    # every mount, so the bastion key David authorised comes
+                    # back 0660 after each roll and ssh refuses it
+                    # ("UNPROTECTED PRIVATE KEY FILE", 2026-09-08). The boot
+                    # path owns the mode; a human chmod is the last time.
+                    chmod 600 /work/.ssh/* 2>/dev/null || true
+                    for i in 1 2 3 4 5 6 7 8 9 10; do
+                      [ -x /work/home/.local/bin/claude ] && break
+                      if curl -fsSL -o /tmp/claude-install.sh https://claude.ai/install.sh; then
+                        HOME=/work/home bash /tmp/claude-install.sh || echo "claude install: attempt $i: installer failed"
+                      else
+                        echo "claude install: attempt $i: download failed (curl exit $?)"
+                      fi
+                      [ -x /work/home/.local/bin/claude ] || sleep 6
+                    done
+                    [ -x /work/home/.local/bin/claude ] || echo "claude install: gave up after 10 attempts; install by hand: curl -fsSL https://claude.ai/install.sh | HOME=/work/home bash"
                     } > /work/ssh/postStart.log 2>&1 || true
           workingDir: /work
           env:
@@ -348,6 +376,16 @@ spec:
             # future default change cannot silently redirect the suite.
             - {name: BOSS_TEST_POSTGRES_ADMIN_URL, value: "postgres://boss:boss@127.0.0.1:5432/postgres"}
             - {name: CARGO_HOME, value: /work/.cargo}
+            # WHO THIS POD IS, converged rather than hand-placed. Since
+            # fix/the-cli-signs-as-its-caller landed, every CLI write is
+            # signed by the actor running it and an unnamed write is
+            # REFUSED rather than credited to the train automation. The
+            # pod answered that with a file written by hand into
+            # /work/home/.config/boss/actor, which is exactly the
+            # imperative state that silently reverts on a converge -
+            # so the identity belongs here, where the manifest is the
+            # definition.
+            - {name: BOSS_ACTOR, value: "claude@algedonic.dev"}
             # Build artefacts go to node-local disk, not to Longhorn.
             # A replicated network volume is the wrong medium for a
             # target dir that rewrites gigabytes on every build; losing
