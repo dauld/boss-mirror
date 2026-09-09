@@ -229,6 +229,10 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
         // `jobs.network.census` event per firing.
         .route("/api/network/census", post(record_network_census::<R, B>))
         .route("/api/stations/load", get(stations_load::<R, B>))
+        // The drain rate `load` says it is missing: arrivals and
+        // departures per station over a wall-clock window, counted
+        // from the log's own step transitions.
+        .route("/api/stations/flow", get(stations_flow::<R, B>))
         // Author-time dry run: lint a spec without persisting, so the
         // editor surfaces the same `station_lint::gate_active` the
         // publish path enforces.

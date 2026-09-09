@@ -1,0 +1,25 @@
+-- A wall-clock window over the log gets an index.
+--
+-- WHY. `audit_log` has indexes on `kind`, `source` and `timestamp` —
+-- and `timestamp` is the one column a rate must never be measured on.
+-- Event time is sim-authoritative on a demo deployment (the doctrine
+-- and the incident are in `boss-views/src/flow.rs`: the epoch runs 366
+-- sim-days in about nine real hours, so a ten-minute triage reads as a
+-- week). `created_at` is the plain write instant nothing overwrites,
+-- and it is therefore the only honest column for "how long did someone
+-- actually wait" — which is exactly why every windowed read reaches
+-- for it: `stage_durations`, `stage_runs`, the fleet's oldest-wait,
+-- and now the station drain rate behind `GET /api/stations/flow`.
+--
+-- Until this index, every one of those reads was a sequential scan of
+-- the whole log. It was already a gigabyte and a million rows when
+-- this was written, and the drain rate is read by an operator surface
+-- that refreshes, so the scan would have been paid over and over.
+--
+-- DESC to match how it is always used: a window is `created_at > $1`,
+-- anchored at the head and reading backwards.
+--
+-- The table is append-only and the column is monotonic with insert
+-- order, so this index is a physically ordered tail — cheap to
+-- maintain and cheap to build.
+CREATE INDEX IF NOT EXISTS audit_log_created_at ON audit_log (created_at DESC);

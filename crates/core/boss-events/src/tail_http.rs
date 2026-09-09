@@ -254,6 +254,74 @@ pub async fn recent_by_kind(
     .map_err(|e| e.to_string())
 }
 
+/// One `(job kind, step kind, spec slug, authority role)` cell of the
+/// station flow cube: how many obligations of that exact shape became
+/// READY and how many were COMPLETED inside a wall-clock window.
+///
+/// Why this read exists at all: `GET /api/stations/load` answers a
+/// station's depth, and its own header says depth is close to
+/// meaningless without a drain rate. The rate needs no new stamp —
+/// `step.ready.<kind>` and `step.done.<kind>` are already the two
+/// transitions a step-waiting station's membership turns on. This is
+/// the read that counts them; `boss-jobs`' `station_flow` module maps
+/// the cells onto stations using each station's own predicate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct StepFlowRow {
+    pub job_kind: String,
+    pub step_kind: String,
+    pub spec_slug: String,
+    pub authority_role: String,
+    pub arrived: i64,
+    pub served: i64,
+}
+
+/// The flow cube over `[since, now]` — wall clock, deliberately.
+///
+/// `created_at`, NEVER `timestamp`. Event time is sim-authoritative on
+/// a demo deployment, where the epoch runs 366 sim-days in about nine
+/// real hours; a ten-minute triage measured on it reads as a week.
+/// `boss-views/src/flow.rs` owns the doctrine and the incident behind
+/// it, and this obeys it. `created_at` is a plain write instant nothing
+/// overwrites, and the epoch trim DELETEs simulated rows rather than
+/// rewriting survivors, so a real packet's wall-clock history is intact
+/// across laps.
+///
+/// The join into `steps` / `jobs` is not decoration: the log's
+/// `step.ready` payload carries neither the Job's kind nor the step's
+/// `spec_slug`, so the two coordinates a station predicate needs most
+/// have to come from the projection. DISTINCT on the step id, because
+/// a step re-promoted to ready records a second event and is still one
+/// obligation.
+pub async fn step_flow_cube(
+    pool: &PgPool,
+    since: DateTime<Utc>,
+) -> Result<Vec<StepFlowRow>, String> {
+    sqlx::query_as::<_, StepFlowRow>(
+        "WITH win AS (
+             SELECT payload->>'step_id' AS sid,
+                    kind LIKE 'step.ready.%' AS is_arrival
+             FROM audit_log
+             WHERE created_at > $1
+               AND (kind LIKE 'step.ready.%' OR kind LIKE 'step.done.%')
+               AND payload->>'step_id' IS NOT NULL
+         )
+         SELECT j.kind AS job_kind,
+                s.kind AS step_kind,
+                COALESCE(NULLIF(s.spec_slug, ''), '') AS spec_slug,
+                COALESCE(s.metadata->>'authority_role', '') AS authority_role,
+                COUNT(DISTINCT win.sid) FILTER (WHERE win.is_arrival)::BIGINT AS arrived,
+                COUNT(DISTINCT win.sid) FILTER (WHERE NOT win.is_arrival)::BIGINT AS served
+         FROM win
+         JOIN steps s ON s.id::text = win.sid
+         JOIN jobs j ON j.id = s.job_id
+         GROUP BY 1, 2, 3, 4",
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// Everything the log holds about ONE job, oldest first — the
 /// per-packet audit read behind boss-jobs' `GET /api/jobs/{id}/events`
 /// (c17871fe). Lives here for the same reason [`recent_by_kind`] does:

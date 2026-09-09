@@ -17,6 +17,7 @@
       { label: 'Performance', path: '/it/operate/perf' },
       { label: 'Atlas', path: '/it/operate/atlas' },
       { label: 'Bottlenecks', path: '/it/operate/bottlenecks' },
+      { label: 'Marshalling Yard', path: '/it/operate/marshalling' },
     ],
     registry: [
       { label: 'Workflows', path: '/it/registry' },

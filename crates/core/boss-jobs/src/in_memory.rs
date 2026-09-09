@@ -2,7 +2,7 @@
 //!
 //! Used by tests and by dev/demo environments that don't need persistence.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -321,6 +321,75 @@ impl JobsRepository for InMemoryJobs {
             })
             .collect();
         Ok(rows)
+    }
+
+    async fn step_flow_cube(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<crate::station_flow::FlowCell>, JobsError> {
+        // The Pg adapter reads `audit_log.created_at`; here the write
+        // instant IS the recorded event's `timestamp`, because nothing
+        // in-memory ever stamps an event with a simulated clock. Same
+        // contract either way: the window is when the transition was
+        // WRITTEN, and it filters before anything is counted.
+        //
+        // DISTINCT on the step id, matching the SQL: a step re-promoted
+        // to ready records a second event and is still one obligation.
+        let state = self.inner.lock().expect("poisoned");
+        let mut cube: HashMap<
+            (String, String, String, String),
+            (BTreeSet<String>, BTreeSet<String>),
+        > = HashMap::new();
+        for event in self.recorded_events() {
+            if event.timestamp <= since {
+                continue;
+            }
+            let arrival = match event.kind.split_once('.') {
+                Some(("step", rest)) if rest.starts_with("ready.") => true,
+                Some(("step", rest)) if rest.starts_with("done.") => false,
+                _ => continue,
+            };
+            let Some(step_id) = event.payload.get("step_id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(step) = state.steps.get(step_id) else {
+                continue;
+            };
+            let Some(job) = state.jobs.get(&step.job_id.to_string()) else {
+                continue;
+            };
+            let key = (
+                job.kind.clone(),
+                step.kind.clone(),
+                step.spec_slug.clone().unwrap_or_default(),
+                step.metadata
+                    .get("authority_role")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            );
+            let entry = cube.entry(key).or_default();
+            if arrival {
+                entry.0.insert(step_id.to_string());
+            } else {
+                entry.1.insert(step_id.to_string());
+            }
+        }
+        Ok(cube
+            .into_iter()
+            .map(
+                |((job_kind, step_kind, spec_slug, authority_role), (arrived, served))| {
+                    crate::station_flow::FlowCell {
+                        job_kind,
+                        step_kind,
+                        spec_slug,
+                        authority_role,
+                        arrived: arrived.len() as i64,
+                        served: served.len() as i64,
+                    }
+                },
+            )
+            .collect())
     }
 
     async fn events_for_job(

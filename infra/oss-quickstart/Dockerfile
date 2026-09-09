@@ -82,7 +82,33 @@ RUN cargo chef cook --release --workspace --features postgres --recipe-path reci
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY examples ./examples
+# EVERY PATH THE CRATES READ AT BUILD TIME MUST BE HERE — through a
+# build.rs, which RUNS in this stage, or an `include_str!`, which is
+# read by rustc while compiling in it. This stage is a SUBSET of the
+# repo, so a crate reaching outside `crates/` compiles on any full
+# checkout and fails here, where nobody is looking. Both bit us on
+# 2026-09-09, in consecutive trains:
+# boss-dispatcher-handlers/build.rs derives the observer's spool
+# directory and cap from infra/estate/observe-lib.sh so the shell and
+# the Rust side cannot drift (CLAUDE.md §9a, a collapse rather than a
+# pin). It landed green through a gate that builds from a full
+# checkout, and then every converge from 04:30 failed on the build
+# script's own `must exist relative to the crate root` panic. Before
+# it, train 283 added infra/forge/host-absent-tools.txt, which
+# boss-cli's gate.rs `include_str!`s in PRODUCTION code, and its
+# converge failed four times from 03:46. Both were invisible, because
+# the build was quiet.
+# infra/lint/the-image-carries-what-build-scripts-read.sh now derives
+# this list from the build scripts themselves and fails when they
+# disagree.
 COPY infra/postgres ./infra/postgres
+# Named FILES, not their directories, on purpose: infra/forge changes
+# several times a day and a directory COPY would invalidate the whole
+# Rust build layer every time a shell script moved.
+COPY infra/estate/observe-lib.sh ./infra/estate/observe-lib.sh
+COPY infra/forge/host-absent-tools.txt ./infra/forge/host-absent-tools.txt
+COPY infra/deploy-services.sh ./infra/deploy-services.sh
+COPY infra/forge/run-car-probe.sh ./infra/forge/run-car-probe.sh
 
 # The commit this image is built from, exported to the cargo build so
 # `Capabilities` self-reports it from every service's health endpoint

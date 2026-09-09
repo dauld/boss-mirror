@@ -267,6 +267,127 @@ pub(super) async fn stations_load<R: JobsRepository + 'static, B: EventBus + 'st
     Json(serde_json::json!({ "data": rows, "total": total })).into_response()
 }
 
+/// The window `GET /api/stations/flow` counts over when the caller
+/// names none. A day is the shortest window in which every queue on
+/// this network has had a chance to be worked at least once, so a
+/// shorter default would report "not draining" about queues that were
+/// merely quiet overnight.
+const DEFAULT_FLOW_WINDOW_HOURS: i64 = 24;
+/// Thirty days. The window is a filter over the log, not a page, so
+/// the cost of a wide one is a wider scan; this caps it.
+const MAX_FLOW_WINDOW_HOURS: i64 = 720;
+
+#[derive(Debug, Deserialize, Default)]
+pub(super) struct FlowQuery {
+    window_hours: Option<i64>,
+}
+
+/// `GET /api/stations/flow` — the drain rate, per station.
+///
+/// WHY IT EXISTS. [`stations_load`] answers depth and the age of the
+/// oldest packet, and says in its own header that depth is close to
+/// meaningless without a drain rate. Depth tells an operator what is
+/// waiting; it does not tell them whether a queue is FORMING, which is
+/// a rate question — is it growing faster than it drains. That is the
+/// question this answers, and it needs no new stamp anywhere: the two
+/// transitions a step-waiting station's membership turns on are
+/// already in the log as `step.ready.<kind>` and `step.done.<kind>`.
+///
+/// THE WINDOW IS WALL CLOCK. Not the sim clock, and not event time:
+/// `boss-views/src/flow.rs` states the doctrine and the incident, and
+/// the port method says the same. A rate on sim time would be a rate
+/// about a brewery, not about a queue.
+///
+/// A STATION WHOSE FLOW CANNOT BE COUNTED SAYS SO. `arrived`, `served`
+/// and `net` come back `null` with a `basis` of `"unavailable"` and a
+/// sentence naming the clause that blinded it — never a zero, which
+/// on this surface reads as "nothing is waiting". See
+/// [`crate::station_flow`] for which predicates are countable and why.
+///
+/// The predicate is evaluated UNBOUND, so a per-actor station reports
+/// blind rather than one person's flow dressed as the network's.
+pub(super) async fn stations_flow<R: JobsRepository + 'static, B: EventBus + 'static>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+    CurrentUser(user): CurrentUser,
+    axum::extract::Query(q): axum::extract::Query<FlowQuery>,
+) -> Response {
+    let reg = match stations_or_503(&state) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    // Same read gate as every other station surface: an unreadable
+    // caller gets an empty collection, not a 403.
+    let predicate = match state.policy.scope_predicate(&user, Resource::job()).await {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("policy check failed: {e}"),
+            )
+                .into_response();
+        }
+    };
+    if matches!(predicate, boss_policy_client::Predicate::None) {
+        return Json(serde_json::json!({ "data": [], "total": 0 })).into_response();
+    }
+    let stations = match effective_stations(&state, reg).await {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+
+    let window_hours = q
+        .window_hours
+        .unwrap_or(DEFAULT_FLOW_WINDOW_HOURS)
+        .clamp(1, MAX_FLOW_WINDOW_HOURS);
+    // `wall_now()`, not `state.clock` — the sanctioned wall reading,
+    // and the only correct one here. The clock port answers the
+    // BUSINESS question ("what day is it in this company's timeline"),
+    // which on a demo deployment is the simulator's; a rate measured on
+    // it would be a rate about a brewery, not about a queue. The window
+    // has to be the same instant the log's `created_at` is written on.
+    let as_of = boss_clock_client::wall_now();
+    let since = as_of - chrono::Duration::hours(window_hours);
+    let cells = match state.jobs.step_flow_cube(since).await {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    let rows: Vec<serde_json::Value> = stations
+        .iter()
+        .map(
+            |spec| match crate::station_flow::station_flow(&spec.predicate, &cells) {
+                Ok(flow) => serde_json::json!({
+                    "station": spec.name,
+                    "kind": spec.kind,
+                    "basis": "step-events",
+                    "arrived": flow.arrived,
+                    "served": flow.served,
+                    "net": flow.net(),
+                    "unavailable_reason": serde_json::Value::Null,
+                }),
+                Err(blind) => serde_json::json!({
+                    "station": spec.name,
+                    "kind": spec.kind,
+                    "basis": "unavailable",
+                    "arrived": serde_json::Value::Null,
+                    "served": serde_json::Value::Null,
+                    "net": serde_json::Value::Null,
+                    "unavailable_reason": blind.reason(),
+                }),
+            },
+        )
+        .collect();
+    let total = rows.len();
+    Json(serde_json::json!({
+        "data": rows,
+        "total": total,
+        "window_hours": window_hours,
+        "since": since,
+        "as_of": as_of,
+    }))
+    .into_response()
+}
+
 /// `GET /api/stations/{name}/queue` — the station's evaluated,
 /// ordered queue: derived membership (the predicate, bound to the
 /// caller, over their policy-scoped packets), data-declared

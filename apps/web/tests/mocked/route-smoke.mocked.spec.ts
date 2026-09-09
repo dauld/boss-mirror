@@ -54,6 +54,13 @@ const ROUTES: ReadonlyArray<string> = [
   // Yard status renders the empty yard under the mock's `[]` catch-all
   // for /api/yard/status — chrome + "no trains / no cars", no crash.
   '/it/operate/yard-status',
+  // The Marshalling Yard — the upstream third. Under the mock's `[]`
+  // catch-all, /api/stations/load and /api/stations/flow come back as
+  // collections with no rows, so the page renders its "every watched
+  // station is clear" state. Crawled here rather than via a catalog
+  // entry because it is a tab, not a sidebar row (same as yard-status
+  // above): pages live in their department.
+  '/it/operate/marshalling',
   // The risk watchlist. Since CAR-6 it HAS a catalog entry, so the
   // drift test at the bottom of this file now enforces its presence
   // here instead of this line being the whole of its coverage.

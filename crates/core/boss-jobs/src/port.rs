@@ -571,6 +571,28 @@ pub trait JobsRepository: Send + Sync {
         limit: i64,
     ) -> Result<Vec<serde_json::Value>, JobsError>;
 
+    /// The station flow cube over `[since, now]` — how many
+    /// obligations of each `(job kind, step kind, spec slug, authority
+    /// role)` shape became ready, and how many were completed, inside
+    /// a WALL-CLOCK window.
+    ///
+    /// `since` is wall clock, deliberately NOT the sim clock: the
+    /// question is how long real people and agents actually waited,
+    /// and event time is sim-authoritative on a demo deployment
+    /// (`boss-views/src/flow.rs` owns that doctrine).
+    ///
+    /// Deliberately NO default impl, for the same reason
+    /// [`Self::queue_age`] has none: the window is a storage-level
+    /// instant (`audit_log.created_at`, the in-memory adapter's
+    /// recorded write instants) that `list_jobs` + `list_steps` cannot
+    /// see, so a default would have to invent one. An adapter with no
+    /// log answers with no cells, and the surface says "flow not
+    /// countable" rather than printing a zero rate.
+    async fn step_flow_cube(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<crate::station_flow::FlowCell>, JobsError>;
+
     /// Everything the log holds about ONE job, oldest first: every
     /// recorded event whose payload names the job (step events under
     /// `job_id`, the job's own lifecycle events under `id`). The

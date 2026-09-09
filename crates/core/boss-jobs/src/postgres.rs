@@ -608,6 +608,30 @@ impl JobsRepository for PgJobs {
             .collect()
     }
 
+    async fn step_flow_cube(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<crate::station_flow::FlowCell>, JobsError> {
+        // Same ownership rule as `recent_events_by_kind`: the SQL
+        // against `audit_log` lives in boss-events. What comes back is
+        // the log's own row shape; the mapping into the station-facing
+        // cell happens here, at the adapter boundary.
+        let rows = boss_events::tail_http::step_flow_cube(&self.pool, since)
+            .await
+            .map_err(JobsError::Storage)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::station_flow::FlowCell {
+                job_kind: r.job_kind,
+                step_kind: r.step_kind,
+                spec_slug: r.spec_slug,
+                authority_role: r.authority_role,
+                arrived: r.arrived,
+                served: r.served,
+            })
+            .collect())
+    }
+
     async fn events_for_job(
         &self,
         job_id: &JobId,

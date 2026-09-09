@@ -64,6 +64,7 @@ describe('parseRoute — every specific path matches its specific case', () => {
     ['/it/operate/audit', { kind: 'systemMonitoringEvents' }],
     ['/it/operate/atlas', { kind: 'systemMonitoringAtlas' }],
     ['/it/operate/bottlenecks', { kind: 'systemFleet' }],
+    ['/it/operate/marshalling', { kind: 'systemMarshallingYard' }],
     ['/it/operate/conductor', { kind: 'systemMonitoringConductor' }],
     ['/it/kb', { kind: 'systemKb' }],
     ['/it/registry/subjects', { kind: 'systemSubjects' }],

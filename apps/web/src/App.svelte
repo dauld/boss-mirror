@@ -62,6 +62,7 @@
   import YardStatusPage from './it/yard/YardStatusPage.svelte';
   import EstatePage from './it/estate/EstatePage.svelte';
   import FleetPage from './it/monitoring/FleetPage.svelte';
+  import MarshallingYardPage from './it/marshalling/MarshallingYardPage.svelte';
   import ItTabs from './it/ItTabs.svelte';
   import DesignReviewPage from './it/design/DesignReviewPage.svelte';
   import ExperimentsPage from './it/experiments/ExperimentsPage.svelte';
@@ -341,6 +342,9 @@
     {:else if route.kind === 'systemFleet'}
       <ItTabs group="operate" active="/it/operate/bottlenecks" />
       <FleetPage />
+    {:else if route.kind === 'systemMarshallingYard'}
+      <ItTabs group="operate" active="/it/operate/marshalling" />
+      <MarshallingYardPage />
     {:else if route.kind === 'systemYardStatus'}
       <ItTabs group="operate" active="/it/operate/yard-status" />
       <YardStatusPage />

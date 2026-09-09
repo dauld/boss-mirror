@@ -102,6 +102,7 @@ export type Route =
   /// Fleet lives on as Operate's Bottlenecks tab (1f6d55e0 Q3: the
   /// per-kind dashboard is unique, not a duplicate rendering).
   | { kind: 'systemFleet' }
+  | { kind: 'systemMarshallingYard' }
   /// The hardware registry, declared beside observed (59ef456a).
   | { kind: 'systemEstate' }
   /// The IT incidents surface — active incident-post-mortem packets +
@@ -155,6 +156,7 @@ export function parseRoute(pathname: string): Route {
     if (p === '/operate/perf') return { kind: 'systemMonitoringPerf' };
     if (p === '/operate/atlas') return { kind: 'systemMonitoringAtlas' };
     if (p === '/operate/bottlenecks') return { kind: 'systemFleet' };
+    if (p === '/operate/marshalling') return { kind: 'systemMarshallingYard' };
     if (p === '/operate/yard-status') return { kind: 'systemYardStatus' };
     if (p === '/operate/conductor') return { kind: 'systemMonitoringConductor' };
     // 3. Registry — one surface over the registry family.
