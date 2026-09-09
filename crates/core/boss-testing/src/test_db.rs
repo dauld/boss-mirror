@@ -751,6 +751,7 @@ async fn drop_database(admin_url: &str, db_name: &str) {
 
 #[cfg(test)]
 mod generated_schema_list {
+    include!("../schema_order.rs");
     use super::SCHEMA_FILES;
 
     /// The generated list must name the manifest's files, in order.
@@ -784,15 +785,9 @@ mod generated_schema_list {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.ends_with(".sql"))
             .collect();
-        // Same key as build.rs and migrate.sh's `sort -t- -k1,1n`.
-        expected.sort_by_key(|n| {
-            let num: u32 = n
-                .split('-')
-                .next()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(u32::MAX);
-            (num, n.clone())
-        });
+        // The SAME key build.rs uses, from the same file, so this test
+        // cannot pass while the two disagree — which is what it is for.
+        expected.sort_by_key(|n| schema_sort_key(n));
         let expected: Vec<String> = expected
             .iter()
             .map(|n| n.trim_end_matches(".sql").to_string())
@@ -806,6 +801,33 @@ mod generated_schema_list {
         assert_eq!(
             actual, expected,
             "generated SCHEMA_FILES is stale against infra/postgres/schema/*.sql"
+        );
+    }
+
+    /// The shape that redded train a20dd59f on 2026-09-09: a
+    /// fourteen-digit prefix beside a twelve-digit one. Numeric order
+    /// and string order disagree here, so a reader that overflows its
+    /// integer and falls back to the string sorts them the other way
+    /// round. Two files, one assertion, and the class cannot come back
+    /// silently.
+    #[test]
+    fn a_wider_prefix_still_sorts_by_its_number() {
+        let mut names = vec![
+            "202609090025-a-flush-job-records-who-worked-it.sql".to_string(),
+            "20260908234904-migration-prefixes-carry-seconds.sql".to_string(),
+            "03-jobs.sql".to_string(),
+            "reference-data.sql".to_string(),
+        ];
+        names.sort_by_key(|n| schema_sort_key(n));
+        assert_eq!(
+            names,
+            vec![
+                "03-jobs.sql".to_string(),
+                "202609090025-a-flush-job-records-who-worked-it.sql".to_string(),
+                "20260908234904-migration-prefixes-carry-seconds.sql".to_string(),
+                "reference-data.sql".to_string(),
+            ],
+            "the numeric prefix decides, a wider one sorts later, and a file with no prefix sorts last"
         );
     }
 }

@@ -166,7 +166,7 @@ services:
       # rules runner never starts → Jobs get assigned + worked but never reach
       # a terminal state (they pile up `open` unbounded). Shipped into the
       # image via `COPY infra/dispatcher` in the Dockerfile.
-      BOSS_DISPATCHER_RULES: /opt/boss/infra/dispatcher/rules.toml
+      BOSS_DISPATCHER_RULES: /opt/boss/infra/dispatcher/rules
       # Bind on 0.0.0.0 so the docker port-forward (4443:4443)
       # actually reaches the gateway. The default in
       # boss-gateway/main.rs is 127.0.0.1, which is right for

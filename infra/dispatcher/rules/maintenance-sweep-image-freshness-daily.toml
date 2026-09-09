@@ -1,0 +1,29 @@
+# 2. IMAGE FRESHNESS. The CI runner's rootful docker held a 31-hour-old
+# boss-ci image while the registry served a newer one. build.sh's header
+# already warns that a registry retag does not refresh a runner's local
+# tag — the warning existed and the drift happened anyway, which is the
+# signal that a comment is not a mechanism (CLAUDE.md 9a). Cost a
+# 25-minute mystery once, and fails in the worst direction: CI goes
+# green or red against an image nobody is looking at.
+[[rule]]
+name = "maintenance-sweep-image-freshness-daily"
+why = """
+A TIMER, the standing exemption: no packet causes "a day passed", so no
+Workflow definition can declare it — a sweep's whole point is to run
+when NO event fired. It adds no routing: one firing spawns one
+maintenance-sweep packet, and what happens next is that protocol's own
+row. A registry retag does not refresh a runner's local tag;
+build.sh's header already warned so and the drift happened anyway,
+which is the signal that a comment is not a mechanism (CLAUDE.md
+§9a). Fails in the worst direction: CI goes green or red against an
+image nobody is looking at. (Ratchet history: 42 -> 45, 2026-08-14.)
+"""
+version = 2
+schedule = { cadence = "daily", anchor_date = "2026-08-14" }
+# One outstanding packet per target (0517387b): yesterday's sweep
+# still open means today has nothing new to say - spawning a twin
+# duplicates the obligation, it does not discharge it.
+when = 'NOT open_job_exists("maintenance-sweep", "image-freshness")'
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"image-freshness\"", title = "\"CI image freshness sweep\"", "metadata.target" = "\"image-freshness\"", "metadata.area" = "\"ci\"" }

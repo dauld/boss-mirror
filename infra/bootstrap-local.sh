@@ -248,7 +248,7 @@ if [[ "$START" -eq 1 ]]; then
     # without it the rules runner never starts and zero side effects fire.
     # Downstream API URLs default to 127.0.0.1:<port> via boss-ports, which
     # is correct for this single-box layout.
-    DISPATCHER_ENV="$SVC_ENV BOSS_DISPATCHER_RULES=$REPO_ROOT/infra/dispatcher/rules.toml"
+    DISPATCHER_ENV="$SVC_ENV BOSS_DISPATCHER_RULES=$REPO_ROOT/infra/dispatcher/rules"
     # Step-assignment distribution strategy named as data (default spread:
     # hash-spread each ready step across its role's active holders). Unknown
     # value → dispatcher warns + falls back to spread.

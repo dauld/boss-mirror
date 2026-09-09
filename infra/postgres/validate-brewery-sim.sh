@@ -429,7 +429,7 @@ fi
 #
 # v1.0.10 F15: boss-step-effects-runner retired. Step-completion
 # side effects route through the dispatcher's rule registry now
-# (infra/dispatcher/rules.toml). The brewery-engine runs WITHOUT
+# (infra/dispatcher/rules/). The brewery-engine runs WITHOUT
 # --local-side-effects so the in-process bridges stay silent —
 # every domain-write side effect flows engine → jobs-api PUT
 # step → jobs-api `step.done.<kind>` NATS event → dispatcher

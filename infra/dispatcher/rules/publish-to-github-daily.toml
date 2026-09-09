@@ -1,0 +1,42 @@
+# ---------------------------------------------------------------------
+# Publish to the public GitHub mirror, on the clock.
+#
+# The mirror is fed by PULL REQUEST, never by pushing main (the mirror
+# protocol's own rule), so the daily packet is what carries a batch of
+# forge commits over and puts David's sign-off in front of the push.
+#
+# Seeded by 129-publish-to-github-rule.sql. It is here because
+# `dispatcher_rules_seed_matches_toml` compares the seeded registry
+# against this file in BOTH directions: a migration that seeds a rule
+# without adding it here fails the same way an unseeded rule does, and
+# that is exactly how it reddened the 13-car train 20260815-0621. The
+# table is the runtime registry; this file is the human-authored source;
+# neither is allowed to be the only one that knows.
+[[rule]]
+name = "publish-to-github-daily"
+why = """
+A TIMER, the standing exemption: no packet causes "publish a batch to
+the public mirror once a day", so no Workflow definition can declare
+it. The mirror is fed by PULL REQUEST, never by pushing main, so the
+daily packet is what carries a batch of forge commits over and puts
+David's sign-off in front of the push. v2's guard keys on the
+packet's declared subject: one mirror, one open publish packet
+(9f0c566a, two identical open packets one day apart).
+(Ratchet history: 46 -> 47, 2026-08-15, migration 129. The rule was
+already seeded and running; the count rose because the authored
+registry caught up with the table, which is what
+`dispatcher_rules_seed_matches_toml` compares in BOTH directions.)
+"""
+# Bumped by migration 149: v1 minted a packet every day regardless of
+# whether yesterday's still sat at its approval sign-off — measured
+# 2026-08-18, two identical open packets one day apart (9f0c566a).
+# One mirror, one open publish packet: the guard keys on the packet's
+# declared subject. Schedule rules evaluate `when` with the same
+# helper resolver as event rules since the same migration's car; a
+# guard that cannot evaluate skips ONLY that rule for the day, loudly.
+version = 2
+when = 'NOT open_publish_exists("github-mirror")'
+schedule = { cadence = "daily", anchor_date = "2026-08-15" }
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"publish-to-github\"", subject_kind = "\"custom\"", subject = "\"github-mirror\"", title = "\"Publish to the public GitHub mirror\"", "metadata.target" = "\"origin/main\"", "metadata.area" = "\"platform\"" }

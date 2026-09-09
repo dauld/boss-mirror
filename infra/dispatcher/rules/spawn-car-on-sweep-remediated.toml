@@ -1,0 +1,31 @@
+# 2. WHAT A SWEEP PRODUCES. A sweep that concluded it needed work spawns
+# a ship-a-change car carrying a `backlog_item` edge back to the sweep,
+# so the car closes its own sweep on merge through the existing
+# feedback-obligation machinery. That is what makes the dock
+# self-filling rather than hand-loaded.
+#
+# Fires on the sweep's TERMINAL OUTCOME, not on the `remediate` step
+# completing: the step-done topic is `step.done.<step kind>` and
+# `remediate` is a plain `task`, so subscribing there would wake this on
+# every task step in every workflow and lean on a `when` to discard
+# almost all of them. The outcome is the more honest trigger anyway.
+[[rule]]
+name = "spawn-car-on-sweep-remediated"
+why = """
+A CROSS-PROTOCOL REACTOR: a `maintenance-sweep` closing `remediated`
+admits a `ship-a-change` car carrying a `backlog_item` edge back to
+the sweep, so the car closes its own sweep on merge through the
+existing feedback-obligation machinery. Two protocols, so no single
+Workflow definition can declare it — and it is what makes the dock
+self-filling rather than hand-loaded. Fires on the TERMINAL OUTCOME
+rather than the remediate step, whose kind is a plain `task`.
+"""
+# Bumped by migration 148, which retired v1 (the unguarded spawn) and
+# inserted this row as v2. Absent, version defaults to 1 and the
+# seed-matches-toml pin reads the two as drifted.
+version = 2
+on_event = "jobs.job.closed"
+when = "kind = \"maintenance-sweep\" AND outcome = \"remediated\" AND NOT open_car_exists(subject_id)"
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"ship-a-change\"", subject_kind = "\"custom\"", subject = "id", title = "title", "metadata.backlog_item" = "id", "metadata.sweep_target" = "subject_id" }

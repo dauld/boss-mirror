@@ -34,7 +34,20 @@
   const STAGE_X: readonly number[] = [620, 700, 780, 860, 940, 1020];
   const bayY = (i: number): number => 70 + i * BAY_H;
   const nBays = $derived(scene.bays.length);
-  const mainY = $derived(Math.max(250, 70 + nBays * BAY_H + 24));
+  // The QUEUE LANE — a holding siding between the mainline and the gate
+  // branch, drawn only when something waits. Runs stand in it in their
+  // place in line, four to a row, and the mainline drops to make room:
+  // the yard grows a lane rather than hiding one.
+  const QUEUE_PER_ROW = 4;
+  const QUEUE_ROW_H = 34;
+  const queued = $derived(scene.wagons.filter(w => w.station === 'gate-queue'));
+  const queueRows = $derived(Math.ceil(queued.length / QUEUE_PER_ROW));
+  const queueRowIndexes = $derived(Array.from({ length: queueRows }, (_, i) => i));
+  const queueTop = $derived(70 + nBays * BAY_H + 8);
+  const queueY = (row: number): number => queueTop + row * QUEUE_ROW_H;
+  const mainY = $derived(
+    Math.max(250, 70 + nBays * BAY_H + 24 + (queueRows > 0 ? queueRows * QUEUE_ROW_H + 12 : 0)),
+  );
   // The arrivals stack starts under its sign and grows the map downward
   // — to the newest ARRIVALS_DRAWN landed wagons; the rest are one plate.
   const ARRIVALS_Y = 66;
@@ -66,6 +79,11 @@
     switch (w.station) {
       case 'approach':
         return [34 + w.slot * WAGON_STEP, mainY - 2];
+      case 'gate-queue':
+        return [
+          30 + (w.slot % QUEUE_PER_ROW) * WAGON_STEP,
+          queueY(Math.floor(w.slot / QUEUE_PER_ROW)),
+        ];
       case 'gate':
         return [240, bayY(w.slot) + 16];
       case 'limbo':
@@ -130,6 +148,16 @@
     {/each}
     <path d="M400 {mainY} C 420 {mainY}, 410 {mainY + 70}, 430 {mainY + 70} L 590 {mainY + 70}" class="rail" />
     <path d="M1060 {mainY} C 1075 {mainY}, 1070 {mainY + 50}, 1085 {mainY + 50} L {VIEW_W - 15} {mainY + 50}" class="rail" />
+    <!-- the queue lane's rails, and the connector taking it into the
+         gate branch: a queued run is next through those sheds -->
+    {#each queueRowIndexes as r (r)}
+      <line x1="24" y1={queueY(r) + 6} x2="200" y2={queueY(r) + 6} class="rail" />
+    {/each}
+    {#if queueRows > 0 && nBays > 0}
+      <path
+        d="M200 {queueY(0) + 6} C 214 {queueY(0) + 6}, 210 {bayY(nBays - 1) + 18}, 228 {bayY(nBays - 1) + 18}"
+        class="rail" />
+    {/if}
     <text x="228" y="40">Gate runners · {nBays > 0 ? `${nBays} bays` : 'no reading'}</text>
     <text x="620" y={mainY + 32}>The track · one train at a time</text>
 
@@ -266,6 +294,23 @@
       <text x="30" y={mainY + 32}>Approach · forge heads</text>
       <text x="30" y={mainY + 44} class="tiny">{scene.machines.approach.label}</text>
     </g>
+    <!-- the queue lane: drawn only when a run is waiting for a bay, and
+         deliberately neutral — a queue is the pipeline working to its
+         bound, not an alarm -->
+    {#if queueRows > 0}
+      <g
+        class="machine area"
+        class:selected={selected === 'gate-queue'}
+        role="button"
+        tabindex="0"
+        aria-label="gate queue · {scene.machines.queue.label}"
+        onclick={pick('gate-queue')}
+        onkeydown={pickKey('gate-queue')}>
+        <rect x="24" y={queueTop - 22} width="360" height={queueRows * QUEUE_ROW_H + 20} class="hit" />
+        <text x="30" y={queueTop - 10}>Gate queue · waiting for a bay</text>
+        <text x="230" y={queueTop - 10} class="tiny">{scene.machines.queue.label}</text>
+      </g>
+    {/if}
     <g
       class="machine area"
       class:selected={selected === 'dock'}

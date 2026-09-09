@@ -1,0 +1,39 @@
+[[rule]]
+name = "parts-consume-on-production-consume-step-done"
+why = """
+Step-completion side effect: a completed `production-consume` step consumes the brew's
+ingredients and capitalizes production overhead onto WIP.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.production-consume"
+[[rule.do]]
+handler = "inventory.parts.consume"
+args = { reason = "\"morning-brew\"" }
+# Production-overhead absorption — the excise pattern applied to burden:
+# each do capitalizes one granular driver DR 1310 / CR <expense>, sized
+# `rate_cents_per_bbl × batch bbl` at runtime (batch bbl from the job's
+# own data: a step's `batch_bbl`, else the summed `excise_bbl` of its
+# produce steps). PREDETERMINED per-bbl rates pinned to the model's own
+# inputs at the ~262k-bbl/yr expected volume (derivations in the
+# pale-ale mash-in comment, examples/brewery/seeds/workflows.toml):
+#   • Direct labor  $36.60/bbl — $9.59M/yr gross production payroll ÷ 262k
+#   • Process utilities $5.60/bbl — 70% of the $2.1M/yr utilities bill ÷ 262k
+#   • Production depreciation $8.60/bbl — 80% of $2.82M/yr depreciation ÷ 262k
+# Absorption nets each expense to its over/under-absorption variance.
+# The produce rule's `overhead_accounts` below names the same accounts —
+# capitalize-set == drain-set, asserted by the brewery seed test
+# (`overhead_absorption_rules_agree`).
+[[rule.do]]
+handler = "inventory.overhead.absorb"
+args = { rate_cents_per_bbl = "3660", credit_account = "\"6100\"", driver = "\"Direct labor\"" }
+[[rule.do]]
+handler = "inventory.overhead.absorb"
+args = { rate_cents_per_bbl = "560", credit_account = "\"6300\"", driver = "\"Process utilities\"" }
+[[rule.do]]
+handler = "inventory.overhead.absorb"
+args = { rate_cents_per_bbl = "860", credit_account = "\"6900\"", driver = "\"Production depreciation\"" }

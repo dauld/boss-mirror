@@ -1,0 +1,27 @@
+# 3. DEPLOY CONVERGENCE LAG. The converge runner failed silently for
+# hours on a missing `-i` in a docker invocation and the cluster sat on
+# a stale image while forge main moved on. A failed systemd oneshot
+# notifies nobody. This is the one that most directly undermines "the
+# cluster is the system of record": an unconverged cluster is a system
+# of record telling you about a commit that is no longer true.
+[[rule]]
+name = "maintenance-sweep-converge-lag-daily"
+why = """
+A TIMER, the standing exemption: no packet causes "a day passed", so no
+Workflow definition can declare it — a sweep's whole point is to run
+when NO event fired. It adds no routing: one firing spawns one
+maintenance-sweep packet, and what happens next is that protocol's own
+row. A failed systemd oneshot notifies nobody, and an
+unconverged cluster is a system of record telling you about a
+commit that is no longer true. (Ratchet history: 42 -> 45,
+2026-08-14, migration 122.)
+"""
+version = 2
+schedule = { cadence = "daily", anchor_date = "2026-08-14" }
+# One outstanding packet per target (0517387b): yesterday's sweep
+# still open means today has nothing new to say - spawning a twin
+# duplicates the obligation, it does not discharge it.
+when = 'NOT open_job_exists("maintenance-sweep", "deploy-convergence")'
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"deploy-convergence\"", title = "\"Deploy convergence sweep\"", "metadata.target" = "\"deploy-convergence\"", "metadata.area" = "\"deploy\"" }

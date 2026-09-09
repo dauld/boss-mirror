@@ -1,0 +1,23 @@
+[[rule]]
+name = "invoice-issue-on-billing-step-done"
+why = """
+Step-completion side effect: a completed `billing` step issues the customer invoice. The
+sales-tax rate, jurisdiction and taxable categories ride in the
+rule args, so a rate change is a registry edit rather than a deploy.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.billing"
+[[rule.do]]
+handler = "commerce.invoice.issue"
+# Sales tax: retail + taproom + event-package lines are end-user sales and
+# carry CA state sales tax (725 bps / US-CA); wholesale + distribution are
+# resale-exempt (omitted from taxable_categories, so they accrue no 2300).
+# The handler taxes only the taxable-category line subtotal; commerce stamps
+# a tax_lines[account=2300] that the ledger accrues, and the quarterly
+# sales-tax-filing Workflow remits it back to Cash.
+args = { due_days = "30", default_revenue_category = "\"uncategorized\"", tax_rate_bps = "725", tax_jurisdiction = "\"US-CA\"", taxable_categories = "\"retail,taproom,event-package\"" }

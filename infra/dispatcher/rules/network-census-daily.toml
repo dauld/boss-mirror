@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------------
+# The packet-loss census (packet-loss.md, all questions decided in
+# review 9fb9904f). Q1's invariant: every admitted packet reaches a
+# terminal, and every non-terminal packet is visible at >= 1 station.
+# Q3 puts the census on a cadence writing its counts to the log, so
+# loss becomes a MEASURED SERIES rather than a spot check; lenses read
+# the series instead of recomputing it.
+#
+# A TIMER, the ratchet's standing exemption, and it adds no routing:
+# the handler spawns nothing and moves nothing — one firing lands
+# exactly one `jobs.network.census` event (via the jobs service's
+# census door) carrying the counts. Report first (Q2): no raiser, no
+# threshold, no catch-all orphan station; the raiser comes later,
+# calibrated against the base rate this series accumulates. The
+# condition it watches is a standing STATE of the network — what is
+# NOT moving — which no Workflow definition can declare, because no
+# packet causes it. Field meanings live in the handler's module doc
+# (boss-dispatcher-handlers handlers/network_census.rs).
+#
+# Seeded by 152-network-census.sql; present here because
+# `dispatcher_rules_seed_matches_toml` compares in BOTH directions.
+[[rule]]
+name = "network-census-daily"
+why = """
+A TIMER, the standing exemption, and the purest case: the condition it
+watches is a standing STATE of the network — what is NOT moving —
+which no Workflow definition can declare, because no packet causes it.
+It spawns nothing and routes nothing: one firing writes one
+`jobs.network.census` event, the measured series the packet-loss
+lenses read instead of recomputing (packet-loss.md, decided 9fb9904f).
+(Ratchet history: 50 -> 51, 2026-08-20, migration 152.)
+"""
+schedule = { cadence = "daily", anchor_date = "2026-08-21" }
+[[rule.do]]
+handler = "network.census"

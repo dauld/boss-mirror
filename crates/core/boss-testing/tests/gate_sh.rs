@@ -406,7 +406,11 @@ fn the_receipt_names_what_only_a_database_could_have_judged() {
         .lines()
         .find(|l| l.contains("changed_paths | grep -E '^infra/postgres/schema/"))
         .expect("db_backed_paths filters changed paths");
-    for needle in ["infra/postgres/schema/", "rules\\.toml", "/seeds/"] {
+    for needle in [
+        "infra/postgres/schema/",
+        "infra/dispatcher/rules/",
+        "/seeds/",
+    ] {
         assert!(
             filter.contains(needle),
             "db_backed_paths must cover {needle} — it is DB-judged and has drifted before:\n{filter}"

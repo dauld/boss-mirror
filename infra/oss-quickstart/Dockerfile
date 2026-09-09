@@ -283,7 +283,7 @@ COPY infra/operator-baseline /opt/boss/infra/operator-baseline
 COPY infra/platform /opt/boss/infra/platform
 # Dispatcher rule registry — boss-dispatcher's side-effect runner reads
 # BOSS_DISPATCHER_RULES (set in docker-compose.yml) which points at
-# /opt/boss/infra/dispatcher/rules.toml. Without this dir the rules runner
+# /opt/boss/infra/dispatcher/rules/. Without this dir the rules runner
 # can't start and Jobs get assigned + worked but never close.
 COPY infra/dispatcher /opt/boss/infra/dispatcher
 COPY examples /opt/boss/examples

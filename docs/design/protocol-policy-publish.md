@@ -54,7 +54,7 @@ The boss-jobs write path is the prototype, unnamed:
   relay.
 
 The missing third is **protocol-declared consequences**: what today
-lives in `infra/dispatcher/rules.toml` as reactions keyed on
+lives in `infra/dispatcher/rules/` as reactions keyed on
 `step.done.<kind>` topics. The precedent that they belong in the
 protocol already shipped: `on_complete_create` is a consequence
 declared in the WorkflowSpec — a cross-protocol spawn the definition

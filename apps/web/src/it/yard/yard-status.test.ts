@@ -13,6 +13,7 @@ import {
   lastVerbReading,
   parseYardStatus,
   phaseLabel,
+  queueLabel,
   trainTone,
   type BoardingPredicate,
   type ConductorHealth,
@@ -59,8 +60,7 @@ describe('parseYardStatus', () => {
       ],
       gates: {
         capacity: 4,
-        active: [{ branch: 'feat/gating', packet_id: 'p1', since: '2026-09-03' }],
-      },
+        active: [{ branch: 'feat/gating', packet_id: 'p1', since: '2026-09-03' }], queued: [], typical_seconds: null },
       garage: [{ branch: 'feat/broken', failed_check: 'test', since: '2026-09-03' }],
       policy: { stall_hours: 6, max_red_trains: 2 },
       now: '2026-09-03T12:00:00Z',
@@ -595,8 +595,80 @@ describe('an active gate carries the server\'s stale flag', () => {
       gates: { capacity: 3, active: [
         { branch: 'feat/a', packet_id: 'p1', since: '2026-09-07', stale: true },
         { branch: 'feat/b', packet_id: 'p2', since: '2026-09-07' },
-      ] },
+      ], queued: [], typical_seconds: null },
     });
     expect(s.gates.active.map(g => g.stale)).toEqual([true, false]);
+  });
+});
+
+describe('the gate QUEUE — runs waiting for a slot', () => {
+  // A queued run is correctly kept out of the bays, and until this
+  // landed nothing else showed it: three busy bays with two waiting read
+  // exactly like three busy bays, so an operator could not tell a queued
+  // gate from one that never launched.
+  test('the queue is parsed in the order the server set, with its estimate', () => {
+    const s = parseYardStatus({
+      gates: {
+        capacity: 3,
+        active: [{ branch: 'feat/gating', packet_id: 'p1', since: '2026-09-07T23:00:00Z' }],
+        typical_seconds: 900,
+        queued: [
+          {
+            branch: 'feat/first',
+            packet_id: 'q1',
+            queued_at: '2026-09-07T23:05:00Z',
+            position: 1,
+            waiting_seconds: 600,
+            estimated_wait_seconds: 300,
+          },
+          {
+            branch: 'feat/second',
+            packet_id: 'q2',
+            queued_at: '2026-09-07T23:07:00Z',
+            position: 2,
+            waiting_seconds: 480,
+            estimated_wait_seconds: 1200,
+          },
+        ],
+      },
+    });
+    expect(s.gates.queued.map(q => q.branch)).toEqual(['feat/first', 'feat/second']);
+    expect(s.gates.queued.map(q => q.position)).toEqual([1, 2]);
+    expect(s.gates.queued[0]!.waiting_seconds).toBe(600);
+    expect(s.gates.queued[0]!.estimated_wait_seconds).toBe(300);
+    expect(s.gates.typical_seconds).toBe(900);
+  });
+
+  test('an older server sends no queue — empty lane, no measurement, never a fabricated wait', () => {
+    const s = parseYardStatus({ gates: { capacity: 3, active: [], queued: [], typical_seconds: null } });
+    expect(s.gates.queued).toEqual([]);
+    expect(s.gates.typical_seconds).toBeNull();
+  });
+
+  test('a wait the server could not derive stays unknown', () => {
+    const s = parseYardStatus({
+      gates: {
+        capacity: 3,
+        active: [],
+        queued: [{ branch: 'feat/x', packet_id: 'q1', queued_at: '2026-09-07T23:05:00Z', position: 1 }],
+      },
+    });
+    expect(s.gates.queued[0]!.waiting_seconds).toBeNull();
+    expect(s.gates.queued[0]!.estimated_wait_seconds).toBeNull();
+  });
+
+  test('the lane line states the place, the wait and the measured estimate', () => {
+    const q = {
+      branch: 'feat/x',
+      packet_id: 'q1',
+      queued_at: '2026-09-07T23:05:00Z',
+      position: 2,
+      waiting_seconds: 720,
+      estimated_wait_seconds: 1080,
+    } as const;
+    expect(queueLabel(q)).toBe('#2 in line · waiting 12m · est. ~18m');
+    expect(queueLabel({ ...q, estimated_wait_seconds: 0 })).toBe('#2 in line · waiting 12m · a slot is free now');
+    expect(queueLabel({ ...q, estimated_wait_seconds: null })).toBe('#2 in line · waiting 12m');
+    expect(queueLabel({ ...q, waiting_seconds: null, estimated_wait_seconds: null })).toBe('#2 in line');
   });
 });

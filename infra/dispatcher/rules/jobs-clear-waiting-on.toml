@@ -1,0 +1,18 @@
+# A closed Job wakes its waiters (e9291570, reopening 50e78d70): any
+# Job carrying `metadata.waiting_on` naming the closed Job (full id or
+# >= 8-char prefix — the `('*','waiting_on')` edge, migration 110)
+# gets the key cleared through jobs-api, whose update path re-evaluates
+# metadata-gated steps (aa9980c8) in the same write. No `when`: every
+# close runs one indexed usually-empty query. Seeded live by
+# 110-waiting-on-edge.sql.
+[[rule]]
+name = "jobs-clear-waiting-on"
+why = """
+A CROSS-PACKET REACTOR: a closed Job wakes every OTHER packet whose
+metadata was waiting on it (e9291570). A Workflow definition can
+declare its own steps and never another packet's, so the waiter-wake
+cannot live in either protocol row.
+"""
+on_event = "jobs.job.closed"
+[[rule.do]]
+handler = "jobs.clear_waiting"

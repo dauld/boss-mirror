@@ -24,25 +24,28 @@
 
 use std::collections::BTreeMap;
 
-fn rules_toml() -> toml::Value {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../infra/dispatcher/rules.toml"
+/// One rule, read from its own file — the file name IS the rule name
+/// (infra/dispatcher/rules/README.md).
+fn rule(rule_name: &str) -> toml::Value {
+    let path = format!(
+        "{}/../../../infra/dispatcher/rules/{rule_name}.toml",
+        env!("CARGO_MANIFEST_DIR")
     );
-    let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-    toml::from_str(&src).unwrap_or_else(|e| panic!("parse rules.toml: {e}"))
-}
-
-/// The `args` map of a rule's single `do` step, by rule name.
-fn spawn_args(doc: &toml::Value, rule_name: &str) -> (String, BTreeMap<String, String>) {
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let doc: toml::Value =
+        toml::from_str(&src).unwrap_or_else(|e| panic!("parse {rule_name}.toml: {e}"));
     let rules = doc
         .get("rule")
         .and_then(|r| r.as_array())
-        .expect("rules.toml has [[rule]] entries");
-    let rule = rules
-        .iter()
-        .find(|r| r.get("name").and_then(|v| v.as_str()) == Some(rule_name))
-        .unwrap_or_else(|| panic!("`{rule_name}` is not in rules.toml"));
+        .unwrap_or_else(|| panic!("{rule_name}.toml has no [[rule]]"))
+        .clone();
+    assert_eq!(rules.len(), 1, "{rule_name}.toml holds one rule");
+    rules[0].clone()
+}
+
+/// The `args` map of a rule's single `do` step, by rule name.
+fn spawn_args(rule_name: &str) -> (String, BTreeMap<String, String>) {
+    let rule = rule(rule_name);
     let dos = rule
         .get("do")
         .and_then(|d| d.as_array())
@@ -71,9 +74,8 @@ fn spawn_args(doc: &toml::Value, rule_name: &str) -> (String, BTreeMap<String, S
 
 #[test]
 fn the_sweep_spawns_exactly_what_the_edge_spawns() {
-    let doc = rules_toml();
-    let (edge_handler, edge_args) = spawn_args(&doc, "design-review-spawn");
-    let (sweep_handler, sweep_args) = spawn_args(&doc, "design-review-level-sweep");
+    let (edge_handler, edge_args) = spawn_args("design-review-spawn");
+    let (sweep_handler, sweep_args) = spawn_args("design-review-level-sweep");
 
     assert_eq!(edge_handler, "jobs.spawn");
     assert_eq!(
@@ -104,17 +106,7 @@ fn the_sweep_spawns_exactly_what_the_edge_spawns() {
 
 #[test]
 fn the_sweep_is_clock_triggered_and_the_edge_is_not() {
-    let doc = rules_toml();
-    let rules = doc.get("rule").and_then(|r| r.as_array()).unwrap();
-    let by = |name: &str| {
-        rules
-            .iter()
-            .find(|r| r.get("name").and_then(|v| v.as_str()) == Some(name))
-            .unwrap_or_else(|| panic!("`{name}` missing"))
-            .clone()
-    };
-
-    let sweep = by("design-review-level-sweep");
+    let sweep = rule("design-review-level-sweep");
     assert!(
         sweep.get("schedule").is_some(),
         "the sweep must be clock-triggered — asking the level question only on an event \
@@ -125,7 +117,7 @@ fn the_sweep_is_clock_triggered_and_the_edge_is_not() {
         "a rule is triggered by an event OR a schedule, never both"
     );
 
-    let edge = by("design-review-spawn");
+    let edge = rule("design-review-spawn");
     assert!(
         edge.get("schedule").is_none(),
         "the edge rule stays an edge — prompt spawning on change is the optimisation \

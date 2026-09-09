@@ -34,12 +34,26 @@ export DOCKER_CONFIG="${BOSS_MIRROR_DOCKER_CONFIG:-/home/david/.docker}"
 # external source ref  |  forge repo:tag (under $REGISTRY_BASE)
 # Keep in lockstep with ci.yml (the kaniko executor the job runs in) and
 # infra/forge/boss-ci/Dockerfile (the FROM bases kaniko then pulls).
+#
+# The cluster's own runtime images joined the list on 2026-09-09. The
+# pipeline stopped pulling publicly first, then the databases followed;
+# these five were what was left running in the cluster straight off
+# docker.io and gcr.io -- nats on the bus, caddy on the TLS front,
+# alpine/k8s and lego on the certificate chain, and the cloud SDK the
+# nightly backup ships with. A resolver stall or a rate limit on any of
+# them is an outage diagnosed from the outside, which is what the
+# mirror exists to prevent.
 IMAGES="
 gcr.io/kaniko-project/executor:v1.23.2-debug|kaniko-executor:v1.23.2-debug
 docker.io/oven/bun:1.3-slim|bun:1.3-slim
 docker.io/library/rust:1.96.1-slim-bookworm|rust:1.96.1-slim-bookworm
 docker.io/library/postgres:16|postgres:16
 docker.io/library/postgres:16-alpine|postgres:16-alpine
+docker.io/library/nats:2.10-alpine|nats:2.10-alpine
+docker.io/library/caddy:2.8-alpine|caddy:2.8-alpine
+docker.io/alpine/k8s:1.33.3|alpine-k8s:1.33.3
+docker.io/goacme/lego:v4.21.0|lego:v4.21.0
+gcr.io/google.com/cloudsdktool/google-cloud-cli:alpine|google-cloud-cli:alpine
 "
 
 mappings() { printf '%s\n' "$IMAGES" | sed '/^[[:space:]]*$/d'; }

@@ -422,7 +422,7 @@ dispatcher's registry watch for those emissions and invoke
 handlers.** Rules are rows in the append-only versioned **`dispatcher_rules`
 registry** (`on_event`, `when`, `do`, over the shared expression
 DSL) — the step_plugins-style draft → active → retired lifecycle,
-authored in-app at `/system/dispatcher/rules` (`infra/dispatcher/rules.toml`
+authored in-app at `/system/dispatcher/rules` (`infra/dispatcher/rules/`
 is now just the human-authored seed source, not the runtime read).
 The reactive wiring is visualized as a cascade — trigger event →
 rule → handler → emitted event → re-triggered rule, feedback cycles

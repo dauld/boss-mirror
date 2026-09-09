@@ -374,6 +374,32 @@ async fn seed_full(jobs: &InMemoryJobs) {
     .await
     .unwrap();
 
+    // A QUEUED gate-run: open, no verdict, and stamped `queued_at` —
+    // `boss gate --wait` took a place in line because the build node was
+    // at its bound. It holds NO bay, and until the queue lane existed the
+    // floor showed nothing at all for it.
+    let waiting = job(
+        "gate-run",
+        "99999999-9999-9999-9999-999999999999",
+        "gate feat/waiting",
+        JobStatus::Open,
+        json!({ "branch": "feat/waiting", "queued_at": "2026-09-03T11:45:00Z" }),
+    );
+    jobs.create_job_at(&waiting, now, &[]).await.unwrap();
+    jobs.add_step_at(
+        &step(
+            &waiting.id,
+            "record-verdict",
+            "Record the receipt",
+            StepStatus::Active,
+            json!({}),
+        ),
+        now,
+        &[],
+    )
+    .await
+    .unwrap();
+
     // A RED gate-run: a failed verdict naming the check — the garage. Its
     // receipt carries the checks array the runner writes.
     let red = job(
@@ -696,6 +722,18 @@ async fn the_gate_slots_and_garage_read_from_the_gate_runs() {
         active[0]["packet_id"],
         "66666666-6666-6666-6666-666666666666"
     );
+    // The QUEUED run rides beside the active ones — its branch, its
+    // packet and its place in line — and takes no bay. A queue an
+    // operator cannot see reads as a gate that never launched.
+    let queued = gates["queued"].as_array().unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0]["branch"], "feat/waiting");
+    assert_eq!(
+        queued[0]["packet_id"],
+        "99999999-9999-9999-9999-999999999999"
+    );
+    assert_eq!(queued[0]["position"], 1);
+    assert_eq!(queued[0]["queued_at"], "2026-09-03T11:45:00Z");
     // The instant the run opened, so a bay can draw elapsed time — not
     // the day it opened on.
     assert_eq!(active[0]["since"], "2026-09-03T11:40:00Z");

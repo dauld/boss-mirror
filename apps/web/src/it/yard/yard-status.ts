@@ -111,12 +111,39 @@ export type ActiveGate = Readonly<{
   stale: boolean;
 }>;
 
+/** One gate-run WAITING for a slot — filed and ordered, but not running.
+ *  `boss gate --wait` takes a place in line when every bay is busy
+ *  instead of refusing, and a queued run correctly occupies no bay; with
+ *  nothing drawing it, three busy bays and two waiting looked exactly
+ *  like three busy bays, and a queued gate was indistinguishable from
+ *  one that never launched. Mirrors the Rust `QueuedGate`. */
+export type QueuedGate = Readonly<{
+  branch: string;
+  packet_id: string;
+  /** When the place in line was taken (RFC3339) — the ordering key. */
+  queued_at: string;
+  /** Place in line, 1-based, oldest first. */
+  position: number;
+  /** How long it has waited, seconds; null when the server had no clock
+   *  or no parseable stamp. */
+  waiting_seconds: number | null;
+  /** How much longer it expects to wait, seconds — derived server-side
+   *  from the MEASURED gate duration. Null when nothing was measured. */
+  estimated_wait_seconds: number | null;
+}>;
+
 /** The gate slots the Approach renders: `capacity` (from the delivery
- *  policy — never a constant baked into the page) and the runs occupying
- *  them right now. */
+ *  policy — never a constant baked into the page), the runs occupying
+ *  them right now, and the line waiting for one. */
 export type Gates = Readonly<{
   capacity: number;
   active: readonly ActiveGate[];
+  /** The queue, in the server's order. Empty on a server that predates
+   *  the reading — an empty lane, never a fabricated one. */
+  queued: readonly QueuedGate[];
+  /** The gate duration the server MEASURED (median seconds) that every
+   *  estimate above derives from; null when it measured nothing. */
+  typical_seconds: number | null;
 }>;
 
 /** A car whose most-recent gate-run is red — waiting for rework. */
@@ -283,6 +310,21 @@ function parseActiveGate(raw: unknown): ActiveGate {
   };
 }
 
+function parseQueuedGate(raw: unknown): QueuedGate {
+  const o = asObject(raw, 'queued gate');
+  return {
+    branch: String(o.branch ?? ''),
+    packet_id: String(o.packet_id ?? ''),
+    queued_at: String(o.queued_at ?? ''),
+    position: Number(o.position ?? 0),
+    // A wait the server could not derive stays unknown — never zero,
+    // which would read as "about to start".
+    waiting_seconds: typeof o.waiting_seconds === 'number' ? o.waiting_seconds : null,
+    estimated_wait_seconds:
+      typeof o.estimated_wait_seconds === 'number' ? o.estimated_wait_seconds : null,
+  };
+}
+
 /** The gate section. Capacity comes from the policy server-side; an
  *  absent section degrades to zero capacity + no active gates rather
  *  than throwing — a build talking to an older backend still renders. */
@@ -291,6 +333,8 @@ function parseGates(raw: unknown): Gates {
   return {
     capacity: typeof o.capacity === 'number' ? o.capacity : 0,
     active: Array.isArray(o.active) ? o.active.map(parseActiveGate) : [],
+    queued: Array.isArray(o.queued) ? o.queued.map(parseQueuedGate) : [],
+    typical_seconds: typeof o.typical_seconds === 'number' ? o.typical_seconds : null,
   };
 }
 
@@ -417,7 +461,26 @@ export type GateSlot =
  *  is best-effort — so more active gates than capacity widen the array to
  *  hold them all rather than dropping a running gate off the visual: a
  *  slot the operator can't see is worse than one more than the bound. */
-export function gateSlots(gates: Gates): readonly GateSlot[] {
+/** A queued run's one line: its place in line, what it has waited, and
+ *  the server's measured estimate. Each part is dropped when the record
+ *  does not carry it — an unknown wait is left unsaid rather than drawn
+ *  as a number the page invented. A zero estimate is a bay standing
+ *  free, which is a real state: `boss gate` queues on the count it saw
+ *  and a slot can free before its next poll. */
+export function queueLabel(q: QueuedGate): string {
+  const parts = [`#${q.position} in line`];
+  if (q.waiting_seconds !== null) parts.push(`waiting ${journeyText(q.waiting_seconds)}`);
+  if (q.estimated_wait_seconds !== null) {
+    parts.push(
+      q.estimated_wait_seconds === 0
+        ? 'a slot is free now'
+        : `est. ~${journeyText(q.estimated_wait_seconds)}`,
+    );
+  }
+  return parts.join(' · ');
+}
+
+export function gateSlots(gates: Pick<Gates, 'capacity' | 'active'>): readonly GateSlot[] {
   const n = Math.max(gates.capacity, gates.active.length, 0);
   return Array.from({ length: n }, (_, i) => {
     const gate = gates.active[i];

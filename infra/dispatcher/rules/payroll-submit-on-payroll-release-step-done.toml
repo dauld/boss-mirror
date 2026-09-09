@@ -1,0 +1,15 @@
+[[rule]]
+name = "payroll-submit-on-payroll-release-step-done"
+why = """
+Step-completion side effect: a completed `payroll-release` step submits the payroll run.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.payroll-release"
+[[rule.do]]
+handler = "ledger.payroll.run.submit"
+args = { periods_per_year = "26", withholding_bps = "2200", employer_cost_bps = "1500", provider = "\"in-house\"" }

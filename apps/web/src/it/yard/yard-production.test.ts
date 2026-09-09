@@ -31,7 +31,7 @@ const statusOf = (over: Partial<YardStatus> = {}): YardStatus => ({
   recent: [],
   stranded: [],
   held: [],
-  gates: { capacity: 3, active: [] },
+  gates: { capacity: 3, active: [], queued: [], typical_seconds: null },
   garage: [],
   policy: { stall_hours: 2, max_red_trains: 2 },
   conductor: null,

@@ -116,8 +116,8 @@ fn wholesale_order_references_one_consistent_sku_set() {
 ///   (d) every producing kind still states the batch size the runtime
 ///       multiplication reads (`batch_bbl` on a step, else the summed
 ///       `excise_bbl` of its produce steps).
-/// Change a rate → change it here + in infra/dispatcher/rules.toml
-/// (then regenerate 41-dispatcher.sql via gen-seed.py).
+/// Change a rate → change it here + in the rule's own file under
+/// infra/dispatcher/rules/ (plus a timestamped seed migration).
 #[test]
 fn overhead_absorption_rules_agree() {
     use boss_jobs::seed_loader::load_workflows_with_owning_team;
@@ -133,29 +133,30 @@ fn overhead_absorption_rules_agree() {
         s.trim().trim_matches('"')
     }
 
-    // --- rules.toml: both halves of the contract -------------------
-    let rules_path = brewery_seeds_dir()
+    // --- the rule registry: both halves of the contract -------------
+    // One file per rule, named for it (infra/dispatcher/rules/README.md).
+    let rules_dir = brewery_seeds_dir()
         .join("..")
         .join("..")
         .join("..")
-        .join("infra/dispatcher/rules.toml");
-    let rules_doc: toml::Value = toml::from_str(
-        &std::fs::read_to_string(&rules_path).expect("read infra/dispatcher/rules.toml"),
-    )
-    .expect("rules.toml parses");
-    let rules = rules_doc
-        .get("rule")
-        .and_then(|v| v.as_array())
-        .expect("rules.toml has [[rule]] entries");
-    let find_rule = |name: &str| {
-        rules
-            .iter()
-            .find(|r| r.get("name").and_then(|v| v.as_str()) == Some(name))
-            .unwrap_or_else(|| panic!("rules.toml missing rule `{name}`"))
+        .join("infra/dispatcher/rules");
+    let read_rule = |name: &str| -> toml::Value {
+        let path = rules_dir.join(format!("{name}.toml"));
+        let doc: toml::Value = toml::from_str(
+            &std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display())),
+        )
+        .unwrap_or_else(|e| panic!("{name}.toml parses: {e}"));
+        let rules = doc
+            .get("rule")
+            .and_then(|v| v.as_array())
+            .unwrap_or_else(|| panic!("{name}.toml has no [[rule]]"));
+        assert_eq!(rules.len(), 1, "{name}.toml holds one rule");
+        rules[0].clone()
     };
 
     // (a) capitalize-set: exactly the three canonical drivers.
-    let consume_rule = find_rule("parts-consume-on-production-consume-step-done");
+    let consume_rule = &read_rule("parts-consume-on-production-consume-step-done");
     let absorb_dos: Vec<&toml::Value> = consume_rule
         .get("do")
         .and_then(|v| v.as_array())
@@ -222,7 +223,7 @@ fn overhead_absorption_rules_agree() {
     );
 
     // (b) drain-set == capitalize-set.
-    let produce_rule = find_rule("products-produce-on-production-produce-step-done");
+    let produce_rule = &read_rule("products-produce-on-production-produce-step-done");
     let produce_do = produce_rule
         .get("do")
         .and_then(|v| v.as_array())

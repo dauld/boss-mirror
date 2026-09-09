@@ -10,7 +10,7 @@
 //!
 //! Migration scope per audit F15 (COMPLETE): all 13 step-completion
 //! handlers live here, registered in main.rs, with matching rule
-//! rows in `infra/dispatcher/rules.toml`. The boss-step-effects-runner
+//! rows in `infra/dispatcher/rules/`. The boss-step-effects-runner
 //! crate has been retired.
 
 pub mod bill_payment_batch;

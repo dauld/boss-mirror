@@ -13,7 +13,7 @@
 //! 1. Every rule that spawns a `maintenance-sweep` carries a dedup
 //!    guard naming its own subject — a new sweep rule without one
 //!    fails here BY NAME.
-//! 2. Every helper referenced by any `when` in rules.toml resolves in
+//! 2. Every helper referenced by any `when` in the rule registry resolves in
 //!    the one resolver the runners bind (`InventoryHelpers`). Called
 //!    with empty args: a KNOWN helper refuses with a helper error, an
 //!    unknown one is `UnknownHelper` — no HTTP happens either way, so
@@ -21,14 +21,14 @@
 
 use boss_dispatcher::rules::expr::{EvalError, HelperResolver};
 use boss_dispatcher::rules::helpers_inventory::InventoryHelpers;
-use boss_dispatcher::rules::registry::parse_raw;
+use boss_dispatcher::rules::registry::{RawRegistry, parse_raw_path};
 
-fn rules_toml() -> String {
-    std::fs::read_to_string(concat!(
+fn rules() -> RawRegistry {
+    parse_raw_path(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../../infra/dispatcher/rules.toml"
+        "/../../../infra/dispatcher/rules"
     ))
-    .expect("read rules.toml")
+    .expect("parse the rule directory")
 }
 
 /// The subject a spawn rule passes, unquoted. Spawn args are expr
@@ -39,7 +39,7 @@ fn literal(arg: &str) -> Option<&str> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn every_sweep_spawner_guards_on_its_own_subject() {
-    let raw = parse_raw(&rules_toml()).expect("rules.toml parses");
+    let raw = rules();
     let mut checked = 0;
     for rule in &raw.rules {
         for step in &rule.do_steps {
@@ -85,7 +85,7 @@ async fn every_sweep_spawner_guards_on_its_own_subject() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn every_helper_a_when_guard_names_resolves() {
-    let raw = parse_raw(&rules_toml()).expect("rules.toml parses");
+    let raw = rules();
     let helpers = InventoryHelpers::new("http://unused.invalid", "http://unused.invalid");
     let mut seen = std::collections::BTreeSet::new();
     for rule in &raw.rules {

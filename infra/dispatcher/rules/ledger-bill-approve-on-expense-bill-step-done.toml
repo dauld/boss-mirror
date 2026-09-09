@@ -1,0 +1,18 @@
+# General operating bills (rent, utilities, …) owned by the ledger —
+# routed to a GL expense account by `bill_category` (bill_accounts.toml),
+# decoupled from the inventory parts vendor-invoice above.
+[[rule]]
+name = "ledger-bill-approve-on-expense-bill-step-done"
+why = """
+Step-completion side effect: a completed `expense-bill` step books a general operating bill to
+its GL expense account.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.expense-bill"
+[[rule.do]]
+handler = "ledger.bill.approve"

@@ -60,7 +60,7 @@ const ACK_WAIT: Duration = Duration::from_secs(30);
 /// gate stayed green (2026-07-10): the filter accepted the topic, the
 /// stream never stored the messages. The
 /// `stream_covers_every_rule_topic` test in boss-dispatcher pins this
-/// list against the shipped rules.toml — and writing that test
+/// list against the shipped rule registry — and writing that test
 /// immediately surfaced a SECOND casualty: the tax-filing webhook
 /// forward (`ledger.tax_filing_filed`) had been dead air the same
 /// way. Domain families with no rule topic still flow over core NATS

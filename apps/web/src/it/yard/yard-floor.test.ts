@@ -55,7 +55,7 @@ const statusOf = (over: Partial<YardStatus> = {}): YardStatus => ({
   recent: [],
   stranded: [],
   held: [],
-  gates: { capacity: 3, active: [] },
+  gates: { capacity: 3, active: [], queued: [], typical_seconds: null },
   garage: [],
   policy: { stall_hours: 2, max_red_trains: 2 },
   conductor: null,
@@ -183,7 +183,7 @@ describe('uniqueTags — one nameplate per branch on the floor', () => {
   test('the floor paints the unique names on the wagons and the bay labels', () => {
     const s = scene(
       yardOf({ dock: [car('c1', says)], cars: [car('c1', says), car('c2', honours)] }),
-      statusOf({ gates: { capacity: 3, active: [gate(honours, 'g1')] } }),
+      statusOf({ gates: { capacity: 3, active: [gate(honours, 'g1')], queued: [], typical_seconds: null } }),
       NOW,
     );
     expect(wagon(s, 'c1').tag).toBe('conduc-says');
@@ -219,7 +219,7 @@ describe('the gate bays', () => {
   test('a gating branch with an open car is that car, in bay 1, working', () => {
     const s = scene(
       yardOf({ cars: [car('c1', 'feat/x')] }),
-      statusOf({ gates: { capacity: 3, active: [gate('feat/x', 'g1')] } }),
+      statusOf({ gates: { capacity: 3, active: [gate('feat/x', 'g1')], queued: [], typical_seconds: null } }),
       NOW,
     );
     const w = wagon(s, 'c1');
@@ -236,24 +236,24 @@ describe('the gate bays', () => {
   });
 
   test('a gating branch with no car yet is the gate packet itself', () => {
-    const s = scene(yardOf(), statusOf({ gates: { capacity: 3, active: [gate('feat/y', 'g9')] } }), NOW);
+    const s = scene(yardOf(), statusOf({ gates: { capacity: 3, active: [gate('feat/y', 'g9')], queued: [], typical_seconds: null } }), NOW);
     expect(wagon(s, 'g9').station).toBe('gate');
     expect(wagon(s, 'g9').tag).toBe('y');
   });
 
   test("a gate's since as a bare date draws no elapsed and no progress; as an instant it draws both", () => {
-    const dated = scene(yardOf(), statusOf({ gates: { capacity: 3, active: [{ ...gate('feat/y', 'g9'), since: '2026-09-07' }] } }), NOW);
+    const dated = scene(yardOf(), statusOf({ gates: { capacity: 3, active: [{ ...gate('feat/y', 'g9'), since: '2026-09-07' }], queued: [], typical_seconds: null } }), NOW);
     expect(dated.bays[0]).toMatchObject({ elapsed: 'Sep 7, 2026', progress: 0 });
     expect(wagon(dated, 'g9').status).toBe('gating · Sep 7, 2026');
-    const timed = scene(yardOf(), statusOf({ gates: { capacity: 3, active: [{ ...gate('feat/y', 'g9'), since: '2026-09-07T23:14:00Z' }] } }), NOW);
+    const timed = scene(yardOf(), statusOf({ gates: { capacity: 3, active: [{ ...gate('feat/y', 'g9'), since: '2026-09-07T23:14:00Z' }], queued: [], typical_seconds: null } }), NOW);
     expect(timed.bays[0]).toMatchObject({ elapsed: '6m' });
     expect(timed.bays[0]?.progress).toBeCloseTo(6 / 12, 5);
     // Past the usual it is full, not over: the bar is a drawing scale.
-    expect(scene(yardOf(), statusOf({ gates: { capacity: 3, active: [gate('feat/y', 'g9')] } }), NOW).bays[0]?.progress).toBe(1);
+    expect(scene(yardOf(), statusOf({ gates: { capacity: 3, active: [gate('feat/y', 'g9')], queued: [], typical_seconds: null } }), NOW).bays[0]?.progress).toBe(1);
   });
 
   test('a stale gate warns — a dead Job looks like a slow one from here, and the bay says so', () => {
-    const s = scene(yardOf(), statusOf({ gates: { capacity: 3, active: [gate('feat/y', 'g9', true)] } }), NOW);
+    const s = scene(yardOf(), statusOf({ gates: { capacity: 3, active: [gate('feat/y', 'g9', true)], queued: [], typical_seconds: null } }), NOW);
     expect(wagon(s, 'g9').lamp).toBe('warn');
     expect(wagon(s, 'g9').tone).toBe('warn');
     expect(s.bays[0]?.stale).toBe(true);
@@ -262,11 +262,92 @@ describe('the gate bays', () => {
   test('more active gates than capacity widen the bays rather than hide a run', () => {
     const s = scene(
       yardOf(),
-      statusOf({ gates: { capacity: 1, active: [gate('a', 'g1'), gate('b', 'g2')] } }),
+      statusOf({ gates: { capacity: 1, active: [gate('a', 'g1'), gate('b', 'g2')], queued: [], typical_seconds: null } }),
       NOW,
     );
     expect(s.bays).toHaveLength(2);
     expect(wagon(s, 'g2').slot).toBe(1);
+  });
+});
+
+describe('the gate QUEUE lane — runs waiting for a bay', () => {
+  // The queue is normal, not an alarm: neutral tone, no warn lamp. Three
+  // busy bays with two waiting must read as a queue, never as absence.
+  const queued = (branch: string, packet_id: string, position: number, over = {}) => ({
+    branch,
+    packet_id,
+    queued_at: '2026-09-07T23:05:00Z',
+    position,
+    waiting_seconds: 600,
+    estimated_wait_seconds: 300,
+    ...over,
+  });
+
+  test('each queued run stands in the lane, in its place in line', () => {
+    const s = scene(
+      yardOf(),
+      statusOf({
+        gates: {
+          capacity: 1,
+          active: [gate('feat/gating', 'g1')],
+          queued: [queued('feat/first', 'q1', 1), queued('feat/second', 'q2', 2, { estimated_wait_seconds: 1200 })],
+          typical_seconds: 900,
+        },
+      }),
+      NOW,
+    );
+    expect(wagon(s, 'q1')).toMatchObject({ station: 'gate-queue', slot: 0, since: '2026-09-07T23:05:00Z' });
+    expect(wagon(s, 'q2').slot).toBe(1);
+    expect(wagon(s, 'q1').status).toBe('queued · #1 in line · waiting 10m · est. ~5m');
+    expect(wagon(s, 'q2').status).toContain('#2 in line');
+    // The bay is still busy with its own run — a queued run takes none.
+    expect(s.bays[0]?.branch).toBe('feat/gating');
+  });
+
+  test('a queue is neutral — never the warn tone a stranded green wears', () => {
+    const s = scene(
+      yardOf(),
+      statusOf({ gates: { capacity: 3, active: [], queued: [queued('feat/x', 'q1', 1)], typical_seconds: 900 } }),
+      NOW,
+    );
+    expect(wagon(s, 'q1').tone).toBe('static');
+    expect(wagon(s, 'q1').lamp).toBe('off');
+  });
+
+  test('the queue machine says how many wait and what the front of the line expects', () => {
+    const two = statusOf({
+      gates: {
+        capacity: 1,
+        active: [gate('feat/gating', 'g1')],
+        queued: [queued('feat/first', 'q1', 1), queued('feat/second', 'q2', 2)],
+        typical_seconds: 900,
+      },
+    });
+    expect(scene(yardOf(), two, NOW).machines.queue).toMatchObject({ count: 2 });
+    expect(scene(yardOf(), two, NOW).machines.queue.label).toBe('2 waiting · next ~5m');
+    expect(scene(yardOf(), statusOf(), NOW).machines.queue.label).toBe('clear');
+  });
+
+  test('the departure board places a queued car before the bays', () => {
+    const s = scene(
+      yardOf(),
+      statusOf({ gates: { capacity: 1, active: [gate('feat/gating', 'g1')], queued: [queued('feat/x', 'q1', 1)], typical_seconds: null } }),
+      NOW,
+    );
+    const rows = s.boardRows.map(r => r.where);
+    expect(rows).toContain('Gate queue · #1');
+    expect(rows.indexOf('Gate queue · #1')).toBeLessThan(rows.indexOf('Gate bay 1'));
+  });
+
+  test('a queued car the page can name keeps its car id, so it slides into the bay', () => {
+    const c = car('c1', 'feat/x');
+    const s = scene(
+      yardOf({ cars: [c] }),
+      statusOf({ gates: { capacity: 1, active: [], queued: [queued('feat/x', 'q1', 1)], typical_seconds: null } }),
+      NOW,
+    );
+    expect(s.wagons.filter(w => w.branch === 'feat/x')).toHaveLength(1);
+    expect(wagon(s, 'c1').station).toBe('gate-queue');
   });
 });
 
@@ -292,7 +373,7 @@ describe('the dock and the garage', () => {
     const c = car('c1', 'fix/a');
     const s = scene(
       yardOf({ dock: [c], cars: [c] }),
-      statusOf({ gates: { capacity: 3, active: [gate('fix/a', 'g1')] } }),
+      statusOf({ gates: { capacity: 3, active: [gate('fix/a', 'g1')], queued: [], typical_seconds: null } }),
       NOW,
     );
     expect(s.wagons.filter(w => w.branch === 'fix/a')).toHaveLength(1);
@@ -562,7 +643,7 @@ describe('the departure board', () => {
           }),
         ],
       }),
-      statusOf({ gates: { capacity: 3, active: [gate('feat/gating', 'g1')] } }),
+      statusOf({ gates: { capacity: 3, active: [gate('feat/gating', 'g1')], queued: [], typical_seconds: null } }),
       NOW,
     );
     expect(s.boardRows.map(r => [r.id, r.where])).toEqual([

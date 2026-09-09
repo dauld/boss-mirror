@@ -97,7 +97,7 @@ Postgres and run the real `Pg*` adapter implementations.
 (`step.<status>.<kind>` topic → rule → handler → emitted event):
 `tests/delegate_subjob_smoke.rs` drives the real
 `Registry::from_toml` → `match_event` → `dispatch` path with the
-rule bodies copied verbatim from `infra/dispatcher/rules.toml`,
+rule bodies copied verbatim from `infra/dispatcher/rules/`,
 so the test drifts if the production arg expressions drift.
 
 **Where it runs:** CI (with the `postgres:16` service container)

@@ -1,0 +1,37 @@
+# ---------------------------------------------------------------------
+# Expire the notifications about a job that has finished (David,
+# 2026-08-14: "we still need a way to automatically expire inbox
+# messages for jobs that have moved past relevancy"). Migration 128.
+#
+# A ready-step notification is true when it is sent and stops being
+# true the moment the work behind it is done. Nothing retracted them,
+# so the admin inbox reached 2,058 unread — overwhelmingly signals
+# about steps closed days ago. That count was not a backlog, it was
+# sediment, and an inbox nobody can read is a channel that does not
+# exist.
+#
+# A cross-protocol reactor, which is the exemption the ratchet names:
+# no single Workflow definition can express "when a job of any kind
+# closes, retire the messages about it", because the messages are not
+# part of the job's protocol.
+#
+# Only unread `signal` rows move, and never a `direct` — the messages
+# port carries that reasoning. A person asking another person something
+# does not stop asking because a job closed.
+# ---------------------------------------------------------------------
+[[rule]]
+name = "expire-signals-on-job-closed"
+why = """
+A CROSS-PROTOCOL REACTOR: no single Workflow definition can express
+"when a job of ANY kind closes, retire the inbox messages about it",
+because those messages are not part of the job's protocol — they
+belong to a domain that merely observed it, and declaring it inside
+every Workflow would be the duplication, not the discipline. A
+ready-step notification is true when sent and stops being true the
+moment the work is done; nothing retracted them and the admin inbox
+reached 2,058 unread sediment. (Ratchet history: 45 -> 46,
+2026-08-14, migration 128.)
+"""
+on_event = "jobs.job.closed"
+[[rule.do]]
+handler = "messages.expire_for_job"

@@ -34,7 +34,10 @@ import {
   clockText,
   elapsedText,
   gateSlots,
+  journeyText,
+  queueLabel,
   type ConductorHealth,
+  type QueuedGate,
   type YardStatus,
 } from './yard-status';
 
@@ -46,7 +49,16 @@ import {
  *  indexes this; a signal stands at each. */
 export const STAGES = ['PR', 'CI', 'merge', 'deploy', 'converge', 'arrived'] as const;
 
-export type Station = 'approach' | 'gate' | 'limbo' | 'dock' | 'garage' | 'train' | 'arrivals';
+export type Station =
+  | 'approach'
+  /** Waiting for a gate bay — the queue lane feeding the sheds. */
+  | 'gate-queue'
+  | 'gate'
+  | 'limbo'
+  | 'dock'
+  | 'garage'
+  | 'train'
+  | 'arrivals';
 export type Tone = 'ok' | 'warn' | 'red' | 'static';
 export type Lamp = 'ok' | 'working' | 'warn' | 'err' | 'off';
 export type Signal = 'ok' | 'now' | 'err' | 'off';
@@ -137,6 +149,9 @@ export const NO_FEEDS: Feeds = { runner: { kind: 'unknown' }, cluster: { kind: '
 
 export type Machines = Readonly<{
   approach: Readonly<{ label: string; stranded: number; publishing: number; held: number }>;
+  /** The queue lane feeding the gate bays. Neutral by construction: a
+   *  queue is the system working to its bound, not an alarm. */
+  queue: Readonly<{ label: string; count: number }>;
   dock: Readonly<{
     label: string;
     parked: number;
@@ -321,13 +336,14 @@ export type Selection =
   | Readonly<{ kind: 'dock' }>
   | Readonly<{ kind: 'garage' }>
   | Readonly<{ kind: 'approach' }>
+  | Readonly<{ kind: 'gate-queue' }>
   | Readonly<{ kind: 'arrivals' }>
   | Readonly<{ kind: 'conductor' }>
   | Readonly<{ kind: 'runner' }>
   | Readonly<{ kind: 'cluster' }>;
 
 const PLAIN_SELECTIONS = [
-  'track', 'dock', 'garage', 'approach', 'arrivals', 'conductor', 'runner', 'cluster',
+  'track', 'dock', 'garage', 'approach', 'gate-queue', 'arrivals', 'conductor', 'runner', 'cluster',
 ] as const;
 type PlainSelection = (typeof PLAIN_SELECTIONS)[number];
 
@@ -403,12 +419,13 @@ export function journeyStops(job: WithSteps | null): readonly JourneyStop[] {
 
 const STATION_RANK: Readonly<Record<Station, number>> = {
   approach: 0,
-  gate: 1,
-  limbo: 2,
-  dock: 3,
-  garage: 4,
-  train: 5,
-  arrivals: 6,
+  'gate-queue': 1,
+  gate: 2,
+  limbo: 3,
+  dock: 4,
+  garage: 5,
+  train: 6,
+  arrivals: 7,
 };
 
 function stageOf(t: TrainRow): number {
@@ -437,6 +454,20 @@ function progressOf(t: TrainRow, stage: number): number {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** The lane's own line: how many wait, and what the FRONT of the line
+ *  expects — the number an operator actually wants, since everyone
+ *  behind it waits at least that long. "clear" when nobody waits; the
+ *  count alone when the server measured no gate to estimate from. */
+function queueLaneLabel(queue: readonly QueuedGate[]): string {
+  const front = queue[0];
+  if (!front) return 'clear';
+  const waiting = `${queue.length} waiting`;
+  if (front.estimated_wait_seconds === null) return waiting;
+  return front.estimated_wait_seconds === 0
+    ? `${waiting} · a bay is free now`
+    : `${waiting} · next ~${journeyText(front.estimated_wait_seconds)}`;
+}
 
 function conductorMachine(c: ConductorHealth | null): ConductorMachine {
   if (!c) return { lamp: 'off', silent: false, lastSeen: null, nextTick: null, label: 'no reading' };
@@ -475,6 +506,7 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
     ...yard.inFlight.flatMap(t => t.cars.map(c => c.branch)),
     ...yard.arrivals.flatMap(t => t.cars.map(c => c.branch)),
     ...(status?.gates.active ?? []).map(g => g.branch),
+    ...(status?.gates.queued ?? []).map(g => g.branch),
     ...yard.approach.map(r => r.branch),
     ...(status?.garage ?? []).map(g => g.branch),
   ]);
@@ -610,6 +642,34 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
       stale: g.stale,
       progress,
     };
+  });
+
+  // THE GATE QUEUE — the lane feeding the bays. A run here has taken a
+  // place in line (the server's `queued_at` order) and holds no bay: it
+  // has no Job, no pod, no workspace. Drawn in the NEUTRAL tone, because
+  // a queue is the pipeline working to its bound, not an alarm — the
+  // distinction the floor learned from held greens.
+  const queue = status?.gates.queued ?? [];
+  queue.forEach(q => {
+    if (claimedBranches.has(q.branch)) return;
+    const car = carByBranch.get(q.branch);
+    const id = car && !claimedIds.has(car.id) ? car.id : q.packet_id;
+    place({
+      id,
+      tag: tagOf(q.branch),
+      title: car?.title ?? q.branch,
+      branch: q.branch,
+      head: car?.head ?? null,
+      kind: car?.kind ?? 'gate-run',
+      sim: car?.sim ?? false,
+      station: 'gate-queue',
+      slot: q.position > 0 ? q.position - 1 : 0,
+      trainId: null,
+      tone: 'static',
+      lamp: 'off',
+      status: `queued · ${queueLabel(q)}`,
+      since: q.queued_at,
+    });
   });
 
   // THE LOADING DOCK — parked cars in the station's own order.
@@ -754,6 +814,8 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
     switch (w.station) {
       case 'approach':
         return 'Approach';
+      case 'gate-queue':
+        return `Gate queue · #${w.slot + 1}`;
       case 'gate':
         return `Gate bay ${w.slot + 1}`;
       case 'limbo':
@@ -839,6 +901,7 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
         cooldownMinutes: cooldown,
         lamp: parked > 0 ? 'ok' : 'off',
       },
+      queue: { label: queueLaneLabel(queue), count: queue.length },
       garage: { label: garageCount > 0 ? `${garageCount} gated red` : 'empty', count: garageCount },
       arrivals: { label: `${landedRecently} landed · 24h`, landed: landedRecently },
       conductor: conductorMachine(status?.conductor ?? null),

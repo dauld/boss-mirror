@@ -535,7 +535,7 @@ impl LoadedStepType {
 // expects. The split exists so a non-company tenant can opt out
 // of company verbs without forking core (`StepRegistry::core_v1()`).
 //
-// The partition criterion lives in infra/dispatcher/rules.toml now —
+// The partition criterion lives in infra/dispatcher/rules/ now —
 // a step kind is "company-modeling" if any rule's `on_event` matches
 // `step.done.<kind>`. step_types.toml is pure schema declaration.
 

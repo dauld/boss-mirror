@@ -454,7 +454,9 @@ fi
 # clock) is not a cadence and is not checked. A DECLARED kind with no
 # rostered timer is left alone: it may be a cluster CronJob or a
 # dispatcher-driven kind, neither of which this file can see.
-RULES_TOML="infra/dispatcher/rules.toml"
+# The cadence roster is the args of ONE rule, and since 2026-09-09 each
+# rule is its own file (infra/dispatcher/rules/README.md).
+RULES_TOML="infra/dispatcher/rules/cadence-silence-sweep-daily.toml"
 
 # The schedule of one .timer, in minutes. Echoes NONE for a unit with no
 # clock schedule and UNPARSED:<text> for a shape this cannot read.
@@ -484,8 +486,9 @@ timer_interval_minutes() {
 }
 
 # The sweep's declared roster, as `<kind> <minutes>` lines. Read off the
-# rule row mirrored in rules.toml — the same text the migration seeds
-# and dispatcher_rules_seed_matches_toml pins to the live table.
+# rule row mirrored in its own file under infra/dispatcher/rules/ — the
+# same text the migration seeds and dispatcher_rules_seed_matches_toml
+# pins to the live table.
 declared=$(grep -oE '"interval_minutes\.[a-z0-9-]+" = "[0-9]+"' "$RULES_TOML" \
     | sed -E 's/"interval_minutes\.([a-z0-9-]+)" = "([0-9]+)"/\1 \2/')
 if [ -z "$declared" ]; then

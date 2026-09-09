@@ -26,6 +26,8 @@
 
 use std::path::{Path, PathBuf};
 
+include!("schema_order.rs");
+
 fn main() {
     let crate_dir = PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by cargo"),
@@ -51,20 +53,10 @@ fn main() {
     // Same ordering rule as migrate.sh's `sort -t- -k1,1n`: the numeric
     // prefix decides, and a file without one sorts last rather than
     // silently landing in the middle of the run.
-    entries.sort_by_key(|n| {
-        // u64, not u32: a `YYYYMMDDHHMMSS-` prefix is ~2.0e13 and would
-        // overflow a u32 into the no-prefix arm. That arm happens to
-        // sort timestamps last and, being a string tiebreak on equal
-        // widths, happens to keep them chronological — accidentally
-        // right, for a reason no reader could rely on. Parsed as what
-        // it is, the ordering is intent rather than luck.
-        let num: u64 = n
-            .split('-')
-            .next()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(u64::MAX);
-        (num, n.clone())
-    });
+    // The order is defined once, in schema_order.rs, which the equality
+    // test includes too — the two Rust readers disagreed on 2026-09-09
+    // and redded a train.
+    entries.sort_by_key(|n| schema_sort_key(n));
 
     // An empty list would load an empty schema into every TestDb and
     // surface as "relation does not exist" a long way from the cause —

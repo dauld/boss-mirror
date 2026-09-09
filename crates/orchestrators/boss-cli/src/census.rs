@@ -1221,77 +1221,52 @@ fn render(c: &Census) -> String {
 /// loaded" — nothing turned the verdict into a car, which is the gap
 /// gate-green auto-park closes. Read-only: it names the branches so an
 /// operator can park the good ones or drop the obsolete.
+/// ONE DEFINITION, shared with the yard read-model and the conductor's
+/// stranded-green alarm (CLAUDE.md §9a): the markers that make a green
+/// spent (`superseded`, `rerailed_to`, `park_skipped`) and the `hold`
+/// that makes it deliberate live in `boss_jobs::stranded`. This
+/// function is the JSON shape adapter plus the census's own
+/// de-dup/sort. The copies drifted once — the yard excluded a
+/// re-railed or held green and the alarm did not, filing four false
+/// STRANDED GREEN packets on 2026-09-09 (e60398dc).
 pub(crate) fn stranded_gate_runs(
     gate_runs: &[Value],
     car_branches: &BTreeSet<String>,
 ) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for g in gate_runs {
-        // A gate-run an operator has marked SUPERSEDED is not stranded —
-        // its green is dead, not waiting: the branch was deleted, or the
-        // same change landed via another branch (facts only git can see,
-        // so they arrive as an annotation on the packet, not a derivation
-        // here). Two such corpses sat in this list for a day reading as
-        // rescuable work (754b01b5); rescue guidance pointing at a
-        // deleted branch is worse than none.
-        if g.get("metadata")
-            .and_then(|m| m.get("superseded"))
-            .is_some_and(|v| !v.is_null() && v.as_bool() != Some(false))
-        {
-            continue;
-        }
-        // A gate-run an operator has marked HOLD is not stranded either —
-        // its green is deliberately waiting: gated on purpose without a
-        // park (a car that must land at a timed restart, or behind
-        // another car). The marker is the reason string, read with the
-        // same shape as `superseded`; orient's STRANDED list, the
-        // stranded-green alarm and the yard read-model all read it.
-        if g.get("metadata")
-            .and_then(|m| m.get("hold"))
-            .is_some_and(|v| !v.is_null() && v.as_bool() != Some(false))
-        {
-            continue;
-        }
-        // A gate-run `boss rerail --finish` stamped `rerailed_to` is
-        // spent: its car now rides the re-railed branch. Without the
-        // stamp the ORIGINAL branch's green read as stranded forever,
-        // even after the branch was deleted on the forge (69daaba2).
-        // The yard read-model (`boss_jobs::yard`) reads the same key.
-        if g.get("metadata")
-            .and_then(|m| m.get("rerailed_to"))
-            .and_then(Value::as_str)
-            .is_some_and(|b| !b.trim().is_empty())
-        {
-            continue;
-        }
-        let green = g
-            .get("steps")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .any(|s| {
-                s.get("metadata")
-                    .and_then(|m| m.get("verdict"))
-                    .and_then(Value::as_str)
-                    == Some("green")
-            });
-        if !green {
-            continue;
-        }
-        let branch = g
-            .get("metadata")
-            .and_then(|m| m.get("branch"))
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if branch.is_empty() || car_branches.contains(branch) {
-            continue;
-        }
-        if !out.iter().any(|b| b == branch) {
-            out.push(branch.to_string());
-        }
-    }
+    let mut out: Vec<String> = unparked_greens(gate_runs, car_branches)
+        .into_iter()
+        .filter(|u| u.is_stranded())
+        .map(|u| u.branch)
+        .collect();
     out.sort();
+    out.dedup();
     out
+}
+
+/// Every green gate-run no car claims, in the order the runs were
+/// read — stranded AND held, each carrying its hold reason and park
+/// intent. The alarm needs the held ones to tell "deliberately waiting"
+/// from "forgotten", and both callers need the intent to tell a gate
+/// that owed itself a car from one a human parked by hand.
+pub(crate) fn unparked_greens(
+    gate_runs: &[Value],
+    car_branches: &BTreeSet<String>,
+) -> Vec<boss_jobs::stranded::UnparkedGreen> {
+    let empty = Value::Object(serde_json::Map::new());
+    gate_runs
+        .iter()
+        .filter_map(|g| {
+            let md = g.get("metadata").unwrap_or(&empty);
+            let steps: Vec<&Value> = g
+                .get("steps")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|s| s.get("metadata"))
+                .collect();
+            boss_jobs::stranded::unparked_green(md, steps, |b| car_branches.contains(b))
+        })
+        .collect()
 }
 
 /// Forge heads no packet claims — work that cannot board, and until

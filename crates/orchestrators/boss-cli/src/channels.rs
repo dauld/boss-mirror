@@ -397,6 +397,7 @@ fn path_weight(path: &str) -> u8 {
         || p.contains("/seeds/")
         || p.ends_with("workflows.toml")
         || p.starts_with("infra/platform/workflows/")
+        || p.starts_with("infra/dispatcher/rules/")
         || p.ends_with("rules.toml")
         || p.ends_with("-registry.sql")
         || p.starts_with("docs/")
@@ -596,7 +597,7 @@ mod tests {
         // a registry row PLUS a crate still needs the build → software
         assert_eq!(
             delivery_channel(&[
-                "infra/dispatcher/rules.toml".into(),
+                "infra/dispatcher/rules/converge-on-merge.toml".into(),
                 "crates/core/boss-dispatcher/src/x.rs".into(),
             ]),
             DeliveryChannel::Software

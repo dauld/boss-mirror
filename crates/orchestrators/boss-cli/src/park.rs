@@ -309,15 +309,23 @@ pub(crate) async fn run(
     // never board); the fix is the rerail write: the fresh receipt rides
     // the job as `regate_receipt`, verbatim, and the skip is cleared. A
     // car that has BOARDED or closed is spent history — a new car then.
-    let parked = crate::gate::rows(
-        crate::gate::api(
-            &http,
-            reqwest::Method::GET,
-            &format!("/api/jobs?kind=ship-a-change&status=open&subject_id={branch}&limit=50"),
-            None,
-        )
-        .await?,
-    );
+    //
+    // READ EVERY OPEN CAR, NOT THE ONES FILED UNDER THIS BRANCH. This
+    // read was narrowed by `subject_id={branch}`, and a car's SUBJECT is
+    // only the branch it was FILED under: `boss rerail` repoints
+    // `metadata.branch` and leaves the subject where it was. So on a
+    // re-railed branch the query answered nothing, "no car" was read as
+    // "no car exists", and this verb filed a TWIN — three of them on
+    // 2026-09-08, one while a sibling car was already aboard a train
+    // (backlog 6790175e). The auto-park handler had the identical defect
+    // and was fixed the same way (car 235157a5): page all the open cars
+    // and let the shared `boss_jobs::car` predicates decide on
+    // `metadata.branch`. `gate::all_open_cars` is that read — ONE
+    // definition, the one `rerail::find_car`, `boss receipt` and
+    // `boss channels` already use — and it pages on `total`, so a car
+    // past page one is found too (a-limit-is-not-a-filter: 832
+    // ship-a-change packets exist as of 2026-09-09).
+    let parked = crate::gate::all_open_cars(&http).await?;
     if let Some(car) = parked_car_for(&parked, branch) {
         let id = car
             .get("id")
@@ -416,6 +424,22 @@ mod tests {
             "kind": "gate-run",
             "metadata": {"branch": branch},
             "steps": [{"title": "Gate launched", "metadata": {}}, step],
+        })
+    }
+
+    /// A PARKED car packet: open, no train stamp, review step ready.
+    /// `subject_branch` is the branch it was FILED under — its subject —
+    /// and `branch` the one it CARRIES, which `boss rerail` repoints and
+    /// the shared predicates read. For an ordinary car the two are equal.
+    fn car(id: &str, subject_branch: &str, branch: &str) -> Value {
+        json!({
+            "id": id,
+            "kind": "ship-a-change",
+            "status": "open",
+            "subject": {"subject_kind": "custom", "id": subject_branch},
+            "metadata": {"branch": branch},
+            "steps": [{"spec_slug": "review", "title": boss_jobs::car::REVIEW,
+                       "status": "ready"}],
         })
     }
 
@@ -642,5 +666,115 @@ mod tests {
         let ps = vec![packet("feat/x", Some("lost"), Some(&lost))];
         let e = receipt_for(&ps, "feat/x", HEAD).unwrap_err().to_string();
         assert!(e.contains("`lost`"), "{e}");
+    }
+    /// A RE-RAILED CAR IS FOUND WHEN PARKING THE BRANCH IT NOW CARRIES.
+    ///
+    /// `boss rerail` repoints `metadata.branch` at the new branch and
+    /// leaves the car's SUBJECT as the branch it was FILED under. The
+    /// shared predicate has always decided on `metadata.branch`, so the
+    /// only thing that hid the car was the read: narrowed by
+    /// `subject_id={branch}`, the API returned nothing for the re-railed
+    /// branch, "no car" was read as "no car exists", and `boss park`
+    /// filed a TWIN (backlog 6790175e; three twins on 2026-09-08). The
+    /// fixture is the shape car 538775dd actually has.
+    #[test]
+    fn a_rerailed_car_is_found_when_parking_the_branch_it_carries() {
+        let rerailed = car(
+            "car-rerail",
+            "feat/arrival-runs-the-probe",
+            "feat/arrival-runs-the-probe-rerail",
+        );
+        let others = [
+            car("car-a", "fix/other", "fix/other"),
+            car("car-b", "fix/another", "fix/another"),
+        ];
+        let all: Vec<Value> = others.iter().cloned().chain([rerailed.clone()]).collect();
+
+        let found = parked_car_for(&all, "feat/arrival-runs-the-probe-rerail")
+            .expect("the re-railed car must be found by the branch it CARRIES, so park refreshes");
+        assert_eq!(found.get("id").and_then(Value::as_str), Some("car-rerail"));
+
+        // THE DEFECT, named: the old read asked the API for cars whose
+        // SUBJECT is the branch. Simulate that server-side filter and the
+        // re-railed car is not in the answer at all — which is how a twin
+        // got filed for a branch that already had a car.
+        let subject_narrowed: Vec<Value> = all
+            .iter()
+            .filter(|c| {
+                c.pointer("/subject/id").and_then(Value::as_str)
+                    == Some("feat/arrival-runs-the-probe-rerail")
+            })
+            .cloned()
+            .collect();
+        assert!(
+            parked_car_for(&subject_narrowed, "feat/arrival-runs-the-probe-rerail").is_none(),
+            "the subject-narrowed read is what hid the car and filed the twin"
+        );
+    }
+
+    /// And the read reaches past page one: `gate::all_open_cars` pages on
+    /// `total`, so a car opened days ago but re-gated today — sorted to
+    /// the tail of `opened_on DESC` — is found rather than twinned. 832
+    /// ship-a-change packets exist as of 2026-09-09, so this is not
+    /// hypothetical.
+    #[tokio::test]
+    async fn a_car_past_page_one_is_found_rather_than_twinned() {
+        use crate::train::{PAGE_LIMIT, list_all_pages};
+        let mut open: Vec<Value> = (0..149)
+            .map(|i| {
+                car(
+                    &format!("car-{i}"),
+                    &format!("fix/f{i}"),
+                    &format!("fix/f{i}"),
+                )
+            })
+            .collect();
+        open.push(car("car-tail", "fix/filed-as", "fix/tail-car"));
+        let open_ref = &open;
+        let gathered = list_all_pages(|offset| async move {
+            let page: Vec<Value> = open_ref
+                .iter()
+                .skip(offset)
+                .take(PAGE_LIMIT)
+                .cloned()
+                .collect();
+            anyhow::Ok(Some(json!({
+                "data": page, "total": open_ref.len(), "offset": offset, "limit": PAGE_LIMIT,
+            })))
+        })
+        .await
+        .unwrap();
+        let found = parked_car_for(&gathered, "fix/tail-car")
+            .expect("the car on page two must be found, not twinned");
+        assert_eq!(found.get("id").and_then(Value::as_str), Some("car-tail"));
+    }
+    /// THE PIN ON THE READ ITSELF. The two tests above show that the
+    /// shared predicate finds a re-railed car once the car is IN the
+    /// list; the defect was never the predicate, it was that the read
+    /// asked the API for cars whose SUBJECT is the branch, so the car
+    /// never reached the predicate. That is a property of the request,
+    /// which has no return value to assert on — so it is pinned at the
+    /// source: this module must gather its cars through
+    /// `gate::all_open_cars` and must never narrow a car read by
+    /// `subject_id`. Red on the pre-fix source, which read
+    /// a car list narrowed to the subject the car was filed under.
+    #[test]
+    fn park_never_narrows_its_car_read_by_subject() {
+        let src = include_str!("park.rs");
+        // The needle is assembled rather than written out, so this test
+        // cannot match its own source and fail on itself.
+        let narrowed = format!("&{}=", "subject_id");
+        assert!(
+            !src.contains(&narrowed),
+            "boss park must not narrow a car read by subject_id: a car's subject is only \
+             the branch it was FILED under, and `boss rerail` repoints metadata.branch \
+             without moving it, so the narrowed read misses a re-railed car and files a \
+             twin (backlog 6790175e)"
+        );
+        assert!(
+            src.contains("all_open_cars"),
+            "the open cars come from gate::all_open_cars — the one definition rerail, \
+             receipt and channels already read, which pages on total"
+        );
     }
 }

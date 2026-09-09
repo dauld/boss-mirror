@@ -43,7 +43,7 @@ const statusOf = (over: Partial<YardStatus> = {}): YardStatus => ({
   recent: [],
   stranded: [],
   held: [],
-  gates: { capacity: 3, active: [] },
+  gates: { capacity: 3, active: [], queued: [], typical_seconds: null },
   garage: [],
   policy: { stall_hours: 2, max_red_trains: 2 },
   conductor: null,
@@ -172,7 +172,7 @@ describe('yardAlerts — what is wrong right now, each a button to its subject',
     const a = alertsOf(
       yardOf(),
       statusOf({
-        gates: { capacity: 3, active: [{ branch: 'feat/slow', packet_id: 'g1', since: '2026-09-08T02:00:00Z', stale: true }] },
+        gates: { capacity: 3, active: [{ branch: 'feat/slow', packet_id: 'g1', since: '2026-09-08T02:00:00Z', stale: true }], queued: [], typical_seconds: null },
       }),
     );
     expect(a[0]).toMatchObject({ subject: 'bay:0', sev: 'warn', since: '2026-09-08T02:00:00Z' });
@@ -238,7 +238,7 @@ describe('yardAlerts — what is wrong right now, each a button to its subject',
       }),
       statusOf({
         stranded: [{ branch: 'feat/stranded' }],
-        gates: { capacity: 3, active: [{ branch: 'feat/slow', packet_id: 'g1', since: '2026-09-08T02:00:00Z', stale: true }] },
+        gates: { capacity: 3, active: [{ branch: 'feat/slow', packet_id: 'g1', since: '2026-09-08T02:00:00Z', stale: true }], queued: [], typical_seconds: null },
         garage: [{ branch: 'fix/red', failed_check: 'test', since: '2026-09-08T02:10:00Z' }],
       }),
       { ...quiet, cluster: { kind: 'dark', since: '2026-09-08T02:30:00Z', error: 'fetch failed' } },

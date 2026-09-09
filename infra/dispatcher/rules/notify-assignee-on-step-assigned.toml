@@ -1,0 +1,17 @@
+# The other order — the step was ALREADY ready and someone picked it up
+# afterwards, which is the common flow: steps materialize ready and
+# unassigned (backlog 534a8dc8). Same handler; the payload carries the
+# assignee, and the deterministic notify:{step}:{recipient} message id
+# collapses the pair when the ready path already told the same person.
+[[rule]]
+name = "notify-assignee-on-step-assigned"
+why = """
+The other order of the same cross-domain fact: steps usually
+materialize ready and unassigned (backlog 534a8dc8), so the
+ASSIGNMENT is the moment there is somebody to tell. Same handler; the
+deterministic message id collapses the pair when the ready path
+already told the same person.
+"""
+on_event = "step.assigned.*"
+[[rule.do]]
+handler = "messages.notify"

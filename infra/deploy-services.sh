@@ -294,7 +294,7 @@ TIMERS=(
 #
 # v1.0.10 F15: boss-step-effects-runner retired — step-completion
 # side effects now route through the dispatcher's rule registry
-# (infra/dispatcher/rules.toml).
+# (infra/dispatcher/rules/).
 #
 # boss-event-relay: drains the transactional event outbox into
 # audit_log + NATS (docs/design/transactional-audit-log.md). Inert
@@ -1168,9 +1168,10 @@ echo "==> systemctl daemon-reload"
 systemctl daemon-reload
 
 # boss-dispatcher's rule registry now lives in the `dispatcher_rules`
-# table (seeded by 41-dispatcher.sql, authored from infra/dispatcher/
-# rules.toml via gen-seed.py) and is loaded at startup — no rules.toml
-# file deploy.
+# table (seeded by 41-dispatcher.sql plus one timestamped migration per
+# rule added since, authored one-file-per-rule under
+# infra/dispatcher/rules/) and is loaded at startup — no rule file
+# deploy.
 
 # Resolve target dir — may be a symlink (`/opt/boss/target` →
 # `/var/lib/boss-build/target` per `infra/dev-bootstrap`) or a real

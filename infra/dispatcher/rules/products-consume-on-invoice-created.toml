@@ -1,0 +1,23 @@
+# FG drawdown + COGS per issued invoice — the consume owns COGS
+# (Q2, docs/architecture-decisions.md §Finance & ledger). Commerce posts
+# revenue/AR/tax only; this rule drives the physical drain + the
+# DR 5100 / CR 1320 recognition through the products surface, at the
+# drained value, tagged with each line's revenue_category. Insufficient
+# stock NAKs and converges when production lands (a visible backorder,
+# not a blocked sale).
+[[rule]]
+name = "products-consume-on-invoice-created"
+why = """
+Step-completion side effect: an issued invoice drains finished goods and recognizes COGS. Keyed
+on a domain event rather than a step, but the same census class:
+the consume owns COGS, and the ordering belongs in the protocol.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "commerce.invoice.created"
+[[rule.do]]
+handler = "products.consume_from_invoice"

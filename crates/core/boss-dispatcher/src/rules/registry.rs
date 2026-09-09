@@ -20,6 +20,7 @@ pub use boss_core::calendar::{Cadence, MAX_POSTPONE_DAYS};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
@@ -127,6 +128,137 @@ pub struct RawDoStep {
 /// which additionally compiles the predicates.
 pub fn parse_raw(src: &str) -> Result<RawRegistry, RegistryError> {
     toml::from_str(src).map_err(|e| RegistryError::Toml(e.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// The authored registry: a DIRECTORY of one-rule files
+// ---------------------------------------------------------------------------
+//
+// `infra/dispatcher/rules/<rule-name>.toml` — one `[[rule]]`, named for
+// its file, carrying the `why` that used to be a sentence next to a
+// hand-typed baseline integer in `infra/lint/dispatcher-rules-ratchet.sh`.
+//
+// It was one file until 2026-09-09, when two rule cars parked in one
+// window and the second was left behind on the tail conflict — the exact
+// shape CLAUDE.md §9a records for `manifest.txt`, collapsed the same way
+// `infra/postgres/schema/` and `infra/platform/workflows/` were: the
+// listing IS the definition and every reader derives it independently.
+// Adding a rule is dropping a file in; no shared line is touched.
+
+/// `why` is AUTHORING metadata, deliberately outside [`RawRule`]: the
+/// runtime registry is the `dispatcher_rules` table, whose rows carry no
+/// justification, and `dispatcher_rules_seed_matches_toml` compares the
+/// serialized rules in both directions. A `why` on `RawRule` would make
+/// every rule read as drifted. So it is parsed from the same text by its
+/// own shape and checked here, at the door.
+#[derive(Debug, Deserialize)]
+struct RuleFileMeta {
+    #[serde(default, rename = "rule")]
+    rules: Vec<RuleMetaEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuleMetaEntry {
+    name: String,
+    #[serde(default)]
+    why: Option<String>,
+}
+
+/// The rule files of the registry directory, in the order the loader
+/// reads them: every `*.toml` directly inside `dir`, sorted by file name.
+/// An empty listing is an error — a registry directory with no rules is a
+/// wrong path, not an empty registry.
+pub fn rule_files(dir: &Path) -> Result<Vec<PathBuf>, RegistryError> {
+    let dir_str = dir.display().to_string();
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| RegistryError::RuleFile {
+            file: dir_str.clone(),
+            reason: e.to_string(),
+        })?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("toml"))
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        return Err(RegistryError::RuleFile {
+            file: dir_str,
+            reason: "no *.toml rule files in the registry directory".into(),
+        });
+    }
+    Ok(files)
+}
+
+/// Parse the rule registry at `path`: the shipped DIRECTORY, or a single
+/// TOML file (a tenant's own registry, an inline fixture).
+pub fn parse_raw_path(path: impl AsRef<Path>) -> Result<RawRegistry, RegistryError> {
+    let path = path.as_ref();
+    if path.is_dir() {
+        return parse_raw_dir(path);
+    }
+    let src = read_rule_text(path)?;
+    parse_raw(&src)
+}
+
+/// Parse a registry directory: every `*.toml` in file-name order, each
+/// holding exactly ONE `[[rule]]` named for the file and carrying a
+/// non-empty `why`.
+pub fn parse_raw_dir(dir: &Path) -> Result<RawRegistry, RegistryError> {
+    let mut rules = Vec::new();
+    for file in rule_files(dir)? {
+        let file_str = file.display().to_string();
+        let stem = file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let src = read_rule_text(&file)?;
+        let parsed = parse_raw(&src).map_err(|e| RegistryError::RuleFile {
+            file: file_str.clone(),
+            reason: e.to_string(),
+        })?;
+        let names: Vec<&str> = parsed.rules.iter().map(|r| r.name.as_str()).collect();
+        if names != [stem.as_str()] {
+            return Err(RegistryError::RuleFile {
+                file: file_str,
+                reason: format!(
+                    "a rule file holds exactly one [[rule]] named after the file \
+                     (expected rule `{stem}`, found {names:?})"
+                ),
+            });
+        }
+        let meta: RuleFileMeta = toml::from_str(&src).map_err(|e| RegistryError::RuleFile {
+            file: file_str.clone(),
+            reason: e.to_string(),
+        })?;
+        let why = meta
+            .rules
+            .iter()
+            .find(|m| m.name == stem)
+            .and_then(|m| m.why.as_deref())
+            .unwrap_or("");
+        if why.trim().is_empty() {
+            return Err(RegistryError::RuleFile {
+                file: file_str,
+                reason: format!(
+                    "rule `{stem}` has no `why`. A dispatcher rule is a reaction the \
+                     protocol definition could not express (protocol-policy-publish.md): \
+                     say in a `why = \"\"\"…\"\"\"` field which standing exemption it \
+                     claims — timer, external ingress/glue, or cross-protocol reactor — \
+                     or declare it in the Workflow definition instead"
+                ),
+            });
+        }
+        rules.extend(parsed.rules);
+    }
+    Ok(RawRegistry { rules })
+}
+
+fn read_rule_text(path: &Path) -> Result<String, RegistryError> {
+    std::fs::read_to_string(path).map_err(|e| RegistryError::RuleFile {
+        file: path.display().to_string(),
+        reason: e.to_string(),
+    })
 }
 
 /// Load the active rules, waiting out an empty table instead of
@@ -585,6 +717,11 @@ pub enum RegistryError {
     MissingTrigger(String),
     #[error("rule {0:?} has both on_event and schedule (exactly one allowed)")]
     AmbiguousTrigger(String),
+    /// A file in the authored registry directory that cannot be read as
+    /// one named, justified rule. Names the FILE, so the author of a
+    /// sixty-file registry is not sent to grep for the row.
+    #[error("{file}: {reason}")]
+    RuleFile { file: String, reason: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -1464,5 +1601,116 @@ handler = "h"
         };
         assert!(s.fires_on(Some(&cal), d(2026, 2, 2)));
         assert!(!s.fires_on(Some(&cal), d(2026, 1, 31)));
+    }
+
+    // ----- the rule registry DIRECTORY -----
+    //
+    // One file per rule (CLAUDE.md §9a): adding a rule is dropping a
+    // file in, so two rule cars touch no shared line. The same collapse
+    // `infra/postgres/schema/` and `infra/platform/workflows/` already
+    // had.
+
+    fn rule_file(name: &str, why: &str) -> String {
+        format!(
+            "[[rule]]\nname = \"{name}\"\nwhy = \"\"\"\n{why}\n\"\"\"\non_event = \"x.y\"\n[[rule.do]]\nhandler = \"noop\"\n"
+        )
+    }
+
+    /// A directory is the registry: every `*.toml` in it, read in
+    /// file-name order regardless of the order they were written.
+    /// Anything that is not a rule file (a README) is ignored.
+    #[test]
+    fn a_rule_directory_loads_its_files_in_name_order() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("zeta.toml"), rule_file("zeta", "a timer")).unwrap();
+        std::fs::write(dir.path().join("alpha.toml"), rule_file("alpha", "a timer")).unwrap();
+        std::fs::write(dir.path().join("README.md"), "# not a rule file\n").unwrap();
+        let raw = parse_raw_path(dir.path()).expect("directory loads");
+        let names: Vec<&str> = raw.rules.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "zeta"]);
+        let files = rule_files(dir.path()).unwrap();
+        let stems: Vec<_> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(stems, vec!["alpha.toml", "zeta.toml"]);
+    }
+
+    /// The file name IS the rule list. A file named for a rule it does
+    /// not hold, or holding two, is refused by name — read wrong, it
+    /// would carry a reaction nobody can find by `ls`.
+    #[test]
+    fn a_rule_file_must_hold_exactly_the_rule_it_is_named_for() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("liar.toml"), rule_file("truth", "a timer")).unwrap();
+        let e = parse_raw_path(dir.path()).unwrap_err().to_string();
+        assert!(e.contains("liar.toml"), "{e}");
+        assert!(e.contains("expected rule `liar`"), "{e}");
+        assert!(e.contains("truth"), "{e}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let two = format!(
+            "{}{}",
+            rule_file("pair", "a timer"),
+            rule_file("other", "a timer")
+        );
+        std::fs::write(dir.path().join("pair.toml"), two).unwrap();
+        let e = parse_raw_path(dir.path()).unwrap_err().to_string();
+        assert!(
+            e.contains("pair.toml") && e.contains("exactly one [[rule]]"),
+            "{e}"
+        );
+    }
+
+    /// THE RATCHET'S SURVIVING PROPERTY. The old ratchet was a
+    /// hand-typed integer whose bump forced a sentence saying why a
+    /// reaction could not be a protocol consequence. The integer was a
+    /// contended tail line; the justification was the point. It now
+    /// lives per rule, in the rule's own file, and a rule file without
+    /// one does not load.
+    #[test]
+    fn a_rule_file_must_say_why_the_rule_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("mute.toml"),
+            "[[rule]]\nname = \"mute\"\non_event = \"x.y\"\n[[rule.do]]\nhandler = \"noop\"\n",
+        )
+        .unwrap();
+        let e = parse_raw_path(dir.path()).unwrap_err().to_string();
+        assert!(e.contains("mute.toml"), "{e}");
+        assert!(e.contains("why"), "{e}");
+
+        // Present but empty is the same as absent — a `why = ""` would
+        // satisfy a grep and say nothing.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("blank.toml"), rule_file("blank", "   ")).unwrap();
+        let e = parse_raw_path(dir.path()).unwrap_err().to_string();
+        assert!(e.contains("blank.toml") && e.contains("why"), "{e}");
+    }
+
+    /// A registry directory with no rule files is a wrong path, not an
+    /// empty registry — a reader must not report "no rules" over a typo.
+    #[test]
+    fn an_empty_rule_directory_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# nothing here\n").unwrap();
+        let e = parse_raw_path(dir.path()).unwrap_err().to_string();
+        assert!(e.contains("no *.toml rule files"), "{e}");
+    }
+
+    /// `why` is authoring metadata, not part of the rule's runtime
+    /// shape: it must not reach the serialized form the DB registry is
+    /// compared against, or every rule would read as drifted.
+    #[test]
+    fn why_is_not_part_of_the_serialized_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("solo.toml"),
+            rule_file("solo", "a cross-protocol reactor"),
+        )
+        .unwrap();
+        let raw = parse_raw_path(dir.path()).unwrap();
+        let json = serde_json::to_value(&raw.rules[0]).unwrap();
+        assert!(json.get("why").is_none(), "{json}");
     }
 }

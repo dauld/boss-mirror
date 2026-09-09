@@ -14,6 +14,58 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::docs_flush::{self, DecisionKind, FlushDecision};
+use crate::identity;
+
+/// The docs API paths this verb calls, named once so a refusal
+/// message and the call it refuses cannot drift apart.
+const REINDEX_PATH: &str = "/api/design/reindex";
+const FLUSH_JOBS_PATH: &str = "/api/design/flush-jobs";
+
+/// Every `boss docs` call goes out signed by the actor RUNNING it,
+/// through the SAME definition the jobs-API path uses
+/// (`identity::signature_for` + `identity::header`) — never a second
+/// one, because a second definition of "who" is a second answer
+/// waiting to disagree (CLAUDE.md §9a).
+///
+/// WHY THIS EXISTS (backlog c3cd3301). `fix/the-cli-signs-as-its-caller`
+/// made every jobs-API write carry its caller and refused an unnamed
+/// one. It deliberately did not touch this file, which talks to a
+/// DIFFERENT service (`BOSS_DOCS_API`) and sent no identity header at
+/// all — so `boss docs flush-pending` moved a flush job through its
+/// lifecycle anonymously while `boss job`, `boss gate` and `boss
+/// prove` were exact. A guarantee that holds on one surface and not
+/// the neighbouring one is worse than one that holds nowhere: a
+/// reader assumes it is global.
+///
+/// The rule is therefore the jobs-API rule, verbatim. A WRITE carries
+/// the caller or does not go out at all; a READ carries them if known
+/// and goes out marked (`operator:unidentified`) otherwise.
+/// Uniformity is the point — a docs flush produces a git commit and a
+/// status row, and both have an owner.
+fn signed(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: &str,
+    signature: identity::Signature,
+) -> Result<reqwest::RequestBuilder> {
+    let signer = identity::apply(signature)?;
+    Ok(client
+        .request(method, url)
+        .header("x-boss-user", identity::header(&signer)))
+}
+
+/// [`signed`] with the decision taken from this process's
+/// environment. `path` is what a refusal names: the url carries the
+/// instance too, which is not the part a reader needs.
+fn request(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: &str,
+    path: &str,
+) -> Result<reqwest::RequestBuilder> {
+    let signature = identity::signature_for(&method, path, identity::caller());
+    signed(client, method, url, signature)
+}
 
 /// The message a caller gets when `BOSS_DOCS_API` is unset. Kept apart
 /// from the lookup so a test can assert what it teaches without touching
@@ -86,10 +138,9 @@ struct StatusUpdate<'a> {
 }
 
 pub async fn reindex() -> Result<()> {
-    let url = format!("{}/api/design/reindex", api_base()?);
+    let url = format!("{}{REINDEX_PATH}", api_base()?);
     let client = reqwest::Client::new();
-    let resp = client
-        .post(&url)
+    let resp = request(&client, reqwest::Method::POST, &url, REINDEX_PATH)?
         .send()
         .await
         .context("POST /api/design/reindex")?;
@@ -112,8 +163,11 @@ pub async fn flush_pending() -> Result<()> {
     let root = repo_root();
 
     // 1. Pull queued jobs.
-    let url = format!("{base}/api/design/flush-jobs?status=queued");
-    let resp = client.get(&url).send().await.context("GET queued jobs")?;
+    let url = format!("{base}{FLUSH_JOBS_PATH}?status=queued");
+    let resp = request(&client, reqwest::Method::GET, &url, FLUSH_JOBS_PATH)?
+        .send()
+        .await
+        .context("GET queued jobs")?;
     if !resp.status().is_success() {
         anyhow::bail!("fetching queued jobs: HTTP {}", resp.status());
     }
@@ -235,18 +289,40 @@ async fn process_job(
     Ok(sha.to_string())
 }
 
-async fn mark_running(client: &reqwest::Client, base: &str, job_id: &str) -> Result<()> {
-    let url = format!("{base}/api/design/flush-jobs?id={job_id}");
-    let body = StatusUpdate {
-        status: "running",
-        commit_sha: None,
-        error: None,
-    };
-    let resp = client.put(&url).json(&body).send().await?;
+/// One PUT, one shape. The three lifecycle transitions differ only in
+/// their body, so they go through one signed request rather than each
+/// building its own — three hand-built calls is three places for the
+/// identity header to go missing again, which is how it went missing
+/// the first time.
+async fn put_status(
+    client: &reqwest::Client,
+    base: &str,
+    job_id: &str,
+    body: &StatusUpdate<'_>,
+) -> Result<()> {
+    let url = format!("{base}{FLUSH_JOBS_PATH}?id={job_id}");
+    let resp = request(client, reqwest::Method::PUT, &url, FLUSH_JOBS_PATH)?
+        .json(body)
+        .send()
+        .await?;
     if !resp.status().is_success() {
-        anyhow::bail!("PUT running: HTTP {}", resp.status());
+        anyhow::bail!("PUT {}: HTTP {}", body.status, resp.status());
     }
     Ok(())
+}
+
+async fn mark_running(client: &reqwest::Client, base: &str, job_id: &str) -> Result<()> {
+    put_status(
+        client,
+        base,
+        job_id,
+        &StatusUpdate {
+            status: "running",
+            commit_sha: None,
+            error: None,
+        },
+    )
+    .await
 }
 
 async fn mark_succeeded(
@@ -255,28 +331,31 @@ async fn mark_succeeded(
     job_id: &str,
     sha: &str,
 ) -> Result<()> {
-    let url = format!("{base}/api/design/flush-jobs?id={job_id}");
-    let body = StatusUpdate {
-        status: "succeeded",
-        commit_sha: Some(sha),
-        error: None,
-    };
-    let resp = client.put(&url).json(&body).send().await?;
-    if !resp.status().is_success() {
-        anyhow::bail!("PUT succeeded: HTTP {}", resp.status());
-    }
-    Ok(())
+    put_status(
+        client,
+        base,
+        job_id,
+        &StatusUpdate {
+            status: "succeeded",
+            commit_sha: Some(sha),
+            error: None,
+        },
+    )
+    .await
 }
 
 async fn mark_failed(client: &reqwest::Client, base: &str, job_id: &str, err: &str) -> Result<()> {
-    let url = format!("{base}/api/design/flush-jobs?id={job_id}");
-    let body = StatusUpdate {
-        status: "failed",
-        commit_sha: None,
-        error: Some(err),
-    };
-    client.put(&url).json(&body).send().await?;
-    Ok(())
+    put_status(
+        client,
+        base,
+        job_id,
+        &StatusUpdate {
+            status: "failed",
+            commit_sha: None,
+            error: Some(err),
+        },
+    )
+    .await
 }
 
 /// Where — if anywhere — a flushed commit gets pushed.
@@ -396,6 +475,161 @@ mod tests {
         assert_eq!(
             resolve_push_remote(env_of(&[("BOSS_DOCS_FLUSH_REMOTE", "   ")])),
             None
+        );
+    }
+}
+
+/// Backlog c3cd3301 — the docs path signs like the jobs-API path.
+///
+/// Asserted at the WIRE, for the same reason `gate::signing_tests`
+/// is: what the socket carries is what a service can record, and a
+/// unit test of the decision function would have passed on the old
+/// code too — the decision was never the missing part, the header
+/// was.
+#[cfg(test)]
+mod signing_tests {
+    use super::*;
+    use crate::identity::Signature;
+
+    /// A one-shot HTTP stub that hands back the request head it read.
+    async fn one_request(body: &'static str) -> (String, tokio::task::JoinHandle<Option<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.ok()?;
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 2048];
+            loop {
+                match sock.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                }
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+            Some(String::from_utf8_lossy(&buf).into_owned())
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// The claim of the backlog item, at the wire: a flush-job status
+    /// PUT must arrive naming the operator who ran `boss docs
+    /// flush-pending`, not nobody.
+    #[tokio::test]
+    async fn a_docs_write_arrives_signed_as_its_caller() {
+        let (base, stub) = one_request("{}").await;
+        let http = reqwest::Client::new();
+        signed(
+            &http,
+            reqwest::Method::PUT,
+            &format!("{base}{FLUSH_JOBS_PATH}?id=fj-1"),
+            Signature::As("claude@algedonic.dev".into()),
+        )
+        .expect("a named write is not refused")
+        .json(&StatusUpdate {
+            status: "succeeded",
+            commit_sha: Some("abc123"),
+            error: None,
+        })
+        .send()
+        .await
+        .expect("the stub answers 200");
+        let head = stub.await.unwrap().expect("the stub read a request");
+        assert!(
+            head.contains(r#""id":"claude@algedonic.dev""#),
+            "a docs write must name its caller; head was:\n{head}"
+        );
+        assert!(
+            !head.contains(crate::identity::CONDUCTOR),
+            "an operator's docs write must not be signed as the train automation; head was:\n{head}"
+        );
+    }
+
+    /// The chosen behaviour for an unnamed writer: REFUSED, exactly as
+    /// the jobs-API path refuses. The docs write it would have made
+    /// commits to git and moves a job to a terminal state; an
+    /// anonymous one of those is the defect, and a placeholder id
+    /// would record a fiction rather than stop.
+    #[tokio::test]
+    async fn an_unnamed_docs_write_never_reaches_the_network() {
+        let (base, stub) = one_request("{}").await;
+        let http = reqwest::Client::new();
+        let refusal = crate::identity::refusal("PUT", FLUSH_JOBS_PATH);
+        let err = signed(
+            &http,
+            reqwest::Method::PUT,
+            &format!("{base}{FLUSH_JOBS_PATH}?id=fj-1"),
+            Signature::Refused(refusal.clone()),
+        )
+        .expect_err("an unnamed write is refused");
+        assert_eq!(err.to_string(), refusal);
+        assert!(
+            err.to_string().contains(crate::identity::ACTOR_ENV),
+            "the refusal must say how to fix it: {err}"
+        );
+        // The stub finishes only once it has ACCEPTED a connection, so
+        // an unfinished stub is proof nothing was sent.
+        assert!(
+            !stub.is_finished(),
+            "a refused docs write must not reach the socket"
+        );
+        stub.abort();
+    }
+
+    /// A read attributes nothing, so it proceeds — marked, never as an
+    /// automation slug. Refusing it would stop `flush-pending` from
+    /// even listing the queue on a box that has not named its
+    /// operator, for no provenance gained.
+    #[tokio::test]
+    async fn an_unnamed_docs_read_arrives_marked() {
+        let (base, stub) = one_request("[]").await;
+        let http = reqwest::Client::new();
+        signed(
+            &http,
+            reqwest::Method::GET,
+            &format!("{base}{FLUSH_JOBS_PATH}?status=queued"),
+            Signature::Unidentified,
+        )
+        .expect("a read is never refused")
+        .send()
+        .await
+        .expect("the stub answers 200");
+        let head = stub.await.unwrap().expect("the stub read a request");
+        assert!(
+            head.contains(crate::identity::UNIDENTIFIED),
+            "an unnamed read must say so; head was:\n{head}"
+        );
+        assert!(!head.contains(crate::identity::CONDUCTOR), "{head}");
+    }
+
+    /// The uniformity claim itself: the docs path does not decide who
+    /// signs, it ASKS the one definition. A second copy of the rule
+    /// here is the failure mode this car exists to close, so the test
+    /// pins the decision to `identity::signature_for` rather than
+    /// restating it.
+    #[test]
+    fn the_docs_path_asks_the_one_definition() {
+        for (method, path) in [
+            (reqwest::Method::POST, REINDEX_PATH),
+            (reqwest::Method::PUT, FLUSH_JOBS_PATH),
+        ] {
+            match crate::identity::signature_for(&method, path, None) {
+                Signature::Refused(msg) => assert!(msg.contains(path), "{msg}"),
+                other => panic!("an unnamed docs write must be refused, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            crate::identity::signature_for(&reqwest::Method::GET, FLUSH_JOBS_PATH, None),
+            Signature::Unidentified
         );
     }
 }

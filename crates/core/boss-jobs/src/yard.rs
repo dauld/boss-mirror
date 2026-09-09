@@ -34,6 +34,7 @@ use serde_json::Value;
 
 use crate::cadence::{CadenceRuleRow, LastFiring};
 use crate::delivery::DeliveryPolicyRow;
+use crate::stranded;
 
 /// A pr-train's step vocabulary, addressed by spec slug with a title
 /// fallback. The conductor writes these steps; the meaning is in the
@@ -770,50 +771,26 @@ pub struct HeldGreen {
     pub since: String,
 }
 
-/// The hold marker on a gate-run, read with the same shape as
-/// `superseded`: `null`, `false` and `""` are no hold; `true` is a
-/// hold with no reason; a string is the reason.
-fn hold_reason(gate_run: &Job) -> Option<String> {
-    match gate_run.metadata.get("hold") {
-        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
-        Some(Value::Bool(true)) => Some("no reason recorded".to_string()),
-        _ => None,
-    }
-}
-
 /// A green gate-run that never became a car — the one classification
-/// behind both `stranded` and `held`. `None` when: marked
-/// `superseded` (its green is dead); marked `rerailed_to` (its car now
-/// rides the re-railed branch — `boss rerail --finish` stamps this, and
-/// without it the original branch read as stranded forever, 69daaba2);
-/// no step recorded `verdict == "green"`; no branch; or a car claims
-/// the branch. Otherwise the branch and its hold reason, if any.
+/// behind both `stranded` and `held`.
+///
+/// ONE DEFINITION, not a second copy (CLAUDE.md §9a): the rule lives in
+/// [`crate::stranded`], which the CLI census and the conductor's
+/// stranded-green ALARM read too. It drifted here once already — the
+/// yard learned to exclude a re-railed or held green on 2026-09-08 and
+/// the alarm did not, which filed four false STRANDED GREEN packets the
+/// next morning (e60398dc). This function is now only the SHAPE
+/// adapter: typed `Job`/`Step` in, the shared predicate's answer out.
 fn unparked_green(
     gate_run: &Job,
     steps: &[Step],
     car_branches: &[String],
 ) -> Option<(String, Option<String>)> {
-    if gate_run
-        .metadata
-        .get("superseded")
-        .is_some_and(|v| !v.is_null() && v.as_bool() != Some(false))
-    {
-        return None;
-    }
-    if meta_str(&gate_run.metadata, "rerailed_to").is_some_and(|b| !b.trim().is_empty()) {
-        return None;
-    }
-    let green = steps
-        .iter()
-        .any(|s| meta_str(&s.metadata, "verdict") == Some("green"));
-    if !green {
-        return None;
-    }
-    let branch = meta_str(&gate_run.metadata, "branch")?;
-    if branch.is_empty() || car_branches.iter().any(|b| b == branch) {
-        return None;
-    }
-    Some((branch.to_string(), hold_reason(gate_run)))
+    let found =
+        stranded::unparked_green(&gate_run.metadata, steps.iter().map(|s| &s.metadata), |b| {
+            car_branches.iter().any(|c| c == b)
+        })?;
+    Some((found.branch, found.hold))
 }
 
 /// A gate-run is stranded when it is an unparked green WITHOUT a hold:
@@ -959,13 +936,188 @@ fn queued_for_a_slot(g: &Job) -> bool {
 /// not an expectation: a normal gate finishes in ~15-90 min.
 pub const GATE_MAX_ACTIVE_HOURS: i64 = 3;
 
+/// One gate-run WAITING for a slot: filed, ordered, but not running.
+///
+/// `boss gate --wait` takes a place in line when the build node is at
+/// its concurrency bound rather than refusing (db7f7b73), and a queued
+/// run is correctly kept out of the bays — but nothing showed it, so
+/// three busy bays with two waiting looked exactly like three busy bays,
+/// and an operator watching the floor could not tell a queued gate from
+/// one that never launched. This is that missing lane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedGate {
+    pub branch: String,
+    pub packet_id: String,
+    /// The [`QUEUED_AT`] stamp — when the place in line was taken, which
+    /// is also the ordering key.
+    pub queued_at: String,
+    /// Place in line: 1-based, oldest `queued_at` first.
+    pub position: i32,
+    /// How long it has waited so far, in seconds. `None` without a clock
+    /// or with a stamp that does not parse — absence is not evidence.
+    pub waiting_seconds: Option<i64>,
+    /// How much longer it is expected to wait, in seconds — see
+    /// [`estimated_waits`]. `None` when nothing has been measured: a
+    /// wait nobody can derive is reported unknown, never invented.
+    pub estimated_wait_seconds: Option<i64>,
+}
+
 /// The gate slots the Approach renders: how many gates run at once
 /// (`capacity`, from the delivery policy — never a constant baked into
-/// the page) and which cars occupy them right now (`active`).
+/// the page), which cars occupy them right now (`active`), and who is
+/// waiting for one (`queued`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Gates {
     pub capacity: i32,
     pub active: Vec<ActiveGate>,
+    /// The line, in its own order. Empty on an older payload.
+    #[serde(default)]
+    pub queued: Vec<QueuedGate>,
+    /// The gate duration this window MEASURED (median seconds), which
+    /// every estimate above is derived from. `None` when no run in the
+    /// window can be measured; a surface then says so rather than
+    /// drawing a wait from a constant.
+    #[serde(default)]
+    pub typical_seconds: Option<i64>,
+}
+
+/// The instant a gate-run reported its verdict: the verdict step's
+/// server-stamped `completed_at`, else the conductor's `completed_at`
+/// metadata stamp, else the job's `closed_at` (a gate-run closes on its
+/// verdict). Three readers because a run recorded by an older path
+/// carries only the last of them, and a duration that cannot be read is
+/// simply not measured.
+fn verdict_instant(job: &Job, steps: &[Step]) -> Option<chrono::DateTime<chrono::Utc>> {
+    steps
+        .iter()
+        .find(|s| meta_str(&s.metadata, "verdict").is_some_and(|v| !v.is_empty()))
+        .and_then(|s| {
+            s.completed_at
+                .or_else(|| completed_at(Some(s)).and_then(parse_instant))
+        })
+        .or_else(|| meta_str(&job.metadata, "closed_at").and_then(parse_instant))
+}
+
+/// Every gate duration this window can MEASURE, in seconds: `opened_at`
+/// to the verdict instant. Only a JUDGED run counts — `lost` and
+/// `unreadable` measure a death, not a gate — and a span past
+/// [`GATE_MAX_ACTIVE_HOURS`] is a corpse the reaper settled rather than
+/// a slow gate, so it is dropped. A run missing either end is not
+/// guessed at.
+fn gate_durations(gate_runs: &[(Job, Vec<Step>)]) -> Vec<i64> {
+    let ceiling = GATE_MAX_ACTIVE_HOURS * 3600;
+    gate_runs
+        .iter()
+        .filter(|(_, steps)| matches!(gate_run_verdict(steps), Some("green" | "failed")))
+        .filter_map(|(g, steps)| {
+            let opened = meta_str(&g.metadata, "opened_at").and_then(parse_instant)?;
+            let done = verdict_instant(g, steps)?;
+            Some((done - opened).num_seconds())
+        })
+        .filter(|s| *s > 0 && *s <= ceiling)
+        .collect()
+}
+
+/// How long a gate takes HERE, measured: the median of
+/// [`gate_durations`]. The median, not the mean, because one reaped
+/// three-hour run would drag an average across every estimate on the
+/// floor. `None` when the window measured nothing.
+fn typical_gate_seconds(gate_runs: &[(Job, Vec<Step>)]) -> Option<i64> {
+    let mut d = gate_durations(gate_runs);
+    if d.is_empty() {
+        return None;
+    }
+    d.sort_unstable();
+    d.get(d.len() / 2).copied()
+}
+
+/// The wait each place in line can expect, in seconds — one entry per
+/// queued run, in queue order.
+///
+/// The model is the floor itself: each slot frees when the run in it
+/// reaches the measured `typical` duration, a slot the policy allows but
+/// nothing occupies frees now, and each queued run takes the earliest
+/// free slot and holds it for a whole gate. A run whose start cannot be
+/// read is assumed to have just started, so its slot's estimate is the
+/// long one: over-stating a wait leaves an operator early, under-stating
+/// it makes a working queue look stuck.
+fn estimated_waits(
+    active: &[ActiveGate],
+    capacity: i32,
+    queued: usize,
+    typical: i64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<i64> {
+    let mut free: Vec<i64> = active
+        .iter()
+        .map(|a| {
+            let elapsed = parse_instant(&a.since).map_or(0, |t| (now - t).num_seconds());
+            (typical - elapsed).max(0)
+        })
+        .collect();
+    // Slots the policy allows that nothing holds are free right now.
+    free.resize(free.len().max(usize::try_from(capacity).unwrap_or(0)), 0);
+    (0..queued)
+        .map(|_| {
+            let Some(i) = (0..free.len()).min_by_key(|i| free[*i]) else {
+                return 0;
+            };
+            let wait = free[i];
+            free[i] = wait + typical;
+            wait
+        })
+        .collect()
+}
+
+/// The line waiting for a slot, in the order the system of record set:
+/// oldest [`QUEUED_AT`] first, branch breaking a tie so the order is
+/// total and the same across polls.
+fn queued_gates(
+    gate_runs: &[(Job, Vec<Step>)],
+    active: &[ActiveGate],
+    capacity: i32,
+    now: Option<chrono::DateTime<chrono::Utc>>,
+) -> (Vec<QueuedGate>, Option<i64>) {
+    let mut waiting: Vec<((&str, &str), &Job)> = gate_runs
+        .iter()
+        .filter(|(g, _)| g.status == JobStatus::Open)
+        .filter(|(_, steps)| gate_run_verdict(steps).is_none())
+        .filter(|(g, _)| queued_for_a_slot(g))
+        .filter_map(|(g, _)| {
+            let stamp = meta_str(&g.metadata, QUEUED_AT).filter(|s| !s.is_empty())?;
+            let branch = meta_str(&g.metadata, "branch").filter(|b| !b.is_empty())?;
+            // The stamp is a whole-second `Z` instant, so string order is
+            // time order — the same reading `active` sorts by; the branch
+            // breaks a tie so the order is total across polls.
+            Some(((stamp, branch), g))
+        })
+        .collect();
+    waiting.sort_by_key(|(key, _)| *key);
+    let typical = typical_gate_seconds(gate_runs);
+    let waits = match (now, typical) {
+        (Some(n), Some(t)) => estimated_waits(active, capacity, waiting.len(), t, n),
+        _ => Vec::new(),
+    };
+    let queued = waiting
+        .iter()
+        .enumerate()
+        .map(|(i, (_, g))| {
+            let stamp = meta_str(&g.metadata, QUEUED_AT).unwrap_or_default();
+            QueuedGate {
+                branch: meta_str(&g.metadata, "branch")
+                    .unwrap_or_default()
+                    .to_string(),
+                packet_id: g.id.to_string(),
+                queued_at: stamp.to_string(),
+                position: i32::try_from(i + 1).unwrap_or(i32::MAX),
+                waiting_seconds: now
+                    .zip(parse_instant(stamp))
+                    .map(|(n, t)| (n - t).num_seconds()),
+                estimated_wait_seconds: waits.get(i).copied(),
+            }
+        })
+        .collect();
+    (queued, typical)
 }
 
 /// A car that gated RED and is waiting for rework — the garage. Named
@@ -1033,7 +1185,15 @@ pub fn gates(
         })
         .collect();
     active.sort_by(|a, b| a.since.cmp(&b.since).then_with(|| a.branch.cmp(&b.branch)));
-    Gates { capacity, active }
+    // The line waiting for one of those slots, and the measured gate
+    // duration every estimate in it is derived from.
+    let (queued, typical_seconds) = queued_gates(gate_runs, &active, capacity, now);
+    Gates {
+        capacity,
+        active,
+        queued,
+        typical_seconds,
+    }
 }
 
 /// The garage: cars whose MOST-RECENT gate-run is red. A branch that
@@ -2426,6 +2586,27 @@ mod tests {
         }
     }
 
+    /// `jobs.auto-park` writes `park_skipped` on a green it DECIDED not
+    /// to file a car for — the branch had already landed, or its car was
+    /// already aboard a train. The handler ran, looked and declined, so
+    /// the green is spent, not forgotten; reading it as stranded put a
+    /// landed branch on an operator's rescue list (e60398dc).
+    #[test]
+    fn an_auto_park_skipped_green_is_not_stranded() {
+        let skipped = gate_run("fix/landed", json!({ "park_skipped": "landed" }));
+        let free = gate_run("fix/free", json!({}));
+        let out = stranded_greens(
+            &[(skipped, vec![green_step()]), (free, vec![green_step()])],
+            &[],
+        );
+        assert_eq!(
+            out,
+            vec![StrandedGreen {
+                branch: "fix/free".into()
+            }]
+        );
+    }
+
     /// The held list is the other half of the same predicate: a green
     /// no car claims, with a `hold` reason. It carries the reason and
     /// when the gate opened, so the surface can say "held — <why>" in
@@ -2576,6 +2757,173 @@ mod tests {
         launched.metadata[QUEUED_AT] = json!("");
         let g = gates(&[(launched, vec![in_flight_step()])], 3, None);
         assert_eq!(g.active.len(), 1, "a blank marker is no marker");
+    }
+
+    /// A gate-run waiting in line, stamped the way `boss gate` stamps it.
+    fn queued_run(branch: &str, queued_at: &str) -> Job {
+        let mut j = gate_run_on(branch, 2);
+        j.metadata[QUEUED_AT] = json!(queued_at);
+        j
+    }
+
+    /// A gate-run that RAN: an `opened_at` instant and a verdict step
+    /// completed at `done_at` — the pair a measured duration is read from.
+    fn finished_run(
+        branch: &str,
+        opened_at: &str,
+        verdict: &str,
+        done_at: &str,
+    ) -> (Job, Vec<Step>) {
+        let mut j = gate_run_on(branch, 2);
+        j.metadata["opened_at"] = json!(opened_at);
+        let mut s = verdict_step(verdict, json!([]));
+        s.completed_at = parse_instant(done_at);
+        (j, vec![s])
+    }
+
+    /// The queue is a LIST, in the order the system of record set:
+    /// oldest [`QUEUED_AT`] first, positions 1..n. Without this the floor
+    /// showed three busy bays and nothing else, and a queued run was
+    /// indistinguishable from a gate that never launched.
+    #[test]
+    fn queued_runs_are_listed_oldest_first_with_their_place_in_line() {
+        let runs = vec![
+            (
+                queued_run("feat/third", "2026-09-02T01:20:00Z"),
+                vec![in_flight_step()],
+            ),
+            (
+                queued_run("feat/first", "2026-09-02T01:00:00Z"),
+                vec![in_flight_step()],
+            ),
+            (
+                queued_run("feat/second", "2026-09-02T01:10:00Z"),
+                vec![in_flight_step()],
+            ),
+            (gate_run_on("feat/running", 2), vec![in_flight_step()]),
+        ];
+        let g = gates(&runs, 3, None);
+        let branches: Vec<&str> = g.queued.iter().map(|q| q.branch.as_str()).collect();
+        assert_eq!(branches, vec!["feat/first", "feat/second", "feat/third"]);
+        let places: Vec<i32> = g.queued.iter().map(|q| q.position).collect();
+        assert_eq!(places, vec![1, 2, 3], "positions are 1-based and dense");
+        assert_eq!(g.queued[0].queued_at, "2026-09-02T01:00:00Z");
+        assert!(
+            !g.queued[0].packet_id.is_empty(),
+            "the lane names its packet"
+        );
+        assert_eq!(
+            g.active.len(),
+            1,
+            "a queued run is listed, never drawn into a bay"
+        );
+    }
+
+    /// How long it has waited is read from the stamp against the clock.
+    /// No clock is no claim — the same rule the rest of this module obeys.
+    #[test]
+    fn a_queued_run_reports_how_long_it_has_waited() {
+        let runs = vec![(
+            queued_run("feat/waiting", "2026-09-02T01:00:00Z"),
+            vec![in_flight_step()],
+        )];
+        let g = gates(&runs, 3, Some(at("2026-09-02T01:10:00Z")));
+        assert_eq!(g.queued[0].waiting_seconds, Some(600));
+        assert_eq!(
+            gates(&runs, 3, None).queued[0].waiting_seconds,
+            None,
+            "no clock, no elapsed"
+        );
+    }
+
+    /// The estimate is MEASURED, not a constant: the median duration of
+    /// the runs this window judged, less what the slot ahead has already
+    /// spent. Here one run took 20 minutes, the occupied slot is 5 minutes
+    /// in, and capacity is 1 — so the first in line waits ~15 minutes and
+    /// the second that plus a whole gate.
+    #[test]
+    fn the_estimated_wait_comes_from_measured_gate_duration() {
+        let mut running = gate_run_on("feat/running", 2);
+        running.metadata["opened_at"] = json!("2026-09-02T01:55:00Z");
+        let runs = vec![
+            finished_run(
+                "feat/measured",
+                "2026-09-02T00:00:00Z",
+                "green",
+                "2026-09-02T00:20:00Z",
+            ),
+            (running, vec![in_flight_step()]),
+            (
+                queued_run("feat/one", "2026-09-02T01:56:00Z"),
+                vec![in_flight_step()],
+            ),
+            (
+                queued_run("feat/two", "2026-09-02T01:57:00Z"),
+                vec![in_flight_step()],
+            ),
+        ];
+        let g = gates(&runs, 1, Some(at("2026-09-02T02:00:00Z")));
+        assert_eq!(g.typical_seconds, Some(1200), "the measured median gate");
+        assert_eq!(g.queued[0].estimated_wait_seconds, Some(900));
+        assert_eq!(
+            g.queued[1].estimated_wait_seconds,
+            Some(900 + 1200),
+            "the second waits for the first to run too"
+        );
+    }
+
+    /// Nothing measured means no estimate — a wait nobody can derive is
+    /// reported as unknown, never as a number the page invented.
+    #[test]
+    fn no_measured_run_means_no_estimate() {
+        let runs = vec![(
+            queued_run("feat/waiting", "2026-09-02T01:00:00Z"),
+            vec![in_flight_step()],
+        )];
+        let g = gates(&runs, 3, Some(at("2026-09-02T01:10:00Z")));
+        assert_eq!(g.typical_seconds, None);
+        assert_eq!(g.queued[0].estimated_wait_seconds, None);
+    }
+
+    /// A free bay is a wait of nothing: `boss gate` queues on the count
+    /// it saw, and a slot can free before its next poll.
+    #[test]
+    fn a_free_bay_makes_the_estimated_wait_nil() {
+        let runs = vec![
+            finished_run(
+                "feat/measured",
+                "2026-09-02T00:00:00Z",
+                "green",
+                "2026-09-02T00:20:00Z",
+            ),
+            (
+                queued_run("feat/waiting", "2026-09-02T01:00:00Z"),
+                vec![in_flight_step()],
+            ),
+        ];
+        let g = gates(&runs, 3, Some(at("2026-09-02T01:10:00Z")));
+        assert_eq!(g.queued[0].estimated_wait_seconds, Some(0));
+    }
+
+    /// A run that never reached a check measures a DEATH, not a gate: a
+    /// `lost` verdict, and a duration past the Job's own deadline, are
+    /// both dropped from the measurement.
+    #[test]
+    fn a_lost_or_impossible_run_is_not_a_measurement() {
+        let lost = finished_run(
+            "feat/lost",
+            "2026-09-02T00:00:00Z",
+            "lost",
+            "2026-09-02T00:05:00Z",
+        );
+        let corpse = finished_run(
+            "feat/corpse",
+            "2026-09-01T00:00:00Z",
+            "failed",
+            "2026-09-02T00:00:00Z",
+        );
+        let g = gates(&[lost, corpse], 3, Some(at("2026-09-02T01:00:00Z")));
+        assert_eq!(g.typical_seconds, None);
     }
 
     #[test]

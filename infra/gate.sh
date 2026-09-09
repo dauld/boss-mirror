@@ -210,10 +210,10 @@ require_headroom "to start"
 #            pre-flight or is named in its exclusion set. Omitting these would let `--auto` skip the only
 #            test guarding the file being edited — which this very car
 #            would have done to itself.
-#     infra/dispatcher/rules.toml -> boss-dispatcher, which owns
+#     infra/dispatcher/rules/*.toml -> boss-dispatcher, which owns
 #            dispatcher_rules_seed.rs. It compares the seeded registry
-#            against that file in BOTH directions, and skipping the
-#            toml half is what reddened the 13-car train
+#            against that directory in BOTH directions, and skipping the
+#            authored half is what reddened the 13-car train
 #            20260815-0621.
 #
 #   Anything else (infra/, apps/, .forgejo/) maps to no crate and is
@@ -266,7 +266,7 @@ changed_paths() {
 # the car was still broken; the receipt gave no way to tell those
 # apart, so the author (me) supplied the optimistic reading each time.
 db_backed_paths() {
-    changed_paths | grep -E '^infra/postgres/schema/|^infra/dispatcher/rules\.toml$|/seeds/[^/]*\.toml$' || true
+    changed_paths | grep -E '^infra/postgres/schema/|^infra/dispatcher/rules/[^/]*\.toml$|/seeds/[^/]*\.toml$' || true
 }
 
 # Did the checks that need a live database actually pass? `fixture`
@@ -300,7 +300,7 @@ path_map() {
            -e 's|^infra/gate\.sh$|boss-testing|p' \
            -e 's|^infra/lint/.*|boss-testing|p' \
            -e 's|^\.forgejo/workflows/ci\.yml$|boss-testing|p' \
-           -e 's|^infra/dispatcher/rules\.toml$|boss-dispatcher|p' \
+           -e 's|^infra/dispatcher/rules/[^/]*\.toml$|boss-dispatcher|p' \
            -e 's|^infra/platform/workflows/[^/]*\.toml$|boss-jobs|p' \
            | sort -u | tr '\n' ' '
 }
@@ -345,8 +345,8 @@ scope_self_test() {
     # change to either must compile and run that crate.
     _case "the gate's own files imply boss-testing" "boss-testing" \
         "infra/gate.sh" ".forgejo/workflows/ci.yml" "infra/lint/no-secrets.sh"
-    _case "the dispatcher rule file implies boss-dispatcher" "boss-dispatcher" \
-        "infra/dispatcher/rules.toml"
+    _case "a dispatcher rule file implies boss-dispatcher" "boss-dispatcher" \
+        "infra/dispatcher/rules/converge-on-merge.toml"
     _case "other infra implies no crate" "" \
         "infra/forge/locomotive.sh" "infra/deploy-services.sh"
     _case "docs outside design/ imply no crate" "" "docs/invariants/x.toml" "README.md"

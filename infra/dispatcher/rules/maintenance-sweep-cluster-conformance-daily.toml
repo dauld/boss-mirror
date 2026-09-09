@@ -1,0 +1,41 @@
+# 5. TREE-vs-CLUSTER CONFORMANCE. infra/cluster/manifests/ describes
+# what should be running; nothing checked that any of it was. boss-dev.yaml
+# was merged on 2026-08-15, applied by hand, and a day later a design doc
+# asserted in review that the pod had never run — while it had 25 hours of
+# uptime. The tree could not answer the question either way.
+#
+# check-manifests-applied.sh answers it. This rule is what makes somebody
+# ask: a sweep packet lands daily with a target, an actor runs the check
+# and records what it found, and the fork is the protocol's own —
+# remediate when a manifest is missing from the cluster, clear when the
+# two agree. The script stops being a file nobody runs and becomes the
+# instrument of a step.
+#
+# Deliberately a sweep and not a systemd timer. A timer that finds drift
+# has nowhere to put the finding; David, 2026-08-16: "let's try and get as
+# much maintenance and management into job protocols rather than floating
+# around scripts or system timers elsewhere."
+[[rule]]
+name = "maintenance-sweep-cluster-conformance-daily"
+why = """
+A TIMER, the standing exemption: no packet causes "a day passed", so no
+Workflow definition can declare it — a sweep's whole point is to run
+when NO event fired. It adds no routing: one firing spawns one
+maintenance-sweep packet, and what happens next is that protocol's own
+row. infra/cluster/manifests/ describes what should be
+running and nothing checked that any of it was — a design doc
+asserted in review that boss-dev had never run while it had 25
+hours of uptime. The check existed as a script, and a script
+nobody runs is not a mechanism. David, 2026-08-16: get maintenance
+into job protocols rather than floating around scripts and system
+timers. (Ratchet history: 48 -> 49, 2026-08-16.)
+"""
+version = 2
+schedule = { cadence = "daily", anchor_date = "2026-08-17" }
+# One outstanding packet per target (0517387b): yesterday's sweep
+# still open means today has nothing new to say - spawning a twin
+# duplicates the obligation, it does not discharge it.
+when = 'NOT open_job_exists("maintenance-sweep", "cluster-conformance")'
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"cluster-conformance\"", title = "\"Cluster conformance sweep\"", "metadata.target" = "\"cluster-conformance\"", "metadata.area" = "\"cluster\"" }

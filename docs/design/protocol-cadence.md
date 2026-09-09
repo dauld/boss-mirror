@@ -80,7 +80,7 @@ Steps 1–3 shipped between 2026-08-12 and 08-13, against the separate
 is left, and the order matters because the loop that would be migrated
 is the one scheduling its own migration:
 
-1. **`[[cadence]]` in `rules.toml`, read-only.** Add the shape and
+1. **`[[cadence]]` in a rule file under `infra/dispatcher/rules/`, read-only.** Add the shape and
    parse it; the loop still obeys `cadence_rules`. Nothing changes
    behaviourally, so this cannot break a window.
 2. **Serve cadence from the jobs API**, the surface car `c083a38e`

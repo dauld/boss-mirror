@@ -97,6 +97,7 @@ fn job_from_row(row: &PgRow) -> Result<FlushJob, DocsError> {
         doc_path: row.try_get("doc_path").map_err(storage)?,
         status,
         requested_by: row.try_get("requested_by").map_err(storage)?,
+        worked_by: row.try_get("worked_by").map_err(storage)?,
         queued_at: row.try_get("queued_at").map_err(storage)?,
         started_at: row.try_get("started_at").map_err(storage)?,
         completed_at: row.try_get("completed_at").map_err(storage)?,
@@ -657,6 +658,7 @@ impl DocsRepository for PgDocsRepo {
         &self,
         id: &str,
         update: &JobStatusUpdate,
+        worked_by: Option<&str>,
     ) -> Result<FlushJob, DocsError> {
         let now = Utc::now();
         let (started_at, completed_at) = match update.status {
@@ -685,6 +687,13 @@ impl DocsRepository for PgDocsRepo {
                 error = CASE
                     WHEN $2 = 'queued' THEN NULL
                     ELSE COALESCE($6, error)
+                END,
+                -- Who moved it. A requeue clears it: a job waiting to
+                -- run has no worker, and keeping the last one would
+                -- describe the past as the present (backlog c3cd3301).
+                worked_by = CASE
+                    WHEN $2 = 'queued' THEN NULL
+                    ELSE COALESCE($7, worked_by)
                 END
              WHERE id = $1
              RETURNING *",
@@ -695,6 +704,7 @@ impl DocsRepository for PgDocsRepo {
         .bind(completed_at)
         .bind(&update.commit_sha)
         .bind(&update.error)
+        .bind(worked_by)
         .fetch_optional(&self.pool)
         .await
         .map_err(storage)?;
@@ -721,6 +731,8 @@ impl DocsRepository for PgDocsRepo {
                 commit_sha: None,
                 error: None,
             },
+            // A requeue clears the worker; there is nobody to name.
+            None,
         )
         .await
     }
@@ -1189,6 +1201,7 @@ mod tests {
                 commit_sha: None,
                 error: None,
             },
+            Some("emp-worker"),
         )
         .await
         .unwrap();
@@ -1203,6 +1216,7 @@ mod tests {
                 commit_sha: Some("def456".to_string()),
                 error: None,
             },
+            Some("emp-worker"),
         )
         .await
         .unwrap();
@@ -1210,6 +1224,10 @@ mod tests {
         assert_eq!(fetched.status, JobStatus::Succeeded);
         assert_eq!(fetched.commit_sha.as_deref(), Some("def456"));
         assert!(fetched.completed_at.is_some());
+        // The column the CLI's signed PUT lands in (backlog c3cd3301):
+        // who ASKED and who MOVED it are different facts.
+        assert_eq!(fetched.requested_by, "alice");
+        assert_eq!(fetched.worked_by.as_deref(), Some("emp-worker"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1254,6 +1272,7 @@ mod tests {
                 commit_sha: None,
                 error: Some("boom".to_string()),
             },
+            Some("emp-worker"),
         )
         .await
         .unwrap();
@@ -1262,6 +1281,8 @@ mod tests {
         assert_eq!(retried.status, JobStatus::Queued);
         assert!(retried.error.is_none());
         assert!(retried.completed_at.is_none());
+        // Requeued: waiting again, so nobody is working it.
+        assert_eq!(retried.worked_by, None);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1306,6 +1327,7 @@ mod tests {
                 commit_sha: Some("def".to_string()),
                 error: None,
             },
+            Some("emp-worker"),
         )
         .await
         .unwrap();

@@ -88,10 +88,17 @@ pub trait DocsRepository: Send + Sync {
 
     async fn flush_jobs_by_status(&self, status: JobStatus) -> Result<Vec<FlushJob>, DocsError>;
 
+    /// Move a job through its lifecycle. `worked_by` is the actor that
+    /// made the call — the HTTP layer reads it off the request, never
+    /// the body, because the body is the caller's to write and the
+    /// identity header is the gateway's (backlog c3cd3301). `None`
+    /// leaves the recorded worker alone; a requeue clears it, because
+    /// a job waiting to run has no worker.
     async fn update_flush_job_status(
         &self,
         id: &str,
         update: &JobStatusUpdate,
+        worked_by: Option<&str>,
     ) -> Result<FlushJob, DocsError>;
 
     /// Retry a failed job by setting status back to `queued` and

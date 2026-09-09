@@ -408,7 +408,7 @@ spec:
             # steps never land on the platform agent.
             - {name: BOSS_DISPATCH_EXECUTOR_ID, value: "claude@algedonic.dev"}
             - {name: BOSS_DISPATCH_EXECUTOR_ROLES, value: "platform-admin"}
-            - {name: BOSS_DISPATCHER_RULES, value: /opt/boss/infra/dispatcher/rules.toml}
+            - {name: BOSS_DISPATCHER_RULES, value: /opt/boss/infra/dispatcher/rules}
             # Widen the dispatcher off loopback so its machine door
             # (boss-dispatcher-internal.yaml, backlog a757b72a) can serve
             # reads to in-cluster automation — the sanctioned knob named in

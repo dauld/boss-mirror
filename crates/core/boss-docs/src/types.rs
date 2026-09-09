@@ -306,6 +306,13 @@ pub struct FlushJob {
     pub doc_path: String,
     pub status: JobStatus,
     pub requested_by: String,
+    /// Who last MOVED the job — the actor on the status PUT, which
+    /// `boss docs flush-pending` now signs (backlog c3cd3301).
+    /// `None` while queued: a job waiting to run has no worker, and
+    /// keeping the previous one would describe the past as the
+    /// present. Distinct from `requested_by`, who asked for the flush.
+    #[serde(default)]
+    pub worked_by: Option<String>,
     pub queued_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,

@@ -237,6 +237,7 @@ impl DocsRepository for InMemoryDocsRepo {
             doc_path: payload.doc_path.clone(),
             status: JobStatus::Queued,
             requested_by: requested_by.to_string(),
+            worked_by: None,
             queued_at: Utc::now(),
             started_at: None,
             completed_at: None,
@@ -281,6 +282,7 @@ impl DocsRepository for InMemoryDocsRepo {
         &self,
         id: &str,
         update: &JobStatusUpdate,
+        worked_by: Option<&str>,
     ) -> Result<FlushJob, DocsError> {
         let mut inner = self.inner.write().unwrap();
         let job = inner
@@ -305,6 +307,11 @@ impl DocsRepository for InMemoryDocsRepo {
                 job.error = None;
             }
         }
+        // The worker is whoever moved it, and a requeue has no worker.
+        job.worked_by = match update.status {
+            JobStatus::Queued => None,
+            _ => worked_by.map(str::to_string).or(job.worked_by.clone()),
+        };
         if let Some(sha) = &update.commit_sha {
             job.commit_sha = Some(sha.clone());
         }
@@ -330,6 +337,8 @@ impl DocsRepository for InMemoryDocsRepo {
         job.completed_at = None;
         job.error = None;
         job.commit_sha = None;
+        // A requeued job is waiting again, and nobody is working it.
+        job.worked_by = None;
         Ok(job.clone())
     }
 
@@ -693,6 +702,7 @@ mod tests {
                 commit_sha: None,
                 error: None,
             },
+            Some("emp-worker"),
         )
         .await
         .unwrap();
@@ -707,6 +717,7 @@ mod tests {
                 commit_sha: Some("def456".to_string()),
                 error: None,
             },
+            Some("emp-worker"),
         )
         .await
         .unwrap();
@@ -714,6 +725,9 @@ mod tests {
         assert_eq!(fetched.status, JobStatus::Succeeded);
         assert_eq!(fetched.commit_sha.as_deref(), Some("def456"));
         assert!(fetched.completed_at.is_some());
+        // Who moved it, not only who asked for it (backlog c3cd3301).
+        assert_eq!(fetched.requested_by, "alice");
+        assert_eq!(fetched.worked_by.as_deref(), Some("emp-worker"));
     }
 
     #[tokio::test]
@@ -757,6 +771,7 @@ mod tests {
                 commit_sha: None,
                 error: Some("boom".to_string()),
             },
+            Some("emp-worker"),
         )
         .await
         .unwrap();
@@ -764,6 +779,9 @@ mod tests {
         assert_eq!(retried.status, JobStatus::Queued);
         assert!(retried.error.is_none());
         assert!(retried.completed_at.is_none());
+        // A job waiting to run again has no worker. Keeping the last
+        // one would say the failed attempt is the current one.
+        assert_eq!(retried.worked_by, None);
     }
 
     #[tokio::test]
@@ -807,6 +825,7 @@ mod tests {
                 commit_sha: Some("def".to_string()),
                 error: None,
             },
+            Some("emp-worker"),
         )
         .await
         .unwrap();

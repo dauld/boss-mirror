@@ -295,14 +295,42 @@ async fn post_reindex(State(state): State<Arc<DocsApiState>>) -> Response {
 
 // ----- POST /api/design/pending-decisions -----
 
-/// Extract a simple "decided_by" identity from a request header.
-/// For v1 we trust the header — FIDO gating lands later.
+/// The id nothing named. Kept as a constant so the tests and the
+/// surfaces that render it agree on one spelling.
+pub const UNKNOWN_ACTOR: &str = "unknown";
+
+/// Who a write is recorded as. For v1 we trust the header — the
+/// gateway strips client-supplied `x-boss-*` at the edge and injects
+/// the session's own, so the header is the trustworthy channel and the
+/// BODY is not; FIDO gating lands later.
+///
+/// `x-boss-user` FIRST (backlog c3cd3301). It is the one identity
+/// header every caller already sends: the gateway builds it from the
+/// session, the dispatcher stamps its rule into it, and `boss docs`
+/// now signs with it through `boss-cli/src/identity.rs`. This handler
+/// used to read ONLY `x-boss-employee-id`, which the gateway sets and
+/// no service-to-service caller does — so every flush job the
+/// `design-decision-flush-queue` rule queued recorded `unknown`, and
+/// the CLI's writes were anonymous by construction.
+///
+/// The employee-id fallback stays because it costs nothing and keeps
+/// any caller that sends only that one working.
 fn decided_by_from_headers(headers: &axum::http::HeaderMap) -> String {
-    headers
-        .get("x-boss-employee-id")
+    let from_user = headers
+        .get("x-boss-user")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown")
-        .to_string()
+        .and_then(|v| serde_json::from_str::<serde_json::Value>(v).ok())
+        .and_then(|v| v.get("id").and_then(|id| id.as_str()).map(str::to_string))
+        .filter(|id| !id.trim().is_empty());
+    from_user
+        .or_else(|| {
+            headers
+                .get("x-boss-employee-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+                .filter(|id| !id.trim().is_empty())
+        })
+        .unwrap_or_else(|| UNKNOWN_ACTOR.to_string())
 }
 
 async fn post_pending_decision(
@@ -463,9 +491,22 @@ struct PutJobQuery {
 async fn put_flush_job_status(
     State(state): State<Arc<DocsApiState>>,
     Query(q): Query<PutJobQuery>,
+    headers: axum::http::HeaderMap,
     Json(update): Json<JobStatusUpdate>,
 ) -> Response {
-    match state.repo.update_flush_job_status(&q.id, &update).await {
+    // Who moved it. Read off the request, never the body: the body is
+    // the caller's to write, the identity header is the gateway's
+    // (backlog c3cd3301). An unnamed caller records as `unknown` here
+    // rather than being refused — the CLI already refuses an unnamed
+    // WRITE before it reaches the network, and a service that dropped
+    // the flusher's terminal PUT would strand the job it just
+    // committed.
+    let worked_by = decided_by_from_headers(&headers);
+    match state
+        .repo
+        .update_flush_job_status(&q.id, &update, Some(worked_by.as_str()))
+        .await
+    {
         Ok(job) => Json(job).into_response(),
         Err(e) => err_to_response(e),
     }
@@ -782,6 +823,187 @@ mod tests {
             body.get("commit_sha").and_then(|v| v.as_str()),
             Some("abcd1234")
         );
+    }
+
+    /// Backlog c3cd3301, at the receiving end. `boss docs
+    /// flush-pending` now signs every call with `x-boss-user`; a
+    /// service that dropped the header would leave the fix decorative,
+    /// so the status PUT records who moved the job.
+    #[tokio::test]
+    async fn a_flush_job_records_the_actor_that_moved_it() {
+        let state = test_state();
+        seed_doc(&state, "docs/design/test.md").await;
+        let repo = state.repo.clone();
+        let app = router(state);
+        post_pending(&app, "docs/design/test.md", "Q0", "yes").await;
+        let job_id = queue_flush(&app, "docs/design/test.md").await;
+
+        // The flusher claims it, signed as the operator running it.
+        let resp = put_status(
+            &app,
+            &job_id,
+            serde_json::json!({"status": "running"}),
+            Some(&user_header("claude@algedonic.dev")),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let job = repo.flush_job_by_id(&job_id).await.unwrap().unwrap();
+        assert_eq!(
+            job.worked_by.as_deref(),
+            Some("claude@algedonic.dev"),
+            "the status PUT must record the actor that made it"
+        );
+
+        // ...and a requeue clears it: a job waiting to run has no
+        // worker, and the last one is not the current one.
+        let resp = put_status(
+            &app,
+            &job_id,
+            serde_json::json!({"status": "queued"}),
+            Some(&user_header("claude@algedonic.dev")),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let job = repo.flush_job_by_id(&job_id).await.unwrap().unwrap();
+        assert_eq!(job.worked_by, None, "a requeued job has no worker");
+    }
+
+    /// The dispatcher's flush-queue rule has always sent `x-boss-user`
+    /// and this handler read only `x-boss-employee-id`, so every job
+    /// the `design-decision-flush-queue` rule queued recorded
+    /// `unknown` — a write with a perfectly good actor on the wire,
+    /// discarded one layer above it.
+    #[tokio::test]
+    async fn a_service_caller_is_recorded_from_x_boss_user() {
+        let state = test_state();
+        seed_doc(&state, "docs/design/test.md").await;
+        let repo = state.repo.clone();
+        let app = router(state);
+        post_pending(&app, "docs/design/test.md", "Q0", "yes").await;
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/design/flush-jobs")
+                    .header("content-type", "application/json")
+                    .header(
+                        "x-boss-user",
+                        user_header("rule:design-decision-flush-queue"),
+                    )
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"doc_path": "docs/design/test.md"}))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let job_id = body_json(resp).await["id"].as_str().unwrap().to_string();
+        let job = repo.flush_job_by_id(&job_id).await.unwrap().unwrap();
+        assert_eq!(
+            job.requested_by, "rule:design-decision-flush-queue",
+            "a caller that names itself in x-boss-user must not record as `{UNKNOWN_ACTOR}`"
+        );
+    }
+
+    /// The gateway's own header still answers, and a call that names
+    /// nobody still records something rather than failing — the CLI
+    /// refuses an unnamed WRITE before it reaches the network, and a
+    /// service that dropped the flusher's terminal PUT would strand a
+    /// job whose commit is already in git.
+    #[tokio::test]
+    async fn an_unnamed_caller_records_as_unknown_and_the_employee_header_still_answers() {
+        let headers = |pairs: &[(&str, &str)]| {
+            let mut h = axum::http::HeaderMap::new();
+            for (k, v) in pairs {
+                h.insert(
+                    axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                    axum::http::HeaderValue::from_str(v).unwrap(),
+                );
+            }
+            h
+        };
+        assert_eq!(decided_by_from_headers(&headers(&[])), UNKNOWN_ACTOR);
+        assert_eq!(
+            decided_by_from_headers(&headers(&[("x-boss-employee-id", "emp-david")])),
+            "emp-david"
+        );
+        // Both present — the gateway sends both — and the id in
+        // x-boss-user is the one provenance reads.
+        assert_eq!(
+            decided_by_from_headers(&headers(&[
+                ("x-boss-employee-id", "emp-david"),
+                ("x-boss-user", &user_header("emp-david")),
+            ])),
+            "emp-david"
+        );
+        // A malformed or empty header names nobody, and naming nobody
+        // is `unknown` — never the empty string.
+        assert_eq!(
+            decided_by_from_headers(&headers(&[("x-boss-user", "not json")])),
+            UNKNOWN_ACTOR
+        );
+        assert_eq!(
+            decided_by_from_headers(&headers(&[("x-boss-user", r#"{"id":"  "}"#)])),
+            UNKNOWN_ACTOR
+        );
+    }
+
+    /// The `x-boss-user` shape every caller sends — the gateway builds
+    /// it from the session, `boss-cli/src/identity.rs` builds it for
+    /// the CLI, and the dispatcher builds it for a rule.
+    fn user_header(id: &str) -> String {
+        serde_json::json!({
+            "id": id,
+            "role": "platform-admin",
+            "access_tier": "operator",
+        })
+        .to_string()
+    }
+
+    async fn queue_flush(app: &axum::Router, doc_path: &str) -> String {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/design/flush-jobs")
+                    .header("content-type", "application/json")
+                    .header("x-boss-employee-id", "alice")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"doc_path": doc_path})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        body_json(resp).await["id"].as_str().unwrap().to_string()
+    }
+
+    async fn put_status(
+        app: &axum::Router,
+        job_id: &str,
+        body: serde_json::Value,
+        user: Option<&str>,
+    ) -> axum::response::Response {
+        let mut req = Request::builder()
+            .method("PUT")
+            .uri(format!("/api/design/flush-jobs?id={job_id}"))
+            .header("content-type", "application/json");
+        if let Some(u) = user {
+            req = req.header("x-boss-user", u);
+        }
+        app.clone()
+            .oneshot(
+                req.body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
     }
 
     #[tokio::test]

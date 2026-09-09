@@ -780,7 +780,7 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
             }),
         ));
 
-        // Dispatcher routing: rules in infra/dispatcher/rules.toml
+        // Dispatcher routing: rules in infra/dispatcher/rules/
         // listen on `step.done.<kind>` so each StepType's side
         // effects can be declared as a rule without a giant `match`
         // in the subscriber. Payload mirrors the simulator's

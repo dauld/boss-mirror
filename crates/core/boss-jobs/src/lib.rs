@@ -39,6 +39,7 @@ pub mod station_projection;
 pub mod station_quarantine;
 pub mod station_queue;
 pub mod stations;
+pub mod stranded;
 pub mod workflow_lint;
 pub mod workflow_quarantine;
 pub mod yard;

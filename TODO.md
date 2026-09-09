@@ -51,7 +51,7 @@ first-contact fixes (#74). Sorted by dependency, not size.
       balance is the year-end WIP-variance close item below — a
       close-rule gap, not a costing residual.
 - [x] **Overhead rates as dispatcher rule args × the step's bbl** —
-      done: `infra/dispatcher/rules.toml` carries `rate_cents_per_bbl`
+      done: `infra/dispatcher/rules/` carries `rate_cents_per_bbl`
       args on the three `inventory.overhead.absorb` rules (direct
       labor → 6100, process utilities → 6300, production
       depreciation → 6900), multiplied by the step's actual bbl at

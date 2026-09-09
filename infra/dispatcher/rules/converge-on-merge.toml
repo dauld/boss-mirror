@@ -1,0 +1,26 @@
+# A merged pr-train fires the cluster converge event-driven, instead of
+# waiting up to ~10 min for the cluster-deploy-runner timer to poll forge
+# main. On the merged step (spec_slug = "merged"; the always-present
+# top-level slug that makes "which step" routable), spawn an ops-request
+# for host=forge verb=converge — the boss-ops-runner (~1-min poll) runs
+# it. Latency accelerator ONLY: the timer + cluster-watchdog remain the
+# independent floor, and the converge is idempotent + STAMP-guarded.
+# Seeded by 202609071700-converge-on-merge.sql; present here because
+# dispatcher_rules_seed_matches_toml compares BOTH directions.
+[[rule]]
+name = "converge-on-merge"
+why = """
+A CROSS-PROTOCOL REACTOR spanning three protocols — pr-train ->
+ops-request -> a deployment on the forge host — which no single
+Workflow `on` consequence can express. A merged train's `merged` step
+spawns an ops-request that starts the cluster-deploy-runner, retiring
+the up-to-10-minute converge poll latency behind the gcr.io DNS flake
+that reddened #236 and #250. Latency accelerator ONLY: the timer and
+the cluster-watchdog remain the independent floor. (Ratchet history:
+56 -> 57, 2026-09-07, migration 202609071700.)
+"""
+on_event = "step.done.task"
+when = 'spec_slug = "merged"'
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"ops-request\"", subject_kind = "\"custom\"", subject = "\"forge\"", title = "\"converge on forge — a train merged to main\"", "metadata.host" = "\"forge\"", "metadata.verb" = "\"converge\"" }

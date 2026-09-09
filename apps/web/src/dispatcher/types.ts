@@ -8,7 +8,7 @@ export type DispatcherRuleDo = Readonly<{
   args: Readonly<Record<string, string>>;
 }>;
 
-/** One dispatcher rule, verbatim from `rules.toml`. */
+/** One dispatcher rule, verbatim from its `infra/dispatcher/rules/` file. */
 export type DispatcherRule = Readonly<{
   name: string;
   on_event: string;

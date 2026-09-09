@@ -1,9 +1,9 @@
 //! Static cascade metadata for the dispatcher-rules visualization.
 //!
-//! `rules.toml` declares the reactive layer as `trigger event → rule →
+//! The rule registry declares the reactive layer as `trigger event → rule →
 //! handler(s)`. To render the full *cascade* — the feedback loops that
 //! make the state machine self-drive — the graph also needs two facts
-//! that aren't in `rules.toml`:
+//! that are not in the rule registry:
 //!
 //!   1. **What each handler causes to be emitted** downstream (by the
 //!      API it calls). A loop closes wherever an emitted kind matches
@@ -27,7 +27,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 /// Event kind(s) each handler causes to be emitted downstream, keyed by
-/// the handler's registered name (the `handler = "..."` in `rules.toml`).
+/// the handler's registered name (the `handler = "..."` in a rule file).
 /// An empty list is a pure sink (notifier / webhook — emits nothing).
 pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
     BTreeMap::from([
@@ -233,7 +233,7 @@ pub fn system_edges() -> Vec<SystemEdge> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::registry::parse_raw;
+    use crate::rules::registry::parse_raw_path;
 
     #[test]
     fn emits_and_system_edges_present() {
@@ -247,18 +247,17 @@ mod tests {
         assert!(!system_edges().is_empty());
     }
 
-    /// Drift guard: every handler the shipped `rules.toml` references must
+    /// Drift guard: every handler the shipped registry references must
     /// have a `handler_emits` entry, so the cascade graph never silently
-    /// drops a handler. Reads the real rules file via CARGO_MANIFEST_DIR so
-    /// it tracks the deployed registry, not a fixture.
+    /// drops a handler. Reads the real rule directory via CARGO_MANIFEST_DIR
+    /// so it tracks the deployed registry, not a fixture.
     #[test]
     fn cascade_handlers_match_rules() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../infra/dispatcher/rules.toml"
+            "/../../../infra/dispatcher/rules"
         );
-        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-        let raw = parse_raw(&src).expect("parse rules.toml");
+        let raw = parse_raw_path(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
         let emits = handler_emits();
         for rule in &raw.rules {
             for step in &rule.do_steps {

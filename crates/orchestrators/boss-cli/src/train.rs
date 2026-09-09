@@ -159,17 +159,23 @@ struct Config {
     /// measures ~10-20 min of image build + rollout, the failure this
     /// exists for measured six silent hours).
     converge_alarm_mins: i64,
-    /// Minutes a gate-run may sit GREEN with no ship-a-change car before
-    /// the conductor files a stranded-green alarm
-    /// (BOSS_TRAIN_STRANDED_ALARM_MINS, default 45). Auto-park fires on
-    /// the `step.done.gate-verdict` event — a green carrying a `--park-*`
-    /// intent becomes a car in seconds, not on a tick — so a green still
-    /// carless well past this window was gated WITHOUT a park intent and
-    /// is genuinely stranded, not mid-park. 45 min clears dispatcher lag
-    /// and a human's gate-then-`boss park` gap with margin, while still
-    /// catching the strand long before its base drifts and a blind rescue
-    /// reverts landed work (the decay `jobs.auto-park` was built to end).
+    /// Minutes a HAND-gated green (no `--park-*` intent) may sit with no
+    /// ship-a-change car before the conductor files a stranded-green
+    /// alarm (BOSS_TRAIN_STRANDED_ALARM_MINS, default 45). Elapsed time
+    /// is the only signal for a human's forgotten green: 45 min clears a
+    /// gate-then-`boss park` gap with margin while still catching the
+    /// strand long before its base drifts and a blind rescue reverts
+    /// landed work. Measured from the VERDICT, not from the gate's start
+    /// — see [`freshest_green`] for what that cost when it was not.
     stranded_alarm_mins: i64,
+    /// Minutes of grace for `jobs.auto-park` on a green that DID carry a
+    /// park intent (BOSS_TRAIN_AUTO_PARK_GRACE_MINS, default 10). The
+    /// handler fires on the `step.done.gate-verdict` event and files in
+    /// 0.6 SECONDS (measured 2026-09-09 over the 12 most recent
+    /// intent-carrying greens on the system of record), so this is not a
+    /// wait for the happy path — it is room for a dispatcher restart or
+    /// a redelivery before the alarm says the handler failed.
+    auto_park_grace_mins: i64,
     /// Release a red train's consist automatically once it has stalled
     /// (BOSS_TRAIN_AUTO_CANCEL, default ON — set to `0` to disable).
     /// On by default because the failure it prevents is a pipeline that
@@ -248,6 +254,9 @@ impl Config {
             stranded_alarm_mins: env_or("BOSS_TRAIN_STRANDED_ALARM_MINS", "45")
                 .parse()
                 .unwrap_or(45),
+            auto_park_grace_mins: env_or("BOSS_TRAIN_AUTO_PARK_GRACE_MINS", "10")
+                .parse()
+                .unwrap_or(10),
             auto_cancel: std::env::var("BOSS_TRAIN_AUTO_CANCEL").as_deref() != Ok("0"),
             ci_host: std::env::var("BOSS_TRAIN_CI_HOST")
                 .ok()
@@ -1317,44 +1326,114 @@ pub(crate) fn verdict_to_bury(run: &Value, now: DateTime<Utc>) -> Option<(String
     Some((sha, verdict.to_string()))
 }
 
+/// Why a green with no car is worth an alarm — which decides both the
+/// window it is judged against and what the packet says failed
+/// (CLAUDE.md §Diagnosis: "a verdict must name what failed").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StrandCause {
+    /// The gate carried a `--park-*` intent, so `jobs.auto-park` owed
+    /// this green a car and recorded neither a car nor a `park_skipped`
+    /// decision. The handler failed; the operator does not need to wait
+    /// out a threshold to be told so.
+    AutoParkFailed,
+    /// A human gated without a park intent and never parked it. Nothing
+    /// is broken — it is forgotten — so it is judged on elapsed time.
+    NeverParked,
+}
+
+impl StrandCause {
+    fn from_intent(park_intent: bool) -> Self {
+        if park_intent {
+            Self::AutoParkFailed
+        } else {
+            Self::NeverParked
+        }
+    }
+}
+
 /// A stranded green worth an alarm: a gate-run that went GREEN, whose
-/// branch no car ever claimed, that has sat that way past the
-/// threshold, and that no open alarm already names.
+/// branch no car ever claimed, that has sat that way past the window
+/// its cause is judged on, and that no open alarm already names.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct StrandedGreen {
     pub branch: String,
     pub gate_run_id: String,
     pub age_mins: i64,
+    pub cause: StrandCause,
 }
 
-/// The (id, age-in-minutes) of the FRESHEST green gate-run for a
-/// branch — the run whose age decides whether the branch just gated (a
-/// car is moments away, or already filed by `jobs.auto-park` on the
-/// green event) or has truly stranded. Age basis, in preference order:
-///   1. the green step's `metadata.completed_at`, when a stamp exists —
-///      the precise verdict instant;
-///   2. the run's `metadata.opened_at` — the run opened BEFORE it went
-///      green, so this over-states green-age, which only surfaces a
-///      strand sooner, never makes a fresh green read old.
-/// The gate runner records the verdict without a `completed_at`
-/// (infra/gate-runner/run.sh), so (2) is the usual path today; (1) is
-/// honoured for free if a future runner stamps one. No parseable stamp
-/// on ANY of the branch's runs → `None`, and the branch is left for a
-/// later pass rather than alarmed on a guessed age (the idiom
-/// `dead_gate_run_hours` uses: absence of a stamp is not evidence).
-fn freshest_green_age(
+/// The two windows this alarm runs on, and why there are two.
+///
+/// MEASURED 2026-09-09 against the system of record, over the 12 most
+/// recent green gate-runs that carried a park intent: 11 had their car
+/// filed 0.6 SECONDS after the verdict — `jobs.auto-park` fires on the
+/// `step.done.gate-verdict` event, so the green-to-parked path is
+/// sub-second, not minutes. A single 45-minute threshold was therefore
+/// not "the ordinary gap plus margin"; it was a wait for something that
+/// either happened instantly or was never going to happen.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StrandWindows {
+    /// For [`StrandCause::NeverParked`] — a human's forgotten green.
+    /// Elapsed time is the only signal there is, so this stays a
+    /// threshold, now measured from the VERDICT rather than from the
+    /// gate's start (see [`freshest_green`]).
+    pub never_parked_mins: i64,
+    /// For [`StrandCause::AutoParkFailed`] — grace for the handler,
+    /// not a wait for the happy path: sized to cover a dispatcher
+    /// restart or a redelivery, ~1000x the measured 0.6s latency.
+    pub auto_park_grace_mins: i64,
+}
+
+impl StrandWindows {
+    fn for_cause(&self, cause: StrandCause) -> i64 {
+        match cause {
+            StrandCause::AutoParkFailed => self.auto_park_grace_mins,
+            StrandCause::NeverParked => self.never_parked_mins,
+        }
+    }
+}
+
+/// The FRESHEST green gate-run for a branch: its id, how long ago it
+/// went green, and whether it carried a park intent.
+///
+/// AGE BASIS, in preference order — every one of them dates the
+/// VERDICT, never the gate's start:
+///   1. the verdict step's own `completed_at` column, which the jobs
+///      API stamps on every completion (`automation:gate-runner`);
+///   2. the same key inside the step's `metadata`, honoured for free in
+///      case a runner ever writes one there;
+///   3. the run's `metadata.closed_at` — the outcome rule closes the
+///      packet ~0.2s after the verdict lands.
+///
+/// `opened_at` IS NOT A BASIS, and using it is the defect this
+/// replaces. A gate-run opens BEFORE it goes green, so dating the green
+/// from the open over-states its age by the whole gate duration —
+/// measured 2026-09-09 over the 21 most recent green runs: median 18.9
+/// min, max 26.1 min, and a run that waits for a concurrency slot
+/// (`queued_at`) can be much longer. Against a 45-minute threshold that
+/// left an effective post-green window of 45 − duration, sometimes
+/// ZERO: the alarm could fire on a green the instant the verdict landed,
+/// ahead of the auto-park handler it was supposedly waiting for. Four
+/// false STRANDED GREEN packets on 2026-09-09 (e60398dc) are what that
+/// looks like from the queue.
+///
+/// No dateable green on ANY of the branch's runs → `None`, and the
+/// branch is left for a later pass rather than alarmed on a guessed age
+/// (the `dead_gate_run_hours` idiom: absence of a stamp is not
+/// evidence).
+fn freshest_green(
     gate_runs: &[Value],
     branch: &str,
     now: DateTime<Utc>,
-) -> Option<(String, i64)> {
-    let mut best: Option<(String, DateTime<Utc>)> = None;
+) -> Option<(String, i64, bool)> {
+    let mut best: Option<(String, DateTime<Utc>, bool)> = None;
     for g in gate_runs {
         let md = metadata_map(g);
         if md.get("branch").and_then(Value::as_str) != Some(branch) {
             continue;
         }
-        // The same green flag census keys "stranded" on: any step whose
-        // metadata.verdict is green.
+        // The same green flag the shared definition keys on: any step
+        // whose metadata.verdict is green.
         let green_step = g
             .get("steps")
             .and_then(Value::as_array)
@@ -1364,16 +1443,21 @@ fn freshest_green_age(
                 s.get("metadata")
                     .and_then(|m| m.get("verdict"))
                     .and_then(Value::as_str)
-                    == Some("green")
+                    == Some(boss_jobs::stranded::VERDICT_GREEN)
             });
         let Some(green_step) = green_step else {
             continue;
         };
         let Some(at) = green_step
-            .get("metadata")
-            .and_then(|m| m.get("completed_at"))
+            .get("completed_at")
             .and_then(Value::as_str)
-            .or_else(|| md.get("opened_at").and_then(Value::as_str))
+            .or_else(|| {
+                green_step
+                    .get("metadata")
+                    .and_then(|m| m.get("completed_at"))
+                    .and_then(Value::as_str)
+            })
+            .or_else(|| md.get("closed_at").and_then(Value::as_str))
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
             .map(|t| t.with_timezone(&Utc))
         else {
@@ -1384,48 +1468,159 @@ fn freshest_green_age(
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        let intent = boss_jobs::stranded::park_intent(g.get("metadata").unwrap_or(&Value::Null));
         match &best {
-            Some((_, best_at)) if *best_at >= at => {}
-            _ => best = Some((id, at)),
+            Some((_, best_at, _)) if *best_at >= at => {}
+            _ => best = Some((id, at, intent)),
         }
     }
-    best.map(|(id, at)| (id, (now - at).num_minutes()))
+    best.map(|(id, at, intent)| (id, (now - at).num_minutes(), intent))
 }
 
-/// Which stranded greens are past the threshold AND not already
+/// Which stranded greens are past their window AND not already
 /// alarmed — the pure decision the reconcile alarm rides on. Detection
-/// (green + no car + not superseded + not held) is
-/// `census::stranded_gate_runs`, reused verbatim so there is ONE
-/// definition of "stranded" (CLAUDE.md §9a); this only layers the age
-/// gate (a just-gated green is not stranded yet) and the dedup
-/// (`already_alarmed` is the branches an open alarm already names, so a
-/// persisting strand is ONE packet, not one every ten minutes).
+/// (green + no car + no spent marker + not held) is
+/// `census::stranded_gate_runs`, which reads `boss_jobs::stranded`, the
+/// ONE definition the yard read-model uses too (CLAUDE.md §9a); this
+/// layers the cause-specific window (a just-gated green is not stranded
+/// yet; a green whose auto-park never ran is stranded almost at once)
+/// and the dedup (`already_alarmed` is the branches an open alarm
+/// already names, so a persisting strand is ONE packet, not one every
+/// ten minutes).
 pub(crate) fn stranded_greens_to_alarm(
     gate_runs: &[Value],
     car_branches: &BTreeSet<String>,
     already_alarmed: &BTreeSet<String>,
     now: DateTime<Utc>,
-    threshold_mins: i64,
+    windows: StrandWindows,
 ) -> Vec<StrandedGreen> {
     let mut out: Vec<StrandedGreen> = Vec::new();
     for branch in crate::census::stranded_gate_runs(gate_runs, car_branches) {
         if already_alarmed.contains(&branch) {
             continue;
         }
-        let Some((gate_run_id, age_mins)) = freshest_green_age(gate_runs, &branch, now) else {
+        let Some((gate_run_id, age_mins, park_intent)) = freshest_green(gate_runs, &branch, now)
+        else {
             continue;
         };
-        if age_mins < threshold_mins {
+        let cause = StrandCause::from_intent(park_intent);
+        if age_mins < windows.for_cause(cause) {
             continue;
         }
         out.push(StrandedGreen {
             branch,
             gate_run_id,
             age_mins,
+            cause,
         });
     }
     out.sort_by(|a, b| a.branch.cmp(&b.branch));
     out
+}
+
+/// The stamp this alarm leaves when IT closes one of its own packets,
+/// so a reader (and any future settled-suppression) can tell a machine
+/// clear from a human's answer. The silence sweep's `cleared_by`
+/// idiom, verbatim.
+pub(crate) const STRANDED_CLEARED_BY: &str = "conductor.stranded-green-alarm";
+
+/// Open alarms whose claim no longer holds: the branch parked, landed,
+/// was re-railed, was held, or was superseded, so it is no longer in
+/// `stranded_now`. Returns `(alarm id, branch)`.
+///
+/// THIS IS THE HALF THAT WAS MISSING. The alarm raised and nothing ever
+/// revisited the claim, so a branch that parked a minute later left a
+/// permanent false packet on the operator's queue — four of them on
+/// 2026-09-09, every one closed by hand (e60398dc). An alarm that
+/// cannot clear itself is a claim the system stops standing behind the
+/// instant it stops being true.
+pub(crate) fn stranded_alarms_to_clear(
+    open_alarms: &[Value],
+    stranded_now: &BTreeSet<String>,
+) -> Vec<(String, String)> {
+    open_alarms
+        .iter()
+        .filter_map(|j| {
+            let branch = j
+                .get("metadata")
+                .and_then(|m| m.get("stranded_branch"))
+                .and_then(Value::as_str)?;
+            if stranded_now.contains(branch) {
+                return None;
+            }
+            let id = j.get("id").and_then(Value::as_str)?;
+            Some((id.to_string(), branch.to_string()))
+        })
+        .collect()
+}
+
+/// WHY a strand ended, named from the same data the detection reads —
+/// so the clear says what happened rather than "no longer stranded".
+pub(crate) fn stranded_clear_reason(
+    gate_runs: &[Value],
+    car_branches: &BTreeSet<String>,
+    branch: &str,
+) -> String {
+    if car_branches.contains(branch) {
+        return format!("a ship-a-change car now carries `{branch}`");
+    }
+    let run = gate_runs.iter().find(|g| {
+        g.get("metadata")
+            .and_then(|m| m.get("branch"))
+            .and_then(Value::as_str)
+            == Some(branch)
+    });
+    let md = run.and_then(|g| g.get("metadata")).unwrap_or(&Value::Null);
+    if let Some(marker) = boss_jobs::stranded::spent_reason(md) {
+        return format!("its gate-run is marked `{marker}` — the green is spent, not waiting");
+    }
+    if let Some(reason) = boss_jobs::stranded::hold_reason(md) {
+        return format!("its gate-run is HELD on purpose: {reason}");
+    }
+    format!("no green gate-run for `{branch}` is unclaimed any more")
+}
+
+/// The measurement a STANDING alarm is refreshed with instead of being
+/// twinned — `PATCH /api/jobs/{id}/metadata` merges top-level keys, so
+/// this is exactly the fields that move between passes.
+pub(crate) fn stranded_refresh_patch(a: &StrandedGreen, now: DateTime<Utc>) -> Value {
+    json!({
+        "gate_run_id": a.gate_run_id,
+        "verdict_age_mins": a.age_mins,
+        "stranded_cause": cause_key(a.cause),
+        "last_measured_at": now.to_rfc3339(),
+    })
+}
+
+/// The triage completion that CLOSES a standing alarm when the branch
+/// stops being stranded. `disposition = "stale"` is the backlog-item
+/// terminal titled "Closed — the claim no longer holds", which is
+/// exactly the case. PUT on a step REPLACES top-level metadata, so the
+/// step's existing keys are carried through.
+pub(crate) fn stranded_clear_step_body(
+    existing: &Map<String, Value>,
+    branch: &str,
+    why: &str,
+) -> Value {
+    let mut metadata = existing.clone();
+    metadata.insert("disposition".into(), json!("stale"));
+    metadata.insert(
+        "evidence".into(),
+        json!(format!(
+            "The conductor re-measured `{branch}` and it is no longer a stranded green: \
+             {why}. The claim this alarm carried no longer holds; closed by machine, not \
+             by judgement. A branch that strands again files a new packet."
+        )),
+    );
+    metadata.insert("cleared_by".into(), json!(STRANDED_CLEARED_BY));
+    json!({"status": "completed", "metadata": metadata})
+}
+
+fn cause_key(cause: StrandCause) -> &'static str {
+    match cause {
+        StrandCause::AutoParkFailed => "auto-park-failed",
+        StrandCause::NeverParked => "never-parked",
+    }
 }
 
 /// The backlog-item an unrescued stranded green becomes. Mirrors
@@ -1436,21 +1631,43 @@ pub(crate) fn stranded_greens_to_alarm(
 /// re-alarm; the branch will not). Priority is `standard`, not
 /// `urgent`: a strand decays over days, not minutes, and an alarm that
 /// cries urgent over non-urgent things trains operators to ignore it
-/// (estate.alarm's own calibration lesson). Rescue guidance is the
-/// orient line verbatim: rebase onto current origin/main + re-gate,
-/// never rebuild blind.
+/// (estate.alarm's own calibration lesson). The packet NAMES ITS CAUSE:
+/// an auto-park that never filed is a broken actor, and a human's
+/// forgotten green is not, and they are not rescued the same way.
 pub(crate) fn stranded_alarm_body(
     a: &StrandedGreen,
-    threshold_mins: i64,
+    windows: StrandWindows,
     now: DateTime<Utc>,
 ) -> Value {
-    json!({
-        "kind": "backlog-item",
-        "status": "open",
-        "title": format!(
+    let window = windows.for_cause(a.cause);
+    let title = match a.cause {
+        StrandCause::AutoParkFailed => format!(
+            "STRANDED GREEN: {} gated green {}min ago and auto-park filed no car",
+            a.branch, a.age_mins
+        ),
+        StrandCause::NeverParked => format!(
             "STRANDED GREEN: {} gated green {}min ago, never parked",
             a.branch, a.age_mins
         ),
+    };
+    let cause_detail = match a.cause {
+        StrandCause::AutoParkFailed => format!(
+            "This green CARRIED a `--park-*` intent, so `jobs.auto-park` owed it a car and \
+             recorded neither a car nor a `park_skipped` decision within {window}min — \
+             measured 2026-09-09, the handler files in 0.6 SECONDS when it runs, so this is \
+             the handler having failed, not a slow happy path. Check the dispatcher: the \
+             rule on `step.done.gate-verdict`, and the handler's journal for this gate-run."
+        ),
+        StrandCause::NeverParked => format!(
+            "This green carried NO park intent — a hand gate that was never parked — and has \
+             sat that way for {}min (window {window}min).",
+            a.age_mins
+        ),
+    };
+    json!({
+        "kind": "backlog-item",
+        "status": "open",
+        "title": title,
         "subject": {"subject_kind": "custom", "id": "bosspipeline"},
         "owner_id": "emp-david",
         "priority": "standard",
@@ -1461,22 +1678,23 @@ pub(crate) fn stranded_alarm_body(
             "stranded_branch": a.branch,
             "gate_run_id": a.gate_run_id,
             "verdict_age_mins": a.age_mins,
+            "stranded_cause": cause_key(a.cause),
+            "last_measured_at": now.to_rfc3339(),
             "detail": format!(
-                "Gate-run {} for `{}` went GREEN {}min ago (threshold {}min) but no \
-                 ship-a-change car ever claimed the branch: it gated, was never parked, \
-                 so it never reached the dock and cannot board. `boss orient`/`census` \
-                 already DETECT this, but detection is passive — nothing filed it until \
-                 a human ran orient and read it. A stranded green DECAYS: gated \
-                 yesterday, unmergeable today, and a later blind rescue reverts landed \
-                 work (the decay jobs.auto-park was built to end, 2026-09-01). RESCUE = \
-                 rebase the branch onto current origin/main + re-gate (its base has \
-                 likely moved); never rebuild blind. If the change already landed via \
-                 another branch, close this stale. Filed by the conductor's reconcile — \
-                 the passive census cross-ref made active.",
+                "Gate-run {} for `{}` went GREEN {}min ago but no ship-a-change car ever \
+                 claimed the branch: it gated, was never parked, so it never reached the \
+                 dock and cannot board. {} A stranded green DECAYS: gated yesterday, \
+                 unmergeable today, and a later blind rescue reverts landed work (the decay \
+                 jobs.auto-park was built to end, 2026-09-01). RESCUE = rebase the branch \
+                 onto current origin/main + re-gate (its base has likely moved); never \
+                 rebuild blind. If the change already landed via another branch, close this \
+                 stale. The age is measured from the VERDICT, not from the gate's start. \
+                 This packet CLOSES ITSELF when the branch parks, lands, is held or is \
+                 re-railed — if it is still open, the claim still holds.",
                 id8(&a.gate_run_id),
                 a.branch,
                 a.age_mins,
-                threshold_mins
+                cause_detail,
             ),
         },
     })
@@ -5735,23 +5953,42 @@ impl Conductor {
         Ok(())
     }
 
-    /// File a best-effort backlog-item for each stranded green past the
-    /// threshold that no open alarm already names. Detection is
-    /// `census::stranded_gate_runs` (reused, §9a); the pure selection +
-    /// dedup is `stranded_greens_to_alarm`; this method is only the I/O
-    /// around it. Reads the same closed gate-runs + all cars orient
-    /// reads (a gate-run CLOSES on its verdict, so a `status=open` query
-    /// would miss every green). Returns `Err` on a read/write failure so
-    /// the caller can journal it — the caller wraps this non-fatally.
+    /// File a best-effort backlog-item for each stranded green past its
+    /// window that no open alarm already names, REFRESH the alarm of a
+    /// strand that persists, and CLOSE the alarm of a strand that ended.
+    /// Detection is `census::stranded_gate_runs` (which reads
+    /// `boss_jobs::stranded`, the one definition the yard uses, §9a);
+    /// the pure selection + dedup is `stranded_greens_to_alarm`; this
+    /// method is only the I/O around them. Reads the same closed
+    /// gate-runs orient reads (a gate-run CLOSES on its verdict, so a
+    /// `status=open` query would miss every green). Returns `Err` on a
+    /// read/write failure so the caller can journal it — the caller
+    /// wraps this non-fatally.
+    ///
+    /// THE CLEAR IS NOT OPTIONAL. Raising and never revisiting the
+    /// claim left four false STRANDED GREEN packets on the operator's
+    /// queue on 2026-09-09, closed by hand (e60398dc): each branch
+    /// parked, landed or was held within minutes of the alarm.
     async fn alarm_stranded_greens(&self, now: DateTime<Utc>) -> Result<()> {
         let gate_runs = rows(
             self.api(Method::GET, "/api/jobs?kind=gate-run&limit=60", None)
                 .await?,
         )?;
-        let cars = rows(
-            self.api(Method::GET, "/api/jobs?kind=ship-a-change&limit=800", None)
-                .await?,
-        )?;
+        // EVERY car, not one page: at 832 ship-a-change packets on
+        // 2026-09-09 the old `limit=800` was already truncated, and the
+        // rows it dropped were the OLDEST — so a landed branch whose car
+        // had aged off the page read as "no car" and alarmed
+        // (a-limit-is-not-a-filter). Open AND closed: a landing closes
+        // the car, and a closed car still answers "this branch has one".
+        let cars = list_all_pages(|offset| async move {
+            self.api(
+                Method::GET,
+                &format!("/api/jobs?kind=ship-a-change&limit={PAGE_LIMIT}&offset={offset}"),
+                None,
+            )
+            .await
+        })
+        .await?;
         let car_branches: BTreeSet<String> = cars
             .iter()
             .filter_map(|c| {
@@ -5795,13 +6032,12 @@ impl Conductor {
                     .map(str::to_string)
             })
             .collect();
-        let to_alarm = stranded_greens_to_alarm(
-            &gate_runs,
-            &car_branches,
-            &already_alarmed,
-            now,
-            self.cfg.stranded_alarm_mins,
-        );
+        let windows = StrandWindows {
+            never_parked_mins: self.cfg.stranded_alarm_mins,
+            auto_park_grace_mins: self.cfg.auto_park_grace_mins,
+        };
+        let to_alarm =
+            stranded_greens_to_alarm(&gate_runs, &car_branches, &already_alarmed, now, windows);
         for a in &to_alarm {
             log(format!(
                 "reconcile: stranded green {} — gated green {}min, no car, no open alarm; filing backlog-item",
@@ -5813,7 +6049,82 @@ impl Conductor {
             self.api(
                 Method::POST,
                 "/api/jobs",
-                Some(stranded_alarm_body(a, self.cfg.stranded_alarm_mins, now)),
+                Some(stranded_alarm_body(a, windows, now)),
+            )
+            .await?;
+        }
+        // A STANDING alarm is refreshed, never twinned: the strand is
+        // still true, and the packet should carry today's measurement
+        // rather than the age it was filed with (the silence sweep's
+        // idiom). `already_alarmed` kept these out of `to_alarm`.
+        let stranded_now: BTreeSet<String> =
+            crate::census::stranded_gate_runs(&gate_runs, &car_branches)
+                .into_iter()
+                .collect();
+        for j in &open_alarms {
+            let Some(branch) = j
+                .get("metadata")
+                .and_then(|m| m.get("stranded_branch"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            if !stranded_now.contains(branch) {
+                continue;
+            }
+            let (Some(id), Some((gate_run_id, age_mins, park_intent))) = (
+                j.get("id").and_then(Value::as_str),
+                freshest_green(&gate_runs, branch, now),
+            ) else {
+                continue;
+            };
+            if self.cfg.dry {
+                continue;
+            }
+            let measured = StrandedGreen {
+                branch: branch.to_string(),
+                gate_run_id,
+                age_mins,
+                cause: StrandCause::from_intent(park_intent),
+            };
+            self.api(
+                Method::PATCH,
+                &format!("/api/jobs/{id}/metadata"),
+                Some(stranded_refresh_patch(&measured, now)),
+            )
+            .await?;
+        }
+        // AND THE ALARM CLOSES ITSELF when the claim stops holding.
+        for (id, branch) in stranded_alarms_to_clear(&open_alarms, &stranded_now) {
+            let why = stranded_clear_reason(&gate_runs, &car_branches, &branch);
+            log(format!(
+                "reconcile: stranded-green alarm {} for {branch} no longer holds ({why}); closing it",
+                id8(&id)
+            ));
+            if self.cfg.dry {
+                continue;
+            }
+            let job = self
+                .api(Method::GET, &format!("/api/jobs/{id}"), None)
+                .await?;
+            let Some(job) = job else { continue };
+            let Some(step) = find_step(&job, "triage", "Measure the claim, choose a route") else {
+                // A packet with no triage step cannot close itself. Say
+                // so once rather than silently leaving a false alarm.
+                log(format!(
+                    "reconcile: stranded-green alarm {} has no triage step; left open",
+                    id8(&id)
+                ));
+                continue;
+            };
+            let Some(step_id) = step.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let existing = metadata_map(step);
+            self.api(
+                Method::PUT,
+                &format!("/api/jobs/{id}/steps/{step_id}"),
+                Some(stranded_clear_step_body(&existing, &branch, &why)),
             )
             .await?;
         }
@@ -9326,6 +9637,7 @@ mod tests {
                 ci_hours: 2,
                 converge_alarm_mins: 30,
                 stranded_alarm_mins: 45,
+                auto_park_grace_mins: 10,
                 auto_cancel: false,
                 ci_host: None,
                 dry: false,
@@ -11854,16 +12166,30 @@ mod burial_tests {
 
 #[cfg(test)]
 mod stranded_green_tests {
-    use super::{StrandedGreen, stranded_alarm_body, stranded_greens_to_alarm};
+    use super::{
+        StrandCause, StrandWindows, StrandedGreen, stranded_alarm_body, stranded_alarms_to_clear,
+        stranded_clear_reason, stranded_clear_step_body, stranded_greens_to_alarm,
+        stranded_refresh_patch,
+    };
     use chrono::{TimeZone, Utc};
-    use serde_json::json;
+    use serde_json::{Map, json};
     use std::collections::BTreeSet;
 
+    /// The windows the live conductor runs on: 45 min for a hand-gated
+    /// green, 10 min of grace for auto-park.
+    fn windows() -> StrandWindows {
+        StrandWindows {
+            never_parked_mins: 45,
+            auto_park_grace_mins: 10,
+        }
+    }
+
     /// A green gate-run for `branch`, opened `opened` (RFC3339), with an
-    /// optional `completed_at` stamp on the verdict step and optional
-    /// extra metadata (e.g. `superseded`). Mirrors a real gate-run: the
-    /// verdict lives on the `record-verdict` step, and the runner does
-    /// NOT stamp `completed_at`, so the default fixture omits it.
+    /// optional verdict-step `completed_at` and optional extra metadata
+    /// (e.g. `superseded`, `park_summary`). Mirrors a real gate-run: the
+    /// verdict lives on the `record-verdict` step, and `completed_at` is
+    /// the STEP'S OWN column, which the jobs API stamps on every
+    /// completion — the same place a live packet carries it.
     fn green_run(
         id: &str,
         branch: &str,
@@ -11877,54 +12203,135 @@ mod stranded_green_tests {
                 md[k] = v.clone();
             }
         }
-        let mut step_md = json!({"verdict": "green"});
+        let mut step = json!({
+            "title": "Record the gate verdict", "spec_slug": "record-verdict",
+            "status": "completed", "metadata": {"verdict": "green"}
+        });
         if let Some(c) = completed_at {
-            step_md["completed_at"] = json!(c);
+            step["completed_at"] = json!(c);
         }
         json!({
             "id": id, "kind": "gate-run", "status": "closed", "metadata": md,
-            "steps": [{"title": "Record the gate verdict", "spec_slug": "record-verdict",
-                       "status": "completed", "metadata": step_md}]
+            "steps": [step]
         })
+    }
+
+    /// The same run with a `--park-*` intent stamped: the shape
+    /// `boss gate --park-summary …` leaves, and the flag
+    /// `jobs.auto-park` keys on.
+    fn green_run_with_intent(
+        id: &str,
+        branch: &str,
+        opened: &str,
+        completed_at: Option<&str>,
+    ) -> serde_json::Value {
+        green_run(
+            id,
+            branch,
+            opened,
+            completed_at,
+            json!({"park_summary": "does the thing"}),
+        )
     }
 
     fn branches(v: &[&str]) -> BTreeSet<String> {
         v.iter().map(|s| s.to_string()).collect()
     }
 
-    /// The reason this alarm exists: a green with no car, aged past the
-    /// threshold, no open alarm — it must be selected, carrying its
-    /// branch, gate-run id and verdict age.
+    /// The reason this alarm exists: a hand-gated green with no car,
+    /// aged past its window, no open alarm — selected, carrying its
+    /// branch, gate-run id, verdict age and CAUSE.
     #[test]
     fn a_stranded_green_past_threshold_is_selected() {
         let now = Utc.with_ymd_and_hms(2026, 9, 7, 12, 0, 0).unwrap();
-        // Opened 90 min before now, no completed_at stamp → age is read
-        // off opened_at (the runner records no completed_at).
+        // Went green 90 min ago.
         let runs = [green_run(
             "gr-1",
             "fix/stranded",
-            "2026-09-07T10:30:00Z",
-            None,
+            "2026-09-07T10:00:00Z",
+            Some("2026-09-07T10:30:00Z"),
             json!({}),
         )];
-        let got = stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, 45);
+        let got = stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, windows());
         assert_eq!(
             got,
             vec![StrandedGreen {
                 branch: "fix/stranded".into(),
                 gate_run_id: "gr-1".into(),
                 age_mins: 90,
+                cause: StrandCause::NeverParked,
             }]
         );
     }
 
-    /// A just-gated green is NOT stranded yet — its car is moments away
-    /// (jobs.auto-park files it on the green event), so a green inside
-    /// the threshold window must never alarm.
+    /// THE FALSE-ALARM REGRESSION (e60398dc). The age was read off the
+    /// gate-run's `opened_at` — when the GATE STARTED — so a gate that
+    /// ran 30 minutes and went green 1 minute ago read as 31 minutes
+    /// stranded, and a slower one crossed the threshold before auto-park
+    /// could possibly have filed. Measured 2026-09-09: green gates run a
+    /// median 18.9 min. Age is now dated from the VERDICT, so a green
+    /// that just landed is fresh no matter how long its gate took.
+    #[test]
+    fn a_long_gate_that_just_went_green_is_not_stranded() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 7, 12, 0, 0).unwrap();
+        let runs = [green_run(
+            "gr-slow",
+            "fix/slow-gate",
+            // Opened 3h ago — under the old opened_at basis this alarms
+            // instantly; the verdict landed 1 minute ago.
+            "2026-09-07T09:00:00Z",
+            Some("2026-09-07T11:59:00Z"),
+            json!({}),
+        )];
+        assert!(
+            stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, windows())
+                .is_empty(),
+            "a green one minute old is not stranded, however long its gate ran"
+        );
+    }
+
+    /// A green with NO dateable verdict is left for a later pass rather
+    /// than alarmed on the gate's start time: absence of a stamp is not
+    /// evidence.
+    #[test]
+    fn a_green_with_no_verdict_stamp_is_left_alone() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 7, 12, 0, 0).unwrap();
+        let runs = [green_run(
+            "gr-nostamp",
+            "fix/nostamp",
+            "2026-09-07T06:00:00Z",
+            None,
+            json!({}),
+        )];
+        assert!(
+            stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, windows())
+                .is_empty()
+        );
+    }
+
+    /// The run's own `closed_at` dates the verdict when a step stamp is
+    /// missing — the outcome rule closes the packet a fraction of a
+    /// second after the verdict lands.
+    #[test]
+    fn closed_at_dates_the_verdict_when_the_step_has_no_stamp() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 7, 12, 0, 0).unwrap();
+        let runs = [green_run(
+            "gr-closed",
+            "fix/closed",
+            "2026-09-07T06:00:00Z",
+            None,
+            json!({"closed_at": "2026-09-07T10:00:00Z"}),
+        )];
+        let got = stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, windows());
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].age_mins, 120);
+    }
+
+    /// A just-gated green is NOT stranded — its car is moments away
+    /// (jobs.auto-park files it on the green event).
     #[test]
     fn a_fresh_green_inside_the_window_is_not_selected() {
         let now = Utc.with_ymd_and_hms(2026, 9, 7, 12, 0, 0).unwrap();
-        // Went green 10 min ago (via completed_at) — well inside 45.
         let runs = [green_run(
             "gr-2",
             "fix/fresh",
@@ -11933,32 +12340,72 @@ mod stranded_green_tests {
             json!({}),
         )];
         assert!(
-            stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, 45).is_empty()
+            stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, windows())
+                .is_empty()
         );
     }
 
-    /// The precise verdict instant wins when the runner stamped one: a
-    /// run OPENED long ago but that went green recently is fresh, not
-    /// stranded — completed_at overrides the opened_at fallback.
+    /// A green that CARRIED a park intent is judged on the auto-park
+    /// grace, not the 45-minute human window: the handler files in 0.6
+    /// SECONDS (measured 2026-09-09), so 20 minutes with no car is the
+    /// handler having failed, and the packet says so.
     #[test]
-    fn completed_at_beats_opened_at_for_age() {
+    fn an_intent_carrying_green_alarms_on_the_grace_and_names_auto_park() {
         let now = Utc.with_ymd_and_hms(2026, 9, 7, 12, 0, 0).unwrap();
-        // Opened 3h ago (a long gate) but went green 5 min ago.
-        let runs = [green_run(
-            "gr-3",
-            "fix/slow-gate",
-            "2026-09-07T09:00:00Z",
+        let runs = [green_run_with_intent(
+            "gr-intent",
+            "fix/auto",
+            "2026-09-07T11:20:00Z",
+            Some("2026-09-07T11:40:00Z"),
+        )];
+        let got = stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, windows());
+        assert_eq!(got.len(), 1, "20 min with no car is past the 10-min grace");
+        assert_eq!(got[0].cause, StrandCause::AutoParkFailed);
+        let body = stranded_alarm_body(&got[0], windows(), now);
+        assert_eq!(body["metadata"]["stranded_cause"], "auto-park-failed");
+        let title = body["title"].as_str().unwrap();
+        assert!(title.contains("auto-park"), "the title names it: {title}");
+    }
+
+    /// Inside the grace, an intent-carrying green is not alarmed: a
+    /// dispatcher restart or one redelivery must not read as a failure.
+    #[test]
+    fn an_intent_carrying_green_inside_the_grace_is_not_selected() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 7, 12, 0, 0).unwrap();
+        let runs = [green_run_with_intent(
+            "gr-intent-fresh",
+            "fix/auto",
+            "2026-09-07T11:20:00Z",
             Some("2026-09-07T11:55:00Z"),
+        )];
+        assert!(
+            stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, windows())
+                .is_empty()
+        );
+    }
+
+    /// The other side of the same split: a HAND-gated green 20 minutes
+    /// old is not alarmed — nothing is broken, and a human's
+    /// gate-then-park gap is not a defect.
+    #[test]
+    fn a_hand_gated_green_gets_the_longer_window() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 7, 12, 0, 0).unwrap();
+        let runs = [green_run(
+            "gr-hand",
+            "fix/hand",
+            "2026-09-07T11:20:00Z",
+            Some("2026-09-07T11:40:00Z"),
             json!({}),
         )];
         assert!(
-            stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, 45).is_empty(),
-            "a run that went green 5 min ago is fresh even though it opened 3h ago"
+            stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, windows())
+                .is_empty()
         );
     }
 
-    /// A green whose branch became a car is not stranded (census
-    /// filters it) — proves the reuse of census::stranded_gate_runs.
+    /// A green whose branch became a car is not stranded (the shared
+    /// definition filters it) — proves the reuse of
+    /// `census::stranded_gate_runs`.
     #[test]
     fn a_green_with_a_car_is_not_selected() {
         let now = Utc.with_ymd_and_hms(2026, 9, 7, 12, 0, 0).unwrap();
@@ -11966,11 +12413,36 @@ mod stranded_green_tests {
             "gr-4",
             "fix/parked",
             "2026-09-07T10:00:00Z",
-            None,
+            Some("2026-09-07T10:10:00Z"),
             json!({}),
         )];
         assert!(
-            stranded_greens_to_alarm(&runs, &branches(&["fix/parked"]), &branches(&[]), now, 45)
+            stranded_greens_to_alarm(
+                &runs,
+                &branches(&["fix/parked"]),
+                &branches(&[]),
+                now,
+                windows()
+            )
+            .is_empty()
+        );
+    }
+
+    /// A green `jobs.auto-park` deliberately SKIPPED — the branch had
+    /// landed, or its car was already aboard a train — is a recorded
+    /// decision, not a strand. It never alarms.
+    #[test]
+    fn an_auto_park_skipped_green_is_not_selected() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 7, 12, 0, 0).unwrap();
+        let runs = [green_run(
+            "gr-skipped",
+            "fix/landed",
+            "2026-09-07T09:00:00Z",
+            Some("2026-09-07T09:10:00Z"),
+            json!({"park_summary": "does the thing", "park_skipped": "landed"}),
+        )];
+        assert!(
+            stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, windows())
                 .is_empty()
         );
     }
@@ -11984,18 +12456,22 @@ mod stranded_green_tests {
             "gr-5",
             "fix/stranded",
             "2026-09-07T10:00:00Z",
-            None,
+            Some("2026-09-07T10:10:00Z"),
             json!({}),
         )];
-        // Same branch, no alarm yet → selected.
         assert_eq!(
-            stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, 45).len(),
+            stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, windows()).len(),
             1
         );
-        // Now an open alarm names it → skipped.
         assert!(
-            stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&["fix/stranded"]), now, 45)
-                .is_empty()
+            stranded_greens_to_alarm(
+                &runs,
+                &branches(&[]),
+                &branches(&["fix/stranded"]),
+                now,
+                windows()
+            )
+            .is_empty()
         );
     }
 
@@ -12004,15 +12480,12 @@ mod stranded_green_tests {
     /// backlog-items; a bare `limit=200` read that treats the truncated
     /// page as the whole set misses it and re-files every pass (the
     /// notification flood). Building the dedup set through
-    /// `list_all_pages` — as `alarm_stranded_greens` now does — gathers
-    /// the alarm on page three, so the strand is deduped. The truncated
-    /// half is the defect the fix removes.
+    /// `list_all_pages` — as `alarm_stranded_greens` does — gathers the
+    /// alarm on page three, so the strand is deduped.
     #[tokio::test]
     async fn a_dedup_alarm_beyond_the_first_page_still_dedups() {
         use super::{PAGE_LIMIT, list_all_pages};
         let now = Utc.with_ymd_and_hms(2026, 9, 7, 12, 0, 0).unwrap();
-        // 250 open backlog-items; the one naming our strand sits at row
-        // 220 — page three, beyond the old 200-row cap.
         let mut open: Vec<serde_json::Value> = (0..250)
             .map(|i| {
                 json!({"id": format!("bi-{i}"),
@@ -12047,15 +12520,14 @@ mod stranded_green_tests {
             "gr-trunc",
             "fix/stranded",
             "2026-09-07T10:00:00Z",
-            None,
+            Some("2026-09-07T10:10:00Z"),
             json!({}),
         )];
         assert!(
-            stranded_greens_to_alarm(&runs, &branches(&[]), &already_alarmed, now, 45).is_empty(),
+            stranded_greens_to_alarm(&runs, &branches(&[]), &already_alarmed, now, windows())
+                .is_empty(),
             "the strand's alarm sits on page three; the paginated read must find it and dedup"
         );
-        // The proof it was the pagination: a first-page-only view (the
-        // old truncated cap) MISSES the alarm and re-files.
         let truncated: BTreeSet<String> = open
             .iter()
             .take(200)
@@ -12067,15 +12539,15 @@ mod stranded_green_tests {
             })
             .collect();
         assert_eq!(
-            stranded_greens_to_alarm(&runs, &branches(&[]), &truncated, now, 45).len(),
+            stranded_greens_to_alarm(&runs, &branches(&[]), &truncated, now, windows()).len(),
             1,
             "a truncated 200-row read misses the alarm and re-files — the defect this fixes"
         );
     }
 
-    /// A superseded green is dead, not waiting — census excludes it, so
-    /// it never alarms (rescue guidance pointing at a deleted branch is
-    /// worse than none).
+    /// A superseded green is dead, not waiting — it never alarms
+    /// (rescue guidance pointing at a deleted branch is worse than
+    /// none).
     #[test]
     fn a_superseded_green_is_not_selected() {
         let now = Utc.with_ymd_and_hms(2026, 9, 7, 12, 0, 0).unwrap();
@@ -12083,31 +12555,46 @@ mod stranded_green_tests {
             "gr-6",
             "fix/superseded",
             "2026-09-07T10:00:00Z",
-            None,
+            Some("2026-09-07T10:10:00Z"),
             json!({"superseded": "by hand"}),
         )];
         assert!(
-            stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, 45).is_empty()
+            stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, windows())
+                .is_empty()
         );
     }
 
-    /// A held green is deliberately waiting — census excludes it, so it
-    /// never alarms; the unheld green beside it, past threshold, still
-    /// does.
+    /// A HELD green is deliberately waiting, and a RE-RAILED one is
+    /// spent — neither alarms; the unheld green beside them still does.
+    /// This is the drift that filed four false packets on 2026-09-09:
+    /// the yard excluded both and the alarm did not.
     #[test]
-    fn a_held_green_is_not_selected() {
+    fn a_held_or_rerailed_green_is_not_selected() {
         let now = Utc.with_ymd_and_hms(2026, 9, 7, 12, 0, 0).unwrap();
         let runs = [
             green_run(
                 "gr-7",
                 "fix/held",
                 "2026-09-07T10:00:00Z",
-                None,
+                Some("2026-09-07T10:10:00Z"),
                 json!({"hold": "lands at the next restart"}),
             ),
-            green_run("gr-8", "fix/free", "2026-09-07T10:00:00Z", None, json!({})),
+            green_run(
+                "gr-9",
+                "fix/old",
+                "2026-09-07T10:00:00Z",
+                Some("2026-09-07T10:10:00Z"),
+                json!({"rerailed_to": "fix/old-rerail"}),
+            ),
+            green_run(
+                "gr-8",
+                "fix/free",
+                "2026-09-07T10:00:00Z",
+                Some("2026-09-07T10:10:00Z"),
+                json!({}),
+            ),
         ];
-        let out = stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, 45);
+        let out = stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, windows());
         assert_eq!(
             out.iter().map(|s| s.branch.as_str()).collect::<Vec<_>>(),
             vec!["fix/free"]
@@ -12137,7 +12624,8 @@ mod stranded_green_tests {
             ),
         ];
         assert!(
-            stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, 45).is_empty(),
+            stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, windows())
+                .is_empty(),
             "the branch was re-gated 10 min ago — fresh, not stranded"
         );
     }
@@ -12152,8 +12640,9 @@ mod stranded_green_tests {
             branch: "fix/stranded".into(),
             gate_run_id: "gr-1".into(),
             age_mins: 90,
+            cause: StrandCause::NeverParked,
         };
-        let b = stranded_alarm_body(&a, 45, now);
+        let b = stranded_alarm_body(&a, windows(), now);
         assert_eq!(b["kind"], "backlog-item");
         assert_eq!(b["status"], "open");
         assert_eq!(b["priority"], "standard");
@@ -12161,6 +12650,7 @@ mod stranded_green_tests {
         assert_eq!(b["metadata"]["stranded_branch"], "fix/stranded");
         assert_eq!(b["metadata"]["gate_run_id"], "gr-1");
         assert_eq!(b["metadata"]["verdict_age_mins"], 90);
+        assert_eq!(b["metadata"]["stranded_cause"], "never-parked");
         let title = b["title"].as_str().unwrap();
         assert!(
             title.contains("fix/stranded"),
@@ -12170,6 +12660,103 @@ mod stranded_green_tests {
         assert!(
             detail.contains("rebase") && detail.contains("re-gate"),
             "detail carries the orient rescue guidance: {detail}"
+        );
+    }
+
+    /// THE HALF THAT WAS MISSING (e60398dc). An alarm whose branch
+    /// stopped being stranded — it parked, landed, was held or was
+    /// re-railed — is closed by the conductor itself. The alarm for a
+    /// strand that still holds is left alone.
+    #[test]
+    fn an_alarm_whose_strand_ended_is_cleared_and_a_live_one_is_not() {
+        let open = [
+            json!({"id": "bi-gone", "metadata": {"stranded_branch": "fix/parked-since"}}),
+            json!({"id": "bi-live", "metadata": {"stranded_branch": "fix/still-stranded"}}),
+            // Not one of ours: no dedup key, so not this alarm's packet.
+            json!({"id": "bi-other", "metadata": {"area": "pipeline"}}),
+        ];
+        let got = stranded_alarms_to_clear(&open, &branches(&["fix/still-stranded"]));
+        assert_eq!(
+            got,
+            vec![("bi-gone".to_string(), "fix/parked-since".to_string())]
+        );
+    }
+
+    /// The clear NAMES WHAT CHANGED rather than saying "no longer
+    /// stranded" — a car now carries it, a marker spent it, or an
+    /// operator held it.
+    #[test]
+    fn the_clear_names_what_ended_the_strand() {
+        let runs = [
+            green_run(
+                "gr-a",
+                "fix/held",
+                "2026-09-07T10:00:00Z",
+                Some("2026-09-07T10:10:00Z"),
+                json!({"hold": "lands at the next restart"}),
+            ),
+            green_run(
+                "gr-b",
+                "fix/rerailed",
+                "2026-09-07T10:00:00Z",
+                Some("2026-09-07T10:10:00Z"),
+                json!({"rerailed_to": "fix/rerailed-rerail"}),
+            ),
+        ];
+        let cars = branches(&["fix/parked"]);
+        assert!(stranded_clear_reason(&runs, &cars, "fix/parked").contains("car now carries"));
+        assert!(stranded_clear_reason(&runs, &cars, "fix/rerailed").contains("rerailed_to"));
+        assert!(stranded_clear_reason(&runs, &cars, "fix/held").contains("HELD"));
+    }
+
+    /// The clear completes the triage step as `stale` — the
+    /// backlog-item terminal titled "Closed — the claim no longer
+    /// holds" — carries the step's existing keys through the PUT, and
+    /// STAMPS ITSELF, so a machine clear is distinguishable from a
+    /// human's answer and can never be read as one.
+    #[test]
+    fn the_clear_step_body_closes_stale_and_stamps_itself() {
+        let mut existing = Map::new();
+        existing.insert("authority_role".into(), json!("platform-admin"));
+        let body = stranded_clear_step_body(&existing, "fix/parked", "a car now carries it");
+        assert_eq!(body["status"], "completed");
+        assert_eq!(body["metadata"]["disposition"], "stale");
+        assert_eq!(body["metadata"]["authority_role"], "platform-admin");
+        assert_eq!(
+            body["metadata"]["cleared_by"],
+            json!(super::STRANDED_CLEARED_BY)
+        );
+        let evidence = body["metadata"]["evidence"].as_str().unwrap();
+        assert!(
+            evidence.contains("fix/parked") && evidence.contains("a car now carries it"),
+            "the evidence names the branch and what changed: {evidence}"
+        );
+    }
+
+    /// A STANDING alarm is refreshed with today's measurement rather
+    /// than twinned — the metadata PATCH merges top-level keys.
+    #[test]
+    fn a_standing_alarm_is_refreshed_with_the_fresh_measurement() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 7, 12, 0, 0).unwrap();
+        let a = StrandedGreen {
+            branch: "fix/stranded".into(),
+            gate_run_id: "gr-2".into(),
+            age_mins: 300,
+            cause: StrandCause::AutoParkFailed,
+        };
+        let patch = stranded_refresh_patch(&a, now);
+        assert_eq!(patch["verdict_age_mins"], 300);
+        assert_eq!(patch["gate_run_id"], "gr-2");
+        assert_eq!(patch["stranded_cause"], "auto-park-failed");
+        assert!(
+            patch["last_measured_at"]
+                .as_str()
+                .unwrap()
+                .starts_with("2026-09-07")
+        );
+        assert!(
+            patch.get("stranded_branch").is_none(),
+            "the dedup key never moves — a refresh must not repoint the packet"
         );
     }
 }

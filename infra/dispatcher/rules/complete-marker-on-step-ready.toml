@@ -1,0 +1,28 @@
+# ---------------------------------------------------------------------------
+# Marker auto-completion (the SYSTEM half of work routing)
+# ---------------------------------------------------------------------------
+# Zero-duration, no-role structural markers — `trigger` (a periodic/event
+# signal), `outcome` (a terminal fork result), `milestone` (a checkpoint) —
+# are state the machine reaches on its own, not work an executor performs.
+# When one goes Ready the system completes it immediately so the downstream
+# `ready_when` predicates re-evaluate without waiting on a human/agent. The
+# `jobs.complete_step` handler classifies markers from the StepType registry
+# (no `required_roles` AND zero `typical_duration_hours`), so it no-ops for
+# role-bearing steps and for `task` (no role, but real HR/IT/admin work).
+# It rides the SAME `step.ready.*` subscription as the notifier below
+# rather than declaring per-kind topics (`step.ready.trigger`, ...) that
+# would overlap `step.ready.*` and make NATS deliver — and complete — every
+# marker event twice.
+[[rule]]
+name = "complete-marker-on-step-ready"
+why = """
+The SYSTEM half of work routing, and not expressible as a protocol
+consequence: a zero-duration, no-role marker is state the machine
+REACHES, not work an executor performs, so something outside the
+packet must complete it the instant it goes ready. A Workflow
+definition cannot complete its own step. The handler classifies
+markers from the StepType registry, so new marker kinds need no rule.
+"""
+on_event = "step.ready.*"
+[[rule.do]]
+handler = "jobs.complete_step"

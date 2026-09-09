@@ -56,6 +56,7 @@
     journeyText,
     lastVerbReading,
     phaseLabel,
+    queueLabel,
     type TrainStatus,
     type YardStatus,
   } from './yard-status';
@@ -114,6 +115,13 @@
   const gatesInUse = $derived(statusData?.gates.active.length ?? 0);
   const gatesFree = $derived(Math.max(gateCapacity - gatesInUse, 0));
   const waitingToGate = $derived(yard ? yard.approach.filter(a => a.state === 'publishing').length : 0);
+  // The QUEUE: runs that asked for a bay and were given a place in line
+  // (db7f7b73). Distinct from `waitingToGate`, which counts branches still
+  // publishing — these have already asked to gate and are waiting on
+  // bandwidth, which is what makes three busy bays read as a queue rather
+  // than as absence.
+  const gateQueue = $derived(statusData?.gates.queued ?? []);
+  const queueTypical = $derived(statusData?.gates.typical_seconds ?? null);
 
   // THE TWO OUTSIDE READS. The converge ops-requests (null before the
   // first read, or when the read failed — the shed then says "no
@@ -659,7 +667,7 @@
             <div class="yard-empty">No such bay on this server's policy.</div>
           {:else if !b.busy}
             <div class="yard-entity-title">available</div>
-            <div class="yard-entity-sub">{gatesInUse} / {gateCapacity} in use · {gatesFree} free{waitingToGate > 0 ? ` · ${waitingToGate} waiting to gate` : ''}</div>
+            <div class="yard-entity-sub">{gatesInUse} / {gateCapacity} in use · {gatesFree} free{gateQueue.length > 0 ? ` · ${gateQueue.length} queued for a bay` : ''}{waitingToGate > 0 ? ` · ${waitingToGate} waiting to gate` : ''}</div>
           {:else}
             <div class="yard-entity-title">{b.branch}</div>
             <div class="yard-entity-sub yard-mono">packet {b.packetId?.slice(0, 8) ?? '—'}</div>
@@ -762,7 +770,7 @@
                car); each row opens its own packet. -->
           <div class="yard-entity-title">{floor.machines.approach.label}</div>
           <div class="yard-entity-sub">
-            gates {gatesInUse} / {gateCapacity} in use · {gatesFree} free{waitingToGate > 0 ? ` · ${waitingToGate} waiting to gate` : ''}
+            gates {gatesInUse} / {gateCapacity} in use · {gatesFree} free{gateQueue.length > 0 ? ` · ${gateQueue.length} queued for a bay` : ''}{waitingToGate > 0 ? ` · ${waitingToGate} waiting to gate` : ''}
           </div>
           {#if yard.approach.length > 0}
             <table class="yard-board">
@@ -810,6 +818,31 @@
                 <li class="yard-garage-row">
                   <span class="yard-held-branch">{h.branch}</span>
                   <span class="yard-stamp" title={`gated ${h.since} — held, not parked`}>held — {h.reason}</span>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        {:else if sel.kind === 'gate-queue'}
+          <h2 class="yard-panel-h">Entity · gate queue</h2>
+          <!-- The line waiting for a bay. `boss gate --wait` takes a place
+               in line when every bay is busy rather than refusing, and a
+               queued run holds no bay — so without this lane the floor
+               showed nothing at all for it, and a queued gate looked
+               exactly like one that never launched. Neutral: a queue is
+               the pipeline working to its bound, not an alarm. -->
+          <div class="yard-entity-title">{floor.machines.queue.label}</div>
+          <div class="yard-entity-sub">
+            {gatesInUse} / {gateCapacity} bays in use{queueTypical !== null ? ` · a gate here measures ~${journeyText(queueTypical)}` : ' · no gate measured yet — the waits below are unknown, not zero'}
+          </div>
+          {#if gateQueue.length === 0}
+            <div class="yard-empty">Nothing is waiting for a bay.</div>
+          {:else}
+            <ul class="yard-garage">
+              {#each gateQueue as q (q.packet_id)}
+                <li class="yard-garage-row">
+                  <span class="yard-held-branch">{q.branch}</span>
+                  <span class="yard-garage-check">{queueLabel(q)}</span>
+                  <button type="button" class="yard-verb-link" onclick={() => openPacket(q.packet_id)}>open gate packet</button>
                 </li>
               {/each}
             </ul>

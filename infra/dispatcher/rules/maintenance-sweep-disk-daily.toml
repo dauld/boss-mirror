@@ -1,0 +1,39 @@
+# ---------------------------------------------------------------------
+# The maintenance protocol (migration 121). David, 2026-08-14: "We
+# probably need protocol around maintenance of the IT systems."
+#
+# These two are the dispatcher's SANCTIONED shape under its narrowed
+# charter — initiate on a schedule, and initiate on threshold. Neither
+# routes anything: routing belongs in the protocol row.
+# ---------------------------------------------------------------------
+
+# 1. ADMISSION, on the clock. The first clock-triggered rule in the
+# system — the schedule machinery existed and had never been used.
+# Daily per maintenance AREA; more areas are more rows, and intraday is
+# a `schedule` edit rather than a deploy. Starting with disk headroom,
+# which has already cost real time twice wearing two disguises on train
+# #22 (once as `ld terminated with signal 7 [Bus error]`, because the
+# linker mmaps its output and ENOSPC surfaces as a bus error, not as
+# "disk full") and put three machines at 100% on 2026-08-13.
+[[rule]]
+name = "maintenance-sweep-disk-daily"
+why = """
+A TIMER, the standing exemption: no packet causes "a day passed", so no
+Workflow definition can declare it — a sweep's whole point is to run
+when NO event fired. It adds no routing: one firing spawns one
+maintenance-sweep packet, and what happens next is that protocol's own
+row. The first clock-triggered rule in the system, and the
+shape of the maintenance protocol (migration 121; David,
+2026-08-14: "We probably need protocol around maintenance of the IT
+systems"). Disk headroom first because it had already cost real
+time twice wearing two disguises.
+"""
+version = 2
+schedule = { cadence = "daily", anchor_date = "2026-08-14" }
+# One outstanding packet per target (0517387b): yesterday's sweep
+# still open means today has nothing new to say - spawning a twin
+# duplicates the obligation, it does not discharge it.
+when = 'NOT open_job_exists("maintenance-sweep", "disk-headroom")'
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"disk-headroom\"", title = "\"Disk headroom sweep\"", "metadata.target" = "\"disk-headroom\"", "metadata.area" = "\"infra\"" }

@@ -1,0 +1,34 @@
+# A train arriving runs each boarded car's recorded probe (backlog
+# 28ac45ab). On a pr-train closing `arrived` — converged AND ci, the
+# first moment every car aboard is both merged and rolled — the
+# jobs.run-car-probes handler files one ops-request per car that
+# recorded a `proof_probe` at park time (host=forge, verb=run-car-probe,
+# args=[car]); the root ops-runner runs infra/forge/run-car-probe.sh,
+# which runs the probe as david and completes `proven` with `boss
+# prove`'s proof record, or stamps `proof_attempt` and leaves `proven`
+# ready. Routed on the closed marker's always-present `kind`/`outcome`
+# (outcome null on a catch-all close reads false, never PredicateFailed).
+# A cross-protocol reactor (pr-train -> ship-a-change -> ops-request ->
+# a verb on the forge host), which no single Workflow `on` consequence
+# can express. Cars without a probe — event-bound ones included — stay
+# hand-proven. Seeded by 202609082215-arrival-runs-the-probe.sql;
+# present here because dispatcher_rules_seed_matches_toml compares BOTH
+# directions.
+[[rule]]
+name = "run-car-probes-on-train-arrived"
+why = """
+A CROSS-PROTOCOL REACTOR spanning four protocols — pr-train ->
+ship-a-change -> ops-request -> a verb on the forge host — which no
+single Workflow `on` consequence can express. A train closing
+`arrived` is the first moment every car aboard is both merged and
+rolled, so it is when a car's recorded probe can honestly run. It adds
+no routing inside any protocol: ship-a-change still owns review ->
+proven -> merged, and this only files the packet that fills one step
+by machine (28ac45ab: 43 landed cars waited 2.5 days on hand-authored
+probes). (Ratchet history: 58 -> 59, 2026-09-08, migration
+202609082130.)
+"""
+on_event = "jobs.job.closed"
+when = 'kind = "pr-train" AND outcome = "arrived"'
+[[rule.do]]
+handler = "jobs.run-car-probes"

@@ -1,18 +1,27 @@
 //! Drift guard for the dispatcher-rules registry migration.
 //!
-//! `41-dispatcher.sql` seeds the `dispatcher_rules` table and is GENERATED
-//! from `infra/dispatcher/rules.toml` by `gen-seed.py`. rules.toml stays
+//! `41-dispatcher.sql` seeds the `dispatcher_rules` table; every rule
+//! added since gets its own `NNN-dispatcher-rule-*.sql`.
+//! `infra/dispatcher/rules/` — one file per rule, named for it — stays
 //! the human-authored source; the table is the runtime registry the
 //! dispatcher loads. This test loads the seeded table via the production
-//! path (`load_active_rules`) and asserts it matches `parse_raw(rules.toml)`
-//! — so editing one without regenerating the other fails CI.
+//! path (`load_active_rules`) and asserts it matches the directory — so
+//! editing one without the other fails CI, in BOTH directions.
 //!
 //! Postgres-only: TestDb applies the full schema (incl 41-dispatcher.sql).
 
 use std::collections::BTreeMap;
 
-use boss_dispatcher::rules::registry::{load_active_rules, parse_raw};
+use boss_dispatcher::rules::registry::{load_active_rules, parse_raw_path};
 use boss_testing::TestDb;
+
+/// The authored registry: the directory, not a file. Adding a rule is
+/// dropping a file in (CLAUDE.md §9a — the collapse `infra/postgres/schema/`
+/// and `infra/platform/workflows/` already had).
+const RULES_DIR: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../infra/dispatcher/rules"
+);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn dispatcher_rules_seed_matches_toml() {
@@ -21,12 +30,7 @@ async fn dispatcher_rules_seed_matches_toml() {
     let from_db = load_active_rules(&db.pool)
         .await
         .expect("load active rules from dispatcher_rules");
-    let toml_src = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../infra/dispatcher/rules.toml"
-    ))
-    .expect("read rules.toml");
-    let from_toml = parse_raw(&toml_src).expect("parse rules.toml");
+    let from_toml = parse_raw_path(RULES_DIR).expect("parse the rule directory");
 
     // Compare name -> serialized RawRule (order-independent; arg maps and
     // field order don't matter, the JSON value compares structurally).
@@ -43,7 +47,7 @@ async fn dispatcher_rules_seed_matches_toml() {
 
     assert_eq!(
         map_db, map_toml,
-        "dispatcher_rules seed drifted from rules.toml. 41-dispatcher.sql is an \
+        "dispatcher_rules seed drifted from infra/dispatcher/rules/. 41-dispatcher.sql is an \
          APPLIED migration — history, never regenerated (the checksum guard \
          trips on every live database). A rule added or changed after the \
          migration runner landed gets its OWN migration file: a new \
@@ -66,12 +70,7 @@ async fn dispatcher_rules_seed_matches_toml() {
 /// it.
 #[test]
 fn stream_covers_every_rule_topic() {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../infra/dispatcher/rules.toml"
-    );
-    let src = std::fs::read_to_string(path).unwrap();
-    let raw = boss_dispatcher::rules::registry::parse_raw(&src).expect("parse rules.toml");
+    let raw = parse_raw_path(RULES_DIR).expect("parse the rule directory");
     let subjects = boss_nats::durable::stream_subjects();
     for rule in &raw.rules {
         // Scheduled rules have no topic — nothing to cover.

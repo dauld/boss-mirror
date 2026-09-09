@@ -10,7 +10,7 @@
 # itself — but new kinds whose completion should fire downstream
 # side effects need a matching dispatcher Handler registered in
 # `boss-dispatcher::rules::handlers::*` + a rule row in
-# `infra/dispatcher/rules.toml` listening on `step.done.<kind>`.
+# `infra/dispatcher/rules/` listening on `step.done.<kind>`.
 #
 # Schema: see `crates/core/boss-jobs/src/step_registry.rs` —
 # `LoadedStepType` (the private serde mirror of `StepType`) and

@@ -1,0 +1,22 @@
+# …and the filer always hears how it ended (same ratification: "But, we
+# should always notify the filer with the terminal state"). ANY
+# terminal, not only the shipped one — `duplicate` and `declined` are
+# answers a filer is owed for the same reason. The message names the
+# packet, the terminal, and what satisfied it, and goes through
+# boss-messages with a deterministic id so a redelivered close
+# collapses on that surface's existing ON CONFLICT (id) insert rather
+# than stacking an inbox row. Seeded live by
+# 117-feedback-obligation.sql.
+[[rule]]
+name = "notify-filer-on-feedback-terminal"
+why = """
+A CROSS-PROTOCOL REACTOR: it notifies the filer on ANY terminal of a
+`user-feedback` packet, and the notification lives in the messages
+domain. Spans two protocols plus a domain, which no single Workflow
+definition can express. (Ratchet history: 38 -> 40, 2026-08-13.)
+"""
+on_event = "jobs.job.closed"
+when = "kind = \"user-feedback\""
+[[rule.do]]
+handler = "messages.notify_job_terminal"
+args = { recipient_key = "\"submitted_by\"" }

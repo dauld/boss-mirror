@@ -1,0 +1,12 @@
+[[rule]]
+name = "resolve-subjob-on-child-job-closed"
+why = """
+A CROSS-PROTOCOL REACTOR — the RESOLVE half of the delegate-subjob
+loop: a child packet's close writes its terminal outcome back onto the
+parent packet's step. Two packets of two kinds, so no single Workflow
+definition can express it.
+"""
+on_event = "jobs.job.closed"
+when = "parent_step_id != null"
+[[rule.do]]
+handler = "jobs.subjob_resolve"

@@ -1,0 +1,40 @@
+# ---------------------------------------------------------------------------
+# Reorder-threshold spawn — the canonical example.
+#
+# When a part crosses its reorder point, spawn one restock Job — unless
+# one is already in flight. The idempotency check is the open-restock
+# predicate (`open_restock_exists`), which goes true the instant the Job
+# is spawned, so a duplicate restock never fires while a PO is pending.
+# ---------------------------------------------------------------------------
+
+[[rule]]
+name = "spawn-restock-on-low-inventory"
+why = """
+A THRESHOLD, the second of the dispatcher's three sanctioned roles
+(David, 2026-08-14: clock, threshold, matchmaking, and nothing else).
+A part crossing its reorder point is a LEVEL of stock, not a
+transition any protocol row can name, so no Workflow definition can
+declare it. It admits one restock packet and routes nothing; the
+open-restock predicate is the idempotency.
+"""
+on_event = "inventory.item.consumed"
+when = "on_hand <= reorder_point AND NOT open_restock_exists(part_sku)"
+[[rule.do]]
+handler = "jobs.spawn"
+# The restock Job's subject is the category-appropriate supplier for
+# the part that crossed its threshold: `vendor_for(part_sku)` resolves
+# it via inventory-api `primary_vendor_for_part`, which matches the
+# part's data-seeded `vendor_category` (parts.toml) against
+# `vendors.category`. Args are expr-evaluated against the event +
+# helpers (same as `when`), so `part_sku` binds from the
+# `inventory.item.consumed` payload.
+# The triggering part rides in Job metadata (`metadata.part_sku`) so the
+# per-SKU dedup (`open_restock_exists`) can match it — each restock buys
+# ONE ingredient, not the whole catalog.
+# `metadata.trigger_name` stamps which trigger fired: this rule reacts
+# to a threshold breach, so the spawned Job records the
+# `inventory-reorder-threshold` trigger. The materializer reads it to
+# complete that trigger step and Skip the alternative
+# (`demand-forecast-reorder`) — only the trigger that actually fired is
+# recorded Completed, never both.
+args = { kind = "\"ingredient-restock\"", subject_kind = "\"vendor\"", subject = "vendor_for(part_sku)", "metadata.part_sku" = "part_sku", "metadata.trigger_name" = "\"inventory-reorder-threshold\"" }
