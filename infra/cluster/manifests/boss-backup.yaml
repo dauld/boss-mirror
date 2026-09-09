@@ -254,6 +254,19 @@ spec:
             - name: backups
               persistentVolumeClaim: {claimName: boss-backups}
             - name: ship-key
-              secret: {secretName: boss-backup-key, defaultMode: 0o256}
+              # 0o400, matching the GCS key below. It was 0o256, which
+              # kubectl confirms the API stored as decimal 174 — the
+              # octal was parsed correctly and the NUMBER was the
+              # problem: owner write-only, group read-execute, other
+              # read-write. The dump container reads this key to ship
+              # offsite and only ever succeeded because it runs as
+              # root, which ignores the bits. The moment anything gives
+              # this Pod runAsNonRoot — which the cluster's restricted
+              # profile already warns about elsewhere in this estate —
+              # an owner-unreadable key stops being readable and the
+              # offsite leg fails, loudly but as an SSH problem rather
+              # than as a file mode set months earlier (backlog
+              # a05835da).
+              secret: {secretName: boss-backup-key, defaultMode: 0o400}
             - name: gcs-key
               secret: {secretName: boss-gcs-offsite, defaultMode: 0o400}

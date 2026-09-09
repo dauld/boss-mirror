@@ -930,235 +930,6 @@ fn regenerate_deployment_spec() -> WorkflowSpec {
     spec
 }
 
-/// Build the canonical `backlog-item` WorkflowSpec.
-///
-/// Engineering backlog, modelled as work rather than as a markdown
-/// file. TODO.md carried 41 open items across eight sections when this
-/// was written, some more than a month old, and the file cannot tell
-/// you which of them are still true.
-///
-/// The Subject is the AREA the item touches — a `custom` Subject whose
-/// id is a crate or surface path (`/crate/boss-ledger`,
-/// `/surface/cockpit`). That makes "what is outstanding against the
-/// ledger" a Subject-history question rather than a grep.
-///
-/// ## Why this is not `user-feedback` with a different name
-///
-/// The shape is close — both fork on a disposition — but two of the
-/// routes here do not exist there, and they are the ones a backlog
-/// needs most:
-///
-/// - `stale`: the claim is no longer true, and nobody did it on
-///   purpose. Triaging this file found C1 ("event_facts and
-///   search_index have no refresh path") dead — two timers now
-///   refresh both, shipped by work that never referenced the item.
-///   Feedback does not rot this way; an outside report is about
-///   something that happened. An internal claim about the codebase
-///   decays every time the codebase moves, which is daily.
-/// - `verify`: the claim needs re-measuring before anyone acts. The
-///   same triage hit an item whose RATIONALE was stale ("masked
-///   because the gate only diffs journal lines" — it diffs facts now)
-///   while its DEFECT stood unverified. Those are different states
-///   and collapsing them is how a backlog becomes fiction.
-///
-/// ## Why `evidence` is required at triage
-///
-/// Because the failure mode of a backlog is not neglect, it is
-/// confident wrong answers read off the file. Both findings above
-/// came from checking the claim against the running system — one
-/// item died, one survived, and reading either off its own text
-/// would have got it backwards. You cannot route an item here
-/// without saying what you actually checked.
-///
-/// Step graph:
-///  -1. `filed`   — an item entered the backlog
-///   0. `triage`  — measure the claim, choose a route (human-gated)
-///   1..n         — one branch per route
-///   999. `closed`
-#[cfg(test)]
-fn backlog_item_spec() -> WorkflowSpec {
-    const DISPOSITIONS: &str = "verify|design|build|duplicate|stale|decline";
-
-    /// A branch that leaves the Job open for someone to do the work.
-    /// Authority-gated for the same reason triage is: `task` declares
-    /// no required roles, so an ungated ready step gets role-matched
-    /// and completed by the simulated workforce.
-    fn branch(title: &str, label: &str, disposition: &str) -> StepSpec {
-        StepSpec {
-            title: title.into(),
-            kind: "task".into(),
-            ready_when: format!(
-                "steps.triage.done AND steps.triage.metadata.disposition = \"{disposition}\""
-            ),
-            title_template: label.into(),
-            authority_role: Some("platform-admin".into()),
-            ..Default::default()
-        }
-    }
-
-    fn closing_branch(
-        title: &str,
-        label: &str,
-        disposition: &str,
-        outcome_kind: &str,
-        outcome: &str,
-    ) -> StepSpec {
-        StepSpec {
-            title: title.into(),
-            kind: "outcome".into(),
-            ready_when: format!(
-                "steps.triage.done AND steps.triage.metadata.disposition = \"{disposition}\""
-            ),
-            title_template: label.into(),
-            metadata_defaults: serde_json::json!({ "outcome_kind": outcome_kind }),
-            terminal: Some(Terminal {
-                outcome: outcome.into(),
-            }),
-            ..Default::default()
-        }
-    }
-
-    let steps = vec![
-        StepSpec {
-            title: "filed".into(),
-            kind: "trigger".into(),
-            ready_when: "true".into(),
-            title_template: "Filed to the backlog".into(),
-            metadata_defaults: serde_json::json!({
-                "trigger_kind": "operator",
-                "trigger_name": "item-enters-the-backlog",
-            }),
-            ..Default::default()
-        },
-        StepSpec {
-            title: "triage".into(),
-            kind: "task".into(),
-            ready_when: "steps.filed.done".into(),
-            title_template: "Measure the claim, choose a route".into(),
-            authority_role: Some("platform-admin".into()),
-            fields: vec![
-                boss_core::job::StepField {
-                    name: "disposition".into(),
-                    field_type: DISPOSITIONS.into(),
-                    required: true,
-                    filled_by: boss_core::job::FilledBy::Executor,
-                    item_keys: Vec::new(),
-                },
-                // What was checked, and what it showed. Required: see
-                // the doc comment. An item routed without a
-                // measurement is an opinion about code that may have
-                // moved since the item was written.
-                boss_core::job::StepField {
-                    name: "evidence".into(),
-                    field_type: "string".into(),
-                    required: true,
-                    filled_by: boss_core::job::FilledBy::Executor,
-                    item_keys: Vec::new(),
-                },
-                // The decider's brief, written at routing time: what
-                // they must read (markdown) and the answer the triager
-                // would give. Optional — only the design route needs
-                // them; the decide step's surface says when absent.
-                boss_core::job::StepField {
-                    name: "context_md".into(),
-                    field_type: "string".into(),
-                    required: false,
-                    filled_by: boss_core::job::FilledBy::Executor,
-                    item_keys: Vec::new(),
-                },
-                boss_core::job::StepField {
-                    name: "proposed".into(),
-                    field_type: "string".into(),
-                    required: false,
-                    filled_by: boss_core::job::FilledBy::Executor,
-                    item_keys: Vec::new(),
-                },
-            ],
-            ..Default::default()
-        },
-        branch("measure", "Re-measure the claim", "verify"),
-        // answer-question, not a bare task: the decision surface —
-        // question, the asker's context, a proposed answer, verdict —
-        // the same step user-feedback's design route uses. A task here
-        // reached David's queue as a title and two empty boxes
-        // (2026-09-05, three items).
-        // The verdict vocabulary is authored on the step, not the
-        // kind bundle: the bundle is unversioned (steptype-bundle-
-        // ratchet), and a bare `string` there let `__probe__` complete
-        // a live design review (a305385b, backlog item cb9661fe).
-        StepSpec {
-            kind: "answer-question".into(),
-            fields: vec![boss_core::job::StepField {
-                name: "verdict".into(),
-                field_type: "approved|declined|answered".into(),
-                required: true,
-                filled_by: boss_core::job::FilledBy::Executor,
-                item_keys: Vec::new(),
-            }],
-            ..branch("design-review", "Decide the design", "design")
-        },
-        branch("build", "Build the change", "build"),
-        closing_branch(
-            "duplicate",
-            "Closed as a duplicate",
-            "duplicate",
-            "withdrawn",
-            "duplicate",
-        ),
-        // Not "completed" — nobody completed it. The world moved and
-        // the claim stopped being true, which is worth being able to
-        // count separately from work anyone chose to do.
-        closing_branch(
-            "stale",
-            "Closed — the claim no longer holds",
-            "stale",
-            "withdrawn",
-            "stale",
-        ),
-        closing_branch(
-            "declined",
-            "Closed without action",
-            "decline",
-            "aborted",
-            "declined",
-        ),
-        StepSpec {
-            title: "closed".into(),
-            kind: "outcome".into(),
-            ready_when: "steps.measure.done OR steps.design-review.done \
-                         OR steps.build.done"
-                .into(),
-            title_template: "Backlog item closed".into(),
-            metadata_defaults: serde_json::json!({ "outcome_kind": "completed" }),
-            terminal: Some(Terminal {
-                outcome: "completed".into(),
-            }),
-            ..Default::default()
-        },
-    ];
-
-    let mut spec = WorkflowSpec::platform_seed(
-        "backlog-item",
-        "Backlog item",
-        "platform",
-        vec!["custom".into()],
-        steps,
-    );
-    spec.metadata = serde_json::json!({ "owner_role": "platform-admin" });
-    spec.description = Some(
-        "One piece of engineering backlog, modelled as work rather than a line in a \
-         markdown file. The Subject is the area it touches, so \"what is outstanding \
-         against the ledger\" answers from Subject history. Triage requires the evidence \
-         behind the routing decision, because the failure mode of a backlog is not \
-         neglect but confident wrong answers read off its own text — an internal claim \
-         about the codebase decays every time the codebase moves. `stale` exists for the \
-         items that die without anyone doing them, and `verify` for the ones whose claim \
-         needs re-measuring before anyone acts."
-            .to_string(),
-    );
-    spec
-}
-
 /// Every Workflow that ships baked into the platform binary. Read by
 /// `boss-jobs-api`'s startup reconciler — `kind_registry
 /// .bootstrap_reconcile(&platform_workflows())` runs on every boot,
@@ -3822,10 +3593,35 @@ mod tests {
         let bundle_path = super::platform_bundle_path();
         let bundled =
             crate::seed_loader::load_workflows(bundle_path).expect("the platform bundle parses");
+        // Every kind that was converted from a Rust literal, by name.
+        // Presence is checked for all of them; fidelity only for the
+        // ones whose literal still exists.
+        const CONVERTED: [&str; 4] = [
+            "workflow-design",
+            "regenerate-deployment",
+            "backlog-item",
+            "ship-a-change",
+        ];
+        // `backlog-item` IS NOT HERE ANY MORE, and that is the point.
+        //
+        // A fidelity pin proves a MOVE was faithful; it is not a second
+        // home for the protocol. `backlog-item` has been authored in
+        // the bundle for several versions, and on 2026-09-09 it needed
+        // a real protocol change — the design-review → build edge
+        // af28e250 measured missing. Holding it here would have made
+        // that edit a Rust edit, which is exactly backwards: "a new
+        // protocol never touches Rust at all", and neither should a new
+        // version of an old one. So the builder was deleted, as this
+        // test's own note says is safe once a release has gone by
+        // green (CLAUDE.md §9a: a pin is a holding action, not a
+        // destination — prefer collapsing, and the copy it left held
+        // no information the bundle did not).
+        //
+        // The presence half is kept for it by `CONVERTED` above, which
+        // is the assertion that actually caught something.
         let expected = [
             workflow_design_spec(),
             regenerate_deployment_spec(),
-            backlog_item_spec(),
             ship_a_change_spec(),
         ];
         // Every CONVERTED kind must still be here. This is the
@@ -3842,11 +3638,10 @@ mod tests {
         // authored as data had to be added to a list of things
         // converted FROM code, which is backwards: the whole direction
         // of travel is that a new protocol never touches Rust at all.
-        for want in &expected {
+        for kind in CONVERTED {
             assert!(
-                bundled.iter().any(|b| b.kind == want.kind),
-                "`{}` was converted to the bundle and has gone missing from it",
-                want.kind
+                bundled.iter().any(|b| b.kind == kind),
+                "`{kind}` was converted to the bundle and has gone missing from it"
             );
         }
         // …and nothing in the bundle may SHADOW a kind the code still
