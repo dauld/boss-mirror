@@ -21,9 +21,16 @@
 //! 2026-08-14) — and running a probe is an actor's work, not routing;
 //! a probe that hangs would hold a JetStream consumer, and the
 //! dispatcher owes the rest of the system its liveness; and the
-//! vantage a probe needs (kubectl as the converge user, the converged
-//! checkout, the forge journal, the SoR over the LAN) lives on the
-//! forge host, not in the `boss` namespace. The forge already answers
+//! vantage a probe needs (the converged checkout, the forge journal,
+//! the SoR over the LAN) lives on the forge host, not in the `boss`
+//! namespace. What the forge does NOT have is the cluster's vantage:
+//! no kubectl, no kubeconfig. A probe is written on the dev pod and
+//! run there, so it can be correct and unrunnable — measured on this
+//! rule's first live run (f9304366), where both cars came back as an
+//! exit code with empty streams. `boss gate` now refuses a probe
+//! naming a tool in infra/forge/host-absent-tools.txt, and the runner
+//! records `unrunnable` with the tool named rather than a bare exit
+//! code. The forge already answers
 //! ops-request packets through a reviewed verb allowlist
 //! (`infra/ops/verbs.json`), so the run goes through that door:
 //! `infra/forge/run-car-probe.sh` re-reads the car, refuses unless it

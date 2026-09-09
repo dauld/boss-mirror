@@ -2953,7 +2953,19 @@ pub(crate) fn failing_checks(rollup: Option<&Value>) -> Vec<String> {
 /// How many bytes of a job log to pull (a suffix Range request — the
 /// forge answers `206 Partial Content`, so a 300KB+ log never crosses
 /// the wire whole) and how much of that to keep once fetched.
-pub(crate) const LOG_FETCH_BYTES: u64 = 16_384;
+/// How much of a failing job's log to pull back from the forge.
+///
+/// This was 16 KB for as long as the alert only ever showed a TAIL. On
+/// 2026-09-09 train 864a4896 reddened on a Rust test that panicked at
+/// byte ~460 K of a 778 KB log; the last 16 KB held svelte-check
+/// deprecation warnings from five minutes later, so the alert named the
+/// check and then showed the reader something irrelevant to it, and the
+/// real cause took a hand dig through the forge Actions API to find
+/// (packet 792d26be). A suffix Range large enough to contain the whole
+/// of any log this pipeline has produced is what lets
+/// [`failing_excerpt`] find the failure at all; the bound still exists
+/// so a pathological log cannot be pulled into memory unbounded.
+pub(crate) const LOG_FETCH_BYTES: u64 = 8_388_608;
 pub(crate) const LOG_TAIL_LINES: usize = 40;
 pub(crate) const LOG_TAIL_BYTES: usize = 4_000;
 /// Ceiling on the combined-logs blob stamped onto the `ci` step.
@@ -3084,6 +3096,114 @@ pub(crate) fn log_tail(
     } else {
         out
     }
+}
+
+/// The lines a failing CI log is worth reading, in the order a reader
+/// would grep for them. Each is unambiguous about a FAILURE: a Rust
+/// panic and its location, cargo's per-target verdict, cargo's own
+/// summary line, the gate runner's own refusal, a rustc error code, a
+/// forge annotation, and bun's per-test failure marker.
+///
+/// Deliberately absent is a bare `error:`. The mocked web suite prints
+/// hundreds of benign `error: Unable to connect` lines for backends it
+/// does not run, and a marker that matches those points the excerpt at
+/// noise — which is the defect this whole function exists to fix, in a
+/// new place. Checked against both red logs of 2026-09-09: four matches
+/// each across 9287 and 7300 lines, the first being the panic, and no
+/// false positive.
+pub(crate) const FAILURE_MARKERS: &[&str] = &[
+    "panicked at",
+    "test result: FAILED",
+    "error: test failed",
+    "GATE FAIL:",
+    "error[E",
+    "##[error]",
+    "(fail)",
+];
+
+/// The excerpt a red-train alert should carry: the window around the
+/// FIRST failure marker, or the tail when nothing matched.
+///
+/// A tail is what you show when you do not know what you are looking
+/// for. Here the markers are known, so showing the end of the log
+/// instead is a choice to hand the reader the wrong 40 lines — and on
+/// 2026-09-09 it did exactly that, for a train carrying six cars that
+/// had each gated green.
+///
+/// The first match is the one kept: a test run reports its earliest
+/// failure first, and the later markers are usually that same failure
+/// restated (the panic, then the target verdict, then cargo's summary,
+/// then the gate's). How many matched is stated, so a reader who needs
+/// the others knows they exist.
+///
+/// The result always says which of the two it is. A packet that shows a
+/// tail while implying a diagnosis is the same defect one layer up.
+pub(crate) fn failing_excerpt(
+    body: &str,
+    drop_partial_first: bool,
+    max_lines: usize,
+    max_bytes: usize,
+) -> String {
+    let trimmed = body.trim_end_matches(['\n', '\r']);
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let mut lines: Vec<&str> = trimmed.lines().collect();
+    // A suffix Range starts mid-line; that fragment is not evidence.
+    if drop_partial_first && lines.len() > 1 {
+        lines.remove(0);
+    }
+
+    let hits: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| FAILURE_MARKERS.iter().any(|m| l.contains(m)))
+        .map(|(i, _)| i)
+        .collect();
+
+    let Some(&first) = hits.first() else {
+        // Nothing named a failure. The tail is then the honest answer,
+        // and it says so in its own words.
+        return log_tail(body, drop_partial_first, max_lines, max_bytes);
+    };
+
+    // Lead-in enough to carry the test's name and the lines it printed
+    // before dying. The window ENDS a few lines past the LAST marker
+    // rather than running out its whole line budget: a Rust failure
+    // restates itself four times in six lines and is then followed by
+    // whatever else the job printed, and spending the budget on that is
+    // how the reader ends up looking at svelte warnings again.
+    let before = max_lines / 3;
+    let last = *hits.last().unwrap_or(&first);
+    let start = first.saturating_sub(before);
+    let end = (last + 4)
+        .min(lines.len())
+        .min(start + max_lines)
+        .max(first + 1);
+    let mut out = lines[start..end].join("\n");
+
+    if out.len() > max_bytes {
+        let mut cut = max_bytes;
+        while cut > 0 && !out.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.truncate(cut);
+        out.push('…');
+    }
+
+    // Only failures the reader cannot see are worth mentioning. The
+    // three or four lines a single Rust failure prints are all inside
+    // the window, and announcing them as "3 more" would send someone
+    // looking for a second failure that does not exist.
+    let more = hits.iter().filter(|&&i| i >= end).count();
+    let also = if more == 0 {
+        String::new()
+    } else if more == 1 {
+        ", 1 more further down".to_string()
+    } else {
+        format!(", {more} more further down")
+    };
+    format!("…(the failure, with context{also})\n{out}")
 }
 
 /// The `(check, log_tail)` pairs the forge managed to attach to failing
@@ -3470,6 +3590,157 @@ mod red_verdict_log_tests {
         // the first line is real.
         assert!(!content_range_starts_past_zero(Some("bytes 0-4999/5000")));
         assert!(!content_range_starts_past_zero(None));
+    }
+
+    // ---- failing_excerpt: the failure, not the end -------------------
+
+    /// The shape of a real red `test` job: thousands of lines of
+    /// passing output, the panic in the middle, and five more minutes
+    /// of unrelated warnings after it. Both red logs of 2026-09-09
+    /// looked exactly like this.
+    fn a_red_test_log() -> String {
+        let mut l = String::new();
+        for i in 0..3000 {
+            l.push_str(&format!("2026-09-09T02:00:00Z passing line {i}\n"));
+        }
+        l.push_str("2026-09-09T02:04:46Z running 5 tests\n");
+        l.push_str("2026-09-09T02:04:46Z test the_error_line ... FAILED\n");
+        l.push_str("2026-09-09T02:04:46Z thread 'the_error_line' panicked at crates/core/boss-jobs/tests/station_boot_quarantine.rs:199:5:\n");
+        l.push_str("2026-09-09T02:04:46Z an unviable active station is logged at ERROR: \n");
+        l.push_str("2026-09-09T02:04:46Z test result: FAILED. 4 passed; 1 failed\n");
+        l.push_str("2026-09-09T02:04:47Z GATE FAIL: test\n");
+        for i in 0..2000 {
+            l.push_str(&format!(
+                "2026-09-09T02:06:13Z Warn: Using `on:submit` is deprecated {i}\n"
+            ));
+        }
+        l
+    }
+
+    #[test]
+    fn the_excerpt_carries_the_failure_not_the_end_of_the_log() {
+        let out = failing_excerpt(&a_red_test_log(), false, 40, 4000);
+        assert!(
+            out.starts_with("…(the failure"),
+            "says which of the two it is: {out}"
+        );
+        assert!(
+            out.contains("panicked at crates/core/boss-jobs/tests/station_boot_quarantine.rs"),
+            "the panic and its file are in the excerpt: {out}"
+        );
+        assert!(
+            out.contains("test result: FAILED"),
+            "cargo's verdict is in the excerpt: {out}"
+        );
+        // A few lines past the last marker are deliberate: a bun
+        // failure prints its assertion diff there, and a gate its next
+        // step. What must not happen is the excerpt BEING those lines,
+        // which is what a 40-line tail of this log was.
+        let warnings = out.matches("deprecated").count();
+        assert!(
+            warnings <= 3,
+            "the warnings five minutes later are context at most, not the excerpt ({warnings} lines): {out}"
+        );
+        assert!(
+            out.lines().filter(|l| l.contains("deprecated")).count() * 2 < out.lines().count(),
+            "the failure, not the noise, is the bulk of what the reader sees: {out}"
+        );
+    }
+
+    #[test]
+    fn the_excerpt_leads_in_far_enough_to_name_the_test() {
+        // The panic line names a file; the lines above it name the test
+        // that produced it, and a reader needs both.
+        let out = failing_excerpt(&a_red_test_log(), false, 40, 100_000);
+        assert!(out.contains("running 5 tests"), "lead-in kept: {out}");
+        assert!(out.contains("test the_error_line ... FAILED"));
+    }
+
+    #[test]
+    fn how_many_failures_matched_is_stated() {
+        let out = failing_excerpt(&a_red_test_log(), false, 40, 100_000);
+        // All three markers of this one failure are inside the window,
+        // so there is nothing further down to announce.
+        assert!(
+            !out.contains("further down"),
+            "no phantom second failure is announced: {out}"
+        );
+        assert!(
+            out.contains("GATE FAIL: test"),
+            "the last marker is shown: {out}"
+        );
+    }
+
+    #[test]
+    fn a_second_failure_far_below_the_window_is_announced() {
+        let mut body = String::new();
+        body.push_str("panicked at the first place\n");
+        for i in 0..200 {
+            body.push_str(&format!("noise {i}\n"));
+        }
+        body.push_str("panicked at the second place\n");
+        let out = failing_excerpt(&body, false, 40, 100_000);
+        assert!(out.contains("the first place"), "the first is shown: {out}");
+        assert!(
+            out.contains("1 more further down"),
+            "the second is announced, not hidden: {out}"
+        );
+        assert!(!out.contains("the second place"), "and not shown: {out}");
+    }
+
+    #[test]
+    fn a_log_with_no_failure_marker_falls_back_to_the_tail_and_says_so() {
+        let body: String = (0..500).map(|i| format!("row {i}\n")).collect();
+        let out = failing_excerpt(&body, false, 40, 100_000);
+        assert!(
+            out.starts_with("…(log tail"),
+            "an excerpt that is really a tail says it is a tail: {out}"
+        );
+        assert!(out.contains("row 499"), "the tail is the end: {out}");
+    }
+
+    #[test]
+    fn the_benign_connection_errors_of_the_mocked_suite_are_not_a_failure() {
+        // The mocked web suite prints hundreds of these for backends it
+        // does not run, and every one of its tests passes. A marker set
+        // that matched them would point the excerpt at noise.
+        let mut body = String::new();
+        for i in 0..200 {
+            body.push_str("error: Unable to connect. Is the computer able to access the url?\n");
+            body.push_str(&format!(
+                "  ✓  {i} [chromium] › tests/mocked/thing.spec.ts\n"
+            ));
+        }
+        let out = failing_excerpt(&body, false, 40, 100_000);
+        assert!(
+            out.starts_with("…(log tail"),
+            "no failure was claimed where none is: {out}"
+        );
+    }
+
+    #[test]
+    fn the_excerpt_holds_its_byte_cap() {
+        let mut body = String::new();
+        body.push_str("panicked at somewhere\n");
+        for i in 0..50 {
+            body.push_str(&format!("{i}:{}\n", "x".repeat(500)));
+        }
+        let out = failing_excerpt(&body, false, 40, 1_000);
+        assert!(out.len() <= 1_000 + 60, "byte-capped: {} bytes", out.len());
+    }
+
+    #[test]
+    fn a_range_fetch_still_drops_the_partial_first_line() {
+        let body = "ed at nothing\npanicked at real place\nafter\n";
+        let out = failing_excerpt(body, true, 40, 4000);
+        assert!(!out.contains("ed at nothing"), "fragment dropped: {out}");
+        assert!(out.contains("panicked at real place"));
+    }
+
+    #[test]
+    fn an_empty_log_stays_empty() {
+        assert_eq!(failing_excerpt("", false, 40, 4000), "");
+        assert_eq!(failing_excerpt("\n\n", false, 40, 4000), "");
     }
 
     // ---- log_tail: bounded and honest --------------------------------
@@ -4301,8 +4572,15 @@ impl ForgejoForge {
                 .get(reqwest::header::CONTENT_RANGE)
                 .and_then(|v| v.to_str().ok()),
         );
-        let body = resp.text().await?;
-        Ok(log_tail(&body, partial, LOG_TAIL_LINES, LOG_TAIL_BYTES))
+        // Forgejo pads job logs with NUL bytes; they survive into the
+        // packet as \u0000 and make an excerpt unreadable.
+        let body = resp.text().await?.replace('\0', "");
+        Ok(failing_excerpt(
+            &body,
+            partial,
+            LOG_TAIL_LINES,
+            LOG_TAIL_BYTES,
+        ))
     }
 }
 

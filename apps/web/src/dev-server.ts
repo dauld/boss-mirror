@@ -24,7 +24,9 @@ import { join } from 'node:path';
 // for this path, with HMR attached."
 import index from '../index.html';
 
-const PORT = Number(process.env['PORT'] ?? 5174);
+import { DEFAULT_PORT, TREE_ID, TREE_PATH, treeResponse } from './dev-tree';
+
+const PORT = Number(process.env['PORT'] ?? DEFAULT_PORT);
 
 // Scratch mode: when BOSS_SCRATCH=1, paired services route to their
 // +1000 scratch ports (boss_scratch DB) so writes don't pollute the
@@ -235,6 +237,11 @@ serve({
     // Tenant manifest is dev-server-local — read straight from the
     // brewery seed file. Must come before the generic /api/* proxy
     // so the catch-all doesn't try to forward it.
+    // Whose tree is this? Answered before anything else so the mocked
+    // suite can tell "a server is up" from "MY server is up" without
+    // waiting on the SPA bundle. See src/dev-tree.ts for why a suite
+    // that could not ask this went green against another worktree.
+    [TREE_PATH]: () => treeResponse(),
     '/api/tenant/manifest': () => serveTenantManifest(),
     // /api/session — gateway-only route in production; mocked here
     // so the SPA's session probe doesn't 502 in dev. Returns the
@@ -264,3 +271,4 @@ console.log(
   `  api proxy → ${SCRATCH ? 'SCRATCH ports (boss_scratch DB) for paired services' : 'prod service ports (boss DB)'}`,
 );
 console.log('  /plugins/* → /var/lib/boss/step-plugins/');
+console.log(`  serving tree: ${TREE_ID} (named at ${TREE_PATH})`);

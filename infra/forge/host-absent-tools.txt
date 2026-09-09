@@ -1,0 +1,31 @@
+# Tools the FORGE HOST does not have. `boss gate --park-probe` refuses
+# a probe that invokes one, at gate time, on the builder's terminal —
+# instead of at arrival, hours later, as an exit code on a car.
+#
+# WHICH MACHINE. This is the one thing about a probe that is easy to
+# get wrong, so say it three ways. A probe is AUTHORED on the dev pod
+# (kubectl, a kubeconfig, the cluster on the other side of localhost).
+# It is RUN on the forge host by infra/forge/run-car-probe.sh, as
+# david, in /home/david/boss, with THIS host's tools — the forge sits
+# outside the cluster and holds no kubeconfig. Those are two machines.
+# A third, again different, is the CI runner image, whose manifest is
+# infra/forge/boss-ci/required-tools.txt: that file lists what the
+# gate's container HAS, this one lists what the forge host HASN'T. Do
+# not read one for the other.
+#
+# WHAT BELONGS HERE. One tool per line, lower-case, no path — the check
+# compares basenames, so `kubectl` also catches `/usr/bin/kubectl`.
+# Only tools MEASURED absent: a line here refuses a builder's gate, and
+# a guess that refuses is worse than the failure it prevents. Blank
+# lines and `#` comments are ignored.
+#
+# kubectl — measured 2026-09-09, backlog f9304366. The auto-proof
+# loop's first live run: a train arrived, the rule filed an
+# ops-request per probed car, the forge answered both, and neither car
+# proved. Both probes were `kubectl -n boss-dev exec …`; both were
+# correct (they passed from the pod, and proved both cars by hand) and
+# both were unrunnable there. A probe that needs the cluster's vantage
+# is either rewritten against a surface the forge can reach (the SoR
+# over HTTP, the forge journal, the checkout) or recorded as
+# `--park-proof-event`.
+kubectl

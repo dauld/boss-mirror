@@ -9,6 +9,16 @@
 
 import { defineConfig } from '@playwright/test';
 
+import { DEFAULT_PORT } from './src/dev-tree';
+
+// The port the runner chose. It is usually DEFAULT_PORT, but when the
+// preferred port is held by a server serving a DIFFERENT tree the runner
+// starts its own on a free one and passes it here — so baseURL must be
+// derived, never hardcoded, or the suite would go back to testing
+// whatever happens to be on :5174 (backlog eaca07e1).
+const PORT = Number(process.env['PORT'] ?? DEFAULT_PORT);
+const ORIGIN = `http://127.0.0.1:${PORT}`;
+
 // The normal entrypoint is `bun run test:mocked` → tests/run-mocked.ts,
 // which starts the dev-server, waits for a genuinely-served `/` under a
 // generous timeout it controls, then invokes Playwright with
@@ -25,7 +35,7 @@ export default defineConfig({
   retries: process.env['CI'] ? 1 : 0,
   reporter: [['list']],
   use: {
-    baseURL: 'http://127.0.0.1:5174',
+    baseURL: ORIGIN,
     headless: true,
     viewport: { width: 1280, height: 800 },
   },
@@ -76,10 +86,19 @@ export default defineConfig({
     ? undefined
     : {
         command: 'bun src/dev-server.ts',
-        url: 'http://127.0.0.1:5174/',
+        url: `${ORIGIN}/`,
         // false under CI so a stale/occupied port fails loudly instead
         // of silently reusing a possibly-broken server; true locally for
         // fast re-runs against a `bun run dev` already up.
+        //
+        // NOTE: Playwright's own reuse test is "does the url answer" —
+        // it cannot check WHICH tree answers, which is the whole of
+        // eaca07e1. That check lives in tests/run-mocked.ts, the
+        // entrypoint every gated run uses, so this dormant fallback is
+        // the one place reuse is still identity-blind. It is reached
+        // only by invoking playwright directly (--ui, --headed, one
+        // spec) — a hand-driven debugging path where the operator reads
+        // the output — so it keeps the faster ergonomics.
         reuseExistingServer: !process.env['CI'],
         timeout: 180_000,
         stdout: 'pipe',

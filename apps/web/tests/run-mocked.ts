@@ -37,9 +37,19 @@
 // PWTEST_SKIP_DEVSERVER=1 so it runs against the already-ready server
 // instead of starting its own. It is a real readiness gate, not a sleep.
 
-const PORT = Number(process.env['PORT'] ?? 5174);
-const ORIGIN = `http://127.0.0.1:${PORT}`;
-const READY_URL = `${ORIGIN}/`;
+// WHICH SERVER, NOT JUST WHETHER ONE ANSWERS.
+//
+// This file used to reuse anything that returned 2xx on `/` at the
+// preferred port. On a pod where several worktrees share one network
+// namespace that is a false-green machine: on 2026-09-08 two runs here
+// reported 94 passes against ANOTHER worktree's bundle, because an
+// operator dev-server held :5174 (backlog eaca07e1). `chooseTarget`
+// answers the question that actually matters — is the server on that
+// port serving THIS tree — and refuses to reuse anything else. Under CI
+// it refuses unconditionally. See src/dev-tree.ts.
+import { DEFAULT_PORT, chooseTarget } from '../src/dev-tree';
+
+const PREFERRED_PORT = Number(process.env['PORT'] ?? DEFAULT_PORT);
 
 // Overall budget to reach a served 200 on `/` (i.e. the SPA bundle has
 // compiled). Generous enough to survive concurrent-gate I/O pressure,
@@ -57,11 +67,11 @@ function log(msg: string): void {
 // A served 2xx on `/` means the shell is up AND — because the dev-server
 // holds `/` open until the bundle finishes — the SPA has been compiled.
 // A connection error, timeout, or non-2xx counts as not-ready.
-async function isServed(timeoutMs: number): Promise<boolean> {
+async function isServed(readyUrl: string, timeoutMs: number): Promise<boolean> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(READY_URL, { signal: controller.signal });
+    const res = await fetch(readyUrl, { signal: controller.signal });
     await res.body?.cancel();
     return res.ok;
   } catch {
@@ -95,62 +105,79 @@ process.on('SIGTERM', () => {
 });
 
 async function main(): Promise<never> {
-  // Reuse a dev-server already serving locally (`bun run dev`); an
-  // already-bundled server answers this instantly, a cold port refuses
-  // fast, so this adds no wall-clock to the CI path where nothing runs.
-  if (await isServed(2_000)) {
-    log(`reusing the server already serving ${ORIGIN}`);
-  } else {
-    log(`starting dev-server on :${PORT} ...`);
+  // Decide WHICH server this run tests, and say so out loud: a run that
+  // does not name its server is a run whose green means nothing.
+  const target = await chooseTarget(PREFERRED_PORT, process.env);
+  const origin = `http://127.0.0.1:${target.port}`;
+  const readyUrl = `${origin}/`;
+  log(target.reason);
+
+  if (!target.reuse) {
+    log(`starting dev-server on :${target.port} ...`);
     devServer = Bun.spawn(['bun', 'src/dev-server.ts'], {
       // BOSS_SCRATCH=0: every /api call is mocked in-browser, so the
       // proxy target is irrelevant; 0 just avoids the scratch ports.
-      env: { ...process.env, PORT: String(PORT), BOSS_SCRATCH: '0' },
+      env: { ...process.env, PORT: String(target.port), BOSS_SCRATCH: '0' },
       stdout: 'inherit', // keep the "Bundled page in Xms" diagnostic line visible
       stderr: 'inherit',
       stdin: 'ignore',
     });
     weStartedIt = true;
+  }
 
-    // Race each readiness probe against the process exiting: if the
-    // dev-server dies (e.g. EADDRINUSE), fail in seconds instead of
-    // blocking inside a held-open `/` request until the per-attempt cap.
-    const exited = devServer.exited.then((code) => ({ kind: 'exited' as const, code }));
-    const deadline = Date.now() + READY_DEADLINE_MS;
-    let ready = false;
-    while (Date.now() < deadline) {
-      const remaining = deadline - Date.now();
-      const outcome = await Promise.race([
-        isServed(Math.min(ATTEMPT_TIMEOUT_MS, remaining)).then((ok) => ({ kind: 'served' as const, ok })),
-        exited,
-      ]);
-      if (outcome.kind === 'exited') {
-        throw new Error(
-          `dev-server exited early (code ${outcome.code}) before serving ${READY_URL}`,
-        );
-      }
-      if (outcome.ok) {
-        ready = true;
-        break;
-      }
-      await Bun.sleep(250); // brief backoff across the port-bind window
-    }
-    if (!ready) {
+  // Readiness is checked the same way either way — a reused server that
+  // is mid-bundle gets the same generous wait as one we just started.
+  // Race each probe against the process exiting: if the dev-server dies
+  // (e.g. a port taken between the choice and the bind), fail in seconds
+  // instead of blocking inside a held-open `/` request until the cap.
+  const exited: Promise<{ kind: 'exited'; code: number }> =
+    devServer?.exited.then((code) => ({ kind: 'exited' as const, code }))
+    ?? new Promise(() => {
+      /* we did not start it — it cannot exit under us */
+    });
+  const deadline = Date.now() + READY_DEADLINE_MS;
+  let ready = false;
+  while (Date.now() < deadline) {
+    const remaining = deadline - Date.now();
+    const outcome = await Promise.race([
+      isServed(readyUrl, Math.min(ATTEMPT_TIMEOUT_MS, remaining)).then((ok) => ({
+        kind: 'served' as const,
+        ok,
+      })),
+      exited,
+    ]);
+    if (outcome.kind === 'exited') {
       throw new Error(
-        `dev-server did not serve ${READY_URL} within ${READY_DEADLINE_MS}ms — treating as broken, not flaky`,
+        `dev-server exited early (code ${outcome.code}) before serving ${readyUrl}`,
       );
     }
-    log(`server ready at ${ORIGIN}`);
+    if (outcome.ok) {
+      ready = true;
+      break;
+    }
+    await Bun.sleep(250); // brief backoff across the port-bind window
   }
+  if (!ready) {
+    throw new Error(
+      `dev-server did not serve ${readyUrl} within ${READY_DEADLINE_MS}ms — treating as broken, not flaky`,
+    );
+  }
+  log(`server ready at ${origin}`);
 
   // Hand off to Playwright against the now-ready server. PWTEST_SKIP_DEVSERVER
   // is honoured by playwright.mocked.config.ts (its webServer block goes
   // undefined) so Playwright does not start a second server or re-run the
-  // fragile 30s-capped probe.
+  // fragile 30s-capped probe. PORT carries the chosen port through to the
+  // config's baseURL — the suite must point at the server we vetted, not
+  // at the default.
   const playwright = Bun.spawn(
     ['bun', 'x', 'playwright', 'test', '-c', 'playwright.mocked.config.ts'],
     {
-      env: { ...process.env, PWTEST_SKIP_DEVSERVER: '1' },
+      env: {
+        ...process.env,
+        PWTEST_SKIP_DEVSERVER: '1',
+        PORT: String(target.port),
+      },
       stdout: 'inherit',
       stderr: 'inherit',
       stdin: 'inherit',

@@ -702,6 +702,75 @@ pub struct ParkIntent {
     pub proof_event: Option<String>,
 }
 
+/// WHERE A RECORDED PROBE RUNS — the forge host's absence manifest.
+///
+/// A `--park-probe` is written HERE (the dev pod: kubectl, a
+/// kubeconfig, the cluster one hop away) and RUN THERE
+/// (`infra/forge/run-car-probe.sh` on the forge host, as david, in
+/// /home/david/boss, when the car's train arrives). Two machines. The
+/// forge is outside the cluster and holds no kubeconfig, so a probe
+/// that reaches for `kubectl` is correct and unrunnable — and its
+/// failure at arrival is an exit code, hours later, on a car.
+///
+/// This file lists the tools MEASURED absent from that host, so the
+/// refusal happens at gate time on the builder's terminal instead. It
+/// is data, not code: an absence measured next month is a line, not a
+/// release. Backlog f9304366.
+const FORGE_ABSENT_TOOLS: &str = include_str!("../../../../infra/forge/host-absent-tools.txt");
+
+/// The manifest's live lines: one tool name each, comments and blanks
+/// dropped.
+pub fn forge_absent_tools() -> Vec<&'static str> {
+    FORGE_ABSENT_TOOLS
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect()
+}
+
+/// The commands a shell line would RUN, in command position — the first
+/// word of the probe and of every segment after a `|`, `&&`, `||`, `;`,
+/// a newline, a subshell or a substitution. Leading environment
+/// assignments and flags are stepped over, as are the words that stand
+/// in front of a program rather than being one (`if`, `sudo`, `env`, …),
+/// and a path is reduced to its basename so `/usr/bin/kubectl` reads as
+/// `kubectl`.
+///
+/// Deliberately not a shell parser: it does not know quoting, so a tool
+/// name inside a quoted string that follows a separator can be read as
+/// a command. The cost of that is a refusal the builder can reword; the
+/// cost of the alternative is a shell parser to maintain in the CLI.
+pub fn commands_invoked(probe: &str) -> Vec<&str> {
+    const NOT_THE_PROGRAM: [&str; 17] = [
+        "if", "then", "elif", "else", "fi", "while", "until", "for", "do", "done", "case", "esac",
+        "!", "time", "sudo", "env", "command",
+    ];
+    probe
+        .split(['|', '&', ';', '\n', '(', ')', '`', '{', '}'])
+        .filter_map(|segment| {
+            segment
+                .split_whitespace()
+                .map(|w| w.trim_matches(['"', '\'', '$', '\\']))
+                .find(|w| {
+                    !w.is_empty()
+                        && !w.contains('=')
+                        && !w.starts_with('-')
+                        && !NOT_THE_PROGRAM.contains(w)
+                })
+                .map(|w| w.rsplit('/').next().unwrap_or(w))
+        })
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// The tool the forge does not have that this probe would need, if any.
+pub fn probe_needs_absent_tool(probe: &str) -> Option<&'static str> {
+    let absent = forge_absent_tools();
+    commands_invoked(probe)
+        .into_iter()
+        .find_map(|c| absent.iter().find(|a| **a == c).copied())
+}
+
 /// The gate-run key each proof flag stamps. The auto-park handler
 /// reads these and writes the car's `proof_*` keys
 /// (`boss_jobs::car::PROOF_*`).
@@ -754,6 +823,24 @@ impl ParkIntent {
                 "--park-probe and --park-proof-event together: a car is proven by a probe \
                  the machine can run, OR it waits for an event only a person can observe. \
                  Pick one — if the probe exists, the car is not event-bound."
+            );
+        }
+        if let Some(probe) = &self.probe
+            && let Some(tool) = probe_needs_absent_tool(probe)
+        {
+            anyhow::bail!(
+                "--park-probe invokes `{tool}`, which the FORGE HOST does not have.\n\n\
+                 A recorded probe does not run here. It runs on the forge host, as david, \
+                 in /home/david/boss, when this car's train arrives \
+                 (infra/forge/run-car-probe.sh) — a machine outside the cluster with no \
+                 kubeconfig. Measured 2026-09-09 (f9304366): the first two cars ever to \
+                 record a probe both used `kubectl`, both were right from this pod, and \
+                 both came back as an exit code with empty streams.\n\n\
+                 Give a probe the forge can run — the system of record over HTTP (curl \
+                 $BOSS_JOBS_URL/api/...), the forge's own journal, the converged checkout \
+                 — or, if only the cluster can show it, record the car as \
+                 --park-proof-event and prove it by hand.\n\n\
+                 The absence list is infra/forge/host-absent-tools.txt."
             );
         }
         let missing: Vec<&str> = [
@@ -2650,19 +2737,104 @@ mod tests {
     /// THE CAR CARRIES ITS PROBE (28ac45ab). A complete intent may add
     /// a probe + expect pair; both ride the gate-run under `park_*`
     /// keys so the auto-park handler copies them onto the car.
+    ///
+    /// The probe here is a `curl` against the system of record because
+    /// that is a probe the forge host can RUN — this case used to be
+    /// written with `kubectl`, which is the shape f9304366 measured
+    /// unrunnable and the next case now refuses.
     #[test]
     fn a_probe_and_its_expectation_ride_the_park_intent_together() {
+        let probe = "curl -fsS $BOSS_JOBS_URL/api/jobs/x | grep -q PARK_PROBE_OK";
         let mut p = park_full();
-        p.probe = Some("kubectl -n boss-dev exec deploy/boss-conductor -- boss gate --help".into());
-        p.expect = Some("park-probe".into());
+        p.probe = Some(probe.into());
+        p.expect = Some("PARK_PROBE_OK".into());
         assert!(p.require_complete().is_ok());
         let m = p.metadata_patch();
-        assert_eq!(
-            m[PARK_PROBE],
-            "kubectl -n boss-dev exec deploy/boss-conductor -- boss gate --help"
-        );
-        assert_eq!(m[PARK_EXPECT], "park-probe");
+        assert_eq!(m[PARK_PROBE], probe);
+        assert_eq!(m[PARK_EXPECT], "PARK_PROBE_OK");
         assert!(m.get(PARK_PROOF_EVENT).is_none());
+    }
+
+    /// WHERE A PROBE RUNS (f9304366). A recorded probe runs on the
+    /// forge host, not on the pod that wrote it. The measured shape —
+    /// both cars of the auto-proof loop's first live run — is refused
+    /// at gate time, on the builder's terminal, naming the tool, the
+    /// host, and the two ways out.
+    #[test]
+    fn a_probe_needing_a_tool_the_forge_lacks_is_refused_at_gate_time() {
+        let mut p = park_full();
+        p.probe = Some(
+            "kubectl -n boss-dev exec deploy/boss-conductor -- /usr/local/bin/boss gate --help \
+             2>&1 | grep -q x && echo OK"
+                .into(),
+        );
+        p.expect = Some("OK".into());
+        let e = p.require_complete().unwrap_err().to_string();
+        assert!(e.contains("kubectl"), "{e}");
+        assert!(e.contains("FORGE HOST"), "{e}");
+        assert!(e.contains("--park-proof-event"), "{e}");
+        assert!(e.contains("host-absent-tools.txt"), "{e}");
+    }
+
+    /// The check reads COMMAND POSITION, not the whole line: a probe
+    /// that merely greps for the word runs fine on the forge and is not
+    /// refused. A refusal a builder cannot act on is worse than the
+    /// arrival failure it replaces.
+    #[test]
+    fn a_probe_that_only_mentions_an_absent_tool_is_allowed() {
+        let mut p = park_full();
+        p.probe = Some("curl -fsS $BOSS_JOBS_URL/api/estate/nodes | grep -c kubectl".into());
+        p.expect = Some("1".into());
+        assert!(p.require_complete().is_ok(), "{:?}", p.require_complete());
+    }
+
+    /// An absent tool is caught wherever it sits in the pipeline, and
+    /// through a path or an `env` prefix — the ways the same mistake
+    /// gets written.
+    #[test]
+    fn the_scan_finds_a_command_anywhere_a_shell_would_run_one() {
+        for probe in [
+            "curl -fsS $BOSS_JOBS_URL/api/yard | kubectl apply -f -",
+            "test -f x && /usr/local/bin/kubectl get pods",
+            "env KUBECONFIG=/x kubectl get cm boss-conductor-env",
+            "echo x $(kubectl get pods)",
+        ] {
+            assert_eq!(
+                probe_needs_absent_tool(probe),
+                Some("kubectl"),
+                "not caught: {probe}"
+            );
+        }
+        for probe in [
+            "curl -fsS $BOSS_JOBS_URL/api/jobs | grep -q TOKEN",
+            "git -C /home/david/boss log -1 --format=%H | grep -q abc",
+            "journalctl -u boss-forge-converge -n 50 | grep -q CONVERGED",
+        ] {
+            assert_eq!(
+                probe_needs_absent_tool(probe),
+                None,
+                "false refusal: {probe}"
+            );
+        }
+    }
+
+    /// The manifest is DATA, and the measured absence is in it. A list
+    /// that lost its one measured entry would make the check silently
+    /// green (CLAUDE.md §Diagnosis: a check nobody reads is a check
+    /// that is not running).
+    #[test]
+    fn the_forge_absence_manifest_carries_the_measured_tool() {
+        let tools = forge_absent_tools();
+        assert!(
+            tools.contains(&"kubectl"),
+            "host-absent-tools.txt lost the tool f9304366 measured: {tools:?}"
+        );
+        for t in &tools {
+            assert!(
+                !t.contains('#') && !t.contains(' ') && !t.contains('/'),
+                "a manifest line must be a bare tool name, got {t:?}"
+            );
+        }
     }
 
     /// A probe with no expectation is `echo hi`; an expectation with no

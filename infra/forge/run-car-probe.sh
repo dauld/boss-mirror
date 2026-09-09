@@ -22,14 +22,38 @@
 # ready, and exits 1 so the ops-request's exit_code carries the
 # verdict too. Backlog 28ac45ab.
 #
+# WHERE A PROBE RUNS — AND WHERE IT WAS WRITTEN. Here: the forge host,
+# as david, in the converged checkout, with the forge's tools. NOT the
+# dev pod, where the builder typed it. Those are different machines:
+# the forge sits outside the cluster and holds no kubeconfig, so a
+# probe that starts with `kubectl` is correct from the pod and
+# impossible here. Backlog f9304366, the auto-proof loop's first live
+# run: two cars, two kubectl probes, two exit codes with EMPTY streams
+# — evidence that reads exactly like a false claim. The streams were
+# empty because the probes swallowed their own diagnostics
+# (`kubectl ... 2>&1 | grep -q ...` pipes `command not found` into the
+# grep), so no amount of care with stderr here recovers it. The fix is
+# a channel the probe cannot redirect: fd 9, opened before the probe's
+# text runs, with a `command_not_found_handle` writing every unfound
+# command to it. When that channel has anything in it the attempt is
+# stamped `unrunnable` with `missing_tools`, and the script exits 3 —
+# "this probe cannot run here" told apart from "the claim is false",
+# without a reader re-deriving it (CLAUDE.md §Diagnosis).
+#
+# `boss gate --park-probe` refuses, at gate time, a probe invoking a
+# tool listed in infra/forge/host-absent-tools.txt, so the common case
+# never reaches this host at all. This is the backstop for the rest.
+#
 # WHY HERE, WHY AS DAVID. The dispatcher must not run shells (it is
-# the queue watcher, and a hung probe would hold a consumer); the
-# conductor pod has no kubectl and no journal; this host has the
-# production vantage every probe shape written so far needs — the
-# SoR over the LAN, kubectl as the converge user, the converged
-# checkout at /home/david/boss, the forge journal. The ops-runner
-# runs verbs as root, so the probe is dropped to $BOSS_PROBE_USER
-# (default david) with `runuser`; it never runs as root.
+# the queue watcher, and a hung probe would hold a consumer); this
+# host holds the production vantage most probes need — the SoR over
+# the LAN, the converged checkout at /home/david/boss, the forge
+# journal, docker and the registry. It does NOT hold the cluster's:
+# no kubectl, no kubeconfig. (This paragraph used to list `kubectl as
+# the converge user` among the vantages here, which is where the
+# f9304366 mistake was learned from.) The ops-runner runs verbs as
+# root, so the probe is dropped to $BOSS_PROBE_USER (default david)
+# with `runuser`; it never runs as root.
 #
 # THE BOUND, STATED HONESTLY. The ops-runner's posture is that it
 # never executes a packet-supplied string, and the verb's argument
@@ -48,6 +72,7 @@
 #   BOSS_PROBE_TIMEOUT (default 60)  seconds before the probe is killed
 #   BOSS_OPS_ACTOR     (default automation:run-car-probe)
 #   BOSS_MACHINE_TOKEN (optional) forwarded as x-boss-machine-token
+#   BOSS_PROBE_NOTFOUND (set here) the file fd 9 records unfound commands in
 set -uo pipefail
 
 me="run-car-probe"
@@ -75,7 +100,32 @@ for t in curl jq timeout; do
 done
 
 workdir=$(mktemp -d) || exit 1
-trap 'rm -rf "$workdir"' EXIT
+# The not-found channel. It lives OUTSIDE $workdir (0700 root) because
+# the probe runs as another user and must be able to append to it; it
+# holds command names and nothing else.
+notfound=$(mktemp) || exit 1
+chmod 666 "$notfound" 2>/dev/null || true
+trap 'rm -rf "$workdir" "$notfound"' EXIT
+
+# The prelude every probe's shell gets, ahead of the probe's own text.
+# fd 9 is opened here, before the probe can redirect anything, so a
+# probe that pipes its own stderr into a grep still cannot hide which
+# command was missing. The handler ALSO prints bash's usual message, so
+# nothing is taken away. If fd 9 cannot be opened the probe still runs.
+#
+# The markers are the extraction points: boss-testing's
+# run_car_probe_sh.rs lifts what lies between them and RUNS it, so the
+# mechanism cannot rot into a comment.
+probe_prelude='
+# PROBE-PRELUDE-BEGIN
+{ exec 9>>"${BOSS_PROBE_NOTFOUND:-/dev/null}"; } 2>/dev/null || exec 9>/dev/null
+command_not_found_handle() {
+    printf "%s: command not found\n" "$1" >&2
+    printf "%s\n" "$1" >&9
+    return 127
+}
+# PROBE-PRELUDE-END
+'
 
 # 1. The car, re-read from the system of record — never trusted from
 #    the packet that asked.
@@ -119,12 +169,14 @@ if [[ "$(id -u)" -eq 0 ]]; then
     home=$(getent passwd "$PROBE_USER" | cut -d: -f6)
     timeout -k 5 "$PROBE_TIMEOUT" runuser -u "$PROBE_USER" -- \
         env --chdir="$PROBE_DIR" HOME="$home" USER="$PROBE_USER" PATH="$PATH" \
-            BOSS_JOBS_URL="$BASE" bash -c "$probe" \
+            BOSS_JOBS_URL="$BASE" BOSS_PROBE_NOTFOUND="$notfound" \
+            bash -c "$probe_prelude$probe" \
         > "$workdir/out" 2> "$workdir/errs" < /dev/null
     rc=$?
 else
     # Run by hand, by a person who is already the probe user.
-    timeout -k 5 "$PROBE_TIMEOUT" env --chdir="$PROBE_DIR" BOSS_JOBS_URL="$BASE" bash -c "$probe" \
+    timeout -k 5 "$PROBE_TIMEOUT" env --chdir="$PROBE_DIR" BOSS_JOBS_URL="$BASE" \
+        BOSS_PROBE_NOTFOUND="$notfound" bash -c "$probe_prelude$probe" \
         > "$workdir/out" 2> "$workdir/errs" < /dev/null
     rc=$?
 fi
@@ -167,6 +219,21 @@ printed_expectation() {
 }
 # --- end expectation-match ---
 
+# WHAT THE PROBE COULD NOT FIND. fd 9 collected every command bash
+# could not resolve, on a channel the probe's own redirections cannot
+# reach. Anything here means the probe did not RUN — a different fact
+# from a probe that ran and disagreed, and the one the empty-stream
+# attempts of 2026-09-09 could not tell anybody.
+missing_json=$(sort -u "$notfound" 2>/dev/null \
+    | jq -Rsc 'split("\n") | map(select(length > 0))' 2>/dev/null)
+[[ -n "$missing_json" ]] || missing_json='[]'
+missing_list=$(printf '%s' "$missing_json" | jq -r 'join(", ")' 2>/dev/null)
+if [[ "$missing_json" == "[]" ]]; then
+    unrunnable=false
+else
+    unrunnable=true
+fi
+
 # 3. Judge — the two rules `boss prove` applies, and no third.
 ok=1
 [[ "$rc" -eq 0 ]] || ok=0
@@ -207,10 +274,21 @@ fi
 # 4b. Not proven. The attempt is evidence too — recorded on the car,
 #     `proven` left ready for a person or a re-run, exit 1 so the
 #     ops-request carries the verdict in its exit_code.
+# The verdict names what failed, in one sentence a reader does not have
+# to re-derive (CLAUDE.md §Diagnosis).
+if [[ "$unrunnable" == true ]]; then
+    why="THE PROBE DID NOT RUN on $host: $missing_list not found. A recorded probe runs on the forge host as $PROBE_USER in $PROBE_DIR, with this host's tools — not on the dev pod where it was written, which is where cluster tools like kubectl live. This says nothing about whether the change works; re-probe from a vantage this host has, or record the car as event-bound."
+elif [[ "$rc" -ne 0 ]]; then
+    why="the probe RAN on $host and exited $rc — the claim it makes is not holding, or the probe is wrong."
+else
+    why="the probe RAN on $host and exited 0, but neither stream contained '$expect' — the claim it makes is not holding, or the expected string is wrong."
+fi
 attempt=$(jq -cn --arg at "$at" --argjson exit "$rc" --arg host "$host" \
-    --arg probe "$probe" --arg expect "$expect" \
+    --arg probe "$probe" --arg expect "$expect" --arg why "$why" \
+    --argjson unrunnable "$unrunnable" --argjson missing_tools "$missing_json" \
     --arg output "$(printf '%s\n%s' "$stdout" "$stderr")" \
-    '{at:$at, exit:$exit, output:$output, host:$host, probe:$probe, expect:$expect}')
+    '{at:$at, exit:$exit, output:$output, host:$host, probe:$probe, expect:$expect,
+      why:$why, unrunnable:$unrunnable, missing_tools:$missing_tools}')
 printf '%s' "$attempt" | jq -c '{proof_attempt: .}' > "$workdir/payload"
 if ! curl -fsS -X PATCH -H "content-type: application/json" -H "x-boss-user: $BOSS_USER" \
         ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
@@ -218,10 +296,14 @@ if ! curl -fsS -X PATCH -H "content-type: application/json" -H "x-boss-user: $BO
         "$BASE/api/jobs/$car/metadata" > /dev/null 2> "$workdir/err"; then
     fail "probe exited $rc and recording the attempt on ${car:0:8} failed too — $(head -c 300 "$workdir/err" | tr '\n' ' ')"
 fi
-if [[ "$rc" -ne 0 ]]; then
-    say "NOT PROVEN ${car:0:8} — the probe exited $rc; proof_attempt recorded, proven stays ready"
+if [[ "$unrunnable" == true ]]; then
+    say "NOT RUN ${car:0:8} — $why"
 else
-    say "NOT PROVEN ${car:0:8} — exit 0 but never printed '$expect'; proof_attempt recorded, proven stays ready"
+    say "NOT PROVEN ${car:0:8} — $why"
 fi
+say "proof_attempt recorded, proven stays ready"
 printf '  stdout: %s\n  stderr: %s\n' "${stdout:-(empty)}" "${stderr:-(empty)}"
+# 3 = could not run here; 1 = ran and did not prove. Two different
+# things to do about it, so two exit codes for the ops-request to carry.
+[[ "$unrunnable" == true ]] && exit 3
 exit 1

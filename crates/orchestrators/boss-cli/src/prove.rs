@@ -561,6 +561,14 @@ fn read_proof(raw: &Value) -> Result<Recorded> {
 /// The probe a car recorded for itself at park time, read back as the
 /// pair `boss prove` would have been given by hand.
 ///
+/// WHERE IT RUNS. Two callers run this text on two different machines:
+/// `--from-car` runs it wherever the operator is standing, and the
+/// arrival rule runs it on the FORGE HOST as david, in the converged
+/// checkout, with that host's tools. The forge has no kubeconfig, so a
+/// probe can pass here and be unrunnable there — measured 2026-09-09
+/// (f9304366), which is why `boss gate --park-probe` refuses a probe
+/// naming a tool in infra/forge/host-absent-tools.txt.
+///
 /// THE CAR CARRIES ITS PROBE (28ac45ab): `boss gate --park-probe/
 /// --park-expect` stamps the intent, the auto-park handler copies it
 /// onto the car under `boss_jobs::car::PROOF_*`, and this is the read
@@ -1156,12 +1164,22 @@ mod tests {
                 "run-car-probe.sh does not write proven key `{k}`"
             );
         }
-        for k in ["at", "exit", "output"] {
+        // `why`, `unrunnable` and `missing_tools` are the diagnosis
+        // half (f9304366): a probe authored on the pod and run on the
+        // forge can be correct and unrunnable, and exit-plus-empty-
+        // streams reads exactly like a false claim. The script must
+        // record which of the two it saw.
+        for k in ["at", "exit", "output", "why", "unrunnable", "missing_tools"] {
             assert!(
                 SH.contains(&format!("{k}:${k}")),
                 "run-car-probe.sh's proof_attempt lacks `{k}`"
             );
         }
+        assert!(
+            SH.contains("command_not_found_handle"),
+            "run-car-probe.sh must give the probe's shell a channel its own \
+             redirections cannot swallow, or a missing tool records as silence"
+        );
         assert!(
             SH.contains(&format!("MAX_STREAM={MAX_STREAM}")),
             "the two stream caps differ"

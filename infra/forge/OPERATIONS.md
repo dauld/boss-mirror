@@ -109,7 +109,14 @@ No ssh from the pod. Three doors, all read-only:
   recorded at park time — `boss gate --park-probe/--park-expect` — as
   david, never root, and completes the car's `proven` step with the
   proof record or stamps `proof_attempt`; filed per car by the
-  dispatcher when its train arrives). The verb list is the tree's,
+  dispatcher when its train arrives). **The probe was written on the
+  dev pod and runs HERE**, in `/home/david/boss` with this host's
+  tools: no kubectl, no kubeconfig, the cluster only over HTTP. A
+  probe that needs a tool this host lacks is refused at `boss gate`
+  against `infra/forge/host-absent-tools.txt`; one that slips through
+  is recorded as `proof_attempt.unrunnable` with the tool named and
+  exits 3, so "cannot run here" never reads as "the claim is
+  false" (f9304366). The verb list is the tree's,
   never the packet's.
 - **The Forgejo API** with the repo-scoped token at `/etc/forge/token`
   on the pod: runs at `/api/v1/repos/david/boss/actions/tasks`, a job's

@@ -193,13 +193,24 @@ enum Commands {
         /// on the car as `proof_probe` and RUN — by `boss prove <car>
         /// --from-car`, or by the arrival rule once the car lands — in
         /// exactly the shape `boss prove` records. Needs --park-expect.
+        ///
+        /// WHERE IT RUNS: on the FORGE HOST, as david, in the converged
+        /// checkout (/home/david/boss), with the forge's tools — NOT on
+        /// the machine you are typing on. The forge is outside the
+        /// cluster and holds no kubeconfig, so a `kubectl` probe is
+        /// correct from the dev pod and unrunnable there (f9304366).
+        /// Write it against something the forge can reach: the system
+        /// of record over HTTP, its own journal, the checkout. A probe
+        /// naming a tool in infra/forge/host-absent-tools.txt is
+        /// refused here rather than at arrival.
         #[arg(long)]
         park_probe: Option<String>,
         /// Auto-park: the string the probe must print for the claim to
         /// hold (`proof_expect` on the car). Required with --park-probe.
-        /// Make it a unique token, not a count: a number is compared as
-        /// a whole token, but `test $(...) -eq 1 && echo claim:ok`
-        /// asserts what you mean and cannot pass on the wrong number.
+        /// Judged on the forge host, where the probe runs. Make it a
+        /// unique token, not a count: a number is compared as a whole
+        /// token, but `test $(...) -eq 1 && echo claim:ok` asserts what
+        /// you mean and cannot pass on the wrong number.
         #[arg(long)]
         park_expect: Option<String>,
         /// Auto-park: for a change only an EVENT can prove (a stalled
@@ -373,6 +384,9 @@ enum Commands {
         /// (`--park-probe` / `--park-expect` on `boss gate`, copied to
         /// the car's `proof_probe` / `proof_expect`) instead of one
         /// given here. `--verified` defaults to the car's summary.
+        /// Runs HERE, on this box — the arrival rule runs the same text
+        /// on the forge host, so a probe can pass one place and be
+        /// unrunnable in the other (f9304366).
         #[arg(long, conflicts_with_all = ["probe", "expect", "exit_only"])]
         from_car: bool,
     },
