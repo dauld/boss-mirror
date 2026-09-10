@@ -18,6 +18,29 @@ table, which the dispatcher loads from Postgres at startup and serves at
 so a migration that seeds a rule without a file here fails the same way
 an unseeded file does. Neither is allowed to be the only one that knows.
 
+**The seed is not the only way in, so the seed guard is not the only
+check.** `POST /api/dispatcher/rules` + publish authors a rule live, with
+no file and no migration; a TestDb never sees those, so the guard above
+stays green while the system enforces rules nobody wrote down. Measured
+2026-09-10: sixty-four enforced rules, sixty files — the `why` guard was
+covering sixty of sixty-four and reporting "OK (60 rules, each saying why
+it exists)", true about this directory and wrong about the system. Two
+things close that now:
+
+- **`GET /api/dispatcher/rules` answers what AND why.** Per enforced rule:
+  `name`, `version`, `status`, its trigger (`on_event` or `schedule`),
+  `when`, `do`, `delay`, the `why` this directory records, and `authored`
+  — false for a rule no file here records. `authored_registry` names the
+  directory the whys were read from (`BOSS_DISPATCHER_RULES`, which the
+  image carries at `/opt/boss/infra/dispatcher/rules`) and reports any
+  error reading it, so `why: null` everywhere never silently means
+  "no rule records a why" when it means "I could not read the source".
+- **`infra/lint/the-live-rules-are-the-authored-rules.sh`** compares the
+  live set to this directory by name and fails on a rule the dispatcher
+  enforces that no file records. It skips loudly where the read surface
+  is unreachable (the forge gate host has no route), and a 200 with no
+  rules — or zero rules — is a failure, not a pass.
+
 This directory was one file (`rules.toml`) until 2026-09-09, when two
 rule cars parked in one window and the second was left behind on
 `conflict: infra/dispatcher/rules.toml, infra/lint/dispatcher-rules-ratchet.sh`

@@ -19,7 +19,7 @@ use boss_core::calendar::BusinessCalendar;
 pub use boss_core::calendar::{Cadence, MAX_POSTPONE_DAYS};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -227,17 +227,11 @@ pub fn parse_raw_dir(dir: &Path) -> Result<RawRegistry, RegistryError> {
                 ),
             });
         }
-        let meta: RuleFileMeta = toml::from_str(&src).map_err(|e| RegistryError::RuleFile {
+        let why = why_in(&src, &stem).map_err(|reason| RegistryError::RuleFile {
             file: file_str.clone(),
-            reason: e.to_string(),
+            reason,
         })?;
-        let why = meta
-            .rules
-            .iter()
-            .find(|m| m.name == stem)
-            .and_then(|m| m.why.as_deref())
-            .unwrap_or("");
-        if why.trim().is_empty() {
+        if why.is_none() {
             return Err(RegistryError::RuleFile {
                 file: file_str,
                 reason: format!(
@@ -259,6 +253,57 @@ fn read_rule_text(path: &Path) -> Result<String, RegistryError> {
         file: path.display().to_string(),
         reason: e.to_string(),
     })
+}
+
+/// The non-empty `why` a rule file records for rule `stem`, if any.
+/// ONE definition of "does this rule say why it exists": `parse_raw_dir`
+/// refuses a file without it at the door, and [`authored_why`] maps it
+/// for the read surface. Two readers of the same field would be the
+/// §9a pair again, one level down.
+fn why_in(src: &str, stem: &str) -> Result<Option<String>, String> {
+    let meta: RuleFileMeta = toml::from_str(src).map_err(|e| e.to_string())?;
+    Ok(meta
+        .rules
+        .iter()
+        .find(|m| m.name == stem)
+        .and_then(|m| m.why.as_deref())
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .map(str::to_string))
+}
+
+/// The authored justification of every rule in a registry DIRECTORY:
+/// `name -> why`.
+///
+/// This is what lets a reader ask the running system not only WHICH
+/// rules it enforces but WHY each one exists — the `dispatcher_rules`
+/// table holds no justification (see [`RuleFileMeta`]), so the read
+/// surface joins the live rows against this map and reports
+/// `authored: false` for any rule no file records. That gap is the
+/// §9a drift: a reaction the system runs that the `why` guard never saw.
+///
+/// An absent, unreadable or rule-less directory is an ERROR, never an
+/// empty map. A reader must be able to tell "no rule records a why"
+/// from "I could not read the authored registry" — a wrong target that
+/// answers instead of erroring is the mistake CLAUDE.md §Doors is about.
+pub fn authored_why(dir: &Path) -> Result<BTreeMap<String, String>, RegistryError> {
+    let mut out = BTreeMap::new();
+    for file in rule_files(dir)? {
+        let stem = file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let src = read_rule_text(&file)?;
+        let why = why_in(&src, &stem).map_err(|reason| RegistryError::RuleFile {
+            file: file.display().to_string(),
+            reason,
+        })?;
+        if let Some(why) = why {
+            out.insert(stem, why);
+        }
+    }
+    Ok(out)
 }
 
 /// Load the active rules, waiting out an empty table instead of
@@ -340,6 +385,13 @@ pub async fn rules_changed(
     }
 }
 
+/// The registry status that means "the dispatcher is enforcing this
+/// row" — the one [`load_active_rules`] selects on, and the one the
+/// read surface reports per rule. ONE constant, bound into the query
+/// below, because a label that could drift from its own filter would
+/// tell a reader the system enforces rows it does not (CLAUDE.md §9a).
+pub const ENFORCED_STATUS: &str = "active";
+
 /// Load the ACTIVE dispatcher rules from the `dispatcher_rules` registry
 /// table into the raw shape. The dispatcher reads this at startup
 /// (replacing the legacy rules.toml file read) and `/api/dispatcher/rules`
@@ -363,8 +415,9 @@ pub async fn load_active_rules(pool: &sqlx::PgPool) -> Result<RawRegistry, Regis
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT name, on_event, when_expr, do_steps, delay, version, \
                 schedule_cadence, schedule_anchor, schedule_calendar \
-         FROM dispatcher_rules WHERE status = 'active' ORDER BY name",
+         FROM dispatcher_rules WHERE status = $1 ORDER BY name",
     )
+    .bind(ENFORCED_STATUS)
     .fetch_all(pool)
     .await
     .map_err(|e| RegistryError::Storage(e.to_string()))?;
@@ -1696,6 +1749,57 @@ handler = "h"
         std::fs::write(dir.path().join("README.md"), "# nothing here\n").unwrap();
         let e = parse_raw_path(dir.path()).unwrap_err().to_string();
         assert!(e.contains("no *.toml rule files"), "{e}");
+    }
+
+    /// The read surface has to answer "and why" — and the runtime
+    /// registry row holds no justification, so the authored directory
+    /// is where `why` comes from: `name -> why`.
+    #[test]
+    fn authored_why_maps_each_rule_to_its_justification() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("sweep.toml"),
+            rule_file("sweep", "a timer: no packet causes a day passing"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("glue.toml"),
+            rule_file("glue", "external glue: the effect lives outside"),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("README.md"), "# not a rule\n").unwrap();
+
+        let why = authored_why(dir.path()).unwrap();
+        assert_eq!(why.len(), 2, "{why:?}");
+        assert!(why["sweep"].contains("a timer"), "{why:?}");
+        assert!(why["glue"].contains("external glue"), "{why:?}");
+    }
+
+    /// A wrong target must ERROR, not answer (CLAUDE.md §Doors). An
+    /// absent or rule-less directory answering an empty map would read
+    /// on the wire as "no rule records a why" — well-formed, confident
+    /// and wrong, which is the failure this whole surface exists to
+    /// make impossible.
+    #[test]
+    fn authored_why_errors_rather_than_answering_empty() {
+        assert!(
+            authored_why(Path::new("/nonexistent/dispatcher/rules")).is_err(),
+            "an absent directory answered instead of erroring"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# nothing here\n").unwrap();
+        let e = authored_why(dir.path()).unwrap_err().to_string();
+        assert!(e.contains("no *.toml rule files"), "{e}");
+    }
+
+    /// The status the read surface REPORTS and the status the query
+    /// SELECTS are one fact, so they are one constant (CLAUDE.md §9a)
+    /// — a label that could drift from its own filter would tell a
+    /// reader the system enforces rows it does not.
+    #[test]
+    fn the_enforced_status_is_the_one_the_query_selects() {
+        assert_eq!(ENFORCED_STATUS, "active");
     }
 
     /// `why` is authoring metadata, not part of the rule's runtime

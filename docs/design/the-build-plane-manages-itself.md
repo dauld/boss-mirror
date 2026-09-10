@@ -52,6 +52,7 @@ red?") is this table not being written down:
 
 | consumer | who owns reclaiming it | touches the others? |
 |---|---|---|
+| per-train `boss-ci:<sha>` images in the **system** daemon | `disk-floor-sweep.sh` (hourly, by AGE — not floor-gated, since e5dc60e4) | no — only sha-shaped tags, so the stable bases stay |
 | regenerable docker/build caches, dangling images | `disk-floor-sweep.sh` (hourly, below-floor) | no — never volumes, never registry-by-API |
 | **named workspace volumes of crashed CI jobs** (the 63GB-orphan class) | `reap-dead-ci-jobs.sh` (exited FORGEJO-ACTIONS-* only) | no — a *live* job's 74GB `target/` is healthy and must not be pruned |
 | Forgejo **registry** container blobs (old image tags) | the registry-tag prune loop (needs a `package`-scoped token) | no — API operation, not host filesystem |

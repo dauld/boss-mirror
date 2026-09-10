@@ -15,11 +15,33 @@
 #     documents the remediation, but refusing is all a preflight can
 #     do.
 #   - the disk-headroom sweep FILES packets but acts on nothing.
-# This script is the missing actuator: hourly, below-floor only,
-# bounded by construction.
+# This script is the missing actuator: hourly, bounded by construction,
+# and — for everything but step (0) below — below-floor only.
+#
+# AND SINCE 2026-09-10, ONE PASS THAT IS NOT FLOOR-TRIGGERED
+# (backlog e5dc60e4). Per-train `boss-ci:<sha>` images in the SYSTEM
+# daemon accumulated until they caused pressure MID-BUILD, because the
+# only thing that ever removed one was this script below its floor.
+# Measured on this unit's own journal, Sep 03 -> Sep 09: 145 runs, 45
+# below the floor, 26 ending FLOOR UNMET, and the system-daemon image
+# prune ran 41 times and freed 238GB — mean 5.8GB, peak 21.5GB a pass —
+# every one of them below the floor, while the other 100 runs logged
+# "nothing to do" and the pile grew back. On 2026-09-05 the pile was
+# 81GB of a 228GB disk. A floor refusal happens BEFORE any check runs,
+# so it says nothing about a branch and still strikes every car aboard:
+# four clean cars, five departures (2026-08-22), and a held day
+# (2026-09-05).
+#
+# So step (0) below runs EVERY hour, floor or no floor, and keeps a
+# LOOSER window than the emergency pass in (a): age-based pruning keeps
+# the floor far away, the floor sweep still catches what the age rule
+# did not anticipate. The two are complements, and the ordering between
+# their windows is pinned by infra/lint/ci-images-are-pruned-by-age.sh.
 #
 # WHAT IT DOES, IN ORDER, stopping as soon as the floor is met and
 # logging each action with the space it freed:
+#   0. per-train CI images in the SYSTEM daemon older than
+#      CI_IMAGE_AGE_HOURS, keeping the newest few — NOT floor-gated
 #   a. docker builder prune -af  (ALL build cache, no age filter)
 #      (build cache is regenerable by definition; the converge runner
 #      uses a gentler filter because it runs above the floor — below it,
@@ -69,6 +91,43 @@ export DOCKER_HOST="${DOCKER_HOST:-unix:///run/user/1000/docker.sock}"
 # died there on 2026-09-04. If these two floors ever diverge, the sweep
 # keeps less than CI needs and every build gambles on luck.
 FLOOR_GB="${1:-${BOSS_DISK_FLOOR_GB:-70}}"
+
+# THE TWO CI-IMAGE WINDOWS, NAMED SO THEIR ORDER CAN BE CHECKED.
+# CI_IMAGE_AGE_HOURS is the ROUTINE window, applied hourly whatever the
+# disk looks like and only to per-train sha tags;
+# CI_IMAGE_FLOOR_AGE_HOURS is the EMERGENCY one, applied below the floor
+# to every unused image in the daemon. The routine number MUST be the
+# looser of the two — otherwise the emergency pass has nothing left to
+# do and the backstop is just the cadence again. The ordering is pinned
+# by infra/lint/ci-images-are-pruned-by-age.sh.
+#
+# 6h, and the evidence for it: a train's whole CI is under an hour, so
+# six hours is six times the longest thing that could still want the
+# image; the next job's pull is a 3.47GB LAN re-pull of something the
+# registry holds; and at the measured 5-14 trains a day (~3.5GB each) a
+# six-hour window bounds the pile at roughly 7-14GB instead of the 81GB
+# found on 2026-09-05. A day was the first cut below the floor and a
+# busy day defeated it — eight trains left eight images inside a 24h
+# filter while the host slid 109 -> 71GB free. 168h (the converge
+# runner's build-CACHE filter) is right for a cache every build reuses
+# and wrong here: a per-train image is pulled by exactly one train.
+CI_IMAGE_AGE_HOURS="${BOSS_CI_IMAGE_AGE_HOURS:-6}"
+CI_IMAGE_FLOOR_AGE_HOURS=4
+# The newest few survive whatever their age: they are what a job that is
+# starting right now pulls. Same keep-N idiom as the registry-tag loop.
+CI_IMAGE_KEEP_NEWEST="${BOSS_CI_IMAGE_KEEP_NEWEST:-3}"
+# The per-train CI image repo (.forgejo/workflows/ci.yml stamps
+# `boss-ci:${GITHUB_SHA}` on every train's build-image job).
+CI_IMAGE_REPO="${BOSS_CI_IMAGE_REPO:-10.20.0.15:3000/david/boss-ci}"
+# WHICH DAEMON, EXPLICITLY, BOTH HALVES. `sudo -n docker` is root's
+# docker — the SYSTEM daemon the Actions jobs run in — and sudo's
+# env_reset is what keeps the DOCKER_HOST exported above from following
+# it there. That is load-bearing enough to state twice: the expected
+# data-root goes with it and the library refuses when the daemon it
+# reached does not match, because a prune aimed at the rootless daemon
+# reports success and frees nothing.
+SYSTEM_DOCKER="${BOSS_CI_IMAGE_DOCKER:-sudo -n docker}"
+SYSTEM_DOCKER_ROOT="${BOSS_CI_IMAGE_DAEMON_ROOT:-/var/lib/docker}"
 case "$FLOOR_GB" in
     ''|*[!0-9]*)
         echo "disk-floor-sweep: floor must be a whole number of GB, got '$FLOOR_GB'" >&2
@@ -82,9 +141,36 @@ esac
 free_kb() { df -Pk / | awk 'NR==2 {print $4}'; }
 
 last_kb=$(free_kb)
+
+# (0) THE ROUTINE PASS — per-train CI images by AGE, every hour, floor or
+# no floor. First because it is the gentlest remediation on the menu and
+# the one aimed at the largest measured consumer; everything below it
+# then decides against the space this has already freed.
+# shellcheck source=infra/forge/prune-ci-images-by-age.lib.sh
+. "$(dirname "$0")/prune-ci-images-by-age.lib.sh"
+AGE_PRUNE_RC=0
+prune_ci_images_by_age "$SYSTEM_DOCKER" "$SYSTEM_DOCKER_ROOT" "$CI_IMAGE_REPO" \
+    "$CI_IMAGE_AGE_HOURS" "$CI_IMAGE_KEEP_NEWEST" disk-floor-sweep || AGE_PRUNE_RC=$?
+age_kb=$(free_kb)
+echo "disk-floor-sweep: CI-image age prune freed $(((age_kb - last_kb) / 1024))MiB on / (now $((age_kb / 1024 / 1024))GB free)"
+last_kb=$age_kb
+
+# A PASS THAT COULD NOT LOOK IS NOT A CLEAN RUN. The unit goes red and
+# its packet closes "Maintenance failed", because the alternative is the
+# exact failure this pass exists to end: a sweep that reports success
+# while the images pile up (e5dc60e4). Every healthy exit goes through
+# here; the FLOOR UNMET exit at the bottom is already non-zero.
+finish() { # $1 = the exit code the floor logic reached
+    if [ "$AGE_PRUNE_RC" -ne 0 ] && [ "${1:-0}" -eq 0 ]; then
+        echo "disk-floor-sweep: the floor is fine, but the hourly CI-image age prune could not run (reason named above) — that pass is what keeps the floor far away, so this run is a failure, not a quiet success." >&2
+        exit 1
+    fi
+    exit "${1:-0}"
+}
+
 if [ $((last_kb / 1024 / 1024)) -ge "$FLOOR_GB" ]; then
     echo "disk-floor-sweep: $((last_kb / 1024 / 1024))GB free >= ${FLOOR_GB}GB floor — nothing to do"
-    exit 0
+    finish 0
 fi
 echo "disk-floor-sweep: $((last_kb / 1024 / 1024))GB free < ${FLOOR_GB}GB floor — reclaiming regenerable docker caches"
 
@@ -102,7 +188,7 @@ floor_met_after() { # step-name
 
 done_at() { # step-name
     echo "disk-floor-sweep: floor met after $1 — stopping"
-    exit 0
+    finish 0
 }
 
 # (a) Build cache — ALL of it, no age filter. We only reach here when
@@ -134,12 +220,16 @@ done_at() { # step-name
 # because the system socket is root's — the same sudo the converge
 # runner uses for `docker run`; refused means the step is skipped and
 # says so, never a silent zero.
-if sudo -n docker image prune -af --filter "until=4h" 2>&1 | tail -1; then
+# THE FILTER AND ITS LABEL ARE ONE FACT (§9a). This logged "older than
+# 24h" for an `until=4h` filter for days — a record describing work
+# nobody did, in the journal an operator reads during a disk incident.
+# shellcheck disable=SC2086
+if $SYSTEM_DOCKER image prune -af --filter "until=${CI_IMAGE_FLOOR_AGE_HOURS}h" 2>&1 | tail -1; then
     :
 else
-    echo "disk-floor-sweep: system-daemon image prune skipped — sudo -n docker refused"
+    echo "disk-floor-sweep: system-daemon image prune skipped — \`$SYSTEM_DOCKER\` refused"
 fi
-if floor_met_after "system-daemon unused-image prune (older than 24h)"; then
+if floor_met_after "system-daemon unused-image prune (older than ${CI_IMAGE_FLOOR_AGE_HOURS}h)"; then
     done_at "system-daemon image prune"
 fi
 docker builder prune -af || true

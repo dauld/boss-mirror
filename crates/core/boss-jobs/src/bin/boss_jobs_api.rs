@@ -189,6 +189,10 @@ async fn main() -> Result<()> {
         // (packet 7ee101aa, second leg).
         let credentials: Arc<dyn boss_jobs::credentials::CredentialsRegistry> =
             Arc::new(boss_jobs::credentials::PgCredentials::new(pool.clone()));
+        // The agent-run record (backlog 83344e16): what an actor's run
+        // cost, on the one door `boss-api` already reaches.
+        let agent_runs: Arc<dyn boss_jobs::agent_runs::AgentRunLog> =
+            Arc::new(boss_jobs::agent_runs::PgAgentRuns::new(pool.clone()));
         // Q7: human job-owner resolution over the people roster.
         let people_url =
             std::env::var("BOSS_PEOPLE_URL").unwrap_or_else(|_| boss_ports::url("people"));
@@ -214,6 +218,7 @@ async fn main() -> Result<()> {
             Some(cadence),
             Some(delivery),
             Some(credentials),
+            Some(agent_runs),
             calendar,
             subject_kinds,
             subject_existence,
@@ -251,6 +256,9 @@ async fn main() -> Result<()> {
         None,
         None,
         None,
+        // In-memory spike path: the agent-run record is a projection of
+        // the log and has no in-memory story worth wiring here.
+        None,
         calendar,
         subject_kinds,
         subject_existence,
@@ -277,6 +285,7 @@ async fn run_server<R: JobsRepository + 'static>(
     cadence: Option<Arc<dyn boss_jobs::cadence::CadenceRepository>>,
     delivery: Option<Arc<dyn boss_jobs::delivery::DeliveryPolicyRepository>>,
     credentials: Option<Arc<dyn boss_jobs::credentials::CredentialsRegistry>>,
+    agent_runs: Option<Arc<dyn boss_jobs::agent_runs::AgentRunLog>>,
     calendar: Option<Arc<dyn boss_calendar_client::CalendarClient>>,
     subject_kinds: Option<Arc<dyn boss_subject_kinds_client::SubjectKindsClient>>,
     subject_existence: Option<Arc<dyn boss_jobs::subject_existence::SubjectExistenceCheck>>,
@@ -371,6 +380,14 @@ async fn run_server<R: JobsRepository + 'static>(
         info!("credentials registry routes mounted at /api/credentials (locations, never values)");
         app = app.merge(boss_jobs::credentials::http::router(
             boss_jobs::credentials::http::CredentialsApiState { registry },
+        ));
+    }
+    if let Some(log) = agent_runs {
+        info!(
+            "agent-run record mounted at /api/agent-runs (+ /cost) and /api/agent-rate-card              (read-only card)"
+        );
+        app = app.merge(boss_jobs::agent_runs::http::router(
+            boss_jobs::agent_runs::http::AgentRunsApiState { log },
         ));
     }
     // Sim-origin middleware: extract x-sim-origin header and set the

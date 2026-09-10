@@ -50,7 +50,21 @@
 //! step requires at done. When none of `steps` is open and the
 //! routing step is, the handler completes it, re-reads the packet,
 //! and completes the branch the fork opened. Any other kind keeps the
-//! v2 answer (a noop note on the car): a filer's decision is theirs.
+//! v2 answer (a noop note): a filer's decision is theirs.
+//!
+//! ## Saying so on BOTH ends (ca76d8f9)
+//!
+//! When the obligation can act on neither the branch nor the route, the
+//! note lands on the car AND on the item. It used to land only on the
+//! car, so the ITEM — the side that still reads as unfinished work, and
+//! the side whoever triages it next opens — carried no trace that a
+//! change answering it had shipped. "A component that waited instead of
+//! speaking" is the shape CLAUDE.md §Diagnosis names, and the item is
+//! where that silence was paid for. The common case is fixed upstream
+//! of this handler now: a park states the item's route when it files the
+//! car (`boss_jobs::car::triage_on_park`), so what reaches here is the
+//! residue that remains — an item a person routed somewhere this
+//! obligation cannot act, or a kind whose triage is not its to make.
 //!
 //! ## Idempotence
 //!
@@ -106,8 +120,18 @@ impl JobsCompleteLinkedStep {
         })
     }
 
-    /// Record on the CAR that its `backlog_item` pointed somewhere the
-    /// obligation could not act.
+    /// Record that the obligation could not act — on BOTH ends of the
+    /// dead link, `on` naming the Job annotated and `counterpart_key` /
+    /// `counterpart` naming the other.
+    ///
+    /// ONE DEFINITION, TWO DIRECTIONS. The note went only on the CAR
+    /// until now: the side that made the claim, and the side a reviewer
+    /// opens. But the ITEM is the side that looks like unfinished work,
+    /// and the side whoever eventually triages it is reading — and it
+    /// said nothing at all, so a packet whose change was built, landed
+    /// and proven carried no trace of any of it (backlog ca76d8f9; the
+    /// `obligation_noop` key is now written from both ends, `packet` on
+    /// the car and `car` on the item).
     ///
     /// The write goes through `PATCH /api/jobs/{id}/metadata` — the
     /// door built for a partial metadata write, merge semantics, and
@@ -116,31 +140,31 @@ impl JobsCompleteLinkedStep {
     /// body, which `Json<Job>` 422s at the extractor for its ten
     /// missing required fields — so the note never landed once, and
     /// the failure drowned in a dispatcher warn (c65110d6).
-    async fn note_on_car(
+    async fn note_noop(
         &self,
-        car_id: &str,
-        packet_id: &str,
+        on: &str,
+        counterpart_key: &str,
+        counterpart: &str,
         why: &str,
         rule: &str,
     ) -> Result<(), HandlerError> {
-        // Idempotent under redelivery: the same car, the same packet,
-        // the same note. The PATCH merge would write the same value
-        // harmlessly, but each write is an audit event — one is truth,
-        // three are noise.
-        let car = self.get_job(car_id, rule).await?;
-        if car
+        // Idempotent under redelivery: the same pair, the same note.
+        // The PATCH merge would write the same value harmlessly, but
+        // each write is an audit event — one is truth, three are noise.
+        let job = self.get_job(on, rule).await?;
+        if job
             .get("metadata")
             .and_then(|m| m.get("obligation_noop"))
-            .and_then(|n| n.get("packet"))
+            .and_then(|n| n.get(counterpart_key))
             .and_then(|v| v.as_str())
-            == Some(packet_id)
+            == Some(counterpart)
         {
             return Ok(());
         }
         let url = format!(
             "{}/api/jobs/{}/metadata",
             self.jobs_base.trim_end_matches('/'),
-            car_id
+            on
         );
         let resp = self
             .client
@@ -149,7 +173,7 @@ impl JobsCompleteLinkedStep {
             .header("x-boss-user", dispatcher_actor_header(rule))
             .header("x-sim-origin", sim_origin_value())
             .json(&json!({
-                "obligation_noop": { "packet": packet_id, "rule": rule, "why": why }
+                "obligation_noop": { counterpart_key: counterpart, "rule": rule, "why": why }
             }))
             .send()
             .await
@@ -456,17 +480,30 @@ impl Handler for JobsCompleteLinkedStep {
                             "obligation completed nothing — {why}"
                         );
                         // A dispatcher log line is not something a car
-                        // author reads, so the note also lands on the
-                        // car — the side that made the claim, and the
-                        // side a reviewer opens. Best-effort: failing
-                        // to annotate must not fail the obligation,
-                        // which has already done all it can.
-                        if let Err(e) = self
-                            .note_on_car(closing_id, target_id, &why, &ctx.rule_name)
-                            .await
-                        {
-                            tracing::warn!(rule = %ctx.rule_name, car = %closing_id,
-                                "could not record the no-op note: {e}");
+                        // author or a triager reads, so the note lands
+                        // on BOTH ends of the link: the car — the side
+                        // that made the claim, and the side a reviewer
+                        // opens — and the ITEM, the side that still
+                        // looks like unfinished work and the side
+                        // whoever triages it next is reading. Until now
+                        // the item got nothing at all, which is the
+                        // "waited instead of speaking" shape CLAUDE.md
+                        // names (backlog ca76d8f9). Best-effort, each
+                        // independently: failing to annotate must not
+                        // fail the obligation, which has already done
+                        // all it can, and one end failing must not cost
+                        // the other.
+                        for (on, key, counterpart) in [
+                            (closing_id, "packet", target_id),
+                            (target_id, "car", closing_id),
+                        ] {
+                            if let Err(e) = self
+                                .note_noop(on, key, counterpart, &why, &ctx.rule_name)
+                                .await
+                            {
+                                tracing::warn!(rule = %ctx.rule_name, job = %on,
+                                    "could not record the no-op note: {e}");
+                            }
                         }
                     }
                     return Ok(());
@@ -1042,8 +1079,11 @@ mod tests {
     /// the first mock had no job-PUT route, so no test watched the
     /// write fail. The note rides the metadata PATCH door now, and
     /// this test is the route's first witness.
+    ///
+    /// ca76d8f9: and it lands on BOTH ends. The item is the side that
+    /// looks like unfinished work, and it used to be told nothing.
     #[tokio::test]
-    async fn an_untriaged_packet_notes_the_noop_on_the_car() {
+    async fn an_untriaged_packet_notes_the_noop_on_both_ends() {
         let (base, puts, patches) = mock_jobs(vec![
             car(json!({ "backlog_item": PACKET, "train": TRAIN, "branch": "fix/x" })),
             untriaged_packet(),
@@ -1060,8 +1100,8 @@ mod tests {
         let patches = patches.lock().unwrap().clone();
         assert_eq!(
             patches.len(),
-            1,
-            "the noop note lands exactly once: {patches:?}"
+            2,
+            "the noop note lands once on each end: {patches:?}"
         );
         let (id, body) = &patches[0];
         assert_eq!(
@@ -1075,6 +1115,22 @@ mod tests {
                 .unwrap_or_default()
                 .contains("triage"),
             "the why names the open step a reader should look at"
+        );
+
+        let (id, body) = &patches[1];
+        assert_eq!(
+            id, PACKET,
+            "and on the ITEM — the side that still looks like unfinished work"
+        );
+        assert_eq!(
+            body["obligation_noop"]["car"], CAR,
+            "read from the item, the note names the car that could not advance it"
+        );
+        assert!(
+            body["obligation_noop"]["why"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("triage")
         );
     }
 
@@ -1149,7 +1205,11 @@ mod tests {
             .expect("runs");
 
         assert!(puts.lock().unwrap().is_empty(), "no step completed");
-        assert_eq!(patches.lock().unwrap().len(), 1, "the noop note lands");
+        assert_eq!(
+            patches.lock().unwrap().len(),
+            2,
+            "the noop note lands on the car and on the packet"
+        );
     }
 
     /// An item already routed elsewhere is not re-routed. Triage chose
@@ -1182,13 +1242,20 @@ mod tests {
 
         assert!(puts.lock().unwrap().is_empty(), "a person's route stands");
         let patches = patches.lock().unwrap().clone();
-        assert_eq!(patches.len(), 1);
-        assert!(
-            patches[0].1["obligation_noop"]["why"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("measure"),
-            "the note names the step a reader should look at"
+        assert_eq!(patches.len(), 2, "car and item: {patches:?}");
+        for (on, body) in &patches {
+            assert!(
+                body["obligation_noop"]["why"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("measure"),
+                "the note on {on} names the step a reader should look at"
+            );
+        }
+        assert_eq!(
+            patches[1].0, PACKET,
+            "the item is told its car landed and could not advance it — it is the side \
+             someone will read when they come back to triage it"
         );
     }
 
@@ -1244,7 +1311,11 @@ mod tests {
         h.invoke(&a, &ctx(close_marker())).await.expect("runs");
 
         assert!(puts.lock().unwrap().is_empty());
-        assert_eq!(patches.lock().unwrap().len(), 1, "the v2 noop note lands");
+        assert_eq!(
+            patches.lock().unwrap().len(),
+            2,
+            "the v2 noop note lands on both ends"
+        );
     }
 
     /// The obligation itself: a merged car completes the branch its

@@ -1,6 +1,7 @@
 //! Runtime configuration for boss-dispatcher.
 
 use serde::Deserialize;
+use std::path::PathBuf;
 use tracing::warn;
 
 /// How the dispatcher distributes a ready Step across the active holders
@@ -72,6 +73,18 @@ pub struct DispatcherConfig {
     /// startup and serves it at `/api/dispatcher/rules`. Replaces the
     /// legacy `BOSS_DISPATCHER_RULES` rules.toml file path.
     pub postgres_url: String,
+    /// The AUTHORED rule registry directory (`infra/dispatcher/rules`),
+    /// from `BOSS_DISPATCHER_RULES` — the image carries it at
+    /// `/opt/boss/infra/dispatcher/rules`.
+    ///
+    /// NOT the runtime registry: that is the `dispatcher_rules` table
+    /// above, and it holds no justification. This is the one thing the
+    /// table cannot answer — each rule's `why` — which the read surface
+    /// joins on so an operator can ask what the system is enforcing AND
+    /// why. `None`, or a directory that will not read, leaves every
+    /// `why` null and the response SAYS so; it never degrades into the
+    /// confident wrong answer "no rule records a why".
+    pub authored_rules_dir: Option<PathBuf>,
     /// External webhook URL for the `webhook.notify` handler to forward
     /// matched events to. `None` (the normal deployment) makes
     /// `webhook.notify` a no-op; a regen sets it to the brewery-engine's
@@ -133,6 +146,9 @@ impl Default for DispatcherConfig {
                 .unwrap_or_else(|_| format!("127.0.0.1:{}", boss_ports::prod("dispatcher"))),
             postgres_url: std::env::var("BOSS_POSTGRES_URL")
                 .unwrap_or_else(|_| "postgres://boss:boss@127.0.0.1/boss".to_string()),
+            authored_rules_dir: std::env::var("BOSS_DISPATCHER_RULES")
+                .ok()
+                .map(PathBuf::from),
             webhook_url: std::env::var("BOSS_EVENT_WEBHOOK_URL").ok(),
             assignment_strategy: AssignmentStrategy::parse(
                 &std::env::var("BOSS_DISPATCH_STRATEGY").unwrap_or_default(),

@@ -13,6 +13,7 @@
 // bundle their own micro-library. The host has zero runtime
 // dependency on React or any other framework.
 
+import { goToLogin } from '@boss/web-kit/session/deadSession';
 import type { StepPluginSpec } from '../it/step-plugins/stepPluginTypes';
 
 export type PluginCurrentUser = {
@@ -170,6 +171,18 @@ async function loadPlugin(kind: string): Promise<StepPluginMountFn | null> {
   // served from the cache this warmed.
   try {
     const resp = await fetch(url);
+    // A 401 is not a broken bundle, it is a dead session — the one
+    // status whose remedy is elsewhere. App.svelte's interceptor
+    // redirects on /api/* and deliberately does not watch this path,
+    // so without these two lines an expired session rendered "plugin
+    // failed to load" with a Retry button that could never succeed
+    // (David, 2026-09-10, after switching computers). Only 401: a 403
+    // is authenticated-but-denied and a 404 is a missing file, and
+    // both keep the loud named failure this preflight exists to
+    // produce. If the redirect is refused — already on /login, or
+    // already leaving — fall through and say what we know rather than
+    // leaving the surface blank.
+    if (resp.status === 401 && goToLogin()) return null;
     if (!resp.ok) {
       loadFailures.set(kind, `HTTP ${resp.status} fetching ${url}`);
       return null;

@@ -22,8 +22,9 @@
 //! machine without them does not manufacture a red.
 
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 const PACKET: &str = "11111111-2222-4333-8444-555555555555";
 const BEGIN: &str = "# --- report-back (begin) ---";
@@ -70,10 +71,23 @@ fn missing(tool: &str) -> bool {
 ///   `409`    — serve the GET, refuse every PUT with 409 (a frozen step).
 /// `delay` seconds pass before it LISTENS, so a curl in that window
 /// gets connection refused — the bare-Service shape of a roll.
+///
+/// It announces two facts by writing the files it is told to, because
+/// they are the two the test has to wait on and cannot see from outside:
+/// `started` before the delay, and `bound` once its listener exists.
 const STUB: &str = r#"
 import http.server, json, sys, time
 port, log, mode, delay = int(sys.argv[1]), sys.argv[2], sys.argv[3], float(sys.argv[4])
-JOB = sys.argv[5]
+JOB, started_at, bound_at = sys.argv[5], sys.argv[6], sys.argv[7]
+
+def announce(path):
+    with open(path, "w") as f:
+        f.write("ok")
+
+# `started` goes out BEFORE the delay, so a test that wants a dark
+# window gets `delay` seconds of one rather than `delay` minus however
+# long python took to boot.
+announce(started_at)
 time.sleep(delay)
 seen = {"n": 0}
 refuse_first = int(mode.split(":")[1]) if mode.startswith("503:") else 0
@@ -115,7 +129,12 @@ class H(http.server.BaseHTTPRequestHandler):
         else:
             self._reply(200)
 
-http.server.ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+# The constructor is where bind() and listen() both happen: past this
+# line a connection to the port can no longer be refused, which is
+# exactly the fact `start_stub` waits for.
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), H)
+announce(bound_at)
+srv.serve_forever()
 "#;
 
 struct Stub {
@@ -132,6 +151,26 @@ impl Drop for Stub {
 }
 
 impl Stub {
+    /// Wait for a fact the stub announces by writing a file. It fails
+    /// fast when the stub is already gone — a port taken in the window
+    /// in `start_stub` dies on EADDRINUSE, and the stub's stderr is
+    /// inherited — and every panic here names the FIXTURE, so "the stub
+    /// never bound" can never be read as "the report never landed".
+    fn await_fact(&mut self, marker: &Path, limit: Duration, fact: &str) {
+        let deadline = Instant::now() + limit;
+        while !marker.exists() {
+            if let Ok(Some(status)) = self.child.try_wait() {
+                panic!("{fact}: the stub exited early ({status}); its stderr is above");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{fact}: no {} after {limit:?}",
+                marker.display()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn puts(&self) -> Vec<String> {
         std::fs::read_to_string(self.dir.join("puts.log"))
             .map(|s| s.lines().map(str::to_string).collect())
@@ -152,13 +191,17 @@ fn scratch(tag: &str) -> PathBuf {
 fn start_stub(tag: &str, mode: &str, delay_secs: f32) -> Stub {
     let dir = scratch(tag);
     // A free port, released before the stub binds it. The window is
-    // microseconds and the tests run one stub each.
+    // microseconds and the tests run one stub each; if something does
+    // take it, python dies on EADDRINUSE and the wait below says so by
+    // name rather than leaving a dark stub behind.
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .expect("bind")
         .local_addr()
         .expect("addr")
         .port();
     let script = dir.join("stub.py");
+    let started = dir.join("started");
+    let bound = dir.join("bound");
     std::fs::write(&script, STUB).expect("write stub");
     let child = Command::new("python3")
         .arg(&script)
@@ -167,18 +210,39 @@ fn start_stub(tag: &str, mode: &str, delay_secs: f32) -> Stub {
         .arg(mode)
         .arg(delay_secs.to_string())
         .arg(PACKET)
+        .arg(&started)
+        .arg(&bound)
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
         .expect("python3 runs");
-    let stub = Stub { child, port, dir };
+    let mut stub = Stub { child, port, dir };
+
+    // READINESS IS A FACT THE STUB STATES, NOT A CONNECT THAT SUCCEEDED.
+    //
+    // This used to poll `TcpStream::connect` and take the first success
+    // as "up". A connect can succeed with nothing listening — a
+    // loopback self-connect, when the kernel hands the probe the same
+    // ephemeral port it is dialling, or a foreign listener that took the
+    // port in the window above — and when it does, the test walks into a
+    // dark stub. That cost train 605f2364 a red at 03:23 UTC on
+    // 2026-09-10: four attempts spent the whole retry budget on `curl
+    // exit 7`, the stub bound in time to serve only its three programmed
+    // 503s, the verdict never landed, and three innocent cars wore it.
+    // Under no load the stub wins that race, which is why every car had
+    // passed this test on its own gate minutes earlier.
+    //
+    // So the stub says when it is up and this waits for it to say so.
+    // `started` first, ALWAYS: a stub with a delay owes the test `delay`
+    // seconds of darkness, and measuring that from `spawn()` hands
+    // python's boot time to the race in the other direction.
+    stub.await_fact(
+        &started,
+        Duration::from_secs(30),
+        "the stub process never started",
+    );
     if delay_secs == 0.0 {
-        // Wait for the listener, not for luck.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-            assert!(std::time::Instant::now() < deadline, "stub never listened");
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        stub.await_fact(&bound, Duration::from_secs(10), "the stub never bound");
     }
     stub
 }

@@ -478,7 +478,14 @@ async fn main() -> Result<()> {
         }
     }
 
-    let app = router(HttpState { live, pool });
+    // The authored registry directory travels into the read surface so
+    // `GET /api/dispatcher/rules` can answer WHY each enforced rule
+    // exists — the one field the `dispatcher_rules` row does not hold.
+    let app = router(HttpState {
+        live,
+        pool,
+        authored_rules_dir: cfg.authored_rules_dir.clone(),
+    });
     let bind: SocketAddr = cfg
         .http_bind
         .parse()

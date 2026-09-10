@@ -54,7 +54,7 @@ closed for everything in the installer's `UNITS` list.
 |---|---|---|---|
 | `forge-converge` | 10 min (boot +4) | fetch forge main and check it out under the checkout lock (as the owner), run `install.sh` — the host adopts its own units | journal; a broken install leaves the previous units running |
 | `cluster-deploy-runner` | 10 min (boot +3), and on every merge via the `converge` ops verb | fetch and check out forge main under the checkout lock, build the cluster image on the rootless daemon, push it to the registry, roll the cluster, then verify every manifest under `infra/cluster/manifests` is applied and not drifted | exit 1 on drift or an unreadable manifest; the conductor's converge step reads the result; a run started by a `converge` ops-request PATCHes that packet with `converged: <sha>`, `converge_held: <reason>` or `converge_failed: <stage> (exit N)` when it ends |
-| `disk-floor-sweep` | hourly (boot +5) | keep free disk above the floor, `BOSS_DISK_FLOOR_GB=100` in the service; prunes the **system** daemon's CI images first (`until=24h`), then the rootless caches, in a fixed order; regenerable caches only, never volumes | exits non-zero with `FLOOR UNMET — a human decides next` rather than deleting harder |
+| `disk-floor-sweep` | hourly (boot +5) | two passes. **Every** run prunes the **system** daemon's per-train `boss-ci:<sha>` images older than `BOSS_CI_IMAGE_AGE_HOURS` (6h), keeping the newest 3 — only sha-shaped tags, so `rust1.96` and `latest` are never candidates. **Below** `BOSS_DISK_FLOOR_GB` (100 in the service) it goes on to the emergency remediations: all unused system-daemon images over 4h, the whole rootless builder cache, dangling images, registry-verified old tags — in that fixed order, stopping at the floor; regenerable caches only, never volumes | exits non-zero with `FLOOR UNMET — a human decides next` rather than deleting harder, and non-zero when the age pass could not reach the system daemon (a prune of the wrong daemon would report success and free nothing) |
 | `reap-dead-ci-jobs` | daily (boot +15) | remove the containers and volumes of crashed CI jobs | journal |
 | `estate-observe-host` | 15 min (boot +3) | record this host's disk, load and units into the estate as observations; the conductor's boarding refuses on a positive "host is short" reading | journal; a stale series reads as unverifiable, and boarding proceeds with one loud line |
 | `boss-ops-runner` | ~1 min | answer `ops-request` packets filed against `forge` with a verb from `infra/ops/verbs.json` | `refused` outcome on the packet; installed by `install.sh` since 2026-09-05 (a drop-in carries this host's identity) |
@@ -173,7 +173,8 @@ The recurring one (2026-08-17, 08-22, 09-02, 09-03, 09-05). Symptoms:
   `test result: FAILED`.
 
 Consumers, largest first, as measured: the system daemon's per-train
-CI images (81 GB, now swept hourly), the rootless daemon's converge
+CI images (81 GB on 2026-09-05 — since 2026-09-10 pruned by AGE on
+every hourly pass, not only below the floor), the rootless daemon's converge
 build cache, `/opt/forgejo/data` (33 GB, grows with packages and
 Actions logs), and each cold `target/` (about 40 GB since lean builds
 landed 2026-09-04). Read with `disk-report`; reclaim with

@@ -45,6 +45,13 @@
 # kind is missing here (CLAUDE.md §9a). Seeded by
 # 202609082300-a-silent-cadence-files-an-alarm.sql; present here because
 # dispatcher_rules_seed_matches_toml compares BOTH directions.
+#
+# v2, 2026-09-10 (20260910024611-boss-gcp-converge-is-a-declared-cadence.sql):
+# `maintenance-boss-gcp-converge` at 30, the new self-converge loop that
+# ends "landed but never installed" on boss-gcp (408c81f6). A loop whose
+# whole job is to stop units rotting must not be able to stop quietly
+# itself — that is the same defect one level up, and its silence would
+# hide every unit fix behind it.
 [[rule]]
 name = "cadence-silence-sweep-daily"
 why = """
@@ -62,7 +69,13 @@ declared kind and files, refreshes, or closes ONE alarm packet per
 silent kind. (Ratchet history: 59 -> 60, 2026-09-08, migration
 202609082300.)
 """
+# v2 carries one more declaration (maintenance-boss-gcp-converge, 30) and
+# nothing else. The version lives here because load_active_rules reads it
+# off the row and dispatcher_rules_seed_matches_toml compares the
+# serialized rule, version included: a bumped row against a file that
+# still says v1 is a red gate, not a silent drift.
+version = 2
 schedule = { cadence = "daily", anchor_date = "2026-09-09" }
 [[rule.do]]
 handler = "cadence.silence.sweep"
-args = { "interval_minutes.maintenance-audit-integrity" = "1440", "interval_minutes.maintenance-backup" = "1440", "interval_minutes.maintenance-cluster-converge" = "10", "interval_minutes.maintenance-cluster-watchdog" = "5", "interval_minutes.maintenance-conservation-invariants" = "60", "interval_minutes.maintenance-disk-floor-sweep" = "60", "interval_minutes.maintenance-estate-observe-host" = "1440", "interval_minutes.maintenance-estate-observe-units" = "5", "interval_minutes.maintenance-files-gc" = "1440", "interval_minutes.maintenance-forge-converge" = "10", "interval_minutes.maintenance-ledger-recognize" = "1440", "interval_minutes.maintenance-ledger-replay" = "1440", "interval_minutes.maintenance-messages-purge" = "1440", "interval_minutes.maintenance-ml-inference-batch" = "1440", "interval_minutes.maintenance-reap-ci-jobs" = "1440", "interval_minutes.maintenance-search-reindex" = "10", "interval_minutes.maintenance-views-catchup" = "5" }
+args = { "interval_minutes.maintenance-audit-integrity" = "1440", "interval_minutes.maintenance-backup" = "1440", "interval_minutes.maintenance-boss-gcp-converge" = "30", "interval_minutes.maintenance-cluster-converge" = "10", "interval_minutes.maintenance-cluster-watchdog" = "5", "interval_minutes.maintenance-conservation-invariants" = "60", "interval_minutes.maintenance-disk-floor-sweep" = "60", "interval_minutes.maintenance-estate-observe-host" = "1440", "interval_minutes.maintenance-estate-observe-units" = "5", "interval_minutes.maintenance-files-gc" = "1440", "interval_minutes.maintenance-forge-converge" = "10", "interval_minutes.maintenance-ledger-recognize" = "1440", "interval_minutes.maintenance-ledger-replay" = "1440", "interval_minutes.maintenance-messages-purge" = "1440", "interval_minutes.maintenance-ml-inference-batch" = "1440", "interval_minutes.maintenance-reap-ci-jobs" = "1440", "interval_minutes.maintenance-search-reindex" = "10", "interval_minutes.maintenance-views-catchup" = "5" }

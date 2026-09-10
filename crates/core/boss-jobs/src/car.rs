@@ -357,6 +357,114 @@ fn is_set(v: Option<&Value>) -> bool {
     }
 }
 
+/// The kind of linked packet a park may ROUTE. A `user-feedback`
+/// packet's triage is the filer's own routing decision and stays
+/// theirs — the same scoping the arrival rule's `route` arg carries
+/// (`jobs.complete_linked_step`, dda0713c).
+pub const TRIAGEABLE_KIND: &str = "backlog-item";
+
+/// The routing step on that kind. Its `spec_slug` is the lookup;
+/// `find_step`'s title fallback is given the same string because this
+/// step has no separate title a car author could rely on.
+pub const TRIAGE_SLUG: &str = "triage";
+
+/// The disposition a parked car states: this car is the item's build.
+pub const DISPOSITION_BUILD: &str = "build";
+
+/// The step write a park owes the item its car links — the step to
+/// complete and the body to PUT. The HTTP stays with each caller
+/// (`boss park` and the dispatcher's auto-park handler); the DECISION
+/// lives here once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriageWrite {
+    /// The id of the item's routing step.
+    pub step_id: String,
+    /// `PUT /api/jobs/{item}/steps/{step_id}` body: completed, with the
+    /// disposition and the evidence merged onto whatever the step
+    /// already carried.
+    pub body: Value,
+}
+
+/// PURE: the triage write parking this car owes the item it links — or
+/// `None` when there is nothing for a park to state.
+///
+/// WHY A PARK DECIDES THE ROUTE. `--park-backlog-item <id>` says "this
+/// car is that item's build". But the item's `build` step only OPENS
+/// once its triage records `disposition = build`, so a car parked
+/// against an un-triaged item links to a step nothing can advance: the
+/// change gets built, gated, landed and proven while the item still
+/// reads as undecided work, and the arrival rule finds nothing to
+/// complete. Measured twice within an hour on 2026-09-09 (items
+/// 5942f205 and af28e250; backlog ca76d8f9) — once walked through by
+/// hand afterwards, once triaged by the builder so the arrival rule
+/// would have something to complete. A car cannot be the build of
+/// something nobody decided to build, so the flag that names it states
+/// the decision at park time rather than leaving residue: an open
+/// packet that looks like unfinished work when the work is live. That
+/// residue is not free — past 100 open `ship-a-change` jobs a
+/// parked-ready car falls off page 1 and never boards (874ea0ae).
+///
+/// IDEMPOTENT, AND NEVER DESTRUCTIVE. `Some` comes back only while the
+/// routing step is still OPEN (`ready`/`active` — the same "open" the
+/// arrival rule's route reads) AND carries no disposition. A triage a
+/// person already completed, an item a person routed to `verify` /
+/// `design` / `stale` / `decline`, a closed or cancelled item, an item
+/// with no routing step, and a kind whose triage is not a park's to
+/// make all answer `None` — so a re-gate, a refresh or a redelivery
+/// writes nothing, and no human's disposition is ever overwritten.
+pub fn triage_on_park(item: &Value, car_id: &str, branch: &str) -> Option<TriageWrite> {
+    if item.get("kind").and_then(Value::as_str) != Some(TRIAGEABLE_KIND) {
+        return None;
+    }
+    if matches!(
+        item.get("status").and_then(Value::as_str),
+        Some("closed" | "cancelled")
+    ) {
+        return None;
+    }
+    let step = find_step(item, TRIAGE_SLUG, TRIAGE_SLUG)?;
+    if !matches!(
+        step.get("status").and_then(Value::as_str),
+        Some("ready" | "active")
+    ) {
+        return None;
+    }
+    let mut metadata = match step.get("metadata").cloned() {
+        Some(Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    };
+    // Belt to the status guard's braces: a disposition already written
+    // is a decision already made, whatever the step's status says.
+    if metadata.contains_key("disposition") {
+        return None;
+    }
+    let step_id = step.get("id").and_then(Value::as_str)?.to_string();
+    metadata.insert("disposition".to_string(), json!(DISPOSITION_BUILD));
+    metadata.insert(
+        "evidence".to_string(),
+        json!(park_triage_evidence(car_id, branch)),
+    );
+    Some(TriageWrite {
+        step_id,
+        // PATCH-on-PUT replaces top-level `metadata` wholesale, so the
+        // step's existing keys ride along rather than being wiped.
+        body: json!({ "status": "completed", "metadata": Value::Object(metadata) }),
+    })
+}
+
+/// The `evidence` the routing step requires at done, naming WHAT made
+/// the decision — a reader of the item should not have to go find out
+/// why its route says `build`.
+fn park_triage_evidence(car_id: &str, branch: &str) -> String {
+    format!(
+        "routed at park: car {} on {branch} is this item's build. \
+         `--park-backlog-item` names the car as the build, so the route is stated when \
+         the car is filed rather than left un-triaged for the arrival rule to find \
+         nothing to advance (backlog ca76d8f9).",
+        &car_id[..8.min(car_id.len())]
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -745,5 +853,104 @@ mod open_car_tests {
         abandoned["status"] = json!("closed");
         abandoned["metadata"]["abandoned"] = json!("true");
         assert!(open_car_for(&[abandoned], BRANCH).is_none());
+    }
+}
+
+/// A PARKED CAR STATES ITS ITEM'S ROUTE (backlog ca76d8f9).
+#[cfg(test)]
+mod park_triage_tests {
+    use super::*;
+
+    const BRANCH: &str = "fix/a-parked-car-triages-its-item";
+    const CAR_ID: &str = "9442139b-1616-4b8d-8a7a-d1e34ff96486";
+
+    /// A `backlog-item` as `--park-backlog-item` usually finds it:
+    /// filed, un-triaged, every route still pending.
+    fn untriaged_item() -> Value {
+        json!({
+            "id": "5942f205-0f0e-4a51-9a31-2f8f3b0b7a11",
+            "kind": "backlog-item",
+            "status": "open",
+            "steps": [
+                { "id": "s-filed", "spec_slug": "filed", "status": "completed", "metadata": {} },
+                { "id": "s-triage", "spec_slug": "triage", "status": "ready",
+                  "metadata": { "context_md": "filed by a builder" } },
+                { "id": "s-build", "spec_slug": "build", "status": "pending", "metadata": {} },
+            ],
+        })
+    }
+
+    #[test]
+    fn parking_a_car_against_an_untriaged_item_routes_it_to_build() {
+        let w = triage_on_park(&untriaged_item(), CAR_ID, BRANCH)
+            .expect("an un-triaged item gets the route its car states");
+        assert_eq!(w.step_id, "s-triage");
+        assert_eq!(w.body["status"], "completed");
+        assert_eq!(w.body["metadata"]["disposition"], DISPOSITION_BUILD);
+        let evidence = w.body["metadata"]["evidence"].as_str().unwrap_or_default();
+        assert!(
+            evidence.contains("9442139b") && evidence.contains(BRANCH),
+            "the evidence names the car and its branch: {evidence}"
+        );
+        // PUT replaces `metadata` wholesale, so what the step already
+        // carried has to ride along.
+        assert_eq!(w.body["metadata"]["context_md"], "filed by a builder");
+    }
+
+    /// The idempotence that makes this safe to run on every re-gate and
+    /// every refresh: a triage a person already completed is a decision,
+    /// and a park never overwrites it.
+    #[test]
+    fn an_already_triaged_item_is_left_exactly_alone() {
+        let mut done = untriaged_item();
+        done["steps"][1]["status"] = json!("completed");
+        done["steps"][1]["metadata"] = json!({ "disposition": "verify", "evidence": "by hand" });
+        assert!(triage_on_park(&done, CAR_ID, BRANCH).is_none());
+
+        // A disposition written while the step is somehow still open is
+        // a decision too.
+        let mut decided = untriaged_item();
+        decided["steps"][1]["metadata"] = json!({ "disposition": "decline" });
+        assert!(triage_on_park(&decided, CAR_ID, BRANCH).is_none());
+
+        // And a route nobody has opened is not one a park may complete.
+        let mut pending = untriaged_item();
+        pending["steps"][1]["status"] = json!("pending");
+        assert!(triage_on_park(&pending, CAR_ID, BRANCH).is_none());
+    }
+
+    /// Claimed by a person is still open — the same "open" the arrival
+    /// rule's route reads, one definition of it across both halves.
+    #[test]
+    fn an_active_routing_step_is_still_open() {
+        let mut active = untriaged_item();
+        active["steps"][1]["status"] = json!("active");
+        assert!(triage_on_park(&active, CAR_ID, BRANCH).is_some());
+    }
+
+    /// A `user-feedback` packet's triage is the FILER's routing
+    /// decision. A car answering one says so in its own evidence; it
+    /// does not choose the filer's route for them.
+    #[test]
+    fn a_filers_own_packet_keeps_its_routing_decision() {
+        let mut feedback = untriaged_item();
+        feedback["kind"] = json!("user-feedback");
+        assert!(triage_on_park(&feedback, CAR_ID, BRANCH).is_none());
+    }
+
+    #[test]
+    fn a_terminal_or_stepless_item_is_untouched() {
+        for terminal in ["closed", "cancelled"] {
+            let mut gone = untriaged_item();
+            gone["status"] = json!(terminal);
+            assert!(
+                triage_on_park(&gone, CAR_ID, BRANCH).is_none(),
+                "{terminal}"
+            );
+        }
+        let mut stepless = untriaged_item();
+        stepless["steps"] = json!([]);
+        assert!(triage_on_park(&stepless, CAR_ID, BRANCH).is_none());
+        assert!(triage_on_park(&json!({}), CAR_ID, BRANCH).is_none());
     }
 }

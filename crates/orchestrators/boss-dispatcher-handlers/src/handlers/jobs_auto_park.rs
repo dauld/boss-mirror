@@ -54,6 +54,67 @@ impl JobsAutoPark {
     fn base(&self) -> &str {
         self.jobs_base.trim_end_matches('/')
     }
+
+    /// BEST-EFFORT: state the linked item's ROUTE, because parking this
+    /// car is what decided it.
+    ///
+    /// `--park-backlog-item <id>` says this car is that item's build.
+    /// The item's `build` step only OPENS once its triage records
+    /// `disposition = build`, so until now a car parked against an
+    /// un-triaged item linked to a step nothing could advance: the
+    /// change shipped, landed and was proven while the item still read
+    /// as undecided work, and the arrival rule found nothing to
+    /// complete (backlog ca76d8f9, measured twice in an hour on
+    /// 2026-09-09). The DECISION is `car::triage_on_park`, shared with
+    /// `boss park` so the two park paths cannot disagree about it, and
+    /// idempotent — a triage a person already completed answers `None`.
+    ///
+    /// NOTHING HERE MAY FAIL THE PARK. By the time this runs the car is
+    /// filed and its steps are complete; a routing write that cannot
+    /// reach the system of record is worth a warning, not a redelivery
+    /// that would re-do the whole park. CLAUDE.md records a fallible
+    /// write inside a reconcile loop freezing ALL landings — so every
+    /// failure here is logged and swallowed.
+    async fn triage_linked_item(&self, item_id: &str, car_id: &str, branch: &str, rule: &str) {
+        // A stored edge may be a >= 8-char prefix — seven cars have one
+        // — and `GET /api/jobs/{prefix}` is a permanent 400. Same test
+        // the arrival rule applies to the same edge, one definition
+        // (CLAUDE.md §9a).
+        if let Some(why) = super::jobs_complete_linked_step::unusable_link(item_id) {
+            tracing::warn!(rule = %rule, car = %car_id,
+                "park left the linked item un-routed — {why}");
+            return;
+        }
+        let item = match get_json(
+            &self.client,
+            &format!("{}/api/jobs/{}", self.base(), item_id),
+            rule,
+        )
+        .await
+        {
+            Ok(item) => item,
+            Err(e) => {
+                tracing::warn!(rule = %rule, car = %car_id, item = %item_id,
+                    "park could not read the linked item to route it: {e}");
+                return;
+            }
+        };
+        let Some(write) = car::triage_on_park(&item, car_id, branch) else {
+            return;
+        };
+        let url = format!(
+            "{}/api/jobs/{}/steps/{}",
+            self.base(),
+            item_id,
+            write.step_id
+        );
+        match write_json(&self.client, reqwest::Method::PUT, &url, &write.body, rule).await {
+            Ok(()) => tracing::info!(rule = %rule, car = %car_id, item = %item_id,
+                "routed the linked item to `build`: the car that names it IS its build"),
+            Err(e) => tracing::warn!(rule = %rule, car = %car_id, item = %item_id,
+                "park could not route the linked item to `build`: {e}"),
+        }
+    }
 }
 
 /// The inputs a green-with-intent gate-run yields for filing its car.
@@ -481,6 +542,13 @@ impl Handler for JobsAutoPark {
                 &ctx.rule_name,
             )
             .await?;
+            // A re-gate restates the route too: the item may still be
+            // un-triaged from the first park (this is new), and a
+            // second pass over an item already routed writes nothing.
+            if let Some(item) = inputs.backlog_item.as_deref() {
+                self.triage_linked_item(item, id, &inputs.branch, &ctx.rule_name)
+                    .await;
+            }
             return Ok(());
         }
 
@@ -539,6 +607,13 @@ impl Handler for JobsAutoPark {
                 &ctx.rule_name,
             )
             .await?;
+        }
+
+        // THE CAR IS THE ITEM'S BUILD — say so on the item, last, so a
+        // failure here costs the routing and not the car.
+        if let Some(item) = inputs.backlog_item.as_deref() {
+            self.triage_linked_item(item, car_id, &inputs.branch, &ctx.rule_name)
+                .await;
         }
 
         Ok(())
@@ -999,6 +1074,138 @@ mod a_moved_head_tests {
             patch["skip_reason"],
             Value::Null,
             "a null key is deleted by the metadata door — the stale skip goes with the stale receipt"
+        );
+    }
+}
+
+/// THE CAR IS THE ITEM'S BUILD (backlog ca76d8f9).
+#[cfg(test)]
+mod park_routes_its_item_tests {
+    use super::*;
+
+    const ITEM: &str = "5942f205-0f0e-4a51-9a31-2f8f3b0b7a11";
+    const CAR_ID: &str = "9442139b-1616-4b8d-8a7a-d1e34ff96486";
+
+    /// Stand-in for jobs-api holding one un-triaged backlog item, and
+    /// recording every step PUT so the routing write can be read back.
+    /// `status` is the code the item GET answers with — 500 stands in
+    /// for an SoR that cannot be reached.
+    async fn mock_item(
+        item: Option<Value>,
+        status: axum::http::StatusCode,
+    ) -> (String, Arc<std::sync::Mutex<Vec<(String, Value)>>>) {
+        use axum::{Json, Router, extract::Path, routing::get};
+        let puts: Arc<std::sync::Mutex<Vec<(String, Value)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let put_log = puts.clone();
+        let app = Router::new()
+            .route(
+                "/api/jobs/{id}",
+                get(move || {
+                    let item = item.clone();
+                    async move {
+                        match item {
+                            Some(item) if status.is_success() => Ok(Json(item)),
+                            _ => Err(status),
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/jobs/{id}/steps/{step_id}",
+                axum::routing::put(
+                    move |Path((_id, step_id)): Path<(String, String)>, Json(body): Json<Value>| {
+                        let puts = put_log.clone();
+                        async move {
+                            puts.lock().unwrap().push((step_id, body));
+                            Json(json!({ "ok": true }))
+                        }
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), puts)
+    }
+
+    fn untriaged_item() -> Value {
+        json!({
+            "id": ITEM,
+            "kind": "backlog-item",
+            "status": "open",
+            "steps": [
+                { "id": "s-filed", "spec_slug": "filed", "status": "completed", "metadata": {} },
+                { "id": "s-triage", "spec_slug": "triage", "status": "ready", "metadata": {} },
+                { "id": "s-build", "spec_slug": "build", "status": "pending", "metadata": {} },
+            ],
+        })
+    }
+
+    /// THE WRITE. Parking a car that names an un-triaged item completes
+    /// that item's triage with `disposition = build` and evidence naming
+    /// the car — so the `build` step the arrival rule completes actually
+    /// opens, instead of the item sitting at triage while the change is
+    /// live.
+    #[tokio::test]
+    async fn parking_routes_the_linked_item_to_build() {
+        let (base, puts) = mock_item(Some(untriaged_item()), axum::http::StatusCode::OK).await;
+        let h = JobsAutoPark::new(base, "http://unused");
+        h.triage_linked_item(ITEM, CAR_ID, "fix/x", "jobs.auto-park")
+            .await;
+
+        let puts = puts.lock().unwrap().clone();
+        assert_eq!(puts.len(), 1, "one routing write: {puts:?}");
+        let (step_id, body) = &puts[0];
+        assert_eq!(step_id, "s-triage");
+        assert_eq!(body["status"], "completed");
+        assert_eq!(body["metadata"]["disposition"], "build");
+        let evidence = body["metadata"]["evidence"].as_str().unwrap_or_default();
+        assert!(
+            evidence.contains("9442139b") && evidence.contains("fix/x"),
+            "the evidence names the car and its branch: {evidence}"
+        );
+    }
+
+    /// IDEMPOTENT ON A RE-GATE. The refresh path runs this too, and an
+    /// item a person already routed keeps their disposition — nothing is
+    /// written at all.
+    #[tokio::test]
+    async fn a_regate_never_re_routes_an_item_someone_decided() {
+        let mut decided = untriaged_item();
+        decided["steps"][1]["status"] = json!("completed");
+        decided["steps"][1]["metadata"] = json!({ "disposition": "verify", "evidence": "by hand" });
+        let (base, puts) = mock_item(Some(decided), axum::http::StatusCode::OK).await;
+        let h = JobsAutoPark::new(base, "http://unused");
+        h.triage_linked_item(ITEM, CAR_ID, "fix/x", "jobs.auto-park")
+            .await;
+        assert!(
+            puts.lock().unwrap().is_empty(),
+            "a person's disposition is never overwritten"
+        );
+    }
+
+    /// BEST-EFFORT, AND THAT IS THE POINT. An unreachable system of
+    /// record costs the routing write, never the park: the car is
+    /// already filed and green by the time this runs, and a fallible
+    /// write in a loop like this one froze every landing once
+    /// (CLAUDE.md §Diagnosis). The same holds for an edge stored as an
+    /// 8-char prefix, which would be a permanent 400.
+    #[tokio::test]
+    async fn a_routing_write_that_cannot_land_does_not_fail_the_park() {
+        let (base, puts) = mock_item(None, axum::http::StatusCode::INTERNAL_SERVER_ERROR).await;
+        let h = JobsAutoPark::new(base.clone(), "http://unused");
+        // Returns () — there is no error for the park to propagate.
+        h.triage_linked_item(ITEM, CAR_ID, "fix/x", "jobs.auto-park")
+            .await;
+        assert!(puts.lock().unwrap().is_empty());
+
+        let h = JobsAutoPark::new(base, "http://unused");
+        h.triage_linked_item("5942f205", CAR_ID, "fix/x", "jobs.auto-park")
+            .await;
+        assert!(
+            puts.lock().unwrap().is_empty(),
+            "a prefix edge is not followed — it is a permanent 400"
         );
     }
 }

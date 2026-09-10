@@ -27,7 +27,9 @@
 //! discipline someone remembers and becomes something the verb enforces.
 
 use anyhow::{Result, bail};
-use boss_jobs::car::{Receipt, car_body, parked_car_for, regate_patch, step_fields};
+use boss_jobs::car::{
+    Receipt, car_body, parked_car_for, regate_patch, step_fields, triage_on_park,
+};
 use serde_json::{Value, json};
 
 /// Find the receipt for `branch` among gate-run packets, or refuse.
@@ -224,6 +226,64 @@ fn step_id(job: &Value, title: &str) -> Result<String> {
         })
 }
 
+/// BEST-EFFORT: state the linked item's ROUTE, because parking this car
+/// is what decided it.
+///
+/// `--backlog-item <id>` says this car is that item's build, and the
+/// item's `build` step only OPENS once its triage records
+/// `disposition = build` — so a car parked against an un-triaged item
+/// linked to a step nothing could advance, and the change shipped while
+/// the item still read as undecided work (backlog ca76d8f9). The
+/// DECISION is `boss_jobs::car::triage_on_park`, shared with the
+/// dispatcher's auto-park handler so the two park paths cannot disagree,
+/// and idempotent — an item a person already routed is left alone.
+///
+/// NOTHING HERE FAILS THE PARK. The car is filed by the time this runs;
+/// a write that cannot land costs a printed line saying what to do by
+/// hand, which is also the warning the builder wanted at park time.
+async fn route_linked_item(http: &reqwest::Client, item_id: &str, car_id: &str, branch: &str) {
+    let id8 = &item_id[..8.min(item_id.len())];
+    let item = match crate::gate::api(
+        http,
+        reqwest::Method::GET,
+        &format!("/api/jobs/{item_id}"),
+        None,
+    )
+    .await
+    {
+        Ok(Some(item)) => item,
+        Ok(None) => return,
+        Err(e) => {
+            println!(
+                "boss park: could not read backlog-item {id8} to route it ({e}) — \
+                 the car is filed; triage the item to `build` by hand or its build step \
+                 never opens"
+            );
+            return;
+        }
+    };
+    let Some(write) = triage_on_park(&item, car_id, branch) else {
+        return;
+    };
+    match crate::gate::api(
+        http,
+        reqwest::Method::PUT,
+        &format!("/api/jobs/{item_id}/steps/{}", write.step_id),
+        Some(write.body),
+    )
+    .await
+    {
+        Ok(_) => println!(
+            "boss park: backlog-item {id8} routed to `build` — this car IS its build, \
+             so the arrival rule has a step to complete"
+        ),
+        Err(e) => println!(
+            "boss park: could not route backlog-item {id8} to `build` ({e}) — \
+             the car is filed; triage it by hand or its build step never opens"
+        ),
+    }
+}
+
 /// File a car for `branch` and fill it up to `review`.
 pub(crate) async fn run(
     branch: &str,
@@ -359,6 +419,12 @@ pub(crate) async fn run(
             "boss park: car {id8} was already parked for {branch} — receipt refreshed \
              (regate_receipt), no second car"
         );
+        // A re-gate restates the route too: the item may still be
+        // un-triaged from the first park, and a second pass over one
+        // already routed writes nothing.
+        if let Some(item) = backlog_item.as_deref() {
+            route_linked_item(&http, item, &id, branch).await;
+        }
         return Ok(());
     }
 
@@ -405,6 +471,13 @@ pub(crate) async fn run(
         "boss park: car {} parked at review — receipt copied, not retyped",
         &car[..8.min(car.len())]
     );
+
+    // THE CAR IS THE ITEM'S BUILD — say so on the item, last, so a
+    // failure here costs the routing and not the car.
+    if let Some(item) = backlog_item.as_deref() {
+        route_linked_item(&http, item, &car, branch).await;
+    }
+
     Ok(())
 }
 

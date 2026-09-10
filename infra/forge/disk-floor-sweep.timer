@@ -1,6 +1,9 @@
-# Hourly, not the converge's 10min: above the floor this is a no-op,
-# and below it the sweep frees tens of GB per pass — an hour of
-# cadence is plenty ahead of the ~1GB-per-converge growth rate.
+# Hourly, not the converge's 10min. Above the floor a pass now prunes
+# the per-train CI images past their window — at 5-14 trains a day that
+# is one or two images an hour, and an hour of cadence keeps the pile
+# bounded at a few images rather than a day's worth. Below the floor the
+# sweep frees tens of GB in one pass, still well ahead of the
+# ~1GB-per-converge growth rate.
 [Unit]
 Description=BOSS forge disk floor sweep (hourly)
 

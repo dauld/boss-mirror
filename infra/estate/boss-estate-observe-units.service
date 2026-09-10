@@ -27,7 +27,16 @@ Environment=JOBS_API=http://10.20.0.34:7900
 # unit_unhealthy:boss-gcp/boss-train.service (72e410a5) forever. The
 # host's own estate observer timer is the unit that must stay alive for
 # the estate loop to see this host at all.
-Environment=UNITS=boss-estate-observe-host.timer
+#
+# boss-gcp-converge.timer joins it (408c81f6): it is the loop that keeps
+# every OTHER unit on this host current, so its silence is the silence of
+# all of them — and an unloaded timer here is what "nobody ran the
+# bootstrap" looks like from outside. Watched from this observer on
+# purpose, because it does not report through the converge it watches.
+#
+# QUOTED, because a space in an unquoted Environment= line starts a
+# SECOND assignment: `Environment=UNITS=a b` sets UNITS=a and drops b.
+Environment="UNITS=boss-estate-observe-host.timer boss-gcp-converge.timer"
 # The timers-leave-a-packet pair: a timer with no Job trail fails
 # silently, which is the exact class this observer exists to end.
 # BOSS_JOBS_URL pinned INLINE: deploy-services' shared jobs-url.conf

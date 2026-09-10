@@ -8,6 +8,7 @@
 
   import { onMount } from 'svelte';
   import { parseRoute, type Route } from './router';
+  import { goToLogin } from '@boss/web-kit/session/deadSession';
   import { loadSession } from '@boss/web-kit/session/session.svelte';
   import { loadManifest } from '@boss/web-kit/session/manifest.svelte';
   import { loadStepTypeRegistry } from './steps/surfaceRegistry.svelte';
@@ -153,6 +154,14 @@
   // the state could ever render, so MePage's advice for that state
   // ("reload to log in") described a loop, not a way in. Data reads
   // and writes still redirect — that is the interceptor's real job.
+  //
+  // Still only /api/* here: a non-API 401 belongs to the call that
+  // made it, which knows whether the status means a dead session
+  // (a step-plugin bundle) or something else. Those callers reach
+  // `goToLogin` directly — web-kit's session/deadSession.ts holds the
+  // target, the ?next= encoding and the on-/login guard ONCE, so this
+  // interceptor, steps/pluginHost.ts and WriteGate's sign-in link
+  // cannot drift (§9a).
   {
     const isIdentityProbe = (url: string): boolean =>
       url.startsWith('/api/session') || url.startsWith('/api/auth/');
@@ -162,15 +171,12 @@
       init?: RequestInit,
     ): Promise<Response> => {
       const resp = await _origFetch(input, init);
-      if (resp.status === 401 && window.location.pathname !== '/login') {
+      if (resp.status === 401) {
         const url = typeof input === 'string'
           ? input
           : input instanceof URL ? input.href : input.url;
-        // Only redirect on /api/* — let app-internal 401 handling
-        // for non-API resources stay where the call was made.
         if (url.startsWith('/api/') && !isIdentityProbe(url)) {
-          const next = encodeURIComponent(window.location.pathname + window.location.search);
-          window.location.href = `/login?next=${next}`;
+          goToLogin();
         }
       }
       return resp;

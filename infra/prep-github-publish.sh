@@ -25,6 +25,29 @@
 # anonymous — the repo is public, so measuring needs no credential
 # anywhere. Add it once: `git remote add github https://github.com/algedonic-dev/boss.git`.
 #
+# THE MIRROR IS GUARDED BY CONTENT, NOT BY COMMIT IDENTITY. A mirror
+# holding work nobody published must block: a snapshot pushed over it
+# destroys that work. Until 2026-09-10 the test for it was commit
+# identity — any commit in `SOURCE..TARGET` blocked — and that test was
+# a false positive BY CONSTRUCTION, because the protocol manufactures
+# exactly such commits: the snapshot is a `commit-tree` of the source
+# ref's tree onto the mirror's main, and merging the PR adds GitHub's
+# merge commit above it. Neither can ever appear on the source ref, so
+# from the first successful publish onward the condition was permanently
+# true and the protocol could never run again. Measured on 2026-09-10:
+# the one "absent" commit was b178a534 "Publish: forge main through
+# 2026-08-27 (#129) (#236)", whose tree 02a76d57 IS the tree of forge
+# main's b78ae6d2 — identical content, nothing to lose — and it was
+# refusing a publish of 238 commits / 763 files. A check its own success
+# makes permanently true protects nothing.
+#
+# So the question asked is now the one worth asking — does the mirror
+# hold file content the source history does not? — and it is asked of
+# TREES, in infra/mirror-drift-lib.sh, which carries the rule and its
+# boundary. `commits_behind` still counts every mirror-only commit;
+# `commits_behind_foreign` counts the ones that changed a file, and only
+# those block. A blocking finding names the commit and the files.
+#
 # A REF THAT DOES NOT RESOLVE IS A REFUSAL, NOT A MEASUREMENT. Until
 # 2026-09-08 a SOURCE_REF or mirror ref that did not exist made every
 # `git rev-list` fail silently under `|| echo 0`, and the script exited
@@ -49,6 +72,12 @@ PR_BRANCH="${PR_BRANCH:-publish/$(date -u +%Y-%m-%d)}"
 JSON=0
 [ "${1:-}" = "--json" ] && JSON=1
 
+# Resolved BESIDE THIS SCRIPT, and before the cd: the classifier is part
+# of this script, while the cd below is about running the tree-wide
+# secrets lint over the repo being measured. Those are two different
+# directories whenever the script is invoked against a scratch repo.
+LIB="$(cd "$(dirname "$0")" && pwd)/mirror-drift-lib.sh"
+
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
 say() { [ "$JSON" -eq 0 ] && echo "$@"; }
@@ -62,6 +91,15 @@ refuse() {
   [ "$JSON" -eq 1 ] && printf '{"refused":"%s"}\n' "$1"
   exit 2
 }
+
+# The classifier is not optional. A tree without it cannot answer
+# whether the mirror holds foreign work, and a measurement that skips
+# the question is the `|| echo 0` failure in a new coat.
+if [ ! -f "$LIB" ]; then
+  refuse "$LIB is missing; without it nothing can tell the mirror's own publish bookkeeping from foreign work on the mirror"
+fi
+# shellcheck source=infra/mirror-drift-lib.sh
+. "$LIB" || refuse "$LIB could not be sourced"
 
 if ! git remote get-url "$REMOTE" >/dev/null 2>&1; then
   refuse "remote '$REMOTE' is not configured (the mirror ref $REMOTE/$BRANCH cannot resolve); add it: git remote add $REMOTE https://github.com/algedonic-dev/boss.git"
@@ -95,16 +133,33 @@ say "  files changed : $FILES"
 
 BLOCKING=""
 
-# A mirror that is BEHIND has commits the source ref does not contain —
-# a push would either fail or, forced, destroy them. Always a human call.
-if [ "$BEHIND" -gt 0 ]; then
+# A mirror commit the source ref does not contain is only a threat if it
+# carries content the source history does not — see the header and
+# mirror-drift-lib.sh. The classifier refuses (2) rather than answering
+# when it cannot tell, and that refusal is passed straight through.
+FOREIGN=$(foreign_mirror_commits "$SOURCE" "$TARGET")
+case $? in
+  0) ;;
+  *) refuse "cannot tell the mirror's own publish bookkeeping from foreign work on $TARGET (see the error above)" ;;
+esac
+FOREIGN_COUNT=$(printf '%s' "$FOREIGN" | grep -c . || true)
+
+if [ "$FOREIGN_COUNT" -gt 0 ]; then
   BLOCKING="${BLOCKING}mirror-has-unmerged-commits "
-  say "  BLOCKING: $TARGET has $BEHIND commit(s) absent from $SOURCE"
+  say "  BLOCKING: $TARGET has $FOREIGN_COUNT commit(s) carrying file content absent from $SOURCE"
+  # Named, because a verdict someone must go re-derive is not a verdict.
+  [ "$JSON" -eq 0 ] && printf '%s\n' "$FOREIGN" | while IFS=$'\t' read -r sha subject files; do
+    [ -n "$sha" ] || continue
+    echo "      $sha $subject"
+    echo "        changed: $files"
+  done
+elif [ "$BEHIND" -gt 0 ]; then
+  say "  of the $BEHIND behind, 0 carry foreign content (our own publish bookkeeping)"
 fi
 
 if [ "$AHEAD" -eq 0 ] && [ -z "$BLOCKING" ]; then
   say "  nothing to publish — the mirror is current"
-  [ "$JSON" -eq 1 ] && printf '{"has_drift":false,"commits_ahead":0,"commits_behind":%s,"files_changed":0,"secrets_scan":"skipped","newly_public":0,"newly_public_files":[],"blocking":""}\n' "$BEHIND"
+  [ "$JSON" -eq 1 ] && printf '{"has_drift":false,"commits_ahead":0,"commits_behind":%s,"commits_behind_foreign":0,"files_changed":0,"secrets_scan":"skipped","newly_public":0,"newly_public_files":[],"blocking":""}\n' "$BEHIND"
   exit 0
 fi
 
@@ -143,8 +198,8 @@ fi
 
 if [ "$JSON" -eq 1 ]; then
   LIST=$(printf '%s\n' "$SENSITIVE" | grep . | sed 's/.*/"&"/' | paste -sd, - 2>/dev/null || true)
-  printf '{"has_drift":true,"commits_ahead":%s,"commits_behind":%s,"files_changed":%s,"secrets_scan":"%s","newly_public":%s,"newly_public_files":[%s],"blocking":"%s"}\n' \
-    "$AHEAD" "$BEHIND" "$FILES" "$SECRETS" "$SENS_COUNT" "${LIST:-}" "$(echo "$BLOCKING" | xargs)"
+  printf '{"has_drift":true,"commits_ahead":%s,"commits_behind":%s,"commits_behind_foreign":%s,"files_changed":%s,"secrets_scan":"%s","newly_public":%s,"newly_public_files":[%s],"blocking":"%s"}\n' \
+    "$AHEAD" "$BEHIND" "$FOREIGN_COUNT" "$FILES" "$SECRETS" "$SENS_COUNT" "${LIST:-}" "$(echo "$BLOCKING" | xargs)"
 fi
 
 if [ -n "$BLOCKING" ]; then

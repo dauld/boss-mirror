@@ -1,8 +1,16 @@
-# Keeps the forge host's root volume above BOSS_DISK_FLOOR_GB
-# (default 25) by reclaiming regenerable docker caches — see
-# disk-floor-sweep.sh for the exact order and the hard bounds. Above
-# the floor a run is one log line; an unmet floor after every bounded
-# remediation is a FAILED unit, deliberately.
+# Hourly disk maintenance for the forge host, two passes with different
+# triggers — see disk-floor-sweep.sh for the exact order and the hard
+# bounds:
+#   * EVERY run prunes the SYSTEM daemon's per-train `boss-ci:<sha>`
+#     images older than six hours (keeping the newest three). Nothing
+#     else ever removes one, and until 2026-09-10 only a below-floor run
+#     did: 81GB of them on 2026-09-05 (backlog e5dc60e4).
+#   * BELOW BOSS_DISK_FLOOR_GB it goes on to the emergency remediations,
+#     regenerable caches only, stopping as soon as the floor is met.
+# An unmet floor after every bounded remediation is a FAILED unit,
+# deliberately — and so is an age pass that could not reach the daemon
+# it was asked to prune, because the alternative is a sweep that reports
+# success and frees nothing.
 #
 # Install (forge host): in install.sh's UNITS list, so —
 #   ssh 10.20.0.15 'cd /home/david/boss && git pull && sudo infra/forge/install.sh'
@@ -10,7 +18,7 @@
 #   sudo cp /home/david/boss/infra/forge/disk-floor-sweep.{service,timer} /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now disk-floor-sweep.timer
 [Unit]
-Description=BOSS forge: keep the root volume above the disk floor (regenerable caches only)
+Description=BOSS forge: prune aged per-train CI images, and keep the root volume above the disk floor (regenerable caches only)
 
 [Service]
 Type=oneshot
