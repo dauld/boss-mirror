@@ -57,6 +57,20 @@ things close that now:
   retirement car from a train; `202609101200-the-flush-pipeline-is-deleted.sql`
   is the worked example of a retirement it reads.
 
+**The four it found are filed** (backlog 8d471ec5, migration
+`20260910190000-every-live-rule-says-why-it-exists.sql`):
+`auto-park-on-gate-green`, `estate-alarm-on-comparison`,
+`spawn-keg-return-on-delivery`, `spawn-tasting-panel-on-brew-close`. Two
+were deliberate two-phase flips — the handler ships inert, then a live
+`POST` + publish turns it on — and phase two never became a file. The
+flip is fine; stopping at it is the defect. **If you publish a rule live,
+the same change owes a file here and a migration**, or the next reader
+cannot ask why the system is doing what it does, and a fresh database
+does not do it at all. The four are also why each of their files narrates
+where its `why` came from: a justification invented to satisfy a lint is
+worse than a named gap, so the builder who found them listed them instead
+of backfilling.
+
 This directory was one file (`rules.toml`) until 2026-09-09, when two
 rule cars parked in one window and the second was left behind on
 `conflict: infra/dispatcher/rules.toml, infra/lint/dispatcher-rules-ratchet.sh`

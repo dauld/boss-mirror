@@ -1,0 +1,63 @@
+# The RAISE half of the estate loop (a5adfb99; the compare half is
+# `estate-compare-on-observation`). A CronJob posts an observation, the
+# compare handler records one finding series on `jobs.estate.compared`,
+# and this rule is what finally makes a persisting finding visible:
+# "estate.alarm is the raiser the comparison series was recorded for
+# (59ef456a): a HARD finding persisting three consecutive same-scope
+# comparisons becomes ONE urgent packet, deduped by estate_finding key,
+# persistence read back from the recorded series (the SoR is the state)"
+# (commit a1951772).
+#
+# WHY IT MUST EXIST AT ALL — the incident class it was written for:
+# "on 2026-08-27 the cp-2/cp-3 kubelets flapped, boss served 500s for
+# ~25 minutes, six CronJob runs died — and it was found HOURS later, by
+# hand, because every noticing mechanism BOSS has keys off packets and a
+# kubelet is not a packet" (handlers/estate_alarm.rs). CLAUDE.md
+# §Diagnosis states the same rule twice: "Detection is not diagnosis,
+# and they fail separately", and "An alarm that reports through its
+# subject dies with it" — which is why the handler's silence sweep runs
+# on EVERY firing, so one dead observer is noticed by its neighbours'
+# heartbeats.
+#
+# NO `when`. The calibration is not a predicate over one event — hard
+# findings only, persistence over PERSIST_N consecutive same-series
+# comparisons read back from the SoR, staleness over STALE_MULTIPLIER
+# missed cadences, dedup against open packets carrying the same
+# `estate_finding` key. All four live in the handler (and are constants
+# there precisely so they can be tuned), and it is "a no-op, not an
+# error, when findings are absent, not yet persistent, or already
+# raised" (handlers/estate_alarm.rs).
+#
+# AUTHORED LIVE, NOT WRITTEN BACK. Same two-phase flip as auto-park:
+# "Inert until the rule on jobs.estate.compared publishes, after deploy
+# — the auto-park two-phase flip" (commit a1951772). Phase two went in
+# through `POST /api/dispatcher/rules` + publish and never reached the
+# tree, so an ALARM ran with no file and no `why` until backlog
+# 8d471ec5. The row below is the live row, copied from
+# `GET /api/dispatcher/rules`.
+[[rule]]
+name = "estate-alarm-on-comparison"
+why = """
+A THRESHOLD, the second of the dispatcher's three sanctioned roles
+(David, 2026-08-14: clock, threshold, matchmaking, and nothing else).
+What raises is a LEVEL integrated over time, not a transition: a hard
+finding that survives consecutive same-series comparisons — "One
+flapped reading is weather; N in a row is a condition"
+(`PERSIST_N`, handlers/estate_alarm.rs) — or a series that stops
+arriving, where "[STALE_MULTIPLIER] missed cadences IS the
+persistence, already integrated over time". No protocol row can name
+that, and no packet causes it: its trigger
+(`jobs.estate.compared`) is the compare handler's reading of the
+CLUSTER, which is EXTERNAL INGRESS one hop upstream — "a kubelet is
+not a packet" is the whole reason this arm exists.
+
+Reacting to the comparison event rather than running a second clock is
+deliberate, the same choice `estate-compare-on-observation` makes: the
+alarm inherits the observer's own cadence, so tightening the observer
+tightens the alarm with no rule change. It adds no routing — one
+firing raises at most one packet per finding key, deduped — and it is
+the algedonic channel BOSS is named for, wired to the cluster itself.
+"""
+on_event = "jobs.estate.compared"
+[[rule.do]]
+handler = "estate.alarm"

@@ -1,0 +1,62 @@
+# The OUTPUT half of auto-park (commit 898e41b1, "the auto-park handler:
+# file a car on a green gate"). The input half is `boss gate --park-*`,
+# which stamps the park prose onto the gate-run as `park_*` metadata
+# (commit 8f7ffedb); this rule is what turns that intent into a filed car.
+#
+# WHY THIS TOPIC. The gate-run workflow's verdict step used to be the
+# generic `task` kind, so a rule wanting to fire on a green gate "would
+# have to listen on `step.done.task` — every task completion in the
+# system — and filter. A dedicated `gate-verdict` kind gives it a
+# targeted `step.done.gate-verdict` topic instead" (commit 3915271e,
+# which added the StepType for exactly this rule). So the narrow topic
+# exists BECAUSE of this rule; widening it back would wake the handler on
+# every task step in every workflow.
+#
+# NO `when`. The handler re-checks both conditions itself and is "a
+# no-op, not an error, when this is not an auto-park: the verdict is not
+# green, or no `--park-*` intent was stamped (a plain manual gate)"
+# (handlers/jobs_auto_park.rs). A predicate here would be a second copy
+# of that test — the §9a shape — and the handler's copy is the one that
+# must be right, because it also decides the receipt copy and the
+# re-gate/skip branches.
+#
+# AUTHORED LIVE, NOT WRITTEN BACK. The handler landed INERT: "INERT until
+# a rule on step.done.gate-verdict is published" (898e41b1), the
+# deploy-then-publish two-phase flip the estate alarm also used ("Inert
+# until the rule on jobs.estate.compared publishes, after deploy — the
+# auto-park two-phase flip", commit a1951772). Phase two was a live
+# `POST /api/dispatcher/rules` + publish and was never written back to
+# the tree, so this rule ran with no file and no `why` until backlog
+# 8d471ec5. The row below is that live row, copied from
+# `GET /api/dispatcher/rules`.
+[[rule]]
+name = "auto-park-on-gate-green"
+why = """
+A CROSS-PROTOCOL REACTOR: a `gate-run` packet's green verdict admits a
+`ship-a-change` car. Two protocols, so no single Workflow definition
+can declare it — the same standing exemption
+`spawn-car-on-sweep-remediated` claims for the same reason, and the
+reaction it is the mirror of.
+
+It is load-bearing for delivery: this is how a gate-green branch
+becomes a car at all, and the reason it cannot wait for a human is
+DECAY — the handler files the car "at computer speed while the base is
+still current (a stranded green decays: gated yesterday, unmergeable
+today)" (commit 898e41b1; CLAUDE.md records the 2026-09-01 session that
+found three stranded greens). It adds no routing: one firing reads the
+park intent plus the VERBATIM receipt off the gate-run and files one
+car through `boss_jobs::car`, the shared builder `boss park` uses, so
+the receipt-copy contract cannot drift (§9a).
+
+NOT A CANDIDATE FOR `on_complete_create`, the shipped WorkflowSpec
+precedent for protocol-declared consequences
+(docs/design/protocol-policy-publish.md): what fires here is not a
+bare spawn. The handler reads the gate-run's park intent and receipt,
+chooses between filing, refreshing a moved-head car, re-gating and
+skipping a branch whose content already landed, and routes the linked
+backlog item to `build` — decisions a protocol row has no way to
+express.
+"""
+on_event = "step.done.gate-verdict"
+[[rule.do]]
+handler = "jobs.auto-park"

@@ -23,6 +23,12 @@
 # system. Nothing could have noticed, because until now nothing compared
 # the live set to anything.
 #
+# THOSE FOUR ARE NOW FILED (backlog 8d471ec5), so EXEMPT is empty and
+# this script's "OK" is a statement about the system. The hole it covers
+# is not closed by that — it is closed by this script existing. Re-read
+# 2026-09-10 18:52 UTC after four retirements converged: 60 live, 56
+# authored, the same four unauthored; 60 and 60 with them filed.
+#
 # THE CHECKED PROPERTY
 # --------------------
 # Live rules are a subset of the authored directory, plus the rules the
@@ -63,9 +69,10 @@
 #
 # WHAT THAT DELIBERATELY DOES NOT EXCUSE. A live rule the tree says
 # NOTHING about — no file and no migration touching it — still FAILS,
-# which is the drift this check exists for and how the four rules in
-# EXEMPT were found (backlog 8d471ec5). "No migration mentions it" and
-# "a migration retires it" are opposite answers, not the same silence.
+# which is the drift this check exists for and how the four rules that
+# used to sit in EXEMPT were found (backlog 8d471ec5). "No migration
+# mentions it" and "a migration retires it" are opposite answers, not
+# the same silence.
 #
 # NOT AN EXEMPTION, on purpose. An EXEMPT entry would pass this car and
 # then fail the next one: the static half refuses an exemption whose
@@ -104,18 +111,19 @@ URL="$BASE/api/dispatcher/rules"
 # rule never edits this line and two cars cannot collide on it (the
 # BASELINE=<n> lesson, §9a).
 #
-# Every one of these was authored live through POST /api/dispatcher/rules
-# and never written back, so none of them carries a `why`. The fix is not
-# an exemption: it is a file in $RULES_DIR plus an ON CONFLICT-safe seed
-# migration (backlog 41ba00cd holds the collapse). They are listed rather
-# than invented justifications for, because a `why` nobody who knows the
-# intent wrote is worse than a named gap.
-EXEMPT=(
-    "auto-park-on-gate-green"
-    "estate-alarm-on-comparison"
-    "spawn-keg-return-on-delivery"
-    "spawn-tasting-panel-on-brew-close"
-)
+# EMPTY, and the fix that emptied it is the one this set was waiting for.
+# It held four rules authored live through POST /api/dispatcher/rules and
+# never written back — auto-park-on-gate-green, estate-alarm-on-comparison,
+# spawn-keg-return-on-delivery, spawn-tasting-panel-on-brew-close — each
+# therefore carrying no `why` (backlog 8d471ec5). They were LISTED rather
+# than justified, because a `why` nobody who knows the intent wrote is
+# worse than a named gap. Each now has a file in $RULES_DIR carrying a
+# sourced `why` and an ON CONFLICT-safe seed migration, so the "OK" this
+# script prints is finally a statement about the SYSTEM and not about the
+# directory. Adding a name back here is a decision that belongs in the
+# diff a reviewer reads, and the two staleness checks below make it
+# expire on its own.
+EXEMPT=()
 
 fail() { echo "the-live-rules-are-the-authored-rules: $*" >&2; problems=$((problems + 1)); }
 problems=0

@@ -1,0 +1,116 @@
+# Brewery demo tenant (Algedonic Ales). THE SOURCE FOR THIS RULE'S
+# INTENT is docs/design/brewery-fidelity.md §The live experiment, which
+# names this exact reaction: "**`tasting-panel` v1** (active 2026-08-21):
+# brew close spawns a sensory panel — pour-flight (qa-tech) →
+# panel-verdict (qa-supervisor, `release|hold`) → terminals
+# released/held. Measures a *hold rate* the brewery has never had." The
+# same section records how it was authored: "Spawn rules ride the
+# dispatcher registry (`jobs.job.closed` filtered by kind)."
+#
+# WHAT IT WAS FOR — a measured hole, not a hypothetical. The same doc's
+# direct SoR queries against the live tenant found: "**batch-qc-hold has
+# never fired.** Zero packets, ever. The workflow is well-formed (5
+# steps) but nothing spawns it — no `job_rate`, no dispatcher rule, no
+# engine hook. QC exists as authored intent only", and in the gap list,
+# "QC is authored at both ends (qc-checkpoint step, batch-qc-hold
+# workflow) minus the wire between them." The program entry then reads
+# "Wire QC. Spawn `batch-qc-hold` from failed qc-checkpoints; the live
+# `tasting-panel` protocol is the sensory layer of the same program."
+# This rule is that sensory layer's wire; the tasting-panel protocol's
+# own description states the obligation it discharges — "Sensory QC on
+# every packaged batch: a real brewery tastes before it ships. A held
+# verdict is the feeder batch-qc-hold never had."
+# (`GET /api/workflows/tasting-panel`, v2.)
+#
+# IT HAS FIRED AND THE MEASUREMENT PAID. The hold rate it was published
+# to measure read 0% across "all ten closed `tasting-panel` packets",
+# which is what exposed a sim defect: the workforce always took the
+# leading enum variant, so "any outcome-distribution measured over sim
+# traffic measured nothing" (boss-sim workforce.rs). Ten panels exist
+# only because this rule opened them.
+#
+# WHY THE BREW'S CLOSE AND NOT ITS PACKAGING STEPS. A `morning-brew`
+# batch packages in up to TWO steps — `package-half` and
+# `package-sixtel`, both `production-produce` kind — and its
+# `brew-completed` terminal is reached only when each has either
+# packaged or been skipped (examples/brewery/seeds/workflows.toml).
+# Listening on `step.done.production-produce` would open TWO panels for
+# one batch, and would also wake on every production-produce step in
+# every other workflow — the `spawn-car-on-sweep-remediated` reasoning.
+# The close is the one-per-batch fact.
+#
+# WHY `outcome = "completed"`. `morning-brew` has two terminals:
+# `brew-completed` (`terminal = { outcome = "completed" }`) and
+# `day-skipped` (`outcome = "skipped"`), the latter reached when the
+# Tier-0 demand gate reads oversupply and the Job routes there "WITHOUT
+# consuming raw ingredients or producing FG". A skipped day produced no
+# beer, so there is nothing to taste.
+#
+# WHY THE SUBJECT IS THE COMPANY. `tasting-panel` declares
+# `subject_kinds = ["company"]` and `morning-brew` runs on the brewhouse
+# Subject, so the spawn pins `subject = "brewery"` /
+# `subject_kind = "company"`. `metadata.batch_job_id = id` is the
+# back-edge to the batch tasted — the only link from a verdict to the
+# beer it judged, and `id` rather than `job_id` for the reason recorded
+# on `spawn-keg-return-on-delivery` (the 2026-08-24 topic-wide abort).
+#
+# THE `when` ENUMERATES THE RECIPES, and that is this rule's one sharp
+# edge. All five kinds it names exist (`morning-brew`, `-ipa`, `-stout`,
+# `-lager`, `-hazy`; each variant's seed says "Identical step graph to
+# morning-brew"), checked against `GET /api/workflows` on 2026-09-10 —
+# but publishing a SIXTH recipe silently gets no tasting panel until
+# this predicate is edited. Recording the edge here is the honest
+# minimum until the expression language can match a kind family.
+#
+# AUTHORED LIVE, NOT WRITTEN BACK. Both the protocol and the rule were
+# published through the API during the 2026-08-21 experiment week and
+# neither reached the tree: there is no `tasting-panel` WorkflowSpec in
+# this repo, no commit message names this rule, and until this file there
+# was no migration for it either. So it ran with no `why` until backlog
+# 8d471ec5. The row below is the live v2 row, copied from
+# `GET /api/dispatcher/rules`.
+[[rule]]
+name = "spawn-tasting-panel-on-brew-close"
+why = """
+A CROSS-PROTOCOL REACTOR: a completed `morning-brew` batch admits a
+`tasting-panel` packet. Two protocols, so no single Workflow
+definition can declare it — the same standing exemption
+`spawn-car-on-sweep-remediated` and `spawn-keg-return-on-delivery`
+claim.
+
+WHAT IT IS FOR, in the design doc that published it: "brew close
+spawns a sensory panel … Measures a *hold rate* the brewery has never
+had" (docs/design/brewery-fidelity.md §The live experiment). The hole
+it fills was measured, not assumed: "batch-qc-hold has never fired.
+Zero packets, ever. … nothing spawns it — no `job_rate`, no dispatcher
+rule, no engine hook. QC exists as authored intent only." This rule is
+the wire that doc's program item 6 asks for, and the protocol it opens
+says the same in its own words: "Sensory QC on every packaged batch: a
+real brewery tastes before it ships. A held verdict is the feeder
+batch-qc-hold never had."
+
+Fires on the batch's TERMINAL OUTCOME rather than its packaging steps
+because a batch packages in up to two `production-produce` steps
+(`package-half`, `package-sixtel`) and a panel is ONE per batch, not
+one per package run. `outcome = "completed"` selects `brew-completed`
+and excludes `day-skipped`, the oversupply terminal where the Tier-0
+demand gate aborted before the mash — no beer, nothing to taste. It
+adds no routing: one closed batch, one panel, carrying
+`metadata.batch_job_id` as the back-edge.
+
+TWO HONEST CAVEATS. (1) `on_complete_create` is a shipped WorkflowSpec
+field that docs/design/protocol-policy-publish.md calls "the precedent
+that [consequences] belong in the protocol"; nothing in the repo
+records it being weighed for this rule, and the account is historical
+— protocol and rule were authored live together in the 2026-08-21
+experiment week. Against moving it there: the predicate fans in over
+FIVE brew kinds, so the protocol-declared form is five identical
+copies on five specs. (2) The `when` enumerates those five by name, so
+a sixth recipe gets no panel until someone edits this file.
+"""
+version = 2
+on_event = "jobs.job.closed"
+when = "(kind = \"morning-brew\" OR kind = \"morning-brew-ipa\" OR kind = \"morning-brew-stout\" OR kind = \"morning-brew-lager\" OR kind = \"morning-brew-hazy\") AND outcome = \"completed\""
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"tasting-panel\"", subject_kind = "\"company\"", subject = "\"brewery\"", title = "\"Tasting panel\"", "metadata.batch_job_id" = "id" }

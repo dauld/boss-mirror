@@ -93,6 +93,23 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // writes back through the jobs API as its own actor, so the
         // only emit this handler owns is the packet it creates.
         ("jobs.run-car-probes", vec!["jobs.job.created"]),
+        // Auto-park (898e41b1): on a gate-run's GREEN gate-verdict step
+        // it files the ship-a-change car (`jobs.job.created`), completes
+        // that car's three receipt steps (`jobs.step.completed`), and —
+        // on the skip/re-gate branches, and when `--park-backlog-item`
+        // routes the linked item to `build` — PATCHes metadata
+        // (`jobs.job.updated`). Every one is a car or backlog-item write,
+        // so the only rule that can re-enter on them is the backlog-item
+        // advance rule; nothing it writes is a gate-run, so the park
+        // cannot trigger its own trigger.
+        (
+            "jobs.auto-park",
+            vec![
+                "jobs.job.created",
+                "jobs.step.completed",
+                "jobs.job.updated",
+            ],
+        ),
         ("jobs.complete_step", vec!["jobs.step.completed"]),
         // Clears waiting_on via PUT /api/jobs — the update emits
         // jobs.job.updated (and wakes metadata-gated steps in the
@@ -125,6 +142,14 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // is for lenses and for calibrating the eventual raiser, so
         // the loop terminates here by design, same as the census.
         ("estate.compare", vec!["jobs.estate.compared"]),
+        // The raiser on that series (a5adfb99): it POSTs an urgent
+        // backlog-item when a hard finding persists or a watched series
+        // goes stale, and nothing else — the dedup read is a GET and a
+        // non-raise is a no-op. A backlog-item write, so it cannot make
+        // the estate series it watches look any different, and the loop
+        // terminates at the operator's queue by design (delivery beyond
+        // the queue is channel work, not this handler's).
+        ("estate.alarm", vec!["jobs.job.created"]),
         // The cadence silence sweep (ecca2f43): a daily clock rule
         // that reconciles each DECLARED cadence against the newest
         // ACTUAL packet of that kind. Three writes, all through the
