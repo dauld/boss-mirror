@@ -25,17 +25,21 @@
 //!     PR heads, and 62 stale `train/*` branches piled up in a week
 //!     before arrival owned its own housekeeping (ab3fa473).
 //!
-//!  2. BOARD — open this window's train Job, collect the ship-a-change
-//!     Jobs that are ready (review step ready/active, a branch pushed to
-//!     the fork, not already on a train), assemble one train branch by
-//!     merging each on top of origin/main, run the CONSIST CHECK over
-//!     the assembled tree (`consist_check` — seconds of cheap text lints,
-//!     because a per-branch gate cannot see a failure that exists only in
-//!     the combination), push it, open ONE batched PR.
+//!  2. BOARD — collect the ship-a-change Jobs that are ready (review
+//!     step ready/active, a branch pushed to the fork, not already on a
+//!     train), assemble one train branch by merging each on top of
+//!     origin/main, run the CONSIST CHECK over the assembled tree
+//!     (`consist_check` — seconds of cheap text lints, because a
+//!     per-branch gate cannot see a failure that exists only in the
+//!     combination), push it, THEN open this window's train Job, then
+//!     ONE batched PR.
 //!     A branch that does not merge cleanly is skipped, named on the Job,
 //!     and left for the next train. An empty window — or a consist the
-//!     check refused — cancels the train via the `job.metadata.empty`
-//!     marker rather than pretending, and a refusal strikes no car.
+//!     check refused — departs nothing and OPENS NO PACKET: the journal
+//!     says why in one `no train departed` line and each car keeps its
+//!     own `skip_reason`. A refusal strikes no car (see "A BOARD THAT
+//!     DEPARTS NO TRAIN OPENS NO PACKET" for the ten hours that bought
+//!     the ordering).
 //!
 //! Two trees, deliberately:
 //!   - assembly happens in a dedicated clone (BOSS_TRAIN_HOME/repo) —
@@ -889,6 +893,80 @@ pub(crate) fn consist_check(tree: &Path, policy: &DeliveryPolicy) -> ConsistVerd
         }
     }
     consist_verdict(&runs, policy.consist_files_named)
+}
+
+// ---------------------------------------------------------------------------
+// A BOARD THAT DEPARTS NO TRAIN OPENS NO PACKET
+//
+// Ten hours of delivery went to this on 2026-09-10 (backlog 4860aff8).
+// ONE car sat on the dock that the consist check refused. The board
+// cadence is queue-depth based and re-fires every 60 seconds while the
+// dock stays deep, and every attempt OPENED a pr-train Job and then
+// cancelled it: `pr-train` total passed 982, the newest 100 rows all
+// closed inside 99 minutes, 89 `outcome: cancelled`, and 100 of 100
+// with no `boarded_jobs`. That is ~1,440 phantom packets a day from one
+// unboardable car. It turned the branch sweep's 50-row window over in
+// under an hour (02069932) and it lied to every window read — the yard,
+// `boss orient`, and any count of how many trains ran.
+//
+// The refusal itself was already right: no PR opened, no CI spent. What
+// it did not skip was the PACKET, because the Job was created BEFORE
+// the check ran — for one reason, that the refusal wanted somewhere to
+// record itself. The record is cheaper than that:
+//
+//   - each car keeps its own `skip_reason`, and for a consist refusal
+//     the structured `consist_refusal` too — the lint output, on the
+//     car whose boarding it blocked, where the operator already looks;
+//   - the journal gets ONE line, this one, which names the reason and
+//     says outright that no packet was opened, so nobody goes hunting
+//     the yard for a train that never existed.
+//
+// A packet is a fact that something happened; a train that never
+// departed is not one. And until it was cancelled it also HELD THE
+// TRACK, so a cancel lost to one API blip wedged boarding behind a
+// train that had never left the yard.
+// ---------------------------------------------------------------------------
+
+/// Why a board attempt departed no train. Every one of these used to
+/// open a pr-train Job and immediately cancel it through the `empty`
+/// marker; none of them opens anything now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NoDeparture {
+    /// The CI host is short of what a run needs — an infrastructure
+    /// refusal, decided before a single car was collected.
+    HostShort { reason: String },
+    /// Nothing was parked and ready when the window opened.
+    NothingParked,
+    /// Every candidate conflicted on the assembled tree.
+    AllConflicted { branches: String },
+    /// The consist check refused the assembled tree. Nobody's car is at
+    /// fault — each was green on its own branch — so every car stays
+    /// boardable and unstruck.
+    ConsistRefused { reason: String, cars: usize },
+}
+
+/// The journal line a refused board leaves. It is the only record of
+/// the window now, so it carries the reason AND the fact that no packet
+/// was opened; a reader who greps `no train departed` gets every
+/// non-departure, whatever refused it.
+pub(crate) fn no_departure_line(refusal: &NoDeparture) -> String {
+    match refusal {
+        NoDeparture::HostShort { reason } => format!(
+            "no train departed — boarding refused before any car was collected: {reason}. \
+             No train packet opened, no PR, no CI spent."
+        ),
+        NoDeparture::NothingParked => "no train departed — no car was parked and ready when the \
+             window opened: an idle window, not a failure. No train packet opened."
+            .to_string(),
+        NoDeparture::AllConflicted { branches } => format!(
+            "no train departed — every candidate was skipped on merge conflicts: {branches}. \
+             No train packet opened, no PR, no CI spent; each car carries its own skip_reason."
+        ),
+        NoDeparture::ConsistRefused { reason, cars } => format!(
+            "no train departed — {reason}. No train packet opened, no PR, no CI spent — \
+             {cars} car(s) stay boardable and unstruck."
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2418,6 +2496,100 @@ pub(crate) fn sweep_settled(boarded_cars: &[Value]) -> bool {
             Some("closed") | Some("cancelled")
         )
     })
+}
+
+/// The closed trains the sweep still owes a visit: a train that
+/// boarded something and carries no `branches_swept` stamp. Swept
+/// trains and cancelled ones (nothing boarded, so no car branch to
+/// delete) drop out here, fetch-free — the list rows carry metadata,
+/// so this costs no per-car reads.
+///
+/// Pure, and separate from the read, because WHICH trains are pending
+/// and HOW MANY rows the read gathered are different questions. The
+/// leak this file was filed for came from answering the second one
+/// with `limit=50`: cancelled trains close about once a minute when
+/// the consist check is refusing, so a 50-row window turns over in
+/// under an hour and a train whose car is proven later than that was
+/// never looked at again.
+pub(crate) fn sweep_pending(closed_trains: &[Value]) -> Vec<&Value> {
+    closed_trains
+        .iter()
+        .filter(|t| {
+            let md = t.get("metadata");
+            !truthy(md.and_then(|m| m.get("branches_swept")))
+                && truthy(md.and_then(|m| m.get("boarded_jobs")))
+        })
+        .collect()
+}
+
+/// Branches this pass withheld ONLY because a still-open car claims
+/// the same name — the deferral `deletable_branches` makes when a
+/// follow-up car rides a branch a landed car already used.
+///
+/// The deferral is right (the open car's work is unmerged) but it is
+/// not final: the claim lifts the moment that car reaches a terminal,
+/// and the branch becomes deletable then. So a deferred branch must
+/// keep its train UNSTAMPED — stamping over it marks the train done
+/// sweeping while one of its branches can still become deletable, and
+/// the branch leaks for good. Same failure the `branch_failures`
+/// guard exists to stop, reached by the other door.
+pub(crate) fn claim_deferred_branches(
+    boarded_cars: &[Value],
+    open_branches: &BTreeSet<String>,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for car in boarded_cars {
+        let Some(cid) = car.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let md = car.get("metadata");
+        let branch = md
+            .and_then(|m| m.get("branch"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let landed = car.get("status").and_then(Value::as_str) == Some("closed")
+            && md.and_then(|m| m.get("outcome")).and_then(Value::as_str) == Some("merged");
+        if !landed
+            || branch.is_empty()
+            || branch == "main"
+            || !open_branches.contains(branch)
+            || out.iter().any(|(b, _)| b == branch)
+        {
+            continue;
+        }
+        out.push((branch.to_string(), cid.to_string()));
+    }
+    out
+}
+
+/// THE LEAK GUARD, in one predicate: a train may be stamped
+/// `branches_swept` only when nothing it carries can still become
+/// deletable. Three ways that is false, and each keeps the train on
+/// the pending list for the next reconcile instead:
+///   - a branch failed to sweep this pass (forge blip, 404 at
+///     `get_job`) — revisit it;
+///   - a branch was deferred to a still-open car's claim — the claim
+///     lifts when that car closes;
+///   - a boarded car has not reached a terminal — its branch becomes
+///     deletable if it lands.
+/// The stamp is what drops the train off the list, so stamping early
+/// is not "a pass skipped", it is a branch left on the forge forever.
+pub(crate) fn sweep_complete(
+    branch_failures: usize,
+    claim_deferred: usize,
+    boarded_cars: &[Value],
+) -> bool {
+    branch_failures == 0 && claim_deferred == 0 && sweep_settled(boarded_cars)
+}
+
+/// A branch held back for a still-open car's claim says so: without a
+/// line, an operator sees the same train re-swept every ten minutes
+/// with nothing to show for it and no reason named.
+pub(crate) fn claim_deferred_line(branch: &str, car: &str) -> String {
+    format!(
+        "sweep: branch {branch} kept — a still-open car claims it (car {} landed); train stays pending",
+        id8(car)
+    )
 }
 
 /// A step's `completed_at` evidence stamp, raw as stored. The
@@ -5683,28 +5855,14 @@ impl Conductor {
         }
     }
 
-    /// Record why the machine abandoned this window, on the same
-    /// `cancelled` terminal a human's `--reason` fills.
-    ///
-    /// The terminal fires off the `empty` predicate, so until now a
-    /// SELF-cancellation completed it with no reason at all. Measured
-    /// 2026-09-05: of 16 cancelled trains, the 11 a human cancelled
-    /// all carry a reason and the 5 the MACHINE cancelled carry none —
-    /// including both of the previous night's consist refusals, which
-    /// is why a jammed yard could only be explained by reading the
-    /// conductor's pod log.
-    ///
-    /// MTTR is detection plus fix, and the fixes have been quick; the
-    /// hours went to finding out. A refusal that leaves no record on
-    /// the packet it refused is the detection cost in its purest form.
-    async fn record_abandon_reason(&self, train: &Value, reason: &str) -> Result<()> {
-        self.complete_step(
-            train,
-            find_step(train, "cancelled", "Cancelled — nothing to board"),
-            &[("reason", Some(reason.to_string()))],
-        )
-        .await
-    }
+    // `record_abandon_reason` lived here: it wrote the machine's reason
+    // onto the `cancelled` terminal of a train the board had opened only
+    // to abandon. A board no longer opens a packet it is not departing
+    // (see "A BOARD THAT DEPARTS NO TRAIN OPENS NO PACKET"), so there is
+    // no self-cancelled train left to explain — the reason it used to
+    // carry is now the journal's `no train departed` line and the cars'
+    // own `skip_reason`. An operator's `boss train cancel` still fills
+    // the same terminal with its `--reason`, on its own path.
 
     /// Settle gate-runs whose runner died without reporting: complete
     /// `record-verdict` as `lost`, the terminal the workflow already
@@ -6600,34 +6758,57 @@ impl Conductor {
     /// boarded car closed with the merged outcome, that branch's
     /// work is on main and the conductor deletes it. A 404 is a fine
     /// answer — something got there first, and the sweep says nothing
-    /// about it (see `sweep_note`). A train whose cars have all
-    /// reached a terminal is stamped `branches_swept`, so the steady
-    /// state costs one list call and no per-car fetches.
+    /// about it (see `sweep_note`). A train with nothing left that
+    /// could become deletable is stamped `branches_swept`
+    /// (`sweep_complete`), so the steady state costs the list read and
+    /// no per-car fetches.
     ///
-    /// Forge cost: one list call, plus per UNSWEPT train one fetch
-    /// per boarded car, one `branch_head` per deletable branch, and
-    /// one delete of the train's own branch (a silent 404 once it is
-    /// gone). The `branches_swept` stamp is what bounds it — coverage
-    /// is never capped, so no landed branch goes uninspected.
+    /// Cost: one jobs-list PAGE per hundred closed trains, plus per
+    /// UNSWEPT train one fetch per boarded car, one `branch_head` per
+    /// deletable branch, and one delete of the train's own branch (a
+    /// silent 404 once it is gone). The `branches_swept` stamp bounds
+    /// the per-train work, not the read — the read pages the whole
+    /// closed set, because the stamp cannot bound what it has not
+    /// seen.
+    ///
+    /// THE LEAK THIS PAGING FIXES (measured 2026-09-10, packet
+    /// 02069932). This read was `limit=50` under a comment claiming
+    /// coverage was never capped. It was capped at 50, and the window
+    /// turns over fast: a consist check that refuses opens and closes
+    /// a cancelled train about once a minute, so ~50 minutes of
+    /// refusals push every arrived train off page one. A train is
+    /// stamped only once all its cars are terminal, so a car still
+    /// open at `proven` — the residue we spend sessions draining —
+    /// leaves its train unstamped, and once the window has turned
+    /// over that train is never read again and its landed branches
+    /// stay on the forge for good. Self-aggravating: proof delay
+    /// causes the leak, and proof delay is what we drain.
+    ///
+    /// Measured: 971 closed trains, eight branches of merged+closed
+    /// cars still on the forge, 529 consist-refused trains closed in
+    /// the preceding nine hours. Two of those eight belong to train
+    /// 82a643b4, whose cars closed 46 seconds AFTER the only reconcile
+    /// that pass — it was still inside the window then, so the cap is
+    /// not what held those two that hour; every later reconcile exited
+    /// on `another conductor run holds the lock` (a separate defect,
+    /// backlog), and by the time the sweep runs again the window has
+    /// turned over 10 times and the cap is what keeps them leaked.
     async fn sweep_landed_branches(&self) -> Result<()> {
-        let arrived = rows(
+        // Every closed train, not the newest page of them: the one
+        // paginator this file shares with candidates,
+        // open_car_branches, preview_dock and probe_dock_depth.
+        let arrived = list_all_pages(|offset| async move {
             self.api(
                 Method::GET,
-                "/api/jobs?kind=pr-train&status=closed&limit=50",
+                &format!(
+                    "/api/jobs?kind=pr-train&status=closed&limit={PAGE_LIMIT}&offset={offset}"
+                ),
                 None,
             )
-            .await?,
-        )?;
-        // Filter on the list rows (they carry metadata): swept trains
-        // and cancelled ones (nothing boarded) drop out fetch-free.
-        let pending: Vec<&Value> = arrived
-            .iter()
-            .filter(|t| {
-                let md = t.get("metadata");
-                !truthy(md.and_then(|m| m.get("branches_swept")))
-                    && truthy(md.and_then(|m| m.get("boarded_jobs")))
-            })
-            .collect();
+            .await
+        })
+        .await?;
+        let pending = sweep_pending(&arrived);
         if pending.is_empty() {
             return Ok(());
         }
@@ -6723,13 +6904,22 @@ impl Conductor {
                         log(sweep_branch_failed_line(&branch, &car, &e));
                     }
                 }
+                // A branch withheld for a still-open car's claim is not
+                // swept — it is deferred, and it becomes deletable the
+                // moment that car closes. Named here so the train's
+                // pending state has a stated reason, and counted so the
+                // stamp below cannot close over it.
+                let deferred = claim_deferred_branches(&cars, &open_branches);
+                for (branch, car) in &deferred {
+                    log(claim_deferred_line(branch, car));
+                }
                 // Stamp swept only when EVERY branch was handled: a
                 // branch we could not sweep this pass must be revisited,
                 // and the stamp is what drops the train off the pending
                 // list. Stamping over an un-swept branch leaks it onto
                 // the forge forever — the very debt this isolation
                 // exists to stop.
-                if branch_failures == 0 && sweep_settled(&cars) {
+                if sweep_complete(branch_failures, deferred.len(), &cars) {
                     self.merge_job_metadata(tid, vec![("branches_swept", json!("true"))])
                         .await?;
                 }
@@ -7241,28 +7431,12 @@ impl Conductor {
         // rebuild.
         match self.ci_host_readiness(now).await {
             host_readiness::Readiness::Refuse { reason } => {
-                log(format!("BOARDING REFUSED — {reason}"));
-                // Recorded the way an empty window records itself: the
-                // train Job opens, carries the reason on its collect
-                // step, and cancels via the `empty` marker — so the
-                // yard shows WHY no train ran instead of showing
-                // nothing at all.
-                let Some(train) = self.open_train_job(&train_branch, &window).await? else {
-                    return Ok(()); // dry run — the refusal is on the journal
-                };
-                let train_id = job_id(&train)?.to_string();
-                let collect = find_step(&train, "collect", "Collect what is ready to board");
-                self.merge_job_metadata(&train_id, vec![("empty", json!("true"))])
-                    .await?;
-                let abandon_reason =
-                    format!("boarding refused before any car was collected — {reason}");
-                self.complete_step(
-                    &train,
-                    collect,
-                    &[("boarded", Some(format!("nothing boarded — {reason}")))],
-                )
-                .await?;
-                self.record_abandon_reason(&train, &abandon_reason).await?;
+                // The refusal is the journal's, not a packet's (see "A
+                // BOARD THAT DEPARTS NO TRAIN OPENS NO PACKET"). The
+                // condition itself — a host short of disk — is already
+                // a packet: the estate observer files and refreshes one
+                // for the host, and it does not arrive once a minute.
+                log(no_departure_line(&NoDeparture::HostShort { reason }));
                 return Ok(());
             }
             host_readiness::Readiness::Unverifiable { reason } => {
@@ -7276,31 +7450,17 @@ impl Conductor {
 
         self.ensure_clone()?;
         let (cands, mut left_behind) = self.candidates().await?;
-        let Some(train) = self.open_train_job(&train_branch, &window).await? else {
-            // dry run
+        if self.cfg.dry {
             log(format!("DRY: candidates: {}", py_pairs(&cands)));
+            log(format!(
+                "DRY: would assemble {train_branch} and, if the consist check passes, open its \
+                 train Job for {window}"
+            ));
             return Ok(());
-        };
-        let train_id = job_id(&train)?.to_string();
-        let collect = find_step(&train, "collect", "Collect what is ready to board");
+        }
 
         if cands.is_empty() {
-            self.merge_job_metadata(&train_id, vec![("empty", json!("true"))])
-                .await?;
-            let abandon_reason =
-                "no car was parked and ready when the window opened — an idle window, not a failure"
-                    .to_string();
-            self.complete_step(
-                &train,
-                collect,
-                &[(
-                    "boarded",
-                    Some("nothing ready to board this window".to_string()),
-                )],
-            )
-            .await?;
-            self.record_abandon_reason(&train, &abandon_reason).await?;
-            log("empty window — train cancels via the marker");
+            log(no_departure_line(&NoDeparture::NothingParked));
             return Ok(());
         }
 
@@ -7412,19 +7572,9 @@ impl Conductor {
             .join(", ");
 
         if boarded.is_empty() {
-            self.merge_job_metadata(&train_id, vec![("empty", json!("true"))])
-                .await?;
-            self.complete_step(
-                &train,
-                collect,
-                &[(
-                    "boarded",
-                    Some(format!(
-                        "all candidates skipped on merge conflicts: {skipped_names}"
-                    )),
-                )],
-            )
-            .await?;
+            log(no_departure_line(&NoDeparture::AllConflicted {
+                branches: skipped_names.clone(),
+            }));
             return Ok(());
         }
 
@@ -7472,72 +7622,49 @@ impl Conductor {
             }
             // NOBODY'S CAR IS AT FAULT. Each one was green on its own
             // branch; the tree only broke once they were merged
-            // together. So: no PR, no push, no CI spent — and every car
-            // keeps `metadata.train` unset (never boarded, so still
-            // `parked_ready`) and `red_trains` untouched. Striking cars
-            // for a combination failure is the bug we already know
-            // about; the only thing they carry away is the reason,
-            // which names the check and the files it complained about.
-            let mut left_boardable = Vec::with_capacity(boarded.len());
+            // together. So: no train packet, no PR, no push, no CI spent
+            // — and every car keeps `metadata.train` unset (never
+            // boarded, so still `parked_ready`) and `red_trains`
+            // untouched. Striking cars for a combination failure is the
+            // bug we already know about.
+            //
+            // THE EVIDENCE RIDES THE CARS, not a cancelled train. It
+            // used to live in `consist_check` on a pr-train Job that
+            // existed only to be cancelled (4860aff8); the car whose
+            // boarding it blocks is both the honest owner of the fact
+            // and where an operator is already looking. `skip_reason`
+            // names the check and the files; `consist_refusal` carries
+            // what each check SAID, in full, because what cost 90
+            // minutes on 2026-09-04 was learning one bit per attempt.
+            // Both are cleared in the same write that stamps a later
+            // boarding, so neither outlives the refusal.
+            let refusal = json!({
+                "verdict": "refused",
+                "checks_run": ran,
+                "failed": failed
+                    .iter()
+                    .map(|f| json!({
+                        "lint": f.name,
+                        "files": f.files,
+                        "output": f.output,
+                    }))
+                    .collect::<Vec<_>>(),
+            });
             for (j, _branch, _head) in &boarded {
                 let cid = job_id(j)?;
-                left_behind.push(json!({
-                    "car_id_short": id8(cid),
-                    "reason": reason.as_str(),
-                }));
-                left_boardable.push(id8(cid));
-                self.merge_job_metadata(cid, vec![("skip_reason", json!(reason))])
-                    .await?;
-            }
-            // The train's own record of what it refused and why. The
-            // `empty` marker is what fires the `cancelled` terminal
-            // (its predicate is collect.done AND metadata.empty) —
-            // the same abandonment path an empty window takes, and
-            // honest here: nothing boarded, because nothing could.
-            self.merge_job_metadata(
-                &train_id,
-                vec![
-                    ("empty", json!("true")),
-                    (
-                        "consist_check",
-                        json!({
-                            "verdict": "refused",
-                            "checks_run": ran,
-                            "failed": failed
-                                .iter()
-                                .map(|f| json!({
-                                    "lint": f.name,
-                                    "files": f.files,
-                                    "output": f.output,
-                                }))
-                                .collect::<Vec<_>>(),
-                            "cars_left_boardable": left_boardable,
-                        }),
-                    ),
-                    ("left_behind", json!(left_behind)),
-                ],
-            )
-            .await?;
-            self.complete_step(
-                &train,
-                collect,
-                &[("boarded", Some(format!("nothing — {reason}")))],
-            )
-            .await?;
-            // The consist detail already rode onto the JOB above; this
-            // puts the headline on the terminal, where the yard and
-            // `boss orient` read a cancellation's reason. Twice on the
-            // night of 2026-09-04 this refusal cancelled a train with
-            // the terminal blank, and the only way to learn that one
-            // lint could not EXECUTE (python3 absent from the
-            // conductor's image) was to read the pod's log.
-            self.record_abandon_reason(&train, &format!("consist check refused — {reason}"))
+                self.merge_job_metadata(
+                    cid,
+                    vec![
+                        ("skip_reason", json!(reason)),
+                        ("consist_refusal", refusal.clone()),
+                    ],
+                )
                 .await?;
-            log(format!(
-                "consist check refused the consist: no PR opened, no CI spent — {} car(s) stay \
-                 boardable and unstruck",
-                boarded.len()
-            ));
+            }
+            log(no_departure_line(&NoDeparture::ConsistRefused {
+                reason: format!("consist check refused — {reason}"),
+                cars: boarded.len(),
+            }));
             return Ok(());
         }
         log(format!(
@@ -7548,6 +7675,21 @@ impl Conductor {
         sh(&["git", "-C", clone, "push", "fork", &train_branch])?;
         let train_ref_out = sh(&["git", "-C", clone, "rev-parse", "--short", "HEAD"])?;
         let train_ref = stdout_str(&train_ref_out).trim().to_string();
+
+        // THE PACKET OPENS HERE — one call site, after the consist check
+        // passed and after the branch is on the forge, so a pr-train Job
+        // exists only for a train that is actually departing (4860aff8).
+        // AFTER the push on purpose: a push that fails leaves one stale
+        // `train/*` branch, while a packet opened for a train that never
+        // pushed HOLDS THE TRACK until a human cancels it.
+        let Some(train) = self.open_train_job(&train_branch, &window).await? else {
+            // `None` is the dry-run answer and a dry run returned long
+            // before the clone was touched. Say it, rather than running
+            // on with no packet to record anything against.
+            log("no train departed — the train Job was not opened; nothing further attempted");
+            return Ok(());
+        };
+        let train_id = job_id(&train)?.to_string();
 
         let mut lines: Vec<String> = boarded
             .iter()
@@ -7705,7 +7847,9 @@ impl Conductor {
             // skip_reason cleared on boarding, in the same update that
             // stamps the train: an earlier window's skip note must not
             // outlive the skip — the key is REMOVED (Null), not left
-            // behind as "".
+            // behind as "". `consist_refusal` — the lint output a
+            // refused consist leaves on the car it blocked — comes off
+            // in the same write, for the same reason.
             //
             // `boarded_head` rides here too, and lives on the CAR
             // rather than in a second list on the train: the sweep
@@ -7719,6 +7863,7 @@ impl Conductor {
                     ("train", json!(train_id.as_str())),
                     ("boarded_head", json!(head.as_str())),
                     ("skip_reason", Value::Null),
+                    ("consist_refusal", Value::Null),
                 ],
             )
             .await?;
@@ -7991,6 +8136,122 @@ impl Conductor {
 }
 
 // ---------------------------------------------------------------------------
+// THE CONDUCTOR'S LOCK — A LOSER THAT LEAVES MUST EVENTUALLY WIN
+//
+// One lock file serializes every conductor verb, and the loser logs and
+// leaves. That is correct for a verb with a designed retry, and wrong
+// for one that can be starved — which is what happened for ten hours on
+// 2026-09-10 (backlog 4860aff8):
+//
+//   - the board cadence fires every 60 seconds and spends 12–14 seconds
+//     in the consist check, so it holds the lock for a fifth of every
+//     minute while a car sits on the dock;
+//   - the 10-minute reconcile fires about one second after it and so
+//     lost the lock EVERY time — 55 consecutive "another conductor run
+//     holds the lock — leaving", each recorded `rc=0 in 0s`;
+//   - the reconcile is what merges a green train, runs the stall
+//     sentinel, writes arrival reports and sweeps landed branches. All
+//     four were dead for nine hours, and nothing said so, because
+//     nothing needed a merge in that window. It surfaced when the next
+//     car tried to land — the verb that lands a fix being the verb that
+//     was starved.
+//
+// The contention is deterministic, not a race: the board always fires
+// first and always wins. So the fix is not a bigger lock, it is
+// FAIRNESS — the starvable side waits a bounded time for its turn:
+//
+//   - RECONCILE and RUN wait (`CONDUCTOR_LOCK_WAIT`). Waiting 14 seconds
+//     out of a 600-second period costs nothing, and the cadence loop's
+//     one-in-flight-run-per-rule guard means a waiting pass cannot stack
+//     up behind itself.
+//   - BOARD and PREFLIGHT do not wait. A board must never queue behind a
+//     reconcile that is deploying (job 9c5871fa: 30+ minutes), and it
+//     does not need to — its firing records boarded-nothing, which
+//     releases the queue-depth cooldown, and the next tick re-fires.
+//
+// The two alternatives were weighed and rejected. Serializing board and
+// reconcile into one cadence slot (`boss train run` already does
+// reconcile-then-board) fixes only the pair of rules that happen to
+// collide today and leaves every other caller — a hand-run verb, a
+// second conductor — starvable by the same mechanism. Shortening the
+// board's hold means shortening the consist check, which is the thing
+// doing the work.
+//
+// The budget is a constant and not delivery-policy data deliberately:
+// the lock is taken before the jobs API is read, so a registry value
+// would have to be fetched by a run that has not yet proved it may run.
+// ---------------------------------------------------------------------------
+
+/// How long a starvable phase waits for the conductor's lock. Two
+/// minutes: comfortably longer than the 12–14s a refusing board holds it
+/// and than a board that departs a train (push + PR + per-car writes),
+/// and a fifth of the reconcile's own 10-minute period, so a pass that
+/// waits its whole budget has still left the next window clear.
+pub(crate) const CONDUCTOR_LOCK_WAIT: Duration = Duration::from_secs(120);
+
+/// How often the waiter retries. The hold it waits out is seconds long,
+/// so a one-second poll wins within a second of the lock being freed.
+const LOCK_POLL: Duration = Duration::from_secs(1);
+
+/// Exit code for a phase that waited its whole budget and still never
+/// ran. Distinct from 0 because the cadence loop records the child's
+/// exit code as the firing's `rc`, and 55 starved passes recording
+/// `rc=0 in 0s` is precisely how nine hours of dead maintenance read as
+/// nine hours of successes. Distinct from 3 (preflight failure) because
+/// two causes must not share one code.
+pub(crate) const LOCK_CONTENDED_EXIT: i32 = 4;
+
+/// How long this phase waits for the lock before leaving.
+pub(crate) fn lock_wait_budget(phase: &Phase) -> Duration {
+    match phase {
+        // Starvable by construction: it fires on a fixed interval
+        // against a board that fires more often and holds longer.
+        Phase::Reconcile | Phase::Run => CONDUCTOR_LOCK_WAIT,
+        // A board has its own retry one tick later, and must not queue
+        // behind a long reconcile. Preflight proves nothing a running
+        // conductor has not already proved. A cancel is an operator
+        // standing at the prompt, who can see the line and re-run.
+        Phase::Preflight | Phase::Board | Phase::Cancel { .. } => Duration::ZERO,
+    }
+}
+
+/// Announced once, when a phase starts waiting rather than leaving.
+pub(crate) fn lock_waiting_line(budget: Duration) -> String {
+    format!(
+        "another conductor run holds the lock — waiting up to {}s for it",
+        budget.as_secs()
+    )
+}
+
+/// The win. Journalled with the waited time because "how long was the
+/// reconcile held off" is the number that was missing for nine hours.
+pub(crate) fn lock_acquired_line(waited: Duration) -> String {
+    format!(
+        "took the conductor's lock after waiting {}s",
+        waited.as_secs()
+    )
+}
+
+/// The loss. Unchanged for a phase that does not wait — the line
+/// operators and `cadence.rs`'s own doc comment already grep for — and
+/// named with the waited time for one that did.
+///
+/// Whole seconds decide which form it takes, not `is_zero`: a phase with
+/// a zero budget still spends a few hundred nanoseconds between taking
+/// the clock and failing the try, and "leaving after waiting 0s" would
+/// be a wait nobody waited.
+pub(crate) fn lock_contended_line(waited: Duration) -> String {
+    if waited.as_secs() == 0 {
+        "another conductor run holds the lock — leaving".to_string()
+    } else {
+        format!(
+            "another conductor run holds the lock — leaving after waiting {}s",
+            waited.as_secs()
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Entry
 // ---------------------------------------------------------------------------
 
@@ -8003,17 +8264,41 @@ pub async fn run(phase: Phase, dry: bool, now: DateTime<Utc>) -> Result<()> {
     let forge = make_forge(&cfg)?;
     fs::create_dir_all(&cfg.home)?;
     let lock = File::create(Path::new(&cfg.home).join("lock"))?;
-    match lock.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => {
-            // A held lock means a conductor run is active right now — the
-            // locomotive is demonstrably pulling; a standalone pre-flight
-            // has nothing further to prove.
-            log("another conductor run holds the lock — leaving");
-            return Ok(());
-        }
-        Err(TryLockError::Error(e)) => {
-            return Err(e).context("locking the conductor's lock file");
+    // A held lock means a conductor run is active right now. A phase with
+    // its own retry leaves at once; a starvable one waits its bounded
+    // turn — see "THE CONDUCTOR'S LOCK" above.
+    let budget = lock_wait_budget(&phase);
+    let since = std::time::Instant::now();
+    loop {
+        match lock.try_lock() {
+            Ok(()) => {
+                // Reaching a second attempt means a poll was slept, so
+                // an elapsed time of one poll or more IS a wait.
+                let waited = since.elapsed();
+                if waited >= LOCK_POLL {
+                    log(lock_acquired_line(waited));
+                }
+                break;
+            }
+            Err(TryLockError::WouldBlock) => {
+                let waited = since.elapsed();
+                if waited >= budget {
+                    log(lock_contended_line(waited));
+                    if budget > Duration::ZERO {
+                        // Waited the whole budget and never ran: the
+                        // firing must not record this as rc=0.
+                        std::process::exit(LOCK_CONTENDED_EXIT);
+                    }
+                    return Ok(());
+                }
+                if waited < LOCK_POLL {
+                    log(lock_waiting_line(budget));
+                }
+                tokio::time::sleep(LOCK_POLL).await;
+            }
+            Err(TryLockError::Error(e)) => {
+                return Err(e).context("locking the conductor's lock file");
+            }
         }
     }
     let problems = preflight(&cfg)?;
@@ -8370,11 +8655,12 @@ mod tests {
         ApiFailure, ConvergenceVerdict, Failure, JOBS_API_RETRY, NO_PLAYGROUND_DEPLOY_EVIDENCE,
         RetryPolicy, SweepGuard, arrival_already_filed, arrival_report, arrival_summary,
         auto_cancel_reason, boarded_head, branch_moved_line, car_hold_reason, ci_overdue,
-        classify_transport, commits_match, convergence_verdict, deletable_branches, deploy_needed,
-        local_jobs_problem, merge_declined_reason, overlay_metadata, parked_ready,
-        playground_deploy_disabled, releasable_cars, repo_path, resolve_train, retryable, retrying,
-        short_cause, skip_reason_branch_missing, skip_reason_conflict, stall_age_hours,
-        sweep_guard, sweep_note, sweep_settled, train_branch_to_delete, verdict_drift,
+        claim_deferred_branches, classify_transport, commits_match, convergence_verdict,
+        deletable_branches, deploy_needed, local_jobs_problem, merge_declined_reason,
+        overlay_metadata, parked_ready, playground_deploy_disabled, releasable_cars, repo_path,
+        resolve_train, retryable, retrying, short_cause, skip_reason_branch_missing,
+        skip_reason_conflict, stall_age_hours, sweep_complete, sweep_guard, sweep_note,
+        sweep_pending, sweep_settled, train_branch_to_delete, verdict_drift,
     };
     use crate::delivery_policy::DeliveryPolicy;
     use anyhow::{Result, anyhow};
@@ -8920,6 +9206,139 @@ mod tests {
         assert!(!sweep_settled(&[landed, still_open]));
         // Nothing boarded is trivially settled.
         assert!(sweep_settled(&[]));
+    }
+
+    // -- the sweep's coverage (packet 02069932) -----------------------------
+
+    fn closed_train(id: &str, boarded: bool, swept: bool) -> Value {
+        let mut md = serde_json::Map::new();
+        if boarded {
+            md.insert("boarded_jobs".into(), json!(["car-1"]));
+        } else {
+            md.insert("outcome".into(), json!("cancelled"));
+        }
+        if swept {
+            md.insert("branches_swept".into(), json!("true"));
+        }
+        json!({"id": id, "kind": "pr-train", "status": "closed", "metadata": md})
+    }
+
+    /// THE COVERAGE LEAK. The sweep read the newest 50 closed trains
+    /// under a comment claiming coverage was never capped. A refusing
+    /// consist check closes a cancelled train about once a minute, so
+    /// the window turned over in under an hour, and a train whose car
+    /// was proven after that dropped out of it for good — its landed
+    /// branch never inspected again. Paging is what makes the claim
+    /// true: the arrived train sits behind 500 cancelled ones here,
+    /// which is what the forge looked like on 2026-09-10.
+    #[tokio::test]
+    async fn the_sweep_reads_the_arrived_train_behind_a_window_of_refusals() {
+        let mut all: Vec<Value> = (0..500)
+            .map(|i| closed_train(&format!("cancelled-{i}"), false, false))
+            .collect();
+        all.push(closed_train("arrived-late-proof", true, false));
+        // The counterfactual, and the whole defect: the old read took
+        // the newest 50 rows, and there is nothing pending in them.
+        assert!(
+            sweep_pending(&all[..50]).is_empty(),
+            "a capped read sees only the refusals — this is what leaked the branch"
+        );
+
+        let all_ref = &all;
+        let gathered = list_all_pages(|offset| async move {
+            let page: Vec<Value> = all_ref
+                .iter()
+                .skip(offset)
+                .take(PAGE_LIMIT)
+                .cloned()
+                .collect();
+            anyhow::Ok(Some(json!({
+                "data": page,
+                "total": all_ref.len(),
+                "offset": offset,
+                "limit": PAGE_LIMIT,
+            })))
+        })
+        .await
+        .unwrap();
+
+        let pending = sweep_pending(&gathered);
+        assert_eq!(
+            pending.iter().map(|t| &t["id"]).collect::<Vec<_>>(),
+            vec![&json!("arrived-late-proof")],
+            "a train proven late must still be swept, however many trains closed since"
+        );
+    }
+
+    #[test]
+    fn a_swept_or_cancelled_train_costs_the_sweep_no_fetches() {
+        let trains = vec![
+            closed_train("swept", true, true),
+            closed_train("cancelled", false, false),
+            closed_train("pending", true, false),
+        ];
+        assert_eq!(
+            sweep_pending(&trains)
+                .iter()
+                .map(|t| &t["id"])
+                .collect::<Vec<_>>(),
+            vec![&json!("pending")]
+        );
+    }
+
+    /// A branch a still-open car claims is DEFERRED, not swept — the
+    /// claim lifts when that car closes. Stamping the train over it
+    /// marks the sweep done while the branch can still become
+    /// deletable, and the branch leaks for good.
+    #[test]
+    fn a_branch_a_live_car_claims_keeps_its_train_pending() {
+        let cars = vec![landed_car("car-1", "feat/x")];
+        let claimed: BTreeSet<String> = ["feat/x".to_string()].into_iter().collect();
+        assert!(
+            deletable_branches(&cars, &claimed).is_empty(),
+            "the live car's claim beats the landed car's deletion"
+        );
+        assert_eq!(
+            claim_deferred_branches(&cars, &claimed),
+            vec![("feat/x".to_string(), "car-1".to_string())],
+            "and the deferral is named, not silent"
+        );
+        assert!(
+            !sweep_complete(0, claim_deferred_branches(&cars, &claimed).len(), &cars),
+            "a deferred branch must not be stamped over"
+        );
+        // No claim, nothing deferred, every car terminal — done.
+        assert!(claim_deferred_branches(&cars, &no_open()).is_empty());
+        assert!(sweep_complete(0, 0, &cars));
+    }
+
+    #[test]
+    fn an_unlanded_car_defers_nothing() {
+        let mut open = landed_car("car-1", "feat/x");
+        open["status"] = json!("open");
+        let mut abandoned = landed_car("car-2", "feat/y");
+        abandoned["metadata"]["outcome"] = json!("abandoned");
+        let claimed: BTreeSet<String> = ["feat/x".to_string(), "feat/y".to_string()]
+            .into_iter()
+            .collect();
+        // Neither branch's content is on main, so neither was ever the
+        // sweep's to delete — nothing to defer, and `main` is never a
+        // car's branch to begin with.
+        assert!(claim_deferred_branches(&[open, abandoned], &claimed).is_empty());
+        let on_main = landed_car("car-3", "main");
+        let main_claim: BTreeSet<String> = ["main".to_string()].into_iter().collect();
+        assert!(claim_deferred_branches(&[on_main], &main_claim).is_empty());
+    }
+
+    #[test]
+    fn the_stamp_waits_on_a_failed_branch_a_deferral_and_an_open_car() {
+        let landed = landed_car("car-1", "feat/x");
+        let mut still_open = landed_car("car-2", "feat/y");
+        still_open["status"] = json!("open");
+        assert!(sweep_complete(0, 0, std::slice::from_ref(&landed)));
+        assert!(!sweep_complete(1, 0, std::slice::from_ref(&landed)));
+        assert!(!sweep_complete(0, 1, std::slice::from_ref(&landed)));
+        assert!(!sweep_complete(0, 0, &[landed, still_open]));
     }
 
     // -- the skip reason on the car job ------------------------------------
@@ -13092,6 +13511,144 @@ mod stranded_green_tests {
         assert!(
             patch.get("stranded_branch").is_none(),
             "the dedup key never moves — a refresh must not repoint the packet"
+        );
+    }
+}
+
+#[cfg(test)]
+mod no_departure_tests {
+    use super::{
+        CONDUCTOR_LOCK_WAIT, LOCK_CONTENDED_EXIT, NoDeparture, Phase, lock_acquired_line,
+        lock_contended_line, lock_wait_budget, lock_waiting_line, no_departure_line,
+    };
+    use std::time::Duration;
+
+    /// THE FLOOD, in one assertion. Ten hours on 2026-09-10 (4860aff8):
+    /// one car the consist check refused, a board firing every 60
+    /// seconds, and every attempt opened a pr-train Job and cancelled
+    /// it — 982 trains, the newest 100 closed inside 99 minutes, 100 of
+    /// 100 with no `boarded_jobs`. The refusal already spends no PR and
+    /// no CI; it must spend no PACKET either, and the journal line is
+    /// now the only place an operator learns a window refused, so it
+    /// has to say all three.
+    #[test]
+    fn a_refused_consist_opens_no_train_packet_and_says_so() {
+        let line = no_departure_line(&NoDeparture::ConsistRefused {
+            reason: "consist check: the-live-rules-are-the-authored-rules failed".to_string(),
+            cars: 3,
+        });
+        assert!(line.starts_with("no train departed —"), "{line}");
+        assert!(
+            line.contains("the-live-rules-are-the-authored-rules"),
+            "the refusal names the check that refused: {line}"
+        );
+        assert!(
+            line.contains("No train packet opened"),
+            "an operator must not go looking for a train that was never opened: {line}"
+        );
+        assert!(
+            line.contains("3 car(s) stay boardable"),
+            "a combination failure strikes nobody: {line}"
+        );
+    }
+
+    /// An idle window is not a failure, and it is not a train either.
+    #[test]
+    fn an_idle_window_departs_nothing_and_opens_nothing() {
+        let line = no_departure_line(&NoDeparture::NothingParked);
+        assert!(line.starts_with("no train departed —"), "{line}");
+        assert!(line.contains("not a failure"), "{line}");
+        assert!(line.contains("No train packet opened"), "{line}");
+    }
+
+    /// Every candidate conflicted: the cars carry their own
+    /// `skip_reason`, and the line names them so the journal answers
+    /// "which branches" without a second read.
+    #[test]
+    fn an_all_conflicted_window_names_the_branches() {
+        let line = no_departure_line(&NoDeparture::AllConflicted {
+            branches: "fix/a, fix/b".to_string(),
+        });
+        assert!(line.starts_with("no train departed —"), "{line}");
+        assert!(line.contains("fix/a, fix/b"), "{line}");
+        assert!(line.contains("No train packet opened"), "{line}");
+    }
+
+    /// An infrastructure refusal is not a consist failure — it says so,
+    /// and it carries the host reason the readiness check measured.
+    #[test]
+    fn a_host_refusal_carries_the_measured_reason() {
+        let line = no_departure_line(&NoDeparture::HostShort {
+            reason: "forge: 3.1 GB free, floor is 20 GB".to_string(),
+        });
+        assert!(line.starts_with("no train departed —"), "{line}");
+        assert!(line.contains("3.1 GB free"), "{line}");
+        assert!(
+            line.contains("before any car was collected"),
+            "nobody's car is at fault: {line}"
+        );
+    }
+
+    /// A lock whose loser logs and leaves is correct ONLY if it
+    /// eventually wins. The board fires every 60 seconds and holds the
+    /// lock 12–14 seconds in the consist check; the 10-minute reconcile
+    /// fired about a second later and lost 55 times in a row, so no
+    /// merge, no stall sentinel, no arrival report and no branch sweep
+    /// ran for nine hours. The starvable side waits; the side that must
+    /// never queue behind a 30-minute deploy does not.
+    #[test]
+    fn only_the_starvable_phases_wait_for_the_lock() {
+        assert_eq!(lock_wait_budget(&Phase::Reconcile), CONDUCTOR_LOCK_WAIT);
+        assert_eq!(lock_wait_budget(&Phase::Run), CONDUCTOR_LOCK_WAIT);
+        assert_eq!(
+            lock_wait_budget(&Phase::Board),
+            Duration::ZERO,
+            "a board must not queue behind a long reconcile — its firing records \
+             boarded-nothing and the next tick re-fires"
+        );
+        assert_eq!(lock_wait_budget(&Phase::Preflight), Duration::ZERO);
+        assert!(
+            CONDUCTOR_LOCK_WAIT >= Duration::from_secs(60),
+            "the budget has to outlast a board that departs a train, not just one that refuses"
+        );
+    }
+
+    /// The three lines a contended lock can leave. Each names the
+    /// waited time, because "leaving" with no number is what made nine
+    /// hours of starvation look like nine hours of 0-second successes.
+    #[test]
+    fn the_lock_lines_name_the_waited_time() {
+        let waiting = lock_waiting_line(Duration::from_secs(120));
+        assert!(waiting.contains("120s"), "{waiting}");
+        let acquired = lock_acquired_line(Duration::from_secs(13));
+        assert!(acquired.contains("13s"), "{acquired}");
+        // The zero-wait case keeps the line every journal reader and
+        // cadence.rs's own doc comment already greps for.
+        let left_at_once = lock_contended_line(Duration::ZERO);
+        assert_eq!(
+            left_at_once, "another conductor run holds the lock — leaving",
+            "the no-wait line is unchanged"
+        );
+        // A zero-budget phase still burns nanoseconds between reading
+        // the clock and failing the try — that is not a wait, and the
+        // line must not claim one.
+        assert_eq!(
+            lock_contended_line(Duration::from_nanos(400)),
+            left_at_once,
+            "a sub-second elapsed is not a wait"
+        );
+        let timed_out = lock_contended_line(Duration::from_secs(120));
+        assert!(
+            timed_out.contains("120s") && timed_out.contains("holds the lock"),
+            "{timed_out}"
+        );
+        assert_ne!(
+            LOCK_CONTENDED_EXIT, 0,
+            "a pass that waited its whole budget and still never ran must not record rc=0"
+        );
+        assert_ne!(
+            LOCK_CONTENDED_EXIT, 3,
+            "3 is the preflight-failure code — two causes must not share one exit"
         );
     }
 }

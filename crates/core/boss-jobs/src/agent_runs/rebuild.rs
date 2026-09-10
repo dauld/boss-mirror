@@ -84,8 +84,19 @@ async fn insert_run(
         .bind(run.run.finished_at)
         .bind(run.run.outcome.as_str())
         .bind(run.run.error.as_deref())
-        .bind(i64::try_from(run.run.input_tokens).unwrap_or(i64::MAX))
-        .bind(i64::try_from(run.run.output_tokens).unwrap_or(i64::MAX))
+        .bind(i64::try_from(run.run.tokens.total()).unwrap_or(i64::MAX))
+        .bind(
+            run.run
+                .tokens
+                .input()
+                .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
+        )
+        .bind(
+            run.run
+                .tokens
+                .output()
+                .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
+        )
         .bind(i32::try_from(run.run.tool_calls).unwrap_or(i32::MAX))
         .bind(run.usd_micros.map(|m| i64::try_from(m).unwrap_or(i64::MAX)))
         .bind(run.priced_by.as_deref())
@@ -111,7 +122,7 @@ mod tests {
     fn the_insert_has_one_placeholder_per_column() {
         let sql = insert_run_sql();
         let columns = super::super::postgres::RUN_COLUMNS.split(',').count();
-        assert_eq!(columns, 15, "agent_runs has fifteen columns");
+        assert_eq!(columns, 16, "agent_runs has sixteen columns");
         for n in 1..=columns {
             assert!(
                 sql.contains(&format!("${n}")),

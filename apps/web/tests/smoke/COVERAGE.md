@@ -216,14 +216,15 @@ the actual surface.
 - [x] `content/ManualPage.svelte` (2) —
       `tests/smoke/manual-shipping.spec.ts` covers tree mount +
       label-link navigation + the collapsible toggle button.
-- [x] `design/DesignIndexPage.svelte` (1) —
-      `tests/smoke/design-docs.spec.ts` covers Refresh-from-git
-      button + hide-completed checkbox toggle + doc-link nav.
-- [~] `design/DesignDocPage.svelte` (12) — same spec file
-      covers Flush-to-git button (always rendered, disabled when
-      pending=0) + h1; the decision-flow buttons (Accept /
-      Override / Prev / Next / Batch-accept) skip cleanly because
-      no doc has pending decisions in current seed.
+- [—] `design/DesignIndexPage.svelte` and `design/DesignDocPage.svelte`
+      are gone, and so is `tests/smoke/design-docs.spec.ts` that
+      covered them. Both rendered the markdown corpus — the doc list,
+      the Refresh-from-git button, the Flush-to-git button and the
+      Accept/Override decision flow — and the corpus index, its
+      service and the flush pipeline behind all of it were deleted on
+      2026-09-10 (backlog f5da586c). `/it/design` renders the
+      `design-review` station's queue now; its unit coverage is
+      `src/it/design/designLens.test.ts`.
 
 ### Integrations / Landing
 - [~] `it/ItPanel.svelte` (5) — same spec covers all 4 page

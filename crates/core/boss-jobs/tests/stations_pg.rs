@@ -99,7 +99,13 @@ async fn platform_seed_ships_the_sdlc_batch_stations() {
         .get_active("design-review")
         .await
         .expect("review row");
-    assert_eq!(review.predicate.kind.as_deref(), Some("design-doc-review"));
+    // `design-doc`, not `design-doc-review`: a design doc IS a packet
+    // now, so the queue holds the docs themselves rather than a review
+    // Job opened per markdown file. The live cluster published this as
+    // station v3 through the API and the tree's seed never learned;
+    // 202609101900 converged it, because with the corpus panel deleted
+    // this predicate is the whole page.
+    assert_eq!(review.predicate.kind.as_deref(), Some("design-doc"));
 }
 
 /// The seeded upstream pointers survive the round trip through the
@@ -124,18 +130,23 @@ async fn the_seeded_upstream_pointers_round_trip() {
     assert_eq!(up.label, "FEEDBACK");
     assert_eq!(up.href, "/system/feedback");
 
-    // The review queue holds design-doc-review Jobs, spawned off
-    // `docs.design.indexed` from the design-doc corpus.
+    // Not every station has an upstream, and one that doesn't must
+    // read back as "none declared" rather than as an empty pointer.
+    //
+    // `design-review` is one of them since 2026-09-10. Its pointer read
+    // `DESIGN DOCS -> /system/design`, which named the corpus page as
+    // where the packets in this queue come FROM — a human clicking a row
+    // in a table of markdown files. They come from `boss design` now, a
+    // verb rather than a page, and the href had been dead since
+    // `/system/*` folded into `/it/*` on 2026-08-31. This test exists to
+    // catch a pointer at a route that does not resolve; the honest fix
+    // for one was to remove it (202609101900).
     let review = registry
         .get_active("design-review")
         .await
         .expect("review row");
-    let up = review.upstream.expect("the review queue declares one");
-    assert_eq!(up.label, "DESIGN DOCS");
-    assert_eq!(up.href, "/system/design");
+    assert_eq!(review.upstream, None);
 
-    // Not every station has an upstream, and one that doesn't must
-    // read back as "none declared" rather than as an empty pointer.
     let watchlist = registry
         .get_active("my-watchlist")
         .await
@@ -179,10 +190,14 @@ async fn an_authored_upstream_survives_draft_and_publish() {
 /// `stations.lens` column (138-station-lens.sql).
 ///
 /// Pinned here for the same reason the upstream hrefs are: this row is
-/// what `/system/design` draws its header and panel set from, so a
-/// seed that fails to parse is not a missing button but a page with no
+/// what `/it/design` draws its header and panel set from, so a seed
+/// that fails to parse is not a missing button but a page with no
 /// name. The panel keys are the renderers `DesignReviewPage` ships —
-/// a key nothing renders is a declared panel that never appears.
+/// a key nothing renders is a declared panel that never appears, which
+/// is exactly what this assertion caught on 2026-09-10: the seed said
+/// `["rejections", "corpus"]` and the bundle shipped neither any
+/// longer, both panels having gone with the markdown corpus they
+/// rendered.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_design_review_lens_round_trips() {
     let db = TestDb::new().await;
@@ -200,8 +215,8 @@ async fn the_design_review_lens_round_trips() {
     );
     assert_eq!(
         lens.panels,
-        vec!["rejections".to_string(), "corpus".to_string()],
-        "rejections first — an incomplete corpus is read before the corpus"
+        vec!["queue".to_string()],
+        "one panel, and it renders this station's own packets"
     );
 
     // A station no page renders reads back as "none declared" rather
@@ -223,7 +238,7 @@ async fn an_authored_lens_survives_draft_and_publish() {
         eyebrow: None,
         title: "Night review".into(),
         subtitle: Some("What came in after hours".into()),
-        panels: vec!["corpus".into()],
+        panels: vec!["queue".into()],
         with_steps: false,
     });
     let expected = authored.lens.clone();

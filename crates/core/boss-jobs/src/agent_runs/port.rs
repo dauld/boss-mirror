@@ -104,8 +104,10 @@ mod tests {
             finished_at: "2026-09-10T01:10:00Z".parse().unwrap(),
             outcome: RunOutcome::Success,
             error: None,
-            input_tokens: 1,
-            output_tokens: 1,
+            tokens: crate::agent_runs::types::TokenUsage::Split {
+                input: 1,
+                output: 1,
+            },
             tool_calls: 1,
             job_id: None,
             branch: None,

@@ -480,10 +480,6 @@ fn build_router(local_auth_state: Option<Arc<LocalAuthState>>) -> axum::Router<A
             "/api/shipping/{*rest}",
             axum::routing::any(|s, r| proxy::handle(s, r, &proxy::SHIPPING)),
         )
-        .route(
-            "/api/design/{*rest}",
-            axum::routing::any(|s, r| proxy::handle(s, r, &proxy::DESIGN)),
-        )
         // No /api/sim route: the sim runs in-process in the
         // boss-brewery-sim daemon, not behind an HTTP surface.
         .route(
@@ -592,18 +588,13 @@ fn build_router(local_auth_state: Option<Arc<LocalAuthState>>) -> axum::Router<A
             axum::routing::get(|s, r| proxy::handle_public(s, r, &proxy::OBSERVABILITY)),
         )
         // The IT Monitoring page probes /api/<port-name>/health for
-        // every PORTS entry. boss-observability and boss-docs both
-        // expose their routes under different prefixes (/api/events,
-        // /api/snapshot, /api/agents for observability; /api/design/*
-        // for docs), so without these aliases the monitoring page
-        // shows them as 'down' even when running.
+        // every PORTS entry. boss-observability exposes its routes
+        // under different prefixes (/api/events, /api/snapshot,
+        // /api/agents), so without this alias the monitoring page
+        // shows it as 'down' even when running.
         .route(
             "/api/observability/health",
             axum::routing::get(|s, r| proxy::handle_public(s, r, &proxy::OBSERVABILITY)),
-        )
-        .route(
-            "/api/docs/health",
-            axum::routing::get(|s, r| proxy::handle_public(s, r, &proxy::DESIGN)),
         )
         // Simulator UX — boss-simulator hosts both the /simulator SPA
         // bundle and its /simulator/api/* control+status surface. The
@@ -1027,7 +1018,6 @@ mod routing_tests {
             // was the test doing its job: it cannot tell a route I
             // wrongly believe exists from one the catch-all stole.
             "/api/events/tail",
-            "/api/design/docs",
             "/api/it/health",
             // Shipped on the service in train #10 and unreachable at
             // the door until train #12 — the reason this list exists.

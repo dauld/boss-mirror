@@ -13,8 +13,8 @@
 #     commerce, people, assets, catalog, calendar, jobs. These share
 #     a DB + NATS and the scratch variant runs on +1000 ports
 #     against boss_scratch.
-#   - Solo (prod only): sim, ml, docs. No scratch variants (sim is
-#     the scratch driver; ml/docs are read-only stateless consumers).
+#   - Solo (prod only): sim, ml. No scratch variants (sim is
+#     the scratch driver; ml is a read-only stateless consumer).
 #
 # Per run the script:
 #   1. Writes /etc/boss-<name>-api[-scratch].toml
@@ -214,7 +214,6 @@ else
         # bin/boss_events_api.rs + boss-ports.events entry).
         "events:7150"
         "policy:7250"
-        "docs:7050"
         # accounts:7550 — accounts + account_notes + account_team +
         # account_next_actions + account_risk_scores + support_cases.
         # Split out of boss-people-api 2026-06; mirrors the
@@ -395,7 +394,6 @@ description_of() {
         content)   echo "HR Content API" ;;
         policy)    echo "Policy API" ;;
         clock)     echo "Clock API" ;;
-        docs)          echo "Docs API" ;;
         classes)       echo "Class Registry API" ;;
         locations)     echo "Locations Registry API" ;;
         subject-kinds) echo "Subject Kind Registry API" ;;
@@ -603,14 +601,6 @@ EOF
 port = $port
 EOF
             ;;
-        docs)
-            cat <<EOF
-# Managed by infra/deploy-services.sh — edits will be overwritten.
-postgres_url = "$PROD_DB_URL"
-http_bind = "127.0.0.1:$port"
-repo_root = "$REPO_ROOT"
-EOF
-            ;;
         classes|locations|subject-kinds|events)
             # Read-only registry / read-surface services. Just need
             # a Postgres URL + bind. No NATS (no event publishing —
@@ -751,16 +741,23 @@ emit_unit() {
     desc="Boss $(description_of "$name")${label}"
 
     # After= ordering. Paired services all use NATS + Postgres.
-    # Solo services use Postgres only (ml, docs, sim).
+    # Solo services use Postgres only (ml, sim).
     after="network-online.target postgresql.service"
     if [[ "$kind" == "paired" ]]; then
         after="$after nats-server.service"
     fi
 
-    # sim and docs need the repo as CWD so they can read local files.
-    if [[ "$name" == "sim" || "$name" == "docs" ]]; then
-        working_dir="WorkingDirectory=$REPO_ROOT"
-    fi
+    # sim needs the repo as CWD so it can read local files.
+    #
+    # `docs` was the other one until 2026-09-10, and it is worth saying
+    # why it is gone rather than just dropping the name: boss-docs-api
+    # INDEXED THE WORKING TREE. It walked `{repo_root}/docs/design/*.md`
+    # on every boot and every reindex, which is the only reason a
+    # service in this list ever needed to be told where the checkout
+    # is. That whole read half was deleted with the corpus index
+    # (backlog f5da586c) — the packet is the doc — so `sim` is the last
+    # service whose CWD means anything, and a deployment no longer has
+    # to place a git checkout where a read API can see it.
 
     # Per-service environment injection. Policy takes its port from env;
     # the config file is a stub for uniformity.
@@ -968,14 +965,12 @@ probe_one() {
     local kind="$1" name="$2" env="$3"
     local port
     port=$(port_of "$name" "$env")
-    # Most services mount routes under /api/<name>; boss-docs-api is
-    # named "docs" internally but serves at /api/design/*; boss-
-    # observability is a non-`-api` service that mounts /api/health
-    # directly (no per-service prefix) — it's a NATS aggregator, not
-    # a domain-CRUD service.
+    # Most services mount routes under /api/<name>; boss-observability
+    # is a non-`-api` service that mounts /api/health directly (no
+    # per-service prefix) — it's a NATS aggregator, not a domain-CRUD
+    # service.
     local url
     case "$name" in
-        docs)          url="http://127.0.0.1:${port}/api/design/health" ;;
         simulator)     url="http://127.0.0.1:${port}/simulator/api/health" ;;
         observability) url="http://127.0.0.1:${port}/api/health" ;;
         *)             url="http://127.0.0.1:${port}/api/${name}/health" ;;

@@ -94,7 +94,17 @@
         {#if clusterObs}
           <div class="estate-obs-row">
             <span class="estate-scope">kubernetes-nodes</span>
-            <span>{clusterObs.nodes.length} machines seen by {clusterObs.observer}</span>
+            <span>
+              {clusterObs.nodes.length} machines seen by {clusterObs.observer}
+              <!-- Free space per node, same idiom as the host row below.
+                   Until a520737f this scope recorded capacity only, so the
+                   disk floor could never fire for a cluster node — w-1
+                   included, the node every gate compiles on. A node whose
+                   kubelet read failed says so rather than going quiet. -->
+              {#each clusterObs.nodes as cn (cn.id)}
+                — {cn.id}: {cn.disk_free_gb != null ? `${cn.disk_free_gb}G free` : 'free space unread'}
+              {/each}
+            </span>
             <span class="estate-when">{formatRelative(clusterObs.observed_at, loadedAt)}</span>
           </div>
         {:else}

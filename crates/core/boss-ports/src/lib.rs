@@ -92,7 +92,7 @@ pub const PAIRED: &[PortSpec] = &[
 ];
 
 /// Solo services — prod only. Registry services + the simulator
-/// + ledger / ml / docs / content. Mirrors `SOLO_SERVICES` in
+/// + ledger / ml / content. Mirrors `SOLO_SERVICES` in
 ///   `infra/deploy-services.sh`.
 pub const SOLO: &[PortSpec] = &[
     // search — the global search read surface (boss-search). Core:
@@ -154,11 +154,6 @@ pub const SOLO: &[PortSpec] = &[
     PortSpec {
         name: "policy",
         prod: 7250,
-        scratch: None,
-    },
-    PortSpec {
-        name: "docs",
-        prod: 7050,
         scratch: None,
     },
     PortSpec {

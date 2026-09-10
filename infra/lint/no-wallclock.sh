@@ -124,10 +124,6 @@ ALLOWED_PREFIXES=(
   "crates/core/boss-content/src/port.rs"
   # Classes client deprecated wallclock helper.
   "crates/core/boss-classes-client/src/lib.rs"
-  # Boss-docs review system: in-memory + reindex are internal
-  # state for the design-doc review workflow. http.rs has tests
-  # inline (covered by tests/ filter where appropriate).
-  "crates/core/boss-docs/"
   # Sim-side faker + bridge generators — sim-only; the audit
   # trail comes from the LiveApiOutput emit path which IS
   # clock-routed (see v1.0.6 #72 scheduler-driven anchors).
@@ -184,8 +180,6 @@ ALLOWED_PREFIXES=(
 # and the operator's wallclock IS the intended timestamp).
 ALLOWED_FILES=(
   "crates/orchestrators/boss-cli/src/main.rs"
-  # docs_flush is a CLI snapshot tool, runs at operator request
-  "crates/orchestrators/boss-cli/src/docs_flush.rs"
   # The train conductor, same class as its two siblings above and
   # adjudicated on the heuristic repair that first made it visible
   # (packet 5cccfbee, 2026-08-23). It stamps `completed_at` into a
@@ -481,9 +475,11 @@ sql_allow_line() {
   # first_seen_at/last_seen_at are spelled out because the `\b` above
   # means a bare `seen_at` alternative does NOT match the prefixed
   # forms (`_` is a word character, so there is no boundary before
-  # `seen`). They are the design-doc indexer's bookkeeping — which
-  # docs failed to parse and when it last tried — and are never read
-  # into an audit_log payload.
+  # `seen`). They were the design-doc indexer's bookkeeping — which
+  # docs failed to parse and when it last tried — and that table went
+  # with the indexer on 2026-09-10; the two names stay in the
+  # vocabulary because the shape is a general one and the next
+  # first-seen/last-seen column should not have to re-earn it.
   if echo "$line_content" | grep -qE '\b(updated_at|created_at|deleted_at|closed_at|settled_at|published|locked_at|paid_at|sent_at|read_at|expires_at|received_at|claimed_at|started_at|finished_at|completed_at|opened_at|seen_at|first_seen_at|last_seen_at|delivered_at)\s*=\s*NOW\s*\(\s*\)'; then
     return 0
   fi

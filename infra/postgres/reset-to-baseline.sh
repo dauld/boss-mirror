@@ -59,7 +59,7 @@ SERVICES_TO_STOP=(
     boss-inventory-api boss-shipping-api boss-assets-api boss-catalog-api
     boss-ledger-api boss-content-api boss-messages-api boss-ml-api
     boss-cybernetics boss-dispatcher boss-products-api boss-classes-api
-    boss-locations-api boss-subject-kinds-api boss-calendar-api boss-docs-api
+    boss-locations-api boss-subject-kinds-api boss-calendar-api
     boss-events-api boss-accounts-api
     # clock-api + observability hold boss-DB pools, and the gateway proxies
     # them; all three must stop or dropdb fails on "database is being accessed".
@@ -104,7 +104,7 @@ for svc in boss-policy-api boss-classes-api boss-locations-api \
            boss-assets-api boss-catalog-api boss-products-api \
            boss-commerce-api boss-inventory-api boss-shipping-api \
            boss-messages-api boss-calendar-api boss-content-api \
-           boss-docs-api boss-events-api boss-ledger-api boss-ml-api \
+           boss-events-api boss-ledger-api boss-ml-api \
            boss-cybernetics boss-clock-api boss-jobs-api boss-dispatcher; do
     systemctl restart "$svc" 2>/dev/null || echo "  (skipped $svc — not installed)"
 done

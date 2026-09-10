@@ -19,7 +19,6 @@ pub mod commerce_invoice_issue;
 pub mod common;
 pub mod credential_issuer;
 pub mod credential_rotate_forgejo;
-pub mod docs_design_sweep;
 pub mod estate_alarm;
 pub mod estate_compare;
 pub mod gate_resolve;

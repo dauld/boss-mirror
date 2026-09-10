@@ -1267,7 +1267,9 @@ fn design_doc_review_spec() -> WorkflowSpec {
          packet carries and gates completion until each one has a recorded resolution. \
          Resolutions land on the step, which IS the record; each release, settled material \
          folds into `docs/architecture-decisions.md`. A LEGACY packet carrying only a \
-         `doc_path` still reads its questions from boss-docs-api's `### Qn:` parse. \
+         `doc_path` and no questions is no longer readable: the corpus index that parsed \
+         `### Qn:` headings out of the file was deleted on 2026-09-10 (backlog f5da586c), \
+         and the surface says so rather than fetching a service that is gone. \
          Replaces the in-app decision-tracker surface retired on 2026-05-03."
             .to_string(),
     );

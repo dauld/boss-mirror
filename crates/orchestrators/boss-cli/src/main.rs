@@ -10,7 +10,6 @@ mod delivery_policy;
 mod deploy;
 mod design;
 mod dock_preview;
-mod docs;
 mod doctor;
 mod gate;
 mod git_auth;
@@ -104,11 +103,6 @@ enum Commands {
     Assets {
         #[command(subcommand)]
         action: AssetsAction,
-    },
-    /// Design corpus index — reindex docs/design/*.md
-    Docs {
-        #[command(subcommand)]
-        action: DocsAction,
     },
     /// Run the Boss simulator (thin wrapper around `boss-sim`)
     Sim {
@@ -622,12 +616,6 @@ enum AssetsAction {
 }
 
 #[derive(Subcommand)]
-enum DocsAction {
-    /// Re-scan docs/design/*.md and refresh the boss-docs cache
-    Reindex,
-}
-
-#[derive(Subcommand)]
 enum SimAction {
     /// Replay a simulation config against the live service APIs.
     /// Shells out to the installed `boss-sim` binary.
@@ -895,9 +883,6 @@ async fn main() -> Result<()> {
             AssetsAction::RebuildProjection { postgres_url } => {
                 cmd_assets_rebuild_projection(&postgres_url).await
             }
-        },
-        Commands::Docs { action } => match action {
-            DocsAction::Reindex => docs::reindex().await,
         },
         Commands::Ledger { action } => match action {
             LedgerAction::Rebuild { postgres_url, json } => {
@@ -1429,9 +1414,8 @@ mod tests {
         let names: Vec<&str> = cmd.get_subcommands().map(|c| c.get_name()).collect();
         for expected in [
             "doctor", "emit", "upgrade", "script", "deploy", "status", "restart", "logs", "backup",
-            "assets", "docs", "sim", "ledger", "inspect", "train", "gate", "park", "merged",
-            "receipt", "running", "workflow", "job", "prove", "publish", "queue", "packet",
-            "audit",
+            "assets", "sim", "ledger", "inspect", "train", "gate", "park", "merged", "receipt",
+            "running", "workflow", "job", "prove", "publish", "queue", "packet", "audit",
         ] {
             assert!(
                 names.contains(&expected),

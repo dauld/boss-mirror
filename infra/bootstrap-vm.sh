@@ -189,7 +189,7 @@ for svc_port in \
     shipping:7100 messages:7200 people:7500 catalog:7750 \
     calendar:7860 events:7150 accounts:7550 \
     clock:7060 ml:7070 ledger:7080 content:7090 \
-    docs:7050 policy:7250 classes:7800 locations:7820 \
+    policy:7250 classes:7800 locations:7820 \
     subject-kinds:7830 products:7840 observability:7880; do
     IFS=: read -r name port <<<"$svc_port"
     case "$name" in
@@ -197,7 +197,6 @@ for svc_port in \
         classes|locations|subject-kinds|events|accounts)
             path="/api/$name/health"
             ;;
-        docs)          path="/api/design/health" ;;
         *)             path="/api/$name/health" ;;
     esac
     code=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$port$path" || echo "000")

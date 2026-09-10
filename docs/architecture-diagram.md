@@ -146,12 +146,12 @@ The colour groups above are operational ("which subsystem") but
 the audit-bar split is orthogonal. Four tiers in the workspace
 today:
 
-- **Tier 1 — core state-machine OS** (`crates/core/`, 29 crates).
+- **Tier 1 — core state-machine OS** (`crates/core/`, 28 crates).
   `boss-gateway`, `boss-jobs-api`, `boss-dispatcher`, `boss-policy-api`,
   `boss-classes-api`, `boss-locations-api`,
   `boss-subject-kinds-api`, `boss-calendar-api`,
   `boss-content-api`, `boss-cybernetics`, plus the libraries
-  (`boss-core`, `boss-events`, `boss-ml`, `boss-docs`,
+  (`boss-core`, `boss-events`, `boss-ml`,
   `boss-testing`, `boss-ports`, `boss-nats`,
   `boss-observability`) and matching `*-client` crates. Yellow +
   most of the rails. **Tightest review bar; correctness protocol

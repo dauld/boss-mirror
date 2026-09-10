@@ -49,6 +49,15 @@ export type ComparisonCounts = Readonly<{
   observed_not_declared: number;
   declared_not_observed: number;
   drift: number;
+  /** Machines below the disk floor — free under 16 GiB or under 35% of
+   *  capacity. Optional because every row recorded before a520737f
+   *  predates the key on the cluster scope. */
+  disk_tight?: number;
+  /** Machines whose free-space reading could not be taken. The kubelet
+   *  read is best-effort so the rest of the observation survives losing
+   *  it; this is the count that keeps going blind distinguishable from
+   *  having room. */
+  disk_unmeasured?: number;
 }>;
 
 export type Comparison = Readonly<{
@@ -180,6 +189,11 @@ export function parseComparisons(raw: unknown): readonly Comparison[] {
         observed_not_declared: n('observed_not_declared'),
         declared_not_observed: n('declared_not_observed'),
         drift: n('drift'),
+        // Absent from every row recorded before a520737f, and `n`
+        // answers 0 for a missing key — a parser that dropped these
+        // would render "no drift" over a full build node.
+        disk_tight: n('disk_tight'),
+        disk_unmeasured: n('disk_unmeasured'),
       },
     }];
   });
@@ -205,6 +219,10 @@ export function comparisonVerdict(c: Comparison): { ok: boolean; text: string } 
   if (k.observed_not_declared > 0) problems.push(`${k.observed_not_declared} in the cluster but undeclared`);
   if (k.declared_not_observed > 0) problems.push(`${k.declared_not_observed} declared but not seen`);
   if (k.drift > 0) problems.push(`${k.drift} drifted from declaration`);
+  // Headroom, not paperwork: a machine out of room stops the pipeline,
+  // so "no drift" must not render beside it (a520737f).
+  if ((k.disk_tight ?? 0) > 0) problems.push(`${k.disk_tight} short of disk`);
+  if ((k.disk_unmeasured ?? 0) > 0) problems.push(`${k.disk_unmeasured} with no free-space reading`);
   if (problems.length === 0) {
     return { ok: true, text: `${k.observed} observed, ${k.participating_declared} declared — no drift` };
   }

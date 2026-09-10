@@ -57,9 +57,6 @@ pub struct DispatcherConfig {
     pub shipping_api_url: String,
     pub ledger_api_url: String,
     pub messages_api_url: String,
-    /// Docs service base URL — the `docs.design.sweep` handler reads
-    /// its corpus index to find docs with unanswered questions.
-    pub docs_api_url: String,
     /// Clock service base URL. The schedule runner consumes its SSE tick
     /// feed (`GET /api/clock/ticks`) to drive sim-day-boundary firing of
     /// schedule-triggered rules.
@@ -131,8 +128,6 @@ impl Default for DispatcherConfig {
                 .unwrap_or_else(|_| boss_ports::url("shipping")),
             ledger_api_url: std::env::var("BOSS_LEDGER_URL")
                 .unwrap_or_else(|_| boss_ports::url("ledger")),
-            docs_api_url: std::env::var("BOSS_DOCS_URL")
-                .unwrap_or_else(|_| boss_ports::url("docs")),
             messages_api_url: std::env::var("BOSS_MESSAGES_URL")
                 .unwrap_or_else(|_| boss_ports::url("messages")),
             clock_api_url: std::env::var("BOSS_CLOCK_URL")

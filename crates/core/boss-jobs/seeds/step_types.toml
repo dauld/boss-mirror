@@ -1873,8 +1873,9 @@ description = """
 Custom Step UX for the `design-doc-review` Workflow. The plugin
 reads the questions the PACKET carries (`metadata.questions`,
 `[{anchor, title, proposal}]`) and renders a per-question resolution
-textarea; a legacy packet carrying only a `doc_path` falls back to
-`/api/design/docs/{doc_path}` and its `### Qn:` headings. Step
+textarea; a legacy packet carrying only a `doc_path` and no questions
+reports that it is unreadable — the corpus index that parsed `### Qn:`
+headings out of the file was deleted on 2026-09-10. Step
 completion is gated on every question having a non-empty resolution
 recorded. Resolutions are saved onto THIS STEP, which is the record
 — they used to be mirrored into a flush pipeline that rewrote the

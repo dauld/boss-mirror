@@ -133,7 +133,7 @@ SERVICES=(
     boss-cybernetics
     boss-dispatcher
     # 2026-05-27: products / classes / locations / subject-kinds /
-    # calendar / docs were missing from this list, so the
+    # calendar were missing from this list, so the
     # brewery-data-seed step ran against unreachable downstream
     # services and silently skipped its finished-product-inventory
     # seed — leaving 0 FP rows, 0 COGS, and 0 production-side ledger
@@ -145,7 +145,6 @@ SERVICES=(
     boss-locations-api
     boss-subject-kinds-api
     boss-calendar-api
-    boss-docs-api
 )
 for svc in "${SERVICES[@]}"; do
     sudo systemctl stop "$svc" 2>/dev/null || true
@@ -213,7 +212,6 @@ START_ORDER=(
     boss-locations-api
     boss-subject-kinds-api
     boss-calendar-api
-    boss-docs-api
     boss-policy-api
     boss-people-api
     boss-products-api

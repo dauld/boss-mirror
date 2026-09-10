@@ -1,0 +1,84 @@
+# Agent runs measured on 2026-09-10 — the coding agents that built the
+# cars that landed on main that day, including the car that built the
+# recorder they are filed into.
+#
+# Filed with infra/record-agent-runs.sh (see that file for the door it
+# uses and the refusals it makes). These are OBSERVATIONS, not schema:
+# they are POSTed through /api/agent-runs, which prices them, writes the
+# projection and the outbox event in one transaction, and collapses a
+# retry on run_id. Nothing here belongs in a migration.
+#
+# ---------------------------------------------------------------------
+# WHERE EACH FIELD COMES FROM, AND WHICH ONE IS NOT MEASURED
+# ---------------------------------------------------------------------
+#
+# total_tokens / tool_calls / duration_ms
+#     Measured. Reported by each coding agent when it finished. The
+#     token figure is a SINGLE total — the harness reports
+#     `subagent_tokens` and no input/output split exists anywhere — so
+#     these rows are filed with total_tokens alone and the server leaves
+#     usd_micros NULL. That is the honest answer: agent_rate_card prices
+#     input and output at different rates ($5.00 vs $25.00 per MTok on
+#     opus-5), so a total cannot be priced, and a blended rate would be
+#     a fabricated number wearing a measurement's clothes. The roll-up
+#     says so out loud: unpriced_runs = 15, total_only_runs = 15.
+#
+# branch
+#     Read from the system of record: each branch has a gate-run packet
+#     from 2026-09-10 (`GET /api/jobs?kind=gate-run`), and four of them
+#     are named in 20260910030644's header with the same token and
+#     tool-call figures.
+#
+# finished_at
+#     DERIVED, and an approximation stated as one: it is the instant the
+#     branch's gate-run packet was opened, which is the first thing that
+#     happens after a builder reports. Accurate to a minute or two. The
+#     run's DURATION is exact regardless, because started_at is computed
+#     by subtracting the measured duration_ms from this instant — so the
+#     interval's length is measured and only its absolute position is
+#     approximate. duration_ms is therefore NOT stored anywhere: the
+#     server derives duration from the two instants, and a stored copy
+#     could disagree with them.
+#
+# job_id
+#     Resolved at filing time by the script, by matching this branch
+#     against the ship-a-change packets. Left NULL when zero or more
+#     than one packet matches — a re-railed branch has two, and guessing
+#     which one the run belongs to would put a wrong id on the record.
+#
+# actor_id
+#     THE ONE FIELD NOT READ FROM THE SYSTEM OF RECORD. Nothing in the
+#     packets, the gate runs or the receipts names the model a builder
+#     ran as. The basis for `claude:opus-5[1m]` is that these agents
+#     were dispatched from the dev pod session, which runs Opus 5 with
+#     the 1M context, and a dispatched agent inherits its parent's model
+#     unless the dispatch names another — none did. It is stated here as
+#     a column rather than defaulted in code so that correcting it is a
+#     one-column edit, and so that a night with mixed models can say so.
+#     Pricing does not depend on it for these rows: a total-only run is
+#     unpriced whatever model ran.
+#
+# outcome
+#     `success` for all fifteen: every run finished and produced the
+#     branch named beside it. This is the AGENT's outcome, not the
+#     gate's verdict — those are different facts, and the gate's lives
+#     on the gate-run packet.
+#
+# Columns, tab-separated:
+#   run_id  actor_id  branch  total_tokens  tool_calls  duration_ms  finished_at  outcome  label
+#
+2026-09-10-mirror-drift	claude:opus-5[1m]	fix/the-mirrors-own-merge-is-not-foreign-work	142982	52	631192	2026-09-10T02:47:58Z	success	mirror-drift classifier
+2026-09-10-park-triage	claude:opus-5[1m]	fix/a-parked-car-triages-its-item	218218	91	854514	2026-09-10T02:48:43Z	success	park-time triage
+2026-09-10-ci-images	claude:opus-5[1m]	fix/ci-images-are-pruned-by-age	204346	68	902123	2026-09-10T02:48:30Z	success	CI image pruning
+2026-09-10-live-rules	claude:opus-5[1m]	feat/a-verb-answers-which-rules-are-live	196036	98	1092097	2026-09-10T02:51:56Z	success	live-rules read
+2026-09-10-boss-gcp-converge	claude:opus-5[1m]	feat/boss-gcp-converges-itself	268676	156	1626752	2026-09-10T02:59:32Z	success	boss-gcp self-converge
+2026-09-10-agent-run-record	claude:opus-5[1m]	feat/an-agent-run-leaves-a-record	272085	85	1080484	2026-09-10T03:16:33Z	success	agent-run record (this recorder)
+2026-09-10-dead-session	claude:opus-5[1m]	fix/a-dead-session-goes-to-the-login-page	148492	64	548866	2026-09-10T03:31:35Z	success	dead-session redirect
+2026-09-10-report-test-stub	claude:opus-5[1m]	fix/the-report-test-waits-for-its-stub	132246	38	1296506	2026-09-10T04:02:16Z	success	report-test stub race
+2026-09-10-flush-pipeline-p1	claude:opus-5[1m]	fix/the-flush-pipeline-is-deleted	369840	156	1547321	2026-09-10T04:28:39Z	success	flush pipeline deletion (first pass)
+2026-09-10-flush-pipeline-p2	claude:opus-5[1m]	fix/the-flush-pipeline-is-deleted	395035	26	396827	2026-09-10T04:43:07Z	success	flush pipeline deletion (follow-up pass)
+2026-09-10-red-receipt	claude:opus-5[1m]	fix/a-red-receipt-names-the-failing-test	185808	66	880579	2026-09-10T14:10:13Z	success	red receipt
+2026-09-10-node-headroom	claude:opus-5[1m]	feat/a-cluster-node-reports-its-headroom	189184	108	953412	2026-09-10T14:10:49Z	success	cluster-node headroom
+2026-09-10-retirement-lint	claude:opus-5[1m]	fix/a-retired-rule-may-lead-the-live-registry	189178	76	860268	2026-09-10T14:11:20Z	success	retirement lint
+2026-09-10-suppressed-cadence	claude:opus-5[1m]	feat/a-suppressed-cadence-is-not-a-silent-one	279208	115	1578760	2026-09-10T14:21:46Z	success	suppressed cadence
+2026-09-10-branch-sweep	claude:opus-5[1m]	fix/the-branch-sweep-inspects-every-landed-car	134392	70	675823	2026-09-10T15:06:40Z	success	branch sweep

@@ -13,7 +13,7 @@
 use boss_core::actor::ActorId;
 use boss_jobs::agent_runs::{
     AGENT_RUN_RECORDED, AgentRunLog, InMemoryAgentRuns, NewAgentRun, RateCardRow, RunFilter,
-    RunOutcome, summarize,
+    RunOutcome, TokenUsage, summarize,
 };
 use chrono::{DateTime, Duration, Utc};
 
@@ -38,10 +38,46 @@ fn at(s: &str) -> DateTime<Utc> {
     s.parse().expect("fixture timestamp parses")
 }
 
-/// One of the four runs measured on 2026-09-10, split 9:1
-/// input:output (the harness reports a single total; the split is the
-/// fixture's, not a claim about the real call mix).
+/// A run from a reporter that HAS the split, 9:1 input:output. No
+/// coding agent on this pod is such a reporter — the split here is the
+/// fixture's, not a claim about the real call mix — but a reporter that
+/// measures both halves is the shape the rate card can price, so the
+/// pricing tests need it. For what tonight's agents could actually
+/// report, see [`measured_total_only`].
 fn measured(branch: &str, total_tokens: u64, tool_calls: u32, minutes: i64) -> NewAgentRun {
+    with_tokens(
+        branch,
+        TokenUsage::Split {
+            input: total_tokens * 9 / 10,
+            output: total_tokens / 10,
+        },
+        tool_calls,
+        minutes,
+    )
+}
+
+/// A run as tonight's coding agents actually reported it: ONE token
+/// number, a tool-call count and a duration. This is the shape that
+/// could not be filed at all until `total_tokens` existed — the schema
+/// demanded a split the reporter does not have, so the only ways
+/// forward were to invent one or to record nothing.
+fn measured_total_only(
+    branch: &str,
+    total_tokens: u64,
+    tool_calls: u32,
+    minutes: i64,
+) -> NewAgentRun {
+    with_tokens(
+        branch,
+        TokenUsage::TotalOnly {
+            total: total_tokens,
+        },
+        tool_calls,
+        minutes,
+    )
+}
+
+fn with_tokens(branch: &str, tokens: TokenUsage, tool_calls: u32, minutes: i64) -> NewAgentRun {
     let started = at("2026-09-10T01:00:00Z");
     NewAgentRun {
         run_id: format!("run-{branch}"),
@@ -50,8 +86,7 @@ fn measured(branch: &str, total_tokens: u64, tool_calls: u32, minutes: i64) -> N
         finished_at: started + Duration::minutes(minutes),
         outcome: RunOutcome::Success,
         error: None,
-        input_tokens: total_tokens * 9 / 10,
-        output_tokens: total_tokens / 10,
+        tokens,
         tool_calls,
         job_id: None,
         branch: Some(branch.to_string()),
@@ -178,7 +213,8 @@ async fn what_did_the_whole_session_cost() {
 
     assert_eq!(summary.runs, 4);
     // The packet's headline number, now answerable: ~761,000 tokens.
-    assert_eq!(summary.input_tokens + summary.output_tokens, 761_578);
+    assert_eq!(summary.total_tokens, 761_578);
+    assert_eq!(summary.input_tokens, Some(685_422), "every run had a split");
     assert_eq!(summary.tool_calls, 52 + 91 + 68 + 98);
     assert_eq!(summary.wall_secs, (10 + 14 + 15 + 18) * 60);
     assert!(
@@ -197,7 +233,11 @@ async fn an_unpriced_run_is_recorded_and_the_total_refuses_to_understate() {
     let out = log.record_run(&unknown, &filer()).await.expect("records");
     assert!(out.recorded, "an unpriced run is still a fact");
     assert_eq!(out.run.usd_micros, None, "unpriced, not free");
-    assert_eq!(out.run.run.input_tokens, 900, "tokens are kept regardless");
+    assert_eq!(
+        out.run.run.tokens.input(),
+        Some(900),
+        "tokens are kept regardless"
+    );
 
     log.record_run(&measured("feat/x", 1_000, 1, 1), &filer())
         .await
@@ -323,4 +363,138 @@ async fn the_rate_card_is_readable_so_a_price_can_be_checked() {
         rows.iter().all(|r| !r.note.is_empty()),
         "every price says where it came from"
     );
+}
+
+// --------------------------------------------------------------------
+// Tonight's real reporters. Three of the fifteen coding-agent runs from
+// 2026-09-10, with their measured figures — the whole set is filed by
+// infra/agent-runs/record-runs.sh, which reads the night's observations
+// from a data file rather than from a fixture.
+// --------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_run_that_only_knows_its_total_is_still_a_record() {
+    let log = InMemoryAgentRuns::new(card());
+    let out = log
+        .record_run(
+            // mirror-drift classifier: 142,982 tokens, 52 tool calls,
+            // 631s. The figures are the harness's; there is no split.
+            &measured_total_only(
+                "fix/the-mirrors-own-merge-is-not-foreign-work",
+                142_982,
+                52,
+                10,
+            ),
+            &filer(),
+        )
+        .await
+        .expect("a total-only run is a well-formed run");
+
+    assert!(out.recorded, "the run is on the record");
+    assert_eq!(out.run.run.tokens.total(), 142_982, "what it spent");
+    assert_eq!(out.run.run.tokens.input(), None, "no split was measured");
+    assert_eq!(out.run.model(), Some("opus-5"), "which model ran");
+    assert_eq!(out.run.duration_secs(), 600, "how long it took");
+    assert_eq!(out.run.run.tool_calls, 52);
+    assert_eq!(
+        out.run.run.branch.as_deref(),
+        Some("fix/the-mirrors-own-merge-is-not-foreign-work"),
+        "which car it produced"
+    );
+    // And the one thing it cannot say, said as unknown rather than as
+    // free or as a blended guess.
+    assert_eq!(
+        out.run.usd_micros, None,
+        "the card prices the halves differently, so a total has no price"
+    );
+    assert_eq!(out.run.priced_by, None);
+
+    // The fact still reached the log in full.
+    let events = log.recorded_events().await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].payload["total_tokens"], 142_982);
+    assert!(events[0].payload["input_tokens"].is_null());
+    assert!(events[0].payload["usd_micros"].is_null());
+}
+
+#[tokio::test]
+async fn a_nights_worth_of_total_only_runs_rolls_up_without_inventing_a_cost() {
+    let log = InMemoryAgentRuns::new(card());
+    for run in [
+        measured_total_only(
+            "fix/the-mirrors-own-merge-is-not-foreign-work",
+            142_982,
+            52,
+            10,
+        ),
+        measured_total_only("fix/a-parked-car-triages-its-item", 218_218, 91, 14),
+        measured_total_only("feat/an-agent-run-leaves-a-record", 272_085, 85, 18),
+    ] {
+        log.record_run(&run, &filer()).await.expect("records");
+    }
+
+    let summary = summarize(&log.list_runs(&RunFilter::default()).await.expect("lists"));
+
+    assert_eq!(summary.runs, 3);
+    assert_eq!(summary.total_tokens, 633_285, "the tokens are all recorded");
+    assert_eq!(summary.tool_calls, 52 + 91 + 85);
+    assert_eq!(summary.wall_secs, (10 + 14 + 18) * 60);
+    assert_eq!(
+        summary.usd_micros, None,
+        "a set of total-only runs must not answer with a confident number"
+    );
+    assert_eq!(summary.unpriced_runs, 3);
+    assert_eq!(
+        summary.total_only_runs, 3,
+        "and must say WHY: no split was reported, so nothing could price it"
+    );
+    assert_eq!(
+        (summary.input_tokens, summary.output_tokens),
+        (None, None),
+        "summing a split nobody measured would read as complete and be wrong"
+    );
+    assert_eq!(summary.by_branch.len(), 3, "one bucket per car");
+    assert!(
+        summary
+            .by_branch
+            .iter()
+            .all(|g| g.usd_micros.is_none() && g.total_tokens > 0),
+        "each car reports its tokens and declines to report a price"
+    );
+}
+
+#[tokio::test]
+async fn a_mixed_night_keeps_every_token_and_refuses_a_partial_bill() {
+    // One reporter with a split, one without. The tokens add up; the
+    // money does not pretend to.
+    let log = InMemoryAgentRuns::new(card());
+    log.record_run(&measured("feat/split-reporter", 1_000_000, 10, 5), &filer())
+        .await
+        .expect("records");
+    log.record_run(
+        &measured_total_only("feat/total-reporter", 142_982, 52, 10),
+        &filer(),
+    )
+    .await
+    .expect("records");
+
+    let summary = summarize(&log.list_runs(&RunFilter::default()).await.expect("lists"));
+    assert_eq!(summary.runs, 2);
+    assert_eq!(summary.total_tokens, 1_142_982);
+    assert_eq!(summary.usd_micros, None);
+    assert_eq!(summary.unpriced_runs, 1);
+    assert_eq!(summary.total_only_runs, 1);
+
+    // The priced car still answers on its own, which is the point of
+    // asking per-branch rather than only in aggregate.
+    let one = summarize(
+        &log.list_runs(&RunFilter {
+            branch: Some("feat/split-reporter".into()),
+            ..Default::default()
+        })
+        .await
+        .expect("lists"),
+    );
+    assert_eq!(one.usd_micros, Some(7_000_000));
+    assert_eq!(one.total_only_runs, 0);
 }

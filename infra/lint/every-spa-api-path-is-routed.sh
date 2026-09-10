@@ -4,8 +4,8 @@
 #
 # THE PAIR THAT DRIFTED TWICE. The SPA fetches `/api/<segment>/…`; the
 # gateway answers a segment either from its proxy table (proxy.rs
-# `ProxyConfig::new("jobs")`, `aliased("design", "docs")`) or from a
-# route of its own (`"/api/auth/…"`, `"/api/tenant/…"`). Nothing tied
+# `ProxyConfig::new("jobs")`) or from a route of its own
+# (`"/api/auth/…"`, `"/api/tenant/…"`). Nothing tied
 # the two lists together, so a page could ship fetching a segment the
 # gateway had never heard of, and the failure is a 404 that renders as
 # an empty panel: `/api/stations` on train #10, then `/api/yard/status`
@@ -29,7 +29,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 answered() {
     local gw="$1/crates/core/boss-gateway/src"
     {
-        grep -rhoE 'ProxyConfig::(new|aliased)\("[a-z_-]+"' "$gw" 2>/dev/null \
+        grep -rhoE 'ProxyConfig::(new|with_fallback)\("[a-z_-]+"' "$gw" 2>/dev/null \
             | grep -oE '"[a-z_-]+"' | tr -d '"'
         grep -rhoE '"/api/[a-z_-]+' "$gw" 2>/dev/null | sed 's|^"/api/||'
     } | tr '_' '-' | sort -u
@@ -55,21 +55,21 @@ self_test() {
     cat >"$fx/crates/core/boss-gateway/src/proxy.rs" <<'RS'
 pub static JOBS: ProxyConfig = ProxyConfig::new("jobs");
 pub static SUBJECT_KINDS: ProxyConfig = ProxyConfig::new("subject_kinds");
-pub static DESIGN: ProxyConfig = ProxyConfig::aliased("design", "docs");
+pub static POLICY: ProxyConfig = ProxyConfig::with_fallback("policy", degrade);
 RS
     cat >"$fx/crates/core/boss-gateway/src/main.rs" <<'RS'
     .route("/api/auth/login", post(login))
     .route("/api/tenant/manifest", get(manifest))
 RS
     cat >"$fx/apps/web/src/it/Page.svelte" <<'SV'
-    fetch('/api/jobs/health'); fetch(`/api/subject-kinds/${k}`); fetch("/api/design/x");
+    fetch('/api/jobs/health'); fetch(`/api/subject-kinds/${k}`); fetch("/api/policy/x");
     fetch('/api/auth/me'); fetch('/api/yard/status');
 SV
     printf "fetch('/api/things');\n" >"$fx/apps/web/src/paginated.test.ts"
     printf "['/api/snapshot', 'observability'],\n" >"$fx/apps/web/src/dev-server.ts"
     local got; got="$(unrouted "$fx" | tr '\n' ' ' | sed 's/ $//')"
     [[ "$got" == "yard" ]] || { echo "every-spa-api-path-is-routed: self-test FAILED — expected the planted 'yard' alone, got '${got}'" >&2; return 1; }
-    echo "every-spa-api-path-is-routed: self-test ok — planted /api/yard caught; jobs, subject-kinds (via subject_kinds), design (aliased), auth (gateway route) answered; a test's /api/things and the dev server's aliases ignored"
+    echo "every-spa-api-path-is-routed: self-test ok — planted /api/yard caught; jobs, subject-kinds (via subject_kinds), policy (via with_fallback), auth (gateway route) answered; a test's /api/things and the dev server's aliases ignored"
 }
 
 if [[ "${1:-}" == "--self-test" ]]; then self_test; exit $?; fi

@@ -13,7 +13,9 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
 use super::port::{AgentRunError, AgentRunLog, RecordedRun, validate};
-use super::types::{AgentRun, NewAgentRun, RateCardRow, RunFilter, RunOutcome, price_run};
+use super::types::{
+    AgentRun, NewAgentRun, RateCardRow, RunFilter, RunOutcome, TokenUsage, price_run,
+};
 
 pub struct PgAgentRuns {
     pool: PgPool,
@@ -32,8 +34,8 @@ fn storage(e: sqlx::Error) -> AgentRunError {
 /// Every column `agent_runs` holds, in one place, so the SELECTs here
 /// and the rebuilder's INSERT cannot disagree about the row's shape.
 pub(super) const RUN_COLUMNS: &str = "run_id, actor_id, started_at, finished_at, outcome, error, \
-     input_tokens, output_tokens, tool_calls, usd_micros, priced_by, job_id, branch, detail, \
-     recorded_at";
+     total_tokens, input_tokens, output_tokens, tool_calls, usd_micros, priced_by, job_id, branch, \
+     detail, recorded_at";
 
 /// `INSERT INTO agent_runs (<cols>) VALUES ($1,…,$n)`, with the
 /// placeholder list DERIVED from [`RUN_COLUMNS`] rather than typed out
@@ -63,13 +65,29 @@ pub(super) fn row_to_run(row: &sqlx::postgres::PgRow) -> Result<AgentRun, AgentR
             "agent_runs.outcome holds {outcome_str:?}, which is not success|failed|cancelled"
         ))
     })?;
-    let input_tokens: i64 = row.try_get("input_tokens").map_err(storage)?;
-    let output_tokens: i64 = row.try_get("output_tokens").map_err(storage)?;
+    // The split is optional and the total is not: a reporter with one
+    // number is a real reporter (see `TokenUsage`). A row that holds
+    // neither shape is a defect in whatever wrote it, and naming the
+    // row is what makes it findable.
+    let total_tokens: i64 = row.try_get("total_tokens").map_err(storage)?;
+    let input_tokens: Option<i64> = row.try_get("input_tokens").map_err(storage)?;
+    let output_tokens: Option<i64> = row.try_get("output_tokens").map_err(storage)?;
+    let run_id: String = row.try_get("run_id").map_err(storage)?;
+    let tokens = TokenUsage::from_parts(
+        input_tokens.map(|v| u64::try_from(v).unwrap_or(0)),
+        output_tokens.map(|v| u64::try_from(v).unwrap_or(0)),
+        Some(u64::try_from(total_tokens).unwrap_or(0)),
+    )
+    .map_err(|e| {
+        AgentRunError::Storage(format!(
+            "agent_runs row {run_id:?} has unreadable tokens: {e}"
+        ))
+    })?;
     let tool_calls: i32 = row.try_get("tool_calls").map_err(storage)?;
     let usd_micros: Option<i64> = row.try_get("usd_micros").map_err(storage)?;
     Ok(AgentRun {
         run: NewAgentRun {
-            run_id: row.try_get("run_id").map_err(storage)?,
+            run_id,
             // Infallible parse: every string is SOME actor class, and
             // an actor that is not an agent reads back as not-an-agent
             // rather than as an error, which is what a rebuild of an
@@ -81,8 +99,7 @@ pub(super) fn row_to_run(row: &sqlx::postgres::PgRow) -> Result<AgentRun, AgentR
             finished_at: row.try_get("finished_at").map_err(storage)?,
             outcome,
             error: row.try_get("error").map_err(storage)?,
-            input_tokens: u64::try_from(input_tokens).unwrap_or(0),
-            output_tokens: u64::try_from(output_tokens).unwrap_or(0),
+            tokens,
             tool_calls: u32::try_from(tool_calls).unwrap_or(0),
             job_id: row.try_get("job_id").map_err(storage)?,
             branch: row.try_get("branch").map_err(storage)?,
@@ -140,8 +157,21 @@ impl AgentRunLog for PgAgentRuns {
             .bind(run.finished_at)
             .bind(run.outcome.as_str())
             .bind(run.error.as_deref())
-            .bind(i64::try_from(run.input_tokens).unwrap_or(i64::MAX))
-            .bind(i64::try_from(run.output_tokens).unwrap_or(i64::MAX))
+            // The total goes in as the ONE figure every run has; the
+            // split goes in beside it only when it was measured. The
+            // table's CHECK refuses a pair that disagrees, and the
+            // derivation here is why it never can.
+            .bind(i64::try_from(run.tokens.total()).unwrap_or(i64::MAX))
+            .bind(
+                run.tokens
+                    .input()
+                    .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
+            )
+            .bind(
+                run.tokens
+                    .output()
+                    .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
+            )
             .bind(i32::try_from(run.tool_calls).unwrap_or(i32::MAX))
             .bind(
                 priced

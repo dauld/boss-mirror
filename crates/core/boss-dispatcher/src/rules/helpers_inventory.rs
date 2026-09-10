@@ -82,7 +82,6 @@ impl HelperResolver for InventoryHelpers {
             // runner binds and it already holds jobs_base; the module
             // outgrew its name the day a second domain needed a dedup
             // helper (design-review-spawn, dogfooding arc e556c000).
-            "open_review_exists" => open_review_exists(self, args),
             "open_car_exists" => open_car_exists(self, args),
             "open_publish_exists" => open_publish_exists(self, args),
             // The generalization the three guards above were converging
@@ -182,23 +181,6 @@ struct JobsListResponse {
 /// on the Job's `metadata.part_sku` (stamped by the reorder rule via
 /// `jobs.spawn`'s `metadata.<field>` args), since the restock's subject is
 /// the vendor, not the part.
-/// Is there an open design-doc-review Job for this doc path? The
-/// spawn rule's dedup: `docs.design.indexed` re-fires on every
-/// question-count change, and each firing must not open another
-/// review. Subject-filtered server-side — the doc path IS the Job's
-/// subject id.
-fn open_review_exists(h: &InventoryHelpers, args: &[Value]) -> Result<Value, EvalError> {
-    let doc_path = first_string(args, "open_review_exists")?;
-    let encoded = percent_encode(doc_path);
-    let url = format!(
-        "{}/api/jobs?kind=design-doc-review&status=open&subject_id={}&limit=1",
-        h.jobs_base.trim_end_matches('/'),
-        encoded,
-    );
-    let r: JobsListResponse = h.get_json(&url, "open_review_exists")?;
-    Ok(Value::Bool(!r.data.is_empty()))
-}
-
 /// Is there already an open `ship-a-change` car for this recurring
 /// finding? The dedup for `spawn-car-on-sweep-remediated`.
 ///
@@ -216,9 +198,11 @@ fn open_review_exists(h: &InventoryHelpers, args: &[Value]) -> Result<Value, Eva
 /// Keyed on the sweep's SUBJECT (`stale-build-caches`), not its id or
 /// title: the id is fresh every firing, and the title is templated per
 /// target, so neither separates "the same finding again" from "a
-/// different finding". `design-review-spawn` has had exactly this
-/// guard — `NOT open_review_exists(path)` — since it was written; this
-/// rule simply never got one.
+/// different finding". `design-review-spawn` had exactly this guard
+/// — `NOT open_review_exists(path)` — from the day it was written;
+/// this rule simply never got one. (That rule and its one-kind helper
+/// were retired with the corpus index on 2026-09-10; `open_job_exists`
+/// below is the generic form that outlived both.)
 fn open_car_exists(h: &InventoryHelpers, args: &[Value]) -> Result<Value, EvalError> {
     let target = first_string(args, "open_car_exists")?;
     let url = format!(
@@ -275,8 +259,8 @@ fn open_publish_exists(h: &InventoryHelpers, args: &[Value]) -> Result<Value, Ev
 /// kind; a fourth one-off (`open_sweep_exists`) would have continued
 /// the pattern this module's own comment calls outgrown. Keyed on the
 /// packet's SUBJECT like `open_publish_exists` — for sweeps the
-/// subject IS the target — and filtered server-side like
-/// `open_review_exists`, so the answer costs one row.
+/// subject IS the target — and filtered server-side rather than
+/// paged and scanned, so the answer costs one row.
 fn open_job_exists(h: &InventoryHelpers, args: &[Value]) -> Result<Value, EvalError> {
     let kind = first_string(args, "open_job_exists")?;
     let subject_id = second_string(args, "open_job_exists")?;

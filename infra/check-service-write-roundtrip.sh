@@ -10,8 +10,9 @@
 # Why this exists: 2026-04-28 boss-docs-api was running in-memory
 # only because it was built without `--features postgres`. POSTs
 # returned 200; the design_pending_decisions table stayed empty. (That
-# table and the one POST are gone since 2026-09-10 — boss-docs is
-# checked on the read side now; see below.)
+# table, that POST and the whole boss-docs service are gone since
+# 2026-09-10 — the crate that named this bug class no longer exists,
+# but the class does; see below.)
 # Option (1) of the fix (boss_core::startup::require_postgres_or_explicit_inmemory)
 # stops the next regression at *boot*. This script is the
 # defense-in-depth check that catches the same class of bug at
@@ -68,16 +69,15 @@ check_read_consistency() {
     fi
 }
 
-# boss-docs-api USED to be the one round-trip check here: a pending
-# decision was the cheapest write to land, and its anchor doubled as
-# the sentinel. The flush pipeline and the pending-decision table were
-# deleted on 2026-09-10 (backlog f5da586c) and boss-docs now has no
-# write endpoint but `reindex`, which rewrites the whole corpus and is
-# not a sentinel. Same signal, read side: the corpus list must agree
-# with the table, which an in-memory fallback cannot fake.
-check_read_consistency "boss-docs-api" \
-    "http://127.0.0.1:7050/api/design/docs" \
-    "design_docs"
+# boss-docs-api was the original subject of this whole script (the
+# 2026-04-28 in-memory-fallback bug above) and it is no longer checked,
+# because it no longer exists. Part 1 of the corpus deletion took its
+# only write endpoint; part 2, the same day, took the service, its
+# three tables and the parser behind them (backlog f5da586c) — the
+# packet is the doc, so there is no corpus to keep consistent with
+# anything. The two read-consistency checks below carry the signal it
+# used to: a list endpoint that disagrees with its table is an
+# in-memory fallback, and no fallback can fake agreement.
 # `boss-classes-api` requires ?subject_kind=… — pick `employee`, the
 # largest classes namespace today.
 check_read_consistency "boss-classes-api" \
@@ -93,7 +93,9 @@ check_read_consistency "boss-locations-api" \
 # Services that emit `/health.capabilities.storage` get a third
 # layer: confirm the binary running self-reports `storage="postgres"`.
 # This catches the boss-docs class of bug at the layer closest to
-# truth — the binary itself tells you what it built with.
+# truth — the binary itself tells you what it built with. (The crate
+# that named the class was deleted on 2026-09-10; the class did not go
+# with it, which is why these checks stay.)
 check_capability() {
     local service="$1"
     local url="$2"
@@ -106,7 +108,6 @@ check_capability() {
     fi
 }
 
-check_capability "boss-docs-api"     "http://127.0.0.1:7050/api/design/health"
 check_capability "boss-people-api"   "http://127.0.0.1:7500/api/people/health"
 check_capability "boss-jobs-api"     "http://127.0.0.1:7900/api/jobs/health"
 check_capability "boss-messages-api" "http://127.0.0.1:7200/api/messages/health"

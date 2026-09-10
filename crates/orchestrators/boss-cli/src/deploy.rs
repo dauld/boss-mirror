@@ -107,13 +107,6 @@ const SERVICES: &[ServiceDef] = &[
         unit: None,
     },
     ServiceDef {
-        name: "docs",
-        package: "boss-docs",
-        binary: "boss-docs-api",
-        features: &["postgres"],
-        unit: Some("boss-docs-api"),
-    },
-    ServiceDef {
         name: "simapi",
         package: "boss-sim-api",
         binary: "boss-sim-api",

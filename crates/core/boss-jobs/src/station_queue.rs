@@ -892,14 +892,14 @@ mod tests {
         spec.lens = Some(crate::stations::StationLens {
             eyebrow: Some("System Model · Design review".into()),
             title: "Design review".into(),
-            subtitle: Some("Open questions, pending decisions, ADRs".into()),
-            panels: vec!["rejections".into(), "corpus".into()],
+            subtitle: Some("Design docs waiting on a decision".into()),
+            panels: vec!["queue".into(), "flow-strip".into()],
             with_steps: false,
         });
         let q = evaluate_station(&spec, vec![], day(20));
         let lens = q.lens.expect("declared, so present");
         assert_eq!(lens.title, "Design review");
-        assert_eq!(lens.panels, vec!["rejections", "corpus"]);
+        assert_eq!(lens.panels, vec!["queue", "flow-strip"]);
     }
 
     /// A lens that places packets at the stop they reached needs their

@@ -22,7 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Services managed by deploy-services.sh (paired = both prod+scratch).
 PAIRED_SERVICES=(shipping messages inventory commerce people assets kb)
-SOLO_SERVICES=(sim ml docs)
+SOLO_SERVICES=(sim ml)
 
 # Services installed by bespoke infra/<name>/setup.sh or raw unit files.
 # If you add a new one, put the unit name here.

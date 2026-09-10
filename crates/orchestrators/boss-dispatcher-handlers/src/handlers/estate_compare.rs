@@ -40,6 +40,15 @@
 //! - **Disk drift is informational.** Observed `disk_gb` is Kubernetes
 //!   ephemeral-storage capacity, which is a filesystem's view, not the
 //!   hardware's; it lands in `disk_informational`, not `drift`.
+//! - **Disk HEADROOM is hard, on both scopes** (a520737f). Capacity
+//!   drifting from the declaration is a paperwork question; a machine
+//!   running out of room stops the pipeline, so one floor
+//!   ([`disk_tight_finding`]) is applied to every observed machine
+//!   whatever scope it arrived under. It could not fire for a cluster
+//!   node until the observer started reading free space, and w-1 — the
+//!   node every gate compiles on — was the one that mattered.
+//!   `disk_unmeasured` is how a node that stops reporting free space
+//!   stays distinguishable from one that has plenty.
 //! - **A NotReady node is present, not absent.** It appears in
 //!   `not_ready` and still counts as observed — a sick machine is
 //!   there, and "missing" must keep meaning missing.
@@ -112,10 +121,31 @@ pub(crate) const HOST_SCOPE: &str = "host";
 /// comment above records fixing (49a8d842).
 pub(crate) const UNITS_SCOPE: &str = "host-units";
 
-/// The disk floor that turns a host reading into a HARD finding
-/// (49a8d842: the forge host — 228G, 83% full, "THE TIGHT ONE" — could
-/// fill and the comparison would keep answering unknown_scope). Free
-/// below 16 GiB or below 35% of capacity is `disk_tight`.
+/// The disk floor that turns a reading into a HARD finding (49a8d842:
+/// the forge host — 228G, 83% full, "THE TIGHT ONE" — could fill and
+/// the comparison would keep answering unknown_scope). Free below 16
+/// GiB or below 35% of capacity is `disk_tight`.
+///
+/// WHICH FILESYSTEM THE NUMBERS DESCRIBE — the thing that makes the
+/// percentage mean one thing across two surfaces (a520737f). Both
+/// `disk_gb` and `disk_free_gb` are total-and-available of ONE
+/// filesystem, the one the work writes into on that machine, rounded to
+/// nearest GiB by the one rule:
+/// - **host scope** (`observe-host.sh`): `df -k /` — the root
+///   filesystem, where the forge's docker store and CI checkouts live.
+/// - **kubernetes-nodes scope** (`boss-estate-observe.yaml`): the
+///   kubelet's root filesystem, "nodefs" — where the image store,
+///   emptyDirs and the gate's warm target live. `disk_gb` is
+///   `status.capacity.ephemeral-storage` and `disk_free_gb` is the
+///   kubelet summary API's `node.fs.availableBytes`; the kubelet
+///   derives the first from a statfs of the same filesystem the second
+///   reports, so numerator and denominator describe one volume.
+///   A cluster node's `/` is a read-only Talos squashfs and is NOT what
+///   fills, which is why nodefs is the filesystem named here.
+///
+/// The trap this comment exists to keep shut: a volume seen from INSIDE
+/// a pod is a third thing again, and reading one of those as a
+/// node-level figure is how the gap this floor now closes stayed hidden.
 ///
 /// WHY 35% (was 8%). The alarm is worth waking someone for only if it
 /// arrives BEFORE the pipeline stops: the CI host's locomotive refuses
@@ -129,6 +159,19 @@ pub(crate) const UNITS_SCOPE: &str = "host-units";
 /// the same reading as before for hosts that do less.
 const DISK_TIGHT_FLOOR_GB: i64 = 16;
 const DISK_TIGHT_FLOOR_PCT: i64 = 35;
+
+/// The floor applied to one observed node — ONE definition, read by
+/// both scopes (CLAUDE.md §9a: the floor is a fact, and a fact that
+/// lives twice drifts). `None` when the node is fine OR when it carries
+/// no usable pair of numbers; an unmeasured node is not a clean one, and
+/// [`compare`] records that separately as `disk_unmeasured`.
+fn disk_tight_finding(node: &Json) -> Option<Json> {
+    let id = node.get("id").and_then(Json::as_str)?;
+    let free = node.get("disk_free_gb").and_then(Json::as_i64)?;
+    let total = node.get("disk_gb").and_then(Json::as_i64)?;
+    (total > 0 && (free < DISK_TIGHT_FLOOR_GB || free * 100 < total * DISK_TIGHT_FLOOR_PCT))
+        .then(|| json!({ "id": id, "free_gb": free, "disk_gb": total }))
+}
 
 /// The self-scoped host comparison, pure: for each observed host that
 /// is also declared, drift on the identity fields + the disk floor;
@@ -153,13 +196,8 @@ pub(crate) fn compare_host(declared: &[Json], observation: &Json) -> Json {
         if node.get("ready").and_then(Json::as_bool) == Some(false) {
             not_ready.push(json!(id));
         }
-        if let (Some(free), Some(total)) = (
-            node.get("disk_free_gb").and_then(Json::as_i64),
-            node.get("disk_gb").and_then(Json::as_i64),
-        ) && total > 0
-            && (free < DISK_TIGHT_FLOOR_GB || free * 100 < total * DISK_TIGHT_FLOOR_PCT)
-        {
-            disk_tight.push(json!({ "id": id, "free_gb": free, "disk_gb": total }));
+        if let Some(finding) = disk_tight_finding(node) {
+            disk_tight.push(finding);
         }
         let dec = declared
             .iter()
@@ -236,6 +274,8 @@ pub(crate) fn compare(declared: &[Json], observation: &Json) -> Json {
     let mut declared_not_observed: Vec<Json> = Vec::new();
     let mut drift: Vec<Json> = Vec::new();
     let mut disk_informational: Vec<Json> = Vec::new();
+    let mut disk_tight: Vec<Json> = Vec::new();
+    let mut disk_unmeasured: Vec<Json> = Vec::new();
     let mut not_ready: Vec<Json> = Vec::new();
 
     let participating: Vec<&Json> = declared.iter().filter(|d| participates(d)).collect();
@@ -246,6 +286,24 @@ pub(crate) fn compare(declared: &[Json], observation: &Json) -> Json {
         };
         if node.get("ready").and_then(Json::as_bool) == Some(false) {
             not_ready.push(json!(id));
+        }
+        // The floor, before the declared lookup — the same order the
+        // host scope uses, and for the same reason: a machine nobody
+        // declared is still a machine that can fill, and w-1 (the node
+        // that compiles this repository) was undeclared for five days.
+        if let Some(finding) = disk_tight_finding(node) {
+            disk_tight.push(finding);
+        } else if node.get("disk_free_gb").and_then(Json::as_i64).is_none()
+            || node.get("disk_gb").and_then(Json::as_i64).is_none()
+        {
+            // No free-space reading at all — the state this whole scope
+            // was in until a520737f, in which `disk_tight` cannot fire
+            // and a filling node is indistinguishable from a healthy
+            // one. The observer's kubelet read is best-effort so the
+            // rest of the observation survives losing it; this is where
+            // losing it becomes visible. Informational, not hard —
+            // `estate.alarm` does not read this key.
+            disk_unmeasured.push(json!(id));
         }
         let Some(dec) = participating
             .iter()
@@ -315,12 +373,16 @@ pub(crate) fn compare(declared: &[Json], observation: &Json) -> Json {
             "observed_not_declared": observed_not_declared.len(),
             "declared_not_observed": declared_not_observed.len(),
             "drift": drift.len(),
+            "disk_tight": disk_tight.len(),
+            "disk_unmeasured": disk_unmeasured.len(),
         },
         "findings": {
             "observed_not_declared": observed_not_declared,
             "declared_not_observed": declared_not_observed,
             "drift": drift,
             "disk_informational": disk_informational,
+            "disk_tight": disk_tight,
+            "disk_unmeasured": disk_unmeasured,
             "not_ready": not_ready,
         },
     })
@@ -760,6 +822,95 @@ mod tests {
         );
         assert_eq!(out["counts"]["participating_declared"], 0);
         assert_eq!(out["counts"]["observed_not_declared"], 1);
+    }
+
+    // ----- the cluster scope's disk floor (a520737f) -----
+
+    fn cluster_obs(id: &str, total: i64, free: Option<i64>) -> Json {
+        let mut node = json!({
+            "id": id, "cpu": 32, "memory_gb": 125, "address": "10.20.0.21",
+            "disk_gb": total, "ready": true });
+        if let Some(free) = free {
+            node["disk_free_gb"] = json!(free);
+        }
+        observed(json!([node]))
+    }
+
+    #[test]
+    fn a_cluster_node_below_the_floor_is_disk_tight() {
+        // w-1 is THE BUILD NODE: every gate's warm target lives on its
+        // nodefs and every gate Job prefers it by affinity. Measured
+        // 2026-09-10 the kubernetes-nodes observation carried
+        // `disk_gb: 929` and NO free figure, so `disk_tight` could never
+        // fire for it — the build node could fill and nothing would say
+        // so (a520737f).
+        let declared = vec![
+            json!({"id":"w-1","role":"talos-worker","cpu":32,"memory_gb":125,
+            "address":"10.20.0.21","disk_gb":929,"retired":false}),
+        ];
+        // 390 GiB free of 929 is 42% — the reading on the day the gap
+        // was found, and correctly not tight.
+        let fine = compare(&declared, &cluster_obs("w-1", 929, Some(390)));
+        assert_eq!(fine["counts"]["disk_tight"], 0);
+        // 300 of 929 is 32%: above the 16 GiB floor, under 35%, so a
+        // packet lands while the gate can still run.
+        let tight = compare(&declared, &cluster_obs("w-1", 929, Some(300)));
+        assert_eq!(tight["counts"]["disk_tight"], 1);
+        assert_eq!(tight["findings"]["disk_tight"][0]["id"], "w-1");
+        assert_eq!(tight["findings"]["disk_tight"][0]["free_gb"], 300);
+        assert_eq!(tight["findings"]["disk_tight"][0]["disk_gb"], 929);
+    }
+
+    #[test]
+    fn the_floor_reads_the_same_on_both_surfaces() {
+        // ONE definition of the floor, not two (CLAUDE.md §9a). The host
+        // scope's 71-of-228 reading (the forge mid-build on 2026-09-05)
+        // and the same ratio on a cluster node must both be tight, and
+        // the same pair the other side of 35% must both be clean.
+        let dec_host = vec![json!({"id":"h","role":"forge"})];
+        let dec_node = vec![json!({"id":"h","role":"talos-worker"})];
+        for (free, want) in [(71, 1), (80, 0)] {
+            assert_eq!(
+                compare_host(&dec_host, &host_obs("h", free, 228))["counts"]["disk_tight"],
+                want,
+                "host scope, {free} of 228"
+            );
+            assert_eq!(
+                compare(&dec_node, &cluster_obs("h", 228, Some(free)))["counts"]["disk_tight"],
+                want,
+                "cluster scope, {free} of 228"
+            );
+        }
+    }
+
+    #[test]
+    fn a_node_with_no_free_reading_is_unmeasured_not_clean() {
+        // The kubelet stats read is best-effort BY DESIGN: losing it must
+        // not cost the whole observation, because declared_not_observed,
+        // not_ready and the alarm's silence sweep all ride the same POST.
+        // So the blindness has to show somewhere, or the instrument can
+        // go dark and read exactly like a healthy estate — which IS the
+        // class this packet reports. Informational, not hard:
+        // `estate.alarm` raises on `disk_tight`, `not_ready`,
+        // `declared_not_observed` and `units_unhealthy`, so nothing new
+        // wakes anyone.
+        let declared = vec![json!({"id":"w-1","role":"talos-worker","retired":false})];
+        let blind = compare(&declared, &cluster_obs("w-1", 929, None));
+        assert_eq!(blind["counts"]["disk_tight"], 0);
+        assert_eq!(blind["counts"]["disk_unmeasured"], 1);
+        assert_eq!(blind["findings"]["disk_unmeasured"][0], "w-1");
+        let seeing = compare(&declared, &cluster_obs("w-1", 929, Some(390)));
+        assert_eq!(seeing["counts"]["disk_unmeasured"], 0);
+    }
+
+    #[test]
+    fn an_undeclared_node_that_is_tight_still_surfaces() {
+        // w-1 was undeclared for five days. A machine nobody declared is
+        // still a machine that can fill, so the floor is tested before
+        // the declared lookup, exactly as the host scope tests it.
+        let out = compare(&[], &cluster_obs("w-9", 929, Some(10)));
+        assert_eq!(out["counts"]["observed_not_declared"], 1);
+        assert_eq!(out["findings"]["disk_tight"][0]["id"], "w-9");
     }
 
     // ----- the self-scoped host comparison (49a8d842) -----

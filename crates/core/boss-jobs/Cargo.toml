@@ -73,6 +73,10 @@ tempfile = "3"
 workspace = true
 
 [[test]]
+name = "agent_runs_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "cadence_pg"
 required-features = ["postgres"]
 

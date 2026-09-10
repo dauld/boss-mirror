@@ -51,9 +51,20 @@
 //! window loudly (`<rule> still running (<n>s) — not re-firing`) and
 //! claims nothing. DIFFERENT rules may overlap on purpose — the
 //! conductor's flock is the arbiter of whether two verbs can really
-//! proceed, and its "another conductor run holds the lock — leaving"
-//! is the correct, already-designed outcome for the loser. A second
-//! lock in this loop would only re-implement it worse.
+//! proceed, and leaving is the correct outcome for a loser that will
+//! get another turn. A second lock in this loop would only re-implement
+//! it worse.
+//!
+//! What that reading missed, and cost ten hours on 2026-09-10
+//! (4860aff8): a loser only "gets another turn" if it can eventually
+//! WIN. The 60-second board holds the flock 12–14s in the consist
+//! check; the 10-minute reconcile fires a second later, lost 55 times
+//! in a row, and every merge, arrival report, stall check and branch
+//! sweep stopped for nine hours. The flock is still the arbiter — it
+//! now gives a starvable phase a bounded wait rather than an immediate
+//! exit (`train::lock_wait_budget`), and records a pass that waited its
+//! whole budget as a NONZERO rc so a starved loop stops reading as a
+//! 0-second success in this loop's own firing rows.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -2127,9 +2138,10 @@ mod tests {
     #[test]
     fn a_different_rules_run_does_not_block_this_one() {
         // The guard is per rule, never global: the conductor's flock
-        // arbitrates whether two verbs may actually proceed, and its
-        // "another conductor run holds the lock — leaving" is the
-        // right outcome for the loser. This loop adds no second lock.
+        // arbitrates whether two verbs may actually proceed, and it
+        // decides what the loser does — leave, or wait a bounded turn if
+        // it is the starvable side (`train::lock_wait_budget`). This
+        // loop adds no second lock.
         let rule = clock_rule(); // train-window
         let now = utc(2026, 8, 13, 18, 0, 0);
         assert_eq!(

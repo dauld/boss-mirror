@@ -30,7 +30,6 @@ members = [
     "crates/modules/boss-shipping",
     "crates/modules/boss-shipping-client",
     "crates/orchestrators/boss-sim",
-    "crates/core/boss-docs",
     "crates/core/boss-ml",
     "crates/orchestrators/boss-ml-api",
     "crates/modules/boss-ml-plugins",

@@ -1098,25 +1098,60 @@ only to serve that half (`design-decision-flush-queue`, and
 `maintenance-sweep-doc-status-daily`, whose entire content was the
 drifted-status report).
 
-Two things the deletion found that the paragraph above did not
-anticipate, both recorded because they change what the remaining half
-rests on. First, the pending-decision rows were **load-bearing for the
-read half**: `upsert_doc` reads them on every reindex and force-resolves
-their anchors, because reindex rebuilds the question set from the parse
-and an answer known only outside the file is otherwise erased on every
-boot. Measured before deleting: dropping both tables would have re-opened
-25 questions across 6 docs and handed back six review packets for
-questions already answered. So the table survives, renamed
+Part 1 stopped at the read half and left two findings, both now
+settled. First, the pending-decision rows were **load-bearing for the
+read half**: `upsert_doc` read them on every reindex and force-resolved
+their anchors, because reindex rebuilt the question set from the parse
+and an answer known only outside the file was otherwise erased on every
+boot. Measured then: dropping both tables would have re-opened 25
+questions across 6 docs and handed back six review packets for questions
+already answered. So the table survived one day, renamed
 `design_recorded_decisions` and backfilled from the stranded flush
-payloads — a CLOSED ledger with no writers, which is the honest shape
-for a corpus being retired. Second, `boss docs reindex` and the corpus
-index **stay for now**: the daily `design-review-level-sweep` reads
-`/api/design/docs`, and retiring a working rule is not a call to make
-inside a deletion. The conventions themselves are confirmed
-file-world-only — a `design-doc` packet's questions are structured
-`[{anchor, title, proposal}]` metadata that nothing parses — so
-CLAUDE.md's §"Design docs" instruction now describes only the legacy
-file flow.
+payloads — a closed ledger with no writers. Second, `boss docs reindex`
+and the corpus index stayed, because the daily
+`design-review-level-sweep` read them and retiring a working rule was
+not a call to make inside a deletion.
+
+**The read half was deleted on 2026-09-10, the same day** — the
+sequencing had to run that way round, because the ledger exists only to
+stop a reindex from re-opening an answered question, and with no
+reindexer there is nothing for it to stop. Gone: the whole `boss-docs`
+crate and the `boss-docs-api` service (the parser, the reindexer, the
+port and both adapters, the remaining `/api/design/docs` routes and the
+gateway's proxy to them), the three read-cache tables
+(`design_docs`, `design_questions`, `design_doc_rejections`) and the
+ledger with them, `boss docs reindex`, the `docs.design.sweep` handler
+and the two dispatcher rules it served (`design-review-spawn`,
+`design-review-level-sweep`) plus the one-kind
+`open_review_exists` helper the first of them used, the `corpus` panel
+on `/it/design`, and the corpus lint (`docs_corpus_presents.rs`) that
+enforced the file conventions. **No history is lost**: `audit_log` is
+the system of record and every `docs.design.indexed` /
+`docs.design.decision_recorded` event stays in it; these were
+projections and read-caches.
+
+Three things that deletion established, worth keeping:
+
+- **The `### Qn:` / `## Open questions` / `**Status**:` conventions were
+  FILE-WORLD ONLY**, and the world they described is gone. A
+  `design-doc` packet's questions are registry-enforced structured
+  metadata (`design-doc.toml`, `item_keys = ["anchor", "title",
+  "proposal"]`); `review-design.js` returns before any docs-API call
+  when the packet carries its own, and a mocked test routes
+  `**/api/design/**` to 500 and asserts zero calls. So nothing anywhere
+  parses a markdown heading for a question any more, and CLAUDE.md's
+  §"Design docs" was corrected from "author your questions like this" to
+  what is actually true.
+- **Docs under `docs/design/` survive as human-read living references.**
+  Nothing indexes them, no lint enforces their shape, and a docs-only
+  change now implies no crate to compile (`infra/gate.sh`'s path map).
+  The file is the residue of a settled discussion, not its venue.
+- **`/it/design` became only what it claimed to be.** The page
+  advertised itself as a lens over the `design-review` station's queue
+  while rendering a table of files; its one use of the queue was a join
+  on `subject.id` = doc path, which no `design-doc` packet can satisfy
+  (its subject is the literal `boss-platform`), so the station's real
+  packets rendered nowhere. It renders the queue now.
 
 ## Open findings — where two live decisions disagree
 

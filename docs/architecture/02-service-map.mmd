@@ -38,7 +38,6 @@ flowchart TB
     subgraph PlatformSvcs ["Platform services &mdash; supporting tooling"]
         direction LR
         ML_S["boss-ml-api<br/><small>models + predictions<br/>declarative-rule + plugin inference</small>"]
-        DOCS_S["boss-docs-api<br/><small>design-doc reader,<br/>decision tracker</small>"]
     end
 
     subgraph TenantSvcs ["Tenant binaries &mdash; live only in example tenants"]
@@ -101,7 +100,7 @@ flowchart TB
     class JOBS_S,ASSETS_S,KB_S,PPL_S,CAL_S,CLS_S,LOC_S,SK_S primitive
     class COMM_S,INV_S,SHIP_S,PROD_S operational
     class POL_S,LDG_S,MSG_S,CONT_S rail
-    class ML_S,DOCS_S platform
+    class ML_S platform
     class BREW,UDS tenant
     class CYB,OBS,SER,INV_CHECK agent
     class PG,NATS infra

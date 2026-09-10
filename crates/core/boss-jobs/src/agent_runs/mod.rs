@@ -59,6 +59,6 @@ pub use postgres::PgAgentRuns;
 #[cfg(feature = "postgres")]
 pub use rebuild::rebuild_agent_runs;
 pub use types::{
-    AgentRun, GroupSpend, NewAgentRun, RateCardRow, RunFilter, RunOutcome, RunSummary, price_run,
-    summarize,
+    AgentRun, GroupSpend, NewAgentRun, RateCardRow, RunFilter, RunOutcome, RunSummary, TokenUsage,
+    price_run, summarize,
 };

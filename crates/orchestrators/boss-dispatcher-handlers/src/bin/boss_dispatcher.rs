@@ -21,8 +21,8 @@ use boss_dispatcher::rules::schedule_runner::{DEFAULT_CATCHUP_CAP, ScheduleRunne
 use boss_dispatcher_handlers::handlers::{
     bill_payment_batch::BillPaymentBatch, cadence_silence::CadenceSilenceSweep,
     commerce_invoice_issue::CommerceInvoiceIssue, credential_issuer,
-    credential_rotate_forgejo::CredentialRotateForgejo, docs_design_sweep::DocsDesignSweep,
-    estate_alarm::EstateAlarm, estate_compare::EstateCompare, gate_resolve::GateResolve,
+    credential_rotate_forgejo::CredentialRotateForgejo, estate_alarm::EstateAlarm,
+    estate_compare::EstateCompare, gate_resolve::GateResolve,
     inventory_bill_approve::InventoryBillApprove,
     inventory_overhead_absorb::InventoryOverheadAbsorb,
     inventory_parts_consume::InventoryPartsConsume, inventory_parts_produce::InventoryPartsProduce,
@@ -322,13 +322,6 @@ async fn main() -> Result<()> {
             // Push notifier: step.ready.* -> message the role's
             // on-call member (the pull-side assignments query is
             // the actual work driver; this is awareness).
-            // Reads the docs corpus AND the jobs board: the level
-            // question spans both, which is why it is a sweep rather
-            // than anything either service could answer alone.
-            handlers.register(DocsDesignSweep::new(
-                cfg.docs_api_url.clone(),
-                cfg.jobs_api_url.clone(),
-            ));
             // The packet-loss census (packet-loss.md, 9fb9904f): count
             // the network's conservation invariant on a clock and land
             // the counts as one jobs.network.census event per firing.

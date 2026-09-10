@@ -194,15 +194,18 @@ require_headroom "to start"
 # Derivation is deliberately dumb — a path under crates/<tier>/<name>/
 # means <name>. Two extras earn their place:
 #
-#   docs/design/  -> boss-docs. Those markdown files are INPUT to the
-#       corpus gate (boss-docs/tests/docs_corpus_presents.rs parses
-#       every one), so a docs-only change really can fail a crate's
-#       tests. Path-to-crate is not the same question as which SOURCE
-#       files a crate compiles.
+#   docs/design/ used to map to boss-docs, because those markdown files
+#       were INPUT to a corpus gate: boss-docs/tests/docs_corpus_presents.rs
+#       parsed every one, so a docs-only change really could fail a
+#       crate's tests. That crate, the test and the corpus index behind
+#       it were deleted on 2026-09-10 (backlog f5da586c) — the packet is
+#       the doc — so docs/design/ now implies no crate, like every other
+#       path under docs/. The rule it illustrated still holds for the
+#       four below: path-to-crate is not the same question as which
+#       SOURCE files a crate compiles.
 #
-#   The same reasoning, four more times — each one a file some crate's
-#   test READS, so changing it can redden that crate without touching
-#   a line of its source:
+#   Four files some crate's test READS, so changing one can redden that
+#   crate without touching a line of its source:
 #     infra/gate.sh, infra/lint/*, .forgejo/workflows/ci.yml
 #         -> boss-testing, which owns gate_sh.rs. That test pins that
 #            ci.yml invokes this script, that this script runs every
@@ -296,7 +299,6 @@ crates_from_paths() {
 # rule under test is paths -> crates; staging files would test git.
 path_map() {
     sed -n -e 's|^crates/[^/]*/\([^/]*\)/.*|\1|p' \
-           -e 's|^docs/design/.*|boss-docs|p' \
            -e 's|^infra/gate\.sh$|boss-testing|p' \
            -e 's|^infra/lint/.*|boss-testing|p' \
            -e 's|^\.forgejo/workflows/ci\.yml$|boss-testing|p' \
@@ -316,14 +318,17 @@ scope_self_test() {
         fi
     }
     # The commit this rule was written for: a docs title over a
-    # boss-jobs change (a6ffcb7c).
-    _case "the commit that earned this rule" "boss-docs boss-jobs" \
+    # boss-jobs change (a6ffcb7c). The docs file contributed a crate of
+    # its own until 2026-09-10; the defect it caught was never about
+    # that, it was about the boss-jobs change riding along unnamed.
+    _case "the commit that earned this rule" "boss-jobs" \
         "docs/design/queue-visibility.md" \
         "crates/core/boss-jobs/src/registry.rs" \
         "crates/core/boss-jobs/tests/platform_bundle.rs"
-    # Design docs are INPUT to boss-docs' corpus gate, so a docs-only
-    # car really does have a crate to compile.
-    _case "a genuinely docs-only car" "boss-docs" "docs/design/payload-encryption.md"
+    # No crate parses the design corpus any more (boss-docs and its
+    # docs_corpus_presents.rs went on 2026-09-10), so a docs-only car
+    # has nothing to compile — the lints still run repo-wide.
+    _case "a genuinely docs-only car" "" "docs/design/payload-encryption.md"
     # The platform bundle is DATA, but boss-jobs compiles a test that
     # parses and lints it (`the_platform_bundle_matches_the_specs_it
     # _replaced`). Without this line a protocol-only car scoped to
@@ -335,7 +340,7 @@ scope_self_test() {
         "infra/platform/workflows/ship-a-change.toml"
     _case "two files, one crate" "boss-cli" \
         "crates/orchestrators/boss-cli/src/train.rs" \
-        "crates/orchestrators/boss-cli/src/docs.rs"
+        "crates/orchestrators/boss-cli/src/gate.rs"
     # The tier segment must not be mistaken for the crate name.
     _case "tier is not the crate" "boss-people" "crates/modules/boss-people/src/http.rs"
     _case "a crate's root files count" "boss-jobs" "crates/core/boss-jobs/Cargo.toml"

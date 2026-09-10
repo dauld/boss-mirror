@@ -58,7 +58,6 @@ there.
 | `boss audit ...` | Query the audit log for domain events |
 | `boss ledger ...` | Ledger operations (rebuild the GL projection) |
 | `boss sim ...` | Run the simulator (thin wrapper around `boss-sim`) |
-| `boss docs reindex` | Re-scan `docs/design/*.md` into the corpus index |
 
 The fresh-box setup walkthrough lives in
 [docs/runbooks/dev-environment-bootstrap.md](../../../docs/runbooks/dev-environment-bootstrap.md).

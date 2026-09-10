@@ -74,8 +74,10 @@ mod tests {
             finished_at: "2026-09-10T01:10:00Z".parse().unwrap(),
             outcome: RunOutcome::Success,
             error: None,
-            input_tokens: 10,
-            output_tokens: 2,
+            tokens: crate::agent_runs::types::TokenUsage::Split {
+                input: 10,
+                output: 2,
+            },
             tool_calls: 3,
             job_id: None,
             branch: Some("feat/x".into()),
@@ -95,6 +97,11 @@ mod tests {
         assert_eq!(ev.payload["run_id"], "run-1");
         assert_eq!(ev.payload["actor_id"], "claude:opus-5");
         assert_eq!(ev.payload["tool_calls"], 3);
+        // The token shape rides the payload the way the wire states it:
+        // the total always present, the split present because it was
+        // measured. A rebuild reads exactly this back.
+        assert_eq!(ev.payload["input_tokens"], 10);
+        assert_eq!(ev.payload["total_tokens"], 12);
         assert_eq!(ev.payload["usd_micros"], 123);
         assert_eq!(ev.payload["priced_by"], "opus-5");
         assert_eq!(ev.payload["detail"]["host"], "dev-pod");
@@ -106,6 +113,17 @@ mod tests {
         assert!(ev.payload.get("usd_micros").is_some());
         assert!(ev.payload["usd_micros"].is_null());
         assert!(ev.payload["priced_by"].is_null());
+    }
+
+    #[test]
+    fn a_total_only_run_states_its_total_and_nulls_the_split() {
+        let mut run = a_run();
+        run.tokens = crate::agent_runs::types::TokenUsage::TotalOnly { total: 142_982 };
+        let ev = run_recorded_event(&ActorId::agent("claude", "opus-5"), &run, &None);
+        assert_eq!(ev.payload["total_tokens"], 142_982);
+        assert!(ev.payload["input_tokens"].is_null());
+        assert!(ev.payload["output_tokens"].is_null());
+        assert!(ev.payload["usd_micros"].is_null());
     }
 
     #[test]

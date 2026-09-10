@@ -247,7 +247,7 @@ copy holds any information its source does not. This one held none.
 The core state-machine OS lives under `crates/core/` (
 among them `boss-core`, `boss-events`, `boss-jobs`, `boss-policy`,
 `boss-gateway`, `boss-observability`, `boss-cybernetics`,
-`boss-docs`, `boss-ml`, `boss-content`, `boss-testing`,
+`boss-ml`, `boss-content`, `boss-testing`,
 `boss-dispatcher`, `boss-clock`, `boss-expr`, `boss-locations`, the
 two taxonomy registries (`boss-classes`, `boss-subject-kinds`),
 `boss-calendar`, `boss-nats`, `boss-ports`,
@@ -336,7 +336,7 @@ the tier it touches.**
   the two taxonomy registries (`boss-classes`, `boss-subject-kinds`),
   `boss-calendar`,
   `boss-content`, the ML stack, `boss-cybernetics`,
-  `boss-testing`, `boss-ports`, `boss-docs`, plus matching
+  `boss-testing`, `boss-ports`, plus matching
   `*-client` crates.
 
 - **`crates/modules/` — Tier 2: Company-modeling layer**.
@@ -376,7 +376,7 @@ the tier it touches.**
 
 The `infra/lint/tier-import-audit.sh` script enforces the
 Tier-1-can't-depend-on-Tier-2 rule (orchestrators excluded);
-runs cleanly today (0 violations across 29 core crates).
+runs cleanly today (0 violations across 28 core crates).
 
 Each domain crate has a matching `*-client` for cross-service
 HTTP calls + a `Pg*` adapter behind the `postgres` feature.
@@ -467,9 +467,42 @@ Read that to know which layer a new test belongs in.
 
 ## Design docs
 
-When writing or editing a file under `docs/design/*.md`, follow the in-repo convention: open questions must be authored as `### Qn: <title>` subheadings (not numbered lists), **inside a `## Open questions` section** — the tracker ingests questions from that section only, and the reindex rejects a doc with a live `Qn:` heading anywhere else (resolved ones may live in a Decision-history section). If you use numbered lists instead, the review workflow silently falls back to positional ids and the open questions you wrote don't show up in the UI.
+**The packet is the doc.** A reviewable design doc is a `design-doc`
+packet: its prose rides in step metadata as `markdown`, and its open
+questions ride as structured metadata — `[{anchor, title, proposal}]`,
+enforced by the Workflow registry (`infra/platform/workflows/design-doc.toml`,
+`item_keys = ["anchor", "title", "proposal"]`). `boss design` files one.
+It is reviewable the second it exists: the review surface
+(`infra/step-plugins/review-design.js`) reads the questions off the
+packet, resolutions are recorded on the step, and the step IS the
+record. Open packets queue at the `design-review` station, rendered at
+`/it/design`.
 
-Resolutions flush into the source doc's Decision-history section via the tracker. Each release, settled material folds into [docs/architecture-decisions.md](docs/architecture-decisions.md) — the Baseline Architecture Decisions, the one current-truth decision record — and the flattened source doc is deleted. Docs that survive under `docs/design/` are living references (reading frames, contracts, governance rules), not decision archives.
+**Nothing parses a markdown heading for a question.** `### Qn:`,
+`## Open questions` and the `**Status**:` line were conventions of a
+corpus indexer that walked `docs/design/*.md`, parsed them into rows,
+and handed the rows to a review — deleted in two halves on 2026-09-10
+(backlog `f5da586c`; the decision is in
+[docs/architecture-decisions.md](docs/architecture-decisions.md),
+"Design docs and the decision record"). With it went the flush pipeline
+that wrote answers back into the file, the `boss-docs-api` service, the
+three read-cache tables, `boss docs reindex`, and the lint that enforced
+the heading shape. **No gate checks the shape of a design doc's prose
+any longer** — the only remaining check on this flow is the Workflow
+registry's validation of a `design-doc` packet's question metadata,
+which is structured data, not text. Writing `### Qn:` headings in a file
+is not wrong; it is just not read by anything, so do not expect a
+question authored in a file to reach a review.
+
+**Files under `docs/design/` survive as human-read living references** —
+reading frames, contracts, governance rules — and as the residue of a
+settled discussion, written at the END of one rather than as its venue.
+Each release, settled material folds into
+[docs/architecture-decisions.md](docs/architecture-decisions.md), the
+Baseline Architecture Decisions and the one current-truth decision
+record, and the flattened source doc is deleted. Writing the file is a
+car's job, after the decision; a doc still under discussion has no
+business in git.
 
 ---
 

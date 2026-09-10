@@ -313,12 +313,14 @@ COPY infra/platform /opt/boss/infra/platform
 # can't start and Jobs get assigned + worked but never close.
 COPY infra/dispatcher /opt/boss/infra/dispatcher
 COPY examples /opt/boss/examples
-# The design decision tracker (boss-docs-api, repo_root=/opt/boss)
-# reads docs/design/*.md from the image. Without this COPY the
-# tracker serves only DB-cached content, reindex finds zero docs,
-# and design reviews never spawn on a container deploy - exactly
-# how the cluster SoR went review-blind on 2026-08-12.
-COPY docs /opt/boss/docs
+# `COPY docs /opt/boss/docs` stood here until 2026-09-10, and it was
+# load-bearing for one reader only: boss-docs-api ran with
+# repo_root=/opt/boss and walked docs/design/*.md on every boot, so
+# without the prose in the image a container deploy went review-blind
+# (2026-08-12). That service, its corpus index and its parser were
+# deleted with the rest of the markdown-corpus machinery (backlog
+# f5da586c) — the packet is the doc — and nothing in the image reads
+# /opt/boss/docs any more, so the image stops carrying the prose.
 
 # Post-API seed scripts boss-launch (services-launcher) runs once the
 # API stack is up: the platform operator-baseline, then the brewery

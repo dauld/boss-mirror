@@ -1,18 +1,19 @@
 // review-design.js — custom Step UX for the design-doc-review JobKind.
 //
-// Reads step.metadata.doc_path, fetches /api/design/docs/{path} to
-// get the design doc + its parsed open questions (### Qn: <title>
-// headings under ## Open Questions). Renders a per-question
-// resolution textarea. Step completion is GATED on every question
-// having a non-empty resolution recorded.
+// Reads the questions the PACKET carries — `metadata.questions` on
+// the step, or on the Job when an author put them there — and renders
+// a per-question resolution textarea. Step completion is GATED on
+// every question having a non-empty resolution recorded.
 //
-// Resolutions are saved onto the STEP, which IS the record. They used
-// to be mirrored to /api/design/pending-decisions so a flush job could
-// write them into the source doc's Decision-history section; that
-// pipeline was deleted on 2026-09-10 (backlog f5da586c) because the
-// packet is the doc, and this surface's own comment had already said
-// the mirror "would create a second copy that can disagree". Settled
-// material folds into docs/architecture-decisions.md each release.
+// Resolutions are saved onto the STEP, which IS the record. Two round
+// trips through markdown files used to hang off this surface and both
+// are gone (backlog f5da586c): the mirror into
+// /api/design/pending-decisions that fed a flush job rewriting the
+// source doc (deleted 2026-09-10, part 1), and the fallback fetch of
+// /api/design/docs/{path} for a packet carrying only a pointer
+// (deleted 2026-09-10, part 2, with the corpus index itself). The
+// packet is the doc. Settled material folds into
+// docs/architecture-decisions.md each release.
 //
 // Plugin contract: window.__boss_register_step_plugin(kind, mount).
 // Host calls mount(container, props) with { step, jobId, onUpdate }.
@@ -257,8 +258,7 @@
   function mount(container, { step, jobId, onUpdate }) {
     const docPath = (step.metadata && step.metadata.doc_path) || '';
     // resolutions: [{ anchor, decision }] — anchor matches the
-    // question anchor returned by /api/design/docs/{path}
-    // (e.g. "Q1", "Q2", ...).
+    // anchor the packet's question carries (e.g. "Q1", "Q2", ...).
     let resolutions = Array.isArray(step.metadata && step.metadata.resolutions)
       ? step.metadata.resolutions.map((r) => ({
           anchor: String(r.anchor || ''),
@@ -310,7 +310,8 @@
     /// nothing, which is most of the corpus' older questions and every
     /// question whose author left the answer open on purpose.
     ///
-    /// `q.proposal` is parsed by boss-docs from a `Proposed:` line.
+    /// `q.proposal` is a declared field of the packet's question
+    /// metadata (`design-doc.toml`, `item_keys`).
     /// That extractor recognised only `**Proposal**:` until 2026-08-14
     /// — a spelling no doc uses — so this field was null on every
     /// question in the corpus and the rail below carries a comment
@@ -816,54 +817,29 @@
         renderActions();
         return;
       }
-      try {
-        const r = await fetch(`/api/design/docs/${docPath}`);
-        if (r.status === 404) {
-          // The honest miss (2e6dfde7): review Jobs are instant data
-          // but docs ride trains, so a review can exist before its
-          // doc reaches deployed main. A bare 404 read as a dead end
-          // to the first operator who hit it; say what is actually
-          // happening and when it resolves.
-          loadError =
-            `${docPath} is not on the deployed main yet — docs ride ` +
-            `release trains, and this review was opened ahead of its ` +
-            `doc's landing. It becomes reviewable when the train ` +
-            `carrying the doc merges and deploys. If this persists ` +
-            `after a landing, the doc may have been REJECTED at ` +
-            `reindex (stray questions outside '## Open questions') — ` +
-            `the rejection reason is recorded at /system/design.`;
-          renderBody();
-          renderProgress();
-          renderActions();
-          return;
-        }
-        if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
-        // The other honest miss (6f40b23f): a front that does not
-        // route /api/design/* answers 200 with a ZERO-BYTE body — the
-        // docs service runs on the operator instance only. Left to
-        // r.json() this rendered as a JSON parse error, which reads
-        // like a broken doc rather than an absent service.
-        const raw = await r.text();
-        if (!raw.trim()) {
-          loadError =
-            `this instance does not serve the docs API (an empty reply ` +
-            `for ${docPath}) — the docs service runs on the operator ` +
-            `instance only. Reviews spawned since 2026-08-18 carry ` +
-            `their questions in the packet and never need this fetch; ` +
-            `this older packet carries only a pointer. Open it on the ` +
-            `operator instance, or re-spawn the review to get a ` +
-            `self-carried packet.`;
-          renderBody();
-          renderProgress();
-          renderActions();
-          return;
-        }
-        const detail = JSON.parse(raw);
-        doc = detail;
-        questions = Array.isArray(detail.questions) ? detail.questions : [];
-      } catch (e) {
-        loadError = e instanceof Error ? e.message : String(e);
-      }
+      // A POINTER-ONLY PACKET IS NO LONGER READABLE, and says so.
+      //
+      // Until 2026-09-10 this branch fetched `/api/design/docs/{path}`
+      // — the corpus index that parsed `### Qn:` headings out of the
+      // file on deployed main. That whole read half was deleted with
+      // the rest of the markdown-corpus machinery (backlog f5da586c):
+      // the packet is the doc, so a packet that carries only a pointer
+      // carries nothing to review. Every review spawned since
+      // 2026-08-18 carries its questions, and the three branches above
+      // read both metadata bags.
+      //
+      // Named honestly rather than left as a fetch that 404s. The old
+      // message apologised that "docs ride trains" and told the reader
+      // to wait for a landing; waiting no longer helps, and a message
+      // that sends someone to wait for something that will not happen
+      // is worse than one that says what to do instead.
+      loadError =
+        `this packet carries only a pointer (metadata.doc_path = ` +
+        `${docPath}) and no questions or prose of its own. The design ` +
+        `corpus index that used to read the file was deleted on ` +
+        `2026-09-10 — the packet is the doc now. Read ${docPath} in ` +
+        `the repo, and file a fresh design-doc packet (\`boss design\`) ` +
+        `carrying its questions to review it here.`;
       renderBody();
       renderProgress();
       renderActions();

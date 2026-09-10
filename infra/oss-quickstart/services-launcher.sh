@@ -45,7 +45,6 @@ SERVICES=(
     "boss-calendar-api"
     "boss-content-api"
     "boss-ledger-api"
-    "boss-docs-api"
     "boss-events-api"
     # boss-event-relay: the single mover from the transactional
     # event_outbox into audit_log + NATS (outbox phase 2). Every

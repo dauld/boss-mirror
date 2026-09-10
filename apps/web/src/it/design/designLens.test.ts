@@ -4,8 +4,8 @@ import {
   KNOWN_PANELS,
   pageHeader,
   panelsFor,
+  queueRows,
   reviewHref,
-  reviewsByDocPath,
   type QueuePacket,
   type StationLens,
 } from './designLens';
@@ -16,7 +16,6 @@ function packet(over: Partial<QueuePacket>): QueuePacket {
     title: 'Review: something',
     status: 'open',
     opened_on: '2026-08-15',
-    subject: { id: 'docs/design/a.md' },
     ...over,
   };
 }
@@ -55,17 +54,18 @@ describe('pageHeader', () => {
 
 describe('panelsFor', () => {
   test('renders the panels the row declares, in its order', () => {
-    expect(panelsFor({ title: 't', panels: ['corpus'] })).toEqual(['corpus']);
+    expect(panelsFor({ title: 't', panels: ['queue'] })).toEqual(['queue']);
   });
 
   test('skips a key this build does not know rather than blanking the page', () => {
     // The registry runs ahead of the bundle during a rollout. A page
     // that throws on an unpublished panel key fails exactly when
-    // someone is publishing one. `rejections` is the REAL case now:
-    // the panel was deleted on 2026-09-10 and a row that still
-    // declares it must render the corpus, not nothing.
-    expect(panelsFor({ title: 't', panels: ['rejections', 'corpus', 'flow-strip'] })).toEqual([
-      'corpus',
+    // someone is publishing one. `rejections` and `corpus` are the
+    // REAL cases: both panels were deleted on 2026-09-10, and a row
+    // that still declares them alongside a key this build ships must
+    // render that key.
+    expect(panelsFor({ title: 't', panels: ['rejections', 'queue', 'corpus'] })).toEqual([
+      'queue',
     ]);
   });
 
@@ -75,34 +75,38 @@ describe('panelsFor', () => {
     expect(panelsFor({ title: 't', panels: [] })).toEqual(KNOWN_PANELS);
   });
 
-  test('a row declaring only unknown panels renders none of them', () => {
-    // Distinct from declaring nothing: the row DID choose, this build
-    // just cannot honour the choice.
-    expect(panelsFor({ title: 't', panels: ['flow-strip'] })).toEqual([]);
+  test('a row declaring ONLY unknown panels falls back rather than blanking', () => {
+    // The live state on 2026-09-10: the row said `["corpus"]` and the
+    // tree's seed said `["rejections", "corpus"]`, and this build
+    // ships neither. Filtering to nothing would render a header over
+    // blank space for every reader until the migration ran. Declaring
+    // nothing and declaring only unknowns are the same state from the
+    // renderer's side — no honourable instruction — so they fall back
+    // the same way.
+    expect(panelsFor({ title: 't', panels: ['corpus'] })).toEqual(KNOWN_PANELS);
+    expect(panelsFor({ title: 't', panels: ['rejections', 'corpus'] })).toEqual(KNOWN_PANELS);
   });
 });
 
-describe('reviewsByDocPath', () => {
-  test('keys packets by the doc path in their subject', () => {
-    const by = reviewsByDocPath([
-      packet({ id: 'a', subject: { id: 'docs/design/a.md' } }),
-      packet({ id: 'b', subject: { id: 'docs/design/b.md' } }),
-    ]);
-    expect(by['docs/design/a.md']?.id).toBe('a');
-    expect(by['docs/design/b.md']?.id).toBe('b');
+describe('queueRows', () => {
+  test('renders every packet the station handed over, in its order', () => {
+    const rows = queueRows([packet({ id: 'first' }), packet({ id: 'second' })]);
+    expect(rows.map((r) => r.id)).toEqual(['first', 'second']);
   });
 
-  test('drops a packet with no subject id — it is a review of nothing', () => {
-    const by = reviewsByDocPath([packet({ id: 'a', subject: null }), packet({ id: 'b' })]);
-    expect(Object.keys(by)).toEqual(['docs/design/a.md']);
-    expect(by['docs/design/a.md']?.id).toBe('b');
+  test('every packet in the queue becomes a row', () => {
+    // This is the regression the panel rename fixed. The old
+    // `reviewsByDocPath` keyed rows by `subject.id` expecting a doc
+    // path, and EVERY `design-doc` packet carries the literal
+    // `boss-platform` its Workflow stamps — so the map collapsed the
+    // whole queue to one entry, and a packet with no subject id was
+    // dropped outright. There is no key to join on; a row is a row.
+    const rows = queueRows([packet({ id: 'a' }), packet({ id: 'b' }), packet({ id: 'c' })]);
+    expect(rows.map((r) => r.id)).toEqual(['a', 'b', 'c']);
   });
 
-  test('two packets for one doc resolve to the one the station hands out first', () => {
-    // The envelope arrives in the station's discipline order, so first
-    // wins is the station's answer, not the loop's.
-    const by = reviewsByDocPath([packet({ id: 'first' }), packet({ id: 'second' })]);
-    expect(by['docs/design/a.md']?.id).toBe('first');
+  test('an empty queue renders no rows rather than throwing', () => {
+    expect(queueRows([])).toEqual([]);
   });
 });
 

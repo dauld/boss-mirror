@@ -84,6 +84,64 @@ describe('observations and comparisons', () => {
     expect(v.ok).toBe(false);
     expect(v.text).toContain('1 in the cluster but undeclared');
   });
+
+  test('a machine short of disk is not "no drift"', () => {
+    // a520737f: the cluster comparison can now carry disk_tight, and a
+    // page that renders "5 observed, 5 declared — no drift" beside a
+    // build node at 90% full is the troubled-packet class — the state
+    // has crossed its own alarm threshold and the surface must say so.
+    const v = comparisonVerdict({
+      observed_at: '', scope: 'kubernetes-nodes',
+      counts: {
+        observed: 5, participating_declared: 5, observed_not_declared: 0,
+        declared_not_observed: 0, drift: 0, disk_tight: 1,
+      },
+    });
+    expect(v.ok).toBe(false);
+    expect(v.text).toContain('1 short of disk');
+  });
+
+  test('a node whose free space went unread is named, not counted as roomy', () => {
+    // The kubelet read is best-effort, so going blind must look
+    // different from having room — otherwise the instrument can fail
+    // back into exactly the silence this packet reported.
+    const v = comparisonVerdict({
+      observed_at: '', scope: 'kubernetes-nodes',
+      counts: {
+        observed: 5, participating_declared: 5, observed_not_declared: 0,
+        declared_not_observed: 0, drift: 0, disk_unmeasured: 2,
+      },
+    });
+    expect(v.ok).toBe(false);
+    expect(v.text).toContain('2 with no free-space reading');
+  });
+
+  test('the parser carries the disk counts through to the verdict', () => {
+    // The verdict can only report what the parser keeps, and the parser
+    // builds counts key by key — so the pair is tested end to end.
+    const rows = parseComparisons([
+      { payload: { scope: 'kubernetes-nodes', observed_at: '2026-09-10T13:45:00Z', counts: {
+        observed: 5, participating_declared: 5, observed_not_declared: 0,
+        declared_not_observed: 0, drift: 0, disk_tight: 1, disk_unmeasured: 1,
+      } } },
+    ]);
+    const v = comparisonVerdict(rows[0] as Comparison);
+    expect(v.ok).toBe(false);
+    expect(v.text).toContain('1 short of disk');
+    expect(v.text).toContain('1 with no free-space reading');
+  });
+
+  test('a comparison recorded before the disk counts existed still reads clean', () => {
+    // Every row already in the series predates both keys.
+    const v = comparisonVerdict({
+      observed_at: '', scope: 'kubernetes-nodes',
+      counts: {
+        observed: 5, participating_declared: 5, observed_not_declared: 0,
+        declared_not_observed: 0, drift: 0,
+      },
+    });
+    expect(v.ok).toBe(true);
+  });
 });
 
 describe('fetchEstate', () => {
