@@ -1,0 +1,81 @@
+# ---------------------------------------------------------------------------
+# learning — a lesson, captured and encoded where it will be read again.
+#
+# Three terminals: `encoded` (it is now in a file someone reads before
+# acting), `recorded` (worth keeping, nowhere to put it yet) and
+# `superseded` (a later lesson replaced it). The split is what makes
+# "how much of what we learn actually lands" a query instead of a
+# feeling — Orwell's half of CLAUDE.md §Founding ideas.
+#
+# Authored live through the API and never written back until 2026-09-10,
+# which is the gap `infra/lint/the-live-protocols-are-the-authored-
+# protocols.sh` now closes. Rendered from the live row rather than
+# retyped; the seed is insert-if-missing, so the live lineage keeps its
+# own version and this file is what a FRESH database gets.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "learning"
+label = "Learning"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "A lesson that outlives the packet which surfaced it.\n\nWHY A PACKET AND NOT A FIELD. Protocols already demand evidence — maintenance-sweep wants findings and measured, ship-a-change wants what_changed and verified. Those capture what is TRUE NOW. None captures what would have saved the next person time, so that knowledge ends up in chat and in an agent's private memory, where it is invisible and unsearchable. A learning needs its own subject so it can be found from anywhere, not buried inside whichever packet happened to expose it.\n\nTHE ENCODE STEP IS THE POINT. It refuses to close without either the MECHANISM that now enforces the lesson, or an honest statement of why none exists. That question is the whole protocol: on 2026-08-26 a car was annotated with a `hold` field to stop it boarding, and the conductor could not read it — documentation standing where a mechanism belonged. The same day, a runbook told operators to check a node had finished booting, and the next node joined unchecked anyway. A lesson that changes nothing is a story.\n\nSo the terminals are not pass/fail. `encoded` means the lesson is now enforced by something that cannot be forgotten — a lint, a required field, a predicate, a test. `recorded` means it is documentation, deliberately, with the reason stated. Both are legitimate; only the difference is worth knowing.\n\nv2 closes the disposition set. In v1 it was free text, so the publish gate required a bare fallback successor — and that fallback (`recorded`, ready on steps.encode.done alone) was satisfied whenever encode closed, firing alongside `encoded` and taking the job outcome. Three learnings filed on day one all reported `recorded`, two of them wrongly. Making the field an enum (encoded|recorded) removes the need for a catch-all: every value routes to exactly one terminal, which is what the brewery workflows already do with package|skip."
+
+[[workflow.step]]
+title = "noticed"
+kind = "trigger"
+ready_when = "true"
+title_template = "Learning: {metadata.headline}"
+authority_role = "platform-admin"
+
+[[workflow.step]]
+title = "capture"
+kind = "task"
+ready_when = "steps.noticed.done"
+title_template = "Capture: {metadata.headline}"
+authority_role = "platform-admin"
+fields = [
+  { name = "lesson", field_type = "string", required = true },
+  { name = "evidence", field_type = "string", required = true },
+  { name = "cost", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "encode"
+kind = "task"
+ready_when = "steps.capture.done"
+title_template = "Encode: {metadata.headline}"
+authority_role = "platform-admin"
+fields = [
+  { name = "disposition", field_type = "encoded|recorded", required = true },
+  { name = "mechanism", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "encoded"
+kind = "outcome"
+ready_when = "steps.encode.done AND steps.encode.metadata.disposition = \"encoded\""
+title_template = "Encoded: {metadata.headline}"
+authority_role = "platform-admin"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "encoded" }
+
+[[workflow.step]]
+title = "recorded"
+kind = "outcome"
+ready_when = "steps.encode.done AND steps.encode.metadata.disposition = \"recorded\""
+title_template = "Recorded: {metadata.headline}"
+authority_role = "platform-admin"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "recorded" }
+
+[[workflow.step]]
+title = "superseded"
+kind = "outcome"
+ready_when = "steps.capture.done AND job.metadata.superseded = \"true\""
+title_template = "Superseded: {metadata.headline}"
+authority_role = "platform-admin"
+metadata_defaults = { outcome_kind = "withdrawn" }
+terminal = { outcome = "superseded" }
+fields = [{ name = "superseded_by", field_type = "string", required = true }]

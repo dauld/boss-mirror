@@ -88,8 +88,36 @@ fn every_bundled_workflow_is_viable() {
     }
 }
 
-/// A maintenance packet ends in its verdict. Until 2026-09-05 every
-/// maintenance kind had one terminal, reached on `steps.run.done`
+/// Is this a maintenance kind a systemd unit runs?
+///
+/// The selector for the rule below, and it asks about the EXECUTOR
+/// rather than the name. A unit-run kind's trigger declares
+/// `trigger_name = "systemd-timer"`, which is what the unit's
+/// `boss-maintenance-wrap.sh` call puts there — so this is the same
+/// fact the timer lint reads, not a second guess at it.
+///
+/// `kind.starts_with("maintenance-")` was the selector until
+/// 2026-09-10, and it was a PROXY for this: it happened to be exact
+/// only because the one maintenance protocol with a different executor
+/// (`maintenance-sweep`, inspected by a person or an agent, forking on
+/// `clear` / `remediated`) was not authored in the tree at all. Writing
+/// it down made the proxy wrong, which is the proxy's fault and not the
+/// protocol's: a sweep has no `run` step whose `result` could route a
+/// verdict, and asserting it ends in completed/failed would have been
+/// asserting something about a shape nothing in this rule's story is
+/// about.
+fn is_unit_run(w: &WorkflowSpec) -> bool {
+    w.kind.starts_with("maintenance-")
+        && w.steps.iter().any(|s| {
+            s.metadata_defaults
+                .get("trigger_name")
+                .and_then(|v| v.as_str())
+                == Some("systemd-timer")
+        })
+}
+
+/// A unit-run maintenance packet ends in its verdict. Until 2026-09-05
+/// every maintenance kind had one terminal, reached on `steps.run.done`
 /// regardless of how the run went — and the unit only completed the
 /// run step from ExecStartPost, which systemd skips on failure. So a
 /// failed run either sat open looking like a run in progress
@@ -99,19 +127,17 @@ fn every_bundled_workflow_is_viable() {
 /// in the bundle AND in the three kinds still compiled into
 /// platform_workflows(), which are one contract.
 #[test]
-fn every_maintenance_kind_ends_in_its_verdict() {
-    let mut kinds: Vec<WorkflowSpec> = bundle()
-        .into_iter()
-        .filter(|w| w.kind.starts_with("maintenance-"))
-        .collect();
+fn every_unit_run_maintenance_kind_ends_in_its_verdict() {
+    let mut kinds: Vec<WorkflowSpec> = bundle().into_iter().filter(is_unit_run).collect();
     kinds.extend(
         boss_jobs::registry::platform_workflows()
             .into_iter()
-            .filter(|w| w.kind.starts_with("maintenance-")),
+            .filter(is_unit_run),
     );
     assert!(
         kinds.len() >= 19,
-        "expected the 16 bundled + 3 compiled maintenance kinds"
+        "expected the 16+ bundled + 3 compiled unit-run maintenance kinds, got {}",
+        kinds.len()
     );
     for w in kinds {
         let terminals: Vec<(&str, &str)> = w
@@ -144,4 +170,28 @@ fn every_maintenance_kind_ends_in_its_verdict() {
             w.kind
         );
     }
+}
+
+/// The carve-out above is a named set, not a silence.
+///
+/// `is_unit_run` exempts a maintenance kind from the verdict rule, and
+/// an exemption nobody can see is how a rule stops covering what it was
+/// written for. So the set it exempts is pinned: exactly one protocol
+/// today, and a second one is a decision that belongs in the diff a
+/// reviewer reads — either the new kind is genuinely not unit-run, or
+/// its trigger is missing the `trigger_name` its unit is supposed to
+/// stamp, which is itself the defect `timers-leave-a-packet` is about.
+#[test]
+fn only_the_sweep_is_exempt_from_the_verdict_rule() {
+    let exempt: Vec<String> = bundle()
+        .into_iter()
+        .filter(|w| w.kind.starts_with("maintenance-") && !is_unit_run(w))
+        .map(|w| w.kind)
+        .collect();
+    assert_eq!(
+        exempt,
+        vec!["maintenance-sweep".to_string()],
+        "a maintenance kind no systemd unit runs skips the completed/failed rule — \
+         say so here, with why"
+    );
 }

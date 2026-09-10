@@ -1,0 +1,72 @@
+# ---------------------------------------------------------------------------
+# publish-request — how a branch from a workspace with no push credential
+# reaches the forge.
+#
+# The workspace files the branch AS A PACKET, bundle riding the Job
+# metadata, and the conductor — the one actor that publishes — verifies
+# and pushes it. `metadata_schema` below is the admission contract
+# (branch, head_sha, base_sha, bundle_b64 required); it is the reason the
+# bundle loader learned to author `metadata_schema` at all, because
+# without that key this file would have described the protocol while
+# silently dropping the half that says what a request must carry.
+#
+# The refusal path is the point of the `publish` step's procedure: the
+# name and the content must not disagree, so a base_sha that is not an
+# ancestor of forge main is REFUSED with a reason rather than pushed.
+#
+# Authored live through the API and never written back until 2026-09-10,
+# which is the gap `infra/lint/the-live-protocols-are-the-authored-
+# protocols.sh` now closes. Rendered from the live row rather than
+# retyped; the seed is insert-if-missing, so the live lineage keeps its
+# own version and this file is what a FRESH database gets.
+#
+# `owning_team` below records the live row's value. The bundle loader
+# stamps every row it reads with the bundle's default (`platform`) and
+# ignores the key, so a fresh database gets `platform` — the one field
+# of the row the tree cannot currently express.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "publish-request"
+label = "Publish a pod-built car branch"
+category = "platform"
+subject_kinds = ["employee", "account", "vendor", "location", "asset", "purchase_order", "campaign", "company"]
+owning_team = "brewery-bootstrap"
+description = "Q5-compatible delivery: a workspace with no push credential files the branch AS A PACKET (bundle riding metadata), and the conductor - the one actor that publishes - verifies and pushes it. 0b1b32f9."
+metadata = { owner_role = "shift-lead" }
+metadata_schema = { properties = { base_sha = { type = "string" }, branch = { type = "string" }, bundle_b64 = { type = "string" }, head_sha = { type = "string" }, requested_by = { type = "string" } }, required = ["branch", "head_sha", "base_sha", "bundle_b64"], type = "object" }
+
+[[workflow.step]]
+title = "filed"
+kind = "trigger"
+ready_when = "true"
+title_template = "Filed"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "workspace-requests-a-publish" }
+
+[[workflow.step]]
+title = "publish"
+kind = "task"
+ready_when = "steps.filed.done"
+title_template = "Verify the bundle and push the branch"
+authority_role = "platform-admin"
+metadata_defaults = { procedure = "Conductor-only. Decode bundle_b64, `git bundle verify`, check base_sha is an ancestor of forge main and head_sha matches the bundle tip, create the branch at head_sha, push to the forge under exactly `branch`. Refuse (result=refused, detail says why) on any mismatch - the name and the content must not disagree (e7b3a044). Record result=pushed with the pushed sha in detail." }
+fields = [
+  { name = "result", field_type = "pushed|refused", required = true },
+  { name = "detail", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "published"
+kind = "outcome"
+ready_when = "steps.publish.done AND steps.publish.metadata.result = \"pushed\""
+title_template = "Branch on the forge"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "published" }
+
+[[workflow.step]]
+title = "refused"
+kind = "outcome"
+ready_when = "steps.publish.done AND steps.publish.metadata.result = \"refused\""
+title_template = "Refused - see detail"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "refused" }

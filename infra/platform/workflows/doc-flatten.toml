@@ -1,0 +1,102 @@
+# ---------------------------------------------------------------------------
+# doc-flatten — folding a design doc's settled material into the one
+# current-truth decision record and deleting the source.
+#
+# CLAUDE.md §Design docs: "Each release, settled material folds into
+# docs/architecture-decisions.md ... and the flattened source doc is
+# deleted." This is that release chore as a protocol — survey, fold,
+# curate, verify, review — so the fold is reviewed by someone other than
+# whoever did it, and `cancelled` is available for a doc that turns out
+# to still be live reference rather than a decision archive.
+#
+# Authored live through the API and never written back until 2026-09-10,
+# which is the gap `infra/lint/the-live-protocols-are-the-authored-
+# protocols.sh` now closes. Rendered from the live row rather than
+# retyped; the seed is insert-if-missing, so the live lineage keeps its
+# own version and this file is what a FRESH database gets.
+#
+# `owning_team` below records the live row's value. The bundle loader
+# stamps every row it reads with the bundle's default (`platform`) and
+# ignores the key, so a fresh database gets `platform` — the one field
+# of the row the tree cannot currently express.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "doc-flatten"
+label = "Documentation flatten"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "it"
+description = "Periodic curation: fold settled decisions into the one current-truth record, retire what they supersede, and prove the corpus still resolves. Born from David's ruling that the corpus is a working surface rather than an archive - history is kept, but edited - and from the audit finding that the declared flatten process had never actually run."
+metadata = { surfaces = ["system-design"] }
+
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+title_template = "Flatten window opens"
+
+[[workflow.step]]
+title = "survey"
+kind = "task"
+ready_when = "steps.opened.done"
+title_template = "Find what has settled but not folded"
+fields = [
+  { name = "resolved_found", field_type = "string", required = true },
+  { name = "source_docs", field_type = "string", required = true },
+  { name = "already_folded", field_type = "string" },
+]
+
+[[workflow.step]]
+title = "fold"
+kind = "task"
+ready_when = "steps.survey.done"
+title_template = "Fold the settled decisions into the current-truth record"
+fields = [
+  { name = "decisions_folded", field_type = "string", required = true },
+  { name = "target_sections", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "curate"
+kind = "task"
+ready_when = "steps.fold.done"
+title_template = "Retire what is now superseded; say what is kept and why"
+fields = [
+  { name = "retired", field_type = "string", required = true },
+  { name = "kept", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "verify"
+kind = "task"
+ready_when = "steps.curate.done"
+title_template = "Prove the corpus still resolves"
+fields = [
+  { name = "lint", field_type = "string", required = true },
+  { name = "references", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "review"
+kind = "sign-off"
+ready_when = "steps.verify.done"
+title_template = "Ratify the fold"
+authority_role = "platform-admin"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
+
+[[workflow.step]]
+title = "recorded"
+kind = "outcome"
+ready_when = "steps.review.done"
+title_template = "Recorded"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "recorded" }
+
+[[workflow.step]]
+title = "cancelled"
+kind = "outcome"
+ready_when = "steps.survey.done AND job.metadata.cancelled = \"true\""
+title_template = "Cancelled"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "cancelled" }

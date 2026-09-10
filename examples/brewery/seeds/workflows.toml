@@ -3557,3 +3557,139 @@ authority_role = "head-of-people"
 title_template = "Head-of-people weekly review"
 duration_hours = 1.0
 terminal = { outcome = "completed" }
+
+# ---------------------------------------------------------------------------
+# keg-return — the empty-keg fleet coming home, at v4 live.
+#
+# A brewery-tenant protocol: the distribution side logs what went out,
+# receives returns over a two-week window (336h on `receive-returns` is
+# an honest duration, not a workday default), washes and restocks. A
+# reconciled packet settles its deposit through the ledger dispatcher
+# rule, which is why the field-bearing steps matter downstream.
+#
+# Authored live through the API and never written back until 2026-09-10.
+# Rendered from the live row rather than retyped. `owning_team` records
+# the live value; the tenant loader stamps `brewery` and ignores the key.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "keg-return"
+label = "Keg Fleet Return"
+category = "sales"
+subject_kinds = ["account"]
+owning_team = "distribution"
+description = "The half of keg commerce every real brewery tracks and this one never did: kegs are returnable assets with deposit liability. One packet per delivered wholesale order follows its fleet back - out, returned-vs-lost, washed, reconciled. Loss rate becomes a measured series."
+
+[[workflow.step]]
+title = "trigger"
+kind = "trigger"
+ready_when = "true"
+title_template = "Kegs in the field - {subject.id}"
+metadata_defaults = { trigger_kind = "event", trigger_name = "kegs-delivered" }
+
+[[workflow.step]]
+title = "log-fleet-out"
+kind = "task"
+ready_when = "steps.trigger.done"
+title_template = "Log kegs out + deposit"
+authority_role = "shipping-clerk"
+metadata_defaults = {}
+fields = [
+  { name = "kegs_out", field_type = "integer", required = true },
+  { name = "deposit_cents", field_type = "integer", required = true },
+]
+
+[[workflow.step]]
+title = "receive-returns"
+kind = "task"
+ready_when = "steps.log-fleet-out.done"
+title_template = "Receive returned kegs"
+authority_role = "warehouse-lead"
+duration_hours = 336.0
+metadata_defaults = {}
+fields = [
+  { name = "kegs_returned", field_type = "integer", required = true },
+  { name = "kegs_lost", field_type = "integer", required = true },
+]
+
+[[workflow.step]]
+title = "wash-and-restock"
+kind = "task"
+ready_when = "steps.receive-returns.done"
+title_template = "Wash + restock fleet"
+authority_role = "brewer"
+duration_hours = 4.0
+metadata_defaults = {}
+
+[[workflow.step]]
+title = "reconciled"
+kind = "outcome"
+ready_when = "steps.wash-and-restock.done"
+title_template = "Fleet reconciled"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
+# ---------------------------------------------------------------------------
+# tasting-panel — QA on a finished batch before it is released, at v2
+# live.
+#
+# A brewery-tenant protocol, spawned on brew close. Two terminals because
+# the panel can hold a batch: `completed` releases it, `held` does not,
+# and a protocol with only the first would make a hold look like a packet
+# someone forgot to close.
+#
+# Authored live through the API and never written back until 2026-09-10.
+# Rendered from the live row rather than retyped. `owning_team` records
+# the live value; the tenant loader stamps `brewery` and ignores the key.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "tasting-panel"
+label = "Tasting Panel"
+category = "production"
+subject_kinds = ["company"]
+owning_team = "brewing"
+description = "Sensory QC on every packaged batch: a real brewery tastes before it ships. A held verdict is the feeder batch-qc-hold never had. Labor-honest: a flight pour and a panel sitting are short human tasks for QA roles inside a normal day."
+
+[[workflow.step]]
+title = "trigger"
+kind = "trigger"
+ready_when = "true"
+title_template = "Batch ready to taste - {subject.id}"
+metadata_defaults = { trigger_kind = "event", trigger_name = "brew-batch-packaged" }
+
+[[workflow.step]]
+title = "pour-flight"
+kind = "task"
+ready_when = "steps.trigger.done"
+title_template = "Pour the panel flight"
+authority_role = "qa-tech"
+metadata_defaults = { flight_size = "5" }
+
+[[workflow.step]]
+title = "panel-verdict"
+kind = "task"
+ready_when = "steps.pour-flight.done"
+title_template = "Panel verdict"
+authority_role = "qa-supervisor"
+metadata_defaults = {}
+fields = [
+  { name = "verdict", field_type = "release|hold", required = true },
+  { name = "tasting_notes", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "released"
+kind = "outcome"
+ready_when = "steps.panel-verdict.done AND steps.panel-verdict.metadata.verdict = \"release\""
+title_template = "Batch released"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
+[[workflow.step]]
+title = "held"
+kind = "outcome"
+ready_when = "steps.panel-verdict.done AND steps.panel-verdict.metadata.verdict = \"hold\""
+title_template = "Batch held for QC"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "held" }

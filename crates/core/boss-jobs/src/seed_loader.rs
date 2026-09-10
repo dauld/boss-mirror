@@ -91,6 +91,17 @@ struct WorkflowToml {
     /// tenant could supply for `metadata_schema` / `entitlements`.
     #[serde(default)]
     metadata: serde_json::Value,
+    /// JSON Schema over the JOB's metadata, mirroring the registry's
+    /// `metadata_schema` column. Authorable because a protocol whose
+    /// admission contract lives only in the live row is a protocol the
+    /// tree cannot describe — `publish-request` is the worked case, and
+    /// the bundle could not express it until 2026-09-10.
+    #[serde(default)]
+    metadata_schema: serde_json::Value,
+    /// Policy hooks on the Workflow itself; mirrors the `entitlements`
+    /// column. Same reason, same shape.
+    #[serde(default)]
+    entitlements: serde_json::Value,
     /// Inline step list — flat; the DAG is implicit in each step's
     /// `ready_when` predicate.
     #[serde(default, rename = "step")]
@@ -316,6 +327,15 @@ fn workflow_toml_to_spec(toml: WorkflowToml, default_owner: &str) -> WorkflowSpe
     // (never overwritten here) carry.
     if !toml.metadata.is_null() {
         spec.metadata = toml.metadata;
+    }
+    // Same null-means-default rule, for the same reason: these two
+    // columns carry `{}` by default and an absent TOML key must not
+    // turn that into a JSON null.
+    if !toml.metadata_schema.is_null() {
+        spec.metadata_schema = toml.metadata_schema;
+    }
+    if !toml.entitlements.is_null() {
+        spec.entitlements = toml.entitlements;
     }
     spec.owning_team = default_owner.to_string();
     spec
@@ -907,6 +927,63 @@ ready_when = "true"
             }
             other => panic!("expected a lint failure naming broken.toml, got {other:?}"),
         }
+    }
+
+    /// `metadata_schema` and `entitlements` are authorable.
+    ///
+    /// They were not until 2026-09-10, and the gap was found backfilling
+    /// `publish-request`: its live row carries a JSON Schema over the
+    /// Job metadata (`branch`, `head_sha`, `base_sha`, `bundle_b64`),
+    /// and with no TOML key for it the bundle file would have described
+    /// the protocol while silently dropping the half that says what a
+    /// packet must carry. A fresh database would have got a
+    /// `publish-request` with `metadata_schema = {}`. That is the "a
+    /// file that disagrees with the live row replaces one problem with
+    /// a worse one" failure, and an exemption would have hidden it.
+    ///
+    /// Absent keys still deserialize to `Value::Null` and so keep
+    /// `platform_seed`'s `{}` — every file authored before this reads
+    /// exactly as it did.
+    #[test]
+    fn a_row_can_author_its_metadata_schema_and_entitlements() {
+        let text = r#"
+[[workflow]]
+kind = "schema-bearing"
+label = "Schema bearing"
+category = "platform"
+subject_kinds = ["custom"]
+metadata_schema = { type = "object", required = ["branch"], properties = { branch = { type = "string" } } }
+entitlements = { approve = ["platform-admin"] }
+
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+
+[[workflow.step]]
+title = "done"
+kind = "outcome"
+ready_when = "steps.opened.done"
+terminal = { outcome = "completed" }
+"#;
+        let specs = parse_workflows(text, "platform", "<test>").unwrap();
+        assert_eq!(
+            specs[0].metadata_schema,
+            serde_json::json!({
+                "type": "object",
+                "required": ["branch"],
+                "properties": { "branch": { "type": "string" } },
+            })
+        );
+        assert_eq!(
+            specs[0].entitlements,
+            serde_json::json!({ "approve": ["platform-admin"] })
+        );
+
+        // Omitted means the seed default, not null.
+        let plain = parse_workflows(&viable_row("plain"), "platform", "<test>").unwrap();
+        assert_eq!(plain[0].metadata_schema, serde_json::json!({}));
+        assert_eq!(plain[0].entitlements, serde_json::json!({}));
     }
 
     fn viable_row(kind: &str) -> String {

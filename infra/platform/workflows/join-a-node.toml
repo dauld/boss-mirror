@@ -1,0 +1,115 @@
+# ---------------------------------------------------------------------------
+# join-a-node — adding a machine to the estate, measured.
+#
+# `measure` before `apply` and four separate verifications after (boot,
+# registry, role, prove) because every one of them has been the thing
+# that was quietly false: a node that joins and never finishes booting
+# looks identical to a healthy one for about seventy minutes. `abandoned`
+# is a real terminal — a node that cannot join should leave a record of
+# why rather than an open packet.
+#
+# Authored live through the API and never written back until 2026-09-10,
+# which is the gap `infra/lint/the-live-protocols-are-the-authored-
+# protocols.sh` now closes. Rendered from the live row rather than
+# retyped; the seed is insert-if-missing, so the live lineage keeps its
+# own version and this file is what a FRESH database gets.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "join-a-node"
+label = "Join a node"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Admitting a machine to the cluster, as a protocol rather than a runbook. Every step demands the evidence that a node which reports Ready can still be broken: twice in one week a node joined, passed every Kubernetes health check, and could not pull an image or had never finished booting. The runbook said to check; nothing made anyone check. Each step here refuses to complete without the measurement."
+
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+title_template = "Join a node: {metadata.node}"
+authority_role = "platform-admin"
+
+[[workflow.step]]
+title = "measure"
+kind = "task"
+ready_when = "steps.opened.done"
+title_template = "Measure {metadata.node} in maintenance mode"
+authority_role = "platform-admin"
+fields = [
+  { name = "hardware_addr", field_type = "string", required = true },
+  { name = "install_disk", field_type = "string", required = true },
+  { name = "schematic", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "apply"
+kind = "task"
+ready_when = "steps.measure.done"
+title_template = "Apply config to {metadata.node}"
+authority_role = "platform-admin"
+fields = [
+  { name = "applied_at", field_type = "string", required = true },
+  { name = "install_disk_confirmed", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "verify-boot"
+kind = "task"
+ready_when = "steps.apply.done"
+title_template = "Boot verified on {metadata.node}"
+authority_role = "platform-admin"
+fields = [
+  { name = "stage", field_type = "string", required = true },
+  { name = "uptime_minutes", field_type = "string", required = true },
+  { name = "services_waiting", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "verify-registry"
+kind = "task"
+ready_when = "steps.verify-boot.done"
+title_template = "Registry verified on {metadata.node}"
+authority_role = "platform-admin"
+fields = [{ name = "image_pulled", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "verify-role"
+kind = "task"
+ready_when = "steps.verify-registry.done"
+title_template = "Role verified on {metadata.node}"
+authority_role = "platform-admin"
+fields = [
+  { name = "labels", field_type = "string", required = true },
+  { name = "declared_in", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "prove"
+kind = "task"
+ready_when = "steps.verify-role.done"
+title_template = "Real work proven on {metadata.node}"
+authority_role = "platform-admin"
+fields = [
+  { name = "workload", field_type = "string", required = true },
+  { name = "evidence", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "joined"
+kind = "outcome"
+ready_when = "steps.prove.done"
+title_template = "Joined: {metadata.node}"
+authority_role = "platform-admin"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "joined" }
+
+[[workflow.step]]
+title = "abandoned"
+kind = "outcome"
+ready_when = "steps.measure.done"
+title_template = "Not joined: {metadata.node}"
+authority_role = "platform-admin"
+metadata_defaults = { outcome_kind = "withdrawn" }
+terminal = { outcome = "abandoned" }
+fields = [{ name = "reason", field_type = "string", required = true }]
