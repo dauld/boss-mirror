@@ -96,16 +96,25 @@ fn select_car(cars: &[Value], given: &str) -> Result<(Value, String)> {
     Ok((car, branch))
 }
 
-/// Does the forge already carry this branch? The one probe both the
-/// rebase path (refusing to cut over an in-flight rerail) and the
-/// finish path (deciding whether there IS a rerail to finish) ask.
-fn on_forge(branch: &str) -> Result<bool> {
+/// The head the forge carries for this branch, or `None` when it
+/// carries no such branch. Asked of the REMOTE, not of a local ref, so
+/// it is true without a fetch — `--finish` never fetches.
+fn forge_head(branch: &str) -> Result<Option<String>> {
     Ok(git(
         ".",
         &["ls-remote", "origin", &format!("refs/heads/{branch}")],
     )?
     .lines()
-    .any(|l| !l.is_empty()))
+    .find_map(|l| l.split_whitespace().next())
+    .map(str::to_string))
+}
+
+/// Does the forge already carry this branch? The one probe both the
+/// rebase path (refusing to cut over an in-flight rerail) and the
+/// finish path (deciding whether there IS a rerail to finish) ask —
+/// the same read as `forge_head`, so the two cannot disagree.
+fn on_forge(branch: &str) -> Result<bool> {
+    Ok(forge_head(branch)?.is_some())
 }
 
 /// PURE: which branch `--finish` finishes.
@@ -162,6 +171,55 @@ fn repoint_note(old_branch: &str, new_branch: &str) -> String {
     }
 }
 
+/// PURE: the `rerail_origins` a repoint records — every branch this car
+/// has been re-railed OFF, oldest first, each with the head it carried
+/// when the car left it. `None` when there is nothing to record, which
+/// OMITS the key: a null would DELETE the origins already on the car
+/// (the metadata door's contract, and the `delivery_channel` lesson in
+/// `boss_jobs::car::regate_patch`).
+///
+/// WHY THE CAR CARRIES THIS AT ALL (packet 473fda1b, generator 1). The
+/// rerail leaves the original branch on the forge, and that branch is
+/// never a car — so the arrival sweep, which iterates a train's boarded
+/// cars, had nothing to act on and could never delete it. Permanent by
+/// construction: 13 originals accumulated and came off by hand on
+/// 2026-09-10. The sweep reads THIS record (`train::recorded_branches`)
+/// rather than guessing a `-rerail` suffix off a name, because a name
+/// is not a record and the head is what the sweep's guard needs anyway:
+/// a commit pushed to the original after the rerail keeps it, exactly
+/// as a commit pushed after boarding keeps a car's own branch.
+///
+/// A refresh in place (`old == new`) moved nothing, so it records
+/// nothing. A branch already recorded keeps the head it was first
+/// recorded with — that is the head the car actually left it at.
+fn origins_after(
+    car: &Value,
+    old_branch: &str,
+    old_head: Option<&str>,
+    new_branch: &str,
+) -> Option<Vec<Value>> {
+    if old_branch.is_empty() || old_branch == new_branch {
+        return None;
+    }
+    let mut out: Vec<Value> = car
+        .pointer("/metadata/rerail_origins")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if out
+        .iter()
+        .any(|o| o.get("branch").and_then(Value::as_str) == Some(old_branch))
+    {
+        return Some(out);
+    }
+    let mut entry = json!({ "branch": old_branch });
+    if let Some(h) = old_head.filter(|h| !h.is_empty()) {
+        entry["head"] = json!(h);
+    }
+    out.push(entry);
+    Some(out)
+}
+
 /// Repoint the car at the re-gated branch: `branch` moves, the fresh
 /// receipt rides `regate_receipt` VERBATIM, and the skip_reason is
 /// deleted (a PATCH key set to null is removed — the metadata door's
@@ -175,6 +233,7 @@ async fn repoint(
     new_branch: &str,
     receipt: &boss_jobs::car::Receipt,
     old_branch: &str,
+    origins: Option<Vec<Value>>,
 ) -> Result<()> {
     // The regate write itself — receipt verbatim, skip cleared — is
     // core's builder, shared with `boss park` and the auto-park handler
@@ -189,6 +248,11 @@ async fn repoint(
         dc.as_deref(),
     );
     patch["branch"] = json!(new_branch);
+    // The branch the car is leaving, so the arrival sweep can take it
+    // too (473fda1b). Omitted, never nulled, when nothing moved.
+    if let Some(origins) = origins {
+        patch["rerail_origins"] = json!(origins);
+    }
     gate::api(
         http,
         reqwest::Method::PATCH,
@@ -266,7 +330,26 @@ async fn finish(
     // Machine-copied, green-preferring, head-matched — every property
     // the by-hand transcription kept getting wrong, in one call.
     let receipt = park::receipt_for(&gate_runs, new_branch, &head)?;
-    repoint(http, car_id, new_branch, &receipt, old_branch).await?;
+    // The head the branch we are LEAVING carries right now — read from
+    // the forge, before anything else touches it, because that is the
+    // content the rerail carries away and the only evidence the sweep
+    // will accept for deleting it later. Best effort on purpose: an
+    // unreadable head must not fail a rerail that is otherwise done,
+    // and an origin recorded without one is refused by name at the
+    // sweep rather than deleted on a guess.
+    let old_head = match forge_head(old_branch) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!(
+                "boss rerail: could not read {old_branch}'s head on the forge, \
+                 recording the origin without one (the sweep will refuse it by \
+                 name rather than guess): {e:#}"
+            );
+            None
+        }
+    };
+    let origins = origins_after(car, old_branch, old_head.as_deref(), new_branch);
+    repoint(http, car_id, new_branch, &receipt, old_branch, origins).await?;
     // Record the rerail on the gate-runs themselves, so the original
     // branch's green stops reading as stranded. Best effort, after the
     // repoint: the car is already correct, and a missed stamp costs one
@@ -496,6 +579,98 @@ mod tests {
         // and simply had a rebase — one verb, no second one to pick
         // wrong.
         assert_eq!(finish_target("fix/y", "fix/y-rerail", false), "fix/y");
+    }
+
+    /// THE ORIGIN THE REPOINT RECORDS (packet 473fda1b, generator 1).
+    /// A rerail leaves the branch it moved off on the forge, and that
+    /// branch is never a car — so the arrival sweep, which iterates a
+    /// train's boarded cars, could never see it: 13 originals
+    /// accumulated and came off by hand on 2026-09-10. The car's record
+    /// now names the branch AND the head it carried when the car left
+    /// it, which is what lets the sweep delete only what the rerail
+    /// actually carried away (the same head guard a car's own branch
+    /// gets).
+    #[test]
+    fn a_rerail_records_the_branch_it_moved_off_with_its_head() {
+        let car = json!({ "id": "car-1", "metadata": { "branch": "feat/x" } });
+        assert_eq!(
+            origins_after(&car, "feat/x", Some("abc123"), "feat/x-rerail"),
+            Some(vec![json!({ "branch": "feat/x", "head": "abc123" })])
+        );
+    }
+
+    /// An unreadable head is recorded as absent, never guessed: the
+    /// sweep then refuses the branch by name (`SweepGuard::NoRecord`),
+    /// which is a line an operator can act on. A fabricated head would
+    /// be a deletion with no evidence behind it.
+    #[test]
+    fn an_unreadable_old_head_is_recorded_as_absent() {
+        let car = json!({ "id": "car-1", "metadata": { "branch": "feat/x" } });
+        assert_eq!(
+            origins_after(&car, "feat/x", None, "feat/x-rerail"),
+            Some(vec![json!({ "branch": "feat/x" })])
+        );
+    }
+
+    /// A refresh in place moved no branch, so there is no original to
+    /// record — and `None` OMITS the key rather than nulling it, which
+    /// the metadata door would read as "delete the origins this car
+    /// already recorded" (the `delivery_channel` lesson in
+    /// `boss_jobs::car::regate_patch`).
+    #[test]
+    fn a_refresh_in_place_records_no_origin() {
+        let car = json!({
+            "id": "car-1",
+            "metadata": {
+                "branch": "feat/x-rerail",
+                "rerail_origins": [{ "branch": "feat/x", "head": "abc123" }]
+            }
+        });
+        assert_eq!(
+            origins_after(&car, "feat/x-rerail", Some("def456"), "feat/x-rerail"),
+            None
+        );
+    }
+
+    /// A CAR RE-RAILED TWICE keeps both originals: the chain is
+    /// appended to, oldest first, so the second rerail does not drop
+    /// the first original back into the leak. A branch already recorded
+    /// is not recorded twice, and its first-recorded head — the one it
+    /// carried when the car actually left it — stands.
+    #[test]
+    fn a_second_rerail_appends_the_branch_it_moved_off() {
+        let car = json!({
+            "id": "car-1",
+            "metadata": {
+                "branch": "feat/x-rerail",
+                "rerail_origins": [{ "branch": "feat/x", "head": "abc123" }]
+            }
+        });
+        assert_eq!(
+            origins_after(
+                &car,
+                "feat/x-rerail",
+                Some("def456"),
+                "feat/x-rerail-rerail"
+            ),
+            Some(vec![
+                json!({ "branch": "feat/x", "head": "abc123" }),
+                json!({ "branch": "feat/x-rerail", "head": "def456" }),
+            ])
+        );
+        // And again, with the first branch somehow re-offered: recorded
+        // once, with the head it carried the first time.
+        let twice = json!({
+            "id": "car-1",
+            "metadata": {
+                "branch": "feat/x",
+                "rerail_origins": [{ "branch": "feat/x", "head": "abc123" }]
+            }
+        });
+        assert_eq!(
+            origins_after(&twice, "feat/x", Some("zzz999"), "feat/x-rerail-2"),
+            Some(vec![json!({ "branch": "feat/x", "head": "abc123" })])
+        );
     }
 
     /// A refresh in place did not move the branch, so it stamps no

@@ -2211,46 +2211,129 @@ pub(crate) fn parked_ready(job: &Value) -> bool {
     )
 }
 
+/// One branch a landed car's record makes a claim about, with
+/// everything the sweep needs to act on it — so the decision and its
+/// evidence travel together instead of the caller re-deriving the
+/// evidence from a car id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CarBranch {
+    /// The branch on the forge.
+    pub(crate) branch: String,
+    /// The car whose record proves this branch's content landed.
+    pub(crate) car: String,
+    /// The head the record says the branch pointed at when the train
+    /// carried its content: the boarded head for the car's own branch,
+    /// the head recorded at the rerail for a branch it was re-railed
+    /// off. `None` = nothing recorded one, and the head guard refuses
+    /// (`SweepGuard::NoRecord`) rather than guessing.
+    pub(crate) head: Option<String>,
+    /// A branch the car was re-railed OFF, rather than the one it
+    /// boarded. Only the journal wording differs — the guards do not.
+    pub(crate) rerail_origin: bool,
+}
+
+/// Every branch ONE car's record makes a landing claim about, in the
+/// order the sweep should consider them: the branch it boarded first,
+/// then each branch a rerail moved it off, oldest first. Empty unless
+/// the car's own bookkeeping completed — closed with the `merged`
+/// outcome (an abandoned car closes too, but its branch holds unmerged
+/// work; abandonment is a disposition, not a sweep). `main` and
+/// unnamed branches drop out here, and a branch named twice appears
+/// once.
+///
+/// THE RERAIL ORIGINAL IS THE SECOND HALF (packet 473fda1b, generator
+/// 1). `boss rerail` moves a car to a new branch and leaves the
+/// original on the forge; the arriving train deletes the branch it
+/// MERGED, which is the new one. The original was never a car, so a
+/// sweep that iterates boarded cars had nothing to act on and would
+/// never consider it — permanent by construction, and 13 branches deep
+/// when it was measured on 2026-09-10. The link is read from the
+/// provenance `boss rerail` RECORDS on the car (`rerail_origins`, each
+/// entry naming a branch and the head it carried when the car left
+/// it), never from a `-rerail` suffix guessed off a name: a name is not
+/// a record, and the head is what the guard needs anyway.
+fn recorded_branches(car: &Value) -> Vec<(String, Option<String>, bool)> {
+    let md = car.get("metadata");
+    let landed = car.get("status").and_then(Value::as_str) == Some("closed")
+        && md.and_then(|m| m.get("outcome")).and_then(Value::as_str) == Some("merged");
+    if !landed {
+        return Vec::new();
+    }
+    let own = md
+        .and_then(|m| m.get("branch"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let origins = md
+        .and_then(|m| m.get("rerail_origins"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .map(|o| {
+            (
+                o.get("branch").and_then(Value::as_str).unwrap_or_default(),
+                o.get("head")
+                    .and_then(Value::as_str)
+                    .filter(|h| !h.is_empty())
+                    .map(str::to_string),
+                true,
+            )
+        });
+    let mut out: Vec<(String, Option<String>, bool)> = Vec::new();
+    for (branch, head, origin) in
+        std::iter::once((own, boarded_head(car).map(str::to_string), false)).chain(origins)
+    {
+        if branch.is_empty() || branch == "main" || out.iter().any(|(b, _, _)| b == branch) {
+            continue;
+        }
+        out.push((branch.to_string(), head, origin));
+    }
+    out
+}
+
+/// Every branch of one car, as the sweep's decision record. A car with
+/// no id cannot be named in a journal line, so it decides nothing.
+fn car_branches(car: &Value) -> Vec<CarBranch> {
+    let cid = car
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if cid.is_empty() {
+        return Vec::new();
+    }
+    recorded_branches(car)
+        .into_iter()
+        .map(|(branch, head, rerail_origin)| CarBranch {
+            branch,
+            car: cid.clone(),
+            head,
+            rerail_origin,
+        })
+        .collect()
+}
+
 /// The branch-sweep decision at arrival (protocol decision, David):
 /// train PRs squash-merge, so git ancestry can never prove a car's
 /// content landed — the JOB RECORD is the proof. Given the cars a
 /// landed train boarded and the branches still-open cars name, a
-/// car's branch is deletable iff:
+/// branch is deletable iff:
 ///   - the car's own bookkeeping completed: closed with the `merged`
 ///     outcome (an abandoned car closes too, but its branch holds
 ///     unmerged work — never touch it);
 ///   - the branch is named and is not `main`;
 ///   - no still-open car rides the same branch (a follow-up car's
 ///     claim keeps it alive).
+/// It holds for the branch the car BOARDED and for every branch a
+/// rerail moved it off — one definition, because both are the same
+/// question asked of the same record (see `recorded_branches`).
 /// Two landed cars naming one branch delete it once. Pure — the
 /// forge call and the journal line belong to the caller.
 pub(crate) fn deletable_branches(
     boarded_cars: &[Value],
     open_branches: &BTreeSet<String>,
-) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::new();
-    for car in boarded_cars {
-        let Some(cid) = car.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        let md = car.get("metadata");
-        let branch = md
-            .and_then(|m| m.get("branch"))
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let landed = car.get("status").and_then(Value::as_str) == Some("closed")
-            && md.and_then(|m| m.get("outcome")).and_then(Value::as_str) == Some("merged");
-        if branch.is_empty()
-            || branch == "main"
-            || !landed
-            || open_branches.contains(branch)
-            || out.iter().any(|(b, _)| b == branch)
-        {
-            continue;
-        }
-        out.push((branch.to_string(), cid.to_string()));
-    }
-    out
+) -> Vec<CarBranch> {
+    decided_branches(boarded_cars, |b| !open_branches.contains(b))
 }
 
 /// The branch head recorded when this car boarded — stamped by the
@@ -2433,25 +2516,40 @@ pub(crate) fn sweep_guard(recorded: Option<&str>, current: Option<&str>) -> Swee
 /// `Delete` is silent here too, but for the opposite reason: the
 /// caller does the deleting and is the only one who knows whether it
 /// was a dry run, a deletion, or a race lost to something faster.
-pub(crate) fn sweep_note(guard: &SweepGuard, branch: &str, car: &str) -> Option<String> {
+pub(crate) fn sweep_note(guard: &SweepGuard, b: &CarBranch) -> Option<String> {
     match guard {
         SweepGuard::Gone | SweepGuard::Delete => None,
-        SweepGuard::NoRecord => Some(format!(
-            "branch {branch} has no boarded head on record — not deleting (car {} landed)",
-            id8(car)
+        SweepGuard::NoRecord if b.rerail_origin => Some(format!(
+            "rerail original {} has no head on record — not deleting (car {} landed)",
+            b.branch,
+            id8(&b.car)
         )),
-        SweepGuard::Moved { recorded, current } => {
-            Some(branch_moved_line(branch, recorded, current))
-        }
+        SweepGuard::NoRecord => Some(format!(
+            "branch {} has no boarded head on record — not deleting (car {} landed)",
+            b.branch,
+            id8(&b.car)
+        )),
+        SweepGuard::Moved { recorded, current } => Some(branch_moved_line(b, recorded, current)),
     }
 }
 
 /// The line the sweep journals when a branch outgrew its boarding —
 /// operator surface, and the only notice that unmerged commits are
 /// sitting on a branch the train did not carry.
-pub(crate) fn branch_moved_line(branch: &str, recorded: &str, current: &str) -> String {
+pub(crate) fn branch_moved_line(b: &CarBranch, recorded: &str, current: &str) -> String {
+    let since = if b.rerail_origin {
+        "rerail original"
+    } else {
+        "branch"
+    };
+    let what = if b.rerail_origin {
+        "moved since the rerail"
+    } else {
+        "moved since boarding"
+    };
     format!(
-        "branch {branch} moved since boarding ({} -> {}) — not deleting",
+        "{since} {} {what} ({} -> {}) — not deleting",
+        b.branch,
         id8(recorded),
         id8(current)
     )
@@ -2536,28 +2634,25 @@ pub(crate) fn sweep_pending(closed_trains: &[Value]) -> Vec<&Value> {
 pub(crate) fn claim_deferred_branches(
     boarded_cars: &[Value],
     open_branches: &BTreeSet<String>,
-) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::new();
+) -> Vec<CarBranch> {
+    decided_branches(boarded_cars, |b| open_branches.contains(b))
+}
+
+/// The two decisions above differ in one predicate — whether a live
+/// car's claim on the name is what we are looking for — so they share
+/// the enumeration. Collapsed rather than copied: the copy is how the
+/// deferral loop came to know about a car's boarded branch and not
+/// about the branches it was re-railed off, which is the other half of
+/// the leak this fix closes (CLAUDE.md §9a).
+fn decided_branches(boarded_cars: &[Value], wanted: impl Fn(&str) -> bool) -> Vec<CarBranch> {
+    let mut out: Vec<CarBranch> = Vec::new();
     for car in boarded_cars {
-        let Some(cid) = car.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        let md = car.get("metadata");
-        let branch = md
-            .and_then(|m| m.get("branch"))
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let landed = car.get("status").and_then(Value::as_str) == Some("closed")
-            && md.and_then(|m| m.get("outcome")).and_then(Value::as_str) == Some("merged");
-        if !landed
-            || branch.is_empty()
-            || branch == "main"
-            || !open_branches.contains(branch)
-            || out.iter().any(|(b, _)| b == branch)
-        {
-            continue;
+        for b in car_branches(car) {
+            if !wanted(&b.branch) || out.iter().any(|o| o.branch == b.branch) {
+                continue;
+            }
+            out.push(b);
         }
-        out.push((branch.to_string(), cid.to_string()));
     }
     out
 }
@@ -2585,11 +2680,26 @@ pub(crate) fn sweep_complete(
 /// A branch held back for a still-open car's claim says so: without a
 /// line, an operator sees the same train re-swept every ten minutes
 /// with nothing to show for it and no reason named.
-pub(crate) fn claim_deferred_line(branch: &str, car: &str) -> String {
+pub(crate) fn claim_deferred_line(b: &CarBranch) -> String {
     format!(
-        "sweep: branch {branch} kept — a still-open car claims it (car {} landed); train stays pending",
-        id8(car)
+        "sweep: {} kept — a still-open car claims it (car {} landed); train stays pending",
+        sweep_subject(b),
+        id8(&b.car)
     )
+}
+
+/// What the journal calls a branch the sweep acted on. A rerail
+/// original is named as one: it was never a car of its own, which is
+/// exactly why no earlier sweep could see it, and an operator reading
+/// "deleted branch feat/x" for a branch no car ever carried has to go
+/// re-derive where the deletion came from (§Diagnosis — a verdict must
+/// name what it acted on).
+pub(crate) fn sweep_subject(b: &CarBranch) -> String {
+    if b.rerail_origin {
+        format!("rerail original {}", b.branch)
+    } else {
+        format!("branch {}", b.branch)
+    }
 }
 
 /// A step's `completed_at` evidence stamp, raw as stored. The
@@ -6858,42 +6968,36 @@ impl Conductor {
                 // UNSTAMPED below, so it is revisited next pass rather
                 // than marked swept with the branch leaked.
                 let mut branch_failures = 0usize;
-                for (branch, car) in deletable_branches(&cars, &open_branches) {
+                for b in deletable_branches(&cars, &open_branches) {
                     let branch_outcome: Result<()> = async {
                         // The job record proved the CONTENT landed; the head
                         // guard proves the branch still holds only that
                         // content. Both, or the branch stays (car 23923b40).
-                        let recorded = cars
-                            .iter()
-                            .find(|c| c.get("id").and_then(Value::as_str) == Some(car.as_str()))
-                            .and_then(boarded_head)
-                            .map(str::to_string);
-                        let current = self.forge.branch_head(&branch).await?;
-                        let guard = sweep_guard(recorded.as_deref(), current.as_deref());
+                        // For a rerail original the recorded head is the one
+                        // the rerail read off it, so a commit pushed after the
+                        // rerail keeps the original exactly as a commit pushed
+                        // after boarding keeps a car's own branch.
+                        let current = self.forge.branch_head(&b.branch).await?;
+                        let guard = sweep_guard(b.head.as_deref(), current.as_deref());
                         // Verdicts that keep a branch narrate themselves, and
                         // a branch already off the forge narrates nothing.
-                        if let Some(note) = sweep_note(&guard, &branch, &car) {
+                        if let Some(note) = sweep_note(&guard, &b) {
                             log(note);
                         }
                         if guard == SweepGuard::Delete {
+                            let what = sweep_subject(&b);
                             if self.cfg.dry {
                                 log(format!(
-                                    "DRY: would delete branch {branch} (car {} landed)",
-                                    id8(&car)
+                                    "DRY: would delete {what} (car {} landed)",
+                                    id8(&b.car)
                                 ));
-                            } else if self.forge.delete_branch(&branch).await? {
-                                log(format!(
-                                    "deleted branch {branch} (car {} landed)",
-                                    id8(&car)
-                                ));
+                            } else if self.forge.delete_branch(&b.branch).await? {
+                                log(format!("deleted {what} (car {} landed)", id8(&b.car)));
                             } else {
                                 // It existed a moment ago — something else
                                 // swept it between the two calls. Rare, and
                                 // worth saying so it is not read as our doing.
-                                log(format!(
-                                    "branch {branch} already gone (car {} landed)",
-                                    id8(&car)
-                                ));
+                                log(format!("{what} already gone (car {} landed)", id8(&b.car)));
                             }
                         }
                         Ok(())
@@ -6901,7 +7005,7 @@ impl Conductor {
                     .await;
                     if let Err(e) = branch_outcome {
                         branch_failures += 1;
-                        log(sweep_branch_failed_line(&branch, &car, &e));
+                        log(sweep_branch_failed_line(&b.branch, &b.car, &e));
                     }
                 }
                 // A branch withheld for a still-open car's claim is not
@@ -6910,8 +7014,8 @@ impl Conductor {
                 // pending state has a stated reason, and counted so the
                 // stamp below cannot close over it.
                 let deferred = claim_deferred_branches(&cars, &open_branches);
-                for (branch, car) in &deferred {
-                    log(claim_deferred_line(branch, car));
+                for b in &deferred {
+                    log(claim_deferred_line(b));
                 }
                 // Stamp swept only when EVERY branch was handled: a
                 // branch we could not sweep this pass must be revisited,
@@ -8652,15 +8756,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
     use super::{
-        ApiFailure, ConvergenceVerdict, Failure, JOBS_API_RETRY, NO_PLAYGROUND_DEPLOY_EVIDENCE,
-        RetryPolicy, SweepGuard, arrival_already_filed, arrival_report, arrival_summary,
-        auto_cancel_reason, boarded_head, branch_moved_line, car_hold_reason, ci_overdue,
-        claim_deferred_branches, classify_transport, commits_match, convergence_verdict,
-        deletable_branches, deploy_needed, local_jobs_problem, merge_declined_reason,
-        overlay_metadata, parked_ready, playground_deploy_disabled, releasable_cars, repo_path,
-        resolve_train, retryable, retrying, short_cause, skip_reason_branch_missing,
-        skip_reason_conflict, stall_age_hours, sweep_complete, sweep_guard, sweep_note,
-        sweep_pending, sweep_settled, train_branch_to_delete, verdict_drift,
+        ApiFailure, CarBranch, ConvergenceVerdict, Failure, JOBS_API_RETRY,
+        NO_PLAYGROUND_DEPLOY_EVIDENCE, RetryPolicy, SweepGuard, arrival_already_filed,
+        arrival_report, arrival_summary, auto_cancel_reason, boarded_head, branch_moved_line,
+        car_hold_reason, ci_overdue, claim_deferred_branches, classify_transport, commits_match,
+        convergence_verdict, deletable_branches, deploy_needed, local_jobs_problem,
+        merge_declined_reason, overlay_metadata, parked_ready, playground_deploy_disabled,
+        releasable_cars, repo_path, resolve_train, retryable, retrying, short_cause,
+        skip_reason_branch_missing, skip_reason_conflict, stall_age_hours, sweep_complete,
+        sweep_guard, sweep_note, sweep_pending, sweep_settled, sweep_subject,
+        train_branch_to_delete, verdict_drift,
     };
     use crate::delivery_policy::DeliveryPolicy;
     use anyhow::{Result, anyhow};
@@ -9126,12 +9231,20 @@ mod tests {
         BTreeSet::new()
     }
 
+    /// The branch names a sweep decision offers, in order.
+    fn names(decided: &[CarBranch]) -> Vec<&str> {
+        decided.iter().map(|b| b.branch.as_str()).collect()
+    }
+
     #[test]
     fn a_landed_cars_branch_is_deletable() {
         let cars = vec![landed_car("car-1", "feat/x")];
-        assert_eq!(
-            deletable_branches(&cars, &no_open()),
-            vec![("feat/x".to_string(), "car-1".to_string())]
+        let decided = deletable_branches(&cars, &no_open());
+        assert_eq!(names(&decided), vec!["feat/x"]);
+        assert_eq!(decided[0].car, "car-1");
+        assert!(
+            !decided[0].rerail_origin,
+            "the car's own branch is not a rerail original"
         );
     }
 
@@ -9188,9 +9301,137 @@ mod tests {
     #[test]
     fn two_landed_cars_on_one_branch_delete_it_once() {
         let cars = vec![landed_car("car-1", "feat/x"), landed_car("car-2", "feat/x")];
+        let decided = deletable_branches(&cars, &no_open());
+        assert_eq!(names(&decided), vec!["feat/x"]);
+        assert_eq!(decided[0].car, "car-1", "the first car named it");
+    }
+
+    // -- the rerail original (packet 473fda1b, generator 1) ---------------
+    //
+    // `boss rerail` moves a car to a NEW branch and leaves the original
+    // on the forge. The train merges and deletes the branch it carried
+    // — the rerail one — and the original was never a car, so a sweep
+    // that iterates boarded cars has nothing to act on and will never
+    // consider it: permanent by construction, 13 branches deep by
+    // 2026-09-10. The fix reads the provenance the rerail RECORDED on
+    // the car (`rerail_origins`), never a `-rerail` suffix guessed off
+    // a name.
+
+    /// The record `boss rerail` leaves: the car now rides `branch`, and
+    /// each branch it was re-railed off is named with the head that
+    /// branch carried at the moment the car left it.
+    fn rerailed_car(id: &str, branch: &str, origins: &[(&str, &str)]) -> Value {
+        let mut car = landed_car(id, branch);
+        car["metadata"]["boarded_head"] = json!(format!("head-of-{branch}"));
+        car["metadata"]["rerail_origins"] = json!(
+            origins
+                .iter()
+                .map(|(b, h)| json!({"branch": b, "head": h}))
+                .collect::<Vec<_>>()
+        );
+        car
+    }
+
+    #[test]
+    fn a_landed_rerail_cars_original_branch_is_deletable_too() {
+        // The pure case from the packet: the work landed under the
+        // `-rerail` twin, and nothing would ever have swept the original.
+        let cars = vec![rerailed_car(
+            "car-1",
+            "feat/x-rerail",
+            &[("feat/x", "head-of-feat/x")],
+        )];
         assert_eq!(
-            deletable_branches(&cars, &no_open()),
-            vec![("feat/x".to_string(), "car-1".to_string())]
+            names(&deletable_branches(&cars, &no_open())),
+            vec!["feat/x-rerail", "feat/x"],
+            "the original must be swept alongside the twin that carried it"
+        );
+    }
+
+    #[test]
+    fn a_rerail_original_a_live_car_claims_is_deferred_not_deleted() {
+        // Someone re-used the original branch name for new work: the
+        // live car's claim beats any landed car's deletion, and the
+        // deferral keeps the train pending rather than stamping over it.
+        let cars = vec![rerailed_car(
+            "car-1",
+            "feat/x-rerail",
+            &[("feat/x", "head-of-feat/x")],
+        )];
+        let claimed: BTreeSet<String> = ["feat/x".to_string()].into_iter().collect();
+        assert_eq!(
+            names(&deletable_branches(&cars, &claimed)),
+            vec!["feat/x-rerail"],
+            "the claimed original survives; the twin is still swept"
+        );
+        assert_eq!(
+            names(&claim_deferred_branches(&cars, &claimed)),
+            vec!["feat/x"],
+            "and the deferral is named, not silent"
+        );
+        assert!(
+            !sweep_complete(0, claim_deferred_branches(&cars, &claimed).len(), &cars),
+            "a deferred original must not be stamped over"
+        );
+    }
+
+    #[test]
+    fn an_abandoned_cars_rerail_original_keeps_its_branch() {
+        // Abandonment is a DISPOSITION, not a sweep (packet 473fda1b):
+        // the branch holds the only copy of work someone chose to stop,
+        // and so does the branch it was re-railed off.
+        let mut car = rerailed_car("car-1", "feat/x-rerail", &[("feat/x", "head-of-feat/x")]);
+        car["metadata"]["outcome"] = json!("abandoned");
+        assert!(
+            deletable_branches(&[car], &no_open()).is_empty(),
+            "neither the twin nor the original is landing evidence"
+        );
+    }
+
+    #[test]
+    fn a_car_re_railed_twice_offers_each_original_once() {
+        // A second conflict re-rails an already-re-railed car, so the
+        // chain is two deep. Every branch in it landed its content under
+        // the car's current head — and an origin that repeats the car's
+        // own branch must not be offered twice.
+        let cars = vec![rerailed_car(
+            "car-1",
+            "feat/x-rerail-rerail",
+            &[
+                ("feat/x", "head-of-feat/x"),
+                ("feat/x-rerail", "head-of-feat/x-rerail"),
+                ("feat/x-rerail-rerail", "head-of-feat/x-rerail-rerail"),
+            ],
+        )];
+        assert_eq!(
+            names(&deletable_branches(&cars, &no_open())),
+            vec!["feat/x-rerail-rerail", "feat/x", "feat/x-rerail"],
+            "both originals, the car's own branch once, nothing invented"
+        );
+    }
+
+    #[test]
+    fn main_is_never_deletable_even_as_a_rerail_origin() {
+        let cars = vec![rerailed_car(
+            "car-1",
+            "feat/x-rerail",
+            &[("main", "head-of-main")],
+        )];
+        assert_eq!(
+            names(&deletable_branches(&cars, &no_open())),
+            vec!["feat/x-rerail"],
+            "a malformed origin naming main must never reach the forge call"
+        );
+    }
+
+    #[test]
+    fn an_origin_without_a_branch_name_contributes_nothing() {
+        let mut car = rerailed_car("car-1", "feat/x-rerail", &[]);
+        car["metadata"]["rerail_origins"] = json!([{"head": "abc"}, {"branch": ""}, "feat/x"]);
+        assert_eq!(
+            names(&deletable_branches(&[car], &no_open())),
+            vec!["feat/x-rerail"],
+            "a malformed origins list costs the car's own sweep nothing"
         );
     }
 
@@ -9299,8 +9540,8 @@ mod tests {
             "the live car's claim beats the landed car's deletion"
         );
         assert_eq!(
-            claim_deferred_branches(&cars, &claimed),
-            vec![("feat/x".to_string(), "car-1".to_string())],
+            names(&claim_deferred_branches(&cars, &claimed)),
+            vec!["feat/x"],
             "and the deferral is named, not silent"
         );
         assert!(
@@ -10703,19 +10944,30 @@ mod tests {
         assert_eq!(sweep_guard(Some(""), None), SweepGuard::Gone);
     }
 
+    /// One sweep decision, for the tests that are about the line it
+    /// earns rather than about which branches were chosen.
+    fn decided(branch: &str) -> CarBranch {
+        CarBranch {
+            branch: branch.to_string(),
+            car: "car-1".to_string(),
+            head: Some(BOARDED.to_string()),
+            rerail_origin: false,
+        }
+    }
+
     #[test]
     fn only_a_branch_that_still_exists_is_worth_narrating() {
         // The sweep's journal is an operator surface: a line earns its
         // place by naming something a human can act on. A branch that
         // is not on the forge is not that — nothing to delete, nothing
         // to rescue, no action available.
-        assert_eq!(sweep_note(&SweepGuard::Gone, "fix/x", "car-1"), None);
+        assert_eq!(sweep_note(&SweepGuard::Gone, &decided("fix/x")), None);
         // Delete narrates at the call site, which knows whether it was
         // a dry run, a deletion, or a race.
-        assert_eq!(sweep_note(&SweepGuard::Delete, "fix/x", "car-1"), None);
+        assert_eq!(sweep_note(&SweepGuard::Delete, &decided("fix/x")), None);
         // The two keep-and-tell cases: the branch exists and the sweep
         // declined it, which is exactly what an operator must hear.
-        let no_record = sweep_note(&SweepGuard::NoRecord, "fix/x", "car-1")
+        let no_record = sweep_note(&SweepGuard::NoRecord, &decided("fix/x"))
             .expect("a surviving branch with no record is worth a line");
         assert!(no_record.contains("fix/x"), "{no_record}");
         assert!(
@@ -10727,13 +10979,39 @@ mod tests {
                 recorded: BOARDED.to_string(),
                 current: MOVED.to_string(),
             },
-            "fix/conductor-hardening",
-            "car-1",
+            &decided("fix/conductor-hardening"),
         )
         .expect("a branch that outgrew its boarding is worth a line");
         assert_eq!(
             moved,
-            branch_moved_line("fix/conductor-hardening", BOARDED, MOVED)
+            branch_moved_line(&decided("fix/conductor-hardening"), BOARDED, MOVED)
+        );
+        // A RERAIL ORIGINAL IS NAMED AS ONE, in both refusals. It never
+        // boarded anything, so "no boarded head" and "moved since
+        // boarding" would send an operator hunting for a boarding that
+        // never happened (§Diagnosis — a verdict must name what failed).
+        let origin = CarBranch {
+            rerail_origin: true,
+            ..decided("feat/x")
+        };
+        let no_head = sweep_note(&SweepGuard::NoRecord, &origin)
+            .expect("a surviving original with no recorded head is worth a line");
+        assert!(
+            no_head.contains("rerail original feat/x") && no_head.contains("no head on record"),
+            "{no_head}"
+        );
+        let origin_moved = sweep_note(
+            &SweepGuard::Moved {
+                recorded: BOARDED.to_string(),
+                current: MOVED.to_string(),
+            },
+            &origin,
+        )
+        .expect("an original that moved after the rerail is worth a line");
+        assert!(
+            origin_moved.contains("rerail original feat/x")
+                && origin_moved.contains("moved since the rerail"),
+            "{origin_moved}"
         );
     }
 
@@ -10755,7 +11033,7 @@ mod tests {
         // Operator surface: the only notice that unmerged commits are
         // sitting on a branch the train did not carry.
         assert_eq!(
-            branch_moved_line("fix/conductor-hardening", BOARDED, MOVED),
+            branch_moved_line(&decided("fix/conductor-hardening"), BOARDED, MOVED),
             "branch fix/conductor-hardening moved since boarding \
              (fc55e4d1 -> 705230b9) — not deleting"
         );
@@ -12707,6 +12985,132 @@ mod tests {
             !deleted.contains(&"fix/a".to_string()),
             "train A aborted before its branch loop, so its branch is untouched \
              this pass and retried next: {deleted:?}"
+        );
+    }
+
+    /// END TO END, the branch the sweep could never see (packet
+    /// 473fda1b, generator 1). One arrived train, one landed car that a
+    /// rerail had moved onto `feat/x-rerail` — and the original
+    /// `feat/x`, which was never a car of its own. The train deletes
+    /// what it MERGED, so before this fix the original survived every
+    /// sweep forever; now the car's recorded origin is swept in the
+    /// same pass, through the same head guard.
+    #[tokio::test]
+    async fn the_sweep_deletes_a_landed_rerail_original_alongside_its_twin() {
+        use axum::extract::{Path, RawQuery};
+        use axum::routing::get;
+        use axum::{Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        const HEAD: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        let train = json!({
+            "id": "t1", "kind": "pr-train", "status": "closed",
+            "metadata": { "boarded_jobs": ["car-1"] },
+            "steps": [
+                {"id":"s-arr","spec_slug":"arrived","title":"Train arrived","status":"completed","metadata":{}}
+            ]
+        });
+        // The car as `boss rerail` leaves it: riding the rerail branch,
+        // with the branch it was moved off and that branch's head on the
+        // record.
+        let car = json!({
+            "id": "car-1", "kind": "ship-a-change", "status": "closed",
+            "metadata": {
+                "train": "t1", "branch": "feat/x-rerail", "outcome": "merged",
+                "boarded_head": HEAD,
+                "rerail_origins": [{ "branch": "feat/x", "head": HEAD }]
+            },
+            "steps": []
+        });
+
+        let by_id: std::collections::HashMap<String, Value> = [
+            ("t1".to_string(), train.clone()),
+            ("car-1".to_string(), car),
+        ]
+        .into_iter()
+        .collect();
+        let by_id = Arc::new(by_id);
+        let closed_list = json!({ "data": [train], "total": 1 });
+
+        let app = Router::new()
+            .route(
+                "/api/jobs",
+                get(move |RawQuery(q): RawQuery| {
+                    let list = closed_list.clone();
+                    async move {
+                        if q.unwrap_or_default().contains("pr-train") {
+                            Json(list)
+                        } else {
+                            Json(json!({ "data": [], "total": 0 }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/jobs/{id}",
+                get(move |Path(id): Path<String>| {
+                    let by_id = by_id.clone();
+                    async move { Json(by_id.get(&id).cloned().unwrap_or(json!({}))) }
+                })
+                .put(|Path(_id): Path<String>, _b: Json<Value>| async move { Json(json!({})) }),
+            )
+            .route(
+                "/api/jobs/{id}/metadata",
+                axum::routing::patch(|Path(_id): Path<String>, _b: Json<Value>| async move {
+                    Json(json!({}))
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let deleted = Arc::new(Mutex::new(Vec::new()));
+        let mut c = cleanup_conductor(
+            "github",
+            Box::new(SweepForge {
+                deleted: deleted.clone(),
+                head: HEAD.to_string(),
+            }),
+        );
+        c.cfg.jobs = format!("http://{addr}");
+        c.sweep_landed_branches().await.unwrap();
+
+        let deleted = deleted.lock().unwrap().clone();
+        assert!(
+            deleted.contains(&"feat/x-rerail".to_string()),
+            "the branch the train merged must still be swept: {deleted:?}"
+        );
+        assert!(
+            deleted.contains(&"feat/x".to_string()),
+            "the rerail original was never a car, so only its record can \
+             reach it — leaked forever without this: {deleted:?}"
+        );
+    }
+
+    /// The journal names a rerail original as one. An operator reading
+    /// "deleted branch feat/x" for a branch no car ever carried has to
+    /// go re-derive where the deletion came from.
+    #[test]
+    fn the_journal_calls_a_rerail_original_what_it_is() {
+        assert_eq!(sweep_subject(&decided("feat/x")), "branch feat/x");
+        assert_eq!(
+            sweep_subject(&CarBranch {
+                rerail_origin: true,
+                ..decided("feat/x")
+            }),
+            "rerail original feat/x"
+        );
+        // And the deferral line carries the same subject, so a held
+        // original reads as one too.
+        let held = claim_deferred_line(&CarBranch {
+            rerail_origin: true,
+            ..decided("feat/x")
+        });
+        assert!(
+            held.contains("rerail original feat/x") && held.contains("train stays pending"),
+            "{held}"
         );
     }
 
