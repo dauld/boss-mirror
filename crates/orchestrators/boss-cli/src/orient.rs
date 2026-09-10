@@ -76,6 +76,41 @@ fn residue_cars<'a>(
         .collect()
 }
 
+/// Cars HELD on the dock, each with the reason an operator wrote —
+/// `(branch, reason)`, branch-sorted.
+///
+/// A held car is parked at the dock and cannot board: `metadata.hold` on
+/// its review step says "this is gated green and still must not ride
+/// yet". The loading-dock station row knows that now (36c3d4ca), which
+/// means the queue lens stops LISTING it — so the DOCK section below,
+/// which reads that lens, would show a shrinking dock and name nothing
+/// about the cars still standing on it. `boss orient` is the verb a
+/// session runs before it does anything else; a car that disappears from
+/// it is a car the next session rebuilds blind.
+///
+/// TWO SHARED DEFINITIONS, no third. "Still at the dock" is
+/// `boss_jobs::car::is_parked` — the predicate `boss park`, the auto-park
+/// handler and the conductor's own dock count already share — plus the
+/// `status=open` filter that predicate deliberately leaves to its callers.
+/// "Is there a hold" is `boss_jobs::stranded::hold_reason`, where `null`,
+/// `false` and `""` are NO marker: a released hold boards again, and a
+/// `truthy`/`is_some` reading of it would strand the car here forever.
+/// Read off the car packets orient has already fetched — no second read.
+fn held_dock_cars(cars: &[Value]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = cars
+        .iter()
+        .filter(|c| c.get("status").and_then(Value::as_str) == Some("open"))
+        .filter(|c| boss_jobs::car::is_parked(c))
+        .filter_map(|c| {
+            let review = boss_jobs::car::find_step(c, "review", boss_jobs::car::REVIEW)?;
+            let reason = boss_jobs::stranded::hold_reason(review.get("metadata")?)?;
+            Some((md_str(c, "branch").to_string(), reason))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 fn bases_behind(checks: &[(String, Option<i32>)]) -> Vec<&str> {
     checks
         .iter()
@@ -287,6 +322,26 @@ pub async fn run() -> Result<()> {
         );
     }
 
+    // HELD ON THE DOCK — cars standing there that cannot board. The
+    // queue lens above no longer lists them (36c3d4ca), so without this
+    // they appear nowhere in the one read a session runs first, and their
+    // branches read as orphans or residue instead of as work waiting on a
+    // named action. A brake deliberately on is not an alarm — but an
+    // invisible brake is.
+    let held = held_dock_cars(&cars);
+    if held.is_empty() {
+        println!("  HELD — none: every car on the dock can board");
+    } else {
+        println!(
+            "  HELD — {} car(s) ON the dock that cannot board (release = clear \
+             `hold` on the review step; never rebuild one blind):",
+            held.len()
+        );
+        for (branch, reason) in &held {
+            println!("    {branch}  —  {reason}");
+        }
+    }
+
     // FRESHNESS (L2, acedf981) — parked and stranded branches whose
     // base has fallen behind origin/main. A car cut from an old main
     // merges clean and reverts the trains, so a green gate on a stale
@@ -302,6 +357,11 @@ pub async fn run() -> Result<()> {
         .filter(|b| !b.is_empty())
         .collect();
     fresh_targets.extend(stranded.iter().cloned());
+    // A held car is still a car: the longer a hold lasts the further its
+    // base falls behind, and a stale base merges clean and reverts the
+    // train ([[parked-cars-go-stale]]). It has to be re-gated before it is
+    // released, so it belongs in the freshness check beside the parked.
+    fresh_targets.extend(held.iter().map(|(b, _)| b.clone()));
     fresh_targets.sort();
     fresh_targets.dedup();
     if !fresh_targets.is_empty() {
@@ -386,6 +446,25 @@ pub async fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    /// A car packet as the jobs API serves it: a branch, a status, and a
+    /// review step carrying whatever the operator wrote on it.
+    fn car(branch: &str, status: &str, review: &str, review_md: serde_json::Value) -> Value {
+        serde_json::json!({
+            "id": branch,
+            "kind": "ship-a-change",
+            "status": status,
+            "title": branch,
+            "metadata": { "branch": branch },
+            "steps": [{
+                "spec_slug": "review",
+                "title": "Open for review",
+                "status": review,
+                "metadata": review_md,
+            }],
+        })
+    }
 
     fn heads(bs: &[&str]) -> std::collections::BTreeSet<String> {
         bs.iter().map(|s| s.to_string()).collect()
@@ -430,5 +509,59 @@ mod tests {
     fn bases_behind_is_empty_when_all_fresh() {
         let checks = vec![("a".to_string(), Some(0)), ("b".to_string(), Some(0))];
         assert!(bases_behind(&checks).is_empty());
+    }
+
+    /// A held car is ON the dock and cannot board, so the queue lens
+    /// stops listing it (36c3d4ca taught the loading-dock row that a
+    /// held car does not board). `boss orient` is the first verb a
+    /// session runs, so a car that vanishes from the dock vanishes from
+    /// the one read that was meant to un-blind the session. It is named
+    /// from the car packets orient has already fetched — no second read,
+    /// and the predicate is the shared one (`car::is_parked`) plus the
+    /// shared marker reading (`stranded::hold_reason`).
+    #[test]
+    fn a_held_car_is_named_with_its_reason() {
+        let cars = vec![
+            car("fix/free", "open", "ready", json!({})),
+            car(
+                "fix/held",
+                "open",
+                "ready",
+                json!({ "hold": "waiting on an operator action" }),
+            ),
+        ];
+        assert_eq!(
+            held_dock_cars(&cars),
+            vec![(
+                "fix/held".to_string(),
+                "waiting on an operator action".to_string()
+            )]
+        );
+    }
+
+    /// THE TRAP. `hold: false` is a RELEASED hold, and a `truthy`/`is_some`
+    /// reading of the marker would hold the car in this list forever. The
+    /// marker semantics live once, in `stranded::hold_reason`; a
+    /// hold/no-hold test alone passes with that bug.
+    #[test]
+    fn a_released_hold_is_not_a_held_car() {
+        for released in [json!({ "hold": false }), json!({ "hold": "" })] {
+            let cars = vec![car("fix/released", "open", "ready", released.clone())];
+            assert!(
+                held_dock_cars(&cars).is_empty(),
+                "{released} is a released hold, not a held car"
+            );
+        }
+    }
+
+    /// Only a car still AT the dock can be held there. A boarded car
+    /// (review completed, or a train stamp) and a closed one are gone
+    /// from the dock, and a hold left on their record is history.
+    #[test]
+    fn a_car_that_left_the_dock_is_not_held_on_it() {
+        let held = json!({ "hold": "x" });
+        let boarded = car("fix/boarded", "open", "completed", held.clone());
+        let closed = car("fix/closed", "closed", "ready", held.clone());
+        assert!(held_dock_cars(&[boarded, closed]).is_empty());
     }
 }

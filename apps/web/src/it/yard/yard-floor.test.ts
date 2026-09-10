@@ -55,6 +55,7 @@ const statusOf = (over: Partial<YardStatus> = {}): YardStatus => ({
   recent: [],
   stranded: [],
   held: [],
+  held_cars: [],
   gates: { capacity: 3, active: [], queued: [], typical_seconds: null },
   garage: [],
   limbo: [],
@@ -123,6 +124,12 @@ const strandedGreen = (branch: string, packet_id: string) => ({
 });
 const heldGreen = (branch: string, packet_id: string, reason: string) => ({
   branch, reason, since: SINCE, packet_id, sha: null,
+});
+/** A car standing ON the dock that cannot board — a dock row plus its
+ *  reason, which is exactly the wire shape (the Rust `HeldCar` flattens
+ *  a `DockCar`). */
+const heldCar = (id: string, branch: string, reason: string) => ({
+  id, title: `Car ${id}`, branch, parked_since: SINCE, reason,
 });
 
 const gate = (branch: string, packet_id: string, stale = false) => ({
@@ -380,6 +387,59 @@ describe('the dock and the garage', () => {
     expect(wagon(s, 'c1').status).toContain('parked');
     expect(wagon(s, 'c2').slot).toBe(1);
     expect(wagon(s, 'c2').status).toContain('track occupied');
+  });
+
+  // THE HELD SIDING. A car an operator held cannot board, so the
+  // loading-dock station row stops listing it (36c3d4ca) and the client
+  // dock goes quiet about it — while the floor's `held` lane counts held
+  // GATE-RUNS, a different thing entirely. It is drawn from the server's
+  // own `held_cars`, on the dock where it physically stands, in the
+  // neutral tone a deliberate brake earns.
+  test('a held car stands on the dock in the neutral tone, with its reason', () => {
+    const s = scene(
+      // The client dock holds the free car only — the state after the
+      // station row stops listing a held one.
+      yardOf({ dock: [car('c1', 'fix/a')] }),
+      statusOf({
+        dock: [{ id: 'c1', title: 'Car c1', branch: 'fix/a', parked_since: '2026-09-07T22:00:00Z' }],
+        held_cars: [heldCar('c9', 'fix/held', 'waiting on an operator action')],
+      }),
+      NOW,
+    );
+    expect(wagon(s, 'c9')).toMatchObject({ station: 'dock', tone: 'static', lamp: 'off' });
+    expect(wagon(s, 'c9').status).toBe('held — waiting on an operator action');
+    expect(wagon(s, 'c9').since).toBe(SINCE);
+    // The dock machine counts what can board and names what cannot.
+    expect(s.machines.dock.parked).toBe(1);
+    expect(s.machines.dock.heldCars).toBe(1);
+    expect(s.machines.dock.label).toContain('1 held');
+  });
+
+  // BEFORE *AND* AFTER the station row learns about holds. While the row
+  // still admits a held car, the client dock lists it too — and the floor
+  // must draw ONE wagon for it, on the held siding, never a parked one
+  // beside a held twin.
+  test('a held car the client dock still lists is one wagon, held', () => {
+    const s = scene(
+      yardOf({ dock: [car('c9', 'fix/held')] }),
+      statusOf({ held_cars: [heldCar('c9', 'fix/held', 'waiting on an operator action')] }),
+      NOW,
+    );
+    expect(s.wagons.filter(w => w.branch === 'fix/held')).toHaveLength(1);
+    expect(wagon(s, 'c9').tone).toBe('static');
+    expect(s.machines.dock.parked).toBe(0);
+  });
+
+  // An operator's marker often opens with its own "held:" — the wagon
+  // already says held, so the reason is what follows it. Same reading the
+  // held-GREEN lane uses; one function, not a second.
+  test('a held car does not say held twice', () => {
+    const s = scene(
+      yardOf(),
+      statusOf({ held_cars: [heldCar('c9', 'fix/held', 'held: rolls the dev pod')] }),
+      NOW,
+    );
+    expect(wagon(s, 'c9').status).toBe('held — rolls the dev pod');
   });
 
   test('a parked car being re-gated is ONE wagon, in the bay, keeping its car id', () => {

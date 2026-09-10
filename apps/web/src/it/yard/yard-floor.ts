@@ -153,7 +153,13 @@ export type Machines = Readonly<{
   queue: Readonly<{ label: string; count: number }>;
   dock: Readonly<{
     label: string;
+    /** Cars that can board — held ones excluded, since the conductor
+     *  will not take them. */
     parked: number;
+    /** Cars standing on the dock that CANNOT board, held by an operator.
+     *  Not the boarding hold below: that is why the dock is not
+     *  departing, this is how many cars a person has to release. */
+    heldCars: number;
     held: string | null;
     next: string | null;
     cooldownMinutes: number | null;
@@ -508,6 +514,9 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
   const tags = uniqueTags([
     ...yard.cars.map(c => c.branch),
     ...yard.dock.map(c => c.branch),
+    // Held cars stand on the floor too, and may not be in the client
+    // dock at all once the station row stops listing them.
+    ...(status?.held_cars ?? []).map(h => h.branch ?? ''),
     ...yard.inFlight.flatMap(t => t.cars.map(c => c.branch)),
     ...yard.arrivals.flatMap(t => t.cars.map(c => c.branch)),
     ...(status?.gates.active ?? []).map(g => g.branch),
@@ -678,11 +687,28 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
     });
   });
 
-  // THE LOADING DOCK — parked cars in the station's own order.
+  // THE LOADING DOCK — parked cars in the station's own order, and the
+  // HELD ones first, on the siding they cannot leave.
+  //
+  // A held car is drawn from the SERVER's `held_cars`, never from the
+  // client dock: once the loading-dock station row learned that a held
+  // car does not board (36c3d4ca), the queue lens stopped listing it, so
+  // the client dock goes quiet about a car that is still standing there.
+  // The dock loop skips anything in this lane by id, so a row the
+  // station still admits is drawn once, as held.
+  //
+  // Neutral tone, lamp off: a brake deliberately on is not an alarm —
+  // the distinction the floor learned from held greens. What IS the
+  // alarm is a held car nothing draws at all.
+  const heldCars = status?.held_cars ?? [];
+  const heldCarIds = new Set(heldCars.map(h => h.id));
   const parkedSince = new Map((status?.dock ?? []).map(d => [d.id, d.parked_since]));
   let dockSlot = 0;
   yard.dock.forEach(c => {
-    if (claimedIds.has(c.id) || claimedBranches.has(c.branch)) return;
+    // A held car is drawn below from the server's lane, whether or not
+    // the client dock still lists it — skipped here so it is ONE wagon,
+    // held, never a parked one beside a held twin.
+    if (claimedIds.has(c.id) || claimedBranches.has(c.branch) || heldCarIds.has(c.id)) return;
     place({
       id: c.id,
       ...base(c),
@@ -693,6 +719,29 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
       lamp: 'ok',
       status: c.skipReason ? `parked · held: ${c.skipReason}` : 'parked · gated green, waiting to board',
       since: parkedSince.get(c.id) ?? null,
+    });
+    dockSlot += 1;
+  });
+  // The held ones stand at the far end of the dock, after the cars that
+  // can still leave it.
+  heldCars.forEach(h => {
+    if (claimedIds.has(h.id)) return;
+    const fromDock = yard.dock.find(c => c.id === h.id);
+    place({
+      id: h.id,
+      tag: tagOf(h.branch ?? ''),
+      title: fromDock?.title ?? h.title,
+      branch: h.branch ?? '',
+      head: fromDock?.head ?? null,
+      kind: fromDock?.kind ?? 'ship-a-change',
+      sim: fromDock?.sim ?? false,
+      station: 'dock',
+      slot: dockSlot,
+      trainId: null,
+      tone: 'static',
+      lamp: 'off',
+      status: `held — ${holdReason(h.reason)}`,
+      since: h.parked_since,
     });
     dockSlot += 1;
   });
@@ -843,7 +892,13 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
     ...(held > 0 ? [`${held} held`] : []),
   ];
   const b = status?.boarding ?? null;
-  const parked = yard.dock.length;
+  // PARKED is what can board. A held car is on the dock and will not
+  // move, and counting it in the number beside the boarding predicate
+  // would say the dock is fuller than the conductor can act on — the
+  // reading that said "2 parked, the threshold is met" while neither car
+  // could board. Filtered by id so the count is the same whether or not
+  // the client dock still lists them.
+  const parked = yard.dock.filter(c => !heldCarIds.has(c.id)).length;
   const cooldown = b?.cooldown_remaining_minutes ?? null;
   // An empty dock is not held — there is nothing to hold — so it says
   // what the next car would meet; a dock with cars says what keeps
@@ -864,6 +919,12 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
           : cooling
             ? `${parked} parked · cooldown ${cooldown} min`
             : `${parked} parked`;
+  // The held cars are appended rather than folded in: the rest of this
+  // label is about when the dock BOARDS, and a held car is not waiting
+  // for a tick — it is waiting for a person. An empty dock with a held
+  // car on it reads "empty · 1 held", which is the true sentence.
+  const heldCarLabel =
+    heldCars.length > 0 ? `${dockLabel} · ${heldCars.length} held` : dockLabel;
   const garageCount = wagons.filter(w => w.station === 'garage').length;
 
   return {
@@ -881,8 +942,9 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
         held,
       },
       dock: {
-        label: dockLabel,
+        label: heldCarLabel,
         parked,
+        heldCars: heldCars.length,
         held: dockHeld,
         next: b?.next_board ?? null,
         cooldownMinutes: cooldown,

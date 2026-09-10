@@ -1187,3 +1187,134 @@ async fn a_merged_train_is_estimated_on_the_remaining_leg_only() {
          defect this pins"
     );
 }
+
+// ---------------------------------------------------------------------
+// 5. The dock's two lanes — parked, and HELD.
+//
+// A held car (`metadata.hold` on its review step) is on the dock and
+// cannot board. The conductor has always known that; the loading-dock
+// station row learned it in 36c3d4ca. Both of those make the car
+// INVISIBLE to anything that lists dock members, which is how a state
+// past its own alarm threshold came to render exactly like a healthy
+// one (CLAUDE.md §Diagnosis, "a troubled packet must look troubled").
+// The status serves it in a lane of its own instead.
+// ---------------------------------------------------------------------
+
+/// A dock of one free car and one held car, plus a released hold — the
+/// three readings that have to come apart.
+async fn seed_dock_with_holds(jobs: &InMemoryJobs) {
+    let now = t(NOW);
+    for (id, branch, title, hold) in [
+        (
+            "22222222-2222-2222-2222-222222222222",
+            "feat/free",
+            "A free car",
+            json!({}),
+        ),
+        (
+            "44444444-4444-4444-4444-444444444444",
+            "feat/held",
+            "A held car",
+            json!({ "hold": "waiting on an operator action" }),
+        ),
+        (
+            "88888888-8888-8888-8888-888888888888",
+            "feat/released",
+            "A released car",
+            json!({ "hold": false }),
+        ),
+    ] {
+        let car = job(
+            "ship-a-change",
+            id,
+            title,
+            JobStatus::Open,
+            json!({ "branch": branch }),
+        );
+        jobs.create_job_at(&car, now, &[]).await.unwrap();
+        jobs.add_step_at(
+            &step(
+                &car.id,
+                "review",
+                "Open for review",
+                StepStatus::Ready,
+                hold,
+            ),
+            now,
+            &[],
+        )
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_held_car_lists_in_its_own_lane_with_the_reason() {
+    let (app, jobs) = app_with(vec![depth_rule(), clock_rule()], vec![policy_row()]);
+    seed_dock_with_holds(&jobs).await;
+    let (_, body) = get(&app, "operator").await;
+
+    let held: Vec<&Value> = body["held_cars"].as_array().unwrap().iter().collect();
+    assert_eq!(held.len(), 1, "one held car: {}", body["held_cars"]);
+    assert_eq!(held[0]["branch"], "feat/held");
+    assert_eq!(held[0]["reason"], "waiting on an operator action");
+    assert_eq!(held[0]["title"], "A held car");
+    assert_eq!(
+        held[0]["id"], "44444444-4444-4444-4444-444444444444",
+        "the row names the packet an operator must open"
+    );
+    assert!(
+        held[0]["parked_since"].is_string(),
+        "how long it has been on the dock, so a long hold reads as one"
+    );
+}
+
+/// A RELEASED hold — `hold: false`, the marker written off rather than
+/// the key deleted — is no hold. `truthy`/`is_some` readings differ from
+/// the marker definition on exactly this value, and a car stranded in
+/// the held lane by that difference would never board again. The lane
+/// reads `stranded::hold_reason`, the one definition.
+#[tokio::test]
+async fn a_released_hold_puts_the_car_back_in_the_dock_lane() {
+    let (app, jobs) = app_with(vec![depth_rule(), clock_rule()], vec![policy_row()]);
+    seed_dock_with_holds(&jobs).await;
+    let (_, body) = get(&app, "operator").await;
+
+    let dock: Vec<&str> = body["dock"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["branch"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        dock,
+        vec!["feat/free", "feat/released"],
+        "a released hold boards again: {}",
+        body["dock"]
+    );
+    let held: Vec<&str> = body["held_cars"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["branch"].as_str().unwrap())
+        .collect();
+    assert_eq!(held, vec!["feat/held"]);
+}
+
+/// The depth that fires a train counts boardable cars only. Measured
+/// live on 2026-09-10: `dock_depth: 2, threshold_met: true, "2 car(s)
+/// parked now — the dock threshold is met"` while BOTH cars were held
+/// and neither could board. The conductor's own predicate had always
+/// excluded them; the read-model now agrees with it.
+#[tokio::test]
+async fn a_held_car_does_not_count_toward_the_dock_depth() {
+    let mut d = depth_rule();
+    d.min_dock_depth = Some(2);
+    let (app, jobs) = app_with(vec![d, clock_rule()], vec![policy_row()]);
+    seed_dock_with_holds(&jobs).await;
+    let (_, body) = get(&app, "operator").await;
+
+    let b = &body["boarding"];
+    assert_eq!(b["dock_depth"], 2, "free + released, not the held one");
+    assert_eq!(b["threshold_met"], true);
+}

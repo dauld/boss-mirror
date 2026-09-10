@@ -219,6 +219,14 @@ fn open_car_exists(h: &InventoryHelpers, args: &[Value]) -> Result<Value, EvalEr
     Ok(Value::Bool(exists))
 }
 
+/// The packet kind `open_publish_exists` asks about. The guard names
+/// only a SUBJECT, so the kind lives here — and it is a `pub const`
+/// rather than a literal in the URL below because a second reader now
+/// needs the same fact: `cadence_roster::parse_guard` normalizes this
+/// guard to the `(kind, subject)` question the cadence-silence sweep
+/// asks, and one constant cannot drift from itself (CLAUDE.md §9a).
+pub const PUBLISH_JOB_KIND: &str = "publish-to-github";
+
 /// True if a `publish-to-github` packet for this mirror subject is
 /// already open — the dedup for `publish-to-github-daily`.
 ///
@@ -236,7 +244,7 @@ fn open_car_exists(h: &InventoryHelpers, args: &[Value]) -> Result<Value, EvalEr
 fn open_publish_exists(h: &InventoryHelpers, args: &[Value]) -> Result<Value, EvalError> {
     let subject = first_string(args, "open_publish_exists")?;
     let url = format!(
-        "{}/api/jobs?kind=publish-to-github&status=open&limit=200",
+        "{}/api/jobs?kind={PUBLISH_JOB_KIND}&status=open&limit=200",
         h.jobs_base.trim_end_matches('/')
     );
     let r: JobsListResponse = h.get_json(&url, "open_publish_exists")?;

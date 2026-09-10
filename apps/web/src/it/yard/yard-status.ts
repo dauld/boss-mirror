@@ -88,6 +88,29 @@ export type DockCar = Readonly<{
   parked_since: string;
 }>;
 
+/** A car standing ON the dock that cannot board: an operator wrote a
+ *  `hold` on its review step — a car whose branch is correct but whose
+ *  world is not (a node cordoned under it, an object to delete first, a
+ *  companion car it must land with).
+ *
+ *  A SIBLING of `HeldGreen`, not a member of its lane. Both answer "what
+ *  cannot move" and they are different answers: a held green has no car
+ *  and is released by filing one; a held car is on the dock and is
+ *  released by clearing the marker. Their fields would also collide —
+ *  `HeldGreen.packet_id` is a gate-run and its `since` is when that run
+ *  opened, while a held car's packet is the ship-a-change and its stamp
+ *  is when the car parked. The Rust `HeldCar` flattens a `DockCar`, so
+ *  this is a dock row plus its reason, field for field. */
+export type HeldCar = Readonly<{
+  id: string;
+  title: string;
+  branch: string | null;
+  parked_since: string;
+  /** Why it cannot board. A bare `hold: true` reads "no reason
+   *  recorded" — the same words the held-green lane uses. */
+  reason: string;
+}>;
+
 export type BoardingPredicate = Readonly<{
   dock_threshold: number | null;
   cooldown_minutes: number | null;
@@ -253,6 +276,10 @@ export type YardStatus = Readonly<{
   stranded: readonly StrandedGreen[];
   /** Empty on a server that predates the reading. */
   held: readonly HeldGreen[];
+  /** Cars standing ON the dock that cannot board — the other held lane,
+   *  and the only surface that names them once the loading-dock station
+   *  row stops listing them. Empty on a server that predates it. */
+  held_cars: readonly HeldCar[];
   gates: Gates;
   garage: readonly GaragedCar[];
   /** The gate exit. Empty on a server that predates the reading. */
@@ -360,6 +387,15 @@ function parseDockCar(raw: unknown): DockCar {
     branch: typeof o.branch === 'string' ? o.branch : null,
     parked_since: String(o.parked_since ?? ''),
   };
+}
+
+/** A held car is a dock row plus its reason — parsed through the same
+ *  dock-row reader, so the two cannot drift, with the blank-reason rule
+ *  the held-green lane already states. */
+function parseHeldCar(raw: unknown): HeldCar {
+  const o = asObjectOrEmpty(raw);
+  const reason = typeof o.reason === 'string' && o.reason !== '' ? o.reason : 'no reason recorded';
+  return { ...parseDockCar(raw), reason };
 }
 
 function parseBoarding(raw: unknown): BoardingPredicate {
@@ -513,6 +549,7 @@ export function parseYardStatus(raw: unknown): YardStatus {
     recent: Array.isArray(o.recent) ? o.recent.map(parseRecent) : [],
     stranded: Array.isArray(o.stranded) ? o.stranded.map(parseStrandedGreen) : [],
     held: Array.isArray(o.held) ? o.held.map(parseHeldGreen) : [],
+    held_cars: Array.isArray(o.held_cars) ? o.held_cars.map(parseHeldCar) : [],
     gates: parseGates(o.gates),
     garage: Array.isArray(o.garage) ? o.garage.map(parseGaragedCar) : [],
     limbo: Array.isArray(o.limbo) ? o.limbo.map(parseLimboCar) : [],

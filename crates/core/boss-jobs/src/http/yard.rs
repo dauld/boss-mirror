@@ -237,19 +237,19 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
             .unwrap_or_default()
     };
 
-    let status = yard::build_status(
-        &open_trains,
-        &closed_trains,
-        &dock_cars,
-        &rules,
-        last_board.as_ref(),
-        policy.as_ref(),
-        &gate_runs,
-        &car_branches,
-        &settled_car_branches,
-        &arrived_trains,
-        Some(now),
-    );
+    let status = yard::build_status(yard::YardInputs {
+        open_trains: &open_trains,
+        closed_trains: &closed_trains,
+        dock_cars: &dock_cars,
+        rules: &rules,
+        last_board: last_board.as_ref(),
+        policy: policy.as_ref(),
+        gate_runs: &gate_runs,
+        car_branches: &car_branches,
+        settled_car_branches: &settled_car_branches,
+        arrived_trains: &arrived_trains,
+        now: Some(now),
+    });
     // The VERB the heartbeat rule runs (`reconcile`), read from its row.
     // This used to pass the rule's NAME, so `last_verb` said
     // `train-reconcile` — a label that was not the fact it named.
@@ -263,14 +263,23 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
     Json(with_conductor(with_now(status, now), health)).into_response()
 }
 
-/// The dock's parked cars: the loading-dock station queue when a station
-/// registry is wired, else the parked predicate over the fetched cars.
+/// The cars standing ON the dock, with their steps: the loading-dock
+/// station queue when a station registry is wired, else the parked
+/// predicate over the fetched cars. The steps ride along because the
+/// HOLD — the fact that decides whether a car can board — is written on
+/// the review step, so [`yard::dock_lanes`] cannot split the dock without
+/// them; the station path fetches them already, to evaluate the
+/// predicate.
+///
+/// Membership asks [`yard::on_the_dock`], which is the row's predicate
+/// with the HOLD disregarded — a held car is on the dock and must be
+/// listed there, even once the row stops admitting it for boarding.
 async fn dock_cars<R: JobsRepository + 'static, B: EventBus + 'static>(
     state: &JobsApiState<R, B>,
     scope: crate::port::JobScope,
     user: &boss_policy_client::User,
     fallback_cars: &[boss_core::job::Job],
-) -> Vec<boss_core::job::Job> {
+) -> Vec<(boss_core::job::Job, Vec<boss_core::job::Step>)> {
     if let Some(reg) = state.stations.as_ref()
         && let Ok(row) = reg.get_active("loading-dock").await
         && let Some(spec) = row.bind_self(self_id(user))
@@ -285,8 +294,8 @@ async fn dock_cars<R: JobsRepository + 'static, B: EventBus + 'static>(
             let mut members = Vec::new();
             for job in jobs {
                 let steps = state.jobs.list_steps(&job.id).await.unwrap_or_default();
-                if spec.predicate.matches(&job, &steps) {
-                    members.push(job);
+                if yard::on_the_dock(&spec.predicate, &job, &steps) {
+                    members.push((job, steps));
                 }
             }
             return members;
@@ -295,15 +304,16 @@ async fn dock_cars<R: JobsRepository + 'static, B: EventBus + 'static>(
     // Fallback: the loading-dock predicate hand-rolled — an open
     // ship-a-change with a branch, not yet on a train, at review
     // ready/active. Kept only for the station-less spike path.
-    fallback_cars
-        .iter()
-        .filter(|j| {
-            j.status == JobStatus::Open
-                && j.metadata.get("branch").is_some()
-                && j.metadata.get("train").is_none()
-        })
-        .cloned()
-        .collect()
+    let mut out = Vec::new();
+    for job in fallback_cars.iter().filter(|j| {
+        j.status == JobStatus::Open
+            && j.metadata.get("branch").is_some()
+            && j.metadata.get("train").is_none()
+    }) {
+        let steps = state.jobs.list_steps(&job.id).await.unwrap_or_default();
+        out.push((job.clone(), steps));
+    }
+    out
 }
 
 /// The status with the clock instant attached — the same `now` field
@@ -333,6 +343,6 @@ fn with_now(status: yard::YardStatus, now: chrono::DateTime<chrono::Utc>) -> ser
 /// The empty yard a denied caller gets — well-formed, so the page renders
 /// "nothing to show" rather than an error or a false-empty.
 fn empty_status() -> serde_json::Value {
-    let status = yard::build_status(&[], &[], &[], &[], None, None, &[], &[], &[], &[], None);
+    let status = yard::build_status(yard::YardInputs::default());
     serde_json::to_value(status).unwrap_or_else(|_| serde_json::json!({}))
 }

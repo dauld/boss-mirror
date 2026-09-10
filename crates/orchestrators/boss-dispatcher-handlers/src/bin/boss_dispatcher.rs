@@ -119,15 +119,21 @@ async fn main() -> Result<()> {
     // as final (823fcb22 mechanism 2: the one-shot load raced the
     // seed and the runner dead-aired forever). 60s covers any honest
     // init; past it we proceed empty, loudly.
+    // The RAW rows are kept alongside the compiled registry: the
+    // cadence-silence sweep derives half its roster from the rules the
+    // dispatcher is ENFORCING (their schedules and dedup guards), and
+    // `Registry::from_raw` compiles the `when` source away.
     match wait_for_rules(
         &pool,
         std::time::Duration::from_secs(2),
         std::time::Duration::from_secs(60),
     )
     .await
-    .and_then(RuleRegistry::from_raw)
-    {
-        Ok(registry) => {
+    .and_then(|raw| {
+        let enforced = raw.rules.clone();
+        RuleRegistry::from_raw(raw).map(|registry| (registry, enforced))
+    }) {
+        Ok((registry, enforced_rules)) => {
             info!(
                 rule_count = registry.rules().len(),
                 "rules registry loaded from dispatcher_rules"
@@ -152,12 +158,20 @@ async fn main() -> Result<()> {
             // being observed; this hears a CHORE that stopped running —
             // the ML batch dead 23 nights (e109f57e) and the
             // five-minute unit observer quiet four days (408c81f6),
-            // both found by hand. Its roster of declared intervals
-            // rides its own rule row's args, so a cadence changes as
-            // registry data. Needs the clock for the ages it measures.
+            // both found by hand. Its roster has two sources, both
+            // registry data: the declared intervals on its own rule
+            // row's args (the timer-executed chores) and the cadences
+            // DERIVED from the clock rules that spawn packets — eight of
+            // which were off the roster by construction until cf0f5e2d,
+            // three families of them silent for nine to nineteen days.
+            // That is why it is handed the enforced rules: it also reads
+            // each one's dedup guard, so a cadence blocked by an
+            // undrained packet is reported as SUPPRESSED, naming the
+            // packet. Needs the clock for the ages it measures.
             handlers.register(CadenceSilenceSweep::new(
                 cfg.jobs_api_url.clone(),
                 cfg.clock_api_url.clone(),
+                enforced_rules,
             ));
             handlers.register(JobsAutoPark::new(
                 cfg.jobs_api_url.clone(),

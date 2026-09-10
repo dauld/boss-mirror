@@ -122,6 +122,35 @@ describe('parseYardStatus', () => {
     ]);
   });
 
+  // A held CAR is a different answer from a held GREEN: the green has no
+  // car yet (release = file one), the car is standing on the dock
+  // (release = clear the marker). Two lanes, so a surface never has to
+  // guess which one a row is — and a server that predates the lane sends
+  // nothing, which reads as nothing held, never as a missing reading.
+  test('held cars are their own lane, shaped like dock rows, and absent means empty', () => {
+    const s = parseYardStatus({
+      dock: [{ id: 'c1', title: 'A free car', branch: 'fix/free', parked_since: '2026-09-09' }],
+      held: [{ branch: 'fix/green', reason: 'lands at the restart', since: '2026-09-08' }],
+      held_cars: [
+        { id: 'c2', title: 'A held car', branch: 'fix/held', parked_since: '2026-09-08', reason: '' },
+      ],
+    });
+    expect(s.dock.map(d => d.branch)).toEqual(['fix/free']);
+    expect(s.held.map(h => h.branch)).toEqual(['fix/green']);
+    expect(s.held_cars).toEqual([
+      {
+        id: 'c2',
+        title: 'A held car',
+        branch: 'fix/held',
+        parked_since: '2026-09-08',
+        // A hold written with no text still says so rather than reading
+        // blank — the same words the held-green lane uses.
+        reason: 'no reason recorded',
+      },
+    ]);
+    expect(parseYardStatus({}).held_cars).toEqual([]);
+  });
+
   // Every lane row names the gate-run packet behind it and the head it
   // gated, because the approach lane DRAWS these rows — a wagon with a
   // packet to open and a head to label. Recovering them client-side from

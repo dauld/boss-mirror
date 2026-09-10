@@ -77,6 +77,15 @@ const CANCELLED: StepKey = StepKey {
     slug: "cancelled",
     title: "Cancelled",
 };
+/// Not a train step: the step a parked CAR waits at, and the one place
+/// the dock brake (`metadata.hold`) is written. The title half comes
+/// from [`crate::car::REVIEW`], which `boss park`, the auto-park handler
+/// and the conductor's own `find_step` already address it by, so a
+/// rename in the workflow moves every end together (CLAUDE.md §9a).
+const REVIEW: StepKey = StepKey {
+    slug: "review",
+    title: crate::car::REVIEW,
+};
 
 /// Find a step by its slug, falling back to its title — the same
 /// addressing the conductor's `find_step` uses, so the two ends agree on
@@ -425,6 +434,121 @@ pub fn dock_car(job: &Job) -> DockCar {
         branch: meta_str(&job.metadata, "branch").map(str::to_string),
         parked_since: job.opened_on.to_string(),
     }
+}
+
+/// A car ON the dock that CANNOT board: parked, gated green, and held by
+/// an operator who wrote `hold` on its review step — a car whose branch
+/// is correct but whose world is not (a node cordoned under it, an
+/// orphaned object to delete first, a companion car it must land with).
+///
+/// WHY A LANE OF ITS OWN, beside [`HeldGreen`] rather than inside it.
+/// Both answer "what cannot move", and they are DIFFERENT answers: a
+/// held GREEN has no car at all and is released by filing one; a held
+/// CAR is standing on the dock and is released by clearing the marker.
+/// Every surface would have to branch on a discriminator to say the
+/// right sentence, which is a union wearing a list's clothes. The field
+/// names settle it: `HeldGreen`'s `packet_id` is a gate-run and its
+/// `since` is when that gate-run opened, while a held car's packet is
+/// the ship-a-change and its stamp is when the car parked. One list
+/// holding both would carry two meanings under one name — the drift §9a
+/// exists to stop, in its worst form. What they genuinely share is the
+/// MARKER reading, and that is shared: [`crate::stranded::hold_reason`].
+///
+/// It is a [`DockCar`] plus its reason, flattened, so the wire shape is
+/// a dock row and a surface draws it with the fields it already draws
+/// parked cars with.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeldCar {
+    /// The dock row itself — same derivation as a parked car's.
+    #[serde(flatten)]
+    pub car: DockCar,
+    /// Why it cannot board: the `hold` marker's text, or "no reason
+    /// recorded" for a bare `hold: true`.
+    pub reason: String,
+}
+
+/// The dock brake on a car: the `hold` marker on its REVIEW step, read
+/// through the one definition of what a marker is
+/// ([`crate::stranded::hold_reason`] — `null`, `false` and `""` are NO
+/// marker, `true` is a marker with no reason, a non-blank string is the
+/// reason).
+///
+/// Read on the review step ALONE. A `hold` written on some other step is
+/// an annotation about that step, and a lane that froze a car over one
+/// would turn any note into a brake.
+pub fn car_hold_reason(steps: &[Step]) -> Option<String> {
+    crate::stranded::hold_reason(&find_step(steps, &REVIEW)?.metadata)
+}
+
+/// These steps with the `hold` marker taken off every one of them — the
+/// question "would this car be on the dock if nobody had held it?".
+///
+/// Every step, not only the review step: the station row names the step
+/// it cares about, so neutralising the marker everywhere needs no opinion
+/// about which one that is. Nothing else is touched — a held car's other
+/// metadata is the evidence a reader came for.
+pub fn steps_without_hold(steps: &[Step]) -> Vec<Step> {
+    steps
+        .iter()
+        .map(|s| {
+            let mut s = s.clone();
+            if let Some(obj) = s.metadata.as_object_mut() {
+                obj.remove("hold");
+            }
+            s
+        })
+        .collect()
+}
+
+/// Is this car standing ON the dock, with the hold DISREGARDED?
+///
+/// The loading-dock row's predicate excludes a held car — 36c3d4ca taught
+/// it that a car carrying `hold` on its review step does not board, which
+/// is right for BOARDING and wrong for LOOKING: a non-member is listed
+/// nowhere, so the held car would disappear from the dock list, from
+/// `/api/stations/loading-dock/queue`, and therefore from `boss orient`,
+/// while the yard's `held` lane lists only held GATE-RUNS. Nothing would
+/// name it at all — the defect class CLAUDE.md §Diagnosis calls "a
+/// troubled packet must look troubled".
+///
+/// So membership is asked twice: as the row states it, and again with the
+/// marker stripped. MONOTONE BY CONSTRUCTION — the relaxed question can
+/// only ADD members, never drop one the row admits — so this can widen
+/// the dock and never narrow it. [`dock_lanes`] then reads the marker
+/// once to say which lane the car stands in. No copy of the dock
+/// predicate lives here; only the knowledge of which marker the lane
+/// turns on, which is this lane's own subject.
+pub fn on_the_dock(
+    predicate: &crate::station_queue::StationPredicate,
+    job: &Job,
+    steps: &[Step],
+) -> bool {
+    predicate.matches(job, steps) || predicate.matches(job, &steps_without_hold(steps))
+}
+
+/// The dock, in its two lanes: the cars that can board, and the cars
+/// that are standing there held.
+///
+/// ONE partition, so the two lanes cannot overlap or leave a gap, and so
+/// the depth that fires a train counts boardable cars only — a held car
+/// counted at the threshold fires a train it then declines to join,
+/// which is the empty-window defect the conductor's own `parked_ready`
+/// already excludes it for (f4baea39). Both lanes keep the order the
+/// dock read handed them — the station's own order, which is the caller's
+/// to decide and not this function's to reinvent.
+pub fn dock_lanes(dock_cars: &[(Job, Vec<Step>)]) -> (Vec<DockCar>, Vec<HeldCar>) {
+    let mut parked: Vec<DockCar> = Vec::new();
+    let mut held: Vec<HeldCar> = Vec::new();
+    for (job, steps) in dock_cars {
+        match car_hold_reason(steps) {
+            Some(reason) => held.push(HeldCar {
+                car: dock_car(job),
+                reason,
+            }),
+            None => parked.push(dock_car(job)),
+        }
+    }
+    (parked, held)
 }
 
 /// The boarding predicate, rendered from the live cadence rows — the
@@ -1844,6 +1968,15 @@ pub struct YardStatus {
     /// older payload → empty.
     #[serde(default)]
     pub held: Vec<HeldGreen>,
+    /// Cars standing ON the dock that cannot board — an operator wrote a
+    /// `hold` on the review step — with the reason and how long they have
+    /// been there. A SIBLING of `held`, not a member of it: see
+    /// [`HeldCar`] for why the two lanes stay apart. Absent on an older
+    /// payload → empty. Without this lane a held car matched no station
+    /// and so appeared nowhere at all, which is the defect class
+    /// CLAUDE.md §Diagnosis calls "a troubled packet must look troubled".
+    #[serde(default)]
+    pub held_cars: Vec<HeldCar>,
     /// The parallel gate slots: capacity (from the policy) + the cars
     /// occupying them right now.
     pub gates: Gates,
@@ -1870,43 +2003,76 @@ pub const TRAIN_WINDOW: i64 = 60;
 /// — the terminal report owns the long view.
 pub const RECENT_LIMIT: usize = 8;
 
-/// Assemble the full status from the rows the handler fetched.
+/// Everything [`build_status`] reads, named.
 ///
-/// - `open_trains` — open pr-train Jobs with their steps. Only those
-///   still before their merge count as the track hold (`holds_the_track`).
-/// - `closed_trains` — recently-closed pr-train Jobs with their steps,
-///   already ordered newest-first by the caller (the adapter orders by
-///   `opened_on desc`, which for a batch of same-day trains is close
-///   enough; the terminal report owns precise cycle stats).
-/// - `dock_cars` — the loading-dock queue's parked cars.
-/// - `rules` — the active cadence rows.
-/// - `last_board` — the board rule's last firing, which the cooldown
-///   hold is read from.
-/// - `policy` — the active delivery policy, if any.
-/// - `gate_runs` / `car_branches` — for the stranded cross-ref.
-/// - `settled_car_branches` — branches whose car reached a terminal; the
-///   garage drops these, since settled work is not awaiting rework.
-/// - `arrived_trains` — pr-train Jobs whose outcome is `arrived`, the
-///   population every in-flight train's ETA is measured against. A
-///   SEPARATE read from `closed_trains` on purpose: the recent window is
-///   overwhelmingly refused boards (696 of 1,014 pr-trains on record are
-///   cancelled, and only ONE of the 40 most recent had arrived), so the
-///   arrived population has to be narrowed in the query. Steps are not
-///   needed — every timing is in the Job's own metadata.
-#[allow(clippy::too_many_arguments)]
-pub fn build_status(
-    open_trains: &[(Job, Vec<Step>)],
-    closed_trains: &[(Job, Vec<Step>)],
-    dock_cars: &[Job],
-    rules: &[CadenceRuleRow],
-    last_board: Option<&LastFiring>,
-    policy: Option<&DeliveryPolicyRow>,
-    gate_runs: &[(Job, Vec<Step>)],
-    car_branches: &[String],
-    settled_car_branches: &[String],
-    arrived_trains: &[Job],
-    now: Option<chrono::DateTime<chrono::Utc>>,
-) -> YardStatus {
+/// It used to be eleven positional parameters under an
+/// `#[allow(clippy::too_many_arguments)]`, two adjacent pairs of which
+/// had the SAME type — `car_branches` / `settled_car_branches` are both
+/// `&[String]`, `open_trains` / `closed_trains` / `gate_runs` are all
+/// `&[(Job, Vec<Step>)]` — so a transposed argument compiled silently
+/// and would have put the garage's rows in the stranded lane. An
+/// `#[allow]` on an eleven-argument function is a smell; a struct with
+/// named fields removes the class of bug and makes the next reading the
+/// payload needs free to add. `Default` is the empty yard a denied
+/// reader gets, and lets a test name only the lane it is about.
+#[derive(Debug, Clone, Default)]
+pub struct YardInputs<'a> {
+    /// Open pr-train Jobs with their steps. Only those still before their
+    /// merge count as the track hold (`holds_the_track`).
+    pub open_trains: &'a [(Job, Vec<Step>)],
+    /// Recently-closed pr-train Jobs with their steps, already ordered
+    /// newest-first by the caller (the adapter orders by `opened_on
+    /// desc`, which for a batch of same-day trains is close enough; the
+    /// terminal report owns precise cycle stats).
+    pub closed_trains: &'a [(Job, Vec<Step>)],
+    /// The cars standing on the loading dock, with their steps — the
+    /// HOLD is a fact about the review step, so the dock cannot be read
+    /// from Jobs alone. [`dock_lanes`] splits these into the parked lane
+    /// and the held lane; the caller's job is to decide membership, not
+    /// boardability.
+    pub dock_cars: &'a [(Job, Vec<Step>)],
+    /// The active cadence rows.
+    pub rules: &'a [CadenceRuleRow],
+    /// The board rule's last firing, which the cooldown hold is read from.
+    pub last_board: Option<&'a LastFiring>,
+    /// The active delivery policy, if any.
+    pub policy: Option<&'a DeliveryPolicyRow>,
+    /// Recent gate-runs with their steps — the stranded/held/garage/limbo
+    /// lanes, and the gate slots.
+    pub gate_runs: &'a [(Job, Vec<Step>)],
+    /// Branches a car claims — the stranded cross-ref.
+    pub car_branches: &'a [String],
+    /// Branches whose car reached a terminal; the garage drops these,
+    /// since settled work is not awaiting rework.
+    pub settled_car_branches: &'a [String],
+    /// pr-train Jobs whose outcome is `arrived`, the population every
+    /// in-flight train's ETA is measured against. A SEPARATE read from
+    /// `closed_trains` on purpose: the recent window is overwhelmingly
+    /// refused boards (696 of 1,014 pr-trains on record are cancelled,
+    /// and only ONE of the 40 most recent had arrived), so the arrived
+    /// population has to be narrowed in the query. Steps are not needed —
+    /// every timing is in the Job's own metadata.
+    pub arrived_trains: &'a [Job],
+    /// The clock instant. `None` asserts no trouble rather than inventing
+    /// a reading, and keeps wall-clock out of the read-model.
+    pub now: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Assemble the full status from the rows the handler fetched.
+pub fn build_status(inputs: YardInputs<'_>) -> YardStatus {
+    let YardInputs {
+        open_trains,
+        closed_trains,
+        dock_cars,
+        rules,
+        last_board,
+        policy,
+        gate_runs,
+        car_branches,
+        settled_car_branches,
+        arrived_trains,
+        now,
+    } = inputs;
     // The instant a train must have completed SOMETHING after, or it is
     // standing still. Computed once so train_status stays a pure
     // comparison, and only when the policy declares a window.
@@ -1926,7 +2092,13 @@ pub fn build_status(
         .iter()
         .map(|(j, s)| train_status(j, s, stall_before, &eta, now))
         .collect();
-    let dock: Vec<DockCar> = dock_cars.iter().map(dock_car).collect();
+    // The dock in its two lanes. The DEPTH that fires a train is the
+    // parked lane alone: a held car is standing there and will not board,
+    // and counting it fires a train it declines to join — the empty
+    // windows that made arrival rate unreadable (f4baea39). The
+    // conductor's `parked_ready` has always excluded it; this is the
+    // read-model agreeing with the loop that actually boards.
+    let (dock, held_cars) = dock_lanes(dock_cars);
     // The track: open trains still before their merge. A merged train
     // waiting to deploy or converge is rendered as such above and holds
     // nothing — the next consist merges on top of it.
@@ -1952,6 +2124,7 @@ pub fn build_status(
         recent,
         stranded: stranded_greens(gate_runs, car_branches),
         held: held_greens(gate_runs, car_branches),
+        held_cars,
         gates: gates(gate_runs, capacity, now),
         garage: garage(gate_runs, settled_car_branches),
         limbo: limbo(gate_runs, settled_car_branches),
@@ -2638,28 +2811,22 @@ mod tests {
             ),
         ];
         let open = vec![(train(vec![], json!({})), converging)];
-        let dock: Vec<Job> = (0..5)
+        let dock: Vec<(Job, Vec<Step>)> = (0..5)
             .map(|i| {
                 let mut car = train(vec![], json!({ "branch": format!("fix/{i}") }));
                 car.kind = "ship-a-change".into();
-                car
+                (car, vec![])
             })
             .collect();
         let rules = vec![board_rule(4, 45)];
 
-        let status = build_status(
-            &open,
-            &[],
-            &dock,
-            &rules,
-            None,
-            None,
-            &[],
-            &[],
-            &[],
-            &[],
-            fixed_now(),
-        );
+        let status = build_status(YardInputs {
+            open_trains: &open,
+            dock_cars: &dock,
+            rules: &rules,
+            now: fixed_now(),
+            ..Default::default()
+        });
         assert_eq!(status.trains[0].phase, TrainPhase::Converging);
         assert_eq!(status.boarding.hold.held_because, None);
         assert_eq!(status.boarding.hold.next_board, "boards on the next tick");
@@ -2699,28 +2866,22 @@ mod tests {
             (train(vec![], json!({})), converging),
             (train(vec![], json!({})), pre_merge),
         ];
-        let dock: Vec<Job> = (0..5)
+        let dock: Vec<(Job, Vec<Step>)> = (0..5)
             .map(|i| {
                 let mut car = train(vec![], json!({ "branch": format!("fix/{i}") }));
                 car.kind = "ship-a-change".into();
-                car
+                (car, vec![])
             })
             .collect();
         let rules = vec![board_rule(4, 45)];
 
-        let status = build_status(
-            &open,
-            &[],
-            &dock,
-            &rules,
-            None,
-            None,
-            &[],
-            &[],
-            &[],
-            &[],
-            fixed_now(),
-        );
+        let status = build_status(YardInputs {
+            open_trains: &open,
+            dock_cars: &dock,
+            rules: &rules,
+            now: fixed_now(),
+            ..Default::default()
+        });
         assert_eq!(
             status.boarding.hold.held_because.as_deref(),
             Some("track occupied (1 open train)")
@@ -3163,6 +3324,220 @@ mod tests {
                     "2026-09-08T18:00:00Z"
                 ),
             ]
+        );
+    }
+
+    // ---- the dock's two lanes: parked, and held ----
+
+    /// A car on the dock, with the steps a car carries at the dock.
+    fn car(branch: &str, review: Step) -> (Job, Vec<Step>) {
+        let mut j = train(vec![], json!({ "branch": branch }));
+        j.kind = "ship-a-change".into();
+        (j, vec![review])
+    }
+
+    fn review(metadata: Value) -> Step {
+        step("review", crate::car::REVIEW, StepStatus::Ready, metadata)
+    }
+
+    /// THE LANE. A car whose review step carries a `hold` is on the dock
+    /// and cannot board, so it lists apart from the parked cars with the
+    /// reason an operator wrote — never silently omitted, and never
+    /// counted toward the depth that fires a train it would decline to
+    /// join.
+    #[test]
+    fn a_held_car_lists_in_the_held_lane_with_its_reason() {
+        let cars = vec![
+            car("fix/free", review(json!({}))),
+            car(
+                "fix/held",
+                review(json!({ "hold": "waiting on a kubectl delete" })),
+            ),
+            car("fix/bare", review(json!({ "hold": true }))),
+        ];
+        let (dock, held) = dock_lanes(&cars);
+        assert_eq!(
+            dock.iter().map(|d| d.branch.as_deref()).collect::<Vec<_>>(),
+            vec![Some("fix/free")],
+            "only the car that can move is parked"
+        );
+        assert_eq!(
+            held.iter()
+                .map(|h| (h.car.branch.as_deref(), h.reason.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some("fix/held"), "waiting on a kubectl delete"),
+                (Some("fix/bare"), "no reason recorded"),
+            ],
+            "held cars list with their reason, in the dock's own order"
+        );
+    }
+
+    /// THE TRAP, PROVED RATHER THAN ASSERTED. `hold: false` is a RELEASED
+    /// hold — an operator clearing the brake by writing the marker off
+    /// rather than deleting the key — and a `truthy`/`is_some` reading of
+    /// it strands the car in the held lane forever. The marker semantics
+    /// live once, in `stranded::hold_reason` (`null`/`false`/`""` are no
+    /// marker), and this lane reads them there; a hold/no-hold test alone
+    /// is green with the bug.
+    #[test]
+    fn a_released_hold_returns_the_car_to_the_parked_lane() {
+        for released in [json!({ "hold": false }), json!({ "hold": "" }), json!({})] {
+            let cars = vec![car("fix/released", review(released.clone()))];
+            let (dock, held) = dock_lanes(&cars);
+            assert_eq!(
+                dock.len(),
+                1,
+                "a released hold boards again: {released} put the car in the held lane"
+            );
+            assert!(held.is_empty(), "{released} is not a hold");
+        }
+    }
+
+    /// The hold lives on the REVIEW step and nowhere else — a `hold` on
+    /// some other step is not the dock brake, and reading any step would
+    /// make an unrelated annotation freeze a car.
+    #[test]
+    fn a_hold_on_another_step_is_not_the_dock_brake() {
+        let mut c = car("fix/other", review(json!({})));
+        c.1.push(step(
+            "proven",
+            "Proven in prod",
+            StepStatus::Ready,
+            json!({ "hold": "a note about the proof" }),
+        ));
+        let (dock, held) = dock_lanes(&[c]);
+        assert_eq!(dock.len(), 1);
+        assert!(held.is_empty());
+    }
+
+    /// The depth that fires a train counts only boardable cars. A dock of
+    /// nothing but held cars is BELOW the threshold, and the summary says
+    /// so — the reading that said "2 car(s) parked now — the dock
+    /// threshold is met" while neither car could board (36c3d4ca).
+    #[test]
+    fn a_dock_of_only_held_cars_is_below_the_threshold() {
+        let cars = vec![
+            car("fix/h1", review(json!({ "hold": "on an operator action" }))),
+            car("fix/h2", review(json!({ "hold": true }))),
+        ];
+        let status = build_status(YardInputs {
+            dock_cars: &cars,
+            rules: &[board_rule(2, 45)],
+            now: fixed_now(),
+            ..Default::default()
+        });
+        assert!(status.dock.is_empty(), "neither car is parked-and-ready");
+        assert_eq!(status.held_cars.len(), 2);
+        assert_eq!(status.boarding.dock_depth, 0);
+        assert_eq!(status.boarding.threshold_met, Some(false));
+    }
+
+    /// The two held lanes are different answers to "what cannot move":
+    /// a held GREEN has no car yet (release = file one), a held CAR is on
+    /// the dock (release = clear the marker). They ride the payload side
+    /// by side so a surface never has to guess which one a row is.
+    #[test]
+    fn the_held_green_lane_and_the_held_car_lane_are_separate() {
+        let held_green = gate_run("feat/green", json!({ "hold": "lands at the restart" }));
+        let status = build_status(YardInputs {
+            dock_cars: &[car(
+                "fix/car",
+                review(json!({ "hold": "on an operator action" })),
+            )],
+            gate_runs: &[(held_green, vec![green_step()])],
+            now: fixed_now(),
+            ..Default::default()
+        });
+        assert_eq!(
+            status
+                .held
+                .iter()
+                .map(|h| h.branch.as_str())
+                .collect::<Vec<_>>(),
+            vec!["feat/green"]
+        );
+        assert_eq!(
+            status
+                .held_cars
+                .iter()
+                .map(|h| h.car.branch.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("fix/car")]
+        );
+    }
+
+    /// A held car rides the wire as a dock row PLUS its reason — one
+    /// definition of a dock row, flattened, so a surface draws it with
+    /// the same fields it already draws parked cars with.
+    #[test]
+    fn a_held_car_serialises_as_a_dock_row_plus_its_reason() {
+        let (dock, held) = dock_lanes(&[car("fix/held", review(json!({ "hold": "why" })))]);
+        assert!(dock.is_empty());
+        let v = serde_json::to_value(&held[0]).unwrap();
+        assert_eq!(v["branch"], "fix/held");
+        assert_eq!(v["reason"], "why");
+        assert_eq!(v["parked_since"], "2026-09-03");
+        assert!(v["id"].is_string());
+        assert!(v["title"].is_string());
+    }
+
+    /// The relaxed membership question takes the marker off and nothing
+    /// else — the rest of a held car's metadata is the evidence a reader
+    /// came for, and the input is left alone (immutable by default).
+    #[test]
+    fn stripping_the_hold_leaves_every_other_fact_and_the_input_intact() {
+        let steps = vec![review(json!({ "hold": "why", "note": "keep me" }))];
+        let stripped = steps_without_hold(&steps);
+        assert_eq!(stripped[0].metadata, json!({ "note": "keep me" }));
+        assert_eq!(
+            steps[0].metadata["hold"], "why",
+            "the caller's steps are not mutated"
+        );
+    }
+
+    /// MONOTONE. Asking membership twice — as the row states it, then with
+    /// the hold stripped — can only ADD a car, never drop one the row
+    /// admits. Pinned with a predicate that REQUIRES the marker (the
+    /// inverse of the dock row's), which the strip would fail: the car is
+    /// still a member, because the row's own answer stands first.
+    #[test]
+    fn disregarding_the_hold_can_only_widen_the_dock_never_narrow_it() {
+        let p: crate::station_queue::StationPredicate = serde_json::from_value(json!({
+            "kind": "ship-a-change",
+            "step": { "slug": "review", "metadata_equals": { "hold": "why" } },
+        }))
+        .unwrap();
+        let (job, steps) = car("fix/held", review(json!({ "hold": "why" })));
+        assert!(
+            p.matches(&job, &steps),
+            "the row admits it with the hold present"
+        );
+        assert!(
+            !p.matches(&job, &steps_without_hold(&steps)),
+            "and not with the hold stripped — the relaxation is the one at risk"
+        );
+        assert!(
+            on_the_dock(&p, &job, &steps),
+            "so the row's own answer has to stand: a relaxation that could \
+             drop a member would hide a car instead of showing one"
+        );
+    }
+
+    /// A car the row refuses for a reason that is NOT the hold stays
+    /// refused. The relaxation lifts one marker, not the predicate.
+    #[test]
+    fn disregarding_the_hold_does_not_admit_a_car_refused_for_anything_else() {
+        let p: crate::station_queue::StationPredicate = serde_json::from_value(json!({
+            "kind": "ship-a-change",
+            "metadata_absent": ["train"],
+        }))
+        .unwrap();
+        let (mut job, steps) = car("fix/boarded", review(json!({ "hold": "why" })));
+        job.metadata["train"] = json!("train/2026-09-10");
+        assert!(
+            !on_the_dock(&p, &job, &steps),
+            "a boarded car has left the dock, held or not"
         );
     }
 
@@ -3846,7 +4221,7 @@ mod tests {
         dock_a.kind = "ship-a-change".into();
         let mut dock_b = train(vec![], json!({ "branch": "feat/b" }));
         dock_b.kind = "ship-a-change".into();
-        let dock = vec![dock_a, dock_b];
+        let dock = vec![(dock_a, vec![]), (dock_b, vec![])];
 
         let mut depth = rule("queue-depth");
         depth.min_dock_depth = Some(4);
@@ -3871,19 +4246,17 @@ mod tests {
 
         let stranded_run = (gate_run("feat/stranded", json!({})), vec![green_step()]);
 
-        let status = build_status(
-            &open,
-            &closed,
-            &dock,
-            &rules,
-            None,
-            Some(&policy),
-            &[stranded_run],
-            &["feat/a".into(), "feat/b".into()],
-            &[],
-            &[],
-            fixed_now(),
-        );
+        let status = build_status(YardInputs {
+            open_trains: &open,
+            closed_trains: &closed,
+            dock_cars: &dock,
+            rules: &rules,
+            policy: Some(&policy),
+            gate_runs: &[stranded_run],
+            car_branches: &["feat/a".into(), "feat/b".into()],
+            now: fixed_now(),
+            ..Default::default()
+        });
 
         // The block is named, prominently, on the train row.
         assert_eq!(status.trains.len(), 1);
@@ -3927,19 +4300,10 @@ mod tests {
         // With no delivery policy the page shows the same bound a gate
         // obeys against an unreachable registry — never a fabricated
         // number.
-        let status = build_status(
-            &[],
-            &[],
-            &[],
-            &[],
-            None,
-            None,
-            &[],
-            &[],
-            &[],
-            &[],
-            fixed_now(),
-        );
+        let status = build_status(YardInputs {
+            now: fixed_now(),
+            ..Default::default()
+        });
         assert_eq!(status.gates.capacity, COMPILED_GATE_MAX_CONCURRENT);
     }
 
@@ -3969,19 +4333,12 @@ mod tests {
             ci_host_floor_gb: 10,
             gate_max_concurrent: 4,
         };
-        let status = build_status(
-            &[],
-            &[],
-            &[],
-            &[],
-            None,
-            Some(&policy),
-            &[in_flight, red],
-            &[],
-            &[],
-            &[],
-            fixed_now(),
-        );
+        let status = build_status(YardInputs {
+            policy: Some(&policy),
+            gate_runs: &[in_flight, red],
+            now: fixed_now(),
+            ..Default::default()
+        });
         assert_eq!(status.gates.capacity, 4);
         assert_eq!(status.gates.active.len(), 1);
         assert_eq!(status.gates.active[0].branch, "feat/gating");
@@ -3995,19 +4352,11 @@ mod tests {
         let many: Vec<(Job, Vec<Step>)> = (0..RECENT_LIMIT + 5)
             .map(|_| (train(vec![], json!({ "outcome": "arrived" })), vec![]))
             .collect();
-        let status = build_status(
-            &[],
-            &many,
-            &[],
-            &[],
-            None,
-            None,
-            &[],
-            &[],
-            &[],
-            &[],
-            fixed_now(),
-        );
+        let status = build_status(YardInputs {
+            closed_trains: &many,
+            now: fixed_now(),
+            ..Default::default()
+        });
         assert_eq!(status.recent.len(), RECENT_LIMIT);
     }
 
@@ -4516,19 +4865,12 @@ mod tests {
     fn the_status_carries_an_eta_on_the_train_in_flight() {
         let job = train(vec![], json!({ "boarded_jobs": ["a", "b"] }));
         let steps = pre_merge_steps("2026-09-04T11:55:00Z");
-        let status = build_status(
-            &[(job, steps)],
-            &[],
-            &[],
-            &[],
-            None,
-            None,
-            &[],
-            &[],
-            &[],
-            &population(20),
-            fixed_now(),
-        );
+        let status = build_status(YardInputs {
+            open_trains: &[(job, steps)],
+            arrived_trains: &population(20),
+            now: fixed_now(),
+            ..Default::default()
+        });
         assert!(
             matches!(status.trains[0].eta, TrainEta::Estimate { .. }),
             "the in-flight train states its ETA: {:?}",

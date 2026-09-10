@@ -456,6 +456,24 @@ fi
 # dispatcher-driven kind, neither of which this file can see.
 # The cadence roster is the args of ONE rule, and since 2026-09-09 each
 # rule is its own file (infra/dispatcher/rules/README.md).
+#
+# THIS CHECK COVERS ONE OF THE ROSTER'S TWO SOURCES, and since
+# 2026-09-10 it says so. The args above are the TIMER half. A daily
+# dispatcher CLOCK RULE that spawns a chore packet is equally a declared
+# cadence and has no timer file to pin against, so it was outside this
+# check — and outside the sweep — by construction: eight such cadences
+# existed, three families of them had been silent for nine to nineteen
+# days, and the public mirror drifted 238 commits behind with nothing
+# announcing it (backlog cf0f5e2d). That half is now DERIVED from the
+# rule registry at runtime (`cadence_roster::clock_cadences`), so the
+# cadence, the kind, the target and the dedup guard have exactly one
+# definition — the rule row — and there is nothing here for bash to keep
+# in sync. What can still go wrong is a new rule dropping out of that
+# derivation silently, and the pin for that lives with the derivation:
+# `boss-dispatcher-handlers/tests/the_silence_roster_covers_the_clock_rules.rs`
+# fails CI naming the rule. Re-implementing "which rules declare a
+# cadence" in bash would be the second definition §9a warns about, which
+# is why it is deliberately not here.
 RULES_TOML="infra/dispatcher/rules/cadence-silence-sweep-daily.toml"
 
 # The schedule of one .timer, in minutes. Echoes NONE for a unit with no

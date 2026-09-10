@@ -14,6 +14,7 @@
 //! crate has been retired.
 
 pub mod bill_payment_batch;
+pub mod cadence_roster;
 pub mod cadence_silence;
 pub mod commerce_invoice_issue;
 pub mod common;

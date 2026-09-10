@@ -90,6 +90,20 @@ async fn every_sweep_spawner_guards_on_its_own_subject() {
     // the assertions above BY NAME. A rule that disappears fails only
     // here — which is why lowering the number is a deliberate act with
     // a reason attached, not a number nudged until green.
+    //
+    // AND IT FAILS HERE AFTER CI HAS BEEN SPENT, which is backlog
+    // 709e480b: this number went stale in a DIFFERENT car from the
+    // retirement, so the contradiction existed only on the assembled
+    // tree and the first reader was a gate. The line below is the same
+    // six, declared in a shape the consist check reads against the rule
+    // directory before a train boards
+    // (`infra/lint/an-expectation-names-a-rule-the-tree-declares.sh`) —
+    // a comment the machine checks, not a comment asking the next
+    // person (CLAUDE.md §9a). It must move when this number moves; that
+    // is the point, and the lint names the file and line when it does
+    // not.
+    //
+    // rule-registry-pin: maintenance-sweep-*-daily = 6
     assert!(
         checked >= 6,
         "expected the six daily sweep spawners (build-caches, \

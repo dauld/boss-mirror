@@ -25,16 +25,24 @@
 //! this sweep is the reader.
 //!
 //! WHAT IT DOES, once a sim-day:
-//! 1. Read the DECLARED cadences off its own rule row's args (see
-//!    "where the declaration lives" below).
-//! 2. For each declared kind, read the newest packet of that kind from
-//!    the system of record.
+//! 1. Build the roster from BOTH its sources — the DECLARED cadences on
+//!    its own rule row's args (see "where the declaration lives" below)
+//!    and the cadences DERIVED from the clock rules that spawn packets
+//!    (see "the roster has a second source").
+//! 2. For each, read the newest packet of that identity from the system
+//!    of record.
 //! 3. Age past [`SILENCE_MULTIPLIER`]x the declared interval — or no
 //!    packet at all, ever — is a finding.
-//! 4. File ONE urgent packet per silent kind, naming the kind, its
-//!    expected interval, and the age of the last packet.
-//! 5. Idempotent: an open alarm for that kind is UPDATED with the
-//!    fresh measurement, never twinned. When packets of the kind start
+//! 4. For a cadence with a dedup guard, ask the guard's own question
+//!    before raising: a silence a still-open packet explains is reported
+//!    as SUPPRESSED and names that packet, and stays quiet entirely
+//!    while the block is younger than [`SUPPRESSION_INTERVALS`]
+//!    intervals.
+//! 5. File ONE urgent packet per quiet cadence, naming the identity, its
+//!    expected interval, the age of the last packet, and — when it is
+//!    blocked — the packet to drain.
+//! 6. Idempotent: an open alarm for that cadence is UPDATED with the
+//!    fresh measurement, never twinned. When packets start
 //!    arriving again the alarm CLOSES ITSELF (`stale` — the claim no
 //!    longer holds), stamped so the settled-suppression below can tell
 //!    a machine clear from a human's answer.
@@ -70,6 +78,33 @@
 //! names the offending kind when they drift, so a timer retuned from
 //! 5min to hourly cannot leave this rule alarming every day.
 //!
+//! THE ROSTER HAS A SECOND SOURCE, AND IT IS DERIVED, NOT DECLARED
+//! (backlog cf0f5e2d, measured 2026-09-10). The args above cover the
+//! kinds a systemd TIMER executes. The dispatcher also fires daily CLOCK
+//! RULES that spawn a chore packet with no timer anywhere, and such a
+//! cadence was outside this roster *by construction*: eight of them
+//! existed, none were watched, and three families had been silent for
+//! nine to nineteen days. The public mirror drifted 238 commits / 763
+//! files behind and a human noticed by hand. So the second source is the
+//! RULE REGISTRY itself — see [`super::cadence_roster`] for the
+//! derivation and for why it is derived (the identity of a clock cadence
+//! is the rule, not the kind: seven sweep rules share the kind
+//! `maintenance-sweep` and differ only in subject).
+//!
+//! A SUPPRESSED FIRING IS NOT A SILENT ONE, and the judgement lives
+//! here rather than in every rule. Each dead rule fires only
+//! `NOT open_job_exists(<kind>, <target>)`: the guard's intent is right
+//! (do not stack duplicate chores) but its effect is that ONE packet
+//! nobody finished converts a cadence into never-again. The alternative
+//! fix was to have each rule record its own suppression, which spreads
+//! the logic across sixty-odd rule rows and still leaves the judgement
+//! ("how long is too long?") nowhere. Instead this sweep reads the
+//! guard, asks the guard's own question, and reports the silence as
+//! SUPPRESSED — naming the packet that is holding the cadence, which is
+//! also the remedy — once the block has outlasted
+//! [`SUPPRESSION_INTERVALS`] of the declared interval. A block younger
+//! than that is the guard doing its job, and stays quiet.
+//!
 //! FAIL-CLOSED. A kind declared with something that is not a positive
 //! integer of minutes is reported as `undetermined`, never silently
 //! skipped: "I cannot tell whether this is silent" is itself the
@@ -93,7 +128,9 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use serde_json::{Map, Value, json};
 
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext};
+use boss_dispatcher::rules::registry::RawRule;
 
+use super::cadence_roster::{ClockCadence, Guard, clock_cadences};
 use super::common::{api_client, get_json, post_json, write_json};
 
 /// Arg-key prefix for one declared cadence. `interval_minutes.<kind>`
@@ -130,6 +167,23 @@ const SILENCE_MULTIPLIER: i64 = 2;
 /// within a day, not within ten minutes.
 const MIN_SILENCE_WINDOW_MIN: i64 = 360;
 
+/// How many of its own declared intervals a cadence may stay SUPPRESSED
+/// by its dedup guard before the suppression is itself the finding.
+///
+/// Three, one more than [`SILENCE_MULTIPLIER`], because an explained
+/// silence is not the same event as an unexplained one: for the first
+/// day or two the guard is doing exactly its job — yesterday's chore is
+/// still open, so today has nothing new to say, and spawning a twin
+/// would duplicate the obligation rather than discharge it (0517387b,
+/// 9f0c566a). Past three intervals that reading stops being credible:
+/// nobody is finishing the packet, and the cadence has been converted
+/// into never-again. The two measured cases cleared this by a wide
+/// margin — nine days for the seven sweeps, NINETEEN for the mirror
+/// (cf0f5e2d) — and the number is deliberately a constant rather than a
+/// rule arg, like [`SILENCE_MULTIPLIER`] beside it: it is a calibration
+/// of this sweep's own judgement, not a per-cadence fact.
+const SUPPRESSION_INTERVALS: i64 = 3;
+
 /// How long a finding a HUMAN settled stays settled — the estate
 /// alarm's constant and its reasoning: an alarm the operator has just
 /// answered is noise until the answer can change. A close this sweep
@@ -158,19 +212,67 @@ pub struct CadenceSilenceSweep {
     /// on the no-wallclock allowlist, so this comes from the clock
     /// service like every other stamp.
     clock: Arc<dyn boss_clock_client::ClockClient>,
+    /// The rules the dispatcher is ENFORCING — the roster's second
+    /// source (see [`super::cadence_roster`]).
+    ///
+    /// This is the registry snapshot the rules runner loaded at startup,
+    /// handed in as an argument, not fetched. Two reasons, in order.
+    /// First, it is what is actually FIRING: a published row the runner
+    /// has not picked up yet (hot-reload is a planned follow-up) is a
+    /// rule nothing is running, and a sweep that judged silence against
+    /// rules nobody enforces would report a cadence as watched when it
+    /// is not. Second, a handler that reports through the service it
+    /// lives inside inherits that service's outages — CLAUDE.md
+    /// §Diagnosis, "an alarm that reports through its subject dies with
+    /// it" — and the rows are right here. The shape is exactly what
+    /// `GET /api/dispatcher/rules` serves, so the derivation is
+    /// unchanged if the reader ever becomes that surface.
+    rules: Vec<RawRule>,
 }
 
 impl CadenceSilenceSweep {
-    pub fn new(jobs_base: impl Into<String>, clock_url: impl Into<String>) -> Arc<Self> {
+    pub fn new(
+        jobs_base: impl Into<String>,
+        clock_url: impl Into<String>,
+        rules: Vec<RawRule>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             client: api_client(),
             jobs_base: jobs_base.into(),
             clock: Arc::new(boss_clock_client::ReqwestClockClient::new(clock_url)),
+            rules,
         })
     }
 
     fn base(&self) -> &str {
         self.jobs_base.trim_end_matches('/')
+    }
+
+    /// Ask one cadence's dedup guard its OWN question — is there an open
+    /// packet of `(kind, subject)`? — and answer with the one that has
+    /// been open longest, which is the packet holding the cadence and the
+    /// remedy for it.
+    ///
+    /// `Ok(None)` is "nothing is holding it", which leaves the silence
+    /// unexplained and therefore still a finding.
+    async fn blocking_packet(
+        &self,
+        kind: &str,
+        subject: &str,
+        guard: &str,
+        rule_name: &str,
+    ) -> Result<Option<Block>, HandlerError> {
+        let url = format!(
+            "{}/api/jobs?kind={kind}&status=open&subject_id={subject}&limit={DEDUP_PAGE}",
+            self.base()
+        );
+        let listing = get_json(&self.client, &url, rule_name).await?;
+        let rows: Vec<Value> = listing
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok(oldest_open_block(&rows, guard))
     }
 }
 
@@ -218,6 +320,122 @@ pub fn declarations(
         out.insert(kind.to_string(), declared);
     }
     out.into_iter().collect()
+}
+
+/// Where one watched cadence's declaration came from. Carried into the
+/// alarm so a reader knows which registry row to edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    /// An `interval_minutes.<kind>` arg on this sweep's own rule row —
+    /// the timer-executed chores.
+    Args,
+    /// Derived from the clock rule that spawns the packet.
+    ClockRule(String),
+}
+
+impl Source {
+    fn as_value(&self) -> Value {
+        match self {
+            Source::Args => json!("cadence-silence-sweep-daily:args"),
+            Source::ClockRule(rule) => json!(format!("rule:{rule}")),
+        }
+    }
+}
+
+/// One cadence this sweep watches: what identifies its packets, how
+/// often they are expected, where that was declared, and what may
+/// legitimately suppress the firing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Watched {
+    /// The identity, in one string: `<kind>` for a timer-declared
+    /// cadence, `<kind>/<subject>` for a clock-rule one. The dedup key
+    /// and the name in every message.
+    pub label: String,
+    pub kind: String,
+    /// Set only when the cadence is identified by subject as well as
+    /// kind — seven sweep rules share one kind.
+    pub subject: Option<String>,
+    pub declared: Declared,
+    pub source: Source,
+    /// The guard that can legitimately hold this cadence, when it has
+    /// one. Only a clock rule has a guard; a timer has no `when`.
+    pub guard: Option<Guard>,
+}
+
+impl Watched {
+    /// A cadence declared by one of this sweep's own args.
+    pub fn from_arg(kind: impl Into<String>, declared: Declared) -> Self {
+        let kind = kind.into();
+        Self {
+            label: kind.clone(),
+            kind,
+            subject: None,
+            declared,
+            source: Source::Args,
+            guard: None,
+        }
+    }
+
+    /// A cadence derived from a clock rule.
+    pub fn from_clock_rule(c: &ClockCadence) -> Self {
+        Self {
+            label: c.label(),
+            kind: c.kind.clone(),
+            subject: Some(c.subject.clone()),
+            declared: Declared::Minutes(c.interval_min),
+            source: Source::ClockRule(c.rule.clone()),
+            guard: c.guard.clone(),
+        }
+    }
+
+    /// The listing that answers "when did a packet of this identity last
+    /// arrive?" — `limit=1`, because only the newest matters.
+    fn newest_packet_path(&self) -> String {
+        match &self.subject {
+            Some(s) => format!("/api/jobs?kind={}&subject_id={}&limit=1", self.kind, s),
+            None => format!("/api/jobs?kind={}&limit=1", self.kind),
+        }
+    }
+}
+
+/// THE roster: both sources, merged, label-sorted so a pass is
+/// deterministic.
+///
+/// A label claimed twice becomes [`Declared::Undetermined`] rather than
+/// one entry silently winning — the same fail-closed posture an
+/// unreadable interval gets. (The coarser collision — an arg declaring a
+/// KIND that a clock rule declares per subject — cannot be seen from one
+/// label and is pinned in CI instead, by
+/// `no_clock_rule_kind_is_also_declared_on_the_sweeps_args`.)
+pub fn watched_cadences(
+    args: &[(String, boss_dispatcher::rules::expr::Value)],
+    rules: &[RawRule],
+) -> Vec<Watched> {
+    let mut out: BTreeMap<String, Watched> = declarations(args)
+        .into_iter()
+        .map(|(kind, declared)| (kind.clone(), Watched::from_arg(kind, declared)))
+        .collect();
+    let (cadences, _skipped) = clock_cadences(rules);
+    for c in &cadences {
+        let w = Watched::from_clock_rule(c);
+        match out.get_mut(&w.label) {
+            Some(existing) => {
+                let first = match &existing.source {
+                    Source::Args => "this sweep's own args".to_string(),
+                    Source::ClockRule(r) => format!("clock rule `{r}`"),
+                };
+                existing.declared = Declared::Undetermined(format!(
+                    "`{}` is declared twice — by {first} and by clock rule `{}`; one fact in \
+                     two places, so neither is trusted",
+                    w.label, c.rule
+                ));
+            }
+            None => {
+                out.insert(w.label.clone(), w);
+            }
+        }
+    }
+    out.into_values().collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +494,30 @@ pub enum Verdict {
     /// shape, and the loudest one, because there is not even a
     /// history to be stale.
     NeverFiled { interval_min: i64 },
+    /// Silent, and the cadence's OWN dedup guard is why: an open packet
+    /// the guard asks about has been sitting there. Not a dead chore — a
+    /// BLOCKED one, whose remedy is the named packet.
+    ///
+    /// `alarming` is the judgement [`SUPPRESSION_INTERVALS`] encodes: a
+    /// young block is the guard working as designed and says nothing,
+    /// while a block past the window has converted the cadence into
+    /// never-again. It is also true when the silence STARTED before the
+    /// block (`age_min` much larger than `blocked_min`), because a block
+    /// cannot explain a quiet that predates it.
+    Suppressed {
+        interval_min: i64,
+        age_min: i64,
+        last: String,
+        /// How long the blocking packet has been open.
+        blocked_min: i64,
+        since: String,
+        by_job: String,
+        by_title: String,
+        /// The guard verbatim, so the alarm quotes what an operator will
+        /// go and read.
+        guard: String,
+        alarming: bool,
+    },
     /// The declaration could not be read. Fail-closed: reported, not
     /// skipped.
     Undetermined { reason: String },
@@ -284,7 +526,100 @@ pub enum Verdict {
 impl Verdict {
     /// Is this verdict worth a packet?
     pub fn is_finding(&self) -> bool {
-        !matches!(self, Verdict::Fresh)
+        match self {
+            Verdict::Fresh => false,
+            // A suppression inside its window is the guard doing its job.
+            Verdict::Suppressed { alarming, .. } => *alarming,
+            _ => true,
+        }
+    }
+
+    /// Is this a silence the guard EXPLAINS but that is not yet worth
+    /// waking anyone for? Neither a finding nor a clear: the cadence is
+    /// quiet on purpose, so a standing alarm must not be closed as
+    /// "arriving again" either.
+    pub fn is_explained(&self) -> bool {
+        matches!(
+            self,
+            Verdict::Suppressed {
+                alarming: false,
+                ..
+            }
+        )
+    }
+}
+
+/// The open packet one cadence's guard is holding it behind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Block {
+    pub job_id: String,
+    pub title: String,
+    pub opened: DateTime<Utc>,
+    /// The guard that asked about it, verbatim.
+    pub guard: String,
+}
+
+/// The OLDEST open packet in a guard's listing — the one nobody drained,
+/// which is both the longest-standing block and the actionable remedy.
+/// A row whose open instant cannot be read is skipped here and cannot
+/// suppress anything, which keeps an unreadable row loud rather than
+/// quiet.
+pub fn oldest_open_block(rows: &[Value], guard: &str) -> Option<Block> {
+    rows.iter()
+        .filter_map(|row| {
+            Some(Block {
+                job_id: row.get("id").and_then(Value::as_str)?.to_string(),
+                title: row
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("(untitled)")
+                    .to_string(),
+                opened: packet_at(row)?,
+                guard: guard.to_string(),
+            })
+        })
+        .min_by_key(|b| b.opened)
+}
+
+/// How long a cadence may stay suppressed before the suppression is the
+/// finding: [`SUPPRESSION_INTERVALS`]x its interval, never less than
+/// [`MIN_SILENCE_WINDOW_MIN`].
+pub fn suppression_window_min(interval_min: i64) -> i64 {
+    (SUPPRESSION_INTERVALS * interval_min).max(MIN_SILENCE_WINDOW_MIN)
+}
+
+/// Fold the packet that explains a silence into the verdict.
+///
+/// Only a [`Verdict::Silent`] can be explained this way. `NeverFiled`
+/// deliberately is not: for every shipped guard the blocking packet IS a
+/// packet of the measured identity, so "no packet ever" plus "a packet is
+/// open" is a contradiction the sweep reports rather than reconciles.
+pub fn explained_by(base: Verdict, block: &Block, now: DateTime<Utc>) -> Verdict {
+    let Verdict::Silent {
+        interval_min,
+        age_min,
+        last,
+    } = base
+    else {
+        return base;
+    };
+    let blocked_min = (now - block.opened).num_minutes();
+    // Quiet that predates the block is quiet the block cannot account
+    // for, so it still alarms — a one-hour block must not bury five days
+    // of unexplained silence.
+    let unexplained_min = age_min - blocked_min;
+    let alarming = blocked_min > suppression_window_min(interval_min)
+        || unexplained_min > silence_window_min(interval_min);
+    Verdict::Suppressed {
+        interval_min,
+        age_min,
+        last,
+        blocked_min,
+        since: block.opened.to_rfc3339(),
+        by_job: block.job_id.clone(),
+        by_title: block.title.clone(),
+        guard: block.guard.clone(),
+        alarming,
     }
 }
 
@@ -403,25 +738,77 @@ fn human_minutes(min: i64) -> String {
 }
 
 /// The one-line condition a finding states — title and detail share it.
-fn headline(kind: &str, v: &Verdict) -> String {
+fn headline(label: &str, v: &Verdict) -> String {
     match v {
-        Verdict::Fresh => format!("{kind} is arriving on cadence"),
+        Verdict::Fresh => format!("{label} is arriving on cadence"),
         Verdict::Silent {
             interval_min,
             age_min,
             ..
         } => format!(
-            "{kind} has filed no packet for {} — it is declared every {}",
+            "{label} has filed no packet for {} — it is declared every {}",
             human_minutes(*age_min),
             human_minutes(*interval_min)
         ),
         Verdict::NeverFiled { interval_min } => format!(
-            "{kind} is declared every {} and NO packet of that kind has ever been filed",
+            "{label} is declared every {} and NO packet of that kind has ever been filed",
             human_minutes(*interval_min)
         ),
+        Verdict::Suppressed {
+            interval_min,
+            age_min,
+            blocked_min,
+            by_job,
+            guard,
+            ..
+        } => format!(
+            "{label} has filed no packet for {} — it is declared every {}, and its own guard \
+             ({guard}) has been held open for {} by packet {by_job}",
+            human_minutes(*age_min),
+            human_minutes(*interval_min),
+            human_minutes(*blocked_min)
+        ),
         Verdict::Undetermined { .. } => {
-            format!("{kind} is declared as cadenced but its interval cannot be read")
+            format!("{label} is declared as cadenced but its interval cannot be read")
         }
+    }
+}
+
+/// What to DO about this finding — the sentence that separates a dead
+/// chore from a blocked one. A verdict someone must go re-derive is not
+/// a verdict (CLAUDE.md §Diagnosis).
+fn remedy(label: &str, v: &Verdict) -> String {
+    match v {
+        Verdict::Suppressed {
+            by_job,
+            by_title,
+            since,
+            guard,
+            blocked_min,
+            interval_min,
+            ..
+        } => format!(
+            "This cadence is not dead, it is BLOCKED, and the block is the remedy: the rule \
+             fires only when `{guard}`, and packet {by_job} (\"{by_title}\") has been open \
+             since {since} — {} against a declared interval of {}. Drive that packet to a \
+             terminal and the next clock day spawns `{label}` again. ONE unfinished packet \
+             converts a cadence into never-again: measured 2026-09-10 (cf0f5e2d), an open \
+             publish packet from 2026-08-22 held the daily mirror check for NINETEEN days \
+             while the public mirror drifted 238 commits / 763 files behind, and seven \
+             undrained sweep packets from 2026-09-01 held their seven rules for nine days. \
+             The threshold for saying so is {SUPPRESSION_INTERVALS} intervals, never under \
+             {MIN_SILENCE_WINDOW_MIN} minutes.",
+            human_minutes(*blocked_min),
+            human_minutes(*interval_min)
+        ),
+        _ => format!(
+            "The interval is declared on this sweep's own dispatcher rule row \
+             (`{ARG_PREFIX}{label}`) or derived from the clock rule that spawns the packet \
+             (see cadence_roster); the actual is the newest packet of that identity in the \
+             system of record. Threshold is {SILENCE_MULTIPLIER}x the declared interval and \
+             never under {MIN_SILENCE_WINDOW_MIN} minutes, so one missed firing is weather \
+             and a daily sweep cannot cry wolf about a five-minute chore."
+        ),
     }
 }
 
@@ -429,11 +816,20 @@ fn headline(kind: &str, v: &Verdict) -> String {
 /// a metadata merge, on every refresh of a standing alarm, so the
 /// packet always shows TODAY's measurement rather than the day it was
 /// first raised.
-pub fn measurement(kind: &str, v: &Verdict, now: DateTime<Utc>) -> Map<String, Value> {
+pub fn measurement(w: &Watched, v: &Verdict, now: DateTime<Utc>) -> Map<String, Value> {
     let mut m = Map::new();
-    m.insert("cadence_kind".into(), json!(kind));
+    // `cadence_kind` stays the packet KIND, as it has been since the
+    // sweep's first alarm; `cadence` is the full identity, which for a
+    // clock-rule cadence is kind + target.
+    m.insert("cadence_kind".into(), json!(w.kind));
+    m.insert("cadence".into(), json!(w.label));
+    m.insert(
+        "cadence_target".into(),
+        w.subject.as_ref().map_or(Value::Null, |s| json!(s)),
+    );
+    m.insert("cadence_declared_by".into(), w.source.as_value());
     m.insert("last_measured_at".into(), json!(now.to_rfc3339()));
-    m.insert("condition".into(), json!(headline(kind, v)));
+    m.insert("condition".into(), json!(headline(&w.label, v)));
     match v {
         Verdict::Fresh => {}
         Verdict::Silent {
@@ -450,6 +846,32 @@ pub fn measurement(kind: &str, v: &Verdict, now: DateTime<Utc>) -> Map<String, V
             m.insert("silent_for_minutes".into(), Value::Null);
             m.insert("last_packet_at".into(), Value::Null);
         }
+        Verdict::Suppressed {
+            interval_min,
+            age_min,
+            last,
+            blocked_min,
+            since,
+            by_job,
+            by_title,
+            guard,
+            alarming,
+        } => {
+            m.insert("expected_interval_minutes".into(), json!(interval_min));
+            m.insert("silent_for_minutes".into(), json!(age_min));
+            m.insert("last_packet_at".into(), json!(last));
+            m.insert("suppressed".into(), json!(true));
+            m.insert("suppressed_for_minutes".into(), json!(blocked_min));
+            m.insert("suppressed_since".into(), json!(since));
+            m.insert("suppressed_by_job".into(), json!(by_job));
+            m.insert("suppressed_by_title".into(), json!(by_title));
+            m.insert("suppression_guard".into(), json!(guard));
+            m.insert(
+                "suppression_threshold_minutes".into(),
+                json!(suppression_window_min(*interval_min)),
+            );
+            m.insert("past_suppression_threshold".into(), json!(alarming));
+        }
         Verdict::Undetermined { reason } => {
             m.insert("expected_interval_minutes".into(), json!("undetermined"));
             m.insert("undetermined_reason".into(), json!(reason));
@@ -459,33 +881,30 @@ pub fn measurement(kind: &str, v: &Verdict, now: DateTime<Utc>) -> Map<String, V
 }
 
 /// The urgent packet one silent kind becomes.
-pub fn alarm_body(kind: &str, v: &Verdict, evidence: &str, now: DateTime<Utc>) -> Value {
-    let mut metadata = measurement(kind, v, now);
+pub fn alarm_body(w: &Watched, v: &Verdict, evidence: &str, now: DateTime<Utc>) -> Value {
+    let label = &w.label;
+    let mut metadata = measurement(w, v, now);
     metadata.insert("area".into(), json!("estate-observation"));
-    metadata.insert("cadence_silence".into(), json!(silence_key(kind)));
+    metadata.insert("cadence_silence".into(), json!(silence_key(label)));
     metadata.insert("reporter".into(), json!("cadence.silence.sweep"));
     metadata.insert(
         "detail".into(),
         json!(format!(
-            "Raised by cadence.silence.sweep (backlog ecca2f43): {}. The interval is \
-             declared on this sweep's own dispatcher rule row \
-             (`{ARG_PREFIX}{kind}`); the actual is the newest packet of that kind in \
-             the system of record. Threshold is {SILENCE_MULTIPLIER}x the declared \
-             interval and never under {MIN_SILENCE_WINDOW_MIN} minutes, so one missed \
-             firing is weather and a daily sweep cannot cry wolf about a \
-             five-minute chore. This alarm UPDATES itself on each daily pass and CLOSES itself \
-             (`stale`) the moment a packet of `{kind}` arrives again — so if it is \
-             still open, the cadence is still silent. Precedent for why this exists: \
-             maintenance-ml-inference-batch died in ExecStartPre for 23 nights \
-             (e109f57e) and the five-minute maintenance-estate-observe-units observer \
-             was quiet for four days (408c81f6); both were found by hand. Evidence: \
-             {evidence}.",
-            headline(kind, v)
+            "Raised by cadence.silence.sweep (backlog ecca2f43): {}. {} This alarm UPDATES \
+             itself on each daily pass and CLOSES itself (`stale`) the moment a packet of \
+             `{label}` arrives again — so if it is still open, the cadence is still quiet. \
+             Precedent for why this exists: maintenance-ml-inference-batch died in \
+             ExecStartPre for 23 nights (e109f57e) and the five-minute \
+             maintenance-estate-observe-units observer was quiet for four days (408c81f6); \
+             both were found by hand, as was the nineteen-day mirror drift the suppression \
+             half of this sweep exists for (cf0f5e2d). Evidence: {evidence}.",
+            headline(label, v),
+            remedy(label, v)
         )),
     );
     json!({
         "kind": "backlog-item",
-        "title": alarm_title(kind, v),
+        "title": alarm_title(label, v),
         "subject": {"subject_kind": "custom", "id": "bosspipeline"},
         "owner_id": "emp-david",
         "priority": "urgent",
@@ -495,18 +914,25 @@ pub fn alarm_body(kind: &str, v: &Verdict, evidence: &str, now: DateTime<Utc>) -
     })
 }
 
-fn alarm_title(kind: &str, v: &Verdict) -> String {
+fn alarm_title(label: &str, v: &Verdict) -> String {
     match v {
-        Verdict::Fresh => format!("CADENCE OK: {kind}"),
+        Verdict::Fresh => format!("CADENCE OK: {label}"),
         Verdict::Silent { age_min, .. } => format!(
-            "CADENCE SILENT: {kind} — no packet for {}",
+            "CADENCE SILENT: {label} — no packet for {}",
             human_minutes(*age_min)
         ),
         Verdict::NeverFiled { .. } => {
-            format!("CADENCE SILENT: {kind} — no packet has ever arrived")
+            format!("CADENCE SILENT: {label} — no packet has ever arrived")
         }
+        // A blocked cadence reads differently from a dead one on
+        // purpose: the title carries the remedy's shape, because the
+        // operator's next move is a packet, not a host.
+        Verdict::Suppressed { blocked_min, .. } => format!(
+            "CADENCE SUPPRESSED: {label} — its own guard held {} by an open packet",
+            human_minutes(*blocked_min)
+        ),
         Verdict::Undetermined { .. } => {
-            format!("CADENCE UNDECLARED: {kind} — expected interval cannot be read")
+            format!("CADENCE UNDECLARED: {label} — expected interval cannot be read")
         }
     }
 }
@@ -514,8 +940,8 @@ fn alarm_title(kind: &str, v: &Verdict) -> String {
 /// The metadata merge that refreshes a STANDING alarm instead of
 /// filing a twin. `PATCH /api/jobs/{id}/metadata` merges top-level
 /// keys, so this is exactly the fields that change between passes.
-pub fn refresh_patch(kind: &str, v: &Verdict, now: DateTime<Utc>) -> Value {
-    Value::Object(measurement(kind, v, now))
+pub fn refresh_patch(w: &Watched, v: &Verdict, now: DateTime<Utc>) -> Value {
+    Value::Object(measurement(w, v, now))
 }
 
 /// The triage completion that CLOSES a standing alarm when the kind
@@ -525,18 +951,18 @@ pub fn refresh_patch(kind: &str, v: &Verdict, now: DateTime<Utc>) -> Value {
 ///
 /// PUT on a step REPLACES top-level metadata, so the step's existing
 /// keys (`authority_role`) are carried through by the caller.
-pub fn clear_step_body(existing: &Map<String, Value>, kind: &str, v: &Verdict) -> Value {
+pub fn clear_step_body(existing: &Map<String, Value>, label: &str, v: &Verdict) -> Value {
     let mut metadata = existing.clone();
     metadata.insert("disposition".into(), json!("stale"));
     metadata.insert(
         "evidence".into(),
         json!(format!(
-            "cadence.silence.sweep re-measured `{kind}` and it is arriving again: {}. \
+            "cadence.silence.sweep re-measured `{label}` and it is arriving again: {}. \
              The claim this alarm carried no longer holds; closed by machine, not by \
              judgement.",
             match v {
                 Verdict::Fresh => "its newest packet is inside the declared window".to_string(),
-                other => headline(kind, other),
+                other => headline(label, other),
             }
         )),
     );
@@ -577,15 +1003,15 @@ impl Handler for CadenceSilenceSweep {
         args: &[(String, boss_dispatcher::rules::expr::Value)],
         ctx: &InvocationContext,
     ) -> Result<(), HandlerError> {
-        let declared = declarations(args);
-        if declared.is_empty() {
+        let watched = watched_cadences(args, &self.rules);
+        if watched.is_empty() {
             // A sweep declaring nothing watches nothing, and would
             // report "all clear" forever. That is the silent-check
             // class this handler exists to end, so it is an error.
             return Err(HandlerError::Permanent(
-                "cadence.silence.sweep: the rule row declares no cadences (no \
-                 `interval_minutes.<kind>` args) — a sweep with an empty roster is a \
-                 check that is not running"
+                "cadence.silence.sweep: the roster is empty — the rule row declares no \
+                 `interval_minutes.<kind>` args AND no enforced clock rule spawns a packet \
+                 on a schedule. A sweep with an empty roster is a check that is not running"
                     .into(),
             ));
         }
@@ -596,24 +1022,24 @@ impl Handler for CadenceSilenceSweep {
         );
 
         // Best-effort accumulator, the estate alarm's posture: one
-        // kind's failed read must never block the other seventeen.
+        // cadence's failed read must never block every other cadence.
         // Every sub-op that failed surfaces as ONE error at the end, so
         // a transient still NAKs for retry (dedup makes the retry
         // idempotent) while every alarm that COULD raise, did.
         let mut errors: Vec<String> = Vec::new();
-        let mut findings: BTreeMap<String, Verdict> = BTreeMap::new();
-        let mut clear: BTreeMap<String, Verdict> = BTreeMap::new();
+        let mut findings: Vec<(&Watched, Verdict)> = Vec::new();
+        let mut clear: Vec<(&Watched, Verdict)> = Vec::new();
 
-        for (kind, decl) in &declared {
+        for w in &watched {
             // An undetermined declaration needs no read: the finding is
             // that we cannot measure it.
-            if let Declared::Undetermined(_) = decl {
-                findings.insert(kind.clone(), verdict(decl, None, now));
+            if let Declared::Undetermined(_) = &w.declared {
+                findings.push((w, verdict(&w.declared, None, now)));
                 continue;
             }
             let listing = match get_json(
                 &self.client,
-                &format!("{}/api/jobs?kind={kind}&limit=1", self.base()),
+                &format!("{}{}", self.base(), w.newest_packet_path()),
                 &ctx.rule_name,
             )
             .await
@@ -621,7 +1047,8 @@ impl Handler for CadenceSilenceSweep {
                 Ok(l) => l,
                 Err(e) => {
                     errors.push(format!(
-                        "newest-packet read for {kind} failed; other kinds still swept: {e}"
+                        "newest-packet read for {} failed; other cadences still swept: {e}",
+                        w.label
                     ));
                     continue;
                 }
@@ -631,11 +1058,49 @@ impl Handler for CadenceSilenceSweep {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            let v = verdict(decl, newest_packet_at(&rows), now);
+            let mut v = verdict(&w.declared, newest_packet_at(&rows), now);
+            // A silence with a guard gets ONE more question: is the
+            // cadence blocked rather than dead? Asked only when there is
+            // already a finding — a cadence arriving on time needs no
+            // explanation — so the common pass costs nothing.
+            if v.is_finding()
+                && let Some(Guard::OpenPacket {
+                    kind,
+                    subject,
+                    source,
+                }) = &w.guard
+            {
+                match self
+                    .blocking_packet(kind, subject, source, &ctx.rule_name)
+                    .await
+                {
+                    Ok(Some(block)) => v = explained_by(v, &block, now),
+                    Ok(None) => {}
+                    Err(e) => {
+                        // The silence still raises, as an UNEXPLAINED
+                        // one — losing the explanation is better than
+                        // losing the alarm.
+                        errors.push(format!(
+                            "guard read for {} failed, so its silence is reported \
+                             unexplained: {e}",
+                            w.label
+                        ));
+                    }
+                }
+            }
             if v.is_finding() {
-                findings.insert(kind.clone(), v);
+                findings.push((w, v));
+            } else if v.is_explained() {
+                // Quiet on purpose: the guard is holding it and has not
+                // held it long enough to be the defect. Neither raise
+                // nor clear — clearing would claim the cadence is
+                // arriving again, which is not what was measured.
+                tracing::info!(
+                    cadence = %w.label,
+                    "cadence.silence.sweep: suppressed by an open packet, inside the window"
+                );
             } else {
-                clear.insert(kind.clone(), v);
+                clear.push((w, v));
             }
         }
 
@@ -691,61 +1156,63 @@ impl Handler for CadenceSilenceSweep {
         let open = open_alarms(&open_rows);
         let settled = settled_recently(&closed_rows, now);
 
-        // Raise or refresh, one packet per silent kind.
-        for (kind, v) in &findings {
-            let key = silence_key(kind);
+        // Raise or refresh, one packet per quiet cadence.
+        for (w, v) in &findings {
+            let label = &w.label;
+            let key = silence_key(label);
             if let Some(existing) = open.get(&key) {
                 let Some(id) = existing.get("id").and_then(Value::as_str) else {
-                    errors.push(format!("open alarm for {kind} has no id; not refreshed"));
+                    errors.push(format!("open alarm for {label} has no id; not refreshed"));
                     continue;
                 };
                 if let Err(e) = write_json(
                     &self.client,
                     reqwest::Method::PATCH,
                     &format!("{}/api/jobs/{id}/metadata", self.base()),
-                    &refresh_patch(kind, v, now),
+                    &refresh_patch(w, v, now),
                     &ctx.rule_name,
                 )
                 .await
                 {
-                    errors.push(format!("refresh of the open alarm for {kind} failed: {e}"));
+                    errors.push(format!("refresh of the open alarm for {label} failed: {e}"));
                     continue;
                 }
-                tracing::info!(cadence = %kind, "cadence.silence.sweep refreshed a standing alarm");
+                tracing::info!(cadence = %label, "cadence.silence.sweep refreshed a standing alarm");
                 continue;
             }
             if settled.contains(&key) {
-                tracing::info!(cadence = %kind, "cadence.silence.sweep: settled by a human inside the window — not re-raising");
+                tracing::info!(cadence = %label, "cadence.silence.sweep: settled by a human inside the window — not re-raising");
                 continue;
             }
             if let Err(e) = post_json(
                 &self.client,
                 &format!("{}/api/jobs", self.base()),
-                &alarm_body(kind, v, &evidence, now),
+                &alarm_body(w, v, &evidence, now),
                 &ctx.rule_name,
             )
             .await
             {
                 errors.push(format!(
-                    "raise for {kind} failed; other findings still raised: {e}"
+                    "raise for {label} failed; other findings still raised: {e}"
                 ));
                 continue;
             }
-            tracing::info!(cadence = %kind, "cadence.silence.sweep raised a packet");
+            tracing::info!(cadence = %label, "cadence.silence.sweep raised a packet");
         }
 
-        // A kind that came back closes its own alarm.
-        for (kind, v) in &clear {
-            let Some(existing) = open.get(&silence_key(kind)) else {
+        // A cadence that came back closes its own alarm.
+        for (w, v) in &clear {
+            let label = &w.label;
+            let Some(existing) = open.get(&silence_key(label)) else {
                 continue;
             };
             let Some(id) = existing.get("id").and_then(Value::as_str) else {
-                errors.push(format!("open alarm for {kind} has no id; not cleared"));
+                errors.push(format!("open alarm for {label} has no id; not cleared"));
                 continue;
             };
             let Some((step_id, step_meta)) = triage_step(existing) else {
                 errors.push(format!(
-                    "open alarm for {kind} has no `{TRIAGE_SLUG}` step; cannot close itself"
+                    "open alarm for {label} has no `{TRIAGE_SLUG}` step; cannot close itself"
                 ));
                 continue;
             };
@@ -753,15 +1220,15 @@ impl Handler for CadenceSilenceSweep {
                 &self.client,
                 reqwest::Method::PUT,
                 &format!("{}/api/jobs/{id}/steps/{step_id}", self.base()),
-                &clear_step_body(&step_meta, kind, v),
+                &clear_step_body(&step_meta, label, v),
                 &ctx.rule_name,
             )
             .await
             {
-                errors.push(format!("auto-close of the alarm for {kind} failed: {e}"));
+                errors.push(format!("auto-close of the alarm for {label} failed: {e}"));
                 continue;
             }
-            tracing::info!(cadence = %kind, "cadence.silence.sweep closed its own alarm — the kind is arriving again");
+            tracing::info!(cadence = %label, "cadence.silence.sweep closed its own alarm — the cadence is arriving again");
         }
 
         finish(errors)
@@ -800,6 +1267,48 @@ mod tests {
             "id": "pkt-1",
             "opened_on": &opened_at[..10],
             "metadata": {"chore": "x", "opened_at": opened_at},
+        })
+    }
+
+    /// A timer-declared cadence, the shape every pre-existing alarm has.
+    fn watched(kind: &str) -> Watched {
+        Watched::from_arg(kind, Declared::Minutes(1440))
+    }
+
+    /// The image-freshness sweep as the registry holds it — the rule that
+    /// went nine days dead behind its own guard (cf0f5e2d).
+    fn image_freshness_rule() -> RawRule {
+        RawRule {
+            name: "maintenance-sweep-image-freshness-daily".into(),
+            on_event: None,
+            schedule: Some(boss_dispatcher::rules::registry::RawSchedule {
+                cadence: boss_core::calendar::Cadence::Daily,
+                anchor_date: "2026-08-14".parse().expect("a date"),
+                business_calendar: None,
+            }),
+            when: Some(r#"NOT open_job_exists("maintenance-sweep", "image-freshness")"#.into()),
+            do_steps: vec![boss_dispatcher::rules::registry::RawDoStep {
+                handler: "jobs.spawn".into(),
+                args: [
+                    ("kind".to_string(), r#""maintenance-sweep""#.to_string()),
+                    ("subject".to_string(), r#""image-freshness""#.to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            }],
+            delay: None,
+            version: 2,
+        }
+    }
+
+    /// The open packet that held it: spawned 2026-09-01, never drained.
+    fn blocking_packet() -> Value {
+        json!({
+            "id": "c7a48d7f-0000-0000-0000-000000000000",
+            "status": "open",
+            "title": "CI image freshness sweep",
+            "opened_on": "2026-09-01",
+            "metadata": {"opened_at": "2026-09-01T03:05:00+00:00", "target": "image-freshness"},
         })
     }
 
@@ -993,7 +1502,7 @@ mod tests {
         let now = at("2026-09-09T12:00:00Z");
         let kind = "maintenance-ml-inference-batch";
         let v = Verdict::NeverFiled { interval_min: 1440 };
-        let raised = alarm_body(kind, &v, "first pass", at("2026-09-08T12:00:00Z"));
+        let raised = alarm_body(&watched(kind), &v, "first pass", at("2026-09-08T12:00:00Z"));
         // The packet as the jobs API would list it back.
         let open = json!({
             "id": "alarm-1",
@@ -1010,7 +1519,7 @@ mod tests {
 
         // And the refresh carries the NEW measurement, so a standing
         // alarm shows today's age rather than the day it was raised.
-        let patch = refresh_patch(kind, &v, now);
+        let patch = refresh_patch(&watched(kind), &v, now);
         assert_eq!(
             patch["last_measured_at"],
             json!(now.to_rfc3339()),
@@ -1103,7 +1612,12 @@ mod tests {
             age_min: 6165,
             last: "2026-09-04T09:15:00+00:00".into(),
         };
-        let body = alarm_body("maintenance-estate-observe-units", &v, "evidence", now);
+        let body = alarm_body(
+            &Watched::from_arg("maintenance-estate-observe-units", Declared::Minutes(5)),
+            &v,
+            "evidence",
+            now,
+        );
         let title = body["title"].as_str().expect("a title");
         assert!(
             title.contains("maintenance-estate-observe-units"),
@@ -1123,13 +1637,240 @@ mod tests {
         );
     }
 
+    // -- the roster's two sources ----------------------------------------
+
+    /// The timer kinds and the clock-rule cadences land in ONE roster,
+    /// and a clock cadence is identified by kind AND subject — the
+    /// distinction seven sibling sweep rules need.
+    #[test]
+    fn the_roster_merges_the_args_with_the_clock_rules() {
+        let args = vec![(
+            "interval_minutes.maintenance-backup".to_string(),
+            ExprValue::Int(1440),
+        )];
+        let roster = watched_cadences(&args, &[image_freshness_rule()]);
+        let labels: Vec<&str> = roster.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec!["maintenance-backup", "maintenance-sweep/image-freshness"]
+        );
+
+        let timer = &roster[0];
+        assert_eq!(timer.source, Source::Args);
+        assert_eq!(timer.guard, None, "a timer has no `when` to suppress it");
+        assert_eq!(
+            timer.newest_packet_path(),
+            "/api/jobs?kind=maintenance-backup&limit=1"
+        );
+
+        let clock = &roster[1];
+        assert_eq!(
+            clock.source,
+            Source::ClockRule("maintenance-sweep-image-freshness-daily".into())
+        );
+        assert_eq!(clock.declared, Declared::Minutes(1440));
+        assert_eq!(
+            clock.newest_packet_path(),
+            "/api/jobs?kind=maintenance-sweep&subject_id=image-freshness&limit=1",
+            "a clock cadence is measured per TARGET; six silent siblings hid behind the kind"
+        );
+    }
+
+    /// §9a at runtime: one identity declared by both sources is trusted
+    /// from neither. (CI pins the coarser case — an arg for a KIND a
+    /// clock rule declares per subject — since one label cannot see it.)
+    #[test]
+    fn an_identity_declared_by_both_sources_is_undetermined() {
+        let args = vec![(
+            "interval_minutes.maintenance-sweep/image-freshness".to_string(),
+            ExprValue::Int(1440),
+        )];
+        let roster = watched_cadences(&args, &[image_freshness_rule()]);
+        assert_eq!(roster.len(), 1, "one identity stays one entry");
+        assert!(
+            matches!(roster[0].declared, Declared::Undetermined(_)),
+            "{:?}",
+            roster[0].declared
+        );
+        assert!(
+            verdict(&roster[0].declared, None, at("2026-09-10T12:00:00Z")).is_finding(),
+            "a double declaration is reported, not silently resolved"
+        );
+    }
+
+    // -- suppression: a blocked cadence is not a dead one ----------------
+
+    /// THE measured case. `maintenance-sweep/image-freshness` was silent
+    /// nine days because the packet its own guard asks about was opened
+    /// 2026-09-01 and never drained. Before this, that was reported as a
+    /// plain silence — or rather, not reported at all, since the cadence
+    /// was off the roster entirely.
+    #[test]
+    fn a_block_past_three_intervals_is_reported_as_suppression_and_names_the_packet() {
+        let now = at("2026-09-10T03:05:00Z");
+        let base = verdict(
+            &Declared::Minutes(1440),
+            newest_packet_at(&[blocking_packet()]),
+            now,
+        );
+        assert!(matches!(base, Verdict::Silent { .. }), "{base:?}");
+
+        let block = oldest_open_block(
+            &[blocking_packet()],
+            r#"NOT open_job_exists("maintenance-sweep", "image-freshness")"#,
+        )
+        .expect("the open packet is readable");
+        let v = explained_by(base, &block, now);
+
+        let Verdict::Suppressed {
+            blocked_min,
+            by_job,
+            by_title,
+            alarming,
+            ..
+        } = &v
+        else {
+            panic!("expected Suppressed, got {v:?}");
+        };
+        assert!(*alarming, "nine days is past three daily intervals");
+        assert_eq!(*blocked_min, 12_960, "nine days, in minutes");
+        assert_eq!(by_job, "c7a48d7f-0000-0000-0000-000000000000");
+        assert_eq!(by_title, "CI image freshness sweep");
+        assert!(v.is_finding());
+
+        let (mut cadences, _) = clock_cadences(&[image_freshness_rule()]);
+        let w = Watched::from_clock_rule(&cadences.remove(0));
+        let body = alarm_body(&w, &v, "evidence", now);
+        let title = body["title"].as_str().expect("a title");
+        assert!(title.starts_with("CADENCE SUPPRESSED:"), "{title}");
+        assert!(
+            title.contains("maintenance-sweep/image-freshness"),
+            "{title}"
+        );
+        let meta = &body["metadata"];
+        assert_eq!(meta["suppressed"], json!(true));
+        assert_eq!(
+            meta["suppressed_by_job"],
+            json!("c7a48d7f-0000-0000-0000-000000000000"),
+            "a verdict must name what failed — here, the packet to drain"
+        );
+        assert_eq!(meta["suppressed_since"], json!("2026-09-01T03:05:00+00:00"));
+        assert_eq!(meta["suppression_threshold_minutes"], json!(4320));
+        assert_eq!(meta["cadence_target"], json!("image-freshness"));
+        assert_eq!(
+            meta["cadence_declared_by"],
+            json!("rule:maintenance-sweep-image-freshness-daily"),
+            "the alarm says which registry row declares the cadence"
+        );
+        let detail = meta["detail"].as_str().expect("a detail");
+        assert!(
+            detail.contains("Drive that packet to a terminal"),
+            "the remedy must be in the packet, not re-derived: {detail}"
+        );
+    }
+
+    /// The guard doing its job says nothing. Yesterday's chore still
+    /// open is exactly why the guard exists (0517387b) — an alarm there
+    /// would fire on every healthy two-day chore and train operators to
+    /// ignore it.
+    #[test]
+    fn a_block_inside_the_window_is_explained_and_stays_quiet() {
+        let now = at("2026-09-10T12:00:00Z");
+        let base = Verdict::Silent {
+            interval_min: 1440,
+            age_min: 4320, // three days
+            last: "2026-09-07T12:00:00+00:00".into(),
+        };
+        let block = Block {
+            job_id: "open-1".into(),
+            title: "CI image freshness sweep".into(),
+            opened: at("2026-09-08T12:00:00Z"), // two days
+            guard: "NOT open_job_exists(...)".into(),
+        };
+        let v = explained_by(base, &block, now);
+        assert!(!v.is_finding(), "{v:?}");
+        assert!(v.is_explained(), "{v:?}");
+    }
+
+    /// A young block must not bury an old silence: quiet that predates
+    /// the block is quiet the block cannot account for.
+    #[test]
+    fn a_silence_that_started_before_the_block_still_alarms() {
+        let now = at("2026-09-10T12:00:00Z");
+        let base = Verdict::Silent {
+            interval_min: 1440,
+            age_min: 14_400, // ten days
+            last: "2026-08-31T12:00:00+00:00".into(),
+        };
+        let block = Block {
+            job_id: "open-2".into(),
+            title: "filed by hand an hour ago".into(),
+            opened: at("2026-09-10T11:00:00Z"),
+            guard: "NOT open_job_exists(...)".into(),
+        };
+        let v = explained_by(base, &block, now);
+        assert!(
+            v.is_finding(),
+            "ten days of silence with a one-hour block is still a finding: {v:?}"
+        );
+    }
+
+    /// `NeverFiled` is never explained away: for every shipped guard the
+    /// blocking packet IS a packet of the measured identity, so "no
+    /// packet ever" plus "a packet is open" is a contradiction to report.
+    #[test]
+    fn a_kind_that_never_filed_is_not_explained_by_a_block() {
+        let now = at("2026-09-10T12:00:00Z");
+        let block = Block {
+            job_id: "open-3".into(),
+            title: "x".into(),
+            opened: at("2026-01-01T00:00:00Z"),
+            guard: "g".into(),
+        };
+        let v = explained_by(Verdict::NeverFiled { interval_min: 1440 }, &block, now);
+        assert_eq!(v, Verdict::NeverFiled { interval_min: 1440 });
+        assert!(v.is_finding());
+    }
+
+    /// The block named is the OLDEST open packet — the one nobody
+    /// drained, which is both the longest-standing block and the
+    /// actionable remedy.
+    #[test]
+    fn the_oldest_open_packet_is_the_named_block() {
+        let rows = vec![
+            json!({"id": "newer", "title": "n", "metadata": {"opened_at": "2026-09-08T00:00:00+00:00"}}),
+            json!({"id": "oldest", "title": "o", "metadata": {"opened_at": "2026-09-01T00:00:00+00:00"}}),
+            json!({"id": "unreadable", "title": "u"}),
+        ];
+        let block = oldest_open_block(&rows, "g").expect("a block");
+        assert_eq!(block.job_id, "oldest");
+    }
+
+    #[test]
+    fn the_suppression_window_is_three_intervals_with_the_same_floor() {
+        assert_eq!(suppression_window_min(1440), 4320);
+        assert_eq!(suppression_window_min(5), MIN_SILENCE_WINDOW_MIN);
+        assert!(
+            suppression_window_min(1440) > silence_window_min(1440),
+            "an explained silence gets more rope than an unexplained one"
+        );
+    }
+
     #[test]
     fn an_undetermined_declaration_files_a_distinct_alarm() {
         let now = at("2026-09-08T12:00:00Z");
         let v = Verdict::Undetermined {
             reason: "declared interval is a string, not a positive number of minutes".into(),
         };
-        let body = alarm_body("maintenance-mystery", &v, "evidence", now);
+        let body = alarm_body(
+            &Watched::from_arg(
+                "maintenance-mystery",
+                Declared::Undetermined("unreadable".into()),
+            ),
+            &v,
+            "evidence",
+            now,
+        );
         assert!(
             body["title"]
                 .as_str()

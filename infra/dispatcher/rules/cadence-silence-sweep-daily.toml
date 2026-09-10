@@ -46,6 +46,22 @@
 # 202609082300-a-silent-cadence-files-an-alarm.sql; present here because
 # dispatcher_rules_seed_matches_toml compares BOTH directions.
 #
+# THESE ARGS ARE THE TIMER HALF OF THE ROSTER. The other half — every
+# daily CLOCK RULE that spawns a chore packet — is DERIVED from the rule
+# registry by the handler (cadence_roster::clock_cadences) and is
+# deliberately NOT declared here: the rule row already states the
+# cadence, the kind, the target and the dedup guard, and a second
+# declaration would be both redundant and coarser, since seven
+# maintenance-sweep-*-daily rules share one kind and differ only in
+# target (CLAUDE.md §9a — collapse it if you can). Adding an
+# `interval_minutes.<kind>` arg for a kind a clock rule already spawns is
+# therefore a CI failure, not a tightening:
+# `no_clock_rule_kind_is_also_declared_on_the_sweeps_args` names it.
+# Measured 2026-09-10 (cf0f5e2d): eight clock-rule cadences existed, all
+# eight were outside this roster, and the daily mirror check had been
+# suppressed by one undrained packet for nineteen days while the public
+# mirror drifted 238 commits behind.
+#
 # v2, 2026-09-10 (20260910024611-boss-gcp-converge-is-a-declared-cadence.sql):
 # `maintenance-boss-gcp-converge` at 30, the new self-converge loop that
 # ends "landed but never installed" on boss-gcp (408c81f6). A loop whose
