@@ -126,6 +126,12 @@ struct AutoParkInputs {
     test: String,
     verified: String,
     backlog_item: Option<String>,
+    /// The item provenance that does NOT authorise a close: the item
+    /// this car is one piece of (`car::PARTIAL_ITEM`), or the reason it
+    /// names none (`car::NO_ITEM_REASON`). Copied onto the car verbatim
+    /// and read by nothing downstream — which is the point, because the
+    /// arrival rule follows `backlog_item` alone.
+    item_provenance: serde_json::Map<String, Value>,
     delivery_channel: Option<String>,
     receipt: Receipt,
     /// The car's proof intent, copied VERBATIM from the gate-run's
@@ -193,6 +199,14 @@ fn auto_park_inputs(
             .get("park_backlog_item")
             .and_then(Value::as_str)
             .map(str::to_string),
+        // The two answers that are NOT the closing edge, copied under
+        // the core keys nothing downstream follows. Read here so the
+        // gate's `park_partial_item` / `park_no_item` cannot silently go
+        // missing between the gate-run and the car.
+        item_provenance: car::item_provenance(
+            md.get("park_partial_item").and_then(Value::as_str),
+            md.get("park_no_item").and_then(Value::as_str),
+        ),
         receipt,
         proof: car::proof_intent(
             md.get("park_probe").and_then(Value::as_str),
@@ -335,10 +349,11 @@ fn open_cars_url(base: &str, offset: usize) -> String {
     format!("{base}/api/jobs?kind=ship-a-change&status=open&limit={CARS_PAGE}&offset={offset}")
 }
 
-/// PURE: the car body, with the proof intent merged into its metadata.
-/// The shared builder owns the packet shape; the proof keys are added
-/// here rather than threaded through its signature because `boss park`
-/// (the hand verb auto-park replaces) has no probe to pass.
+/// PURE: the car body, with the proof intent and the item provenance
+/// merged into its metadata. The shared builder owns the packet shape;
+/// these keys are added here rather than threaded through its signature
+/// because `boss park` (the hand verb auto-park replaces) has no probe
+/// to pass.
 fn car_body_with_proof(inputs: &AutoParkInputs) -> Value {
     let mut body = car::car_body(
         &inputs.branch,
@@ -348,6 +363,7 @@ fn car_body_with_proof(inputs: &AutoParkInputs) -> Value {
     );
     if let Some(md) = body.get_mut("metadata").and_then(Value::as_object_mut) {
         md.extend(inputs.proof.clone());
+        md.extend(inputs.item_provenance.clone());
     }
     body
 }
@@ -533,6 +549,11 @@ impl Handler for JobsAutoPark {
                 car::regate_patch(&inputs.receipt, &note, inputs.delivery_channel.as_deref());
             if let Some(m) = patch.as_object_mut() {
                 m.extend(inputs.proof.clone());
+                // The provenance too: a re-gate may be the run where the
+                // builder first said which item this car is a piece of,
+                // and the refreshed car should carry what its latest
+                // green stamped.
+                m.extend(inputs.item_provenance.clone());
             }
             write_json(
                 &self.client,
@@ -738,6 +759,80 @@ mod tests {
         assert!(got.proof.is_empty());
         let md = car_body_with_proof(&got)["metadata"].clone();
         for k in [car::PROOF_PROBE, car::PROOF_EXPECT, car::PROOF_EVENT] {
+            assert!(md.get(k).is_none(), "{k} must be absent, not null");
+        }
+    }
+
+    /// THE PARTIAL EDGE RIDES ONTO THE CAR, AND THE CLOSING KEY DOES
+    /// NOT (e1325456).
+    ///
+    /// `--park-partial-item` says this car is one piece of a
+    /// several-piece item: record which item, do not authorise its
+    /// close. The inertness is structural, not a second rule — the
+    /// arrival rule reads `metadata.backlog_item` and nothing else, and
+    /// `triage_linked_item` is called only for `inputs.backlog_item`, so
+    /// a `None` there is the whole guarantee that parking writes nothing
+    /// on the item either.
+    #[test]
+    fn a_partial_item_rides_onto_the_car_without_the_closing_edge() {
+        let gr = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+            "park_partial_item": "cf0f5e2d-0000-0000-0000-000000000000",
+        }));
+        let got = auto_park_inputs(&gr, &green_step_meta()).expect("parks");
+        assert_eq!(
+            got.backlog_item, None,
+            "a partial item is not the closing edge — and this None is what stops the \
+             park-time triage write too"
+        );
+        let md = car_body_with_proof(&got)["metadata"].clone();
+        assert_eq!(
+            md[car::PARTIAL_ITEM],
+            "cf0f5e2d-0000-0000-0000-000000000000"
+        );
+        assert!(
+            md.get("backlog_item").is_none(),
+            "the key the arrival rule follows must be absent: {md}"
+        );
+    }
+
+    /// AN ITEM-LESS CAR CARRIES ITS REASON. `--park-no-item` is the
+    /// escape for a car that genuinely answers no item, and the reason
+    /// is what distinguishes it from a forgotten edge when someone reads
+    /// the car later.
+    #[test]
+    fn an_item_less_car_carries_the_reason_it_names_none() {
+        let gr = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+            "park_no_item": "David asked for this in conversation",
+        }));
+        let got = auto_park_inputs(&gr, &green_step_meta()).expect("parks");
+        assert_eq!(got.backlog_item, None);
+        let md = car_body_with_proof(&got)["metadata"].clone();
+        assert_eq!(
+            md[car::NO_ITEM_REASON],
+            "David asked for this in conversation"
+        );
+        assert!(md.get(car::PARTIAL_ITEM).is_none());
+    }
+
+    /// A car that IS an item's build is unchanged, and carries neither
+    /// provenance key — absent, not null, like the proof keys.
+    #[test]
+    fn the_closing_edge_still_rides_alone() {
+        let gr = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+            "park_backlog_item": "7c9e376d-0000-0000-0000-000000000000",
+        }));
+        let got = auto_park_inputs(&gr, &green_step_meta()).expect("parks");
+        assert_eq!(
+            got.backlog_item.as_deref(),
+            Some("7c9e376d-0000-0000-0000-000000000000")
+        );
+        assert!(got.item_provenance.is_empty());
+        let md = car_body_with_proof(&got)["metadata"].clone();
+        assert_eq!(md["backlog_item"], "7c9e376d-0000-0000-0000-000000000000");
+        for k in [car::PARTIAL_ITEM, car::NO_ITEM_REASON] {
             assert!(md.get(k).is_none(), "{k} must be absent, not null");
         }
     }

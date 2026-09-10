@@ -1066,6 +1066,11 @@ pub fn platform_workflows() -> Vec<WorkflowSpec> {
 /// Deliberately NOT spawned by the dispatcher's schedule runner: it
 /// fires on SIM-day boundaries, and at warp a "daily" rule fires
 /// every couple of wall-minutes — maintenance is wall-clock work.
+///
+/// `description` is prose and goes in the `description` column;
+/// `category` is the grouping key, and these are platform chores like
+/// the seventeen `maintenance-*` protocols authored under
+/// infra/platform/workflows/, so it is "platform" for all of them.
 fn maintenance_spec(kind: &str, label: &str, description: &str) -> WorkflowSpec {
     let steps = vec![
         StepSpec {
@@ -1126,7 +1131,8 @@ fn maintenance_spec(kind: &str, label: &str, description: &str) -> WorkflowSpec 
         },
     ];
     let mut spec =
-        WorkflowSpec::platform_seed(kind, label, description, vec!["custom".into()], steps);
+        WorkflowSpec::platform_seed(kind, label, "platform", vec!["custom".into()], steps);
+    spec.description = Some(description.to_string());
     // Owner + /system/flow membership: maintenance is the department's
     // own labor, so it appears with the other platform kinds.
     spec.metadata = serde_json::json!({ "owner_role": "platform-admin" });
@@ -6145,6 +6151,65 @@ mod tests {
             feedback.steps.iter().any(|s| s.terminal.is_some()),
             "must have a terminal step or feedback Jobs never close"
         );
+    }
+
+    #[test]
+    fn a_maintenance_protocol_states_its_category() {
+        // `category` is a GROUPING KEY; `description` is the prose.
+        // `maintenance_spec` took `(kind, label, description)` and
+        // handed the third argument to `platform_seed`'s CATEGORY
+        // slot, so all three shipped chores carried a unique sentence
+        // where the grouping key belongs and NULL where the prose
+        // belongs — three singleton categories on any surface that
+        // groups or filters by one, and no description anywhere.
+        //
+        // "platform" is not a grouping invented here: it is what every
+        // other platform Workflow uses — all of
+        // infra/platform/workflows/*.toml (including the seventeen
+        // `maintenance-*` chores authored as data, e.g.
+        // maintenance-files-gc, which puts "The 04:16 file_refs GC
+        // sweep (boss-files-gc)." in `description` and "platform" in
+        // `category`) and every other `platform_seed` call in this
+        // file.
+        //
+        // This lived in CODE, and bootstrap_reconcile re-asserts these
+        // specs on every boot, so it could not drift back on its own
+        // and every new deployment reproduced it.
+        let kinds = platform_workflows();
+        for spec in &kinds {
+            assert_eq!(
+                spec.category, "platform",
+                "{}: `category` is the grouping key every platform Workflow shares — \
+                 a sentence here groups the kind with nothing. Prose belongs in \
+                 `description`.",
+                spec.kind
+            );
+        }
+
+        for (kind, expected) in [
+            (
+                "maintenance-backup",
+                "The 03:00 backup run — configs, Postgres dump, kanidm state.",
+            ),
+            (
+                "maintenance-audit-integrity",
+                "The 03:00 chain scan + event-kind drift guard.",
+            ),
+            (
+                "maintenance-ledger-replay",
+                "The 03:30 rooted-at-audit-log replay comparison.",
+            ),
+        ] {
+            let spec = kinds
+                .iter()
+                .find(|k| k.kind == kind)
+                .unwrap_or_else(|| panic!("`{kind}` present in platform_workflows()"));
+            assert_eq!(
+                spec.description.as_deref(),
+                Some(expected),
+                "`{kind}`'s prose must reach the `description` column"
+            );
+        }
     }
 
     #[test]

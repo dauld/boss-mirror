@@ -201,10 +201,10 @@ require_headroom "to start"
 #       it were deleted on 2026-09-10 (backlog f5da586c) — the packet is
 #       the doc — so docs/design/ now implies no crate, like every other
 #       path under docs/. The rule it illustrated still holds for the
-#       four below: path-to-crate is not the same question as which
-#       SOURCE files a crate compiles.
+#       data files below: path-to-crate is not the same question as
+#       which SOURCE files a crate compiles.
 #
-#   Four files some crate's test READS, so changing one can redden that
+#   Data files some crate's test READS, so changing one can redden that
 #   crate without touching a line of its source:
 #     infra/gate.sh, infra/lint/*, .forgejo/workflows/ci.yml
 #         -> boss-testing, which owns gate_sh.rs. That test pins that
@@ -218,6 +218,23 @@ require_headroom "to start"
 #            against that directory in BOTH directions, and skipping the
 #            authored half is what reddened the 13-car train
 #            20260815-0621.
+#     examples/<tenant>/seeds/* -> boss-jobs for workflows.toml (its
+#            seed_loader parses BOTH tenants' bundles through the
+#            viability lint), boss-sim for tenant.toml (seven of its
+#            shape-driven unit tests load that exact file),
+#            boss-policy-client for policy_rules.toml (its loader's unit
+#            tests parse both tenants' grants), and
+#            boss-<tenant>-engine for anything in the bundle — four of
+#            the brewery's TOMLs are `include_str!`d into that crate, so
+#            they are compile input, and its layer-1 lint test reads the
+#            directory. This line was missing until backlog b59efe54:
+#            the rule above it was written for infra/platform/workflows
+#            and the tenant's equivalent never got a line beside it, so
+#            a bundle-only car scoped to ZERO crates and the one test
+#            that can reject a broken predicate never ran on it. The
+#            tenant name is DERIVED from the directory, never listed — a
+#            brewery-only rule would have left the same hole for the
+#            used-device-shop bundle and its 36 kinds.
 #
 #   Anything else (infra/, apps/, .forgejo/) maps to no crate and is
 #       REPORTED rather than ignored. The lints already run repo-wide,
@@ -298,17 +315,27 @@ crates_from_paths() {
 # The fixtures are path lists rather than real trees on purpose. The
 # rule under test is paths -> crates; staging files would test git.
 path_map() {
+    # An expression REWRITES the pattern space, so the one that matches
+    # first wins and the later ones never see the original path. That is
+    # why the two specific bundle files sit above the catch-all below
+    # them. A rule may name more than one crate, space-separated; the
+    # split happens before the dedupe so a crate implied twice is still
+    # named once.
     sed -n -e 's|^crates/[^/]*/\([^/]*\)/.*|\1|p' \
            -e 's|^infra/gate\.sh$|boss-testing|p' \
            -e 's|^infra/lint/.*|boss-testing|p' \
            -e 's|^\.forgejo/workflows/ci\.yml$|boss-testing|p' \
            -e 's|^infra/dispatcher/rules/[^/]*\.toml$|boss-dispatcher|p' \
            -e 's|^infra/platform/workflows/[^/]*\.toml$|boss-jobs|p' \
-           | sort -u | tr '\n' ' '
+           -e 's|^examples/\([^/]*\)/seeds/workflows\.toml$|boss-jobs boss-\1-engine|p' \
+           -e 's|^examples/\([^/]*\)/seeds/tenant\.toml$|boss-sim boss-\1-engine|p' \
+           -e 's|^examples/\([^/]*\)/seeds/policy_rules\.toml$|boss-policy-client boss-\1-engine|p' \
+           -e 's|^examples/\([^/]*\)/seeds/.*|boss-\1-engine|p' \
+           | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' '
 }
 
 scope_self_test() {
-    local fails=0 label want got
+    local fails=0 label want got seeds tenant
     _case() {
         label="$1"; want="$2"; shift 2
         got=$(printf '%s\n' "$@" | path_map); got="${got% }"
@@ -352,6 +379,51 @@ scope_self_test() {
         "infra/gate.sh" ".forgejo/workflows/ci.yml" "infra/lint/no-secrets.sh"
     _case "a dispatcher rule file implies boss-dispatcher" "boss-dispatcher" \
         "infra/dispatcher/rules/converge-on-merge.toml"
+    # A TENANT seed bundle is the same shape as the platform bundle one
+    # case up, and it was missed for the same reason: the rule was
+    # written for infra/platform/workflows and the tenant's equivalent
+    # never got a line beside it (backlog b59efe54). boss-jobs parses
+    # both tenants' workflows.toml through the viability lint
+    # (`round_trips_brewery_seed_bundle`,
+    # `round_trips_used_device_shop_seed_bundle`), and the tenant's own
+    # engine parses it again in its layer-1 lint test — so a bundle-only
+    # car that scoped to no crate ran neither, and a broken predicate or
+    # a missing terminal would have gated GREEN on its way to the live
+    # registry.
+    _case "a tenant seed bundle still has a crate" "boss-brewery-engine boss-jobs" \
+        "examples/brewery/seeds/workflows.toml"
+    # Derived from the directory, not a list of tenants: the
+    # used-device-shop bundle declares 36 kinds and must be covered by
+    # the same line, without that line naming either tenant.
+    _case "the sibling tenant needs no line of its own" "boss-jobs boss-used-device-shop-engine" \
+        "examples/used-device-shop/seeds/workflows.toml"
+    # The rest of a bundle is its tenant engine's business: four of the
+    # brewery's TOMLs are `include_str!`d into boss-brewery-engine, so
+    # they are compile INPUT, and its e2e test reads the whole directory.
+    _case "the rest of a tenant bundle implies its engine" "boss-brewery-engine" \
+        "examples/brewery/seeds/vendors.toml"
+    # policy_rules.toml is parsed by boss-policy-client's own unit tests
+    # (`brewery_seed_parses`, `used_device_shop_seed_parses`) — the
+    # privilege model every write passes through, so a malformed grant
+    # must not reach the seed with nothing compiled against it.
+    _case "a tenant policy bundle implies the policy loader" "boss-brewery-engine boss-policy-client" \
+        "examples/brewery/seeds/policy_rules.toml"
+    # tenant.toml is boss-sim's parse fixture — seven of its unit tests
+    # load this exact file, so a shape change there reddens the sim.
+    _case "a tenant manifest implies the sim that parses it" "boss-brewery-engine boss-sim" \
+        "examples/brewery/seeds/tenant.toml"
+    # A bundle edit beside a boss-jobs edit must name boss-jobs ONCE:
+    # these rules emit more than one crate, so the split has to happen
+    # before the dedupe.
+    _case "a crate named twice is named once" "boss-brewery-engine boss-jobs" \
+        "examples/brewery/seeds/workflows.toml" \
+        "crates/core/boss-jobs/src/seed_loader.rs"
+    # What is deliberately NOT mapped: everything in examples/ outside a
+    # seed bundle. The domain docs compile nowhere, and the data/ JSON
+    # rosters are read best-effort (`if let Ok(...)`) by the engines, so
+    # a malformed one degrades rather than failing a test.
+    _case "examples outside a seed bundle imply no crate" "" \
+        "examples/used-device-shop/DOMAIN.md" "examples/brewery/data/assets.json"
     _case "other infra implies no crate" "" \
         "infra/forge/locomotive.sh" "infra/deploy-services.sh"
     _case "docs outside design/ imply no crate" "" "docs/invariants/x.toml" "README.md"
@@ -361,6 +433,22 @@ scope_self_test() {
     # Get this wrong in the other direction — map schema to some crate
     # — and every migration would compile a crate for no reason.
     _case "a migration implies no crate" "" "infra/postgres/schema/141-x.sql"
+    # The tenant-bundle rules DERIVE a crate name from the directory
+    # rather than listing the two tenants, which moves the thing that
+    # can rot: a third tenant whose engine crate is not
+    # `boss-<dir>-engine` would make this map demand a `-p` cargo cannot
+    # satisfy, and the gate would refuse with an impossible instruction.
+    # So pin the derivation against the tree that defines it (CLAUDE.md
+    # §9a — the directory is the definition, and a derivation that
+    # cannot be collapsed any further gets a test).
+    for seeds in examples/*/seeds; do
+        [ -d "$seeds" ] || continue
+        tenant="$(basename "$(dirname "$seeds")")"
+        if [ ! -f "crates/tenants/boss-${tenant}-engine/Cargo.toml" ]; then
+            echo "gate.sh scope self-test FAIL: ${seeds} maps to boss-${tenant}-engine, which is not a crate under crates/tenants/" >&2
+            fails=1
+        fi
+    done
     if [ "$fails" -ne 0 ]; then
         echo "gate.sh: the scope check cannot be trusted — fix it before relying on -p" >&2
         exit 2

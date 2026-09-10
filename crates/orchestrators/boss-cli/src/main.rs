@@ -40,7 +40,16 @@ struct Cli {
     command: Commands,
 }
 
+/// `large_enum_variant` is allowed deliberately. This enum is the
+/// PARSE of one command line: exactly one value of it exists per
+/// process, built by clap at startup and matched once. `Gate` is the
+/// widest variant because gating carries the full park intent a car
+/// needs, and clippy's remedy — boxing its fields — would add an
+/// indirection to every field for a one-off allocation no one measures.
+/// The lint is about data structures held in quantity; a subcommand
+/// parse is not one.
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Post-install health check — verifies Postgres, NATS, gateway,
     /// tenant manifest, SPA bundle, and registered systemd services.
@@ -166,7 +175,9 @@ enum Commands {
         /// Auto-park on green: what the change does (first sentence =
         /// title). Stamped onto the gate-run so the dispatcher files the
         /// car when the gate goes green — no hand-park. Requires the
-        /// other three --park-* below (a car needs a full receipt).
+        /// other three --park-* below (a car needs a full receipt) and
+        /// ONE of --park-backlog-item / --park-partial-item /
+        /// --park-no-item (a car says which item it fixes).
         #[arg(long)]
         park_summary: Option<String>,
         /// Auto-park: what the change deliberately leaves out.
@@ -178,9 +189,38 @@ enum Commands {
         /// Auto-park: what was observed working beyond the gate.
         #[arg(long)]
         park_verified: Option<String>,
-        /// Auto-park: the backlog item this change answers (optional).
+        /// Auto-park: the backlog item this change answers. This car IS
+        /// that item's build, so the arrival rule routes its triage and
+        /// COMPLETES its build when the car lands — which closes it.
+        ///
+        /// One of this, --park-partial-item or --park-no-item is
+        /// REQUIRED with any --park-* flag. Measured 2026-09-10
+        /// (e1325456): 13 of 19 open cars named no item, so their items
+        /// stayed open after the fix was live and an operator closed
+        /// them by hand with a worse record than the car's own arrival.
         #[arg(long)]
         park_backlog_item: Option<String>,
+        /// Auto-park: the item this change is ONE PIECE of — recorded as
+        /// provenance, NOT as the closing edge.
+        ///
+        /// For an item that is several separable pieces. `backlog_item`
+        /// is one-to-one and the arrival rule closes what it names, so
+        /// linking a multi-piece item to a car that is one piece closes
+        /// it with work outstanding (cf0f5e2d was three pieces; held car
+        /// f73828a9 was piece (1), piece (3) awaiting David's yes). This
+        /// flag records which item the car belongs to and leaves the
+        /// item open for its remaining pieces.
+        #[arg(long)]
+        park_partial_item: Option<String>,
+        /// Auto-park: this car answers NO item, and why.
+        ///
+        /// The escape for the item-less cars that legitimately exist — a
+        /// fix David asks for in conversation, a defect found while
+        /// building something else. The reason is the point: it records
+        /// which kind, so a later reader can tell a deliberate one from
+        /// a forgotten one.
+        #[arg(long, value_name = "REASON")]
+        park_no_item: Option<String>,
         /// Auto-park: the probe that proves this change in production,
         /// written now by the builder who knows what it does. Recorded
         /// on the car as `proof_probe` and RUN — by `boss prove <car>
@@ -1113,6 +1153,8 @@ async fn main() -> Result<()> {
             park_test,
             park_verified,
             park_backlog_item,
+            park_partial_item,
+            park_no_item,
             park_probe,
             park_expect,
             park_proof_event,
@@ -1125,6 +1167,8 @@ async fn main() -> Result<()> {
                 test: park_test,
                 verified: park_verified,
                 backlog_item: park_backlog_item,
+                partial_item: park_partial_item,
+                no_item: park_no_item,
                 probe: park_probe,
                 expect: park_expect,
                 proof_event: park_proof_event,

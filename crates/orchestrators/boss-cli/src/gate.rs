@@ -697,6 +697,11 @@ pub struct ParkIntent {
     pub test: Option<String>,
     pub verified: Option<String>,
     pub backlog_item: Option<String>,
+    /// The item this car is ONE PIECE of: the edge is recorded for
+    /// provenance and the item is NOT closed when the car lands.
+    pub partial_item: Option<String>,
+    /// Why this car answers no item at all.
+    pub no_item: Option<String>,
     pub probe: Option<String>,
     pub expect: Option<String>,
     pub proof_event: Option<String>,
@@ -778,6 +783,13 @@ pub const PARK_PROBE: &str = "park_probe";
 pub const PARK_EXPECT: &str = "park_expect";
 pub const PARK_PROOF_EVENT: &str = "park_proof_event";
 
+/// The gate-run keys the two non-closing item answers stamp. The
+/// auto-park handler copies them onto the car as
+/// `boss_jobs::car::PARTIAL_ITEM` / `NO_ITEM_REASON` — NEVER as
+/// `backlog_item`, which is the one key the arrival rule follows.
+pub const PARK_NO_ITEM: &str = "park_no_item";
+pub const PARK_PARTIAL_ITEM: &str = "park_partial_item";
+
 impl ParkIntent {
     /// True when no `--park-*` flag was given: a plain gate.
     pub fn is_empty(&self) -> bool {
@@ -786,6 +798,8 @@ impl ParkIntent {
             && self.test.is_none()
             && self.verified.is_none()
             && self.backlog_item.is_none()
+            && self.partial_item.is_none()
+            && self.no_item.is_none()
             && self.probe.is_none()
             && self.expect.is_none()
             && self.proof_event.is_none()
@@ -864,6 +878,111 @@ impl ParkIntent {
         }
     }
 
+    /// WHICH ITEM DOES THIS CAR FIX — refuse park intent that does not
+    /// say. Exactly one of three answers, and the refusal is syntactic:
+    /// it reads the flags given, never the branch name or the diff.
+    ///
+    /// THE GAP (e1325456, measured 2026-09-10). The edge that closes a
+    /// backlog item when its fix lands was optional, so it was omitted:
+    /// of 19 open cars only SIX carried `metadata.backlog_item`, and the
+    /// thirteen without one left their items open after the fix was live
+    /// in production. Nothing detected it — no gate-run carried the link
+    /// either (all 619 read), because the flag was simply never typed —
+    /// so the residue surfaced as a future session reading an open item
+    /// it could not tell was already shipped. That is the re-derivation
+    /// CLAUDE.md §Engineering Session Startup step 4 exists to warn
+    /// about, and on 2026-09-01 it cost a landed fix rebuilt from a
+    /// stale base. Meanwhile the mechanism WORKS when used: two cars
+    /// gated with `--park-backlog-item` that evening had their items
+    /// close by themselves, with no operator action, while eight others
+    /// were closed by hand.
+    ///
+    /// WHY THREE ANSWERS AND NOT ONE. A refusal that admitted only
+    /// `--park-backlog-item` would pressure a builder into linking an
+    /// item that should not be linked, and the failure mode would flip
+    /// from residue a human notices to a silent premature close:
+    ///
+    /// - `--park-backlog-item <id>` — this car IS the item's build. The
+    ///   arrival rule routes its triage and completes its build, which
+    ///   closes it.
+    /// - `--park-partial-item <id>` — this car is ONE PIECE of the item.
+    ///   The edge is recorded for provenance under its own key, which no
+    ///   rule follows, so the item stays open for its other pieces.
+    /// - `--park-no-item <reason>` — no item, and which kind of item-less
+    ///   car this is.
+    ///
+    /// THE COST OF THE REFUSAL is seconds at the builder's terminal, and
+    /// the thing it prevents costs a future session a read — the same
+    /// calculus `infra/forge/host-absent-tools.txt` applies to a probe
+    /// naming a tool the forge lacks. Its own rule is that a guess which
+    /// refuses is worse than the failure it prevents, which is why there
+    /// is no heuristic here: title-matching was measured useless on this
+    /// very data (car "A red gate receipt names the failing TEST" vs item
+    /// "…the failing CHECK", sharing a prefix and differing in the word
+    /// that matters), so the builder states the answer or the gate does
+    /// not launch.
+    pub fn require_item_answer(&self) -> Result<()> {
+        if self.is_empty() {
+            return Ok(());
+        }
+        let given: Vec<&str> = [
+            ("--park-backlog-item", self.backlog_item.is_some()),
+            ("--park-partial-item", self.partial_item.is_some()),
+            ("--park-no-item", self.no_item.is_some()),
+        ]
+        .into_iter()
+        .filter(|(_, g)| *g)
+        .map(|(f, _)| f)
+        .collect();
+        match given.as_slice() {
+            [] => anyhow::bail!(
+                "auto-park needs to know WHICH item this car fixes. Pass exactly one of:\n  \
+                 --park-backlog-item <id>    this car IS that item's build — the item CLOSES \
+                 when the car lands\n  \
+                 --park-partial-item <id>    this car is ONE PIECE of that item — the edge is \
+                 recorded, the item stays open\n  \
+                 --park-no-item \"<reason>\"   this car answers no item — say which kind (asked \
+                 for in conversation, found while building something else)\n\n\
+                 Measured 2026-09-10 (e1325456): 13 of 19 open cars named no item, so the \
+                 arrival rule had nothing to route and each item stayed open after its fix was \
+                 live in production — the residue CLAUDE.md §Engineering Session Startup step 4 \
+                 sends the next session to re-derive by hand."
+            ),
+            [_] => {}
+            many => anyhow::bail!(
+                "{} together — pass exactly one. Which one decides whether the item CLOSES \
+                 when this car lands, so there is nothing to rank: a car is an item's build, \
+                 or one piece of it, or answers no item.",
+                many.join(" and ")
+            ),
+        }
+        if let Some(reason) = &self.no_item
+            && reason.trim().is_empty()
+        {
+            anyhow::bail!(
+                "--park-no-item needs a reason: which kind of item-less car is this? \
+                 \"David asked for it in conversation\", \"found while building <x>\". The \
+                 reason IS the answer — without it this is the silent omission again, just \
+                 with a flag in front of it."
+            );
+        }
+        for (flag, id) in [
+            ("--park-backlog-item", &self.backlog_item),
+            ("--park-partial-item", &self.partial_item),
+        ] {
+            if let Some(id) = id
+                && id.trim().is_empty()
+            {
+                anyhow::bail!(
+                    "{flag} names no item: a blank id passes the ref check as \"no claim to \
+                     check\" (migration 104) and records nothing. Give the item's id, or \
+                     --park-no-item \"<reason>\"."
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// The metadata patch to MERGE onto the gate-run — only the fields
     /// set, keyed `park_*` so the auto-park handler reads them on green.
     pub fn metadata_patch(&self) -> Value {
@@ -878,6 +997,8 @@ impl ParkIntent {
         put("park_test", &self.test);
         put("park_verified", &self.verified);
         put("park_backlog_item", &self.backlog_item);
+        put(PARK_PARTIAL_ITEM, &self.partial_item);
+        put(PARK_NO_ITEM, &self.no_item);
         put(PARK_PROBE, &self.probe);
         put(PARK_EXPECT, &self.expect);
         put(PARK_PROOF_EVENT, &self.proof_event);
@@ -895,6 +1016,8 @@ impl ParkIntent {
             "park_test": Value::Null,
             "park_verified": Value::Null,
             "park_backlog_item": Value::Null,
+            PARK_PARTIAL_ITEM: Value::Null,
+            PARK_NO_ITEM: Value::Null,
             PARK_PROBE: Value::Null,
             PARK_EXPECT: Value::Null,
             PARK_PROOF_EVENT: Value::Null,
@@ -1660,6 +1783,11 @@ pub async fn run(
     // bound should cost a line of output, not a gate slot.
     let mode = normalize_mode(&mode.unwrap_or_default())?;
     park.require_complete()?;
+    // WHICH ITEM — refused here, with the receipt, because the edge is
+    // the part of a car nothing downstream can recover: no gate-run of
+    // the thirteen unlinked cars carried it either, so an omission at
+    // this line is invisible until the item lingers (e1325456).
+    park.require_item_answer()?;
     // The park expectation is the one the MACHINE will judge at
     // arrival, so it never passes through `boss prove`'s own
     // warning. Say it here instead, while the flag is still being
@@ -2818,13 +2946,18 @@ mod tests {
         // re-gate of a landed branch inherits a stale probe.
         let mut everything = park_full();
         everything.backlog_item = Some("7c9e376d".into());
+        // Both non-closing answers too: `clear_patch` must cover every
+        // key an intent CAN stamp, not every combination it may stamp at
+        // once (the three answers are mutually exclusive at the guard).
+        everything.partial_item = Some("cf0f5e2d".into());
+        everything.no_item = Some("asked in chat".into());
         everything.probe = Some("true".into());
         everything.expect = Some("x".into());
         for k in everything.metadata_patch().as_object().unwrap().keys() {
             assert!(p[k].is_null(), "{k} must be nulled so the door deletes it");
         }
         assert!(p[PARK_PROOF_EVENT].is_null());
-        assert_eq!(p.as_object().unwrap().len(), 8);
+        assert_eq!(p.as_object().unwrap().len(), 10);
     }
 
     /// THE CAR CARRIES ITS PROBE (28ac45ab). A complete intent may add
@@ -3069,6 +3202,161 @@ mod tests {
         p.backlog_item = Some("7c9e376d".into());
         assert!(p.require_complete().is_ok());
         assert_eq!(p.metadata_patch()["park_backlog_item"], "7c9e376d");
+    }
+
+    /// WHICH ITEM DOES THIS CAR FIX — the question auto-park used to let
+    /// a builder skip silently.
+    ///
+    /// MEASURED 2026-09-10 (e1325456): of 19 open ship-a-change cars only
+    /// SIX carried `metadata.backlog_item`. Thirteen carried none, so the
+    /// arrival rule had nothing to route and each item stayed open after
+    /// its fix was live in production — the residue CLAUDE.md
+    /// §Engineering Session Startup step 4 sends the next session to
+    /// re-derive by hand. No gate-run carried the link either (all 619
+    /// read), so there was nothing to detect after the fact: the flag was
+    /// simply not typed. The refusal is the fix, and it costs seconds at
+    /// the builder's terminal.
+    #[test]
+    fn park_intent_with_no_item_answer_is_refused_naming_all_three_escapes() {
+        let err = park_full().require_item_answer().unwrap_err().to_string();
+        for flag in [
+            "--park-backlog-item",
+            "--park-partial-item",
+            "--park-no-item",
+        ] {
+            assert!(err.contains(flag), "the refusal must name {flag}: {err}");
+        }
+    }
+
+    /// A PLAIN GATE IS NEVER ASKED. The question belongs to a car, and a
+    /// gate with no `--park-*` flag files none.
+    #[test]
+    fn a_plain_gate_is_never_asked_which_item_it_fixes() {
+        assert!(ParkIntent::default().require_item_answer().is_ok());
+    }
+
+    /// ANSWER (1) — this car IS the item's build. Unchanged: the edge
+    /// rides the gate-run as `park_backlog_item`, becomes
+    /// `metadata.backlog_item` on the car, and the arrival rule closes
+    /// the item when the car lands.
+    #[test]
+    fn the_item_a_car_fixes_still_answers_the_question() {
+        let mut p = park_full();
+        p.backlog_item = Some("7c9e376d".into());
+        assert!(p.require_item_answer().is_ok());
+        assert_eq!(p.metadata_patch()["park_backlog_item"], "7c9e376d");
+    }
+
+    /// ANSWER (2) — no item, and WHY. Item-less cars legitimately exist
+    /// (a fix David asks for in conversation, a defect found while
+    /// building something else) and the reason records which kind, so a
+    /// later reader can tell a deliberate one from a forgotten one. A
+    /// blank reason is refused for the same reason `--hold` refuses one:
+    /// the reason IS the answer.
+    #[test]
+    fn an_item_less_car_states_why_and_the_reason_rides_the_gate_run() {
+        let mut p = park_full();
+        p.no_item = Some("David asked for this in conversation".into());
+        assert!(p.require_item_answer().is_ok());
+        assert_eq!(
+            p.metadata_patch()[PARK_NO_ITEM],
+            "David asked for this in conversation"
+        );
+
+        let mut blank = park_full();
+        blank.no_item = Some("   ".into());
+        let err = blank.require_item_answer().unwrap_err().to_string();
+        assert!(err.contains("needs a reason"), "{err}");
+    }
+
+    /// ANSWER (3) — PROVENANCE WITHOUT THE CLOSE, which is the whole
+    /// constraint on the refusal.
+    ///
+    /// The `backlog_item` edge is one-to-one and the arrival rule
+    /// COMPLETES the linked item's build when the car closes. An item
+    /// that is several separable pieces must therefore not be linked to a
+    /// car that is one of them: live on 2026-09-10, item cf0f5e2d was
+    /// three pieces and held car f73828a9 was piece (1) only, whose
+    /// piece (3) was waiting on David's explicit yes. Linking it would
+    /// have closed the item with work outstanding — a silent premature
+    /// close, strictly worse than the residue this refusal prevents.
+    ///
+    /// So the partial answer stamps its own key and NEVER
+    /// `park_backlog_item`: that absence is what makes it inert on the
+    /// arrival path, because the rule reads exactly one key.
+    #[test]
+    fn a_partial_item_records_the_edge_without_authorising_the_close() {
+        let mut p = park_full();
+        p.partial_item = Some("cf0f5e2d".into());
+        assert!(p.require_item_answer().is_ok());
+        let m = p.metadata_patch();
+        assert_eq!(m[PARK_PARTIAL_ITEM], "cf0f5e2d");
+        assert!(
+            m.get("park_backlog_item").is_none(),
+            "a partial edge must not stamp the key the arrival rule follows: {m}"
+        );
+    }
+
+    /// TWO ANSWERS ARE NO ANSWER. Whether the item closes on arrival is
+    /// exactly what these flags decide, so a pair of them is refused
+    /// rather than ranked — naming which one the builder meant is the
+    /// point.
+    #[test]
+    fn two_item_answers_at_once_are_refused_rather_than_ranked() {
+        for (case, (backlog, partial, none)) in [
+            ("backlog + partial", ("7c9e376d", "cf0f5e2d", "")),
+            ("backlog + no-item", ("7c9e376d", "", "asked in chat")),
+            ("partial + no-item", ("", "cf0f5e2d", "asked in chat")),
+        ] {
+            let pick = |v: &str| {
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.to_string())
+                }
+            };
+            let mut p = park_full();
+            p.backlog_item = pick(backlog);
+            p.partial_item = pick(partial);
+            p.no_item = pick(none);
+            let err = p.require_item_answer().unwrap_err().to_string();
+            assert!(
+                err.contains("exactly one"),
+                "{case} must be refused as ambiguous: {err}"
+            );
+        }
+    }
+
+    /// A BLANK ID NAMES NO ITEM. `job_edge_resolves` treats an empty
+    /// candidate as "no claim to check" (migration 104), so a blank id
+    /// would pass the ref check and record nothing — the exact invisible
+    /// omission this guard exists to stop.
+    #[test]
+    fn a_blank_item_id_is_refused_like_no_answer_at_all() {
+        for flag in ["backlog", "partial"] {
+            let mut p = park_full();
+            if flag == "backlog" {
+                p.backlog_item = Some("  ".into());
+            } else {
+                p.partial_item = Some("  ".into());
+            }
+            let err = p.require_item_answer().unwrap_err().to_string();
+            assert!(err.contains("names no item"), "{flag}: {err}");
+        }
+    }
+
+    /// An item answer alone is still park intent: it opts into auto-park,
+    /// so the four receipt fields are still required and `--hold` still
+    /// refuses to combine.
+    #[test]
+    fn an_item_answer_alone_is_still_park_intent() {
+        let p = ParkIntent {
+            no_item: Some("asked in chat".into()),
+            ..Default::default()
+        };
+        assert!(!p.is_empty());
+        assert!(p.require_complete().is_err(), "the four are still needed");
+        assert!(hold_guard(Some("waiting"), &p).is_err());
     }
 
     /// `--hold` marks a green as deliberately waiting. It needs a reason

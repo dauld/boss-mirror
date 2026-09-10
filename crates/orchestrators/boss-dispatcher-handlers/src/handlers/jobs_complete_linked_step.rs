@@ -1443,6 +1443,48 @@ mod tests {
         );
     }
 
+    /// A PARTIAL EDGE IS PROVENANCE, NOT AN OBLIGATION (e1325456).
+    ///
+    /// `boss gate --park-partial-item <id>` records `metadata.partial_item`
+    /// on the car so a reader can see which item the change belongs to,
+    /// for an item that is several separable pieces and must NOT close
+    /// when one of them lands (cf0f5e2d was three pieces; piece (3) was
+    /// waiting on an operator's explicit yes). The inertness is
+    /// structural: this handler reads the ONE key its rule names, so a
+    /// car carrying only the partial key completes nothing — and this
+    /// test is what keeps that true if the lookup ever widens.
+    #[tokio::test]
+    async fn a_partial_item_is_provenance_and_closes_nothing() {
+        let (base, puts, _) = mock_jobs(vec![
+            car(json!({ "partial_item": PACKET, "train": TRAIN, "branch": "fix/x" })),
+            packet("ready"),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        h.invoke(&args_with_route(), &ctx(close_marker()))
+            .await
+            .expect("runs");
+        assert!(
+            puts.lock().unwrap().is_empty(),
+            "a partial edge authorises no write on the item: {:?}",
+            puts.lock().unwrap()
+        );
+    }
+
+    /// An item-less car's recorded reason is likewise inert — it is prose
+    /// for a reader, not a reference, and nothing follows it.
+    #[tokio::test]
+    async fn a_recorded_no_item_reason_closes_nothing() {
+        let (base, puts, _) = mock_jobs(vec![
+            car(json!({ "no_item_reason": "David asked for this in conversation" })),
+            packet("ready"),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        h.invoke(&args(), &ctx(close_marker())).await.expect("runs");
+        assert!(puts.lock().unwrap().is_empty(), "nothing to complete");
+    }
+
     /// A packet that already reached a terminal is untouched. Its
     /// filer got their answer from whatever closed it.
     #[tokio::test]

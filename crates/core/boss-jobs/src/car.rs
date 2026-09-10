@@ -182,6 +182,46 @@ pub fn proof_intent(
     m
 }
 
+/// THE ITEM A CAR NAMES WITHOUT AUTHORISING ITS CLOSE.
+///
+/// `backlog_item` is a declared one-to-one job edge, and the arrival
+/// rule `complete-feedback-branch-on-car-merged` follows exactly that
+/// key to route the item's triage and complete its `build` — which
+/// closes it. So a car that is ONE PIECE of a several-piece item must
+/// not use it: on 2026-09-10 item cf0f5e2d was three pieces and held
+/// car f73828a9 was piece (1) only, with piece (3) waiting on an
+/// operator's explicit yes; linking it would have closed an item with
+/// work outstanding. This key records the same provenance under a name
+/// NO rule reads, which is what makes it inert at arrival.
+pub const PARTIAL_ITEM: &str = "partial_item";
+/// Why this car names no item at all — the answer a deliberately
+/// item-less car gives (`--park-no-item`). Item-less cars legitimately
+/// exist (a fix asked for in conversation, a defect found while
+/// building something else); the reason is what lets a later reader
+/// tell one from a car whose builder simply forgot, which is the
+/// omission e1325456 measured thirteen times in nineteen.
+pub const NO_ITEM_REASON: &str = "no_item_reason";
+
+/// The item provenance a car carries beyond the closing edge: the item
+/// it is one piece of, or the reason it names none. Absent and blank
+/// values are omitted (never nulled), so merging this into a car body
+/// or a metadata PATCH adds what was stated and touches nothing else —
+/// the same contract [`proof_intent`] has.
+pub fn item_provenance(
+    partial_item: Option<&str>,
+    no_item_reason: Option<&str>,
+) -> serde_json::Map<String, Value> {
+    let mut m = serde_json::Map::new();
+    let mut put = |k: &str, v: Option<&str>| {
+        if let Some(v) = v.filter(|s| !s.trim().is_empty()) {
+            m.insert(k.to_string(), json!(v));
+        }
+    };
+    put(PARTIAL_ITEM, partial_item);
+    put(NO_ITEM_REASON, no_item_reason);
+    m
+}
+
 /// A step by its registry slug, falling back to its title. The same
 /// lookup the conductor uses; one definition (CLAUDE.md 9a).
 pub fn find_step<'a>(job: &'a Value, slug: &str, title: &str) -> Option<&'a Value> {
@@ -495,6 +535,28 @@ mod tests {
         let e = proof_intent(None, None, Some("event-bound — the next yard cancel"));
         assert_eq!(e.len(), 1);
         assert_eq!(e[PROOF_EVENT], "event-bound — the next yard cancel");
+    }
+
+    /// PROVENANCE WITHOUT THE CLOSE. Same write-only-what-was-stated
+    /// contract as the proof keys — and the key that matters here is the
+    /// one NOT written: `backlog_item` is what the arrival rule follows,
+    /// so neither provenance key may collide with it.
+    #[test]
+    fn item_provenance_writes_only_what_was_stated_and_never_the_closing_edge() {
+        assert!(item_provenance(None, None).is_empty());
+        assert!(item_provenance(Some("  "), Some("\t")).is_empty());
+        let p = item_provenance(Some("cf0f5e2d"), None);
+        assert_eq!(p[PARTIAL_ITEM], "cf0f5e2d");
+        assert!(!p.contains_key(NO_ITEM_REASON));
+        assert!(
+            !p.contains_key("backlog_item"),
+            "a partial edge must never write the key the arrival rule follows"
+        );
+        let n = item_provenance(None, Some("David asked for this in conversation"));
+        assert_eq!(n.len(), 1);
+        assert_eq!(n[NO_ITEM_REASON], "David asked for this in conversation");
+        assert_ne!(PARTIAL_ITEM, "backlog_item");
+        assert_ne!(NO_ITEM_REASON, "backlog_item");
     }
 
     #[test]

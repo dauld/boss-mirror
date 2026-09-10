@@ -1,0 +1,47 @@
+-- A car can name an item it only PARTLY fixes.
+--
+-- WHY A SECOND EDGE AND NOT A SECOND USE OF THE FIRST (e1325456).
+-- `ship-a-change.backlog_item` is one-to-one and LOAD-BEARING on
+-- arrival: the dispatcher rule `complete-feedback-branch-on-car-merged`
+-- follows it when the car merges, routes the item's triage and
+-- completes its `build`, which fires the item's `closed` terminal. That
+-- is exactly right for a car that IS an item's build, and wrong for a
+-- car that is one of several separable pieces — the item would close
+-- with work outstanding.
+--
+-- MEASURED, 2026-09-10. Item cf0f5e2d was three pieces and held car
+-- f73828a9 was piece (1) only, while piece (3) waited on an operator's
+-- explicit yes. `boss gate` now REFUSES a `--park-*` invocation that
+-- names no item (13 of 19 open cars named none, and each of their items
+-- stayed open after its fix was live), and a refusal that admitted only
+-- `--park-backlog-item` would have pressured a builder into linking
+-- exactly that item. So there are three answers, and this row is what
+-- makes the middle one a real edge rather than a loose string:
+--
+--   --park-backlog-item <id>   -> metadata.backlog_item  (closes it)
+--   --park-partial-item  <id>  -> metadata.partial_item  (provenance)
+--   --park-no-item "<reason>"  -> metadata.no_item_reason (prose)
+--
+-- WHAT DECLARING IT BUYS. The write path ref-checks the value and
+-- NORMALIZES it to the full Job id (104 + 125), so a partial edge
+-- cannot be built out of a typo or left as an 8-char prefix the read
+-- path cannot use; the census counts it when it dangles; the Job page's
+-- Links panel renders it. `backlog_text` is the precedent for the other
+-- choice — free text that nothing follows — and provenance a future
+-- session is meant to rely on deserves better than prose.
+--
+-- `job_id`, not `job_id_list`: a car is a piece of ONE item. A change
+-- that is genuinely a piece of two items is a different relation and
+-- should be filed as one when it actually happens.
+--
+-- NOTHING FOLLOWS THIS KEY, BY DESIGN. No rule reads `partial_item`;
+-- that absence IS the feature, pinned by
+-- `a_partial_item_is_provenance_and_closes_nothing` in
+-- jobs_complete_linked_step.rs. on_missing takes the table default,
+-- which is `abort` since 202608291630 — the one-time UPDATE that
+-- migration replaced with a real default exists precisely so a new edge
+-- like this one does not land weaker than its neighbours.
+INSERT INTO job_edges (source_kind, field_path, field_kind, description) VALUES
+  ('ship-a-change', 'partial_item', 'job_id',
+   'An item this change is ONE PIECE of — provenance only; it does not close on merge')
+ON CONFLICT (source_kind, field_path) DO NOTHING;

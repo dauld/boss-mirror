@@ -67,6 +67,12 @@ impl JobEdgesRegistry for InMemoryJobEdges {
             ),
             mk(
                 "ship-a-change",
+                "partial_item",
+                "job_id",
+                "An item this change is ONE PIECE of — provenance only; it does not close on merge",
+            ),
+            mk(
+                "ship-a-change",
                 "train",
                 "job_id",
                 "The pr-train Job this change boarded",
@@ -162,6 +168,44 @@ mod tests {
         );
         assert!(
             MIGRATION.contains("'design-doc', 'translated_from', 'job_id'"),
+            "the migration must seed the same triple the in-memory list serves"
+        );
+        assert!(
+            MIGRATION.contains(&edge.description),
+            "the migration's description must match the in-memory one, or the two \
+             registries disagree about what the edge means: {}",
+            edge.description
+        );
+    }
+
+    /// THE SAME PIN FOR THE PARTIAL-ITEM EDGE (e1325456), and for the
+    /// same reason: this list and the migration that seeds it are one
+    /// fact living twice, so the agreement is a test and not a comment.
+    ///
+    /// The edge exists so a car can name an item it only PARTLY fixes.
+    /// `backlog_item` is one-to-one and the arrival rule closes what it
+    /// names, so an item that is several separable pieces needs a key
+    /// nothing follows — declared all the same, so the value is
+    /// ref-checked and normalised rather than being loose prose.
+    #[tokio::test]
+    async fn the_partial_item_edge_matches_the_migration_that_seeds_it() {
+        const MIGRATION: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../infra/postgres/schema/",
+            "20260910210000-a-car-can-name-an-item-it-only-partly-fixes.sql"
+        ));
+        let edges = InMemoryJobEdges.list().await.expect("list");
+        let edge = edges
+            .iter()
+            .find(|e| e.source_kind == "ship-a-change" && e.field_path == "partial_item")
+            .expect("ship-a-change.partial_item must be in the in-memory defaults");
+
+        assert_eq!(
+            edge.field_kind, "job_id",
+            "a car is one piece of exactly one item"
+        );
+        assert!(
+            MIGRATION.contains("'ship-a-change', 'partial_item', 'job_id'"),
             "the migration must seed the same triple the in-memory list serves"
         );
         assert!(

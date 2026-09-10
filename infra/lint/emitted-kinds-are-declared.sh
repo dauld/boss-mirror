@@ -52,12 +52,8 @@ SCHEMA_DIR="infra/postgres/schema"
 # below expands them.
 # ---------------------------------------------------------------------
 declared() {
-    # NB: the anchor is written `INSERT[ ]+INTO` rather than the plain
-    # words so this READER of schema SQL is not mistaken for a WRITER of
-    # it by api-path-bypass-smell (whose DML scanner keys on the literal
-    # `INSERT<space>INTO`). The bracket class still matches the real SQL.
     awk '
-        /INSERT[ ]+INTO event_kinds/ { inblk = 1 }
+        /INSERT INTO event_kinds/ { inblk = 1 }
         inblk && /^[[:space:]]*\(/ {
             line = $0
             if (match(line, /\x27[^\x27]+\x27/)) {

@@ -113,6 +113,15 @@ async fn registry_seeds_exactly_the_declared_edges() {
                 "backlog_item".into(),
                 "job_id".into()
             ),
+            // An item a car is ONE PIECE of — declared so the value is
+            // ref-checked and normalised, and deliberately followed by
+            // no rule, so it records provenance without closing the
+            // item (e1325456).
+            (
+                "ship-a-change".into(),
+                "partial_item".into(),
+                "job_id".into()
+            ),
             ("ship-a-change".into(), "train".into(), "job_id".into()),
         ]
     );
