@@ -4,15 +4,12 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde_json::Value as JsonValue;
 use sqlx::{PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 
 use crate::port::{DocsError, DocsRepository};
 use crate::types::{
-    DecisionKind, DesignDoc, DesignQuestion, DocStatus, FlushJob, FlushJobPayload, JobStatus,
-    JobStatusUpdate, PendingDecision, PendingDecisionInput, RejectedDocRecord,
-    apply_recorded_decisions,
+    DesignDoc, DesignQuestion, DocStatus, RejectedDocRecord, apply_recorded_decisions,
 };
 
 pub struct PgDocsRepo {
@@ -37,7 +34,6 @@ fn doc_from_row(row: &PgRow) -> Result<DesignDoc, DocsError> {
         path: row.try_get("path").map_err(storage)?,
         title: row.try_get("title").map_err(storage)?,
         status,
-        pending_count: row.try_get("pending_count").map_err(storage)?,
         word_count: row.try_get("word_count").map_err(storage)?,
         last_modified: row.try_get("last_modified").map_err(storage)?,
         last_author: row.try_get("last_author").map_err(storage)?,
@@ -61,61 +57,8 @@ fn question_from_row(row: &PgRow) -> Result<DesignQuestion, DocsError> {
     })
 }
 
-fn pending_from_row(row: &PgRow) -> Result<PendingDecision, DocsError> {
-    let kind_str: String = row.try_get("kind").map_err(storage)?;
-    let kind = match kind_str.as_str() {
-        "accept" => DecisionKind::Accept,
-        "override" => DecisionKind::Override,
-        other => return Err(DocsError::Storage(format!("unknown kind {other}"))),
-    };
-    Ok(PendingDecision {
-        id: row.try_get("id").map_err(storage)?,
-        doc_path: row.try_get("doc_path").map_err(storage)?,
-        anchor: row.try_get("anchor").map_err(storage)?,
-        kind,
-        resolution: row.try_get("resolution").map_err(storage)?,
-        rationale: row.try_get("rationale").map_err(storage)?,
-        decided_by: row.try_get("decided_by").map_err(storage)?,
-        decided_at: row.try_get("decided_at").map_err(storage)?,
-    })
-}
-
-fn job_from_row(row: &PgRow) -> Result<FlushJob, DocsError> {
-    let status_str: String = row.try_get("status").map_err(storage)?;
-    let status = match status_str.as_str() {
-        "queued" => JobStatus::Queued,
-        "running" => JobStatus::Running,
-        "succeeded" => JobStatus::Succeeded,
-        "failed" => JobStatus::Failed,
-        other => return Err(DocsError::Storage(format!("unknown status {other}"))),
-    };
-    let payload_json: JsonValue = row.try_get("payload").map_err(storage)?;
-    let payload: FlushJobPayload = serde_json::from_value(payload_json)
-        .map_err(|e| DocsError::Storage(format!("bad payload json: {e}")))?;
-    Ok(FlushJob {
-        id: row.try_get("id").map_err(storage)?,
-        doc_path: row.try_get("doc_path").map_err(storage)?,
-        status,
-        requested_by: row.try_get("requested_by").map_err(storage)?,
-        worked_by: row.try_get("worked_by").map_err(storage)?,
-        queued_at: row.try_get("queued_at").map_err(storage)?,
-        started_at: row.try_get("started_at").map_err(storage)?,
-        completed_at: row.try_get("completed_at").map_err(storage)?,
-        payload,
-        commit_sha: row.try_get("commit_sha").map_err(storage)?,
-        error: row.try_get("error").map_err(storage)?,
-    })
-}
-
 fn storage<E: std::fmt::Display>(e: E) -> DocsError {
     DocsError::Storage(e.to_string())
-}
-
-/// Is this the unique-index violation that means "someone else got
-/// there first"? Matched on SQLSTATE rather than on the message, which
-/// is the database's to reword.
-fn is_unique_violation(e: &sqlx::Error) -> bool {
-    matches!(e, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505"))
 }
 
 #[async_trait]
@@ -163,31 +106,23 @@ impl DocsRepository for PgDocsRepo {
         // the doc would re-spawn a review for a question already
         // answered.
         //
-        // Both sources count, because a recorded answer moves between
-        // them: `create_flush_job` snapshots the pending rows into the
-        // job payload and deletes them, so once a flush is queued the
-        // answer lives ONLY in that payload. Queuing a flush is not
-        // writing the file — the 2026-08-18 measurement found five
-        // queued jobs holding sixteen answers and twenty-nine more
-        // marked failed, every one of them invisible to this count.
-        // A `succeeded` job is excluded: that one did write the file,
-        // so the heading now carries `(resolved)` on its own.
-        // `->> 'anchor'` is nullable in the type system (a malformed
-        // payload entry yields NULL), hence `Option` + `flatten`.
-        let decided: HashSet<String> = sqlx::query_scalar::<_, Option<String>>(
-            "SELECT anchor FROM design_pending_decisions WHERE doc_path = $1
-             UNION
-             SELECT d ->> 'anchor'
-               FROM design_flush_jobs j,
-                    LATERAL jsonb_array_elements(j.payload -> 'decisions') AS d
-              WHERE j.doc_path = $1 AND j.status <> 'succeeded'",
+        // `design_recorded_decisions` is the closed ledger of every
+        // answer ever recorded against an anchor — the rows the
+        // pending-decision table held, plus the answers stranded in
+        // flush-job payloads, backfilled when that pipeline was deleted
+        // (migration 202609101200). It is READ-ONLY now: nothing writes
+        // a row, and nothing writes `(resolved)` into a heading either,
+        // so this merge is the only thing that keeps an answered
+        // question from re-opening. Measured the day the pipeline was
+        // deleted: 25 questions across 6 docs.
+        let decided: HashSet<String> = sqlx::query_scalar::<_, String>(
+            "SELECT anchor FROM design_recorded_decisions WHERE doc_path = $1",
         )
         .bind(&doc.path)
         .fetch_all(&mut *tx)
         .await
         .map_err(storage)?
         .into_iter()
-        .flatten()
         .collect();
         let questions = apply_recorded_decisions(questions, &decided);
         let questions = &questions[..];
@@ -223,10 +158,10 @@ impl DocsRepository for PgDocsRepo {
 
         sqlx::query(
             "INSERT INTO design_docs (
-                path, title, status, pending_count, word_count,
+                path, title, status, word_count,
                 last_modified, last_author, last_indexed_at,
                 last_commit_sha, content_html
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
              ON CONFLICT (path) DO UPDATE SET
                 title = EXCLUDED.title,
                 status = EXCLUDED.status,
@@ -240,7 +175,6 @@ impl DocsRepository for PgDocsRepo {
         .bind(&doc.path)
         .bind(&doc.title)
         .bind(doc.status.as_str())
-        .bind(doc.pending_count)
         .bind(doc.word_count)
         .bind(doc.last_modified)
         .bind(&doc.last_author)
@@ -349,39 +283,32 @@ impl DocsRepository for PgDocsRepo {
     }
 
     async fn delete_doc(&self, path: &str) -> Result<(), DocsError> {
-        // Cascade handles design_questions. Pending decisions have no
-        // FK to design_docs (they're keyed by (doc_path, anchor) as
-        // free text), so delete them explicitly.
+        // Cascade handles design_questions. The recorded-decision
+        // ledger has no FK to design_docs (it is keyed by
+        // (doc_path, anchor) as free text), so it is cleared
+        // explicitly.
         //
-        // Flush jobs DO have an FK (`design_flush_jobs_doc_path_fkey`)
-        // and it is not a cascade, so a doc with flush-job history could
-        // not be deleted at all — and the reindex prune is the only
-        // caller. One doc removed from disk with a flush job attached
-        // therefore failed the WHOLE reindex, not just its own prune:
+        // WHY THE EXPLICIT DELETE MATTERS. `design_flush_jobs` used to
+        // carry a non-cascading FK to `design_docs`, so a doc with
+        // flush-job history could not be deleted at all — and the
+        // reindex prune is the only caller. One doc removed from disk
+        // therefore failed the WHOLE reindex:
         //
         //   update or delete on table "design_docs" violates foreign key
         //   constraint "design_flush_jobs_doc_path_fkey"
         //
         // Which is what happened. `event-kind-registry.md` was folded
         // away per the docs lifecycle, kept its flush jobs, and every
-        // reindex since has returned 500 — so the tracker stopped
-        // learning about the corpus while continuing to look healthy
-        // from the outside. The upserts run before the prune and commit
-        // in their own transactions, so docs still got re-parsed; only
-        // the caller's answer was an error.
+        // reindex since returned 500 — so the tracker stopped learning
+        // about the corpus while continuing to look healthy from the
+        // outside. That table is gone; the lesson is why this delete is
+        // explicit and unconditional rather than left to a constraint.
         //
-        // The jobs go with the doc for the same reason the pending
-        // decisions do: they are a queue of work to write INTO a file
-        // that no longer exists. Their history is preserved in the
-        // audit log, which is the durable record; this table is a
-        // worklist.
+        // The ledger rows go with the doc: they answer questions in a
+        // file that no longer exists. Their history is preserved in the
+        // audit log, which is the durable record.
         let mut tx = self.pool.begin().await.map_err(storage)?;
-        sqlx::query("DELETE FROM design_flush_jobs WHERE doc_path = $1")
-            .bind(path)
-            .execute(&mut *tx)
-            .await
-            .map_err(storage)?;
-        sqlx::query("DELETE FROM design_pending_decisions WHERE doc_path = $1")
+        sqlx::query("DELETE FROM design_recorded_decisions WHERE doc_path = $1")
             .bind(path)
             .execute(&mut *tx)
             .await
@@ -394,363 +321,12 @@ impl DocsRepository for PgDocsRepo {
         tx.commit().await.map_err(storage)?;
         Ok(())
     }
-
-    async fn upsert_pending_decision(
-        &self,
-        input: &PendingDecisionInput,
-        decided_by: &str,
-    ) -> Result<PendingDecision, DocsError> {
-        let id = format!("pd-{}", Uuid::new_v4().simple());
-        let now: DateTime<Utc> = Utc::now();
-        let mut tx = self.pool.begin().await.map_err(storage)?;
-
-        sqlx::query(
-            "INSERT INTO design_pending_decisions (
-                id, doc_path, anchor, kind, resolution, rationale,
-                decided_by, decided_at
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-             ON CONFLICT (doc_path, anchor) DO UPDATE SET
-                kind = EXCLUDED.kind,
-                resolution = EXCLUDED.resolution,
-                rationale = EXCLUDED.rationale,
-                decided_by = EXCLUDED.decided_by,
-                decided_at = EXCLUDED.decided_at",
-        )
-        .bind(&id)
-        .bind(&input.doc_path)
-        .bind(&input.anchor)
-        .bind(input.kind.as_str())
-        .bind(&input.resolution)
-        .bind(&input.rationale)
-        .bind(decided_by)
-        .bind(now)
-        .execute(&mut *tx)
-        .await
-        .map_err(storage)?;
-
-        // The decision is the event the review lifecycle turns on
-        // (dogfooding arc e556c000, S1): a dispatcher rule can now
-        // complete the review step / queue the flush instead of a
-        // human noticing.
-        let event = boss_core::event::Event {
-            id: Uuid::new_v4(),
-            timestamp: now,
-            source: "docs".to_string(),
-            kind: "docs.design.decision_recorded".to_string(),
-            payload: serde_json::json!({
-                "doc_path": input.doc_path,
-                "anchor": input.anchor,
-                "kind": input.kind.as_str(),
-                "resolution": input.resolution,
-                "decided_by": decided_by,
-            }),
-        };
-        boss_events::outbox::record_event_in_tx(&mut tx, &event)
-            .await
-            .map_err(storage)?;
-
-        // Refresh pending_count on the doc row.
-        sqlx::query(
-            "UPDATE design_docs SET pending_count = (
-                SELECT COUNT(*) FROM design_pending_decisions WHERE doc_path = $1
-             ) WHERE path = $1",
-        )
-        .bind(&input.doc_path)
-        .execute(&mut *tx)
-        .await
-        .map_err(storage)?;
-
-        // Re-fetch the row so we return the canonical state (ON
-        // CONFLICT may have kept an older id).
-        let row = sqlx::query(
-            "SELECT * FROM design_pending_decisions WHERE doc_path = $1 AND anchor = $2",
-        )
-        .bind(&input.doc_path)
-        .bind(&input.anchor)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(storage)?;
-        let pending = pending_from_row(&row)?;
-
-        tx.commit().await.map_err(storage)?;
-        Ok(pending)
-    }
-
-    async fn delete_pending_decision(&self, doc_path: &str, anchor: &str) -> Result<(), DocsError> {
-        let mut tx = self.pool.begin().await.map_err(storage)?;
-        let result =
-            sqlx::query("DELETE FROM design_pending_decisions WHERE doc_path = $1 AND anchor = $2")
-                .bind(doc_path)
-                .bind(anchor)
-                .execute(&mut *tx)
-                .await
-                .map_err(storage)?;
-        if result.rows_affected() == 0 {
-            return Err(DocsError::NotFound(format!("{doc_path}#{anchor}")));
-        }
-        sqlx::query(
-            "UPDATE design_docs SET pending_count = (
-                SELECT COUNT(*) FROM design_pending_decisions WHERE doc_path = $1
-             ) WHERE path = $1",
-        )
-        .bind(doc_path)
-        .execute(&mut *tx)
-        .await
-        .map_err(storage)?;
-        tx.commit().await.map_err(storage)?;
-        Ok(())
-    }
-
-    async fn pending_decisions_for_doc(
-        &self,
-        doc_path: &str,
-    ) -> Result<Vec<PendingDecision>, DocsError> {
-        let rows = sqlx::query(
-            "SELECT * FROM design_pending_decisions
-             WHERE doc_path = $1 ORDER BY decided_at",
-        )
-        .bind(doc_path)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(storage)?;
-        rows.iter().map(pending_from_row).collect()
-    }
-
-    async fn create_flush_job(
-        &self,
-        payload: &FlushJobPayload,
-        requested_by: &str,
-    ) -> Result<FlushJob, DocsError> {
-        if payload.decisions.is_empty() {
-            return Err(DocsError::BadRequest(format!(
-                "no pending decisions for {}",
-                payload.doc_path
-            )));
-        }
-
-        let mut tx = self.pool.begin().await.map_err(storage)?;
-
-        // Defensive: verify the pending rows still exist in the DB.
-        // If the payload has N decisions but there are zero rows,
-        // the caller lied and we should fail with BadRequest so the
-        // UI can refetch.
-        let pending_rows: Vec<PgRow> =
-            sqlx::query("SELECT * FROM design_pending_decisions WHERE doc_path = $1")
-                .bind(&payload.doc_path)
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(storage)?;
-        if pending_rows.is_empty() {
-            return Err(DocsError::BadRequest(format!(
-                "no pending decisions for {}",
-                payload.doc_path
-            )));
-        }
-
-        let id = format!("fj-{}", Uuid::new_v4().simple());
-        let now = Utc::now();
-        let payload_json = serde_json::to_value(payload)
-            .map_err(|e| DocsError::Storage(format!("serializing payload: {e}")))?;
-
-        // `design_flush_jobs_one_queued_per_doc` (migration 140) is what
-        // makes an answer burst settle clean. Eight decisions recorded
-        // at once fire the queue rule eight times; each reads the same
-        // pending rows OUTSIDE this transaction and arrives here with an
-        // identical payload. Without the index all eight insert, and
-        // the doc ends up with a stack of jobs claiming the same work —
-        // which is what buried David's review on 2026-08-15.
-        //
-        // The loser reads as "already queued", which is both true and a
-        // no-op: the decisions it carries are in the job that won, and
-        // the caller (`docs.flush_queue`) already treats a 400 as
-        // nothing to do.
-        let inserted = sqlx::query(
-            "INSERT INTO design_flush_jobs (
-                id, doc_path, status, requested_by, queued_at, payload
-             ) VALUES ($1,$2,'queued',$3,$4,$5)",
-        )
-        .bind(&id)
-        .bind(&payload.doc_path)
-        .bind(requested_by)
-        .bind(now)
-        .bind(&payload_json)
-        .execute(&mut *tx)
-        .await;
-        if let Err(e) = inserted {
-            if is_unique_violation(&e) {
-                return Err(DocsError::BadRequest(format!(
-                    "a flush is already queued for {} — its payload carries these decisions",
-                    payload.doc_path
-                )));
-            }
-            return Err(storage(e));
-        }
-
-        // Delete ONLY the rows this payload actually snapshotted.
-        //
-        // This used to delete every pending row for the doc, while the
-        // snapshot came from the caller's payload and the check above
-        // only verified that SOME rows existed. A decision recorded
-        // between the caller building its payload and this transaction
-        // running was therefore deleted having never been captured
-        // anywhere — silently, with the flush job looking complete and
-        // internally consistent (feedback 1dd28e4c, defect 2).
-        //
-        // Deleting by anchor makes the race harmless instead: a
-        // decision that arrived late is not in the payload, so it is
-        // not deleted, and it is still pending for the next flush.
-        let anchors: Vec<String> = payload.decisions.iter().map(|d| d.anchor.clone()).collect();
-        sqlx::query(
-            "DELETE FROM design_pending_decisions
-             WHERE doc_path = $1 AND anchor = ANY($2)",
-        )
-        .bind(&payload.doc_path)
-        .bind(&anchors)
-        .execute(&mut *tx)
-        .await
-        .map_err(storage)?;
-
-        // pending_count reflects what SURVIVES, not zero. With the
-        // delete now scoped to the snapshot, a late-arriving decision
-        // is still pending and the badge has to say so — otherwise the
-        // row lives on with a count of 0 and nobody flushes it.
-        sqlx::query(
-            "UPDATE design_docs SET pending_count = (
-                 SELECT COUNT(*) FROM design_pending_decisions WHERE doc_path = $1
-             ) WHERE path = $1",
-        )
-        .bind(&payload.doc_path)
-        .execute(&mut *tx)
-        .await
-        .map_err(storage)?;
-
-        let row = sqlx::query("SELECT * FROM design_flush_jobs WHERE id = $1")
-            .bind(&id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(storage)?;
-        let job = job_from_row(&row)?;
-
-        tx.commit().await.map_err(storage)?;
-        Ok(job)
-    }
-
-    async fn flush_job_by_id(&self, id: &str) -> Result<Option<FlushJob>, DocsError> {
-        let row = sqlx::query("SELECT * FROM design_flush_jobs WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(storage)?;
-        row.as_ref().map(job_from_row).transpose()
-    }
-
-    async fn flush_jobs_by_status(&self, status: JobStatus) -> Result<Vec<FlushJob>, DocsError> {
-        let rows =
-            sqlx::query("SELECT * FROM design_flush_jobs WHERE status = $1 ORDER BY queued_at")
-                .bind(status.as_str())
-                .fetch_all(&self.pool)
-                .await
-                .map_err(storage)?;
-        rows.iter().map(job_from_row).collect()
-    }
-
-    async fn update_flush_job_status(
-        &self,
-        id: &str,
-        update: &JobStatusUpdate,
-        worked_by: Option<&str>,
-    ) -> Result<FlushJob, DocsError> {
-        let now = Utc::now();
-        let (started_at, completed_at) = match update.status {
-            JobStatus::Running => (Some(now), None),
-            JobStatus::Succeeded | JobStatus::Failed => (None, Some(now)),
-            JobStatus::Queued => (None, None),
-        };
-
-        // Use a CASE to preserve existing started_at when setting
-        // terminal states, and to clear completion when going back
-        // to queued.
-        let row = sqlx::query(
-            "UPDATE design_flush_jobs SET
-                status = $2,
-                started_at = CASE
-                    WHEN $2 = 'running' AND started_at IS NULL THEN $3
-                    WHEN $2 = 'queued' THEN started_at
-                    ELSE started_at
-                END,
-                completed_at = CASE
-                    WHEN $2 IN ('succeeded','failed') THEN $4
-                    WHEN $2 = 'queued' THEN NULL
-                    ELSE completed_at
-                END,
-                commit_sha = COALESCE($5, commit_sha),
-                error = CASE
-                    WHEN $2 = 'queued' THEN NULL
-                    ELSE COALESCE($6, error)
-                END,
-                -- Who moved it. A requeue clears it: a job waiting to
-                -- run has no worker, and keeping the last one would
-                -- describe the past as the present (backlog c3cd3301).
-                worked_by = CASE
-                    WHEN $2 = 'queued' THEN NULL
-                    ELSE COALESCE($7, worked_by)
-                END
-             WHERE id = $1
-             RETURNING *",
-        )
-        .bind(id)
-        .bind(update.status.as_str())
-        .bind(started_at)
-        .bind(completed_at)
-        .bind(&update.commit_sha)
-        .bind(&update.error)
-        .bind(worked_by)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(storage)?;
-
-        match row {
-            Some(r) => job_from_row(&r),
-            None => Err(DocsError::NotFound(id.to_string())),
-        }
-    }
-
-    async fn retry_flush_job(&self, id: &str) -> Result<FlushJob, DocsError> {
-        // Read current status first; if already succeeded, it's a no-op.
-        let existing = self.flush_job_by_id(id).await?;
-        let Some(job) = existing else {
-            return Err(DocsError::NotFound(id.to_string()));
-        };
-        if job.status == JobStatus::Succeeded {
-            return Ok(job);
-        }
-        self.update_flush_job_status(
-            id,
-            &JobStatusUpdate {
-                status: JobStatus::Queued,
-                commit_sha: None,
-                error: None,
-            },
-            // A requeue clears the worker; there is nobody to name.
-            None,
-        )
-        .await
-    }
-
-    async fn recent_flush_jobs(&self, limit: i64) -> Result<Vec<FlushJob>, DocsError> {
-        let rows = sqlx::query("SELECT * FROM design_flush_jobs ORDER BY queued_at DESC LIMIT $1")
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(storage)?;
-        rows.iter().map(job_from_row).collect()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{DecisionKind, DocStatus, FlushDecision};
+    use crate::types::DocStatus;
     use boss_testing::TestDb;
     use chrono::TimeZone;
 
@@ -759,7 +335,6 @@ mod tests {
             path: path.to_string(),
             title: "Test Doc".to_string(),
             status: DocStatus::InReview,
-            pending_count: 0,
             word_count: 100,
             last_modified: Utc.with_ymd_and_hms(2026, 4, 13, 12, 0, 0).unwrap(),
             last_author: "alice".to_string(),
@@ -783,6 +358,26 @@ mod tests {
         }
     }
 
+    /// Stand a ledger row up. Nothing in production writes this table
+    /// any more — the flush pipeline that did was deleted on
+    /// 2026-09-10 and the rows were backfilled by its migration — so
+    /// there is no port method to call and the test writes the row it
+    /// is asserting about.
+    async fn record(db: &TestDb, doc_path: &str, anchor: &str) {
+        sqlx::query(
+            "INSERT INTO design_recorded_decisions
+                 (id, doc_path, anchor, kind, resolution, decided_by)
+             VALUES ($1,$2,$3,'override',$4,'david@algedonic.dev')",
+        )
+        .bind(format!("{doc_path}#{anchor}"))
+        .bind(doc_path)
+        .bind(anchor)
+        .bind("WireGuard")
+        .execute(&db.pool)
+        .await
+        .expect("seed a recorded decision");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn upsert_and_list_docs() {
         let db = TestDb::new().await;
@@ -797,13 +392,15 @@ mod tests {
         assert_eq!(docs.len(), 2);
     }
 
-    /// The UNION in `upsert_doc` is the whole fix, and only a real
-    /// database exercises it. Two answers, in the two different places
-    /// an answer can be sitting when the file has not been rewritten
-    /// yet: one still pending, one already snapshotted into a queued
-    /// flush job. Neither doc heading says `(resolved)`.
+    /// The ledger read in `upsert_doc` is the whole fix, and only a
+    /// real database exercises it. Two answers recorded, one question
+    /// never answered; no doc heading says `(resolved)`, and since the
+    /// flush pipeline is gone none ever will — so this merge is the
+    /// only thing keeping an answered question from re-opening and
+    /// spawning a duplicate review (David, 2026-08-18: "I keep seeing
+    /// jobs that I have responded to").
     #[tokio::test(flavor = "multi_thread")]
-    async fn recorded_answers_resolve_their_questions_wherever_they_sit() {
+    async fn recorded_answers_resolve_the_questions_the_file_still_calls_open() {
         let db = TestDb::new().await;
         let repo = PgDocsRepo::new(db.pool.clone());
         let doc = sample_doc("docs/design/a.md");
@@ -817,47 +414,41 @@ mod tests {
         repo.upsert_doc(&doc, &parsed()).await.unwrap();
 
         for anchor in ["Q1", "Q2"] {
-            repo.upsert_pending_decision(
-                &PendingDecisionInput {
-                    doc_path: "docs/design/a.md".to_string(),
-                    anchor: anchor.to_string(),
-                    kind: DecisionKind::Accept,
-                    resolution: "WireGuard".to_string(),
-                    rationale: None,
-                },
-                "david@algedonic.dev",
-            )
-            .await
-            .unwrap();
+            record(&db, "docs/design/a.md", anchor).await;
         }
-        // Q2's answer moves into a queued flush job, which deletes its
-        // pending row. Q1's stays pending.
-        repo.create_flush_job(
-            &FlushJobPayload {
-                doc_path: "docs/design/a.md".to_string(),
-                base_commit_sha: "abc".to_string(),
-                decisions: vec![FlushDecision {
-                    anchor: "Q2".to_string(),
-                    kind: DecisionKind::Accept,
-                    resolution: "WireGuard".to_string(),
-                    rationale: None,
-                }],
-            },
-            "david@algedonic.dev",
-        )
-        .await
-        .unwrap();
 
         repo.upsert_doc(&doc, &parsed()).await.unwrap();
 
         let qs = repo.questions_for_doc("docs/design/a.md").await.unwrap();
         let by_anchor = |a: &str| qs.iter().find(|q| q.anchor == a).unwrap().resolved;
-        assert!(by_anchor("Q1"), "Q1 has a pending decision — answered");
-        assert!(
-            by_anchor("Q2"),
-            "Q2's answer is in a queued flush — answered"
-        );
+        assert!(by_anchor("Q1"), "Q1 carries a recorded answer");
+        assert!(by_anchor("Q2"), "Q2 carries a recorded answer");
         assert!(!by_anchor("Q3"), "Q3 was never answered — still open");
+    }
+
+    /// Pruning a doc clears its ledger rows. They answer questions in
+    /// a file that no longer exists, and the reindex prune is the only
+    /// caller — one un-deletable row used to fail the WHOLE reindex.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deleting_a_doc_clears_its_recorded_decisions() {
+        let db = TestDb::new().await;
+        let repo = PgDocsRepo::new(db.pool.clone());
+        repo.upsert_doc(
+            &sample_doc("docs/design/a.md"),
+            &[sample_question("docs/design/a.md", "Q1", 0)],
+        )
+        .await
+        .unwrap();
+        record(&db, "docs/design/a.md", "Q1").await;
+        repo.delete_doc("docs/design/a.md").await.unwrap();
+        let left: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM design_recorded_decisions WHERE doc_path = $1",
+        )
+        .bind("docs/design/a.md")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(left, 0, "the ledger rows go with the doc");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -891,448 +482,5 @@ mod tests {
                 .len(),
             1
         );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn pending_decisions_overwrite_same_anchor() {
-        let db = TestDb::new().await;
-        let repo = PgDocsRepo::new(db.pool.clone());
-        repo.upsert_doc(&sample_doc("docs/design/a.md"), &[])
-            .await
-            .unwrap();
-        repo.upsert_pending_decision(
-            &PendingDecisionInput {
-                doc_path: "docs/design/a.md".to_string(),
-                anchor: "Q1".to_string(),
-                kind: DecisionKind::Accept,
-                resolution: "first".to_string(),
-                rationale: None,
-            },
-            "alice",
-        )
-        .await
-        .unwrap();
-        repo.upsert_pending_decision(
-            &PendingDecisionInput {
-                doc_path: "docs/design/a.md".to_string(),
-                anchor: "Q1".to_string(),
-                kind: DecisionKind::Override,
-                resolution: "better".to_string(),
-                rationale: Some("changed mind".to_string()),
-            },
-            "alice",
-        )
-        .await
-        .unwrap();
-        let pending = repo
-            .pending_decisions_for_doc("docs/design/a.md")
-            .await
-            .unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].resolution, "better");
-        assert_eq!(pending[0].kind, DecisionKind::Override);
-        let doc = repo.doc_by_path("docs/design/a.md").await.unwrap().unwrap();
-        assert_eq!(doc.pending_count, 1);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_decision_recorded_after_the_payload_survives_the_flush() {
-        // Regression for feedback 1dd28e4c defect 2. The delete used to
-        // take every pending row for the doc while the snapshot came
-        // from the caller's payload, so a decision recorded in the gap
-        // between payload-build and flush-create was destroyed without
-        // ever being captured — silently, with the flush job looking
-        // complete. Deleting by anchor makes that race harmless.
-        let db = TestDb::new().await;
-        let repo = PgDocsRepo::new(db.pool.clone());
-        repo.upsert_doc(&sample_doc("docs/design/a.md"), &[])
-            .await
-            .unwrap();
-        for i in 0..2 {
-            repo.upsert_pending_decision(
-                &PendingDecisionInput {
-                    doc_path: "docs/design/a.md".to_string(),
-                    anchor: format!("Q{i}"),
-                    kind: DecisionKind::Accept,
-                    resolution: format!("answer {i}"),
-                    rationale: None,
-                },
-                "alice",
-            )
-            .await
-            .unwrap();
-        }
-
-        // The caller snapshots Q0 and Q1...
-        let payload = FlushJobPayload {
-            doc_path: "docs/design/a.md".to_string(),
-            base_commit_sha: "abc123".to_string(),
-            decisions: (0..2)
-                .map(|i| FlushDecision {
-                    anchor: format!("Q{i}"),
-                    kind: DecisionKind::Accept,
-                    resolution: format!("answer {i}"),
-                    rationale: None,
-                })
-                .collect(),
-        };
-
-        // ...and Q2 lands before the flush job is created.
-        repo.upsert_pending_decision(
-            &PendingDecisionInput {
-                doc_path: "docs/design/a.md".to_string(),
-                anchor: "Q2".to_string(),
-                kind: DecisionKind::Accept,
-                resolution: "the late one".to_string(),
-                rationale: None,
-            },
-            "bob",
-        )
-        .await
-        .unwrap();
-
-        repo.create_flush_job(&payload, "alice").await.unwrap();
-
-        // Q2 was never snapshotted, so it must still be pending.
-        let pending = repo
-            .pending_decisions_for_doc("docs/design/a.md")
-            .await
-            .unwrap();
-        assert_eq!(
-            pending.len(),
-            1,
-            "the un-snapshotted decision was destroyed by the flush: {pending:?}"
-        );
-        assert_eq!(pending[0].anchor, "Q2");
-        assert_eq!(pending[0].resolution, "the late one");
-
-        // And the badge must say there is still one to flush.
-        let doc = repo.doc_by_path("docs/design/a.md").await.unwrap().unwrap();
-        assert_eq!(
-            doc.pending_count, 1,
-            "pending_count was zeroed while a decision was still pending"
-        );
-    }
-
-    /// A doc can have at most one flush WAITING, and the database is
-    /// what guarantees it.
-    ///
-    /// David finished a review of eight questions on 2026-08-15 and
-    /// could not find it anywhere. All eight had been recorded — eight
-    /// POSTs, eight 200s — and the queue rule, which fires once per
-    /// recorded decision, turned them into THREE identical jobs. The
-    /// pending rows were consumed into those payloads, so the
-    /// `pending_count` the page reads was 0. A finished review was
-    /// indistinguishable from one that never registered.
-    ///
-    /// `post_flush_job` reads the pending rows OUTSIDE the transaction,
-    /// so under a burst every firing arrives with the same payload and
-    /// the defensive re-read inside the transaction still sees rows —
-    /// a sibling that has not committed is invisible to it. No amount
-    /// of checking fixes that; only a constraint does.
-    ///
-    /// Asserted against the index directly rather than by racing two
-    /// calls. A first attempt at this test drove `create_flush_job`
-    /// twice in sequence and passed with the migration REMOVED — the
-    /// second call was rejected by the pre-existing "no pending
-    /// decisions" path, so it proved nothing about the index. A test
-    /// that cannot fail is worse than no test.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn only_one_flush_may_wait_per_doc() {
-        let db = TestDb::new().await;
-        let repo = PgDocsRepo::new(db.pool.clone());
-        repo.upsert_doc(&sample_doc("docs/design/a.md"), &[])
-            .await
-            .unwrap();
-
-        let insert = |id: &'static str, status: &'static str| {
-            let pool = db.pool.clone();
-            async move {
-                sqlx::query(
-                    "INSERT INTO design_flush_jobs
-                        (id, doc_path, status, requested_by, queued_at, payload)
-                     VALUES ($1, 'docs/design/a.md', $2, 'rule', now(), $3::jsonb)",
-                )
-                .bind(id)
-                .bind(status)
-                .bind(
-                    r#"{"doc_path":"docs/design/a.md","base_commit_sha":"0000000","decisions":[]}"#,
-                )
-                .execute(&pool)
-                .await
-            }
-        };
-
-        insert("fj-first", "queued").await.expect("the first waits");
-
-        let second = insert("fj-second", "queued").await;
-        let err = second.expect_err("a second waiting flush for one doc must be refused");
-        assert!(
-            is_unique_violation(&err),
-            "expected the partial unique index to refuse it, got: {err}"
-        );
-
-        // History is unconstrained: a doc accumulates finished flushes
-        // over its life, and only the WAITING one must be singular.
-        insert("fj-done", "succeeded")
-            .await
-            .expect("a succeeded job alongside a queued one is ordinary history");
-        insert("fj-dead", "failed")
-            .await
-            .expect("so is a failed one");
-
-        let queued = repo.flush_jobs_by_status(JobStatus::Queued).await.unwrap();
-        assert_eq!(
-            queued
-                .iter()
-                .filter(|j| j.doc_path == "docs/design/a.md")
-                .count(),
-            1,
-            "one doc, one waiting flush"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn create_flush_job_is_atomic() {
-        let db = TestDb::new().await;
-        let repo = PgDocsRepo::new(db.pool.clone());
-        repo.upsert_doc(&sample_doc("docs/design/a.md"), &[])
-            .await
-            .unwrap();
-        for i in 0..3 {
-            repo.upsert_pending_decision(
-                &PendingDecisionInput {
-                    doc_path: "docs/design/a.md".to_string(),
-                    anchor: format!("Q{i}"),
-                    kind: DecisionKind::Accept,
-                    resolution: format!("answer {i}"),
-                    rationale: None,
-                },
-                "alice",
-            )
-            .await
-            .unwrap();
-        }
-        let doc_before = repo.doc_by_path("docs/design/a.md").await.unwrap().unwrap();
-        assert_eq!(doc_before.pending_count, 3);
-
-        let payload = FlushJobPayload {
-            doc_path: "docs/design/a.md".to_string(),
-            base_commit_sha: "abc123".to_string(),
-            decisions: (0..3)
-                .map(|i| FlushDecision {
-                    anchor: format!("Q{i}"),
-                    kind: DecisionKind::Accept,
-                    resolution: format!("answer {i}"),
-                    rationale: None,
-                })
-                .collect(),
-        };
-        let job = repo.create_flush_job(&payload, "alice").await.unwrap();
-        assert_eq!(job.status, JobStatus::Queued);
-        assert_eq!(job.payload.decisions.len(), 3);
-
-        // Pending rows cleared.
-        let pending = repo
-            .pending_decisions_for_doc("docs/design/a.md")
-            .await
-            .unwrap();
-        assert!(pending.is_empty());
-        let doc_after = repo.doc_by_path("docs/design/a.md").await.unwrap().unwrap();
-        assert_eq!(doc_after.pending_count, 0);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn create_flush_job_with_no_pending_errors() {
-        let db = TestDb::new().await;
-        let repo = PgDocsRepo::new(db.pool.clone());
-        repo.upsert_doc(&sample_doc("docs/design/a.md"), &[])
-            .await
-            .unwrap();
-        let payload = FlushJobPayload {
-            doc_path: "docs/design/a.md".to_string(),
-            base_commit_sha: "abc123".to_string(),
-            decisions: vec![],
-        };
-        let result = repo.create_flush_job(&payload, "alice").await;
-        assert!(matches!(result, Err(DocsError::BadRequest(_))));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn update_flush_job_status_lifecycle() {
-        let db = TestDb::new().await;
-        let repo = PgDocsRepo::new(db.pool.clone());
-        repo.upsert_doc(&sample_doc("docs/design/a.md"), &[])
-            .await
-            .unwrap();
-        repo.upsert_pending_decision(
-            &PendingDecisionInput {
-                doc_path: "docs/design/a.md".to_string(),
-                anchor: "Q1".to_string(),
-                kind: DecisionKind::Accept,
-                resolution: "ok".to_string(),
-                rationale: None,
-            },
-            "alice",
-        )
-        .await
-        .unwrap();
-        let job = repo
-            .create_flush_job(
-                &FlushJobPayload {
-                    doc_path: "docs/design/a.md".to_string(),
-                    base_commit_sha: "abc".to_string(),
-                    decisions: vec![FlushDecision {
-                        anchor: "Q1".to_string(),
-                        kind: DecisionKind::Accept,
-                        resolution: "ok".to_string(),
-                        rationale: None,
-                    }],
-                },
-                "alice",
-            )
-            .await
-            .unwrap();
-
-        repo.update_flush_job_status(
-            &job.id,
-            &JobStatusUpdate {
-                status: JobStatus::Running,
-                commit_sha: None,
-                error: None,
-            },
-            Some("emp-worker"),
-        )
-        .await
-        .unwrap();
-        let fetched = repo.flush_job_by_id(&job.id).await.unwrap().unwrap();
-        assert_eq!(fetched.status, JobStatus::Running);
-        assert!(fetched.started_at.is_some());
-
-        repo.update_flush_job_status(
-            &job.id,
-            &JobStatusUpdate {
-                status: JobStatus::Succeeded,
-                commit_sha: Some("def456".to_string()),
-                error: None,
-            },
-            Some("emp-worker"),
-        )
-        .await
-        .unwrap();
-        let fetched = repo.flush_job_by_id(&job.id).await.unwrap().unwrap();
-        assert_eq!(fetched.status, JobStatus::Succeeded);
-        assert_eq!(fetched.commit_sha.as_deref(), Some("def456"));
-        assert!(fetched.completed_at.is_some());
-        // The column the CLI's signed PUT lands in (backlog c3cd3301):
-        // who ASKED and who MOVED it are different facts.
-        assert_eq!(fetched.requested_by, "alice");
-        assert_eq!(fetched.worked_by.as_deref(), Some("emp-worker"));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn retry_failed_resets_to_queued() {
-        let db = TestDb::new().await;
-        let repo = PgDocsRepo::new(db.pool.clone());
-        repo.upsert_doc(&sample_doc("docs/design/a.md"), &[])
-            .await
-            .unwrap();
-        repo.upsert_pending_decision(
-            &PendingDecisionInput {
-                doc_path: "docs/design/a.md".to_string(),
-                anchor: "Q1".to_string(),
-                kind: DecisionKind::Accept,
-                resolution: "ok".to_string(),
-                rationale: None,
-            },
-            "alice",
-        )
-        .await
-        .unwrap();
-        let job = repo
-            .create_flush_job(
-                &FlushJobPayload {
-                    doc_path: "docs/design/a.md".to_string(),
-                    base_commit_sha: "abc".to_string(),
-                    decisions: vec![FlushDecision {
-                        anchor: "Q1".to_string(),
-                        kind: DecisionKind::Accept,
-                        resolution: "ok".to_string(),
-                        rationale: None,
-                    }],
-                },
-                "alice",
-            )
-            .await
-            .unwrap();
-        repo.update_flush_job_status(
-            &job.id,
-            &JobStatusUpdate {
-                status: JobStatus::Failed,
-                commit_sha: None,
-                error: Some("boom".to_string()),
-            },
-            Some("emp-worker"),
-        )
-        .await
-        .unwrap();
-
-        let retried = repo.retry_flush_job(&job.id).await.unwrap();
-        assert_eq!(retried.status, JobStatus::Queued);
-        assert!(retried.error.is_none());
-        assert!(retried.completed_at.is_none());
-        // Requeued: waiting again, so nobody is working it.
-        assert_eq!(retried.worked_by, None);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn retry_succeeded_is_noop() {
-        let db = TestDb::new().await;
-        let repo = PgDocsRepo::new(db.pool.clone());
-        repo.upsert_doc(&sample_doc("docs/design/a.md"), &[])
-            .await
-            .unwrap();
-        repo.upsert_pending_decision(
-            &PendingDecisionInput {
-                doc_path: "docs/design/a.md".to_string(),
-                anchor: "Q1".to_string(),
-                kind: DecisionKind::Accept,
-                resolution: "ok".to_string(),
-                rationale: None,
-            },
-            "alice",
-        )
-        .await
-        .unwrap();
-        let job = repo
-            .create_flush_job(
-                &FlushJobPayload {
-                    doc_path: "docs/design/a.md".to_string(),
-                    base_commit_sha: "abc".to_string(),
-                    decisions: vec![FlushDecision {
-                        anchor: "Q1".to_string(),
-                        kind: DecisionKind::Accept,
-                        resolution: "ok".to_string(),
-                        rationale: None,
-                    }],
-                },
-                "alice",
-            )
-            .await
-            .unwrap();
-        repo.update_flush_job_status(
-            &job.id,
-            &JobStatusUpdate {
-                status: JobStatus::Succeeded,
-                commit_sha: Some("def".to_string()),
-                error: None,
-            },
-            Some("emp-worker"),
-        )
-        .await
-        .unwrap();
-        let retried = repo.retry_flush_job(&job.id).await.unwrap();
-        assert_eq!(retried.status, JobStatus::Succeeded);
-        assert_eq!(retried.commit_sha.as_deref(), Some("def"));
     }
 }

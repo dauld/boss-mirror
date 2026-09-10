@@ -76,10 +76,28 @@ async fn every_sweep_spawner_guards_on_its_own_subject() {
             );
         }
     }
+    // SIX since 2026-09-10, down from seven: the seventh was
+    // `maintenance-sweep-doc-status-daily`, retired with the design-doc
+    // flush pipeline (backlog f5da586c). Its whole content was the
+    // drifted-status report — `GET /api/design/stale-statuses`, which
+    // that deletion removed — and a packet's status IS its status, so
+    // there is no drifted doc left to sweep for. The six are
+    // build-caches, cluster-conformance, converge-lag, disk,
+    // empty-decisions and image-freshness.
+    //
+    // The floor is what this pin is for: a sweep rule that loses its
+    // guard still spawns, so it is still counted here and still fails
+    // the assertions above BY NAME. A rule that disappears fails only
+    // here — which is why lowering the number is a deliberate act with
+    // a reason attached, not a number nudged until green.
     assert!(
-        checked >= 7,
-        "expected the seven daily sweep spawners, found {checked} — \
-         if sweeps moved, move this pin with them"
+        checked >= 6,
+        "expected the six daily sweep spawners (build-caches, \
+         cluster-conformance, converge-lag, disk, empty-decisions, \
+         image-freshness), found {checked} — a sweep went missing. If one \
+         was retired on purpose, lower this pin AND say which and why, \
+         the way the doc-status sweep's retirement is recorded above; if \
+         not, a sweep stopped running and nobody noticed."
     );
 }
 

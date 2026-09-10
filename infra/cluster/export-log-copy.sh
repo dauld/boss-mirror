@@ -15,8 +15,16 @@
 #                            (workflow publishes land in the log but
 #                            nothing consumes them; classes writes are
 #                            eventless today)
-#   - design_pending_decisions, design_flush_jobs
-#                          — non-event-sourced by design
+#   - design_recorded_decisions
+#                          — non-event-sourced by design, and the only
+#                            thing keeping an answered design-doc
+#                            question from re-opening (boss-docs reads
+#                            it on every reindex). Was two tables,
+#                            `design_pending_decisions` and
+#                            `design_flush_jobs`, until the flush
+#                            pipeline was deleted on 2026-09-10
+#                            (f5da586c): the second is gone and the
+#                            first was renamed to what it now is.
 #   - sim_clock            — the epoch baseline row; its audit-id
 #                            references copy verbatim with audit_log
 #   - messages_events      — the messages retention log (history beyond
@@ -64,8 +72,7 @@ COPY_TABLES=(
     policy_rules
     policy_rule_audit
     dispatcher_rules
-    design_pending_decisions
-    design_flush_jobs
+    design_recorded_decisions
     sim_clock
     messages_events
 )

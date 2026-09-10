@@ -9,7 +9,9 @@
 #
 # Why this exists: 2026-04-28 boss-docs-api was running in-memory
 # only because it was built without `--features postgres`. POSTs
-# returned 200; the design_pending_decisions table stayed empty.
+# returned 200; the design_pending_decisions table stayed empty. (That
+# table and the one POST are gone since 2026-09-10 — boss-docs is
+# checked on the read side now; see below.)
 # Option (1) of the fix (boss_core::startup::require_postgres_or_explicit_inmemory)
 # stops the next regression at *boot*. This script is the
 # defense-in-depth check that catches the same class of bug at
@@ -20,8 +22,9 @@
 #
 # Exit codes:
 #   0 — all round-trips succeeded
-#   1 — at least one round-trip failed (POST returned 200 but
-#       Postgres has no row, OR POST itself failed)
+#   1 — at least one check failed (a write returned 200 but Postgres
+#       has no row, a list disagreed with its table, or the call
+#       itself failed)
 
 set -euo pipefail
 
@@ -33,32 +36,6 @@ psql_run() {
 }
 
 declare -a FAILURES=()
-
-# ---------- boss-docs-api ----------
-# A pending decision is the cheapest write to round-trip: one row in
-# `design_pending_decisions`, no events emitted, no projections to
-# rebuild. Anchor field doubles as our sentinel.
-check_docs() {
-    local doc_path="docs/design/_heartbeat.md"
-    local anchor="$SENTINEL"
-    local resp
-    resp=$(curl -sS -o /dev/null -w "%{http_code}" \
-        -X POST -H 'content-type: application/json' \
-        -H 'x-boss-employee-id: heartbeat' \
-        -d "{\"doc_path\":\"${doc_path}\",\"anchor\":\"${anchor}\",\"kind\":\"accept\",\"resolution\":\"heartbeat\",\"rationale\":null}" \
-        http://127.0.0.1:7050/api/design/pending-decisions || echo "0")
-    if [[ "$resp" != "200" ]]; then
-        FAILURES+=("boss-docs-api: POST /api/design/pending-decisions returned $resp")
-        return
-    fi
-    local rows
-    rows=$(psql_run "SELECT COUNT(*) FROM design_pending_decisions WHERE anchor = '${anchor}'")
-    if [[ "$rows" != "1" ]]; then
-        FAILURES+=("boss-docs-api: POST returned 200 but Postgres has $rows rows for anchor=${anchor} (silent in-memory fallback?)")
-    fi
-    # Cleanup — direct DB delete avoids needing the API to be healthy.
-    psql_run "DELETE FROM design_pending_decisions WHERE anchor = '${anchor}'" >/dev/null
-}
 
 # ---------- read-consistency check ----------
 # For services whose HTTP surface is read-only at the platform level
@@ -91,7 +68,16 @@ check_read_consistency() {
     fi
 }
 
-check_docs
+# boss-docs-api USED to be the one round-trip check here: a pending
+# decision was the cheapest write to land, and its anchor doubled as
+# the sentinel. The flush pipeline and the pending-decision table were
+# deleted on 2026-09-10 (backlog f5da586c) and boss-docs now has no
+# write endpoint but `reindex`, which rewrites the whole corpus and is
+# not a sentinel. Same signal, read side: the corpus list must agree
+# with the table, which an in-memory fallback cannot fake.
+check_read_consistency "boss-docs-api" \
+    "http://127.0.0.1:7050/api/design/docs" \
+    "design_docs"
 # `boss-classes-api` requires ?subject_kind=… — pick `employee`, the
 # largest classes namespace today.
 check_read_consistency "boss-classes-api" \
@@ -128,7 +114,7 @@ check_capability "boss-assets-api"    "http://127.0.0.1:7600/api/assets/health"
 check_capability "boss-calendar-api" "http://127.0.0.1:7860/api/calendar/health"
 
 if [[ ${#FAILURES[@]} -eq 0 ]]; then
-    echo "ok: 9 checks passed (1 round-trip, 2 read-consistency, 6 capability handshake)."
+    echo "ok: 9 checks passed (3 read-consistency, 6 capability handshake)."
     exit 0
 fi
 

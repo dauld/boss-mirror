@@ -2088,6 +2088,94 @@ pub(crate) fn verdict_line(verdict: &str, packet: &str, body: &Value) -> String 
     )
 }
 
+/// What a red verdict owes the operator who waited for it.
+///
+/// `--wait` used to end a red gate with `gate verdict: failed (packet …,
+/// branch)` and nothing more, so the next move was always the same one:
+/// go and read the receipt, or the pod log, to learn what broke. The
+/// receipt already holds the answer — the failing checks in `checks`, and
+/// since backlog 4a4d1227 the failing TEST names with the panic line and
+/// its `file:line` in `fails` — and the verb that was holding the packet
+/// open has no excuse for not saying it.
+///
+/// THE LADDER, most specific first. `fails` is the half a reader acts on.
+/// `checks` covers receipts written before the runner carried detail, and
+/// scoped runs where a check failed without naming a test.
+/// `refused_because` covers a REFUSAL, which fails no check at all and
+/// is not a statement about the branch (§Diagnosis: "an infrastructure
+/// refusal is not a consist failure"). `None` when there is no readable
+/// receipt — a runner that died before writing one leaves the bare
+/// verdict line, and inventing a cause would be worse than silence.
+///
+/// BOUNDED, WITH THE REMAINDER COUNTED. A console line is not a receipt,
+/// so at most [`DETAIL_LINES`] entries are printed and what is left is
+/// stated as a number — the receipt on the packet keeps all of it.
+fn red_verdict_detail(body: &Value) -> Option<String> {
+    /// Entries printed before the rest is counted instead.
+    const DETAIL_LINES: usize = 8;
+
+    let raw = body
+        .get("steps")?
+        .as_array()?
+        .iter()
+        .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some("record-verdict"))?
+        .pointer("/metadata/receipt")?
+        .as_str()?;
+    let receipt: Value = serde_json::from_str(raw).ok()?;
+
+    let fails: Vec<String> = receipt
+        .get("fails")
+        .and_then(Value::as_array)
+        .map(|f| {
+            f.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut lines = if fails.is_empty() {
+        receipt
+            .get("checks")
+            .and_then(Value::as_array)
+            .map(|cs| {
+                cs.iter()
+                    .filter(|c| c.get("result").and_then(Value::as_str) != Some("pass"))
+                    .filter_map(|c| c.get("name").and_then(Value::as_str))
+                    .map(|n| format!("{n}: failed (this receipt names no test)"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        fails
+    };
+    if lines.is_empty() {
+        lines = receipt
+            .get("refused_because")
+            .and_then(Value::as_str)
+            .map(|why| vec![format!("the gate refused before any check ran: {why}")])
+            .unwrap_or_default();
+    }
+    if lines.is_empty() {
+        return None;
+    }
+
+    let total = lines.len();
+    if total > DETAIL_LINES {
+        lines.truncate(DETAIL_LINES);
+        lines.push(format!(
+            "+ {} more on the receipt (`boss receipt <branch>`)",
+            total - DETAIL_LINES
+        ));
+    }
+    Some(
+        lines
+            .iter()
+            .map(|l| format!("  {l}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
 /// Poll the PACKET, not the pod.
 ///
 /// The runner self-reports its verdict onto the gate-run packet, and
@@ -2181,8 +2269,13 @@ async fn wait_for_verdict(
             record_gated_head(http, packet, &job).await;
             println!("{}", verdict_line(&v, packet, &job));
             if v != "green" {
+                // The receipt is right here; a verdict someone must go
+                // re-derive is not a verdict (backlog 4a4d1227).
+                let detail = red_verdict_detail(&job)
+                    .map(|d| format!("\n{d}"))
+                    .unwrap_or_default();
                 bail!(
-                    "gate verdict: {v}  (packet {}, {})",
+                    "gate verdict: {v}  (packet {}, {}){detail}",
                     &packet[..8.min(packet.len())],
                     job.pointer("/metadata/branch")
                         .and_then(Value::as_str)
@@ -4094,6 +4187,107 @@ kind: Job\n\
         assert!(
             red.contains("packet 6de49582") && red.contains("fix/incident-post-mortem-v2"),
             "{red}"
+        );
+    }
+
+    /// A WAITER THAT PRINTS ONLY "failed" SENDS ITS READER BACK TO THE
+    /// LOG. The receipt names the failing test and where it panicked
+    /// (backlog 4a4d1227); the verb that was already holding the packet
+    /// open has no excuse for making someone go and look it up.
+    #[test]
+    fn a_red_verdict_carries_what_the_receipt_says_failed() {
+        let body = json!({
+            "id": "9dc722d2-0000-4000-8000-000000000001",
+            "metadata": {"branch": "fix/the-flush-pipeline-is-deleted"},
+            "steps": [{
+                "spec_slug": "record-verdict", "status": "completed",
+                "metadata": {"verdict": "failed", "receipt":
+                    "{\"verdict\":\"failed\",\"head\":\"68ef2957\",\"checks\":[\
+                      {\"name\":\"fmt\",\"result\":\"pass\"},\
+                      {\"name\":\"test\",\"result\":\"fail\"}],\
+                      \"fails\":[\"test: every_sweep_spawner_guards_on_its_own_subject - \
+                      panicked at crates/core/boss-dispatcher/tests/sweep_spawn_guards.rs:79:5: \
+                      expected the seven daily sweep spawners, found 6\"]}"}
+            }]
+        });
+        let detail = red_verdict_detail(&body).expect("a red receipt with fails has detail");
+        assert!(
+            detail.contains("every_sweep_spawner_guards_on_its_own_subject")
+                && detail.contains("sweep_spawn_guards.rs:79:5"),
+            "the waiter prints the failing TEST and its file:line, which is what the reader \
+             acts on: {detail}"
+        );
+    }
+
+    /// An older receipt — and a refusal, which fails no test — still has
+    /// `checks`, so the detail falls back to the failing check names
+    /// rather than to nothing.
+    #[test]
+    fn a_red_verdict_falls_back_to_the_failing_check_names() {
+        let body = json!({
+            "steps": [{
+                "spec_slug": "record-verdict",
+                "metadata": {"receipt":
+                    "{\"verdict\":\"failed\",\"checks\":[{\"name\":\"clippy\",\"result\":\"fail\"},\
+                      {\"name\":\"web-unit\",\"result\":\"fail\"}]}"}
+            }]
+        });
+        let detail = red_verdict_detail(&body).expect("checks alone are still detail");
+        assert!(
+            detail.contains("clippy") && detail.contains("web-unit"),
+            "both failing checks are named: {detail}"
+        );
+
+        // A refusal fails no check at all; `refused_because` is the fact
+        // that tells "the host was unfit" from "the branch was bad", so
+        // it is the last fallback rather than a silent empty line.
+        let refused = json!({
+            "steps": [{
+                "spec_slug": "record-verdict",
+                "metadata": {"receipt":
+                    "{\"verdict\":\"refused\",\"refused_because\":\"4.1 GB free, floor is 25\",\
+                      \"checks\":[]}"}
+            }]
+        });
+        assert!(
+            red_verdict_detail(&refused)
+                .expect("a refusal says why")
+                .contains("floor is 25")
+        );
+
+        // No receipt at all (a runner that died before writing one)
+        // leaves the bare verdict line it has always been.
+        assert!(
+            red_verdict_detail(&json!({
+                "steps": [{"spec_slug": "record-verdict",
+                           "metadata": {"verdict": "lost"}}]
+            }))
+            .is_none(),
+            "nothing to read must stay silent rather than invent a cause"
+        );
+    }
+
+    /// The reduction is bounded and says so. A suite failing forty tests
+    /// writes forty `fails` entries; a console line is not where forty
+    /// belong, and dropping the rest without a count is the defect this
+    /// whole line of work is about.
+    #[test]
+    fn the_waiters_detail_is_capped_with_the_remainder_counted() {
+        let fails: Vec<String> = (0..30)
+            .map(|i| format!("test: case_{i} - FAILED"))
+            .collect();
+        let receipt = json!({"verdict": "failed", "fails": fails}).to_string();
+        let body = json!({
+            "steps": [{"spec_slug": "record-verdict", "metadata": {"receipt": receipt}}]
+        });
+        let detail = red_verdict_detail(&body).expect("detail");
+        assert!(
+            detail.lines().count() <= 10,
+            "a console line is not a receipt: {detail}"
+        );
+        assert!(
+            detail.contains("22 more"),
+            "and what it left out is counted, not dropped quietly: {detail}"
         );
     }
 

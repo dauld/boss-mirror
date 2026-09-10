@@ -1199,10 +1199,9 @@ pub fn feedback_branch_for_disposition(disposition: &str) -> Option<FeedbackBran
 ///                        captures a resolution per question,
 ///                        blocks completion until all questions
 ///                        have a resolution recorded. Resolutions
-///                        flow into the existing
-///                        `/api/design/pending-decisions` rows;
-///                        `/api/design/flush-jobs` extracts them
-///                        to ADRs.
+///                        live on the step, which IS the record;
+///                        settled material folds into the ADR each
+///                        release.
 ///  999. `outcome`      — review complete; decisions captured
 fn design_doc_review_spec() -> WorkflowSpec {
     let steps = vec![
@@ -1264,12 +1263,11 @@ fn design_doc_review_spec() -> WorkflowSpec {
     spec.metadata = serde_json::json!({ "owner_role": "platform-admin" });
     spec.description = Some(
         "Meta-kind: every design doc under docs/design/ gets reviewed via a Job of this kind. \
-         The `review-design` step uses a custom Step UX plugin that reads the doc's open \
-         questions (parsed by boss-docs-api from `### Qn:` headings) and gates completion \
-         until each one has a recorded resolution. Resolutions land in \
-         `/api/design/pending-decisions`; subsequent `/api/design/flush-jobs` writes them \
-         into the source doc's Decision-history section (each release, settled material \
-         folds into `docs/architecture-decisions.md` and the source doc is deleted). \
+         The `review-design` step uses a custom Step UX plugin that reads the questions the \
+         packet carries and gates completion until each one has a recorded resolution. \
+         Resolutions land on the step, which IS the record; each release, settled material \
+         folds into `docs/architecture-decisions.md`. A LEGACY packet carrying only a \
+         `doc_path` still reads its questions from boss-docs-api's `### Qn:` parse. \
          Replaces the in-app decision-tracker surface retired on 2026-05-03."
             .to_string(),
     );

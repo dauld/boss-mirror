@@ -15,7 +15,6 @@
 //!    spawn-review rule fires forever.
 //! 3. A change in the question set (a question resolving) emits again
 //!    with the new counts.
-//! 4. Recording a pending decision emits `docs.design.decision_recorded`.
 
 use boss_docs::port::DocsRepository;
 use boss_docs::postgres::PgDocsRepo;
@@ -27,7 +26,6 @@ fn doc(path: &str) -> DesignDoc {
         path: path.into(),
         title: "A doc".into(),
         status: boss_docs::types::DocStatus::Draft,
-        pending_count: 0,
         word_count: 100,
         last_modified: chrono::Utc::now(),
         last_author: "tester".into(),
@@ -95,26 +93,4 @@ async fn index_emits_on_first_and_on_change_never_on_identical() {
     assert_eq!(events.len(), 2, "the change emits: {events:?}");
     assert_eq!(events[1].1["open_questions"], 1);
     assert_eq!(events[1].1["resolved_questions"], 1);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn recording_a_decision_emits() {
-    let db = TestDb::new().await;
-    let repo = PgDocsRepo::new(db.pool.clone());
-    let input = boss_docs::types::PendingDecisionInput {
-        doc_path: "docs/design/example.md".into(),
-        anchor: "Q1".into(),
-        kind: boss_docs::types::DecisionKind::Accept,
-        resolution: "Agreed".into(),
-        rationale: None,
-    };
-    repo.upsert_pending_decision(&input, "emp-bootstrap-admin")
-        .await
-        .unwrap();
-    let events = outbox_kinds(&db.pool).await;
-    assert_eq!(events.len(), 1, "{events:?}");
-    assert_eq!(events[0].0, "docs.design.decision_recorded");
-    assert_eq!(events[0].1["doc_path"], "docs/design/example.md");
-    assert_eq!(events[0].1["anchor"], "Q1");
-    assert_eq!(events[0].1["decided_by"], "emp-bootstrap-admin");
 }

@@ -20,7 +20,6 @@ pub mod common;
 pub mod credential_issuer;
 pub mod credential_rotate_forgejo;
 pub mod docs_design_sweep;
-pub mod docs_flush_queue;
 pub mod estate_alarm;
 pub mod estate_compare;
 pub mod gate_resolve;

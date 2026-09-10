@@ -6,13 +6,13 @@
 // resolution textarea. Step completion is GATED on every question
 // having a non-empty resolution recorded.
 //
-// Resolutions are saved as pending-decisions via
-// /api/design/pending-decisions; the follow-up
-// /api/design/flush-jobs endpoint writes them into the source
-// doc's Decision-history section (each release, settled material
-// folds into docs/architecture-decisions.md and the source doc is
-// deleted). Brings back the "system models its own development"
-// workflow that existed pre-2026-05-03.
+// Resolutions are saved onto the STEP, which IS the record. They used
+// to be mirrored to /api/design/pending-decisions so a flush job could
+// write them into the source doc's Decision-history section; that
+// pipeline was deleted on 2026-09-10 (backlog f5da586c) because the
+// packet is the doc, and this surface's own comment had already said
+// the mirror "would create a second copy that can disagree". Settled
+// material folds into docs/architecture-decisions.md each release.
 //
 // Plugin contract: window.__boss_register_step_plugin(kind, mount).
 // Host calls mount(container, props) with { step, jobId, onUpdate }.
@@ -269,10 +269,9 @@
     let doc = null;
     let questions = [];
     // True when the questions came from the packet rather than the
-    // docs API. Decides whether answers are mirrored to
-    // pending-decisions: a self-carried packet's answers live in step
-    // metadata, which IS the record, so mirroring them into the flush
-    // pipeline would create a second copy that can disagree.
+    // docs API. Kept because the loader's four branches need to know
+    // which of them answered; it no longer decides where answers go,
+    // since every answer now lives only on the step.
     let selfCarried = false;
     let loadError = null;
     let saving = false;
@@ -564,50 +563,6 @@
       }
     }
 
-    async function persistPendingDecisions() {
-      // Mirror each non-empty resolution to /api/design/pending-decisions
-      // so the existing flush-jobs path can extract them to ADRs. We
-      // POST one at a time — the endpoint is upsert-style.
-      // PendingDecisionInput wants {doc_path, anchor, kind, resolution}.
-      // The old body sent `proposal` with no kind — a 422 this catch
-      // swallowed, so flush-jobs always saw zero pending decisions.
-      //
-      // `kind` is now a fact rather than a constant. It used to be
-      // hardcoded to override because no question ever carried a
-      // proposal to accept (the parser looked for a spelling the corpus
-      // does not use), which made the accept/override split carry no
-      // information at all. It is derived from what the reviewer
-      // submitted: identical to the doc's proposal means he took it,
-      // anything else means he wrote his own. That is a claim about his
-      // text, not about who drafted it — nothing here records that a
-      // proposal was pre-filled.
-      const proposalFor = (anchor) => {
-        const q = questions.find((x) => x.anchor === anchor);
-        return q && typeof q.proposal === 'string' ? q.proposal.trim() : '';
-      };
-      const writes = resolutions
-        .filter((r) => r.decision.trim().length > 0)
-        .map((r) =>
-          fetch('/api/design/pending-decisions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              doc_path: docPath,
-              anchor: r.anchor,
-              kind: r.decision.trim() === proposalFor(r.anchor) ? 'accept' : 'override',
-              resolution: r.decision,
-            }),
-          }),
-        );
-      const results = await Promise.allSettled(writes);
-      const failed = results.filter((r) => r.status === 'rejected' || (r.value && !r.value.ok));
-      if (failed.length > 0) {
-        // Don't block step save on a pending-decision write failure;
-        // the resolution is still persisted on the step itself.
-        console.warn('[review-design] pending-decisions writes failed:', failed.length);
-      }
-    }
-
     async function mergeOwnedKeys() {
       // Merge ONLY the keys this surface owns, server-side. The old
       // idiom PUT `{ ...step.metadata, doc_path, resolutions }` — the
@@ -659,7 +614,6 @@
       saveError = null;
       renderActions();
       try {
-        if (!selfCarried) await persistPendingDecisions();
         const completing = autoComplete && (allAnswered() || questions.length === 0);
 
         // 1. Land ALL metadata writes first (title + metadata are what

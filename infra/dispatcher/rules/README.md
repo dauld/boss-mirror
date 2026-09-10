@@ -36,10 +36,26 @@ things close that now:
   error reading it, so `why: null` everywhere never silently means
   "no rule records a why" when it means "I could not read the source".
 - **`infra/lint/the-live-rules-are-the-authored-rules.sh`** compares the
-  live set to this directory by name and fails on a rule the dispatcher
-  enforces that no file records. It skips loudly where the read surface
-  is unreachable (the forge gate host has no route), and a 200 with no
-  rules — or zero rules — is a failure, not a pass.
+  live set to this directory and fails on a rule the dispatcher enforces
+  that neither a file here records nor a migration retires. It skips
+  loudly where the read surface is unreachable (the forge gate host has
+  no route), and a 200 with no rules — or zero rules — is a failure, not
+  a pass.
+
+  **Retiring a rule is the reverse of adding one, and it leans on the
+  same window.** A retirement deletes the file here and retires the row
+  in a migration — and a migration runs at converge, which is AFTER the
+  consist check that boards the car. So for that window the rule is still
+  live with no file, the mirror image of the add case, and the lint reads
+  the retirement out of `infra/postgres/schema/` rather than failing on
+  it: it replays every `dispatcher_rules` status write in apply order and
+  asks whether the tree's last word on that rule AT THAT VERSION is a
+  retirement. A version bump (retire v1, insert v2 active) is therefore
+  not a retirement, and a rule no migration mentions at all is not one
+  either — that is still the drift the check exists for. The first
+  version of the lint read only the add direction and so blocked every
+  retirement car from a train; `202609101200-the-flush-pipeline-is-deleted.sql`
+  is the worked example of a retirement it reads.
 
 This directory was one file (`rules.toml`) until 2026-09-09, when two
 rule cars parked in one window and the second was left behind on

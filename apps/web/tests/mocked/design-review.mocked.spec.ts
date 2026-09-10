@@ -1,9 +1,9 @@
 // Design review list (/it/design) — content-level guard for the
 // docs-review surface: the table must show each indexed doc with its
 // LIVE open-question count (a doc with 3 unresolved `### Qn:` anchors
-// must not read "0" — the pre-2026-07-06 page showed pending_count,
-// i.e. unflushed decisions, under an "Open Qs" header) and offer the
-// review-Job entry point. Route-smoke only asserts the page mounts.
+// must not read "0" — the pre-2026-07-06 page counted recorded
+// answers under an "Open Qs" header) and offer the review-Job entry
+// point. Route-smoke only asserts the page mounts.
 
 import { test, expect } from '@playwright/test';
 import { mountPage } from '../smoke/_helpers';
@@ -14,7 +14,6 @@ const DOCS = [
     title: 'Inventory value conservation (costing PR 6)',
     status: 'in-review',
     open_questions: 3,
-    pending_count: 0,
     word_count: 941,
     last_modified: new Date().toISOString(),
     last_author: 'david',
@@ -27,7 +26,6 @@ const DOCS = [
     title: 'The BOSS correctness protocol',
     status: 'living',
     open_questions: 0,
-    pending_count: 0,
     word_count: 1398,
     last_modified: new Date().toISOString(),
     last_author: 'david',
@@ -56,15 +54,6 @@ test.beforeEach(async ({ page }) => {
   );
   await page.route('**/api/design/docs', (route) =>
     route.fulfill({ json: DOCS }),
-  );
-  // Empty by default: the common case is a fully-indexed corpus, and
-  // it keeps the panel out of the way of the assertions below. The
-  // non-empty case has its own test.
-  await page.route('**/api/design/rejections', (route) =>
-    route.fulfill({ json: [] }),
-  );
-  await page.route('**/api/design/stale-statuses', (route) =>
-    route.fulfill({ json: [] }),
   );
   await page.route('**/api/jobs?*', (route) =>
     route.fulfill({ json: { jobs: [], total: 0 } }),
@@ -119,18 +108,15 @@ async function installJobCreateMock(page: import('@playwright/test').Page) {
 }
 
 test.describe('Design review list', () => {
-  test('shows live open-question counts, not pending decisions', async ({
-    page,
-  }) => {
+  test('shows live open-question counts', async ({ page }) => {
     await mountPage(page, '/it/design', { titleMatch: /design review/i });
 
     const row = page.locator('tr', {
       hasText: 'Inventory value conservation',
     });
     await expect(row).toBeVisible({ timeout: 10_000 });
-    // Column order: doc, status, open Qs, pending decisions, …
+    // Column order: doc, status, open Qs, last modified, review.
     await expect(row.locator('td').nth(2)).toHaveText('3');
-    await expect(row.locator('td').nth(3)).toHaveText('0');
 
     const settled = page.locator('tr', { hasText: 'correctness protocol' });
     await expect(settled.locator('td').nth(2)).toHaveText('0');
@@ -198,31 +184,6 @@ test.describe('Design review list', () => {
     await expect(page.locator('.empty', { hasText: /HTTP 422/ })).toHaveCount(
       0,
     );
-  });
-
-  test('names docs the reindexer refused, and how long they have been invisible', async ({
-    page,
-  }) => {
-    const sixDaysAgo = new Date(Date.now() - 6 * 86_400_000).toISOString();
-    await page.route('**/api/design/rejections', (route) =>
-      route.fulfill({
-        json: [
-          {
-            path: 'docs/design/half-written.md',
-            reason: 'no title heading',
-            first_seen_at: sixDaysAgo,
-            last_seen_at: new Date().toISOString(),
-          },
-        ],
-      }),
-    );
-    await mountPage(page, '/it/design', { titleMatch: /design review/i });
-    await expect(
-      page.getByRole('heading', { name: /not indexed \(1\)/i }),
-    ).toBeVisible();
-    const row = page.locator('tr', { hasText: 'docs/design/half-written.md' });
-    await expect(row).toContainText('6 days');
-    await expect(row).toContainText('no title heading');
   });
 
   test('an in-review doc links to the full-page step surface, not the job page', async ({
@@ -329,62 +290,4 @@ test.describe('Design review list', () => {
     await expect(page).toHaveURL(/\/service\/job-review-9(\?|$)/);
   });
 
-  test('a failing rejections call does not blank the page', async ({
-    page,
-  }) => {
-    // Rejections are supplementary. Throwing on a non-OK response
-    // replaced the entire surface with an error banner — the docs
-    // list, the counts, every review button — over a panel that
-    // renders nothing when empty anyway.
-    await page.route('**/api/design/rejections', (route) =>
-      route.fulfill({ status: 500, body: 'boom' }),
-    );
-    await mountPage(page, '/it/design', { titleMatch: /design review/i });
-    await expect(
-      page.locator('tr', { hasText: 'Inventory value conservation' }),
-    ).toHaveCount(1);
-    await expect(page.locator('.empty', { hasText: /^Error:/ })).toHaveCount(0);
-  });
 });
-
-// The status line is hand-written and almost nothing updates it, so it
-// goes stale by default: on 2026-08-15 eleven of the twenty docs
-// claiming to be live had nothing open, every one wrong in the same
-// direction, and no surface said so (0b8ae875). This is the surface.
-//
-// Rendered rather than reasoned about, per the invariant
-// `a-rendered-surface-is-verified-by-rendering-it` — which exists
-// because a landing-page fix was applied to two wrong files before
-// anyone rendered the third.
-test('a doc whose status drifted is reported, with what it claims', async ({ page }) => {
-  await page.route('**/api/design/stale-statuses', (route) =>
-    route.fulfill({
-      json: [
-        {
-          path: 'docs/design/stations.md',
-          title: 'Stations',
-          status: 'in-review',
-          reason:
-            'status is `in-review`, which asserts live discussion, but the doc has no open questions',
-        },
-      ],
-    }),
-  );
-  await mountPage(page, '/it/design');
-
-  await expect(page.getByText('Status drifted (1)')).toBeVisible();
-  await expect(page.getByText('docs/design/stations.md')).toBeVisible();
-  // The reason has to travel to the surface. A panel that says a doc
-  // is wrong without saying how is one an operator has to go
-  // investigate before they can act, which is most of the cost.
-  await expect(page.getByText(/no open questions/)).toBeVisible();
-});
-
-// Empty is the healthy state and must render as NOTHING, not as an
-// empty table. A panel that is always present teaches people to skip
-// the region it lives in.
-test('a corpus with no drift shows no panel at all', async ({ page }) => {
-  await mountPage(page, '/it/design');
-  await expect(page.getByText(/Status drifted/)).toHaveCount(0);
-});
-

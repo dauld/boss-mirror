@@ -9,9 +9,9 @@ import { expect, test, type Page, type Route } from '@playwright/test';
 
 // The live corpus as measured 2026-08-15: 38 docs, 9 with open
 // questions, 11 claiming in-review/draft with nothing open.
-const D = (path: string, status: string, q = 0, p = 0) =>
+const D = (path: string, status: string, q = 0) =>
   ({ path: `docs/design/${path}`, title: path.replace('.md', '').replace(/-/g, ' '),
-     status, open_questions: q, pending_count: p, word_count: 2000,
+     status, open_questions: q, word_count: 2000,
      last_modified: '2026-08-14T00:00:00Z' });
 
 const DOCS = [
@@ -21,7 +21,7 @@ const DOCS = [
   D('packet-loss.md', 'in-review', 4), D('design-conformance.md', 'in-review', 3),
   D('dev-cluster.md', 'in-review', 3), D('feedback-triage-agent.md', 'in-review', 3),
   D('framing-convergence.md', 'in-review', 3),
-  D('idm-kanidm.md', 'draft', 0, 4),
+  D('idm-kanidm.md', 'draft', 4),
   // The eleven that were cluttering the top section.
   D('crates-and-layers.md', 'in-review'), D('departure-board.md', 'in-review'),
   D('protocol-cadence.md', 'in-review'), D('protocol-experiments.md', 'in-review'),
@@ -44,12 +44,11 @@ async function mocks(page: Page) {
     json(r, { username: 'david', employee_id: 'emp-david', role: 'platform-admin' }));
   await page.route(/\/api\/jobs\/live$/, (r) => json(r, { counts: {}, open_total: 0, recent: [], sim_clock: {} }));
   await page.route(/\/api\/design\/docs/, (r) => json(r, DOCS));
-  await page.route(/\/api\/design\/rejections/, (r) => json(r, []));
   await page.route(/\/api\/stations\/design-review\/queue/, (r) => json(r, {
     station: 'design-review', kind: 'batch', discipline: ['priority', 'age'], over_limit: false,
     total: 0, data: [],
     lens: { eyebrow: 'System Model · Design review', title: 'Design review',
-            subtitle: 'Open questions, pending decisions, ADRs', panels: ['rejections', 'corpus'] },
+            subtitle: 'Open questions and ADRs', panels: ['corpus'] },
   }));
 }
 
@@ -75,10 +74,9 @@ test('a doc claiming in-review with nothing open is in the library, not your que
   const firstRow = needs.locator('tbody tr').first();
   await expect(firstRow).toContainText('design-docs-as-data');
 
-  // A doc with only unflushed answers still needs you: those are
-  // decisions that never reached the doc.
+  // Open questions put a DRAFT on your plate too — a draft that has
+  // started asking is exactly what this page is for.
   await expect(needs).toContainText('idm-kanidm');
-  await expect(needs).toContainText('4 recorded answers not yet flushed');
 
   // A draft that has asked nothing is neither settled nor pending.
   const written = page.locator('section', { has: page.getByText(/^Being written/) });

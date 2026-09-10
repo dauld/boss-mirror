@@ -147,32 +147,6 @@ impl DocStatus {
     pub fn forbids_open_questions(&self) -> bool {
         matches!(self, Self::Shipped | Self::Superseded | Self::Living)
     }
-
-    /// Does this status ASSERT there is live discussion?
-    ///
-    /// The mirror of [`forbids_open_questions`]. That one catches a
-    /// doc claiming to be settled while carrying questions, and the
-    /// reindex rejects it. This catches the opposite and much quieter
-    /// drift: a doc claiming to be under discussion with nothing left
-    /// to discuss.
-    ///
-    /// The status line is hand-written and almost nothing updates it.
-    /// Answering a question is a flush, and until recently the flush
-    /// rewrote the Decision-history section without touching the
-    /// frontmatter — so status drifted stale BY DEFAULT. Measured on
-    /// the live corpus on 2026-08-15: eleven of the twenty docs
-    /// claiming to be live had zero open questions, zero pending
-    /// decisions and no open review. Worse than a coin toss, and every
-    /// one wrong in the same direction (0b8ae875).
-    ///
-    /// `promote_status_line_to_approved` has since closed most of it —
-    /// the count is three today — but only for docs whose last
-    /// question was answered THROUGH a flush. A question resolved by
-    /// hand, or a doc whose questions were removed in an edit, still
-    /// drifts and nothing notices.
-    pub fn claims_live_discussion(&self) -> bool {
-        matches!(self, Self::Draft | Self::InReview | Self::Reopened)
-    }
 }
 
 /// A parsed open question from a design doc's `## Open questions` section.
@@ -189,8 +163,8 @@ pub struct DesignQuestion {
     /// Heading carries `(resolved)`. The question stays parsed — the
     /// doc keeps its decision record — but it is no longer counted as
     /// open. Without this the panel counted every parsed question as
-    /// open, so a doc whose review had just been flushed still
-    /// reported its questions outstanding.
+    /// open, so a doc whose questions had just been answered still
+    /// reported them outstanding.
     pub resolved: bool,
 }
 
@@ -222,9 +196,12 @@ pub struct DesignQuestion {
 /// `resolutions: [{anchor: "Q3", ...}, {anchor: "Q2", "WireGuard"}]`
 /// on its review step: the packet knew the answer the whole time.
 ///
-/// The file is now a projection that may lag. When the flush does
-/// eventually write `(resolved)` into the heading the two agree, so
-/// this is convergent rather than a second opinion.
+/// The file is now a projection that may lag, and since the flush
+/// pipeline was deleted (2026-09-10) nothing will ever write
+/// `(resolved)` back into a heading. The recorded-decision ledger is
+/// therefore the only thing keeping an answered question closed:
+/// measured on the live corpus the day it was deleted, 25 questions
+/// across 6 docs were resolved by this merge alone.
 pub fn apply_recorded_decisions(
     questions: &[DesignQuestion],
     decided_anchors: &HashSet<String>,
@@ -250,124 +227,12 @@ pub struct DesignDoc {
     pub path: String,
     pub title: String,
     pub status: DocStatus,
-    pub pending_count: i32,
     pub word_count: i32,
     pub last_modified: DateTime<Utc>,
     pub last_author: String,
     pub last_indexed_at: DateTime<Utc>,
     pub last_commit_sha: String,
     pub content_html: String,
-}
-
-/// A pending decision — the human has clicked through a question but
-/// not yet flushed it to git.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingDecision {
-    pub id: String,
-    pub doc_path: String,
-    pub anchor: String,
-    pub kind: DecisionKind,
-    pub resolution: String,
-    pub rationale: Option<String>,
-    pub decided_by: String,
-    pub decided_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DecisionKind {
-    Accept,
-    Override,
-}
-
-impl DecisionKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Accept => "accept",
-            Self::Override => "override",
-        }
-    }
-}
-
-/// Request body for `POST /api/design/pending-decisions`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct PendingDecisionInput {
-    pub doc_path: String,
-    pub anchor: String,
-    pub kind: DecisionKind,
-    pub resolution: String,
-    pub rationale: Option<String>,
-}
-
-/// A flush job. Immutable payload snapshot + worker status.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FlushJob {
-    pub id: String,
-    pub doc_path: String,
-    pub status: JobStatus,
-    pub requested_by: String,
-    /// Who last MOVED the job — the actor on the status PUT, which
-    /// `boss docs flush-pending` now signs (backlog c3cd3301).
-    /// `None` while queued: a job waiting to run has no worker, and
-    /// keeping the previous one would describe the past as the
-    /// present. Distinct from `requested_by`, who asked for the flush.
-    #[serde(default)]
-    pub worked_by: Option<String>,
-    pub queued_at: DateTime<Utc>,
-    pub started_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
-    pub payload: FlushJobPayload,
-    pub commit_sha: Option<String>,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum JobStatus {
-    Queued,
-    Running,
-    Succeeded,
-    Failed,
-}
-
-impl JobStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Running => "running",
-            Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
-        }
-    }
-}
-
-/// Immutable snapshot of pending decisions captured at flush-job
-/// creation time. The worker consumes this payload and produces a
-/// commit that embeds each decision into the target markdown file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FlushJobPayload {
-    pub doc_path: String,
-    pub base_commit_sha: String,
-    pub decisions: Vec<FlushDecision>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FlushDecision {
-    pub anchor: String,
-    pub kind: DecisionKind,
-    pub resolution: String,
-    pub rationale: Option<String>,
-}
-
-/// Body for `PUT /api/design/flush-jobs/:id` when the worker updates
-/// status. Not every field has to be set on every call.
-#[derive(Debug, Clone, Deserialize)]
-pub struct JobStatusUpdate {
-    pub status: JobStatus,
-    #[serde(default)]
-    pub commit_sha: Option<String>,
-    #[serde(default)]
-    pub error: Option<String>,
 }
 
 #[cfg(test)]
@@ -534,10 +399,14 @@ mod recorded_decision_tests {
 
     #[test]
     fn the_file_can_still_resolve_a_question_on_its_own() {
-        // The flush eventually writes `(resolved)` and drops the
-        // recorded decision. The doc must not spring back open.
+        // A file that carries `(resolved)` in the heading resolves
+        // its own question with no ledger row. The doc must not
+        // spring back open.
         let out = apply_recorded_decisions(&[q("Q1", true)], &HashSet::new());
-        assert!(out[0].resolved, "a flushed question stays resolved");
+        assert!(
+            out[0].resolved,
+            "a question the file resolved stays resolved"
+        );
     }
 
     #[test]

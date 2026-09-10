@@ -30,7 +30,6 @@ async fn schema_matches_doc_status_enum() {
             path: format!("docs/design/_status-{}.md", status.as_str()),
             title: format!("status {}", status.as_str()),
             status,
-            pending_count: 0,
             word_count: 1,
             last_modified: now,
             last_author: "test".into(),

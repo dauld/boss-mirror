@@ -1085,6 +1085,39 @@ corpus lint that enforced them, and the `stale-statuses` and
 `rejections` reports — with them the concept of a "drifted" doc, since
 a packet's status *is* its status.
 
+**The write-back half was deleted on 2026-09-10** (backlog `f5da586c`,
+filed because this record had described the deletion in the present
+tense for twelve days while the pipeline kept running). Gone: the flush
+pipeline end to end — `design_flush_jobs`, the four `/api/design/
+flush-jobs` routes, `boss docs flush-pending`, the markdown surgery it
+applied, and the `git commit`/`git push` it ran; `POST`/`DELETE
+/api/design/pending-decisions` and the step plugin's mirror into them;
+the `stale-statuses` and `rejections` routes, their two SPA panels, and
+`design_docs.pending_count`; and the two dispatcher rules that existed
+only to serve that half (`design-decision-flush-queue`, and
+`maintenance-sweep-doc-status-daily`, whose entire content was the
+drifted-status report).
+
+Two things the deletion found that the paragraph above did not
+anticipate, both recorded because they change what the remaining half
+rests on. First, the pending-decision rows were **load-bearing for the
+read half**: `upsert_doc` reads them on every reindex and force-resolves
+their anchors, because reindex rebuilds the question set from the parse
+and an answer known only outside the file is otherwise erased on every
+boot. Measured before deleting: dropping both tables would have re-opened
+25 questions across 6 docs and handed back six review packets for
+questions already answered. So the table survives, renamed
+`design_recorded_decisions` and backfilled from the stranded flush
+payloads — a CLOSED ledger with no writers, which is the honest shape
+for a corpus being retired. Second, `boss docs reindex` and the corpus
+index **stay for now**: the daily `design-review-level-sweep` reads
+`/api/design/docs`, and retiring a working rule is not a call to make
+inside a deletion. The conventions themselves are confirmed
+file-world-only — a `design-doc` packet's questions are structured
+`[{anchor, title, proposal}]` metadata that nothing parses — so
+CLAUDE.md's §"Design docs" instruction now describes only the legacy
+file flow.
+
 ## Open findings — where two live decisions disagree
 
 Flattening surfaced three places where a settled decision conflicts

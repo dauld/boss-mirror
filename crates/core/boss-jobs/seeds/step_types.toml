@@ -1871,15 +1871,15 @@ ux = "expanded"
 version = 1
 description = """
 Custom Step UX for the `design-doc-review` Workflow. The plugin
-fetches `/api/design/docs/{doc_path}`, lists every `### Qn:` open
-question parsed by boss-docs-api, and renders a per-question
-resolution textarea. Step completion is gated on every question
-having a non-empty resolution recorded. Resolutions are saved as
-pending-decisions via `/api/design/pending-decisions`; the
-follow-up `/api/design/flush-jobs` writes them into the source
-doc's Decision-history section (each release, settled material
-folds into `docs/architecture-decisions.md` and the source doc is
-deleted).
+reads the questions the PACKET carries (`metadata.questions`,
+`[{anchor, title, proposal}]`) and renders a per-question resolution
+textarea; a legacy packet carrying only a `doc_path` falls back to
+`/api/design/docs/{doc_path}` and its `### Qn:` headings. Step
+completion is gated on every question having a non-empty resolution
+recorded. Resolutions are saved onto THIS STEP, which is the record
+— they used to be mirrored into a flush pipeline that rewrote the
+markdown file, deleted 2026-09-10 (backlog f5da586c). Each release,
+settled material folds into `docs/architecture-decisions.md`.
 """
 typical_duration_hours = 4.0
 typical_duration_jitter = 0.5

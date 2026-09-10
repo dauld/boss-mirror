@@ -25,11 +25,12 @@
 #
 # THE CHECKED PROPERTY
 # --------------------
-# Live rules are a subset of the authored directory, plus the exemptions
-# named below. It reads the live set by NAME from the read surface and
-# the authored set from THIS TREE — deliberately not from the endpoint's
-# own `authored` flag, which is computed against the deployed image's
-# tree, while the tree under test is the one a car changes.
+# Live rules are a subset of the authored directory, plus the rules the
+# tree RETIRES, plus the exemptions named below. It reads the live set by
+# name and version from the read surface and the authored set from THIS
+# TREE — deliberately not from the endpoint's own `authored` flag, which
+# is computed against the deployed image's tree, while the tree under
+# test is the one a car changes.
 #
 # ONE DIRECTION, on purpose. A file with no live rule is the EXPECTED
 # state between a rule car's merge and the converge that deploys and
@@ -38,6 +39,43 @@
 # consist failure" cost CLAUDE.md records. That direction is already a
 # hard test on the path that can be tested hermetically (the seed guard
 # above), so it is REPORTED here, not failed on.
+#
+# A RETIREMENT IS THE SAME WINDOW, READ BACKWARDS. The tolerance above
+# is not about which set is larger; it is that THE TREE LEGITIMATELY
+# LEADS THE LIVE REGISTRY between a merge and the converge behind it.
+# A car that retires a rule deletes its file and retires the row in a
+# migration — and a migration runs at converge, which is AFTER the
+# consist check. So at check time the rule is still live and its file
+# is already gone: the tree leading the live registry again, in the
+# other direction. The first version of this script reasoned only
+# about a rule being ADDED, so every rule-RETIREMENT car was blocked
+# for good: `fix/the-flush-pipeline-is-deleted` was refused a train on
+# every attempt (car a8262b51), and no amount of waiting would have
+# helped, because the converge that would have cleared it is on the
+# far side of the board.
+#
+# So the question this asks of a live rule with no file is not "is
+# there a file" but "does the TREE still enforce this rule". The tree's
+# answer is its migrations: replay every `dispatcher_rules` status
+# write under infra/postgres/schema/ in apply order, and if the last
+# word on THIS rule at THIS version is a retirement, the tree has
+# retired it and the live row is residue the next converge clears.
+#
+# WHAT THAT DELIBERATELY DOES NOT EXCUSE. A live rule the tree says
+# NOTHING about — no file and no migration touching it — still FAILS,
+# which is the drift this check exists for and how the four rules in
+# EXEMPT were found (backlog 8d471ec5). "No migration mentions it" and
+# "a migration retires it" are opposite answers, not the same silence.
+#
+# NOT AN EXEMPTION, on purpose. An EXEMPT entry would pass this car and
+# then fail the next one: the static half refuses an exemption whose
+# rule HAS a file and the live half refuses one the registry does not
+# enforce, so an exemption written for a retirement goes stale the
+# moment that retirement converges — a two-step dance across a converge,
+# and a red gate for whoever is standing there when it goes stale.
+# Reading the retirement migration needs no second step: the migration
+# is applied history, it stays in the tree forever, and once the row is
+# gone from the live set the clause simply stops matching anything.
 #
 # WHEN THE API IS UNREACHABLE it SKIPS, loudly, and exits 0 — the gate
 # runs on the forge host, which has no route to the in-cluster read
@@ -130,11 +168,17 @@ code=$(curl -sS -m 10 -o "$body" -w '%{http_code}' "$URL" 2>/dev/null)
 # 000 is curl's "never got an answer" — no route, refused, timed out.
 [ "$code" = "200" ] || skip "$URL answered HTTP $code"
 
-# Rule names, one per line. A response that parses but carries no `rules`
-# ARRAY is not an empty registry — it is a different endpoint, or an
-# error body with a 200. Exit 3 and 4 separate those two cases so the
-# message can say which.
-live_names=$(python3 - "$body" <<'PY'
+# One enforced rule per line as `name<TAB>version`. The version is what
+# lets the retirement clause below be about THIS version of the rule
+# rather than the name — a retirement naming a version retires only
+# that row, which is how every version bump in the schema directory is
+# written. A rule whose body carries no version prints an empty one and
+# so matches only a version-less retirement: fails closed, never open.
+#
+# A response that parses but carries no `rules` ARRAY is not an empty
+# registry — it is a different endpoint, or an error body with a 200.
+# Exit 3 and 4 separate those two cases so the message can say which.
+live_pairs=$(python3 - "$body" <<'PY'
 import json, sys
 try:
     doc = json.load(open(sys.argv[1]))
@@ -145,10 +189,14 @@ rules = doc.get("rules") if isinstance(doc, dict) else None
 if not isinstance(rules, list):
     print(f"no `rules` array (top-level keys: {sorted(doc) if isinstance(doc, dict) else type(doc).__name__})", file=sys.stderr)
     sys.exit(4)
-names = sorted(r["name"] for r in rules if isinstance(r, dict) and "name" in r)
-if not names:
+pairs = sorted(
+    (r["name"], r.get("version"))
+    for r in rules
+    if isinstance(r, dict) and "name" in r
+)
+if not pairs:
     sys.exit(5)
-print("\n".join(names))
+print("\n".join(f"{n}\t{'' if v is None else v}" for n, v in pairs))
 PY
 )
 case "$?" in
@@ -170,8 +218,148 @@ surface, or an error body; either way nothing read the registry"
     *) skip "could not read rule names from the response" ;;
 esac
 
-unauthored=$(LC_ALL=C comm -23 <(printf '%s\n' "$live_names") <(printf '%s\n' "$tree_names") \
-             | LC_ALL=C grep -vxF -f <(printf '%s\n' "${EXEMPT[@]}") || true)
+live_names=$(printf '%s\n' "$live_pairs" | cut -f1)
+
+# ---------------------------------------------------------------------------
+# What the TREE says each rule's status will be after the next converge.
+# ---------------------------------------------------------------------------
+# The authored directory answers "is this rule written down"; it cannot
+# answer "is this rule RETIRED", because a retirement's whole shape is
+# the file being gone. The migrations answer that, and they are the same
+# authority the database will obey: `infra/postgres/schema/*.sql` in
+# apply order (the numeric prefix, `sort -t- -k1,1n`, exactly as
+# migrate.sh derives it).
+#
+# One event per status write, `name|version|status`, in apply order, with
+# `*` for a retirement that names no version and so takes every row of
+# that name. Replaying them is how a version BUMP is told apart from a
+# retirement: `202608311700-sweep-spawn-guards.sql` retires v1 and
+# inserts v2 active, so the last word on v2 is an insert and that rule is
+# still enforced by the tree — a missing file for it is real drift, not a
+# retirement. Nothing here is per-rule; it is a replay.
+#
+# SHAPES IT READS. Comments are stripped first (quote-aware, so a `--`
+# inside a literal survives). An `INSERT INTO dispatcher_rules` row is
+# read as `('<name>', <version>, '<status>'` — the column order every
+# insert in the directory uses. A status write is `UPDATE
+# dispatcher_rules ... SET status = '<status>'` (or a DELETE) with the
+# names taken from whatever follows `name` in the statement, so
+# `name = 'x'` and `name IN ('x', 'y')` both read, across lines, in
+# either clause order.
+#
+# WHAT IT DOES NOT READ, each of which leaves the rule looking untouched
+# by the tree and so FAILS rather than passes: a retirement matching by
+# anything but a literal name (`name LIKE`, a subquery), one whose `SET`
+# and `status` land on different lines, and a version bump done live
+# through the API with no migration behind it.
+SCHEMA_DIR="infra/postgres/schema"
+
+schema_files=()
+while IFS= read -r base; do
+    [ -n "$base" ] && schema_files+=("$SCHEMA_DIR/$base")
+done <<EOF
+$(find "$SCHEMA_DIR" -maxdepth 1 -name '*.sql' -type f -exec basename {} \; 2>/dev/null \
+    | LC_ALL=C sort -t- -k1,1n)
+EOF
+
+if [ ${#schema_files[@]} -lt 10 ]; then
+    fail "found only ${#schema_files[@]} migration(s) in $SCHEMA_DIR — the scrape broke"
+    echo "" >&2
+    echo "  The retirement replay below reads that directory. Refusing rather" >&2
+    echo "  than reporting every retired rule as unauthored drift." >&2
+    exit 1
+fi
+
+rule_events=$(mktemp) || exit 1
+trap 'rm -f "$body" "$rule_events"' EXIT
+
+LC_ALL=C awk '
+function strip(line,   i, n, c, out, inq) {
+    out = ""; inq = 0; n = length(line)
+    for (i = 1; i <= n; i++) {
+        c = substr(line, i, 1)
+        if (c == "\047") { inq = 1 - inq; out = out c; continue }
+        if (inq == 0 && c == "-" && substr(line, i + 1, 1) == "-") break
+        out = out c
+    }
+    return out
+}
+function reset_stmt() { un = 0; ustatus = ""; uversion = ""; seenname = 0; split("", uname) }
+function emit_stmt(   i, st) {
+    st = (mode == "DELETE") ? "deleted" : ustatus
+    if ((mode != "UPDATE" && mode != "DELETE") || st == "") return
+    for (i = 1; i <= un; i++)
+        print uname[i] "|" (uversion == "" ? "*" : uversion) "|" st
+}
+FNR == 1 { mode = "NONE"; reset_stmt() }
+{
+    line = strip($0)
+    low = tolower(line)
+
+    if (low ~ /^[ \t]*insert[ \t]+into[ \t]+dispatcher_rules([ \t(]|$)/) { mode = "INSERT"; reset_stmt() }
+    else if (low ~ /^[ \t]*update[ \t]+dispatcher_rules([ \t]|$)/) { mode = "UPDATE"; reset_stmt() }
+    else if (low ~ /^[ \t]*delete[ \t]+from[ \t]+dispatcher_rules([ \t]|$)/) { mode = "DELETE"; reset_stmt() }
+    else if (low ~ /^[ \t]*(insert[ \t]+into|update|delete[ \t]+from)[ \t]+[a-z_]/) { mode = "NONE"; reset_stmt() }
+
+    if (mode == "INSERT") {
+        s = line
+        while (match(s, /\047[A-Za-z0-9_.:@+-]+\047[ \t]*,[ \t]*[0-9]+[ \t]*,[ \t]*\047[a-z]+\047/)) {
+            tup = substr(s, RSTART, RLENGTH)
+            s = substr(s, RSTART + RLENGTH)
+            nm = tup; sub(/\047[ \t]*,.*$/, "", nm); sub(/^\047/, "", nm)
+            vv = tup; sub(/^[^,]*,[ \t]*/, "", vv); sub(/[ \t]*,.*$/, "", vv)
+            st = tup; sub(/^.*,[ \t]*\047/, "", st); sub(/\047$/, "", st)
+            print nm "|" vv "|" st
+        }
+    } else if (mode == "UPDATE" || mode == "DELETE") {
+        if (match(low, /set[ \t]+status[ \t]*=[ \t]*\047[a-z]+\047/)) {
+            seg = substr(line, RSTART, RLENGTH)
+            if (match(seg, /\047[a-z]+\047/)) ustatus = substr(seg, RSTART + 1, RLENGTH - 2)
+        }
+        if (match(low, /version[ \t]*=[ \t]*[0-9]+/)) {
+            seg = substr(low, RSTART, RLENGTH); gsub(/[^0-9]/, "", seg); uversion = seg
+        }
+        seg = ""
+        if (seenname) seg = line
+        else if (match(low, /(^|[^a-z_])name([^a-z_]|$)/)) { seenname = 1; seg = substr(line, RSTART + RLENGTH) }
+        while (match(seg, /\047[^\047]*\047/)) {
+            cand = substr(seg, RSTART + 1, RLENGTH - 2)
+            seg = substr(seg, RSTART + RLENGTH)
+            if (cand != "" && cand != "active" && cand != "draft" && cand != "retired") uname[++un] = cand
+        }
+    }
+
+    if (index(line, ";") > 0) { emit_stmt(); mode = "NONE"; reset_stmt() }
+}
+' "${schema_files[@]}" > "$rule_events"
+
+# Does the tree's last word on THIS rule at THIS version retire it?
+# A rule with no event at all is not retired — it is a rule the tree has
+# never heard of, which is precisely the drift this check fails on.
+tree_retires() {
+    LC_ALL=C awk -F'|' -v n="$1" -v v="$2" '
+        $1 != n { next }
+        ($2 == "*" || $2 == v) { last = $3 }
+        END { exit (last != "" && last != "active") ? 0 : 1 }
+    ' "$rule_events"
+}
+
+# Live, no file, not exempt — then split by what the tree says.
+unauthored=()
+retiring=()
+while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    version=$(printf '%s\n' "$live_pairs" | LC_ALL=C awk -F'\t' -v n="$name" '$1 == n { print $2; exit }')
+    if tree_retires "$name" "$version"; then
+        retiring+=("$name")
+    else
+        unauthored+=("$name")
+    fi
+done <<EOF
+$(LC_ALL=C comm -23 <(printf '%s\n' "$live_names") <(printf '%s\n' "$tree_names") \
+  | LC_ALL=C grep -vxF -f <(printf '%s\n' "${EXEMPT[@]}") || true)
+EOF
+
 pending=$(LC_ALL=C comm -13 <(printf '%s\n' "$live_names") <(printf '%s\n' "$tree_names") || true)
 
 # A stale exemption in the other direction: named here, not enforced
@@ -185,9 +373,9 @@ for name in "${EXEMPT[@]}"; do
     fi
 done
 
-if [ -n "$unauthored" ]; then
-    fail "the dispatcher enforces $(printf '%s\n' "$unauthored" | wc -l | tr -d ' ') rule(s) that $RULES_DIR does not record:"
-    printf '    %s\n' $unauthored >&2
+if [ ${#unauthored[@]} -gt 0 ]; then
+    fail "the dispatcher enforces ${#unauthored[@]} rule(s) that $RULES_DIR does not record, and no migration retires:"
+    printf '    %s\n' "${unauthored[@]}" >&2
     echo "" >&2
     echo "  Each of these reaches the registry without a file, so it carries" >&2
     echo "  no \`why\`: nothing says which standing exemption it claims" >&2
@@ -197,11 +385,19 @@ if [ -n "$unauthored" ]; then
     echo "    1. $RULES_DIR/<name>.toml — one [[rule]] named for the file," >&2
     echo "       carrying its \`why\`. Read the live body from" >&2
     echo "       GET $URL" >&2
-    echo "    2. infra/postgres/schema/NNN-dispatcher-rule-<name>.sql — an" >&2
+    echo "    2. $SCHEMA_DIR/NNN-dispatcher-rule-<name>.sql — an" >&2
     echo "       ON CONFLICT-safe INSERT, so a fresh DB has it" >&2
     echo "       (101-dispatcher-rule-step-assigned.sql is the worked example)" >&2
     echo "    3. handler_emits() in crates/core/boss-dispatcher/src/cascade.rs," >&2
     echo "       if its \`do\` names a handler not already listed there" >&2
+    echo "" >&2
+    echo "  RETIRING it instead? Then the file is meant to be gone, and what" >&2
+    echo "  this check reads is the migration that retires the row — a status" >&2
+    echo "  write in $SCHEMA_DIR naming the rule, which is also what a fresh" >&2
+    echo "  database needs. 202609101200-the-flush-pipeline-is-deleted.sql is" >&2
+    echo "  the worked example. If you wrote one and this still names the" >&2
+    echo "  rule, the replay did not recognise its shape — fix the replay in" >&2
+    echo "  this script, not the rule." >&2
     echo "" >&2
     echo "  See $RULES_DIR/README.md. Exempting it in this script instead is" >&2
     echo "  a decision, and it belongs in the diff a reviewer reads." >&2
@@ -212,8 +408,10 @@ fi
 msg="the-live-rules-are-the-authored-rules: OK — $(printf '%s\n' "$live_names" | wc -l | tr -d ' ') enforced rules, ${#files[@]} authored"
 [ ${#EXEMPT[@]} -eq 0 ] || msg="$msg, ${#EXEMPT[@]} exempt (${EXEMPT[*]})"
 echo "$msg"
-# Not a failure: the tree is ahead of the deployment between a rule
-# car's merge and the converge that seeds it. The hard both-directions
-# pin on the seed path is dispatcher_rules_seed_matches_toml.
+# Neither of these is a failure: both are the tree ahead of the
+# deployment, in the window between a rule car's merge and the converge
+# behind it. The hard both-directions pin on the seed path is
+# dispatcher_rules_seed_matches_toml.
 [ -z "$pending" ] || printf '  authored but not yet enforced (awaiting converge + seed): %s\n' "$(printf '%s\n' $pending | tr '\n' ' ')"
+[ ${#retiring[@]} -eq 0 ] || printf '  retired in this tree but still enforced (awaiting converge + migrate): %s\n' "${retiring[*]}"
 exit 0

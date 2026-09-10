@@ -200,25 +200,12 @@ async fn reindex_one(
         path: rel_path.to_string(),
         title: parsed.title,
         status: parsed.status,
-        pending_count: 0, // refreshed by pending-decision endpoints
         word_count: parsed.word_count,
         last_modified,
         last_author,
         last_indexed_at: Utc::now(),
         last_commit_sha,
         content_html: parsed.content_html,
-    };
-
-    // Preserve pending_count if there's already a row for this doc
-    // (re-index shouldn't clobber in-flight human clicks).
-    let preserved_pending = repo
-        .doc_by_path(rel_path)
-        .await?
-        .map(|d| d.pending_count)
-        .unwrap_or(0);
-    let doc = DesignDoc {
-        pending_count: preserved_pending,
-        ..doc
     };
 
     repo.upsert_doc(&doc, &parsed.questions).await?;
@@ -264,23 +251,6 @@ fn git_metadata(repo_root: &Path, abs_path: &Path) -> Option<(DateTime<Utc>, Str
     let author = parts[2].to_string();
     let last_modified = Utc.timestamp_opt(ts, 0).single()?;
     Some((last_modified, author, sha))
-}
-
-/// Return the current HEAD commit sha for the repo, used as the
-/// `base_commit_sha` on flush job payloads. Returns "0000000" if
-/// git isn't available.
-pub fn current_head_sha(repo_root: &Path) -> String {
-    let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(repo_root)
-        .output();
-    if let Ok(o) = output
-        && o.status.success()
-        && let Ok(s) = String::from_utf8(o.stdout)
-    {
-        return s.trim().to_string();
-    }
-    "0000000".to_string()
 }
 
 #[cfg(test)]
@@ -380,7 +350,6 @@ mod tests {
             path: "docs/design/nonexistent.md".to_string(),
             title: "Ghost".to_string(),
             status: crate::types::DocStatus::Draft,
-            pending_count: 0,
             word_count: 0,
             last_modified: now,
             last_author: "ghost".to_string(),

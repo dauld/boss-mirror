@@ -1,7 +1,5 @@
-//! `boss-docs-api` service: design decision tracker backed by Postgres.
-//!
-//! Read-layer over docs/design/*.md with ephemeral decision + flush-job
-//! state.
+//! `boss-docs-api` service: the design corpus index, backed by
+//! Postgres. A read-layer over docs/design/*.md.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

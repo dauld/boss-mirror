@@ -8,11 +8,10 @@
   // filtered in the browser — which is two definitions of one queue,
   // drifting silently. See `designLens.ts` for the full reasoning.
   //
-  // The doc corpus and the indexer's rejections stay their own reads:
-  // they describe docs that have NO packet yet, which is exactly the
-  // set you need in order to START a review, and they are
-  // boss-docs-api's to serve. The station registry's business is the
-  // queue and how it is framed.
+  // The doc corpus stays its own read: it describes docs that have NO
+  // packet yet, which is exactly the set you need in order to START a
+  // review, and it is boss-docs-api's to serve. The station registry's
+  // business is the queue and how it is framed.
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
   import { href, navigate } from '../../router';
@@ -33,39 +32,11 @@
     status: string;
     /// Questions currently parsed from the doc's ## Open questions.
     open_questions: number;
-    /// Decisions recorded in review but not yet flushed to git.
-    pending_count: number;
     word_count: number;
     last_modified: string;
   };
 
-  type Rejection = {
-    path: string;
-    reason: string;
-    first_seen_at: string;
-    last_seen_at: string;
-  };
-
-  type StaleStatus = {
-    path: string;
-    title: string;
-    status: string;
-    reason: string;
-  };
-
   let docs = $state<ReadonlyArray<DesignDoc>>([]);
-  // Docs on disk that are NOT in the list below, and why. Empty is the
-  // healthy state. Without this the panel silently showed a partial
-  // corpus: a rejected doc has no design_docs row, so its absence read
-  // as "nobody wrote it" — which is how transactional-audit-log.md
-  // stayed invisible for six days.
-  let rejections = $state<ReadonlyArray<Rejection>>([]);
-  // The quieter sibling of a rejection. A rejected doc is missing; a
-  // doc whose status drifted is present and lying — it says "in
-  // review" with nothing left to review. Eleven of the twenty docs
-  // claiming to be live were in that state on 2026-08-15, every one
-  // wrong in the same direction, and nothing surfaced it (0b8ae875).
-  let staleStatuses = $state<ReadonlyArray<StaleStatus>>([]);
   let queue = $state<DesignQueueEnvelope | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
@@ -85,15 +56,6 @@
     department: null,
   });
 
-  /// Whole days a doc has been out of the tracker. The age is what
-  /// makes a rejection actionable — "failed" invites a shrug, "absent
-  /// for 6 days" does not.
-  function daysSince(iso: string): number {
-    const then = new Date(iso).getTime();
-    if (Number.isNaN(then)) return 0;
-    return Math.max(0, Math.floor((Date.now() - then) / 86_400_000));
-  }
-
   async function load(): Promise<void> {
     loading = true;
     error = null;
@@ -107,21 +69,6 @@
       const docsResp = await fetch('/api/design/docs');
       if (!docsResp.ok) throw new Error(`docs: HTTP ${docsResp.status}`);
       docs = (await docsResp.json()) as DesignDoc[];
-
-      // Rejections are supplementary — they name docs the indexer
-      // could not parse. If that call fails, the page still has
-      // everything an operator came for, so degrade to an empty list
-      // rather than replacing the whole surface with an error. (It
-      // did throw here once, which blanked the page whenever the
-      // route was unavailable.)
-      rejections = await fetch('/api/design/rejections')
-        .then((r) => (r.ok ? (r.json() as Promise<Rejection[]>) : []))
-        .catch(() => []);
-      // Same degrade-to-empty contract as rejections above: a report
-      // about the corpus must never be able to blank the corpus.
-      staleStatuses = await fetch('/api/design/stale-statuses')
-        .then((r) => (r.ok ? (r.json() as Promise<StaleStatus[]>) : []))
-        .catch(() => []);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -236,8 +183,7 @@
   // What is actually asking for something, versus what merely claims
   // to be. See designGroups.ts — the short version is that a doc's
   // `**Status**:` line is the one input nobody updates when the last
-  // question closes, so it drifts stale in one direction and eleven
-  // settled docs had accumulated in the top section (David, bedda461:
+  // question closes, so it is a label and not a gate (David, bedda461:
   // "This page is full of stale info").
   const grouped = $derived(
     groupDocs(docs, (path) => openReviewsByPath[path] !== undefined),
@@ -264,58 +210,7 @@
   <p class="design-error">Error: {error}</p>
 {:else}
   {#each panels as panel (panel)}
-    {#if panel === 'rejections' && staleStatuses.length > 0}
-      <Section title={`Status drifted (${staleStatuses.length})`} wide>
-        <p class="reject-lede">
-          These docs say they are under discussion but have no open
-          questions. The status line is hand-written and almost
-          nothing updates it, so it goes stale by default — a doc that
-          reads <code>in-review</code> here may simply be finished.
-          Not an error: a doc can legitimately wait on a person with
-          nothing registered. It is a prompt to check.
-        </p>
-        <table class="design-table">
-          <thead>
-            <tr><th>Doc</th><th>Says</th><th>Why it looks wrong</th></tr>
-          </thead>
-          <tbody>
-            {#each staleStatuses as d (d.path)}
-              <tr>
-                <td><code>{d.path}</code></td>
-                <td class="reject-age">{d.status}</td>
-                <td class="reject-reason">{d.reason}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </Section>
-    {/if}
-    {#if panel === 'rejections' && rejections.length > 0}
-      <Section title={`Not indexed (${rejections.length})`} wide>
-        <p class="reject-lede">
-          These files are in <code>docs/design/</code> but are <strong>not</strong>
-          in the lists below — the reindexer refused them. Until each is
-          fixed, this panel is showing an incomplete corpus.
-        </p>
-        <table class="design-table">
-          <thead>
-            <tr><th>Doc</th><th>Invisible for</th><th>Why</th></tr>
-          </thead>
-          <tbody>
-            {#each rejections as r (r.path)}
-              <tr>
-                <td><code>{r.path}</code></td>
-                <td class="reject-age">
-                  {daysSince(r.first_seen_at)}
-                  {daysSince(r.first_seen_at) === 1 ? 'day' : 'days'}
-                </td>
-                <td class="reject-reason">{r.reason}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </Section>
-    {:else if panel === 'corpus'}
+    {#if panel === 'corpus'}
       <Section
         title={`Needs you (${grouped.needsYou.length})`}
         wide
@@ -323,16 +218,12 @@
         {#if grouped.needsYou.length === 0}
           <p class="empty">
             Nothing is waiting on a decision. New questions land here
-            when a doc adds <code>### Qn:</code> headings, and recorded
-            answers land here until they are flushed into the doc.
+            when a doc adds <code>### Qn:</code> headings.
           </p>
         {:else}
           <p class="design-lede">
             {waiting.questions}
-            {waiting.questions === 1 ? 'open question' : 'open questions'}{#if waiting.pending > 0},
-              and {waiting.pending} recorded
-              {waiting.pending === 1 ? 'answer' : 'answers'} not yet flushed into
-              {waiting.pending === 1 ? 'its doc' : 'their docs'}{/if}. Deepest first.
+            {waiting.questions === 1 ? 'open question' : 'open questions'}. Deepest first.
           </p>
           {@render docTable(grouped.needsYou, 'Start review')}
         {/if}
@@ -379,7 +270,6 @@
         <th>Doc</th>
         <th>Status</th>
         <th>Open Qs</th>
-        <th>Pending decisions</th>
         <th>Last modified</th>
         <th>Review</th>
       </tr>
@@ -394,7 +284,6 @@
           </td>
           <td class="design-status">{doc.status}</td>
           <td>{doc.open_questions}</td>
-          <td>{doc.pending_count}</td>
           <td class="design-when">{relTime(doc.last_modified)}</td>
           <td>
             <!-- One affordance, one destination. This column used to
@@ -419,26 +308,6 @@
 {/snippet}
 
 <style>
-  /* Warning prose, not an empty-state: FOG at reading line-height. It was
-     STATIC via `.empty`, which buried the one paragraph explaining why the
-     corpus above is incomplete. */
-  .reject-lede {
-    color: var(--fog, #E8ECEF);
-    line-height: 1.6;
-    max-width: 720px;
-    margin: 0 0 12px;
-  }
-  .reject-age {
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
-  }
-  /* Body prose in a cell. 0.85rem was 11.9px at the 14px root — below the
-     13px body floor — with cramped leading. */
-  .reject-reason {
-    font-size: 13px;
-    line-height: 1.6;
-    max-width: 60ch;
-  }
   .design-table {
     width: 100%;
     border-collapse: collapse;

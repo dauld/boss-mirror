@@ -11,7 +11,7 @@
 //! That is not hypothetical. The 2026-08-13 audit closed five reviews
 //! on the evidence "questions resolved; tracker pending_count=0;
 //! decision history in doc" — and the evidence was wrong, because
-//! `pending_count=0` also means nobody ever answered, and two of the
+//! that count (since deleted) read 0 when nobody had answered, and two of the
 //! docs' Decision-history sections read `_None yet._`. Roughly
 //! twenty-three questions across payload-encryption, queue-visibility,
 //! workflow-ux-as-data, department-flow-dashboards and dev-cluster
@@ -114,10 +114,13 @@ impl DocsDesignSweep {
 
 /// Docs carrying open questions, as `(path, title, open_questions)`.
 ///
-/// `open_questions` and not `pending_count`: the first is "questions
-/// nobody has answered", the second is "answers nobody has flushed".
-/// Confusing them is what made the 2026-08-13 audit close five live
-/// reviews, so the distinction is load-bearing rather than pedantic.
+/// `open_questions` and nothing else on the row. The list used to
+/// carry a second count, `pending_count` ("answers recorded but not
+/// written back"), and confusing the two is what made the 2026-08-13
+/// audit close five live reviews — so this function reads exactly one
+/// field and ignores whatever else a row carries. The count itself was
+/// dropped with the flush pipeline on 2026-09-10; the discipline of
+/// reading one named field stays.
 pub(crate) fn docs_with_open_questions(list: &serde_json::Value) -> Vec<(String, String, i64)> {
     list.as_array()
         .map(|rows| {
@@ -250,12 +253,14 @@ mod tests {
         );
     }
 
-    // `pending_count` is answers-not-yet-flushed and is NOT the signal.
-    // Reading it as one is what closed five live reviews on 2026-08-13.
+    // Only `open_questions` decides. A row carrying some OTHER count
+    // must not be read as one — which is exactly how the 2026-08-13
+    // audit closed five live reviews, reading the then-present
+    // `pending_count` as the signal.
     #[test]
-    fn pending_count_is_not_mistaken_for_open_questions() {
+    fn no_other_count_on_the_row_is_mistaken_for_open_questions() {
         let list = json!([
-            {"path": "docs/design/a.md", "title": "A", "open_questions": 0, "pending_count": 4},
+            {"path": "docs/design/a.md", "title": "A", "open_questions": 0, "word_count": 4000},
         ]);
         assert!(docs_with_open_questions(&list).is_empty());
     }

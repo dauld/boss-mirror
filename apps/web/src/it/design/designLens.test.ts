@@ -26,12 +26,12 @@ describe('pageHeader', () => {
     const lens: StationLens = {
       eyebrow: 'System Model · Design review',
       title: 'Design review',
-      subtitle: 'Open questions, pending decisions, ADRs',
+      subtitle: 'Open questions and ADRs',
     };
     expect(pageHeader(lens)).toEqual({
       eyebrow: 'System Model · Design review',
       title: 'Design review',
-      subtitle: 'Open questions, pending decisions, ADRs',
+      subtitle: 'Open questions and ADRs',
     });
   });
 
@@ -55,18 +55,17 @@ describe('pageHeader', () => {
 
 describe('panelsFor', () => {
   test('renders the panels the row declares, in its order', () => {
-    expect(panelsFor({ title: 't', panels: ['corpus', 'rejections'] })).toEqual([
-      'corpus',
-      'rejections',
-    ]);
+    expect(panelsFor({ title: 't', panels: ['corpus'] })).toEqual(['corpus']);
   });
 
   test('skips a key this build does not know rather than blanking the page', () => {
     // The registry runs ahead of the bundle during a rollout. A page
     // that throws on an unpublished panel key fails exactly when
-    // someone is publishing one.
-    expect(panelsFor({ title: 't', panels: ['rejections', 'flow-strip'] })).toEqual([
-      'rejections',
+    // someone is publishing one. `rejections` is the REAL case now:
+    // the panel was deleted on 2026-09-10 and a row that still
+    // declares it must render the corpus, not nothing.
+    expect(panelsFor({ title: 't', panels: ['rejections', 'corpus', 'flow-strip'] })).toEqual([
+      'corpus',
     ]);
   });
 

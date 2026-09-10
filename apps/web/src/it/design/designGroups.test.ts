@@ -7,7 +7,6 @@ function doc(over: Partial<DesignDoc>): DesignDoc {
     title: 'A',
     status: 'in-review',
     open_questions: 0,
-    pending_count: 0,
     word_count: 100,
     last_modified: '2026-08-01T00:00:00Z',
     ...over,
@@ -27,10 +26,6 @@ describe('groupOf', () => {
   test('open questions put it on your plate whatever the status says', () => {
     expect(groupOf(doc({ status: 'approved', open_questions: 2 }), false)).toBe('needs-you');
     expect(groupOf(doc({ status: 'living', open_questions: 1 }), false)).toBe('needs-you');
-  });
-
-  test('an unflushed decision counts — it is an answer that never landed', () => {
-    expect(groupOf(doc({ status: 'draft', pending_count: 4 }), false)).toBe('needs-you');
   });
 
   test('an open review Job counts even with nothing parsed', () => {
@@ -64,17 +59,6 @@ describe('groupDocs', () => {
     expect(g.library.map((d) => d.path)).toEqual(['settled.md']);
   });
 
-  test('pending decisions weigh the same as questions — both are waiting on you', () => {
-    const g = groupDocs(
-      [
-        doc({ path: 'questions.md', open_questions: 3 }),
-        doc({ path: 'pending.md', pending_count: 5 }),
-      ],
-      none,
-    );
-    expect(g.needsYou.map((d) => d.path)).toEqual(['pending.md', 'questions.md']);
-  });
-
   test('order is stable when weights tie', () => {
     const g = groupDocs(
       [doc({ path: 'b.md', open_questions: 2 }), doc({ path: 'a.md', open_questions: 2 })],
@@ -99,12 +83,12 @@ describe('openWeight', () => {
     expect(
       openWeight([
         doc({ open_questions: 8 }),
-        doc({ open_questions: 5, pending_count: 4 }),
+        doc({ open_questions: 5 }),
       ]),
-    ).toEqual({ questions: 13, pending: 4 });
+    ).toEqual({ questions: 13 });
   });
 
   test('nothing waiting reads as zero, not as absent', () => {
-    expect(openWeight([])).toEqual({ questions: 0, pending: 0 });
+    expect(openWeight([])).toEqual({ questions: 0 });
   });
 });

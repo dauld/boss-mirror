@@ -11,7 +11,6 @@ mod deploy;
 mod design;
 mod dock_preview;
 mod docs;
-mod docs_flush;
 mod doctor;
 mod gate;
 mod git_auth;
@@ -106,7 +105,7 @@ enum Commands {
         #[command(subcommand)]
         action: AssetsAction,
     },
-    /// Design decision tracker — reindex docs and flush pending jobs
+    /// Design corpus index — reindex docs/design/*.md
     Docs {
         #[command(subcommand)]
         action: DocsAction,
@@ -626,10 +625,6 @@ enum AssetsAction {
 enum DocsAction {
     /// Re-scan docs/design/*.md and refresh the boss-docs cache
     Reindex,
-    /// Pick up every queued flush job, apply decisions to the
-    /// markdown file, commit, push, and mark the job succeeded.
-    /// Use this when a human says "flush pending design jobs."
-    FlushPending,
 }
 
 #[derive(Subcommand)]
@@ -903,7 +898,6 @@ async fn main() -> Result<()> {
         },
         Commands::Docs { action } => match action {
             DocsAction::Reindex => docs::reindex().await,
-            DocsAction::FlushPending => docs::flush_pending().await,
         },
         Commands::Ledger { action } => match action {
             LedgerAction::Rebuild { postgres_url, json } => {

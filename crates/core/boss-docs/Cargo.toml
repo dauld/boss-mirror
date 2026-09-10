@@ -1,6 +1,6 @@
 [package]
 name = "boss-docs"
-description = "Design decision tracker — read-layer over docs/design/*.md with ephemeral decision + flush-job state"
+description = "Design corpus index — read-layer over docs/design/*.md"
 version.workspace = true
 edition.workspace = true
 

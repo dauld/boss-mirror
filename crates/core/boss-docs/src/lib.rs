@@ -1,10 +1,12 @@
-//! boss-docs — design decision tracker.
+//! boss-docs — design corpus index.
 //!
-//! Indexes markdown files under `docs/design/*.md` and exposes a
-//! read + decision-collection API over them. Git is the source of
-//! truth for doc prose; this crate holds ephemeral working memory
-//! (pending human clicks + queued flush jobs) and read-caches
-//! refreshed on demand.
+//! Indexes markdown files under `docs/design/*.md` and exposes a READ
+//! API over them. Git is the source of truth for doc prose; this crate
+//! holds read-caches refreshed on demand plus a closed ledger of
+//! answers recorded before the flush pipeline was deleted (2026-09-10,
+//! backlog f5da586c — the decision is in
+//! `docs/architecture-decisions.md`, "Design docs and the decision
+//! record"). It writes nothing back.
 
 pub mod config;
 pub mod http;

@@ -16,10 +16,8 @@
 // is attached", and it was right for the corpus it was written
 // against. What changed is that the corpus grew a long tail of
 // finished discussions — because the status line is the one input to
-// that rule nobody ever updates. Answering a doc's last question is a
-// flush; the flush rewrites Decision history and never touches the
-// frontmatter. So status drifts to stale by default, in one direction,
-// and the section fills with settled work.
+// that rule nobody ever updates. So status drifts to stale by default,
+// in one direction, and the section fills with settled work.
 //
 // So the rule inverts: a doc is asking for something when something is
 // OPEN. Status becomes a label rather than a gate — kept visible,
@@ -32,15 +30,14 @@ export type DesignDoc = Readonly<{
   title: string;
   status: string;
   open_questions: number;
-  pending_count: number;
   word_count: number;
   last_modified: string;
 }>;
 
 /// Where a doc sits on this page.
 ///
-/// - `needs-you`  something is open: questions, unflushed decisions,
-///                or a review Job in flight.
+/// - `needs-you`  something is open: questions, or a review Job in
+///                flight.
 /// - `draft`      the author is still writing it and has not asked
 ///                anything yet. Not settled, and filing it as settled
 ///                would lose it.
@@ -55,7 +52,7 @@ export function groupOf(doc: DesignDoc, hasOpenReview: boolean): DesignGroup {
   // Anything open outranks anything the frontmatter claims — including
   // for a draft, since a draft that has started asking questions is
   // exactly what this page is for.
-  if (doc.open_questions > 0 || doc.pending_count > 0 || hasOpenReview) {
+  if (doc.open_questions > 0 || hasOpenReview) {
     return 'needs-you';
   }
   if (DRAFTING.includes(doc.status)) return 'draft';
@@ -89,8 +86,7 @@ export function groupDocs(
   // and the deepest doc is the one worth an hour rather than a minute.
   // Ties break on path so the order is stable across reloads.
   const byWeight = (a: DesignDoc, b: DesignDoc) =>
-    b.open_questions + b.pending_count - (a.open_questions + a.pending_count) ||
-    a.path.localeCompare(b.path);
+    b.open_questions - a.open_questions || a.path.localeCompare(b.path);
   return {
     needsYou: [...needsYou].sort(byWeight),
     drafts: [...drafts].sort((a, b) => a.path.localeCompare(b.path)),
@@ -98,15 +94,13 @@ export function groupDocs(
   };
 }
 
-/// How many questions and unflushed decisions are actually waiting.
-/// Rendered in the section header, because "9 docs" and "48 questions"
-/// are different sizes of afternoon.
+/// How many questions are actually waiting. Rendered in the section
+/// header, because "9 docs" and "48 questions" are different sizes of
+/// afternoon.
 export function openWeight(docs: readonly DesignDoc[]): Readonly<{
   questions: number;
-  pending: number;
 }> {
   return {
     questions: docs.reduce((n, d) => n + d.open_questions, 0),
-    pending: docs.reduce((n, d) => n + d.pending_count, 0),
   };
 }

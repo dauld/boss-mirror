@@ -74,7 +74,7 @@ export type ReviewPacket = Readonly<{
 export const FALLBACK_HEADER = {
   eyebrow: 'System Model · Design review',
   title: 'Design review',
-  subtitle: 'Open questions, pending decisions, ADRs',
+  subtitle: 'Open questions and ADRs',
 } as const;
 
 export type PageHeader = Readonly<{
@@ -97,10 +97,15 @@ export function pageHeader(lens: StationLens | null | undefined): PageHeader {
 }
 
 /** Panel renderers this surface ships, in the order they read when the
- *  registry declares nothing. `rejections` first is deliberate: it
- *  names docs the indexer refused, so the corpus below it is known to
- *  be incomplete until that panel is empty. */
-export const KNOWN_PANELS = ['rejections', 'corpus'] as const;
+ *  registry declares nothing.
+ *
+ *  `rejections` was the second one — the indexer's refusals plus the
+ *  drifted-status report. Both were deleted on 2026-09-10 with the
+ *  write-back half of the tracker (backlog f5da586c): a packet's
+ *  status IS its status, so there is no such thing as a drifted doc.
+ *  A registry row that still declares `rejections` renders `corpus`
+ *  alone, which is what `panelsFor`'s skip-unknown contract is for. */
+export const KNOWN_PANELS = ['corpus'] as const;
 export type PanelKey = (typeof KNOWN_PANELS)[number];
 
 /** Which panels to render, in the row's declared order.

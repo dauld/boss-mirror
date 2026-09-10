@@ -373,6 +373,326 @@ else
 fi
 trap - ERR
 
+# --- failure detail (begin) ---
+# WHAT FAILED, IN THE RECORD THAT OUTLIVES THE POD.
+#
+# The 2026-09-09 work made the receipt name the failing CHECK: 62 entries
+# with a result and a duration each, which is what turned one diagnosis
+# into a six-minute read. It stopped one level short. Gate-run 9dc722d2
+# recorded verdict=failed with `test` correctly marked the single failure
+# and nothing whatsoever about WHICH test - and the check name is not
+# what a reader acts on. The failing test name was one grep away in this
+# pod's log, and the pod log is REAPED: the receipt is the durable record
+# (backlog 4a4d1227).
+#
+# So the sections this script already pulls out of gate.log for the
+# stdout replay are also parsed for the part that has to survive - the
+# failing test names, and the panic line with its file:line - and merged
+# into the receipt as `fails` before it is reported.
+#
+# ONE PARSER. The replay and `fails` answer the same question ("what did
+# the failed checks say"), so gate.log is read once and the replay text
+# is written to a file the block below merely prints (CLAUDE.md §9a: a
+# fact that would otherwise live twice). That also moves the old
+# `|| tail -200` shell fallback INSIDE the parser, where it can say why
+# it fired instead of firing silently.
+#
+# `fails` IS ALWAYS PRESENT, `[]` when nothing failed. The field was
+# absent from every receipt gate.sh writes - so a reader saw `null`,
+# while the pre-2026-09-09 four-field digests sitting beside it on older
+# packets carried `[]`. "Nothing failed" and "nobody wrote the field"
+# must not look the same.
+#
+# EVERY CAP BELOW IS DELIBERATE AND STATES ITSELF. A suite failing 200
+# tests must not write a receipt nobody can read; a cap that silently
+# drops the remainder is the 778 KB-log-tailed-to-16 KB defect wearing a
+# different hat, so each one carries the count of what it left out.
+python3 - "$RECEIPT" /gate-target/gate.log /gate-target/failed-checks.txt <<'PY' || echo "gate-runner: failure-detail extractor crashed - the receipt keeps whatever gate.sh wrote"
+import json, os, re, sys
+from collections import deque
+
+receipt_path, log_path, replay_path = sys.argv[1], sys.argv[2], sys.argv[3]
+
+REPLAY_TAIL = 300      # lines per failed check replayed to the pod log
+PARSE_TAIL = 2000      # lines per failed check this parser reads
+RAW_TAIL = 200         # lines of gate.log when nothing can be parsed
+PER_CHECK = 5          # named failures per check on the receipt
+TOTAL_ENTRIES = 40     # entries on the whole receipt
+ENTRY_CHARS = 400      # characters per entry
+QUOTE_LINES = 3        # raw lines quoted for a check this cannot parse
+
+try:
+    with open(log_path, errors="replace") as fh:
+        LOG = [line.rstrip("\n") for line in fh]
+except OSError:
+    LOG = []
+
+
+def raw_tail():
+    """gate.log's own last words, for the cases nothing can be parsed."""
+    if not LOG:
+        return ["(gate.log is missing or empty - there is nothing to fall back to)"]
+    return ["last %d of %d line(s) of gate.log:" % (min(RAW_TAIL, len(LOG)), len(LOG))] \
+        + LOG[-RAW_TAIL:]
+
+
+def sections(names):
+    """The ::group:: block each named check wrote.
+
+    gate.sh brackets every check with `::group::gate: <name>` /
+    `::endgroup::`, so the failed sections can be lifted exactly and
+    nothing else - a full gate.log is mostly successful build chatter.
+    Returns name -> (last PARSE_TAIL lines, TRUE line count), because a
+    reduction that cannot say what it dropped is the defect this whole
+    block is about. An UNTERMINATED group is kept: that is a timeout, an
+    OOM kill, a node reset mid-gate - one of the cases most worth
+    explaining.
+    """
+    wanted = {"::group::gate: %s" % n: n for n in names}
+    out, cur, buf, seen = {}, None, None, 0
+    for line in LOG:
+        if cur is None:
+            name = wanted.get(line)
+            if name is not None:
+                cur, buf, seen = name, deque(maxlen=PARSE_TAIL), 0
+        elif line == "::endgroup::":
+            out[cur] = (list(buf), seen)
+            cur, buf = None, None
+        else:
+            buf.append(line)
+            seen += 1
+    if cur is not None:
+        out[cur] = (list(buf), seen)
+    return out
+
+
+RE_FAILED = re.compile(r"^test (\S+) \.\.\. FAILED")
+RE_STDOUT = re.compile(r"^---- (\S+) stdout ----")
+RE_LISTED = re.compile(r"^ {4}(\S+)$")
+RE_PANIC_OLD = re.compile(r"^thread '([^']*)' panicked at '(.*)', (\S+)$")
+RE_PANIC_NEW = re.compile(r"^thread '([^']*)' panicked at (\S+):$")
+RE_ERROR = re.compile(r"^\s*(error(\[E\d{4}\])?|Error|ERROR)\b[: ]")
+RE_ARROW = re.compile(r"^\s*--> (\S+)")
+
+
+def failing_tests(body):
+    """Every test cargo said failed, in the order it said so.
+
+    Three statements of the same fact, all real: the per-test
+    `test X ... FAILED` line, the `---- X stdout ----` header above each
+    panic, and the `failures:` list cargo prints at the end. The list is
+    the only one certain to be within PARSE_TAIL of a long suite, so all
+    three are read and deduped.
+    """
+    names, seen, in_list = [], set(), False
+
+    def add(n):
+        if n not in seen:
+            seen.add(n)
+            names.append(n)
+
+    for line in body:
+        if line.strip() == "failures:":
+            in_list = True
+            continue
+        m = RE_FAILED.match(line) or RE_STDOUT.match(line)
+        if m:
+            add(m.group(1))
+            in_list = False
+            continue
+        if in_list:
+            m = RE_LISTED.match(line)
+            if m:
+                add(m.group(1))
+            elif line.strip():
+                in_list = False
+    return names
+
+
+def panics(body):
+    """(test or None, location, message) for each panic cargo printed.
+
+    Attributed to the `---- <test> stdout ----` block it appeared in,
+    falling back to the panicking thread's name - which for a plain
+    `#[test]` IS the test name. Both cargo panic formats are read: the
+    current two-line one (location, then the message) and the older
+    single-line `panicked at 'msg', location`.
+    """
+    out, block = [], None
+    for i, line in enumerate(body):
+        m = RE_STDOUT.match(line)
+        if m:
+            block = m.group(1)
+            continue
+        m = RE_PANIC_OLD.match(line)
+        if m:
+            out.append((block or m.group(1) or None, m.group(3), m.group(2)))
+            continue
+        m = RE_PANIC_NEW.match(line)
+        if m:
+            msg = body[i + 1].strip() if i + 1 < len(body) else ""
+            out.append((block or m.group(1) or None, m.group(2), msg))
+    return out
+
+
+def error_lines(body):
+    """Error lines with their `-->` location, for checks that are not
+    cargo-test-shaped: a compile error, clippy, svelte-check. This is as
+    far as the evidence goes - no test name is invented from them."""
+    out = []
+    for i, line in enumerate(body):
+        if RE_ERROR.match(line):
+            where = ""
+            for nxt in body[i + 1:i + 3]:
+                m = RE_ARROW.match(nxt)
+                if m:
+                    where = " (%s)" % m.group(1)
+                    break
+            out.append(line.strip() + where)
+    return out
+
+
+def clip(entry):
+    """One entry, one line, bounded - and saying by how much."""
+    entry = " ".join(entry.split())
+    if len(entry) <= ENTRY_CHARS:
+        return entry
+    return entry[:ENTRY_CHARS] + "... (+%d char(s); the Job log replay has the full text)" % (
+        len(entry) - ENTRY_CHARS)
+
+
+def detail(name, got):
+    """What `fails` says about one failed check.
+
+    A precedence ladder, and every rung names which one it is standing
+    on, so a reader never has to guess whether a line was parsed or
+    merely quoted.
+    """
+    if got is None:
+        return ["%s: no ::group:: block in gate.log - it failed before it ran, or gate.sh "
+                "changed its grouping and this extractor needs updating" % name]
+    body, total = got
+    if not body:
+        return ["%s: the check produced no output at all" % name]
+
+    out = []
+    tests = failing_tests(body)
+    found = panics(body)
+    where = {}
+    for test, loc, msg in found:
+        if test is not None and test not in where:
+            where[test] = (loc, msg)
+
+    if tests:
+        for test in tests[:PER_CHECK]:
+            loc, msg = where.get(test, (None, None))
+            if loc is None:
+                out.append("%s: %s - FAILED, with no panic line for it in this check's "
+                           "output" % (name, test))
+            else:
+                out.append("%s: %s - panicked at %s: %s" % (name, test, loc, msg))
+        if len(tests) > PER_CHECK:
+            out.append("%s: + %d more failing test(s) not named here (%d failed in all) - the "
+                       "Job log replay lists them" % (name, len(tests) - PER_CHECK, len(tests)))
+        return out
+
+    loose = [(loc, msg) for _, loc, msg in found]
+    if loose:
+        for loc, msg in loose[:PER_CHECK]:
+            out.append("%s: panicked at %s: %s (no failing test name in this check's "
+                       "output)" % (name, loc, msg))
+        if len(loose) > PER_CHECK:
+            out.append("%s: + %d more panic(s) (%d in all)" % (
+                name, len(loose) - PER_CHECK, len(loose)))
+        return out
+
+    errs = error_lines(body)
+    if errs:
+        out.append("%s: no cargo test failure in this check's output; %d error line(s), "
+                   "first %d:" % (name, len(errs), min(PER_CHECK, len(errs))))
+        out += ["%s: | %s" % (name, e) for e in errs[:PER_CHECK]]
+        return out
+
+    quoted = [line for line in body[-QUOTE_LINES:] if line.strip()]
+    out.append("%s: nothing this parser recognises - no failing test, no panic, no error line; "
+               "last %d of %d line(s) quoted verbatim:" % (name, len(quoted), total))
+    out += ["%s: | %s" % (name, line) for line in quoted]
+    return out
+
+
+def write(entries, replay):
+    with open(replay_path, "w") as fh:
+        fh.write("\n".join(replay) + ("\n" if replay else ""))
+    if entries is None:
+        return
+    if len(entries) > TOTAL_ENTRIES:
+        dropped = len(entries) - TOTAL_ENTRIES + 1
+        entries = entries[:TOTAL_ENTRIES - 1] + [
+            "+ %d more entr%s omitted - this receipt caps `fails` at %d so it stays readable; "
+            "the Job log replay has the rest" % (dropped, "y" if dropped == 1 else "ies",
+                                                 TOTAL_ENTRIES)]
+    RECEIPT["fails"] = [clip(e) for e in entries]
+    tmp = receipt_path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(RECEIPT, fh, indent=2)
+    os.replace(tmp, receipt_path)
+
+
+# An unreadable receipt is evidence too, and rewriting it would destroy
+# the only copy. Hand over the log's last words and leave the file alone;
+# the summary block below reports `verdict: unreadable` on its own.
+try:
+    with open(receipt_path) as fh:
+        RECEIPT = json.load(fh)
+    if not isinstance(RECEIPT, dict):
+        raise ValueError("receipt is not an object")
+except Exception as exc:
+    write(None, ["gate-runner: receipt unreadable (%s); falling back to the raw tail" % exc]
+          + raw_tail())
+    raise SystemExit(0)
+
+checks = RECEIPT.get("checks")
+failed = [c.get("name") for c in checks if isinstance(c, dict) and c.get("result") != "pass"] \
+    if isinstance(checks, list) else []
+failed = [n for n in failed if isinstance(n, str)]
+
+if not failed:
+    if RECEIPT.get("verdict") == "green":
+        write([], [])
+        raise SystemExit(0)
+    # A verdict with no failed check means the run ended OUTSIDE a check:
+    # the headroom guard refusing, or a crash before the receipt. That is
+    # not a consist failure and the record has to be able to say so.
+    note = ("no check is marked failed - the run ended outside a check (a headroom refusal, "
+            "or a crash before the receipt)")
+    if RECEIPT.get("refused_because"):
+        note += "; see `refused_because` on this receipt"
+    write([note], ["gate-runner: verdict is %s but %s" % (RECEIPT.get("verdict"), note)]
+          + raw_tail())
+    raise SystemExit(0)
+
+found = sections(failed)
+entries, replay = [], []
+for name in failed:
+    got = found.get(name)
+    entries += detail(name, got)
+    replay.append("")
+    replay.append("----- FAILED: %s -----" % name)
+    if got is None:
+        replay.append("  (no ::group:: block for this check in gate.log - it failed before it")
+        replay.append("   ran, or gate.sh changed its grouping and this extractor needs updating)")
+        continue
+    body, total = got
+    if not body:
+        replay.append("  (the check produced no output at all)")
+        continue
+    tail = body[-REPLAY_TAIL:]
+    replay.append("  last %d of %d line(s):" % (len(tail), total))
+    replay += ["  " + line for line in tail]
+write(entries, replay)
+PY
+# --- failure detail (end) ---
+
 # --- receipt summary (begin) ---
 # THE PACKET KEEPS THE WHOLE RECEIPT.
 #
@@ -397,9 +717,13 @@ trap - ERR
 # COMPACT, one line: `gate-runner: receipt $SUMMARY` below is the third
 # copy of the verdict — the one `kubectl logs` serves when the PVC and
 # the packet do not (cf0021ae) — and a greppable line has to stay one
-# line. `fails` is NOT re-derived here: `checks` carries every name with
-# its result, and a derived duplicate inside the same document is a fact
-# living twice with nothing holding the two equal (CLAUDE.md §9a).
+# line. `fails` is not re-derived here either — the block above already
+# merged it into the receipt this reads, and it is NOT a copy of `checks`:
+# `checks` says which check failed, `fails` says which TEST and where it
+# panicked, which is the part `checks` cannot carry and a reader acts on.
+# A `fails` that merely restated the check names would be a fact living
+# twice inside one document with nothing holding the two equal
+# (CLAUDE.md §9a), which is why it does not.
 SUMMARY=$(python3 - "$RECEIPT" "$HEAD_SHA" <<'PY'
 import json, sys
 try:
@@ -513,67 +837,21 @@ fi
 # stdout is the one surface that outlives the container: `kubectl logs`
 # serves a terminated pod for as long as the Job exists. gate.sh already
 # brackets every check with `::group::gate: <name>` / `::endgroup::`, so
-# we can replay exactly the sections that failed and nothing else. That
-# distinction is the whole point — a full gate.log is mostly successful
-# build chatter and dumping it whole would bury the three lines that
-# matter.
+# the failure-detail block above replays exactly the sections that failed
+# and nothing else. That distinction is the whole point — a full gate.log
+# is mostly successful build chatter and dumping it whole would bury the
+# three lines that matter.
+#
+# THIS IS A PRINTER NOW, not a second parser. The extraction moved up to
+# the one block that also writes the receipt's `fails`, because "what did
+# the failed checks say" is one fact and it was about to live twice
+# (CLAUDE.md §9a). Its `|| tail` belt remains for the case where that
+# block did not run at all; every case it DID handle — an unreadable
+# receipt, a verdict with no failed check — writes its own explanation
+# plus the raw tail into the file, so the fallback says why it fired.
 if [ "$VERDICT" != green ]; then
     echo "=== gate-runner: replaying failed checks from gate.log ==="
-    python3 - "$RECEIPT" /gate-target/gate.log <<'PY' || tail -200 /gate-target/gate.log || true
-import json, sys
-
-receipt_path, log_path = sys.argv[1], sys.argv[2]
-# Per-check cap. A check that fails by producing 200k lines must not
-# push the earlier failures out of the reader's scrollback.
-TAIL = 300
-
-try:
-    receipt = json.load(open(receipt_path))
-    failed = [c["name"] for c in receipt["checks"] if c["result"] != "pass"]
-except Exception as e:
-    # No receipt means gate.sh died before writing one, which is itself
-    # the interesting case. Fall through to the shell's tail.
-    print("gate-runner: receipt unreadable (%s); falling back to raw tail" % e)
-    raise SystemExit(1)
-
-if not failed:
-    print("gate-runner: verdict is not green but no check is marked failed —")
-    print("  the run died outside a check (headroom guard, or a crash before the receipt).")
-    raise SystemExit(1)
-
-wanted = {"::group::gate: %s" % name: name for name in failed}
-sections, current, buf = {}, None, []
-with open(log_path, errors="replace") as fh:
-    for line in fh:
-        stripped = line.rstrip("\n")
-        if current is None:
-            name = wanted.get(stripped)
-            if name is not None:
-                current, buf = name, []
-        elif stripped == "::endgroup::":
-            sections[current] = buf[-TAIL:]
-            current, buf = None, []
-        else:
-            buf.append(stripped)
-# An unterminated group means the check was still running when the log
-# ended — a timeout or a kill. Keep what it managed to say.
-if current is not None:
-    sections[current] = buf[-TAIL:]
-
-for name in failed:
-    body = sections.get(name)
-    print("\n----- FAILED: %s -----" % name)
-    if body is None:
-        print("  (no ::group:: block for this check in gate.log — it failed before it ran,")
-        print("   or gate.sh changed its grouping and this extractor needs updating)")
-        continue
-    if not body:
-        print("  (the check produced no output at all)")
-        continue
-    print("  last %d of %d lines:" % (min(TAIL, len(body)), len(body)))
-    for line in body:
-        print("  " + line)
-PY
+    cat /gate-target/failed-checks.txt 2>/dev/null || tail -200 /gate-target/gate.log || true
     echo "=== end of failed-check replay ==="
 fi
 
