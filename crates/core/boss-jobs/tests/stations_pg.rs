@@ -19,7 +19,7 @@ use boss_jobs::events::{
     STATION_DRAFT_SAVED, STATION_PUBLISHED, STATION_QUARANTINED, STATION_RETIRED,
 };
 use boss_jobs::registry::WorkflowStatus;
-use boss_jobs::station_queue::StationPredicate;
+use boss_jobs::station_queue::{StationPredicate, StepMatch};
 use boss_jobs::{PgStations, StationKind, StationRegistry, StationSpec};
 use boss_testing::TestDb;
 
@@ -400,6 +400,130 @@ async fn pg_writes_stage_their_events_in_the_outbox() {
     assert_eq!(previous.status, WorkflowStatus::Retired);
     let active = registry.get_active("loading-dock").await.expect("active");
     assert_eq!(active.version, next);
+}
+
+/// The migration that gave the dock its brake, run against the state it
+/// was actually written FOR.
+///
+/// A scratch database exercises only the easy half: the schema loads in
+/// order and the clause lands. The live cluster is the hard half — its
+/// `loading-dock` was at version 3, published through the API with no
+/// migration behind it, while this tree's migrations produce version 2.
+/// That is exactly the divergence that made hardcoding a version number
+/// wrong, and nothing else in the suite can see it. So this test
+/// reproduces it: publish an un-clause'd row on top of the seeded one
+/// the way a hand edit would, re-run the migration, and require it to
+/// heal.
+///
+/// Third run asserts the guard, not politeness: `migrate.sh` applies a
+/// file once, but the guard is what lets the INSERT compute
+/// `max(version) + 1` without stacking a new version every time anyone
+/// loads the directory.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_dock_brake_migration_lands_on_a_hand_published_row() {
+    const MIGRATION: &str = include_str!(
+        "../../../../infra/postgres/schema/20260910201453-a-held-car-is-not-at-the-dock.sql"
+    );
+    /// The clause the row must carry, by the only definition that
+    /// matters — what the evaluator parses out of the column.
+    fn brake(spec: &StationSpec) -> Vec<String> {
+        spec.predicate
+            .step
+            .as_ref()
+            .map(|s| s.metadata_unmarked.clone())
+            .unwrap_or_default()
+    }
+
+    let db = TestDb::new().await;
+    let registry = PgStations::new(db.pool.clone());
+    let now = chrono::Utc::now();
+
+    // The seed's own answer, from the ordered schema load.
+    let seeded = registry
+        .get_active("loading-dock")
+        .await
+        .expect("seeded active dock");
+    assert_eq!(
+        brake(&seeded),
+        vec!["hold".to_string()],
+        "the migration is in the schema directory, so a fresh database \
+         must already hold the brake"
+    );
+
+    // Now the live cluster's shape: a later version published by hand
+    // that knows nothing about the clause.
+    let mut by_hand = StationSpec::draft(
+        "loading-dock",
+        "Loading dock — parked ship-a-change cars",
+        StationKind::Batch,
+        StationPredicate {
+            kind: Some("ship-a-change".into()),
+            status: Some(boss_core::job::JobStatus::Open),
+            metadata_present: vec!["branch".into()],
+            metadata_absent: vec!["train".into()],
+            step: Some(StepMatch {
+                slug: Some("review".into()),
+                status_in: vec![
+                    boss_core::job::StepStatus::Ready,
+                    boss_core::job::StepStatus::Active,
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        now,
+    );
+    by_hand.wip_limit = Some(24);
+    registry
+        .create_draft(by_hand, &author(), now)
+        .await
+        .expect("draft a hand-authored version");
+    let hand_published = registry
+        .publish("loading-dock", &author(), now)
+        .await
+        .expect("publish it");
+    assert!(brake(&hand_published).is_empty(), "the hazard is set up");
+
+    sqlx::raw_sql(MIGRATION)
+        .execute(&db.pool)
+        .await
+        .expect("the migration applies to a cluster with a hand-published row");
+    let healed = registry
+        .get_active("loading-dock")
+        .await
+        .expect("one active row after the migration");
+    assert_eq!(
+        brake(&healed),
+        vec!["hold".to_string()],
+        "the migration must carry the brake onto whatever version is active, \
+         not onto a version number it guessed"
+    );
+    assert_eq!(
+        healed.version,
+        hand_published.version + 1,
+        "the new version follows the row it superseded"
+    );
+    assert_eq!(
+        healed.wip_limit,
+        Some(24),
+        "every other column is carried forward — 119's comment: a lost \
+         `upstream` is worse than a broken one, because it disappears \
+         exactly when someone is diagnosing"
+    );
+
+    sqlx::raw_sql(MIGRATION)
+        .execute(&db.pool)
+        .await
+        .expect("a second application is legal");
+    let again = registry
+        .get_active("loading-dock")
+        .await
+        .expect("still exactly one active row");
+    assert_eq!(
+        again.version, healed.version,
+        "re-applying must be a no-op, or the guard is not guarding and every \
+         load of this directory appends a version"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -69,12 +69,21 @@ pub const VERDICT_GREEN: &str = "green";
 /// become a car, whatever its verdict says.
 const SPENT_MARKERS: [&str; 3] = ["superseded", "rerailed_to", "park_skipped"];
 
-/// A marker read the way `superseded` has always been read: `null`,
-/// `false` and `""` are NO marker; `true` is a marker with no reason; a
-/// non-blank string is the reason. Every marker in this module shares
-/// this shape, because an operator writing `hold: true` and an operator
-/// writing `hold: "waiting for the restart"` mean the same thing.
-fn marked(md: &Value, key: &str) -> Option<String> {
+/// THE definition of "is this marker set", read the way `superseded`
+/// has always been read: `null`, `false` and `""` are NO marker; `true`
+/// is a marker with no reason; a non-blank string is the reason. Every
+/// marker in this module shares this shape, because an operator writing
+/// `hold: true` and an operator writing `hold: "waiting for the
+/// restart"` mean the same thing.
+///
+/// Public because the shape is not local to gate-runs. The station
+/// predicate language's `StepMatch::metadata_unmarked` — how the
+/// loading-dock row says "a held car is not boardable" — calls this
+/// rather than carrying its own rule, and so does the conductor's
+/// `parked_ready`. The trap that makes the reuse load-bearing: a
+/// RELEASED hold is written `hold: false`, so any rule built on "the
+/// key is missing or null" reads a released car as held forever.
+pub fn marked(md: &Value, key: &str) -> Option<String> {
     match md.get(key) {
         Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
         Some(Value::Bool(true)) => Some("no reason recorded".to_string()),

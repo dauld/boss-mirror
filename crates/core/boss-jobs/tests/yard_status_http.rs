@@ -162,6 +162,17 @@ fn app_with_cadence(
     cadence: InMemoryCadence,
     policy: Vec<StoredPolicy>,
 ) -> (axum::Router, Arc<InMemoryJobs>) {
+    app_with_parts(cadence, policy, None)
+}
+
+/// `app_with_cadence`, plus a station registry — so a test can drive the
+/// dock through the registry row the deployment reads instead of the
+/// handler's station-less fallback.
+fn app_with_parts(
+    cadence: InMemoryCadence,
+    policy: Vec<StoredPolicy>,
+    stations: Option<Arc<dyn boss_jobs::StationRegistry>>,
+) -> (axum::Router, Arc<InMemoryJobs>) {
     let jobs = Arc::new(InMemoryJobs::new());
     let policy_client: Arc<dyn PolicyClient> = Arc::new(
         FakePolicyClient::builder()
@@ -181,7 +192,7 @@ fn app_with_cadence(
         kind_registry: None,
         plugin_registry: None,
         job_edges: None,
-        stations: None,
+        stations,
         calendar: None,
         subject_kinds: None,
         subject_existence: None,
@@ -525,6 +536,152 @@ async fn a_changed_cadence_rule_moves_the_line() {
     assert_eq!(body["boarding"]["dock_threshold"], 2);
     // Two parked, threshold two → met.
     assert_eq!(body["boarding"]["threshold_met"], true);
+}
+
+/// The loading-dock station row, in miniature: the clause under test is
+/// `step.metadata_unmarked`, and everything else mirrors the seeded row.
+/// The row's own fidelity is pinned elsewhere (`stations_pg`'s migration
+/// test, and the conductor's `dock_pin`); what this shape is here for is
+/// the PLUMBING — that a held car is dropped by the station queue, so it
+/// never reaches `dock_depth`, so it cannot make `threshold_met` true.
+fn dock_station_row() -> boss_jobs::StationSpec {
+    let mut s = boss_jobs::StationSpec::draft(
+        "loading-dock",
+        "Loading dock — parked ship-a-change cars",
+        boss_jobs::StationKind::Batch,
+        boss_jobs::station_queue::StationPredicate {
+            kind: Some("ship-a-change".into()),
+            status: Some(JobStatus::Open),
+            metadata_present: vec!["branch".into()],
+            metadata_absent: vec!["train".into()],
+            step: Some(boss_jobs::station_queue::StepMatch {
+                slug: Some("review".into()),
+                status_in: vec![StepStatus::Ready, StepStatus::Active],
+                metadata_unmarked: vec!["hold".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        t(NOW),
+    );
+    s.status = boss_jobs::registry::WorkflowStatus::Active;
+    s
+}
+
+/// Two parked cars whose review steps carry the hold an operator wrote,
+/// plus their review steps — the dock as it stood at 18:07Z.
+async fn seed_held_dock(jobs: &InMemoryJobs, holds: [Value; 2]) {
+    let now = t(NOW);
+    for ((id, branch, title), hold) in [
+        ("22222222-2222-2222-2222-222222222222", "feat/a", "A fix"),
+        ("44444444-4444-4444-4444-444444444444", "feat/b", "B fix"),
+    ]
+    .into_iter()
+    .zip(holds)
+    {
+        let car = job(
+            "ship-a-change",
+            id,
+            title,
+            JobStatus::Open,
+            json!({ "branch": branch }),
+        );
+        jobs.create_job_at(&car, now, &[]).await.unwrap();
+        let mut metadata = json!({});
+        if !hold.is_null() {
+            metadata["hold"] = hold;
+        }
+        jobs.add_step_at(
+            &step(
+                &car.id,
+                "review",
+                "Open for review",
+                StepStatus::Ready,
+                metadata,
+            ),
+            now,
+            &[],
+        )
+        .await
+        .unwrap();
+    }
+}
+
+/// THE MEASURED FAILURE (backlog 36c3d4ca). At 18:07:34Z on 2026-09-10,
+/// right after train 8fa00047 took the two boardable cars,
+/// `/api/yard/status` said `dock_depth: 2`, `threshold_met: true` and "2
+/// car(s) parked now — the dock threshold is met" — while BOTH remaining
+/// cars were held and neither could board. For boarding purposes the dock
+/// was empty and the surface said the opposite.
+///
+/// A dock of only-held cars must report depth 0, and the sentence an
+/// operator reads must say it is below the threshold rather than met.
+#[tokio::test]
+async fn a_dock_of_only_held_cars_is_not_a_met_threshold() {
+    let mut d = depth_rule();
+    d.min_dock_depth = Some(1);
+    let stations = Arc::new(boss_jobs::InMemoryStations::new());
+    stations
+        .seed(dock_station_row())
+        .expect("seed the dock row");
+    let (app, jobs) = app_with_parts(
+        InMemoryCadence::new(vec![d]),
+        vec![policy_row()],
+        Some(stations),
+    );
+    // One held with a reason, one held with no reason recorded — both
+    // shapes an operator writes, and `boss gate --hold` writes the first.
+    seed_held_dock(&jobs, [json!("waiting on a kubectl delete"), json!(true)]).await;
+
+    let (status, body) = get(&app, "operator").await;
+    assert_eq!(status, StatusCode::OK);
+    let b = &body["boarding"];
+    assert_eq!(
+        body["dock"].as_array().unwrap().len(),
+        0,
+        "a held car is not at the dock for boarding purposes"
+    );
+    assert_eq!(b["dock_depth"], 0);
+    assert_eq!(
+        b["threshold_met"], false,
+        "the threshold cannot be met by cars that cannot board — this read \
+         `true` on a dock of two held cars"
+    );
+    assert!(
+        b["summary"]
+            .as_str()
+            .unwrap()
+            .contains("below the dock threshold"),
+        "{}",
+        b["summary"]
+    );
+}
+
+/// The other half of the same clause: releasing a hold puts the car back
+/// on the dock. A release is written `hold: false`, NOT by deleting the
+/// key (that is how car 04520403 was released on 2026-09-10), so a rule
+/// built on "the key is missing" would hold the car forever and the dock
+/// would never refill.
+#[tokio::test]
+async fn a_released_hold_returns_the_car_to_the_dock() {
+    let mut d = depth_rule();
+    d.min_dock_depth = Some(1);
+    let stations = Arc::new(boss_jobs::InMemoryStations::new());
+    stations
+        .seed(dock_station_row())
+        .expect("seed the dock row");
+    let (app, jobs) = app_with_parts(
+        InMemoryCadence::new(vec![d]),
+        vec![policy_row()],
+        Some(stations),
+    );
+    // One released by writing false, one that never carried a hold.
+    seed_held_dock(&jobs, [json!(false), Value::Null]).await;
+
+    let (_, body) = get(&app, "operator").await;
+    let b = &body["boarding"];
+    assert_eq!(b["dock_depth"], 2, "both cars are boardable");
+    assert_eq!(b["threshold_met"], true);
 }
 
 /// 2026-09-07, twice: the operator watched a threshold-met dock not

@@ -15,7 +15,9 @@
 //! station that could not hold anything on any day is.
 //!
 //! - **Contradictory metadata.** A key in both `metadata_present` and
-//!   `metadata_absent`. No packet can satisfy both.
+//!   `metadata_absent`. No packet can satisfy both. The step clause has
+//!   the same shape: a key demanded both `metadata_unmarked` and
+//!   `metadata_equals` a marker value.
 //! - **Terminal status with no window.** `status: closed|cancelled`
 //!   while `terminal_window_days` is unset. The evaluation universe is
 //!   in-flight packets (`http/stations.rs` filters `JobStatus::Open`
@@ -159,6 +161,39 @@ fn check_predicate(spec: &StationSpec, p: &StationPredicate, errs: &mut Vec<Stat
             format!(
                 "metadata key `{key}` is required both present and absent; \
                  no packet can satisfy both, so this queue is always empty"
+            ),
+        ));
+    }
+    check_step_markers(spec, p, errs);
+}
+
+/// The step clause's version of the same contradiction: a key demanded
+/// equal to a marker value AND demanded unmarked. `metadata_unmarked`
+/// reads [`crate::stranded::marked`]'s rule, so the two clauses are only
+/// contradictory when the demanded value IS a marker — `hold: ""` is a
+/// released hold and agrees with `metadata_unmarked: ["hold"]`, which is
+/// why this tests the value rather than the key alone.
+fn check_step_markers(spec: &StationSpec, p: &StationPredicate, errs: &mut Vec<StationLintError>) {
+    let Some(step) = &p.step else { return };
+    let mut both: Vec<&String> = step
+        .metadata_unmarked
+        .iter()
+        .filter(|k| {
+            step.metadata_equals.get(*k).is_some_and(|want| {
+                crate::stranded::marked(&serde_json::json!({ "v": want }), "v").is_some()
+            })
+        })
+        .collect();
+    both.sort();
+    both.dedup();
+    for key in both {
+        errs.push(err(
+            spec,
+            "predicate.step.metadata_unmarked",
+            format!(
+                "step metadata key `{key}` is required unmarked and equal to a \
+                 marker value at once; no step can satisfy both, so this queue \
+                 is always empty"
             ),
         ));
     }
@@ -354,6 +389,30 @@ mod tests {
         assert!(errs[0].reason.contains("`train`"), "{}", errs[0].reason);
         // `branch` is present-only and must not be reported.
         assert!(!errs[0].reason.contains("branch"), "{}", errs[0].reason);
+    }
+
+    /// The step clause's contradiction, and the one case that is NOT
+    /// one: `hold: ""` is a RELEASED hold, which `metadata_unmarked`
+    /// reads as no marker, so demanding both is satisfiable and must not
+    /// be refused. A lint that refused it would block the row this car
+    /// exists to seed.
+    #[test]
+    fn a_step_key_required_unmarked_and_marked_can_never_match() {
+        let mut spec = viable();
+        spec.predicate.step = Some(StepMatch {
+            slug: Some("review".into()),
+            metadata_unmarked: vec!["hold".into()],
+            metadata_equals: BTreeMap::from([("hold".to_string(), "a reason".to_string())]),
+            ..Default::default()
+        });
+        let errs = validate_station(&spec);
+        assert_eq!(reasons(&errs), vec!["predicate.step.metadata_unmarked"]);
+        assert!(errs[0].reason.contains("`hold`"), "{}", errs[0].reason);
+
+        // A released hold is no marker, so this pair is satisfiable.
+        spec.predicate.step.as_mut().unwrap().metadata_equals =
+            BTreeMap::from([("hold".to_string(), String::new())]);
+        assert_eq!(validate_station(&spec), Vec::new());
     }
 
     #[test]

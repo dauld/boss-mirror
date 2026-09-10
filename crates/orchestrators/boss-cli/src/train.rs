@@ -2204,11 +2204,20 @@ pub(crate) fn parked_ready(job: &Value) -> bool {
     // must not count toward the threshold either, or it would fire a
     // train it then declines to join, producing the empty windows that
     // made arrival rate unreadable (feedback f4baea39).
-    !truthy(
-        review
-            .and_then(|s| s.get("metadata"))
-            .and_then(|m| m.get("hold")),
-    )
+    //
+    // THE MARKER READ IS NOT LOCAL. `stranded::hold_reason` is the one
+    // definition of "is this marker set" — `null`/`false`/blank are no
+    // marker, `true` is a marker with no reason — and the loading-dock
+    // station row's `metadata_unmarked: ["hold"]` clause calls the same
+    // function. This used to be a local `truthy`, which agreed by
+    // coincidence rather than by construction; the station row had no
+    // hold term at all until 20260910201453, and the two predicates
+    // answering "is this car boardable" differently is the defect
+    // backlog 36c3d4ca records (CLAUDE.md §9a).
+    review
+        .and_then(|s| s.get("metadata"))
+        .and_then(boss_jobs::stranded::hold_reason)
+        .is_none()
 }
 
 /// One branch a landed car's record makes a claim about, with
@@ -9097,11 +9106,17 @@ mod tests {
         held_active["steps"][0]["metadata"] = json!({"hold": "not yet"});
         assert!(!parked_ready(&held_active));
 
-        // An EMPTY hold is not a hold. `truthy` treats "" as false, so
-        // clearing the field releases the car without deleting the key.
-        let mut released = ready_car();
-        released["steps"][0]["metadata"] = json!({"hold": ""});
-        assert!(parked_ready(&released));
+        // A RELEASED hold is not a hold, and it is released by writing a
+        // falsy value, not by deleting the key - `hold: false` is what
+        // releasing car 04520403 wrote on 2026-09-10, and `""`/`null`
+        // arrive the same way. `stranded::marked` reads all three as no
+        // marker; a rule built on "the key is missing" would hold these
+        // cars forever.
+        for released in [json!(""), json!(false), json!(null), json!("   ")] {
+            let mut car = ready_car();
+            car["steps"][0]["metadata"] = json!({"hold": released});
+            assert!(parked_ready(&car), "a released hold must board: {released}");
+        }
 
         // Metadata that says nothing about holding leaves it boardable.
         let mut other = ready_car();
@@ -14053,6 +14068,237 @@ mod no_departure_tests {
         assert_ne!(
             LOCK_CONTENDED_EXIT, 3,
             "3 is the preflight-failure code — two causes must not share one exit"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The dock pin — `parked_ready` against the SEEDED loading-dock row.
+// ---------------------------------------------------------------------------
+
+/// "Is this car parked and ready to board?" is answered twice: here, by
+/// the conductor, and by the `loading-dock` station row the yard, the
+/// `/queue` endpoint and `boss orient` all read. On 2026-09-10 they
+/// disagreed — the row had no hold term, so `/api/yard/status` reported
+/// `dock_depth: 2, threshold_met: true` over two cars that could not
+/// board (backlog 36c3d4ca). This is the equality test CLAUDE.md §9a
+/// asks for while the duplication stands.
+///
+/// **A PIN IS A HOLDING ACTION, NOT A DESTINATION.** The destination is
+/// the conductor reading the row instead of carrying its own copy —
+/// `GET /api/stations/loading-dock/queue` already serves exactly this
+/// predicate. That is not this car: `parked_ready` is a pure
+/// `fn(&Value) -> bool` called from the boarding collector AND the
+/// cadence loop's depth probe, and making it HTTP-bound puts every
+/// landing behind a new network dependency, which is the failure mode
+/// "a conductor loop write must not be fatal" was written about. So both
+/// predicates stay, and this test refuses to let them drift again.
+#[cfg(test)]
+mod dock_pin {
+    use super::parked_ready;
+    use boss_core::job::{Job, JobStatus, Priority, Step, StepStatus, Subject};
+    use boss_jobs::{PgStations, StationRegistry};
+    use serde_json::Value;
+
+    /// ONE fixture, both shapes. The typed pair feeds the station
+    /// predicate; its own serialisation feeds `parked_ready`, which
+    /// reads a car as JSON off the API. Deriving the JSON rather than
+    /// hand-writing it is the point — a hand-written copy can disagree
+    /// with the types and the test would still pass.
+    fn car(
+        branch: &str,
+        review: StepStatus,
+        review_metadata: Value,
+        train: Option<&str>,
+    ) -> (Job, Vec<Step>) {
+        let mut job = Job::new(
+            "ship-a-change",
+            Subject::new("custom", branch),
+            format!("car {branch}"),
+            "emp-1",
+            Priority::Standard,
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 10).unwrap(),
+        );
+        job.status = JobStatus::Open;
+        let mut metadata = serde_json::json!({ "branch": branch });
+        if let Some(t) = train {
+            metadata["train"] = serde_json::json!(t);
+        }
+        job.metadata = metadata;
+        let mut step = Step::new(job.id, "task", "Open for review", 0);
+        step.spec_slug = Some("review".to_string());
+        step.status = review;
+        step.metadata = review_metadata;
+        (job, vec![step])
+    }
+
+    fn as_api_json(job: &Job, steps: &[Step]) -> Value {
+        let mut v = serde_json::to_value(job).expect("a Job serialises");
+        v["steps"] = serde_json::to_value(steps).expect("steps serialise");
+        v
+    }
+
+    async fn seeded_dock(db: &boss_testing::TestDb) -> boss_jobs::StationSpec {
+        PgStations::new(db.pool.clone())
+            .get_active("loading-dock")
+            .await
+            .expect("the schema seeds one active loading-dock row")
+    }
+
+    /// Every case the dock actually holds, and the answer BOTH readers
+    /// must give. Two deliberate differences are left out and named in
+    /// the test below; they are the measure of what a full collapse
+    /// would buy.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_seeded_dock_row_and_the_conductor_agree_on_every_car() {
+        let db = boss_testing::TestDb::new().await;
+        let spec = seeded_dock(&db).await;
+
+        let cases: Vec<(&str, bool, (Job, Vec<Step>))> = vec![
+            (
+                "parked, nothing written on the review step",
+                true,
+                car("feat/a", StepStatus::Ready, serde_json::json!({}), None),
+            ),
+            (
+                "parked and claimed — active is boardable too",
+                true,
+                car("feat/b", StepStatus::Active, serde_json::json!({}), None),
+            ),
+            (
+                "held with a reason",
+                false,
+                car(
+                    "feat/c",
+                    StepStatus::Ready,
+                    serde_json::json!({"hold": "waiting on a kubectl delete"}),
+                    None,
+                ),
+            ),
+            (
+                "held with no reason recorded",
+                false,
+                car(
+                    "feat/d",
+                    StepStatus::Ready,
+                    serde_json::json!({"hold": true}),
+                    None,
+                ),
+            ),
+            // THE TRAP: a released hold is `false`, not a deleted key.
+            (
+                "hold released by writing false",
+                true,
+                car(
+                    "feat/e",
+                    StepStatus::Ready,
+                    serde_json::json!({"hold": false}),
+                    None,
+                ),
+            ),
+            (
+                "hold released by blanking the field",
+                true,
+                car(
+                    "feat/f",
+                    StepStatus::Ready,
+                    serde_json::json!({"hold": ""}),
+                    None,
+                ),
+            ),
+            (
+                "metadata that says nothing about holding",
+                true,
+                car(
+                    "feat/g",
+                    StepStatus::Ready,
+                    serde_json::json!({"note": "looks fine"}),
+                    None,
+                ),
+            ),
+            (
+                "already aboard a train",
+                false,
+                car(
+                    "feat/h",
+                    StepStatus::Ready,
+                    serde_json::json!({}),
+                    Some("train-job-id"),
+                ),
+            ),
+            (
+                "review completed — past the dock",
+                false,
+                car("feat/i", StepStatus::Completed, serde_json::json!({}), None),
+            ),
+            (
+                "review not yet ready",
+                false,
+                car("feat/j", StepStatus::Pending, serde_json::json!({}), None),
+            ),
+        ];
+
+        for (what, expected, (job, steps)) in &cases {
+            let conductor = parked_ready(&as_api_json(job, steps));
+            assert_eq!(
+                conductor, *expected,
+                "`parked_ready` is wrong about a car {what}"
+            );
+            assert_eq!(
+                spec.predicate.matches(job, steps),
+                *expected,
+                "the seeded loading-dock predicate is wrong about a car {what} \
+                 — the row and the conductor have drifted, which is backlog \
+                 36c3d4ca happening again"
+            );
+        }
+    }
+
+    /// THE TWO KNOWN DIFFERENCES, written as a test so they cannot be
+    /// forgotten, and both unreachable for a real car:
+    ///
+    /// - a `train/` branch. `parked_ready` refuses one ("a consist is
+    ///   not a car"); the predicate language has no prefix clause. It
+    ///   cannot matter, because the row's `kind: ship-a-change` clause
+    ///   never admits a consist — a train is a `pr-train` packet.
+    /// - a blank `branch`. `metadata_present` means "present and
+    ///   non-null", not "non-blank", so the row counts a car whose
+    ///   branch is `""` and the conductor does not. Nothing writes one:
+    ///   `boss park` and the auto-park handler both take the branch from
+    ///   the gate receipt.
+    ///
+    /// Closing either means widening the predicate language again, which
+    /// is worth doing only once a real car lands in one of these states.
+    /// If one does, this test is where the evidence goes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_differences_that_remain_are_unreachable() {
+        let db = boss_testing::TestDb::new().await;
+        let spec = seeded_dock(&db).await;
+
+        let (consist, steps) = car(
+            "train/20260910-2000",
+            StepStatus::Ready,
+            serde_json::json!({}),
+            None,
+        );
+        assert!(!parked_ready(&as_api_json(&consist, &steps)));
+        assert!(
+            spec.predicate.matches(&consist, &steps),
+            "documented difference: the row has no branch-prefix clause"
+        );
+        let mut pr_train = consist.clone();
+        pr_train.kind = "pr-train".to_string();
+        assert!(
+            !spec.predicate.matches(&pr_train, &steps),
+            "the `kind` clause is what makes that difference unreachable: a real \
+             consist is a pr-train packet and the dock never admits one"
+        );
+
+        let (blank, steps) = car("", StepStatus::Ready, serde_json::json!({}), None);
+        assert!(!parked_ready(&as_api_json(&blank, &steps)));
+        assert!(
+            spec.predicate.matches(&blank, &steps),
+            "documented difference: `metadata_present` means non-null, not non-blank"
         );
     }
 }
