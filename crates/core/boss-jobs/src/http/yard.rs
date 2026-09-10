@@ -192,7 +192,7 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
     let gate_runs = {
         let filter = JobFilter {
             kind: Some("gate-run".to_string()),
-            scope,
+            scope: scope.clone(),
             ..Default::default()
         };
         match state.jobs.list_jobs(&filter, GATE_RUN_WINDOW, 0).await {
@@ -208,6 +208,35 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
         }
     };
 
+    // The arrived population the in-flight ETA is measured against — a
+    // read of its OWN, narrowed in SQL on `metadata.outcome`.
+    //
+    // WHY IT CANNOT REUSE `closed_trains`. A board the consist check
+    // refuses still opens a pr-train Job and cancels it, so the recent
+    // tail is almost entirely zero-length cancellations: measured
+    // 2026-09-10, 696 of 1,014 pr-trains are `cancelled`, and of the 40
+    // most recent exactly ONE had arrived. Reaching 10 measurable
+    // arrivals from the newest end takes a window 583 trains deep, so no
+    // recency window a page can afford holds enough of them — the filter
+    // has to be in the query, which is the same lesson `closed_since`
+    // carries in its own doc comment on `JobFilter`. No steps are
+    // fetched: every timing the estimate needs is in the Job's metadata,
+    // so this costs one list read and no N+1.
+    let arrived_trains = {
+        let filter = JobFilter {
+            kind: Some("pr-train".to_string()),
+            metadata_contains: Some(serde_json::json!({ "outcome": "arrived" })),
+            scope: scope.clone(),
+            ..Default::default()
+        };
+        state
+            .jobs
+            .list_jobs(&filter, yard::TRAIN_WINDOW, 0)
+            .await
+            .map(|(rows, _)| rows)
+            .unwrap_or_default()
+    };
+
     let status = yard::build_status(
         &open_trains,
         &closed_trains,
@@ -218,6 +247,7 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
         &gate_runs,
         &car_branches,
         &settled_car_branches,
+        &arrived_trains,
         Some(now),
     );
     // The VERB the heartbeat rule runs (`reconcile`), read from its row.
@@ -303,6 +333,6 @@ fn with_now(status: yard::YardStatus, now: chrono::DateTime<chrono::Utc>) -> ser
 /// The empty yard a denied caller gets — well-formed, so the page renders
 /// "nothing to show" rather than an error or a false-empty.
 fn empty_status() -> serde_json::Value {
-    let status = yard::build_status(&[], &[], &[], &[], None, None, &[], &[], &[], None);
+    let status = yard::build_status(&[], &[], &[], &[], None, None, &[], &[], &[], &[], None);
     serde_json::to_value(status).unwrap_or_else(|_| serde_json::json!({}))
 }

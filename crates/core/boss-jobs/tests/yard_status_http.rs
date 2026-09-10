@@ -877,3 +877,292 @@ async fn a_day_of_arrivals_does_not_push_the_open_train_off_the_board() {
     // The recent tail still reads the arrivals, capped as before.
     assert_eq!(body["recent"].as_array().unwrap().len(), RECENT_LIMIT);
 }
+
+/// An arrived train as the conductor records one: the outcome stamped,
+/// the arrival report's timings, and the `closed_at` the server writes.
+/// `board_to_merge_s` and the merge→`closed_at` gap are the two legs the
+/// ETA measures.
+fn arrived_train(i: i64, board_to_merge_s: i64, merge_to_arrival_s: i64) -> Job {
+    let merged = t("2026-09-01T10:00:00Z");
+    let closed = merged + chrono::Duration::seconds(merge_to_arrival_s);
+    let mut j = job(
+        "pr-train",
+        &format!("44444444-4444-4444-4444-{i:012}"),
+        &format!("arrived train #{i}"),
+        JobStatus::Closed,
+        json!({
+            "outcome": "arrived",
+            "closed_at": closed.to_rfc3339(),
+            "arrival_report": { "timings": {
+                "board_to_merge_s": board_to_merge_s,
+                "merged_at": merged.to_rfc3339(),
+            }},
+        }),
+    );
+    // OLDER than the refusal flood, so `opened_on desc` puts every one of
+    // these behind the noise — the position that makes a recency-only
+    // read miss them entirely.
+    j.opened_on = NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
+    j
+}
+
+/// A board the consist check refused: the Job opened, cancelled, carried
+/// no cars and measured nothing. 696 of the 1,014 pr-trains on the live
+/// record are this (measured 2026-09-10).
+fn refused_train(i: i64) -> Job {
+    job(
+        "pr-train",
+        &format!("55555555-5555-5555-5555-{i:012}"),
+        &format!("refused train #{i}"),
+        JobStatus::Closed,
+        json!({ "outcome": "cancelled", "boarded_jobs": [] }),
+    )
+}
+
+/// An open train that has boarded but not merged, 5 minutes before `NOW`.
+fn boarding_train() -> (Job, Vec<Step>) {
+    let mut j = job(
+        "pr-train",
+        "66666666-6666-6666-6666-666666666666",
+        "PR train in flight",
+        JobStatus::Open,
+        json!({ "boarded_jobs": ["a", "b", "c"] }),
+    );
+    j.opened_on = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+    let boarded = json!({ "completed_at": "2026-09-03T11:55:00Z" });
+    let steps = vec![
+        step(
+            &j.id,
+            "collect",
+            "Collect what is ready to board",
+            StepStatus::Completed,
+            boarded.clone(),
+        ),
+        step(
+            &j.id,
+            "pr",
+            "Open the batched PR",
+            StepStatus::Completed,
+            boarded,
+        ),
+        step(&j.id, "ci", "CI verdict", StepStatus::Active, json!({})),
+        step(
+            &j.id,
+            "merged",
+            "Merged into main",
+            StepStatus::Ready,
+            json!({}),
+        ),
+    ];
+    (j, steps)
+}
+
+/// A TRAIN IN FLIGHT STATES ITS ETA — and the estimate reaches PAST the
+/// refusal flood to find the arrivals it is measured from.
+///
+/// THE TRAP THIS PINS. A board the consist check refuses still opens a
+/// pr-train Job and cancels it, so the recent population is
+/// overwhelmingly zero-length cancellations: measured 2026-09-10, 696 of
+/// 1,014 pr-trains are `cancelled`, and of the 40 most recent — the
+/// window the departure board fetches client-side — exactly ONE had
+/// arrived. Reaching 10 measurable arrivals from the newest end needs a
+/// window 583 trains deep. So the arrived population is narrowed IN THE
+/// QUERY (`metadata_contains`), not sampled by recency and filtered
+/// after. This test puts a full `TRAIN_WINDOW` of refusals NEWER than
+/// every arrival: a read that samples on recency sees nothing but zeros
+/// and the ETA comes back unknown (or worse, near-instant).
+#[tokio::test]
+async fn a_train_in_flight_states_an_eta_measured_past_the_refusal_flood() {
+    use boss_jobs::yard::{MIN_ETA_ARRIVALS, TRAIN_WINDOW};
+
+    let (app, jobs) = app_with(vec![depth_rule(), clock_rule()], vec![policy_row()]);
+    let now = t(NOW);
+
+    let (in_flight, steps) = boarding_train();
+    jobs.create_job_at(&in_flight, now, &[]).await.unwrap();
+    for s in &steps {
+        jobs.add_step_at(s, now, &[]).await.unwrap();
+    }
+
+    // A whole window of refusals, all NEWER than the arrivals below.
+    for i in 0..TRAIN_WINDOW {
+        jobs.create_job_at(&refused_train(i), now, &[])
+            .await
+            .unwrap();
+    }
+    // Exactly the floor's worth of measurable arrivals, spread so the
+    // 10th/90th percentiles are distinct observations: board→merge
+    // 900..1800, merge→arrival 600..1500.
+    for i in 0..MIN_ETA_ARRIVALS {
+        let k = i64::try_from(i).unwrap();
+        jobs.create_job_at(&arrived_train(k, 900 + k * 100, 600 + k * 100), now, &[])
+            .await
+            .unwrap();
+    }
+
+    let (status, body) = get(&app, "operator").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The recency window really is drowned — this is the noise a naive
+    // sample would have averaged.
+    let recent = body["recent"].as_array().unwrap();
+    assert!(
+        recent.iter().all(|r| r["outcome"] == "cancelled"),
+        "the recent tail is all refusals, which is the point: {recent:?}"
+    );
+
+    let eta = &body["trains"][0]["eta"];
+    assert_eq!(
+        eta["kind"], "estimate",
+        "the arrivals are behind a window of refusals — only a filter in \
+         the query reaches them: {body}"
+    );
+    assert_eq!(
+        eta["leg"], "boarding → arrival",
+        "the leg is named on the wire, so a reader never guesses which one"
+    );
+    assert_eq!(eta["sample_size"], MIN_ETA_ARRIVALS);
+    // 5 minutes (300s) into the board→merge leg. median 1400/1100,
+    // p10 1000/700, p90 1800/1500.
+    assert_eq!(eta["remaining_seconds"], (1400 - 300) + 1100);
+    assert_eq!(eta["remaining_low_seconds"], (1000 - 300) + 700);
+    assert_eq!(eta["remaining_high_seconds"], (1800 - 300) + 1500);
+    assert_eq!(eta["overdue"], false);
+    assert!(
+        eta["basis"].as_str().unwrap().contains("arrivals"),
+        "the number arrives with its provenance: {eta}"
+    );
+}
+
+/// Thin history REFUSES, and names what it was short of. A number drawn
+/// from three arrivals reads as a promise; "3 arrived, 10 needed" sends
+/// nobody to re-derive why there is no figure.
+#[tokio::test]
+async fn too_few_arrivals_refuse_with_a_stated_reason() {
+    use boss_jobs::yard::MIN_ETA_ARRIVALS;
+
+    let (app, jobs) = app_with(vec![depth_rule(), clock_rule()], vec![policy_row()]);
+    let now = t(NOW);
+
+    let (in_flight, steps) = boarding_train();
+    jobs.create_job_at(&in_flight, now, &[]).await.unwrap();
+    for s in &steps {
+        jobs.add_step_at(s, now, &[]).await.unwrap();
+    }
+    for i in 0..20 {
+        jobs.create_job_at(&refused_train(i), now, &[])
+            .await
+            .unwrap();
+    }
+    for i in 0..3 {
+        jobs.create_job_at(&arrived_train(i, 1200, 1100), now, &[])
+            .await
+            .unwrap();
+    }
+
+    let (status, body) = get(&app, "operator").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let eta = &body["trains"][0]["eta"];
+    assert_eq!(eta["kind"], "unknown", "3 arrivals is an anecdote: {body}");
+    let reason = eta["reason"].as_str().unwrap();
+    assert!(reason.contains('3'), "name what it found: {reason}");
+    assert!(
+        reason.contains(&MIN_ETA_ARRIVALS.to_string()),
+        "name the floor it fell short of: {reason}"
+    );
+    assert!(
+        eta.get("remaining_seconds").is_none(),
+        "no number rides alongside a refusal: {eta}"
+    );
+}
+
+/// A MERGED train is told the remaining leg only. merge→arrival measured
+/// a median of 1,183s — HALF the journey — so handing a merged train the
+/// whole-journey figure roughly doubles what it has left.
+#[tokio::test]
+async fn a_merged_train_is_estimated_on_the_remaining_leg_only() {
+    use boss_jobs::yard::MIN_ETA_ARRIVALS;
+
+    let (app, jobs) = app_with(vec![depth_rule(), clock_rule()], vec![policy_row()]);
+    let now = t(NOW);
+
+    let mut merged_train = job(
+        "pr-train",
+        "77777777-7777-7777-7777-777777777777",
+        "PR train past the merge",
+        JobStatus::Open,
+        json!({ "boarded_jobs": ["a"] }),
+    );
+    merged_train.opened_on = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+    let merged_at = json!({ "completed_at": "2026-09-03T11:55:00Z" });
+    let steps = vec![
+        step(
+            &merged_train.id,
+            "collect",
+            "Collect what is ready to board",
+            StepStatus::Completed,
+            json!({ "completed_at": "2026-09-03T11:00:00Z" }),
+        ),
+        step(
+            &merged_train.id,
+            "pr",
+            "Open the batched PR",
+            StepStatus::Completed,
+            json!({ "completed_at": "2026-09-03T11:00:00Z" }),
+        ),
+        step(
+            &merged_train.id,
+            "ci",
+            "CI verdict",
+            StepStatus::Completed,
+            merged_at.clone(),
+        ),
+        step(
+            &merged_train.id,
+            "merged",
+            "Merged into main",
+            StepStatus::Completed,
+            merged_at,
+        ),
+        step(
+            &merged_train.id,
+            "deployed",
+            "Deployed to the playground",
+            StepStatus::Ready,
+            json!({}),
+        ),
+        step(
+            &merged_train.id,
+            "converged",
+            "Cluster converged",
+            StepStatus::Pending,
+            json!({}),
+        ),
+    ];
+    jobs.create_job_at(&merged_train, now, &[]).await.unwrap();
+    for s in &steps {
+        jobs.add_step_at(s, now, &[]).await.unwrap();
+    }
+    for i in 0..MIN_ETA_ARRIVALS {
+        let k = i64::try_from(i).unwrap();
+        jobs.create_job_at(&arrived_train(k, 900 + k * 100, 600 + k * 100), now, &[])
+            .await
+            .unwrap();
+    }
+
+    let (_, body) = get(&app, "operator").await;
+    let eta = &body["trains"][0]["eta"];
+    assert_eq!(eta["kind"], "estimate");
+    assert_eq!(
+        eta["leg"], "merge → arrival",
+        "a merged train is estimated on the leg it is actually on: {body}"
+    );
+    // 5 minutes past the merge, against the merge→arrival median of 1100.
+    assert_eq!(eta["remaining_seconds"], 1100 - 300);
+    assert!(
+        eta["remaining_seconds"].as_i64().unwrap() < (1400 - 300) + 1100,
+        "less than the whole-journey figure — mixing the legs is the \
+         defect this pins"
+    );
+}

@@ -35,6 +35,33 @@ export type TrainBlock =
   | { readonly kind: 'converge-overdue' }
   | { readonly kind: 'stalled'; readonly since: string };
 
+/** When a train in flight is expected to arrive — or why that cannot
+ *  be said. A discriminated union on `kind`, mirroring the Rust
+ *  `TrainEta`: a reader gets either a figure or a reason, never a bare
+ *  null to interpret.
+ *
+ *  MEASURED 2026-09-10 over the live record: the two legs are the same
+ *  size (board→merge median 1,206s, merge→arrival 1,183s), so a merged
+ *  train told the whole-journey figure is told roughly double what it
+ *  has left. That is why `leg` is on the wire. */
+export type TrainEta =
+  | Readonly<{
+      kind: 'estimate';
+      /** Which leg the figure covers: `boarding → arrival` before the
+       *  merge, `merge → arrival` after it. */
+      leg: string;
+      remaining_seconds: number;
+      /** The 10th and 90th percentiles of the same population — the
+       *  spread, published because one number would over-claim. */
+      remaining_low_seconds: number;
+      remaining_high_seconds: number;
+      sample_size: number;
+      basis: string;
+      /** Elapsed has passed the 90th percentile of everything measured. */
+      overdue: boolean;
+    }>
+  | Readonly<{ kind: 'unknown'; reason: string }>;
+
 export type TrainStatus = Readonly<{
   id: string;
   title: string;
@@ -48,6 +75,10 @@ export type TrainStatus = Readonly<{
    *  on a server that does not send it; the floor then reads the
    *  boarding minute off the title. */
   boarded_at: string | null;
+  /** When this train is expected to arrive, or why that cannot be said.
+   *  A server that does not send one reads as `unknown` with a reason —
+   *  the page never shows a fabricated zero. */
+  eta: TrainEta;
 }>;
 
 export type DockCar = Readonly<{
@@ -237,6 +268,33 @@ function parseBlock(raw: unknown): TrainBlock | null {
   }
 }
 
+/** The ETA off the wire. An absent field, and a `kind` this build does
+ *  not model, both read as "no estimate" WITH a reason rather than
+ *  failing the page or inventing a number — the same forgiving shape
+ *  `parseBlock` uses for an unknown block kind. */
+function parseEta(raw: unknown): TrainEta {
+  const o = asObjectOrEmpty(raw);
+  if (o.kind === 'estimate') {
+    return {
+      kind: 'estimate',
+      leg: String(o.leg ?? ''),
+      remaining_seconds: Number(o.remaining_seconds ?? 0),
+      remaining_low_seconds: Number(o.remaining_low_seconds ?? 0),
+      remaining_high_seconds: Number(o.remaining_high_seconds ?? 0),
+      sample_size: Number(o.sample_size ?? 0),
+      basis: String(o.basis ?? ''),
+      overdue: o.overdue === true,
+    };
+  }
+  if (o.kind === 'unknown' && typeof o.reason === 'string') {
+    return { kind: 'unknown', reason: o.reason };
+  }
+  return {
+    kind: 'unknown',
+    reason: 'this server sent no arrival estimate for the train',
+  };
+}
+
 function parseTrain(raw: unknown): TrainStatus {
   const o = asObject(raw, 'train');
   return {
@@ -249,6 +307,7 @@ function parseTrain(raw: unknown): TrainStatus {
     pr_url: typeof o.pr_url === 'string' ? o.pr_url : null,
     car_count: Number(o.car_count ?? 0),
     boarded_at: typeof o.boarded_at === 'string' ? o.boarded_at : null,
+    eta: parseEta(o.eta),
   };
 }
 
@@ -604,4 +663,39 @@ export function elapsedText(since: string | null | undefined, nowMs: number): st
   const started = Date.parse(since);
   if (Number.isNaN(started)) return null;
   return journeyText(Math.max(nowMs - started, 0) / 1000);
+}
+
+/** The ETA as a chip: the median remaining time with the measured
+ *  10th–90th band beside it, or a stated refusal.
+ *
+ *  ALWAYS A BAND, never a bare number. Measured 2026-09-10 over 143
+ *  arrivals, the spread WITHIN a single car count ran 770s to 4,274s
+ *  while the medians between car counts differed by 10% — so the
+ *  variation an operator needs to see is the spread, and a point
+ *  estimate would read as a promise the pipeline never made.
+ *
+ *  An overdue train stops counting down and says so, in an alarm tone: a
+ *  state past its own measured threshold must LOOK past it, not render
+ *  like a healthy transit (CLAUDE.md §Diagnosis). */
+export function etaReading(eta: TrainEta): Reading {
+  if (eta.kind === 'unknown') return { tone: 'muted', text: 'no ETA' };
+  if (eta.overdue) {
+    const slowest = journeyText(eta.remaining_high_seconds);
+    return {
+      tone: 'err',
+      text: `overdue — past the slowest of ${eta.sample_size} measured (${slowest})`,
+    };
+  }
+  const band = `${journeyText(eta.remaining_low_seconds)}–${journeyText(eta.remaining_high_seconds)}`;
+  return { tone: 'ok', text: `~${journeyText(eta.remaining_seconds)} left (${band})` };
+}
+
+/** The long form, for a tooltip: WHICH LEG the figure covers and what it
+ *  was measured from — or, with no estimate, the reason in full. The leg
+ *  is load-bearing: board→arrival and merge→arrival are materially
+ *  different lengths, and a reader guessing which one they are looking at
+ *  has no estimate at all. */
+export function etaDetail(eta: TrainEta): string {
+  if (eta.kind === 'unknown') return eta.reason;
+  return `${eta.leg} — ${eta.basis}`;
 }

@@ -36,6 +36,23 @@
 # setting lives in the user's own cargo config, which is what this
 # writes.
 #
+# WHAT IS SHARED THAT SHOULD NOT BE, measured 2026-09-10. Cargo's unit
+# hash does not include the worktree path, so two checkouts of the same
+# commit share one rlib AND one build-script OUT_DIR. That is exactly
+# the saving above for the 461 third-party rlibs — they are
+# byte-identical — but it is wrong for any artifact a build script
+# GENERATES from the tree, because those are not identical: they carry
+# the generating worktree's paths and its files. Measured case:
+# boss-testing's build.rs compiles the migration list from
+# `infra/postgres/schema/`; a checkout holding a NEW migration was
+# reported `Finished` with nothing recompiled, linked to the list its
+# neighbour generated, and every DB-backed test there would have run
+# against a schema missing the migration under test. No
+# `rerun-if-changed` can see it — the script is not run at all. That
+# crate now refuses at run time instead (see the fingerprint check in
+# `crates/core/boss-testing/src/test_db.rs`), and a build script added
+# here that generates from the tree needs the same kind of guard.
+#
 # ESCAPE HATCH: `CARGO_TARGET_DIR=... cargo …` on a single invocation
 # overrides the config, so deliberately-parallel work does not need
 # this turned off globally.

@@ -52,6 +52,8 @@
     boardsWhen,
     conductorReading,
     elapsedText,
+    etaDetail,
+    etaReading,
     fetchYardStatus,
     journeyText,
     lastVerbReading,
@@ -600,6 +602,14 @@
               {#if st}
                 <dt>conductor says</dt>
                 <dd>{phaseLabel(st.phase)}{st.at_step ? ` · at ${st.at_step}` : ''}{st.ci_result ? ` · CI ${st.ci_result}` : ''}</dd>
+                <!-- Measured from ARRIVED trains, with the leg it covers
+                     and the spread named — so the answer to "is this
+                     normal?" is on the panel rather than in a head. -->
+                <dt>when it lands</dt>
+                <dd>
+                  {etaReading(st.eta).text}
+                  <span class="yard-eta-why">{etaDetail(st.eta)}</span>
+                </dd>
                 {#if st.block}
                   <dt>block</dt>
                   <dd><span class="yard-trouble">{blockLabel(st.block)}</span></dd>
@@ -1169,9 +1179,31 @@
               onclick={() => openCancel(t)}>cancel train</button>
           {/if}
           {#if t.eta.phase !== 'arrived'}
-            <span class="yard-eta" class:est={t.eta.kind === 'eta'} title={etaTitle(t.eta)}>
+            {@const srv = serverTrainById.get(t.id)?.eta ?? null}
+            <span
+              class="yard-eta"
+              class:est={t.eta.kind === 'eta'}
+              title={srv && t.eta.kind !== 'eta' ? etaDetail(srv) : etaTitle(t.eta)}>
               {etaText(t.eta)}
             </span>
+            <!-- The SERVER's measured estimate, shown when the
+                 client-side projection has none. That is not a rare
+                 case: `trainEta` samples the last 5 ARRIVED trains out
+                 of the 40 pr-trains this page fetches, and measured
+                 2026-09-10 exactly ONE of the 40 most recent had arrived
+                 — 696 of 1,014 are boards the consist check refused.
+                 Reaching 10 measurable arrivals from the newest end
+                 needs a window 583 deep, so no client fetch can get
+                 there; /api/yard/status narrows on the outcome in SQL
+                 instead. One chip at a time, never two numbers. -->
+            {#if srv && t.eta.kind !== 'eta'}
+              {@const r = etaReading(srv)}
+              {#if srv.kind === 'estimate'}
+                <span class="yard-eta is-measured" class:late={r.tone === 'err'} title={etaDetail(srv)}>
+                  {r.text}
+                </span>
+              {/if}
+            {/if}
           {/if}
           {#if t.status === 'CONVERGING'}
             {@const since = convergingFor(t)}
@@ -1446,6 +1478,13 @@
     border: 1px solid var(--hairline, #2A3138); font-variant-numeric: tabular-nums;
     white-space: nowrap; }
   .yard-eta.est { color: var(--text, #C7CED6); }
+  /* The server-measured estimate: brighter than a phase-only chip
+     because it IS a measurement, and red once the train is past the
+     slowest arrival on record — a state past its own threshold has to
+     look past it (CLAUDE.md §Diagnosis). */
+  .yard-eta-why { display: block; color: var(--static, #7A838C); font-size: 11px; }
+  .yard-eta.is-measured { color: var(--text, #C7CED6); letter-spacing: 0.04em; }
+  .yard-eta.is-measured.late { color: var(--alarm, #E5484D); border-color: var(--alarm, #E5484D); }
   /* The converge wait, as elapsed time — an active signal in the
      signal-green idiom, not the muted arrival stamp. */
   .yard-since { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;

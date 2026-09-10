@@ -14,9 +14,12 @@ import {
   parseYardStatus,
   phaseLabel,
   queueLabel,
+  etaDetail,
+  etaReading,
   trainTone,
   type BoardingPredicate,
   type ConductorHealth,
+  type TrainEta,
   type TrainStatus,
 } from './yard-status';
 
@@ -539,6 +542,7 @@ describe('trainTone', () => {
     pr_url: null,
     car_count: 0,
     boarded_at: null,
+    eta: { kind: 'unknown', reason: 'not under test' },
   };
   test('a blocked train is an error tone', () => {
     expect(trainTone({ ...base, block: { kind: 'converge-overdue' } })).toBe('err');
@@ -670,5 +674,120 @@ describe('the gate QUEUE — runs waiting for a slot', () => {
     expect(queueLabel({ ...q, estimated_wait_seconds: 0 })).toBe('#2 in line · waiting 12m · a slot is free now');
     expect(queueLabel({ ...q, estimated_wait_seconds: null })).toBe('#2 in line · waiting 12m');
     expect(queueLabel({ ...q, waiting_seconds: null, estimated_wait_seconds: null })).toBe('#2 in line');
+  });
+});
+
+// The ETA on a train in flight. The gates panel beside it has carried a
+// measured `typical_seconds` for months; trains never got the
+// equivalent, and the cost landed on the operator, who had to ask a
+// human whether a 20-minute transit was normal — twice.
+//
+// MEASURED 2026-09-10 against the live record (1,014 pr-trains): 696
+// cancelled, 254 arrived, 143 with a readable board→merge leg, 105 with
+// a readable merge→arrival leg. board→merge p10/median/p90 = 890 / 1206
+// / 1709s; merge→arrival = 589 / 1183 / 4799s.
+describe('the ETA on a train in flight', () => {
+  const estimate = (over: Partial<Extract<TrainEta, { kind: 'estimate' }>> = {}) =>
+    ({
+      kind: 'estimate',
+      leg: 'boarding → arrival',
+      remaining_seconds: 2100,
+      remaining_low_seconds: 1200,
+      remaining_high_seconds: 4500,
+      sample_size: 105,
+      basis: 'median of recent arrivals — boarding→merge from 143, merge→arrival from 105',
+      overdue: false,
+      ...over,
+    }) as TrainEta;
+
+  test('parses the estimate off the train row', () => {
+    const s = parseYardStatus({
+      trains: [
+        {
+          id: 't1',
+          title: 'train #200',
+          phase: 'awaiting-ci',
+          eta: {
+            kind: 'estimate',
+            leg: 'boarding → arrival',
+            remaining_seconds: 2100,
+            remaining_low_seconds: 1200,
+            remaining_high_seconds: 4500,
+            sample_size: 105,
+            basis: 'median of recent arrivals',
+            overdue: false,
+          },
+        },
+      ],
+    });
+    const eta = s.trains[0]!.eta;
+    expect(eta.kind).toBe('estimate');
+    if (eta.kind !== 'estimate') throw new Error('unreachable');
+    expect(eta.remaining_seconds).toBe(2100);
+    expect(eta.leg).toBe('boarding → arrival');
+    expect(eta.sample_size).toBe(105);
+  });
+
+  // A server that does not send one, and a kind this build does not
+  // model, both read as "no estimate" with a reason — never as a
+  // fabricated zero, and never by failing the whole page.
+  test('an absent or unknown eta reads as no estimate, with a reason', () => {
+    const missing = parseYardStatus({ trains: [{ id: 't1', title: 'x', phase: 'boarding' }] });
+    const eta = missing.trains[0]!.eta;
+    expect(eta.kind).toBe('unknown');
+    if (eta.kind !== 'unknown') throw new Error('unreachable');
+    expect(eta.reason.length).toBeGreaterThan(0);
+
+    const weird = parseYardStatus({
+      trains: [{ id: 't1', title: 'x', phase: 'boarding', eta: { kind: 'from-the-future' } }],
+    });
+    expect(weird.trains[0]!.eta.kind).toBe('unknown');
+  });
+
+  // The SPREAD is published, not flattened. A single number would
+  // over-claim: within one car count the measured arrivals ranged 770s
+  // to 4,274s, so the label carries the 10th–90th band beside the median.
+  test('the reading states the median AND the spread', () => {
+    const r = etaReading(estimate());
+    expect(r.text).toBe('~35m left (20m–1.3h)');
+    expect(r.tone).toBe('ok');
+  });
+
+  // "A troubled packet must look troubled" (CLAUDE.md §Diagnosis): past
+  // the 90th percentile of everything measured, the chip stops counting
+  // down and says so.
+  test('a train past the measured spread reads overdue, in an alarm tone', () => {
+    const r = etaReading(estimate({ overdue: true, remaining_seconds: 0 }));
+    expect(r.text).toContain('overdue');
+    expect(r.tone).toBe('err');
+    expect(r.text).not.toContain('~0m left');
+  });
+
+  // No estimate is a stated refusal, never a blank or a zero.
+  test('no estimate says so, and the reason is readable', () => {
+    const r = etaReading({
+      kind: 'unknown',
+      reason: 'too little history to measure — 3 arrived train(s) in the window, 3 with a readable leg, 10 needed',
+    });
+    expect(r.text).toBe('no ETA');
+    expect(r.tone).toBe('muted');
+    expect(etaDetail({ kind: 'unknown', reason: 'too little history — 3 of 10' })).toBe(
+      'too little history — 3 of 10',
+    );
+  });
+
+  // The LEG is on the tooltip, because board→arrival and merge→arrival
+  // are materially different lengths (a median of 2,389s against 1,183s)
+  // and a reader who has to guess which one has no estimate.
+  test('the detail names the leg and the basis', () => {
+    const d = etaDetail(estimate());
+    expect(d).toContain('boarding → arrival');
+    expect(d).toContain('median of recent arrivals');
+    expect(d).toContain('105');
+  });
+
+  test('the detail of a merged train names the merge leg', () => {
+    const d = etaDetail(estimate({ leg: 'merge → arrival', basis: 'median of 105 legs' }));
+    expect(d).toContain('merge → arrival');
   });
 });

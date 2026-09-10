@@ -502,7 +502,7 @@ describe('the track — wagons behind a locomotive', () => {
       }),
       statusOf({
         trains: [
-          { id: 't1', title: 'PR train 2026-09-07 23:37', phase: 'awaiting-ci', at_step: 'CI', block: { kind: 'ci-red', checks: 'clippy' }, ci_result: 'failing', pr_url: null, car_count: 1, boarded_at: null },
+          { id: 't1', title: 'PR train 2026-09-07 23:37', phase: 'awaiting-ci', at_step: 'CI', block: { kind: 'ci-red', checks: 'clippy' }, ci_result: 'failing', pr_url: null, car_count: 1, boarded_at: null, eta: { kind: 'unknown', reason: 'not under test' } },
         ],
       }),
       NOW,
@@ -526,7 +526,7 @@ describe('the track — wagons behind a locomotive', () => {
     const served = scene(
       yardOf({ inFlight: [trainRow('t1', 'BOARDED', { cars: [car('c1', 'fix/a')] })] }),
       statusOf({
-        trains: [{ id: 't1', title: 'PR train 2026-09-07 23:37', phase: 'awaiting-ci', at_step: 'ci', block: null, ci_result: null, pr_url: null, car_count: 1, boarded_at: '2026-09-07T23:37:12Z' }],
+        trains: [{ id: 't1', title: 'PR train 2026-09-07 23:37', phase: 'awaiting-ci', at_step: 'ci', block: null, ci_result: null, pr_url: null, car_count: 1, boarded_at: '2026-09-07T23:37:12Z', eta: { kind: 'unknown', reason: 'not under test' } }],
       }),
       NOW,
     );

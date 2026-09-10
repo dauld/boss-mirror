@@ -14,6 +14,8 @@
   import type { Remote } from '../../data/remote';
   import {
     blockLabel,
+    etaDetail,
+    etaReading,
     fetchYardStatus,
     journeyText,
     phaseLabel,
@@ -67,6 +69,7 @@
     {:else}
       <div class="ys-trains">
         {#each s.trains as t (t.id)}
+          {@const eta = etaReading(t.eta)}
           <div class="ys-train" class:blocked={!!t.block}>
             <div class="ys-train-head">
               <span class="ys-train-title">{t.title}</span>
@@ -81,6 +84,22 @@
             {#if t.at_step}
               <div class="ys-at">at: {t.at_step}</div>
             {/if}
+            <!-- WHEN IT LANDS. The gates panel below has carried a
+                 measured `typical_seconds` for months; trains had no
+                 equivalent, so reading whether a 20-minute transit was
+                 normal meant asking a human. The figure is measured from
+                 ARRIVED trains only (a refused board opens and cancels a
+                 pr-train, and those are the majority), it names the leg
+                 it covers, and with too little history it says so rather
+                 than guessing. -->
+            <div class="ys-eta" class:late={eta.tone === 'err'} class:off={eta.tone === 'muted'} title={etaDetail(t.eta)}>
+              {eta.text}
+              {#if t.eta.kind === 'estimate'}
+                <span class="ys-eta-leg">{t.eta.leg} · {t.eta.sample_size} arrivals</span>
+              {:else}
+                <span class="ys-eta-leg">{t.eta.reason}</span>
+              {/if}
+            </div>
             {#if t.block}
               <!-- The buried fact, surfaced. -->
               <div class="ys-block">{blockLabel(t.block)}</div>
@@ -218,6 +237,15 @@
     color: var(--signal, #5fd4a8); text-decoration: none; margin-left: auto;
   }
   .ys-at { color: var(--static, #7a838c); font-size: 13px; }
+  .ys-eta { font-size: 13px; color: var(--ok, #1f7a3d); }
+  .ys-eta.late { color: var(--err, #b3261e); font-weight: 600; }
+  .ys-eta.off { color: var(--static, #7a838c); }
+  .ys-eta-leg {
+    color: var(--static, #7a838c);
+    font-size: 12px;
+    font-weight: 400;
+    margin-left: 6px;
+  }
   .ys-block {
     color: var(--err, #d9534f); font-weight: 600; font-size: 13px;
     font-family: var(--font-mono, ui-monospace, monospace);

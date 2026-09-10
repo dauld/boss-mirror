@@ -227,6 +227,16 @@ pub struct TrainStatus {
     /// no stamp. The same instant `journey_seconds` starts from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub boarded_at: Option<String>,
+    /// When this train is expected to arrive — or why that cannot be
+    /// said. The gates panel beside it has carried a measured
+    /// `typical_seconds` for months; trains never got the equivalent,
+    /// and the cost landed on the operator, who had to ask a human
+    /// whether a 20-minute transit was normal. See [`train_eta`]: the
+    /// figure is measured from arrived trains only, and it names the leg
+    /// it covers. `#[serde(default)]` so an older payload deserializes
+    /// to "no estimate was computed" rather than failing the page.
+    #[serde(default)]
+    pub eta: TrainEta,
 }
 
 /// The title of the first ready-or-active step — the exact place the
@@ -361,10 +371,16 @@ fn truthy(v: &Value) -> bool {
 }
 
 /// Build one train row from its Job and steps.
+///
+/// `eta` is what the arrived population measured ([`eta_basis`]),
+/// computed once per status build and passed in so every train on the
+/// board is measured against the same history.
 pub fn train_status(
     job: &Job,
     steps: &[Step],
     stall_before: Option<chrono::DateTime<chrono::Utc>>,
+    eta: &EtaBasis,
+    now: Option<chrono::DateTime<chrono::Utc>>,
 ) -> TrainStatus {
     let phase = phase_of(steps);
     let car_count = job
@@ -386,6 +402,7 @@ pub fn train_status(
             .map(str::to_string),
         car_count,
         boarded_at: boarded_at(steps).map(str::to_string),
+        eta: train_eta(steps, eta, now),
     }
 }
 
@@ -727,6 +744,340 @@ pub fn recent_train(job: &Job, steps: &[Step]) -> RecentTrain {
         title: job.title.clone(),
         outcome: outcome_of(job, steps),
         journey_seconds: journey_seconds(job, steps),
+    }
+}
+
+/// How many measurable arrivals the ETA needs before it will publish a
+/// number. Ten, because ten is the smallest population where the three
+/// order statistics the field publishes are three DISTINCT observations
+/// and the low one is not simply the minimum: at n=10 the indices are
+/// p10→1, median→5, p90→9. Below that the "spread" would be the range
+/// restated, and one wedged 25-hour arrival (the record holds a 90,204s
+/// one) could carry the median on its own — it takes six of them to move
+/// a median of ten. Measured 2026-09-10 the population is 143 / 105, so
+/// the floor costs nothing at normal volume; it binds exactly where it
+/// should, on a fresh deployment or after a rebuild, and then the field
+/// says what it is short of instead of inventing a number.
+pub const MIN_ETA_ARRIVALS: usize = 10;
+
+/// What one arrived train measured, in seconds. The two legs a train
+/// actually spends its time on, read from the arrival report the
+/// conductor wrote and the `closed_at` the server stamped.
+///
+/// WHY NOT `total_s`. The arrival report declares `total_s` and
+/// `arrived_at`, and both are NULL on every arrived train in the record
+/// (measured 2026-09-10: 0 of 143). A reader leaning on them measures
+/// nothing while looking like it measured everything, so the legs are
+/// derived from the instants that are actually there.
+///
+/// WHY NOT `merge_to_deploy_s`. It is 0 on every arrival measured — the
+/// deploy stamp and the merge stamp are the same instant — so it
+/// describes a leg that takes no time while the merge→ARRIVAL leg takes
+/// a median of 1,183s, half the journey. Measuring the declared leg
+/// would under-state a merged train's remaining time by that half.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ArrivedLegs {
+    board_to_merge_s: Option<i64>,
+    merge_to_arrival_s: Option<i64>,
+}
+
+/// One leg's measured distribution: the median and the 10th/90th
+/// percentiles, so a surface can publish a spread instead of a point
+/// estimate. The spread is the finding, not decoration — within a single
+/// car count, arrivals ranged 770s to 4,274s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegSample {
+    /// The 10th percentile — a fast-but-real arrival, never the minimum.
+    pub low: i64,
+    pub median: i64,
+    /// The 90th percentile. Deliberately NOT the maximum: the record
+    /// holds a 25-hour wedged train, and one of those is not a forecast.
+    pub high: i64,
+    /// How many arrivals this leg was measured from.
+    pub n: usize,
+}
+
+/// What the arrived population measured — computed ONCE per status build
+/// and shared by every in-flight train, so the sort happens once and
+/// every train on the board is measured against the same history.
+///
+/// `Thin` carries the counts it found rather than a bare `None`: "9
+/// arrived trains, 10 needed" sends nobody to re-derive why there is no
+/// number (CLAUDE.md §Diagnosis — a verdict must name what failed).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EtaBasis {
+    Measured {
+        board_to_merge: LegSample,
+        merge_to_arrival: LegSample,
+    },
+    Thin {
+        /// Trains in the window whose outcome is `arrived`.
+        arrivals: usize,
+        /// Of those, how many measured at least one leg.
+        measurable: usize,
+    },
+}
+
+/// One arrived train's legs — `None` for anything that did not ARRIVE.
+///
+/// THE FILTER LIVES HERE, not in the caller, and that is deliberate. A
+/// board the consist check refuses still opens a pr-train Job and
+/// cancels it, so the recent population is overwhelmingly zero-length
+/// cancellations: measured 2026-09-10, 696 of 1,014 pr-trains are
+/// `cancelled`, and of the 40 most recent — the window the departure
+/// board fetches — exactly ONE had arrived. A population sampled on
+/// recency would therefore average a pile of zeros and report a
+/// confident, wrong, near-instant ETA. Making the outcome test part of
+/// the extractor means a caller cannot forget it.
+fn arrived_legs(job: &Job) -> Option<ArrivedLegs> {
+    if meta_str(&job.metadata, "outcome") != Some("arrived") {
+        return None;
+    }
+    let timings = job.metadata.get("arrival_report")?.get("timings")?;
+    let board_to_merge_s = timings
+        .get("board_to_merge_s")
+        .and_then(Value::as_i64)
+        .filter(|s| *s > 0);
+    // The merge→arrival leg: the merge stamp in the report to the
+    // `closed_at` the server wrote when the terminal step completed.
+    // Both ends are read; a leg that runs backwards (clock skew, or a
+    // `closed_at` from another path) is dropped rather than negated.
+    let merge_to_arrival_s = meta_str(timings, "merged_at")
+        .and_then(parse_instant)
+        .zip(meta_str(&job.metadata, "closed_at").and_then(parse_instant))
+        .map(|(merged, closed)| (closed - merged).num_seconds())
+        .filter(|s| *s > 0);
+    (board_to_merge_s.is_some() || merge_to_arrival_s.is_some()).then_some(ArrivedLegs {
+        board_to_merge_s,
+        merge_to_arrival_s,
+    })
+}
+
+/// The order statistic at `fraction` of a sorted sample. Index by
+/// truncation, clamped inside the slice — the same "an observation, not
+/// an interpolation" convention [`typical_gate_seconds`] uses, so the
+/// numbers on this page are all read off real arrivals.
+fn quantile(sorted: &[i64], fraction: f64) -> Option<i64> {
+    if sorted.is_empty() {
+        return None;
+    }
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    let i = (sorted.len() as f64 * fraction) as usize;
+    sorted.get(i.min(sorted.len() - 1)).copied()
+}
+
+/// One leg's distribution, or `None` when the leg has no samples. The
+/// MIN_ETA_ARRIVALS floor is applied to the POPULATION in [`eta_basis`],
+/// not per leg: the two legs have different counts (143 and 105 on the
+/// record, because `closed_at` is missing on some arrivals) and the
+/// binding constraint belongs in one place.
+fn leg_sample(mut v: Vec<i64>) -> Option<LegSample> {
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_unstable();
+    Some(LegSample {
+        low: quantile(&v, 0.10)?,
+        median: quantile(&v, 0.50)?,
+        high: quantile(&v, 0.90)?,
+        n: v.len(),
+    })
+}
+
+/// What the arrived population measured. Pure: a slice of Jobs in, a
+/// distribution or a stated shortfall out.
+///
+/// CAR COUNT IS NOT A DIMENSION, and the reason is measured rather than
+/// assumed. Over 143 arrivals the Spearman rank correlation between car
+/// count and board→merge time is 0.167, and the bucket medians are
+/// 1,140 / 1,197 / 1,256 / 1,259s for 1 / 2-3 / 4-6 / 7+ cars — a 10%
+/// spread BETWEEN buckets against a 770..4,274s spread INSIDE a single
+/// one. Slicing the population by car count would cut 143 samples into
+/// an 8-sample bucket to move the median by 4%: strictly less
+/// information, published with more confidence. So every train is
+/// measured against the whole arrived population, and the spread — which
+/// is where the real variation lives — is published beside the median.
+pub fn eta_basis(arrived: &[Job]) -> EtaBasis {
+    let arrivals = arrived
+        .iter()
+        .filter(|j| meta_str(&j.metadata, "outcome") == Some("arrived"))
+        .count();
+    let legs: Vec<ArrivedLegs> = arrived.iter().filter_map(arrived_legs).collect();
+    let pick =
+        |f: fn(&ArrivedLegs) -> Option<i64>| -> Vec<i64> { legs.iter().filter_map(f).collect() };
+    let thin = EtaBasis::Thin {
+        arrivals,
+        measurable: legs.len(),
+    };
+    if legs.len() < MIN_ETA_ARRIVALS {
+        return thin;
+    }
+    match (
+        leg_sample(pick(|l| l.board_to_merge_s)),
+        leg_sample(pick(|l| l.merge_to_arrival_s)),
+    ) {
+        (Some(board_to_merge), Some(merge_to_arrival)) => EtaBasis::Measured {
+            board_to_merge,
+            merge_to_arrival,
+        },
+        // One leg measured and the other not is not half an estimate: a
+        // whole-journey figure built from one leg would under-state by
+        // the other, which is the mixing this type exists to prevent.
+        _ => thin,
+    }
+}
+
+/// When a train in flight is expected to arrive — or why that cannot be
+/// said. A tagged union rather than a nullable number, so a reader gets
+/// either a figure or a reason and never a bare `null` to interpret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum TrainEta {
+    Estimate {
+        /// WHICH LEG the figure covers, in words: `boarding → arrival`
+        /// for a train not yet merged, `merge → arrival` for one past
+        /// it. On the wire because the two are materially different
+        /// lengths (a median of 2,389s against 1,183s) and a reader who
+        /// has to guess which one they are looking at has no estimate.
+        leg: String,
+        /// Seconds still to run, measured from this train's own elapsed
+        /// time against the population's median. Never negative: a leg
+        /// already over-spent contributes nothing, and `overdue` says so.
+        remaining_seconds: i64,
+        /// The same arithmetic on the population's 10th and 90th
+        /// percentiles — the spread, published because one number would
+        /// over-claim. Measured spread for a freshly boarded train:
+        /// ~35 min typical, 20 to 103 min.
+        remaining_low_seconds: i64,
+        remaining_high_seconds: i64,
+        /// How many arrivals the figure rests on — the binding leg's
+        /// count, so it is the smaller of the two when they differ.
+        sample_size: usize,
+        /// The population and the legs, in words, so the number arrives
+        /// with its provenance attached.
+        basis: String,
+        /// Elapsed has already passed the 90th percentile of everything
+        /// measured: this train is outside the whole measured range, and
+        /// the surface must look troubled rather than keep counting down
+        /// (CLAUDE.md §Diagnosis — "a troubled packet must look
+        /// troubled").
+        overdue: bool,
+    },
+    /// No estimate, and why — a thin population, an arrived train, a
+    /// missing stamp, or no clock. Never a number.
+    Unknown { reason: String },
+}
+
+impl Default for TrainEta {
+    fn default() -> Self {
+        TrainEta::Unknown {
+            reason: "no estimate was computed".to_string(),
+        }
+    }
+}
+
+/// The estimate for one train in flight. Pure: its steps, what the
+/// arrived population measured, and a clock.
+///
+/// PHASE-AWARE, because the two legs are the same size. A train that has
+/// not merged is estimated across BOTH legs from its boarding stamp; one
+/// that has merged is estimated across the remaining leg only, from its
+/// MERGE stamp. Telling a merged train the whole-journey figure would
+/// roughly double what it has left.
+///
+/// Every refusal is explicit. A missing stamp is never filled in from
+/// the other leg's stamp — that would silently mix the legs, which is the
+/// one thing a figure like this must not do.
+pub fn train_eta(
+    steps: &[Step],
+    basis: &EtaBasis,
+    now: Option<chrono::DateTime<chrono::Utc>>,
+) -> TrainEta {
+    let unknown = |reason: String| TrainEta::Unknown { reason };
+    let phase = phase_of(steps);
+    if phase == TrainPhase::Arrived {
+        return unknown("the train has arrived — nothing left to estimate".to_string());
+    }
+    let EtaBasis::Measured {
+        board_to_merge,
+        merge_to_arrival,
+    } = basis
+    else {
+        let EtaBasis::Thin {
+            arrivals,
+            measurable,
+        } = basis
+        else {
+            // Unreachable: `EtaBasis` has two variants and the first was
+            // just matched. Written as a statement rather than an
+            // `unreachable!()` because library code does not panic.
+            return unknown("the arrival history could not be read".to_string());
+        };
+        return unknown(format!(
+            "too little history to measure — {arrivals} arrived train(s) in the window, \
+             {measurable} with a readable leg, {MIN_ETA_ARRIVALS} needed"
+        ));
+    };
+    let Some(now) = now else {
+        return unknown(
+            "no clock — this read-model never reaches for wall time, so elapsed \
+             cannot be measured"
+                .to_string(),
+        );
+    };
+    // Post-merge: only the remaining leg, measured from the merge.
+    let post_merge = matches!(phase, TrainPhase::Deploying | TrainPhase::Converging);
+    let (leg, from, legs): (&str, Option<&str>, Vec<&LegSample>) = if post_merge {
+        (
+            "merge → arrival",
+            completed_at(find_step(steps, &MERGED)),
+            vec![merge_to_arrival],
+        )
+    } else {
+        (
+            "boarding → arrival",
+            boarded_at(steps),
+            vec![board_to_merge, merge_to_arrival],
+        )
+    };
+    let Some(started) = from.and_then(parse_instant) else {
+        return unknown(format!(
+            "no {} stamp on this train — elapsed time is unreadable, and an \
+             estimate from the other leg's stamp would mix the legs",
+            if post_merge { "merge" } else { "boarding" }
+        ));
+    };
+    let elapsed = (now - started).num_seconds().max(0);
+    // The leg under way is spent down by the elapsed time; every leg
+    // after it is still whole. `legs[0]` is always the one under way.
+    let project = |pick: fn(&LegSample) -> i64| -> i64 {
+        legs.iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let v = pick(s);
+                if i == 0 { (v - elapsed).max(0) } else { v }
+            })
+            .sum()
+    };
+    let high = legs.iter().map(|s| s.high).sum::<i64>();
+    TrainEta::Estimate {
+        leg: leg.to_string(),
+        remaining_seconds: project(|s| s.median),
+        remaining_low_seconds: project(|s| s.low),
+        remaining_high_seconds: project(|s| s.high),
+        sample_size: legs.iter().map(|s| s.n).min().unwrap_or(0),
+        basis: if post_merge {
+            format!(
+                "median of {} measured merge→arrival legs (10th–90th: {}–{}s)",
+                merge_to_arrival.n, merge_to_arrival.low, merge_to_arrival.high
+            )
+        } else {
+            format!(
+                "median of recent arrivals — boarding→merge from {}, merge→arrival from {}",
+                board_to_merge.n, merge_to_arrival.n
+            )
+        },
+        overdue: elapsed > high,
     }
 }
 
@@ -1431,6 +1782,13 @@ pub const RECENT_LIMIT: usize = 8;
 /// - `gate_runs` / `car_branches` — for the stranded cross-ref.
 /// - `settled_car_branches` — branches whose car reached a terminal; the
 ///   garage drops these, since settled work is not awaiting rework.
+/// - `arrived_trains` — pr-train Jobs whose outcome is `arrived`, the
+///   population every in-flight train's ETA is measured against. A
+///   SEPARATE read from `closed_trains` on purpose: the recent window is
+///   overwhelmingly refused boards (696 of 1,014 pr-trains on record are
+///   cancelled, and only ONE of the 40 most recent had arrived), so the
+///   arrived population has to be narrowed in the query. Steps are not
+///   needed — every timing is in the Job's own metadata.
 #[allow(clippy::too_many_arguments)]
 pub fn build_status(
     open_trains: &[(Job, Vec<Step>)],
@@ -1442,6 +1800,7 @@ pub fn build_status(
     gate_runs: &[(Job, Vec<Step>)],
     car_branches: &[String],
     settled_car_branches: &[String],
+    arrived_trains: &[Job],
     now: Option<chrono::DateTime<chrono::Utc>>,
 ) -> YardStatus {
     // The instant a train must have completed SOMETHING after, or it is
@@ -1455,9 +1814,13 @@ pub fn build_status(
     let stall_before = now
         .zip(policy.map(|p| p.stall_hours).filter(|h| *h > 0))
         .map(|(n, h)| n - chrono::Duration::hours(i64::from(h)));
+    // What the arrived population measured, once: the sort happens here
+    // rather than per train, and every train on the board is measured
+    // against the same history.
+    let eta = eta_basis(arrived_trains);
     let trains = open_trains
         .iter()
-        .map(|(j, s)| train_status(j, s, stall_before))
+        .map(|(j, s)| train_status(j, s, stall_before, &eta, now))
         .collect();
     let dock: Vec<DockCar> = dock_cars.iter().map(dock_car).collect();
     // The track: open trains still before their merge. A merged train
@@ -1642,6 +2005,16 @@ mod tests {
         )
     }
 
+    /// The basis a test that is not exercising the ETA passes: no
+    /// arrival history read, so every train reads "no estimate" with a
+    /// stated reason — the honest value, not a stand-in number.
+    fn no_history() -> EtaBasis {
+        EtaBasis::Thin {
+            arrivals: 0,
+            measurable: 0,
+        }
+    }
+
     fn rule(basis: &str) -> CadenceRuleRow {
         CadenceRuleRow {
             name: "r".into(),
@@ -1785,7 +2158,7 @@ mod tests {
             ),
         ];
         let job = train(vec![], json!({}));
-        let ts = train_status(&job, &steps, None);
+        let ts = train_status(&job, &steps, None, &no_history(), None);
         assert_eq!(ts.phase, TrainPhase::Deploying);
         assert_eq!(
             ts.block,
@@ -1831,7 +2204,7 @@ mod tests {
             step("merged", "Merged into main", StepStatus::Ready, json!({})),
         ];
         let job = train(vec![], json!({}));
-        let ts = train_status(&job, &steps, None);
+        let ts = train_status(&job, &steps, None, &no_history(), None);
         assert_eq!(
             ts.block,
             Some(TrainBlock::CiRed {
@@ -1941,7 +2314,10 @@ mod tests {
             ),
         ];
         let job = train(vec![], json!({}));
-        assert_eq!(train_status(&job, &steps, None).block, None);
+        assert_eq!(
+            train_status(&job, &steps, None, &no_history(), None).block,
+            None
+        );
     }
 
     // ---- boarding predicate, from live rules ----
@@ -2176,6 +2552,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             fixed_now(),
         );
         assert_eq!(status.trains[0].phase, TrainPhase::Converging);
@@ -2233,6 +2610,7 @@ mod tests {
             &rules,
             None,
             None,
+            &[],
             &[],
             &[],
             &[],
@@ -2449,7 +2827,7 @@ mod tests {
             step("pr", "Open the batched PR", StepStatus::Ready, json!({})),
         ];
         let job = train(vec![], json!({}));
-        let t = train_status(&job, &steps, None);
+        let t = train_status(&job, &steps, None, &no_history(), None);
         assert_eq!(t.phase, TrainPhase::Boarding);
         assert_eq!(t.boarded_at.as_deref(), Some("2026-09-08T02:03:05Z"));
         // Additive on the wire: present as a string when known.
@@ -2466,7 +2844,7 @@ mod tests {
             json!({}),
         )];
         let job = train(vec![], json!({}));
-        let t = train_status(&job, &steps, None);
+        let t = train_status(&job, &steps, None, &no_history(), None);
         assert_eq!(t.boarded_at, None);
         // And absent from the wire, like the other unknowns on the row.
         let v = serde_json::to_value(&t).unwrap();
@@ -3325,6 +3703,7 @@ mod tests {
             &[stranded_run],
             &["feat/a".into(), "feat/b".into()],
             &[],
+            &[],
             fixed_now(),
         );
 
@@ -3375,7 +3754,19 @@ mod tests {
         // With no delivery policy the page shows the same bound a gate
         // obeys against an unreachable registry — never a fabricated
         // number.
-        let status = build_status(&[], &[], &[], &[], None, None, &[], &[], &[], fixed_now());
+        let status = build_status(
+            &[],
+            &[],
+            &[],
+            &[],
+            None,
+            None,
+            &[],
+            &[],
+            &[],
+            &[],
+            fixed_now(),
+        );
         assert_eq!(status.gates.capacity, COMPILED_GATE_MAX_CONCURRENT);
     }
 
@@ -3415,6 +3806,7 @@ mod tests {
             &[in_flight, red],
             &[],
             &[],
+            &[],
             fixed_now(),
         );
         assert_eq!(status.gates.capacity, 4);
@@ -3430,7 +3822,19 @@ mod tests {
         let many: Vec<(Job, Vec<Step>)> = (0..RECENT_LIMIT + 5)
             .map(|_| (train(vec![], json!({ "outcome": "arrived" })), vec![]))
             .collect();
-        let status = build_status(&[], &many, &[], &[], None, None, &[], &[], &[], fixed_now());
+        let status = build_status(
+            &[],
+            &many,
+            &[],
+            &[],
+            None,
+            None,
+            &[],
+            &[],
+            &[],
+            &[],
+            fixed_now(),
+        );
         assert_eq!(status.recent.len(), RECENT_LIMIT);
     }
 
@@ -3491,5 +3895,497 @@ mod tests {
             json!({ "verdict": "failed", "receipt": raw }),
         )];
         assert_eq!(failing_check(&steps).as_deref(), Some("clippy, test"));
+    }
+
+    // ---- the ETA on a train in flight ----
+    //
+    // MEASURED 2026-09-10 against the live record (1,014 pr-trains):
+    // 696 cancelled, 254 arrived, 143 of those with a readable
+    // `board_to_merge_s`, 105 with a readable merge→arrival leg.
+    // board→merge p10/median/p90 = 890 / 1206 / 1709s; merge→arrival =
+    // 589 / 1183 / 4799s. The fixtures below are shaped to those.
+
+    /// An arrived train as the conductor records one: `outcome` stamped,
+    /// the arrival report's timings, and the server's `closed_at`.
+    fn arrived(board_to_merge_s: i64, merge_to_arrival_s: i64) -> Job {
+        let merged = at("2026-09-04T10:00:00Z");
+        let closed = merged + chrono::Duration::seconds(merge_to_arrival_s);
+        let mut j = train(vec![], json!({}));
+        j.status = JobStatus::Closed;
+        j.metadata = json!({
+            "outcome": "arrived",
+            "closed_at": closed.to_rfc3339(),
+            "arrival_report": {
+                "timings": {
+                    "board_to_merge_s": board_to_merge_s,
+                    "merged_at": merged.to_rfc3339(),
+                    // Measured null on ALL 143 arrived trains — the
+                    // fixture carries the same hole the record has, so a
+                    // reader that leans on them fails here.
+                    "total_s": null,
+                    "arrived_at": null,
+                }
+            }
+        });
+        j
+    }
+
+    /// The same arrival, carrying `n` cars.
+    fn with_cars(mut j: Job, n: usize) -> Job {
+        let cars: Vec<Value> = (0..n).map(|i| json!(format!("car-{i}"))).collect();
+        j.metadata["boarded_jobs"] = json!(cars);
+        j
+    }
+
+    /// A refused board: the consist check turned it away, so the Job
+    /// opened, cancelled, carried no cars and measured nothing. 696 of
+    /// the 1,014 pr-trains on record are this.
+    fn refused() -> Job {
+        let mut j = train(vec![], json!({}));
+        j.status = JobStatus::Closed;
+        j.metadata = json!({
+            "outcome": "cancelled",
+            "closed_at": "2026-09-04T10:00:00Z",
+            "boarded_jobs": [],
+        });
+        j
+    }
+
+    /// A population big enough to measure: `n` arrivals spread across
+    /// the measured range, so p10 < median < p90 are distinct.
+    fn population(n: usize) -> Vec<Job> {
+        (0..n)
+            .map(|i| {
+                let k = i64::try_from(i).unwrap_or(0);
+                arrived(900 + k * 100, 600 + k * 100)
+            })
+            .collect()
+    }
+
+    fn pre_merge_steps(boarded: &str) -> Vec<Step> {
+        vec![
+            done("collect", "Collect what is ready to board", boarded),
+            done("pr", "Open the batched PR", boarded),
+            step("ci", "CI verdict", StepStatus::Active, json!({})),
+            step("merged", "Merged into main", StepStatus::Ready, json!({})),
+        ]
+    }
+
+    fn post_merge_steps(boarded: &str, merged: &str) -> Vec<Step> {
+        vec![
+            done("collect", "Collect what is ready to board", boarded),
+            done("pr", "Open the batched PR", boarded),
+            done("ci", "CI verdict", merged),
+            done("merged", "Merged into main", merged),
+            step(
+                "deployed",
+                "Deployed to the playground",
+                StepStatus::Ready,
+                json!({}),
+            ),
+            step(
+                "converged",
+                "Cluster converged",
+                StepStatus::Pending,
+                json!({}),
+            ),
+        ]
+    }
+
+    /// THE TRAP. A board the consist check refused still opened a
+    /// pr-train Job and cancelled it, so the recent population is mostly
+    /// zero-length cancellations — at one point every row of page one.
+    /// A sample taken on RECENCY would hand an operator a confident
+    /// near-instant ETA. The population is chosen by OUTCOME, so a pile
+    /// of refusals measures nothing and the field says so.
+    #[test]
+    fn a_pile_of_refused_boards_measures_nothing() {
+        let noise: Vec<Job> = (0..200).map(|_| refused()).collect();
+        let basis = eta_basis(&noise);
+        assert_eq!(
+            basis,
+            EtaBasis::Thin {
+                arrivals: 0,
+                measurable: 0
+            },
+            "200 cancelled trains are 0 arrivals, not a 0-second journey"
+        );
+        let eta = train_eta(
+            &pre_merge_steps("2026-09-04T11:55:00Z"),
+            &basis,
+            fixed_now(),
+        );
+        match eta {
+            TrainEta::Unknown { reason } => assert!(
+                reason.contains("0 arrived"),
+                "the reason must name the population it found: {reason}"
+            ),
+            other => panic!("a pile of refusals must not yield an estimate: {other:?}"),
+        }
+    }
+
+    /// And the same population mixed with a couple of real arrivals must
+    /// still refuse: two measurable arrivals is an anecdote.
+    #[test]
+    fn a_thin_history_refuses_with_its_count() {
+        let mut pop: Vec<Job> = (0..200).map(|_| refused()).collect();
+        pop.extend(population(MIN_ETA_ARRIVALS - 1));
+        let basis = eta_basis(&pop);
+        assert_eq!(
+            basis,
+            EtaBasis::Thin {
+                arrivals: MIN_ETA_ARRIVALS - 1,
+                measurable: MIN_ETA_ARRIVALS - 1
+            }
+        );
+        let eta = train_eta(
+            &pre_merge_steps("2026-09-04T11:55:00Z"),
+            &basis,
+            fixed_now(),
+        );
+        match eta {
+            TrainEta::Unknown { reason } => {
+                assert!(reason.contains("9"), "name the count: {reason}");
+                assert!(
+                    reason.contains(&MIN_ETA_ARRIVALS.to_string()),
+                    "name the floor it fell short of: {reason}"
+                );
+            }
+            other => panic!("9 arrivals is below the floor: {other:?}"),
+        }
+
+        // One more crosses it.
+        pop.push(arrived(1206, 1183));
+        assert!(matches!(eta_basis(&pop), EtaBasis::Measured { .. }));
+    }
+
+    /// A pre-merge train's estimate covers BOTH legs and names that, so
+    /// a reader never has to guess which leg the number measures.
+    #[test]
+    fn a_pre_merge_train_estimates_the_whole_journey_and_says_so() {
+        let basis = eta_basis(&population(20));
+        // Boarded 5 minutes before `fixed_now` (12:00:00Z).
+        let eta = train_eta(
+            &pre_merge_steps("2026-09-04T11:55:00Z"),
+            &basis,
+            fixed_now(),
+        );
+        let TrainEta::Estimate {
+            leg,
+            remaining_seconds,
+            remaining_low_seconds,
+            remaining_high_seconds,
+            sample_size,
+            overdue,
+            ..
+        } = eta
+        else {
+            panic!("20 measured arrivals must yield an estimate: {eta:?}");
+        };
+        assert_eq!(leg, "boarding → arrival", "the leg is named on the wire");
+        assert_eq!(sample_size, 20);
+        assert!(!overdue, "5 minutes in is not overdue");
+        // population(20): board→merge 900..2800 step 100, merge→arrival
+        // 600..2500 step 100. median index 10 → 1900 / 1600; p10 index 2
+        // → 1100 / 800; p90 index 18 → 2700 / 2400.
+        assert_eq!(remaining_seconds, (1900 - 300) + 1600);
+        assert_eq!(remaining_low_seconds, (1100 - 300) + 800);
+        assert_eq!(remaining_high_seconds, (2700 - 300) + 2400);
+        assert!(
+            remaining_low_seconds < remaining_seconds && remaining_seconds < remaining_high_seconds,
+            "the spread must straddle the median — a point estimate over-claims"
+        );
+    }
+
+    /// PHASE AWARENESS. merge→arrival measured a median of 1,183s — half
+    /// the journey — so a merged train told the whole-journey figure is
+    /// told roughly double what it has left. Its estimate covers the
+    /// remaining leg only, measured from the MERGE stamp, and names it.
+    #[test]
+    fn a_merged_train_estimates_only_the_leg_it_is_on() {
+        let basis = eta_basis(&population(20));
+        let steps = post_merge_steps("2026-09-04T11:00:00Z", "2026-09-04T11:55:00Z");
+        assert_eq!(phase_of(&steps), TrainPhase::Deploying);
+        let eta = train_eta(&steps, &basis, fixed_now());
+        let TrainEta::Estimate {
+            leg,
+            remaining_seconds,
+            remaining_low_seconds,
+            remaining_high_seconds,
+            sample_size,
+            ..
+        } = eta
+        else {
+            panic!("expected an estimate: {eta:?}");
+        };
+        assert_eq!(leg, "merge → arrival");
+        assert_eq!(sample_size, 20);
+        // 5 minutes past the merge, against the merge→arrival leg only.
+        assert_eq!(remaining_seconds, 1600 - 300);
+        assert_eq!(remaining_low_seconds, 800 - 300);
+        assert_eq!(remaining_high_seconds, 2400 - 300);
+        // It must NOT be the whole-journey figure the pre-merge train got.
+        assert!(
+            remaining_seconds < (1900 - 300) + 1600,
+            "a merged train has less left than a boarding one — mixing \
+             the legs is what this test exists to catch"
+        );
+    }
+
+    /// A train past the 90th percentile of everything measured is
+    /// overdue, and says so rather than counting down below zero. "A
+    /// troubled packet must look troubled" (CLAUDE.md §Diagnosis).
+    #[test]
+    fn a_train_past_the_measured_spread_reads_overdue() {
+        let basis = eta_basis(&population(20));
+        // p90 of the whole journey is 2700 + 2400 = 5100s = 85 min.
+        // Boarded 3 hours before `fixed_now`.
+        let eta = train_eta(
+            &pre_merge_steps("2026-09-04T09:00:00Z"),
+            &basis,
+            fixed_now(),
+        );
+        let TrainEta::Estimate {
+            remaining_seconds,
+            overdue,
+            remaining_high_seconds,
+            ..
+        } = eta
+        else {
+            panic!("expected an estimate: {eta:?}");
+        };
+        assert!(overdue, "3h against an 85-minute p90 is overdue");
+        assert_eq!(
+            remaining_seconds, 1600,
+            "the elapsed leg is spent, never negative — what is left is \
+             the leg not yet started"
+        );
+        assert_eq!(remaining_high_seconds, 2400);
+    }
+
+    /// The spread is WIDE and that is the finding, not a flaw: within one
+    /// car count arrivals ranged 770s to 4,274s. A single number would
+    /// over-claim, so the field publishes p10 and p90 beside the median.
+    #[test]
+    fn a_wide_spread_is_published_not_flattened() {
+        // Ten arrivals whose board→merge spans the measured 770..7391,
+        // with merge→arrival fixed so the spread is attributable.
+        let pop: Vec<Job> = [770, 890, 1070, 1140, 1206, 1318, 1439, 1709, 4274, 7391]
+            .into_iter()
+            .map(|b| arrived(b, 1183))
+            .collect();
+        let EtaBasis::Measured {
+            board_to_merge,
+            merge_to_arrival,
+        } = eta_basis(&pop)
+        else {
+            panic!("10 arrivals is the floor, exactly");
+        };
+        // n=10 → p10 index 1, median index 5, p90 index 9: three
+        // distinct observations, and p10 is not the minimum.
+        assert_eq!(board_to_merge.low, 890);
+        assert_eq!(board_to_merge.median, 1318);
+        assert_eq!(board_to_merge.high, 7391);
+        assert_eq!(board_to_merge.n, 10);
+        assert_eq!(merge_to_arrival.median, 1183);
+        assert!(
+            board_to_merge.high > board_to_merge.median * 5,
+            "the tail is real — flattening it to the median would hide \
+             that a train CAN take two hours"
+        );
+    }
+
+    /// An arrived train is not waiting for anything, and a train whose
+    /// stamps or clock cannot be read is told so — never handed a number
+    /// derived from a missing instant.
+    #[test]
+    fn an_unreadable_train_is_told_why_not_guessed() {
+        let basis = eta_basis(&population(20));
+
+        let arrived_steps = vec![
+            done(
+                "collect",
+                "Collect what is ready to board",
+                "2026-09-04T10:00:00Z",
+            ),
+            done("merged", "Merged into main", "2026-09-04T10:20:00Z"),
+            done(
+                "deployed",
+                "Deployed to the playground",
+                "2026-09-04T10:30:00Z",
+            ),
+            done("converged", "Cluster converged", "2026-09-04T10:40:00Z"),
+        ];
+        match train_eta(&arrived_steps, &basis, fixed_now()) {
+            TrainEta::Unknown { reason } => {
+                assert!(reason.contains("arrived"), "{reason}")
+            }
+            other => panic!("an arrived train needs no ETA: {other:?}"),
+        }
+
+        // No clock: the read-model never reaches for wall time.
+        match train_eta(&pre_merge_steps("2026-09-04T11:55:00Z"), &basis, None) {
+            TrainEta::Unknown { reason } => assert!(reason.contains("clock"), "{reason}"),
+            other => panic!("no clock means no estimate: {other:?}"),
+        }
+
+        // Boarded, but the collect step carries no stamp: elapsed is
+        // unreadable, so there is nothing to subtract.
+        let unstamped = vec![
+            step(
+                "collect",
+                "Collect what is ready to board",
+                StepStatus::Completed,
+                json!({}),
+            ),
+            step(
+                "pr",
+                "Open the batched PR",
+                StepStatus::Completed,
+                json!({}),
+            ),
+        ];
+        match train_eta(&unstamped, &basis, fixed_now()) {
+            TrainEta::Unknown { reason } => assert!(reason.contains("stamp"), "{reason}"),
+            other => panic!("no boarding stamp means no estimate: {other:?}"),
+        }
+
+        // Merged, but the merge step carries no stamp. Falling back to
+        // the whole-journey figure here would SILENTLY MIX the legs.
+        let merged_unstamped = vec![
+            done(
+                "collect",
+                "Collect what is ready to board",
+                "2026-09-04T11:00:00Z",
+            ),
+            done("pr", "Open the batched PR", "2026-09-04T11:00:00Z"),
+            step(
+                "merged",
+                "Merged into main",
+                StepStatus::Completed,
+                json!({}),
+            ),
+            step(
+                "deployed",
+                "Deployed to the playground",
+                StepStatus::Ready,
+                json!({}),
+            ),
+        ];
+        match train_eta(&merged_unstamped, &basis, fixed_now()) {
+            TrainEta::Unknown { reason } => assert!(reason.contains("stamp"), "{reason}"),
+            other => panic!("a merged train with no merge stamp must refuse: {other:?}"),
+        }
+    }
+
+    /// An arrival with a zero or backwards leg is not a 0-second train:
+    /// `merge_to_deploy_s` is 0 on every arrival measured, which is why
+    /// nothing here reads it. Non-positive legs are dropped, not averaged.
+    #[test]
+    fn a_zero_length_leg_is_dropped_not_averaged() {
+        let mut pop = population(MIN_ETA_ARRIVALS);
+        // A backwards pair: closed BEFORE the merge (a clock skew, or a
+        // `closed_at` from a different path).
+        let mut broken = arrived(1206, 0);
+        broken.metadata = json!({
+            "outcome": "arrived",
+            "closed_at": "2026-09-04T09:00:00Z",
+            "arrival_report": { "timings": {
+                "board_to_merge_s": 0,
+                "merged_at": "2026-09-04T10:00:00Z",
+            }},
+        });
+        pop.push(broken);
+        let EtaBasis::Measured {
+            board_to_merge,
+            merge_to_arrival,
+        } = eta_basis(&pop)
+        else {
+            panic!("the good arrivals still measure");
+        };
+        assert_eq!(board_to_merge.n, MIN_ETA_ARRIVALS, "the 0 leg is dropped");
+        assert_eq!(
+            merge_to_arrival.n, MIN_ETA_ARRIVALS,
+            "the backwards leg too"
+        );
+    }
+
+    /// The wire shape: a tagged union, so the SPA reads one field and
+    /// gets either a number or a reason — never a bare null.
+    #[test]
+    fn the_eta_serializes_as_a_tagged_union() {
+        let basis = eta_basis(&population(20));
+        let v = serde_json::to_value(train_eta(
+            &pre_merge_steps("2026-09-04T11:55:00Z"),
+            &basis,
+            fixed_now(),
+        ))
+        .unwrap();
+        assert_eq!(v["kind"], "estimate");
+        assert_eq!(v["leg"], "boarding → arrival");
+        assert!(v["remaining_seconds"].is_i64());
+        assert!(v["basis"].is_string(), "the basis is stated, not implied");
+
+        let v = serde_json::to_value(train_eta(
+            &pre_merge_steps("2026-09-04T11:55:00Z"),
+            &eta_basis(&[]),
+            fixed_now(),
+        ))
+        .unwrap();
+        assert_eq!(v["kind"], "unknown");
+        assert!(v["reason"].is_string());
+    }
+
+    /// The status carries the estimate on the train row — the whole
+    /// point: David should not have to ask whether a 20-minute transit
+    /// is normal.
+    #[test]
+    fn the_status_carries_an_eta_on_the_train_in_flight() {
+        let job = train(vec![], json!({ "boarded_jobs": ["a", "b"] }));
+        let steps = pre_merge_steps("2026-09-04T11:55:00Z");
+        let status = build_status(
+            &[(job, steps)],
+            &[],
+            &[],
+            &[],
+            None,
+            None,
+            &[],
+            &[],
+            &[],
+            &population(20),
+            fixed_now(),
+        );
+        assert!(
+            matches!(status.trains[0].eta, TrainEta::Estimate { .. }),
+            "the in-flight train states its ETA: {:?}",
+            status.trains[0].eta
+        );
+    }
+
+    /// Car count is NOT a dimension of the estimate, and this test is the
+    /// record of why. MEASURED 2026-09-10 over 143 arrivals: Spearman rho
+    /// between car count and board→merge is 0.167, and the bucket medians
+    /// are 1,140 / 1,197 / 1,256 / 1,259s for 1 / 2-3 / 4-6 / 7+ cars — a
+    /// 10% spread BETWEEN buckets against a 770..4,274s spread INSIDE
+    /// one. Splitting 143 samples into an 8-sample bucket to move the
+    /// median 4% is strictly worse than measuring the whole population,
+    /// so the estimate is blind to car count by design.
+    #[test]
+    fn the_estimate_does_not_vary_with_car_count() {
+        let light: Vec<Job> = population(20)
+            .into_iter()
+            .map(|j| with_cars(j, 1))
+            .collect();
+        let heavy: Vec<Job> = population(20)
+            .into_iter()
+            .map(|j| with_cars(j, 16))
+            .collect();
+        assert_eq!(
+            eta_basis(&light),
+            eta_basis(&heavy),
+            "same timings, different consists — the basis must not move; \
+             see the measurement above for why car count is not a dimension"
+        );
     }
 }

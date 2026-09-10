@@ -38,3 +38,51 @@ fn schema_sort_key(name: &str) -> (u64, String) {
         .unwrap_or(u64::MAX);
     (num, name.to_string())
 }
+
+/// FNV-1a's offset basis — the seed for every fingerprint below.
+#[allow(dead_code)]
+const FNV1A_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// FNV-1a, continued from `seed`.
+///
+/// Not a security primitive and not trying to be. The properties
+/// required are that the same bytes yield the same number across
+/// processes and runs, that different bytes usually do not, and that it
+/// adds no dependency to a crate every test in the workspace links.
+/// One implementation, because a hash that lives twice can drift
+/// (CLAUDE.md §9a) — `schema_fingerprint` in `test_db.rs` held the
+/// second copy.
+#[allow(dead_code)]
+fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
+    let mut hash = seed;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Fingerprint of an ORDERED schema list: every name and every byte of
+/// SQL, in apply order.
+///
+/// This is the number that makes a stale build detectable. `build.rs`
+/// computes it over the files it reads and emits it as a constant;
+/// `test_db.rs` recomputes it over the list actually linked into the
+/// binary and over the directory as it is on disk at run time. Three
+/// readings of one definition — derived, never authored, so no second
+/// list exists to drift.
+///
+/// Length-prefixed per field, so no two different lists can hash alike
+/// by moving a byte across an entry boundary (`("ab","c")` and
+/// `("a","bc")` must differ).
+#[allow(dead_code)]
+fn schema_set_fingerprint<'a>(entries: impl IntoIterator<Item = (&'a str, &'a str)>) -> u64 {
+    let mut hash = FNV1A_OFFSET;
+    for (name, sql) in entries {
+        hash = fnv1a(hash, &(name.len() as u64).to_le_bytes());
+        hash = fnv1a(hash, name.as_bytes());
+        hash = fnv1a(hash, &(sql.len() as u64).to_le_bytes());
+        hash = fnv1a(hash, sql.as_bytes());
+    }
+    hash
+}

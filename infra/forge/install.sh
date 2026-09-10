@@ -168,4 +168,39 @@ for u in "${UNITS[@]}" boss-ops-runner; do
     printf '  %-24s %s\n' "$u" "$("$SYSTEMCTL" is-active "${u}.timer")"
 done
 
+# The journal-over-HTTP read door (:19531). Hand-enabled once on
+# 2026-09-03 and in the tree nowhere, which is the Residue item this
+# closes: a host rebuild silently loses the one door that still works
+# when the API is dark. There is no unit file of ours to install — the
+# socket and service are the distro's (the `systemd-journal-remote`
+# package), so ONE definition means enabling theirs, never shipping a
+# copy that can drift from it (CLAUDE.md §9a).
+#
+# EVERY FAILURE HERE IS NON-FATAL, deliberately. This is a visibility
+# door, and CLAUDE.md §Diagnosis' rule is that a loop which can ACT must
+# owe nothing to what it watches: a missing package must not abort the
+# converge that installs the units which keep this host alive. So it
+# warns in a line an operator can act on and the installer carries on.
+GATEWAY_SOCKET="systemd-journal-gatewayd.socket"
+UNIT_LIB="${INSTALL_UNIT_LIB:-/usr/lib/systemd/system}"
+APT_GET="${INSTALL_APT_GET:-apt-get}"
+if [ ! -f "${UNIT_LIB}/${GATEWAY_SOCKET}" ]; then
+    echo "install.sh: ${GATEWAY_SOCKET} is absent — installing systemd-journal-remote" >&2
+    if ! DEBIAN_FRONTEND=noninteractive timeout 300 "$APT_GET" install -y \
+        -o DPkg::Lock::Timeout=60 --no-install-recommends systemd-journal-remote >/dev/null 2>&1; then
+        echo "install.sh: could not install systemd-journal-remote — the journal read door" >&2
+        echo "            (http://10.20.0.15:19531) stays DOWN until a human runs:" >&2
+        echo "              sudo apt-get install -y systemd-journal-remote" >&2
+    fi
+fi
+if [ -f "${UNIT_LIB}/${GATEWAY_SOCKET}" ]; then
+    if "$SYSTEMCTL" enable --now "$GATEWAY_SOCKET"; then
+        printf '  %-24s %s\n' "journal-gateway" "$("$SYSTEMCTL" is-active "$GATEWAY_SOCKET")"
+    else
+        echo "install.sh: ${GATEWAY_SOCKET} would not enable — the journal read door is DOWN" >&2
+    fi
+else
+    echo "install.sh: ${GATEWAY_SOCKET} still absent — the journal read door is DOWN" >&2
+fi
+
 echo "install.sh: ${installed} unit pair(s) installed and enabled"

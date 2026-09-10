@@ -30,7 +30,7 @@ the only filesystem that matters, and every consumer below shares it.
 | system docker daemon | `docker.service` + `containerd.service` | the daemon CI jobs and Forgejo run on | `/var/lib/containerd` |
 | rootless docker daemon | David's user daemon (data-root `/home/david/.local/share/docker`) | the daemon `cluster-deploy-runner` builds the cluster image on | its own image and build cache |
 | WireGuard | `wg-quick@wg0.service` | the tunnel to boss-gcp and the hub; the pod reaches this host over the LAN, not the tunnel | — |
-| journal gateway | `systemd-journal-gatewayd` on `:19531` | the read door: any unit's journal over HTTP from the pod, plus anything a script logs with `\| systemd-cat -t <tag>` | hand-installed 2026-09-03; **not in `install.sh`** — see Residue |
+| journal gateway | `systemd-journal-gatewayd.socket` on `:19531`, enabled by `install.sh` | the read door: any unit's journal over HTTP from the pod, plus anything a script logs with `\| systemd-cat -t <tag>`. **Read it through `infra/forge/journal-read.sh`, never raw curl** — see below | the distro's units (`systemd-journal-remote`); converged since 2026-09-10 |
 
 ## The BOSS units
 
@@ -58,6 +58,7 @@ closed for everything in the installer's `UNITS` list.
 | `reap-dead-ci-jobs` | daily (boot +15) | remove the containers and volumes of crashed CI jobs | journal |
 | `estate-observe-host` | 15 min (boot +3) | record this host's disk, load and units into the estate as observations; the conductor's boarding refuses on a positive "host is short" reading | journal; a stale series reads as unverifiable, and boarding proceeds with one loud line |
 | `boss-ops-runner` | ~1 min | answer `ops-request` packets filed against `forge` with a verb from `infra/ops/verbs.json` | `refused` outcome on the packet; installed by `install.sh` since 2026-09-05 (a drop-in carries this host's identity) |
+| `systemd-journal-gatewayd` | socket-activated, no timer | serve this host's journal over HTTP on `:19531` — the read door the pod uses when there is no ssh and the API is dark | **it does not fail loudly, and that is the point of `journal-read.sh`.** The distro's units, enabled (never copied) by `install.sh`; if the package is absent the installer says so and carries on, because a visibility door must not be able to abort the converge. It has **no periodic restart**: bounding the process with `RuntimeMaxSec=` would leave the unit `failed` after every expiry, and `infra/estate/observe-units.sh` reads `ActiveState=failed` as unhealthy — an hourly red nobody reads is the same defect as no check at all (CLAUDE.md §Diagnosis). When it wedges, `journal-read.sh` refuses and prints `systemctl restart systemd-journal-gatewayd.service` |
 | `cluster-watchdog` | 5 min (boot +2) | know the cluster is working from outside it; roll to the last converged build after three dark checks | its own journal line every tick, `hands needed` when it cannot act |
 
 Two disk floors, deliberately different: the locomotive refuses a CI
@@ -82,11 +83,35 @@ packet looked exactly like a run in progress.
 
 No ssh from the pod. Three doors, all read-only:
 
-- **The journal gateway.**
-  `http://10.20.0.15:19531/entries?_SYSTEMD_UNIT=<unit>` for any unit
-  above; `?SYSLOG_IDENTIFIER=<tag>` for a script's own output;
-  `/fields/_SYSTEMD_UNIT` lists every unit that has ever logged. Ask
-  for `Accept: application/json` and read line by line.
+- **The journal gateway — through `infra/forge/journal-read.sh`.**
+
+      infra/forge/journal-read.sh _SYSTEMD_UNIT=disk-floor-sweep.service
+      infra/forge/journal-read.sh SYSLOG_IDENTIFIER=<tag> --count 200
+      infra/forge/journal-read.sh --check        # freshness only
+
+  It states how far behind the door is before it reads anything, and
+  **refuses (exit 4) past 30 minutes**, naming both timestamps. Zero
+  rows from a fresh door is then a real "nothing to report" and it says
+  so, with the retained window, so "rotated out" stays distinguishable
+  from "never logged". An unreachable or wrong target skips loudly
+  (exit 3) and never passes.
+
+  **Why not raw curl.** On 2026-09-10 the gateway served a journal whose
+  newest entry was seven hours old while answering 200 to everything, so
+  a unit-filtered query for `disk-floor-sweep.service` — which had run —
+  came back empty, and was one report away from becoming "the forge disk
+  sweep is not running" (packet 8bea0c9c). `GET /machine` → 200, the
+  reachability check this file used to document, does not detect that at
+  all. The raw endpoints still work
+  (`http://10.20.0.15:19531/entries?_SYSTEMD_UNIT=<unit>`,
+  `?SYSLOG_IDENTIFIER=<tag>`, `/fields/_SYSTEMD_UNIT` for every unit that
+  has ever logged, with `Accept: application/json`) — they just answer
+  without telling you whether the answer is current.
+
+  **When it refuses,** the `journal-tail` ops verb below reads the same
+  journal with local `journalctl` on the host and is unaffected by the
+  gateway; that is the independent path, and it is what the refusal
+  points you at.
 - **An ops-request packet.** `boss job file --kind ops-request
   --metadata '{"host":"forge","verb":"df"}'`; the runner answers within
   about a minute with the output on the packet's `execute` step. Verbs:
@@ -309,16 +334,33 @@ arrived is answered by the next run, usually `converged: <sha>`.
 
 ## Residue (measured 2026-09-05)
 
-- `systemd-journal-gatewayd` is hand-installed and not in the tree at
-  all. A host rebuild loses the read door — the one door that works
-  when the API is dark. One car: the socket unit in the tree, installed
-  by `install.sh`.
+- The journal gateway's residue closed on 2026-09-10 (`install.sh`
+  enables `systemd-journal-gatewayd.socket`, installing the
+  `systemd-journal-remote` package if a rebuild has left it absent, and
+  `journal-read.sh` is the door that states its own freshness — packet
+  8bea0c9c).
 - The ops runner's residue closed on 2026-09-05 (`install.sh` lands it
   from `infra/ops` with a drop-in for this host).
+- **Not established:** why the gateway went seven hours stale on
+  2026-09-10 while still answering 200. Measured from the pod: journald
+  was healthy and the on-disk journal continuous through the window (264
+  cron entries between 09-09 19:00 and 09-10 06:00 UTC, no gap over 10
+  min in the 7 days retained); journald logged no rotation and no restart
+  between 09-05 21:11 and the measurement, so "a reader holding a rotated
+  file" is not supported by journald's own record; and the gateway has
+  been the same process since its one `Started` at 2026-09-03 23:10:06,
+  recovering without a restart. A transient fault inside a long-lived
+  reader. Pinning the mechanism needs `lsof` or `ls -l /proc/<pid>/fd` on
+  the host while it is stale — the pod has no ssh here, so it is a human
+  step, and the refusal is what makes the next occurrence safe to ignore
+  until someone can take it.
 
 ## Related
 
 - `infra/forge/install.sh` — the installer and its `UNITS` list.
+- `infra/forge/journal-read.sh` — the journal door, fronted by the
+  freshness assertion; `infra/lint/the-journal-door-states-its-freshness.sh`
+  proves its three postures and that the installer still enables the socket.
 - `infra/forge/disk-floor-sweep.sh` — the one definition of a bounded
   reclaim; `infra/ops/verbs.json` — the ops verbs.
 - `docs/runbooks/operator.md` — the cluster-side runbook.

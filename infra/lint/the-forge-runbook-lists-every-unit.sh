@@ -24,11 +24,15 @@ for f in "$INSTALL" "$RUNBOOK"; do
     [ -f "$f" ] || { echo "the-forge-runbook-lists-every-unit: $f not found" >&2; exit 1; }
 done
 
-# The installed units: the UNITS=( ... ) array plus boss-ops-runner,
-# which install.sh installs separately via its own drop-in.
+# The installed units: the UNITS=( ... ) array, plus boss-ops-runner,
+# which install.sh installs separately via its own drop-in, plus the
+# distro-provided journal gateway socket it enables — read out of the
+# installer's own GATEWAY_SOCKET line rather than spelled again here, so
+# renaming it there moves this too (CLAUDE.md §9a).
 installed=$(
     { sed -n '/^UNITS=(/,/^)/p' "$INSTALL" | grep -oE '^[[:space:]]+[a-z0-9-]+' | tr -d ' '
       echo boss-ops-runner
+      sed -n 's/^GATEWAY_SOCKET="\([a-z0-9-]*\)\.socket"$/\1/p' "$INSTALL"
     } | sort -u
 )
 
