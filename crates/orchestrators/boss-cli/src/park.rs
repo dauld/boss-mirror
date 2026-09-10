@@ -28,9 +28,13 @@
 
 use anyhow::{Result, bail};
 use boss_jobs::car::{
-    Receipt, car_body, parked_car_for, regate_patch, step_fields, triage_on_park,
+    Receipt, building_car_for, car_body, finish_writes, parked_car_for, regate_patch,
+    triage_on_park,
 };
-use serde_json::{Value, json};
+// `json!` is no longer needed out here: the step bodies a park writes are
+// built by `car::finish_writes` in core. The test module still builds
+// fixtures with it and imports it itself.
+use serde_json::Value;
 
 /// Find the receipt for `branch` among gate-run packets, or refuse.
 ///
@@ -209,22 +213,12 @@ pub(crate) fn resolve_job_id(candidates: &[Value], given: &str) -> Result<String
 // in boss_jobs::car — shared with the dispatcher's auto-park handler so
 // the two ways of filing a car cannot drift.
 
-fn step_id(job: &Value, title: &str) -> Result<String> {
-    job.get("steps")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .find(|s| s.get("title").and_then(Value::as_str) == Some(title))
-        .and_then(|s| s.get("id").and_then(Value::as_str))
-        .map(str::to_string)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "the car has no step titled {title:?}. The ship-a-change workflow was \
-                 renamed or re-versioned; this verb fills steps by title and will not \
-                 guess which one was meant."
-            )
-        })
-}
+// The by-title step lookup this verb used to carry is gone: step ids
+// now come off the packet inside `boss_jobs::car::finish_writes`, which
+// looks a step up by its registry SLUG with the title as a fallback —
+// the same `find_step` the conductor uses — and refuses rather than
+// guessing when a step is absent. One lookup, one refusal (CLAUDE.md
+// §9a).
 
 /// BEST-EFFORT: state the linked item's ROUTE, because parking this car
 /// is what decided it.
@@ -241,7 +235,17 @@ fn step_id(job: &Value, title: &str) -> Result<String> {
 /// NOTHING HERE FAILS THE PARK. The car is filed by the time this runs;
 /// a write that cannot land costs a printed line saying what to do by
 /// hand, which is also the warning the builder wanted at park time.
-async fn route_linked_item(http: &reqwest::Client, item_id: &str, car_id: &str, branch: &str) {
+pub(crate) async fn route_linked_item(
+    http: &reqwest::Client,
+    item_id: &str,
+    car_id: &str,
+    branch: &str,
+    // The verb saying it, so the line reads as the verb the operator
+    // actually ran. `boss car open` routes the item too — the item's
+    // `build` step opens when the build STARTS, not when it succeeds —
+    // and shares this write rather than copying it (CLAUDE.md §9a).
+    verb: &str,
+) {
     let id8 = &item_id[..8.min(item_id.len())];
     let item = match crate::gate::api(
         http,
@@ -255,7 +259,7 @@ async fn route_linked_item(http: &reqwest::Client, item_id: &str, car_id: &str, 
         Ok(None) => return,
         Err(e) => {
             println!(
-                "boss park: could not read backlog-item {id8} to route it ({e}) — \
+                "boss {verb}: could not read backlog-item {id8} to route it ({e}) — \
                  the car is filed; triage the item to `build` by hand or its build step \
                  never opens"
             );
@@ -274,11 +278,11 @@ async fn route_linked_item(http: &reqwest::Client, item_id: &str, car_id: &str, 
     .await
     {
         Ok(_) => println!(
-            "boss park: backlog-item {id8} routed to `build` — this car IS its build, \
+            "boss {verb}: backlog-item {id8} routed to `build` — this car IS its build, \
              so the arrival rule has a step to complete"
         ),
         Err(e) => println!(
-            "boss park: could not route backlog-item {id8} to `build` ({e}) — \
+            "boss {verb}: could not route backlog-item {id8} to `build` ({e}) — \
              the car is filed; triage it by hand or its build step never opens"
         ),
     }
@@ -423,29 +427,65 @@ pub(crate) async fn run(
         // un-triaged from the first park, and a second pass over one
         // already routed writes nothing.
         if let Some(item) = backlog_item.as_deref() {
-            route_linked_item(&http, item, &id, branch).await;
+            route_linked_item(&http, item, &id, branch, "park").await;
         }
         return Ok(());
     }
 
+    // A GREEN FINISHES THE CAR THE BUILDER OPENED; IT DOES NOT FILE A
+    // TWIN (backlog be025b44). Now that `boss car open` files the packet
+    // at build START, the commonest live state a park meets is BUILDING,
+    // not parked — the car's `gate` step has not reported, so
+    // `parked_car_for` above correctly answered `None`. Reading that as
+    // "no car" is the exact mistake that filed three twins (d052afad,
+    // 02165b1d, 6790175e) and it would file a fourth the day builders
+    // start opening cars. `building_car_for` is the shared predicate,
+    // keyed on `metadata.branch` like the rest (CLAUDE.md §9a).
+    let building = building_car_for(&parked, branch).cloned();
+
     if dry {
-        println!("boss park: DRY would file a car for {branch} carrying that receipt");
+        match &building {
+            Some(c) => {
+                let id = c.get("id").and_then(Value::as_str).unwrap_or("?");
+                println!(
+                    "boss park: DRY would FINISH car {} — open for {branch} since {} — \
+                     not file a second",
+                    &id[..8.min(id.len())],
+                    c.pointer("/metadata/build_started_at")
+                        .and_then(Value::as_str)
+                        .unwrap_or("an unrecorded time")
+                );
+            }
+            None => println!("boss park: DRY would file a car for {branch} carrying that receipt"),
+        }
         return Ok(());
     }
 
-    let created = crate::gate::api(
-        &http,
-        reqwest::Method::POST,
-        "/api/jobs",
-        Some(car_body(branch, summary, backlog_item.as_deref(), None)),
-    )
-    .await?;
-    let car = created
-        .as_ref()
-        .and_then(|c| c.get("data").unwrap_or(c).get("id"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("jobs api did not return an id for the new car"))?
-        .to_string();
+    // Either the car already exists (opened at build start) or this park
+    // files it. From there the two paths are identical: read the packet
+    // back, then complete the steps it has not already completed.
+    let car = match &building {
+        Some(c) => c
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("the building car for {branch} has no id"))?
+            .to_string(),
+        None => {
+            let created = crate::gate::api(
+                &http,
+                reqwest::Method::POST,
+                "/api/jobs",
+                Some(car_body(branch, summary, backlog_item.as_deref(), None)),
+            )
+            .await?;
+            created
+                .as_ref()
+                .and_then(|c| c.get("data").unwrap_or(c).get("id"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("jobs api did not return an id for the new car"))?
+                .to_string()
+        }
+    };
 
     let job = crate::gate::api(
         &http,
@@ -456,26 +496,36 @@ pub(crate) async fn run(
     .await?
     .ok_or_else(|| anyhow::anyhow!("could not read back car {car}"))?;
 
-    for (title, metadata) in step_fields(summary, excludes, test, verified, &receipt, now) {
-        let sid = step_id(&job, title)?;
+    // The writes are decided in core, shared with the auto-park handler,
+    // and SKIP whatever the open already completed — the step API refuses
+    // a metadata write to a completed step, so re-sending `scope` would
+    // 409 on every car a builder opened.
+    for w in finish_writes(&job, summary, excludes, test, verified, &receipt, now)
+        .map_err(anyhow::Error::msg)?
+    {
         crate::gate::api(
             &http,
             reqwest::Method::PUT,
-            &format!("/api/jobs/{car}/steps/{sid}"),
-            Some(json!({"status": "completed", "metadata": metadata})),
+            &format!("/api/jobs/{car}/steps/{}", w.step_id),
+            Some(w.body),
         )
         .await?;
     }
 
     println!(
-        "boss park: car {} parked at review — receipt copied, not retyped",
-        &car[..8.min(car.len())]
+        "boss park: car {} {} at review — receipt copied, not retyped",
+        &car[..8.min(car.len())],
+        if building.is_some() {
+            "FINISHED and parked"
+        } else {
+            "parked"
+        }
     );
 
     // THE CAR IS THE ITEM'S BUILD — say so on the item, last, so a
     // failure here costs the routing and not the car.
     if let Some(item) = backlog_item.as_deref() {
-        route_linked_item(&http, item, &car, branch).await;
+        route_linked_item(&http, item, &car, branch, "park").await;
     }
 
     Ok(())
@@ -484,6 +534,7 @@ pub(crate) async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn packet(branch: &str, verdict: Option<&str>, receipt: Option<&str>) -> Value {
         let mut step = json!({"title": "Record the receipt", "metadata": {}});

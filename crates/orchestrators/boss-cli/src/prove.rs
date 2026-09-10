@@ -667,7 +667,10 @@ pub(crate) fn car_verified(car: &Value, given: Option<String>) -> Result<String>
         })
 }
 
-fn host() -> String {
+/// The host a verb is running on. Shared with `boss car open`, which
+/// records it on the car at build start — the same question, one
+/// definition (CLAUDE.md §9a).
+pub(crate) fn host() -> String {
     std::process::Command::new("hostname")
         .output()
         .ok()

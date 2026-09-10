@@ -501,6 +501,68 @@ fn the_full_gate_still_runs_the_preflight_set() {
     );
 }
 
+/// No lint can truncate the roster, and the gate says so on every run.
+///
+/// Until 2026-09-10 `run_preflight` ran the roster as `while read -r
+/// name path; do check "$name" bash "$path"; done <<< "$roster"`, which
+/// handed every lint the REMAINING ROSTER LINES as its stdin. A lint
+/// that reads stdin — a `grep` or `awk` whose file list came out empty,
+/// a bare `cat`, a `read` — ate the rest of the roster; the loop ended
+/// normally, and the gate printed `pre-flight: clean` and exited 0.
+/// Measured on a draft lint: a 61-lint roster ran NINE checks and the
+/// gate called it clean (backlog 9d5797d4). That is a false green on the
+/// pipeline's lint authority, and the same under-covering shape as
+/// `gate_script_covers_the_checks` — arriving through the loop instead
+/// of through the list.
+///
+/// The shell pin is `gate.sh --self-test`, and it runs inside every mode
+/// the gate has, so it cannot be true only when someone remembers to
+/// ask. Two things are asserted here that the shell cannot assert about
+/// itself:
+///
+/// - it HOLDS on this tree, run rather than read (a text assertion about
+///   a redirection would pass on a comment);
+/// - `run_preflight` still CALLS it. Delete that one line and the pin
+///   goes quiet while staying green under `--self-test`, which is the
+///   "check nobody reads" failure one level up.
+#[test]
+fn no_lint_can_truncate_the_roster() {
+    let gate = read("infra/gate.sh");
+
+    // The INVOCATION inside run_preflight, not the word anywhere in the
+    // file: the function's own definition and this test's provenance
+    // comment both name it.
+    let body: String = gate
+        .split_once("\nrun_preflight() {")
+        .map(|(_, rest)| rest.split("\n}").next().unwrap_or("").to_string())
+        .expect("infra/gate.sh defines run_preflight");
+    assert!(
+        body.lines()
+            .any(|l| l.trim() == "roster_loop_self_test" || l.trim() == "roster_loop_self_test;"),
+        "run_preflight no longer calls roster_loop_self_test — the pin on the roster loop \
+         then runs only when someone types --self-test, and a lint that eats the roster is \
+         back to printing `pre-flight: clean` (backlog 9d5797d4). run_preflight reads:\n{body}"
+    );
+
+    // And it passes. The three cases each fail when exactly one of the
+    // three mechanisms is removed, verified by mutation when this landed:
+    // revert the loop to stdin, drop the `< /dev/null` on the call, or
+    // remove the count comparison, and one case names it.
+    let out = std::process::Command::new("bash")
+        .arg(repo_root().join("infra/gate.sh"))
+        .arg("--self-test")
+        .current_dir(repo_root())
+        .output()
+        .expect("run gate.sh --self-test");
+    assert!(
+        out.status.success(),
+        "infra/gate.sh --self-test failed — the roster loop cannot be trusted to run every \
+         lint, so no gate receipt from this tree says what it claims:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// The pre-push hook exists, is executable, and actually runs the
 /// pre-flight.
 ///

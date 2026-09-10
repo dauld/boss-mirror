@@ -303,6 +303,10 @@ enum ParkAction<'a> {
     Skip(Value),
     /// Refresh the car already at the dock with the fresh receipt.
     Refresh(&'a Value),
+    /// FINISH the car the builder opened at build start: complete the
+    /// steps their open left open, and carry the gate's own facts onto
+    /// the packet that already exists.
+    Adopt(&'a Value),
     /// No live car for this branch: file one.
     File,
 }
@@ -314,10 +318,169 @@ fn park_action<'a>(open: &'a [Value], all: &[Value], branch: &str) -> ParkAction
     if let Some(patch) = boarded_skip(open, branch) {
         return ParkAction::Skip(patch);
     }
-    match car::parked_car_for(open, branch) {
-        Some(car) => ParkAction::Refresh(car),
+    if let Some(car) = car::parked_car_for(open, branch) {
+        return ParkAction::Refresh(car);
+    }
+    // A GREEN FINISHES THE CAR THE BUILDER OPENED (backlog be025b44).
+    // Asked last, so every guard measured before it answers first — and
+    // asked at all, because with `boss car open` in the builders' hands
+    // this is the COMMON case, not an edge: the branch's packet exists
+    // from the build's first minute and its `gate` step has not
+    // reported, so none of the questions above matches it. `File` here
+    // would be the fourth twin of the same shape.
+    match car::building_car_for(open, branch) {
+        Some(car) => ParkAction::Adopt(car),
         None => ParkAction::File,
     }
+}
+
+/// PURE: the job-metadata patch an ADOPT owes the car it finishes.
+///
+/// A car filed at green gets the gate's facts in its `car_body`; a car
+/// opened at build start was filed before those facts existed, so they
+/// arrive here instead — the proof intent copied verbatim from the
+/// gate-run's `park_*` keys (`boss prove --from-car` and the arrival rule
+/// read it back), the item provenance that does NOT authorise a close
+/// (`car::PARTIAL_ITEM` / `car::NO_ITEM_REASON`), and the delivery
+/// channel classified from the diff.
+///
+/// THE PROVENANCE IS CARRIED BY ALL THREE PARK PATHS OR BY NONE. The
+/// file path merges it into `car_body_with_proof` and the refresh path
+/// into `regate_patch`; an adopt that did not would silently drop a
+/// `--park-partial-item` answer for every car a builder opened — which
+/// is to say, for every car, once they do. The textual merge of these
+/// two changes did not catch that, because the two edits are in
+/// different functions.
+///
+/// NOTHING IS NULLED and nothing the open recorded is restated, with the
+/// one deliberate exception `supersede` below carries. The job-metadata
+/// door DELETES a key set to null, so a channel the open recorded must
+/// not be stripped by a green that could not classify one.
+///
+/// THE CLOSING EDGE IS NOT ADDED HERE, and that is deliberate —
+/// [`adopt_edge_patch`] says why.
+fn adopt_patch(car: &Value, inputs: &AutoParkInputs) -> Value {
+    let mut patch = serde_json::Map::new();
+    patch.extend(inputs.proof.clone());
+    patch.extend(inputs.item_provenance.clone());
+    if let Some(dc) = inputs.delivery_channel.as_deref() {
+        patch.insert("delivery_channel".to_string(), json!(dc));
+    }
+    for (k, v) in supersede(car, inputs) {
+        patch.insert(k, v);
+    }
+    Value::Object(patch)
+}
+
+/// PURE: the one case where an adopt OVERWRITES what the open recorded —
+/// the builder's two item answers contradict each other.
+///
+/// HOW IT ARISES. `boss car open --backlog-item X` writes the CLOSING
+/// edge on the car at build start, ref-checked at the POST. The gate is
+/// then given `--park-partial-item X` or `--park-no-item <reason>`,
+/// which both say the opposite: do not close that item. Nothing rejects
+/// the pair, because the two statements are made by two verbs an hour
+/// apart, and the arrival rule follows `metadata.backlog_item` alone —
+/// so left as-is the car would close an item whose builder had just
+/// said it has work outstanding. That is the exact harm e1325456 was
+/// filed for (item cf0f5e2d was three pieces; closing it would have
+/// buried piece 3, which was waiting on an operator's yes).
+///
+/// WHY THE GATE'S ANSWER WINS. It is the later statement, made with the
+/// finished diff in hand, and the two errors are not symmetrical: an
+/// item left open when it could have closed costs one human close,
+/// while an item closed with work outstanding buries the work. So the
+/// closing edge is deleted (present-and-null — the metadata door's
+/// delete) and the same id is preserved under `PARTIAL_ITEM`, the key
+/// the landed design put there for exactly this provenance-without-a-
+/// close purpose. Nothing is lost: the car still names the item, under
+/// a name no rule follows.
+///
+/// NOT SILENT. `item_answer_superseded` records the contradiction in
+/// prose on the car, and the handler logs it — a reader who wonders why
+/// the edge they typed at open is gone finds the answer on the packet,
+/// rather than re-deriving it.
+///
+/// EMPTY whenever there is no contradiction: a gate that names the
+/// closing edge (the three `--park-*` answers are mutually exclusive, so
+/// provenance is then empty anyway), a gate with no provenance, or an
+/// opened car that carries no edge to supersede.
+fn supersede(car: &Value, inputs: &AutoParkInputs) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    // A gate that DOES name the closing edge is not a contradiction —
+    // and must never lose it. Belt and braces: the flags are mutually
+    // exclusive at the gate, so this can only fire on a packet edited by
+    // hand, where the closing edge is the safer thing to keep.
+    if inputs.backlog_item.is_some() || inputs.item_provenance.is_empty() {
+        return out;
+    }
+    let Some(open_edge) = car
+        .pointer("/metadata/backlog_item")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+    else {
+        return out;
+    };
+    let answer = if let Some(reason) = inputs
+        .item_provenance
+        .get(car::NO_ITEM_REASON)
+        .and_then(Value::as_str)
+    {
+        format!("--park-no-item \"{reason}\"")
+    } else {
+        let partial = inputs
+            .item_provenance
+            .get(car::PARTIAL_ITEM)
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        format!("--park-partial-item {}", &partial[..8.min(partial.len())])
+    };
+    out.insert("backlog_item".to_string(), Value::Null);
+    // Keep the id the open named, unless the gate already named one.
+    if !inputs.item_provenance.contains_key(car::PARTIAL_ITEM) {
+        out.insert(car::PARTIAL_ITEM.to_string(), json!(open_edge));
+    }
+    out.insert(
+        "item_answer_superseded".to_string(),
+        json!(format!(
+            "the open named backlog_item {} (the edge the arrival rule closes) and the \
+             gate then answered {answer}, which says the opposite. The gate's answer is \
+             the later one and made with the finished diff, and closing an item with work \
+             outstanding buries that work (e1325456), so the closing edge was removed and \
+             the id kept under `{}` — provenance without a close. If the item really is \
+             this car's whole build, re-gate with --park-backlog-item.",
+            &open_edge[..8.min(open_edge.len())],
+            car::PARTIAL_ITEM,
+        )),
+    );
+    out
+}
+
+/// PURE: the backlog edge an ADOPT adds, when the gate's intent named one
+/// the opened car does not already carry. `None` = nothing to write.
+///
+/// A SEPARATE, BEST-EFFORT WRITE, because `backlog_item` is a DECLARED
+/// job edge: a DB trigger refuses an id that does not resolve, with a
+/// **400**, and `write_json` maps anything but a 422 to `Downstream` —
+/// which redelivers. So an unresolvable edge folded into `adopt_patch`
+/// would retry the adopt forever and, worse, cost the car its proof
+/// intent on every attempt. CLAUDE.md records what a fallible write
+/// inside a loop does: a single observability write froze ALL landings.
+/// The receipt and the steps are what a car must not lose; an edge that
+/// will not resolve is worth a warning.
+///
+/// Skipped when the car already carries the same edge — an open that was
+/// given `--backlog-item` wrote it at POST, where it was ref-checked.
+fn adopt_edge_patch(car: &Value, inputs: &AutoParkInputs) -> Option<Value> {
+    let item = inputs.backlog_item.as_deref()?;
+    if car
+        .pointer("/metadata/backlog_item")
+        .and_then(Value::as_str)
+        == Some(item)
+    {
+        return None;
+    }
+    Some(json!({ "backlog_item": item }))
 }
 
 /// How many cars one page of the open-car read asks for. The dock and
@@ -513,8 +676,9 @@ impl Handler for JobsAutoPark {
             )
             .collect();
         // ONE DECISION, taken on what the SoR holds: skip (landed, or
-        // aboard a train), refresh the car at the dock, or file.
-        let parked = match park_action(&cars, &all, &inputs.branch) {
+        // aboard a train), refresh the car at the dock, finish the car a
+        // builder opened, or file.
+        let (parked, adopt) = match park_action(&cars, &all, &inputs.branch) {
             ParkAction::Skip(patch) => {
                 write_json(
                     &self.client,
@@ -526,8 +690,9 @@ impl Handler for JobsAutoPark {
                 .await?;
                 return Ok(());
             }
-            ParkAction::Refresh(car) => Some(car),
-            ParkAction::File => None,
+            ParkAction::Refresh(car) => (Some(car), None),
+            ParkAction::Adopt(car) => (None, Some(car.clone())),
+            ParkAction::File => (None, None),
         };
 
         if let Some(parked) = parked {
@@ -575,21 +740,85 @@ impl Handler for JobsAutoPark {
 
         let now = boss_clock_client::now_from(&self.clock).await;
 
-        // File the car: POST the packet, then complete its three steps
-        // with the shared builder — the same sequence `boss park::run`
-        // performs, receipt verbatim.
-        let body = car_body_with_proof(&inputs);
-        let created = post_json_return(
-            &self.client,
-            &format!("{}/api/jobs", self.base()),
-            &body,
-            &ctx.rule_name,
-        )
-        .await?;
-        let car_id = created
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| HandlerError::Downstream("auto-park: create returned no id".into()))?;
+        // ONE CAR, TWO WAYS IN. Either the builder opened it when the
+        // build started and this green FINISHES it, or no car exists and
+        // this green files one. Past this point the sequence is identical:
+        // read the packet, then complete the steps it has not already
+        // completed — which is why the step writes are decided in core
+        // (`car::finish_writes`), shared with `boss park`.
+        let car_id = match &adopt {
+            Some(existing) => {
+                let id = existing
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        HandlerError::Downstream("auto-park: the building car has no id".into())
+                    })?
+                    .to_string();
+                // The gate's own facts — proof intent, item provenance,
+                // delivery channel — onto the packet that already exists.
+                // Before the steps, so a car whose arrival rule fires off
+                // the gate completion already carries its probe AND the
+                // item answer that decides whether it closes anything.
+                let url = format!("{}/api/jobs/{}/metadata", self.base(), id);
+                let patch = adopt_patch(existing, &inputs);
+                if let Some(why) = patch
+                    .pointer("/item_answer_superseded")
+                    .and_then(Value::as_str)
+                {
+                    tracing::warn!(rule = %ctx.rule_name, car = %id, "{why}");
+                }
+                if patch.as_object().is_some_and(|m| !m.is_empty()) {
+                    write_json(
+                        &self.client,
+                        reqwest::Method::PATCH,
+                        &url,
+                        &patch,
+                        &ctx.rule_name,
+                    )
+                    .await?;
+                }
+                // The declared edge, separately and best-effort: an id
+                // that will not resolve is a 400, which redelivers, and
+                // a redelivery over an edge must not cost the car the
+                // write above (see `adopt_edge_patch`).
+                if let Some(edge) = adopt_edge_patch(existing, &inputs)
+                    && let Err(e) = write_json(
+                        &self.client,
+                        reqwest::Method::PATCH,
+                        &url,
+                        &edge,
+                        &ctx.rule_name,
+                    )
+                    .await
+                {
+                    tracing::warn!(rule = %ctx.rule_name, car = %id,
+                        "the gate's backlog edge would not attach to the opened car: {e} — \
+                         the car is finished; link it by hand");
+                }
+                tracing::info!(rule = %ctx.rule_name, car = %id, branch = %inputs.branch,
+                    "finishing the car its builder opened at build start — no second car");
+                id
+            }
+            None => {
+                let body = car_body_with_proof(&inputs);
+                let created = post_json_return(
+                    &self.client,
+                    &format!("{}/api/jobs", self.base()),
+                    &body,
+                    &ctx.rule_name,
+                )
+                .await?;
+                created
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        HandlerError::Downstream("auto-park: create returned no id".into())
+                    })?
+                    .to_string()
+            }
+        };
+        let car_id = car_id.as_str();
 
         let car = get_json(
             &self.client,
@@ -597,34 +826,28 @@ impl Handler for JobsAutoPark {
             &ctx.rule_name,
         )
         .await?;
-        let steps = car
-            .get("steps")
-            .and_then(Value::as_array)
-            .ok_or_else(|| HandlerError::Downstream("auto-park: car has no steps".into()))?;
 
         // In order (scope → build → gate): each completion re-evaluates
-        // readiness so the next is ready, the same order `boss park` uses.
-        for (title, meta) in car::step_fields(
+        // readiness so the next is ready. A step the OPEN already
+        // completed is skipped — the step API refuses a metadata write to
+        // a completed step, so re-sending `scope` would 409 on every car
+        // a builder opened.
+        for w in car::finish_writes(
+            &car,
             &inputs.summary,
             &inputs.excludes,
             &inputs.test,
             &inputs.verified,
             &inputs.receipt,
             now,
-        ) {
-            let step_id = steps
-                .iter()
-                .find(|s| s.get("title").and_then(Value::as_str) == Some(title))
-                .and_then(|s| s.get("id"))
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    HandlerError::Downstream(format!("auto-park: car missing step '{title}'"))
-                })?;
+        )
+        .map_err(HandlerError::Downstream)?
+        {
             write_json(
                 &self.client,
                 reqwest::Method::PUT,
-                &format!("{}/api/jobs/{}/steps/{}", self.base(), car_id, step_id),
-                &json!({"status": "completed", "metadata": meta}),
+                &format!("{}/api/jobs/{}/steps/{}", self.base(), car_id, w.step_id),
+                &w.body,
                 &ctx.rule_name,
             )
             .await?;
@@ -1302,5 +1525,369 @@ mod park_routes_its_item_tests {
             puts.lock().unwrap().is_empty(),
             "a prefix edge is not followed — it is a permanent 400"
         );
+    }
+}
+
+/// A GREEN FINISHES THE CAR THE BUILDER OPENED (backlog be025b44).
+///
+/// `boss car open` files the `ship-a-change` packet at build START, so
+/// by the time this handler sees a green the branch usually ALREADY has
+/// a car — one whose `gate` step has not reported, which is to say one
+/// that is neither parked nor boarded. Every earlier guard answered that
+/// shape with `File`, and filing there would be the fourth twin of the
+/// same kind (d052afad, 02165b1d, 6790175e): a packet recording a build
+/// that already has one, on the dock beside it.
+#[cfg(test)]
+mod building_car_tests {
+    use super::*;
+
+    const BRANCH: &str = "feat/a-car-opens-when-the-build-starts";
+
+    /// A car as `boss car open` leaves it: scope declared with the brief,
+    /// build CLAIMED by the builder, gate and review still ahead.
+    fn building() -> Value {
+        json!({
+            "id": "be025b44-0000-0000-0000-000000000000",
+            "kind": "ship-a-change",
+            "status": "open",
+            "subject": { "subject_kind": "custom", "id": BRANCH },
+            "metadata": {
+                "branch": BRANCH,
+                "build_started_at": "2026-09-10T18:00:00Z",
+                "built_by": "claude@algedonic.dev",
+                "build_host": "boss-dev-0",
+            },
+            "steps": [
+                {"id": "s-opened", "spec_slug": "opened", "title": car::OPENED,
+                 "status": "completed"},
+                {"id": "s-scope", "spec_slug": "scope", "title": car::SCOPE,
+                 "status": "completed",
+                 "metadata": {"summary": "s", "excludes": "e"}},
+                {"id": "s-build", "spec_slug": "build", "title": car::BUILD,
+                 "status": "active", "assignee_id": "claude@algedonic.dev"},
+                {"id": "s-gate", "spec_slug": "gate", "title": car::GATE, "status": "pending"},
+                {"id": "s-review", "spec_slug": "review", "title": car::REVIEW,
+                 "status": "pending"},
+            ],
+        })
+    }
+
+    /// THE CAR THIS CAR EXISTS FOR. A green whose branch already has a
+    /// building car ADOPTS it — it does not file a second.
+    #[test]
+    fn a_green_adopts_the_car_the_builder_opened() {
+        let open = [building()];
+        match park_action(&open, &open, BRANCH) {
+            ParkAction::Adopt(car) => {
+                assert_eq!(car["id"], "be025b44-0000-0000-0000-000000000000")
+            }
+            other => panic!("a building car is finished, not twinned: {other:?}"),
+        }
+    }
+
+    /// And what it writes onto that car is exactly the steps the open
+    /// did NOT already complete — the step API refuses a metadata write
+    /// to a completed step, so re-sending `scope` would 409 every time.
+    #[test]
+    fn adopting_writes_the_steps_the_open_left_open() {
+        let inputs = AutoParkInputs {
+            branch: BRANCH.to_string(),
+            summary: "s".into(),
+            excludes: "e".into(),
+            test: "ran the tests".into(),
+            verified: "seen working".into(),
+            backlog_item: None,
+            item_provenance: serde_json::Map::new(),
+            delivery_channel: Some("software".into()),
+            receipt: Receipt {
+                raw: "{\"verdict\":\"green\",\"head\":\"deadbeef\",\"mode\":\"full\"}".into(),
+                head: "deadbeef".into(),
+                mode: "full".into(),
+            },
+            proof: car::proof_intent(Some("echo hi"), Some("hi"), None),
+        };
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-10T18:30:00Z")
+            .unwrap()
+            .into();
+        let writes = car::finish_writes(
+            &building(),
+            &inputs.summary,
+            &inputs.excludes,
+            &inputs.test,
+            &inputs.verified,
+            &inputs.receipt,
+            now,
+        )
+        .expect("an opened car can be finished");
+        let ids: Vec<&str> = writes.iter().map(|w| w.step_id.as_str()).collect();
+        assert_eq!(ids, vec!["s-build", "s-gate"], "scope is already declared");
+        assert_eq!(writes[1].body["metadata"]["receipt"], inputs.receipt.raw);
+
+        // The proof intent and the channel ride the JOB, not a step, so
+        // an adopted car carries what a freshly filed one would.
+        let patch = adopt_patch(&building(), &inputs);
+        assert_eq!(patch[car::PROOF_PROBE], "echo hi");
+        assert_eq!(patch[car::PROOF_EXPECT], "hi");
+        assert_eq!(patch["delivery_channel"], "software");
+        assert!(
+            patch.get("summary").is_none(),
+            "the open already recorded the summary; an adopt does not restate it"
+        );
+    }
+
+    /// THE MERGE HAZARD, PINNED. The file path merges the item
+    /// provenance into `car_body_with_proof` and the refresh path into
+    /// `regate_patch`; the adopt path must too, or a
+    /// `--park-partial-item` answer is silently dropped for every car a
+    /// builder opened. The two changes landed in different functions, so
+    /// a textual merge could not see it — this is the test that can.
+    #[test]
+    fn an_adopt_carries_the_item_provenance_every_other_park_path_carries() {
+        let inputs = AutoParkInputs {
+            branch: BRANCH.to_string(),
+            summary: "s".into(),
+            excludes: "e".into(),
+            test: "t".into(),
+            verified: "v".into(),
+            backlog_item: None,
+            item_provenance: car::item_provenance(
+                Some("cf0f5e2d-0000-0000-0000-000000000000"),
+                None,
+            ),
+            delivery_channel: None,
+            receipt: Receipt {
+                raw: "{}".into(),
+                head: "deadbeef".into(),
+                mode: "full".into(),
+            },
+            proof: serde_json::Map::new(),
+        };
+        let patch = adopt_patch(&building(), &inputs);
+        assert_eq!(
+            patch[car::PARTIAL_ITEM],
+            "cf0f5e2d-0000-0000-0000-000000000000"
+        );
+        assert!(
+            patch.get("backlog_item").is_none(),
+            "a partial item must never become the key the arrival rule closes on: {patch}"
+        );
+        // And the same for a deliberately item-less car.
+        let mut none = inputs;
+        none.item_provenance = car::item_provenance(None, Some("David asked in conversation"));
+        let patch = adopt_patch(&building(), &none);
+        assert_eq!(patch[car::NO_ITEM_REASON], "David asked in conversation");
+        assert!(patch.get("backlog_item").is_none());
+    }
+
+    /// THE TWO ANSWERS CAN CONTRADICT EACH OTHER, and the contradiction
+    /// must not default to closing an item with work outstanding.
+    ///
+    /// `boss car open --backlog-item X` writes the CLOSING edge at build
+    /// start; the gate is then given `--park-partial-item` or
+    /// `--park-no-item`, which say the opposite. The gate's answer is the
+    /// later one and made with the finished diff, and the two errors are
+    /// not symmetrical — an item left open costs one human close, an item
+    /// closed with work outstanding buries the work (e1325456). So the
+    /// edge goes, the id survives under `PARTIAL_ITEM`, and the car says
+    /// in prose why.
+    #[test]
+    fn a_gate_that_says_do_not_close_supersedes_an_edge_the_open_wrote() {
+        let opened = {
+            let mut c = building();
+            c["metadata"]["backlog_item"] = json!("cf0f5e2d-0000-0000-0000-000000000000");
+            c
+        };
+        let mut inputs = AutoParkInputs {
+            branch: BRANCH.to_string(),
+            summary: "s".into(),
+            excludes: "e".into(),
+            test: "t".into(),
+            verified: "v".into(),
+            backlog_item: None,
+            item_provenance: car::item_provenance(None, Some("one piece of a bigger item")),
+            delivery_channel: None,
+            receipt: Receipt {
+                raw: "{}".into(),
+                head: "deadbeef".into(),
+                mode: "full".into(),
+            },
+            proof: serde_json::Map::new(),
+        };
+        let patch = adopt_patch(&opened, &inputs);
+        assert!(
+            patch["backlog_item"].is_null(),
+            "present-and-null is the metadata door's DELETE — the arrival rule must find \
+             no edge to close: {patch}"
+        );
+        assert_eq!(
+            patch[car::PARTIAL_ITEM],
+            "cf0f5e2d-0000-0000-0000-000000000000",
+            "the id the open named survives under the key no rule follows"
+        );
+        let why = patch["item_answer_superseded"].as_str().unwrap_or_default();
+        assert!(why.contains("cf0f5e2d"), "names the item: {why}");
+        assert!(
+            why.contains("--park-no-item") && why.contains("--park-backlog-item"),
+            "names what was answered and how to undo it: {why}"
+        );
+
+        // A gate that names its own partial item keeps ITS id, not the
+        // open's — the later, more specific statement.
+        inputs.item_provenance =
+            car::item_provenance(Some("aaaa1111-0000-0000-0000-000000000000"), None);
+        let patch = adopt_patch(&opened, &inputs);
+        assert_eq!(
+            patch[car::PARTIAL_ITEM],
+            "aaaa1111-0000-0000-0000-000000000000"
+        );
+        assert!(patch["backlog_item"].is_null());
+    }
+
+    /// AND NOTHING IS SUPERSEDED WHEN THE ANSWERS AGREE. The common case
+    /// must not touch the edge: a destructive write that fires when it
+    /// should not is worse than the drop it was written to prevent.
+    #[test]
+    fn an_agreeing_or_absent_answer_supersedes_nothing() {
+        let opened = {
+            let mut c = building();
+            c["metadata"]["backlog_item"] = json!("cf0f5e2d-0000-0000-0000-000000000000");
+            c
+        };
+        let base = |backlog_item: Option<&str>,
+                    provenance: serde_json::Map<String, Value>|
+         -> AutoParkInputs {
+            AutoParkInputs {
+                branch: BRANCH.to_string(),
+                summary: "s".into(),
+                excludes: "e".into(),
+                test: "t".into(),
+                verified: "v".into(),
+                backlog_item: backlog_item.map(str::to_string),
+                item_provenance: provenance,
+                delivery_channel: None,
+                receipt: Receipt {
+                    raw: "{}".into(),
+                    head: "deadbeef".into(),
+                    mode: "full".into(),
+                },
+                proof: serde_json::Map::new(),
+            }
+        };
+        // The gate names the closing edge too: agreement, not conflict.
+        let agree = base(
+            Some("cf0f5e2d-0000-0000-0000-000000000000"),
+            serde_json::Map::new(),
+        );
+        assert!(supersede(&opened, &agree).is_empty());
+        // The gate carries no provenance at all.
+        assert!(supersede(&opened, &base(None, serde_json::Map::new())).is_empty());
+        // A partial answer, but the open named no edge — nothing to
+        // supersede, and the provenance rides on its own.
+        let partial = base(
+            None,
+            car::item_provenance(Some("cf0f5e2d-0000-0000-0000-000000000000"), None),
+        );
+        assert!(supersede(&building(), &partial).is_empty());
+        // Both set at once can only come from a hand-edited packet. The
+        // closing edge is the safer thing to keep, so it is kept.
+        let both = base(
+            Some("cf0f5e2d-0000-0000-0000-000000000000"),
+            car::item_provenance(Some("aaaa1111"), None),
+        );
+        assert!(supersede(&opened, &both).is_empty());
+    }
+
+    /// THE DECLARED EDGE RIDES ITS OWN WRITE. `backlog_item` is
+    /// ref-checked by a DB trigger that answers 400, and 400 maps to
+    /// `Downstream`, which REDELIVERS — so an unresolvable edge folded
+    /// into the proof-intent patch would retry the adopt forever and cost
+    /// the car its probe on every attempt.
+    #[test]
+    fn the_backlog_edge_is_a_separate_best_effort_write() {
+        let inputs = AutoParkInputs {
+            branch: BRANCH.to_string(),
+            summary: "s".into(),
+            excludes: "e".into(),
+            test: "t".into(),
+            verified: "v".into(),
+            backlog_item: Some("be025b44-2725-4db5-90d9-f16aba3844c6".into()),
+            item_provenance: serde_json::Map::new(),
+            delivery_channel: None,
+            receipt: Receipt {
+                raw: "{}".into(),
+                head: "deadbeef".into(),
+                mode: "full".into(),
+            },
+            proof: car::proof_intent(Some("echo hi"), Some("hi"), None),
+        };
+        let patch = adopt_patch(&building(), &inputs);
+        assert!(
+            patch.get("backlog_item").is_none(),
+            "a refused edge must not be able to cost the car its proof intent"
+        );
+        assert_eq!(patch[car::PROOF_PROBE], "echo hi");
+        // Nothing is NULLED: the metadata door deletes a null key, and a
+        // delivery channel the open recorded must survive a green that
+        // could not classify the diff.
+        assert!(patch.get("delivery_channel").is_none());
+
+        let edge = adopt_edge_patch(&building(), &inputs).expect("the edge is written");
+        assert_eq!(edge["backlog_item"], "be025b44-2725-4db5-90d9-f16aba3844c6");
+
+        // An open given `--backlog-item` already wrote it, ref-checked, at
+        // the POST. Nothing to re-write.
+        let mut linked = building();
+        linked["metadata"]["backlog_item"] = json!("be025b44-2725-4db5-90d9-f16aba3844c6");
+        assert!(adopt_edge_patch(&linked, &inputs).is_none());
+
+        // And a green carrying no intent writes no edge at all.
+        let mut unlinked = inputs;
+        unlinked.backlog_item = None;
+        assert!(adopt_edge_patch(&building(), &unlinked).is_none());
+    }
+
+    /// The earlier answers do not move. A car aboard a train, at the
+    /// dock, or landed is still reported as such — the building case is
+    /// asked LAST, after every guard that was measured first.
+    #[test]
+    fn the_guards_measured_first_still_answer_first() {
+        let mut boarded = building();
+        boarded["metadata"]["train"] = json!("d72ecdb9");
+        boarded["steps"][3]["status"] = json!("completed");
+        boarded["steps"][4]["status"] = json!("ready");
+        let open = [building(), boarded];
+        assert!(
+            matches!(park_action(&open, &open, BRANCH), ParkAction::Skip(_)),
+            "a branch in transit is still skipped"
+        );
+
+        let mut landed = building();
+        landed["metadata"]["merged"] = json!("true");
+        let all = [landed];
+        match park_action(&all, &all, BRANCH) {
+            ParkAction::Skip(p) => assert_eq!(p["park_skipped"], "landed"),
+            other => panic!("a landed branch records the landing: {other:?}"),
+        }
+    }
+
+    /// A RERAILED building car answers on the branch it CARRIES, not the
+    /// one it was filed under — the read this handler was already fixed
+    /// once for (car 235157a5, backlog 02165b1d).
+    #[test]
+    fn a_rerailed_building_car_is_adopted_not_twinned() {
+        let mut rerailed = building();
+        rerailed["metadata"]["branch"] = json!("feat/rerailed");
+        let open = [rerailed];
+        match park_action(&open, &open, "feat/rerailed") {
+            ParkAction::Adopt(c) => {
+                assert_eq!(c["id"], "be025b44-0000-0000-0000-000000000000");
+                assert_eq!(
+                    c["subject"]["id"], BRANCH,
+                    "its subject is still the filing branch — which is why the read \
+                     must not narrow by subject"
+                );
+            }
+            other => panic!("the rerailed building car is the one to finish: {other:?}"),
+        }
     }
 }

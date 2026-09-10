@@ -97,13 +97,33 @@ pub const SCOPE: &str = "Declare the boundary";
 pub const BUILD: &str = "Build it";
 pub const GATE: &str = "Green, and observed working";
 
-/// The evidence each of the three steps carries, and when it was filled.
+/// The trigger step a car OPENS at. `ship-a-change`'s first step, with
+/// `ready_when: true`, so the POST that files the packet completes it
+/// and `scope` is ready the moment the car exists.
+pub const OPENED: &str = "Change started";
+
+/// The registry SLUGS for the same steps — the primary key `find_step`
+/// looks a step up by, with the titles above as its fallback. Paired
+/// with their titles in one place so a lookup cannot drift from the
+/// evidence written through it (CLAUDE.md §9a); `step_fields` carries
+/// the pair through to every caller rather than letting each re-derive
+/// it.
+pub const OPENED_SLUG: &str = "opened";
+pub const SCOPE_SLUG: &str = "scope";
+pub const BUILD_SLUG: &str = "build";
+pub const GATE_SLUG: &str = "gate";
+pub const REVIEW_SLUG: &str = "review";
+
+/// The evidence each of the three steps carries, and when it was filled,
+/// as `(registry slug, step title, metadata)`.
 ///
-/// All three stamps are the same instant on purpose: filing a car is one
-/// act, so scope, build and gate genuinely complete together. What the
-/// stamp separates is the *dock* — gate's stamp is when the car became
-/// ready, and the conductor's stamp on `review` is when it boarded, so
-/// the difference is queue time and nothing else.
+/// When a car is filed at GREEN all three stamps are the same instant,
+/// because filing it is one act. When a builder OPENED the car at build
+/// start they are not: `scope` was filled then, and only the steps still
+/// open are written now — see [`finish_writes`], which is what callers
+/// use. What the stamps separate is the *dock* — gate's stamp is when
+/// the car became ready, and the conductor's stamp on `review` is when
+/// it boarded, so the difference is queue time and nothing else.
 pub fn step_fields(
     summary: &str,
     excludes: &str,
@@ -111,15 +131,17 @@ pub fn step_fields(
     verified: &str,
     receipt: &Receipt,
     now: chrono::DateTime<chrono::Utc>,
-) -> [(&'static str, Value); 3] {
+) -> [(&'static str, &'static str, Value); 3] {
     let at = stamp(now);
     [
         (
+            SCOPE_SLUG,
             SCOPE,
             json!({"summary": summary, "excludes": excludes, "completed_at": at}),
         ),
-        (BUILD, json!({"test": test, "completed_at": at})),
+        (BUILD_SLUG, BUILD, json!({"test": test, "completed_at": at})),
         (
+            GATE_SLUG,
             GATE,
             json!({
                 "gates": if receipt.mode.is_empty() { "full" } else { &receipt.mode },
@@ -137,6 +159,176 @@ pub fn step_fields(
 /// boarding stamps `metadata.train` rather than completing it (so a
 /// cancelled train can release the car by clearing the stamp).
 pub const REVIEW: &str = "Open for review";
+
+/// One step write a car's filer owes: which step, and the body to PUT.
+///
+/// The step ID is read OFF the car, never assembled — the same rule the
+/// receipt lives by, for the same reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepWrite {
+    /// The step's id, as the packet reported it.
+    pub step_id: String,
+    /// Its title, so a message can name what was written.
+    pub title: &'static str,
+    /// `PUT /api/jobs/{car}/steps/{step_id}` body.
+    pub body: Value,
+}
+
+/// PURE: the id of `(slug, title)` on this car, or `None` when the
+/// packet has no such step. The id a CLAIM needs
+/// (`POST …/steps/{id}/claim`), which takes no body and so has nowhere
+/// to carry a [`StepWrite`].
+pub fn step_id_for(car: &Value, slug: &str, title: &str) -> Option<String> {
+    find_step(car, slug, title)?
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Has this step already been taken through? A completed or skipped step
+/// is frozen — the step API refuses a metadata write to one and its 409
+/// names the job-metadata door instead — so every writer below skips it
+/// rather than discovering that at the wire.
+fn already_done(step: &Value) -> bool {
+    matches!(
+        step.get("status").and_then(Value::as_str),
+        Some("completed" | "skipped")
+    )
+}
+
+/// The missing-step refusal both writers share: an in-flight packet is
+/// pinned to the workflow version it was admitted under, so a car whose
+/// steps do not answer to the slugs this code knows must refuse rather
+/// than write evidence onto whatever step happened to be there.
+fn no_such_step(slug: &str, title: &str) -> String {
+    format!(
+        "this car has no `{slug}` step ('{title}') — refusing to write evidence onto a \
+         packet whose shape does not match the ship-a-change steps this build of boss \
+         knows. An in-flight car is pinned to the workflow version it was admitted \
+         under; read the packet before writing to it."
+    )
+}
+
+/// PURE: the writes that OPEN a car at build start — `scope` completed
+/// with the brief the builder was handed.
+///
+/// WHY THE SCOPE IS WRITTEN AT OPEN AND NOT AT GREEN. `scope` asks what
+/// the change contains and what it deliberately excludes, and the
+/// registry row says why: *"it asks a person ... BEFORE the work, which
+/// is the only moment that decision keeps a PR small."* Filed at green
+/// it was being recorded after the fact. A builder opening the car has
+/// exactly that brief in hand, so it is stated when it is true.
+///
+/// `build` is NOT written here. It is taken through the CLAIM door
+/// (`POST …/steps/{id}/claim`), a Ready→Active compare-and-set that
+/// records the claimant and refuses a second one with a 409 naming the
+/// holder — which is how "two agents on the same branch" becomes visible
+/// instead of becoming a twin car.
+///
+/// IDEMPOTENT: a car whose scope is already declared yields no writes,
+/// so a builder re-running the verb writes nothing rather than 409ing on
+/// a frozen step.
+pub fn open_writes(
+    car: &Value,
+    summary: &str,
+    excludes: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<StepWrite>, String> {
+    let Some(step) = find_step(car, SCOPE_SLUG, SCOPE) else {
+        return Err(no_such_step(SCOPE_SLUG, SCOPE));
+    };
+    if already_done(step) {
+        return Ok(Vec::new());
+    }
+    let Some(step_id) = step.get("id").and_then(Value::as_str) else {
+        return Err(format!("the `{SCOPE_SLUG}` step on this car has no id"));
+    };
+    let at = stamp(now);
+    Ok(vec![StepWrite {
+        step_id: step_id.to_string(),
+        title: SCOPE,
+        body: json!({
+            "status": "completed",
+            "metadata": {"summary": summary, "excludes": excludes, "completed_at": at},
+        }),
+    }])
+}
+
+/// PURE: the writes a GREEN owes a car — each of scope/build/gate that
+/// is not already completed, carrying [`step_fields`]' evidence.
+///
+/// ONE DEFINITION OF "WHAT A GREEN OWES A CAR", for the three callers
+/// that owe it: `boss park`, the dispatcher's auto-park handler, and now
+/// both of those acting on a car a builder OPENED rather than one they
+/// just filed. The two cases differ only in which steps are already
+/// done, which is a fact ON THE PACKET — so it is read off the packet
+/// here instead of each caller deciding (CLAUDE.md §9a).
+///
+/// THE SKIP IS THE POINT. A car opened at build start has `scope`
+/// completed already, and the step API refuses a metadata write to a
+/// completed step. A green that re-sent `scope` would 409 on every car a
+/// builder opened — which is to say, on every car, once they do.
+pub fn finish_writes(
+    car: &Value,
+    summary: &str,
+    excludes: &str,
+    test: &str,
+    verified: &str,
+    receipt: &Receipt,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<StepWrite>, String> {
+    let mut out = Vec::new();
+    for (slug, title, metadata) in step_fields(summary, excludes, test, verified, receipt, now) {
+        let Some(step) = find_step(car, slug, title) else {
+            return Err(no_such_step(slug, title));
+        };
+        if already_done(step) {
+            continue;
+        }
+        let Some(step_id) = step.get("id").and_then(Value::as_str) else {
+            return Err(format!("the `{slug}` step on this car has no id"));
+        };
+        out.push(StepWrite {
+            step_id: step_id.to_string(),
+            title,
+            body: json!({"status": "completed", "metadata": metadata}),
+        });
+    }
+    Ok(out)
+}
+
+/// The metadata a car carries about its own BUILD, stamped when the
+/// builder opens it.
+///
+/// THIS IS THE FACT THE MIDDLE THIRD RENDERS (backlog be025b44, design
+/// 9e82ee62). Four builders ran for 19–47 minutes each on 2026-09-09 and
+/// the yard showed an empty dock throughout, because a car's packet did
+/// not exist until its gate went green. Who is building, on which host,
+/// in which worktree, since when — none of it was anywhere. It is four
+/// keys, and a board is a reader of them.
+///
+/// ABSENT, NEVER NULLED. The job-metadata door DELETES a key set to
+/// null, so an unknown host must omit its key rather than strip one an
+/// earlier write recorded.
+pub fn build_start(
+    actor: &str,
+    host: &str,
+    worktree: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> serde_json::Map<String, Value> {
+    let mut m = serde_json::Map::new();
+    m.insert("build_started_at".to_string(), json!(stamp(now)));
+    let mut put = |k: &str, v: &str| {
+        let v = v.trim();
+        if !v.is_empty() {
+            m.insert(k.to_string(), json!(v));
+        }
+    };
+    put("built_by", actor);
+    put("build_host", host);
+    put("build_worktree", worktree);
+    m
+}
 
 /// THE CAR CARRIES ITS PROBE. `boss prove` records a proof as a
 /// command that ran plus the string it had to print; until 2026-09-08
@@ -261,11 +453,53 @@ pub fn is_parked(car: &Value) -> bool {
         return false;
     }
     matches!(
-        find_step(car, "review", REVIEW)
+        find_step(car, REVIEW_SLUG, REVIEW)
             .and_then(|s| s.get("status"))
             .and_then(Value::as_str),
         Some("ready" | "active")
     )
+}
+
+/// Is this car OPEN AT BUILD — filed when its build STARTED, and not yet
+/// carrying a gate verdict?
+///
+/// THE THIRD STATE A LIVE CAR CAN BE IN, and it did not exist until
+/// 2026-09-10. While a car was only ever filed at green, `is_parked` and
+/// `is_boarded` between them covered every live car. A car opened at
+/// build start (backlog be025b44) is neither: its `gate` step has not
+/// reported, so `review` is not open, so the dock does not hold it — and
+/// correctly, because a car with no receipt must never board. It is
+/// nonetheless THE car for its branch, which is the whole point: the
+/// branch has exactly one packet from its first minute, so "no parked
+/// car" can never again be read as "no car" and file a twin (d052afad,
+/// 02165b1d, 6790175e — three measured twins, all that shape).
+///
+/// The gate step must be PRESENT and open. Absent means this build of
+/// boss cannot read the packet's shape, and an unreadable car is not one
+/// to adopt — refuse, do not guess.
+pub fn is_building(car: &Value) -> bool {
+    let md = car.get("metadata");
+    let branch = md
+        .and_then(|m| m.get("branch"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if branch.is_empty() || !is_open(car) || is_set(md.and_then(|m| m.get("train"))) {
+        return false;
+    }
+    matches!(
+        find_step(car, GATE_SLUG, GATE)
+            .and_then(|s| s.get("status"))
+            .and_then(Value::as_str),
+        Some("pending" | "ready" | "active")
+    )
+}
+
+/// The car a builder already OPENED for `branch`, if one is still
+/// building. `None` means no build is in flight for it under a packet.
+pub fn building_car_for<'a>(cars: &'a [Value], branch: &str) -> Option<&'a Value> {
+    cars.iter().find(|c| {
+        c.pointer("/metadata/branch").and_then(Value::as_str) == Some(branch) && is_building(c)
+    })
 }
 
 /// The car a re-gate of `branch` refreshes, if one is still parked.
@@ -295,8 +529,9 @@ pub fn is_boarded(car: &Value) -> bool {
 }
 
 /// The live car this branch already has — aboard a train if one is,
-/// otherwise the one parked at the dock. `None` means the branch has no
-/// car: a green may file one.
+/// otherwise the one parked at the dock, otherwise the one a builder
+/// opened and is still building. `None` means the branch has no car: a
+/// green may file one.
 ///
 /// ONE PREDICATE, TWO CALLERS, ONE MEASURED BUG (backlog 02165b1d).
 /// 2026-09-08 20:30:54: car d08a6418 boarded train #274. 20:31:20: a
@@ -307,11 +542,18 @@ pub fn is_boarded(car: &Value) -> bool {
 /// parked car" was read as "no car". It is not. So both the handler and
 /// `boss gate`'s launch guard ask THIS question — is there a live car
 /// at all — from one definition (CLAUDE.md §9a).
+/// THE BUILDING CAR IS A LIVE CAR TOO (be025b44). Since a builder opens
+/// the car when the build starts, the commonest live state is no longer
+/// "parked": it is "building", and a question that missed it would file
+/// the fourth twin of this exact shape. Ordered as the failures were
+/// measured — aboard, then at the dock, then building — so the earlier
+/// answers cannot move.
 pub fn open_car_for<'a>(cars: &'a [Value], branch: &str) -> Option<&'a Value> {
     let mine = |c: &&Value| c.pointer("/metadata/branch").and_then(Value::as_str) == Some(branch);
     cars.iter()
         .find(|c| mine(c) && is_boarded(c))
         .or_else(|| cars.iter().find(|c| mine(c) && is_open(c) && is_parked(c)))
+        .or_else(|| cars.iter().find(|c| mine(c) && is_building(c)))
 }
 
 /// A car that already carried its branch to main: closed with
@@ -605,11 +847,15 @@ mod tests {
         let fields = step_fields("s", "e", "t", "v", &receipt, at("2026-08-29T04:15:09Z"));
 
         assert_eq!(fields.len(), 3);
-        for (title, md) in &fields {
+        for (slug, title, md) in &fields {
             assert_eq!(
                 md.get("completed_at").and_then(Value::as_str),
                 Some("2026-08-29T04:15:09Z"),
                 "{title} was filled without saying when"
+            );
+            assert!(
+                !slug.is_empty(),
+                "{title} carries the registry slug `find_step` looks it up by"
             );
         }
     }
@@ -626,7 +872,7 @@ mod tests {
         };
         let now = at("2026-08-29T04:15:09.847213Z");
         let fields = step_fields("s", "e", "t", "v", &receipt, now);
-        let parked = fields[2].1["completed_at"].as_str().unwrap().to_string();
+        let parked = fields[2].2["completed_at"].as_str().unwrap().to_string();
 
         assert_eq!(parked, stamp(now));
         assert!(
@@ -651,13 +897,13 @@ mod tests {
             &receipt,
             at("2026-08-29T04:15:09Z"),
         );
-        assert_eq!(f[0].1["summary"], json!("sum"));
-        assert_eq!(f[0].1["excludes"], json!("exc"));
-        assert_eq!(f[1].1["test"], json!("tst"));
-        assert_eq!(f[2].1["verified"], json!("ver"));
+        assert_eq!(f[0].2["summary"], json!("sum"));
+        assert_eq!(f[0].2["excludes"], json!("exc"));
+        assert_eq!(f[1].2["test"], json!("tst"));
+        assert_eq!(f[2].2["verified"], json!("ver"));
         // An empty mode still reads as a full gate.
-        assert_eq!(f[2].1["gates"], json!("full"));
-        assert_eq!(f[2].1["receipt"], json!(GREEN));
+        assert_eq!(f[2].2["gates"], json!("full"));
+        assert_eq!(f[2].2["receipt"], json!(GREEN));
     }
 }
 
@@ -1020,5 +1266,340 @@ mod park_triage_tests {
         stepless["steps"] = json!([]);
         assert!(triage_on_park(&stepless, CAR_ID, BRANCH).is_none());
         assert!(triage_on_park(&json!({}), CAR_ID, BRANCH).is_none());
+    }
+}
+
+/// A CAR OPENS WHEN THE BUILD STARTS (backlog be025b44).
+///
+/// Until now a car's packet was filed by auto-park when the gate went
+/// GREEN — the END of the build. Everything before that left no trace:
+/// on 2026-09-08 three builder sessions died mid-flight and the only
+/// symptom was a twin car appearing on the dock later, filed by a retry
+/// loop that outlived its agent; on 2026-09-09 four builders ran for
+/// 19–47 minutes each and the dock read empty throughout. The builder
+/// now OPENS the car at build start, so a branch has exactly one packet
+/// from its first minute and a green FINISHES that packet instead of
+/// filing a second.
+#[cfg(test)]
+mod building_tests {
+    use super::*;
+
+    const BRANCH: &str = "feat/a-car-opens-when-the-build-starts";
+    const HEAD: &str = "e16708f69bc5b0a0a3f4bd1572f9db6dec76e7c8";
+    const GREEN: &str = r#"{"verdict": "green", "head": "e16708f69bc5b0a0a3f4bd1572f9db6dec76e7c8", "mode": "full", "fails": []}"#;
+
+    fn at(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s).unwrap().into()
+    }
+
+    fn receipt() -> Receipt {
+        Receipt {
+            raw: GREEN.to_string(),
+            head: HEAD.to_string(),
+            mode: "full".to_string(),
+        }
+    }
+
+    /// A car as `boss car open` leaves it: filed, its trigger
+    /// auto-completed by the POST, `scope` completed with the brief the
+    /// builder was handed, `build` CLAIMED (active, assignee = the actor
+    /// running the verb), gate and review still ahead of it.
+    ///
+    /// `subject_branch` is the branch it was FILED under — its Subject —
+    /// and `branch` the one it CARRIES. `boss rerail` repoints the second
+    /// and leaves the first, which is how three twins got filed on
+    /// 2026-09-08; the shared predicates read `metadata.branch`.
+    fn building(id: &str, subject_branch: &str, branch: &str) -> Value {
+        json!({
+            "id": id,
+            "kind": "ship-a-change",
+            "status": "open",
+            "subject": {"subject_kind": "custom", "id": subject_branch},
+            "metadata": {
+                "branch": branch,
+                "build_started_at": "2026-09-10T18:00:00Z",
+                "built_by": "claude@algedonic.dev",
+            },
+            "steps": [
+                {"id": "s-opened", "spec_slug": "opened", "title": OPENED,
+                 "status": "completed"},
+                {"id": "s-scope", "spec_slug": "scope", "title": SCOPE,
+                 "status": "completed",
+                 "metadata": {"summary": "s", "excludes": "e"}},
+                {"id": "s-build", "spec_slug": "build", "title": BUILD,
+                 "status": "active", "assignee_id": "claude@algedonic.dev"},
+                {"id": "s-gate", "spec_slug": "gate", "title": GATE, "status": "pending"},
+                {"id": "s-review", "spec_slug": "review", "title": REVIEW, "status": "pending"},
+            ],
+        })
+    }
+
+    /// A car as the POST alone leaves it — nothing completed but the
+    /// trigger. The shape auto-park has always filed.
+    fn fresh(id: &str, branch: &str) -> Value {
+        json!({
+            "id": id,
+            "kind": "ship-a-change",
+            "status": "open",
+            "metadata": {"branch": branch},
+            "steps": [
+                {"id": "s-opened", "spec_slug": "opened", "title": OPENED,
+                 "status": "completed"},
+                {"id": "s-scope", "spec_slug": "scope", "title": SCOPE, "status": "ready"},
+                {"id": "s-build", "spec_slug": "build", "title": BUILD, "status": "pending"},
+                {"id": "s-gate", "spec_slug": "gate", "title": GATE, "status": "pending"},
+                {"id": "s-review", "spec_slug": "review", "title": REVIEW, "status": "pending"},
+            ],
+        })
+    }
+
+    /// THE THIRD STATE A LIVE CAR CAN BE IN. `is_parked` and
+    /// `is_boarded` covered every live car while cars were only ever
+    /// filed at green; a car opened at build start is neither.
+    #[test]
+    fn a_car_opened_at_build_start_is_building_not_parked_and_not_boarded() {
+        let c = building("b1", BRANCH, BRANCH);
+        assert!(
+            is_building(&c),
+            "a car whose gate has not reported is building"
+        );
+        assert!(!is_parked(&c), "its review step is not open yet");
+        assert!(!is_boarded(&c), "no train has stamped it");
+        assert!(!is_landed(&c));
+    }
+
+    /// THE TWINNING FAILURE MODE, CLOSED. "No parked car" was read as
+    /// "no car" three times (d052afad, 02165b1d, 6790175e) and each time
+    /// a second car was filed. A building car must answer the same
+    /// question, or opening cars early would invent a fourth twin.
+    #[test]
+    fn the_building_car_is_the_branchs_one_live_car() {
+        let cars = [building("b1", BRANCH, BRANCH)];
+        let got = open_car_for(&cars, BRANCH).expect("a building car is a live car");
+        assert_eq!(got["id"], "b1");
+        assert_eq!(
+            building_car_for(&cars, BRANCH).and_then(|c| c["id"].as_str()),
+            Some("b1")
+        );
+        assert!(building_car_for(&cars, "feat/other").is_none());
+    }
+
+    /// A car already at the dock or aboard a train still wins: those
+    /// questions were measured first and their answers must not move.
+    #[test]
+    fn a_parked_or_boarded_car_still_answers_before_a_building_one() {
+        let mut parked = building("p", BRANCH, BRANCH);
+        parked["steps"][3]["status"] = json!("completed");
+        parked["steps"][4]["status"] = json!("ready");
+        let cars = [building("b1", BRANCH, BRANCH), parked];
+        assert_eq!(open_car_for(&cars, BRANCH).unwrap()["id"], "p");
+
+        let mut boarded = building("a", BRANCH, BRANCH);
+        boarded["metadata"]["train"] = json!("train-9");
+        let cars = [building("b1", BRANCH, BRANCH), boarded];
+        assert_eq!(open_car_for(&cars, BRANCH).unwrap()["id"], "a");
+        assert!(
+            !is_building(&cars[1]),
+            "a boarded car is aboard, whatever its gate step says"
+        );
+    }
+
+    /// `boss rerail` repoints `metadata.branch` and leaves the Subject
+    /// where the car was filed, so the predicate reads the branch the car
+    /// CARRIES (backlog 6790175e).
+    #[test]
+    fn a_rerailed_building_car_answers_on_the_branch_it_carries() {
+        let cars = [building("b1", BRANCH, "feat/rerailed")];
+        assert_eq!(
+            building_car_for(&cars, "feat/rerailed").and_then(|c| c["id"].as_str()),
+            Some("b1")
+        );
+        assert!(
+            building_car_for(&cars, BRANCH).is_none(),
+            "the filing branch is history once a rerail repoints the car"
+        );
+    }
+
+    #[test]
+    fn a_gated_or_closed_or_unreadable_car_is_not_building() {
+        let mut gated = building("b1", BRANCH, BRANCH);
+        gated["steps"][3]["status"] = json!("completed");
+        assert!(!is_building(&gated), "its gate has reported");
+
+        let mut closed = building("b1", BRANCH, BRANCH);
+        closed["status"] = json!("closed");
+        assert!(!is_building(&closed));
+
+        let mut nameless = building("b1", BRANCH, BRANCH);
+        nameless["metadata"]["branch"] = json!("");
+        assert!(!is_building(&nameless));
+
+        // A packet whose gate step this version of boss cannot find is
+        // not adopted: an unreadable shape must refuse, not guess.
+        let mut stepless = building("b1", BRANCH, BRANCH);
+        stepless["steps"] = json!([]);
+        assert!(!is_building(&stepless));
+    }
+
+    /// WHAT AN OPEN WRITES: the brief, on `scope`, and nothing else. The
+    /// build step is taken through the CLAIM door (Ready→Active as a
+    /// compare-and-set, which records the claimant and refuses a second
+    /// agent), not by a status PUT here.
+    #[test]
+    fn an_open_records_the_brief_on_scope_and_nothing_else() {
+        let writes = open_writes(
+            &fresh("f1", BRANCH),
+            "does a thing",
+            "not that",
+            at("2026-09-10T18:00:00Z"),
+        )
+        .expect("a fresh car can be opened");
+        assert_eq!(writes.len(), 1, "one write: scope");
+        assert_eq!(writes[0].step_id, "s-scope");
+        assert_eq!(writes[0].title, SCOPE);
+        assert_eq!(writes[0].body["status"], "completed");
+        assert_eq!(writes[0].body["metadata"]["summary"], "does a thing");
+        assert_eq!(writes[0].body["metadata"]["excludes"], "not that");
+        assert_eq!(
+            writes[0].body["metadata"]["completed_at"], "2026-09-10T18:00:00Z",
+            "the same stamp format every other writer uses"
+        );
+    }
+
+    /// IDEMPOTENT: re-running the open on a car whose scope is already
+    /// declared writes nothing, so a builder re-invoking the verb does
+    /// not hit the 409 a completed step returns for a metadata write.
+    #[test]
+    fn opening_a_car_whose_scope_is_already_declared_writes_nothing() {
+        let writes = open_writes(
+            &building("b1", BRANCH, BRANCH),
+            "s",
+            "e",
+            at("2026-09-10T18:00:00Z"),
+        )
+        .expect("an already-opened car is readable");
+        assert!(writes.is_empty(), "scope is already completed: {writes:?}");
+    }
+
+    /// WHAT A GREEN OWES AN OPENED CAR: the steps it has NOT already
+    /// completed. The step API refuses a metadata write to a completed
+    /// step, so a green that re-sent `scope` would 409 on every car a
+    /// builder opened.
+    #[test]
+    fn finishing_an_opened_car_skips_the_scope_the_open_already_completed() {
+        let writes = finish_writes(
+            &building("b1", BRANCH, BRANCH),
+            "s",
+            "e",
+            "ran the tests",
+            "seen working",
+            &receipt(),
+            at("2026-09-10T18:30:00Z"),
+        )
+        .expect("an opened car can be finished");
+        let titles: Vec<&str> = writes.iter().map(|w| w.title).collect();
+        assert_eq!(titles, vec![BUILD, GATE], "scope is already declared");
+        assert_eq!(writes[0].step_id, "s-build");
+        assert_eq!(writes[0].body["metadata"]["test"], "ran the tests");
+        assert_eq!(writes[1].step_id, "s-gate");
+        assert_eq!(
+            writes[1].body["metadata"]["receipt"], GREEN,
+            "the receipt rides verbatim, as it does on a fresh car"
+        );
+        assert_eq!(writes[1].body["metadata"]["verified"], "seen working");
+    }
+
+    /// And the path auto-park has always taken is unchanged: a car it
+    /// just POSTed has nothing completed, so all three steps are filled
+    /// in the order the workflow runs them.
+    #[test]
+    fn finishing_a_fresh_car_writes_all_three_steps_in_order() {
+        let writes = finish_writes(
+            &fresh("f1", BRANCH),
+            "s",
+            "e",
+            "t",
+            "v",
+            &receipt(),
+            at("2026-09-10T18:30:00Z"),
+        )
+        .expect("a fresh car can be finished");
+        let titles: Vec<&str> = writes.iter().map(|w| w.title).collect();
+        assert_eq!(titles, vec![SCOPE, BUILD, GATE]);
+        assert_eq!(writes[0].step_id, "s-scope");
+        for w in &writes {
+            assert_eq!(w.body["status"], "completed");
+            assert_eq!(
+                w.body["metadata"]["completed_at"], "2026-09-10T18:30:00Z",
+                "{} was filled without saying when",
+                w.title
+            );
+        }
+    }
+
+    /// A SHAPE WE CANNOT READ REFUSES. An in-flight packet is pinned to
+    /// the workflow version it was admitted under; if a car's steps do
+    /// not answer to the slugs this code knows, filling it by guesswork
+    /// would write evidence onto the wrong step.
+    #[test]
+    fn finishing_refuses_a_car_whose_steps_it_cannot_find() {
+        let mut odd = fresh("f1", BRANCH);
+        odd["steps"] = json!([{"id": "s-opened", "spec_slug": "opened", "title": OPENED,
+                               "status": "completed"}]);
+        let e = finish_writes(
+            &odd,
+            "s",
+            "e",
+            "t",
+            "v",
+            &receipt(),
+            at("2026-09-10T18:30:00Z"),
+        )
+        .expect_err("a car with no scope step cannot be finished");
+        assert!(
+            e.contains("scope"),
+            "the refusal names the missing step: {e}"
+        );
+        let e = open_writes(&odd, "s", "e", at("2026-09-10T18:00:00Z"))
+            .expect_err("nor can it be opened");
+        assert!(e.contains("scope"), "{e}");
+    }
+
+    /// THE MIDDLE THIRD NEEDS TO KNOW WHO AND WHERE. An agent working
+    /// for forty minutes left no trace at all; the fact a board renders
+    /// is the actor, the host and the worktree, stamped when the build
+    /// started.
+    #[test]
+    fn the_build_start_stamp_names_the_actor_the_host_and_the_worktree() {
+        let md = build_start(
+            "claude@algedonic.dev",
+            "boss-dev-0",
+            "/work/boss/.claude/worktrees/agent-a23",
+            at("2026-09-10T18:00:00Z"),
+        );
+        assert_eq!(md["built_by"], "claude@algedonic.dev");
+        assert_eq!(md["build_host"], "boss-dev-0");
+        assert_eq!(
+            md["build_worktree"], "/work/boss/.claude/worktrees/agent-a23",
+            "two agents on the same tree is a thing a reader must be able to see"
+        );
+        assert_eq!(md["build_started_at"], "2026-09-10T18:00:00Z");
+        // Absent, never nulled: the metadata door DELETES a null key, so
+        // an unknown worktree must not strip one a re-open recorded.
+        let thin = build_start("claude@algedonic.dev", "", "", at("2026-09-10T18:00:00Z"));
+        assert!(!thin.contains_key("build_host"));
+        assert!(!thin.contains_key("build_worktree"));
+        assert_eq!(thin["built_by"], "claude@algedonic.dev");
+    }
+
+    /// The step id a caller needs for the CLAIM — read off the car, not
+    /// assembled from anything.
+    #[test]
+    fn the_build_step_id_comes_off_the_car() {
+        assert_eq!(
+            step_id_for(&building("b1", BRANCH, BRANCH), BUILD_SLUG, BUILD).as_deref(),
+            Some("s-build")
+        );
+        assert!(step_id_for(&json!({"steps": []}), BUILD_SLUG, BUILD).is_none());
     }
 }

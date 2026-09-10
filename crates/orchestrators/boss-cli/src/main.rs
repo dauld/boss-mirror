@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod cadence;
+mod car;
 mod census;
 mod channels;
 mod credential;
@@ -296,6 +297,14 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// A car's own lifecycle — the half that happens BEFORE the gate.
+    ///
+    /// Grouped like `Workflow` and `Job`: a new car verb lands inside
+    /// `CarAction`, not as another variant here (84f9fbc0).
+    Car {
+        #[command(subcommand)]
+        action: CarAction,
+    },
     /// Protocol registry operations.
     ///
     /// Grouped deliberately: a new workflow verb lands inside
@@ -521,6 +530,43 @@ enum Commands {
     Receipt(receipt::Cmd),
     #[command(flatten)]
     Running(running::Cmd),
+}
+
+#[derive(Subcommand)]
+enum CarAction {
+    /// Open the car for a branch at the START of its build.
+    ///
+    /// Files the `ship-a-change` packet at `opened`, declares the
+    /// `scope` it was given, CLAIMS the `build` step, and records who is
+    /// building, on which host, in which worktree, since when. A green
+    /// then FINISHES this packet — `boss park` and the dispatcher's
+    /// auto-park handler both adopt a car that is already building —
+    /// so a branch has exactly ONE packet from its first minute.
+    ///
+    /// WHY (backlog be025b44): the packet used to be filed at GREEN,
+    /// which is the END of the build. On 2026-09-09 four builders ran
+    /// for 19–47 minutes each and the yard showed an empty dock
+    /// throughout; on 2026-09-08 three builder sessions died mid-flight
+    /// and nothing anywhere said so.
+    Open {
+        /// The branch whose build is starting.
+        branch: String,
+        /// What the change does. Its first sentence becomes the title.
+        #[arg(long)]
+        summary: String,
+        /// What it deliberately leaves out. The load-bearing half: it
+        /// is what keeps the car small enough to review.
+        #[arg(long)]
+        excludes: String,
+        /// Backlog item this change answers (a ref-checked job edge).
+        /// Routed to `build` when the car opens, because that is when
+        /// the build starts.
+        #[arg(long)]
+        backlog_item: Option<String>,
+        /// Report what would be filed, without filing it.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1041,6 +1087,25 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Commands::Car { action } => match action {
+            CarAction::Open {
+                branch,
+                summary,
+                excludes,
+                backlog_item,
+                dry_run,
+            } => {
+                car::open(
+                    &branch,
+                    &summary,
+                    &excludes,
+                    backlog_item,
+                    dry_run,
+                    chrono::Utc::now(),
+                )
+                .await
+            }
+        },
         Commands::Workflow { action } => match action {
             WorkflowAction::Publish {
                 kind,

@@ -17,6 +17,10 @@
 #                                 # nothing changed implies a crate —
 #                                 # 74 of 164 live branches are in that
 #                                 # class. Never used by CI.
+#   infra/gate.sh --self-test     # run the roster loop's own pin and
+#                                 # nothing else. It runs inside every
+#                                 # mode below too; this is the way to
+#                                 # read its verdict on its own.
 #   infra/gate.sh -p crate [...]  # car mode — cargo phases scoped to
 #                                 # the named crates (FULL suites, all
 #                                 # features); lints + fmt always run
@@ -48,6 +52,7 @@ AUTO=0
 QUICK=0
 LINT=0
 ROSTER=0
+SELFTEST=0
 while [ $# -gt 0 ]; do
     case "$1" in
         -p) shift; SCOPE+=(-p "${1:?-p needs a crate name}"); NAMED+=("$1"); shift ;;
@@ -55,7 +60,8 @@ while [ $# -gt 0 ]; do
         --quick) QUICK=1; shift ;;
         --lint) LINT=1; shift ;;
         --roster) ROSTER=1; shift ;;
-        *) echo "gate.sh: unknown arg: $1 (accepts -p <crate>, --auto, --quick, --lint and --roster)" >&2; exit 2 ;;
+        --self-test) SELFTEST=1; shift ;;
+        *) echo "gate.sh: unknown arg: $1 (accepts -p <crate>, --auto, --quick, --lint, --roster and --self-test)" >&2; exit 2 ;;
     esac
 done
 # Alternatives, not companions: --auto derives exactly what -p states,
@@ -763,22 +769,193 @@ if [ "$ROSTER" -eq 1 ]; then
     exit $?
 fi
 
+# ---------------------------------------------------------------------
+# Running a roster
+# ---------------------------------------------------------------------
+# The loop that runs every lint, and the three mechanisms that keep it
+# from eating itself.
+#
+# Until 2026-09-10 this was `while read -r name path; do check "$name"
+# bash "$path"; done <<< "$roster"`, which handed every lint the
+# REMAINING ROSTER LINES as its stdin. Any lint that reads stdin — a
+# `grep` or `awk` whose file list came out empty and so falls back to
+# it, a bare `cat`, a `read` — consumed the rest of the roster. The loop
+# then ended normally having run only the checks above it, and the gate
+# printed `pre-flight: clean` and exited 0. MEASURED on a draft lint
+# with an empty grep file list: a 61-lint roster ran NINE checks and the
+# gate called it clean (backlog 9d5797d4).
+#
+# The irony is the point, and it is the comment the old loop carried: it
+# ran `bash <path>` rather than executing the file precisely because "a
+# lint that quietly could not run is the under-covering gate this roster
+# exists to prevent". It guarded one way a lint silently does not run
+# and introduced another.
+#
+# THREE mechanisms, because they fail differently:
+#
+#   `3<<<` / `<&3` — the ROSTER's defence. The list the loop reads is
+#   not on a descriptor a child is handed by default, so no body this
+#   loop ever grows can truncate it. A `< /dev/null` on the one call
+#   below would have fixed the one call; the descriptor fixes the loop.
+#
+#   `< /dev/null` — the CHILD's defence, and worth keeping as well.
+#   With only fd 3, a stdin-reading lint inherits whatever stdin the
+#   GATE got: a pipe under the runner, a terminal by hand. The same lint
+#   would then read different bytes, or block forever, depending on how
+#   the gate was invoked. An explicit empty stdin makes it EOF
+#   everywhere, which is the only answer a lint can be written against.
+#
+#   the COUNT — the unknown mechanism's defence. The two above close the
+#   causes we know; a truncation is invisible by nature, so the loop
+#   also asserts it ran as many checks as the roster holds and refuses
+#   BY NAME when it did not, whatever ate them. fd 3 is deliberately
+#   left open to the children rather than closed with `3<&-`: a lint
+#   reading it directly is absurd but possible, and a loud count refusal
+#   on that is worth more than closing the hole and leaving the count
+#   with no failure mode anyone can exercise.
+#
+# `$runner` is `check` in the gate and a recorder in the self-test
+# below, so the pin exercises THIS loop rather than a copy of it
+# (CLAUDE.md §9a).
+#
+# `bash <path>` rather than executing it, as the consist check does: a
+# checkout may not carry the executable bit, and a lint that quietly
+# could not run is the under-covering gate this roster exists to
+# prevent.
+run_roster() {
+    local roster="$1" runner="$2" name path want ran=0 last="(none)"
+    want=$(printf '%s\n' "$roster" | grep -c '[^[:space:]]')
+    while read -r name path <&3; do
+        [ -n "$name" ] || continue
+        "$runner" "$name" bash "$path" < /dev/null
+        ran=$((ran + 1))
+        last="$name"
+    done 3<<< "$roster"
+    if [ "$ran" -ne "$want" ]; then
+        printf 'GATE REFUSED: the roster holds %s checks but %s ran.\n' "$want" "$ran" >&2
+        printf '  The last check that ran was `%s`. Something consumed the\n' "$last" >&2
+        printf '  descriptor this loop reads, which truncates the roster silently —\n' >&2
+        printf '  without this count the gate would report clean having run %s of\n' "$ran" >&2
+        printf '  %s checks (backlog 9d5797d4).\n' "$want" >&2
+        return 1
+    fi
+    return 0
+}
+
+# The pin on all three mechanisms, and it runs wherever the roster runs.
+# That is why it is NOT a case inside `scope_self_test`: that one fires
+# only on a `-p` invocation, and the modes that matter most here are the
+# bare run CI makes and the `--quick` a builder makes, neither of which
+# names a crate.
+#
+# The fixtures live in a temp directory, NEVER in infra/lint/: a file
+# there would be discovered as a real lint by this roster and by the
+# conductor's consist check, which is the one way a fixture could ship.
+#
+# Both cases hand the loop a stdin of their own, so no fixture can block
+# on a terminal: case 1 hands it the roster text, which is exactly what
+# the defect did.
+roster_loop_self_test() {
+    local tmp bad=0 fixture seen_want
+    tmp="$(mktemp -d)" || { echo "gate.sh: the roster self-test cannot make a temp dir" >&2; exit 2; }
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmp'" RETURN
+    printf 'cat > /dev/null\n' > "$tmp/eats-stdin.sh"
+    printf 'cat <&3 > /dev/null 2>&1 || true\n' > "$tmp/eats-fd3.sh"
+    printf 'if IFS= read -r l; then echo "stdin carried: $l" >&2; exit 1; fi\nexit 0\n' \
+        > "$tmp/demands-empty-stdin.sh"
+    printf 'exit 0\n' > "$tmp/quiet.sh"
+    local ST_SEEN=""
+    # The same shape as `check`: take a name, shift, run the rest, record
+    # the name and how it went. A runner that redirected anything itself
+    # would be testing itself.
+    _st_runner() {
+        local n="$1"; shift
+        if "$@"; then ST_SEEN="${ST_SEEN}${n}:pass "; else ST_SEEN="${ST_SEEN}${n}:fail "; fi
+    }
+
+    # 1. THE DEFECT, reproduced. Three checks with a stdin-eater in the
+    #    middle, and the loop's own stdin set to the roster text — which
+    #    is what `done <<< "$roster"` made it. All three must run.
+    fixture="first $tmp/quiet.sh
+eats-stdin $tmp/eats-stdin.sh
+last $tmp/quiet.sh"
+    printf '%s\n' "$fixture" > "$tmp/as-stdin"
+    seen_want="first:pass eats-stdin:pass last:pass "
+    ST_SEEN=""
+    if ! run_roster "$fixture" _st_runner < "$tmp/as-stdin"; then
+        echo "gate.sh roster self-test FAIL: a stdin-reading check truncated the roster" >&2
+        bad=1
+    fi
+    if [ "$ST_SEEN" != "$seen_want" ]; then
+        echo "gate.sh roster self-test FAIL: ran [${ST_SEEN}], wanted [${seen_want}] — a check that reads stdin ate the roster behind it" >&2
+        bad=1
+    fi
+
+    # 2. THE COUNT IS NOT VACUOUS. A check that drains the descriptor the
+    #    loop itself reads truncates the roster by a route the two
+    #    redirections do not cover, and the count is the only thing that
+    #    can see it. `run_roster` must REFUSE.
+    fixture="first $tmp/quiet.sh
+eats-fd3 $tmp/eats-fd3.sh
+last $tmp/quiet.sh"
+    ST_SEEN=""
+    if run_roster "$fixture" _st_runner < /dev/null 2>/dev/null; then
+        echo "gate.sh roster self-test FAIL: a check that drained the loop's own descriptor left [${ST_SEEN}] and run_roster still returned success — either the count guard is gone, or the loop no longer reads the roster on fd 3 and case 1 is the one to fix" >&2
+        bad=1
+    fi
+
+    # 3. EVERY CHECK GETS AN EMPTY STDIN, which case 1 cannot see: with
+    #    the roster on fd 3, a lint reading stdin no longer breaks the
+    #    ROSTER, so the truncation cases stay green while the lint reads
+    #    the gate's own stdin — different bytes on a runner than by hand,
+    #    or a block forever on a terminal. This roster holds no eater, so
+    #    the only thing that can give this check EOF is the `< /dev/null`
+    #    on the call itself.
+    fixture="first $tmp/quiet.sh
+demands-empty-stdin $tmp/demands-empty-stdin.sh
+last $tmp/quiet.sh"
+    seen_want="first:pass demands-empty-stdin:pass last:pass "
+    ST_SEEN=""
+    run_roster "$fixture" _st_runner < "$tmp/as-stdin" 2>/dev/null
+    if [ "$ST_SEEN" != "$seen_want" ]; then
+        echo "gate.sh roster self-test FAIL: ran [${ST_SEEN}], wanted [${seen_want}] — a check was handed the gate's own stdin instead of an empty one, so what it reads depends on how the gate was invoked" >&2
+        bad=1
+    fi
+
+    if [ "$bad" -ne 0 ]; then
+        echo "gate.sh: the roster loop cannot be trusted to run every lint — fix it before trusting a green pre-flight" >&2
+        exit 2
+    fi
+}
+
+# Runnable on its own, because a pin whose only output is silence is a
+# pin nobody can check is still a pin. `roster_loop_self_test` exits 2
+# with a named failure, so reaching the line below means it held.
+if [ "$SELFTEST" -eq 1 ]; then
+    roster_loop_self_test
+    echo "gate.sh: roster self-test ok — a check that reads stdin cannot truncate the roster, \
+every check is handed an empty stdin, and a truncation by any other route is refused by count"
+    exit 0
+fi
+
 run_preflight() {
+    roster_loop_self_test
     check "fmt" cargo fmt -- --check
-    local roster name path
+    local roster
     if ! roster=$(preflight_roster); then
         echo "GATE FAIL: preflight-roster" >&2
         FAILED+=("preflight-roster")
         RAN+=("preflight-roster:fail:0")
         return
     fi
-    # `bash <path>` rather than executing it, as the consist check does:
-    # a checkout may not carry the executable bit, and a lint that
-    # quietly could not run is the under-covering gate this roster
-    # exists to prevent.
-    while read -r name path; do
-        check "$name" bash "$path"
-    done <<< "$roster"
+    # A truncated roster is a FAILED check, not a quiet shortfall: the
+    # receipt has to carry the fact that the gate did not ask everything
+    # it claims to ask.
+    if ! run_roster "$roster" check; then
+        FAILED+=("preflight-roster-complete")
+        RAN+=("preflight-roster-complete:fail:0")
+    fi
 }
 
 # `--quick` stops here. It is a PRE-FLIGHT, not a gate, and says so:
