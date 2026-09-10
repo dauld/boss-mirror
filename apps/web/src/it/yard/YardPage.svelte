@@ -29,6 +29,7 @@
   import { onMount } from 'svelte';
   import {
     CANCEL_ROLE,
+    approach,
     canOfferCancel,
     cancelRequestBody,
     disciplineLabel,
@@ -116,7 +117,11 @@
   const gateCapacity = $derived(statusData?.gates.capacity ?? 0);
   const gatesInUse = $derived(statusData?.gates.active.length ?? 0);
   const gatesFree = $derived(Math.max(gateCapacity - gatesInUse, 0));
-  const waitingToGate = $derived(yard ? yard.approach.filter(a => a.state === 'publishing').length : 0);
+  const waitingToGate = $derived(yard ? yard.publishing.length : 0);
+  // The approach lane: the publish dock's rows plus the server's verdict
+  // lanes, composed by the one function the floor uses — so the table and
+  // the map cannot disagree about what stands on the approach.
+  const approachRows = $derived(yard ? approach(yard.publishing, statusData) : []);
   // The QUEUE: runs that asked for a bay and were given a place in line
   // (db7f7b73). Distinct from `waitingToGate`, which counts branches still
   // publishing — these have already asked to gate and are waiting on
@@ -774,28 +779,40 @@
           <h2 class="yard-panel-h">Entity · approach</h2>
           <!-- The approach (f930cda2): the car lifecycle upstream of the
                dock. queued → gating (the bays) → green becomes a parked
-               car, RED drops into the garage. Ordered by distance from
-               the dock: publishing, red, green-unparked, HELD (gated
-               green with the brake deliberately on — not a stranded
-               car); each row opens its own packet. -->
+               car, RED drops into the garage, a run that died before a
+               verdict stands at the GATE EXIT. Ordered by distance from
+               the dock: publishing, red, gate-lost, green-unparked, HELD
+               (gated green with the brake deliberately on — not a
+               stranded car); each row opens its own packet. The verdict
+               rows ARE the server's lanes (/api/yard/status), so this
+               table says exactly what the read model says. Keyed by
+               lane + branch, not by packet id: a lane row from a server
+               that predates `packet_id` carries none, and two blank keys
+               would collide. -->
           <div class="yard-entity-title">{floor.machines.approach.label}</div>
           <div class="yard-entity-sub">
             gates {gatesInUse} / {gateCapacity} in use · {gatesFree} free{gateQueue.length > 0 ? ` · ${gateQueue.length} queued for a bay` : ''}{waitingToGate > 0 ? ` · ${waitingToGate} waiting to gate` : ''}
           </div>
-          {#if yard.approach.length > 0}
+          {#if approachRows.length > 0}
             <table class="yard-board">
               <tbody>
-                {#each yard.approach as a (a.id)}
-                  <tr class="yard-approach" class:is-held={a.state === 'held'} ondblclick={() => openPacket(a.id)}>
+                {#each approachRows as a (`${a.state}:${a.branch}`)}
+                  <tr class="yard-approach" class:is-held={a.state === 'held'} ondblclick={() => a.id && openPacket(a.id)}>
                     <td class="yard-appr-state" data-state={a.state}>{a.state.replace('-', ' ')}</td>
                     <td>
-                      <a
-                        href={`/jobs/${a.id}`}
-                        title="open the packet behind this row"
-                        onclick={e => {
-                          e.preventDefault();
-                          openPacket(a.id);
-                        }}>{a.branch}</a>
+                      {#if a.id}
+                        <a
+                          href={`/jobs/${a.id}`}
+                          title="open the packet behind this row"
+                          onclick={e => {
+                            e.preventDefault();
+                            openPacket(a.id);
+                          }}>{a.branch}</a>
+                      {:else}
+                        <!-- No packet on the row (an older server): the
+                             branch still reads, it just opens nothing. -->
+                        {a.branch}
+                      {/if}
                     </td>
                     <td class="yard-stamp">{a.sha ? a.sha.slice(0, 8) : '—'}</td>
                     {#if a.hold !== null}
@@ -812,6 +829,10 @@
             <div class="yard-empty">The approach is clear — nothing publishing, no verdict unclaimed.</div>
           {/if}
           {#if statusData && statusData.stranded.length > 0}
+            <!-- The stranded lane, listed under the table beside the held
+                 one. Both now repeat rows the table already draws (it IS
+                 these lanes); kept because which lists this panel shows
+                 is a layout call, not part of collapsing the judgement. -->
             <div class="yard-label">Stranded greens — gated, never parked; rebase + re-gate</div>
             <ul class="yard-garage">
               {#each statusData.stranded as s (s.branch)}
@@ -1455,6 +1476,9 @@
   .yard-appr-state[data-state='gated-red'] { color: var(--err, #e2685c); }
   .yard-appr-state[data-state='gated-green'] { color: var(--ok, #4fb98a); }
   .yard-appr-state[data-state='publishing'] { color: var(--static, #7A838C); }
+  /* A run that died before a verdict: amber, not red. Nothing was
+     judged, so it is a question to re-ask, not a failure to fix. */
+  .yard-appr-state[data-state='gate-lost'] { color: var(--warn, #d9a441); }
   /* A HELD car: brake deliberately on. Not the ok-green of a gated
      green (which reads "ready — forgotten?"), not the warn of a running
      gate, not the err of a red: a boxed lamp on a dimmed row, with the

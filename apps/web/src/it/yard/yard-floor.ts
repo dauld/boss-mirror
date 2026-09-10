@@ -28,7 +28,7 @@
 import { formatDate } from '@boss/web-kit/ui/date';
 import type { ClusterMachine, RunnerMachine } from './yard-machines';
 export type { ClusterMachine, RunnerMachine } from './yard-machines';
-import { failedChecks, stampAt, troubleLabel, type CarRow, type TrainRow, type WithSteps, type YardState } from './yard';
+import { approach, failedChecks, stampAt, troubleLabel, type CarRow, type TrainRow, type WithSteps, type YardState } from './yard';
 import {
   blockLabel,
   clockText,
@@ -65,8 +65,7 @@ export type Signal = 'ok' | 'now' | 'err' | 'off';
 
 export type Wagon = Readonly<{
   /** The packet id — the car's wherever one is known (see the module
-   *  comment), else the gate-run / publish-request, else `garage:<branch>`
-   *  for a server-garaged branch no packet in the window names. Stable
+   *  comment), else the gate-run / publish-request the row names. Stable
    *  across polls, which is what makes a station change a slide. */
   id: string;
   /** The short name painted on the wagon, ≤ 11 chars, from the branch. */
@@ -499,6 +498,12 @@ function conductorMachine(c: ConductorHealth | null): ConductorMachine {
  *  machines say so. */
 export function scene(yard: YardState, status: YardStatus | null, nowMs: number, feeds: Feeds = NO_FEEDS): Scene {
   const carByBranch = new Map(yard.cars.map(c => [c.branch, c]));
+  // The approach lane: the publish dock's rows plus the server's verdict
+  // lanes (stranded / held / garage / limbo). Composed here because this
+  // is where both read models are held — and composed by ONE function,
+  // which is what keeps "is this gate-run spent?" a single answer rather
+  // than a client re-derivation that drifts (see `approach` in yard.ts).
+  const approachRows = approach(yard.publishing, status);
   // Every branch that can stand on the floor names its wagon once.
   const tags = uniqueTags([
     ...yard.cars.map(c => c.branch),
@@ -507,8 +512,9 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
     ...yard.arrivals.flatMap(t => t.cars.map(c => c.branch)),
     ...(status?.gates.active ?? []).map(g => g.branch),
     ...(status?.gates.queued ?? []).map(g => g.branch),
-    ...yard.approach.map(r => r.branch),
-    ...(status?.garage ?? []).map(g => g.branch),
+    // Every approach row — which now includes every garaged and
+    // gate-exit branch, since those lanes ARE the approach.
+    ...approachRows.map(r => r.branch),
   ]);
   const tagOf = (branch: string): string => tags.get(branch) ?? wagonTag(branch);
   const claimedIds = new Set<string>();
@@ -699,8 +705,7 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
   let garageSlot = 0;
   let publishing = 0;
   let held = 0;
-  let strandedRows = 0;
-  yard.approach.forEach(row => {
+  approachRows.forEach(row => {
     if (claimedBranches.has(row.branch)) return;
     const car = carByBranch.get(row.branch);
     const id = car && !claimedIds.has(car.id) ? car.id : row.id;
@@ -727,19 +732,21 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
           since: row.opened_on,
         });
         return;
+      case 'gate-lost':
+        // Never JUDGED — the runner died, or its receipt would not
+        // parse. The gate exit, not the garage: nothing is known about
+        // the branch, so it is neither rework nor fine.
+        place({
+          ...shared,
+          station: 'limbo',
+          slot: limboSlot++,
+          tone: 'warn',
+          lamp: 'warn',
+          status: 'gate lost — the environment died before a verdict; re-gate',
+          since: row.opened_on,
+        });
+        return;
       case 'gated-red': {
-        if (row.verdict === 'lost') {
-          place({
-            ...shared,
-            station: 'limbo',
-            slot: limboSlot++,
-            tone: 'warn',
-            lamp: 'warn',
-            status: 'gate lost — the environment died before a verdict; re-gate',
-            since: row.opened_on,
-          });
-          return;
-        }
         const g = garageByBranch.get(row.branch);
         place({
           ...shared,
@@ -753,7 +760,6 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
         return;
       }
       case 'gated-green':
-        strandedRows += 1;
         place({
           ...shared,
           station: 'approach',
@@ -778,28 +784,6 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
         return;
     }
   });
-  // A branch the server garages that the approach no longer lists (its
-  // verdict aged out of the window): still red, still in the garage.
-  for (const g of status?.garage ?? []) {
-    if (claimedBranches.has(g.branch)) continue;
-    place({
-      id: `garage:${g.branch}`,
-      tag: tagOf(g.branch),
-      title: g.branch,
-      branch: g.branch,
-      head: null,
-      kind: 'gate-run',
-      sim: false,
-      station: 'garage',
-      slot: garageSlot++,
-      trainId: null,
-      tone: 'red',
-      lamp: 'err',
-      status: `garaged · red gate (${g.failed_check ?? 'run died outside a check'}) — rework`,
-      since: g.since,
-    });
-  }
-
   // THE SIGNALS — lit by the lead locomotive, the one furthest along.
   const lead = locos.reduce<Loco | null>((best, l) => (best === null || l.stage > best.stage ? l : best), null);
   const signals: Signal[] = STAGES.map((_, i) => {
@@ -849,7 +833,10 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
   ];
 
   // THE MACHINES — each label a fact the read model states.
-  const stranded = status ? status.stranded.length : strandedRows;
+  // The lane's count, not the drawn one: a stranded branch whose wagon
+  // stands elsewhere (a car already claims it) is still stranded, and no
+  // status at all is no reading — the label then says nothing about it.
+  const stranded = status?.stranded.length ?? 0;
   const approachParts = [
     ...(stranded > 0 ? [`${stranded} stranded`] : []),
     ...(publishing > 0 ? [`${publishing} publishing`] : []),

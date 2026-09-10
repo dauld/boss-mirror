@@ -311,7 +311,7 @@ pub(crate) fn rerunnable(
 /// The matching core `find_car` and `boss job` share: a row matches by
 /// exact `metadata.branch`, or by an id prefix of at least 8
 /// characters. Pure and message-free so each verb can refuse in its
-/// own vocabulary — `find_car`'s "no open ship-a-change car" would be
+/// own vocabulary — `find_car`'s "no ship-a-change car" would be
 /// a lie coming from `boss job get`, which sees every kind.
 pub(crate) fn matching_jobs<'a>(rows: &'a [Value], given: &str) -> Vec<&'a Value> {
     rows.iter()
@@ -330,20 +330,45 @@ pub(crate) fn matching_jobs<'a>(rows: &'a [Value], given: &str) -> Vec<&'a Value
         .collect()
 }
 
-/// Find the one open car for `given` — a branch name, or an id prefix.
+/// Find the one car for `given` — a branch name, or an id prefix.
 ///
 /// Refuses on ambiguity rather than picking. `boss park` learned this
 /// the expensive way: it took the LAST match from a list the API
 /// returns newest-first, and quietly parked two cars against a stale
 /// receipt. Choosing among candidates is how that happens, so this
 /// does not choose.
+///
+/// A CLOSED car is not a candidate, and dropping it is not choosing —
+/// it cannot take a new proof at all. Measured live 2026-09-10 05:02
+/// UTC (backlog 0a58827d): `boss prove feat/arrival-runs-the-probe-rerail`
+/// refused with "2 open cars match" over one live car and one closed and
+/// abandoned ("gated, then changed"). There was one candidate, so the
+/// refusal was wrong to fire, and the word "open" sent the reader to
+/// investigate a dead car — two queries spent learning what the message
+/// had already asserted falsely. So the candidates are narrowed by
+/// `boss_jobs::car::is_open`, the one definition of "this car is live"
+/// that `boss park`, `boss rerail` and the auto-park handler already
+/// decide on (CLAUDE.md §9a).
+///
+/// The narrowing is a PREFERENCE, not a `status=open` read: when no
+/// match is open the closed ones stand, because `--recheck` re-runs a
+/// recorded proof on a car that has landed and closed. And the refusal
+/// names the state it is talking about, since after narrowing the
+/// candidates are either all open or all closed.
 pub(crate) fn find_car<'a>(cars: &'a [Value], given: &str) -> Result<&'a Value> {
-    let matches = matching_jobs(cars, given);
+    let all = matching_jobs(cars, given);
+    let open: Vec<&Value> = all
+        .iter()
+        .copied()
+        .filter(|c| boss_jobs::car::is_open(c))
+        .collect();
+    let live = !open.is_empty();
+    let matches = if live { open } else { all };
 
     match matches.len() {
         1 => Ok(matches[0]),
         0 => bail!(
-            "no open ship-a-change car for {given:?}. Give the car's branch exactly \
+            "no ship-a-change car for {given:?}. Give the car's branch exactly \
              as it was parked, or at least 8 characters of its id."
         ),
         n => {
@@ -355,7 +380,8 @@ pub(crate) fn find_car<'a>(cars: &'a [Value], given: &str) -> Result<&'a Value> 
                     c.get("title").and_then(Value::as_str).unwrap_or("?")
                 ));
             }
-            bail!("{n} open cars match {given:?} — say which:{listed}")
+            let state = if live { "open" } else { "closed" };
+            bail!("{n} {state} cars match {given:?} — say which:{listed}")
         }
     }
 }
@@ -367,9 +393,11 @@ pub(crate) fn find_car<'a>(cars: &'a [Value], given: &str) -> Result<&'a Value> 
 /// closed cars accumulate they fill that one page, so a legitimately
 /// open, unproven car sorting past row 200 vanishes from [`find_car`] —
 /// a false negative that grows with the pipeline's age. A `status=open`
-/// filter would not fix it: `--recheck` re-runs the proof on a CLOSED
-/// car, so the reader must read closed cars too and let `find_car`
-/// choose. Paging on `total` keeps every car reachable, open or closed.
+/// filter would not fix it — and is why this read is the one car lookup
+/// NOT built on `gate::all_open_cars`: `--recheck` re-runs the proof on
+/// a CLOSED car, so the reader must read closed cars too and let
+/// [`find_car`] prefer the open one among them. Paging on `total` keeps
+/// every car reachable, open or closed.
 async fn all_ship_a_change_cars(http: &reqwest::Client, base: &str) -> Result<Vec<Value>> {
     const PAGE: usize = 500;
     let mut cars: Vec<Value> = Vec::new();
@@ -1334,6 +1362,68 @@ mod tests {
         ];
         let e = find_car(&cars, "feat/x").unwrap_err().to_string();
         assert!(e.contains("2 open cars match"), "{e}");
+    }
+
+    /// A CLOSED car is not a candidate for a new proof, so it must not
+    /// widen the candidate set into an ambiguity. Measured live
+    /// 2026-09-10 05:02 UTC (backlog 0a58827d): `boss prove
+    /// feat/arrival-runs-the-probe-rerail` refused with "2 open cars
+    /// match" and listed a car that was closed and abandoned. The
+    /// refusal shape was right — it stops rather than guessing — but the
+    /// word "open" sent the reader to investigate a dead car. One open
+    /// car among the matches IS the answer.
+    #[test]
+    fn a_closed_twin_is_not_a_prove_candidate() {
+        let mut abandoned = car("22222222-bbb", "feat/x", "ready");
+        abandoned["status"] = json!("closed");
+        abandoned["metadata"]["skip_reason"] =
+            json!("gate receipt is for fb973bd0 but the branch boards 0ec4521f");
+        let cars = vec![car("11111111-aaa", "feat/x", "ready"), abandoned];
+        let found = find_car(&cars, "feat/x").expect("the one OPEN car is the candidate");
+        assert_eq!(
+            found.get("id").and_then(Value::as_str),
+            Some("11111111-aaa")
+        );
+    }
+
+    /// And the refusal is not regressed: two cars that are genuinely
+    /// open still refuse, and still name both so "say which" is
+    /// answerable.
+    #[test]
+    fn two_genuinely_open_cars_still_refuse_and_list_both() {
+        let cars = vec![
+            car("11111111-aaa", "feat/x", "ready"),
+            car("22222222-bbb", "feat/x", "ready"),
+        ];
+        let e = find_car(&cars, "feat/x").unwrap_err().to_string();
+        assert!(e.contains("2 open cars match"), "{e}");
+        assert!(e.contains("11111111") && e.contains("22222222"), "{e}");
+    }
+
+    /// `--recheck` re-runs a recorded proof on a CLOSED car, so closed
+    /// cars stay reachable when no open one matches — the filter is a
+    /// preference, not a `status=open` read.
+    #[test]
+    fn a_closed_car_is_still_reachable_when_no_open_one_matches() {
+        let mut closed = car("33333333-ccc", "feat/x", "completed");
+        closed["status"] = json!("closed");
+        let cars = vec![closed];
+        assert!(find_car(&cars, "feat/x").is_ok());
+    }
+
+    /// And when the ambiguity is among closed cars only, the refusal
+    /// must not call them open.
+    #[test]
+    fn an_ambiguity_among_closed_cars_is_not_called_open() {
+        let closed = |id: &str| {
+            let mut c = car(id, "feat/x", "completed");
+            c["status"] = json!("closed");
+            c
+        };
+        let cars = vec![closed("11111111-aaa"), closed("22222222-bbb")];
+        let e = find_car(&cars, "feat/x").unwrap_err().to_string();
+        assert!(e.contains("2 closed cars match"), "{e}");
+        assert!(!e.contains("open"), "{e}");
     }
 
     #[test]

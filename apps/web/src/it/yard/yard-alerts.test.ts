@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { ApproachRow, CarRow, TrainRow, YardState } from './yard';
+import type { CarRow, TrainRow, YardState } from './yard';
 import { scene, type Feeds } from './yard-floor';
 import type { YardStatus } from './yard-status';
 import { OPS_RUNNER_STUCK_MINUTES, yardAlerts } from './yard-alerts';
@@ -19,7 +19,7 @@ const yardOf = (over: Partial<YardState> = {}): YardState => ({
   cancelled: [],
   delivery: [],
   awaitingProof: [],
-  approach: [],
+  publishing: [],
   cars: [],
   packets: { trains: [], gateRuns: [] },
   ...over,
@@ -45,6 +45,7 @@ const statusOf = (over: Partial<YardStatus> = {}): YardStatus => ({
   held: [],
   gates: { capacity: 3, active: [], queued: [], typical_seconds: null },
   garage: [],
+  limbo: [],
   policy: { stall_hours: 2, max_red_trains: 2 },
   conductor: null,
   now: NOW_ISO,
@@ -82,15 +83,12 @@ const trainRow = (id: string, over: Partial<TrainRow> = {}): TrainRow => ({
   ...over,
 });
 
-const approachRow = (id: string, branch: string, state: ApproachRow['state']): ApproachRow => ({
-  id,
-  branch,
-  sha: null,
-  state,
-  opened_on: '2026-09-08',
-  note: null,
-  hold: null,
-  verdict: null,
+/** The server's verdict-lane rows the approach is drawn from. */
+const strandedGreen = (branch: string, packet_id: string, since = '2026-09-08') => ({
+  branch, packet_id, sha: null, since,
+});
+const garaged = (branch: string, failed_check: string | null, since: string, packet_id = `g-${branch}`) => ({
+  branch, failed_check, since, packet_id, sha: null,
 });
 
 const quiet: Feeds = {
@@ -184,11 +182,11 @@ describe('yardAlerts — what is wrong right now, each a button to its subject',
 
   test('each garaged car warns with the check that failed, selecting the garage', () => {
     const a = alertsOf(
-      yardOf({ cars: [car('c1', 'fix/red')], approach: [{ ...approachRow('g1', 'fix/red', 'gated-red'), verdict: 'failed' }] }),
+      yardOf({ cars: [car('c1', 'fix/red')] }),
       statusOf({
         garage: [
-          { branch: 'fix/red', failed_check: 'clippy, test', since: '2026-09-08T01:00:00Z' },
-          { branch: 'fix/old', failed_check: null, since: '2026-09-01' },
+          garaged('fix/red', 'clippy, test', '2026-09-08T01:00:00Z'),
+          garaged('fix/old', null, '2026-09-01'),
         ],
       }),
     );
@@ -199,11 +197,16 @@ describe('yardAlerts — what is wrong right now, each a button to its subject',
     expect(new Set(a.map(x => x.id)).size).toBe(2);
   });
 
-  test('a stranded green warns, selecting the approach; one the approach no longer lists still counts', () => {
+  test('every stranded green the server names warns, selecting the approach', () => {
+    // The approach siding IS `status.stranded` now — at any age — so a
+    // branch gated weeks ago warns beside one gated this morning, and
+    // the alert and the wagon cannot disagree about which exist.
     const a = alertsOf(
-      yardOf({ approach: [approachRow('s1', 'feat/stranded', 'gated-green')] }),
-      statusOf({ stranded: [{ branch: 'feat/stranded' }, { branch: 'feat/aged-out' }] }),
+      yardOf(),
+      statusOf({ stranded: [strandedGreen('feat/stranded', 's1'), strandedGreen('feat/aged-out', 's2')] }),
     );
+    // In the server's order (it sorts the lane by branch); same `since`,
+    // so nothing re-orders them here.
     expect(a.map(x => [x.subject, x.sev, x.text])).toEqual([
       ['approach', 'warn', 'stranded green: feat/stranded — gated, never parked; rebase + re-gate'],
       ['approach', 'warn', 'stranded green: feat/aged-out — gated, never parked; rebase + re-gate'],
@@ -235,12 +238,11 @@ describe('yardAlerts — what is wrong right now, each a button to its subject',
     const a = alertsOf(
       yardOf({
         inFlight: [trainRow('t1', { status: 'BOARDED', lamp: 'failing', trouble: { kind: 'ci-red' } })],
-        approach: [approachRow('s1', 'feat/stranded', 'gated-green')],
       }),
       statusOf({
-        stranded: [{ branch: 'feat/stranded' }],
+        stranded: [strandedGreen('feat/stranded', 's1')],
         gates: { capacity: 3, active: [{ branch: 'feat/slow', packet_id: 'g1', since: '2026-09-08T02:00:00Z', stale: true }], queued: [], typical_seconds: null },
-        garage: [{ branch: 'fix/red', failed_check: 'test', since: '2026-09-08T02:10:00Z' }],
+        garage: [garaged('fix/red', 'test', '2026-09-08T02:10:00Z')],
       }),
       { ...quiet, cluster: { kind: 'dark', since: '2026-09-08T02:30:00Z', error: 'fetch failed' } },
     );

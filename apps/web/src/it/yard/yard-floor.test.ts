@@ -31,7 +31,7 @@ const yardOf = (over: Partial<YardState> = {}): YardState => ({
   cancelled: [],
   delivery: [],
   awaitingProof: [],
-  approach: [],
+  publishing: [],
   cars: [],
   packets: { trains: [], gateRuns: [] },
   ...over,
@@ -57,6 +57,7 @@ const statusOf = (over: Partial<YardStatus> = {}): YardStatus => ({
   held: [],
   gates: { capacity: 3, active: [], queued: [], typical_seconds: null },
   garage: [],
+  limbo: [],
   policy: { stall_hours: 2, max_red_trains: 2 },
   conductor: null,
   now: NOW_ISO,
@@ -95,21 +96,33 @@ const trainRow = (id: string, status: TrainRow['status'], over: Partial<TrainRow
   ...over,
 });
 
-const approachRow = (
-  id: string,
-  branch: string,
-  state: ApproachRow['state'],
-  over: Partial<ApproachRow> = {},
-): ApproachRow => ({
+/** A publish-dock row — the one approach lane the client still supplies
+ *  (the station's queue, mapped 1:1). The verdict lanes come from the
+ *  status payload's `garage` / `limbo` / `stranded` / `held` below. */
+const publishRow = (id: string, branch: string, over: Partial<ApproachRow> = {}): ApproachRow => ({
   id,
   branch,
   sha: null,
-  state,
+  state: 'publishing',
   opened_on: '2026-09-07',
   note: null,
   hold: null,
   verdict: null,
   ...over,
+});
+
+const SINCE = '2026-09-07';
+const garaged = (branch: string, packet_id: string, failed_check: string | null = null) => ({
+  branch, failed_check, since: SINCE, packet_id, sha: null,
+});
+const unjudged = (branch: string, packet_id: string, verdict = 'lost') => ({
+  branch, verdict, since: SINCE, packet_id, sha: null,
+});
+const strandedGreen = (branch: string, packet_id: string) => ({
+  branch, packet_id, sha: null, since: SINCE,
+});
+const heldGreen = (branch: string, packet_id: string, reason: string) => ({
+  branch, reason, since: SINCE, packet_id, sha: null,
 });
 
 const gate = (branch: string, packet_id: string, stale = false) => ({
@@ -382,11 +395,8 @@ describe('the dock and the garage', () => {
 
   test('a red gate puts the car in the garage with the check that failed', () => {
     const s = scene(
-      yardOf({
-        cars: [car('c1', 'fix/red')],
-        approach: [approachRow('g1', 'fix/red', 'gated-red', { verdict: 'failed' })],
-      }),
-      statusOf({ garage: [{ branch: 'fix/red', failed_check: 'clippy, test', since: '2026-09-07' }] }),
+      yardOf({ cars: [car('c1', 'fix/red')] }),
+      statusOf({ garage: [garaged('fix/red', 'g1', 'clippy, test')] }),
       NOW,
     );
     const w = wagon(s, 'c1');
@@ -396,15 +406,17 @@ describe('the dock and the garage', () => {
     expect(w.status).toContain('clippy, test');
   });
 
-  test('a garaged branch the approach no longer lists still stands in the garage', () => {
-    // The approach drops closed verdicts after two days; the server's
-    // garage keeps the latest run per branch. The floor shows both.
+  test('a garaged branch with no car stands in the garage under its gate-run packet', () => {
+    // The garage lane has no age bound and needs no stand-in pass: the
+    // approach IS this lane now, so a branch whose last verdict is weeks
+    // old draws from the same row as a fresh one — under the packet id
+    // the lane names, which is a packet an operator can open.
     const s = scene(
       yardOf(),
-      statusOf({ garage: [{ branch: 'fix/old-red', failed_check: null, since: '2026-09-01' }] }),
+      statusOf({ garage: [garaged('fix/old-red', 'g-old')] }),
       NOW,
     );
-    const w = wagon(s, 'garage:fix/old-red');
+    const w = wagon(s, 'g-old');
     expect(w.station).toBe('garage');
     expect(w.status).toContain('run died outside a check');
     expect(s.machines.garage.count).toBe(1);
@@ -412,8 +424,8 @@ describe('the dock and the garage', () => {
 
   test('a lost verdict stands at the gate exit, not in the garage — the change was never judged', () => {
     const s = scene(
-      yardOf({ approach: [approachRow('g1', 'fix/lost', 'gated-red', { verdict: 'lost' })] }),
-      statusOf(),
+      yardOf(),
+      statusOf({ limbo: [unjudged('fix/lost', 'g1')] }),
       NOW,
     );
     const w = wagon(s, 'g1');
@@ -427,14 +439,11 @@ describe('the dock and the garage', () => {
 describe('the approach siding', () => {
   test('a stranded green, a held car and a publish request each stand on the approach and say which they are', () => {
     const s = scene(
-      yardOf({
-        approach: [
-          approachRow('p1', 'feat/pub', 'publishing', { note: 'emp-david' }),
-          approachRow('g1', 'feat/stranded', 'gated-green'),
-          approachRow('g2', 'feat/held', 'held', { hold: 'waiting on #240' }),
-        ],
+      yardOf({ publishing: [publishRow('p1', 'feat/pub', { note: 'emp-david' })] }),
+      statusOf({
+        stranded: [strandedGreen('feat/stranded', 'g1')],
+        held: [heldGreen('feat/held', 'g2', 'waiting on #240')],
       }),
-      statusOf({ stranded: [{ branch: 'feat/stranded' }] }),
       NOW,
     );
     expect(wagon(s, 'p1')).toMatchObject({ station: 'approach', tone: 'static', lamp: 'working' });
@@ -445,13 +454,31 @@ describe('the approach siding', () => {
     expect(wagon(s, 'g2').status).toBe('held — waiting on #240');
     // An operator's marker that opens with its own "held:" is not said twice.
     const twice = scene(
-      yardOf({ approach: [approachRow('g3', 'feat/h', 'held', { hold: 'held: rolls the dev pod' })] }),
-      statusOf(),
+      yardOf(),
+      statusOf({ held: [heldGreen('feat/h', 'g3', 'held: rolls the dev pod')] }),
       NOW,
     );
     expect(wagon(twice, 'g3').status).toBe('held — rolls the dev pod');
     expect(s.wagons.filter(w => w.station === 'approach').map(w => w.slot)).toEqual([0, 1, 2]);
     expect(s.machines.approach.label).toBe('1 stranded · 1 publishing · 1 held');
+  });
+
+  test('a green gate-run the server does not strand draws NO wagon, however fresh the packet', () => {
+    // THE PHANTOM CAR, 2026-09-10: a green stamped `rerailed_to` stood
+    // here as a gated-green wagon all day, because the floor's approach
+    // was derived from the page's own gate-run window with a weaker
+    // notion of "spent" than boss-jobs' (CLAUDE.md §9a). The floor now
+    // asks the server and nothing else — the packets ride along for the
+    // signals panel, and the empty lane is the empty siding.
+    const rerailed = {
+      id: 'f802558d', kind: 'gate-run', title: 'Gate: feat/x', status: 'closed',
+      opened_on: '2026-09-07',
+      metadata: { branch: 'feat/x', sha: 'a'.repeat(40), rerailed_to: 'feat/x-rerail' },
+      steps: [{ title: 'Record the receipt', status: 'completed', metadata: { verdict: 'green' } }],
+    };
+    const s = scene(yardOf({ packets: { trains: [], gateRuns: [rerailed] } }), statusOf(), NOW);
+    expect(s.wagons).toEqual([]);
+    expect(s.machines.approach.label).toBe('clear');
   });
 });
 
@@ -626,11 +653,7 @@ describe('the departure board', () => {
     const s = scene(
       yardOf({
         cars: [car('gc', 'feat/gating')],
-        approach: [
-          approachRow('p1', 'feat/pub', 'publishing'),
-          approachRow('l1', 'feat/lost', 'gated-red', { verdict: 'lost' }),
-          approachRow('r1', 'feat/red', 'gated-red', { verdict: 'failed' }),
-        ],
+        publishing: [publishRow('p1', 'feat/pub')],
         dock: [car('d1', 'feat/parked')],
         inFlight: [trainRow('t1', 'BOARDED', { cars: [car('a1', 'feat/aboard')] })],
         arrivals: [
@@ -643,7 +666,11 @@ describe('the departure board', () => {
           }),
         ],
       }),
-      statusOf({ gates: { capacity: 3, active: [gate('feat/gating', 'g1')], queued: [], typical_seconds: null } }),
+      statusOf({
+        gates: { capacity: 3, active: [gate('feat/gating', 'g1')], queued: [], typical_seconds: null },
+        limbo: [unjudged('feat/lost', 'l1')],
+        garage: [garaged('feat/red', 'r1')],
+      }),
       NOW,
     );
     expect(s.boardRows.map(r => [r.id, r.where])).toEqual([

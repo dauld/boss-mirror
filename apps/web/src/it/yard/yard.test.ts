@@ -1040,9 +1040,18 @@ describe('awaitingProof', () => {
 
 // ---------------------------------------------------------------------
 // The approach — the car lifecycle upstream of the dock (f930cda2).
+//
+// WHAT THIS SUITE IS FOR, AND WHAT IT NO LONGER ANSWERS. Which gate-runs
+// are spent, green, held or red is `/api/yard/status`'s answer, computed
+// in boss-jobs off one marker list (`stranded::SPENT_MARKERS`); the cases
+// that used to live here — a superseded red, a same-day green answering
+// it, which run is a branch's latest, the freshness window — are pinned
+// in `stranded.rs` and `yard.rs` instead. What is left for this lens is
+// the publish-dock rows, the mapping of the server's four lanes onto the
+// approach order, and the contract that a missing status is ADDITIVE.
 // ---------------------------------------------------------------------
 
-import { approach } from './yard';
+import { approach, publishRows, type ApproachLanes } from './yard';
 
 const NOW = Date.parse('2026-08-31T21:00:00Z');
 
@@ -1070,226 +1079,161 @@ const publishEnv = (jobs: readonly JobLite[]): StationQueueEnvelope => ({
   over_limit: false, total: jobs.length, data: jobs,
 });
 
-describe('approach', () => {
-  test('an open gate-run is the GATES view, not an approach row', () => {
-    // The gate mid-run lives in the server-computed slots the page
-    // renders beside the approach; drawing it here too was the
-    // redundancy David flagged (feedback 3771438f).
-    expect(approach([gateRun({})], null, [ship('fix/x')], NOW)).toEqual([]);
+/** The server's verdict lanes, as the status payload carries them. */
+const lanes = (over: Partial<ApproachLanes> = {}): ApproachLanes => ({
+  stranded: [],
+  held: [],
+  garage: [],
+  limbo: [],
+  ...over,
+});
+
+const publishRequest = (branch: string, over: Partial<JobLite> = {}): JobLite => ({
+  id: `p-${branch}`, kind: 'publish-request', title: `Publish ${branch}`, status: 'open',
+  opened_on: '2026-08-31', metadata: { branch, head_sha: 'b'.repeat(40), requested_by: 'pod' },
+  steps: [], ...over,
+});
+
+describe('the approach lane', () => {
+  test('open publish-requests ride in front, with the requester on the row', () => {
+    const rows = approach(publishRows(publishEnv([publishRequest('fix/y')])), lanes());
+    expect(rows.map(r => ({ state: r.state, note: r.note, verdict: r.verdict }))).toEqual([
+      { state: 'publishing', note: 'pod', verdict: null },
+    ]);
   });
 
-  test('a green gate with no car anywhere is the gap the dock cannot see', () => {
-    const rows = approach(
-      [gateRun({ status: 'closed', steps: [verdictStep('green')] })], null, [], NOW,
-    );
-    expect(rows.map(r => r.state)).toEqual(['gated-green']);
-  });
-
-  test('a green gate whose branch any car names has entered the yard — no row', () => {
-    const rows = approach(
-      [gateRun({ status: 'closed', steps: [verdictStep('green')] })],
-      null, [ship('fix/x')], NOW,
-    );
+  test('a closed publish-request is done asking — no row', () => {
+    const rows = approach(publishRows(publishEnv([publishRequest('fix/y', { status: 'closed' })])), lanes());
     expect(rows).toEqual([]);
   });
 
-  test('a red gate stays visible until a merged car buries it', () => {
-    const red = gateRun({ status: 'closed', steps: [verdictStep('failed')] });
-    expect(approach([red], null, [ship('fix/x')], NOW).map(r => r.state))
-      .toEqual(['gated-red']);
-    const merged = ship('fix/x', { status: 'closed', metadata: { branch: 'fix/x', outcome: 'merged' } });
-    expect(approach([red], null, [merged], NOW)).toEqual([]);
-  });
-
-  test('a lost verdict reads as red — no evidence must not read as fine', () => {
+  test('the four server lanes stand in order: publishing, red, gate exit, green, held', () => {
     const rows = approach(
-      [gateRun({ status: 'closed', steps: [verdictStep('lost')] })], null, [], NOW,
+      publishRows(publishEnv([publishRequest('fix/pub')])),
+      lanes({
+        garage: [{ branch: 'fix/red', failed_check: 'test', since: '2026-08-31', packet_id: 'g-red', sha: 'r'.repeat(40) }],
+        limbo: [{ branch: 'fix/lost', verdict: 'lost', since: '2026-08-31', packet_id: 'g-lost', sha: null }],
+        stranded: [{ branch: 'fix/green', packet_id: 'g-green', sha: null, since: '2026-08-31' }],
+        held: [{ branch: 'fix/held', reason: 'waiting for #240', since: '2026-08-31', packet_id: 'g-held', sha: null }],
+      }),
     );
-    expect(rows.map(r => r.state)).toEqual(['gated-red']);
-  });
-
-  test('a same-day green answers a red — the green gets the row (754b01b5)', () => {
-    // Same-day server order is NOT insertion order, so the red may sort
-    // above the very green that answered it; an alarm that stays on
-    // after the condition clears teaches the operator to ignore alarms
-    // (misread twice on 2026-08-31). The green claims the branch's row.
-    const red = gateRun({ id: 'g2', status: 'closed', steps: [verdictStep('failed')] });
-    const green = gateRun({ id: 'g1', status: 'closed', steps: [verdictStep('green')] });
-    expect(approach([red, green], null, [], NOW).map(r => ({ id: r.id, state: r.state })))
-      .toEqual([{ id: 'g1', state: 'gated-green' }]);
-    // ...and a merged car buries the whole branch, red included.
-    const merged = ship('fix/x', { status: 'closed', metadata: { branch: 'fix/x', outcome: 'merged' } });
-    expect(approach([red, green], null, [merged], NOW)).toEqual([]);
-  });
-
-  test('a red strictly newer by day than every green is a REGRESSION — stays red', () => {
-    const red = gateRun({
-      id: 'g2', status: 'closed', opened_on: '2026-08-31', steps: [verdictStep('failed')],
-    });
-    const green = gateRun({
-      id: 'g1', status: 'closed', opened_on: '2026-08-30', steps: [verdictStep('green')],
-    });
-    expect(approach([red, green], null, [], NOW).map(r => r.state))
-      .toEqual(['gated-red']);
-  });
-
-  test('an operator-annotated superseded red is folded from the view', () => {
-    // The git-only cases — branch deleted, change landed via another
-    // branch — arrive as an annotation; the record keeps the packet.
-    const red = gateRun({
-      status: 'closed',
-      metadata: { branch: 'fix/x', sha: 'a'.repeat(40), superseded: true },
-      steps: [verdictStep('failed')],
-    });
-    expect(approach([red], null, [], NOW)).toEqual([]);
-    // Explicit false is not an annotation.
-    const kept = gateRun({
-      status: 'closed',
-      metadata: { branch: 'fix/x', sha: 'a'.repeat(40), superseded: false },
-      steps: [verdictStep('failed')],
-    });
-    expect(approach([kept], null, [], NOW).map(r => r.state)).toEqual(['gated-red']);
-  });
-
-  // HELD cars. An operator holds a car by gating it without parking;
-  // until the hold marker existed that rendered as a stranded green —
-  // a car someone forgot — and the two must read differently: a hold
-  // is a brake deliberately on, a stranded green is a gap.
-  test('a green gate-run an operator HELD reads held, with its reason — not stranded', () => {
-    const held = gateRun({
-      status: 'closed',
-      metadata: { branch: 'fix/x', sha: 'a'.repeat(40), hold: 'waiting for #240 to land first' },
-      steps: [verdictStep('green')],
-    });
-    expect(approach([held], null, [], NOW).map(r => ({ state: r.state, hold: r.hold }))).toEqual([
-      { state: 'held', hold: 'waiting for #240 to land first' },
+    expect(rows.map(r => [r.branch, r.state])).toEqual([
+      ['fix/pub', 'publishing'],
+      ['fix/red', 'gated-red'],
+      ['fix/lost', 'gate-lost'],
+      ['fix/green', 'gated-green'],
+      ['fix/held', 'held'],
     ]);
   });
 
-  test('a green without a hold is unchanged — gated-green, hold null', () => {
+  test('a stranded green carries the packet, head and instant the server sent', () => {
+    // The lane row is complete enough to DRAW: the packet so the row
+    // opens, the head so the wagon is labelled, the instant so its age
+    // reads. Recovering these from a window of gate-run packets is what
+    // grew the second copy of "is this green spent?" in the first place.
     const rows = approach(
-      [gateRun({ status: 'closed', steps: [verdictStep('green')] })], null, [], NOW,
+      [],
+      lanes({
+        stranded: [{
+          branch: 'feat/x',
+          packet_id: 'f802558d-2ebd-4b91-b158-fc4a27ddf5a2',
+          sha: 'c'.repeat(40),
+          since: '2026-09-09T18:00:00Z',
+        }],
+      }),
     );
-    expect(rows.map(r => ({ state: r.state, hold: r.hold }))).toEqual([
-      { state: 'gated-green', hold: null },
-    ]);
-    // An empty, false or null marker is not a hold.
-    for (const hold of ['', false, null]) {
-      const r = approach(
-        [gateRun({
-          status: 'closed',
-          metadata: { branch: 'fix/x', hold },
-          steps: [verdictStep('green')],
-        })],
-        null, [], NOW,
-      );
-      expect(r.map(x => x.state)).toEqual(['gated-green']);
-    }
+    expect(rows).toEqual([{
+      id: 'f802558d-2ebd-4b91-b158-fc4a27ddf5a2',
+      branch: 'feat/x',
+      sha: 'c'.repeat(40),
+      state: 'gated-green',
+      opened_on: '2026-09-09T18:00:00Z',
+      note: null,
+      hold: null,
+      verdict: 'green',
+    }]);
   });
 
-  test('a bare `hold: true` is still a hold — with no reason recorded', () => {
-    const held = gateRun({
-      status: 'closed',
-      metadata: { branch: 'fix/x', hold: true },
-      steps: [verdictStep('green')],
-    });
-    const rows = approach([held], null, [], NOW);
-    expect(rows[0]?.state).toBe('held');
-    expect(rows[0]?.hold).toBe('no reason recorded');
-  });
-
-  test('a hold does not soften a red, and a superseded hold stays folded', () => {
-    // Red is work outstanding whatever the operator wrote; and dead
-    // (superseded) beats waiting (held) — the earlier `continue` wins.
-    const red = gateRun({
-      status: 'closed',
-      metadata: { branch: 'fix/x', hold: 'brake on' },
-      steps: [verdictStep('failed')],
-    });
-    expect(approach([red], null, [], NOW).map(r => r.state)).toEqual(['gated-red']);
-    const dead = gateRun({
-      status: 'closed',
-      metadata: { branch: 'fix/x', hold: 'brake on', superseded: true },
-      steps: [verdictStep('green')],
-    });
-    expect(approach([dead], null, [], NOW)).toEqual([]);
-  });
-
-  test("a held branch a car already claims is the yard's row, not the approach's", () => {
-    const held = gateRun({
-      status: 'closed',
-      metadata: { branch: 'fix/x', hold: 'brake on' },
-      steps: [verdictStep('green')],
-    });
-    expect(approach([held], null, [ship('fix/x')], NOW)).toEqual([]);
-  });
-
-  test('held rows sit behind the greens — furthest from the dock', () => {
-    const green = gateRun({
-      id: 'g-green', status: 'closed',
-      metadata: { branch: 'fix/g' }, steps: [verdictStep('green')],
-    });
-    const held = gateRun({
-      id: 'g-held', status: 'closed',
-      metadata: { branch: 'fix/h', hold: 'brake on' }, steps: [verdictStep('green')],
-    });
-    expect(approach([held, green], null, [], NOW).map(r => r.state)).toEqual([
-      'gated-green', 'held',
+  test('a held green reads held, with the operator\'s reason — not stranded', () => {
+    const rows = approach([], lanes({
+      held: [{ branch: 'fix/x', reason: 'lands at the next restart', since: '2026-08-31', packet_id: 'g-h', sha: null }],
+    }));
+    expect(rows.map(r => ({ state: r.state, hold: r.hold, verdict: r.verdict }))).toEqual([
+      { state: 'held', hold: 'lands at the next restart', verdict: 'green' },
     ]);
   });
 
-  test('a stale closed gate is archaeology, not approach', () => {
-    const old = gateRun({
-      status: 'closed', opened_on: '2026-08-27', steps: [verdictStep('green')],
-    });
-    expect(approach([old], null, [], NOW)).toEqual([]);
-    // An OPEN gate-run is live activity at any age — but it lives in the
-    // GATES slots, so it is never an approach row.
-    expect(approach([gateRun({ opened_on: '2026-08-27' })], null, [], NOW)).toEqual([]);
+  test('a garaged row is red with the judged verdict; a gate-exit row carries the unjudged one', () => {
+    // `lost` is NOT red: the environment died before anything was
+    // judged, and "we do not know" must read neither as rework nor as
+    // fine — the gate exit, not the garage.
+    const red = approach([], lanes({
+      garage: [{ branch: 'fix/r', failed_check: 'clippy', since: '2026-08-31', packet_id: 'g-r', sha: null }],
+    }));
+    expect(red.map(r => [r.state, r.verdict])).toEqual([['gated-red', 'failed']]);
+    const unreadable = approach([], lanes({
+      limbo: [{ branch: 'fix/u', verdict: 'unreadable', since: '2026-08-31', packet_id: 'g-u', sha: null }],
+    }));
+    expect(unreadable.map(r => [r.state, r.verdict])).toEqual([['gate-lost', 'unreadable']]);
   });
 
-  test('open publish-requests ride in front, with the requester on the row', () => {
-    const pr = gateRun({
-      id: 'p1', kind: 'publish-request', title: 'Publish fix/y',
-      metadata: { branch: 'fix/y', head_sha: 'b'.repeat(40), requested_by: 'pod' },
-    });
-    const rows = approach([], publishEnv([pr]), [], NOW);
-    expect(rows.map(r => ({ state: r.state, note: r.note }))).toEqual([
-      { state: 'publishing', note: 'pod' },
-    ]);
+  test('no status is ADDITIVE: the station rows still draw and the gate lanes read empty', () => {
+    // The status endpoint being down must never take the page with it.
+    const rows = approach(publishRows(publishEnv([publishRequest('fix/y')])), null);
+    expect(rows.map(r => r.state)).toEqual(['publishing']);
+    expect(approach([], null)).toEqual([]);
   });
 
-  test('rows group by distance from the dock: publishing, red, green (gating is the slots)', () => {
-    const rows = approach(
-      [
-        gateRun({ id: 'g1', metadata: { branch: 'fix/a' } }),
-        gateRun({ id: 'g2', status: 'closed', metadata: { branch: 'fix/b' }, steps: [verdictStep('green')] }),
-        gateRun({ id: 'g3', status: 'closed', metadata: { branch: 'fix/c' }, steps: [verdictStep('failed')] }),
-      ],
-      publishEnv([gateRun({ id: 'p1', kind: 'publish-request', metadata: { branch: 'fix/d' } })]),
-      [], NOW,
-    );
-    // fix/a is mid-gate — it is a GATES slot, not an approach row.
-    expect(rows.map(r => r.state)).toEqual(['publishing', 'gated-red', 'gated-green']);
+  test('a lane row with no packet id still draws — it just opens nothing', () => {
+    // An older server sends a lane without `packet_id`; the parser reads
+    // that as ''. A branch an operator can see beats a row suppressed.
+    const rows = approach([], lanes({
+      stranded: [{ branch: 'fix/x', packet_id: '', sha: null, since: '2026-08-31' }],
+    }));
+    expect(rows.map(r => ({ id: r.id, branch: r.branch }))).toEqual([{ id: '', branch: 'fix/x' }]);
   });
 
-  test('assembleYard without the new feeds still assembles, approach empty', () => {
+  test('assembleYard without the new feeds still assembles, publishing empty', () => {
     const y = assembleYard([], [], null, NOW, null);
-    expect(y.approach).toEqual([]);
+    expect(y.publishing).toEqual([]);
   });
 });
 
-describe('approach — a live gate suppresses its branch\'s stale verdict', () => {
-  test('a live re-gate hides a same-day closed green for its branch', () => {
-    // Server order within a day is not insertion order (measured
-    // 2026-08-31: two refused-launch packets sorted above the gates
-    // that ran). A closed green served FIRST must not draw a green
-    // approach row while the branch is being re-gated — the live gate
-    // is the GATES slot, and no stale verdict rides beneath it.
-    const closedGreen = gateRun({ id: 'g-old', status: 'closed', steps: [verdictStep('green')] });
-    const liveRegate = gateRun({ id: 'g-live' });
-    expect(approach([closedGreen, liveRegate], null, [], NOW)).toEqual([]);
-  });
+// ---------------------------------------------------------------------
+// THE PHANTOM CAR, 2026-09-10. feat/a-probe-declares-where-it-runs stood
+// on the approach as a gated-green wagon all day, on every browser,
+// session and device, while the server's /api/yard/status correctly
+// reported `stranded: []`. "Is this gate-run spent?" was answered in two
+// places: boss-jobs' `stranded::SPENT_MARKERS` (superseded, rerailed_to,
+// park_skipped), shared by four Rust readers, and this lens, which knew
+// only `superseded` — so a green stamped by `boss rerail` or by the
+// auto-park handler was ignored everywhere and drawn here anyway.
+// CLAUDE.md §9a. These pin the collapse: the page still HOLDS the
+// gate-run packets (the signals panel reads them), and the approach
+// draws nothing from them.
+// ---------------------------------------------------------------------
+
+describe('a spent gate-run is not on the approach', () => {
+  const spent = (marker: Record<string, unknown>): JobLite =>
+    gateRun({
+      status: 'closed',
+      metadata: { branch: 'fix/x', sha: 'a'.repeat(40), ...marker },
+      steps: [verdictStep('green')],
+    });
+
+  for (const [what, marker] of [
+    ['a re-railed green (`boss rerail --finish` stamped rerailed_to)', { rerailed_to: 'fix/x-rerail' }],
+    ['a park_skipped green (the auto-park handler looked and declined)', { park_skipped: 'already aboard a train' }],
+    ['a superseded green (the branch landed under another name)', { superseded: true }],
+  ] as const) {
+    test(`${what} draws no approach row`, () => {
+      const y = assembleYard([], [], null, NOW, null, [spent(marker)], null);
+      // The packet is still in the page's hands...
+      expect(y.packets.gateRuns).toHaveLength(1);
+      // ...and the approach asks the server, which strands none of them.
+      expect(approach(y.publishing, lanes())).toEqual([]);
+    });
+  }
 });
 
 // ---------------------------------------------------------------------
@@ -1520,17 +1464,3 @@ describe('the yard names every open car', () => {
   });
 });
 
-describe('an approach row carries its verdict as recorded', () => {
-  test('a lost run is red on the approach AND says lost, so the floor can send it to the gate exit, not the garage', () => {
-    const rows = approach([gateRun({ status: 'closed', steps: [verdictStep('lost')] })], null, [], NOW);
-    expect(rows.map(r => [r.state, r.verdict])).toEqual([['gated-red', 'lost']]);
-    const red = approach([gateRun({ status: 'closed', steps: [verdictStep('failed')] })], null, [], NOW);
-    expect(red[0]?.verdict).toBe('failed');
-  });
-
-  test('a publish row has no verdict yet', () => {
-    const rows = approach([], publishEnv([{ id: 'p1', kind: 'publish-request', title: 'x', status: 'open',
-      opened_on: '2026-08-31', metadata: { branch: 'fix/p' } }]), [], NOW);
-    expect(rows[0]?.verdict).toBeNull();
-  });
-});

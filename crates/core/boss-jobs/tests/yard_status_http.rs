@@ -690,10 +690,21 @@ async fn the_dock_recent_stranded_and_policy_all_read_from_the_record() {
     assert_eq!(recent[0]["outcome"], "arrived");
     assert_eq!(recent[0]["journey_seconds"], 1800);
 
-    // Stranded: the green gate-run whose branch is no car.
+    // Stranded: the green gate-run whose branch is no car. It names its
+    // PACKET as well as its branch — the approach lane draws a wagon per
+    // row and opens that packet, so recovering it client-side from a
+    // window of gate-runs is what grew a second copy of "is this green
+    // spent?" in the web lens (CLAUDE.md §9a, 2026-09-10).
     let stranded = body["stranded"].as_array().unwrap();
     assert_eq!(stranded.len(), 1);
     assert_eq!(stranded[0]["branch"], "feat/stranded");
+    assert!(
+        stranded[0]["packet_id"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "a stranded row names its gate-run packet: {}",
+        stranded[0]
+    );
 
     // Policy thresholds from the active row.
     assert_eq!(body["policy"]["stall_hours"], 6);
@@ -744,6 +755,16 @@ async fn the_gate_slots_and_garage_read_from_the_gate_runs() {
     assert_eq!(garage.len(), 1);
     assert_eq!(garage[0]["branch"], "feat/broken");
     assert_eq!(garage[0]["failed_check"], "test");
+    assert!(
+        garage[0]["packet_id"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "a garaged row names its gate-run packet: {}",
+        garage[0]
+    );
+    // The gate EXIT is its own lane, always present: nothing here was
+    // settled unjudged, so it is empty rather than absent.
+    assert_eq!(body["limbo"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]

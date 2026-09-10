@@ -117,13 +117,36 @@ export type RecentTrain = Readonly<{
   journey_seconds: number | null;
 }>;
 
-export type StrandedGreen = Readonly<{ branch: string }>;
+/** A green gate-run no car claims and nobody held — gated, then
+ *  forgotten. THE authoritative answer to "is this green still owed a
+ *  car?": the marker list that decides it (`superseded`, `rerailed_to`,
+ *  `park_skipped`) lives once, in boss-jobs' `stranded` module, and the
+ *  row arrives complete enough to draw — packet and head included — so
+ *  no lens has to re-derive it from a window of gate-runs. Doing that
+ *  is what drew a phantom wagon for a re-railed branch all day on
+ *  2026-09-10 (CLAUDE.md §9a). */
+export type StrandedGreen = Readonly<{
+  branch: string;
+  /** The gate-run packet behind the row. '' on a server that predates
+   *  the field — a row that cannot be opened, never a fabricated id. */
+  packet_id: string;
+  sha: string | null;
+  /** When the gate-run opened: an RFC3339 instant when the packet
+   *  carries one, else the bare date. */
+  since: string;
+}>;
 
 /** A green gate-run an operator HELD off the dock on purpose — the
  *  other half of the stranded predicate (the Rust `HeldGreen`). It
  *  carries its reason so the page can say "held — <why>" in a neutral
  *  colour: a brake deliberately on is not an alarm. */
-export type HeldGreen = Readonly<{ branch: string; reason: string; since: string }>;
+export type HeldGreen = Readonly<{
+  branch: string;
+  reason: string;
+  since: string;
+  packet_id: string;
+  sha: string | null;
+}>;
 
 /** One gate currently being assessed — an open gate-run with no verdict
  *  yet. The Approach draws these into its parallel gate SLOTS. */
@@ -182,6 +205,22 @@ export type GaragedCar = Readonly<{
   branch: string;
   failed_check: string | null;
   since: string;
+  packet_id: string;
+  sha: string | null;
+}>;
+
+/** A car whose most-recent gate-run was never JUDGED — `lost` (the
+ *  runner died before saying anything) or `unreadable` (the receipt
+ *  would not parse). The gate exit, not the garage: the change asked a
+ *  question and got no answer, which must read neither as rework nor as
+ *  fine. Mirrors the Rust `LimboCar`. */
+export type LimboCar = Readonly<{
+  branch: string;
+  /** `lost` / `unreadable`, as recorded. */
+  verdict: string;
+  since: string;
+  packet_id: string;
+  sha: string | null;
 }>;
 
 export type PolicyThresholds = Readonly<{
@@ -216,6 +255,8 @@ export type YardStatus = Readonly<{
   held: readonly HeldGreen[];
   gates: Gates;
   garage: readonly GaragedCar[];
+  /** The gate exit. Empty on a server that predates the reading. */
+  limbo: readonly LimboCar[];
   policy: PolicyThresholds;
   /** `null` on a server that predates the reading — rendered as "no
    *  reading", never as a healthy conductor. */
@@ -397,12 +438,43 @@ function parseGates(raw: unknown): Gates {
   };
 }
 
+/** The packet a lane row names, and the head it gated. Shared by every
+ *  lane because every lane row is one gate-run: '' for a packet id a
+ *  server did not send (the row then opens nothing, rather than opening
+ *  the wrong thing) and null for a head nobody recorded. */
+function parsePacket(o: Record<string, unknown>): { packet_id: string; sha: string | null } {
+  return {
+    packet_id: typeof o.packet_id === 'string' ? o.packet_id : '',
+    sha: typeof o.sha === 'string' && o.sha !== '' ? o.sha : null,
+  };
+}
+
 function parseGaragedCar(raw: unknown): GaragedCar {
   const o = asObject(raw, 'garaged car');
   return {
     branch: String(o.branch ?? ''),
     failed_check: typeof o.failed_check === 'string' ? o.failed_check : null,
     since: String(o.since ?? ''),
+    ...parsePacket(o),
+  };
+}
+
+function parseLimboCar(raw: unknown): LimboCar {
+  const o = asObject(raw, 'limbo car');
+  return {
+    branch: String(o.branch ?? ''),
+    verdict: typeof o.verdict === 'string' ? o.verdict : '',
+    since: String(o.since ?? ''),
+    ...parsePacket(o),
+  };
+}
+
+function parseStrandedGreen(raw: unknown): StrandedGreen {
+  const o = asObjectOrEmpty(raw);
+  return {
+    branch: String(o.branch ?? ''),
+    since: String(o.since ?? ''),
+    ...parsePacket(o),
   };
 }
 
@@ -428,6 +500,7 @@ function parseHeldGreen(raw: unknown): HeldGreen {
     branch: String(o.branch ?? ''),
     reason: typeof o.reason === 'string' && o.reason !== '' ? o.reason : 'no reason recorded',
     since: String(o.since ?? ''),
+    ...parsePacket(o),
   };
 }
 
@@ -438,12 +511,11 @@ export function parseYardStatus(raw: unknown): YardStatus {
     dock: Array.isArray(o.dock) ? o.dock.map(parseDockCar) : [],
     boarding: parseBoarding(o.boarding),
     recent: Array.isArray(o.recent) ? o.recent.map(parseRecent) : [],
-    stranded: Array.isArray(o.stranded)
-      ? o.stranded.map((s) => ({ branch: String(asObjectOrEmpty(s).branch ?? '') }))
-      : [],
+    stranded: Array.isArray(o.stranded) ? o.stranded.map(parseStrandedGreen) : [],
     held: Array.isArray(o.held) ? o.held.map(parseHeldGreen) : [],
     gates: parseGates(o.gates),
     garage: Array.isArray(o.garage) ? o.garage.map(parseGaragedCar) : [],
+    limbo: Array.isArray(o.limbo) ? o.limbo.map(parseLimboCar) : [],
     policy: parsePolicy(o.policy),
     conductor: parseConductor(o.conductor),
     now: String(o.now ?? ''),

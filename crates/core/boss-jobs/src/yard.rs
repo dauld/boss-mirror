@@ -1102,9 +1102,24 @@ pub fn policy_thresholds(policy: Option<&DeliveryPolicyRow>) -> PolicyThresholds
 /// derivation, not a second definition — this operates on `Job` structs
 /// where orient's operates on JSON, because the two live in different
 /// crates; the RULE is identical and pinned by a test each side).
+///
+/// Carries the PACKET, not just the branch: the web approach lane draws
+/// a wagon per row and needs the gate-run's id to open it and its head
+/// to label it. Those used to be recovered client-side by re-scanning a
+/// window of gate-runs — which is exactly how a second, poorer copy of
+/// "is this green spent?" grew in `apps/web/src/it/yard/yard.ts` and
+/// drew a phantom wagon for a re-railed branch all day on 2026-09-10.
+/// Served here, the lens has nothing left to judge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StrandedGreen {
     pub branch: String,
+    /// The gate-run packet this green belongs to.
+    pub packet_id: String,
+    /// The head it gated, from `metadata.sha`, when it named one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+    /// When the gate-run opened, as [`opened_since`] reads it.
+    pub since: String,
 }
 
 /// A green gate-run no car claims: gated green, never parked. Held or
@@ -1120,6 +1135,11 @@ pub struct HeldGreen {
     pub reason: String,
     /// When the gate-run opened, as [`opened_since`] reads it.
     pub since: String,
+    /// The gate-run packet, so a surface can open it. See [`StrandedGreen`].
+    pub packet_id: String,
+    /// The head it gated, from `metadata.sha`, when it named one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
 }
 
 /// A green gate-run that never became a car — the one classification
@@ -1161,18 +1181,30 @@ pub fn stranded_greens(
     gate_runs: &[(Job, Vec<Step>)],
     car_branches: &[String],
 ) -> Vec<StrandedGreen> {
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<StrandedGreen> = Vec::new();
     for (g, steps) in gate_runs {
-        if let Some(b) = gate_run_is_stranded(g, steps, car_branches)
-            && !out.contains(&b)
+        if let Some(branch) = gate_run_is_stranded(g, steps, car_branches)
+            && !out.iter().any(|s| s.branch == branch)
         {
-            out.push(b);
+            out.push(StrandedGreen {
+                branch,
+                packet_id: g.id.to_string(),
+                sha: sha_of(g),
+                since: opened_since(g),
+            });
         }
     }
-    out.sort();
-    out.into_iter()
-        .map(|branch| StrandedGreen { branch })
-        .collect()
+    out.sort_by(|a, b| a.branch.cmp(&b.branch));
+    out
+}
+
+/// The head a gate-run gated, from `metadata.sha`. Blank is no sha — a
+/// reaped or refused run carries the key with nothing in it, and a
+/// surface drawing an empty head is worse than one drawing none.
+fn sha_of(g: &Job) -> Option<String> {
+    meta_str(&g.metadata, "sha")
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
 }
 
 /// Every HELD green among `(gate_run, steps)` pairs — unparked greens
@@ -1189,6 +1221,8 @@ pub fn held_greens(gate_runs: &[(Job, Vec<Step>)], car_branches: &[String]) -> V
                 branch,
                 reason,
                 since: opened_since(g),
+                packet_id: g.id.to_string(),
+                sha: sha_of(g),
             });
         }
     }
@@ -1501,6 +1535,33 @@ pub struct GaragedCar {
     /// When the failing gate-run opened — the instant when stamped, else
     /// the date, as [`opened_since`] reads it.
     pub since: String,
+    /// The gate-run packet, so a surface can open it. See [`StrandedGreen`].
+    pub packet_id: String,
+    /// The head it gated, from `metadata.sha`, when it named one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+}
+
+/// A car whose latest gate-run was NEVER JUDGED — the gate exit. The
+/// reaper settles a dead runner as `lost` (no verdict was produced) and
+/// a receipt that will not parse as `unreadable`; neither says anything
+/// about the branch, which is why [`garage`] refuses to call them red.
+/// They are not nothing, though: the change asked a question and got no
+/// answer, so it is standing where an operator must re-gate it. Drawn on
+/// its own siding for exactly that reason — "we do not know" must read
+/// neither as rework nor as fine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LimboCar {
+    pub branch: String,
+    /// The verdict as recorded — `lost` or `unreadable`.
+    pub verdict: String,
+    /// When the gate-run opened, as [`opened_since`] reads it.
+    pub since: String,
+    /// The gate-run packet, so a surface can open it.
+    pub packet_id: String,
+    /// The head it gated, from `metadata.sha`, when it named one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
 }
 
 /// When a gate-run opened, as finely as the record knows it: the
@@ -1580,8 +1641,69 @@ pub fn gates(
 /// still-running retry is only kept as latest when it is the sole run.
 /// Sorted by branch for a stable render.
 pub fn garage(gate_runs: &[(Job, Vec<Step>)], settled_branches: &[String]) -> Vec<GaragedCar> {
+    let mut out: Vec<GaragedCar> = unsettled_latest(gate_runs, settled_branches)
+        .into_iter()
+        .filter_map(|(branch, g, steps)| {
+            let verdict = gate_run_verdict(steps)?;
+            // Only a JUDGED red is rework. Green is fixed; lost and
+            // unreadable were never judged (they are [`limbo`]); an
+            // in-flight run has no verdict and was filtered above.
+            (verdict == "failed").then(|| GaragedCar {
+                branch: branch.to_string(),
+                failed_check: failing_check(steps),
+                since: opened_since(g),
+                packet_id: g.id.to_string(),
+                sha: sha_of(g),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.branch.cmp(&b.branch));
+    out
+}
+
+/// The gate exit: cars whose most-recent gate-run was never judged —
+/// `lost` (the runner died, the reaper buried it) or `unreadable` (the
+/// receipt would not parse). The other half of [`garage`]'s partition
+/// over the same latest-run-per-branch grouping, so a branch can never
+/// be in both and no judged-or-not state falls between them.
+/// Sorted by branch for a stable render.
+pub fn limbo(gate_runs: &[(Job, Vec<Step>)], settled_branches: &[String]) -> Vec<LimboCar> {
+    let mut out: Vec<LimboCar> = unsettled_latest(gate_runs, settled_branches)
+        .into_iter()
+        .filter_map(|(branch, g, steps)| {
+            let verdict = gate_run_verdict(steps)?;
+            matches!(verdict, "lost" | "unreadable").then(|| LimboCar {
+                branch: branch.to_string(),
+                verdict: verdict.to_string(),
+                since: opened_since(g),
+                packet_id: g.id.to_string(),
+                sha: sha_of(g),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.branch.cmp(&b.branch));
+    out
+}
+
+/// The latest gate-run per branch, minus the branches whose car has
+/// settled — the one grouping [`garage`] and [`limbo`] both partition,
+/// so the two cannot disagree about which run is a branch's current
+/// state (CLAUDE.md §9a).
+///
+/// A branch whose car has SETTLED is not awaiting anything — the work
+/// finished, by landing or by being dropped. Its last gate-run under
+/// that name keeps its verdict forever, because a car fixed by
+/// re-railing onto a fresh branch, or squash-merged and deleted, never
+/// re-gates under the old name to clear it. Without this the garage
+/// accumulates ghosts: on 2026-09-04 all three entries were landed work
+/// (branches deleted from the forge, packets closed), which makes a
+/// rework queue nobody can trust. A branch with NO car at all is kept —
+/// a red never parks, so that is the ordinary case the garage exists for.
+fn unsettled_latest<'a>(
+    gate_runs: &'a [(Job, Vec<Step>)],
+    settled_branches: &[String],
+) -> Vec<(&'a str, &'a Job, &'a [Step])> {
     use std::collections::HashMap;
-    // branch -> the latest (job, steps) seen for it.
     // The instant a run opened: `metadata.opened_at` (RFC3339, stamped
     // by `boss gate`) when present, else the row's `opened_on` at
     // midnight. `opened_on` alone has DAY resolution, so two gates of
@@ -1602,6 +1724,9 @@ pub fn garage(gate_runs: &[(Job, Vec<Step>)], settled_branches: &[String]) -> Ve
         let Some(branch) = meta_str(&g.metadata, "branch").filter(|b| !b.is_empty()) else {
             continue;
         };
+        if settled_branches.iter().any(|b| b == branch) {
+            continue;
+        }
         match latest.get(branch) {
             Some((prev, _)) if opened_instant(prev) >= opened_instant(g) => {}
             _ => {
@@ -1609,35 +1734,10 @@ pub fn garage(gate_runs: &[(Job, Vec<Step>)], settled_branches: &[String]) -> Ve
             }
         }
     }
-    let mut out: Vec<GaragedCar> = latest
+    latest
         .into_iter()
-        .filter_map(|(branch, (g, steps))| {
-            // A branch whose car has SETTLED is not awaiting rework — the
-            // work finished, by landing or by being dropped. Its last
-            // gate-run under that name stays red forever, because a car
-            // fixed by re-railing onto a fresh branch, or squash-merged
-            // and deleted, never re-gates under the old name to clear it.
-            // Without this the garage accumulates ghosts: on 2026-09-04 all
-            // three entries were landed work (branches deleted from the
-            // forge, packets closed), which makes a rework queue nobody can
-            // trust. A red branch with NO car at all is kept — red never
-            // parks, so that is the ordinary case the garage exists for.
-            if settled_branches.iter().any(|b| b == branch) {
-                return None;
-            }
-            let verdict = gate_run_verdict(steps)?;
-            // Only a JUDGED red is rework. Green is fixed; lost and
-            // unreadable were never judged; an in-flight run has no
-            // verdict and was filtered above.
-            (verdict == "failed").then(|| GaragedCar {
-                branch: branch.to_string(),
-                failed_check: failing_check(steps),
-                since: opened_since(g),
-            })
-        })
-        .collect();
-    out.sort_by(|a, b| a.branch.cmp(&b.branch));
-    out
+        .map(|(branch, (g, steps))| (branch, g, steps))
+        .collect()
 }
 
 /// What the conductor is doing, in its own record — and, crucially,
@@ -1749,6 +1849,10 @@ pub struct YardStatus {
     pub gates: Gates,
     /// Cars whose latest gate-run is red — waiting for rework.
     pub garage: Vec<GaragedCar>,
+    /// Cars whose latest gate-run was never judged — the gate exit.
+    /// Absent on an older payload → empty.
+    #[serde(default)]
+    pub limbo: Vec<LimboCar>,
     /// The alarm thresholds the yard enforces, from the delivery policy.
     pub policy: PolicyThresholds,
 }
@@ -1850,6 +1954,7 @@ pub fn build_status(
         held: held_greens(gate_runs, car_branches),
         gates: gates(gate_runs, capacity, now),
         garage: garage(gate_runs, settled_car_branches),
+        limbo: limbo(gate_runs, settled_car_branches),
         policy: policy_thresholds(policy),
     }
 }
@@ -2911,15 +3016,49 @@ mod tests {
         )
     }
 
+    /// The branches a lane names, in its order — what these tests are
+    /// about. The packet fields each row also carries are pinned once,
+    /// by `a_stranded_green_carries_its_packet_and_head`.
+    fn stranded_branches(out: &[StrandedGreen]) -> Vec<&str> {
+        out.iter().map(|s| s.branch.as_str()).collect()
+    }
+
     #[test]
     fn a_green_gate_run_with_no_car_is_stranded() {
         let g = gate_run("feat/x", json!({}));
         let out = stranded_greens(&[(g, vec![green_step()])], &[]);
+        assert_eq!(stranded_branches(&out), vec!["feat/x"]);
+    }
+
+    /// A stranded row names its PACKET and its head, not only its
+    /// branch. The web approach lane draws a wagon per row and needs
+    /// both — and used to recover them by re-scanning a window of
+    /// gate-runs client-side, which is how a second, weaker copy of
+    /// "is this green spent?" grew there and drew a phantom wagon for a
+    /// re-railed branch all day on 2026-09-10 (CLAUDE.md §9a).
+    #[test]
+    fn a_stranded_green_carries_its_packet_and_head() {
+        let mut g = gate_run("feat/x", json!({}));
+        g.metadata["sha"] = json!("deadbeef");
+        g.metadata["opened_at"] = json!("2026-09-09T18:00:00Z");
+        let id = g.id.to_string();
+        let out = stranded_greens(&[(g, vec![green_step()])], &[]);
         assert_eq!(
             out,
             vec![StrandedGreen {
-                branch: "feat/x".into()
+                branch: "feat/x".into(),
+                packet_id: id,
+                sha: Some("deadbeef".into()),
+                since: "2026-09-09T18:00:00Z".into(),
             }]
+        );
+        // A blank sha is no sha — a drawn head must be a head that is
+        // on the record.
+        let mut blank = gate_run("feat/y", json!({}));
+        blank.metadata["sha"] = json!("");
+        assert_eq!(
+            stranded_greens(&[(blank, vec![green_step()])], &[])[0].sha,
+            None
         );
     }
 
@@ -2948,12 +3087,7 @@ mod tests {
             &[(held, vec![green_step()]), (free, vec![green_step()])],
             &[],
         );
-        assert_eq!(
-            out,
-            vec![StrandedGreen {
-                branch: "feat/free".into()
-            }]
-        );
+        assert_eq!(stranded_branches(&out), vec!["feat/free"]);
     }
 
     /// `boss rerail --finish` repoints a car at `<branch>-rerail` and
@@ -2967,12 +3101,7 @@ mod tests {
         let old = gate_run("fix/x", json!({ "rerailed_to": "fix/x-rerail" }));
         let new = gate_run("fix/x-rerail", json!({ "rerailed_from": "fix/x" }));
         let out = stranded_greens(&[(old, vec![green_step()]), (new, vec![green_step()])], &[]);
-        assert_eq!(
-            out,
-            vec![StrandedGreen {
-                branch: "fix/x-rerail".into()
-            }]
-        );
+        assert_eq!(stranded_branches(&out), vec!["fix/x-rerail"]);
         // An empty or null stamp is no stamp.
         for v in [json!(""), Value::Null] {
             let g = gate_run("fix/y", json!({ "rerailed_to": v }));
@@ -2993,12 +3122,7 @@ mod tests {
             &[(skipped, vec![green_step()]), (free, vec![green_step()])],
             &[],
         );
-        assert_eq!(
-            out,
-            vec![StrandedGreen {
-                branch: "fix/free".into()
-            }]
-        );
+        assert_eq!(stranded_branches(&out), vec!["fix/free"]);
     }
 
     /// The held list is the other half of the same predicate: a green
@@ -3028,18 +3152,16 @@ mod tests {
             &["feat/claimed".into()],
         );
         assert_eq!(
-            out,
+            out.iter()
+                .map(|h| (h.branch.as_str(), h.reason.as_str(), h.since.as_str()))
+                .collect::<Vec<_>>(),
             vec![
-                HeldGreen {
-                    branch: "feat/bare".into(),
-                    reason: "no reason recorded".into(),
-                    since: "2026-09-03".into(),
-                },
-                HeldGreen {
-                    branch: "feat/held".into(),
-                    reason: "lands at the next restart".into(),
-                    since: "2026-09-08T18:00:00Z".into(),
-                },
+                ("feat/bare", "no reason recorded", "2026-09-03"),
+                (
+                    "feat/held",
+                    "lands at the next restart",
+                    "2026-09-08T18:00:00Z"
+                ),
             ]
         );
     }
@@ -3586,6 +3708,62 @@ mod tests {
         );
     }
 
+    /// …and an unjudged run is not NOTHING either: it stands at the gate
+    /// exit, on its own siding, waiting to be re-gated. The web lens
+    /// drew this lane from its own gate-run window until 2026-09-10;
+    /// served here it is the same partition of the same grouping the
+    /// garage reads, so a branch can never be on both sidings.
+    #[test]
+    fn an_unjudged_run_stands_at_the_gate_exit() {
+        let mut g = gate_run_on("fix/lean-ci-builds", 4);
+        g.metadata["sha"] = json!("c0ffee");
+        let id = g.id.to_string();
+        let runs = vec![(g, vec![verdict_step("lost", json!([]))])];
+        assert_eq!(
+            limbo(&runs, &[]),
+            vec![LimboCar {
+                branch: "fix/lean-ci-builds".into(),
+                verdict: "lost".into(),
+                since: "2026-09-04".into(),
+                packet_id: id,
+                sha: Some("c0ffee".into()),
+            }]
+        );
+        // An unreadable receipt is the same kind of unknown.
+        let runs = vec![(
+            gate_run_on("fix/x", 4),
+            vec![verdict_step("unreadable", json!([]))],
+        )];
+        assert_eq!(limbo(&runs, &[])[0].verdict, "unreadable");
+        // A judged run is the garage's business, not limbo's; and a
+        // branch whose car settled has left the floor entirely.
+        let judged = vec![(
+            gate_run_on("fix/red", 4),
+            vec![verdict_step("failed", json!([]))],
+        )];
+        assert!(limbo(&judged, &[]).is_empty());
+        let settled = vec![(
+            gate_run_on("fix/gone", 4),
+            vec![verdict_step("lost", json!([]))],
+        )];
+        assert!(limbo(&settled, &["fix/gone".to_string()]).is_empty());
+    }
+
+    /// A branch being re-gated right now is in the SLOTS, not at the
+    /// gate exit: the in-flight run is its latest state and has no
+    /// verdict to read.
+    #[test]
+    fn a_branch_regating_after_a_lost_run_is_not_in_limbo() {
+        let runs = vec![
+            (
+                gate_run_on("fix/x", 4),
+                vec![verdict_step("lost", json!([]))],
+            ),
+            (gate_run_on("fix/x", 5), vec![in_flight_step()]),
+        ];
+        assert!(limbo(&runs, &[]).is_empty());
+    }
+
     #[test]
     fn a_branch_being_regated_right_now_is_a_slot_not_the_garage() {
         // Day 2 red, day 3 IN FLIGHT (no verdict). The latest run has no
@@ -3730,12 +3908,7 @@ mod tests {
         assert_eq!(status.recent[1].outcome, "cancelled");
 
         // The stranded green shows (its branch is not a car).
-        assert_eq!(
-            status.stranded,
-            vec![StrandedGreen {
-                branch: "feat/stranded".into()
-            }]
-        );
+        assert_eq!(stranded_branches(&status.stranded), vec!["feat/stranded"]);
 
         // The policy thresholds come from the registry row.
         assert_eq!(status.policy.stall_hours, Some(6));

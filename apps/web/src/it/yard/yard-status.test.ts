@@ -86,6 +86,10 @@ describe('parseYardStatus', () => {
         branch: 'fix/the-pod-installs-claude-with-a-retry',
         reason: 'rolls the dev pod — lands at a David-timed restart',
         since: '2026-09-08T18:00:00Z',
+        // This payload predates the packet fields the approach lane
+        // draws with: '' opens nothing, null draws no head.
+        packet_id: '',
+        sha: null,
       },
     ]);
     expect(s.gates.capacity).toBe(4);
@@ -113,7 +117,35 @@ describe('parseYardStatus', () => {
       held: [{ branch: 'fix/held', reason: '', since: '2026-09-08' }],
     });
     expect(s.stranded).toEqual([]);
-    expect(s.held).toEqual([{ branch: 'fix/held', reason: 'no reason recorded', since: '2026-09-08' }]);
+    expect(s.held).toEqual([
+      { branch: 'fix/held', reason: 'no reason recorded', since: '2026-09-08', packet_id: '', sha: null },
+    ]);
+  });
+
+  // Every lane row names the gate-run packet behind it and the head it
+  // gated, because the approach lane DRAWS these rows — a wagon with a
+  // packet to open and a head to label. Recovering them client-side from
+  // a window of gate-runs is what grew a second, weaker copy of "is this
+  // green spent?" and drew a phantom wagon for a re-railed branch all
+  // day on 2026-09-10 (CLAUDE.md §9a).
+  test('each lane row carries its packet and head; a server that sends neither degrades', () => {
+    const s = parseYardStatus({
+      stranded: [{ branch: 'feat/x', packet_id: 'f802558d', sha: 'abc123', since: '2026-09-09T18:00:00Z' }],
+      garage: [{ branch: 'fix/r', failed_check: 'test', since: '2026-09-09', packet_id: 'g-r', sha: 'def456' }],
+      limbo: [{ branch: 'fix/l', verdict: 'lost', since: '2026-09-09', packet_id: 'g-l', sha: '' }],
+    });
+    expect(s.stranded).toEqual([
+      { branch: 'feat/x', packet_id: 'f802558d', sha: 'abc123', since: '2026-09-09T18:00:00Z' },
+    ]);
+    expect(s.garage[0]!.packet_id).toBe('g-r');
+    expect(s.garage[0]!.sha).toBe('def456');
+    // A blank sha is no sha — never a head drawn from an empty string.
+    expect(s.limbo[0]).toEqual({
+      branch: 'fix/l', verdict: 'lost', since: '2026-09-09', packet_id: 'g-l', sha: null,
+    });
+    // An older server sends no limbo lane at all: an empty lane, never a
+    // throw, and never a fabricated row.
+    expect(parseYardStatus({ stranded: [] }).limbo).toEqual([]);
   });
 
   test('a garaged car with no named check keeps failed_check null', () => {

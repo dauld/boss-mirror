@@ -65,6 +65,9 @@ export type CarRow = Readonly<{
 // the definitions live exactly once (CLAUDE.md §9a) and yard consumers
 // need no change.
 import { isSim } from '@boss/web-kit/ui/packet-card';
+// The server-computed read model. The approach lane's verdict rows are
+// ITS lanes, not this lens's derivation — see [`approach`].
+import type { YardStatus } from './yard-status';
 export { isSim, PROTOCOL_PALETTE, protocolHue } from '@boss/web-kit/ui/packet-card';
 
 export type TrainStatus = 'BOARDING' | 'BOARDED' | 'DEPARTED' | 'CONVERGING' | 'ARRIVED';
@@ -219,12 +222,13 @@ export type YardState = Readonly<{
    *  to the dock to the train; a gating branch is matched to its car
    *  here, and only a branch with no car falls back to the gate packet. */
   cars: readonly CarRow[];
-  /** The car lifecycle upstream of the dock (f930cda2): publish-requests
-   *  waiting, gates in flight, fresh verdicts whose branch no car has
-   *  claimed. Empty when the approach is clear — or when the cluster
-   *  cannot serve the feeds, which must read the same way: additive,
-   *  never a reason the yard fails to render. */
-  approach: readonly ApproachRow[];
+  /** The publish dock's queue, mapped 1:1 — branches asking to reach a
+   *  gate. The upstream HALF of the approach that is not a gate verdict;
+   *  the verdict lanes come from `/api/yard/status` and the two are
+   *  composed by [`approach`], wherever both are held. Empty when the
+   *  cluster cannot serve the station queue: additive, never a reason
+   *  the yard fails to render. */
+  publishing: readonly ApproachRow[];
   /** The raw packets the signals panel reads its stamps from — every
    *  train in the window (open and closed, as served: newest first)
    *  and the gate-runs. Held as fetched; nothing here is derived. */
@@ -233,68 +237,48 @@ export type YardState = Readonly<{
 
 /** Where an inbound branch stands, ordered by distance from the dock.
  *  `held` is a gated-green car an operator is deliberately NOT parking
- *  (`metadata.hold` on the gate-run) — brake on, not forgotten. */
-export type ApproachState = 'publishing' | 'gated-red' | 'gated-green' | 'held';
+ *  — brake on, not forgotten. `gate-lost` is a run that died before any
+ *  verdict: the gate exit, not the garage, because "we do not know" must
+ *  read neither as rework nor as fine. */
+export type ApproachState = 'publishing' | 'gated-red' | 'gate-lost' | 'gated-green' | 'held';
 
 export type ApproachRow = Readonly<{
-  /** The packet behind the row — a publish-request or gate-run Job. */
+  /** The packet behind the row — a publish-request or gate-run Job.
+   *  '' when the server sent a lane row without one (an older backend):
+   *  the row still draws, it just opens nothing. */
   id: string;
   branch: string;
   /** The head the packet named, when it named one. */
   sha: string | null;
   state: ApproachState;
+  /** When the packet opened: the station row's date on a publish row,
+   *  and the lane's `since` — an RFC3339 instant when the gate-run
+   *  stamped one, else the date — on a gate row. */
   opened_on: string;
   /** Requester on publish rows; nothing yet on gate rows. */
   note: string | null;
   /** The operator's reason for the hold — non-null exactly when `state`
    *  is `held`; a stock phrase when the marker carried no reason. */
   hold: string | null;
-  /** The verdict as the gate recorded it (`green` / `failed` / `lost`),
-   *  null on a publish row. `lost` folds into `gated-red` for the
-   *  approach (no evidence must not read as fine) but is a different
-   *  place on the floor: the environment died, the change was never
-   *  judged — the gate exit, not the garage. */
+  /** The verdict as the gate recorded it (`green` / `failed` / `lost` /
+   *  `unreadable`), null on a publish row. */
   verdict: string | null;
 }>;
 
-/** A closed gate older than this is archaeology, not approach. An OPEN
- *  gate-run stays visible at any age — a live gate is live activity. */
-const APPROACH_FRESH_DAYS = 2;
+/** The verdict lanes of `/api/yard/status` — the only part of the status
+ *  payload the approach reads. Named as exactly what it needs so the
+ *  dependency is visible and a test can state four lanes instead of a
+ *  whole read model. A `YardStatus` satisfies it structurally. */
+export type ApproachLanes = Readonly<
+  Pick<YardStatus, 'stranded' | 'held' | 'garage' | 'limbo'>
+>;
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-/** The approach to the dock — everything inbound that the dock's own
- *  queue cannot see yet. Pure; the fetches live in fetchYard.
- *
- *  Latest-gate-per-branch trusts the server's newest-first order, the
- *  same authority contract the dock envelope already leans on: a
- *  client re-sort would need an instant the day-granular `opened_on`
- *  cannot give. */
-export function approach(
-  gateRuns: readonly JobLite[],
-  publishQueue: StationQueueEnvelope | null,
-  ships: readonly JobLite[],
-  nowMs: number = Date.now(),
-): readonly ApproachRow[] {
-  const branchOf = (j: JobLite): string =>
-    String((j.metadata as { branch?: unknown } | null)?.branch ?? '');
-  // A branch any car names has entered the yard proper (parked, riding,
-  // or landed) — green rows about it would double-report the dock. A
-  // MERGED car buries every verdict; a still-open car does not bury a
-  // red one, because that red is exactly the work outstanding.
-  const carClaimed = new Set(ships.map(branchOf).filter(Boolean));
-  const mergedCarClaimed = new Set(
-    ships
-      .filter(
-        j =>
-          j.status === 'closed' &&
-          (j.metadata as { outcome?: unknown } | null)?.outcome === 'merged',
-      )
-      .map(branchOf)
-      .filter(Boolean),
-  );
-
-  const publishing: ApproachRow[] = (publishQueue?.data ?? [])
+/** The publish dock's own rows: branches asking to be published to the
+ *  forge, which have not reached a gate yet. The station's queue IS the
+ *  answer here — membership from the registry predicate, order from the
+ *  declared discipline — so this maps 1:1 and judges nothing. */
+export function publishRows(publishQueue: StationQueueEnvelope | null): readonly ApproachRow[] {
+  return (publishQueue?.data ?? [])
     .filter(j => j.status === 'open')
     .map(j => {
       const md = (j.metadata ?? {}) as {
@@ -313,117 +297,58 @@ export function approach(
         verdict: null,
       };
     });
+}
 
-  const red: ApproachRow[] = [];
-  const green: ApproachRow[] = [];
-  // HELD: a green the operator gated and deliberately did not park —
-  // waiting on another change, or on a David-timed restart. Without
-  // the marker a hold is indistinguishable from a stranded green, and a
-  // brake that looks like a gap gets "rescued" onto a train.
-  const held: ApproachRow[] = [];
-  const holdOf = (g: JobLite): string | null => {
-    const v = (g.metadata as { hold?: unknown } | null)?.hold;
-    if (typeof v === 'string') return v.trim() !== '' ? v : null;
-    return v === true ? 'no reason recorded' : null;
-  };
-  // A live gate outranks every same-day verdict for its branch: server
-  // order within a day is NOT insertion order (measured 2026-08-31 —
-  // two refused-launch packets sorted above the gates that ran), and
-  // the verdict steps carry no instant to order by. An open packet is
-  // deterministic; among closed ones the lens shows *a* same-day
-  // verdict and `boss park` stays the enforcement layer.
-  const liveBranches = new Set(
-    gateRuns.filter(g => g.status === 'open').map(branchOf).filter(Boolean),
-  );
-  const verdictOf = (g: JobLite): string | undefined =>
-    (g.steps ?? [])
-      .map(s => (s.metadata as { verdict?: unknown } | null)?.verdict)
-      .find((v): v is string => typeof v === 'string');
-  // A red with a green answer is SUPERSEDED — the question it raised is
-  // closed, and an alarm that stays on after the condition clears
-  // teaches the operator to ignore alarms (David misread the yard twice
-  // on 2026-08-31 for exactly this). Two forms, view-folded only — the
-  // packet keeps the record:
-  //   - DERIVED: a closed green exists for the same branch dated the
-  //     same day or later. Day-granular `opened_on` cannot order
-  //     same-day runs (server order within a day is not insertion
-  //     order), so a same-day green is read as the answer — the gate +
-  //     park layer, not this lens, is what enforces a current receipt.
-  //     A red strictly NEWER by day than every green stays red: that is
-  //     a regression, not an answered question.
-  //   - ANNOTATED: `metadata.superseded` on the gate-run, for the
-  //     git-only facts (branch deleted; change landed via another
-  //     branch) an operator records because no API row shows them.
-  const latestGreenDay = new Map<string, string>();
-  for (const g of gateRuns) {
-    if (g.status === 'open' || verdictOf(g) !== 'green') continue;
-    const b = branchOf(g);
-    if (!b) continue;
-    const prev = latestGreenDay.get(b);
-    if (!prev || g.opened_on > prev) latestGreenDay.set(b, g.opened_on);
-  }
-  const annotatedSuperseded = (g: JobLite): boolean => {
-    const v = (g.metadata as { superseded?: unknown } | null)?.superseded;
-    return v != null && v !== false;
-  };
-  const seen = new Set<string>();
-  for (const g of gateRuns) {
-    const branch = branchOf(g);
-    if (!branch || seen.has(branch)) continue;
-    if (g.status !== 'open' && liveBranches.has(branch)) continue;
-    const md = (g.metadata ?? {}) as { sha?: string };
-    const verdict = verdictOf(g);
-    const row = {
-      id: g.id,
-      branch,
-      sha: md.sha ?? null,
-      opened_on: g.opened_on,
-      note: null,
-      hold: null,
-      verdict: verdict ?? null,
-    };
-    if (g.status === 'open') {
-      // A gate mid-run is the GATES view's row now (the server-computed
-      // slots), not one here — the redundancy David flagged. It still
-      // CLAIMS its branch, so a stale same-day verdict for that branch
-      // cannot draw a red/green row beneath the live gate.
-      seen.add(branch);
-      continue;
-    }
-    // A superseded run does NOT claim its branch's row: same-day server
-    // order is not insertion order, so the red may sort above the very
-    // green that answered it — the green (or nothing) must get the row.
-    if (annotatedSuperseded(g)) continue;
-    if (
-      (verdict === 'failed' || verdict === 'lost') &&
-      (latestGreenDay.get(branch) ?? '') >= g.opened_on
-    ) {
-      continue;
-    }
-    seen.add(branch);
-    if (nowMs - Date.parse(g.opened_on) > APPROACH_FRESH_DAYS * DAY_MS) continue;
-    if (mergedCarClaimed.has(branch)) continue;
-    // The verdict is data on whichever step recorded it, not a slug
-    // this lens hardcodes (CLAUDE.md §9: data-keyed, not kind-keyed).
-    if (verdict === 'green') {
-      // A branch a car claims is the yard's row already. Otherwise a
-      // hold reads HELD; only an unheld green is the stranded gap.
-      const hold = holdOf(g);
-      if (carClaimed.has(branch)) {
-        // in the yard proper — the dock or a train reports it
-      } else if (hold !== null) {
-        held.push({ ...row, state: 'held', hold });
-      } else {
-        green.push({ ...row, state: 'gated-green' });
-      }
-    } else if (verdict === 'failed' || verdict === 'lost') {
-      // `lost` reads as red on purpose: the environment died before
-      // saying anything, and "we don't know" must not read as fine.
-      red.push({ ...row, state: 'gated-red' });
-    }
-  }
+/** The approach to the dock — everything inbound that the dock's own
+ *  queue cannot see yet: the publish requests, then the server's verdict
+ *  lanes, ordered by distance from the dock.
+ *
+ *  THIS LENS JUDGES NOTHING. Which gate-runs are spent, green, held or
+ *  red is `/api/yard/status`'s answer — `garage`, `limbo`, `stranded`,
+ *  `held`, each computed in boss-jobs off the ONE marker list
+ *  (`stranded::SPENT_MARKERS`) that four Rust readers already share.
+ *  This function used to re-derive that partition from a window of
+ *  gate-run packets, with its own notion of "spent" that knew only
+ *  `superseded` — so a green stamped `rerailed_to` by `boss rerail`, or
+ *  `park_skipped` by the auto-park handler, was correctly ignored by
+ *  every Rust reader and drawn here as a stranded green anyway. On
+ *  2026-09-10 feat/a-probe-declares-where-it-runs stood on the approach
+ *  all day, on every browser, session and device, while the server
+ *  reported `stranded: []`. CLAUDE.md §9a: the fact lived twice, so it
+ *  drifted. It lives once now, and the only thing left here is ORDER.
+ *
+ *  ADDITIVE: no status (the endpoint is down, or has not answered yet)
+ *  means the gate lanes are unknown, not empty-and-fine — so the
+ *  approach shows what the station does say and the page still renders.
+ *  A lane an older server does not send reads as empty the same way. */
+export function approach(
+  publishing: readonly ApproachRow[],
+  status: ApproachLanes | null,
+): readonly ApproachRow[] {
+  const gateRow = (
+    lane: Readonly<{ branch: string; packet_id: string; sha: string | null; since: string }>,
+    state: ApproachState,
+    verdict: string | null,
+    hold: string | null = null,
+  ): ApproachRow => ({
+    id: lane.packet_id,
+    branch: lane.branch,
+    sha: lane.sha,
+    state,
+    opened_on: lane.since,
+    note: null,
+    hold,
+    verdict,
+  });
+  // The garage lane is `failed` by definition — boss-jobs keeps a branch
+  // there only on a verdict a check actually judged — and the limbo lane
+  // carries the unjudged verdict it was settled with.
+  const red = (status?.garage ?? []).map(g => gateRow(g, 'gated-red', 'failed'));
+  const lost = (status?.limbo ?? []).map(l => gateRow(l, 'gate-lost', l.verdict));
+  const green = (status?.stranded ?? []).map(s => gateRow(s, 'gated-green', 'green'));
   // Held last: a car with its brake on is the furthest from boarding.
-  return [...publishing, ...red, ...green, ...held];
+  const held = (status?.held ?? []).map(h => gateRow(h, 'held', 'green', h.reason));
+  return [...publishing, ...red, ...lost, ...green, ...held];
 }
 
 function step(j: WithSteps, slug: string, titleFallback: string): StepLite | null {
@@ -1111,7 +1036,7 @@ export function assembleYard(
       .map(c => toTrainRow(c.t, shipById, false, medians, nowMs)),
     delivery: deliveryStats(report),
     awaitingProof: awaitingProof(ships).map(carRow),
-    approach: approach(gateRuns, publishQueue, ships, nowMs),
+    publishing: publishRows(publishQueue),
     packets: { trains, gateRuns },
     cars: ships
       .filter(j => j.status === 'open')
@@ -1153,9 +1078,10 @@ export async function fetchYard(): Promise<YardState | null> {
     fetch('/api/workflows/ship-a-change/terminal-report')
       .then((r) => (r.ok ? (r.json() as Promise<TerminalReport>) : null))
       .catch(() => null),
-    // The approach feeds are additive the same way: 60 gate-runs is
-    // two days of heavy gating, and the freshness bound in approach()
-    // drops the tail anyway.
+    // The gate-run window, additive the same way. The approach lane no
+    // longer reads it — that is `/api/yard/status`'s four lanes — so
+    // these packets are held for the SIGNALS panel's stamps alone; 60 is
+    // two days of heavy gating, which is the window a signal reads over.
     fetch('/api/jobs?kind=gate-run&limit=60')
       .then((r) => (r.ok ? (r.json() as Promise<{ data?: JobLite[] }>) : null))
       .then((b) => b?.data ?? [])

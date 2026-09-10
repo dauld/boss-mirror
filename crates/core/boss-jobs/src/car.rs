@@ -341,7 +341,13 @@ pub fn regate_patch(receipt: &Receipt, note: &str, delivery_channel: Option<&str
 /// is usually redundant — and a fixture without one must still answer —
 /// but a list that also holds closed cars (the handler pages both) must
 /// not read a closed car as a live one.
-fn is_open(car: &Value) -> bool {
+///
+/// Public because `boss prove` asks it too: its read is deliberately
+/// `kind=ship-a-change` with NO status filter (`--recheck` re-runs a
+/// proof on a closed car), so it is the other caller holding a mixed
+/// list. One definition for "is this car live", not a fourth copy of
+/// `!= "closed"` (CLAUDE.md §9a).
+pub fn is_open(car: &Value) -> bool {
     car.get("status").and_then(Value::as_str) != Some("closed")
 }
 
