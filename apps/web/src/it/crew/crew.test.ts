@@ -354,16 +354,15 @@ describe('actorLane — the four lanes the board draws', () => {
   });
 
   it('reads the address-shaped agent id the live data actually uses', () => {
-    // MEASURED DISCREPANCY, 2026-09-11: `claude@algedonic.dev` holds 250
-    // step assignments and 5 completions on the system of record, but it
-    // carries no colon, so `isHumanActor` calls it a human — the Rust
-    // ActorId union has no address form. This board must not draw an
-    // agent's work as a person's, so the address shape is named here as
-    // the one documented exception to the delegation above. The fix
-    // belongs in actor.ts (shared by five other surfaces) or in the
-    // actor vocabulary itself, not in this page; it is reported, not
-    // papered over.
-    expect(isHumanActor('claude@algedonic.dev')).toBe(true); // the bug, pinned
+    // This board found the defect and pinned it rather than papering over
+    // it: `claude@algedonic.dev` held 250 step assignments and signed 5
+    // completions on the system of record, yet `isHumanActor` called it a
+    // human, because it carries no colon. The fix landed where the packet
+    // said it belonged — in `data/actor.ts`, the one definition shared by
+    // every surface asking this question (backlog a6b10413) — so the
+    // delegation above now covers the address form too and this
+    // assertion records the fix instead of the bug.
+    expect(isHumanActor('claude@algedonic.dev')).toBe(false);
     expect(actorLane('claude@algedonic.dev', false)).toBe('agent');
   });
 
