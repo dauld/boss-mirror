@@ -163,6 +163,13 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
     // be read: the dock is then UNREAD, which the payload says rather
     // than drawing an empty lane (see [`dock_cars`]).
     let dock_read = dock_cars(&state, scope.clone(), &user).await;
+    // Derived ONCE, because two consumers answer with it: the boarding
+    // block's depth, verdict and sentences, and `dock_source` beside the
+    // dock lane. They were two reads of this same `Option` — honest, but
+    // free to drift, and the two halves landed hours apart precisely
+    // because each lived in the file the other change held (backlog
+    // 2cb91534). One value cannot disagree with itself (CLAUDE.md §9a).
+    let dock_reading = yard::Reading::of(&dock_read);
 
     // The cadence rows and the delivery policy — read straight from the
     // repositories this process holds. A read failure degrades to
@@ -295,7 +302,7 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
             arrived_trains: &arrived_trains,
             now: Some(now),
         },
-        yard::Reading::of(&dock_read),
+        dock_reading,
         yard::BoardingReadings {
             cadence: cadence_reading,
             last_board: last_board_reading,
@@ -313,7 +320,7 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
     );
     Json(with_dock_source(
         with_conductor(with_now(status, now), health),
-        dock_read.is_some(),
+        dock_reading,
     ))
     .into_response()
 }
@@ -380,11 +387,20 @@ async fn dock_cars<R: JobsRepository + 'static, B: EventBus + 'static>(
 /// predicate was deleted (c0708d66). There is no third case: a dock read
 /// from the row is a reading, and anything else is an admission — never
 /// an empty lane that reads as a fact.
-fn with_dock_source(mut v: serde_json::Value, read: bool) -> serde_json::Value {
+///
+/// Takes the [`yard::Reading`] the boarding block is built from, not a
+/// `bool` of its own: this marker and that block are two renderings of
+/// one fact, and a `bool` here let the caller derive it twice (backlog
+/// 2cb91534). Matching exhaustively also makes a third `Reading` variant
+/// a compile error here rather than a silent `unavailable`.
+fn with_dock_source(mut v: serde_json::Value, reading: yard::Reading) -> serde_json::Value {
     if let Some(obj) = v.as_object_mut() {
         obj.insert(
             "dock_source".to_string(),
-            serde_json::json!(if read { "station" } else { "unavailable" }),
+            serde_json::json!(match reading {
+                yard::Reading::Read => "station",
+                yard::Reading::Unread => "unavailable",
+            }),
         );
     }
     v

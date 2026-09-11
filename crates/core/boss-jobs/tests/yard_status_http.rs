@@ -770,6 +770,62 @@ async fn an_unreadable_dock_row_says_unavailable_rather_than_empty() {
     assert!(body["trains"].is_array());
 }
 
+/// The payload's two halves must agree about the SAME read. `dock_source`
+/// states the dock's provenance (52fed017); the boarding block's
+/// `dock_depth`, `threshold_met` and three sentences are the consequence
+/// of it (efe6ef10). Both descend from the one `Option` [`dock_cars`]
+/// returns — and for the hours those two changes were in flight at once
+/// neither could reach the other's file, so the handler passed
+/// `Reading::Read` unconditionally and the payload said `dock_source:
+/// unavailable` beside `dock_depth: 0` and "below threshold": an
+/// admission and a count, about a single unread row (backlog 2cb91534).
+///
+/// Pinned HERE, at the handler, rather than on `build_status_for`: the
+/// seam itself was honest both times, and a unit test on it passes
+/// whichever reading the handler chooses to hand it. The fact lives once
+/// now — one `dock_reading` feeds the seam AND `dock_source` — and this
+/// is the test that says so from outside (CLAUDE.md §9a).
+#[tokio::test]
+async fn an_unreadable_dock_says_so_in_the_boarding_block_too() {
+    // The cadence IS readable — a 4-car depth rule, and a firing read
+    // that answers `None` — so the dock is the ONLY unread input and
+    // every admission below can only be about it.
+    let (app, jobs) = app_with_parts(
+        InMemoryCadence::new(vec![depth_rule()]),
+        vec![policy_row()],
+        None,
+    );
+    seed_dock_with_holds(&jobs).await;
+
+    let (_, body) = get(&app, "operator").await;
+    assert_eq!(body["dock_source"], "unavailable", "{body}");
+    let b = &body["boarding"];
+    // The rows that WERE read still answer, so nothing below is the
+    // cadence failing in the dock's name.
+    assert_eq!(b["dock_threshold"], 4, "{b}");
+    assert_eq!(b["cadence_reading"], "read", "{b}");
+    assert_eq!(b["last_board_reading"], "read", "{b}");
+    // The consequence of `dock_source: unavailable`: not a count, and not
+    // a verdict reached without one.
+    assert!(b["dock_depth"].is_null(), "a count nobody took: {b}");
+    assert!(b["threshold_met"].is_null(), "{b}");
+    // And every sentence carries the one admission phrase rather than a
+    // permissive answer a reader would act on.
+    for field in ["summary", "next_board", "held_because"] {
+        let s = b[field]
+            .as_str()
+            .unwrap_or_else(|| panic!("{field} is a sentence, not {}", b[field]));
+        assert!(s.contains(boss_jobs::yard::DEPTH_UNREAD), "{field}: {s}");
+        assert!(!s.contains("below threshold"), "{field}: {s}");
+        assert!(!s.contains("boards on the next tick"), "{field}: {s}");
+    }
+    // The invariant every other arm of this sentence holds: a depth rule
+    // has no clock, so a time of day here would be invented, and no
+    // colon is how that is pinned.
+    let next_board = b["next_board"].as_str().unwrap();
+    assert!(!next_board.contains(':'), "{next_board}");
+}
+
 /// A cadence repository whose READS FAIL — the shape the handler used to
 /// erase. `active_rules()` ran through `unwrap_or_default()` and
 /// `last_firing()` through `.ok().flatten()`, so a storage error arrived
