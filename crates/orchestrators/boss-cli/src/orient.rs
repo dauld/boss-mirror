@@ -47,10 +47,13 @@ fn at_step(v: &Value) -> String {
 
 /// Branches whose base has fallen behind `origin/main`. Each pair is
 /// (branch, exit code of `git merge-base --is-ancestor origin/main
-/// origin/<branch>`): 0 = main is an ancestor (fresh), 1 = not an
-/// ancestor (behind), anything else = a bad or missing ref, which we do
-/// NOT flag (a deleted branch is not a stale one). A parked car on a
-/// stale base merges clean and reverts the train
+/// origin/<branch>`), read through the ONE definition of that code
+/// (`freshness::base_from_is_ancestor_code`): 0 = main is an ancestor
+/// (fresh), 1 = not an ancestor (behind), anything else = a bad or
+/// missing ref, which we do NOT flag (a deleted branch is not a stale
+/// one). `boss gate` refuses a behind base on that same reading, and the
+/// two must not disagree about what "behind" means (§9a). A parked car
+/// on a stale base merges clean and reverts the train
 /// ([[a-clean-merge-is-not-a-correct-merge]]), so the conductor must
 /// re-gate it before boarding — L2 of the orientation protocol
 /// (acedf981): measure current reality before building or boarding.
@@ -176,7 +179,9 @@ fn abandoned_report(places: &[AbandonedPlace]) -> Vec<String> {
 fn bases_behind(checks: &[(String, Option<i32>)]) -> Vec<&str> {
     checks
         .iter()
-        .filter(|(_, code)| *code == Some(1))
+        .filter(|(_, code)| {
+            crate::freshness::base_from_is_ancestor_code(*code) == crate::freshness::Base::Behind
+        })
         .map(|(b, _)| b.as_str())
         .collect()
 }

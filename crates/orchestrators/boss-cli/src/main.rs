@@ -13,6 +13,7 @@ mod design;
 mod dock_preview;
 mod doctor;
 mod envelope;
+mod freshness;
 mod gate;
 mod git_auth;
 mod host_readiness;
@@ -283,6 +284,16 @@ enum Commands {
         /// --park-*.
         #[arg(long, value_name = "REASON")]
         force_regate: Option<String>,
+        /// Gate a branch whose base is BEHIND origin/main, stating why
+        /// (e.g. reproducing something that only happens on the old
+        /// tree). Refused by default: a gate judges the branch's tree
+        /// alone, so a green on a stale base vouches for a tree that
+        /// will never exist — train #244 went red that way with two
+        /// innocent cars aboard (2026-09-07). The reason is recorded on
+        /// the gate-run as `stale_base_anyway`. The ordinary fix is
+        /// `git rebase origin/main`, which the refusal prints.
+        #[arg(long, value_name = "REASON")]
+        stale_base_anyway: Option<String>,
         /// Gate and deliberately do NOT park: stamp `hold: <reason>` on
         /// the gate-run so its green reads HELD (in the yard, `boss
         /// orient` and the stranded-green alarm) rather than stranded.
@@ -1306,6 +1317,7 @@ async fn main() -> Result<()> {
             park_expect,
             park_proof_event,
             force_regate,
+            stale_base_anyway,
             hold,
         } => {
             let park = gate::ParkIntent {
@@ -1330,6 +1342,7 @@ async fn main() -> Result<()> {
                 dry_run,
                 park,
                 force_regate,
+                stale_base_anyway,
                 hold,
                 // Wall-clock at the CLI boundary, minted once: the queue's
                 // ordering key and its heartbeat are real elapsed time on

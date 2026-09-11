@@ -9071,6 +9071,9 @@ mod tests {
         // misconfiguration — failing a fixture that is entirely healthy.
         // A filesystem path addresses no host, so it cannot contradict
         // an adapter.
+        //
+        // shared-tmp-ok: an expectation string about a remote URL, not a
+        // path anything builds — nothing here touches the filesystem.
         assert_eq!(
             forge_mismatch("github", "/tmp/boss-preflight-102054-healthy/upstream.git"),
             None
@@ -11099,10 +11102,23 @@ mod tests {
         }
     }
 
-    /// A conductor whose config is literals and whose forge is the
+    /// The tree root the config fixtures name.
+    ///
+    /// `scratch_path` rather than a fixed `/tmp/boss-train-test`, and it
+    /// creates nothing — no test here touches the filesystem. The name
+    /// still carries the uid and the pid, because a fixed name under the
+    /// 1777 shared temp root is the shape that has bitten this repo
+    /// fourteen times, and the next test that DOES touch this path would
+    /// inherit the collision silently.
+    fn train_test_home() -> std::path::PathBuf {
+        boss_testing::scratch::scratch_path("boss-train-test")
+    }
+
+    /// A conductor whose config is fixtures and whose forge is the
     /// recorder — the cleanup touches neither the jobs API nor the
     /// tree, so nothing else needs to exist.
     fn cleanup_conductor(forge_kind: &str, forge: Box<dyn Forge>) -> Conductor {
+        let home = train_test_home();
         Conductor {
             cfg: Config {
                 jobs: "http://jobs.invalid".into(),
@@ -11110,9 +11126,9 @@ mod tests {
                 head_owner: "example".into(),
                 fork_url: "https://github.com/example/boss-fork.git".into(),
                 upstream_url: "https://github.com/example/boss.git".into(),
-                home: "/tmp/boss-train-test".into(),
-                clone: "/tmp/boss-train-test/repo".into(),
-                deploy_tree: "/tmp/boss-train-test/tree".into(),
+                home: home.display().to_string(),
+                clone: home.join("repo").display().to_string(),
+                deploy_tree: home.join("tree").display().to_string(),
                 forge_kind: forge_kind.into(),
                 auto_merge: false,
                 allow_local_jobs: true,
@@ -11332,8 +11348,10 @@ mod tests {
     fn a_real_deploy_tree_keeps_the_playground_deploy() {
         // The default the boss-gcp conductor runs under — unchanged.
         assert!(!playground_deploy_disabled("/opt/boss"));
-        // And the /tmp path the tree-backed deploy tests exercise.
-        assert!(!playground_deploy_disabled("/tmp/boss-train-test/tree"));
+        // And the scratch path the tree-backed deploy tests exercise.
+        assert!(!playground_deploy_disabled(
+            &train_test_home().join("tree").display().to_string()
+        ));
     }
 
     #[test]
@@ -11790,8 +11808,11 @@ mod tests {
     /// A bare fork, a bare origin, and a clone wired to both — the
     /// conductor's actual shape.
     fn clone_fixture(name: &str) -> (Scratch, std::path::PathBuf) {
-        let root = std::env::temp_dir().join(format!("boss-pcb-{name}"));
-        let _ = std::fs::remove_dir_all(&root);
+        // `scratch_dir`, not a fixed `/tmp/boss-pcb-<name>`: the root
+        // carries the uid and the pid. /tmp is 1777 and this pod runs the
+        // suite as root AND as the gate's uid 65534, so a fixed name
+        // belongs to whichever ran first and is unwritable for the other.
+        let root = boss_testing::scratch::scratch_dir(&format!("boss-pcb-{name}"));
         let guard = Scratch(root.clone());
         let clone = root.join("clone");
         for bare in ["fork.git", "origin.git"] {

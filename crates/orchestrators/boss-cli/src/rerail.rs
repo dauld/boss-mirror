@@ -476,6 +476,12 @@ pub async fn run(
         false,
         gate::ParkIntent::default(),
         None,
+        // No `--stale-base-anyway`: this branch was just cut FROM
+        // origin/main a few lines above, so its base is current by
+        // construction. If the base guard ever refuses here, something
+        // landed between the cut and the gate and re-railing onto the
+        // newer main is the right answer, not a forced gate.
+        None,
         None,
         now,
     )

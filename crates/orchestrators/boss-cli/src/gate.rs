@@ -1926,6 +1926,7 @@ pub async fn run(
     dry: bool,
     park: ParkIntent,
     force_regate: Option<String>,
+    stale_base_anyway: Option<String>,
     hold: Option<String>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
@@ -2032,6 +2033,31 @@ pub async fn run(
         return Ok(());
     }
 
+    // NOR IS A BASE THAT IS NOT CURRENT. Same admission law as the two
+    // guards above — decided before a packet is filed or a slot is taken —
+    // but placed AFTER the attach return, because it is about LAUNCHING a
+    // gate and not about following one: an operator running `boss gate
+    // <branch> --wait` to watch a run that is already going should not be
+    // refused for the base that run already has.
+    //
+    // A gate judges this branch's tree ALONE, so a green taken on a base
+    // main has moved past vouches for a tree that will never exist. That
+    // is how train #244 went red with two innocent cars aboard
+    // (2026-09-07), and what nearly landed again on 2026-09-11 (31a28f49)
+    // in the one window nothing covered: `boss orient`'s FRESHNESS reads
+    // PARKED and stranded branches, and a car that is gating and
+    // re-gating is neither.
+    //
+    // An unreadable base PROCEEDS with a note — "cannot answer" is not
+    // "stale", and this is the single door every car passes through, so a
+    // guard that failed closed on a forge blip would stop all delivery,
+    // which is worse than the defect it guards.
+    let base_obs = crate::freshness::observe(std::path::Path::new("."), branch);
+    match crate::freshness::stale_base_guard(branch, &base_obs, stale_base_anyway.as_deref()) {
+        crate::freshness::BaseGuard::Note(note) => println!("{note}"),
+        crate::freshness::BaseGuard::Refuse(why) => bail!("{why}"),
+    }
+
     // EVERY REFUSAL IS DECIDED HERE, BEFORE A PACKET EXISTS (fd217c65).
     // The bound, the queue cap, the legacy-workspace law and an
     // unfillable manifest all used to fire AFTER the packet was filed
@@ -2114,6 +2140,37 @@ pub async fn run(
             }
         }
     };
+
+    // THE BASE THIS GREEN WILL VOUCH FOR. A receipt that does not say
+    // which main it was taken against cannot be read later at all: the
+    // reader has the branch's head and nothing to compare it to, and
+    // "absent" is indistinguishable from "nobody checked". Stamped
+    // whether the base was current, behind-but-forced, or unreadable —
+    // `base_standing` is the one field that tells those three apart.
+    //
+    // A PATCH, for the same reasons the park intent uses one: it merges,
+    // and it works on a packet that was just filed or one that is being
+    // reused. BEST EFFORT, unlike the park intent: this is a record, not
+    // an instruction — nothing downstream acts on it — and the refusal
+    // above is the half that does the enforcing. Losing the record to a
+    // rolling SoR must not cost the gate.
+    if !dry
+        && let Err(e) = api(
+            &http,
+            reqwest::Method::PATCH,
+            &format!("/api/jobs/{packet}/metadata"),
+            Some(crate::freshness::base_metadata(
+                &base_obs,
+                stale_base_anyway.as_deref(),
+            )),
+        )
+        .await
+    {
+        eprintln!(
+            "boss gate: could not stamp the base onto the gate-run ({e:#}) — the gate \
+             runs anyway, but this receipt will not say which main it was taken against."
+        );
+    }
 
     // Stamp the park intent onto the gate-run so the auto-park handler
     // can file the car verbatim on green. A PATCH so it works whether the
