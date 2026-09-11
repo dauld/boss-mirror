@@ -34,6 +34,19 @@ Type=oneshot
 # The script stops at the floor and touches only regenerable caches, so
 # a higher number costs nothing when the disk is already above it.
 Environment=BOSS_DISK_FLOOR_GB=100
+# WHICH SYSTEM OF RECORD THE PRUNE ASKS. The routine pass collects a
+# per-train CI image whose `pr-train` packet is CLOSED, which it can only
+# know by reading the record; unset, it falls back to the age window that
+# could legally collect nothing at the current train rate (backlog
+# 9195a2a6). Pinned INLINE on the sibling ExecStartPre/ExecStopPost lines
+# below for the same reason it is pinned here — systemd does not inherit
+# a sibling's `env` — and stated once more as a [Service] Environment so
+# ExecStart itself has it. There is no default in the script: boss-gcp
+# runs a second, older, complete stack on 127.0.0.1:7900 and a read
+# against the wrong one answers "no trains" instead of erroring. An
+# unreachable or unset URL costs reclaim, never safety: the pass prunes
+# less, and the below-floor remediations owe the record nothing.
+Environment=BOSS_JOBS_URL=http://10.20.0.34:7900
 # Rootless docker, same as cluster-deploy-runner; the script defaults
 # DOCKER_HOST itself.
 User=david

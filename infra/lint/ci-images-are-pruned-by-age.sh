@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # ci-images-are-pruned-by-age — the forge's per-train CI images are
-# dropped on a CADENCE, not only when the disk hits its floor.
+# dropped on a CADENCE rather than only at the disk floor, and the
+# cadence collects by the FACT the system of record holds — the train
+# landed — with the age window as its fallback.
 #
 # WHY. Measured on the forge host's own journal (disk-floor-sweep.service,
 # Sep 03 -> Sep 09 2026): 145 hourly runs, 45 of them BELOW the floor, 26
@@ -33,11 +35,29 @@
 #      the floor early-return — and its window is strictly looser than
 #      the below-floor emergency window, so the two stay ordered:
 #      routine keeps more, the backstop deletes harder.
+#   D. THE RECORD BEFORE THE CLOCK, and its safety property (backlog
+#      9195a2a6). An age window is a proxy for "this image will not be
+#      needed again", and the proxy broke when the train rate rose from
+#      5-14 a day to ~60: measured 2026-09-11, all 13 images in the
+#      daemon were inside the six-hour window and the pass could legally
+#      collect NOTHING. So a tag whose train is DONE is collectable at
+#      any age, and the age window covers only what the record cannot
+#      vouch for. EVERY failure of that lookup must prune LESS: an
+#      unreachable system of record, a reply that does not parse, a reply
+#      that lists no trains (an unauthenticated read is handed an empty
+#      page, not an error) and an unset URL all yield an empty set, and
+#      an empty set is exactly the pass that shipped before.
+#      The behaviour of one landed image inside the window is pinned
+#      beside the full stub-driven suite in
+#      crates/core/boss-testing/tests/an_image_outlives_its_train_not_its_clock.rs,
+#      which RUNS disk-floor-sweep.sh; this lint is the build-free half
+#      that also runs in `infra/gate.sh --quick`.
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-lib="$here/../forge/prune-ci-images-by-age.lib.sh"
+lib="$here/../forge/prune-ci-images.lib.sh"
+resolver="$here/../forge/landed-train-shas.lib.sh"
 sweep="$here/../forge/disk-floor-sweep.sh"
-for f in "$lib" "$sweep"; do
+for f in "$lib" "$resolver" "$sweep"; do
     [ -f "$f" ] || { echo "ci-images-are-pruned-by-age: missing $f" >&2; exit 1; }
 done
 
@@ -107,14 +127,16 @@ add rust1.96 400 $((3 * GB))
 printf '%s %s\n' "$d0" "$d0" >>"$tmp/listing"
 
 # $1 = the root the stub daemon reports, $2 = the root the caller asks
-# for, $3 = a tag whose `rmi` docker refuses, $4 = 1 to make `info` fail.
+# for, $3 = a tag whose `rmi` docker refuses, $4 = 1 to make `info` fail,
+# $5 = the newline-separated landed-train key set (empty = the system of
+# record could not be read, which is the pass that shipped before).
 # Window 6h, keep the newest 1 — the same shape the sweep runs.
 run_pass() {
     ( set -euo pipefail
       export STUB_DIR="$tmp" STUB_ROOT="$1" STUB_RMI_FAIL="${3:-}" STUB_INFO_FAIL="${4:-0}"
-      # shellcheck source=infra/forge/prune-ci-images-by-age.lib.sh
+      # shellcheck source=infra/forge/prune-ci-images.lib.sh
       . "$lib"
-      prune_ci_images_by_age "$tmp/docker" "$2" "$REPO" 6 1 selftest ) \
+      prune_ci_images "$tmp/docker" "$2" "$REPO" 6 1 selftest "${5:-}" ) \
       >"$tmp/out" 2>&1
     echo $?
 }
@@ -162,13 +184,15 @@ grep -q "SKIPPED" "$tmp/out" || fail "an unreadable daemon is not reported loudl
 # ---------------------------------------------------------------------
 # C. the wiring in disk-floor-sweep.sh
 # ---------------------------------------------------------------------
-grep -q 'prune-ci-images-by-age.lib.sh' "$sweep" \
-    || fail "$sweep does not source the age-prune library — a second pruning mechanism is a drifting pair (CLAUDE.md 9a)"
+grep -q 'prune-ci-images.lib.sh' "$sweep" \
+    || fail "$sweep does not source the prune library — a second pruning mechanism is a drifting pair (CLAUDE.md 9a)"
+grep -q 'landed-train-shas.lib.sh' "$sweep" \
+    || fail "$sweep does not source the landed-train resolver, so the routine pass is back to the clock alone — which at ~60 trains a day can legally collect nothing (9195a2a6)"
 
 # Code lines only: both phrases also appear in the prose above them, and
 # a check that reads a comment as the mechanism is no check at all.
 code_line() { grep -n "$1" "$sweep" | grep -vE '^[0-9]+:[[:space:]]*#' | head -1 | cut -d: -f1; }
-prune_line=$(code_line 'prune_ci_images_by_age "')
+prune_line=$(code_line 'prune_ci_images "')
 floor_line=$(code_line 'nothing to do')
 if [ -z "$prune_line" ] || [ -z "$floor_line" ]; then
     fail "cannot locate the age pass and the floor early-return in $sweep"
@@ -184,6 +208,93 @@ elif [ "$routine" -le "$floor_age" ]; then
     fail "the routine window (${routine}h) is not looser than the below-floor window (${floor_age}h): the emergency pass must delete harder than the cadence, or the backstop is just the cadence again"
 fi
 
+# An SoR outage must not weaken the floor defence: everything below the
+# floor early-return owes the record nothing.
+floor_half="$(sed -n '/reclaiming regenerable docker caches/,$p' "$sweep")"
+for token in LANDED landed_train_shas BOSS_JOBS_URL; do
+    printf '%s' "$floor_half" | grep -q "$token" \
+        && fail "the below-floor remediations in $sweep reference \`$token\` — an arm that needs the system of record is not an arm when the record is what is down"
+done
+
+# ---------------------------------------------------------------------
+# D. the record before the clock, and the failure paths that prune LESS
+# ---------------------------------------------------------------------
+# The 3h image is INSIDE the window. Handed its train's key, the pass
+# collects it; handed nothing, it keeps it — which is the whole defect and
+# the whole safety property in one pair of runs.
+: >"$tmp/calls"
+rc=$(run_pass /var/lib/docker /var/lib/docker "$e0" 0 "$(printf '%s\n' "${f0:0:7}")")
+[ "$rc" = 0 ] || fail "a pass handed a landed-train key returned $rc"
+grep -qx "rmi $REPO:$f0" "$tmp/calls" \
+    || fail "the 3h image whose train has LANDED was not collected — the pass is still bounded by the clock (9195a2a6): $(cat "$tmp/out")"
+grep -q "landed=1" "$tmp/out" \
+    || fail "the summary does not count what the record collected: $(cat "$tmp/out")"
+grep -q "its train is done" "$tmp/out" \
+    || fail "the removal does not say WHY it was collectable — a record that says THAT and not WHAT is the defect class that cost a day"
+
+: >"$tmp/calls"
+rc=$(run_pass /var/lib/docker /var/lib/docker "$e0" 0 "")
+[ "$rc" = 0 ] || fail "a pass with no landed-train keys returned $rc"
+grep -qx "rmi $REPO:$f0" "$tmp/calls" \
+    && fail "an EMPTY landed set collected the 3h image anyway — a lookup that cannot answer must leave the pass exactly as it was, pruning less and never more"
+grep -q "removed=2" "$tmp/out" \
+    || fail "an empty landed set changed what the age window alone collects: $(cat "$tmp/out")"
+grep -q "NO landed-train shas were available" "$tmp/out" \
+    || fail "a pass that could not read the record does not say so — an operator cannot tell it from one that consulted the record"
+
+# The resolver itself: nothing on stdout unless it can answer, and never
+# a non-zero return. Visibility is best-effort; destruction is not.
+cat >"$tmp/curl" <<'CURLSTUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$STUB_DIR/curl-calls"
+cat "$STUB_DIR/reply.json"
+exit "${STUB_CURL_EXIT:-0}"
+CURLSTUB
+chmod +x "$tmp/curl"
+resolve() { # $1 = reply body, $2 = curl exit, $3 = jobs url (default set)
+    printf '%s' "$1" >"$tmp/reply.json"
+    ( set -uo pipefail
+      export STUB_DIR="$tmp" STUB_CURL_EXIT="${2:-0}"
+      # shellcheck source=infra/forge/landed-train-shas.lib.sh
+      . "$resolver"
+      landed_train_shas "$tmp/curl" "${3-http://10.20.0.34:7900}" 120 selftest ) \
+      >"$tmp/keys" 2>"$tmp/why"
+    echo $?
+}
+LANDED_REPLY='{"total":9,"data":[
+  {"status":"closed","steps":[{"metadata":{"train_ref":"train/20260911-1044@abc1234"}},
+                              {"metadata":{"merge_ref":"def5678abcd"}}]},
+  {"status":"open","steps":[{"metadata":{"train_ref":"train/20260911-1144@def5678"}}]}
+]}'
+: >"$tmp/curl-calls"
+rc=$(resolve "$LANDED_REPLY")
+[ "$rc" = 0 ] || fail "the resolver returned $rc on a good read — it must always return 0"
+grep -qx abc1234 "$tmp/keys" || fail "a closed train's train_ref sha is not collectable: $(cat "$tmp/keys") / $(cat "$tmp/why")"
+grep -qx def5678 "$tmp/keys" && fail "a sha an OPEN train still references was reported as landed — the open reference must veto the closed one"
+grep -q 'x-boss-user' "$tmp/curl-calls" || fail "the read is unsigned, and an unauthenticated read is handed an EMPTY page rather than an error — which would retire this mechanism silently"
+rc=$(resolve "$LANDED_REPLY" 7)
+[ "$rc" = 0 ] || fail "the resolver returned $rc when curl failed — an unreachable record must not fail the sweep that defends the disk"
+[ -s "$tmp/keys" ] && fail "the resolver invented keys from a failed read: $(cat "$tmp/keys")"
+grep -q 'AGE WINDOW' "$tmp/why" || fail "an unreadable record is silent about the fallback"
+rc=$(resolve '<html>502</html>')
+[ "$rc" = 0 ] || fail "the resolver returned $rc on a reply that is not JSON"
+[ -s "$tmp/keys" ] && fail "the resolver invented keys from a reply that is not JSON: $(cat "$tmp/keys")"
+grep -q 'AGE WINDOW' "$tmp/why" || fail "a reply that does not parse is silent about the fallback"
+# An EMPTY page is a FAILED read, not the fact that no train exists: an
+# out-of-scope or unauthenticated read is handed a smaller world (measured
+# total 0 where the signed read sees the row). The keys are empty either
+# way, so what this pins is that the pass SAYS it could not read —
+# otherwise the mechanism could retire itself and still look healthy.
+rc=$(resolve '{"total":0,"data":[]}')
+grep -q 'AGE WINDOW' "$tmp/why" \
+    || fail "the resolver read an EMPTY page as fact rather than as a failed read: $(cat "$tmp/why")"
+grep -q 'listed NO pr-train packets' "$tmp/why" \
+    || fail "an empty page does not name itself in the fallback reason, so nobody can tell a denied scope from a quiet pass"
+: >"$tmp/curl-calls"
+rc=$(resolve "$LANDED_REPLY" 0 "")
+[ -s "$tmp/keys" ] && fail "the resolver answered without being told which system of record to ask"
+[ -s "$tmp/curl-calls" ] && fail "the resolver read a guessed instance — two jobs APIs exist and the wrong one answers 'no trains' instead of erroring"
+
 # The label and the filter are ONE fact (CLAUDE.md 9a). The journal said
 # "older than 24h" for an `until=4h` filter for days — a record that
 # describes work nobody did.
@@ -192,8 +303,8 @@ grep -q 'sudo -n docker' "$sweep" || fail "$sweep does not name the system daemo
 
 if [ "$problems" -gt 0 ]; then
     echo "" >&2
-    echo "  $problems problem(s): the per-train CI images are not pruned by age." >&2
+    echo "  $problems problem(s): the per-train CI images are not collected when their train lands, or a failure path prunes more rather than less." >&2
     exit 1
 fi
-echo "ci-images-are-pruned-by-age: ok — the age pass runs every hour before the floor check, refuses the wrong daemon, reports its bytes, and one stuck image does not stop it"
+echo "ci-images-are-pruned-by-age: ok — the routine pass runs every hour before the floor check, collects a tag whose train is done at any age, falls back to the age window whenever the record cannot be read, refuses the wrong daemon, reports its bytes, and one stuck image does not stop it"
 exit 0
