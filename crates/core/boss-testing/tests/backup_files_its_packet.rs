@@ -19,10 +19,10 @@
 //! OPENS before the dump, CLOSES after both offsite legs, and — the
 //! property that matters most — does NOT close green when the dump or
 //! the upload fails. So the container scripts are lifted out of
-//! `boss-backup.yaml` exactly as they ship, their container mount paths
-//! rebased into a temp dir, and run under bash in the order Kubernetes
-//! runs them: initContainers in sequence, STOP at the first failure,
-//! then the main containers.
+//! `boss-backup.yaml` exactly as they ship, every absolute path they
+//! name rebased into a scratch dir this run owns outright, and run under
+//! bash in the order Kubernetes runs them: initContainers in sequence,
+//! STOP at the first failure, then the main containers.
 //!
 //! WHAT IS FAKED, AND WHY ONLY THAT. `pg_dump`, `ssh`, `gcloud` and
 //! `apk` come from the container images and cannot run here, so they
@@ -47,7 +47,8 @@
 //! shims record their argv, so this test reads the exact call the
 //! manifest makes.
 
-use std::path::PathBuf;
+use boss_testing::scratch;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const MANIFEST: &str = "infra/cluster/manifests/boss-backup.yaml";
@@ -235,10 +236,53 @@ impl PodRun {
     }
 }
 
-fn write_exec(path: &PathBuf, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, body).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+/// Every absolute path the container scripts name, and the scratch
+/// subdirectory it is rebased onto.
+///
+/// The container MOUNT paths are the obvious half. The other half is
+/// every fixed scratch file a script writes for ITSELF — `/tmp/k`,
+/// `/tmp/all` — and that half is the one that bites, because it appears
+/// nowhere in the manifest's `volumeMounts` and so nothing reminds an
+/// author to add it here. `/tmp/all` was missed for exactly that reason
+/// (backlog 6a71aa21). `assert_rebased` below is what makes the next one
+/// impossible to miss.
+const REBASE: &[(&str, &str)] = &[
+    ("/backup", "backup"),
+    ("/keys", "keys"),
+    ("/gcs", "gcs"),
+    ("/tmp/k", "k"),
+    ("/tmp/all", "all"),
+];
+
+/// No path in the SHARED temp dir may survive the rebase.
+///
+/// `/tmp` is `1777`, and this pod runs the suite as root AND as the
+/// gate's uid 65534 (since #310). A fixed path there is therefore
+/// created by whichever uid ran first and is unwritable by every later
+/// run under a different uid — so the failure appears only on the
+/// SECOND uid, looks like `Permission denied` inside a shell script five
+/// frames from the test, and reads to the builder who hits it as
+/// something their own change did. It cost three reds of this file's
+/// eight tests while the other five passed.
+///
+/// This is the ELEVENTH instance of the fixed-path-under-a-shared-/tmp
+/// class in this repo, so the check is on the rebase's OUTPUT rather
+/// than on the one path that prompted it: a twelfth path added to a
+/// container script fails here, by name, instead of silently.
+fn assert_rebased(name: &str, script: &str, dir: &Path) {
+    let own = dir.display().to_string();
+    for (at, _) in script.match_indices("/tmp") {
+        assert!(
+            script[at..].starts_with(&own),
+            "container `{name}` in {MANIFEST} names a path in the SHARED temp dir that REBASE \
+             does not redirect:\n    {}\nAdd it to REBASE (and to the scratch subdirectories \
+             run_pod creates, if it is a directory). /tmp is shared and sticky, so a fixed path \
+             there belongs to whichever uid ran this suite first and is unwritable for every \
+             later run under another uid — root and the gate's 65534 both run here, and the \
+             failure shows up only on the second one.",
+            script[at..].lines().next().unwrap_or_default().trim()
+        );
+    }
 }
 
 /// Run the manifest's containers the way Kubernetes would.
@@ -246,27 +290,28 @@ fn run_pod(tag: &str, fail: Fail) -> PodRun {
     let yaml = manifest();
     // No thread id in the path: `ThreadId(3)` puts parentheses in a
     // directory name the container scripts then have to quote. Each
-    // caller passes its own tag, which is what makes this unique.
-    let dir = std::env::temp_dir().join(format!("boss-backup-pod-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    // caller passes its own tag; `scratch_dir` adds the uid and the pid,
+    // which is what makes this unique across accounts as well as across
+    // live processes.
+    let dir = scratch::scratch_dir(&format!("boss-backup-pod-{tag}"));
     for sub in ["backup", "keys", "gcs", "bin"] {
-        std::fs::create_dir_all(dir.join(sub)).expect("scratch dirs");
+        scratch::create_dir(&dir.join(sub));
     }
     let seq = dir.join("sequence.log");
-    std::fs::write(&seq, "").expect("seed sequence log");
-    std::fs::write(dir.join("keys/id_ed25519"), "not-a-key\n").expect("fake ship key");
-    std::fs::write(dir.join("gcs/bucket"), "boss-offsite-test").expect("fake bucket name");
-    std::fs::write(dir.join("gcs/sa.json"), "{}\n").expect("fake sa key");
+    scratch::write_file(&seq, "");
+    scratch::write_file(&dir.join("keys/id_ed25519"), "not-a-key\n");
+    scratch::write_file(&dir.join("gcs/bucket"), "boss-offsite-test");
+    scratch::write_file(&dir.join("gcs/sa.json"), "{}\n");
 
     // ---- what the images provide and this host does not
     let bin = dir.join("bin");
     // The dump leg installs openssh-client with apk.
-    write_exec(&bin.join("apk"), "#!/usr/bin/env bash\nexit 0\n");
+    scratch::write_exec(&bin.join("apk"), "#!/usr/bin/env bash\nexit 0\n");
     // pg_dump writes a real dump; the `dump` failure mode stops
     // mid-stream and exits non-zero, which `set -e` does NOT catch on
     // the left of a pipe — the exact hole the manifest's `gzip -t` +
     // trailer check plugs.
-    write_exec(
+    scratch::write_exec(
         &bin.join("pg_dump"),
         "#!/usr/bin/env bash\n\
          echo \"exec:pg_dump\" >> \"$BOSS_TEST_SEQ\"\n\
@@ -276,7 +321,7 @@ fn run_pod(tag: &str, fail: Fail) -> PodRun {
          echo '-- PostgreSQL database dump complete'\n\
          exit 0\n",
     );
-    write_exec(
+    scratch::write_exec(
         &bin.join("ssh"),
         "#!/usr/bin/env bash\n\
          cat > /dev/null\n\
@@ -284,7 +329,7 @@ fn run_pod(tag: &str, fail: Fail) -> PodRun {
          if [ \"$BOSS_TEST_FAIL\" = \"ship\" ]; then exit 255; fi\n\
          exit 0\n",
     );
-    write_exec(
+    scratch::write_exec(
         &bin.join("gcloud"),
         "#!/usr/bin/env bash\n\
          case \"$1 ${2:-}\" in\n\
@@ -302,7 +347,7 @@ fn run_pod(tag: &str, fail: Fail) -> PodRun {
     // manifest makes. Both refuse without BOSS_JOBS_URL exactly as the
     // real ones do (exit 78, EX_CONFIG), so a manifest that forgets the
     // env fails here rather than at 09:10 UTC.
-    write_exec(
+    scratch::write_exec(
         &bin.join("boss-maintenance-wrap.sh"),
         "#!/usr/bin/env bash\n\
          echo \"open:$*\" >> \"$BOSS_TEST_SEQ\"\n\
@@ -310,7 +355,7 @@ fn run_pod(tag: &str, fail: Fail) -> PodRun {
          if [ \"$BOSS_TEST_FAIL\" = \"open\" ]; then echo 'HTTP 400' >&2; exit 22; fi\n\
          exit 0\n",
     );
-    write_exec(
+    scratch::write_exec(
         &bin.join("boss-step.sh"),
         "#!/usr/bin/env bash\n\
          echo \"close:$*\" >> \"$BOSS_TEST_SEQ\"\n\
@@ -328,17 +373,17 @@ fn run_pod(tag: &str, fail: Fail) -> PodRun {
             if aborted {
                 break;
             }
-            // The container mount paths, rebased into the scratch dir.
-            // /usr/local/bin is where the image puts the maintenance
-            // helpers; here it holds the recording shims.
-            let script = container_script(&yaml, name)
-                .replace("/usr/local/bin/", &format!("{}/", bin.display()))
-                .replace("/backup", &format!("{}/backup", dir.display()))
-                .replace("/keys", &format!("{}/keys", dir.display()))
-                .replace("/gcs", &format!("{}/gcs", dir.display()))
-                .replace("/tmp/k", &format!("{}/k", dir.display()));
+            // The container's absolute paths, rebased into the scratch
+            // dir. /usr/local/bin is where the image puts the
+            // maintenance helpers; here it holds the recording shims.
+            let script = REBASE.iter().fold(
+                container_script(&yaml, name)
+                    .replace("/usr/local/bin/", &format!("{}/", bin.display())),
+                |s, (from, to)| s.replace(from, &format!("{}/{to}", dir.display())),
+            );
+            assert_rebased(name, &script, &dir);
             let path = dir.join(format!("{name}.sh"));
-            std::fs::write(&path, &script).expect("write container script");
+            scratch::write_file(&path, &script);
             let out = Command::new("bash")
                 .arg(&path)
                 .current_dir(&dir)

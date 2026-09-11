@@ -144,26 +144,23 @@ for u in "${UNITS[@]}"; do
         > "${ETC}/${u}.service.d/jobs-url.conf"
 done
 
-# The ops-request runner is the same unit boss-gcp runs (infra/ops), so
-# it is installed from there — with THIS host's identity and checkout in
-# a drop-in, never in a second copy of the unit file. Until 2026-09-05
-# it answered packets on this host only because someone had installed
-# it by hand; a rebuild would have lost the read door (packet 4d5f158a,
-# infra/forge/OPERATIONS.md §Residue). The empty `ExecStart=` line
-# clears the unit's own command before the override, which is how a
-# drop-in replaces rather than appends an ExecStart.
-OPS_DIR="$(cd "${HERE}/../ops" && pwd)"
-REPO="$(cd "${HERE}/../.." && pwd)"
-for ext in service timer; do
-    install -m 0644 "${OPS_DIR}/boss-ops-runner.${ext}" "${ETC}/boss-ops-runner.${ext}"
-done
-mkdir -p "${ETC}/boss-ops-runner.service.d"
-printf '[Service]\nEnvironment=HOST_ID=forge\nExecStart=\nExecStart=/usr/bin/env BOSS_JOBS_URL=%s %s/infra/ops/ops-runner.sh\n' \
-    "$JOBS_URL" "$REPO" > "${ETC}/boss-ops-runner.service.d/forge.conf"
+# The ops-request runner is the same unit boss-gcp runs, installed the
+# same way: infra/ops/install-ops-runner.sh is the ONE definition of how
+# a host gets one — the unit pair byte-identical from infra/ops, plus a
+# drop-in carrying THIS host's identity and checkout and the system of
+# record pinned inline. Until 2026-09-05 this host answered packets only
+# because someone had installed it by hand; a rebuild would have lost
+# the read door (packet 4d5f158a, infra/forge/OPERATIONS.md §Residue).
+# The block that used to sit here was copied for boss-gcp on 2026-09-11
+# and collapsed into that script the same day rather than living twice
+# (CLAUDE.md §9a). It enables the timer itself, which is why the loop
+# below no longer appends it.
+INSTALL_ETC="$ETC" INSTALL_SYSTEMCTL="$SYSTEMCTL" \
+    bash "${HERE}/../ops/install-ops-runner.sh" forge
 installed=$((installed + 1))
 
 "$SYSTEMCTL" daemon-reload
-for u in "${UNITS[@]}" boss-ops-runner; do
+for u in "${UNITS[@]}"; do
     "$SYSTEMCTL" enable --now "${u}.timer"
     printf '  %-24s %s\n' "$u" "$("$SYSTEMCTL" is-active "${u}.timer")"
 done

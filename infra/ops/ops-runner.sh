@@ -24,6 +24,17 @@
 #   are validated against strict per-param patterns first (no
 #   whitespace, no leading '-'), which is also what makes the
 #   newline-split of jq's argv output below exact rather than hopeful.
+# - A VERB SERVES NAMED HOSTS, and a host serves only the verbs that
+#   name it: every allowlist entry declares `hosts` (estate node ids),
+#   and a verb whose `hosts` does not list this runner's HOST_ID is
+#   REFUSED — absent `hosts` included, so a new verb cannot reach a
+#   host by forgetting to say. Not a privilege boundary (every runner
+#   reads the same file) but a door that tells the truth about what it
+#   opens: 11 of the 16 verbs name a script under the FORGE's checkout,
+#   so when boss-gcp got a runner (2026-09-11) the unscoped allowlist
+#   would have advertised a vocabulary of which 11 could only fail on
+#   ENOENT. An exec failure is not a verdict; a refusal naming the
+#   verb, this host and the hosts that verb does serve is.
 # - Anything else — unknown verb, wrong arg shape, pattern miss —
 #   drives the packet to its `refused` terminal with the reason in
 #   `output` AND, named, in `reason` — the same text the journal line
@@ -165,13 +176,20 @@ while [ "$i" -lt "$n" ]; do
     # One jq pass over the ALLOWLIST decides: either a refusal reason
     # or a fully resolved argv. The packet's verb and args enter only
     # as --arg/--argjson values — data, never program text.
-    decision=$(jq -c --arg verb "$verb" --argjson args "$args" '
+    decision=$(jq -c --arg verb "$verb" --arg host "$HOST_ID" --argjson args "$args" '
         def refuse(msg): {refuse: msg};
         .verbs[$verb] as $spec
         | if $verb == "" then refuse("metadata.verb is missing")
           elif $spec == null then
             refuse("verb \($verb) is not in the allowlist (infra/ops/verbs.json); phase-1 verbs: "
                    + (.verbs | keys | join(", ")))
+          elif (($spec.hosts // []) | index($host)) == null then
+            refuse("verb \($verb) does not serve host \($host) — infra/ops/verbs.json scopes it to "
+                   + (if (($spec.hosts // []) | length) == 0
+                      then "no host (a verb that declares no `hosts` is refused everywhere)"
+                      else ($spec.hosts | join(", ")) end)
+                   + "; verbs this host serves: "
+                   + ([.verbs | to_entries[] | select((.value.hosts // []) | index($host)) | .key] | join(", ")))
           elif ($args | type) != "array" or any($args[]; type != "string") then
             refuse("metadata.args must be a JSON array of strings")
           elif ($args | length) > ($spec.params | length) then

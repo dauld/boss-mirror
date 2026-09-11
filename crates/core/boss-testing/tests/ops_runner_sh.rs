@@ -65,16 +65,24 @@ fn stub_sor(root: &Path) -> PathBuf {
     bin
 }
 
-/// One open ops-request for the forge, `execute` ready, carrying the
-/// given verb and args.
-fn packet(root: &Path, verb: &str, args: &str) {
+/// One open ops-request for the named host, `execute` ready, carrying
+/// the given verb and args. The runner acts only on an exact
+/// `metadata.host` match, so this is also what decides whether a run
+/// sees the packet at all.
+fn packet_for(root: &Path, host: &str, verb: &str, args: &str) {
     std::fs::write(
         root.join("jobs.json"),
         format!(
-            r#"{{"data":[{{"id":"aaaaaaaa-0000-4000-8000-000000000000","status":"open","metadata":{{"host":"forge","verb":"{verb}","args":{args}}},"steps":[{{"id":"s-execute","spec_slug":"execute","status":"ready","metadata":{{"authority_role":"platform-admin"}}}}]}}]}}"#
+            r#"{{"data":[{{"id":"aaaaaaaa-0000-4000-8000-000000000000","status":"open","metadata":{{"host":"{host}","verb":"{verb}","args":{args}}},"steps":[{{"id":"s-execute","spec_slug":"execute","status":"ready","metadata":{{"authority_role":"platform-admin"}}}}]}}]}}"#
         ),
     )
     .unwrap();
+}
+
+/// One open ops-request for the forge, `execute` ready, carrying the
+/// given verb and args.
+fn packet(root: &Path, verb: &str, args: &str) {
+    packet_for(root, "forge", verb, args);
 }
 
 /// Run the runner once against the stub. Returns (stdout+stderr, the
@@ -259,7 +267,7 @@ fn an_absent_optional_literal_drops_its_placeholder_word() {
     let verbs = root.join("verbs.json");
     std::fs::write(
         &verbs,
-        r#"{"verbs":{"say":{"about":"echo","argv":["echo","ran","{1}"],"params":[{"name":"mode","one_of":["--check"],"optional":true}]}}}"#,
+        r#"{"verbs":{"say":{"about":"echo","hosts":["forge"],"argv":["echo","ran","{1}"],"params":[{"name":"mode","one_of":["--check"],"optional":true}]}}}"#,
     )
     .unwrap();
 
@@ -276,4 +284,93 @@ fn an_absent_optional_literal_drops_its_placeholder_word() {
     let (out, payload) = run(&root, &verbs, &[]);
     let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
     assert_eq!(md["output"], "ran --check\n", "{md}");
+}
+
+/// A VERB SERVES NAMED HOSTS. boss-gcp got a runner on 2026-09-11, and
+/// 11 of the allowlist's 16 verbs name a script under the FORGE's
+/// checkout (`/home/david/boss/infra/forge/...`), which does not exist
+/// there. Unscoped, standing that runner up advertised a vocabulary of
+/// which 11 could only fail on ENOENT — and an exec failure is not a
+/// verdict (CLAUDE.md §Diagnosis). So a verb whose `hosts` does not
+/// list this runner's HOST_ID is REFUSED, and the refusal names the
+/// verb, this host, the hosts that verb does serve, and what this host
+/// can be asked for instead.
+#[test]
+fn a_verb_that_does_not_serve_this_host_is_refused_by_name() {
+    needs_jq!();
+    let root = scratch("host-not-served");
+    stub_sor(&root);
+    let verbs = real_verbs(&root);
+    packet_for(&root, "boss-gcp", "converge", "[]");
+    let (out, payload) = run(&root, &verbs, &[("HOST_ID", "boss-gcp".to_string())]);
+    let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
+    assert_eq!(md["disposition"], "refused", "{md} / {out}");
+    let reason = md["reason"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no reason on the step: {md}"));
+    assert!(
+        reason.contains("verb converge does not serve host boss-gcp"),
+        "the refusal must name the verb and this host: {reason}"
+    );
+    assert!(
+        reason.contains("scopes it to forge"),
+        "the refusal must name the hosts the verb DOES serve: {reason}"
+    );
+    assert!(
+        reason.contains("verbs this host serves: ") && reason.contains("df"),
+        "the refusal must say what this host can be asked for instead: {reason}"
+    );
+    assert_eq!(md["reason"], md["output"], "reason and output differ: {md}");
+    assert!(md.get("exit_code").is_none(), "a refusal ran nothing: {md}");
+    assert!(
+        out.contains(&format!("refused aaaaaaaa — {reason}")),
+        "the journal line must carry the same reason: {out}"
+    );
+}
+
+/// And the five read-only, host-agnostic reads DO serve boss-gcp: the
+/// bastion answers `df` through the same runner, with `runner_host`
+/// recording which host answered.
+#[test]
+fn a_read_only_verb_answers_on_boss_gcp() {
+    needs_jq!();
+    let root = scratch("host-served");
+    stub_sor(&root);
+    let verbs = real_verbs(&root);
+    packet_for(&root, "boss-gcp", "df", "[]");
+    let (out, payload) = run(&root, &verbs, &[("HOST_ID", "boss-gcp".to_string())]);
+    let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
+    assert_eq!(md["disposition"], "answered", "{md} / {out}");
+    assert_eq!(md["exit_code"], "0", "{md} / {out}");
+    assert_eq!(md["runner_host"], "boss-gcp", "{md}");
+    assert!(out.contains("answered df"), "{out}");
+}
+
+/// ABSENT MEANS REFUSE, so a verb cannot reach a host by forgetting to
+/// say which hosts it serves — the fail-closed half, without which the
+/// scoping would be advice rather than a rule.
+#[test]
+fn a_verb_declaring_no_hosts_is_refused_everywhere() {
+    needs_jq!();
+    let root = scratch("hosts-absent");
+    stub_sor(&root);
+    let verbs = root.join("verbs.json");
+    std::fs::write(
+        &verbs,
+        r#"{"verbs":{"say":{"about":"echo","argv":["echo","ran"],"params":[]}}}"#,
+    )
+    .unwrap();
+
+    packet(&root, "say", "[]");
+    let (out, payload) = run(&root, &verbs, &[]);
+    let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
+    assert_eq!(
+        md["disposition"], "refused",
+        "a verb with no hosts must be refused, not run: {md} / {out}"
+    );
+    let reason = md["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("no host") && reason.contains("refused everywhere"),
+        "the refusal must say the allowlist entry declares no hosts: {reason}"
+    );
 }

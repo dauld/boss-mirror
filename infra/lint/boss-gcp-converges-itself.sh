@@ -45,6 +45,12 @@
 #      had no read path for logs OR unit state, so a timer there could
 #      only be diagnosed by a human on the box, and the forge's door was
 #      hand-installed and therefore one rebuild from gone
+#   9. the converge installs this host's ops-request RUNNER — the third
+#      loop (act), after converge and observe — from the same one
+#      definition the forge installer uses, with this host's identity,
+#      this checkout, and the CLUSTER as its system of record. Never
+#      127.0.0.1, which here is the legacy second stack: a runner
+#      pointed there answers nothing and looks healthy (c3d06016)
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
@@ -218,6 +224,68 @@ grep -q 'journal read door' "$tmp/units-absent.out" \
          cat "$tmp/units-absent.out" >&2; exit 1; }
 
 # ---------------------------------------------------------------------
+# 9. THE THIRD LOOP: THE ops-request RUNNER, CONVERGED.
+#
+# Backlog c3d06016. BOSS runs three loops on a managed host — converge,
+# observe, and ACT. boss-gcp had the first two and not the third: the
+# ops-runner had never been installed here, so an ops-request filed
+# against `host: boss-gcp` sat at `ready` with nothing behind it and
+# every operational read on the WireGuard bastion went back through a
+# human. It rides this mode, from the same ONE definition the forge
+# installer uses (infra/ops/install-ops-runner.sh).
+#
+# THE FAILURE THIS SECTION EXISTS FOR is the invisible one. This mode
+# writes every TIMERS row a `jobs-url.conf` drop-in naming
+# `127.0.0.1:<jobs port>` — on THIS host the legacy second stack, not
+# the system of record. A runner pointed there finds no ops-request
+# packets, exits 0 every minute and looks healthy forever: a wrong
+# target answers instead of erroring (CLAUDE.md §Doors). So the
+# assertion that matters most below is the negative one.
+# ---------------------------------------------------------------------
+for ext in service timer; do
+    [ -f "$tmp/etc/boss-ops-runner.$ext" ] \
+        || units_fail "boss-ops-runner.$ext did not land — this host cannot answer an
+    ops-request, so every read on the bastion is a human with ssh again (c3d06016)"
+done
+cmp -s "$repo/infra/ops/boss-ops-runner.service" "$tmp/etc/boss-ops-runner.service" \
+    || units_fail "the installed ops unit differs from infra/ops/boss-ops-runner.service —
+    the unit file is ONE definition for every host; what differs is the drop-in"
+grep -q 'enable --now boss-ops-runner.timer' "$tmp/systemctl.log" \
+    || units_fail "boss-ops-runner.timer was not enabled:
+$(cat "$tmp/systemctl.log")"
+dropin="$tmp/etc/boss-ops-runner.service.d/boss-gcp.conf"
+[ -f "$dropin" ] || units_fail "the ops runner has no boss-gcp drop-in. The unit file carries
+    no HOST_ID, deliberately — a runner that guessed its host would answer another host's
+    packets — so with no drop-in it refuses on every tick."
+grep -qx 'Environment=HOST_ID=boss-gcp' "$dropin" \
+    || units_fail "the drop-in does not name this host: $(cat "$dropin")"
+grep -qx 'ExecStart=' "$dropin" \
+    || units_fail "the drop-in does not clear the unit's ExecStart before overriding it"
+grep -qx "ExecStart=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 $repo/infra/ops/ops-runner.sh" "$dropin" \
+    || units_fail "the drop-in does not run the runner from THIS checkout with the cluster
+    pinned inline by env(1): $(cat "$dropin")"
+# THE NEGATIVE. `127.0.0.1` anywhere in what configures this runner is
+# the legacy stack, and the failure it causes is silent.
+# Directive lines only: the unit's own comments explain this very trap
+# by naming the address.
+ops_conf=$(cat "$tmp/etc/boss-ops-runner.service" "$tmp/etc/boss-ops-runner.service.d/"*.conf 2>/dev/null \
+    | grep -vE '^[[:space:]]*[#;]')
+if printf '%s\n' "$ops_conf" | grep -n '127\.0\.0\.1'; then
+    units_fail "the ops runner is configured against 127.0.0.1 — boss-gcp's localhost jobs API
+    is the LEGACY second stack (91ddebfb), not the system of record. The runner would poll it,
+    find no ops-request packets, exit 0 every minute and look healthy forever."
+fi
+# AND IT IS NOT A TIMERS ROW, deliberately. A row would earn it that
+# 127.0.0.1 drop-in and would owe timers-leave-a-packet.sh a
+# maintenance-wrap packet pair — which this unit must not have: it
+# fires every minute, its product IS packets, and a packet per firing
+# would drown the board (infra/ops/ops-runner.sh's header).
+printf '%s\n' "$rows" | grep -q 'boss-ops-runner' \
+    && units_fail "boss-ops-runner is a TIMERS row. It must be installed from its own block:
+    as a row it would get the legacy 127.0.0.1 jobs-url drop-in and would owe a
+    maintenance-wrap packet pair it deliberately does not have."
+
+# ---------------------------------------------------------------------
 # 4. WHERE IT CONVERGES FROM. GitHub is the mirror, never the source
 #    (27ab7680). boss-gcp's /opt/boss carries BOTH remotes, so the loop
 #    has to choose, and choosing wrong converges the host on a mirror
@@ -369,5 +437,5 @@ printf '%s' "$out" | grep -q "LINE-ONE-OF-MANY" \
     || fail "only part of the installer's output survived — no tails (CLAUDE.md §Diagnosis)
 $out"
 
-echo "boss-gcp-converges-itself: ok — $installed timer pairs install from \`deploy-services.sh units\` (the converge's own among them, nothing restarted), the journal read door on :19531 comes up with it and cannot abort it, the loop converges from the forge and refuses the mirror, refuses a dirty tree, fast-forwards and drives the installer idempotently, and prints every line of a failed install"
+echo "boss-gcp-converges-itself: ok — $installed timer pairs install from \`deploy-services.sh units\` (the converge's own among them, nothing restarted), the journal read door on :19531 comes up with it and cannot abort it, the ops-request runner lands with HOST_ID=boss-gcp, this checkout and the CLUSTER as its system of record (never the legacy 127.0.0.1 stack) without being a TIMERS row, the loop converges from the forge and refuses the mirror, refuses a dirty tree, fast-forwards and drives the installer idempotently, and prints every line of a failed install"
 exit 0

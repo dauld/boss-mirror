@@ -27,6 +27,18 @@
 //! credential cannot list, and an object it cannot read, each with the
 //! server's own words. "Could not look" reduced to a count is the
 //! record thrown away before the reader sees it (CLAUDE.md §Diagnosis).
+//!
+//! THE LINT IS EXERCISED HERE TOO, out of the same fixture, because it is
+//! the consumer — and because the other half of 19aa75e0 was that it held
+//! a SECOND copy of these rules: its own $EXCLUDED_KINDS, $EXEMPT,
+//! $EXEMPT_ANY_NS, $is_exempt and its own sweep of the cluster. Two
+//! definitions of "what the tree does not declare" differ in exactly the
+//! places nobody compared (CLAUDE.md §9a), and at the far end of
+//! `delete-orphan-object` a divergence is a path to deleting a DECLARED
+//! object. So the lint's half of this file asserts a COLLAPSE rather than
+//! a second copy: make the two disagree, and the lint must follow the
+//! derivation instead of itself. A test that only checked the answers
+//! would pass just as well against two copies that happen to agree today.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -274,6 +286,14 @@ impl Case {
             kubectl,
             live,
         }
+    }
+
+    /// Put one more object into the fixture's cluster after construction.
+    fn add_live(&self, kind: &str, ns: &str, name: &str, owner: &str) {
+        let f = self.live.join(format!("{kind}.{ns}"));
+        let mut body = std::fs::read_to_string(&f).unwrap_or_default();
+        body.push_str(&format!("{name}\t{owner}\n"));
+        std::fs::write(&f, body).unwrap();
     }
 
     /// `(exit code, stdout, stdout+stderr)`. stdout is kept apart
@@ -528,82 +548,108 @@ fn check_still_says_not_live_for_an_object_that_is_absent() {
 // The consumer. Moving the silence one layer up is not a fix.
 // ---------------------------------------------------------------------------
 
-/// `infra/lint/a-deleted-manifest-leaves-no-object.sh` is the other
-/// reader of this question, and the one a human reads. Before this car
-/// it derived its own declared set and sent the parse's stderr to
-/// /dev/null, so the fixture above made it print:
-///
-///     1 live object(s) in the managed namespaces that no manifest declares:
-///         Service/svc-a (ns boss)
-///
-/// — a DECLARED object named as an orphan, under advice to `kubectl
-/// delete` it, with no mention anywhere that a manifest would not parse.
-/// Exit 1, the same code a genuine orphan produces.
-///
-/// The lint is run out of a COPY of the tree, because it reads the
-/// manifests beside itself; the scripts it runs are the repository's
-/// own, so the refusal under test is the real one.
-#[test]
-fn the_consuming_lint_refuses_rather_than_calling_a_declared_object_an_orphan() {
-    let c = Case::new("lint", &[]);
-    // The two exemptions the lint expects to find live; absent, it
-    // reports them stale and the run fails for an unrelated reason.
-    for (kind, ns, name) in [
-        ("ConfigMap", "boss", "step-plugins"),
-        ("ConfigMap", "boss-dev", "gate-runner-script"),
-    ] {
-        let f = c.live.join(format!("{kind}.{ns}"));
-        let mut body = std::fs::read_to_string(&f).unwrap_or_default();
-        body.push_str(&format!("{name}\t\n"));
-        std::fs::write(&f, body).unwrap();
-    }
-    let bin = c.root.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    std::fs::copy(&c.kubectl, bin.join("kubectl")).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(bin.join("kubectl"), std::fs::Permissions::from_mode(0o755)).unwrap();
+/// The lint's path to the derivation, and the derivation's own path.
+const LINT_REL: &str = "infra/lint/a-deleted-manifest-leaves-no-object.sh";
+const DERIVE_REL: &str = "infra/cluster/undeclared-objects.sh";
 
-    let lint_rel = "infra/lint/a-deleted-manifest-leaves-no-object.sh";
-    for rel in [lint_rel, "infra/cluster/undeclared-objects.sh"] {
-        let dst = c.tree.join(rel);
-        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
-        std::fs::copy(repo_root().join(rel), &dst).unwrap();
-    }
-    // The lint's property A walks git history for deleted manifests, so
-    // the fixture is a real repository with nothing deleted in it.
-    let git = |args: &[&str]| {
-        let out = Command::new("git")
-            .args(args)
-            .current_dir(&c.tree)
-            .env("GIT_AUTHOR_NAME", "t")
-            .env("GIT_AUTHOR_EMAIL", "t@t")
-            .env("GIT_COMMITTER_NAME", "t")
-            .env("GIT_COMMITTER_EMAIL", "t@t")
-            .output()
-            .expect("git runs");
+/// The exemptions the DERIVATION holds, as `Kind/ns/name`. The lint
+/// asserts none of them has gone stale, so the fixture's cluster has to
+/// hold them — otherwise every run below fails for a reason no test here
+/// is about.
+const DERIVED_EXEMPTIONS: [(&str, &str, &str); 2] = [
+    ("ConfigMap", "boss", "step-plugins"),
+    ("ConfigMap", "boss-dev", "gate-runner-script"),
+];
+
+/// The lint, RUN out of a copy of the fixture tree: it reads the
+/// manifests beside itself, calls the derivation beside itself, and walks
+/// git history for the manifests the tree deleted, so the fixture has to
+/// be a real repository. Both scripts are the repository's own, so every
+/// verdict below is one the shipped code reached.
+struct LintCase {
+    c: Case,
+    bin: PathBuf,
+}
+
+impl LintCase {
+    fn new(name: &str, extra: &[(&str, &str, &str, &str)]) -> Self {
+        let c = Case::new(name, extra);
+        for (kind, ns, n) in DERIVED_EXEMPTIONS {
+            c.add_live(kind, ns, n, "");
+        }
+
+        let bin = c.root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::copy(&c.kubectl, bin.join("kubectl")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(bin.join("kubectl"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+
+        for rel in [LINT_REL, DERIVE_REL] {
+            let dst = c.tree.join(rel);
+            std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+            std::fs::copy(repo_root().join(rel), &dst).unwrap();
+        }
+
+        // A SEAM for the one case the real derivation cannot be driven
+        // into from its inputs: `--list` refusing while `--declared`
+        // answers. Both modes share the parse, so no fixture makes one
+        // refuse and not the other — and what has to be shown is that the
+        // lint consumes the CODE from the mode it asked, whichever mode
+        // that is. Spliced in ahead of `set -uo pipefail`, hence
+        // `${1:-}`; inert unless $STUB_LIST_REFUSES names a file.
+        let derive = c.tree.join(DERIVE_REL);
+        let body = std::fs::read_to_string(&derive).unwrap();
+        let shebang = "#!/usr/bin/env bash\n";
         assert!(
-            out.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
+            body.starts_with(shebang),
+            "the derivation no longer opens with the shebang this seam is spliced after"
         );
-    };
-    git(&["init", "-q", "-b", "main"]);
-    git(&["add", "-A"]);
-    git(&["-c", "commit.gpgsign=false", "commit", "-qm", "fixture"]);
+        let guard = format!(
+            "{shebang}if [ \"${{1:-}}\" = \"--list\" ] && [ -n \"${{STUB_LIST_REFUSES:-}}\" ]; then\n    \
+             echo \"undeclared-objects: cannot parse ${{STUB_LIST_REFUSES}} — refusing to sweep against a declaration set that is missing it\" >&2\n    \
+             exit 4\nfi\n"
+        );
+        std::fs::write(&derive, body.replacen(shebang, &guard, 1)).unwrap();
 
-    let run = |extra: &[(&str, String)]| -> (i32, String) {
+        let run_git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&c.tree)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run_git(&["init", "-q", "-b", "main"]);
+        run_git(&["add", "-A"]);
+        run_git(&["-c", "commit.gpgsign=false", "commit", "-qm", "fixture"]);
+
+        LintCase { c, bin }
+    }
+
+    /// `(exit code, stdout+stderr)`. The lint's answer is its prose and
+    /// its code; unlike the derivation it has no machine-read stdout.
+    fn run(&self, extra: &[(&str, String)]) -> (i32, String) {
         let mut cmd = Command::new("bash");
-        cmd.arg(c.tree.join(lint_rel))
+        cmd.arg(self.c.tree.join(LINT_REL))
             .env_clear()
             .env(
                 "PATH",
                 format!(
                     "{}:{}",
-                    bin.display(),
+                    self.bin.display(),
                     std::env::var("PATH").unwrap_or_default()
                 ),
             )
-            .env("STUB_LIVE", &c.live);
+            .env("STUB_LIVE", &self.c.live);
         for (k, v) in extra {
             cmd.env(k, v);
         }
@@ -616,28 +662,46 @@ fn the_consuming_lint_refuses_rather_than_calling_a_declared_object_an_orphan() 
                 String::from_utf8_lossy(&out.stderr)
             ),
         )
-    };
+    }
+
+    /// Add one entry to the DERIVATION's exemption list — the only place
+    /// an exemption can live. Used to make the two scripts disagree.
+    fn exempt_in_derivation(&self, entry: &str) {
+        let path = self.c.tree.join(DERIVE_REL);
+        let body = std::fs::read_to_string(&path).unwrap();
+        let anchor = "EXEMPT=(\n";
+        assert!(
+            body.contains(anchor),
+            "the derivation's exemptions are no longer an `EXEMPT=(` array; rewrite this fixture"
+        );
+        std::fs::write(
+            &path,
+            body.replacen(anchor, &format!("{anchor}    \"{entry}\"\n"), 1),
+        )
+        .unwrap();
+    }
+}
+
+/// `infra/lint/a-deleted-manifest-leaves-no-object.sh` is the other
+/// reader of this question, and the one a human reads. Before the car
+/// that collapsed the declared set it derived its own, and sent the
+/// parse's stderr to /dev/null, so the fixture below made it print:
+///
+///     1 live object(s) in the managed namespaces that no manifest declares:
+///         Service/svc-a (ns boss)
+///
+/// — a DECLARED object named as an orphan, under advice to `kubectl
+/// delete` it, with no mention anywhere that a manifest would not parse.
+/// Exit 1, the same code a genuine orphan produces.
+#[test]
+fn the_consuming_lint_refuses_rather_than_calling_a_declared_object_an_orphan() {
+    let c = LintCase::new("lint", &[]);
 
     // The baseline, so the refusal below cannot be "it always fails".
-    let (rc, out) = run(&[]);
+    let (rc, out) = c.run(&[]);
     assert_eq!(rc, 0, "the lint did not pass a clean fixture:\n{out}");
 
-    // The lint keeps its own sweep (the derivation answers the DECLARED
-    // set, not this), so it carries the same obligation for a pair it
-    // cannot read: the server's words, not a count.
-    let forbid = c.forbid(&[("Service", "boss")]);
-    let (rc, out) = run(&[forbid]);
-    assert_eq!(
-        rc, 0,
-        "a partly-readable cluster is still an answer about the part read:\n{out}"
-    );
-    names_all(
-        &out,
-        &["UNVERIFIED", "cannot list Service in boss"],
-        "the lint's unreadable-pair case",
-    );
-
-    let (rc, out) = run(&[c.badparse("svc-a.yaml")]);
+    let (rc, out) = c.run(&[c.c.badparse("svc-a.yaml")]);
     assert_ne!(rc, 0, "the lint reported a partial scrape as clean:\n{out}");
     names_all(
         &out,
@@ -654,5 +718,224 @@ fn the_consuming_lint_refuses_rather_than_calling_a_declared_object_an_orphan() 
     assert!(
         !out.contains("Service/svc-a"),
         "the lint named a DECLARED object as an orphan because its manifest would not parse:\n{out}"
+    );
+}
+
+/// A pair this credential cannot list is not a clean pair, and the lint
+/// is the surface a human reads — so the server's own words have to reach
+/// it. They come from the derivation's sweep now, which means the lint's
+/// obligation is to pass them through rather than reduce them to a count
+/// (CLAUDE.md §Diagnosis: quiet is a loan against the next diagnosis).
+#[test]
+fn the_lint_carries_the_reason_a_pair_it_could_not_read_gave() {
+    let c = LintCase::new("lint-unreadable", &[]);
+    let forbid = c.c.forbid(&[("Service", "boss")]);
+    let (rc, out) = c.run(&[forbid]);
+    assert_eq!(
+        rc, 0,
+        "a partly-readable cluster is still an answer about the part read:\n{out}"
+    );
+    names_all(
+        &out,
+        &["UNVERIFIED", "cannot list Service in boss"],
+        "the lint's unreadable-pair case",
+    );
+}
+
+/// THE COLLAPSE, asserted the only way a collapse can be: make the two
+/// scripts DISAGREE and watch the lint follow the derivation.
+///
+/// Until this car the lint carried its own `$EXEMPT`, so an exemption
+/// added to the derivation changed nothing about what the lint reported —
+/// the two answers matched only while nobody edited either list, which is
+/// precisely the §9a failure mode. A test that checked the answers
+/// instead of the authority would pass against two copies that happen to
+/// agree today, and go on passing the day they stop.
+///
+/// `ConfigMap/boss/generated-thing` is the real shape of this: an object
+/// that IS declared, just not as YAML, which is what both live exemptions
+/// are.
+#[test]
+fn the_lint_follows_the_derivations_exemptions_rather_than_its_own() {
+    let c = LintCase::new(
+        "lint-exemption",
+        &[("ConfigMap", "boss", "generated-thing", "")],
+    );
+
+    // Exempt nowhere: an orphan to both, so the assertion below cannot be
+    // satisfied by a lint that reports nothing at all.
+    let (rc, out) = c.run(&[]);
+    assert_ne!(
+        rc, 0,
+        "an undeclared live object was not reported at all:\n{out}"
+    );
+    assert!(
+        out.contains("generated-thing"),
+        "the baseline never named the object this exemption is about:\n{out}"
+    );
+
+    c.exempt_in_derivation("ConfigMap/boss/generated-thing");
+    let (rc, out) = c.run(&[]);
+    assert_eq!(
+        rc, 0,
+        "the lint did not follow the derivation's exemption — it is still deciding \
+         'undeclared' for itself, which is the second definition backlog 19aa75e0 was \
+         made of:\n{out}"
+    );
+    assert!(
+        !out.contains("generated-thing"),
+        "the lint named an object the derivation exempts:\n{out}"
+    );
+}
+
+/// Clean, a finding, and a refusal to sweep — one test, because the three
+/// are one contract and the only dangerous confusions are between them.
+///
+/// The refusal case holds a live orphan too. A lint that still swept the
+/// cluster itself would name that orphan and never mention the file the
+/// derivation refused over; a lint that read the refusal as "clean" would
+/// exit 0. Both fail here, which is what "a refusal must not read as
+/// clean and must not read as a finding" means in the only place it can
+/// be measured.
+#[test]
+fn the_lint_tells_clean_from_an_orphan_from_a_refusal_to_sweep() {
+    let clean = LintCase::new("lint-codes-clean", &[]).run(&[]);
+    let found =
+        LintCase::new("lint-codes-orphan", &[("Service", "boss", "ghost-svc", "")]).run(&[]);
+    let refused = {
+        let c = LintCase::new(
+            "lint-codes-refused",
+            &[("Service", "boss", "ghost-svc", "")],
+        );
+        c.run(&[("STUB_LIST_REFUSES", "ghost.yaml".to_string())])
+    };
+
+    assert_eq!(clean.0, 0, "a tree and a cluster that agree:\n{}", clean.1);
+    names_all(
+        &clean.1,
+        // The derivation's own coverage line, carried through rather than
+        // recomputed: a run that says nothing about how much of the scope
+        // it covered is a green that means nothing.
+        &["OK", "undeclared object(s) in"],
+        "the lint's clean case",
+    );
+
+    assert_ne!(
+        found.0, 0,
+        "a live object no manifest declares was not reported:\n{}",
+        found.1
+    );
+    names_all(
+        &found.1,
+        &["ghost-svc", "no manifest declares"],
+        "the lint's orphan case",
+    );
+
+    assert_ne!(
+        refused.0, 0,
+        "a derivation that refused to sweep was reported as a clean cluster:\n{}",
+        refused.1
+    );
+    names_all(
+        &refused.1,
+        &[
+            "CANNOT ANSWER",
+            // The file the refusal named, and the derivation's own code.
+            "ghost.yaml",
+            &format!("exit {CANNOT_ANSWER}"),
+        ],
+        "the lint's refused-sweep case",
+    );
+    assert!(
+        !refused.1.contains("no manifest declares"),
+        "a refusal was reported in the words of a finding about the cluster:\n{}",
+        refused.1
+    );
+    assert!(
+        !refused.1.contains("ghost-svc"),
+        "the lint named an orphan from a sweep the derivation refused to run — so it \
+         is sweeping the cluster itself:\n{}",
+        refused.1
+    );
+}
+
+/// The assertion that SURVIVED the collapse, and the one reason property
+/// B shrank rather than vanished: the derivation does not check its own
+/// exemptions for staleness, and a stale one silently excuses the next
+/// object that takes the name. Both directions still fire, and both now
+/// send the reader to the derivation rather than to this lint.
+///
+/// Here because "it shrank" would otherwise be indistinguishable from "it
+/// went away quietly" — a deletion that takes a working check with it is
+/// the failure this car is supposed to be the opposite of.
+#[test]
+fn the_lint_still_catches_a_stale_exemption_in_the_derivation() {
+    let declared = LintCase::new("lint-stale-declared", &[]);
+    // `svc-a.yaml` declares Service/boss/svc-a, so an exemption for it is
+    // doing nothing and would excuse a future Service of that name.
+    declared.exempt_in_derivation("Service/boss/svc-a");
+    let (rc, out) = declared.run(&[]);
+    assert_ne!(rc, 0, "an exemption the tree now declares passed:\n{out}");
+    names_all(
+        &out,
+        &[
+            "Service/boss/svc-a",
+            "stale",
+            "the tree now declares it",
+            DERIVE_REL,
+        ],
+        "the stale-because-declared case",
+    );
+
+    let absent = LintCase::new("lint-stale-absent", &[]);
+    absent.exempt_in_derivation("ConfigMap/boss/never-existed");
+    let (rc, out) = absent.run(&[]);
+    assert_ne!(
+        rc, 0,
+        "an exemption for an object the cluster does not have passed:\n{out}"
+    );
+    names_all(
+        &out,
+        &[
+            "ConfigMap/boss/never-existed",
+            "stale",
+            "the cluster does not have it",
+            DERIVE_REL,
+        ],
+        "the stale-because-absent case",
+    );
+}
+
+/// A list nobody reads is the next thing to drift, and no RUN of the lint
+/// can see one: an unread array is inert, not wrong. So this reads the
+/// source — the one assertion in this file that does — and refuses the
+/// DEFINITIONS whose second copy was the defect. Each has exactly one
+/// home now, in the derivation, next to the set it modifies.
+///
+/// A definition, not a mention: the lint's header names all four to say
+/// why they are not there and where they went, which is the documentation
+/// a deletion owes its next reader, not a second copy.
+#[test]
+fn the_lint_keeps_no_second_copy_of_the_derivations_rules() {
+    let body = std::fs::read_to_string(repo_root().join(LINT_REL)).expect("the lint is readable");
+    for name in [
+        "\nEXCLUDED_KINDS=",
+        "\nEXEMPT_ANY_NS=",
+        "\nEXEMPT=",
+        "\nis_exempt()",
+    ] {
+        assert!(
+            !body.contains(name),
+            "{LINT_REL} defines `{}` again. It belongs to {DERIVE_REL}: two definitions \
+             of what the tree does not declare differ in the places nobody compared, and \
+             at the far end of delete-orphan-object that names a DECLARED object as \
+             deletable (backlog 19aa75e0). Read the list from \
+             `undeclared-objects.sh --exemptions` instead.",
+            name.trim()
+        );
+    }
+    assert!(
+        body.contains("--list"),
+        "{LINT_REL} no longer asks {DERIVE_REL} --list for the orphan set"
     );
 }

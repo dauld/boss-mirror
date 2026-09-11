@@ -1,17 +1,20 @@
 # The ops-request runner (packet 729329c6, PULL half): answers
 # host-side debug reads filed as packets, so nobody sshes and pastes.
-# Installed BY HAND per host, mirroring boss-estate-observe-host's
-# notes, until the config-not-in-repo debt is paid:
 #
-# boss-gcp (conductor VM; unit's HOST_ID default is boss-gcp):
-#   sudo install -m644 /opt/boss/infra/ops/boss-ops-runner.{service,timer} /etc/systemd/system/
-#   sudo systemctl daemon-reload && sudo systemctl enable --now boss-ops-runner.timer
+# NOBODY INSTALLS THIS BY HAND ANY MORE, and this comment used to be
+# the two recipes for doing so. Both hosts that run it now converge it
+# from one definition — infra/ops/install-ops-runner.sh, called by
+# infra/forge/install.sh (forge) and by `deploy-services.sh units`
+# (boss-gcp). A hand-installed unit is one rebuild from gone, which is
+# exactly how the forge nearly lost this door (packet 4d5f158a).
 #
-# forge host (override HOST_ID via drop-in):
-#   sudo install -m644 /opt/boss/infra/ops/boss-ops-runner.{service,timer} /etc/systemd/system/
-#   sudo mkdir -p /etc/systemd/system/boss-ops-runner.service.d
-#   printf '[Service]\nEnvironment=HOST_ID=forge\n' | sudo tee /etc/systemd/system/boss-ops-runner.service.d/host.conf
-#   sudo systemctl daemon-reload && sudo systemctl enable --now boss-ops-runner.timer
+# THIS FILE IS HOST-AGNOSTIC and installed byte-identical everywhere.
+# Identity and checkout come from the per-host drop-in that installer
+# writes (`Environment=HOST_ID=<estate node id>` plus a cleared-and-
+# overridden ExecStart). Deliberately no HOST_ID default: a runner that
+# guessed which host it speaks for would answer another host's packets,
+# so with no drop-in the script refuses and systemd records the unit
+# red — a state somebody notices.
 [Unit]
 Description=BOSS ops: answer ops-request packets filed against this host
 Wants=network-online.target
@@ -19,7 +22,6 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-Environment=HOST_ID=boss-gcp
 # BOSS_JOBS_URL pinned INLINE on the Exec line, exactly like
 # boss-estate-observe-host.service and for the same reason:
 # deploy-services' shared jobs-url.conf drop-in points the timer fleet
@@ -32,4 +34,9 @@ Environment=HOST_ID=boss-gcp
 # and a packet per firing would drown the board. Its product IS
 # packets — the ops-requests it answers — and its failure modes are
 # this unit going red plus a filed packet aging visibly unanswered.
+#
+# Every host's drop-in REPLACES this line with the runner from its own
+# checkout; the path below is only what a host whose checkout is
+# /opt/boss would get. The URL is the same on both, because the system
+# of record is one place.
 ExecStart=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/ops/ops-runner.sh

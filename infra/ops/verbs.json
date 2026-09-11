@@ -18,6 +18,19 @@
     "never from the packet, a literal may lead with '-' (publish-github-pr's --check). With",
     "`optional: true` an absent arg drops its {N} word from the argv instead of failing.",
     "",
+    "verbs.<name>.hosts is WHICH HOSTS THE VERB SERVES — the estate node ids (nodes.id in",
+    "infra/postgres/schema, the same string a packet's metadata.host carries) whose runner will",
+    "execute it. REQUIRED, and ABSENT MEANS REFUSE: the runner refuses a verb whose hosts does",
+    "not list its own HOST_ID, so a new verb cannot reach a host by forgetting to say. It is not",
+    "a privilege boundary — every runner reads this same file — it is the door telling the truth",
+    "about what it opens. Before 2026-09-11 it could not: boss-gcp got its runner that day and 11",
+    "of the 16 verbs here name a script under the FORGE's checkout (/home/david/boss/infra/forge),",
+    "which does not exist there, so standing the runner up advertised a vocabulary of which 11",
+    "could only fail on ENOENT. An exec failure is not a verdict (CLAUDE.md §Diagnosis); a refusal",
+    "that names the verb, this host and the hosts that verb does serve is. Widening a verb to",
+    "another host is a reviewed change HERE, per verb — boss-gcp's set is deliberately the five",
+    "read-only host-agnostic reads and nothing mutating.",
+    "",
     "Defense, stated once and relied on by ops-runner.sh: the runner never executes a",
     "packet-supplied string. It builds an argv ARRAY from this file — no shell -c, no eval, no",
     "interpolation into program text. The patterns admit no whitespace and no leading '-', so a",
@@ -31,21 +44,25 @@
   "verbs": {
     "rollback-to": {
       "about": "MUTATING — roll deploy/boss to a NAMED build and verify it Ready (infra/forge/rollback-to.sh). The lever the 2026-09-05 outage needed a human's shell for: the classifier blocks the agent's kubectl, the converge's own rollback had rolled to the wrong image, and David was asleep. Authorized by David, 2026-09-05: 'it is obvious we need a lot more ad hoc controls while we are still learning'. The sha names an image the registry holds — read it from `rollout history` or the converge's stamp, never guess. Leaves the stamp and main untouched: a rollback buys time for a fix.",
+      "hosts": ["forge"],
       "argv": ["/home/david/boss/infra/forge/rollback-to.sh", "{1}"],
       "params": [{"name": "sha", "pattern": "^[0-9a-f]{7,40}$"}]
     },
     "hold-converge": {
       "about": "MUTATING — an operator's hold on the cluster converge: writes the hold file the runner reads before it builds or rolls anything (infra/forge/converge-hold.sh). Same authorization as rollback-to (David, 2026-09-05). The reason is one token (no spaces; use dashes) and rides on the packet.",
+      "hosts": ["forge"],
       "argv": ["/home/david/boss/infra/forge/converge-hold.sh", "hold", "{1}"],
       "params": [{"name": "reason", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$"}]
     },
     "release-converge": {
       "about": "MUTATING — lifts the converge hold (infra/forge/converge-hold.sh release). Same authorization as rollback-to (David, 2026-09-05).",
+      "hosts": ["forge"],
       "argv": ["/home/david/boss/infra/forge/converge-hold.sh", "release"],
       "params": []
     },
     "unit-status": {
       "about": "systemctl status of one unit",
+      "hosts": ["boss-gcp", "forge"],
       "argv": ["systemctl", "status", "--no-pager", "--", "{1}"],
       "params": [
         { "name": "unit", "pattern": "^[A-Za-z0-9@._][A-Za-z0-9@._-]*$" }
@@ -53,6 +70,7 @@
     },
     "journal-tail": {
       "about": "last N journal lines of one unit (default 100, max 200)",
+      "hosts": ["boss-gcp", "forge"],
       "argv": ["journalctl", "-u", "{1}", "-n", "{2}", "--no-pager"],
       "params": [
         { "name": "unit", "pattern": "^[A-Za-z0-9@._][A-Za-z0-9@._-]*$" },
@@ -61,21 +79,25 @@
     },
     "df": {
       "about": "filesystem usage, human units",
+      "hosts": ["boss-gcp", "forge"],
       "argv": ["df", "-h"],
       "params": []
     },
     "uptime": {
       "about": "uptime and load averages",
+      "hosts": ["boss-gcp", "forge"],
       "argv": ["uptime"],
       "params": []
     },
     "timer-list": {
       "about": "systemd timers and when they fire next",
+      "hosts": ["boss-gcp", "forge"],
       "argv": ["systemctl", "list-timers", "--no-pager"],
       "params": []
     },
     "reclaim-disk": {
       "about": "MUTATING — the first, and the only one (David, 2026-09-03; see _about). Runs the forge host's disk-floor-sweep.sh: first prunes the SYSTEM daemon's per-train boss-ci:<sha> images past their age window (6h, keeping the newest 3 — only sha-shaped tags, so the stable bases are never candidates), then reclaims regenerable docker caches (builder cache, dangling images, registry-verified old tags) until floor_gb free on the root volume, stopping at the floor; never volumes or non-docker paths, by construction of the script. floor_gb defaults to 25, mirroring BOSS_DISK_FLOOR_GB's default in the script. Path is the forge checkout (/home/david/boss, where install.sh's units point); on any other host the exec fails and the packet records it. A run killed at OPS_TIMEOUT is safe: every remediation already applied stays applied, and the hourly disk-floor-sweep.timer finishes the job.",
+      "hosts": ["forge"],
       "argv": ["/home/david/boss/infra/forge/disk-floor-sweep.sh", "{1}"],
       "params": [
         { "name": "floor_gb", "pattern": "^[0-9]{1,3}$", "default": "25" }
@@ -83,11 +105,13 @@
     },
     "disk-report": {
       "about": "READ-ONLY: what is consuming this host's disk — df, BOTH docker daemons (system: the CI jobs; rootless: the converge builds), and a fixed list of directories largest-first. No arguments, nothing mutated; sudo -n is tried where root is needed and each line says when it was refused. Added 2026-09-05 after the locomotive refused #204 at 65GB and the bounded reclaim stopped at the floor with nobody able to say what held the rest (David: 'I want to understand what is consuming disk first').",
+      "hosts": ["forge"],
       "argv": ["/home/david/boss/infra/forge/disk-report.sh"],
       "params": []
     },
     "reach": {
       "about": "READ-ONLY: can this host open a TCP connection to <ip>:<port>? A LAN/tunnel-side vantage the cluster pod lacks (no CAP_NET_RAW, no route into the WireGuard overlay). First use 2026-09-07: is the WireGuard hub 10.99.0.1 reachable over wg0 (the bastion route into the LAN); also the gateway-vs-ISP question for the 1.1.1.0/24 blackhole. Read-only in the phase-1 sense: a TCP connect, nothing sent, nothing mutated. Runs infra/forge/reach.sh: one line, open (<N>ms) / closed (<reason>) / timeout (4s), exit 0 only when open. IPv4 literal only — no hostname, so the host never resolves a name on a packet's behalf.",
+      "hosts": ["forge"],
       "argv": ["/home/david/boss/infra/forge/reach.sh", "{1}", "{2}"],
       "params": [
         { "name": "ip", "pattern": "^[0-9]{1,3}(\\.[0-9]{1,3}){3}$" },
@@ -96,16 +120,19 @@
     },
     "converge": {
       "about": "MUTATING — trigger ONE cluster converge NOW by starting the existing cluster-deploy-runner oneshot: the same unit the 10-minute timer runs (same User=david, same $HOME/env, same maintenance-wrap, same build+push+roll). The event-driven fast path — a dispatcher rule spawns this on a pr-train's merged-step-done, so the cluster converges ~1 minute after merge instead of waiting up to 10 minutes for the timer tick. It only ACCELERATES: cluster-deploy-runner.timer and cluster-watchdog remain the independent floor (they owe nothing to NATS/SoR, which this fast path does — so a cluster-down event path costs latency, never a missed converge). Idempotent and self-guarding by construction of the script it starts: exits 0 if forge main has not moved vs the stamp, honors the converge hold file and the bricked-boot quarantine, so a redundant fire is a safe no-op. Runs infra/forge/converge-now.sh: `systemctl start --no-block` returns the moment systemd accepts the job (so the ~1-minute ops-runner never blocks on the build) — which is why this packet read `answered` on 2026-09-07 22:01 while the run it started died on a git lock (backlog d66f92b2). converge-now notes this packet's id (OPS_REQUEST_ID, from the runner's environment) in the checkout's inbox, and cluster-deploy-runner PATCHes this packet's metadata when the run ends: `converged: <sha>`, `converge_held: <reason>`, or `converge_failed: <stage> (exit N)`. Authorized by David 2026-09-07 — same explicit per-verb process as reclaim-disk / rollback-to (this entry is a precedent for the PROCESS, not a loosened default).",
+      "hosts": ["forge"],
       "argv": ["/home/david/boss/infra/forge/converge-now.sh"],
       "params": []
     },
     "mirror-base-images": {
       "about": "MUTATING — mirror the CI build's external base images (the kaniko executor from gcr.io, plus the boss-ci Dockerfile's oven/bun and rust bases from docker.io) into the forge registry, so build-image resolves NO public DNS. Runs infra/forge/mirror-base-images.sh, which pulls a FIXED in-tree list and pushes it to 10.20.0.15:3000/david — bounded by construction like reclaim-disk (no packet-supplied image name). The gcr.io/docker.io DNS flake reddened trains #236 and #250; this moves that lookup off the every-train hot path onto an occasional, retryable job. Idempotent (re-mirrors the same tags). Authorized by David 2026-09-07, same explicit per-verb process as reclaim-disk / rollback-to / converge. Backlog 7f408b99.",
+      "hosts": ["forge"],
       "argv": ["/home/david/boss/infra/forge/mirror-base-images.sh"],
       "params": []
     },
     "publish-github-pr": {
       "about": "MUTATING — open the public mirror's pull request BY MACHINE: the machine step of publish-to-github v6 (design 7b59af2c, David 2026-09-08: the mirror is 'strictly a backup of source protocol' and the PR 'should open from our dauld GitHub account'). The dispatcher rule publish-github-pr-on-open-pr-ready files this when David signs the protocol's approve step. Runs infra/forge/publish-github-pr.sh with no packet-supplied text — the one arg it admits is the literal `--check`, the verb's own no-network input check (6964f9e8: without it the only way to exercise the verb through the runner was the real run). A run (no arg) finds the one open publish-to-github packet whose open-pr step is ready, fetches forge main from the Forgejo repository on this host (a path, no forge token) and the mirror's main anonymously, builds the dated SNAPSHOT commit (git commit-tree <forge tree> -p <mirror main> — the mirror's history is publish snapshots; a merge conflicts in hundreds of files), pushes it to the dauld fork as publish/<date> (forking once if the fork is gone), opens the PR against algedonic-dev/boss as dauld, and completes open-pr with pr_url. Bounded by construction: fixed repos and branch name, nothing packet-supplied; it never touches the mirror's main — the merge on GitHub stays David's. The dauld token is READ from /etc/boss-publish/github.token (credentials registry id dauld-github-token; provisioned by David's token admin) and never printed; a missing token is a loud refusal naming the path. Idempotent per day (force-updates the dated fork branch, reuses an open PR). Its own timeout: a first push of the whole tree exceeds the runner's 30s default. Authorized by David 2026-09-08 via the design packet, same explicit per-verb process as reclaim-disk / rollback-to / converge / mirror-base-images.",
+      "hosts": ["forge"],
       "argv": ["/home/david/boss/infra/forge/publish-github-pr.sh", "{1}"],
       "params": [
         { "name": "mode", "one_of": ["--check"], "optional": true }
@@ -114,6 +141,7 @@
     },
     "run-car-probe": {
       "about": "RUNS A LANDED CAR'S RECORDED PROBE — as david, never root — and writes the verdict on the car (infra/forge/run-car-probe.sh). The machine half of `boss prove` (backlog 28ac45ab: 43 landed cars waited 2.5 days on hand-authored probes). The dispatcher rule run-car-probes-on-train-arrived files one of these per car aboard an arrived train that recorded `proof_probe`/`proof_expect` at park time (`boss gate --park-probe/--park-expect`). The script re-reads the car from the system of record and refuses unless it is a ship-a-change car with metadata.merged=true, a recorded probe AND expect, and an open `proven` step; then runs the probe with `runuser -u david`, cwd /home/david/boss, under a 60s timeout with both streams capped at 4000 bytes; judges by the two rules `boss prove` applies (exit 0 and the expected string printed); completes `proven` with `boss prove`'s proof record on green, or stamps `proof_attempt` on the car, leaves `proven` ready and exits 1 so this packet's exit_code carries the verdict. Nothing on this host is mutated by the script itself. The bound, honestly: the probe is program text the car's builder wrote — the same builder whose branch just merged and was converged onto the cluster by this host as this same user — and what may run is exactly one recorded command, for a merged car only, as david. The verb's own argument is a full uuid, pattern-checked here and again in the script. Authorization: the routed build on backlog 28ac45ab (2026-09-08), the same per-verb process as reclaim-disk / converge / publish-github-pr — flagged for David's review as the first verb that runs builder-authored text.",
+      "hosts": ["forge"],
       "argv": ["/home/david/boss/infra/forge/run-car-probe.sh", "{1}"],
       "params": [
         { "name": "car", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" }
@@ -122,6 +150,7 @@
     },
     "delete-orphan-object": {
       "about": "MUTATING — delete ONE cluster object THE TREE ALREADY PROVES IS UNDECLARED, and nothing else (infra/forge/delete-orphan-object.sh). The converge applies infra/cluster/manifests with no --prune, so deleting a manifest removes the DECLARATION and leaves the OBJECT running; until this verb the only way to clear one was a human typing `kubectl -n boss delete svc <name>`, which blocked a gated-green car for nine days (backlog a139d5bb). THE AUTHORITY IS DERIVED, NOT GRANTED — and that is the whole design: there is deliberately NO general `kubectl delete` verb, because 'delete any object by name' hands an agent namespace-wide destruction through an audited door, which is worse than no door (CLAUDE.md: reads and bounded reclaims are mechanical, destructive-by-policy actions are not). Instead the script re-runs, at call time, the ONE definition of what is orphaned — infra/cluster/undeclared-objects.sh, the same computation the orphan lint reports from — and acts only if that computation NAMES the object it was given, using the kind/namespace/name from the derivation's own output rather than from the packet's string. Five bounds, each refusing loudly and by name: the argument's shape (re-checked in the script, not only here); the manifests directory must be CLEAN IN GIT, so the declaration set is reviewed content and a rename in progress can never be eligible (and EVERY git read drops to the checkout's owner, read off the directory with stat — the runner executes verbs as root, git refuses to read a clone it does not own, and the first live run refused a real checkout as 'not a git checkout' for exactly that reason, ops-request c9877f75; same as_owner shape as infra/gcp/boss-gcp-converge.sh); the derivation must say undeclared (it refuses a declared object, a namespace the tree does not own, a kind the tree declares nothing of, an excluded kind, an exempt object, a controller-owned object, an object that is not live — and says CANNOT ANSWER, never 'undeclared', when a credential cannot list the pair or a manifest will not parse); the verb's own KIND FLOOR, narrower than the derivation's scope (Service, ConfigMap, Deployment, CronJob, Job — kinds a manifest reapply restores completely; PVC/StatefulSet are bytes, Secret and ServiceAccount are credentials, Role/RoleBinding are privileges, and all of those stay a named human step); and CAPTURE BEFORE DELETE — the object's YAML is printed onto this packet first, because a deleted object cannot be read back. `--dry-run` runs every bound and deletes nothing, so the verb is exercisable through the runner without acting. Its own timeout: the derivation parses every manifest with kubectl, which exceeds the runner's 30s default. Authorized by David 2026-09-10 ('let's make sure any cars that are blocked on my manual intervention get a job to create an agent-usable mechanism'), same explicit per-verb process as reclaim-disk / rollback-to / converge / publish-github-pr — a precedent for the PROCESS, not a loosened default.",
+      "hosts": ["forge"],
       "argv": ["/home/david/boss/infra/forge/delete-orphan-object.sh", "{1}", "{2}"],
       "params": [
         { "name": "object", "pattern": "^[A-Z][A-Za-z0-9]{0,62}/[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?/[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$" },

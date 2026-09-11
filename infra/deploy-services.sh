@@ -1280,6 +1280,47 @@ case "$MODE" in
         # 0 and warns instead, because a visibility door must never stop
         # the converge that keeps this host's units current.
         "$REPO_ROOT/infra/journal-door-ensure.sh"
+        # THE THIRD LOOP: THIS HOST ANSWERS ops-request PACKETS.
+        #
+        # BOSS runs three loops on a managed host — converge (it adopts
+        # its units from forge main), observe (the estate observers
+        # report what it is and what its units do), and ACT (the
+        # ops-runner answers ops-request packets). On boss-gcp the first
+        # two were live and the third had never been installed, so an
+        # ops-request filed against `host: boss-gcp` sat at `ready` with
+        # nothing behind it — and every operational read on the
+        # WireGuard bastion went back through a human (David: "I am
+        # really tired of the copy pasting after sshing"; CLAUDE.md
+        # §Diagnosis: mechanical operations belong to the machine).
+        # Backlog c3d06016; David, design 9e3e093f: boss-gcp "isn't part
+        # of the kubernetes cluster... I still want it fully managed and
+        # maintained by BOSS and protocol".
+        #
+        # NOT A TIMERS ROW, AND NOT BECAUSE OF A LINT. The ops runner
+        # has no boss-maintenance-wrap packet pair on purpose: it fires
+        # every minute, a packet per firing would drown the board, its
+        # product IS packets, and its failure modes are a red unit plus
+        # a filed packet aging visibly unanswered (see
+        # infra/ops/ops-runner.sh's header). timers-leave-a-packet.sh
+        # scrapes the TIMERS array and rightly demands that pair of
+        # every row, so this unit is installed from its own block —
+        # the same shape infra/forge/install.sh uses, and the same ONE
+        # definition: infra/ops/install-ops-runner.sh.
+        #
+        # CONSISTENT WITH "UNIT FILES ONLY", like the read door above.
+        # The restraint that keeps this mode safe to run unattended
+        # every half hour is about BOSS's own fleet: no build, no
+        # schema, and above all no service of the second (older) stack
+        # this host carries getting bounced. A ~1-minute read-only
+        # answering loop bounces nothing and stages nothing; it adds one
+        # oneshot that polls the system of record and runs allowlisted
+        # reads. What it may run on this host is the five host-agnostic
+        # reads in infra/ops/verbs.json (df, uptime, unit-status,
+        # timer-list, journal-tail) and nothing else: every verb there
+        # declares the hosts it serves, and the runner REFUSES one that
+        # does not name this host — by name, on the packet.
+        INSTALL_ETC="$TIMER_ETC" INSTALL_SYSTEMCTL="$TIMER_SYSTEMCTL" \
+            bash "$REPO_ROOT/infra/ops/install-ops-runner.sh" boss-gcp
         echo "units: ${#TIMERS[@]} timer unit pair(s) installed and enabled from $REPO_ROOT"
         exit 0
         ;;
