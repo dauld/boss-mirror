@@ -277,11 +277,12 @@ impl WorkflowSpec {
 }
 
 // ---------------------------------------------------------------------------
-// Platform kinds — code-resident Workflows that the bootstrap
-// reconciler upserts into the live registry on every
-// boss-jobs-api start. The single platform kind today is
-// `workflow-design`, the meta-kind that authors every other
-// kind in the registry. See docs/architecture-decisions.md
+// Platform kinds. Every one is a file under infra/platform/workflows/,
+// published by `boss-platform-workflow-seed`; the builders that follow
+// are #[cfg(test)] residue, kept only as the bundle-fidelity test's
+// expected value. `platform_workflows()` — the code-resident roster the
+// bootstrap reconciler reads at every boss-jobs-api start — has been
+// empty since 2026-09-11. See docs/architecture-decisions.md
 // §Jobs, Workflows, Steps (Workflows bootstrap through Jobs).
 // ---------------------------------------------------------------------------
 
@@ -961,11 +962,11 @@ fn regenerate_deployment_spec() -> WorkflowSpec {
 /// inserting missing rows / refreshing drifted bootstrap-owned
 /// rows / preserving operator-edited rows.
 ///
-/// Today: `workflow-design` + `design-doc-review`. Future platform
-/// kinds (a `step-plugin-design` meta-kind, perhaps a
-/// `policy-rule-design` one) land here as additional entries —
-/// never as TOML-loader exceptions, never as direct
-/// `INSERT INTO workflows` SQL.
+/// EMPTY since 2026-09-11, and required to stay that way. A new platform
+/// protocol is a file under infra/platform/workflows/ — never an entry
+/// here, never a TOML-loader exception, never a direct
+/// `INSERT INTO workflows`. `seedable_platform_workflows()` below is
+/// what answers "every kind a deployment has".
 /// The path to the platform Workflow bundle, resolved from this crate.
 ///
 /// A DIRECTORY, one `<kind>.toml` per protocol, read in file-name order
@@ -1003,53 +1004,38 @@ pub fn seedable_platform_workflows() -> Vec<WorkflowSpec> {
 }
 
 pub fn platform_workflows() -> Vec<WorkflowSpec> {
-    vec![
-        maintenance_spec(
-            "maintenance-backup",
-            "Nightly backup",
-            "The 03:00 backup run — configs, Postgres dump, kanidm state.",
-        ),
-        maintenance_spec(
-            "maintenance-audit-integrity",
-            "Audit-log integrity check",
-            "The 03:00 chain scan + event-kind drift guard.",
-        ),
-        maintenance_spec(
-            "maintenance-ledger-replay",
-            "Ledger replay check",
-            "The 03:30 rooted-at-audit-log replay comparison.",
-        ),
-        design_doc_review_spec(),
-        // `workflow-design`, `regenerate-deployment`, `backlog-item`,
-        // `ship-a-change`, `user-feedback` and `pr-train`
-        // are NOT missing — they moved to infra/platform/workflows/
-        // and are supplied by `boss-platform-workflow-seed`
-        // (protocols-as-data, step 1: the kinds with no traffic first,
-        // so a wrong loader can hurt nothing).
-        //
-        // Leaving this list is the point of the exercise. A kind here
-        // is a protocol that cannot be changed without a deploy, and
-        // one bootstrap_reconcile will rewrite if an operator edits it.
-        // A kind in the bundle is data: the seed inserts it once and
-        // nothing ever overwrites it.
-        //
-        // THE BUNDLE IS WHAT SAYS WHICH, and it has to be read on the
-        // main this lands on rather than the one the branch was cut
-        // from. This car spent a round narrowed to `regenerate-deployment`
-        // alone, because at its base commit the bundle held one
-        // workflow. Train #45 added the other two an hour later, so
-        // measuring against the branch point would have left
-        // `workflow-design` and `backlog-item` in BOTH places — and a
-        // kind in both places is the worse failure, not the safe one:
-        // bootstrap_reconcile republishes the code version over the
-        // bundle's on every boot, which is precisely what moving them
-        // out was for.
-        //
-        // The three builders survive below under #[cfg(test)] as the
-        // fidelity test's expected value — the proof the bundle says
-        // exactly what the code used to. They are deleted for real
-        // once that test has watched a release go by.
-    ]
+    // EMPTY, AND THAT IS THE DESTINATION, not a gap.
+    //
+    // Every platform protocol is a file under infra/platform/workflows/,
+    // published by `boss-platform-workflow-seed`. The last four left
+    // this list on 2026-09-11: `design-doc-review` and the three
+    // `maintenance_spec` chores (backup / audit-integrity /
+    // ledger-replay).
+    //
+    // A kind here was a protocol that could not be changed without
+    // building and shipping a binary — CLAUDE.md's three-layers reading
+    // calls that a protocol leaked into the substrate — and one
+    // `bootstrap_reconcile` re-asserts on every boot, so an operator's
+    // edit to the live row was reverted at the next pod roll
+    // (68331085). It also made a wrong value unable to drift back:
+    // `maintenance_spec` handed its description to `platform_seed`'s
+    // CATEGORY slot, and every new deployment reproduced the mistake
+    // until the code was fixed (6c796f75).
+    //
+    // So this is kept as an empty roster rather than deleted, because
+    // reconcile's insert / republish / preserve contract is still a port
+    // method with a live adapter pair, and the emptiness is what is
+    // load-bearing: `infra/lint/the-live-protocols-are-the-authored-
+    // protocols.sh` requires this body to read exactly `vec![]`, so a
+    // new platform protocol cannot arrive here as a literal without
+    // deleting that check. Retiring reconcile itself is a separate
+    // change with its own blast radius.
+    //
+    // The builders survive below under #[cfg(test)] as the fidelity
+    // test's expected value — the proof the bundle says exactly what the
+    // code used to. They are deleted for real once that test has
+    // watched a release go by.
+    vec![]
 }
 
 /// One maintenance kind per chore (internal-forge.md Q6): the systemd
@@ -1069,8 +1055,16 @@ pub fn platform_workflows() -> Vec<WorkflowSpec> {
 ///
 /// `description` is prose and goes in the `description` column;
 /// `category` is the grouping key, and these are platform chores like
-/// the seventeen `maintenance-*` protocols authored under
+/// every other `maintenance-*` protocol authored under
 /// infra/platform/workflows/, so it is "platform" for all of them.
+///
+/// TEST-ONLY since 2026-09-11. All three chores this built are authored
+/// at infra/platform/workflows/maintenance-{backup,audit-integrity,
+/// ledger-replay}.toml, and it survives as
+/// `the_platform_bundle_matches_the_specs_it_replaced`'s expected
+/// value — the proof the bundle says exactly what the code used to.
+/// Deleted once that test has watched a release go by.
+#[cfg(test)]
 fn maintenance_spec(kind: &str, label: &str, description: &str) -> WorkflowSpec {
     let steps = vec![
         StepSpec {
@@ -1209,6 +1203,12 @@ pub fn feedback_branch_for_disposition(disposition: &str) -> Option<FeedbackBran
 ///                        settled material folds into the ADR each
 ///                        release.
 ///  999. `outcome`      — review complete; decisions captured
+///
+/// TEST-ONLY since 2026-09-11: the protocol is authored at
+/// infra/platform/workflows/design-doc-review.toml, and this survives as
+/// `the_platform_bundle_matches_the_specs_it_replaced`'s expected value.
+/// Deleted once that test has watched a release go by.
+#[cfg(test)]
 fn design_doc_review_spec() -> WorkflowSpec {
     let steps = vec![
         StepSpec {
@@ -3599,12 +3599,13 @@ mod tests {
     ///
     /// `validate_all` is what proves a protocol can FINISH — that
     /// every terminal is reachable and no step is orphaned. Rust
-    /// kinds get it via `platform_workflows_passes_validate_all`;
-    /// until now nothing pointed it at the bundle, so a protocol
-    /// authored as data had strictly less checking than one authored
-    /// as a literal. That gap is the wrong incentive to leave in
-    /// place while the whole direction of travel is protocols
-    /// becoming data.
+    /// kinds got it via `platform_workflows_passes_validate_all`;
+    /// until this existed nothing pointed it at the bundle, so a
+    /// protocol authored as data had strictly less checking than one
+    /// authored as a literal. Since 2026-09-11 there are no literals
+    /// left, so this is the only home the property has — which is why
+    /// the roster-side test was deleted rather than left asserting over
+    /// an empty list.
     #[test]
     fn the_bundle_is_as_viable_as_the_code() {
         use crate::step_registry::StepRegistry;
@@ -3627,11 +3628,16 @@ mod tests {
         // Every kind that was converted from a Rust literal, by name.
         // Presence is checked for all of them; fidelity only for the
         // ones whose literal still exists.
-        const CONVERTED: [&str; 4] = [
+        const CONVERTED: [&str; 8] = [
             "workflow-design",
             "regenerate-deployment",
             "backlog-item",
             "ship-a-change",
+            // The last four out of `platform_workflows()`, 2026-09-11.
+            "design-doc-review",
+            "maintenance-backup",
+            "maintenance-audit-integrity",
+            "maintenance-ledger-replay",
         ];
         // `backlog-item` IS NOT HERE ANY MORE, and that is the point.
         //
@@ -3654,6 +3660,22 @@ mod tests {
             workflow_design_spec(),
             regenerate_deployment_spec(),
             ship_a_change_spec(),
+            design_doc_review_spec(),
+            maintenance_spec(
+                "maintenance-backup",
+                "Nightly backup",
+                "The 03:00 backup run — configs, Postgres dump, kanidm state.",
+            ),
+            maintenance_spec(
+                "maintenance-audit-integrity",
+                "Audit-log integrity check",
+                "The 03:00 chain scan + event-kind drift guard.",
+            ),
+            maintenance_spec(
+                "maintenance-ledger-replay",
+                "Ledger replay check",
+                "The 03:30 rooted-at-audit-log replay comparison.",
+            ),
         ];
         // Every CONVERTED kind must still be here. This is the
         // load-bearing half and it has earned its keep: it went red
@@ -3704,6 +3726,41 @@ mod tests {
             assert_eq!(
                 got.owning_team, want.owning_team,
                 "{}: owning_team",
+                want.kind
+            );
+
+            // DESCRIPTION, METADATA AND THE TWO JSON CONTRACT COLUMNS —
+            // added 2026-09-11 with the last four conversions, because
+            // this test could not have caught the defect that made those
+            // four worth moving. `maintenance_spec` put its prose in the
+            // CATEGORY slot and left `description` NULL for all three
+            // chores, and a conversion that carried that pairing across
+            // faithfully would have matched on `category` while saying
+            // the wrong thing. `metadata` carries `owner_role`, which is
+            // what makes platform meta-work resolvable to a holder at
+            // all; `metadata_schema` is a protocol's admission contract
+            // (publish-request's four required keys) and `entitlements`
+            // its policy hooks — neither was compared, so either could
+            // have been dropped by a conversion in silence.
+            assert_eq!(
+                got.description, want.description,
+                "{}: description — prose belongs in this column, and a conversion \
+                 must carry it",
+                want.kind
+            );
+            assert_eq!(
+                got.metadata, want.metadata,
+                "{}: metadata (owner_role lives here)",
+                want.kind
+            );
+            assert_eq!(
+                got.metadata_schema, want.metadata_schema,
+                "{}: metadata_schema — the Job's admission contract",
+                want.kind
+            );
+            assert_eq!(
+                got.entitlements, want.entitlements,
+                "{}: entitlements — the Workflow's policy hooks",
                 want.kind
             );
 
@@ -5853,48 +5910,53 @@ mod tests {
 
     #[test]
     fn platform_workflows_carries_the_shipped_meta_kinds() {
+        // THE ROSTER IS EMPTY, and this is the assertion that keeps it
+        // that way. The count only ever went down — a kind left for
+        // infra/platform/workflows/ and never came back — and on
+        // 2026-09-11 the last four went: `design-doc-review` and the
+        // three `maintenance_spec` chores. A protocol here is one that
+        // cannot be changed without building and shipping a binary, and
+        // one `bootstrap_reconcile` rewrites if an operator edits the
+        // live row.
+        //
+        // Keeping the test rather than deleting it with its subject is
+        // deliberate: zero is a value something has to hold, and a new
+        // platform protocol arriving as a Rust literal has to delete
+        // this line to do it. `infra/lint/the-live-protocols-are-the-
+        // authored-protocols.sh` says the same thing about the same
+        // function from outside the crate.
         let kinds = platform_workflows();
-        // The roster and the seed change together — that is
-        // `a-registry-seed-and-its-roster-test-change-together` in the
-        // register, and this assertion is the half that enforces it.
-        // The count only ever goes DOWN now: protocols-as-data.md's
-        // direction of travel is that a kind leaves this roster for
-        // infra/platform/workflows/ and never comes back, and a
-        // new protocol never touches Rust at all.
-        assert_eq!(
-            kinds.len(),
-            4,
-            "ships design-doc-review + the three maintenance kinds (backup / \
-             audit-integrity / ledger-replay — internal-forge Q6). \
-             workflow-design, regenerate-deployment, backlog-item, \
-             ship-a-change, and now user-feedback and pr-train (e332a320) \
-             are in the bundle, not here."
+        assert!(
+            kinds.is_empty(),
+            "a platform protocol is a file under infra/platform/workflows/, not a Rust \
+             literal — found {:?}",
+            kinds.iter().map(|k| &k.kind).collect::<Vec<_>>()
         );
         // NO TENANT NOUNS IN CORE. David, 2026-08-16: "We don't want
         // brewery nouns in core no matter what. But most nouns should
         // be data anyway, so that was its own class of problem."
         //
-        // Two problems were tangled in protocols-as-data Q5 and this
-        // asserts the one that survives. The FORM problem — protocols
-        // as Rust literals — is what the bundle fixes. The LAYER
-        // problem — a tenant's vocabulary living in Tier 1 — is never
-        // acceptable and was held only by vigilance: the roster count
-        // above says "seven", not "seven PLATFORM kinds", so swapping
-        // one for `morning-brew` would keep it green.
+        // Two problems were tangled in protocols-as-data Q5. The FORM
+        // problem — protocols as Rust literals — is now finished: the
+        // roster is empty. The LAYER problem — a tenant's vocabulary
+        // shipping in Tier 1 — is never acceptable and does NOT go away
+        // with the literals, because the platform BUNDLE is Tier 1 data
+        // that every deployment seeds regardless of what it models. So
+        // the denylist follows the protocols to where they now live: an
+        // empty roster would have made it vacuous, which is how a guard
+        // quietly stops covering what it was written for.
         //
-        // `tier-import-audit.sh` cannot see this. It checks crate
-        // DEPENDENCIES, and a brewery noun hardcoded in a core crate
-        // adds no dependency at all — which is exactly how this class
-        // hides.
+        // `tier-import-audit.sh` cannot see this class. It checks crate
+        // DEPENDENCIES, and a brewery noun in a core crate or a core
+        // data file adds no dependency at all.
         //
         // The list is the brewery and used-device-shop vocabularies
         // that have historically appeared here. Deliberately a
         // denylist rather than a shape rule: "is this noun
         // tenant-specific" is a judgement, and encoding a bad guess as
-        // a lint would block legitimate platform kinds. A tenant kind
-        // that is not on this list still gets caught by the count
-        // assertion above, which cannot be satisfied without a
-        // deliberate edit.
+        // a lint would block legitimate platform kinds.
+        let bundled_kinds = crate::seed_loader::load_workflows(super::platform_bundle_path())
+            .expect("the platform bundle parses");
         for tenant_noun in [
             "sale",
             "morning-brew",
@@ -5907,21 +5969,13 @@ mod tests {
             "refurb-device",
         ] {
             assert!(
-                !kinds.iter().any(|k| k.kind == tenant_noun),
-                "`{tenant_noun}` is a TENANT noun and must not ship in \
-                 platform_workflows() — tenant kinds seed from examples/<tenant>/, \
-                 and a brewery vocabulary in Tier 1 is the leak CLAUDE.md §10 names. \
+                !bundled_kinds.iter().any(|k| k.kind == tenant_noun),
+                "`{tenant_noun}` is a TENANT noun and must not ship in the PLATFORM \
+                 bundle — tenant kinds seed from examples/<tenant>/seeds/workflows.toml, \
+                 and a brewery vocabulary in Tier 1 is the leak CLAUDE.md §10 names, \
+                 whether it arrives as a Rust literal or as platform data. \
                  tier-import-audit.sh cannot catch this: a hardcoded noun adds no \
                  crate dependency."
-            );
-        }
-
-        for bundled_kind in ["workflow-design", "regenerate-deployment", "backlog-item"] {
-            assert!(
-                !kinds.iter().any(|k| k.kind == bundled_kind),
-                "`{bundled_kind}` is supplied by the bundle; a kind in BOTH places is \
-                 worse than a kind in neither — bootstrap_reconcile republishes the \
-                 code version over the bundle's on every boot"
             );
         }
 
@@ -5935,8 +5989,6 @@ mod tests {
         // regenerate-deployment got below. A guarantee that stops being
         // checked because its subject changed file is a guarantee that
         // was never really held.
-        let bundled_kinds = crate::seed_loader::load_workflows(super::platform_bundle_path())
-            .expect("the platform bundle parses");
         let ship = bundled_kinds
             .iter()
             .find(|k| k.kind == "ship-a-change")
@@ -5970,9 +6022,7 @@ mod tests {
         // assertions follow it there rather than lapsing. A guarantee
         // that stops being checked because its subject moved house is
         // a guarantee that was deleted quietly.
-        let bundled = crate::seed_loader::load_workflows(super::platform_bundle_path())
-            .expect("the platform bundle parses");
-        let regen = bundled
+        let regen = bundled_kinds
             .iter()
             .find(|k| k.kind == "regenerate-deployment")
             .expect("regenerate-deployment present in the bundle");
@@ -6050,7 +6100,7 @@ mod tests {
         // Follows the kind into the bundle, like the regenerate-deployment
         // assertions above. A guarantee that lapses because its subject
         // moved house is a guarantee that was deleted quietly.
-        let backlog = bundled
+        let backlog = bundled_kinds
             .iter()
             .find(|k| k.kind == "backlog-item")
             .expect("backlog-item present in the bundle");
@@ -6081,7 +6131,7 @@ mod tests {
             "`evidence` must be required at done"
         );
 
-        let design = bundled
+        let design = bundled_kinds
             .iter()
             .find(|k| k.kind == "workflow-design")
             .expect("workflow-design present in the bundle");
@@ -6090,10 +6140,11 @@ mod tests {
         assert_eq!(design.subject_kinds, vec!["custom".to_string()]);
         assert_eq!(design.owning_team, "platform");
 
-        let review = kinds
+        // From the bundle since 2026-09-11, like every other protocol.
+        let review = bundled_kinds
             .iter()
             .find(|k| k.kind == "design-doc-review")
-            .expect("design-doc-review present");
+            .expect("design-doc-review present in the bundle");
         assert_eq!(review.version, 1);
         assert_eq!(review.status, WorkflowStatus::Active);
 
@@ -6164,18 +6215,20 @@ mod tests {
         // groups or filters by one, and no description anywhere.
         //
         // "platform" is not a grouping invented here: it is what every
-        // other platform Workflow uses — all of
-        // infra/platform/workflows/*.toml (including the seventeen
-        // `maintenance-*` chores authored as data, e.g.
-        // maintenance-files-gc, which puts "The 04:16 file_refs GC
-        // sweep (boss-files-gc)." in `description` and "platform" in
-        // `category`) and every other `platform_seed` call in this
-        // file.
+        // platform Workflow uses — all of
+        // infra/platform/workflows/*.toml, e.g. maintenance-files-gc,
+        // which puts "The 04:16 file_refs GC sweep (boss-files-gc)." in
+        // `description` and "platform" in `category`.
         //
-        // This lived in CODE, and bootstrap_reconcile re-asserts these
-        // specs on every boot, so it could not drift back on its own
-        // and every new deployment reproduced it.
-        let kinds = platform_workflows();
+        // This lived in CODE, and bootstrap_reconcile re-asserts a code
+        // spec on every boot, so it could not drift back on its own and
+        // every new deployment reproduced it. That is the concrete cost
+        // that moved these three out of `platform_workflows()` on
+        // 2026-09-11, so the check follows them to the bundle — where it
+        // now ranges over EVERY platform protocol rather than the three
+        // that happened to be literals.
+        let kinds = crate::seed_loader::load_workflows(super::platform_bundle_path())
+            .expect("the platform bundle parses");
         for spec in &kinds {
             assert_eq!(
                 spec.category, "platform",
@@ -6203,7 +6256,7 @@ mod tests {
             let spec = kinds
                 .iter()
                 .find(|k| k.kind == kind)
-                .unwrap_or_else(|| panic!("`{kind}` present in platform_workflows()"));
+                .unwrap_or_else(|| panic!("`{kind}` present in the platform bundle"));
             assert_eq!(
                 spec.description.as_deref(),
                 Some(expected),
@@ -6223,11 +6276,17 @@ mod tests {
         // immutability then sealed the empty value forever
         // ("Failed to load doc: step.metadata.doc_path is empty",
         // 2026-07-14).
-        let kinds = platform_workflows();
+        //
+        // Read from the bundle since 2026-09-11: the kind is authored at
+        // infra/platform/workflows/design-doc-review.toml, and a
+        // materialization contract this specific is exactly what a
+        // conversion could have dropped.
+        let kinds = crate::seed_loader::load_workflows(super::platform_bundle_path())
+            .expect("the platform bundle parses");
         let review = kinds
             .iter()
             .find(|k| k.kind == "design-doc-review")
-            .expect("design-doc-review present");
+            .expect("design-doc-review present in the bundle");
 
         let subject = Subject::new("custom", "docs/design/transactional-audit-log.md");
         let job_id = JobId::new();
@@ -6321,38 +6380,39 @@ mod tests {
             "a decision that is not `approved` needs its own terminal"
         );
 
-        // design-doc-review is still code-supplied, so it is asserted
-        // against the code — this test now reads both registries, which
-        // is what the split actually looks like.
-        let review = platform_workflows()
-            .into_iter()
+        // design-doc-review joined the bundle on 2026-09-11, so this no
+        // longer reads two registries — there is one left.
+        let review = kinds
+            .iter()
             .find(|k| k.kind == "design-doc-review")
-            .expect("design-doc-review present in platform_workflows");
+            .expect("design-doc-review present in the bundle");
         assert_eq!(review.steps.len(), 3, "review lifecycle has 3 steps");
     }
 
-    #[test]
-    fn platform_workflows_passes_validate_all() {
-        use crate::step_registry::StepRegistry;
-        use crate::workflow_lint::validate_all;
-
-        let kinds = platform_workflows();
-        let registry = StepRegistry::v1();
-        let errs = validate_all(&kinds, &registry);
-        assert!(
-            errs.is_empty(),
-            "platform_workflows() must pass the same lint that gates every other kind: {errs:?}"
-        );
-    }
+    // `platform_workflows_passes_validate_all` lived here until
+    // 2026-09-11 and was deleted with the last literal. An empty roster
+    // made it assert nothing while still reading green, which is the
+    // "a check nobody reads is a check that is not running" shape in its
+    // quietest form. The property did not move: the same lint runs over
+    // the same protocols in `the_bundle_is_as_viable_as_the_code` above,
+    // and over every row a deployment seeds in
+    // `platform_bundle.rs::every_bundled_workflow_is_viable`.
 
     #[test]
-    fn platform_workflows_round_trip_through_json() {
+    fn every_shipped_platform_spec_round_trips_through_json() {
         // The wire shape used by HTTP handlers + the audit_log
         // payload must round-trip cleanly. If anything in the
         // platform spec drifts from the deserializer's expectations
         // (a missing #[serde] attribute on a new WorkflowSpec
         // field, say), this test is the early-warning line.
-        let kinds = platform_workflows();
+        //
+        // WAS `platform_workflows_round_trip_through_json`, over the
+        // Rust roster, which is empty since 2026-09-11. The specs a
+        // deployment actually puts on the wire are the bundle's, so
+        // `seedable_platform_workflows()` is both the honest subject and
+        // a strictly larger one.
+        let kinds = seedable_platform_workflows();
+        assert!(!kinds.is_empty(), "an empty set would prove nothing");
         for original in kinds {
             let wire = serde_json::to_value(&original).expect("serialize");
             let decoded: WorkflowSpec = serde_json::from_value(wire).expect("deserialize");

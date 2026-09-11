@@ -66,15 +66,15 @@ BUNDLE="infra/platform/workflows"   # a directory: one <kind>.toml per protocol
 [ -f "$DEPLOY" ] || { echo "timers-leave-a-packet: $DEPLOY not found" >&2; exit 1; }
 [ -d "$BUNDLE" ] || { echo "timers-leave-a-packet: $BUNDLE not found" >&2; exit 1; }
 
-# The kinds a Workflow actually defines: the bundle, plus the three
-# still baked into platform_workflows() in registry.rs. Both are read,
-# because a kind in either place is a real protocol — and the tree is
-# mid-migration from the second to the first.
-kinds=$(
-    { cat "$BUNDLE"/*.toml | grep -oE '^kind = "maintenance-[a-z-]+"' | sed -E 's/kind = "(.*)"/\1/'
-      grep -oE '"maintenance-[a-z-]+"' crates/core/boss-jobs/src/registry.rs | tr -d '"'
-    } | sort -u
-)
+# The kinds a Workflow actually defines. ONE SOURCE since 2026-09-11:
+# the last three `maintenance-*` kinds baked into platform_workflows()
+# moved into the bundle, so this no longer unions the bundle with a grep
+# over registry.rs. That grep was the looser half by a wide margin — it
+# swept every `"maintenance-…"` literal in a 6000-line file, test
+# fixtures and doc comments included — and keeping it now would mean a
+# kind deleted from the bundle could still read as defined because a
+# test in Rust still names it.
+kinds=$(cat "$BUNDLE"/*.toml | grep -oE '^kind = "maintenance-[a-z-]+"' | sed -E 's/kind = "(.*)"/\1/' | sort -u)
 
 rows=$(sed -n '/^TIMERS=(/,/^)/p' "$DEPLOY" | grep -oE '"[a-z0-9-]+:[^"]+"' | tr -d '"')
 # Forge-host units live beside their installer, so the "subdirectory"

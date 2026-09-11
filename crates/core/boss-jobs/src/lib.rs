@@ -45,9 +45,10 @@ pub mod stranded;
 pub mod workflow_lint;
 pub mod workflow_quarantine;
 pub mod yard;
-// Platform Workflows live in `registry::platform_workflows()` (currently
-// just `workflow-design`); tenant Workflows live in
-// `examples/<tenant>/seeds/workflows.toml` and load via `seed_loader`.
+// Platform Workflows live in `infra/platform/workflows/<kind>.toml`
+// (`registry::platform_workflows()`, the Rust roster, is empty since
+// 2026-09-11); tenant Workflows live in
+// `examples/<tenant>/seeds/workflows.toml`. Both load via `seed_loader`.
 // See docs/design/platform-vs-tenant-jobkinds.md.
 pub mod owner_resolution;
 pub mod seed_loader;

@@ -658,23 +658,74 @@ mod tests {
         // which silently fails the "required at done" contract.
         //
         // Tenant-specific kinds live in per-tenant TOMLs, linted at
-        // load time by the seed_loader test. `platform_workflows()` carries
-        // just `workflow-design`.
+        // load time by the seed_loader test.
+        //
+        // Reads the bundle as well as the roster since 2026-09-11
+        // (`seedable_platform_workflows()` is the union). The roster is
+        // empty now that every platform protocol is a file, and this
+        // loop over it would have kept passing while ranging over
+        // nothing — the quietest way for a closed-alphabet invariant to
+        // stop being held.
+        //
+        // POINTING IT AT THE REAL SET FOUND ONE EXCEPTION IMMEDIATELY,
+        // and it is a deliberate one. `correct-the-record`'s review step
+        // declares `correction-verdict` precisely because a StepPlugin
+        // registers BY KIND and the SPA mounts by kind: registering the
+        // corrections UX against `task` would hijack every task step in
+        // the system. The concern this invariant is about does not apply
+        // to it — the validator it would lose is the kind bundle's, and
+        // its completion contract is authored inline as the step's own
+        // `fields`, which ARE enforced at done. `StepRegistry` is
+        // permissive for unknown kinds by design, and the dispatcher's
+        // `executor_for` already treats an unknown kind as
+        // decision-shaped so the verdict still reaches a person.
+        //
+        // Named rather than silently skipped. An exemption nobody can
+        // see is how a rule stops covering what it was written for, so a
+        // SECOND unregistered kind is a decision that lands in a diff —
+        // and the entry is checked for staleness both ways, the same
+        // discipline `the-live-protocols-are-the-authored-protocols.sh`
+        // applies to its own list.
+        const PLUGIN_ONLY_KINDS: [&str; 1] = ["correction-verdict"];
+
         let reg = StepRegistry::v1();
         let defined: std::collections::HashSet<&str> = reg.all().iter().map(|t| t.kind).collect();
 
+        let specs = crate::registry::seedable_platform_workflows();
+        assert!(!specs.is_empty(), "an empty set would prove nothing");
         let mut missing: Vec<(String, String)> = Vec::new();
-        for spec in crate::registry::platform_workflows() {
+        let mut seen_exempt: Vec<&str> = Vec::new();
+        for spec in &specs {
             for step in &spec.steps {
-                if !defined.contains(step.kind.as_str()) {
-                    missing.push((spec.kind.clone(), step.kind.clone()));
+                if defined.contains(step.kind.as_str()) {
+                    continue;
                 }
+                if let Some(k) = PLUGIN_ONLY_KINDS.iter().find(|k| **k == step.kind.as_str()) {
+                    seen_exempt.push(k);
+                    continue;
+                }
+                missing.push((spec.kind.clone(), step.kind.clone()));
             }
         }
         assert!(
             missing.is_empty(),
-            "platform Workflows reference undefined StepType kinds: {missing:?}"
+            "platform Workflows reference undefined StepType kinds: {missing:?} — define \
+             each in StepRegistry::v1(), or, if it exists only to mount a StepPlugin whose \
+             contract is the step's own `fields`, add it to PLUGIN_ONLY_KINDS above with why"
         );
+        for kind in PLUGIN_ONLY_KINDS {
+            assert!(
+                !defined.contains(kind),
+                "`{kind}` is in the StepType registry now — drop it from \
+                 PLUGIN_ONLY_KINDS, or the exemption silently excuses the next \
+                 unregistered kind of that name"
+            );
+            assert!(
+                seen_exempt.contains(&kind),
+                "no platform Workflow declares a `{kind}` step any more — drop it from \
+                 PLUGIN_ONLY_KINDS"
+            );
+        }
     }
 
     #[test]

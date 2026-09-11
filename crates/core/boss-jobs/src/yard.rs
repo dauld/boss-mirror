@@ -615,6 +615,18 @@ pub struct BoardHold {
     /// The sentence. A depth rule has no clock (`next_due` promises it
     /// no window), so this is always "boards on the next tick once …",
     /// naming EVERY hold that has to clear — never a time of day.
+    ///
+    /// When a clock rule is ALSO configured it carries a trailing "or
+    /// sooner at a scheduled clock window" clause, naming the holds that
+    /// bind the depth rule only. That rule boards on its own firing
+    /// history and never reads `cooldown_minutes` or `min_dock_depth`
+    /// (see [`boarding_hold`]), so a sentence that stopped at the depth
+    /// answer overstated the wait — 2026-09-10 18:04:47Z it said "once
+    /// the cooldown clears (16 min)" and a train boarded 73 seconds
+    /// later on the 18:05 window. Still no time of day: the board lands
+    /// on the conductor's next TICK after an elapsed window, not at the
+    /// window, so an hour here would replace one false promise with
+    /// another.
     pub next_board: String,
 }
 
@@ -720,6 +732,18 @@ fn cooldown_released(last: &LastFiring) -> bool {
 /// now) in, the hold out. The cooldown needs a clock: no clock, no
 /// cooldown reading — the rule `build_status` keeps for stalls. Only the
 /// clockless empty status takes that path, and it carries no firing.
+///
+/// `held_because` and `cooldown_remaining_minutes` are the queue-depth
+/// rule's answer and only its. `next_board` is not: it answers "when
+/// does the next train board?", and a CLOCK rule boards too. The
+/// conductor evaluates each cadence row against its own last firing
+/// (`cadence::last_firing(&rule.name)`), and `cooldown_minutes` /
+/// `min_dock_depth` live inside `Basis::QueueDepth` — `due_window` reads
+/// them in that arm alone. So the cooldown and the depth threshold hold
+/// the depth rule and nothing else, while the open-train count holds
+/// every departing verb. `next_board` says which of its holds the clock
+/// rule is exempt from, because a reader who acts on the sentence is
+/// otherwise told to wait for a board that already happened.
 pub fn boarding_hold(
     rules: &[CadenceRuleRow],
     last_board: Option<&LastFiring>,
@@ -755,18 +779,28 @@ pub fn boarding_hold(
             next_board: "no depth rule is configured — nothing boards on dock depth".to_string(),
         };
     }
-    let mut holds: Vec<(String, String)> = Vec::new();
+    // (why it holds, what clears it, what a clock rule is exempt from)
+    // — in the conductor's order. The third element is `Some(name)` when
+    // the hold binds the DEPTH rule ONLY, so a configured clock rule
+    // boards straight through it; `None` means it binds every departing
+    // verb and the clock rule waits too.
+    let mut holds: Vec<(String, String, Option<&'static str>)> = Vec::new();
     if on_track > 0 {
         let s = if on_track == 1 { "" } else { "s" };
+        // `decide` checks the open-train count for every verb that
+        // departs a train, before it claims a window — so this one is
+        // not an exemption.
         holds.push((
             format!("track occupied ({on_track} open train{s})"),
             "the track clears".to_string(),
+            None,
         ));
     }
     if let Some(m) = cooldown_remaining {
         holds.push((
             format!("cooldown — {m} min left"),
             format!("the cooldown clears ({m} min)"),
+            Some("the cooldown"),
         ));
     }
     if let Some(t) = threshold
@@ -775,23 +809,45 @@ pub fn boarding_hold(
         holds.push((
             format!("below threshold (depth {dock_depth} of {t})"),
             format!("the dock reaches {t}"),
+            Some("the dock threshold"),
         ));
     }
 
     let next_board = match threshold {
         None => "no depth rule is configured — nothing boards on dock depth".to_string(),
         Some(_) if holds.is_empty() => "boards on the next tick".to_string(),
-        Some(_) => format!(
-            "boards on the next tick once {}",
-            holds
-                .iter()
-                .map(|(_, clears)| clears.as_str())
-                .collect::<Vec<_>>()
-                .join(" and ")
-        ),
+        Some(_) => {
+            let base = format!(
+                "boards on the next tick once {}",
+                holds
+                    .iter()
+                    .map(|(_, clears, _)| clears.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            );
+            // A depth-only hold does not bind a configured clock rule, so
+            // stopping at `base` would state a wait the system does not
+            // keep — see [`BoardHold::next_board`]. The clock window is
+            // named as a window, never as an hour: `at_times` holds
+            // `HH:MM`, and the board lands on the next tick after the
+            // window, not at it.
+            let exempt: Vec<&str> = holds.iter().filter_map(|(_, _, e)| *e).collect();
+            match (clock_rule(rules), exempt.as_slice()) {
+                (Some(_), [one]) => {
+                    format!(
+                        "{base} — or sooner at a scheduled clock window, which {one} does not hold"
+                    )
+                }
+                (Some(_), many) if !many.is_empty() => format!(
+                    "{base} — or sooner at a scheduled clock window, which neither {} holds",
+                    many.join(" nor ")
+                ),
+                _ => base,
+            }
+        }
     };
     BoardHold {
-        held_because: holds.into_iter().next().map(|(why, _)| why),
+        held_because: holds.into_iter().next().map(|(why, _, _)| why),
         cooldown_remaining_minutes: cooldown_remaining,
         last_board_at: last_board.map(|l| l.fired_at),
         next_board,
@@ -2885,6 +2941,91 @@ mod tests {
         assert_eq!(
             status.boarding.hold.held_because.as_deref(),
             Some("track occupied (1 open train)")
+        );
+    }
+
+    /// The clock rule as the live registry holds it (`train-window`,
+    /// verb `run`, `at_times` 06:05 / 18:05). No depth, no cooldown —
+    /// which is the whole point of it.
+    fn clock_rule_row() -> CadenceRuleRow {
+        let mut r = rule("clock");
+        r.name = "train-window".into();
+        r.at_times = Some(json!(["06:05", "18:05"]));
+        r
+    }
+
+    /// 2026-09-10 18:04:47Z this field read "boards on the next tick once
+    /// the cooldown clears (16 min)" and a train boarded at 18:06:00Z on
+    /// the 18:05 clock window — wrong by fifteen minutes.
+    ///
+    /// The conductor evaluates each cadence row against ITS OWN last
+    /// firing (`cadence::last_firing(&rule.name)`, inside the per-rule
+    /// loop), and `cooldown_minutes` is a field of the queue-depth basis
+    /// alone — `due_window` reads it only in that arm. A clock rule
+    /// therefore never waits out the depth rule's cooldown, so naming
+    /// only the cooldown states a delay the system never promised.
+    #[test]
+    fn a_clock_window_boards_through_the_depth_rules_cooldown() {
+        let last = fired("2026-09-07T20:00:00Z", Some(0));
+        let h = boarding_hold(
+            &[board_rule(4, 45), clock_rule_row()],
+            Some(&last),
+            5,
+            0,
+            Some(at("2026-09-07T20:10:00Z")),
+        );
+        // The hold itself is unchanged: the DEPTH rule is cooling.
+        assert_eq!(h.held_because.as_deref(), Some("cooldown — 35 min left"));
+        assert_eq!(h.cooldown_remaining_minutes, Some(35));
+        assert_eq!(
+            h.next_board,
+            "boards on the next tick once the cooldown clears (35 min) \
+             — or sooner at a scheduled clock window, which the cooldown does not hold"
+        );
+        // Still no time of day. The conductor boards at its next TICK
+        // after an elapsed window, not at the window, so an hour here
+        // would swap one false promise for another.
+        assert!(!h.next_board.contains(':'), "{}", h.next_board);
+    }
+
+    #[test]
+    fn the_clock_exemption_names_every_depth_only_hold() {
+        // Track + cooldown + depth. The clock rule is bound by the track
+        // and by neither of the others, so it can still board before the
+        // sentence's full set clears, and both exemptions are named.
+        let last = fired("2026-09-07T20:00:00Z", Some(0));
+        let h = boarding_hold(
+            &[board_rule(4, 45), clock_rule_row()],
+            Some(&last),
+            2,
+            1,
+            Some(at("2026-09-07T20:10:00Z")),
+        );
+        assert_eq!(
+            h.next_board,
+            "boards on the next tick once the track clears and the cooldown clears (35 min) \
+             and the dock reaches 4 — or sooner at a scheduled clock window, which neither \
+             the cooldown nor the dock threshold holds"
+        );
+        assert!(!h.next_board.contains(':'), "{}", h.next_board);
+    }
+
+    #[test]
+    fn the_track_holds_the_clock_rule_too_so_it_buys_no_exemption() {
+        // `decide` gates EVERY departing verb on the open-train count
+        // before it claims a window — `train-window`'s `run` included. A
+        // dock held only by the track has nothing that boards sooner,
+        // and saying otherwise would be this same defect mirrored.
+        let h = boarding_hold(
+            &[board_rule(4, 45), clock_rule_row()],
+            None,
+            5,
+            1,
+            Some(at("2026-09-07T20:10:00Z")),
+        );
+        assert_eq!(
+            h.next_board,
+            "boards on the next tick once the track clears"
         );
     }
 

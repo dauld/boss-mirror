@@ -726,6 +726,10 @@ async fn a_recent_board_firing_reads_as_a_cooldown_hold_with_the_minutes_left() 
 /// sentence still names the depth that has to follow. The seed's own
 /// open train is merged (mid-deploy) and does NOT count — two trains are
 /// open, the track reads one.
+///
+/// A clock rule is configured here, so the sentence also says the depth
+/// threshold does not hold IT: the track binds every departing verb, the
+/// threshold binds the depth rule alone.
 #[tokio::test]
 async fn an_open_train_reads_as_track_occupied_before_anything_else() {
     let (app, jobs) = app_with(vec![depth_rule(), clock_rule()], vec![policy_row()]);
@@ -777,7 +781,8 @@ async fn an_open_train_reads_as_track_occupied_before_anything_else() {
     assert!(b["last_board_at"].is_null());
     assert_eq!(
         b["next_board"],
-        "boards on the next tick once the track clears and the dock reaches 4"
+        "boards on the next tick once the track clears and the dock reaches 4 \
+         — or sooner at a scheduled clock window, which the dock threshold does not hold"
     );
 }
 
@@ -796,9 +801,13 @@ async fn a_merged_train_waiting_to_deploy_does_not_hold_the_track() {
     assert_eq!(body["trains"][0]["phase"], "deploying");
     let b = &body["boarding"];
     assert_eq!(b["held_because"], "below threshold (depth 2 of 4)");
+    // And the clock rule this fixture configures is not held by the dock
+    // threshold, so the wire says so rather than promising a wait for a
+    // depth the 06:00 / 18:00 window never reads.
     assert_eq!(
         b["next_board"],
-        "boards on the next tick once the dock reaches 4"
+        "boards on the next tick once the dock reaches 4 \
+         — or sooner at a scheduled clock window, which the dock threshold does not hold"
     );
 }
 

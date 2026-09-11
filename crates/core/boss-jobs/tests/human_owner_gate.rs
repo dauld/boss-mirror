@@ -211,7 +211,24 @@ async fn platform_meta_kinds_declare_a_resolvable_owner_role() {
     // design-Job create was rejected, no brewery kind ever
     // published, and the whole from-empty stack starved. The
     // platform meta-kinds must name a real role explicitly.
-    for spec in boss_jobs::registry::platform_workflows() {
+    //
+    // Reads the BUNDLE since 2026-09-11: `platform_workflows()` is empty
+    // now that every platform protocol is a file, and a loop over an
+    // empty roster would have kept this green while checking nothing.
+    //
+    // The subject is a NAMED SET rather than "everything a deployment
+    // seeds", because the wider claim is false and asserting it would be
+    // the worse repair: `incident` is owned by `shift-lead` and nine
+    // bundled protocols declare no `owner_role` at all, which is correct
+    // for work nobody's queue should claim by role. The meta-kinds — the
+    // protocols that author other protocols and their reviews — are the
+    // ones the 2026-07-17 starvation was about.
+    let specs = boss_jobs::registry::seedable_platform_workflows();
+    for kind in ["workflow-design", "design-doc", "design-doc-review"] {
+        let spec = specs
+            .iter()
+            .find(|s| s.kind == kind)
+            .unwrap_or_else(|| panic!("`{kind}` is a platform meta-kind and must be seeded"));
         let owner_role = spec.metadata.get("owner_role").and_then(|v| v.as_str());
         assert_eq!(
             owner_role,

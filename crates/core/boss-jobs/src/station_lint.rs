@@ -610,9 +610,10 @@ mod tests {
     /// own shape, and if the two drift this catches which.
     #[test]
     fn every_projected_station_passes_its_own_lint() {
-        use crate::registry::platform_workflows;
+        use crate::registry::seedable_platform_workflows;
         let now = chrono::Utc.with_ymd_and_hms(2026, 8, 13, 12, 0, 0).unwrap();
-        let derived = crate::station_projection::derived_stations(&platform_workflows(), &[], now);
+        let derived =
+            crate::station_projection::derived_stations(&seedable_platform_workflows(), &[], now);
         assert!(!derived.is_empty(), "expected derived stations to test");
         let errs = validate_all(&derived);
         assert_eq!(errs, Vec::new(), "a projected station failed the lint");

@@ -123,20 +123,19 @@ fn is_unit_run(w: &WorkflowSpec) -> bool {
 /// failed run either sat open looking like a run in progress
 /// (disk-floor-sweep, 16:10, two FLOOR UNMET runs) or was closed "ok"
 /// by the next run's recovery (forge-converge, 17:39, exit 1). Now the
-/// run step's `result` routes: `ok` completes, anything else fails —
-/// in the bundle AND in the three kinds still compiled into
-/// platform_workflows(), which are one contract.
+/// run step's `result` routes: `ok` completes, anything else fails.
+///
+/// The three chores that were still compiled into `platform_workflows()`
+/// joined the bundle on 2026-09-11, so this reads one place. It read
+/// both, and the second half is gone rather than kept as an empty loop:
+/// `platform_workflows()` is empty now, and iterating it would have
+/// looked like coverage it no longer provides.
 #[test]
 fn every_unit_run_maintenance_kind_ends_in_its_verdict() {
-    let mut kinds: Vec<WorkflowSpec> = bundle().into_iter().filter(is_unit_run).collect();
-    kinds.extend(
-        boss_jobs::registry::platform_workflows()
-            .into_iter()
-            .filter(is_unit_run),
-    );
+    let kinds: Vec<WorkflowSpec> = bundle().into_iter().filter(is_unit_run).collect();
     assert!(
         kinds.len() >= 19,
-        "expected the 16+ bundled + 3 compiled unit-run maintenance kinds, got {}",
+        "expected at least the 19 bundled unit-run maintenance kinds, got {}",
         kinds.len()
     );
     for w in kinds {

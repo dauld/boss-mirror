@@ -27,9 +27,31 @@ replaced without a deploy has leaked into the substrate".
 
 Three of the four registries carrying the operating model already seed
 as data (dispatcher_rules, stations, step_plugins). `workflows` did
-not: twelve kinds were Rust literals in `platform_workflows()`, and an
+not: its kinds were Rust literals in `platform_workflows()`, and an
 API publish of one is REVERTED on the next boot because
 bootstrap_reconcile republishes the code default (68331085).
+
+**`platform_workflows()` is EMPTY as of 2026-09-11**, so this directory
+is the whole platform protocol set. The last four out were
+`design-doc-review` and the three `maintenance_spec` chores (backup,
+audit-integrity, ledger-replay), and the roster is now pinned empty
+from two sides: `platform_workflows_carries_the_shipped_meta_kinds` in
+registry.rs, and the lint below, which requires the function body to
+read exactly `vec![]`.
+
+A kind that leaves the roster for this directory does NOT change the
+row a live deployment already has. `bootstrap_reconcile` only iterates
+the roster, so the kind simply stops being reconciled; the seed is
+insert-if-missing and an active row is present, so it is untouched. The
+four rows kept their versions — `design-doc-review` v1, the three
+chores v3 — no version was retired, and no in-flight packet's pin
+moved. What changes is ownership: nothing rewrites those rows any more,
+so an operator's edit survives a pod roll, and a correction the tree
+makes no longer reaches the row on its own. `design-doc-review` is the
+worked case: its live v1 `description` still names a surface deleted on
+2026-09-10, because reconcile's drift test excludes `description` as
+cosmetic, and the file here carries the corrected text. Publishing a
+new version from a bundle file is `boss workflow publish <kind>`.
 
 Parsed by `boss_jobs::seed_loader::load_workflows`, the same reader the
 brewery's 25-row bundle uses. Authored rather than generated on
@@ -71,13 +93,17 @@ tree unable to describe it is not.
 
 The lint counts four authoring homes, because the question it asks is
 "can a reader find out what this protocol is": this directory, a
-tenant's `examples/<tenant>/seeds/workflows.toml`, a Rust literal still
-in `platform_workflows()`, and an insert in `infra/postgres/schema/`
+tenant's `examples/<tenant>/seeds/workflows.toml`, a Rust literal in
+`platform_workflows()`, and an insert in `infra/postgres/schema/`
 (how `repair-a-train` arrived). The last two are duplication this tree
-is moving away from, not endorsements. The reverse direction — a file
-with no live row — is REPORTED, never failed on: it is the window
-between a protocol car's merge and the converge behind it, and the
-permanent state of whichever tenant a deployment does not run.
+is moving away from, not endorsements — and since 2026-09-11 the lint
+says so about the third directly: a kind in `platform_workflows()` is a
+FAILURE on its own, not merely a tolerated home, because a protocol
+there cannot be changed without shipping a binary. The reverse
+direction — a file with no live row — is REPORTED, never failed on: it
+is the window between a protocol car's merge and the converge behind
+it, and the permanent state of whichever tenant a deployment does not
+run.
 
 **Render a backfill from the live row; do not retype it.** A file that
 disagrees with the live row replaces one problem with a worse one. Four

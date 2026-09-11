@@ -448,17 +448,26 @@ async fn run_server<R: JobsRepository + 'static>(
     Ok(())
 }
 
-/// Reconcile the platform-supplied Workflows (today: just
-/// `workflow-design`) against the live registry. Insert if
-/// missing, refresh bootstrap-owned drift, preserve operator
-/// edits — same shape as
+/// Reconcile the code-resident platform Workflows against the live
+/// registry: insert if missing, refresh bootstrap-owned drift, preserve
+/// operator edits — same shape as
 /// `boss_policy_client::PolicyRepository::bootstrap_reconcile`.
 ///
+/// `platform_workflows()` IS EMPTY since 2026-09-11, so this is a no-op
+/// on every boot and logs `total=0`. That is the destination, not a
+/// regression: every platform protocol is a file under
+/// infra/platform/workflows/ seeded by `boss-platform-workflow-seed`
+/// (insert-if-missing), and the four rows that were reconciled until
+/// then are simply no longer reconciled — they keep the version they
+/// reached, and an operator's edit to one now survives a pod roll.
+///
+/// The call stays because the reconcile contract is still a port method
+/// with two adapters and its own tests, and because the stats line is
+/// where a platform kind reappearing as a Rust literal would announce
+/// itself. Retiring reconcile outright is a separate change.
+///
 /// Logs the stats line on every boot so operators can see the
-/// reconcile decision land in real time. The platform list is
-/// short (just one kind in v1) so a missing default surfaces
-/// instantly: the next boot logs `inserted=1` if someone
-/// retired the meta-kind by hand.
+/// reconcile decision land in real time.
 ///
 /// Each inserted/republished row records `jobs.kind.published`
 /// with the row (registry-events invariant), attributed to the

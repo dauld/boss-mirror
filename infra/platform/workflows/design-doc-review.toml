@@ -1,0 +1,55 @@
+# The review half of "the system models its own development": a design
+# doc becomes the Subject of one of these packets and the review-design
+# step plugin gates completion on every open question having a recorded
+# resolution.
+#
+# A Rust literal (`design_doc_review_spec()`) until 2026-09-11, which
+# made a change to this governance protocol a deploy.
+#
+# ONE FIELD IS DELIBERATELY NOT THE LIVE ROW'S. The live v1 row's
+# `description` still describes the `/api/design/pending-decisions` +
+# flush-jobs corpus surface that was deleted on 2026-09-10 (backlog
+# f5da586c). The Rust literal's description was corrected in the same
+# change and never reached the row, because `kind_body_matches` —
+# bootstrap_reconcile's drift test — excludes `description` as
+# cosmetic. The corrected text is what is written down here; authoring
+# the stale sentence would be writing a known-false statement into the
+# tree. The live row keeps its own until someone publishes a new
+# version from this file.
+[[workflow]]
+kind = "design-doc-review"
+label = "Review a design doc"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Meta-kind: every design doc under docs/design/ gets reviewed via a Job of this kind. The `review-design` step uses a custom Step UX plugin that reads the questions the packet carries and gates completion until each one has a recorded resolution. Resolutions land on the step, which IS the record; each release, settled material folds into `docs/architecture-decisions.md`. A LEGACY packet carrying only a `doc_path` and no questions is no longer readable: the corpus index that parsed `### Qn:` headings out of the file was deleted on 2026-09-10 (backlog f5da586c), and the surface says so rather than fetching a service that is gone. Replaces the in-app decision-tracker surface retired on 2026-05-03."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "open"
+kind = "trigger"
+ready_when = "true"
+title_template = "Design doc opened for review"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "design-doc-author-opens-review" }
+
+# doc_path is stamped AT MATERIALIZATION from the Job's subject (the doc
+# path IS the subject id) — atomically, in the write that creates the
+# step. It must never rely on a follow-up PUT: a second write loses
+# read-overlay-write races against dispatcher assignment and workforce
+# completion, and terminal-metadata immutability then seals the empty
+# value (the 2026-07-14 "doc_path is empty" incident).
+[[workflow.step]]
+title = "review"
+kind = "review-design"
+ready_when = "steps.open.done"
+title_template = "Review design doc — address open questions"
+authority_role = "platform-admin"
+metadata_defaults = { doc_path = "{subject.id}", resolutions = [] }
+
+[[workflow.step]]
+title = "reviewed"
+kind = "outcome"
+ready_when = "steps.review.done"
+title_template = "Design reviewed — decisions captured"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }

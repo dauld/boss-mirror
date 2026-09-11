@@ -146,21 +146,38 @@ tenant_kinds_of() {
 }
 tenant_kinds=$(for f in "${tenant_files[@]}"; do tenant_kinds_of "$f"; done | LC_ALL=C sort -u)
 
-# Home 3: the Rust literals still inside `platform_workflows()`.
+# Home 3: the Rust literals inside `platform_workflows()`. EMPTY since
+# 2026-09-11, and the check below is what keeps it that way.
 #
-# The body is scraped between the signature and the first line that
-# closes it at column 0. Two shapes are read: a kebab-case string
+# This home was always a tolerated waypoint, never a destination: a kind
+# here is a protocol that cannot be changed without building and
+# shipping a binary, which is CLAUDE.md's own definition of a protocol
+# that has leaked into the substrate. The last four left on 2026-09-11
+# (`design-doc-review` and the three `maintenance_spec` chores), and the
+# concrete cost of the form is on the record — `maintenance_spec` put its
+# description in the CATEGORY column for all three, and because
+# `bootstrap_reconcile` re-asserts a code spec on every boot the wrong
+# value could not drift back on its own and every new deployment
+# reproduced it (6c796f75).
+#
+# So the roster is now checked EMPTY rather than merely scraped. The
+# body is read between the signature and the first line closing it at
+# column 0; two entry shapes are recognised — a kebab-case string
 # literal (`maintenance_spec("maintenance-backup", …)`) and a
 # no-argument `<name>_spec()` call, whose kind is its name with
 # underscores as dashes (`design_doc_review_spec()` →
-# `design-doc-review`). Labels and descriptions in the same body are
-# filtered out by the kebab-case test — they carry spaces and capitals.
+# `design-doc-review`) — and they still feed the authored set, so a
+# literal put back tomorrow is counted as authoring and NOT reported as
+# an unauthored live kind. It fails on the narrower ground that a
+# protocol belongs in the bundle.
 #
-# A kind this cannot see reads as unauthored and FAILS, loudly, naming
-# it. That is the right direction to be wrong in: the fix for a
-# `platform_workflows()` entry this does not recognise is to move that
-# kind into the bundle, which is where protocols-as-data is taking it
-# anyway.
+# An empty roster must also LOOK empty, because "the scrape saw nothing"
+# and "there is nothing to see" have to stay distinguishable: the body
+# with comments and whitespace stripped is required to be exactly
+# `vec![]`. That is what keeps this honest against an entry shape the
+# two patterns above do not recognise — such an entry leaves the body
+# non-empty, and a non-empty body is a failure whether or not a kind
+# name could be read out of it.
 code_kinds=$(
     LC_ALL=C awk '
         /^pub fn platform_workflows\(\)/ { inside = 1; next }
@@ -184,7 +201,47 @@ code_kinds=$(
         }
     ' "$REGISTRY_RS" | LC_ALL=C sort -u
 )
-[ -n "$code_kinds" ] || fail "read no kinds out of platform_workflows() in $REGISTRY_RS — the scrape broke, so a green result would mean nothing"
+
+# The roster's body, comments and whitespace gone. `absent` means the
+# signature itself could not be found — a renamed function, which is a
+# broken scrape and not an empty roster.
+roster_body=$(
+    LC_ALL=C awk '
+        /^pub fn platform_workflows\(\)/ { inside = 1; found = 1; next }
+        inside && /^\}/                  { inside = 0 }
+        inside {
+            line = $0
+            sub(/\/\/.*$/, "", line)
+            gsub(/[ \t]/, "", line)
+            body = body line
+        }
+        END { if (!found) print "absent"; else print body }
+    ' "$REGISTRY_RS"
+)
+if [ "$roster_body" = "absent" ]; then
+    fail "could not find \`pub fn platform_workflows()\` in $REGISTRY_RS — the scrape \
+broke, so a green result would mean nothing"
+elif [ "$roster_body" != "vec![]" ]; then
+    n=$(printf '%s\n' "$code_kinds" | LC_ALL=C sed '/^$/d' | wc -l | tr -d ' ')
+    fail "platform_workflows() authors $n workflow kind(s) as Rust literals:"
+    printf '    %s\n' ${code_kinds:+$code_kinds} >&2
+    echo "" >&2
+    echo "  A protocol here cannot be changed without building and shipping a" >&2
+    echo "  binary — CLAUDE.md's own definition of a protocol that has leaked" >&2
+    echo "  into the substrate — and bootstrap_reconcile RE-ASSERTS it on every" >&2
+    echo "  boot, so an operator's edit to the live row is reverted at the next" >&2
+    echo "  pod roll and a wrong value cannot drift back (6c796f75)." >&2
+    echo "" >&2
+    echo "  Move it to $BUNDLE/<kind>.toml, rendered from the live row, and" >&2
+    echo "  delete the literal. The row the deployment already has is NOT" >&2
+    echo "  touched: the seed is insert-if-missing, so the kind keeps its" >&2
+    echo "  current version and every in-flight packet keeps its spec — it" >&2
+    echo "  simply stops being reconciled. See $BUNDLE/README.md." >&2
+    echo "" >&2
+    echo "  The roster must also READ as empty — \`vec![]\` with nothing but" >&2
+    echo "  comments — so that an entry shape this script does not recognise" >&2
+    echo "  still fails here instead of passing silently." >&2
+fi
 
 # Home 4: a migration that inserts a row directly. Only files that
 # actually write a `workflows` row are read, and every single-quoted
