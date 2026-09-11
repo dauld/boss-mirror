@@ -20,6 +20,7 @@
   // Renders only when a step carries an `arrival_report` — a train's
   // landing report. Every other Job renders exactly as before.
   import ArrivalReport from '../it/yard/ArrivalReport.svelte';
+  import { fetchRemote, type Remote } from '../data/remote';
 
   let { jobId } = $props<{ jobId: string }>();
 
@@ -38,22 +39,27 @@
     field_kind: string;
     description: string;
   }>;
-  let edgeSpecs = $state<ReadonlyArray<JobEdgeSpec>>([]);
+  // A failed registry read used to leave `edgeSpecs` empty, which reads
+  // as "this Job links to nothing" — the false-empty class (backlog
+  // a704c5eb; the union is packet 3fba9c35's). Lower stakes than the HR
+  // tasks table that packet was filed about — missing link labels, not a
+  // claim about a person — but the same silent shape, so it gets the
+  // same treatment: a Remote, branched on at the render site.
+  let edges = $state<Exclude<Remote<ReadonlyArray<JobEdgeSpec>>, { kind: 'loading' }> | null>(
+    null,
+  );
   $effect(() => {
     void (async () => {
-      try {
-        const r = await fetch('/api/jobs/job-edges');
-        if (!r.ok) return;
-        const body: unknown = await r.json();
-        edgeSpecs = Array.isArray(body) ? (body as ReadonlyArray<JobEdgeSpec>) : [];
-      } catch {
-        edgeSpecs = [];
-      }
+      edges = await fetchRemote('/api/jobs/job-edges', (raw) => {
+        if (!Array.isArray(raw)) throw new Error('job-edges: expected an array');
+        return raw as ReadonlyArray<JobEdgeSpec>;
+      });
     })();
   });
 
   let jobLinks = $derived.by(() => {
     const j = job;
+    const edgeSpecs = edges?.kind === 'ready' ? edges.data : [];
     if (!j) return [];
     const out: { label: string; description: string; ids: string[] }[] = [];
     for (const e of edgeSpecs) {
@@ -221,7 +227,16 @@
 
     <div class="tab-grid">
       <ArrivalReport job={j} />
-      {#if jobLinks.length > 0}
+      {#if edges?.kind === 'failed'}
+        <!-- Saying nothing here would be saying "no linked Jobs", which
+             the failed read has no standing to claim. -->
+        <Section title="Linked Jobs">
+          <p class="load-failed" role="alert" style="font-size:13px">
+            Couldn't read the job-edges registry — {edges.error}. Any links
+            this Job declares are unknown, not absent.
+          </p>
+        </Section>
+      {:else if jobLinks.length > 0}
         <Section title="Linked Jobs">
           {#each jobLinks as link (link.label)}
             <div class="jd-info-row">

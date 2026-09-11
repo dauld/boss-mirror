@@ -111,10 +111,26 @@ export type HeldCar = Readonly<{
   reason: string;
 }>;
 
+/** Whether the server could READ one of the boarding block's inputs, as
+ *  it states it on the wire. `null` on a server that does not state it —
+ *  the page then reads the fields it qualifies exactly as it always did.
+ *
+ *  It exists because the nulls it qualifies cannot carry the distinction
+ *  themselves: `dock_threshold: null` is "no depth rule is configured" on
+ *  a registry that was read and "I could not tell you" on one that was
+ *  not, and those ask an operator for different things (31783deb).
+ *  `dock_depth` can express its own unread state as a null against a
+ *  number; a field whose null is ALREADY a legitimate value cannot. */
+export type ReadState = 'read' | 'unread';
+
 export type BoardingPredicate = Readonly<{
   dock_threshold: number | null;
   cooldown_minutes: number | null;
   at_times: readonly string[];
+  /** Whether the server read the cadence rows. `unread` says the three
+   *  fields above are unknowns, not absences — and the server's own
+   *  `summary` then says so in words. */
+  cadence_reading: ReadState | null;
   /** How many cars are parked right now, or NULL when the server could
    *  not read the dock — the `loading-dock` station row did not serve.
    *  Never coerced to 0: a zero is a count, and a count nobody took is
@@ -137,6 +153,11 @@ export type BoardingPredicate = Readonly<{
   cooldown_remaining_minutes: number | null;
   /** When the board rule last fired (RFC3339), released or not. */
   last_board_at: string | null;
+  /** Whether the server read that firing. `unread` says `last_board_at`
+   *  and `cooldown_remaining_minutes` are unknowns — not "it has never
+   *  boarded" and not "no cooldown is running", which is how the pair
+   *  reads on its own and is the answer that lets something proceed. */
+  last_board_reading: ReadState | null;
   /** "boards on the next tick once …" — never a time of day; the depth
    *  rule has no clock. Null on a server that does not send it. */
   next_board: string | null;
@@ -407,12 +428,21 @@ function parseHeldCar(raw: unknown): HeldCar {
   return { ...parseDockCar(raw), reason };
 }
 
+/** A reading the server states, or `null` when it states none. Anything
+ *  else — an older server, a missing key, a typo — is "not stated", never
+ *  `read`: claiming a read that was never stated is the defect this field
+ *  exists to report. */
+function parseReadState(raw: unknown): ReadState | null {
+  return raw === 'read' || raw === 'unread' ? raw : null;
+}
+
 function parseBoarding(raw: unknown): BoardingPredicate {
   const o = asObjectOrEmpty(raw);
   return {
     dock_threshold: typeof o.dock_threshold === 'number' ? o.dock_threshold : null,
     cooldown_minutes: typeof o.cooldown_minutes === 'number' ? o.cooldown_minutes : null,
     at_times: Array.isArray(o.at_times) ? o.at_times.map(String) : [],
+    cadence_reading: parseReadState(o.cadence_reading),
     // `?? 0` would turn the server's "I could not read the dock" into
     // "the dock is empty" — the defect in a new place (efe6ef10). An
     // absent key is no reading either.
@@ -426,6 +456,7 @@ function parseBoarding(raw: unknown): BoardingPredicate {
     cooldown_remaining_minutes:
       typeof o.cooldown_remaining_minutes === 'number' ? o.cooldown_remaining_minutes : null,
     last_board_at: typeof o.last_board_at === 'string' ? o.last_board_at : null,
+    last_board_reading: parseReadState(o.last_board_reading),
     next_board: typeof o.next_board === 'string' ? o.next_board : null,
   };
 }
@@ -718,6 +749,10 @@ export function lastVerbReading(c: ConductorHealth | null): Reading {
  *  A clock rule beside it is quoted verbatim from the registry row. */
 export function boardsWhen(b: BoardingPredicate): string {
   const t = b.dock_threshold;
+  // No threshold has two causes — a registry with no depth rule, and a
+  // cadence read that failed — and only the SERVER can tell them apart,
+  // so the server's sentence is what renders. `cadence_reading` says
+  // which one it is for anything that needs to branch.
   if (t === null) return b.summary !== '' ? b.summary : 'no boarding rule configured';
   const cooldown =
     b.cooldown_minutes !== null ? `the cooldown (${b.cooldown_minutes}m) clears` : null;
@@ -756,6 +791,10 @@ export type BoardHoldView = Readonly<{
    *  ok; a no-depth-rule line muted. */
   primary: Readonly<{ tone: Reading['tone'] | null; text: string }>;
   next: string | null;
+  /** The last board as a clock time, `not read` when the server could
+   *  not read the firing, or null when it has never boarded. A bare
+   *  absence would render as "never boarded", which is the server's old
+   *  permissive answer moved into the page. */
   lastBoard: string | null;
 }>;
 
@@ -765,19 +804,25 @@ export type BoardHoldView = Readonly<{
  *  own authority. Every line is the server's sentence — the depth rule
  *  has no clock, so nothing here is a time of day. */
 export function boardHold(b: BoardingPredicate): BoardHoldView | null {
-  const lastBoard = clockText(b.last_board_at);
+  // Any input the server could not read makes this row a NON-READING, and
+  // a non-reading is never painted as health — not green, and not the
+  // plain colour a working hold wears. The server's own sentences already
+  // say which input; this is the lens agreeing with them.
+  const unread =
+    b.cadence_reading === 'unread' || b.last_board_reading === 'unread' || b.dock_depth === null;
+  const lastBoard = b.last_board_reading === 'unread' ? 'not read' : clockText(b.last_board_at);
   if (b.held_because !== null) {
     return {
-      primary: { tone: null, text: `held: ${b.held_because}` },
+      primary: { tone: unread ? 'muted' : null, text: `held: ${b.held_because}` },
       next: b.next_board,
       lastBoard,
     };
   }
   if (b.next_board !== null) {
-    // An unread depth is never `ok`. The server's sentence already says
+    // An unread input is never `ok`. The server's sentence already says
     // "cannot say", and painting it green is the same defect in the lens
     // — the conductor lamp's "no reading" posture applies here too.
-    const known = b.dock_threshold !== null && b.dock_depth !== null;
+    const known = b.dock_threshold !== null && !unread;
     return {
       primary: { tone: known ? 'ok' : 'muted', text: b.next_board },
       next: null,

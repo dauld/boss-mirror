@@ -28,7 +28,9 @@ use axum::http::{Request, StatusCode};
 use boss_core::job::{Job, JobId, JobStatus, Priority, Step, StepId, StepStatus, Subject};
 use boss_core::port::EventBus;
 use boss_core::publisher::DomainPublisher;
-use boss_jobs::cadence::{CadenceRepository, CadenceRuleRow, InMemoryCadence, NewFiring};
+use boss_jobs::cadence::{
+    CadenceError, CadenceRepository, CadenceRuleRow, InMemoryCadence, LastFiring, NewFiring,
+};
 use boss_jobs::delivery::{
     DeliveryPolicyRepository, DeliveryPolicyRow, InMemoryDeliveryPolicy, StoredPolicy,
 };
@@ -183,6 +185,18 @@ fn app_with_parts(
     policy: Vec<StoredPolicy>,
     stations: Option<Arc<dyn boss_jobs::StationRegistry>>,
 ) -> (axum::Router, Arc<InMemoryJobs>) {
+    app_with_cadence_repo(Arc::new(cadence), policy, stations)
+}
+
+/// `app_with_parts` over any cadence repository — so a test can wire one
+/// whose READS FAIL. `InMemoryCadence` always answers and a `None`
+/// repository is never asked, so neither can produce the storage error
+/// the handler actually meets in production (see [`FailingCadence`]).
+fn app_with_cadence_repo(
+    cadence: Arc<dyn CadenceRepository>,
+    policy: Vec<StoredPolicy>,
+    stations: Option<Arc<dyn boss_jobs::StationRegistry>>,
+) -> (axum::Router, Arc<InMemoryJobs>) {
     let jobs = Arc::new(InMemoryJobs::new());
     let policy_client: Arc<dyn PolicyClient> = Arc::new(
         FakePolicyClient::builder()
@@ -191,7 +205,6 @@ fn app_with_parts(
     );
     let bus = RecordingEventBus::new();
     let bus_dyn: Arc<dyn EventBus> = bus.clone();
-    let cadence: Arc<dyn CadenceRepository> = Arc::new(cadence);
     let delivery: Arc<dyn DeliveryPolicyRepository> = Arc::new(InMemoryDeliveryPolicy::new(policy));
     let state = JobsApiState {
         jobs: jobs.clone(),
@@ -757,6 +770,160 @@ async fn an_unreadable_dock_row_says_unavailable_rather_than_empty() {
     assert!(body["trains"].is_array());
 }
 
+/// A cadence repository whose READS FAIL — the shape the handler used to
+/// erase. `active_rules()` ran through `unwrap_or_default()` and
+/// `last_firing()` through `.ok().flatten()`, so a storage error arrived
+/// in the read-model as "no rules configured" and "never boarded"
+/// (31783deb). Neither `InMemoryCadence` (always answers) nor a `None`
+/// repository (never asked) can produce that error, so the test needs
+/// this one.
+///
+/// `rules: None` fails the rules read; `firing_fails` fails the firing
+/// read. The two fail independently in production and so do they here.
+struct FailingCadence {
+    rules: Option<Vec<CadenceRuleRow>>,
+    firing_fails: bool,
+}
+
+#[async_trait::async_trait]
+impl CadenceRepository for FailingCadence {
+    async fn active_rules(&self) -> Result<Vec<CadenceRuleRow>, CadenceError> {
+        self.rules
+            .clone()
+            .ok_or_else(|| CadenceError::Storage("connection reset by peer".into()))
+    }
+
+    async fn last_firing(&self, _rule: &str) -> Result<Option<LastFiring>, CadenceError> {
+        if self.firing_fails {
+            Err(CadenceError::Storage("connection reset by peer".into()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn claim_firing(&self, _new: &NewFiring) -> Result<bool, CadenceError> {
+        Err(CadenceError::Storage("read-only fake".into()))
+    }
+
+    async fn record_outcome(
+        &self,
+        _firing_id: &str,
+        _rc: i32,
+        _runtime_secs: u64,
+    ) -> Result<(), CadenceError> {
+        Err(CadenceError::Storage("read-only fake".into()))
+    }
+}
+
+/// The cadence half of 31783deb, at the layer where the information was
+/// destroyed. A FAILED rules read was indistinguishable from no rules, so
+/// the payload said `dock_threshold: null`, `at_times: []`, "No boarding
+/// cadence is configured" and "no depth rule is configured — nothing
+/// boards on dock depth" — four confident statements about a registry
+/// this process could not reach, and the comment above the read said it
+/// degraded to "unknown cadence".
+///
+/// Permissive is the direction that matters: "nothing is configured" is
+/// the answer that lets a reader conclude nothing is waiting on a rule.
+#[tokio::test]
+async fn a_failed_cadence_read_says_unknown_rather_than_no_cadence_configured() {
+    let stations = Arc::new(boss_jobs::InMemoryStations::new());
+    stations
+        .seed(dock_station_row())
+        .expect("seed the dock row");
+    let (app, jobs) = app_with_cadence_repo(
+        Arc::new(FailingCadence {
+            rules: None,
+            firing_fails: true,
+        }),
+        vec![policy_row()],
+        Some(stations),
+    );
+    seed_full(&jobs).await;
+
+    let (status, body) = get(&app, "operator").await;
+    // The board is still drawn: the trains and the dock are what the
+    // operator came for, and a cadence blip must not black it out.
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["trains"].as_array().unwrap().len(), 1);
+    assert_eq!(body["dock_source"], "station", "the dock read fine");
+
+    let b = &body["boarding"];
+    assert_eq!(b["cadence_reading"], "unread", "{b}");
+    assert_eq!(b["last_board_reading"], "unread", "{b}");
+    let summary = b["summary"].as_str().unwrap();
+    assert!(
+        !summary.contains("No boarding cadence is configured"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("the boarding cadence could not be read"),
+        "{summary}"
+    );
+    let next_board = b["next_board"].as_str().unwrap();
+    assert!(
+        !next_board.contains("no depth rule is configured"),
+        "{next_board}"
+    );
+    assert!(
+        next_board.contains("the boarding cadence could not be read"),
+        "{next_board}"
+    );
+    // The dock WAS read, so its count still stands beside the admission:
+    // one failed read must not silence the ones that answered.
+    assert_eq!(b["dock_depth"], 2, "{b}");
+}
+
+/// The firing half. `last_firing()` failing left `held_because`,
+/// `cooldown_remaining_minutes` and `last_board_at` all null, which
+/// together read as "no cooldown in force, boards on the next tick" — on
+/// a dock that is at its threshold with a clear track, the most
+/// permissive answer the block can give, produced by a failure.
+#[tokio::test]
+async fn a_failed_firing_read_does_not_report_the_dock_clear_to_board() {
+    let mut d = depth_rule();
+    d.min_dock_depth = Some(2);
+    let stations = Arc::new(boss_jobs::InMemoryStations::new());
+    stations
+        .seed(dock_station_row())
+        .expect("seed the dock row");
+    let (app, jobs) = app_with_cadence_repo(
+        Arc::new(FailingCadence {
+            rules: Some(vec![d]),
+            firing_fails: true,
+        }),
+        vec![policy_row()],
+        Some(stations),
+    );
+    // Two boardable cars, no train on the track: threshold met, nothing
+    // else holding. Everything the cooldown answer rests on is read —
+    // except the firing.
+    seed_held_dock(&jobs, [json!(false), Value::Null]).await;
+
+    let (status, body) = get(&app, "operator").await;
+    assert_eq!(status, StatusCode::OK);
+    let b = &body["boarding"];
+    // The rules read answered, so the rule's own numbers stand.
+    assert_eq!(b["dock_threshold"], 2, "{b}");
+    assert_eq!(b["threshold_met"], true, "{b}");
+    assert_eq!(b["cadence_reading"], "read", "{b}");
+    // The firing did not, and the payload says which nulls that explains.
+    assert_eq!(b["last_board_reading"], "unread", "{b}");
+    assert!(b["last_board_at"].is_null(), "{b}");
+    assert!(b["cooldown_remaining_minutes"].is_null(), "{b}");
+    let next_board = b["next_board"].as_str().unwrap();
+    assert_ne!(next_board, "boards on the next tick", "{b}");
+    assert!(
+        next_board.contains("the board rule's last firing could not be read"),
+        "{next_board}"
+    );
+    let held = b["held_because"].as_str().unwrap();
+    assert!(
+        held.contains("the board rule's last firing could not be read"),
+        "{held}"
+    );
+}
+
 /// 2026-09-07, twice: the operator watched a threshold-met dock not
 /// board and asked why. The answer lived only in the conductor's journal
 /// — a cooldown with minutes left. Now the payload says so, with the
@@ -1058,19 +1225,39 @@ async fn no_cadence_or_policy_wired_degrades_gracefully() {
     assert_eq!(status, StatusCode::OK);
     // Trains still surface.
     assert_eq!(body["trains"].as_array().unwrap().len(), 1);
-    // No cadence → the honest "no configured cadence" line, and no hold
-    // invented for a depth rule that does not exist.
+    // No cadence REPOSITORY is wired, so the rows could not be read —
+    // which is not the same fact as a registry that holds no cadence, and
+    // the payload now says the one that is true. It used to say "No
+    // boarding cadence is configured" and "no depth rule is configured —
+    // nothing boards on dock depth": two claims about a registry this
+    // process never reached (31783deb). Same call the dock made for an
+    // unreadable station row one field over (`dock_source`), and the two
+    // cases it covers are the same two: nothing wired, or the read
+    // failed.
     assert!(body["boarding"]["dock_threshold"].is_null());
-    assert!(body["boarding"]["held_because"].is_null());
+    assert_eq!(body["boarding"]["cadence_reading"], "unread");
+    assert_eq!(body["boarding"]["last_board_reading"], "unread");
+    let next_board = body["boarding"]["next_board"].as_str().unwrap();
     assert_eq!(
-        body["boarding"]["next_board"],
-        "no depth rule is configured — nothing boards on dock depth"
+        next_board,
+        "cannot say — the boarding cadence could not be read, \
+         so no boarding rule can be evaluated"
+    );
+    // A `null` hold reads as "boards on the conductor's next tick", which
+    // nothing here can claim.
+    let held = body["boarding"]["held_because"].as_str().unwrap();
+    assert!(
+        held.contains("the boarding cadence could not be read"),
+        "{held}"
+    );
+    let summary = body["boarding"]["summary"].as_str().unwrap();
+    assert!(
+        !summary.contains("No boarding cadence is configured"),
+        "{summary}"
     );
     assert!(
-        body["boarding"]["summary"]
-            .as_str()
-            .unwrap()
-            .contains("No boarding cadence is configured")
+        summary.contains("the boarding cadence could not be read"),
+        "{summary}"
     );
     // No policy → thresholds null, never a fabricated default.
     assert!(body["policy"]["stall_hours"].is_null());

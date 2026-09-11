@@ -97,9 +97,19 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
     // the open read owns those, so only its terminal rows become the
     // recent list — `opened_on desc` from the adapter is already the
     // order that list wants.
+    //
+    // A failed steps read FAILS the request, like the two train reads
+    // above it. `unwrap_or_default()` made it a train with no steps
+    // instead: no phase, no block reason, and — because `holds_the_track`
+    // is a fact about the steps — not holding the track, so a read
+    // failure reported the track CLEAR (31783deb). The steps are not a
+    // garnish on a train row; they are what the row means.
     let mut open_trains: Vec<(boss_core::job::Job, Vec<boss_core::job::Step>)> = Vec::new();
     for job in open_rows {
-        let steps = state.jobs.list_steps(&job.id).await.unwrap_or_default();
+        let steps = match state.jobs.list_steps(&job.id).await {
+            Ok(steps) => steps,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        };
         open_trains.push((job, steps));
     }
     let mut closed_trains: Vec<(boss_core::job::Job, Vec<boss_core::job::Step>)> = Vec::new();
@@ -107,7 +117,10 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
         .into_iter()
         .filter(|j| j.status != JobStatus::Open)
     {
-        let steps = state.jobs.list_steps(&job.id).await.unwrap_or_default();
+        let steps = match state.jobs.list_steps(&job.id).await {
+            Ok(steps) => steps,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        };
         closed_trains.push((job, steps));
     }
 
@@ -156,10 +169,21 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
     // "unknown cadence / no policy" rather than failing the whole yard:
     // the trains and the dock are the thing the operator came for, and a
     // cadence blip must not black out the board.
-    let rules = match state.cadence.as_ref() {
-        Some(repo) => repo.active_rules().await.unwrap_or_default(),
-        None => Vec::new(),
+    //
+    // `None` is "could not be read" — the read failed, or no cadence
+    // repository is wired at all, exactly the two cases the dock's
+    // `None` already covers. The rows then degrade to an empty list for
+    // everything that walks them, and the READING rides beside them so
+    // the payload says "unknown cadence" rather than the "No boarding
+    // cadence is configured" it used to say here (31783deb). The
+    // reading is derived from this same `Option`, never written by hand
+    // beside it (CLAUDE.md §9a).
+    let rules_read = match state.cadence.as_ref() {
+        Some(repo) => repo.active_rules().await.ok(),
+        None => None,
     };
+    let cadence_reading = yard::Reading::of(&rules_read);
+    let rules = rules_read.unwrap_or_default();
     // The conductor's liveness, from the record IT writes. The reconcile
     // rule is the heartbeat: it is the pass that keeps every train's
     // truth current, so its last firing is what "have we heard from the
@@ -177,9 +201,24 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
     // from. The rule is found by SHAPE (the row declaring
     // `min_dock_depth`), the same way the predicate finds its threshold,
     // so a renamed row moves both together.
-    let last_board = match (state.cadence.as_ref(), yard::depth_rule(&rules)) {
-        (Some(repo), Some(rule)) => repo.last_firing(&rule.name).await.ok().flatten(),
-        _ => None,
+    //
+    // Three outcomes, not two: a firing, no firing (the rule has never
+    // boarded — an ANSWER), and a read that did not answer. `.ok()`
+    // collapsed the third into the second, and the three nulls that
+    // follow from it — `last_board_at`, `cooldown_remaining_minutes`,
+    // `held_because` — read together as "no cooldown in force, boards on
+    // the next tick", which is the permissive answer (31783deb).
+    let (last_board, last_board_reading) = match (state.cadence.as_ref(), yard::depth_rule(&rules))
+    {
+        (Some(repo), Some(rule)) => match repo.last_firing(&rule.name).await {
+            Ok(firing) => (firing, yard::Reading::Read),
+            Err(_) => (None, yard::Reading::Unread),
+        },
+        // No depth rule among rows we COULD read: there is no board rule,
+        // so there is no firing, and `None` is the answer. With the rows
+        // unread we cannot say that — and the cadence reading is exactly
+        // the fact that decides which of the two this is.
+        _ => (None, cadence_reading),
     };
     let policy = match state.delivery.as_ref() {
         Some(repo) => repo.active_policy("train-conductor").await.ok().flatten(),
@@ -236,19 +275,32 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
             .unwrap_or_default()
     };
 
-    let status = yard::build_status(yard::YardInputs {
-        open_trains: &open_trains,
-        closed_trains: &closed_trains,
-        dock_cars: dock_read.as_deref().unwrap_or(&[]),
-        rules: &rules,
-        last_board: last_board.as_ref(),
-        policy: policy.as_ref(),
-        gate_runs: &gate_runs,
-        car_branches: &car_branches,
-        settled_car_branches: &settled_car_branches,
-        arrived_trains: &arrived_trains,
-        now: Some(now),
-    });
+    // Every read that can fail QUIETLY states whether it answered: the
+    // dock from the `Option` `dock_cars` already returns, the cadence
+    // rows from theirs, the firing from its own `Result`. The trains and
+    // the gate-runs are not here because a train read failing returns
+    // 500 rather than an empty board (above) — the posture this seam
+    // exists to extend to the rest.
+    let status = yard::build_status_for(
+        yard::YardInputs {
+            open_trains: &open_trains,
+            closed_trains: &closed_trains,
+            dock_cars: dock_read.as_deref().unwrap_or(&[]),
+            rules: &rules,
+            last_board: last_board.as_ref(),
+            policy: policy.as_ref(),
+            gate_runs: &gate_runs,
+            car_branches: &car_branches,
+            settled_car_branches: &settled_car_branches,
+            arrived_trains: &arrived_trains,
+            now: Some(now),
+        },
+        yard::Reading::of(&dock_read),
+        yard::BoardingReadings {
+            cadence: cadence_reading,
+            last_board: last_board_reading,
+        },
+    );
     // The VERB the heartbeat rule runs (`reconcile`), read from its row.
     // This used to pass the rule's NAME, so `last_verb` said
     // `train-reconcile` — a label that was not the fact it named.
@@ -303,7 +355,12 @@ async fn dock_cars<R: JobsRepository + 'static, B: EventBus + 'static>(
         if let Ok((jobs, _)) = state.jobs.list_jobs(&filter, MAX_LIMIT, 0).await {
             let mut members = Vec::new();
             for job in jobs {
-                let steps = state.jobs.list_steps(&job.id).await.unwrap_or_default();
+                // A failed steps read makes the dock UNREAD, which is
+                // what this `Option` is for. Defaulted to no steps it
+                // made a HELD car look unheld — boardable — which is the
+                // permissive answer and the one lane this read exists to
+                // get right.
+                let steps = state.jobs.list_steps(&job.id).await.ok()?;
                 if yard::on_the_dock(&spec.predicate, &job, &steps) {
                     members.push((job, steps));
                 }

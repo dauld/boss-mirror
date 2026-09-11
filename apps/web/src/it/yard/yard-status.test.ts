@@ -228,12 +228,14 @@ describe('parseYardStatus', () => {
       dock_threshold: 4,
       cooldown_minutes: null,
       at_times: [],
+      cadence_reading: 'read',
       dock_depth: null,
       threshold_met: null,
       summary: 'x',
       held_because: null,
       cooldown_remaining_minutes: null,
       last_board_at: null,
+      last_board_reading: 'read',
       next_board: 'cannot say — the dock depth could not be read',
     });
     expect(unread?.primary.tone).toBe('muted');
@@ -307,12 +309,15 @@ describe('parseYardStatus', () => {
       dock_threshold: 4,
       cooldown_minutes: 120,
       at_times: ['06:00'],
+      // The payload above states neither reading, so neither is claimed.
+      cadence_reading: null,
       dock_depth: 5,
       threshold_met: true,
       summary: 'Boards at 4 parked cars; 5 car(s) parked now.',
       held_because: null,
       cooldown_remaining_minutes: null,
       last_board_at: null,
+      last_board_reading: null,
       next_board: null,
     });
   });
@@ -438,12 +443,14 @@ describe('boardsWhen', () => {
     dock_threshold: 4,
     cooldown_minutes: 120,
     at_times: [],
+    cadence_reading: 'read',
     dock_depth: 2,
     threshold_met: false,
     summary: 'Boards at 4 parked cars (then a 120m cooldown); 2 car(s) parked now.',
     held_because: null,
     cooldown_remaining_minutes: null,
     last_board_at: null,
+    last_board_reading: 'read',
     next_board: null,
     ...over,
   });
@@ -511,12 +518,14 @@ describe('boardHold', () => {
     dock_threshold: 4,
     cooldown_minutes: 45,
     at_times: [],
+    cadence_reading: 'read',
     dock_depth: 5,
     threshold_met: true,
     summary: 'x',
     held_because: null,
     cooldown_remaining_minutes: null,
     last_board_at: null,
+    last_board_reading: 'read',
     next_board: 'boards on the next tick',
     ...over,
   });
@@ -563,6 +572,78 @@ describe('boardHold', () => {
 
   test('an older server that sends no hold gets none — the page states the rule instead', () => {
     expect(boardHold(predicate({ held_because: null, next_board: null }))).toBeNull();
+  });
+
+  // 31783deb, the reader-side half. A failed cadence or firing read is
+  // not a working hold, so it must not wear the colour of one — and a
+  // `last board` slot left blank reads as "it has never boarded", which
+  // is the permissive answer the server stopped giving.
+  test('an unread cadence is muted, not the plain colour of a working hold', () => {
+    const v = boardHold(
+      predicate({
+        cadence_reading: 'unread',
+        dock_threshold: null,
+        threshold_met: null,
+        held_because: 'the boarding cadence could not be read — no boarding rule can be evaluated',
+        next_board: 'cannot say — the boarding cadence could not be read',
+      }),
+    );
+    expect(v!.primary.tone).toBe('muted');
+  });
+
+  test('an unread firing says the last board was not read, never a blank', () => {
+    const v = boardHold(
+      predicate({
+        last_board_reading: 'unread',
+        last_board_at: null,
+        held_because:
+          "the board rule's last firing could not be read — the cooldown cannot be evaluated",
+      }),
+    );
+    expect(v!.lastBoard).toBe('not read');
+    expect(v!.primary.tone).toBe('muted');
+  });
+
+  test('a board that never happened is still a reading — blank, and ok', () => {
+    // The honest negative: `Ok(None)` from the registry. The page must
+    // keep telling this apart from the unread case above.
+    const v = boardHold(predicate({ last_board_reading: 'read', last_board_at: null }));
+    expect(v!.lastBoard).toBeNull();
+    expect(v!.primary.tone).toBe('ok');
+  });
+});
+
+describe('the readings on the wire', () => {
+  test('a stated reading parses; anything else is not stated, never read', () => {
+    const stated = parseYardStatus({
+      boarding: { dock_depth: 0, at_times: [], summary: 'x', cadence_reading: 'unread', last_board_reading: 'read' },
+    }).boarding;
+    expect(stated.cadence_reading).toBe('unread');
+    expect(stated.last_board_reading).toBe('read');
+    // An older server states neither, and a junk value is not a reading.
+    const older = parseYardStatus({ boarding: { dock_depth: 0, at_times: [], summary: 'x' } }).boarding;
+    expect(older.cadence_reading).toBeNull();
+    expect(older.last_board_reading).toBeNull();
+    const junk = parseYardStatus({
+      boarding: { dock_depth: 0, at_times: [], summary: 'x', cadence_reading: 'yes' },
+    }).boarding;
+    expect(junk.cadence_reading).toBeNull();
+  });
+
+  test("an unread cadence renders the server's sentence, not a rule it invented", () => {
+    const text = boardsWhen(
+      parseYardStatus({
+        boarding: {
+          dock_threshold: null,
+          dock_depth: 2,
+          at_times: [],
+          cadence_reading: 'unread',
+          summary: 'Cannot say when a train boards — the boarding cadence could not be read; 2 car(s) parked now.',
+        },
+      }).boarding,
+    );
+    expect(text).toContain('the boarding cadence could not be read');
+    expect(text).not.toContain('no boarding rule configured');
   });
 });
 

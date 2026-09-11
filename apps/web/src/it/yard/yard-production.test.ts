@@ -36,7 +36,7 @@ const yardOf = (over: Partial<YardState> = {}): YardState => ({
 const statusOf = (over: Partial<YardStatus> = {}): YardStatus => ({
   trains: [],
   dock: [],
-  boarding: { dock_threshold: 1, cooldown_minutes: 45, at_times: [], dock_depth: 0, threshold_met: false, summary: '', held_because: null, cooldown_remaining_minutes: null, last_board_at: null, next_board: null },
+  boarding: { dock_threshold: 1, cooldown_minutes: 45, at_times: [], cadence_reading: 'read', dock_depth: 0, threshold_met: false, summary: '', held_because: null, cooldown_remaining_minutes: null, last_board_at: null, last_board_reading: 'read', next_board: null },
   recent: [],
   stranded: [],
   held: [],
