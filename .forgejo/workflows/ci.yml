@@ -548,3 +548,81 @@ jobs:
         # no-wallclock, tier-import-audit, no-secrets, schema-converge —
         # were unenforced on the branch that actually gates every train.
         run: infra/gate.sh
+
+  # THE RECLAIM FOLLOWS THE BUILD.
+  #
+  # The disk this run just filled is reclaimed when this run ENDS, not at
+  # the next hourly tick. Measured on the forge, 2026-09-11 (backlog
+  # 0357e0eb): six observations fifteen minutes apart read 89, 100, 99,
+  # 60, 92, 98 GB free of 227. The locomotive refuses to START below 70
+  # (BOSS_CI_MIN_FREE_GB), so the 04:03 trough was ten gigabytes under the
+  # door — and that refusal happens BEFORE any check runs, so it says
+  # nothing about a branch while striking every car aboard. Four clean
+  # cars lost five departures to it on 2026-08-22 and a day went to
+  # holding on 2026-09-05.
+  #
+  # Both floors are individually right; the CADENCE is the defect. The
+  # fill is event-driven (this job's own train built and pulled a
+  # per-train boss-ci:<sha> image into the system docker daemon); the
+  # reclaim was timer-driven (disk-floor-sweep.timer, hourly, defending
+  # 100GB — deliberately above the locomotive's 70 so a floor buys
+  # headroom). A dip bigger than that 30GB gap inside one interval walks
+  # through it.
+  #
+  # ONLY THE TRIGGER WAS MISSING, and it lives HERE rather than in a new
+  # systemd unit on the host: this file IS the definition the runner
+  # reads, so the trigger cannot land uninstalled the way host units on
+  # this box have. The script files an ops-request for the allowlisted,
+  # bounded `reclaim-disk` verb (infra/ops/verbs.json) and the forge's
+  # ops-runner — already installed, ~1-minute poll — runs the same
+  # disk-floor-sweep.sh the timer runs. Same posture as the `converge`
+  # verb's merge fast path: an ACCELERATOR only. The hourly timer owes
+  # nothing to the system of record and stays the independent floor, so a
+  # request that cannot be filed costs latency, never a reclaim.
+  #
+  # always(), AND THAT IS THE POINT. A RED train built the same image. A
+  # locomotive DISK REFUSAL skips fast/test/web entirely and is the
+  # self-healing case — the door refused for want of disk, and this is
+  # what frees it before the next boarding. The one thing gated is
+  # build-image: its image is this job's container, so without it there is
+  # nothing to run in. continue-on-error plus a script that exits 0 on
+  # every path, because an accelerator that reds a train causes the exact
+  # strike it exists to prevent.
+  reclaim:
+    runs-on: docker
+    needs: [build-image, locomotive, fast, test, web]
+    if: ${{ always() && needs.build-image.result == 'success' }}
+    continue-on-error: true
+    container:
+      image: 10.20.0.15:3000/david/boss-ci:${{ github.sha }}
+    env:
+      # PINNED INLINE, the boss-estate-observe-host idiom: a CI job
+      # inherits no systemd drop-in, and the script refuses to guess
+      # (defaulting to 127.0.0.1 is how weeks of maintenance packets
+      # landed on a non-authoritative instance, 2026-08-17).
+      BOSS_JOBS_URL: http://10.20.0.34:7900
+    steps:
+      - name: Check out from the forge, not github.com
+        # actions/checkout is a JavaScript action the runner pulls from
+        # github.com before the job starts; the runner's container DNS
+        # has no redundancy (see build-image's retry note), so one
+        # dropped lookup there reds the whole train with no car at fault
+        # — d9a34560. The repo is on the forge at a LAN IP, so a git
+        # clone by IP resolves no name. github.token is the job's own
+        # repo-scoped credential, the same one locomotive passes below.
+        env:
+          FORGE_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          git init -q .
+          git remote add origin \
+            "http://x-access-token:${FORGE_TOKEN}@10.20.0.15:3000/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth=1 origin "${GITHUB_REF}"
+          git checkout -q --force FETCH_HEAD
+
+      - name: Ask the forge to reclaim disk now this run is done
+        # Measures free space the way locomotive.sh does — `df -Pk` on the
+        # workspace's own filesystem — and files nothing at all when the
+        # host is above the floor the sweep's unit defends, so a healthy
+        # pipeline puts no packets on the board.
+        run: bash infra/forge/request-reclaim-disk.sh
