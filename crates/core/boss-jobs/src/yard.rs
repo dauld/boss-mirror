@@ -768,9 +768,11 @@ pub fn depth_rule(rules: &[CadenceRuleRow]) -> Option<&CadenceRuleRow> {
 /// A cadence rule fires by CLOCK when it declares `at_times` (and is not
 /// the calendar basis, which also uses `at_times` but for whole days).
 fn clock_rule(rules: &[CadenceRuleRow]) -> Option<&CadenceRuleRow> {
-    rules
-        .iter()
-        .find(|r| r.basis == "clock" && r.at_times.is_some())
+    // A clock row is a BOARDING trigger only if its verb departs a train
+    // — the conductor's own rule, read from its one home (634a475b).
+    rules.iter().find(|r| {
+        r.basis == "clock" && r.at_times.is_some() && crate::cadence::departs_a_train(&r.verb)
+    })
 }
 
 /// The `at_times` array as a list of `HH:MM` strings, dropping anything
@@ -985,16 +987,34 @@ pub fn boarding_hold(
     }
 
     // The rows WERE read and hold no depth rule → nothing boards on dock
-    // depth, and nothing can HOLD a boarding that does not exist: no
-    // "track occupied", no cooldown, no threshold. Pinned by
-    // no_depth_rule_says_so_rather_than_inventing_a_hold.
+    // depth, so no cooldown and no threshold apply. But "no depth rule"
+    // is NOT "nothing holds" (382d3383): an open train holds the track
+    // for EVERY departing verb, the clock board included, and a clock
+    // rule that exists still boards at its window. Both are facts the
+    // rows did not create, so both are stated; only the depth trigger is
+    // absent. Pinned by no_depth_rule_says_so_rather_than_inventing_a_hold
+    // (no train, no invented hold) and no_depth_rule_with_a_train_on_the_
+    // track_still_names_the_track_hold.
     if threshold.is_none() {
+        let holds: Vec<_> = track_hold.into_iter().collect();
+        let clock = match (clock_rule(rules), holds.is_empty()) {
+            (Some(_), true) => " — a scheduled clock window still boards",
+            (Some(_), false) => " — a scheduled clock window boards once the track clears",
+            (None, _) => "",
+        };
         return BoardHold {
-            held_because: None,
+            held_because: holds.first().map(|(why, _, _)| why.clone()),
             cooldown_remaining_minutes: None,
-            last_board_at: None,
+            last_board_at: last_board.map(|l| l.fired_at),
             last_board_reading: readings.last_board,
-            next_board: "no depth rule is configured — nothing boards on dock depth".to_string(),
+            next_board: format!(
+                "no depth rule is configured — nothing boards on dock depth{clock}{}",
+                if holds.is_empty() {
+                    String::new()
+                } else {
+                    format!("; {}", held_by(&holds).trim_end_matches(", and "))
+                }
+            ),
         };
     }
     // (why it holds, what clears it, what a clock rule is exempt from)
@@ -3405,6 +3425,22 @@ mod tests {
         r
     }
 
+    /// 634a475b: a clock row is a boarding trigger only if its verb
+    /// departs a train. A `basis=clock` row that opens a packet at a time
+    /// of day must not be described as "Boards at …".
+    #[test]
+    fn a_clock_row_that_departs_no_train_is_not_a_boarding_trigger() {
+        let mut opens_a_packet = clock_rule_row();
+        opens_a_packet.name = "protocol-retro-window".into();
+        opens_a_packet.verb = "open:protocol-retro".into();
+        assert!(clock_rule(&[opens_a_packet.clone()]).is_none());
+        // The real train-window (verb `run`) still is one, and is found
+        // past a non-boarding clock row.
+        let rows = [opens_a_packet, clock_rule_row()];
+        let found = clock_rule(&rows).expect("train-window");
+        assert_eq!(found.name, "train-window");
+    }
+
     /// 2026-09-10 18:04:47Z this field read "boards on the next tick once
     /// the cooldown clears (16 min)" and a train boarded at 18:06:00Z on
     /// the 18:05 clock window — wrong by fifteen minutes.
@@ -3627,9 +3663,67 @@ mod tests {
             BoardingReadings::default(),
         );
         assert_eq!(h.held_because, None);
+        // The depth trigger's absence is the sentence's claim; the clock
+        // board that still exists is named after it (382d3383).
+        assert!(
+            h.next_board
+                .starts_with("no depth rule is configured — nothing boards on dock depth"),
+            "{}",
+            h.next_board
+        );
+    }
+
+    /// 382d3383: "no depth rule" is not "nothing holds". With a clock rule
+    /// and NO depth rule, an open train is still a track hold — on the
+    /// clock board too (`decide` checks the track for every departing
+    /// verb) — and the surface must say so instead of `None`, which
+    /// reads as a go-ahead.
+    #[test]
+    fn no_depth_rule_with_a_train_on_the_track_still_names_the_track_hold() {
+        let mut clock = rule("clock");
+        clock.at_times = Some(json!(["06:00"]));
+        let h = boarding_hold(
+            &[clock],
+            None,
+            Some(3),
+            1,
+            Some(at("2026-09-07T20:10:00Z")),
+            BoardingReadings::default(),
+        );
         assert_eq!(
-            h.next_board,
-            "no depth rule is configured — nothing boards on dock depth"
+            h.held_because.as_deref(),
+            Some("track occupied (1 open train)"),
+            "{h:?}"
+        );
+        assert!(
+            h.next_board.contains("no depth rule is configured")
+                && h.next_board.contains("the track clears")
+                && h.next_board.contains("clock window"),
+            "next_board must state the depth trigger is absent, the track hold, and the clock board that still happens: {}",
+            h.next_board
+        );
+    }
+
+    /// The same registry with a clear track: no hold, and the clock board
+    /// is still named as the way anything boards.
+    #[test]
+    fn no_depth_rule_with_a_clear_track_names_the_clock_board_and_no_hold() {
+        let mut clock = rule("clock");
+        clock.at_times = Some(json!(["06:00"]));
+        let h = boarding_hold(
+            &[clock],
+            None,
+            Some(3),
+            0,
+            Some(at("2026-09-07T20:10:00Z")),
+            BoardingReadings::default(),
+        );
+        assert_eq!(h.held_because, None);
+        assert!(
+            h.next_board.contains("no depth rule is configured")
+                && h.next_board.contains("clock window"),
+            "{}",
+            h.next_board
         );
     }
 

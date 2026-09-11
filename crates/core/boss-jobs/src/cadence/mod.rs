@@ -26,4 +26,6 @@ pub use in_memory::InMemoryCadence;
 pub use port::{CadenceError, CadenceRepository};
 #[cfg(feature = "postgres")]
 pub use postgres::PgCadence;
-pub use types::{CadenceRuleRow, ClaimResult, FiringOutcome, LastFiring, NewFiring};
+pub use types::{
+    CadenceRuleRow, ClaimResult, FiringOutcome, LastFiring, NewFiring, departs_a_train,
+};

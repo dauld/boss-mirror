@@ -245,13 +245,17 @@ impl PodRun {
 /// here only so it can be redirected. Nothing on this host is built at
 /// it, and `assert_rebased` below proves no `/tmp` path survives into a
 /// script this host runs.
-const REBASE: &[(&str, &str)] = &[
-    ("/backup", "backup"),
-    ("/keys", "keys"),
-    ("/gcs", "gcs"),
-    ("/tmp/k", "k"),
-    ("/tmp/all", "all"),
-];
+const REBASE: &[(&str, &str)] = &[("/backup", "backup"), ("/keys", "keys"), ("/gcs", "gcs")];
+
+/// The scratch files a script writes for ITSELF (`k`, `all`) no longer
+/// need a REBASE row each: the manifest writes them under
+/// `${TMPDIR:-/tmp}` and this test sets `TMPDIR` to a directory it owns
+/// (fcbe1bc5) — the §9a collapse of the second half of the table, so a
+/// twelfth such file is redirected by the same variable and nobody has
+/// to remember a row for it. `assert_rebased` still refuses any OTHER
+/// `/tmp` in a script; the `${TMPDIR:-/tmp}` default is the one
+/// spelling it admits, because `TMPDIR` is always set here.
+const TMPDIR_DEFAULT: &str = "${TMPDIR:-/tmp}";
 
 /// No path in the SHARED temp dir may survive the rebase.
 ///
@@ -270,6 +274,10 @@ const REBASE: &[(&str, &str)] = &[
 /// container script fails here, by name, instead of silently.
 fn assert_rebased(name: &str, script: &str, dir: &Path) {
     let own = dir.display().to_string();
+    // A `/tmp` that is only the DEFAULT of `${TMPDIR:-/tmp}` is never
+    // used here (TMPDIR is set below); every other `/tmp` must be gone.
+    let script = script.replace(TMPDIR_DEFAULT, "${TMPDIR}");
+    let script = script.as_str();
     for (at, _) in script.match_indices("/tmp") {
         assert!(
             script[at..].starts_with(&own),
@@ -293,7 +301,7 @@ fn run_pod(tag: &str, fail: Fail) -> PodRun {
     // which is what makes this unique across accounts as well as across
     // live processes.
     let dir = scratch::scratch_dir(&format!("boss-backup-pod-{tag}"));
-    for sub in ["backup", "keys", "gcs", "bin"] {
+    for sub in ["backup", "keys", "gcs", "bin", "tmp"] {
         scratch::create_dir(&dir.join(sub));
     }
     let seq = dir.join("sequence.log");
@@ -394,6 +402,7 @@ fn run_pod(tag: &str, fail: Fail) -> PodRun {
                         std::env::var("PATH").unwrap_or_default()
                     ),
                 )
+                .env("TMPDIR", dir.join("tmp"))
                 .env("BOSS_JOBS_URL", "http://boss-jobs-internal.test:7900")
                 .env("BOSS_TEST_SEQ", &seq)
                 .env("BOSS_TEST_FAIL", fail.tag())

@@ -154,8 +154,8 @@ spec:
                   # The key is deposit-only (forced command + restrict);
                   # the receiver stamps the name and prunes its own set.
                   apk add --no-cache openssh-client >/dev/null 2>&1
-                  install -m 600 /keys/id_ed25519 /tmp/k
-                  cat "$OUT" | ssh -i /tmp/k \
+                  install -m 600 /keys/id_ed25519 ${TMPDIR:-/tmp}/k
+                  cat "$OUT" | ssh -i ${TMPDIR:-/tmp}/k \
                     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
                     -o ConnectTimeout=20 david@34.45.110.40
                   echo "backups on volume:"; ls -lh /backup | tail -8
@@ -192,10 +192,10 @@ spec:
                   # NAME order, which is chronological because the stamp
                   # is %Y%m%d-%H%M%S — never by listing order.
                   gcloud storage ls "gs://${BUCKET}/" \
-                    | grep -E 'boss-.*\.sql\.gz$' | sort > /tmp/all
-                  TOTAL=$(wc -l < /tmp/all)
+                    | grep -E 'boss-.*\.sql\.gz$' | sort > ${TMPDIR:-/tmp}/all
+                  TOTAL=$(wc -l < ${TMPDIR:-/tmp}/all)
                   if [ "$TOTAL" -gt 21 ]; then
-                    for obj in $(head -n $((TOTAL - 21)) /tmp/all); do
+                    for obj in $(head -n $((TOTAL - 21)) ${TMPDIR:-/tmp}/all); do
                       echo "pruning $obj"; gcloud storage rm "$obj"
                     done
                   fi

@@ -10,6 +10,23 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Does a cadence verb put a train on the track? `board` assembles and
+/// departs one; `run` is reconcile-then-board. Exactly these — a
+/// reconcile or a packet-open never needs a clear track.
+///
+/// ONE DEFINITION (CLAUDE.md §9a). The conductor decides serialization
+/// and idle-firing outcomes on it, and the yard decides whether a
+/// `basis=clock` row is a BOARDING trigger worth describing to the
+/// operator ("Boards at 06:05 / 18:05 UTC") on it. It lived only in the
+/// conductor until 634a475b, so the yard selected clock rows by basis
+/// alone and would have named a clock row with any other verb as a
+/// boarding window — latent while the only live clock row is
+/// `train-window` with verb `run`. Tier 1 owns it because Tier 1 cannot
+/// read the orchestrator, and both readers can read here.
+pub fn departs_a_train(verb: &str) -> bool {
+    matches!(verb, "board" | "run")
+}
+
 /// One row of `cadence_rules`, unparsed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CadenceRuleRow {

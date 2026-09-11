@@ -125,13 +125,14 @@ pub(crate) enum Action {
 /// Refuses rather than guesses, and the refusal names both shapes —
 /// a row is edited by a person, and "unknown verb" without the
 /// alternatives is the kind of message that sends someone to the source.
-/// The verbs that put a train on the track. `board` assembles and
-/// departs one; `run` is reconcile-then-board. Serialization holds
-/// exactly these — a reconcile or a packet-open never needs a clear
-/// track, and holding them would be a second, wrong cooldown.
-pub(crate) fn departs_a_train(verb: &str) -> bool {
-    matches!(verb, "board" | "run")
-}
+// The verbs that put a train on the track — `board` and `run` — are
+// ONE definition in boss_jobs::cadence (634a475b): the yard reads it to
+// tell a boarding clock window from a clock row that opens a packet,
+// and this loop reads it for serialization and idle-firing outcomes.
+// Serialization holds exactly these — a reconcile or a packet-open never
+// needs a clear track, and holding them would be a second, wrong
+// cooldown.
+pub(crate) use boss_jobs::cadence::departs_a_train;
 
 /// The outcome code recorded for a departing board that RAN CLEANLY yet
 /// boarded nothing — an idle firing. Negative on purpose, like

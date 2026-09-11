@@ -386,37 +386,77 @@ fn width() -> usize {
         .unwrap_or(100)
 }
 
+/// One page of the job list.
+const RESOLVE_PAGE: usize = 500;
+
+/// How many closed rows a prefix lookup will read before giving up.
+///
+/// The list is `ORDER BY opened_on DESC, created_at DESC`, so "the
+/// newest 500 closed" is the newest 500 BY OPENING DATE — and a busy
+/// day closes a thousand rows (gate-runs, chores, ops-requests), so a
+/// packet opened this morning and closed tonight sat past page one and
+/// `boss job get <prefix>` said "no job matches … give the full uuid if
+/// it is older than that" for a packet closed seconds earlier, three
+/// times in one evening (71d2334c). Ten pages covers about a week of
+/// this deployment's closings; the refusal names the depth it read.
+const RESOLVE_CLOSED_MAX: usize = 5_000;
+
+/// How many closed rows to read for a prefix lookup: the whole set when
+/// it fits, else the bound. Pure, so the arithmetic is pinned.
+pub(crate) fn closed_rows_to_read(total: usize) -> usize {
+    total.min(RESOLVE_CLOSED_MAX)
+}
+
 /// Fetch rows to resolve a reference against: open first (most lookups
-/// are live work), closed only if nothing matched.
+/// are live work), then closed — page by page, newest opening date
+/// first, up to [`RESOLVE_CLOSED_MAX`] rows — stopping at the first
+/// page that matches.
 pub(crate) async fn fetch_and_resolve(http: &reqwest::Client, job_ref: &str) -> Result<String> {
     if looks_like_uuid(job_ref) {
         return Ok(job_ref.to_string());
     }
-    for status in ["open", "closed"] {
-        let rows = crate::gate::rows(
-            crate::gate::api(
-                http,
-                reqwest::Method::GET,
-                &format!("/api/jobs?status={status}&limit=500"),
-                None,
-            )
-            .await?,
-        );
+    let page = |status: &'static str, offset: usize| async move {
+        let path = format!("/api/jobs?status={status}&limit={RESOLVE_PAGE}&offset={offset}");
+        crate::gate::api(http, reqwest::Method::GET, &path, None).await
+    };
+    let id_of = |row: &Value| {
+        row.get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .context("matched a job with no id")
+    };
+    let open = crate::gate::rows(page("open", 0).await?);
+    match resolve(&open, job_ref) {
+        Ok(row) => return id_of(row),
+        Err(e) if e.to_string().starts_with("no job matches") => {}
+        Err(e) => return Err(e),
+    }
+    let mut read = 0usize;
+    let mut to_read = RESOLVE_CLOSED_MAX;
+    while read < to_read {
+        let body = page("closed", read).await?;
+        let total = body
+            .as_ref()
+            .and_then(|b| b.get("total"))
+            .and_then(Value::as_u64)
+            .map(|t| usize::try_from(t).unwrap_or(usize::MAX))
+            .unwrap_or(0);
+        to_read = closed_rows_to_read(total);
+        let rows = crate::gate::rows(body);
+        if rows.is_empty() {
+            break;
+        }
+        read += rows.len();
         match resolve(&rows, job_ref) {
-            Ok(row) => {
-                return row
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .context("matched a job with no id");
-            }
+            Ok(row) => return id_of(row),
             Err(e) if e.to_string().starts_with("no job matches") => continue,
             Err(e) => return Err(e),
         }
     }
     bail!(
-        "no job matches {job_ref:?} in the newest 500 open or 500 closed — \
-         give the full uuid if it is older than that"
+        "no job matches {job_ref:?} in the newest {} open or the newest {read} closed (by \
+         opening date) — give the full uuid if it is older than that",
+        open.len()
     )
 }
 
@@ -605,6 +645,13 @@ pub async fn patch(job_ref: &str, path: &std::path::Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_prefix_lookup_reads_the_whole_closed_set_when_it_fits_and_the_bound_when_not() {
+        assert_eq!(super::closed_rows_to_read(0), 0);
+        assert_eq!(super::closed_rows_to_read(1_200), 1_200);
+        assert_eq!(super::closed_rows_to_read(25_008), 5_000);
+    }
+
     use super::*;
 
     #[test]

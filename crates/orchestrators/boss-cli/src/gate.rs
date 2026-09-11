@@ -986,9 +986,19 @@ impl ParkIntent {
                  it reads as operator:unidentified — and an unidentified reader is answered \
                  with a NARROWER WORLD, silently.\n\n\
                  {}\n\n\
-                 Read it as a named reader instead. Either is fine:\n  \
+                 Read it as a named reader instead. Any of these is fine:\n  \
                  {SOR_READER} /api/yard/status | grep -q '\"dock_depth\":1'\n  \
-                 curl -fsS -H \"x-boss-user: ${SOR_USER_VAR}\" $BOSS_JOBS_URL/api/...\n\n\
+                 curl -fsS -H \"x-boss-user: ${SOR_USER_VAR}\" $BOSS_JOBS_URL/api/...\n  \
+                 {SOR_READER} /api/yard/status | jq -e '.boarding.dock_depth == 1' \
+                 >/dev/null && echo claim:ok\n\n\
+                 THE READER DOES THE READ; ANYTHING MAY PARSE ITS STDOUT. `jq` and \
+                 `python3` on the right of that pipe are parsers, not readers, and this \
+                 check no longer refuses them (5dc5159d) — so reach for the shape that \
+                 reads the claim precisely rather than bending it into a `grep -q`, which \
+                 is line-based and cannot match a phrase that wraps. Use {SOR_READER} and \
+                 not `boss-api` in a PARKED probe: this text runs on the forge, where \
+                 {SOR_READER} is in the converged tree and boss-api has never been \
+                 measured present (infra/forge/host-absent-tools.txt).\n\n\
                  {SOR_READER} is infra/forge/probe-bin/{SOR_READER}, first on the probe's \
                  PATH in the converged checkout; it is GET-only and signs as a read-scoped \
                  actor the runner supplies (audit-readonly — Read everywhere, write \

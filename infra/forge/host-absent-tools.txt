@@ -107,3 +107,28 @@ boss
 # `curl -fsS -H "x-boss-user: $BOSS_SOR_USER" $BOSS_JOBS_URL/api/...`
 # is accepted too — the refusal is about reading UNIDENTIFIED, not
 # about curl.
+#
+# THREE THINGS IT DOES NOT REFUSE, narrowed 2026-09-11 (backlog
+# 5dc5159d) after nine correct probes had to argue past it — four of
+# them in one afternoon, which makes the override routine, and a
+# routine override is read by nobody:
+#
+#   - A READER PIPED INTO A PARSER. `boss-sor-read /api/... | jq -e ...`
+#     or `| python3 -c ...`: the reader does the read, the parser is
+#     handed its stdout. `python3` is still a client when the text
+#     names something that could open a socket (urllib, requests,
+#     http.client, socket, subprocess, …) — which is the first
+#     measured instance, `urllib.request.urlopen`.
+#   - A GATEWAY SESSION. `POST /api/auth/guest`, then `curl -b` with
+#     the cookie it returned. Measured the same day: that session read
+#     22 / 56 / 703 rows where the operator's own door read 22 / 56 /
+#     703 and an unidentified read of the jobs API's own port read
+#     0 / 0 / 0. A FORGED cookie literal answers 401, identical to
+#     sending none — so unlike a header, a session cannot be
+#     self-asserted, and admitting it cannot produce a false pass.
+#     It counts only for a gateway-shaped read: a cookie says nothing
+#     about a read on :7900, which does not read cookies.
+#   - Nothing else. A route-SHAPE probe (401-vs-404 with a control
+#     that fails closed) is still refused and still needs
+#     `--probe-anyway`: what makes it safe is its control, which is
+#     program logic, not something a text scan can see.

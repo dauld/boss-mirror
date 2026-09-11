@@ -390,8 +390,10 @@ pub(crate) fn admit(probe: &str, from_car: bool) -> Admission {
              NARROWER WORLD, silently. What this verb would record is a proof of nothing.\
              \n\n{evidence}\n\n\
              Read it as a named reader instead — `boss-api GET /api/...` where that door \
-             exists, `{reader} /api/...` on the forge, or a curl that sends an identity \
-             header.\n\n\
+             exists, `{reader} /api/...` on the forge, a curl that sends an identity \
+             header, or a gateway session (POST /api/auth/guest, then curl -b). The DOOR \
+             has to do the read; `jq` or `python3` fed its stdout is a parser and is not \
+             refused (5dc5159d).\n\n\
              If this read IS identified in a way a text check cannot see, say so and it \
              runs: {OVERRIDE_FLAG} '<reason>'. The reason is recorded in the proof, because \
              `--recheck` re-runs this probe later when nobody is watching.",
