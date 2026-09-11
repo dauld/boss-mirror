@@ -48,10 +48,11 @@ set -euo pipefail
 
 TOKEN_FILE="${BOSS_GITHUB_TOKEN_FILE:-/etc/boss-publish/github.token}"
 STATE_DIR="${BOSS_PUBLISH_STATE_DIR:-/var/lib/boss-publish}"
-# The Forgejo container's bind mount (/opt/forgejo/data = /data in the
-# container; repositories live under git/repositories). Root on this
-# host reads it as a plain path — no token, no network.
-FORGE_REPO="${BOSS_FORGE_REPO_PATH:-/opt/forgejo/data/git/repositories/david/boss.git}"
+# WHERE THE FORGE REPOSITORY IS — derived, not asserted. See the block
+# below the helpers; these are its inputs.
+FORGE_COMPOSE="${BOSS_FORGE_COMPOSE:-/opt/forgejo/docker-compose.yml}"
+FORGE_REPO_SLUG="${BOSS_FORGE_REPO_SLUG:-david/boss}"
+FORGE_DATA_FALLBACK="${BOSS_FORGE_DATA_FALLBACK:-/opt/forgejo/data}"
 MIRROR_SLUG="${BOSS_MIRROR_SLUG:-algedonic-dev/boss}"
 MIRROR_URL="${BOSS_MIRROR_URL:-https://github.com/${MIRROR_SLUG}.git}"
 FORK_SLUG="${BOSS_FORK_SLUG:-dauld/boss}"
@@ -70,6 +71,104 @@ me="publish-github-pr"
 say() { echo "$me: $*"; }
 refuse() { echo "$me: REFUSED — $*" >&2; exit 2; }
 fail() { echo "$me: FAILED — $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------
+# WHERE THE FORGE REPOSITORY IS — derived from the thing that declares
+# it, not asserted by this file.
+# ---------------------------------------------------------------------
+# Until 2026-09-11 this was one hardcoded default,
+# /opt/forgejo/data/git/repositories/david/boss.git, and that string
+# appeared EXACTLY ONCE in the tree — here — with the only other
+# references being test overrides that substitute a tmpdir. So it had
+# never been run against the real host, and the verb's real run had
+# never succeeded: ops-request 04975694 ran `--check` on the forge and
+# the repository path was its one and only failure (backlog ed84b5d9).
+#
+# Forgejo runs on that host as a container (codeberg.org/forgejo/forgejo
+# :16.0.2, measured on ops-request aa0118a6, 2026-09-11) and its compose
+# file DECLARES which host directory is mounted at the container's
+# /data. That declaration is the one definition of where the
+# repositories live, so read it (CLAUDE.md §9a: one definition, never a
+# second copy in a shell default). Inside /data, the repository root is
+# Forgejo's OWN `[repository] ROOT` from app.ini when that is readable;
+# git/repositories is only the image's default.
+#
+# Every layer is reported by --check, labelled with where it came from,
+# so the next reader never has to guess which one answered.
+# BOSS_FORGE_REPO_PATH overrides the lot.
+
+# The host directory bound to the container's /data. Compose's short
+# syntax (`- ./data:/data[:ro]`) and long syntax (`source:`/`target:`)
+# both appear in Forgejo's published examples, so both are read. A NAMED
+# volume (`forgejo-data:/data`) is not a host path and is declined.
+compose_data_dir() {
+    local compose="$1" here host
+    [ -r "$compose" ] || return 1
+    here=$(cd "$(dirname "$compose")" 2>/dev/null && pwd) || return 1
+    host=$(sed -n -E 's@^[[:space:]]*-[[:space:]]*"?([^":[:space:]]+):/data(:[a-zA-Z,]+)?"?[[:space:]]*$@\1@p' "$compose" | head -n 1)
+    if [ -z "$host" ]; then
+        host=$(awk '
+            /^[[:space:]]*-?[[:space:]]*source:[[:space:]]*[^[:space:]]+[[:space:]]*$/ {
+                s = $NF; gsub(/"/, "", s)
+            }
+            /^[[:space:]]*target:[[:space:]]*\/data[[:space:]]*$/ {
+                if (s != "") { print s; exit }
+            }' "$compose")
+    fi
+    case "$host" in
+        /*)       printf '%s\n' "$host" ;;
+        ./*|../*) printf '%s\n' "$here/${host#./}" ;;
+        *)        return 1 ;;
+    esac
+}
+
+# Forgejo's own [repository] ROOT, read off app.ini under the data dir
+# and translated from the container's /data to the host directory. Only
+# the [repository] section's ROOT — app.ini has other ROOT-ish keys.
+forge_repo_root() {
+    local data="$1" ini root
+    ini="$data/gitea/conf/app.ini"
+    if [ -r "$ini" ]; then
+        root=$(awk '
+            /^[[:space:]]*\[/ { sec = $0 }
+            sec ~ /^[[:space:]]*\[repository\]/ && /^[[:space:]]*ROOT[[:space:]]*=/ {
+                sub(/^[^=]*=[[:space:]]*/, ""); sub(/[[:space:]]+$/, ""); print; exit
+            }' "$ini")
+        case "$root" in
+            /data/*) printf '%s\n' "$data${root#/data}"; return 0 ;;
+        esac
+    fi
+    printf '%s\n' "$data/git/repositories"
+}
+
+if [ -n "${BOSS_FORGE_REPO_PATH:-}" ]; then
+    FORGE_REPO="$BOSS_FORGE_REPO_PATH"
+    FORGE_REPO_FROM="BOSS_FORGE_REPO_PATH in the environment"
+elif FORGE_DATA=$(compose_data_dir "$FORGE_COMPOSE"); then
+    FORGE_REPO_ROOT=$(forge_repo_root "$FORGE_DATA")
+    FORGE_REPO="$FORGE_REPO_ROOT/$FORGE_REPO_SLUG.git"
+    FORGE_REPO_FROM="derived: $FORGE_COMPOSE mounts $FORGE_DATA at the container's /data, repository root $FORGE_REPO_ROOT, slug $FORGE_REPO_SLUG"
+else
+    FORGE_REPO="$FORGE_DATA_FALLBACK/git/repositories/$FORGE_REPO_SLUG.git"
+    FORGE_REPO_FROM="fallback — $FORGE_COMPOSE is not readable, so the host's /data mount could not be read and this path is a GUESS at the image default; name the real one with BOSS_FORGE_REPO_PATH"
+fi
+
+# EVERY READ OF THE FORGE REPOSITORY GOES THROUGH THIS ONE OPTION SET,
+# --check and the run alike, so --check can never pass on a repository
+# the run cannot read.
+#
+# safe.directory, scoped to this one path. The ops-runner executes verbs
+# AS ROOT and this repository belongs to the Forgejo container's
+# account, so since git 2.35.2 every command refuses it as "dubious
+# ownership" — the same refusal, measured on this host class on
+# ops-request c9877f75 (2026-09-10), that made delete-orphan-object's
+# read impossible. That script drops to the owner instead; this one
+# cannot, because the fetch's DESTINATION is root's own state dir under
+# /var/lib, which the owner cannot write. The hazard the drop protects
+# against — a root WRITE leaving root-owned objects in somebody else's
+# repository — is not reachable here: a fetch only reads the source, and
+# nothing in this script writes under $FORGE_REPO.
+FORGE_GIT=(-c "safe.directory=$FORGE_REPO")
 
 # ---------------------------------------------------------------------
 # Preconditions — the same list --check reports on.
@@ -91,6 +190,46 @@ token_problem() {
     fi
 }
 
+# The deepest prefix of a path that exists — so "absent" can say how far
+# the layout WAS right instead of only that the whole path was wrong.
+deepest_existing() {
+    local p="$1"
+    while [ -n "$p" ] && [ "$p" != "/" ] && [ "$p" != "." ]; do
+        if [ -e "$p" ]; then printf '%s' "$p"; return 0; fi
+        p=$(dirname "$p")
+    done
+    printf '/'
+}
+
+# FOUR findings, four sentences. Until 2026-09-11 all four reported
+# "forge repository not found at <path>" — the same words whether the
+# path was absent, was a file, was unreadable by the caller, or was
+# readable and refused by git. That is CLAUDE.md §Doors ("a wrong target
+# answers instead of erroring") in its most literal form: the first
+# reading of the live refusal could not tell a wrong path from a
+# permission boundary, so the obvious next step was to guess a second
+# path. The verb runs as root through the ops-runner, so "unreadable by
+# root" and "unreadable by david" are different findings and the message
+# names which user could not read it.
+forge_repo_problem() {
+    local who anc err
+    who="$(id -un 2>/dev/null || id -u 2>/dev/null || printf '?')"
+    if [ ! -e "$FORGE_REPO" ]; then
+        anc=$(deepest_existing "$FORGE_REPO")
+        if [ -r "$anc" ] && [ -x "$anc" ]; then
+            echo "no forge repository at $FORGE_REPO — nothing exists there; the deepest path that does exist is $anc. Path came from: $FORGE_REPO_FROM"
+        else
+            echo "no forge repository at $FORGE_REPO — nothing exists there that this user ($who) can see, and $anc is not searchable by $who, so 'absent' here may mean 'hidden'. Path came from: $FORGE_REPO_FROM"
+        fi
+    elif [ ! -d "$FORGE_REPO" ]; then
+        echo "the forge repository path $FORGE_REPO exists but is not a directory — a bare git repository was expected. Path came from: $FORGE_REPO_FROM"
+    elif [ ! -r "$FORGE_REPO" ] || [ ! -x "$FORGE_REPO" ]; then
+        echo "the forge repository $FORGE_REPO is a directory but is not readable by this user ($who) — a permission finding, not a wrong path. Path came from: $FORGE_REPO_FROM"
+    elif ! err=$(git "${FORGE_GIT[@]}" -C "$FORGE_REPO" rev-parse --git-dir 2>&1 >/dev/null); then
+        echo "the forge repository $FORGE_REPO is a readable directory but git refused it as a repository (read as $who). git said: ${err%%$'\n'*}"
+    fi
+}
+
 check_inputs() {
     local rc=0 problem
     for tool in git gh curl jq; do
@@ -100,10 +239,8 @@ check_inputs() {
     done
     problem=$(token_problem)
     if [ -n "$problem" ]; then echo "$me: $problem" >&2; rc=1; fi
-    if ! git -C "$FORGE_REPO" rev-parse --is-bare-repository >/dev/null 2>&1 \
-       && ! git -C "$FORGE_REPO" rev-parse --git-dir >/dev/null 2>&1; then
-        echo "$me: forge repository not found at $FORGE_REPO (BOSS_FORGE_REPO_PATH)" >&2; rc=1
-    fi
+    problem=$(forge_repo_problem)
+    if [ -n "$problem" ]; then echo "$me: $problem" >&2; rc=1; fi
     if ! mkdir -p "$STATE_DIR" 2>/dev/null || [ ! -w "$STATE_DIR" ]; then
         echo "$me: state dir $STATE_DIR is not writable (BOSS_PUBLISH_STATE_DIR)" >&2; rc=1
     fi
@@ -116,6 +253,7 @@ if [ "${1:-}" = "--check" ]; then
     echo "$me --check"
     echo "  token file : $TOKEN_FILE"
     echo "  forge repo : $FORGE_REPO"
+    echo "               ($FORGE_REPO_FROM)"
     echo "  mirror     : $MIRROR_URL (anonymous fetch)"
     echo "  fork       : $FORK_URL (push as $FORK_OWNER)"
     echo "  state dir  : $STATE_DIR"
@@ -168,8 +306,12 @@ set_remote() { g remote get-url "$1" >/dev/null 2>&1 && g remote set-url "$1" "$
 set_remote forge "$FORGE_REPO"
 set_remote mirror "$MIRROR_URL"
 set_remote fork "$FORK_URL"
-g fetch -q forge "+refs/heads/main:refs/remotes/forge/main"   || fail "fetching forge main from $FORGE_REPO"
-g fetch -q mirror "+refs/heads/main:refs/remotes/mirror/main" || fail "fetching mirror main from $MIRROR_URL"
+# Git's own words on both fetches: a verdict somebody must go re-derive
+# is not a verdict (CLAUDE.md §Diagnosis).
+g "${FORGE_GIT[@]}" fetch -q forge "+refs/heads/main:refs/remotes/forge/main" 2>"$workdir/err" \
+    || fail "fetching forge main from $FORGE_REPO ($FORGE_REPO_FROM) — git said: $(head -c 300 "$workdir/err" | tr '\n' ' ')"
+g fetch -q mirror "+refs/heads/main:refs/remotes/mirror/main" 2>"$workdir/err" \
+    || fail "fetching mirror main from $MIRROR_URL — git said: $(head -c 300 "$workdir/err" | tr '\n' ' ')"
 forge_head=$(g rev-parse refs/remotes/forge/main)
 forge_tree=$(g rev-parse "refs/remotes/forge/main^{tree}")
 mirror_head=$(g rev-parse refs/remotes/mirror/main)

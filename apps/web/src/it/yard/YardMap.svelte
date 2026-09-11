@@ -1,7 +1,8 @@
 <script lang="ts">
   // The yard as a rail map. Scenery is drawn from the scene's shape
-  // (one gate shed per bay the policy allows, the mainline under six
-  // signals, the dock and garage sidings, the arrivals yard); tokens —
+  // (one gate shed per bay the policy allows, the mainline under one
+  // signal per stage, the dock and garage sidings, the arrivals yard and
+  // the inspection shed it feeds with its two sidings); tokens —
   // wagons and locomotives — are keyed by id and positioned by a CSS
   // transform, so when a wagon's station changes between two polls the
   // browser slides the same node from the old place to the new one.
@@ -31,7 +32,7 @@
   const WAGON_W = 70;
   const WAGON_STEP = 74;
   const VIEW_W = 1240;
-  const STAGE_X: readonly number[] = [620, 700, 780, 860, 940, 1020];
+  const STAGE_X: readonly number[] = [620, 700, 780, 860, 940, 1000, 1056];
   const bayY = (i: number): number => 70 + i * BAY_H;
   const nBays = $derived(scene.bays.length);
   // The QUEUE LANE — a holding siding between the mainline and the gate
@@ -54,7 +55,31 @@
   const drawn = $derived(drawnWagons(scene.wagons));
   const stackRows = $derived(Math.ceil(Math.min(drawn.drawn.filter(w => w.station === 'arrivals').length, ARRIVALS_DRAWN) / 2));
   const plateY = $derived(mainY + ARRIVALS_Y + stackRows * 40 + 2);
-  const height = $derived(Math.max(mainY + 150, plateY + (drawn.hidden > 0 ? 18 : 8)));
+  // THE INSPECTION SHED AND ITS TWO SIDINGS — the band the arrivals yard
+  // feeds, under everything else. Three lanes, each as tall as it needs
+  // to be: the yard GROWS a lane rather than hiding wagons, the way the
+  // gate queue does, so nothing here is ever capped or counted away.
+  const LANE_COLS = 8;
+  const LANE_ROW_H = 34;
+  const LANE_X = 640;
+  const lane = (station: Wagon['station']) => scene.wagons.filter(w => w.station === station);
+  const inspecting = $derived(lane('inspection-shed'));
+  const onEvent = $derived(lane('siding-event'));
+  const noProbe = $derived(lane('siding-no-probe'));
+  const laneRows = (n: number): number => Math.max(1, Math.ceil(n / LANE_COLS));
+  // Below the garage siding AND below the arrivals stack, whichever
+  // reaches further down — the band must not sit on another machine's
+  // click area.
+  const shedY = $derived(Math.max(mainY + 140, plateY + (drawn.hidden > 0 ? 40 : 34)));
+  const eventY = $derived(shedY + laneRows(inspecting.length) * LANE_ROW_H + 22);
+  const noProbeY = $derived(eventY + laneRows(onEvent.length) * LANE_ROW_H + 20);
+  const laneBottom = $derived(noProbeY + laneRows(noProbe.length) * LANE_ROW_H + 8);
+  const laneXY = (top: number, slot: number): readonly [number, number] => [
+    LANE_X + (slot % LANE_COLS) * WAGON_STEP,
+    top + 14 + Math.floor(slot / LANE_COLS) * LANE_ROW_H,
+  ];
+  const shed = $derived(scene.machines.inspection);
+  const height = $derived(Math.max(mainY + 150, plateY + (drawn.hidden > 0 ? 18 : 8), laneBottom + 10));
   // The machines the page feeds from outside the yard status, and the
   // clock their elapsed readings run on (the scene's — the server's
   // when the status served).
@@ -98,6 +123,12 @@
       }
       case 'arrivals':
         return [1080 + (w.slot % 2) * WAGON_STEP, mainY + ARRIVALS_Y + Math.floor(w.slot / 2) * 40];
+      case 'inspection-shed':
+        return laneXY(shedY, w.slot);
+      case 'siding-event':
+        return laneXY(eventY, w.slot);
+      case 'siding-no-probe':
+        return laneXY(noProbeY, w.slot);
     }
   }
 
@@ -192,7 +223,9 @@
       </g>
     {/each}
 
-    <!-- the signals along the track: one machine, six lamps -->
+    <!-- the signals along the track: one machine, one lamp per stage.
+         The last one, `proven`, is the exception — no locomotive reaches
+         it, so the inspection shed lights it (yard-floor.ts). -->
     <g
       class="machine"
       class:selected={selected === 'track'}
@@ -343,7 +376,10 @@
       aria-label="arrivals · {scene.machines.arrivals.label}"
       onclick={pick('arrivals')}
       onkeydown={pickKey('arrivals')}>
-      <rect x="1062" y={mainY - 50} width={VIEW_W - 1070} height={height - mainY + 40} class="hit" />
+      <!-- bounded at the plate: the inspection band below is its own
+           machine, and an area that swallowed those clicks would make
+           the shed unselectable -->
+      <rect x="1062" y={mainY - 50} width={VIEW_W - 1070} height={plateY - mainY + 60} class="hit" />
       <text x="1066" y={mainY + 32}>Arrivals</text>
       <text x="1066" y={mainY + 44} class="tiny">{scene.machines.arrivals.label}</text>
       {#if drawn.hidden > 0}
@@ -351,6 +387,47 @@
         <rect x="1080" y={plateY - 2} width="144" height="14" class="plate" />
         <text x="1152" y={plateY + 8} text-anchor="middle" class="tiny">+{drawn.hidden} more landed · see the board</text>
       {/if}
+    </g>
+
+    <!-- THE INSPECTION SHED — fed by the arrivals yard. A car that landed
+         carrying a probe stands here until the forge's `run-car-probe`
+         request is drained and the `proven` step is stamped; the two
+         sidings under it hold the cars no probe can settle. Everything
+         drawn is a packet field (yard-shed.ts) — the yard invents nothing
+         here, and draws no count the record does not hold. -->
+    <g
+      class="machine area"
+      class:selected={selected === 'inspection-shed'}
+      role="button"
+      tabindex="0"
+      aria-label="inspection shed · {shed.label}"
+      onclick={pick('inspection-shed')}
+      onkeydown={pickKey('inspection-shed')}>
+      <rect x="24" y={shedY - 22} width={VIEW_W - 40} height={laneBottom - shedY + 26} class="hit" />
+      <!-- the spur down off the arrivals lead, and one rail per lane -->
+      <path
+        d="M1085 {mainY + 50} C 1068 {mainY + 58}, 1062 {shedY - 10}, 1040 {shedY + 14} L 632 {shedY + 14}"
+        class="rail" />
+      <path d="M668 {shedY + 14} C 652 {shedY + 14}, 648 {eventY + 14}, 632 {eventY + 14} L {VIEW_W - 15} {eventY + 14}" class="rail" />
+      <path d="M668 {eventY + 14} C 652 {eventY + 14}, 648 {noProbeY + 14}, 632 {noProbeY + 14} L {VIEW_W - 15} {noProbeY + 14}" class="rail" />
+      <line x1="632" y1={shedY + 14} x2={VIEW_W - 15} y2={shedY + 14} class="rail" />
+      <!-- the shed building over the inspection lane -->
+      <rect
+        x="620"
+        y={shedY - 14}
+        width={VIEW_W - 628}
+        height={laneRows(inspecting.length) * LANE_ROW_H + 6}
+        class="shed"
+        class:busy={shed.inspecting > 0 && shed.failed === 0}
+        class:err={shed.failed > 0} />
+      <text x="30" y={shedY - 2} class:err={shed.failed > 0}>Inspection shed · proven?</text>
+      <text x="30" y={shedY + 12} class="tiny" class:err={shed.failed > 0}>{shed.label}</text>
+      <text x="30" y={eventY + 10}>Siding · on an event</text>
+      <text x="30" y={eventY + 22} class="tiny"
+        >{shed.onEvent === 0 ? 'empty' : `${shed.onEvent} waiting — no probe can settle it`}</text>
+      <text x="30" y={noProbeY + 10}>Siding · no probe</text>
+      <text x="30" y={noProbeY + 22} class="tiny"
+        >{shed.noProbe === 0 ? 'empty' : `${shed.noProbe} carrying no probe — a person must prove them`}</text>
     </g>
 
     <!-- tokens: keyed by id, moved by transform, so a station change
@@ -370,7 +447,13 @@
           onclick={pick(`car:${w.id}`)}
           onkeydown={pickKey(`car:${w.id}`)}
           transition:fade={{ duration: 500 }}>
-          <title>{w.title} — {w.branch}@{w.head ?? '—'}</title>
+          <!-- A wagon standing in the inspection shed shows the probe
+               command and the string it must print; the entity panel
+               carries them unwrapped. -->
+          <title
+            >{w.title} — {w.branch}@{w.head ?? '—'}{w.probe
+              ? `\nprobe: ${w.probe.command}\nmust print: ${w.probe.expect ?? '(nothing recorded)'}`
+              : ''}{w.event ? `\nwaiting on: ${w.event}` : ''}</title>
           <rect x="0" y="-10" width={WAGON_W} height="20" class="body" />
           <rect x="0" y="-10" width="5" height="20" class="stripe" />
           <circle cx="12" cy="12" r="3" class="wheel" />

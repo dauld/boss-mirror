@@ -57,7 +57,96 @@ export type CarRow = Readonly<{
    *  head the gate receipt recorded — shortened to seven, or null when
    *  no record carries one. Painted beside the branch on the floor. */
   head: string | null;
+  /** What the packet records about PROVING it — the four `proof_*` keys
+   *  and the `proven` step's stamp ([`readCarProof`]). Null when the
+   *  packet records none of them; absent on a row built before the
+   *  reader existed. The inspection shed is a lens over this and
+   *  nothing else. */
+  proof?: CarProof | null;
 }>;
+
+/** A probe run the forge wrote back onto the car (`proof_attempt`). Only
+ *  a run that did NOT settle the car survives here: a run that exits
+ *  zero and prints what was claimed completes the `proven` step, which
+ *  is recorded as a [`ProvenStamp`] instead. */
+export type ProofAttempt = Readonly<{
+  at: string | null;
+  exit: number | null;
+  host: string | null;
+  output: string | null;
+  /** Tools the probe needed and the host did not have. */
+  missingTools: readonly string[];
+}>;
+
+/** The `proven` step completed — the transition a car leaves the
+ *  inspection shed on. `by` is the step's `proven_by` (`run-car-probe`
+ *  when the forge drained the request, else whoever ran `boss prove`). */
+export type ProvenStamp = Readonly<{ at: string | null; by: string | null }>;
+
+/** Everything a car's packet says about proving it in production.
+ *
+ *  `probe` / `expect` are what `boss gate --park-probe/--park-expect`
+ *  recorded and the arrival rule hands the forge; `event` is the prose a
+ *  car carries when only an EVENT can settle it, which no probe can
+ *  run; `attempt` is the forge's last unsuccessful run; `stamped` is the
+ *  `proven` step completing. Nothing here is derived — five fields, five
+ *  places the packet holds them. */
+export type CarProof = Readonly<{
+  probe: string | null;
+  expect: string | null;
+  event: string | null;
+  attempt: ProofAttempt | null;
+  stamped: ProvenStamp | null;
+}>;
+
+const text = (v: unknown): string | null => (typeof v === 'string' && v !== '' ? v : null);
+
+function proofAttempt(v: unknown): ProofAttempt | null {
+  if (typeof v !== 'object' || v === null) return null;
+  const a = v as Record<string, unknown>;
+  const tools = Array.isArray(a.missing_tools) ? a.missing_tools.filter((t): t is string => typeof t === 'string') : [];
+  return {
+    at: text(a.at),
+    exit: typeof a.exit === 'number' ? a.exit : null,
+    host: text(a.host),
+    output: text(a.output),
+    missingTools: tools,
+  };
+}
+
+/** The car's proof record, or null when the packet holds none of it.
+ *
+ *  Null rather than a row of nulls on purpose: "this packet says nothing
+ *  about proving it" and "this packet records an empty probe" are
+ *  different facts, and the second one is a defect an operator should
+ *  see rather than a shape the floor smooths over. */
+export function readCarProof(j: JobLite | null | undefined): CarProof | null {
+  if (!j) return null;
+  const md = (j.metadata ?? {}) as Record<string, unknown>;
+  const proven = step(j, 'proven', 'Proven in production');
+  const stamped: ProvenStamp | null =
+    proven !== null && proven.status === 'completed'
+      ? { at: stampAt(proven) ?? text(proven.completed_on), by: text((proven.metadata ?? {}).proven_by) }
+      : null;
+  const proof: CarProof = {
+    probe: text(md.proof_probe),
+    expect: text(md.proof_expect),
+    event: text(md.proof_event),
+    attempt: proofAttempt(md.proof_attempt),
+    stamped,
+  };
+  const empty =
+    proof.probe === null &&
+    proof.expect === null &&
+    proof.event === null &&
+    proof.attempt === null &&
+    proof.stamped === null &&
+    // An EMPTY probe string is still a record — the packet carries the
+    // key, it just says nothing useful. Keep the row so the shed can
+    // draw the car rather than silently treat it as unrecorded.
+    !('proof_probe' in md);
+  return empty ? null : proof;
+}
 
 // The protocol palette + kind → hue hash + the sim predicate moved to
 // web-kit with the card itself (@boss/web-kit/ui/packet-card) so every
@@ -915,6 +1004,9 @@ export function toTrainRow(
       sim: car ? isSim(car) : false,
       skipReason: cmd.skip_reason ?? null,
       head: car ? headOf(car) : null,
+      // A car outside the window says nothing about its own proof, and
+      // the arrivals stack must not read that silence as "not proven".
+      proof: readCarProof(car),
     };
   });
   return {
@@ -973,6 +1065,7 @@ function carRow(j: JobLite): CarRow {
     sim: isSim(j),
     skipReason: md.skip_reason ?? null,
     head: headOf(j),
+    proof: readCarProof(j),
   };
 }
 

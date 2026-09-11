@@ -48,7 +48,12 @@
     <div class="n mono">{median}{#if production.journeySamples > 0}<small>n={production.journeySamples}</small>{/if}</div>
     <div class="l">median car lead time</div>
   </div>
-  <div class="tile" title="merged and deployed, not yet proven in production">
+  <!-- Kept now that the floor draws the inspection shed: the shed shows
+       WHICH cars are unproven and on what, this tile is the one live
+       number in the day's scoreboard, next to the counts it is read
+       against. The two answer different questions — it points at the
+       shed rather than repeating it. -->
+  <div class="tile" title="merged and deployed, not yet proven in production — the inspection shed on the map holds these cars">
     <div class="n mono">{production.awaitingProof}</div>
     <div class="l">awaiting proof</div>
   </div>

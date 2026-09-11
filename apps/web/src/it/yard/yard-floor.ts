@@ -28,7 +28,17 @@
 import { formatDate } from '@boss/web-kit/ui/date';
 import type { ClusterMachine, RunnerMachine } from './yard-machines';
 export type { ClusterMachine, RunnerMachine } from './yard-machines';
-import { approach, failedChecks, stampAt, troubleLabel, type CarRow, type TrainRow, type WithSteps, type YardState } from './yard';
+import { approach, failedChecks, stampAt, troubleLabel, type CarRow, type JobLite, type TrainRow, type WithSteps, type YardState } from './yard';
+import {
+  inspectionShed,
+  runAt,
+  shedCounts,
+  shedLabel,
+  shedLamp,
+  shedStatus,
+  shedTone,
+  type ShedPlace,
+} from './yard-shed';
 import {
   blockLabel,
   clockText,
@@ -45,9 +55,18 @@ import {
 // The scene.
 // ---------------------------------------------------------------------
 
-/** The mainline's six stages, left to right. A locomotive's `stage`
- *  indexes this; a signal stands at each. */
-export const STAGES = ['PR', 'CI', 'merge', 'deploy', 'converge', 'arrived'] as const;
+/** The mainline's stages, left to right. A locomotive's `stage` indexes
+ *  this; a signal stands at each.
+ *
+ *  `proven` is the ONE stage no locomotive reaches: a train's furthest
+ *  stage is `arrived`, and proving is per CAR, downstream of every train
+ *  (see [`PROVEN_STAGE`] and the inspection shed in yard-shed.ts). It is
+ *  on the line because the journey ends there and the page has always
+ *  said so — the floor just did not draw it. */
+export const STAGES = ['PR', 'CI', 'merge', 'deploy', 'converge', 'arrived', 'proven'] as const;
+
+/** The index of the stage the inspection shed lights, not a locomotive. */
+export const PROVEN_STAGE = STAGES.length - 1;
 
 export type Station =
   | 'approach'
@@ -58,10 +77,20 @@ export type Station =
   | 'dock'
   | 'garage'
   | 'train'
-  | 'arrivals';
+  | 'arrivals'
+  /** Landed, carrying a probe, not yet stamped `proven`. */
+  | 'inspection-shed'
+  /** Landed, settled only by an event no probe can run. */
+  | 'siding-event'
+  /** Landed, carrying no probe at all. */
+  | 'siding-no-probe';
 export type Tone = 'ok' | 'warn' | 'red' | 'static';
 export type Lamp = 'ok' | 'working' | 'warn' | 'err' | 'off';
 export type Signal = 'ok' | 'now' | 'err' | 'off';
+
+/** What the shed has to show on a wagon: the probe command and the
+ *  string it must print, both straight off the car's packet. */
+export type ShedProbe = Readonly<{ command: string; expect: string | null }>;
 
 export type Wagon = Readonly<{
   /** The packet id — the car's wherever one is known (see the module
@@ -85,6 +114,14 @@ export type Wagon = Readonly<{
   lamp: Lamp;
   /** One line: what the wagon is doing, in the read model's words. */
   status: string;
+  /** The probe a wagon IN THE INSPECTION SHED must pass: the command the
+   *  forge runs and the string it has to print. Absent on every wagon
+   *  standing anywhere else — the shed is the only place the floor makes
+   *  this claim. */
+  probe?: ShedProbe | null;
+  /** The event prose on a wagon standing on the event siding; absent
+   *  elsewhere. */
+  event?: string | null;
   /** When it reached this station — an RFC3339 instant or a bare date,
    *  whichever the record carries; null when it carries none. */
   since: string | null;
@@ -142,9 +179,20 @@ export type ConductorMachine = Readonly<{
  *  deploy-runner shed (the converge ops-requests) and the cluster tower
  *  (/api/jobs/health) — both derived in yard-machines.ts and fed in.
  *  `NO_FEEDS` before the first read: the map draws both dark and says
- *  "no reading", never idle. */
-export type Feeds = Readonly<{ runner: RunnerMachine; cluster: ClusterMachine }>;
-export const NO_FEEDS: Feeds = { runner: { kind: 'unknown' }, cluster: { kind: 'unknown' } };
+ *  "no reading", never idle.
+ *
+ *  `probes` is the SAME ops-request rows the runner machine is derived
+ *  from, handed over raw so the inspection shed can find the
+ *  `run-car-probe` request the arrival rule filed for each car. One
+ *  fetch, two readers; `null` until that fetch lands, which the shed
+ *  reports as "no probe run in the packets read" rather than as "no
+ *  request was filed". */
+export type Feeds = Readonly<{
+  runner: RunnerMachine;
+  cluster: ClusterMachine;
+  probes: readonly JobLite[] | null;
+}>;
+export const NO_FEEDS: Feeds = { runner: { kind: 'unknown' }, cluster: { kind: 'unknown' }, probes: null };
 
 export type Machines = Readonly<{
   approach: Readonly<{ label: string; stranded: number; publishing: number; held: number }>;
@@ -167,6 +215,16 @@ export type Machines = Readonly<{
   }>;
   garage: Readonly<{ label: string; count: number }>;
   arrivals: Readonly<{ label: string; landed: number }>;
+  /** The inspection shed and its two sidings — the counts are the three
+   *  places, and `failed` is how many of the inspected cars have a
+   *  non-zero probe run on record. */
+  inspection: Readonly<{
+    label: string;
+    inspecting: number;
+    failed: number;
+    onEvent: number;
+    noProbe: number;
+  }>;
   conductor: ConductorMachine;
   runner: RunnerMachine;
   cluster: ClusterMachine;
@@ -343,12 +401,14 @@ export type Selection =
   | Readonly<{ kind: 'approach' }>
   | Readonly<{ kind: 'gate-queue' }>
   | Readonly<{ kind: 'arrivals' }>
+  /** The inspection shed and its two sidings, selected as one area. */
+  | Readonly<{ kind: 'inspection-shed' }>
   | Readonly<{ kind: 'conductor' }>
   | Readonly<{ kind: 'runner' }>
   | Readonly<{ kind: 'cluster' }>;
 
 const PLAIN_SELECTIONS = [
-  'track', 'dock', 'garage', 'approach', 'gate-queue', 'arrivals', 'conductor', 'runner', 'cluster',
+  'track', 'dock', 'garage', 'approach', 'gate-queue', 'arrivals', 'inspection-shed', 'conductor', 'runner', 'cluster',
 ] as const;
 type PlainSelection = (typeof PLAIN_SELECTIONS)[number];
 
@@ -431,6 +491,11 @@ const STATION_RANK: Readonly<Record<Station, number>> = {
   garage: 5,
   train: 6,
   arrivals: 7,
+  // Downstream of arrival: the shed and its sidings are the last thing
+  // on the line, so they read last on the board.
+  'inspection-shed': 8,
+  'siding-event': 9,
+  'siding-no-probe': 10,
 };
 
 function stageOf(t: TrainRow): number {
@@ -519,6 +584,9 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
     ...(status?.held_cars ?? []).map(h => h.branch ?? ''),
     ...yard.inFlight.flatMap(t => t.cars.map(c => c.branch)),
     ...yard.arrivals.flatMap(t => t.cars.map(c => c.branch)),
+    // The shed and its sidings — named here too, not only via the open
+    // cars, so a nameplate does not depend on which list found the car.
+    ...yard.awaitingProof.map(c => c.branch),
     ...(status?.gates.active ?? []).map(g => g.branch),
     ...(status?.gates.queued ?? []).map(g => g.branch),
     // Every approach row — which now includes every garaged and
@@ -585,6 +653,44 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
     });
   });
 
+  // THE INSPECTION SHED AND ITS TWO SIDINGS — landed cars the log has
+  // not stamped `proven` yet (yard-shed.ts). PLACED BEFORE THE ARRIVALS
+  // STACK on purpose: a car in the shed has landed, so its train is in
+  // the arrivals window and the stack would claim the same wagon. The
+  // shed is downstream, so it takes the car and arrivals skips it —
+  // one branch, one wagon. A car still aboard a moving train was claimed
+  // by the track above and stays there: the shed never pulls a wagon
+  // back off the line.
+  const arrivedCar = new Map<string, Readonly<{ trainId: string; at: string | null }>>();
+  yard.arrivals.forEach(t =>
+    t.cars.forEach(c =>
+      arrivedCar.set(c.id, { trainId: t.id, at: t.arrivedAt.at !== '' ? t.arrivedAt.at : null }),
+    ),
+  );
+  const shed = inspectionShed(yard.awaitingProof, feeds.probes);
+  const shedSlot: Record<ShedPlace, number> = { 'inspection-shed': 0, 'siding-event': 0, 'siding-no-probe': 0 };
+  shed.forEach(s => {
+    if (claimedIds.has(s.car.id)) return;
+    const arrival = arrivedCar.get(s.car.id) ?? null;
+    place({
+      id: s.car.id,
+      ...base(s.car),
+      station: s.place,
+      slot: shedSlot[s.place]++,
+      trainId: arrival?.trainId ?? null,
+      tone: shedTone(s),
+      lamp: shedLamp(s),
+      status: shedStatus(s),
+      // It entered the shed when its train arrived. Falls back to the
+      // run's own instant when the train is outside the arrivals window,
+      // and to nothing when neither is on record.
+      since: arrival?.at ?? runAt(s.run),
+      probe: s.probe !== null ? { command: s.probe, expect: s.expect } : null,
+      event: s.event,
+    });
+  });
+  const shedTally = shedCounts(shed);
+
   // THE ARRIVALS YARD — landed cars stack newest first.
   const landed = [...yard.arrivals].sort((a, b) => b.arrivedAt.ms - a.arrivedAt.ms);
   let landedSlot = 0;
@@ -602,7 +708,12 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
         trainId: t.id,
         tone: 'ok',
         lamp: 'ok',
-        status: t.mergeRef ? `landed in ${t.mergeRef} · arrived` : 'landed · arrived',
+        // LEAVING THE SHED STAMPED. The `proven` step completing is the
+        // one transition: the car drops out of `awaitingProof`, its
+        // wagon leaves the shed, and it stands here reading `proven`
+        // instead of `arrived`. Silence is `arrived` — a car outside the
+        // window says nothing about its own proof.
+        status: `${t.mergeRef ? `landed in ${t.mergeRef}` : 'landed'} · ${c.proof?.stamped ? 'proven' : 'arrived'}`,
         since: t.arrivedAt.at !== '' ? t.arrivedAt.at : null,
       });
       landedSlot += 1;
@@ -834,8 +945,16 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
     }
   });
   // THE SIGNALS — lit by the lead locomotive, the one furthest along.
+  // EXCEPT THE LAST. `proven` is not a stage any locomotive reaches (a
+  // train's furthest is `arrived`) — proving is per car, in the shed
+  // downstream of every train — so that lamp is lit by the shed: red
+  // when a probe has failed, pulsing while a car is being inspected,
+  // dark otherwise. A siding does not light it: nothing runs there.
   const lead = locos.reduce<Loco | null>((best, l) => (best === null || l.stage > best.stage ? l : best), null);
   const signals: Signal[] = STAGES.map((_, i) => {
+    if (i === PROVEN_STAGE) {
+      return shedTally.failed > 0 ? 'err' : shedTally.inspecting > 0 ? 'now' : 'off';
+    }
     if (!lead) return 'off';
     if (i < lead.stage) return 'ok';
     if (i === lead.stage) return lead.blocked ? 'err' : 'now';
@@ -863,6 +982,12 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
       }
       case 'arrivals':
         return 'Arrivals';
+      case 'inspection-shed':
+        return 'Inspection shed';
+      case 'siding-event':
+        return 'Siding · on an event';
+      case 'siding-no-probe':
+        return 'Siding · no probe';
     }
   };
   const sinceMs = (w: Wagon): number => {
@@ -961,6 +1086,7 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
       queue: { label: queueLaneLabel(queue), count: queue.length },
       garage: { label: garageCount > 0 ? `${garageCount} gated red` : 'empty', count: garageCount },
       arrivals: { label: `${landedRecently} landed · 24h`, landed: landedRecently },
+      inspection: { label: shedLabel(shedTally), ...shedTally },
       conductor: conductorMachine(status?.conductor ?? null),
       runner: feeds.runner,
       cluster: feeds.cluster,

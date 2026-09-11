@@ -104,6 +104,7 @@ const garaged = (branch: string, failed_check: string | null, since: string, pac
 const quiet: Feeds = {
   runner: { kind: 'idle', last: null },
   cluster: { kind: 'ready', commit: '0d8c37d', since: NOW_ISO },
+  probes: null,
 };
 const alertsOf = (yard: YardState, status: YardStatus | null, feeds: Feeds = quiet) =>
   yardAlerts(scene(yard, status, NOW, feeds), status, NOW);
@@ -113,7 +114,7 @@ describe('yardAlerts — what is wrong right now, each a button to its subject',
     expect(alertsOf(yardOf(), statusOf())).toEqual([]);
     // Before any reading at all there is nothing to say either: unknown
     // is not an alarm.
-    expect(alertsOf(yardOf(), null, { runner: { kind: 'unknown' }, cluster: { kind: 'unknown' } })).toEqual([]);
+    expect(alertsOf(yardOf(), null, { runner: { kind: 'unknown' }, cluster: { kind: 'unknown' }, probes: null })).toEqual([]);
   });
 
   test("a blocked train is an error, since the server's block, selecting the train", () => {

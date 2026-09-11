@@ -148,9 +148,19 @@ export function runnerProgress(r: RunnerMachine, nowMs: number): number {
   return Math.min(Math.max(nowMs - started, 0) / (CONVERGE_USUAL_MINUTES * 60_000), 1);
 }
 
+/** How many ops-requests the page reads. Three readers share this one
+ *  fetch — the deploy-runner shed (newest converge), the signals panel,
+ *  and the inspection shed's per-car `run-car-probe` lookup. The arrival
+ *  rule files ONE request per probed car, so an arriving six-car train
+ *  fills six rows at once and a window of twenty covered barely three
+ *  trains; sixty keeps a day of probe runs findable. Still a window, not
+ *  a filter: the shed says "no probe run in the packets read" rather
+ *  than claiming none was filed. */
+const OPS_REQUEST_WINDOW = 60;
+
 export async function fetchOpsRequests(): Promise<readonly JobLite[] | null> {
   try {
-    const r = await fetch('/api/jobs?kind=ops-request&limit=20');
+    const r = await fetch(`/api/jobs?kind=ops-request&limit=${OPS_REQUEST_WINDOW}`);
     if (!r.ok) return null;
     const body = (await r.json()) as { data?: JobLite[] };
     return Array.isArray(body.data) ? body.data : null;

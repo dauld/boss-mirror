@@ -175,6 +175,9 @@ describe('the dock from the station envelope', () => {
     expect(y.dock[0]).toEqual({
       id: 's1', kind: 'ship-a-change', branch: 'feat/s1', title: 'car s1',
       tags: ['hotfix'], sim: true, skipReason: 'CI red', head: null,
+      // This packet records nothing about proving it — null, not a row
+      // of nulls (readCarProof).
+      proof: null,
     });
     expect(y.dock[1]?.sim).toBe(false);
     expect(y.dock[1]?.skipReason).toBeNull();

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   ARRIVALS_DRAWN,
+  NO_FEEDS,
   STAGES,
   boardedAtFromTitle,
   drawnWagons,
@@ -12,7 +13,7 @@ import {
   uniqueTags,
   wagonTag,
 } from './yard-floor';
-import type { ApproachRow, CarRow, TrainRow, YardState } from './yard';
+import type { ApproachRow, CarProof, CarRow, TrainRow, YardState } from './yard';
 import type { YardStatus } from './yard-status';
 
 // The floor is the testable half of the map: where every wagon stands,
@@ -83,6 +84,17 @@ const car = (id: string, branch: string, over: Partial<CarRow> = {}): CarRow => 
   sim: false,
   skipReason: null,
   head: 'abc1234',
+  ...over,
+});
+
+/** What a car's packet records about proving it — the four `proof_*`
+ *  fields plus the `proven` step's stamp, as [`readCarProof`] reads them. */
+const proofOf = (over: Partial<CarProof> = {}): CarProof => ({
+  probe: null,
+  expect: null,
+  event: null,
+  attempt: null,
+  stamped: null,
   ...over,
 });
 
@@ -570,8 +582,8 @@ describe('the track — wagons behind a locomotive', () => {
     expect(wagon(s, 'c1').status).toBe('aboard #259 · PR');
   });
 
-  test('each stage of the line is a stage index over PR · CI · merge · deploy · converge · arrived', () => {
-    expect(STAGES).toEqual(['PR', 'CI', 'merge', 'deploy', 'converge', 'arrived']);
+  test('each stage of the line is a stage index over PR · CI · merge · deploy · converge · arrived · proven', () => {
+    expect(STAGES).toEqual(['PR', 'CI', 'merge', 'deploy', 'converge', 'arrived', 'proven']);
     expect(aboard('BOARDED', { lamp: 'pending' }).locos[0]?.stage).toBe(1);
     expect(aboard('BOARDED', { lamp: 'green' }).locos[0]?.stage).toBe(2);
     expect(aboard('DEPARTED').locos[0]?.stage).toBe(3);
@@ -632,18 +644,18 @@ describe('the track — wagons behind a locomotive', () => {
 
 describe('the signals along the track', () => {
   test('no train: every lamp off', () => {
-    expect(scene(yardOf(), statusOf(), NOW).signals).toEqual(['off', 'off', 'off', 'off', 'off', 'off']);
+    expect(scene(yardOf(), statusOf(), NOW).signals).toEqual(['off', 'off', 'off', 'off', 'off', 'off', 'off']);
   });
 
   test('the lead train lights the signals: passed green, current pulsing, blocked red', () => {
     const s = scene(yardOf({ inFlight: [trainRow('t1', 'DEPARTED')] }), statusOf(), NOW);
-    expect(s.signals).toEqual(['ok', 'ok', 'ok', 'now', 'off', 'off']);
+    expect(s.signals).toEqual(['ok', 'ok', 'ok', 'now', 'off', 'off', 'off']);
     const b = scene(
       yardOf({ inFlight: [trainRow('t1', 'BOARDED', { lamp: 'failing', trouble: { kind: 'ci-red' } })] }),
       statusOf(),
       NOW,
     );
-    expect(b.signals).toEqual(['ok', 'err', 'off', 'off', 'off', 'off']);
+    expect(b.signals).toEqual(['ok', 'err', 'off', 'off', 'off', 'off', 'off']);
   });
 
   test('with two trains open, the one furthest along leads', () => {
@@ -652,7 +664,179 @@ describe('the signals along the track', () => {
       statusOf(),
       NOW,
     );
-    expect(s.signals).toEqual(['ok', 'ok', 'ok', 'ok', 'now', 'off']);
+    expect(s.signals).toEqual(['ok', 'ok', 'ok', 'ok', 'now', 'off', 'off']);
+  });
+
+  // THE PROVEN SIGNAL IS NOT A TRAIN'S. A locomotive's furthest stage is
+  // `arrived`; proving is per CAR, downstream of every train, so the last
+  // lamp is lit by the inspection shed instead of by the lead loco.
+  test('the last lamp is the shed: pulsing while a car is inspected, red when a probe failed', () => {
+    const probed = car('p1', 'feat/probed', { proof: proofOf({ probe: 'bash x.sh', expect: 'ok' }) });
+    const s = scene(yardOf({ awaitingProof: [probed] }), statusOf(), NOW);
+    expect(s.signals[6]).toBe('now');
+    const failed = car('p2', 'feat/failed', {
+      proof: proofOf({
+        probe: 'bash y.sh',
+        attempt: { at: '2026-09-07T22:00:00Z', exit: 1, host: 'forge', output: 'boom', missingTools: [] },
+      }),
+    });
+    expect(scene(yardOf({ awaitingProof: [failed] }), statusOf(), NOW).signals[6]).toBe('err');
+    // A siding is not the shed working: nothing is running there.
+    const evented = car('p3', 'feat/evented', { proof: proofOf({ event: 'the next train' }) });
+    expect(scene(yardOf({ awaitingProof: [evented] }), statusOf(), NOW).signals[6]).toBe('off');
+  });
+});
+
+// THE INSPECTION SHED AND ITS TWO SIDINGS — the floor's last stage.
+// Before this, `arrived` was the end of the map while the page's own
+// subtitle promised PROVEN, and the only surface for a probe was one
+// counter tile. Every value below is a field the packet already carries.
+describe('the inspection shed', () => {
+  const probe = (over: Partial<CarProof> = {}) =>
+    proofOf({ probe: 'bash infra/lint/x.sh --self-test', expect: 'X-OK', ...over });
+
+  const arrivedWith = (trainId: string, at: string, c: CarRow): TrainRow =>
+    trainRow(trainId, 'ARRIVED', {
+      live: false,
+      outcome: 'arrived',
+      mergeRef: 'b641f3a',
+      arrivedAt: { ms: Date.parse(at), at, basis: 'completed_at' },
+      cars: [c],
+    });
+
+  test('an arrived car with a probe stands in the shed, showing the command and the string', () => {
+    const c = car('c1', 'feat/probed', { proof: probe() });
+    const s = scene(yardOf({ awaitingProof: [c] }), statusOf(), NOW);
+    expect(wagon(s, 'c1')).toMatchObject({
+      station: 'inspection-shed',
+      slot: 0,
+      tone: 'ok',
+      lamp: 'working',
+      probe: { command: 'bash infra/lint/x.sh --self-test', expect: 'X-OK' },
+    });
+    expect(wagon(s, 'c1').status).toBe('inspection shed · no probe run in the packets read');
+  });
+
+  test('the queued run-car-probe request is the wagon\'s line, read off the ops-requests the page fetched', () => {
+    const c = car('c1', 'feat/probed', { proof: probe() });
+    const req = {
+      id: 'r1',
+      kind: 'ops-request',
+      title: 'run the recorded probe',
+      status: 'open',
+      opened_on: '2026-09-07',
+      metadata: { verb: 'run-car-probe', car: 'c1', opened_at: '2026-09-07T23:10:00Z' },
+    } as const;
+    const s = scene(yardOf({ awaitingProof: [c] }), statusOf(), NOW, { ...NO_FEEDS, probes: [req] });
+    expect(wagon(s, 'c1').status).toBe('inspection shed · probe queued on the forge');
+  });
+
+  test('a car waiting on an event stands on the first siding, one carrying no probe on the second', () => {
+    const ev = car('c2', 'feat/evented', { proof: proofOf({ event: 'the next train in flight' }) });
+    const bare = car('c3', 'feat/bare', { proof: null });
+    const s = scene(yardOf({ awaitingProof: [ev, bare] }), statusOf(), NOW);
+    expect(wagon(s, 'c2')).toMatchObject({ station: 'siding-event', slot: 0, tone: 'static', lamp: 'off', probe: null });
+    expect(wagon(s, 'c2').status).toBe('siding · waiting on an event, no probe can settle it');
+    expect(wagon(s, 'c3')).toMatchObject({ station: 'siding-no-probe', slot: 0, tone: 'static', lamp: 'off' });
+    expect(wagon(s, 'c3').status).toBe('siding · no probe recorded');
+  });
+
+  // ONE BRANCH, ONE WAGON. A car in the shed has landed, so its train is
+  // in the arrivals window and the arrivals stack would claim it too.
+  // The shed is downstream of arrivals, so the shed wins — and the
+  // wagon keeps the train link and the train's own arrival instant,
+  // which is when it entered the shed.
+  test('a car in the shed is not also in the arrivals stack', () => {
+    const c = car('c1', 'feat/probed', { proof: probe() });
+    const s = scene(
+      yardOf({ awaitingProof: [c], arrivals: [arrivedWith('t9', '2026-09-07T23:00:00Z', c)] }),
+      statusOf(),
+      NOW,
+    );
+    expect(s.wagons.filter(w => w.id === 'c1')).toHaveLength(1);
+    expect(wagon(s, 'c1')).toMatchObject({
+      station: 'inspection-shed',
+      trainId: 't9',
+      since: '2026-09-07T23:00:00Z',
+    });
+    // It left the arrivals yard, so it is no longer one of the day's
+    // landed wagons there.
+    expect(s.machines.arrivals.landed).toBe(0);
+  });
+
+  test('a car still aboard a moving train is on the track, never in the shed', () => {
+    const c = car('c1', 'feat/probed', { proof: probe() });
+    const s = scene(
+      yardOf({ awaitingProof: [c], inFlight: [trainRow('t1', 'CONVERGING', { cars: [c] })] }),
+      statusOf(),
+      NOW,
+    );
+    expect(s.wagons.filter(w => w.id === 'c1')).toHaveLength(1);
+    expect(wagon(s, 'c1').station).toBe('train');
+  });
+
+  test('the shed machine counts the three places and says clear when empty', () => {
+    const s = scene(
+      yardOf({
+        awaitingProof: [
+          car('c1', 'feat/probed', { proof: probe() }),
+          car('c2', 'feat/evented', { proof: proofOf({ event: 'a train' }) }),
+          car('c3', 'feat/bare', { proof: null }),
+        ],
+      }),
+      statusOf(),
+      NOW,
+    );
+    expect(s.machines.inspection).toEqual({
+      label: '1 inspecting · 1 on an event · 1 with no probe',
+      inspecting: 1,
+      failed: 0,
+      onEvent: 1,
+      noProbe: 1,
+    });
+    expect(scene(yardOf(), statusOf(), NOW).machines.inspection).toEqual({
+      label: 'clear',
+      inspecting: 0,
+      failed: 0,
+      onEvent: 0,
+      noProbe: 0,
+    });
+  });
+
+  test('the board names each place and does not call an unproven car landed', () => {
+    const s = scene(
+      yardOf({
+        awaitingProof: [
+          car('c1', 'feat/probed', { proof: probe() }),
+          car('c2', 'feat/evented', { proof: proofOf({ event: 'a train' }) }),
+          car('c3', 'feat/bare', { proof: null }),
+        ],
+      }),
+      statusOf(),
+      NOW,
+    );
+    const rows = s.boardRows.filter(r => ['c1', 'c2', 'c3'].includes(r.id));
+    expect(rows.map(r => [r.where, r.landed])).toEqual([
+      ['Inspection shed', false],
+      ['Siding · on an event', false],
+      ['Siding · no probe', false],
+    ]);
+  });
+
+  test('selecting the shed is a plain selection the map and the panel share', () => {
+    expect(parseSelection('inspection-shed')).toEqual({ kind: 'inspection-shed' });
+  });
+
+  // LEAVE STAMPED. The `proven` step completing is the transition: the
+  // car drops out of `awaitingProof`, so the wagon leaves the shed, and
+  // the arrivals stack says it is proven rather than merely arrived.
+  test('a stamped car stands in the arrivals yard and reads proven', () => {
+    const c = car('c9', 'feat/done', {
+      proof: proofOf({ probe: 'bash x.sh', stamped: { at: '2026-09-07T23:05:00Z', by: 'run-car-probe' } }),
+    });
+    const s = scene(yardOf({ arrivals: [arrivedWith('t9', '2026-09-07T23:00:00Z', c)] }), statusOf(), NOW);
+    expect(wagon(s, 'c9').station).toBe('arrivals');
+    expect(wagon(s, 'c9').status).toBe('landed in b641f3a · proven');
   });
 });
 
@@ -837,6 +1021,7 @@ describe('the machines', () => {
     const fed = scene(yardOf(), statusOf(), NOW, {
       runner: { kind: 'idle', last: null },
       cluster: { kind: 'ready', commit: '0d8c37d', since: NOW_ISO },
+      probes: null,
     });
     expect(fed.machines.runner).toEqual({ kind: 'idle', last: null });
     expect(fed.machines.cluster).toEqual({ kind: 'ready', commit: '0d8c37d', since: NOW_ISO });

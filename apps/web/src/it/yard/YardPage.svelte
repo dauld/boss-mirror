@@ -130,17 +130,27 @@
   const gateQueue = $derived(statusData?.gates.queued ?? []);
   const queueTypical = $derived(statusData?.gates.typical_seconds ?? null);
 
-  // THE TWO OUTSIDE READS. The converge ops-requests (null before the
-  // first read, or when the read failed — the shed then says "no
-  // reading") and the tower's reading, which keeps its `since` across
-  // polls while its state holds (yard-machines.ts).
+  // THE TWO OUTSIDE READS. The ops-requests (null before the first read,
+  // or when the read failed — the shed then says "no reading") and the
+  // tower's reading, which keeps its `since` across polls while its
+  // state holds (yard-machines.ts). The ops-request rows are fed on BOTH
+  // ways: reduced to the deploy-runner machine, and raw as `probes`, so
+  // the inspection shed can find the `run-car-probe` request the arrival
+  // rule filed for each landed car. One fetch, two readers.
   let opsRequests = $state<readonly JobLite[] | null>(null);
   let cluster = $state<ClusterMachine>({ kind: 'unknown' });
-  const feeds = $derived<Feeds>({ runner: runnerMachine(opsRequests, nowMs), cluster });
+  const feeds = $derived<Feeds>({ runner: runnerMachine(opsRequests, nowMs), cluster, probes: opsRequests });
 
   // THE FLOOR: the pure scene both the map and the board draw.
   const floor = $derived<Scene | null>(yard ? sceneOf(yard, statusData, nowMs, feeds) : null);
   const wagonById = $derived(new Map((floor?.wagons ?? []).map(w => [w.id, w])));
+  // The shed and its two sidings, in the order the board reads them —
+  // the inspection panel's rows.
+  const shedRows = $derived(
+    (floor?.wagons ?? []).filter(
+      w => w.station === 'inspection-shed' || w.station === 'siding-event' || w.station === 'siding-no-probe',
+    ),
+  );
   const whereById = $derived(new Map((floor?.boardRows ?? []).map(r => [r.id, r.where])));
   const locoById = $derived(new Map((floor?.locos ?? []).map(l => [l.id, l])));
 
@@ -542,6 +552,19 @@
               <dd><span class="yard-lamp-dot {w.lamp}"></span>{w.status} · since {sinceText(w.since, nowMs)}</dd>
               <dt>where</dt>
               <dd>{whereById.get(w.id) ?? '—'}</dd>
+              <!-- THE SHED'S TWO FACTS, unwrapped: the command the forge
+                   runs for this car and the string it has to print. Both
+                   are the car's own `proof_probe` / `proof_expect`. -->
+              {#if w.probe}
+                <dt>probe</dt>
+                <dd class="yard-mono yard-probe">{w.probe.command}</dd>
+                <dt>must print</dt>
+                <dd class="yard-mono yard-probe">{w.probe.expect ?? 'nothing recorded — the car names no expectation'}</dd>
+              {/if}
+              {#if w.event}
+                <dt>waiting on</dt>
+                <dd>{w.event}</dd>
+              {/if}
               {#if w.trainId}
                 {@const tr = trainById(w.trainId)}
                 <dt>train</dt>
@@ -911,6 +934,46 @@
             {/each}
             {#if floor.boardRows.every(r => !r.landed)}
               <span class="yard-empty">none yet</span>
+            {/if}
+          </div>
+        {:else if sel.kind === 'inspection-shed'}
+          <h2 class="yard-panel-h">Entity · inspection shed</h2>
+          <!-- THE LAST STAGE. A car is not delivered when it lands; it is
+               delivered when the log says it was observed working in
+               production. This panel is that queue: the cars in the shed
+               with the probe each one must pass, and the two sidings
+               holding the ones no probe can settle. Every line is a
+               packet field — `proof_probe`, `proof_expect`,
+               `proof_event`, the forge's `proof_attempt` and the
+               `run-car-probe` ops-request (yard-shed.ts). -->
+          <div class="yard-entity-title" class:is-silent={floor.machines.inspection.failed > 0}>{floor.machines.inspection.label}</div>
+          <div class="yard-entity-sub">
+            landed, not yet stamped proven — the arrival rule files one run-car-probe request per probed car and the forge drains it; a car leaves when its `proven` step is stamped
+          </div>
+          <div class="yard-steps">
+            {#each shedRows as w (w.id)}
+              <button type="button" class="yard-step yard-step-btn" onclick={() => select(`car:${w.id}`)}>
+                <span class="yard-lamp-dot {w.lamp}"></span>
+                <span>{w.title}</span>
+                <span class="yard-when yard-mono">{whereById.get(w.id) ?? ''} · {w.status}</span>
+              </button>
+              {#if w.probe}
+                <div class="yard-probe-row yard-mono">
+                  <span class="yard-probe-k">probe</span><span class="yard-probe">{w.probe.command}</span>
+                </div>
+                <div class="yard-probe-row yard-mono">
+                  <span class="yard-probe-k">prints</span><span class="yard-probe"
+                    >{w.probe.expect ?? 'nothing recorded — the car names no expectation'}</span>
+                </div>
+              {/if}
+              {#if w.event}
+                <div class="yard-probe-row">
+                  <span class="yard-probe-k">awaits</span><span class="yard-probe">{w.event}</span>
+                </div>
+              {/if}
+            {/each}
+            {#if shedRows.length === 0}
+              <span class="yard-empty">nothing unproven — every landed car in the window carries its stamp</span>
             {/if}
           </div>
         {:else if sel.kind === 'conductor'}
@@ -1351,6 +1414,12 @@
   .yard-step-btn { background: transparent; border: 0; color: inherit; font: inherit; text-align: left; padding: 2px 0; cursor: pointer; border-radius: 0; }
   .yard-step-btn:hover, .yard-step-btn:focus-visible { color: var(--signal, #5fd4a8); }
   .yard-when { color: var(--static, #7a838c); font-size: 11.5px; overflow-wrap: anywhere; }
+  /* A probe is a shell command and an exact string — both have to be
+     readable in full and copyable, so they wrap rather than truncate. */
+  .yard-probe-row { display: grid; grid-template-columns: 56px 1fr; gap: var(--s2, 8px); align-items: baseline;
+    font-size: 11.5px; padding-left: 22px; }
+  .yard-probe-k { color: var(--static, #7a838c); text-transform: uppercase; letter-spacing: var(--ls-label, 0.1em); font-size: 10px; }
+  .yard-probe { color: var(--fog, #e8ecef); overflow-wrap: anywhere; white-space: pre-wrap; user-select: text; }
   .yard-verbs { display: flex; gap: var(--s2, 8px); flex-wrap: wrap; margin-top: var(--s4, 16px); }
   .yard-verbs button, .yard-verb-link {
     background: transparent; color: var(--fog, #e8ecef); border: 1px solid var(--border-strong, #3a434d);
