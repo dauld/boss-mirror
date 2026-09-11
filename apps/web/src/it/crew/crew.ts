@@ -542,20 +542,15 @@ export type ActorCard = Readonly<{
 ///
 /// There is no `agents` table and no browser-reachable actor registry.
 /// `AgentSpec` is a type plus a TOML file with only an in-memory
-/// implementation; the observability service serves an agents listing,
-/// but it is not among the prefixes the gateway proxies. The agent-runs
-/// surface on the jobs API — which DOES have a table, an `actor_id` and
-/// a `branch`, and is the richest "what is this actor building and what
-/// did it cost" read in the system — is likewise unrouted at the
-/// gateway, so it cannot be reached from a browser without a server
-/// change this car is not allowed to make. The people roster covers
-/// HUMANS only: every row in `employees` is a person, and the machine
-/// actors that do most of the work are not employees.
-///
-/// (Those two paths are named without their `/api` prefix on purpose.
-/// `infra/lint/every-spa-api-path-is-routed` greps this file for API
-/// segments without stripping comments, so writing them in full would
-/// fail the gate on prose — see the report on this car.)
+/// implementation; the observability service serves `/api/agents`, but
+/// that prefix is not among the ones the gateway proxies. The
+/// `/api/agent-runs` surface on the jobs API — which DOES have a table,
+/// an `actor_id` and a `branch`, and is the richest "what is this actor
+/// building and what did it cost" read in the system — is likewise
+/// unrouted at the gateway, so it cannot be reached from a browser
+/// without a server change this car is not allowed to make. The people
+/// roster covers HUMANS only: every row in `employees` is a person, and
+/// the machine actors that do most of the work are not employees.
 ///
 /// So the crew is derived, which is the honest answer and is stated on
 /// the page: an actor exists here because it holds a step or signed a

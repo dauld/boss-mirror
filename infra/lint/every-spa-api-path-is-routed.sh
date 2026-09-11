@@ -24,6 +24,15 @@
 # Usage: infra/lint/every-spa-api-path-is-routed.sh [--self-test]
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/strip-comments.sh
+. "$here/lib/strip-comments.sh"
+export -f strip_comments
+# The product sources this lint reads, one path per line.
+sources() {
+    find "$1/apps/web/src" "$1/libs/web-kit/src" "$1/apps/simulator/src" \
+        \( -name '*.ts' -o -name '*.svelte' \) \
+        ! -name '*.test.ts' ! -name 'dev-server.ts' -type f 2>/dev/null | sort
+}
 
 # Segments the gateway answers, one per line, kebab-case, sorted.
 answered() {
@@ -36,12 +45,13 @@ answered() {
 }
 
 # Segments the SPA fetches, one per line, sorted.
+# A MENTION is not a USE: comments are stripped first (lib/strip-comments.sh),
+# so a docstring explaining why a path is unreachable is not a fetch site
+# (a1752a75).
 fetched() {
     local root="$1"
-    grep -rhoE "['\"\`]/api/[a-z_-]+" \
-        "$root/apps/web/src" "$root/libs/web-kit/src" "$root/apps/simulator/src" \
-        --include='*.ts' --include='*.svelte' \
-        --exclude='*.test.ts' --exclude='dev-server.ts' 2>/dev/null \
+    sources "$root" | xargs -d '\n' -r bash -c 'strip_comments "$@"' _ \
+        | grep -oE "['\"\`]/api/[a-z_-]+" \
         | sed -E "s|^['\"\`]/api/||" | tr '_' '-' | sort -u
 }
 
@@ -62,14 +72,31 @@ RS
     .route("/api/tenant/manifest", get(manifest))
 RS
     cat >"$fx/apps/web/src/it/Page.svelte" <<'SV'
+    <!-- a Svelte comment naming '/api/ghost-html' is a mention, not a use -->
     fetch('/api/jobs/health'); fetch(`/api/subject-kinds/${k}`); fetch("/api/policy/x");
     fetch('/api/auth/me'); fetch('/api/yard/status');
 SV
+    # A docstring that names unreachable paths — the a1752a75 car — plus a
+    # URL whose `//` is not a comment, plus the swallow hazard: prose that
+    # mentions `/api/*` must not open a block comment that eats the fetch
+    # after it. Only the real fetch of /api/yard may be reported.
+    cat >"$fx/apps/web/src/it/crew.ts" <<'TS'
+    /// The agent-runs surface at '/api/ghost-doc' is unrouted at the gateway,
+    /// so it cannot be reached from a browser. A glob like /api/* in prose
+    /// is not a comment opener either.
+    const docs = 'http://forge/api/ghost-url'; // trailing note names '/api/ghost-line'
+    /* and a block comment
+       naming "/api/ghost-block" */
+    fetch('/api/yard/status');
+TS
     printf "fetch('/api/things');\n" >"$fx/apps/web/src/paginated.test.ts"
     printf "['/api/snapshot', 'observability'],\n" >"$fx/apps/web/src/dev-server.ts"
     local got; got="$(unrouted "$fx" | tr '\n' ' ' | sed 's/ $//')"
     [[ "$got" == "yard" ]] || { echo "every-spa-api-path-is-routed: self-test FAILED — expected the planted 'yard' alone, got '${got}'" >&2; return 1; }
-    echo "every-spa-api-path-is-routed: self-test ok — planted /api/yard caught; jobs, subject-kinds (via subject_kinds), policy (via with_fallback), auth (gateway route) answered; a test's /api/things and the dev server's aliases ignored"
+    # The stripper must keep line numbers, or "fetched at:" names the wrong line.
+    local nl; nl="$(strip_comments "$fx/apps/web/src/it/crew.ts" | wc -l | tr -d ' ')"
+    [[ "$nl" == "$(wc -l <"$fx/apps/web/src/it/crew.ts" | tr -d ' ')" ]] || { echo "every-spa-api-path-is-routed: self-test FAILED — stripping comments changed the line count ($nl)" >&2; return 1; }
+    echo "every-spa-api-path-is-routed: self-test ok — planted /api/yard caught; jobs, subject-kinds (via subject_kinds), policy (via with_fallback), auth (gateway route) answered; a test's /api/things and the dev server's aliases ignored; four /api/ghost-* mentions in a docstring, a line comment, a block comment and an HTML comment not counted as fetches, a URL's // not read as a comment, and the line count preserved"
 }
 
 if [[ "${1:-}" == "--self-test" ]]; then self_test; exit $?; fi
@@ -83,9 +110,9 @@ if [[ -n "$missing" ]]; then
     while read -r seg; do
         [[ -z "$seg" ]] && continue
         echo "  /api/$seg — fetched at:" >&2
-        grep -rnE "['\"\`]/api/$seg\b" "$repo/apps/web/src" "$repo/libs/web-kit/src" "$repo/apps/simulator/src" \
-            --include='*.ts' --include='*.svelte' --exclude='*.test.ts' --exclude='dev-server.ts' 2>/dev/null \
-            | head -3 | sed "s|^$repo/|    |" >&2
+        while IFS= read -r f; do
+            strip_comments "$f" | grep -nE "['\"\`]/api/$seg\b" | sed "s|^|${f#"$repo"/}:|"
+        done < <(sources "$repo") | head -3 | sed 's|^|    |' >&2
     done <<<"$missing"
     echo "  Add it to the gateway's proxy table (crates/core/boss-gateway/src/proxy.rs) or route it there; a fetch the gateway cannot answer is an empty panel in production." >&2
     exit 1
