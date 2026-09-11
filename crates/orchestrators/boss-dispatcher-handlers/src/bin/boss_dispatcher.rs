@@ -10,6 +10,7 @@ use boss_dispatcher::config::DispatcherConfig;
 use boss_dispatcher::dispatcher::{DispatcherCtx, run_loop};
 use boss_dispatcher::http::{HttpState, router};
 use boss_dispatcher::liveness::DispatcherLiveness;
+use boss_dispatcher::rules::dead_letter::{DeadLetterSink, JobsApiDeadLetters};
 use boss_dispatcher::rules::handler::HandlerRegistry;
 use boss_dispatcher::rules::helpers_inventory::InventoryHelpers;
 use boss_dispatcher::rules::jobs_spawn::JobsSpawn;
@@ -519,6 +520,8 @@ async fn main() -> Result<()> {
             let calendar = Arc::new(ReqwestCalendarClient::new(cfg.calendar_api_url.clone()));
             let live_rules = live.clone();
             let pool_rules = pool.clone();
+            let dead_letters: Arc<dyn DeadLetterSink> =
+                JobsApiDeadLetters::new(cfg.jobs_api_url.clone());
             tokio::spawn(async move {
                 let mut registry = registry;
                 let mut fp = fp;
@@ -527,6 +530,14 @@ async fn main() -> Result<()> {
                         registry: registry.clone(),
                         handlers: handlers.clone(),
                         helpers: helpers.clone(),
+                        // A dead-letter lands on its packet (`a9c498eb`):
+                        // a step a machine owed and did not deliver is
+                        // annotated with the rule, handler, attempt count
+                        // and error, so it stops looking like a step whose
+                        // turn has not come — and so the record outlives
+                        // this pod's log. Best-effort; see
+                        // boss_dispatcher::rules::dead_letter.
+                        dead_letters: Some(dead_letters.clone()),
                     });
                     let ev = {
                         let live = live_rules.clone();

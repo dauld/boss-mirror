@@ -119,6 +119,97 @@ pub fn assert_absent_impl(value: &Value, field: &str, context: Option<String>) {
     }
 }
 
+/// Assert that a DERIVED collection still holds at least `floor` items,
+/// on the line above the per-item assertion that ranges over it.
+///
+/// ```ignore
+/// let stations = derived_stations(&seedable_platform_workflows(), &[], now());
+/// assert_roster_floor!(stations, 30, "the platform protocol bundle's constraint queues");
+/// for s in &stations { assert!(...); }
+/// ```
+///
+/// WHY THIS EXISTS. A per-item assertion over a derived set is **two
+/// claims** — *the set is the right set*, and *each member satisfies P* —
+/// and only the second is ever written. An empty set satisfies the second
+/// one **vacuously**: `for x in roster() { assert!(..) }` over `vec![]`
+/// passes, loudly green, having checked nothing. So a derivation that
+/// legitimately returns fewer items — a retirement, a migration, a move —
+/// silently weakens every assertion over it instead of reddening. This
+/// macro is the first claim, written down.
+///
+/// Not hypothetical: `boss_jobs::registry::platform_workflows()` went to
+/// `vec![]` on 2026-09-11 (train #311) when four protocols moved from code
+/// to registry data, and four tests that ranged over it stayed green
+/// checking nothing. The builder who emptied it found that by hand
+/// (backlog `024c0db2`). This codebase is full of derived rosters
+/// *because* CLAUDE.md §9a pushes lists into directories — the lint
+/// roster is a directory, the schema order is a directory, the dispatcher
+/// rules are a directory, the protocol bundle is a directory — and every
+/// one of them is iterated by tests.
+///
+/// A FLOOR, NEVER AN EXACT COUNT. An exact total is a second copy of the
+/// thing it counts (§9a) and has to be edited on every legitimate change,
+/// which is the cost the pin was supposed to avoid. Set the floor
+/// somewhere below today's real number, high enough that a roster which
+/// collapsed to a handful fails: the prior art is the rule-name lint's
+/// 60-of-60 non-vacuity guard and the gate's compile-input index floor of
+/// 20 against a real 46. State today's number in the message so the next
+/// reader knows the headroom.
+///
+/// AND IT WRITES ONE CLAIM, NOT BOTH. This deliberately does NOT take the
+/// predicate: the per-item loop's value here is its failure prose, which
+/// names the protocol, the station, the rule that broke — "a verdict must
+/// name what failed" (CLAUDE.md §Diagnosis). Folding the loop into a
+/// closure returning `bool` would trade that verdict for `false`. So the
+/// guard is one line above the loop, and its absence is what review looks
+/// for.
+///
+/// A floor of `0` is refused: it is the vacuity this exists to stop,
+/// spelled as a guard.
+#[macro_export]
+macro_rules! assert_roster_floor {
+    ($items:expr, $floor:expr $(,)?) => {
+        $crate::assertions::assert_roster_floor_impl($items.len(), $floor, None)
+    };
+    ($items:expr, $floor:expr, $($arg:tt)+) => {
+        $crate::assertions::assert_roster_floor_impl(
+            $items.len(),
+            $floor,
+            Some(format!($($arg)+)),
+        )
+    };
+}
+
+/// Behind [`assert_roster_floor!`]. `#[track_caller]` so the panic names
+/// the guarded test's own line, not this file's.
+#[track_caller]
+pub fn assert_roster_floor_impl(found: usize, floor: usize, context: Option<String>) {
+    let why = context
+        .map(|c| format!("\n  the roster: {c}"))
+        .unwrap_or_default();
+    assert!(
+        floor > 0,
+        "\n  a floor of 0 is not a floor — every universally quantified assertion is satisfied \
+         by the empty set, which is the whole defect this guard exists to stop. Pick a number \
+         below the derivation's real count and above a collapse.{why}\n"
+    );
+    if found < floor {
+        panic!(
+            "\n  DERIVED ROSTER BELOW ITS FLOOR: the derivation answered {found} item(s), and \
+             the per-item assertions below this line need at least {floor} to be saying \
+             anything.{why}\n\n  \
+             A per-item assertion over a derived set is TWO claims — that the set is the right \
+             set, and that each member satisfies P — and an empty or thinned set satisfies the \
+             second one VACUOUSLY, staying green while checking nothing. This line is the first \
+             claim.\n\n  \
+             If the derivation broke, fix the derivation. If it legitimately shrank — a \
+             retirement, a migration, a move — lower the floor IN THE SAME COMMIT that shrank \
+             it, and say why in the message. Never raise it to an exact total: that is a second \
+             copy of the thing it counts (CLAUDE.md §9a).\n"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -185,5 +276,87 @@ mod tests {
     #[should_panic(expected = "not a JSON object")]
     fn a_non_object_has_no_fields_to_null() {
         assert_explicit_null!(json!(null), "hold");
+    }
+
+    /// THE DEFECT, PINNED. This is the shape the macro exists to stop,
+    /// written out so the next reader can see that it PASSES: a
+    /// universally quantified assertion over the empty set is satisfied,
+    /// so a test body identical to a real one checks nothing and reports
+    /// green. `platform_workflows()` going to `vec![]` on 2026-09-11 is
+    /// the live instance (backlog `024c0db2`).
+    #[test]
+    fn a_per_item_assertion_over_an_empty_roster_passes_checking_nothing() {
+        let emptied_roster: Vec<&str> = Vec::new();
+        let mut checked = 0usize;
+        for item in &emptied_roster {
+            checked += 1;
+            assert!(item.is_empty(), "a claim no member is ever asked to meet");
+        }
+        assert_eq!(
+            checked, 0,
+            "the loop body never ran, and the test still passed — which is why the guard has to \
+             be a separate line"
+        );
+    }
+
+    /// And the guard is what turns that green into a red.
+    #[test]
+    #[should_panic(expected = "DERIVED ROSTER BELOW ITS FLOOR")]
+    fn the_floor_reds_the_same_emptied_roster() {
+        let emptied_roster: Vec<&str> = Vec::new();
+        assert_roster_floor!(emptied_roster, 4, "a roster that used to hold four");
+    }
+
+    #[test]
+    fn a_roster_at_or_above_its_floor_is_accepted() {
+        let roster = ["a", "b", "c", "d"];
+        assert_roster_floor!(roster, 4);
+        assert_roster_floor!(roster, 2, "and takes prose too, like its siblings");
+    }
+
+    /// A THINNED roster, not just an emptied one. The defect class is not
+    /// "the list went to zero" — it is "the list got smaller and nobody
+    /// was told", which is what a floor above a collapse catches.
+    #[test]
+    #[should_panic(expected = "answered 1 item(s)")]
+    fn a_roster_thinned_below_its_floor_also_reds() {
+        let roster = ["the last one standing"];
+        assert_roster_floor!(roster, 6, "was seven on 2026-09-11");
+    }
+
+    /// A floor of zero is the vacuity spelled as a guard, so the helper
+    /// refuses it rather than accepting a line that cannot fail — the
+    /// same reason `assert_explicit_null!` exists above.
+    #[test]
+    #[should_panic(expected = "a floor of 0 is not a floor")]
+    fn a_floor_of_zero_is_refused() {
+        let roster: Vec<&str> = Vec::new();
+        assert_roster_floor!(roster, 0);
+    }
+
+    /// The message has to carry both numbers: a verdict must name what
+    /// failed (CLAUDE.md §Diagnosis), and here that means what the
+    /// derivation answered as well as what was expected.
+    #[test]
+    fn the_verdict_names_the_count_the_floor_and_the_roster() {
+        let err = std::panic::catch_unwind(|| {
+            let roster = ["one", "two"];
+            super::assert_roster_floor_impl(
+                roster.len(),
+                9,
+                Some("the platform protocol bundle".to_string()),
+            );
+        })
+        .expect_err("below the floor");
+        let msg = err
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .unwrap_or("");
+        for needle in ["2 item(s)", "at least 9", "the platform protocol bundle"] {
+            assert!(
+                msg.contains(needle),
+                "the verdict must say `{needle}`: {msg}"
+            );
+        }
     }
 }

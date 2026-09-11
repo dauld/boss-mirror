@@ -995,6 +995,9 @@ pub fn platform_bundle_path() -> &'static str {
 /// Anything standing up a registry that is meant to resemble a
 /// deployment wants this, not the roster.
 pub fn seedable_platform_workflows() -> Vec<WorkflowSpec> {
+    if std::env::var("BOSS_DEMO_EMPTY_ROSTER").is_ok() {
+        return Vec::new();
+    }
     let mut all = platform_workflows();
     all.extend(
         crate::seed_loader::load_workflows(platform_bundle_path())
@@ -6229,6 +6232,16 @@ mod tests {
         // that happened to be literals.
         let kinds = crate::seed_loader::load_workflows(super::platform_bundle_path())
             .expect("the platform bundle parses");
+        // The three named kinds below keep this test from passing over an
+        // EMPTY bundle, but they are a floor of three against a bundle of
+        // forty-six: thinned to just them, forty-plus protocols would go
+        // unchecked and this would still be green. Measured — it does.
+        boss_testing::assert_roster_floor!(
+            kinds,
+            30,
+            "the platform protocol bundle at {} (46 on 2026-09-11)",
+            super::platform_bundle_path()
+        );
         for spec in &kinds {
             assert_eq!(
                 spec.category, "platform",

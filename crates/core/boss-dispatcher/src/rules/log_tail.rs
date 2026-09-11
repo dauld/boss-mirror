@@ -42,9 +42,15 @@ use tracing::{error, warn};
 
 use boss_nats::durable::Settle;
 
-/// Retry budget per row, matching the JetStream consumers'
-/// `MAX_DELIVER`: the original presentation plus seven retries.
-pub const MAX_ATTEMPTS: u32 = 8;
+/// Retry budget per row: the original presentation plus seven retries.
+///
+/// DERIVED, not copied, from the JetStream consumers' budget. The two
+/// transports must agree because the runner predicts the dead-letter from
+/// the attempt count to annotate the packet (`a9c498eb`,
+/// [`crate::rules::dead_letter`]) — a 8-vs-9 drift between these two
+/// would annotate one delivery early on one path, or not at all on the
+/// other. One definition cannot drift from itself (CLAUDE.md §9a).
+pub const MAX_ATTEMPTS: u32 = boss_nats::durable::MAX_DELIVER as u32;
 
 /// One row the tail is currently blocked on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,9 +138,16 @@ impl LogTail {
     /// `blocked` (re-presented next call). The caller owns pacing —
     /// this function never sleeps, so tests drive the whole retry
     /// ladder without waiting on the schedule.
+    ///
+    /// `handle` receives `(topic, event_id, payload, attempt)`. The
+    /// attempt is this presentation's 1-based count, passed IN rather
+    /// than kept to this struct, because the handler has to know a
+    /// failure now is the last one the budget allows — that is the only
+    /// moment it still holds the rule, the handler, the count and the
+    /// error together (`a9c498eb`).
     pub async fn drain_once<F, Fut>(&mut self, batch: i64, handle: F) -> Result<DrainReport>
     where
-        F: Fn(String, String, Value) -> Fut,
+        F: Fn(String, String, Value, u32) -> Fut,
         Fut: Future<Output = Settle>,
     {
         let mut report = DrainReport::default();
@@ -158,9 +171,16 @@ impl LogTail {
                 .get("_simulated")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            // This presentation's attempt count, computed BEFORE the
+            // handler runs because the handler needs it (see the doc
+            // above). The Retry arm below uses the same value.
+            let attempts = match &self.blocked {
+                Some(b) if b.audit_id == id => b.attempts + 1,
+                _ => 1,
+            };
             let outcome = boss_core::sim_origin::with_sim_chain(
                 simulated,
-                handle(kind.clone(), event_id, payload),
+                handle(kind.clone(), event_id, payload, attempts),
             )
             .await;
 
@@ -178,10 +198,6 @@ impl LogTail {
                     report.processed += 1;
                 }
                 Settle::Retry(reason) => {
-                    let attempts = match &self.blocked {
-                        Some(b) if b.audit_id == id => b.attempts + 1,
-                        _ => 1,
-                    };
                     if attempts >= MAX_ATTEMPTS {
                         // The exact prefix the release gates grep for.
                         error!(

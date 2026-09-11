@@ -732,6 +732,9 @@ mod tests {
     fn all_kinds_are_unique() {
         let reg = StepRegistry::v1();
         let kinds: Vec<&str> = reg.all().iter().map(|t| t.kind).collect();
+        // Uniqueness is satisfied by the empty set, so the alphabet has
+        // to state a floor or this test is about nothing.
+        boss_testing::assert_roster_floor!(kinds, 30, "the StepType alphabet (48 on 2026-09-11)");
         let mut deduped = kinds.clone();
         deduped.sort();
         deduped.dedup();

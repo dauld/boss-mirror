@@ -523,6 +523,11 @@ mod tests {
                 .filter_map(|r| r.get("code").and_then(|v| v.as_str()))
                 .map(str::to_string)
                 .collect();
+        boss_testing::assert_roster_floor!(
+            models,
+            5,
+            "data/catalog.json's models (8 on 2026-09-11)"
+        );
         for model in &models {
             let category = model
                 .get("category")

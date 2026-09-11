@@ -12315,6 +12315,16 @@ mod tests {
             .iter()
             .map(|p| p.file_name().unwrap_or_default().to_string_lossy().into())
             .collect();
+        // Same floor the sibling test above uses, on purpose: one
+        // opinion per derivation. A negative claim — "the victim is not
+        // on the roster" — is the vacuity-prone direction, true of an
+        // empty roster, and `cheap_lints` returning nothing is exactly
+        // the failure this would then hide.
+        boss_testing::assert_roster_floor!(
+            names,
+            15,
+            "infra/lint/ minus the policy's exclusions (69 scripts less 4 today)"
+        );
         assert!(
             !names.iter().any(|n| n == victim),
             "the roster is the directory MINUS the policy's exclusions: {names:?}"

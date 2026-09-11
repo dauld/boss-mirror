@@ -15,7 +15,9 @@
 /// of `crate::rules::expr::Value` etc. keep working.
 pub use boss_expr as expr;
 
+pub mod actor;
 pub mod authoring;
+pub mod dead_letter;
 pub mod handler;
 pub mod helpers_inventory;
 pub mod jobs_spawn;

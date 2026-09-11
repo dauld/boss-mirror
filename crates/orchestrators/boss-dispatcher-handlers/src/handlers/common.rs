@@ -115,10 +115,6 @@ pub(crate) fn overhead_source_id(step_id: &str, credit_account: &str) -> String 
     format!("overhead-absorbed@{step_id}:{credit_account}")
 }
 
-/// Build the `x-boss-user` header value for dispatcher-side
-/// API calls. Per the rule-as-actor model in the dispatcher design
-/// doc: every dispatcher-fired event names the rule as actor, with
-/// `executed_by = automation:dispatcher` distinct from `actor`.
 /// The `x-sim-origin` value for a downstream call.
 ///
 /// Reads the task-local the dispatch loop set from the TRIGGERING
@@ -172,17 +168,13 @@ pub fn api_client() -> reqwest::Client {
         .expect("reqwest client always builds")
 }
 
-pub fn dispatcher_actor_header(rule_name: &str) -> String {
-    serde_json::json!({
-        "id": format!("rule:{}", rule_name),
-        "role": "platform-admin",
-        "access_tier": "operator",
-        "territory_account_ids": [],
-        "direct_report_ids": [],
-        "department": "platform",
-    })
-    .to_string()
-}
+/// Re-exported, not defined here: the rules runner in core writes as
+/// this same actor when it lands a dead-letter on a packet
+/// (`boss_dispatcher::rules::dead_letter`), and an identity that exists
+/// twice drifts — a policy refusal that reads as missing data. One
+/// definition, in `boss_dispatcher::rules::actor` (CLAUDE.md §9a); every
+/// call site here is unchanged.
+pub use boss_dispatcher::rules::actor::dispatcher_actor_header;
 
 /// POST a JSON body to a downstream service, stamping the dispatcher's
 /// rule-as-actor `x-boss-user` header, and map a non-2xx response into a

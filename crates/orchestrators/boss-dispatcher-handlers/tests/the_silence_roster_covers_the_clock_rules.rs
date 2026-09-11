@@ -164,6 +164,45 @@ fn the_measured_clock_cadences_are_on_the_roster() {
     }
 }
 
+/// CONSERVATION, which is stronger than any floor — the shape worth
+/// reaching for whenever a derivation PARTITIONS its input.
+///
+/// `clock_cadences` splits the scheduled rules into exactly two buckets:
+/// a measurable cadence, or a named `NotACadence` reason. So their sum
+/// must equal the number of scheduled rules in the directory, and that
+/// equation survives every legitimate change: teaching the parser a new
+/// guard shape moves a rule ACROSS the line and keeps the total, where a
+/// floor would have to be re-judged. What it refuses is the one thing a
+/// floor cannot see — a rule that lands in NEITHER bucket, which is how
+/// eight cadences sat outside the roster for nineteen days (cf0f5e2d).
+///
+/// Conservation is the strongest of the three non-vacuity shapes and the
+/// narrowest: it applies only where the output partitions the input.
+/// Where it does, prefer it; `assert_roster_floor!` is for the rest.
+#[test]
+fn every_scheduled_rule_lands_in_exactly_one_bucket() {
+    let raw = parse_raw_path(RULES_DIR).expect("parse the shipped rule registry directory");
+    let scheduled = raw.rules.iter().filter(|r| r.schedule.is_some()).count();
+    let (cadences, skipped) = clock_cadences(&raw.rules);
+    assert_eq!(
+        cadences.len() + skipped.len(),
+        scheduled,
+        "{scheduled} rules in {RULES_DIR} carry a schedule, but the derivation accounted for \
+         {} of them ({} cadences + {} named non-cadences). A scheduled rule in neither bucket \
+         is a cadence nobody watches and nobody can name — and unlike a thinned roster, no \
+         floor would notice, because the count it left behind is still plausible.",
+        cadences.len() + skipped.len(),
+        cadences.len(),
+        skipped.len()
+    );
+    // And the partition is not trivially empty on both sides.
+    boss_testing::assert_roster_floor!(
+        raw.rules,
+        40,
+        "the authored dispatcher rule registry at {RULES_DIR} (61 files on 2026-09-11)"
+    );
+}
+
 /// FAIL-CLOSED on the guard. The sweep explains a silence by naming the
 /// open packet its guard asks about; a guard shape the parser cannot read
 /// is a suppression nobody can name, so it must be taught rather than
@@ -171,6 +210,11 @@ fn the_measured_clock_cadences_are_on_the_roster() {
 #[test]
 fn every_derived_cadence_has_a_readable_guard_or_none_at_all() {
     let (cadences, _) = shipped();
+    boss_testing::assert_roster_floor!(
+        cadences,
+        6,
+        "the clock cadences derived from {RULES_DIR} (7 on 2026-09-11)"
+    );
     for c in &cadences {
         if let Some(Guard::Unreadable(src)) = &c.guard {
             panic!(

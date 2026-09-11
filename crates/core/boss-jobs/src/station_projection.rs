@@ -168,6 +168,16 @@ pub fn derived_stations(
 
 #[cfg(test)]
 mod tests {
+
+    /// One floor for one derivation, declared once rather than four times
+    /// — the per-test copies were the same fact living four places, which
+    /// is what §9a is about, and which this car is about in the first
+    /// place. Six against a real ten on 2026-09-11 (off 46 protocols):
+    /// low enough that retiring a protocol or two is not an edit here,
+    /// high enough that a projection which collapsed would red.
+    const QUEUE_FLOOR: usize = 6;
+    const QUEUES: &str = "the constraint queues the platform protocol bundle declares \
+                          (10 on 2026-09-11, off 46 protocols)";
     use super::*;
     use crate::registry::seedable_platform_workflows;
 
@@ -282,7 +292,9 @@ mod tests {
     /// decoration. `capability` is what M and the claim CAS read.
     #[test]
     fn the_constraint_reaches_the_capability_gate() {
-        for s in derived_stations(&seedable_platform_workflows(), &[], now()) {
+        let derived = derived_stations(&seedable_platform_workflows(), &[], now());
+        boss_testing::assert_roster_floor!(derived, QUEUE_FLOOR, "{QUEUES}");
+        for s in derived {
             let cap = s.capability.as_ref().unwrap_or_else(|| {
                 panic!(
                     "{} has no capability — its constraint is decorative",
@@ -313,7 +325,9 @@ mod tests {
     /// make a load number useless to M.
     #[test]
     fn only_actionable_steps_are_queued() {
-        for s in derived_stations(&seedable_platform_workflows(), &[], now()) {
+        let derived = derived_stations(&seedable_platform_workflows(), &[], now());
+        boss_testing::assert_roster_floor!(derived, QUEUE_FLOOR, "{QUEUES}");
+        for s in derived {
             let step = s
                 .predicate
                 .step
@@ -387,7 +401,9 @@ mod tests {
     /// unit tests would stay green.
     #[test]
     fn a_derived_name_survives_a_url_path_segment() {
-        for s in derived_stations(&seedable_platform_workflows(), &[], now()) {
+        let derived = derived_stations(&seedable_platform_workflows(), &[], now());
+        boss_testing::assert_roster_floor!(derived, QUEUE_FLOOR, "{QUEUES}");
+        for s in derived {
             assert!(
                 !s.name.contains('/'),
                 "`{}` would not match /api/stations/{{name}}/queue",
@@ -414,7 +430,9 @@ mod tests {
     /// across the network, not by reading the code.
     #[test]
     fn a_derived_queue_matches_the_role_not_just_the_kind() {
-        for s in derived_stations(&seedable_platform_workflows(), &[], now()) {
+        let derived = derived_stations(&seedable_platform_workflows(), &[], now());
+        boss_testing::assert_roster_floor!(derived, QUEUE_FLOOR, "{QUEUES}");
+        for s in derived {
             let step = s
                 .predicate
                 .step

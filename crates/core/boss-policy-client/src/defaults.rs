@@ -229,6 +229,11 @@ mod tests {
     #[test]
     fn every_default_rule_has_unique_id() {
         let rules = default_rules();
+        boss_testing::assert_roster_floor!(
+            rules,
+            100,
+            "core's default policy rules (175 on 2026-09-11)"
+        );
         let mut ids = std::collections::HashSet::new();
         for r in &rules {
             assert!(
@@ -259,7 +264,19 @@ mod tests {
     #[test]
     fn audit_readonly_only_has_read_grants() {
         let rules = default_rules();
-        for r in rules.iter().filter(|r| r.role == "audit-readonly") {
+        // The FILTERED set is what this ranges over, so that is what needs
+        // the floor: a role whose grants all vanished would satisfy
+        // "never has a non-Read action" perfectly.
+        let granted: Vec<_> = rules
+            .iter()
+            .filter(|r| r.role == "audit-readonly")
+            .collect();
+        boss_testing::assert_roster_floor!(
+            granted,
+            10,
+            "audit-readonly's grants (16 on 2026-09-11)"
+        );
+        for r in granted {
             assert_eq!(
                 r.action,
                 Action::Read,
@@ -275,6 +292,13 @@ mod tests {
         // The 2026-05-24 tier-purity pass moved the C-suite and the
         // department/IC role grants out of core. Pin that.
         let rules = default_rules();
+        // "No tenant role appears" is true of no rules at all, which is
+        // the one way this could go quiet.
+        boss_testing::assert_roster_floor!(
+            rules,
+            100,
+            "core's default policy rules (175 on 2026-09-11)"
+        );
         let banned = [
             "ceo",
             "coo",
@@ -353,7 +377,9 @@ mod tests {
     #[test]
     fn break_glass_never_reaches_data_surfaces_or_delete() {
         let rules = default_rules();
-        for r in rules.iter().filter(|r| r.role == "break-glass") {
+        let granted: Vec<_> = rules.iter().filter(|r| r.role == "break-glass").collect();
+        boss_testing::assert_roster_floor!(granted, 8, "break-glass's grants (12 on 2026-09-11)");
+        for r in granted {
             for banned in ["ledger", "account", "employee", "invoice", "subject"] {
                 assert_ne!(
                     r.resource.as_str(),

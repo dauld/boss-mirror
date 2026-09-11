@@ -19,5 +19,10 @@ boss-policy = { path = "../../core/boss-policy", default-features = false }
 boss-ports = { path = "../../core/boss-ports" }
 boss-sim = { path = "../../orchestrators/boss-sim" }
 
+[dev-dependencies]
+# For `assert_roster_floor!` — the catalog-category pin ranges over
+# data/catalog.json, which an empty file would satisfy vacuously.
+boss-testing = { path = "../../core/boss-testing" }
+
 [lints]
 workspace = true

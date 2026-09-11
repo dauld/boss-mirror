@@ -847,6 +847,14 @@ mod walker_tests {
             .find(|s| s.kind == "workflow-design")
             .expect("workflow-design present in the bundle");
         let dummy_spec = json!({"kind": "closure-test-target"});
+        // Both 2026-09-02 boot-bricks were ONE step's metadata. A
+        // `workflow-design` that lost its steps would pass this while
+        // covering none of them — measured, it does.
+        boss_testing::assert_roster_floor!(
+            design.steps,
+            4,
+            "`workflow-design`'s steps (5 on 2026-09-11)"
+        );
         for step in &design.steps {
             let step_value = json!({
                 "metadata": step.metadata_defaults,
