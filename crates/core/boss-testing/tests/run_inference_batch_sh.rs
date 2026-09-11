@@ -23,14 +23,7 @@
 //! ids it was asked to infer and fails for a chosen set. The same
 //! shape as `gate_sh.rs` overriding `df` via `BOSS_GATE_DF_CMD`.
 
-use std::path::PathBuf;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
+use boss_testing::repo_root;
 
 const SCRIPT: &str = "infra/ml/run-inference-batch.sh";
 

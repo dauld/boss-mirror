@@ -40,6 +40,7 @@
 //! derivation instead of itself. A test that only checked the answers
 //! would pass just as well against two copies that happen to agree today.
 
+use boss_testing::repo_root;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -49,13 +50,6 @@ use std::process::Command;
 /// code other than 0 and 3 to CANNOT ANSWER already, so this is a
 /// sharpening of the contract, not a break in it.
 const CANNOT_ANSWER: i32 = 4;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
 
 /// A scratch directory THIS uid and THIS process own outright. `/tmp` is
 /// sticky, so a fixed name left behind by another uid is a directory this

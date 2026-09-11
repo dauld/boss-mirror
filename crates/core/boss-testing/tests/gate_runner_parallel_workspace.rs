@@ -27,14 +27,7 @@
 //! - unlocked seed read/refresh: a torn seed — half-copied rlibs under
 //!   fresh fingerprints, reds that are nobody's code
 
-use std::path::PathBuf;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
+use boss_testing::repo_root;
 
 fn read(rel: &str) -> String {
     let path = repo_root().join(rel);

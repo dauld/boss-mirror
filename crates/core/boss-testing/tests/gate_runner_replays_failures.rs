@@ -37,17 +37,10 @@
 //! Skips rather than fails when `python3` is absent, so a machine
 //! without it does not manufacture a red.
 
+use boss_testing::repo_root;
 use serde_json::Value;
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::Command;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
 
 /// The failure-detail extractor, lifted out of `run.sh` verbatim.
 ///

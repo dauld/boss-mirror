@@ -47,14 +47,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use boss_testing::repo_root;
 use boss_testing::scratch::{scratch_dir, write_exec, write_file};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
 
 fn read(rel: &str) -> String {
     let path = repo_root().join(rel);

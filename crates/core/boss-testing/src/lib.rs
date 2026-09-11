@@ -21,6 +21,7 @@ pub mod request;
 pub mod scratch;
 #[cfg(feature = "postgres")]
 pub mod test_db;
+pub mod tree;
 
 pub use assertions::*;
 pub use recording_bus::RecordingEventBus;
@@ -28,3 +29,4 @@ pub use request::{TestRequest, TestResponse};
 pub use scratch::{create_dir, scratch_dir, scratch_path, write_exec, write_file};
 #[cfg(feature = "postgres")]
 pub use test_db::TestDb;
+pub use tree::{repo_root, tree_match};

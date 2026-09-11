@@ -25,19 +25,13 @@
 //! found the derivation was RIGHT to match only `.yaml`, because that is
 //! exactly what the converge applies; the defect is on the converge side.
 
+use boss_testing::repo_root;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const LINT_REL: &str = "infra/lint/a-manifest-the-converge-ignores-is-refused.sh";
 const LIB_REL: &str = "infra/forge/cluster-deploy-lib.sh";
 const MANIFESTS_REL: &str = "infra/cluster/manifests";
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
 
 /// A scratch directory THIS uid and THIS process own outright — pid and
 /// uid in the name. `/tmp` is sticky, so a fixed fixture path left by

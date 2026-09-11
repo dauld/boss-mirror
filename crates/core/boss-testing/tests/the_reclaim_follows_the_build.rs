@@ -40,15 +40,9 @@
 //!    train would cause the exact strike it exists to prevent, and the
 //!    hourly timer remains the independent floor.
 
+use boss_testing::repo_root;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
 
 fn read(rel: &str) -> String {
     let path = repo_root().join(rel);

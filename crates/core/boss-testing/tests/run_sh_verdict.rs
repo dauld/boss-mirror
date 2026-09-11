@@ -21,14 +21,7 @@
 //! failure branch must distinguish an open packet from a terminal one,
 //! and must not promise an alarm in the case where none can fire.
 
-use std::path::PathBuf;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
+use boss_testing::repo_root;
 
 fn run_sh() -> String {
     let path = repo_root().join("infra/gate-runner/run.sh");

@@ -15,15 +15,9 @@
 //! read-only, anonymous (the repo is public), so measuring needs no
 //! credential anywhere.
 
+use boss_testing::repo_root;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
 
 fn script() -> PathBuf {
     repo_root().join("infra/prep-github-publish.sh")

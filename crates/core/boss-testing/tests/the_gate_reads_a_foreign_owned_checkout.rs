@@ -42,15 +42,9 @@
 //! the property that makes them trustworthy on the runner: they do not
 //! pass merely because the account happened to own the tree.
 
-use std::path::{Path, PathBuf};
+use boss_testing::repo_root;
+use std::path::Path;
 use std::process::{Command, Output};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
 
 /// Run a command, returning its output with stdout and stderr joined —
 /// the refusal these tests look for goes to stderr, and a verdict that

@@ -47,8 +47,9 @@
 //! shims record their argv, so this test reads the exact call the
 //! manifest makes.
 
+use boss_testing::repo_root;
 use boss_testing::scratch;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 const MANIFEST: &str = "infra/cluster/manifests/boss-backup.yaml";
@@ -63,13 +64,6 @@ const INIT_ORDER: &[&str] = &["open-packet", "dump", "offsite-gcs"];
 const MAIN_ORDER: &[&str] = &["close-packet"];
 
 const KIND: &str = "maintenance-backup";
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
 
 fn manifest() -> String {
     let path = repo_root().join(MANIFEST);
