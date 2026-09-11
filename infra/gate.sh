@@ -621,8 +621,15 @@ scope_self_test() {
     # Everything outside those two trees implies nothing to scope —
     # the lints already run repo-wide.
     # gate.sh and ci.yml are READ by boss-testing's gate_sh.rs, so a
-    # change to either must compile and run that crate.
-    _case "the gate's own files imply boss-testing" "boss-cli boss-testing" \
+    # change to either must compile and run that crate. Since
+    # docs/design/a-probe-shape-follows-the-car.md, gate.sh is ALSO read
+    # by boss-jobs/tests/a_probe_shape_follows_the_car.rs (the receipt
+    # shape is one of the four facts it pins), and the file-input index
+    # above derives that on its own — this line is the pinned copy of a
+    # derived fact, so it moves whenever a new crate starts reading the
+    # gate's files, and a red here after adding such a reader is the
+    # index being right.
+    _case "the gate's own files imply boss-testing" "boss-cli boss-jobs boss-testing" \
         "infra/gate.sh" ".forgejo/workflows/ci.yml" "infra/lint/no-secrets.sh"
     _case "a dispatcher rule file implies boss-dispatcher" "boss-brewery-engine boss-dispatcher" \
         "infra/dispatcher/rules/converge-on-merge.toml"

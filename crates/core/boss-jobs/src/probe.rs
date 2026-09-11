@@ -35,6 +35,11 @@
 //! The predicates below are shared; the wording of a refusal or a
 //! warning belongs to the door, because what to do instead differs by
 //! door.
+//!
+//! WHICH SHAPE OF PROBE A GIVEN CLAIM ADMITS — a different question from
+//! any of the three above, and the one that actually cost a session:
+//! docs/design/a-probe-shape-follows-the-car.md, keyed to what the car
+//! changed.
 
 use serde_json::Value;
 

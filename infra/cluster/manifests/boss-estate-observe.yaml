@@ -88,6 +88,39 @@ subjects:
     name: estate-observer
     namespace: boss
 ---
+# THE ONE OTHER THING THE OBSERVER MAY READ: gate runner Jobs, in the
+# gate namespace only. A runner that dies with its node (cp-2 and w-1
+# together, 2026-09-11 18:58Z, incident a398c4d3) never reports, and the
+# conductor that reaps dead runs has no Kubernetes access by design —
+# it reaps by CLOCK, three hours after opened_at. Kubernetes states the
+# death the second it happens (`status.failed`), and this observer is
+# the one actor with both `kubectl` and a signed write to the system of
+# record, so it carries that one fact across. Namespaced, read-only,
+# jobs only: it can see that a runner died, not touch it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: estate-observer-gate-jobs
+  namespace: boss-dev
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: estate-observer-gate-jobs
+  namespace: boss-dev
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: estate-observer-gate-jobs
+subjects:
+  - kind: ServiceAccount
+    name: estate-observer
+    namespace: boss
+---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -300,6 +333,74 @@ spec:
                   body=$(printf '%s\n' "$resp" | sed '$d')
                   echo "jobs api: $code $body"
                   test "$code" = "202"
+                  # A DEAD RUNNER IS SETTLED BY WHOEVER CAN SEE IT DIE.
+                  # A gate runner that dies with its node never reports
+                  # its verdict (cp-2 and w-1 together, 2026-09-11 18:58Z,
+                  # incident a398c4d3): Kubernetes marks the Job Failed
+                  # that second, but the only reader of a gate Job was
+                  # the Job, and the conductor that reaps dead runs has no
+                  # Kubernetes access by design, so it reaps by CLOCK —
+                  # three hours after opened_at — while the yard draws
+                  # the corpse as a healthy run and a re-gate shows two
+                  # rows for one branch. This observer has kubectl AND a
+                  # signed write, so it carries the one fact across: for
+                  # every runner Job with status.failed > 0 whose packet
+                  # is still open with no verdict, record `lost` — the
+                  # verdict the gate-run protocol already has for "the
+                  # environment died" — naming the Job and its Failed
+                  # condition, because a verdict must name what failed.
+                  # A Job that failed AFTER reporting (a red gate's runner
+                  # exits non-zero) already carries its verdict and is
+                  # left alone: the report is the truth, the exit code is
+                  # not a second verdict. Namespaced to the gate namespace
+                  # and scoped to app=gate-runner, so no other Job's death
+                  # can ever read as a lost gate.
+                  #
+                  # BEST-EFFORT, after the observation has landed: the
+                  # node observation is this pod's first duty, and a
+                  # refused or failed read here costs one spoken line,
+                  # never the run — the same contract as a lost kubelet
+                  # read above.
+                  GATE_NS="${BOSS_GATE_NAMESPACE:-boss-dev}"
+                  if kubectl get jobs -n "$GATE_NS" -l app=gate-runner -o json >"$WORK/gate-jobs.json" 2>"$WORK/gate-jobs.err"; then
+                    jq -r '(.items // [])[]
+                      | select((.status.failed // 0) > 0)
+                      | ((.status.conditions // []) | map(select(.type == "Failed")) | .[0] // {}) as $c
+                      | [ .metadata.name,
+                          (.metadata.labels["boss.dev/packet"] // ""),
+                          ($c.reason // "unknown reason"),
+                          ($c.lastTransitionTime // "unknown time"),
+                          ($c.message // "") ]
+                      | @tsv' "$WORK/gate-jobs.json" >"$WORK/dead-gates.tsv"
+                    while IFS="$(printf '\t')" read -r job packet reason at message; do
+                      [ -n "$packet" ] || continue
+                      if ! api_curl -sf -H "x-boss-user: {\"id\":\"automation:estate-observer\",\"role\":\"platform-admin\",\"access_tier\":\"operator\"}" \
+                          "$JOBS_API/api/jobs/$packet" >"$WORK/packet.json" 2>/dev/null; then
+                        echo "dead runner $job: packet $packet could not be read — left for the clock reaper"
+                        continue
+                      fi
+                      step=$(jq -r 'select(.status == "open")
+                                    | (.steps // [])[]
+                                    | select(.kind == "gate-verdict" and .status != "completed")
+                                    | .id' "$WORK/packet.json" | head -n 1)
+                      [ -n "$step" ] || continue
+                      jq -n --arg job "$job" --arg reason "$reason" --arg at "$at" --arg message "$message" '{
+                        status: "completed",
+                        metadata: {
+                          verdict: "lost",
+                          receipt: ("NO VERDICT WAS PRODUCED. Runner Job " + $job + " is Failed in Kubernetes (" + $reason + " at " + $at + (if $message == "" then "" else ": " + $message end) + "), so the checks never finished and this run says nothing about the branch. Settled as LOST by the cluster observer from the Job status; an infrastructure death is not a consist failure. Re-gate for a real verdict.")
+                        }
+                      }' >"$WORK/settle.json"
+                      scode=$(api_curl -s -o /dev/null -w '%{http_code}' -X PUT \
+                        -H "content-type: application/json" \
+                        -H "x-boss-user: {\"id\":\"automation:estate-observer\",\"role\":\"platform-admin\",\"access_tier\":\"operator\"}" \
+                        --data-binary @"$WORK/settle.json" \
+                        "$JOBS_API/api/jobs/$packet/steps/$step") || scode="curl $?"
+                      echo "dead runner $job ($reason at $at): packet $packet settled lost -> $scode"
+                    done <"$WORK/dead-gates.tsv"
+                  else
+                    echo "gate jobs unread — no dead runner can be settled this pass: $(cat "$WORK/gate-jobs.err")"
+                  fi
               env:
                 - name: JOBS_API
                   # boss-jobs-internal is the in-cluster door; ns boss has
