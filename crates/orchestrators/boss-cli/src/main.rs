@@ -12,6 +12,7 @@ mod deploy;
 mod design;
 mod dock_preview;
 mod doctor;
+mod envelope;
 mod gate;
 mod git_auth;
 mod host_readiness;
@@ -899,12 +900,25 @@ enum WorkflowAction {
 
 #[derive(Subcommand)]
 enum JobAction {
-    /// One packet, rendered for a person: envelope, steps with who
-    /// holds them, metadata in full.
+    /// One packet in a stable shape: kind and protocol version, every
+    /// step by slug/kind/status/holder/authority with the ready one
+    /// marked, the gate receipt if it carries one, and what metadata
+    /// keys exist. An ambiguous reference LISTS the matches.
     Get {
         /// Full uuid, 8+ characters of the id, or the car's branch.
         job: String,
         /// Print the raw API body instead.
+        #[arg(long)]
+        json: bool,
+    },
+    /// What is queued at a station: the station's discipline and WIP
+    /// limit, its real depth next to this page's size, then one line
+    /// per packet. (`boss queue` is the feedback triage board, a
+    /// different thing.)
+    Station {
+        /// Station name, e.g. `loading-dock`, `q.platform-admin.task`.
+        station: String,
+        /// Print the normalized rows as JSON for a machine reader.
         #[arg(long)]
         json: bool,
     },
@@ -1160,6 +1174,7 @@ async fn main() -> Result<()> {
         },
         Commands::Job { action } => match action {
             JobAction::Get { job, json } => job::get(&job, json).await,
+            JobAction::Station { station, json } => job::station(&station, json).await,
             JobAction::List {
                 kind,
                 status,
@@ -1577,6 +1592,41 @@ mod tests {
                 "subcommand `{expected}` missing from the CLI; present: {names:?}"
             );
         }
+    }
+
+    /// The two queue-shaped surfaces are different things, and stay
+    /// different. `boss queue` is the FEEDBACK TRIAGE BOARD (columns:
+    /// waiting / with-agent / routed / done); `boss job station <name>`
+    /// is a station's packet queue. Backlog d44f6152 proposed the
+    /// station reader as `boss queue <station>`, which would have
+    /// silently changed what the existing verb answers — a reader asking
+    /// one and getting the other is the same class of confident wrong
+    /// answer the verb exists to end. Pinned so neither absorbs the
+    /// other, and so the station reader cannot be orphaned out of
+    /// `JobAction` by a conflict resolution (84f9fbc0).
+    #[test]
+    fn the_station_reader_lives_under_job_and_the_feedback_board_keeps_queue() {
+        let cmd = Cli::command();
+        let job = cmd
+            .get_subcommands()
+            .find(|c| c.get_name() == "job")
+            .expect("no `job` subcommand");
+        let under_job: Vec<&str> = job.get_subcommands().map(|c| c.get_name()).collect();
+        for expected in ["get", "station", "list", "file", "patch"] {
+            assert!(
+                under_job.contains(&expected),
+                "`boss job {expected}` is gone; present: {under_job:?}"
+            );
+        }
+        // `station` is NOT a top-level verb: a new packet-read verb
+        // belongs inside this grouping, which touches no contended line.
+        let top: Vec<&str> = cmd.get_subcommands().map(|c| c.get_name()).collect();
+        assert!(!top.contains(&"station"), "present: {top:?}");
+        assert!(
+            !top.contains(&"show"),
+            "`boss job get` already reads a packet — a second way to read one is the \
+             thing d44f6152 asked us NOT to add; present: {top:?}"
+        );
     }
 
     /// Each verb owns its own about-text. Pinned because a car

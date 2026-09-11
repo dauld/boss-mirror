@@ -40,6 +40,73 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
+/// `bash infra/gate.sh <args>` in this tree, READABLE BY WHATEVER UID
+/// RUNS THE TEST.
+///
+/// WHY, measured on 2026-09-11 (packet `b048c511`). Since that day the
+/// gate runs as uid 65534 and every builder brief says to verify work
+/// under `setpriv --reuid=65534`. The dev pod's checkout is root-owned
+/// (`drwxrwsr-x root 1500`), so since git 2.35.2 every git command run
+/// by any other uid refuses it:
+///
+///     fatal: detected dubious ownership in repository at '/work/boss'
+///
+/// `--auto` derives its scope from git, so the refusal became "found no
+/// change at all against HEAD~1" and the gate declined before the poll
+/// this file tests could happen: 12 of 13 as 65534, 13 of 13 as root.
+/// A test ABOUT the gate that cannot pass the verification step the
+/// gate itself demands leaves a builder choosing between ignoring a red
+/// and stopping, which is the whole packet.
+///
+/// The fix is git's own env-var config channel, and it reaches every
+/// git in the child tree rather than only gate.sh's own calls —
+/// measured as 65534 in this tree: `--roster` and `--self-test` make 3
+/// git calls each (trunk-candidate `rev-parse`, discarded in those
+/// modes), `--quick` makes 223 of which 34 hit the refusal, and without
+/// this env `--quick` exits 1 naming three pre-flight lints that read
+/// history — `migrations-append-only`, `no-secrets`,
+/// `steptype-bundle-ratchet` — while the receipt's `rev-parse HEAD`
+/// degrades to `"head": "unknown"`. With the env supplied, the same
+/// `--quick` as 65534 exits 0 and no ownership refusal is left.
+///
+/// SCOPED TO THE RESOLVED `repo_root()`, never `*`: blessing one known
+/// path is a statement about this checkout, while a wildcard would bless
+/// every repository a test ever reaches — including the throwaway clones
+/// the sibling suites build.
+///
+/// Appended AFTER whatever `GIT_CONFIG_*` entries the parent already
+/// exports, the way `boss-cli`'s `git_auth::apply_at` does, because
+/// `infra/cluster/manifests/boss-dev.yaml` uses slot 0 for the forge
+/// credential helper: a flat `GIT_CONFIG_COUNT=1` here would silently
+/// take that helper away from the child.
+///
+/// WHY `safe.directory` IS RIGHT HERE AND WRONG IN
+/// `infra/forge/delete-orphan-object.sh`, which rejected it by name and
+/// drops to the tree's owner instead: that verb runs as root inside
+/// somebody else's clone, and a root WRITE there leaves root-owned
+/// objects that break the owner's later pulls — silencing the ownership
+/// check would buy its read at the price of making that hazard reachable
+/// by the next edit. Nothing in this direction writes: `--auto` diffs,
+/// the receipt reads `HEAD`, the lints read history. That is the same
+/// distinction `infra/forge/publish-github-pr.sh` drew when it DID
+/// accept `safe.directory` for its fetch. Do not "tidy" this into a
+/// wildcard, and do not copy it to a path that writes.
+fn gate_cmd(args: &[&str]) -> std::process::Command {
+    let root = repo_root();
+    let slot = std::env::var("GIT_CONFIG_COUNT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut cmd = std::process::Command::new("bash");
+    cmd.arg(root.join("infra/gate.sh"))
+        .args(args)
+        .env("GIT_CONFIG_COUNT", (slot + 1).to_string())
+        .env(format!("GIT_CONFIG_KEY_{slot}"), "safe.directory")
+        .env(format!("GIT_CONFIG_VALUE_{slot}"), &root)
+        .current_dir(&root);
+    cmd
+}
+
 /// The `test`-job slice of the Forgejo workflow — the job that carries
 /// the Postgres service, and so the only one that can run the gate's
 /// DB-backed test phase. `test` is the last job in the file, so the
@@ -150,10 +217,7 @@ fn gate_script_covers_the_checks() {
         ),
     ];
 
-    let out = std::process::Command::new("bash")
-        .arg(repo_root().join("infra/gate.sh"))
-        .arg("--roster")
-        .current_dir(repo_root())
+    let out = gate_cmd(&["--roster"])
         .output()
         .expect("run gate.sh --roster");
     assert!(
@@ -222,6 +286,15 @@ fn gate_script_covers_the_checks() {
 /// and a unit test of the arithmetic would not answer that.
 #[test]
 fn the_gate_refuses_to_run_without_headroom() {
+    // THE ONE GATE INVOCATION IN THIS FILE THAT DOES NOT GO THROUGH
+    // `gate_cmd`, and deliberately: a floor no disk can satisfy refuses
+    // at `require_headroom "to start"`, which runs BEFORE the trunk
+    // derivation — measured as 65534 in a root-owned tree, this mode
+    // makes exactly 0 git calls, so it has no ownership dependency to
+    // supply for. That ordering is not incidental; it is what
+    // `headroom_is_checked_before_the_scope_is_derived` pins. Stating
+    // the boundary here beats spraying the env over an invocation that
+    // never reaches git, which would hide the dependency instead.
     let out = std::process::Command::new("bash")
         .arg(repo_root().join("infra/gate.sh"))
         .arg("--auto")
@@ -261,7 +334,6 @@ fn the_gate_refuses_to_run_without_headroom() {
 /// begin with.
 #[test]
 fn the_gate_rechecks_headroom_as_the_run_proceeds() {
-    let root = repo_root();
     let dir = boss_testing::scratch_dir("boss-gate-headroom-poll");
     let counter = dir.join("calls");
     let fake = dir.join("df");
@@ -285,9 +357,7 @@ fn the_gate_rechecks_headroom_as_the_run_proceeds() {
     )
     .expect("chmod");
 
-    let out = std::process::Command::new("bash")
-        .arg(root.join("infra/gate.sh"))
-        .arg("--auto")
+    let out = gate_cmd(&["--auto"])
         .env("BOSS_GATE_DF_CMD", fake.to_str().expect("utf8"))
         .env("BOSS_GATE_MIN_FREE_GB", "12")
         // THE POLL NEEDS THE GATE TO REACH A PHASE, and `--auto` only
@@ -301,7 +371,6 @@ fn the_gate_rechecks_headroom_as_the_run_proceeds() {
         // a branch or on main, so the derivation succeeds in both and
         // the poll is tested rather than the scope.
         .env("BOSS_GATE_TRUNK", "HEAD~1")
-        .current_dir(&root)
         .output()
         .expect("run gate.sh");
 
@@ -546,10 +615,7 @@ fn no_lint_can_truncate_the_roster() {
     // three mechanisms is removed, verified by mutation when this landed:
     // revert the loop to stdin, drop the `< /dev/null` on the call, or
     // remove the count comparison, and one case names it.
-    let out = std::process::Command::new("bash")
-        .arg(repo_root().join("infra/gate.sh"))
-        .arg("--self-test")
-        .current_dir(repo_root())
+    let out = gate_cmd(&["--self-test"])
         .output()
         .expect("run gate.sh --self-test");
     assert!(
@@ -652,7 +718,6 @@ fn the_bootstrap_says_how_to_install_the_hook() {
 /// check in it.
 #[test]
 fn the_receipt_times_every_check() {
-    let root = repo_root();
     let dir = boss_testing::scratch_dir("boss-gate-check-timing");
     let counter = dir.join("calls");
     let fake = dir.join("df");
@@ -679,13 +744,10 @@ fn the_receipt_times_every_check() {
     )
     .expect("chmod");
 
-    let out = std::process::Command::new("bash")
-        .arg(root.join("infra/gate.sh"))
-        .arg("--quick")
+    let out = gate_cmd(&["--quick"])
         .env("BOSS_GATE_DF_CMD", fake.to_str().expect("utf8"))
         .env("BOSS_GATE_MIN_FREE_GB", "12")
         .env("BOSS_GATE_RECEIPT", receipt.to_str().expect("utf8"))
-        .current_dir(&root)
         .output()
         .expect("run gate.sh");
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();

@@ -375,6 +375,32 @@ fn build_router(local_auth_state: Option<Arc<LocalAuthState>>) -> axum::Router<A
             "/api/yard/status",
             axum::routing::any(|s, r| proxy::handle(s, r, &proxy::JOBS)),
         )
+        // The agent-run record — which actor built what, and what it
+        // cost. `GET /api/agent-runs[?actor_id=&branch=&since=]` lists
+        // the rows and `/cost` rolls them up; both live on the jobs
+        // upstream beside the yard. GET only, and deliberately: the
+        // POST that files a run names its own actor and its callers
+        // (coding agents, the CLI) reach boss-jobs-api directly, so a
+        // write door for no browser consumer is surface for nothing. A
+        // POST through here gets a 405 from this MethodRouter, not the
+        // catch-all's 404.
+        //
+        // Same failure as stations (#10) and /api/yard/status (#192),
+        // third time: the surface shipped in train #294 and 404'd at
+        // the human door, so the Crew Board — whose whole purpose is
+        // showing actors working — shipped with no cost-per-actor read
+        // at all (backlog 48bb0200). `/api/agent-rate-card` is the one
+        // route on this service deliberately left unrouted: it answers
+        // what a model costs per MTok, not what an actor spent, and
+        // nothing reads it from a browser yet.
+        .route(
+            "/api/agent-runs",
+            axum::routing::get(|s, r| proxy::handle(s, r, &proxy::JOBS)),
+        )
+        .route(
+            "/api/agent-runs/{*rest}",
+            axum::routing::get(|s, r| proxy::handle(s, r, &proxy::JOBS)),
+        )
         // Scheduling routes live alongside jobs on the same upstream.
         // Auth-gated like the rest of /api/*.
         .route(
@@ -1031,6 +1057,16 @@ mod routing_tests {
             // slots and the garage entirely (the sections are
             // `{#if}`-gated on a status that never became ready).
             "/api/yard/status",
+            // The agent-run record — what each actor built and what it
+            // cost. Shipped on the jobs upstream in train #294 and
+            // unreachable at the human door ever since: the Crew Board
+            // wanted exactly this read on 2026-09-11 and shipped
+            // without it (backlog 48bb0200). Third instance of the
+            // stations/yard shape above, which is why all three now sit
+            // in this list rather than being rediscovered a fourth
+            // time from an empty panel.
+            "/api/agent-runs",
+            "/api/agent-runs/cost",
         ];
         for path in REAL {
             let (_, body) = get(app(), path).await;
@@ -1038,6 +1074,30 @@ mod routing_tests {
                 !body.contains(MISS),
                 "`{path}` fell through to the /api catch-all — the catch-all is \
                  shadowing a real service route"
+            );
+        }
+    }
+
+    /// The agent-run reads carry per-actor build cost, so they must sit
+    /// behind the session-gated `proxy::handle` and never
+    /// `handle_public`. The discriminator needs no upstream: the gated
+    /// proxy refuses a cookie-less request with 401 before it forwards
+    /// anything, while a public route would try to reach boss-jobs-api
+    /// and answer 502. A read that leaks what each actor costs is worse
+    /// than one that 404s, which is why this is pinned next to the
+    /// route rather than left to review.
+    #[tokio::test]
+    async fn the_agent_run_reads_refuse_a_sessionless_caller() {
+        for path in ["/api/agent-runs", "/api/agent-runs/cost"] {
+            let (status, body) = get(app(), path).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "`{path}` must be gated by the session proxy: {body}"
+            );
+            assert!(
+                !body.contains(MISS),
+                "`{path}` reached the /api catch-all: {body}"
             );
         }
     }
