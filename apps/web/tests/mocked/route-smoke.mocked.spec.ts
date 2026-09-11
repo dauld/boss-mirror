@@ -79,6 +79,17 @@ const ROUTES: ReadonlyArray<string> = [
   // unit suite pins the failed-never-empty arms; this crawl pins that
   // the route actually mounts.
   '/it/estate',
+  // The Crew Board — the middle third of the operator surface, and a
+  // sidebar row of its own (backlog 04c5bbc0). Its four reads are
+  // `/api/jobs?kind=ship-a-change`, `/api/jobs?kind=gate-run`,
+  // `/api/yard/status` and `/api/jobs/queue-age`: the first, second and
+  // fourth come back `[]` from the catch-all and the third from the
+  // well-formed empty yard fixture above, so the crawl renders the
+  // board's five empty stage columns and its empty crew list. Every read
+  // goes through fetchRemote, so an unreachable backend renders a
+  // bordered failure line per lane rather than an idle pipeline — the
+  // same failed-never-empty bar as the estate row above.
+  '/it/crew',
 ];
 
 // DEFERRED, group 1 — aggregation dashboards that read OBJECT-shaped

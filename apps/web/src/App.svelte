@@ -61,6 +61,7 @@
   import SubjectsClassesPage from './it/subjects/SubjectsClassesPage.svelte';
   import YardPage from './it/yard/YardPage.svelte';
   import YardStatusPage from './it/yard/YardStatusPage.svelte';
+  import CrewBoardPage from './it/crew/CrewBoardPage.svelte';
   import EstatePage from './it/estate/EstatePage.svelte';
   import FleetPage from './it/monitoring/FleetPage.svelte';
   import MarshallingYardPage from './it/marshalling/MarshallingYardPage.svelte';
@@ -343,6 +344,10 @@
       <DesignReviewPage />
     {:else if route.kind === 'systemYard'}
       <YardPage />
+    {:else if route.kind === 'systemCrew'}
+      <!-- No ItTabs: the Crew Board is its own sidebar row, not a tab on
+           an existing family (backlog 04c5bbc0, David 2026-09-11). -->
+      <CrewBoardPage />
     {:else if route.kind === 'systemEstate'}
       <EstatePage />
     {:else if route.kind === 'systemFleet'}

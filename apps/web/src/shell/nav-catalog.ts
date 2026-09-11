@@ -74,6 +74,12 @@ export type NavGroup = Readonly<{ label: string; items: ReadonlyArray<NavItem> }
 // manual is permKey-less like the docs it renders.
 export type UngatedSurfaceId =
   | 'system-incidents'
+  // 'system-crew' (the Crew Board): permKey-less like the Operate row
+  // above, and for the same reason — it is a read-only observation
+  // surface over the delivery pipeline, readable by any operator, and
+  // adding a permKey would mean widening the RouteName vocabulary in
+  // libs/web-kit and hand-editing four role entries in ROUTE_ACCESS.
+  | 'system-crew'
   | 'system-fleet'
   | 'system-backlog'
   | 'hr'
@@ -135,6 +141,10 @@ export const ROUTE_CATALOG: Readonly<Record<RouteName | UngatedSurfaceId, NavIte
   'system-backlog':          { id: 'system-backlog',          label: 'IT backlog',          path: '/it/design/backlog', permKey: 'system-feedback',      app: 'it' },
   // The hardware registry — declared beside observed beside the
   // difference, plus the dev-workspace door (59ef456a).
+  // The Crew Board — the middle third of the operator surface. A SIDEBAR
+  // ROW, not a tab: David's decision on backlog 04c5bbc0 (2026-09-11)
+  // reversed the proposal to fold it into an existing IT family.
+  'system-crew':             { id: 'system-crew',             label: 'Crew Board',          path: '/it/crew',         app: 'it' },
   'system-estate':           { id: 'system-estate',           label: 'Estate',              path: '/it/estate',       permKey: 'system-estate',           app: 'it' },
   'system-kb':               { id: 'system-kb',               label: 'Knowledge Base',      path: '/it/kb',           permKey: 'system-kb',               app: 'it' },
   // Unlisted door: reachable, never a sidebar row.

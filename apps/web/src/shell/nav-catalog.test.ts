@@ -84,6 +84,12 @@ describe('nav catalog — app assignment', () => {
     // Beside Flow deliberately: Flow is throughput, Fleet is where
     // the work is piling up (queue-visibility Q4's depth signal).
     'system-fleet',
+    // The Crew Board — the middle third of the operator surface: who is
+    // building what, right now. New surface, and a new SIDEBAR ROW,
+    // which the test below was written to forbid: David's decision on
+    // backlog 04c5bbc0 (2026-09-11) read the proposal to make it a tab
+    // in an existing family and overrode it.
+    'system-crew',
     // The train yard — the departure board over the pipeline's queues
     // and the IT app's guest-visible landing (departure-board.md Q1).
     // Its car landed without this line; added when the map arrived.
@@ -119,13 +125,14 @@ describe('nav catalog — app assignment', () => {
   // Source-level because the groups live inside a component. Crude,
   // but it fails when someone adds an IT surface and forgets the
   // sidebar, which is exactly the mistake it exists for.
-  it('the IT sidebar holds exactly the six consolidated rows, and every other IT surface is a tab or a documented door', () => {
+  it('the IT sidebar holds exactly the seven rows, and every other IT surface is a tab or a documented door', () => {
     // The 2026-08-31 consolidation (packet 1f6d55e0): David — "we do
     // have too many IT pages though. We should consolidate." The
-    // sidebar is EXACTLY six rows; every remaining IT catalog entry
+    // sidebar is EXACTLY seven rows; every remaining IT catalog entry
     // must be reachable as a tab on one of them (ItTabs.svelte) or be
     // on the short documented list of parent-reached doors. This test
-    // is also the executable "17 pages became 6" claim.
+    // is also the executable "17 pages became 6, plus one decided since"
+    // claim.
     const shell = readFileSync(
       new URL('./AppShell.svelte', import.meta.url),
       'utf8',
@@ -134,23 +141,33 @@ describe('nav catalog — app assignment', () => {
       shell.indexOf('const IT_GROUPS'),
       shell.indexOf('// Home —'),
     );
-    const SIDEBAR_SIX: ReadonlyArray<string> = [
+    const SIDEBAR_ROWS: ReadonlyArray<string> = [
       'system-yard',      // /it — the landing
       'system-incidents', // Operate
       'workflows',        // Registry
       'system-design',    // Design
+      'system-crew',      // Crew Board — see below
       'system-estate',    // Estate
       'system-kb',        // Knowledge Base
     ];
-    for (const k of SIDEBAR_SIX) {
+    for (const k of SIDEBAR_ROWS) {
       expect(
         groups.includes(`'${k}'`) || groups.includes(`ROUTE_CATALOG.${k}`),
         `sidebar row missing: ${k}`,
       ).toBe(true);
     }
-    // No seventh row: count the catalog references inside IT_GROUPS.
+    // No EIGHTH row: count the catalog references inside IT_GROUPS.
+    //
+    // This was six until 2026-09-11. The seventh is the Crew Board, and
+    // the bar for adding it was a decision, not a convenience: the
+    // proposal on backlog 04c5bbc0 was a tab inside an existing family,
+    // citing this very count, and David answered "Port the Crew Board as
+    // a new sidebar page in IT" with `accepted_as_proposed: false`. The
+    // count still exists and still bites — the consolidation's point was
+    // that a family belongs behind one row — so a new row needs the same
+    // kind of answer, not an edit to this line.
     const rowRefs = (groups.match(/ROUTE_CATALOG(\.\w[\w-]*|\['[^']+'\])/g) ?? []).length;
-    expect(rowRefs, 'the IT sidebar must hold exactly six rows').toBe(6);
+    expect(rowRefs, 'the IT sidebar must hold exactly seven rows').toBe(7);
 
     const tabs = readFileSync(
       new URL('../it/ItTabs.svelte', import.meta.url),
@@ -166,7 +183,7 @@ describe('nav catalog — app assignment', () => {
     const unreachable = entries
       .filter(([, v]) => v.app === 'it')
       .map(([k, v]) => [k, v.path] as const)
-      .filter(([k]) => !SIDEBAR_SIX.includes(k) && !DOCUMENTED_DOORS.includes(k))
+      .filter(([k]) => !SIDEBAR_ROWS.includes(k) && !DOCUMENTED_DOORS.includes(k))
       .filter(([, path]) => !tabs.includes(`'${path}'`));
     expect(
       unreachable.map(([k]) => k),

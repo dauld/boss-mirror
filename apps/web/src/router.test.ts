@@ -75,6 +75,7 @@ describe('parseRoute — every specific path matches its specific case', () => {
     ['/it/design/experiments', { kind: 'experiments' }],
     ['/it/design/feedback', { kind: 'systemFeedback' }],
     ['/it', { kind: 'systemYard' }],
+    ['/it/crew', { kind: 'systemCrew' }],
     ['/it/estate', { kind: 'systemEstate' }],
     
     ['/it/operate', { kind: 'incidents' }],

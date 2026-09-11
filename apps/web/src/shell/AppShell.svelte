@@ -143,11 +143,18 @@
     items: workForRole(role).map((r) => ROUTE_CATALOG[r]),
   });
 
-  // The IT department — exactly six rows (the 2026-08-31
-  // consolidation, packet 1f6d55e0). Families live as tabs on their
-  // surface, not as sidebar rows; auth-admin stays reachable but
-  // unlisted. The old Run / Define / Evolve / Platform grouping died
-  // with the /system prefix.
+  // The IT department — seven rows. Six came from the 2026-08-31
+  // consolidation (packet 1f6d55e0), which established that families
+  // live as tabs on their surface rather than as sidebar rows;
+  // auth-admin stays reachable but unlisted, and the old Run / Define /
+  // Evolve / Platform grouping died with the /system prefix.
+  //
+  // The seventh is the Crew Board, and it is a deliberate exception to
+  // that rule rather than a drift back from it: David's decision on
+  // backlog 04c5bbc0 (2026-09-11) read the proposal to make it a tab in
+  // an existing family and overrode it — "Port the Crew Board as a new
+  // sidebar page in IT." The middle third of the operator surface is its
+  // own question, not a sub-view of Operate's incidents.
   const IT_GROUPS: ReadonlyArray<NavGroup> = [
     {
       label: 'IT',
@@ -156,6 +163,7 @@
         ROUTE_CATALOG['system-incidents'],
         ROUTE_CATALOG.workflows,
         ROUTE_CATALOG['system-design'],
+        ROUTE_CATALOG['system-crew'],
         ROUTE_CATALOG['system-estate'],
         ROUTE_CATALOG['system-kb'],
       ],

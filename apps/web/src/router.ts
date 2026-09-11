@@ -103,6 +103,11 @@ export type Route =
   /// per-kind dashboard is unique, not a duplicate rendering).
   | { kind: 'systemFleet' }
   | { kind: 'systemMarshallingYard' }
+  /// The Crew Board — who is building what, right now. The MIDDLE third
+  /// of the operator surface (backlog 04c5bbc0): the Train Yard shows
+  /// landed work, the Marshalling Yard shows work waiting, and the
+  /// interval in between had no surface at all.
+  | { kind: 'systemCrew' }
   /// The hardware registry, declared beside observed (59ef456a).
   | { kind: 'systemEstate' }
   /// The IT incidents surface — active incident-post-mortem packets +
@@ -180,6 +185,11 @@ export function parseRoute(pathname: string): Route {
     if (p === '/design/feedback') return { kind: 'systemFeedback' };
     if (p === '/design/backlog') return { kind: 'systemBacklog' };
     // 5. Estate. 6. KB. Plus the unlisted auth door.
+    // 5a. The Crew Board — a sidebar row of its own, not an Operate tab.
+    // David's decision on 04c5bbc0 (2026-09-11) overrode the proposal to
+    // make it a tab inside an existing family: "Port the Crew Board as a
+    // new sidebar page in IT."
+    if (p === '/crew') return { kind: 'systemCrew' };
     if (p === '/estate') return { kind: 'systemEstate' };
     if (p === '/kb') return { kind: 'systemKb' };
     if (p === '/auth-admin') return { kind: 'authAdmin' };
