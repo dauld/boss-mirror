@@ -70,21 +70,17 @@ export type ActorLane = 'human' | 'agent' | 'automation' | 'sim';
 /// thousand times faster than the wall — simulated work measured against
 /// a real clock cannot share a lane with the real crew.
 ///
-/// The address form is the one documented exception to the delegation.
-/// Measured 2026-09-11 on the system of record: `claude@algedonic.dev`
-/// holds 250 step assignments and signs 5 completions, and it carries no
-/// colon, so `isHumanActor` reads it as a person. The `ActorId` union
-/// (crates/core/boss-core/src/actor.rs) has no address spelling, so this
-/// is a gap between the vocabulary and the live data. A board about who
-/// is working must not draw an agent's work as a person's; the real fix
-/// belongs in `actor.ts` or in the vocabulary, and is reported rather
-/// than papered over.
+/// The address form (`claude@algedonic.dev`, an agent's session login)
+/// is NOT an exception any more: `isHumanActor` reads an `@` as a
+/// machine since fix/one-actor-one-spelling, so it lands in the agent
+/// lane through the same delegation as every other machine id. The
+/// local `includes('@')` branch this function once carried is gone —
+/// it had become unreachable, and its comment sent readers to look for
+/// a fix that had already landed (2178203d).
 export function actorLane(actorId: string, simulated: boolean): ActorLane {
   if (simulated) return 'sim';
   if (actorId.startsWith('automation:')) return 'automation';
-  if (!isHumanActor(actorId)) return 'agent';
-  // Colon-free, so `actor.ts` says human. An address is an agent session.
-  return actorId.includes('@') ? 'agent' : 'human';
+  return isHumanActor(actorId) ? 'human' : 'agent';
 }
 
 // ---------------------------------------------------------------------
