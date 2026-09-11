@@ -186,7 +186,34 @@ fn bases_behind(checks: &[(String, Option<i32>)]) -> Vec<&str> {
         .collect()
 }
 
-pub async fn run() -> Result<()> {
+/// How many orphans the default listing shows before it says "…and N
+/// more". A bound, not a filter: the count above it is always the whole
+/// set, and the tail line names the flag that shows the rest.
+pub(crate) const ORPHANS_SHOWN: usize = 12;
+
+/// The ORPHANS listing lines for a set of forge heads, bounded to
+/// `shown` entries unless `all` — and when bounded, the tail line
+/// SAYS how to see the rest, because a list truncated with no way to
+/// read the remainder is read once and then skipped (ce673e64: 46
+/// orphans, 12 shown, 34 invisible from every surface, and `boss
+/// orient` took no flags at all). Pure so the shape is testable.
+pub(crate) fn orphan_lines(orphans: &[String], shown: usize, all: bool) -> Vec<String> {
+    let cap = if all { orphans.len() } else { shown };
+    let mut out: Vec<String> = orphans
+        .iter()
+        .take(cap)
+        .map(|b| format!("    {b}"))
+        .collect();
+    if orphans.len() > cap {
+        out.push(format!(
+            "    …and {} more — `boss orient --all` lists every one",
+            orphans.len() - cap
+        ));
+    }
+    out
+}
+
+pub async fn run(all: bool) -> Result<()> {
     let http = reqwest::Client::new();
 
     println!("boss orient — the approach, before you build");
@@ -335,12 +362,8 @@ pub async fn run() -> Result<()> {
                      file a packet or delete the branch):",
                     orphans.len()
                 );
-                const SHOWN: usize = 12;
-                for b in orphans.iter().take(SHOWN) {
-                    println!("    {b}");
-                }
-                if orphans.len() > SHOWN {
-                    println!("    …and {} more", orphans.len() - SHOWN);
+                for line in orphan_lines(&orphans, ORPHANS_SHOWN, all) {
+                    println!("{line}");
                 }
             }
             // RESIDUE (L3, acedf981): the inverse cross-ref. Orphans are
@@ -532,6 +555,35 @@ pub async fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_bounded_orphan_list_names_the_flag_that_shows_the_rest() {
+        let orphans: Vec<String> = (0..46).map(|i| format!("feat/b{i}")).collect();
+        let lines = super::orphan_lines(&orphans, 12, false);
+        assert_eq!(lines.len(), 13, "12 entries plus one tail line");
+        assert_eq!(lines[0], "    feat/b0");
+        assert_eq!(lines[11], "    feat/b11");
+        assert!(
+            lines[12].contains("34 more") && lines[12].contains("boss orient --all"),
+            "the tail must say how many are hidden AND how to see them: {}",
+            lines[12]
+        );
+    }
+
+    #[test]
+    fn all_lists_every_orphan_with_no_tail() {
+        let orphans: Vec<String> = (0..46).map(|i| format!("feat/b{i}")).collect();
+        let lines = super::orphan_lines(&orphans, 12, true);
+        assert_eq!(lines.len(), 46);
+        assert!(lines.iter().all(|l| l.starts_with("    feat/b")));
+    }
+
+    #[test]
+    fn a_list_within_the_bound_has_no_tail_either_way() {
+        let orphans: Vec<String> = (0..5).map(|i| format!("feat/b{i}")).collect();
+        assert_eq!(super::orphan_lines(&orphans, 12, false).len(), 5);
+        assert_eq!(super::orphan_lines(&orphans, 12, true).len(), 5);
+    }
+
     use super::*;
     use serde_json::json;
 
