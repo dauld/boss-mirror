@@ -567,10 +567,25 @@ pub struct BoardingPredicate {
     /// The times-of-day a train boards (the `clock` rule's `at_times`),
     /// verbatim from the row — e.g. `["06:00","18:00"]`.
     pub at_times: Vec<String>,
-    /// How many cars are parked right now.
-    pub dock_depth: usize,
+    /// How many cars are parked right now — `None` when the dock could
+    /// not be READ (no station registry wired, or the row's read failed).
+    ///
+    /// NOT a zero. A zero here is a count, and a count nobody took is
+    /// exactly the shape that passes an absence assertion falsely:
+    /// 61085a9e measured that from the reader's side (an unidentified
+    /// reader got trains, dock, held, recent and `dock_depth` ALL zero —
+    /// a confident, well-formed, completely idle yard), and this is the
+    /// same lesson applied to the SERVER's own answer. With the station
+    /// row unreadable the payload used to say "I could not read the dock"
+    /// and "the dock has nothing in it" at once, and an operator or a
+    /// verb acts on the second (efe6ef10).
+    pub dock_depth: Option<usize>,
     /// Whether the dock has reached the depth threshold this instant.
-    /// `None` when no depth rule is configured.
+    /// `None` when the question has NO ANSWER — either no depth rule is
+    /// configured, or the dock depth could not be read. A reader must not
+    /// treat `None` as `false`: the TS parser keeps it `null` and
+    /// `boardsWhen` branches on it rather than falling through to "below
+    /// the threshold".
     pub threshold_met: Option<bool>,
     /// A plain-language sentence an operator can read without knowing
     /// the rule shapes.
@@ -605,6 +620,11 @@ pub struct BoardHold {
     /// — or `None` when the dock would board on the conductor's next
     /// tick. When several apply the line names one, in the order the
     /// conductor checks them: track, then cooldown, then depth.
+    ///
+    /// With the dock depth unread and no other hold visible it carries
+    /// the admission instead (`"the dock depth could not be read — the
+    /// N-car threshold cannot be evaluated"`), because `None` here is
+    /// read as a go-ahead and the read-model has no grounds for one.
     pub held_because: Option<String>,
     /// Minutes until the board cooldown clears; `None` when none is
     /// running — never fired, elapsed, or released by a firing that
@@ -627,8 +647,20 @@ pub struct BoardHold {
     /// on the conductor's next TICK after an elapsed window, not at the
     /// window, so an hour here would replace one false promise with
     /// another.
+    ///
+    /// An unread dock gets the same treatment one step further: it
+    /// opens `"cannot say — …"`, names the holds it CAN still read, and
+    /// refuses both "boards on the next tick" and "once the dock reaches
+    /// N" — neither is derivable without the row. A configured clock rule
+    /// is still named, since it never reads the depth at all.
     pub next_board: String,
 }
+
+/// The one phrase every sentence in this block uses for an unread dock,
+/// so the admission reads the same in the summary, the hold and
+/// `next_board` — and so a reader (or a probe) greps for one string
+/// rather than three near-identical ones (CLAUDE.md §9a).
+pub const DEPTH_UNREAD: &str = "the dock depth could not be read";
 
 /// A cadence rule fires by DEPTH when it declares `min_dock_depth`.
 /// Public so the handler reads the board rule's last firing under the
@@ -661,9 +693,14 @@ fn at_times_of(rule: Option<&CadenceRuleRow>) -> Vec<String> {
 
 /// `on_track` is the number of open trains still before their merge —
 /// the ones that hold the track (`holds_the_track`).
+///
+/// `dock_depth` is a READING, not a number: `None` means the dock could
+/// not be read, and every sentence below then says so instead of
+/// answering with a zero — the same posture `now: None` already takes
+/// ("no clock, no claim").
 pub fn boarding_predicate(
     rules: &[CadenceRuleRow],
-    dock_depth: usize,
+    dock_depth: Option<usize>,
     last_board: Option<&LastFiring>,
     on_track: usize,
     now: Option<chrono::DateTime<chrono::Utc>>,
@@ -672,7 +709,11 @@ pub fn boarding_predicate(
     let dock_threshold = depth.and_then(|r| r.min_dock_depth);
     let cooldown_minutes = depth.and_then(|r| r.cooldown_minutes);
     let at_times = at_times_of(clock_rule(rules));
-    let threshold_met = dock_threshold.map(|t| dock_depth as i64 >= i64::from(t));
+    // Both halves have to be present for the question to have an answer:
+    // a threshold with no depth behind it is not "not met".
+    let threshold_met = dock_threshold
+        .zip(dock_depth)
+        .map(|(t, d)| d as i64 >= i64::from(t));
 
     let mut clauses: Vec<String> = Vec::new();
     if let Some(t) = dock_threshold {
@@ -685,23 +726,30 @@ pub fn boarding_predicate(
     if !at_times.is_empty() {
         clauses.push(format!("{} UTC", at_times.join(" / ")));
     }
+    // The depth as a sentence. An unread dock states the absence; it
+    // never borrows a zero to fill the slot.
+    let parked = match dock_depth {
+        Some(d) => format!("{d} car(s) parked now"),
+        None => DEPTH_UNREAD.to_string(),
+    };
     let summary = if clauses.is_empty() {
         // No cadence rules readable — say so plainly rather than imply a
         // schedule the registry does not hold.
         format!(
-            "No boarding cadence is configured; {dock_depth} car(s) parked. \
+            "No boarding cadence is configured; {parked}. \
              The conductor boards on its own schedule."
         )
     } else {
-        let met = match threshold_met {
-            Some(true) => " — the dock threshold is met",
-            Some(false) => " — below the dock threshold",
-            None => "",
+        let met = match (dock_threshold, threshold_met) {
+            (_, Some(true)) => " — the dock threshold is met",
+            (_, Some(false)) => " — below the dock threshold",
+            // A threshold IS configured and the depth is unread: the
+            // question stands and has no answer. Saying nothing here
+            // would read as "the threshold does not apply".
+            (Some(_), None) => " — so the threshold cannot be evaluated",
+            (None, None) => "",
         };
-        format!(
-            "Boards at {}; {dock_depth} car(s) parked now{met}.",
-            clauses.join(" or ")
-        )
+        format!("Boards at {}; {parked}{met}.", clauses.join(" or "))
     };
 
     BoardingPredicate {
@@ -747,7 +795,7 @@ fn cooldown_released(last: &LastFiring) -> bool {
 pub fn boarding_hold(
     rules: &[CadenceRuleRow],
     last_board: Option<&LastFiring>,
-    dock_depth: usize,
+    dock_depth: Option<usize>,
     on_track: usize,
     now: Option<chrono::DateTime<chrono::Utc>>,
 ) -> BoardHold {
@@ -804,19 +852,56 @@ pub fn boarding_hold(
         ));
     }
     if let Some(t) = threshold
-        && (dock_depth as i64) < i64::from(t)
+        && let Some(d) = dock_depth
+        && (d as i64) < i64::from(t)
     {
         holds.push((
-            format!("below threshold (depth {dock_depth} of {t})"),
+            format!("below threshold (depth {d} of {t})"),
             format!("the dock reaches {t}"),
             Some("the dock threshold"),
         ));
     }
+    // A depth term with no depth behind it. The other two holds — the
+    // track and the cooldown — are read from facts that have nothing to
+    // do with the dock row, so they stand and are named first, exactly
+    // as the conductor checks them; this one cannot be decided either way
+    // and says so. `threshold` is `Some` here by construction.
+    let depth_unread = threshold.filter(|_| dock_depth.is_none());
 
-    let next_board = match threshold {
-        None => "no depth rule is configured — nothing boards on dock depth".to_string(),
-        Some(_) if holds.is_empty() => "boards on the next tick".to_string(),
-        Some(_) => {
+    let next_board = match (threshold, depth_unread) {
+        (None, _) => "no depth rule is configured — nothing boards on dock depth".to_string(),
+        // Never "boards on the next tick", never "once the dock reaches
+        // N": without the row neither is a sentence this read-model can
+        // stand behind. Same refusal as the clock clause below
+        // (44576594) — name what must clear, promise no instant.
+        (_, Some(t)) => {
+            let held = if holds.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "held by {}, and ",
+                    holds
+                        .iter()
+                        .map(|(why, _, _)| why.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" and ")
+                )
+            };
+            // A clock rule never reads `min_dock_depth`, so it boards
+            // through an unread dock untouched — and a sentence that
+            // stopped at "cannot say" would hide a board that IS
+            // scheduled. Still a window, never an hour.
+            let clock = if clock_rule(rules).is_some() {
+                " — a scheduled clock window boards regardless of the dock depth"
+            } else {
+                ""
+            };
+            format!(
+                "cannot say — {held}{DEPTH_UNREAD}, so the {t}-car threshold cannot be evaluated{clock}"
+            )
+        }
+        (Some(_), None) if holds.is_empty() => "boards on the next tick".to_string(),
+        (Some(_), None) => {
             let base = format!(
                 "boards on the next tick once {}",
                 holds
@@ -847,7 +932,17 @@ pub fn boarding_hold(
         }
     };
     BoardHold {
-        held_because: holds.into_iter().next().map(|(why, _, _)| why),
+        // The hold the read-model can still see, first — and when it can
+        // see none and the dock is unread, the ADMISSION rather than
+        // `None`. `None` in this slot means "the dock would board on the
+        // conductor's next tick" (see the field), and that is a claim
+        // nobody can make without the row: the choice is between a line
+        // that might overstate a hold and a `None` that reads as a
+        // go-ahead, and this block's posture is to state the absence.
+        held_because: holds.into_iter().next().map(|(why, _, _)| why).or_else(|| {
+            depth_unread
+                .map(|t| format!("{DEPTH_UNREAD} — the {t}-car threshold cannot be evaluated"))
+        }),
         cooldown_remaining_minutes: cooldown_remaining,
         last_board_at: last_board.map(|l| l.fired_at),
         next_board,
@@ -2114,8 +2209,42 @@ pub struct YardInputs<'a> {
     pub now: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// Assemble the full status from the rows the handler fetched.
+/// Whether the handler could READ the dock, which is not the same
+/// question as whether the dock has cars on it.
+///
+/// The dock's membership rule lives in the `loading-dock` station row
+/// (52fed017). When that row cannot be read — no station registry wired,
+/// or the read failed — the handler has no dock at all, and an empty
+/// `dock_cars` slice is then an ADMISSION, not a count of zero. Passing
+/// it as [`DockReading::Read`] is what made the payload say "I could not
+/// read the dock" and "the dock has nothing in it" at once (efe6ef10).
+///
+/// An enum rather than a `bool` because the call site reads as the fact
+/// it states; `build_status(.., false)` does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockReading {
+    /// `dock_cars` is what stands on the dock. An empty slice means the
+    /// dock is empty, and the depth is that count.
+    Read,
+    /// The dock could not be read. `dock_cars` carries no information,
+    /// and the boarding block says the depth is unknown rather than zero.
+    Unread,
+}
+
+/// Assemble the full status from the rows the handler fetched, asserting
+/// the dock WAS read — see [`build_status_for`] for a caller that could
+/// not read it.
 pub fn build_status(inputs: YardInputs<'_>) -> YardStatus {
+    build_status_for(inputs, DockReading::Read)
+}
+
+/// Assemble the full status, stating whether the dock could be read.
+///
+/// The reading is a second argument rather than a [`YardInputs`] field
+/// only because the field would be a breaking change to an exhaustive
+/// struct literal in a handler another car holds open; collapse it into
+/// `YardInputs` when that car lands.
+pub fn build_status_for(inputs: YardInputs<'_>, dock_reading: DockReading) -> YardStatus {
     let YardInputs {
         open_trains,
         closed_trains,
@@ -2162,7 +2291,13 @@ pub fn build_status(inputs: YardInputs<'_>) -> YardStatus {
         .iter()
         .filter(|(_, s)| holds_the_track(s))
         .count();
-    let boarding = boarding_predicate(rules, dock.len(), last_board, on_track, now);
+    // The depth is the parked lane's length only when the dock was read.
+    // Unread, it is no number at all — see [`DockReading`].
+    let dock_depth = match dock_reading {
+        DockReading::Read => Some(dock.len()),
+        DockReading::Unread => None,
+    };
+    let boarding = boarding_predicate(rules, dock_depth, last_board, on_track, now);
     let recent = closed_trains
         .iter()
         .take(RECENT_LIMIT)
@@ -2665,11 +2800,11 @@ mod tests {
         clock.at_times = Some(json!(["06:00", "18:00"]));
         let rules = vec![depth, clock];
 
-        let p = boarding_predicate(&rules, 2, None, 0, None);
+        let p = boarding_predicate(&rules, Some(2), None, 0, None);
         assert_eq!(p.dock_threshold, Some(4));
         assert_eq!(p.cooldown_minutes, Some(120));
         assert_eq!(p.at_times, vec!["06:00", "18:00"]);
-        assert_eq!(p.dock_depth, 2);
+        assert_eq!(p.dock_depth, Some(2));
         assert_eq!(p.threshold_met, Some(false));
         assert!(p.summary.contains("4 parked cars"));
         assert!(p.summary.contains("06:00 / 18:00 UTC"));
@@ -2681,14 +2816,89 @@ mod tests {
     fn the_predicate_reports_the_threshold_met_when_the_dock_is_deep() {
         let mut depth = rule("queue-depth");
         depth.min_dock_depth = Some(4);
-        let p = boarding_predicate(&[depth], 5, None, 0, None);
+        let p = boarding_predicate(&[depth], Some(5), None, 0, None);
         assert_eq!(p.threshold_met, Some(true));
         assert!(p.summary.contains("the dock threshold is met"));
     }
 
+    /// efe6ef10: with the station row unreadable the handler has no dock
+    /// at all, and the depth used to arrive here as a zero — so the
+    /// payload said "I could not read the dock" and "0 car(s) parked now
+    /// — below the dock threshold" at once. The second is the sentence an
+    /// operator or a verb acts on. 61085a9e measured the same shape from
+    /// the reader's side.
+    #[test]
+    fn an_unread_dock_says_the_depth_is_unknown_rather_than_zero() {
+        let mut depth = rule("queue-depth");
+        depth.min_dock_depth = Some(4);
+        let p = boarding_predicate(&[depth], None, None, 0, None);
+        assert_eq!(p.dock_depth, None, "a depth nobody read is not a depth");
+        assert_eq!(
+            p.threshold_met, None,
+            "the threshold question has no answer without a depth"
+        );
+        // The operator-facing line, pinned whole. The threshold IS
+        // configured, so the unanswered question is named rather than
+        // silently dropped — saying nothing would read as "the threshold
+        // does not apply".
+        assert_eq!(
+            p.summary,
+            "Boards at 4 parked cars; the dock depth could not be read \
+             — so the threshold cannot be evaluated."
+        );
+        assert!(!p.summary.contains("car(s) parked"), "{}", p.summary);
+    }
+
+    /// The threshold is still unanswerable when the dock is unread AND no
+    /// depth rule exists — but for the other reason, and the sentence
+    /// must not imply a dock reading it never took.
+    #[test]
+    fn an_unread_dock_with_no_cadence_still_says_so_rather_than_zero() {
+        let p = boarding_predicate(&[], None, None, 0, None);
+        assert_eq!(p.dock_depth, None);
+        assert!(
+            p.summary.contains("No boarding cadence is configured"),
+            "{}",
+            p.summary
+        );
+        assert!(p.summary.contains(DEPTH_UNREAD), "{}", p.summary);
+        assert!(!p.summary.contains("0 car(s) parked"), "{}", p.summary);
+    }
+
+    /// The wire shape, pinned: `null`, never `0` and never absent. A
+    /// reader that coerces it to zero has reproduced the defect one layer
+    /// out, which is why the TS parser keeps it `number | null`.
+    #[test]
+    fn an_unread_depth_rides_the_wire_as_null_never_zero() {
+        let mut depth = rule("queue-depth");
+        depth.min_dock_depth = Some(4);
+        let v = serde_json::to_value(boarding_predicate(&[depth], None, None, 0, None)).unwrap();
+        assert!(v["dock_depth"].is_null(), "{v}");
+        assert!(v["threshold_met"].is_null(), "{v}");
+        assert_ne!(v["dock_depth"], 0, "{v}");
+        assert_ne!(v["threshold_met"], false, "{v}");
+    }
+
+    /// A read dock of zero is still a COUNT, and must keep saying so —
+    /// the distinction the whole change exists to make.
+    #[test]
+    fn a_read_but_empty_dock_still_reports_a_depth_of_zero() {
+        let mut depth = rule("queue-depth");
+        depth.min_dock_depth = Some(4);
+        let p = boarding_predicate(&[depth], Some(0), None, 0, None);
+        assert_eq!(p.dock_depth, Some(0));
+        assert_eq!(p.threshold_met, Some(false));
+        assert!(p.summary.contains("0 car(s) parked now"), "{}", p.summary);
+        assert!(
+            p.summary.contains("below the dock threshold"),
+            "{}",
+            p.summary
+        );
+    }
+
     #[test]
     fn no_cadence_rules_reads_as_no_configured_cadence_not_a_fake_schedule() {
-        let p = boarding_predicate(&[], 3, None, 0, None);
+        let p = boarding_predicate(&[], Some(3), None, 0, None);
         assert_eq!(p.dock_threshold, None);
         assert_eq!(p.threshold_met, None);
         assert!(p.at_times.is_empty());
@@ -2700,7 +2910,7 @@ mod tests {
     fn a_malformed_at_times_degrades_to_the_string_entries_only() {
         let mut clock = rule("clock");
         clock.at_times = Some(json!(["06:00", 18, null]));
-        let p = boarding_predicate(&[clock], 0, None, 0, None);
+        let p = boarding_predicate(&[clock], Some(0), None, 0, None);
         assert_eq!(p.at_times, vec!["06:00"]);
     }
 
@@ -2731,7 +2941,7 @@ mod tests {
         let h = boarding_hold(
             &[board_rule(4, 45)],
             Some(&last),
-            5,
+            Some(5),
             0,
             Some(at("2026-09-07T20:33:30Z")),
         );
@@ -2752,7 +2962,7 @@ mod tests {
         let now = Some(at("2026-09-07T20:05:00Z"));
         for rc in [1, -2] {
             let last = fired("2026-09-07T20:00:00Z", Some(rc));
-            let h = boarding_hold(&[board_rule(4, 45)], Some(&last), 5, 0, now);
+            let h = boarding_hold(&[board_rule(4, 45)], Some(&last), Some(5), 0, now);
             assert_eq!(h.held_because, None, "rc={rc}");
             assert_eq!(h.cooldown_remaining_minutes, None, "rc={rc}");
             assert_eq!(h.last_board_at, Some(at("2026-09-07T20:00:00Z")));
@@ -2768,7 +2978,7 @@ mod tests {
         let h = boarding_hold(
             &[board_rule(4, 45)],
             Some(&last),
-            5,
+            Some(5),
             0,
             Some(at("2026-09-07T20:05:00Z")),
         );
@@ -2782,7 +2992,7 @@ mod tests {
         let h = boarding_hold(
             &[board_rule(4, 45)],
             Some(&last),
-            5,
+            Some(5),
             0,
             Some(at("2026-09-07T20:00:00Z")),
         );
@@ -2797,7 +3007,7 @@ mod tests {
         let h = boarding_hold(
             &[board_rule(4, 45)],
             None,
-            2,
+            Some(2),
             0,
             Some(at("2026-09-07T20:00:00Z")),
         );
@@ -2820,7 +3030,7 @@ mod tests {
         // cooldown or the depth — and the sentence names all three.
         let last = fired("2026-09-07T20:00:00Z", Some(0));
         let now = Some(at("2026-09-07T20:10:00Z"));
-        let h = boarding_hold(&[board_rule(4, 45)], Some(&last), 2, 2, now);
+        let h = boarding_hold(&[board_rule(4, 45)], Some(&last), Some(2), 2, now);
         assert_eq!(
             h.held_because.as_deref(),
             Some("track occupied (2 open trains)")
@@ -2831,7 +3041,7 @@ mod tests {
             "boards on the next tick once the track clears and the cooldown clears (35 min) \
              and the dock reaches 4"
         );
-        let one = boarding_hold(&[board_rule(4, 45)], None, 5, 1, now);
+        let one = boarding_hold(&[board_rule(4, 45)], None, Some(5), 1, now);
         assert_eq!(
             one.held_because.as_deref(),
             Some("track occupied (1 open train)")
@@ -2970,7 +3180,7 @@ mod tests {
         let h = boarding_hold(
             &[board_rule(4, 45), clock_rule_row()],
             Some(&last),
-            5,
+            Some(5),
             0,
             Some(at("2026-09-07T20:10:00Z")),
         );
@@ -2997,7 +3207,7 @@ mod tests {
         let h = boarding_hold(
             &[board_rule(4, 45), clock_rule_row()],
             Some(&last),
-            2,
+            Some(2),
             1,
             Some(at("2026-09-07T20:10:00Z")),
         );
@@ -3019,7 +3229,7 @@ mod tests {
         let h = boarding_hold(
             &[board_rule(4, 45), clock_rule_row()],
             None,
-            5,
+            Some(5),
             1,
             Some(at("2026-09-07T20:10:00Z")),
         );
@@ -3035,7 +3245,7 @@ mod tests {
         let h = boarding_hold(
             &[board_rule(4, 45)],
             Some(&last),
-            2,
+            Some(2),
             0,
             Some(at("2026-09-07T20:10:00Z")),
         );
@@ -3051,7 +3261,7 @@ mod tests {
         let h = boarding_hold(
             &[board_rule(4, 45)],
             None,
-            4,
+            Some(4),
             0,
             Some(at("2026-09-07T20:10:00Z")),
         );
@@ -3062,11 +3272,104 @@ mod tests {
         assert!(!h.next_board.contains(':'), "{}", h.next_board);
     }
 
+    /// The hold half of efe6ef10. With the depth unread the sentence must
+    /// refuse BOTH promises: "boards on the next tick" (it may well be
+    /// below the threshold) and "once the dock reaches N" (it may already
+    /// be past it). Same refusal as 44576594's clock clause.
+    #[test]
+    fn an_unread_dock_will_not_promise_a_board_nor_a_threshold_it_cannot_check() {
+        let h = boarding_hold(
+            &[board_rule(4, 45)],
+            None,
+            None,
+            0,
+            Some(at("2026-09-07T20:10:00Z")),
+        );
+        assert_eq!(
+            h.next_board,
+            "cannot say — the dock depth could not be read, \
+             so the 4-car threshold cannot be evaluated"
+        );
+        assert_eq!(
+            h.held_because.as_deref(),
+            Some("the dock depth could not be read — the 4-car threshold cannot be evaluated")
+        );
+        assert_ne!(h.next_board, "boards on the next tick");
+        assert!(h.next_board.contains(DEPTH_UNREAD), "{}", h.next_board);
+        assert!(
+            !h.next_board.contains("the dock reaches"),
+            "{}",
+            h.next_board
+        );
+        // The depth rule has no clock; a time of day here would be
+        // invented — the deliberate invariant, held on the new arm too.
+        assert!(!h.next_board.contains(':'), "{}", h.next_board);
+        // The hold slot carries the admission, not a `None` that reads as
+        // a go-ahead, and never the below-threshold verdict it cannot
+        // reach.
+        let why = h.held_because.as_deref().unwrap_or("");
+        assert!(why.contains(DEPTH_UNREAD), "{why}");
+        assert!(!why.contains("below threshold"), "{why}");
+    }
+
+    /// The track and the cooldown are read from facts that owe the dock
+    /// row nothing, so an unread dock must not swallow them — a verdict
+    /// that names nothing is the defect class this block was built for.
+    #[test]
+    fn an_unread_dock_still_names_the_holds_it_can_read() {
+        let last = fired("2026-09-07T20:00:00Z", Some(0));
+        let h = boarding_hold(
+            &[board_rule(4, 45)],
+            Some(&last),
+            None,
+            1,
+            Some(at("2026-09-07T20:10:00Z")),
+        );
+        // The conductor's order still decides which one is THE hold.
+        assert_eq!(
+            h.held_because.as_deref(),
+            Some("track occupied (1 open train)")
+        );
+        assert_eq!(h.cooldown_remaining_minutes, Some(35));
+        assert_eq!(
+            h.next_board,
+            "cannot say — held by track occupied (1 open train) and cooldown — 35 min left, \
+             and the dock depth could not be read, so the 4-car threshold cannot be evaluated"
+        );
+        assert!(!h.next_board.contains(':'), "{}", h.next_board);
+    }
+
+    /// A clock rule never reads `min_dock_depth`, so it boards through an
+    /// unread dock — and a sentence that stopped at "cannot say" would
+    /// hide a board that IS scheduled (the 2026-09-10 18:04 overstatement,
+    /// one state further out). Still a window, never an hour.
+    #[test]
+    fn an_unread_dock_still_says_a_clock_window_boards_regardless() {
+        let mut clock = rule("clock");
+        clock.at_times = Some(json!(["06:00", "18:00"]));
+        let h = boarding_hold(
+            &[board_rule(4, 45), clock],
+            None,
+            None,
+            0,
+            Some(at("2026-09-07T20:10:00Z")),
+        );
+        assert_eq!(
+            h.next_board,
+            "cannot say — the dock depth could not be read, \
+             so the 4-car threshold cannot be evaluated \
+             — a scheduled clock window boards regardless of the dock depth"
+        );
+        // The window is named, the hour never is — `at_times` holds
+        // "06:00" and "18:00" and neither reaches the sentence.
+        assert!(!h.next_board.contains(':'), "{}", h.next_board);
+    }
+
     #[test]
     fn no_depth_rule_says_so_rather_than_inventing_a_hold() {
         let mut clock = rule("clock");
         clock.at_times = Some(json!(["06:00"]));
-        let h = boarding_hold(&[clock], None, 3, 0, Some(at("2026-09-07T20:10:00Z")));
+        let h = boarding_hold(&[clock], None, Some(3), 0, Some(at("2026-09-07T20:10:00Z")));
         assert_eq!(h.held_because, None);
         assert_eq!(
             h.next_board,
@@ -3079,7 +3382,7 @@ mod tests {
         let last = fired("2026-09-07T20:00:00Z", Some(0));
         let p = boarding_predicate(
             &[board_rule(4, 45)],
-            5,
+            Some(5),
             Some(&last),
             0,
             Some(at("2026-09-07T20:33:00Z")),
@@ -3570,8 +3873,43 @@ mod tests {
         });
         assert!(status.dock.is_empty(), "neither car is parked-and-ready");
         assert_eq!(status.held_cars.len(), 2);
-        assert_eq!(status.boarding.dock_depth, 0);
+        assert_eq!(status.boarding.dock_depth, Some(0));
         assert_eq!(status.boarding.threshold_met, Some(false));
+    }
+
+    /// The seam the handler reaches for when the `loading-dock` row could
+    /// not be read: the SAME inputs, one reading apart. An empty slice is
+    /// a count of zero under `Read` and carries no information under
+    /// `Unread`, and only the caller knows which it handed over.
+    #[test]
+    fn an_unread_dock_reading_carries_an_unknown_depth_through_build_status() {
+        let rules = [board_rule(4, 45)];
+        let inputs = || YardInputs {
+            dock_cars: &[],
+            rules: &rules,
+            now: fixed_now(),
+            ..Default::default()
+        };
+        let read = build_status_for(inputs(), DockReading::Read);
+        assert_eq!(read.boarding.dock_depth, Some(0), "an empty dock, read");
+        assert_eq!(read.boarding.threshold_met, Some(false));
+
+        let unread = build_status_for(inputs(), DockReading::Unread);
+        assert_eq!(unread.boarding.dock_depth, None, "no dock, so no depth");
+        assert_eq!(unread.boarding.threshold_met, None);
+        assert!(
+            unread.boarding.summary.contains(DEPTH_UNREAD),
+            "{}",
+            unread.boarding.summary
+        );
+        assert!(
+            !unread.boarding.summary.contains("below the dock threshold"),
+            "{}",
+            unread.boarding.summary
+        );
+        // `build_status` is the read path, unchanged: a caller that says
+        // nothing is asserting it read the dock.
+        assert_eq!(build_status(inputs()).boarding.dock_depth, Some(0));
     }
 
     /// The two held lanes are different answers to "what cannot move":
@@ -4408,7 +4746,7 @@ mod tests {
 
         // The boarding predicate is computed from the live rules + depth.
         assert_eq!(status.boarding.dock_threshold, Some(4));
-        assert_eq!(status.boarding.dock_depth, 2);
+        assert_eq!(status.boarding.dock_depth, Some(2));
         assert_eq!(status.boarding.threshold_met, Some(false));
         assert_eq!(status.boarding.at_times, vec!["06:00", "18:00"]);
 

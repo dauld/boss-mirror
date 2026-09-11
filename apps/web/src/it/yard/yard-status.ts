@@ -115,7 +115,16 @@ export type BoardingPredicate = Readonly<{
   dock_threshold: number | null;
   cooldown_minutes: number | null;
   at_times: readonly string[];
-  dock_depth: number;
+  /** How many cars are parked right now, or NULL when the server could
+   *  not read the dock — the `loading-dock` station row did not serve.
+   *  Never coerced to 0: a zero is a count, and a count nobody took is
+   *  the shape that passes an absence check falsely (61085a9e measured
+   *  exactly that on this endpoint, and efe6ef10 is the server's own
+   *  version of it). Everything below that reads a depth must branch on
+   *  the null rather than fall through to "below the threshold". */
+  dock_depth: number | null;
+  /** Whether the threshold is met — null when the question has NO
+   *  ANSWER: no depth rule configured, or the depth unread. Not false. */
   threshold_met: boolean | null;
   summary: string;
   /** Why the dock is not boarding RIGHT NOW — `track occupied (…)`,
@@ -404,7 +413,10 @@ function parseBoarding(raw: unknown): BoardingPredicate {
     dock_threshold: typeof o.dock_threshold === 'number' ? o.dock_threshold : null,
     cooldown_minutes: typeof o.cooldown_minutes === 'number' ? o.cooldown_minutes : null,
     at_times: Array.isArray(o.at_times) ? o.at_times.map(String) : [],
-    dock_depth: Number(o.dock_depth ?? 0),
+    // `?? 0` would turn the server's "I could not read the dock" into
+    // "the dock is empty" — the defect in a new place (efe6ef10). An
+    // absent key is no reading either.
+    dock_depth: typeof o.dock_depth === 'number' ? o.dock_depth : null,
     threshold_met: typeof o.threshold_met === 'boolean' ? o.threshold_met : null,
     summary: String(o.summary ?? ''),
     // The hold: absent → null in every field. Never default a hold that
@@ -709,12 +721,19 @@ export function boardsWhen(b: BoardingPredicate): string {
   if (t === null) return b.summary !== '' ? b.summary : 'no boarding rule configured';
   const cooldown =
     b.cooldown_minutes !== null ? `the cooldown (${b.cooldown_minutes}m) clears` : null;
+  const clockOf = (): string =>
+    b.at_times.length > 0 ? ` · or by the clock at ${b.at_times.join(' / ')} UTC` : '';
+  // NO READING comes first. Without a depth the threshold question has no
+  // answer, and "0/4 parked — boards when the dock reaches 4" is the
+  // sentence an operator acts on. The clock rule still boards, and it
+  // never reads the depth, so it is still quoted.
+  if (b.dock_depth === null)
+    return `dock depth unread — the ${t}-car threshold cannot be evaluated${clockOf()}`;
   const depth = `${b.dock_depth}/${t} parked`;
   const rule = b.threshold_met
     ? `threshold met — ${depth}; boards ${cooldown ? `when ${cooldown}` : "on the conductor's next pass"}`
     : `${depth} — boards when the dock reaches ${t}${cooldown ? ` and ${cooldown}` : ''}`;
-  const clock = b.at_times.length > 0 ? ` · or by the clock at ${b.at_times.join(' / ')} UTC` : '';
-  return rule + clock;
+  return rule + clockOf();
 }
 
 /** An RFC3339 stamp as the clock time it names, `HH:MM UTC` — the
@@ -755,8 +774,12 @@ export function boardHold(b: BoardingPredicate): BoardHoldView | null {
     };
   }
   if (b.next_board !== null) {
+    // An unread depth is never `ok`. The server's sentence already says
+    // "cannot say", and painting it green is the same defect in the lens
+    // — the conductor lamp's "no reading" posture applies here too.
+    const known = b.dock_threshold !== null && b.dock_depth !== null;
     return {
-      primary: { tone: b.dock_threshold !== null ? 'ok' : 'muted', text: b.next_board },
+      primary: { tone: known ? 'ok' : 'muted', text: b.next_board },
       next: null,
       lastBoard,
     };

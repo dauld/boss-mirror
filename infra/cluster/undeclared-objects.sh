@@ -61,25 +61,40 @@
 # and looks undeclared — and for the verb that would mean deleting a
 # DECLARED object. So a file `kubectl` cannot parse, a directory with
 # implausibly few manifests, or a credential that cannot list a pair
-# makes this script say "cannot answer" and exit 1. "Could not look" is
+# makes this script say "cannot answer" and exit 4. "Could not look" is
 # never rounded to "nothing to report" (CLAUDE.md §Doors: a wrong
 # target answers instead of erroring).
+#
+# CANNOT ANSWER HAS AN EXIT CODE OF ITS OWN (4), and that is the whole
+# point of it. In `--list` a clean cluster and a cluster full of orphans
+# BOTH exit 0 — the answer is on stdout, not in the status — so a
+# consumer that reads only `-ne 0` cannot tell a refusal from a finding,
+# and one that reads only `-eq 0` reads a refusal as "clean". Neither
+# mistake is available once the refusal has its own number. 1 stays what
+# it was for: this run asked nothing well posed (a bad mode, a missing
+# argument). Every code other than 0 and 3 was already CANNOT ANSWER to
+# the ops verb, so this sharpens the contract rather than breaking it.
 #
 # USAGE
 #   undeclared-objects.sh --list
 #       kind<TAB>ns<TAB>name for every in-scope live object no manifest
 #       declares. Coverage notes on stderr. This is the orphan set.
+#       exit 0 — answered; stdout IS the set, empty when there are none
+#       exit 4 — cannot answer; stdout is empty and the reason is named
 #   undeclared-objects.sh --check <Kind>/<namespace>/<name>
 #       exit 0 — undeclared; prints `undeclared<TAB>kind<TAB>ns<TAB>name`
 #       exit 3 — NO, with the test that refused it named on stderr
-#       exit 1 — cannot answer, with the reason named
+#       exit 4 — cannot answer, with the reason named
 #   undeclared-objects.sh --declared
 #       kind<TAB>ns<TAB>name<TAB>file for everything the tree declares.
+#       exit 4 when any manifest would not parse: a declared set missing
+#       a file is not a smaller declared set, it is no answer.
 #   undeclared-objects.sh --exemptions
 #       the exemption entries, as `Kind/ns/name` or `Kind/name`.
 #   undeclared-objects.sh --kubectl
 #       the resolved kubectl argv, so a caller needing its own kubectl
 #       call uses the same one rather than a second resolution.
+#   exit 1 in any mode — a usage error. Nothing was computed.
 #
 # ENV
 #   BOSS_CLUSTER_TREE  the tree to read manifests from (default: the
@@ -102,6 +117,16 @@ set -uo pipefail
 
 ME="undeclared-objects"
 say() { echo "$ME: $*" >&2; }
+
+# "I could not look" — never an answer, and never the same number as one.
+# See the header: in --list both answers are exit 0, so a refusal that
+# shares a code with either is a refusal a consumer cannot read.
+CANNOT_ANSWER=4
+cannot_answer() { # reason-lines...
+    local line
+    for line in "$@"; do say "$line"; done
+    exit "$CANNOT_ANSWER"
+}
 
 TREE="${BOSS_CLUSTER_TREE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 DIR="$TREE/infra/cluster/manifests"
@@ -208,17 +233,18 @@ if [ "$MODE" = "--exemptions" ]; then
     exit 0
 fi
 
-KUBECTL_LINE=$(resolve_kubectl) || exit 1
+KUBECTL_LINE=$(resolve_kubectl) || exit "$CANNOT_ANSWER"
 read -r -a KUBECTL <<<"$KUBECTL_LINE"
 if [ "$MODE" = "--kubectl" ]; then
     printf '%s\n' "$KUBECTL_LINE"
     exit 0
 fi
 
-[ -d "$DIR" ] || { say "$DIR does not exist"; exit 1; }
-command -v python3 >/dev/null 2>&1 || { say "python3 is not on this box — cannot read the manifests"; exit 1; }
+[ -d "$DIR" ] || cannot_answer "$DIR does not exist"
+command -v python3 >/dev/null 2>&1 \
+    || cannot_answer "python3 is not on this box — cannot read the manifests"
 
-TMP=$(mktemp -d) || exit 1
+TMP=$(mktemp -d) || cannot_answer "cannot make a scratch directory to parse into"
 trap 'rm -rf "$TMP"' EXIT
 
 shopt -s nullglob
@@ -232,9 +258,9 @@ OTHER_MANIFESTS=("$TREE"/infra/gate-runner/*.yaml)
 shopt -u nullglob
 
 if [ "${#MANIFESTS[@]}" -lt 10 ]; then
-    say "found only ${#MANIFESTS[@]} manifest(s) in $DIR — the scrape broke"
-    say "  Refusing rather than reporting every live object as undeclared."
-    exit 1
+    cannot_answer \
+        "found only ${#MANIFESTS[@]} manifest(s) in $DIR — the scrape broke" \
+        "  Refusing rather than reporting every live object as undeclared."
 fi
 
 # kind<TAB>ns<TAB>name<TAB>file for every object in one manifest's JSON.
@@ -311,17 +337,20 @@ declared_converged="$TMP/declared-converged"
 declared_all="$TMP/declared-all"
 : > "$declared_converged"
 for f in "${MANIFESTS[@]}"; do
-    objects_in_file "$f" >> "$declared_converged" || exit 1
+    # The refusal is `objects_in_file`'s, already printed with the
+    # offending file and kubectl's own words; this only carries it out
+    # as CANNOT ANSWER rather than letting a short declared set stand.
+    objects_in_file "$f" >> "$declared_converged" || exit "$CANNOT_ANSWER"
 done
 cp "$declared_converged" "$declared_all"
 for f in ${OTHER_MANIFESTS+"${OTHER_MANIFESTS[@]}"}; do
-    objects_in_file "$f" >> "$declared_all" || exit 1
+    objects_in_file "$f" >> "$declared_all" || exit "$CANNOT_ANSWER"
 done
 
 declared_count=$(grep -c . "$declared_converged" || true)
 if [ "$declared_count" -lt 20 ]; then
-    say "parsed only $declared_count object(s) from $DIR — the scrape broke, so any answer would mean nothing"
-    exit 1
+    cannot_answer \
+        "parsed only $declared_count object(s) from $DIR — the scrape broke, so any answer would mean nothing"
 fi
 
 if [ "$MODE" = "--declared" ]; then
@@ -357,8 +386,7 @@ is_excluded_kind() { # kind
 # --- the namespaces the tree owns ------------------------------------------
 managed_ns=$(LC_ALL=C awk -F'\t' '$1 == "Namespace" { print $3 }' "$declared_converged" | LC_ALL=C sort -u)
 if [ -z "$managed_ns" ]; then
-    say "$DIR declares no Namespace object — cannot tell which namespaces the tree owns"
-    exit 1
+    cannot_answer "$DIR declares no Namespace object — cannot tell which namespaces the tree owns"
 fi
 owns_ns() { printf '%s\n' "$managed_ns" | LC_ALL=C grep -qxF "$1"; }
 
@@ -384,11 +412,23 @@ live_names() { # kind ns
     printf '%s\n' "$out" | LC_ALL=C awk -F'\t' 'NF && $1 != "" && $2 == "" { print $1 }'
 }
 
-# The ownerReference kind of one object, or empty. Returns 1 if the
-# object is not there.
+# The text of the last failed read, as one line. $TMP/get.err is ONE
+# file and the next pair overwrites it, so a reason not copied out at the
+# call site is a reason nobody will ever read — the reduction-before-
+# storing failure CLAUDE.md §Diagnosis names, applied to the only
+# evidence that an answer is incomplete.
+read_error() { # err-file
+    [ -s "$1" ] || { printf 'no output from kubectl\n'; return 0; }
+    LC_ALL=C tr '\n\t' '  ' < "$1" | LC_ALL=C sed 's/  */ /g; s/^ //; s/ $//'
+}
+
+# The ownerReference kind of one object, or empty. Returns 1 if the read
+# failed — which is "not there" ONLY when the server said so; its own
+# error file, because the caller compares its text against NotFound and
+# $TMP/get.err belongs to the listing that ran before it.
 owner_of() { # kind ns name
     "${KUBECTL[@]}" get "$1" "$3" -n "$2" \
-        -o 'jsonpath={.metadata.ownerReferences[0].kind}' --request-timeout=10s 2>"$TMP/get.err"
+        -o 'jsonpath={.metadata.ownerReferences[0].kind}' --request-timeout=10s 2>"$TMP/owner.err"
 }
 
 # ---------------------------------------------------------------------------
@@ -427,19 +467,31 @@ if [ "$MODE" = "--check" ]; then
         say "CANNOT ANSWER for $kind/$ns/$name — this credential cannot list $kind in \`$ns\`:"
         sed 's/^/    /' "$TMP/get.err" >&2
         say "  'could not look' is not 'undeclared'. Point KUBECONFIG at a credential that can read it."
-        exit 1
+        exit "$CANNOT_ANSWER"
     fi
     if ! printf '%s\n' "$names" | LC_ALL=C grep -qxF "$name"; then
         if owner=$(owner_of "$kind" "$ns" "$name"); then
             if [ -n "$owner" ]; then
                 say "REFUSED $kind/$ns/$name — a controller owns it (ownerReferences[0].kind=$owner)."
                 say "  Deleting the parent's manifest is the declared change; the child follows."
-            else
-                say "CANNOT ANSWER for $kind/$ns/$name — it exists but did not appear in the listing of $kind in \`$ns\`."
+                exit 3
             fi
-            exit 3
+            say "CANNOT ANSWER for $kind/$ns/$name — it exists but did not appear in the listing of $kind in \`$ns\`."
+            exit "$CANNOT_ANSWER"
         fi
-        say "REFUSED $kind/$ns/$name — it is not live: no $kind \`$name\` in \`$ns\`."
+        # A FAILED READ IS NOT AN ABSENT OBJECT. Only the server saying
+        # NotFound means "not there"; Forbidden, a timeout or a TLS error
+        # mean this credential cannot tell, and reporting those as "it is
+        # not live" states a fact about the cluster from evidence about
+        # the credential.
+        owner_err=$(read_error "$TMP/owner.err")
+        if ! printf '%s' "$owner_err" | LC_ALL=C grep -qiE 'notfound|not found'; then
+            say "CANNOT ANSWER for $kind/$ns/$name — it was not in the listing and it cannot be read either:"
+            say "    $owner_err"
+            say "  'could not read it' is not 'it is not there'. Point KUBECONFIG at a credential that can."
+            exit "$CANNOT_ANSWER"
+        fi
+        say "REFUSED $kind/$ns/$name — it is not live: no $kind \`$name\` in \`$ns\` ($owner_err)."
         say "  'Not found' is not 'orphaned', and a delete of it would be a no-op reported as work."
         exit 3
     fi
@@ -467,7 +519,11 @@ while IFS=$'\t' read -r kind ns; do
     pairs_total=$((pairs_total + 1))
     if ! names=$(live_names "$kind" "$ns"); then
         unreadable=$((unreadable + 1))
-        unreadable_names+=("$kind in $ns — not listable by this credential")
+        # The server's OWN WORDS, copied out now. A count of pairs is a
+        # symptom; "Forbidden" and "connection refused" are different
+        # problems with different fixes, and the reader of the UNVERIFIED
+        # line is the one who has to tell them apart.
+        unreadable_names+=("$kind in $ns — not listable by this credential: $(read_error "$TMP/get.err")")
         continue
     fi
     pairs_checked=$((pairs_checked + 1))

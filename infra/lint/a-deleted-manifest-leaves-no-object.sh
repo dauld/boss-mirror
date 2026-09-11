@@ -144,8 +144,11 @@
 # EXIT
 #   0  no orphan in what it could read (or it could read nothing and
 #      said so)
-#   1  an object the tree does not account for is running, or an
-#      exemption here has gone stale
+#   1  an object the tree does not account for is running, an exemption
+#      here has gone stale, or the DECLARED SET could not be derived —
+#      which is not a finding about the cluster and says so. A manifest
+#      that will not parse lands here: every object it declares would
+#      otherwise read as an orphan, so there is no answer to give.
 
 set -uo pipefail
 
@@ -201,14 +204,14 @@ fail() { echo "a-deleted-manifest-leaves-no-object: $*" >&2; problems=$((problem
 [ -d "$DIR" ] || { echo "a-deleted-manifest-leaves-no-object: $DIR does not exist" >&2; exit 1; }
 
 shopt -s nullglob
+# Counted here only, as the static half's own floor — it runs with no
+# cluster, which is where most runs of this check stop. WHICH files make
+# up the declared set is the derivation's question, and it is asked once,
+# below. (Its answer also spans infra/gate-runner/*.yaml: the gate runner
+# applies its own PVC and Job, so an object they declare is DECLARED,
+# just not converged — which is what keeps `gate-runner-disk` from
+# reading as an orphan.)
 MANIFESTS=("$DIR"/*.yaml)
-# Every other Kubernetes manifest in the tree. These are applied by
-# something other than the converge (the gate runner applies its own
-# PVC and Job), so an object they declare is DECLARED — just not
-# converged. Reading them is what keeps property B from reporting
-# `gate-runner-disk` as an orphan, and it collapses what would
-# otherwise be two more exemption lines.
-OTHER_MANIFESTS=(infra/gate-runner/*.yaml)
 shopt -u nullglob
 
 if [ ${#MANIFESTS[@]} -lt 10 ]; then
@@ -349,28 +352,58 @@ kubectl version -o json --request-timeout=10s >/dev/null 2>&1 \
     || skip "cannot reach the cluster API"
 
 JSONBUF=$(mktemp) || exit 1
-trap 'rm -f "$JSONBUF"' EXIT
+PARSEERR=$(mktemp) || exit 1
+READERR=$(mktemp) || exit 1
+trap 'rm -f "$JSONBUF" "$PARSEERR" "$READERR"' EXIT
 
-# kind<TAB>ns<TAB>name for the manifest FILES named, via kubectl's parser.
-objects_in_files() { # files...
-    local f
-    : > "$JSONBUF"
-    for f in "$@"; do
-        [ -f "$f" ] || continue
-        kubectl create --dry-run=client -o json -f "$f" 2>/dev/null >> "$JSONBUF"
-    done
-    objects_from_json "$JSONBUF"
+# --- what the tree declares -------------------------------------------------
+# ASKED, NOT RECOMPUTED. This used to be a local `objects_in_files` that
+# ran `kubectl create --dry-run=client` per file with `2>/dev/null` — so a
+# manifest that would not parse was silently skipped, its objects fell out
+# of the declared set, and the object it DECLARES was reported here as an
+# orphan under advice to delete it. Measured (backlog 19aa75e0, fixture in
+# crates/core/boss-testing/tests/undeclared_objects_sh.rs): one
+# unparseable file made this print "1 live object(s) ... that no manifest
+# declares: Service/svc-a" and exit 1, naming a declared object and never
+# mentioning the file.
+#
+# `undeclared-objects.sh --declared` is the one definition of this
+# question, and it refuses with the filename instead (exit 4, CANNOT
+# ANSWER). Two copies of one derivation differ in exactly the places
+# nobody compared (CLAUDE.md §9a), and this was that place.
+DERIVE="infra/cluster/undeclared-objects.sh"
+[ -x "$DERIVE" ] || {
+    echo "a-deleted-manifest-leaves-no-object: $DERIVE is missing — it is where the declared set is defined." >&2
+    exit 1
 }
+# kind<TAB>ns<TAB>name<TAB>file for EVERY manifest in the tree, converged
+# or not; the file column is dropped here because this check compares
+# identities.
+# `|| {` and NOT `if ! …; then`: inside the `then` of an `if !`, `$?` is
+# the status the `!` produced, which is always 0 — so the first draft of
+# this reported every refusal as "exit 0", a verdict that names nothing
+# (CLAUDE.md §Diagnosis). Measured with `if ! (exit 4); then echo $?`.
+declared_rows=$("$DERIVE" --declared 2>"$PARSEERR") || {
+    rc=$?
+    echo "a-deleted-manifest-leaves-no-object: CANNOT ANSWER — $DERIVE could not derive the declared set (exit $rc):" >&2
+    sed 's/^/    /' "$PARSEERR" >&2
+    echo "  A declared set missing a file is not a smaller declared set; every object that" >&2
+    echo "  file declares would read as an orphan. Nothing is claimed about the cluster." >&2
+    exit 1
+}
+# Anything it said while still answering is the reader's too: a warning
+# swallowed on the success path is the same defect one notch quieter.
+sed 's/^/  /' "$PARSEERR" >&2
 
-# --- what the tree declares, converged and otherwise ------------------------
-declared_converged=$(objects_in_files "${MANIFESTS[@]}" | LC_ALL=C sort -u)
-
-declared_tree=$(
-    {
-        printf '%s\n' "$declared_converged"
-        [ ${#OTHER_MANIFESTS[@]} -eq 0 ] || objects_in_files "${OTHER_MANIFESTS[@]}"
-    } | grep -v '^[[:space:]]*$' | LC_ALL=C sort -u
-)
+declared_tree=$(printf '%s\n' "$declared_rows" \
+    | LC_ALL=C awk -F'\t' 'NF >= 3 { print $1 "\t" $2 "\t" $3 }' \
+    | grep -v '^[[:space:]]*$' | LC_ALL=C sort -u)
+# Converged-only: the subset declared by a file under $DIR. `managed_ns`
+# below must come from this and not from the gate-runner manifests, which
+# declare objects into a namespace they do not own.
+declared_converged=$(printf '%s\n' "$declared_rows" \
+    | LC_ALL=C awk -F'\t' -v d="$DIR/" 'NF >= 4 && index($4, d) == 1 { print $1 "\t" $2 "\t" $3 }' \
+    | grep -v '^[[:space:]]*$' | LC_ALL=C sort -u)
 
 declared_count=$(printf '%s\n' "$declared_converged" | grep -c . || true)
 if [ "$declared_count" -lt 20 ]; then
@@ -422,7 +455,15 @@ live_seen=""
 
 # List the live object names of one kind in one namespace, excluding
 # anything a controller owns. Prints nothing and returns 1 when this
-# credential cannot look.
+# credential cannot look — leaving the server's words in $READERR,
+# because "Forbidden" and "connection refused" are different problems
+# with different fixes and the reader of the UNVERIFIED line below is the
+# one who has to tell them apart.
+#
+# A FILE, not a variable. The caller runs this inside `$(...)`, so an
+# assignment here happens in a subshell and is gone by the time anything
+# could read it — which is how the first attempt at keeping this reason
+# produced an empty one.
 live_names() { # kind ns
     local out rc
     out=$(kubectl get "$1" -n "$2" \
@@ -430,6 +471,8 @@ live_names() { # kind ns
         --request-timeout=10s 2>&1)
     rc=$?
     if [ "$rc" -ne 0 ]; then
+        printf '%s' "$out" | LC_ALL=C tr '\n\t' '  ' | LC_ALL=C sed 's/  */ /g; s/^ //; s/ $//' > "$READERR"
+        [ -s "$READERR" ] || printf 'no output from kubectl (exit %s)' "$rc" > "$READERR"
         return 1
     fi
     printf '%s\n' "$out" | LC_ALL=C awk -F'\t' 'NF && $1 != "" && $2 == "" { print $1 }'
@@ -473,6 +516,20 @@ while IFS= read -r path; do
         [ -n "$sha" ] && blob=$(git show "$sha^:$path" 2>/dev/null)
     fi
     [ -n "$blob" ] || continue
+    # THE PARSE, WITH ITS ERRORS KEPT. The derivation cannot do this one
+    # — it reads files in the tree, and this content exists only in git
+    # history — so the parse stays here, and so does the obligation. With
+    # `2>/dev/null` a deleted manifest that will not parse declared
+    # NOTHING as far as this loop could tell, and property A then passed
+    # it silently: the one direction of drift this check exists for,
+    # reported clean because the evidence was discarded.
+    if ! printf '%s\n' "$blob" | kubectl create --dry-run=client -o json -f - \
+            > "$JSONBUF" 2> "$PARSEERR"; then
+        fail "cannot parse the DELETED manifest $path as of the commit that removed it:"
+        sed 's/^/    /' "$PARSEERR" >&2
+        echo "  So nothing here knows what it declared, and a pass would mean 'could not look'." >&2
+        continue
+    fi
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         # Declared again by another file — a rename, a split, a move.
@@ -490,7 +547,7 @@ while IFS= read -r path; do
         deleted_objects="${deleted_objects}${kind}	${name}	${path}	${ns}
 "
     done <<EOF
-$(printf '%s\n' "$blob" | kubectl create --dry-run=client -o json -f - 2>/dev/null > "$JSONBUF"; objects_from_json "$JSONBUF")
+$(objects_from_json "$JSONBUF")
 EOF
 done <<EOF
 $deleted_paths
@@ -560,7 +617,7 @@ while IFS=$'\t' read -r kind ns; do
     pairs_total=$((pairs_total + 1))
     if ! names=$(live_names "$kind" "$ns"); then
         unreadable=$((unreadable + 1))
-        unreadable_names+=("$kind in $ns — not listable by this credential")
+        unreadable_names+=("$kind in $ns — not listable by this credential: $(cat "$READERR")")
         continue
     fi
     pairs_checked=$((pairs_checked + 1))

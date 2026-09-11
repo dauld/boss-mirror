@@ -124,7 +124,9 @@ pub(crate) const UNITS_SCOPE: &str = "host-units";
 /// The disk floor that turns a reading into a HARD finding (49a8d842:
 /// the forge host — 228G, 83% full, "THE TIGHT ONE" — could fill and
 /// the comparison would keep answering unknown_scope). Free below 16
-/// GiB or below 35% of capacity is `disk_tight`.
+/// GiB, or below 35% of capacity while also under the headroom ceiling
+/// below, is `disk_tight` — the percentage rules in the middle of the
+/// disk-size range and an absolute number rules at each end.
 ///
 /// WHICH FILESYSTEM THE NUMBERS DESCRIBE — the thing that makes the
 /// percentage mean one thing across two surfaces (a520737f). Both
@@ -160,6 +162,55 @@ pub(crate) const UNITS_SCOPE: &str = "host-units";
 const DISK_TIGHT_FLOOR_GB: i64 = 16;
 const DISK_TIGHT_FLOOR_PCT: i64 = 35;
 
+/// WHY THE PERCENTAGE IS CAPPED — the clause the comment above reasoned
+/// out for the SMALL end and not at all for the large one (8e425862).
+/// Above this much free space the percentage is not consulted: the
+/// effective floor is `max(16 GiB, min(35% of capacity, 200 GB))`.
+///
+/// The reason is that 35% of a big enough disk overshoots every absolute
+/// floor the pipeline actually enforces. w-1, the 929 GB build node, sat
+/// at 305 GB free = 32.8% on 2026-09-11 and was therefore `disk_tight`
+/// while holding FOUR TIMES the highest of them; the raiser dedups per
+/// host + condition, so alarm packet 290a5269 could never settle, and a
+/// permanently-true alarm is the "a check nobody reads is a check that
+/// is not running" failure from CLAUDE.md §Diagnosis — it teaches the
+/// operator to discount `disk_tight` on the forge too, where the number
+/// is real. Same raise (8 → 35) overshooting in the other direction.
+///
+/// DERIVED, NOT PICKED — twice the highest of the three absolute floors
+/// this pipeline enforces, read out of the files that enforce them on
+/// 2026-09-11:
+/// - **70 GB** — the locomotive's run-START refusal,
+///   `infra/forge/locomotive.sh` (`BOSS_CI_MIN_FREE_GB:-70`).
+/// - **100 GB** — the disk sweep's floor,
+///   `infra/forge/disk-floor-sweep.service`
+///   (`Environment=BOSS_DISK_FLOOR_GB=100`; the script's own default is
+///   70, raised here deliberately because a floor only buys headroom if
+///   it is higher than the one it defends). The highest, so the ceiling
+///   is 2 × 100.
+/// - **40 GB** — the conductor's boarding refusal, delivery-policy
+///   `ci_host_floor_gb` (compiled fallback
+///   `boss-cli::delivery_policy::COMPILED_CI_HOST_FLOOR_GB`, live value a
+///   registry row: `202609050500-the-ci-host-floor-is-forty.sql`).
+///
+/// §9a asks for a collapse, not a fourth number, and this is the honest
+/// reason it is a constant: two of those three floors are shell and
+/// systemd text, and the third is a `pub(crate)` compile-time fallback
+/// for a value whose authority is a database row — none is reachable
+/// from this crate. So the duplication is PINNED instead, by
+/// `the_headroom_ceiling_is_pinned_to_the_floors_it_was_derived_from`,
+/// which reads all three out of the tree and fails naming the one that
+/// moved. A pin is a holding action: if these floors ever land in one
+/// registry, this constant should read it and the pin should go.
+///
+/// The doubling is headroom for the gap between a floor and the work
+/// that eats into it — the same argument the sweep's unit makes for
+/// keeping 100 against CI's 70. At 2 × 100 on the 929 GB build node the
+/// percentage stops ruling at 21.5%, which still leaves `disk_tight`
+/// able to fire on w-1 with ~200 GB in hand: far earlier than any floor
+/// that stops the pipeline, and no longer permanently.
+const DISK_TIGHT_HEADROOM_CEILING_GB: i64 = 200;
+
 /// The floor applied to one observed node — ONE definition, read by
 /// both scopes (CLAUDE.md §9a: the floor is a fact, and a fact that
 /// lives twice drifts). `None` when the node is fine OR when it carries
@@ -169,7 +220,16 @@ fn disk_tight_finding(node: &Json) -> Option<Json> {
     let id = node.get("id").and_then(Json::as_str)?;
     let free = node.get("disk_free_gb").and_then(Json::as_i64)?;
     let total = node.get("disk_gb").and_then(Json::as_i64)?;
-    (total > 0 && (free < DISK_TIGHT_FLOOR_GB || free * 100 < total * DISK_TIGHT_FLOOR_PCT))
+    // The floor is the MAX of an absolute minimum and a CAPPED
+    // percentage — `max(DISK_TIGHT_FLOOR_GB, min(pct of capacity,
+    // DISK_TIGHT_HEADROOM_CEILING_GB))`. The cap is the clause that was
+    // missing: a percentage alone rules at BOTH ends of the disk-size
+    // range, and on a big enough disk 35% is more headroom than anything
+    // in this pipeline asks for (8e425862).
+    let below_minimum = free < DISK_TIGHT_FLOOR_GB;
+    let below_capped_pct =
+        free < DISK_TIGHT_HEADROOM_CEILING_GB && free * 100 < total * DISK_TIGHT_FLOOR_PCT;
+    (total > 0 && (below_minimum || below_capped_pct))
         .then(|| json!({ "id": id, "free_gb": free, "disk_gb": total }))
 }
 
@@ -852,13 +912,139 @@ mod tests {
         // was found, and correctly not tight.
         let fine = compare(&declared, &cluster_obs("w-1", 929, Some(390)));
         assert_eq!(fine["counts"]["disk_tight"], 0);
-        // 300 of 929 is 32%: above the 16 GiB floor, under 35%, so a
-        // packet lands while the gate can still run.
-        let tight = compare(&declared, &cluster_obs("w-1", 929, Some(300)));
+        // 150 of 929 is 16%: above the 16 GiB floor, under 35%, and
+        // under the headroom ceiling — so a packet lands while the gate
+        // can still run. This case USED to be 300 of 929, which read
+        // tight on the percentage alone; 300 GB is more than four times
+        // the highest floor the pipeline enforces, and saying so every
+        // fifteen minutes is what kept alarm 290a5269 open forever
+        // (8e425862, and the table in
+        // `the_percentage_is_capped_by_the_headroom_ceiling`).
+        let tight = compare(&declared, &cluster_obs("w-1", 929, Some(150)));
         assert_eq!(tight["counts"]["disk_tight"], 1);
         assert_eq!(tight["findings"]["disk_tight"][0]["id"], "w-1");
-        assert_eq!(tight["findings"]["disk_tight"][0]["free_gb"], 300);
+        assert_eq!(tight["findings"]["disk_tight"][0]["free_gb"], 150);
         assert_eq!(tight["findings"]["disk_tight"][0]["disk_gb"], 929);
+    }
+
+    #[test]
+    fn the_percentage_is_capped_by_the_headroom_ceiling() {
+        // THE TABLE, with the measured numbers (8e425862). A percentage
+        // with no cap at the LARGE end made w-1 — the 929 GB build node
+        // — `disk_tight` at 305 GB free: more than four times the
+        // highest absolute floor anything in this pipeline enforces. The
+        // raiser dedups per host + condition, so that packet stays open
+        // forever and teaches the operator to discount `disk_tight`
+        // everywhere, including on the forge where the number is real.
+        // Both surfaces, because the floor is ONE definition (§9a).
+        let dec = vec![json!({"id":"h","role":"talos-worker","retired":false})];
+        let dec_host = vec![json!({"id":"h","role":"forge"})];
+        for (free, total, want, why) in [
+            // w-1 as the packet measured it, 2026-09-11 01:30Z.
+            (305, 929, 0, "w-1, 305 of 929 = 32.8%"),
+            // w-1 re-read live the same night: still under 35%, still
+            // holding twice what the sweep keeps on the CI host.
+            (275, 929, 0, "w-1, 275 of 929 = 29.6%"),
+            // The forge, the host the 8 → 35 raise was FOR: clean on the
+            // percentage alone at both readings, so the cap is not what
+            // is keeping it clean.
+            (101, 227, 0, "forge, 101 of 227 = 44%"),
+            (92, 227, 0, "forge, 92 of 227 = 40.5%"),
+            // A 228 GB host genuinely filling — below the ceiling, so
+            // the percentage still rules and the raise still works.
+            (60, 228, 1, "a filling 228 GB host, 60 of 228 = 26%"),
+            // A 48 GB bastion: 35% is under the 16 GiB minimum, which
+            // rules, exactly as before. Unchanged by the cap.
+            (10, 48, 1, "a 48 GB bastion at 10 of 48"),
+            // AT the ceiling is CLEAN, one GB under it is tight: every
+            // comparison in this file is strict `<`, so "exactly at the
+            // floor" is never a finding — the same reading as exactly 16
+            // GiB free and exactly 35% free, both of which are clean.
+            (
+                DISK_TIGHT_HEADROOM_CEILING_GB,
+                929,
+                0,
+                "exactly at the ceiling",
+            ),
+            (
+                DISK_TIGHT_HEADROOM_CEILING_GB - 1,
+                929,
+                1,
+                "one GB under the ceiling",
+            ),
+        ] {
+            assert_eq!(
+                compare(&dec, &cluster_obs("h", total, Some(free)))["counts"]["disk_tight"],
+                want,
+                "cluster scope: {why}"
+            );
+            assert_eq!(
+                compare_host(&dec_host, &host_obs("h", free, total))["counts"]["disk_tight"],
+                want,
+                "host scope: {why}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_headroom_ceiling_is_pinned_to_the_floors_it_was_derived_from() {
+        // §9a, the pin half: the ceiling is DERIVED from three absolute
+        // floors that live in three other files, and two of them are
+        // shell/systemd text no Rust constant can read. So this test is
+        // what stands in for collapsing them — if any floor moves, it
+        // names the file and says re-derive, instead of leaving a comment
+        // asking the next person to keep four numbers in sync.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let int_after = |rel: &str, needle: &str| -> i64 {
+            let text = std::fs::read_to_string(root.join(rel))
+                .unwrap_or_else(|e| panic!("{rel} must be readable to pin the ceiling: {e}"));
+            let at = text
+                .find(needle)
+                .unwrap_or_else(|| panic!("{rel} no longer contains `{needle}` — re-derive"));
+            let digits: String = text[at + needle.len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            digits
+                .parse()
+                .unwrap_or_else(|e| panic!("{rel}: `{needle}` is not followed by a number: {e}"))
+        };
+        let floors = [
+            (
+                "the locomotive's run-START refusal",
+                70,
+                int_after("infra/forge/locomotive.sh", "BOSS_CI_MIN_FREE_GB:-"),
+            ),
+            (
+                "the disk sweep's floor",
+                100,
+                int_after(
+                    "infra/forge/disk-floor-sweep.service",
+                    "Environment=BOSS_DISK_FLOOR_GB=",
+                ),
+            ),
+            (
+                "the conductor's boarding refusal",
+                40,
+                int_after(
+                    "crates/orchestrators/boss-cli/src/delivery_policy.rs",
+                    "COMPILED_CI_HOST_FLOOR_GB: i64 = ",
+                ),
+            ),
+        ];
+        for (what, documented, found) in floors {
+            assert_eq!(
+                found, documented,
+                "{what} moved to {found} GB — DISK_TIGHT_HEADROOM_CEILING_GB's doc comment \
+                 still says {documented}, so re-derive the ceiling and update both"
+            );
+        }
+        let highest = floors.iter().map(|f| f.2).max().expect("three floors");
+        assert_eq!(
+            DISK_TIGHT_HEADROOM_CEILING_GB,
+            2 * highest,
+            "the ceiling is twice the highest enforced floor ({highest} GB) — re-derive it"
+        );
     }
 
     #[test]

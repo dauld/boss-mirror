@@ -206,6 +206,39 @@ describe('parseYardStatus', () => {
     expect(s.boarding.at_times).toEqual([]);
   });
 
+  // The reader-side half of efe6ef10. The server now sends `dock_depth:
+  // null` when the `loading-dock` row could not be read; a parser that
+  // coerced it (`Number(o.dock_depth ?? 0)`, which this used to do) hands
+  // every downstream reader a count nobody took.
+  test('an unread dock depth parses as null — never coerced to 0', () => {
+    const s = parseYardStatus({
+      boarding: { dock_threshold: 4, dock_depth: null, threshold_met: null, at_times: [], summary: 'x' },
+    });
+    expect(s.boarding.dock_depth).toBeNull();
+    expect(s.boarding.dock_depth).not.toBe(0);
+    expect(s.boarding.threshold_met).toBeNull();
+    expect(s.boarding.threshold_met).not.toBe(false);
+    // A read dock of zero is still a count, and must stay one.
+    const empty = parseYardStatus({ boarding: { dock_depth: 0, at_times: [], summary: 'x' } });
+    expect(empty.boarding.dock_depth).toBe(0);
+  });
+
+  test('an unread depth reads muted, not ok — a non-reading is not health', () => {
+    const unread = boardHold({
+      dock_threshold: 4,
+      cooldown_minutes: null,
+      at_times: [],
+      dock_depth: null,
+      threshold_met: null,
+      summary: 'x',
+      held_because: null,
+      cooldown_remaining_minutes: null,
+      last_board_at: null,
+      next_board: 'cannot say — the dock depth could not be read',
+    });
+    expect(unread?.primary.tone).toBe('muted');
+  });
+
   test('a non-object throws so an outage renders failed, not empty', () => {
     expect(() => parseYardStatus('not the payload')).toThrow();
   });
@@ -449,6 +482,24 @@ describe('boardsWhen', () => {
       .toBe('Boards at 06:00 UTC.');
     expect(boardsWhen(predicate({ dock_threshold: null, threshold_met: null, summary: '' })))
       .toBe('no boarding rule configured');
+  });
+
+  // efe6ef10: the server says the dock could not be read (dock_depth
+  // null, threshold_met null). A lens that falls through to the
+  // below-threshold branch has reproduced the defect one layer out — and
+  // `0/4 parked — boards when the dock reaches 4` is the sentence an
+  // operator acts on.
+  test('an unread depth states the absence, never a 0/N parked reading', () => {
+    const text = boardsWhen(predicate({ dock_depth: null, threshold_met: null }));
+    expect(text).toBe('dock depth unread — the 4-car threshold cannot be evaluated');
+    expect(text).not.toContain('parked');
+    expect(text).not.toContain('boards when the dock reaches');
+  });
+
+  test('an unread depth still quotes a clock rule, which never reads the depth', () => {
+    expect(boardsWhen(predicate({ dock_depth: null, threshold_met: null, at_times: ['06:00'] }))).toBe(
+      'dock depth unread — the 4-car threshold cannot be evaluated · or by the clock at 06:00 UTC',
+    );
   });
 });
 
