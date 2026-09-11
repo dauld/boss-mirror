@@ -362,7 +362,14 @@ enum Commands {
     /// stranded greens, the dock, and the task queue — the approach in
     /// one read, with the startup checklist at the end (CLAUDE.md
     /// §Engineering Session Startup; automation of acedf981's L1).
-    Orient,
+    Orient {
+        /// List every entry of a bounded section instead of the first
+        /// twelve and "…and N more". The default is a bound, not a
+        /// filter — the counts are always whole — but 34 of 46 orphans
+        /// were unreadable from any surface until this flag (ce673e64).
+        #[arg(long)]
+        all: bool,
+    },
     /// The handover a builder is dispatched with: the packet verbatim
     /// from the system of record, and the invariants derived from the
     /// files that decide them.
@@ -1244,7 +1251,7 @@ async fn main() -> Result<()> {
             }
             JobAction::Patch { job, patch } => job::patch(&job, &patch).await,
         },
-        Commands::Orient => orient::run().await,
+        Commands::Orient { all } => orient::run(all).await,
         Commands::Brief { packet } => brief::run(packet).await,
         Commands::Channels => channels::run().await,
         Commands::Design {
