@@ -673,3 +673,451 @@ fn git_version() -> String {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| "git version unknown".into())
 }
+
+// ---------------------------------------------------------------------
+// Defect 4 (2026-09-11, the fourth failure of the day) — the fork check
+// verified a NAME, not a fork.
+//
+// `gh repo view "$FORK_SLUG" --json name` succeeded for `dauld/boss`,
+// David's unrelated PRIVATE repository, so the auto-fork beneath it was
+// skipped, the snapshot was pushed into a repository outside
+// algedonic-dev/boss's fork network, and `gh pr create` then returned
+// four GraphQL errors at once — "Head sha can't be blank", "Base sha
+// can't be blank", "No commits between algedonic-dev:main and
+// dauld:publish/2026-09-11", "Head ref must be a branch" — none of which
+// names the cause. Measured the same day against GitHub's REST API, with
+// a control on the same connection: repos/dauld/boss 404,
+// repos/algedonic-dev/boss 200 (fork=false), repos/dauld/boss-mirror 200
+// (fork=true, parent=algedonic-dev/boss).
+//
+// So the cases below run the VERB's run path, not `--check`: the fork
+// question needs the token and the network, which `--check` deliberately
+// has neither of. Every outside party is a fixture — the jobs API a
+// `curl` stub that prints one packet, GitHub's REST API a `gh` stub that
+// prints a repository object, the mirror and the fork local bare
+// repositories — and the slugs are fixture names, never dauld's. The
+// accepted and the refused case differ in ONE thing: the `fork`/`parent`
+// fields of that object. Without that pairing neither proves anything.
+// ---------------------------------------------------------------------
+
+/// One git command in `dir` with `input` on stdin — `hash-object` and
+/// `mktree` are the two fixtures below need, and both read stdin.
+fn git_stdin(dir: &Path, args: &[&str], input: &str) -> String {
+    use std::io::Write;
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .env("GIT_AUTHOR_NAME", "fixture")
+        .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+        .env("GIT_COMMITTER_NAME", "fixture")
+        .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+        .spawn()
+        .expect("git runs");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin is piped")
+        .write_all(input.as_bytes())
+        .expect("git reads stdin");
+    let out = child.wait_with_output().expect("git finishes");
+    assert!(
+        out.status.success(),
+        "git {args:?} in {}: {}",
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A bare repository whose `main` holds one file with `content`. The
+/// forge and the mirror stand-ins must differ in their TREE, not only
+/// their history: the verb refuses "nothing to publish" when the two
+/// trees match, so two empty-tree fixtures would never reach the fork.
+fn git_init_bare_holding(path: &Path, content: &str) {
+    git_init_bare(path);
+    let blob = git_stdin(
+        path,
+        &["hash-object", "-t", "blob", "-w", "--stdin"],
+        content,
+    );
+    let tree = git_stdin(path, &["mktree"], &format!("100644 blob {blob}\tfile\n"));
+    let commit = git_in(path, &["commit-tree", &tree, "-m", "fixture"]);
+    git_in(path, &["update-ref", "refs/heads/main", &commit]);
+}
+
+/// Real `jq`, not the `exit 0` stand-in `stub_bin` installs for a missing
+/// tool: the run path reads the packet and the repository object with it,
+/// so a stub would make every case below pass vacuously.
+fn have_real_jq() -> bool {
+    Command::new("sh")
+        .args(["-c", "command -v jq >/dev/null 2>&1"])
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+const FORK_SLUG: &str = "fixture-owner/mirror-fork";
+const MIRROR_SLUG: &str = "fixture-upstream/mirror";
+const PUBLISH_DATE: &str = "2026-01-02";
+
+/// One offline run of the verb. Build it, describe what GitHub says about
+/// the fork with `gh_repo` / `on_fork`, then `go()`.
+struct Run {
+    root: PathBuf,
+    forge: PathBuf,
+    mirror: PathBuf,
+    fork: PathBuf,
+    gh_api: PathBuf,
+    stubs: PathBuf,
+}
+
+impl Run {
+    fn new(case: &str) -> Run {
+        let root = scratch(case);
+        let forge = root.join("forge.git");
+        let mirror = root.join("mirror.git");
+        let fork = root.join("fork.git");
+        // Distinct trees, or the verb stops at "nothing to publish".
+        git_init_bare_holding(&forge, "forge main\n");
+        git_init_bare_holding(&mirror, "an older mirror main\n");
+        git_init_bare(&fork);
+        let gh_api = root.join("gh-api");
+        std::fs::create_dir_all(&gh_api).unwrap();
+
+        // One open publish-to-github packet whose open-pr step is ready —
+        // the shape the verb selects with jq.
+        let jobs = root.join("jobs.json");
+        boss_testing::write_file(
+            &jobs,
+            r#"{"data":[{"id":"00000000-0000-0000-0000-0000000000aa",
+                         "title":"publish to github","status":"open",
+                         "steps":[{"id":"00000000-0000-0000-0000-0000000000bb",
+                                   "spec_slug":"open-pr","status":"ready",
+                                   "metadata":{"ops_verb":"publish-github-pr"}}]}]}"#,
+        );
+
+        let stubs = root.join("stubs");
+        std::fs::create_dir_all(&stubs).unwrap();
+        let fork_file = format!("{}.json", FORK_SLUG.replace('/', "_"));
+        // `gh`: the REST repository object from a fixture file, `repo
+        // view --json name` answering for ANY name that has one (which is
+        // exactly how today's wrong repository passed), and `repo fork`
+        // materialising whatever `on_fork` left for it.
+        boss_testing::write_exec(
+            &stubs.join("gh"),
+            &format!(
+                r#"#!/bin/sh
+echo "$*" >> '{log}'
+slug_file() {{ echo '{api}/'"$(echo "$1" | tr / _)".json; }}
+if [ "$1" = "api" ]; then
+    f=$(slug_file "${{2#repos/}}")
+    if [ -f "$f" ]; then cat "$f"; exit 0; fi
+    echo 'gh: Not Found (HTTP 404)' >&2
+    exit 1
+fi
+if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
+    f=$(slug_file "$3")
+    if [ -f "$f" ]; then echo '{{"name":"stub"}}'; exit 0; fi
+    echo 'gh: Could not resolve to a Repository (HTTP 404)' >&2
+    exit 1
+fi
+if [ "$1" = "repo" ] && [ "$2" = "fork" ]; then
+    [ -f '{api}/_on_fork.json' ] && cp '{api}/_on_fork.json' '{api}/{fork_file}'
+    exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+    echo 'https://github.invalid/{mirror_slug}/pull/1'
+    exit 0
+fi
+exit 0
+"#,
+                log = root.join("gh.log").display(),
+                api = gh_api.display(),
+                fork_file = fork_file,
+                mirror_slug = MIRROR_SLUG,
+            ),
+        );
+        // `curl`: the packet on a GET, silence on the step PUT.
+        boss_testing::write_exec(
+            &stubs.join("curl"),
+            &format!(
+                r#"#!/bin/sh
+echo "$*" >> '{log}'
+for a in "$@"; do
+    if [ "$a" = "PUT" ]; then exit 0; fi
+done
+cat '{jobs}'
+"#,
+                log = root.join("curl.log").display(),
+                jobs = jobs.display(),
+            ),
+        );
+
+        Run {
+            root,
+            forge,
+            mirror,
+            fork,
+            gh_api,
+            stubs,
+        }
+    }
+
+    /// What GitHub's REST API says about `slug`.
+    fn gh_repo(&self, slug: &str, body: &str) {
+        boss_testing::write_file(
+            &self.gh_api.join(format!("{}.json", slug.replace('/', "_"))),
+            body,
+        );
+    }
+
+    /// What `gh repo fork` brings into being — absent, the fork stays 404
+    /// after forking, which is its own finding.
+    fn on_fork(&self, body: &str) {
+        boss_testing::write_file(&self.gh_api.join("_on_fork.json"), body);
+    }
+
+    fn go(&self) -> (bool, String) {
+        let outer = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+        // Ours first: `stub_bin` stands in for tools this box LACKS, and
+        // gh/curl must be ours even where the box has them.
+        let path = format!(
+            "{}:{}:{outer}",
+            self.stubs.display(),
+            stub_bin(&self.root).display()
+        );
+        let mut cmd = Command::new("bash");
+        cmd.arg(script()).env_clear().env("PATH", path);
+        for (k, v) in base_env(&self.root) {
+            cmd.env(k, v);
+        }
+        cmd.env("BOSS_JOBS_URL", "http://jobs.invalid")
+            .env("BOSS_FORGE_REPO_PATH", self.forge.display().to_string())
+            .env("BOSS_MIRROR_SLUG", MIRROR_SLUG)
+            .env("BOSS_MIRROR_URL", self.mirror.display().to_string())
+            .env("BOSS_FORK_SLUG", FORK_SLUG)
+            .env("BOSS_FORK_URL", self.fork.display().to_string())
+            .env("BOSS_PUBLISH_DATE", PUBLISH_DATE);
+        let out = cmd.output().expect("the verb runs");
+        let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        (out.status.success(), text)
+    }
+
+    /// Did the snapshot reach the repository standing in for the fork?
+    /// This is the assertion that matters: a refusal that still pushed is
+    /// not a refusal.
+    fn pushed(&self) -> bool {
+        Command::new("git")
+            .arg("-C")
+            .arg(&self.fork)
+            .args([
+                "rev-parse",
+                "--verify",
+                "-q",
+                &format!("refs/heads/publish/{PUBLISH_DATE}"),
+            ])
+            .output()
+            .expect("git runs")
+            .status
+            .success()
+    }
+
+    fn gh_log(&self) -> String {
+        std::fs::read_to_string(self.root.join("gh.log")).unwrap_or_default()
+    }
+
+    fn curl_log(&self) -> String {
+        std::fs::read_to_string(self.root.join("curl.log")).unwrap_or_default()
+    }
+}
+
+/// A fork of the mirror — `fork=true`, `parent`/`source` the mirror. The
+/// POSITIVE half of the pair: the verb must push and open the PR here, or
+/// the refusal below is just a verb that refuses everything.
+#[test]
+fn a_real_fork_of_the_mirror_is_published_to() {
+    if !have_real_jq() {
+        eprintln!("publish_github_pr_sh: SKIPPED — the run path needs a real jq");
+        return;
+    }
+    let run = Run::new("fork-accepted");
+    run.gh_repo(
+        FORK_SLUG,
+        &format!(
+            r#"{{"full_name":"{FORK_SLUG}","fork":true,
+                 "parent":{{"full_name":"{MIRROR_SLUG}"}},
+                 "source":{{"full_name":"{MIRROR_SLUG}"}},
+                 "default_branch":"main","private":false}}"#
+        ),
+    );
+    let (ok, out) = run.go();
+    assert!(ok, "the verb refused a real fork of the mirror: {out}");
+    assert!(
+        run.pushed(),
+        "the verb accepted the fork but pushed nothing to it: {out}"
+    );
+    assert!(
+        out.contains("https://github.invalid"),
+        "no PR was opened: {out}"
+    );
+    assert!(
+        run.curl_log().contains("PUT"),
+        "open-pr was never completed on the packet: {}",
+        run.curl_log()
+    );
+    assert!(
+        !run.gh_log().contains("repo fork"),
+        "the verb forked a fork that already existed: {}",
+        run.gh_log()
+    );
+}
+
+/// THE CASE THAT FAILED. A repository that EXISTS under the fork's name
+/// and is not in the mirror's fork network — today's `dauld/boss`, and
+/// below it a fork of some OTHER upstream, because "is a fork" is not the
+/// question either. Both must be refused by name, and neither may push:
+/// GitHub accepts the push (it is our own repository) and only the PR
+/// fails, one step too late to undo.
+#[test]
+fn a_namesake_that_is_not_a_fork_of_the_mirror_is_refused_before_the_push() {
+    if !have_real_jq() {
+        eprintln!("publish_github_pr_sh: SKIPPED — the run path needs a real jq");
+        return;
+    }
+    // (a) exists, not a fork at all — the live shape of dauld/boss.
+    let run = Run::new("fork-namesake");
+    run.gh_repo(
+        FORK_SLUG,
+        &format!(
+            r#"{{"full_name":"{FORK_SLUG}","fork":false,"parent":null,"source":null,
+                 "default_branch":"main","private":true}}"#
+        ),
+    );
+    let (ok, out) = run.go();
+    assert!(
+        !ok,
+        "a repository that is NOT a fork of {MIRROR_SLUG} was accepted: {out}"
+    );
+    assert!(
+        !run.pushed(),
+        "REFUSED and pushed anyway — the push is the step that cannot be taken back: {out}"
+    );
+    assert!(
+        out.contains(FORK_SLUG) && out.contains(MIRROR_SLUG),
+        "the refusal names neither the wrong repository nor the mirror: {out}"
+    );
+    assert!(
+        out.contains("fork=false"),
+        "the refusal does not quote what the repository says about itself: {out}"
+    );
+    assert!(
+        !run.gh_log().contains("pr create"),
+        "it reached gh pr create, which is where today's failure surfaced: {}",
+        run.gh_log()
+    );
+
+    // (b) a fork — of something else. `isFork` alone would pass this.
+    let run = Run::new("fork-of-another-upstream");
+    run.gh_repo(
+        FORK_SLUG,
+        &format!(
+            r#"{{"full_name":"{FORK_SLUG}","fork":true,
+                 "parent":{{"full_name":"someone-else/boss"}},
+                 "source":{{"full_name":"someone-else/boss"}},
+                 "default_branch":"main","private":false}}"#
+        ),
+    );
+    let (ok, out) = run.go();
+    assert!(
+        !ok,
+        "a fork of someone-else/boss was accepted as a fork of {MIRROR_SLUG}: {out}"
+    );
+    assert!(!run.pushed(), "REFUSED and pushed anyway: {out}");
+    assert!(
+        out.contains("someone-else/boss"),
+        "the refusal does not say which upstream it IS a fork of: {out}"
+    );
+}
+
+/// ABSENT (404) is the one case the auto-fork was written for, and it must
+/// still reach it — and fork under the fork's OWN name, because
+/// `gh repo fork` otherwise names the new fork after the upstream, which
+/// on this account is the repository that caused today's failure.
+#[test]
+fn an_absent_fork_is_created_under_the_forks_own_name_and_re_read() {
+    if !have_real_jq() {
+        eprintln!("publish_github_pr_sh: SKIPPED — the run path needs a real jq");
+        return;
+    }
+    let run = Run::new("fork-absent");
+    // No repository object for the fork: gh answers 404.
+    run.on_fork(&format!(
+        r#"{{"full_name":"{FORK_SLUG}","fork":true,
+             "parent":{{"full_name":"{MIRROR_SLUG}"}},
+             "source":{{"full_name":"{MIRROR_SLUG}"}},
+             "default_branch":"main","private":false}}"#
+    ));
+    let (ok, out) = run.go();
+    assert!(ok, "the verb could not fork an absent fork: {out}");
+    let log = run.gh_log();
+    assert!(
+        log.contains(&format!("repo fork {MIRROR_SLUG}")),
+        "the auto-fork never ran: {log}"
+    );
+    assert!(
+        log.contains("--fork-name mirror-fork"),
+        "the fork was created under the upstream's name, not {FORK_SLUG}'s — the next push would go somewhere else again: {log}"
+    );
+    assert!(run.pushed(), "nothing was pushed after forking: {out}");
+}
+
+/// And if the fork does NOT appear after forking, that is a refusal too —
+/// `gh repo fork` exiting 0 is not evidence that the repository we are
+/// about to push to is the one we just made.
+#[test]
+fn a_fork_that_does_not_appear_after_forking_is_refused() {
+    if !have_real_jq() {
+        eprintln!("publish_github_pr_sh: SKIPPED — the run path needs a real jq");
+        return;
+    }
+    let run = Run::new("fork-absent-after");
+    // No repository object, and nothing for `repo fork` to bring into
+    // being — it exits 0 and changes nothing, the way a silent failure
+    // looks from here.
+    let (ok, out) = run.go();
+    assert!(
+        !ok,
+        "the verb pushed to a fork GitHub never reported: {out}"
+    );
+    assert!(!run.pushed(), "REFUSED and pushed anyway: {out}");
+    assert!(
+        out.contains(FORK_SLUG),
+        "the refusal does not name the fork: {out}"
+    );
+}
+
+/// The DEFAULT, read off a real run of `--check`: unset, `BOSS_FORK_SLUG`
+/// must be dauld/boss-mirror — the fork that is actually in
+/// algedonic-dev/boss's network — and must not be dauld/boss, which is
+/// not. Nothing in the tree sets this variable, so the default IS what
+/// runs, and `--check` prints it without touching the network.
+#[test]
+fn the_default_fork_is_the_mirrors_real_fork() {
+    let root = scratch("default-fork");
+    let repo = root.join("boss.git");
+    git_init_bare(&repo);
+    let (ok, out) = check(&root, &[forge_path(&repo)], None);
+    assert!(ok, "--check refused a complete input set: {out}");
+    assert!(
+        out.contains("https://github.com/dauld/boss-mirror.git"),
+        "--check does not name dauld/boss-mirror as the fork: {out}"
+    );
+    assert!(
+        !out.contains("https://github.com/dauld/boss.git"),
+        "the fork default is still dauld/boss, David's unrelated private repository: {out}"
+    );
+}

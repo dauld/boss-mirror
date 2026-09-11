@@ -69,6 +69,16 @@ const LIB_RS: &str = "pub fn one() -> u32 {\n    1\n}\n\n#[cfg(test)]\nmod tests
 /// The same file with four more production lines appended.
 const LIB_RS_GROWN: &str = "pub fn one() -> u32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(1, 1);\n    }\n}\npub fn two() -> u32 {\n    2\n}\n// four added lines\n";
 
+/// A one-row step-type registry. The code-branch half of CLAUDE.md §9 is
+/// counted against the kinds the MEASURED TREE declares, so a fixture
+/// with no registry in it has no vocabulary and the counter refuses —
+/// which is why the leaked-branch fixture has to seed one.
+const STEP_TYPES_TOML: &str = "[[step_type]]\nkind = \"sign-off\"\nlabel = \"Sign-off\"\n";
+
+/// Core code that must be edited to teach it a new step kind: the
+/// anti-pattern §9 names, in its smallest honest form.
+const LEAK_RS: &str = "pub fn body(step_kind: &str) -> u32 {\n    match step_kind {\n        \"sign-off\" => {\n            let n = one();\n            n + 1\n        }\n        _ => 0,\n    }\n}\n";
+
 impl Fixture {
     /// Five landings, each one hand-counted in the constant beside it.
     fn new(case: &str) -> Self {
@@ -107,6 +117,21 @@ impl Fixture {
         me.write("crates/core/boss-x/src/lib.rs", LIB_RS);
         me.commit("prod delete only");
 
+        me
+    }
+
+    /// The same five landings plus a sixth that seeds a one-row step-type
+    /// registry and a core file branching on its kind — so the
+    /// code-branch half of §9 has both a vocabulary to measure against
+    /// and exactly one thing to find.
+    fn with_a_leaked_branch(case: &str) -> Self {
+        let me = Fixture::new(case);
+        me.write(
+            "crates/core/boss-jobs/seeds/step_types.toml",
+            STEP_TYPES_TOML,
+        );
+        me.write("crates/core/boss-x/src/leak.rs", LEAK_RS);
+        me.commit("a leaked branch");
         me
     }
 
@@ -184,6 +209,17 @@ impl Fixture {
             .arg("--repo")
             .arg(&self.dir)
             .env("BOSS_TRUNK_REF", "main")
+            // THE COUNTER IS PINNED, not discovered. The script's own
+            // resolution walk looks at $CARGO_TARGET_DIR and
+            // `<repo>/target` — both of which differ between this pod and
+            // the gate, so a test that let it search would assert a
+            // different thing on each machine. Naming the binary cargo
+            // just built makes the code-branch half of every assertion
+            // below a fact about the script rather than about the box.
+            .env(
+                "BOSS_LEAKED_POLICY_BIN",
+                env!("CARGO_BIN_EXE_boss-leaked-policy"),
+            )
             .output()
             .expect("spawn codebase-metrics.sh")
     }
@@ -376,19 +412,32 @@ fn the_row_carries_the_two_headline_ratios_and_says_what_it_could_not_count() {
         out["measured"]["registry"]["rows"].is_i64(),
         "registry rows are countable and must be counted: {out:#}"
     );
-    // ...and the code-branch half is NOT, which the row says in words
-    // rather than filling with a proxy that means nothing.
+    // ...and so is the code-branch half, by `boss-leaked-policy` over an
+    // AST. THIS FIXTURE HAS NO REGISTRY IN IT, so the counter refuses
+    // rather than reporting that a tree with no registries has no leaked
+    // branches — and the row carries the refusal in words. Gate 2 of the
+    // classification rule is "an arm literal is a registry-declared
+    // kind", so with an empty vocabulary every site would classify as if
+    // BOSS had no registries, and a confident 0 is exactly the shape of a
+    // query against the wrong deployment answering `total: 0`.
     assert!(
         out["measured"]["registry"]["code_branches_on_kind"].is_null(),
-        "a number here would be a proxy nobody can interpret: {out:#}"
+        "a tree with no registry seeds has no kind vocabulary to measure \
+         against, so there is no number to report: {out:#}"
+    );
+    let why = out["measured"]["registry"]["code_branches_not_counted_why"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        why.len() > 40,
+        "an honest 'not measured' has to say why: {out:#}"
     );
     assert!(
-        out["measured"]["registry"]["code_branches_not_counted_why"]
-            .as_str()
-            .unwrap_or_default()
-            .len()
-            > 40,
-        "an honest 'not measured' has to say why: {out:#}"
+        why.contains("registry kinds") || why.contains("CANNOT ANSWER") || why.contains("refused"),
+        "the reason must name the REFUSAL it came from, not a generic blank — \
+         a reader has to be able to tell 'this box could not look' from \
+         'this codebase has none': {why}"
     );
 
     // The row is one object carrying both halves plus the series, so a
@@ -423,6 +472,118 @@ fn a_repo_it_cannot_read_refuses_rather_than_reporting_an_empty_series() {
         "the refusal must carry the marker every other git-reading check uses: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+// ---------------------------------------------------------------------------
+// THE CODE-BRANCH HALF of CLAUDE.md §9 — the field this script carried as
+// `null` until `boss-leaked-policy` existed.
+//
+// The row has to distinguish THREE states that a single nullable integer
+// cannot: counted (here is the number), this machine has no counter, and
+// the counter refused. The first two are tested here; the third is tested
+// above, where a fixture with no registry seeds makes the counter refuse
+// for a real reason rather than a simulated one.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_snapshot_counts_the_code_branches_and_names_where_they_are() {
+    let fx = Fixture::with_a_leaked_branch("code-branches");
+    let out = fx.run(&["snapshot"]);
+    let reg = &out["registry"];
+
+    assert_eq!(
+        num(reg, &["code_branches_on_kind"]),
+        1,
+        "one `match step_kind` over a kind the fixture's step_types.toml \
+         declares: {out:#}"
+    );
+    assert_eq!(
+        num(reg, &["code_branches_unclassified"]),
+        0,
+        "a count that silently guesses is the thing this pass exists to \
+         avoid, so the undecided ones are their own number: {out:#}"
+    );
+    assert!(
+        reg["code_branches_not_counted_why"].is_null(),
+        "there IS a number, so there is nothing left to excuse: {out:#}"
+    );
+
+    // The audit trail. An integer nobody can go and check by hand is an
+    // integer that gets quoted and never verified, which is the whole
+    // objection the `null` was recorded under in the first place.
+    let sites = reg["code_branches_sites"]["leaked_policy"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no leaked_policy sites array: {out:#}"));
+    assert_eq!(sites.len(), 1, "{sites:#?}");
+    assert_eq!(sites[0]["file"], "crates/core/boss-x/src/leak.rs");
+    assert_eq!(sites[0]["scrutinee"], "step_kind");
+    assert_eq!(
+        sites[0]["registry_literals"],
+        serde_json::json!(["sign-off"]),
+        "the site names WHICH registry kind it branched on"
+    );
+
+    // And the rule that produced the number rides on the same row as the
+    // number — an approximation whose limits are unwritten is
+    // indistinguishable from a precise number that is wrong.
+    let method = reg["code_branches_method"].as_str().unwrap_or_default();
+    assert!(
+        method.contains("gate") || method.contains("scrutinee"),
+        "the row must state the classification rule, not just its output: {method}"
+    );
+
+    // The scope is on the row too: widening it would move the number for
+    // a reason that is not a change in the codebase.
+    assert_eq!(
+        reg["code_branches_scanned"]["scopes"],
+        serde_json::json!(["crates/core"])
+    );
+    assert!(num(reg, &["code_branches_scanned", "vocabulary_kinds"]) >= 1);
+}
+
+#[test]
+fn a_machine_with_no_counter_says_so_instead_of_reporting_zero() {
+    // boss-gcp's converge deliberately does not build, so the counter is
+    // present on a box only once somebody built it there. That box must
+    // report "unmeasured here" — never 0 leaked branches, which is the
+    // same defect as a query against the wrong deployment answering
+    // `total: 0`: well-formed, confident and wrong.
+    let fx = Fixture::with_a_leaked_branch("no-counter");
+    let absent = fx.dir.join("no-such-counter");
+    let out = Command::new("bash")
+        .arg(script())
+        .args(["snapshot", "--repo"])
+        .arg(&fx.dir)
+        .env("BOSS_TRUNK_REF", "main")
+        .env("BOSS_LEAKED_POLICY_BIN", &absent)
+        .output()
+        .expect("spawn codebase-metrics.sh");
+    assert!(
+        out.status.success(),
+        "a missing counter costs one field, never the whole row — exited {:?}:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let row: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("the snapshot is still JSON");
+    let reg = &row["registry"];
+
+    assert!(
+        reg["code_branches_on_kind"].is_null(),
+        "this fixture HAS a leaked branch; reporting 0 because the counter \
+         was missing would be a measurement of the machine: {row:#}"
+    );
+    let why = reg["code_branches_not_counted_why"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        why.contains(absent.to_string_lossy().as_ref()),
+        "the reason must NAME the path it could not run, so the fix is one \
+         command away rather than a hunt: {why}"
+    );
+    // The rest of the row is untouched — the registry half is still
+    // counted exactly, which is the point of keeping the two independent.
+    assert!(num(reg, &["rows"]) >= 1, "{row:#}");
 }
 
 // ---------------------------------------------------------------------------
@@ -543,6 +704,14 @@ fn the_filing_run_patches_the_open_packet_and_starts_at_the_last_filed_head() {
         .arg(&fx.dir)
         .env("BOSS_TRUNK_REF", "main")
         .env("BOSS_JOBS_URL", format!("http://127.0.0.1:{port}"))
+        // Pinned for the same reason `try_run` pins it: the script's
+        // resolution walk reads $CARGO_TARGET_DIR, which is set on this
+        // pod and unset in the gate, so letting it search would make the
+        // filed row's code-branch half differ by machine.
+        .env(
+            "BOSS_LEAKED_POLICY_BIN",
+            env!("CARGO_BIN_EXE_boss-leaked-policy"),
+        )
         .output()
         .expect("spawn codebase-metrics.sh file");
     let _ = child.kill();

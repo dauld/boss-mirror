@@ -60,7 +60,25 @@ FORGE_REPO_SLUG="${BOSS_FORGE_REPO_SLUG:-david/boss}"
 FORGE_DATA_FALLBACK="${BOSS_FORGE_DATA_FALLBACK:-/opt/forgejo/data}"
 MIRROR_SLUG="${BOSS_MIRROR_SLUG:-algedonic-dev/boss}"
 MIRROR_URL="${BOSS_MIRROR_URL:-https://github.com/${MIRROR_SLUG}.git}"
-FORK_SLUG="${BOSS_FORK_SLUG:-dauld/boss}"
+# THE FORK — dauld/boss-mirror, which is the one repository in
+# algedonic-dev/boss's fork network that dauld owns. Until 2026-09-11 this
+# default read `dauld/boss`, and NOTHING in the tree ever set
+# BOSS_FORK_SLUG (it appeared exactly once, here), so the default was
+# always what ran. Measured against GitHub's REST API that day, with a
+# control on the same connection:
+#
+#   repos/dauld/boss          -> 404 (David's unrelated PRIVATE repository)
+#   repos/algedonic-dev/boss  -> 200  fork=false parent=none
+#   repos/dauld/boss-mirror   -> 200  fork=true  parent=algedonic-dev/boss
+#
+# The push to dauld/boss SUCCEEDED — the token authenticates for it — and
+# `gh pr create` then failed with four GraphQL errors at once ("Head sha
+# can't be blank", "Base sha can't be blank", "No commits between
+# algedonic-dev:main and dauld:publish/2026-09-11", "Head ref must be a
+# branch"), none of which names the cause: GitHub opens a pull request
+# only between two repositories in ONE fork network, and dauld/boss is
+# not in it. The slug was the symptom; the check below is the defect.
+FORK_SLUG="${BOSS_FORK_SLUG:-dauld/boss-mirror}"
 FORK_URL="${BOSS_FORK_URL:-https://github.com/${FORK_SLUG}.git}"
 FORK_OWNER="${FORK_SLUG%%/*}"
 AUTHOR_NAME="${BOSS_PUBLISH_AUTHOR_NAME:-dauld}"
@@ -328,7 +346,11 @@ if [ "${1:-}" = "--check" ]; then
     echo "  forge repo : $FORGE_REPO"
     echo "               ($FORGE_REPO_FROM)"
     echo "  mirror     : $MIRROR_URL (anonymous fetch)"
-    echo "  fork       : $FORK_URL (push as $FORK_OWNER)"
+    # Named as NOT covered on purpose: --check holds no token and opens no
+    # socket, so it cannot ask GitHub whether this is a fork of the mirror
+    # — the question that a green --check preceded three failures on
+    # without ever asking (2026-09-11). Saying so beats implying it.
+    echo "  fork       : $FORK_URL (push as $FORK_OWNER; that it is a fork of $MIRROR_SLUG is checked at run time, with the token — not here)"
     echo "  state dir  : $STATE_DIR"
     echo "  jobs api   : ${BOSS_JOBS_URL:-<unset — the ops-runner pins it on its Exec line>}"
     if check_inputs; then rc=0; else rc=1; fi
@@ -409,10 +431,70 @@ say "snapshot $snapshot (tree $forge_tree of forge $forge_head, parent mirror $m
 helper="!f() { echo username=x-access-token; echo \"password=\$(cat '$TOKEN_FILE')\"; }; f"
 gh_t() { GH_TOKEN="$(cat "$TOKEN_FILE")" gh "$@"; }
 
-if ! gh_t repo view "$FORK_SLUG" --json name >/dev/null 2>"$workdir/err"; then
-    say "fork $FORK_SLUG not found ($(head -c 200 "$workdir/err" | tr '\n' ' ')) — forking $MIRROR_SLUG once"
-    gh_t repo fork "$MIRROR_SLUG" --clone=false >/dev/null 2>"$workdir/err" \
-        || fail "gh repo fork $MIRROR_SLUG: $(head -c 300 "$workdir/err" | tr '\n' ' ')"
+# A SIXTH REFUSAL — the fork must be a fork OF THE MIRROR, not merely a
+# name that resolves. Until 2026-09-11 this asked `gh repo view
+# "$FORK_SLUG" --json name`, which proves only that SOMETHING answers to
+# that name. On 2026-09-11 something did: dauld/boss, David's unrelated
+# private repository, outside algedonic-dev/boss's fork network entirely.
+# So the auto-fork below was skipped (the repository "existed"), the
+# snapshot was pushed into the wrong repository, and the failure surfaced
+# one step later as four GraphQL errors that name no cause. CLAUDE.md
+# §Doors, "a wrong target answers instead of erroring", and its corollary:
+# before concluding something exists, ask a question whose answer
+# distinguishes it from its namesake.
+#
+# The question is therefore the RELATIONSHIP. GitHub's REST repository
+# object answers it in two fields — `parent.full_name` is what a fork was
+# forked FROM, `source.full_name` is the root of its whole network, so a
+# fork of a fork of the mirror still answers the mirror — and `gh api` is
+# the stable way to read them. Three outcomes, three different things to
+# do, and each says which one it took:
+#
+#   absent (404)       the auto-fork's case, and the only one it was ever
+#                      written for. It forks UNDER $FORK_SLUG's own name
+#                      (--fork-name): `gh repo fork` otherwise names the
+#                      new fork after the upstream, which on this account
+#                      is dauld/boss — the repository that caused this.
+#   present, unrelated REFUSED, naming both slugs and what the repository
+#                      says about itself. Never a push: the push is the
+#                      one step here that puts our commit somewhere we did
+#                      not choose, and it cannot be taken back from here.
+#   present, a fork of the mirror — proceed, saying so.
+fork_of_mirror() {
+    # 0 = $1 is a fork whose parent or source is $MIRROR_SLUG; 1 = it is
+    # not; 2 = there is no such repository (gh could not read it at all).
+    # Either way $workdir/fork-says holds the repository's own words, so
+    # the refusal quotes GitHub rather than paraphrasing it.
+    local slug="$1" meta="$workdir/fork.json"
+    if ! gh_t api "repos/$slug" > "$meta" 2>"$workdir/err"; then
+        return 2
+    fi
+    jq -r '"fork=\(.fork // false) parent=\(.parent.full_name // "none") source=\(.source.full_name // "none") private=\(.private // "?")"' \
+        "$meta" > "$workdir/fork-says" 2>/dev/null \
+        || printf 'a repository object jq could not read' > "$workdir/fork-says"
+    jq -e --arg m "$MIRROR_SLUG" '
+        (.fork == true)
+        and ((((.parent.full_name // "") | ascii_downcase) == ($m | ascii_downcase))
+             or (((.source.full_name // "") | ascii_downcase) == ($m | ascii_downcase)))' \
+        "$meta" >/dev/null 2>&1
+}
+
+fork_rc=0
+fork_of_mirror "$FORK_SLUG" || fork_rc=$?
+if [ "$fork_rc" -eq 0 ]; then
+    say "fork $FORK_SLUG confirmed in $MIRROR_SLUG's network ($(cat "$workdir/fork-says"))"
+elif [ "$fork_rc" -eq 2 ]; then
+    say "fork $FORK_SLUG not found ($(head -c 200 "$workdir/err" | tr '\n' ' ')) — forking $MIRROR_SLUG once as ${FORK_SLUG#*/}"
+    gh_t repo fork "$MIRROR_SLUG" --clone=false --fork-name "${FORK_SLUG#*/}" >/dev/null 2>"$workdir/err" \
+        || fail "gh repo fork $MIRROR_SLUG --fork-name ${FORK_SLUG#*/}: $(head -c 300 "$workdir/err" | tr '\n' ' ')"
+    # Re-read rather than assume. The repository we push to must be the
+    # fork we just made, and "the command exited 0" is not that — it is
+    # the same standard of evidence that failed today.
+    fork_of_mirror "$FORK_SLUG" \
+        || refuse "forked $MIRROR_SLUG as $FORK_SLUG, but GitHub does not then report $FORK_SLUG as a fork of $MIRROR_SLUG ($(cat "$workdir/fork-says" 2>/dev/null || printf 'it is still not there')) — nothing was pushed"
+    say "forked $MIRROR_SLUG as $FORK_SLUG ($(cat "$workdir/fork-says"))"
+else
+    refuse "$FORK_SLUG exists on GitHub but is NOT a fork of $MIRROR_SLUG — it says $(cat "$workdir/fork-says"). A pull request can only be opened between two repositories in one fork network, so pushing $BRANCH there would succeed and then fail at gh pr create with errors that name no cause (measured 2026-09-11 against dauld/boss, a namesake outside the network). Point BOSS_FORK_SLUG at a fork of $MIRROR_SLUG, or rename $FORK_SLUG so this verb forks it itself. Nothing was pushed"
 fi
 
 g -c "credential.helper=$helper" push -q --force fork "$snapshot:refs/heads/$BRANCH" 2>"$workdir/err" \

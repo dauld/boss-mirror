@@ -31,11 +31,24 @@
 #      append-only registries, not as new branches in core code. The
 #      registry half is counted exactly (rule files, workflow rows, step
 #      types, step plugins). The code-branch half — `match kind {
-#      "refurb-used" => … }`, the named anti-pattern — is NOT counted,
-#      and the row says so in words. See `code_branches_not_counted_why`
-#      in the output: a regex over match arms cannot tell a leaked policy
-#      from the dispatcher's own handler table, and a number nobody can
-#      interpret is worse than a blank, because it gets quoted.
+#      "refurb-used" => … }`, the named anti-pattern — is counted too, by
+#      `boss-leaked-policy`, an AST pass rather than a regex. The first
+#      cut of this script left it `null` with its reason in words,
+#      because a regex over match arms cannot tell a leaked policy from
+#      the dispatcher's own handler table and a number nobody can
+#      interpret is worse than a blank. That reason still stands; what
+#      changed is that something now understands Rust items. Measured
+#      2026-09-11 over crates/core: 53 string-literal matches, of which
+#      3 are leaked policy, 0 unclassified.
+#
+#      `code_branches_on_kind` is the integer;
+#      `code_branches_by_class` is the whole ladder it came off;
+#      `code_branches_sites` names the file and line of every leaked and
+#      every undecided one, so the number is auditable without re-running
+#      the pass; `code_branches_method` states the rule.
+#      `code_branches_not_counted_why` survives for the ONE case it is
+#      still true of: a machine with no counter on it. That is a fact
+#      about the machine, and it is not the same fact as a zero.
 #
 # Everything else — totals by area, lint count, migration count, crates
 # per tier, test:prod — is context. It rides in the row and is not the
@@ -128,6 +141,10 @@ case "$CMD" in
 esac
 
 for tool in git jq awk tar; do
+    # `boss-leaked-policy` is deliberately NOT in this list. A missing
+    # counter costs one field; a missing `git` costs the whole
+    # measurement, and collapsing the two would turn "this box has no
+    # Rust build" into an infrastructure refusal of the entire row.
     command -v "$tool" >/dev/null 2>&1 || {
         echo "$NAME: $LINT_CANNOT_ANSWER_MARKER — no $tool on PATH, so nothing was measured." >&2
         exit "$LINT_CANNOT_ANSWER"
@@ -370,6 +387,101 @@ END {
 }
 '
 
+# ---------------------------------------------------------------------
+# THE CODE-BRANCH HALF of CLAUDE.md §9, counted by `boss-leaked-policy`
+# (crates/core/boss-testing/src/leaked_policy.rs — the rule is written out
+# there, and every rung of it is pinned by a test whose fixture is copied
+# from the tree it measures).
+#
+# WHY A SEPARATE BINARY AND NOT MORE AWK. The two gates the count rests on
+# are "the scrutinee names a kind" and "an arm literal is a
+# registry-declared kind", and both need Rust items: arms span lines and
+# nest, an inline `#[cfg(test)] mod tests` has to be skipped by brace
+# structure, and a `FromStr` whose vocabulary collides with a step-kind
+# spelling has to be told apart from a branch on that kind. awk can do the
+# line arithmetic this script is otherwise made of; it cannot do this.
+#
+# WHERE IT IS LOOKED FOR, in order, and WHY THE ABSENCE IS A SENTENCE
+# RATHER THAN A ZERO. boss-gcp's converge deliberately does not build
+# (`infra/gcp/boss-gcp-converge.sh`: "This does not build, stage binaries,
+# converge the schema, or restart a service"), so the counter is present
+# on a box only once somebody built it there. A machine without it must
+# say "not measured here", because reporting 0 leaked branches from a box
+# with no Rust toolchain is the same defect as a query against the wrong
+# deployment answering `total: 0` — well-formed, confident and wrong.
+leaked_policy_bin() {
+    if [ -n "${BOSS_LEAKED_POLICY_BIN:-}" ]; then
+        # Explicitly named and not runnable is a CONFIGURATION error, and
+        # it gets said out loud rather than silently falling back to a
+        # different binary than the operator asked for.
+        if [ -x "$BOSS_LEAKED_POLICY_BIN" ]; then
+            printf '%s' "$BOSS_LEAKED_POLICY_BIN"
+            return 0
+        fi
+        return 1
+    fi
+    # `$CARGO_TARGET_DIR` before `$REPO/target`: a pod or dev box that
+    # redirects cargo's output has no `target/` in the checkout at all,
+    # and the first cut of this looked only at `$REPO/target` and so
+    # reported "no counter on this machine" from a machine that had just
+    # built one.
+    local candidate
+    for candidate in "${CARGO_TARGET_DIR:-}/release/boss-leaked-policy" \
+        "${CARGO_TARGET_DIR:-}/debug/boss-leaked-policy" \
+        "$REPO/target/release/boss-leaked-policy" \
+        "$REPO/target/debug/boss-leaked-policy"; do
+        # An unset CARGO_TARGET_DIR leaves `/release/boss-leaked-policy`,
+        # an absolute path into the root filesystem. Skip it rather than
+        # stat a path nobody meant.
+        case "$candidate" in
+            /release/* | /debug/*) continue ;;
+        esac
+        if [ -x "$candidate" ]; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    command -v boss-leaked-policy 2>/dev/null && return 0
+    return 1
+}
+
+# Writes the counter's JSON to `<scratch>/leaked.json` and, when there is
+# no number, the sentence explaining that to `<scratch>/leaked.why`.
+#
+# FILES RATHER THAN VARIABLES, on purpose: the first cut echoed the JSON
+# and set a global for the reason, and a caller's `x=$(fn …)` runs the
+# function in a SUBSHELL, so the reason died with it. The symptom was a
+# row carrying `code_branches_on_kind: null` beside
+# `code_branches_not_counted_why: null` — a blank that does not even say
+# it is a blank, which is the one outcome this field exists to prevent.
+#
+# Takes the EXTRACTED TREE, not the checkout: the count must belong to the
+# same sha every other figure in the snapshot belongs to.
+leaked_policy_measure() { # <extracted tree> <scratch dir>
+    local tree="$1" scratch="$2" bin
+    : >"$scratch/leaked.json"
+    : >"$scratch/leaked.why"
+    if ! bin=$(leaked_policy_bin); then
+        if [ -n "${BOSS_LEAKED_POLICY_BIN:-}" ]; then
+            printf '%s' "BOSS_LEAKED_POLICY_BIN=$BOSS_LEAKED_POLICY_BIN is not an executable, so the code-branch half was not counted. Named explicitly and not runnable is a configuration error, not a reason to silently count with something else." >"$scratch/leaked.why"
+        else
+            printf '%s' "No boss-leaked-policy on this machine (tried \$BOSS_LEAKED_POLICY_BIN, \$CARGO_TARGET_DIR, $REPO/target/release, $REPO/target/debug, \$PATH), so the code-branch half of CLAUDE.md §9 was NOT counted on this run. This is a fact about the machine, not about the codebase: the count is unmeasured here, which is not the same as zero. Build it with \`cargo build --release -p boss-testing --bin boss-leaked-policy\`." >"$scratch/leaked.why"
+        fi
+        return 0
+    fi
+    if "$bin" --repo "$tree" --scope crates/core \
+        >"$scratch/leaked.json" 2>"$scratch/leaked.err"; then
+        return 0
+    fi
+    # THE WHOLE REFUSAL, to the journal AND onto the row. A reduction
+    # before the record is stored throws away the only copy, and this
+    # file's own `unreadable_files` path makes the same argument.
+    : >"$scratch/leaked.json"
+    sed 's/^/    /' "$scratch/leaked.err" >&2
+    printf '%s' "$bin refused rather than counting: $(tr '\n' ' ' <"$scratch/leaked.err"). Its full output is in this run's stderr." >"$scratch/leaked.why"
+    return 0
+}
+
 snapshot_json() {
     local tmp
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/codebase-metrics.XXXXXX") || {
@@ -440,18 +552,48 @@ snapshot_json() {
     reg_tenant_wf=$(rows workflow "$t"/examples/*/seeds/workflows.toml)
     reg_steptypes=$(rows step_type "$t/crates/core/boss-jobs/seeds/step_types.toml")
     reg_plugins=$(find "$t/infra/step-plugins" -name '*.js' 2>/dev/null | wc -l)
+    # THE CODE-BRANCH HALF. Counted off the SAME extracted tree, so both
+    # halves of the §9 measurement — rows and branches — belong to one sha.
+    leaked_policy_measure "$t" "$tmp"
+    local leaked leaked_why
+    leaked=$(cat "$tmp/leaked.json")
+    leaked_why=$(cat "$tmp/leaked.why")
+
     local registry
     registry=$(jq -n \
         --argjson rules "$reg_rules" --argjson workflows "$reg_wf" \
         --argjson tenant_workflows "$reg_tenant_wf" \
         --argjson step_types "$reg_steptypes" --argjson step_plugins "$reg_plugins" \
+        --argjson leaked "${leaked:-null}" \
+        --arg leaked_why "$leaked_why" \
         '{rows: ($rules + $workflows + $tenant_workflows + $step_types + $step_plugins),
           by_registry: {dispatcher_rules: $rules, platform_workflows: $workflows,
                         tenant_workflows: $tenant_workflows,
                         step_types: $step_types, step_plugins: $step_plugins},
-          code_branches_on_kind: null,
+          # Every key, always, null included — a stable row shape is what
+          # makes the series queryable without the reader guessing which
+          # keys a given day happened to have.
+          code_branches_on_kind: ($leaked | if . == null then null else .leaked_policy end),
+          code_branches_unclassified: ($leaked | if . == null then null else .unclassified end),
+          code_branches_by_class: ($leaked | if . == null then null else .by_class end),
+          # The audit trail: which file and line every leaked and every
+          # undecided branch is at, so the integer can be checked by hand
+          # without re-running the pass. That hand-check is the only
+          # evidence a number is worth filing daily.
+          code_branches_sites: ($leaked | if . == null then null else .sites end),
+          code_branches_scanned: ($leaked | if . == null then null else
+            {scopes: .scopes, files: .files_parsed, matches: .matches,
+             vocabulary_kinds: .vocabulary.kinds,
+             round_trip_over_registry_kinds: .round_trip_over_registry_kinds} end),
+          code_branches_method: ($leaked | if . == null then null else .method end),
+          # A blank that does not say it is a blank is the one outcome
+          # this field exists to prevent, so no number AND no reason is
+          # itself a reason.
           code_branches_not_counted_why:
-            "CLAUDE.md §9 names `match kind { \"refurb-used\" => … }` in core code as the anti-pattern, and counting those arms soundly is beyond a regex: a string-literal match arm is equally a leaked workflow policy, the dispatcher handler table that EXECUTES the registry, a serde round-trip, or an HTTP route. Arms also span lines and nest. A proxy here would move for reasons unrelated to the goal and would then be quoted as if it meant something, so this stays null until something that understands Rust items measures it (an AST pass over crates/core, filed rather than faked)."}')
+            (if $leaked_why != "" then $leaked_why
+             elif $leaked == null then
+               "The counter produced neither a measurement nor a reason — a bug in codebase-metrics.sh itself, not a fact about the codebase. Re-run `codebase-metrics.sh snapshot` and read this run'"'"'s stderr."
+             else null end)}')
 
     printf '%s' "$totals" | jq \
         --arg ref "$REF" --arg head "$HEAD_SHA" \
@@ -469,6 +611,7 @@ method_json() {
       skipped: "Lockfiles (Cargo.lock, bun.lock, package-lock.json) and binary assets are counted in neither bucket, in the series and the snapshot alike: a lockfile churns thousands of lines for a one-line dependency bump.",
       buckets: "rust_prod / rust_test (a tests/ or benches/ directory) / rust_test_inline (snapshot only) / web_prod / web_test (*.test.*, *.spec.*, apps/*/tests/) / schema / registry (dispatcher rules, platform workflows, step plugins, and every crate seeds/ directory) / lint / infra / seed (examples/) / docs / other. crates/core/boss-testing/src counts as rust_prod: it is a library other crates link, and reclassifying a whole crate on the strength of its name is a judgement a path rule should not make silently.",
       registry_rows: "`registry.rows` counts five NAMED registries — dispatcher rules, platform workflow rows, tenant workflow rows, step types, step plugin bundles — not every seed file in the tree. The registry LINE bucket is deliberately broader (any crate seeds/ directory), so the two answer different questions: rows is how much BEHAVIOUR is data, lines is how much of the tree that data occupies.",
+      code_branches: "`registry.code_branches_on_kind` is the other half of CLAUDE.md §9, counted by `boss-leaked-policy` over a syn AST (never a regex) on the SAME extracted tree. `code_branches_method` on the same row states the classification rule; `code_branches_sites` names every leaked and every undecided site by file and line. TWO LIMITS: it counts `match` expressions only, so `if kind == \"sign-off\"` and `matches!(kind, \"…\")` are NOT in this number — `infra/lint/no-step-kind-match.sh` is the check that covers those shapes, and the two are complementary. And it is scoped to `crates/core`, because §9 is about core code; widening the scope would move the number for a reason that is not a change in the codebase, so the scope rides in `code_branches_scanned.scopes`. When the field is null, `code_branches_not_counted_why` says which machine fact made it null — never a zero.",
       snapshot_source: "The measured commits tree (git archive), not the working copy, so totals are a function of the sha."
     }'
 }
@@ -582,7 +725,13 @@ file_row() {
           ": +\($m.window.adds)/-\($m.window.dels), net \($m.window.net), " +
           "delete:add " + (if $m.window.delete_add_pct == null then "n/a (nothing added)" else "\($m.window.delete_add_pct)%" end),
           "  totals at \($m.head[0:8]): \($m.totals.lines) lines — prod \($m.totals.prod_lines), tests \($m.totals.test_lines) (\($m.totals.test_prod_pct)% of prod)",
-          "  registry rows \($m.registry.rows); code branches on kind: NOT counted (the row says why)",
+          "  registry rows \($m.registry.rows); code branches on kind: " +
+            (if $m.registry.code_branches_on_kind == null
+             then "NOT counted (the row says why)"
+             else "\($m.registry.code_branches_on_kind) leaked" +
+                  ", \($m.registry.code_branches_unclassified) unclassified" +
+                  ", of \($m.registry.code_branches_scanned.matches) string-literal matches in \($m.registry.code_branches_scanned.scopes | join(", "))"
+             end),
           "  filed on \($id)"'
 }
 
