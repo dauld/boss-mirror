@@ -40,16 +40,13 @@ fn has(tool: &str) -> bool {
 /// A scratch directory per case, so cases cannot see each other's
 /// fixtures.
 fn scratch(case: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("ops-runner-sh-{case}"));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    dir
+    // Per-uid and per-process, and it REFUSES by name if a
+    // leftover cannot be cleared — see `boss_testing::scratch`.
+    boss_testing::scratch_dir(&format!("ops-runner-sh-{case}"))
 }
 
 fn write_exec(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    boss_testing::write_exec(path, body);
 }
 
 /// The stubbed system of record: `bin/curl` serves `jobs.json` on any

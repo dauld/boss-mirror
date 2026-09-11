@@ -27,9 +27,10 @@ impl Drop for Scratch {
 }
 
 fn scratch(name: &str) -> (Scratch, PathBuf) {
-    let root = std::env::temp_dir().join(format!("boss-dst-{name}"));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(root.join("cargo")).expect("mkdir");
+    // Per-uid and per-process, and it REFUSES by name if a leftover
+    // cannot be cleared — see `boss_testing::scratch`.
+    let root = boss_testing::scratch_dir(&format!("boss-dst-{name}"));
+    boss_testing::create_dir(&root.join("cargo"));
     (Scratch(root.clone()), root)
 }
 

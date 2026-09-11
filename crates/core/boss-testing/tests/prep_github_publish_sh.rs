@@ -32,10 +32,9 @@ fn script() -> PathBuf {
 /// A scratch directory per case, so cases cannot see each other's
 /// fixtures.
 fn scratch(case: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("prep-github-publish-{case}"));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    dir
+    // Per-uid and per-process, and it REFUSES by name if a
+    // leftover cannot be cleared — see `boss_testing::scratch`.
+    boss_testing::scratch_dir(&format!("prep-github-publish-{case}"))
 }
 
 fn git(dir: &Path, args: &[&str]) -> Output {

@@ -72,10 +72,9 @@ fn probe_prelude() -> String {
 }
 
 fn scratch(case: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("run-car-probe-sh-{case}"));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    dir
+    // Per-uid and per-process, and it REFUSES by name if a
+    // leftover cannot be cleared — see `boss_testing::scratch`.
+    boss_testing::scratch_dir(&format!("run-car-probe-sh-{case}"))
 }
 
 /// Run one probe exactly as the script runs it: the prelude, then the
@@ -382,17 +381,16 @@ fn the_sanctioned_reader_ships_in_the_checkout_and_is_executable() {
 fn run_reader(case: &str, args: &[&str], env: &[(&str, &str)]) -> (i32, String, String, String) {
     let dir = scratch(case);
     let bin = dir.join("bin");
-    std::fs::create_dir_all(&bin).expect("stub bin");
+    boss_testing::create_dir(&bin);
     let log = dir.join("curl-argv");
-    std::fs::write(
-        bin.join("curl"),
-        format!(
+    boss_testing::write_file(
+        &bin.join("curl"),
+        &format!(
             "#!/usr/bin/env bash\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{}'\n\
              printf 'STUB_BODY\\n'\n",
             log.display()
         ),
-    )
-    .expect("write stub curl");
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

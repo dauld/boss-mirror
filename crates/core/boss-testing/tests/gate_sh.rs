@@ -262,9 +262,7 @@ fn the_gate_refuses_to_run_without_headroom() {
 #[test]
 fn the_gate_rechecks_headroom_as_the_run_proceeds() {
     let root = repo_root();
-    let dir = std::env::temp_dir().join("boss-gate-headroom-poll");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("mkdir");
+    let dir = boss_testing::scratch_dir("boss-gate-headroom-poll");
     let counter = dir.join("calls");
     let fake = dir.join("df");
     // 1st call: 900GB free. Every later call: 1GB.
@@ -655,9 +653,7 @@ fn the_bootstrap_says_how_to_install_the_hook() {
 #[test]
 fn the_receipt_times_every_check() {
     let root = repo_root();
-    let dir = std::env::temp_dir().join("boss-gate-check-timing");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("mkdir");
+    let dir = boss_testing::scratch_dir("boss-gate-check-timing");
     let counter = dir.join("calls");
     let fake = dir.join("df");
     let receipt = dir.join("receipt.json");

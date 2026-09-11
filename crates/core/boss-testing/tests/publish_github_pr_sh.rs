@@ -43,11 +43,12 @@ fn script() -> PathBuf {
 }
 
 fn scratch(case: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("publish-github-pr-{case}"));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch dir");
+    // Per-uid and per-process, and it REFUSES by name if a leftover
+    // cannot be cleared — see `boss_testing::scratch`.
+    let dir = boss_testing::scratch_dir(&format!("publish-github-pr-{case}"));
     // Traversable by the second uid the ownership cases drop to.
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
+        .unwrap_or_else(|e| panic!("chmod 0755 {}: {e}", dir.display()));
     dir
 }
 

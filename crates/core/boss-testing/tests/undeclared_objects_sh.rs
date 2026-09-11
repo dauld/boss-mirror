@@ -45,20 +45,13 @@ fn repo_root() -> PathBuf {
         .expect("repo root resolves")
 }
 
-/// A scratch directory THIS uid can own outright. `/tmp` is sticky, so a
-/// fixed name left behind by another uid is a directory this run can
-/// neither remove nor write — the gate runs as 65534 and a developer as
-/// root, and a test that fails on whichever ran second is a test that
-/// reds cars for no reason.
+/// A scratch directory THIS uid and THIS process own outright. `/tmp` is
+/// sticky, so a fixed name left behind by another uid is a directory this
+/// run can neither remove nor write — the gate runs as 65534 and a
+/// developer as root, and a test that fails on whichever ran second is a
+/// test that reds cars for no reason.
 fn scratch(case: &str) -> PathBuf {
-    use std::os::unix::fs::MetadataExt;
-    let uid = std::fs::metadata("/proc/self")
-        .map(|m| m.uid())
-        .unwrap_or(u32::MAX);
-    let dir = std::env::temp_dir().join(format!("undeclared-objects-{case}-{uid}"));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    dir
+    boss_testing::scratch_dir(&format!("undeclared-objects-{case}"))
 }
 
 fn write_exec(path: &Path, body: &str) {
