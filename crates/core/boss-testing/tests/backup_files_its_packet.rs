@@ -246,6 +246,11 @@ impl PodRun {
 /// author to add it here. `/tmp/all` was missed for exactly that reason
 /// (backlog 6a71aa21). `assert_rebased` below is what makes the next one
 /// impossible to miss.
+///
+/// shared-tmp-ok: the left-hand side is the CONTAINER's own path, named
+/// here only so it can be redirected. Nothing on this host is built at
+/// it, and `assert_rebased` below proves no `/tmp` path survives into a
+/// script this host runs.
 const REBASE: &[(&str, &str)] = &[
     ("/backup", "backup"),
     ("/keys", "keys"),

@@ -473,8 +473,17 @@ async fn drain_one(
                 detail: format!("{e:#}"),
             },
             Ok(bytes) => {
-                let path =
-                    std::env::temp_dir().join(format!("boss-publish-request-{}.bundle", id8(&jid)));
+                // The pid, not just the request id: the dev pod runs
+                // `boss` as root AND as the gate's uid 65534, and /tmp is
+                // 1777 — two accounts fulfilling the same request would
+                // otherwise meet on one path, and the second would fail
+                // on a file it cannot write for a reason that has nothing
+                // to do with the request.
+                let path = std::env::temp_dir().join(format!(
+                    "boss-publish-request-{}-{}.bundle",
+                    id8(&jid),
+                    std::process::id()
+                ));
                 std::fs::write(&path, &bytes)
                     .with_context(|| format!("writing {}", path.display()))?;
                 let _guard = TempFile(path.clone());
@@ -746,9 +755,12 @@ mod tests {
     /// `origin` or `fork` — so any hardcoded remote name in the code
     /// under test fails here instead of in production.
     fn fixture(name: &str) -> (Scratch, Fx) {
-        let root = std::env::temp_dir().join(format!("boss-pubreq-{name}"));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("mkdir root");
+        // `scratch_dir`, not a fixed `/tmp/boss-pubreq-<name>`: the root
+        // carries the uid and the pid, so two accounts running this suite
+        // on one long-lived host do not share a path. `create_dir_all`
+        // returns Ok on a directory belonging to SOMEONE ELSE, so the old
+        // form reported success and died at the first write inside.
+        let root = boss_testing::scratch::scratch_dir(&format!("boss-pubreq-{name}"));
         let guard = Scratch(root.clone());
 
         let forge = root.join("forge.git");

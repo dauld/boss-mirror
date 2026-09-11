@@ -513,7 +513,12 @@ mod tests {
     #[test]
     fn the_defaults_are_the_shell_observers_own() {
         assert_eq!(
-            SPOOL_DIR_DEFAULT, "/var/tmp/boss-estate-spool",
+            // shared-tmp-ok: a DELIBERATE operational location, not a
+            // fixture. The observer runs as root with no HOME and must
+            // find its spool again across reboots, so the path is fixed
+            // on purpose; this line pins the derivation, it builds nothing.
+            SPOOL_DIR_DEFAULT,
+            "/var/tmp/boss-estate-spool",
             "derived from infra/estate/observe-lib.sh; if that file moved the spool deliberately, update this expectation"
         );
         assert_eq!(
