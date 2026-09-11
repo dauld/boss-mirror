@@ -228,6 +228,49 @@ if ! verdict exit-code 1 result=floor-unmet | grep -q 'result=floor-unmet'; then
     problems=$((problems + 1))
 fi
 
+# 6b. AND IT CARRIES WHAT THE RUN ITSELF RECORDED.
+#
+# $SERVICE_RESULT says whether a run died; it cannot say what the run DID.
+# maintenance-boss-gcp-converge's packets held `result=ok` and nothing
+# else, and on 2026-09-11 — the day an ops-runner install block landed —
+# that was enough to support the wrong conclusion about whether the
+# converge had installed it (it had, on both ticks). Establishing that
+# took an ops-request and 200 journal lines pulled off the host. So a unit
+# may leave structured facts in $BOSS_RUN_SUMMARY_FILE and boss-step.sh
+# merges them onto the step; see infra/run-summary.sh.
+#
+# READ-AND-DELETED, and its ABSENCE recorded: the file outliving the run
+# that wrote it would let the next run's ExecStopPost stamp facts onto a
+# packet they do not belong to, and a stale record reads exactly as
+# confident as a true one.
+rs_dir=$(mktemp -d)
+rs_file="$rs_dir/summary.json"
+printf '{"units_installed":"14","anomalies":"SKIP boss-backup\\nand why"}' >"$rs_file"
+rs_out=$(SERVICE_RESULT=success EXIT_STATUS=0 BOSS_STEP_DRY_RUN=1 \
+    BOSS_JOBS_URL=http://example.invalid BOSS_RUN_SUMMARY_FILE="$rs_file" \
+    bash infra/boss-step.sh maintenance-selftest run 2>/dev/null)
+if ! printf '%s' "$rs_out" | grep -q 'units_installed'; then
+    echo "timers-leave-a-packet: boss-step.sh ignores \$BOSS_RUN_SUMMARY_FILE, so a unit that" >&2
+    echo "    recorded what it did cannot get those facts onto its own packet. Got: $rs_out" >&2
+    problems=$((problems + 1))
+fi
+if [ -f "$rs_file" ]; then
+    echo "timers-leave-a-packet: boss-step.sh left $BOSS_RUN_SUMMARY_FILE in place after" >&2
+    echo "    reading it. The next run's ExecStopPost would then stamp THIS run's facts on" >&2
+    echo "    a packet they do not belong to." >&2
+    problems=$((problems + 1))
+fi
+rs_out=$(SERVICE_RESULT=exit-code EXIT_STATUS=1 BOSS_STEP_DRY_RUN=1 \
+    BOSS_JOBS_URL=http://example.invalid BOSS_RUN_SUMMARY_FILE="$rs_dir/never-written.json" \
+    bash infra/boss-step.sh maintenance-selftest run 2>/dev/null)
+if ! printf '%s' "$rs_out" | grep -q 'summary_absent'; then
+    echo "timers-leave-a-packet: a run that left NO summary records nothing about that." >&2
+    echo "    'the run left no summary' is a finding; silence makes the packet look like" >&2
+    echo "    every other packet. Got: $rs_out" >&2
+    problems=$((problems + 1))
+fi
+rm -rf "$rs_dir"
+
 # 7. A CHORE WHOSE KIND ONLY THE BUNDLE DEFINES FILES WHERE THE BUNDLE
 #    IS SEEDED — and its packet never blocks its run.
 #

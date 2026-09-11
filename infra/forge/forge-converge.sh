@@ -34,12 +34,33 @@ set -euo pipefail
 if [ -z "${BOSS_CONVERGE_SNAPSHOT:-}" ]; then
     snap="$(mktemp -t forge-converge.XXXXXX)"
     cat "$0" > "$snap"
-    BOSS_CONVERGE_SNAPSHOT="$snap" exec bash "$snap" "$@"
+    # Where this script's own library lives, captured while $0 still
+    # points into the checkout: after the exec it points at the snapshot
+    # in /tmp, so `dirname $0` finds nothing of ours.
+    BOSS_FORGE_CONVERGE_INFRA="${BOSS_FORGE_CONVERGE_INFRA:-$(cd "$(dirname "$0")/.." && pwd)}" \
+        BOSS_CONVERGE_SNAPSHOT="$snap" exec bash "$snap" "$@"
 fi
 trap 'rm -f "$BOSS_CONVERGE_SNAPSHOT"' EXIT
 
 REPO="${BOSS_FORGE_REPO_DIR:-/home/david/boss}"
 OWNER="${BOSS_FORGE_REPO_OWNER:-david}"
+
+# WHAT THIS RUN LEAVES FOR ITS OWN PACKET. maintenance-forge-converge
+# closed `result=ok` carrying nothing else — the same silence as its
+# boss-gcp sibling, which on 2026-09-11 was enough to support a wrong
+# conclusion about what a converge had installed (infra/run-summary.sh
+# carries the measurement). This host does have a readable journal door,
+# so the stakes are lower; it is also the host whose door once answered
+# 200 with a seven-hour-stale journal, and two converges that report
+# differently about the same question are the §9a shape. install.sh below
+# records what it installed; this records which commit from.
+#
+# CLEARED FIRST, BEFORE ANYTHING CAN FAIL. boss-step.sh reads the file
+# from ExecStopPost — a different process — so a run that dies early must
+# leave nothing, or the last run's success is read as this run's.
+# shellcheck source=infra/run-summary.sh
+. "${BOSS_FORGE_CONVERGE_INFRA:-$(dirname "$0")/..}/run-summary.sh"
+run_summary_reset
 
 # Fetch and check out forge main as the checkout's OWNER, never as root
 # — a root `git` in a david-owned clone leaves root-owned objects that
@@ -57,6 +78,11 @@ OWNER="${BOSS_FORGE_REPO_OWNER:-david}"
 # (backlog d66f92b2). The helper is read whole at source time, so the
 # checkout it then performs cannot rewrite the code running it.
 runuser -l "$OWNER" -c "cd '$REPO' && . infra/forge/checkout-lock.sh && checkout_git '$REPO' fetch -q forgejo main && checkout_git '$REPO' checkout -qf \"\$(git rev-parse forgejo/main)\""
+
+# WHICH COMMIT THIS HOST'S UNITS NOW COME FROM, read as the checkout's
+# owner for the same reason every git call above is: root cannot even READ
+# a clone it does not own.
+run_summary_field converge_sha "$(runuser -l "$OWNER" -c "git -C '$REPO' rev-parse HEAD")"
 
 # install.sh needs root (writes /etc/systemd/system). This script runs
 # as root; git already finished above, so install.sh's bytes are stable

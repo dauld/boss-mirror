@@ -159,11 +159,42 @@ fi
 if [ -z "${BOSS_GCP_CONVERGE_SNAPSHOT:-}" ]; then
     snap="$(mktemp -t boss-gcp-converge.XXXXXX)"
     cat "$0" > "$snap"
-    BOSS_GCP_CONVERGE_SNAPSHOT="$snap" exec bash "$snap" "$@"
+    # WHERE THIS SCRIPT'S OWN LIBRARY LIVES, captured while $0 still
+    # points into the checkout. After the exec it points at the snapshot
+    # in /tmp, so `dirname $0` can no longer find anything of ours — and
+    # the library must come from the same tree as the script, not from
+    # $REPO, which may be a different checkout entirely under test.
+    BOSS_GCP_CONVERGE_INFRA="${BOSS_GCP_CONVERGE_INFRA:-$(cd "$(dirname "$0")/.." && pwd)}" \
+        BOSS_GCP_CONVERGE_SNAPSHOT="$snap" exec bash "$snap" "$@"
 fi
 trap 'rm -f "$BOSS_GCP_CONVERGE_SNAPSHOT"' EXIT
 
 INSTALLER="${BOSS_GCP_CONVERGE_INSTALLER:-$REPO/infra/deploy-services.sh}"
+
+# WHAT THIS RUN LEAVES FOR ITS OWN PACKET.
+#
+# The packet carried `result=ok` and nothing else until 2026-09-11, and
+# that one field cost a wrong diagnosis the day the ops-runner block
+# landed: both converges installed it, both said only "ok", and the
+# question "did it?" took an ops-request plus 200 journal lines off the
+# host to answer (infra/run-summary.sh carries the measurement). The
+# installer's every line still goes to the journal, in full; the counted
+# shape and every anomaly now also ride the packet, which is the record a
+# reader with no host access has.
+#
+# SOURCED BEFORE THE FAST-FORWARD, like infra/forge/checkout-lock.sh: the
+# merge below rewrites these bytes, and bash reads a sourced file the same
+# way it reads this one.
+#
+# CLEARED FIRST, BEFORE ANY REFUSAL. boss-step.sh reads this file in
+# ExecStopPost — a different process, linked to this one by nothing but
+# the path — so a run that dies or refuses early must leave NOTHING
+# behind, or the previous run's success gets stamped on this run's
+# packet. That is "a wrong target answers instead of erroring" one layer
+# in, and it is the failure this ordering exists to make impossible.
+# shellcheck source=infra/run-summary.sh
+. "${BOSS_GCP_CONVERGE_INFRA:-$(dirname "$0")}/run-summary.sh"
+run_summary_reset
 
 # A BUSY TREE IS REFUSED, NEVER CLOBBERED. The retired deploy hop this
 # replaces (boss-cli train.rs `deploy`) read exactly these two facts and
@@ -206,6 +237,12 @@ if [ "$before" = "$after" ]; then
 else
     echo "boss-gcp-converge: ${before:0:8} -> ${after:0:8} from $REMOTE/main"
 fi
+# Each fact on the packet as soon as it is true, never assembled at the
+# end: the installer below can fail, and a summary built after it would
+# be a summary the failure took with it.
+run_summary_field converge_remote "$REMOTE"
+run_summary_field converge_from "$before"
+run_summary_field converge_sha "$after"
 
 # CONVERGE, EVERY TICK, WHETHER OR NOT MAIN MOVED. The installer is
 # idempotent and cheap (file copies + daemon-reload), and a unit removed
@@ -227,6 +264,10 @@ if [ "$rc" -ne 0 ]; then
     echo "boss-gcp-converge: the installer FAILED (exit $rc) at ${after:0:8} — its complete" >&2
     echo "    output is above, every line of it. Units on this host are whatever the" >&2
     echo "    previous converge left; nothing was removed." >&2
+    # systemd's own verdict says the run died; this says WHERE, on the
+    # packet, beside whatever the installer had already recorded.
+    run_summary_field installer_exit "$rc"
+    run_summary_note "deploy-services.sh units exited $rc — see this host's journal for every line"
     exit "$rc"
 fi
 echo "boss-gcp-converge: converged on ${after:0:8} ($REMOTE/main)"

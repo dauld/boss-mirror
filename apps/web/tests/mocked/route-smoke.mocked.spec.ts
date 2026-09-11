@@ -12,85 +12,12 @@
 import { test, expect } from '@playwright/test';
 import { installSmokeMocks } from './_smokeMocks';
 import { installAuthoringMocks, JOB_ID } from './_mockApi';
+// The roster lives in _routes.ts, not here: outage-crawl.mocked.spec.ts
+// reads the same list, and a second copy would reproduce the very defect
+// the drift test at the bottom of this file exists to stop (CLAUDE.md
+// §9a — collapse, do not pin).
+import { ROUTES } from './_routes';
 
-// Every top-level surface a ceo persona reaches, from the router's
-// exact-match routes. Pure-action / form-submit routes (/login,
-// /finance/new, /finance/journal-entries/new) are excluded — this asserts
-// surfaces RENDER without throwing, not that forms submit. Two detail
-// routes are included (a Workflow + a marketing asset) because the mock
-// seeds them, and that is where the omitted-field crashes live.
-const ROUTES: ReadonlyArray<string> = [
-  // User Experiences perspective — bare / is the public home alias; the
-  // operator surfaces are re-rooted under /ux/*.
-  '/', '/ux/me', '/ux/inbox', '/ux/views', '/ux/jobs', '/ux/accounts', '/ux/vendors', '/ux/people', '/ux/parts',
-  '/ux/products', '/ux/shipping', '/ux/assets', '/ux/catalog',
-  '/ux/marketing-assets', '/ux/marketing-assets/ma-1', '/ux/calendar', '/ux/calendar/me',
-  '/ux/support', '/ux/service', '/ux/refurb', '/ux/qa', '/ux/hr', '/ux/sales',
-  '/ux/shop', '/ux/manual',
-  // The IT department — six surfaces, families as tabs (1f6d55e0).
-  // /system is GONE (David's Q1/Q4: no legacy users, no redirects), so
-  // this list crawls exactly what the catalog declares and nothing
-  // else answers.
-  '/it', '/it/registry/subjects', '/it/registry/dispatcher', '/it/registry/rules',
-  '/it/operate/perf',
-  '/it/operate/atlas', '/it/registry/step-plugins', '/it/kb', '/it/design',
-  '/it/design/experiments',
-  // Modeling + admin surfaces (System Model).
-  '/it/registry', '/it/registry/new',
-  '/it/registry/seasonal-release', '/it/registry/policy', '/it/auth-admin',
-  // IT surfaces added since the app split. They were absent for three
-  // releases and the crawl reported success the whole time — see the
-  // drift test at the bottom of this file for why that can no longer
-  // happen quietly.
-  '/it/design/feedback',
-  '/it/design/backlog',
-  // Incidents (the Operate landing) renders both panels' empty states
-  // under the mock's `[]` catch-all — chrome + empty states, no crash.
-  '/it/operate',
-  // Bottlenecks (was Fleet) renders its no-Workflows empty state under
-  // the mock's empty /api/workflows — page chrome + picker. The map
-  // and flow pages died into the Atlas tab (already crawled above).
-  '/it/operate/bottlenecks',
-  // Yard status renders the empty yard under the mock's `[]` catch-all
-  // for /api/yard/status — chrome + "no trains / no cars", no crash.
-  '/it/operate/yard-status',
-  // The Marshalling Yard — the upstream third. Under the mock's `[]`
-  // catch-all, /api/stations/load and /api/stations/flow come back as
-  // collections with no rows, so the page renders its "every watched
-  // station is clear" state. Crawled here rather than via a catalog
-  // entry because it is a tab, not a sidebar row (same as yard-status
-  // above): pages live in their department.
-  '/it/operate/marshalling',
-  // The risk watchlist. Since CAR-6 it HAS a catalog entry, so the
-  // drift test at the bottom of this file now enforces its presence
-  // here instead of this line being the whole of its coverage.
-  '/watchlist',
-  // HR and the operator manual joined the catalog with the watchlist
-  // (CAR-6): HR renders its empty-roster states under the mock's `[]`
-  // catch-all; the manual renders its docs chrome with the fetch
-  // failing honestly. Both pin chrome + no-crash, same bar as every
-  // other row.
-  '/hr',
-  '/manual',
-  // The estate page under the mock's catch-all: every /api/estate/*
-  // fetch fails or reads empty, and the page's whole design is that
-  // absence renders as bordered failure notices, never an empty
-  // estate - chrome + three honest failure states, no crash. Its own
-  // unit suite pins the failed-never-empty arms; this crawl pins that
-  // the route actually mounts.
-  '/it/estate',
-  // The Crew Board — the middle third of the operator surface, and a
-  // sidebar row of its own (backlog 04c5bbc0). Its four reads are
-  // `/api/jobs?kind=ship-a-change`, `/api/jobs?kind=gate-run`,
-  // `/api/yard/status` and `/api/jobs/queue-age`: the first, second and
-  // fourth come back `[]` from the catch-all and the third from the
-  // well-formed empty yard fixture above, so the crawl renders the
-  // board's five empty stage columns and its empty crew list. Every read
-  // goes through fetchRemote, so an unreachable backend renders a
-  // bordered failure line per lane rather than an idle pipeline — the
-  // same failed-never-empty bar as the estate row above.
-  '/it/crew',
-];
 
 // DEFERRED, group 1 — aggregation dashboards that read OBJECT-shaped
 // responses (statements, snapshots, summaries) the generic `[]` catch-all
@@ -113,14 +40,14 @@ const ROUTES: ReadonlyArray<string> = [
 // nav-catalog entry and that test only walks ROUTE_CATALOG. So the
 // deferral was lifted in prose while the coverage it described never
 // existed — a green suite reporting on a page it never opened. The
-// route is now in ROUTES above, spelled the way the router spells it.
+// route is now in ROUTES (_routes.ts), spelled the way the router spells it.
 //
 // Resolved: the marketing-assets no-shell this harness first caught was a
 // real effect_update_depth_exceeded loop in loadClasses() called from a
 // tracked $effect — fixed in session/classes.svelte.ts. The /calendar +
 // /calendar/me failures seen alongside it were that loop bleeding across a
-// shared page (pre-fix); both render cleanly in isolation and are gated
-// above. All four routes are now in ROUTES.
+// shared page (pre-fix); both render cleanly in isolation and are gated.
+// All four routes are now in ROUTES (_routes.ts).
 
 type Issue = { route: string; kind: string; text: string };
 

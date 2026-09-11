@@ -36,7 +36,12 @@
 # token file is a loud refusal naming the path — never a silent skip.
 #
 # --check: validate inputs (tools, token file, forge repository, state
-# dir) with no network and exit 0/1. What the gate lint runs.
+# dir) with no network and exit 0/1. What the gate lint runs. It also
+# PERFORMS the forge fetch, into a throwaway repository it deletes,
+# because that fetch's permission model differs from a direct read and a
+# --check that does not run it passes where the publish fails — which is
+# what happened on 2026-09-11 (--check ok at 13:41, publish FAILED at
+# 13:43 on the same host, mirror 271 commits behind).
 #
 # Idempotent: re-running the same day force-updates publish/<date> on
 # the fork and reuses an already-open PR for that head. A verb killed
@@ -153,10 +158,13 @@ else
     FORGE_REPO_FROM="fallback — $FORGE_COMPOSE is not readable, so the host's /data mount could not be read and this path is a GUESS at the image default; name the real one with BOSS_FORGE_REPO_PATH"
 fi
 
-# EVERY READ OF THE FORGE REPOSITORY GOES THROUGH THIS ONE OPTION SET,
+# EVERY READ OF THE FORGE REPOSITORY GOES THROUGH THIS ONE CHANNEL,
 # --check and the run alike, so --check can never pass on a repository
-# the run cannot read.
-#
+# the run cannot read. The working directory is created HERE, above
+# --check, because the channel is a file and this is where it lives.
+workdir=$(mktemp -d) || { echo "$me: FAILED — no working directory under ${TMPDIR:-/tmp}" >&2; exit 1; }
+trap 'rm -rf "$workdir"' EXIT
+
 # safe.directory, scoped to this one path. The ops-runner executes verbs
 # AS ROOT and this repository belongs to the Forgejo container's
 # account, so since git 2.35.2 every command refuses it as "dubious
@@ -167,8 +175,36 @@ fi
 # /var/lib, which the owner cannot write. The hazard the drop protects
 # against — a root WRITE leaving root-owned objects in somebody else's
 # repository — is not reachable here: a fetch only reads the source, and
-# nothing in this script writes under $FORGE_REPO.
-FORGE_GIT=(-c "safe.directory=$FORGE_REPO")
+# nothing in this script writes under $FORGE_REPO. That is also why the
+# exemption names $FORGE_REPO exactly and never `*`: it is right for a
+# READER and wrong where root writes, which is why
+# infra/forge/delete-orphan-object.sh rejects it by name.
+#
+# WHY A FILE AND NOT `-c safe.directory=…`. Until 2026-09-11 it was the
+# `-c` form, and `-c` CANNOT exempt a fetch SOURCE. A local fetch runs
+# `git upload-pack` IN THE SOURCE REPOSITORY, and git clears the
+# command-line config when it crosses into another repository — git's own
+# trace says so, verbatim:
+#
+#   run_command: unset GIT_CONFIG_PARAMETERS … git-upload-pack '<src>'
+#
+# so that child runs its ownership check with no exemption at all. A
+# DIRECT read in this process does honour `-c`, which is exactly how
+# `--check` passed while the publish failed. Measured three ways on git
+# 2.39.5, one destination exempted by a protected file so the only
+# variable was how the SOURCE was exempted:
+#
+#   source via `-c` only (the old shape)  exit 128, dubious ownership
+#   source via GIT_CONFIG_GLOBAL file     the fetch succeeds
+#   source not exempted (control)         exit 128, dubious ownership
+#
+# GIT_CONFIG_GLOBAL is protected configuration AND is not in the set git
+# clears crossing repositories, so the child inherits it. The file lives
+# in $workdir — per-run, 0700, removed by the trap — never a fixed path
+# under /tmp that another run or another user could have planted.
+FORGE_SAFE_CONFIG="$workdir/forge-safe.gitconfig"
+printf '[safe]\n\tdirectory = %s\n' "$FORGE_REPO" > "$FORGE_SAFE_CONFIG"
+forge_git() { GIT_CONFIG_GLOBAL="$FORGE_SAFE_CONFIG" git "$@"; }
 
 # ---------------------------------------------------------------------
 # Preconditions — the same list --check reports on.
@@ -225,9 +261,39 @@ forge_repo_problem() {
         echo "the forge repository path $FORGE_REPO exists but is not a directory — a bare git repository was expected. Path came from: $FORGE_REPO_FROM"
     elif [ ! -r "$FORGE_REPO" ] || [ ! -x "$FORGE_REPO" ]; then
         echo "the forge repository $FORGE_REPO is a directory but is not readable by this user ($who) — a permission finding, not a wrong path. Path came from: $FORGE_REPO_FROM"
-    elif ! err=$(git "${FORGE_GIT[@]}" -C "$FORGE_REPO" rev-parse --git-dir 2>&1 >/dev/null); then
+    elif ! err=$(forge_git -C "$FORGE_REPO" rev-parse --git-dir 2>&1 >/dev/null); then
         echo "the forge repository $FORGE_REPO is a readable directory but git refused it as a repository (read as $who). git said: ${err%%$'\n'*}"
     fi
+}
+
+# A FIFTH finding, and the one the four above could not reach: the path
+# is a git repository this user can read, and the FETCH still fails.
+# `git -C <repo> rev-parse` and `git fetch <repo>` do not share a
+# permission model — the first reads in this process, the second spawns
+# upload-pack inside <repo> — so a check that only does the first passes
+# where the run fails. This performs the run's fetch, refspec and all,
+# into a bare repository under $workdir that the trap deletes. Measured
+# against this tree (188 MB git dir) it costs 0.65 s and 11 MB transient;
+# the cost of NOT doing it was 271 commits.
+forge_fetch_problem() {
+    local probe="$workdir/forge-read-probe.git" err="$workdir/probe-err" who sha
+    who="$(id -un 2>/dev/null || id -u 2>/dev/null || printf '?')"
+    if ! git init -q --bare "$probe" 2>"$err"; then
+        printf 'NOT ATTEMPTED — no probe repository under %s' "$workdir" > "$workdir/fetch-note"
+        echo "the fetch probe repository could not be created under $workdir (as $who). git said: $(head -c 200 "$err" | tr '\n' ' ')"
+        return 0
+    fi
+    if ! forge_git -C "$probe" fetch -q "$FORGE_REPO" "+refs/heads/main:refs/boss-publish/probe" 2>"$err"; then
+        printf 'FAILED as %s — %s' "$who" "$(head -c 300 "$err" | tr '\n' ' ')" > "$workdir/fetch-note"
+        echo "the forge repository $FORGE_REPO is a git repository $who can read, but the FETCH the publish performs fails from it — a different permission model, not a wrong path. git said: $(head -c 300 "$err" | tr '\n' ' '). Path came from: $FORGE_REPO_FROM"
+        return 0
+    fi
+    sha=$(git -C "$probe" rev-parse refs/boss-publish/probe 2>/dev/null || printf '?')
+    # Freed here, not only by the trap: the forge host has hit its disk
+    # floor before (backlog 99696e43) and the probe's pack is the one
+    # thing in this verb measured in megabytes.
+    rm -rf "$probe"
+    printf 'ok — refs/heads/main is %s, fetched as %s into a throwaway repository' "$sha" "$who" > "$workdir/fetch-note"
 }
 
 check_inputs() {
@@ -240,7 +306,14 @@ check_inputs() {
     problem=$(token_problem)
     if [ -n "$problem" ]; then echo "$me: $problem" >&2; rc=1; fi
     problem=$(forge_repo_problem)
-    if [ -n "$problem" ]; then echo "$me: $problem" >&2; rc=1; fi
+    if [ -n "$problem" ]; then
+        echo "$me: $problem" >&2; rc=1
+    else
+        # Only once the path IS a readable repository is the fetch a
+        # question worth asking; before that it restates the finding above.
+        problem=$(forge_fetch_problem)
+        if [ -n "$problem" ]; then echo "$me: $problem" >&2; rc=1; fi
+    fi
     if ! mkdir -p "$STATE_DIR" 2>/dev/null || [ ! -w "$STATE_DIR" ]; then
         echo "$me: state dir $STATE_DIR is not writable (BOSS_PUBLISH_STATE_DIR)" >&2; rc=1
     fi
@@ -258,7 +331,9 @@ if [ "${1:-}" = "--check" ]; then
     echo "  fork       : $FORK_URL (push as $FORK_OWNER)"
     echo "  state dir  : $STATE_DIR"
     echo "  jobs api   : ${BOSS_JOBS_URL:-<unset — the ops-runner pins it on its Exec line>}"
-    if check_inputs; then
+    if check_inputs; then rc=0; else rc=1; fi
+    echo "  forge fetch: $(cat "$workdir/fetch-note" 2>/dev/null || printf 'NOT ATTEMPTED — the forge repository findings above say why')"
+    if [ "$rc" -eq 0 ]; then
         echo "$me: --check ok"
         exit 0
     fi
@@ -272,9 +347,6 @@ fi
 [ -n "${BOSS_JOBS_URL:-}" ] || refuse "BOSS_JOBS_URL is not set; the ops-runner pins it on its Exec line and a hand run must name the system of record"
 BASE="${BOSS_JOBS_URL%/}"
 check_inputs || refuse "inputs incomplete (see above); nothing was fetched or pushed"
-
-workdir=$(mktemp -d) || exit 1
-trap 'rm -rf "$workdir"' EXIT
 
 # 1. The packet. One mirror, one open publish packet (149's guard), and
 #    its open-pr must be ready or active — a rule fired on readiness.
@@ -308,7 +380,7 @@ set_remote mirror "$MIRROR_URL"
 set_remote fork "$FORK_URL"
 # Git's own words on both fetches: a verdict somebody must go re-derive
 # is not a verdict (CLAUDE.md §Diagnosis).
-g "${FORGE_GIT[@]}" fetch -q forge "+refs/heads/main:refs/remotes/forge/main" 2>"$workdir/err" \
+forge_git -C "$CLONE" fetch -q forge "+refs/heads/main:refs/remotes/forge/main" 2>"$workdir/err" \
     || fail "fetching forge main from $FORGE_REPO ($FORGE_REPO_FROM) — git said: $(head -c 300 "$workdir/err" | tr '\n' ' ')"
 g fetch -q mirror "+refs/heads/main:refs/remotes/mirror/main" 2>"$workdir/err" \
     || fail "fetching mirror main from $MIRROR_URL — git said: $(head -c 300 "$workdir/err" | tr '\n' ' ')"

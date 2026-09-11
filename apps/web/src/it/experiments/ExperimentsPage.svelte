@@ -105,7 +105,7 @@
   <p class="exp-msg">Loading experiments…</p>
 {:else if load.kind === 'failed'}
   <div class="exp-failed" role="alert">
-    <p class="exp-failed-text">
+    <p class="exp-failed-text load-failed">
       Could not read experiments — {load.message}. This panel is blank because the
       record is unreachable, not because nothing is running.
     </p>

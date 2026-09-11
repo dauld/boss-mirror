@@ -35,6 +35,16 @@ set -euo pipefail
 cd "$(dirname "$0")" || exit 1
 HERE="$(pwd)"
 
+# What this run leaves for forge-converge's own packet — counts, each
+# sub-installer's verdict, every anomaly verbatim. A no-op unless the
+# caller set BOSS_RUN_SUMMARY_FILE; forge-converge.service does. The forge
+# has a readable journal door, unlike boss-gcp, but a door that answered
+# 200 with a seven-hour-stale journal is already on the record
+# (2026-09-10), and two converges reporting differently about what they
+# installed is the §9a shape. One definition: infra/run-summary.sh.
+# shellcheck source=infra/run-summary.sh
+. "${HERE}/../run-summary.sh"
+
 # Where units land and who reloads them. Overridable so the installer
 # can be exercised into a scratch directory with a stub systemctl —
 # infra/lint/forge-install-covers-the-ops-runner.sh runs it on every
@@ -155,8 +165,14 @@ done
 # and collapsed into that script the same day rather than living twice
 # (CLAUDE.md §9a). It enables the timer itself, which is why the loop
 # below no longer appends it.
+#
+# ITS FAILURE IS LOUD BUT LATE, and that is why the rc is carried instead
+# of letting `set -e` act here: a runner that did not install deserves a
+# red unit and a packet on the `failed` terminal, but not at the price of
+# leaving every timer below installed-and-not-enabled.
+ops_runner_rc=0
 INSTALL_ETC="$ETC" INSTALL_SYSTEMCTL="$SYSTEMCTL" \
-    bash "${HERE}/../ops/install-ops-runner.sh" forge
+    bash "${HERE}/../ops/install-ops-runner.sh" forge || ops_runner_rc=$?
 installed=$((installed + 1))
 
 "$SYSTEMCTL" daemon-reload
@@ -180,3 +196,12 @@ done
 JOURNAL_DOOR_URL="http://10.20.0.15:19531" bash "${HERE}/../journal-door-ensure.sh"
 
 echo "install.sh: ${installed} unit pair(s) installed and enabled"
+run_summary_field units_installed "$installed"
+run_summary_field units_skipped 0
+run_summary_field summary "installed $installed unit pair(s) and enabled their timers"
+if [ "$ops_runner_rc" -ne 0 ]; then
+    echo "install.sh: the ops-request runner did NOT install (exit $ops_runner_rc) — it named" >&2
+    echo "    what failed above, and the run summary carries it. Every other unit converged;" >&2
+    echo "    this host cannot answer an ops-request until that is fixed." >&2
+    exit "$ops_runner_rc"
+fi

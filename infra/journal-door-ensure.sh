@@ -46,12 +46,23 @@
 # the host alive. Each one warns in a line an operator can act on, and
 # the caller carries on.
 #
+# AND IT SAYS WHICH, ON THE PACKET. Exiting 0 come what may is right and
+# is why this file says so twice — but until 2026-09-11 the only trace of
+# a door that did NOT come up was a stderr line in the journal of the
+# host whose journal you were trying to reach. Circular, and on boss-gcp
+# unreadable. So the verdict is also recorded in the run summary
+# (infra/run-summary.sh), which rides the converge's packet: `active`, or
+# `down: <what stopped it>`. One word a reader off the host can act on.
+#
 # Env (test hooks; on a host every one of them is the default):
 #   INSTALL_SYSTEMCTL  systemctl to call
 #   INSTALL_UNIT_LIB   where the distro's unit files live
 #   INSTALL_APT_GET    package manager to call
 #   JOURNAL_DOOR_URL   the address to name in a warning, for the operator
 set -uo pipefail
+
+# shellcheck source=infra/run-summary.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/run-summary.sh"
 
 SYSTEMCTL="${INSTALL_SYSTEMCTL:-systemctl}"
 UNIT_LIB="${INSTALL_UNIT_LIB:-/usr/lib/systemd/system}"
@@ -66,17 +77,29 @@ if [ ! -f "${UNIT_LIB}/${GATEWAY_SOCKET}" ]; then
         echo "journal-door: could not install systemd-journal-remote — the journal read door" >&2
         echo "            (${DOOR_URL}) stays DOWN until a human runs:" >&2
         echo "              sudo apt-get install -y systemd-journal-remote" >&2
+        run_summary_note "journal-door: apt-get could not install systemd-journal-remote; ${DOOR_URL} stays DOWN"
     fi
 fi
 
 if [ -f "${UNIT_LIB}/${GATEWAY_SOCKET}" ]; then
     if "$SYSTEMCTL" enable --now "$GATEWAY_SOCKET"; then
-        printf '  %-24s %s\n' "journal-gateway" "$("$SYSTEMCTL" is-active "$GATEWAY_SOCKET")"
+        state="$("$SYSTEMCTL" is-active "$GATEWAY_SOCKET")"
+        printf '  %-24s %s\n' "journal-gateway" "$state"
+        if [ "$state" = active ]; then
+            run_summary_field journal_door active
+        else
+            run_summary_field journal_door "down: ${GATEWAY_SOCKET} is $state after enable --now"
+            run_summary_note "journal-door: ${GATEWAY_SOCKET} enabled but is '$state' — ${DOOR_URL} is DOWN"
+        fi
     else
         echo "journal-door: ${GATEWAY_SOCKET} would not enable — the journal read door is DOWN" >&2
+        run_summary_field journal_door "down: ${GATEWAY_SOCKET} would not enable"
+        run_summary_note "journal-door: ${GATEWAY_SOCKET} would not enable; ${DOOR_URL} is DOWN"
     fi
 else
     echo "journal-door: ${GATEWAY_SOCKET} still absent — the journal read door is DOWN" >&2
+    run_summary_field journal_door "down: ${GATEWAY_SOCKET} absent (systemd-journal-remote not installed)"
+    run_summary_note "journal-door: ${GATEWAY_SOCKET} still absent; ${DOOR_URL} is DOWN"
 fi
 
 exit 0

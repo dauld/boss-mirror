@@ -121,17 +121,17 @@
     <div class="crew-section">00 — THE BUILDER PIPELINE</div>
 
     {#if crew.yard.kind === 'failed'}
-      <p class="crew-fail">
+      <p class="crew-fail load-failed">
         The yard did not answer: {crew.yard.error}. This page refuses to guess — an unreachable
         yard is not an idle pipeline.
       </p>
     {:else if crew.cars.kind === 'failed'}
-      <p class="crew-fail">
+      <p class="crew-fail load-failed">
         The car packets did not answer: {crew.cars.error}. Without them the track cannot say what
         is being built.
       </p>
     {:else if crew.gateRuns.kind === 'failed'}
-      <p class="crew-fail">
+      <p class="crew-fail load-failed">
         The gate registry did not answer: {crew.gateRuns.error}. BUILDING is defined as "a branch
         with no gate run behind it", so without the registry this page cannot tell a car being
         built from one being assessed, and refuses to draw either.
@@ -191,12 +191,12 @@
     <div class="crew-section">01 — THE CREW</div>
 
     {#if crew.waits.kind === 'failed'}
-      <p class="crew-fail">
+      <p class="crew-fail load-failed">
         The queue-age projection did not answer: {crew.waits.error}. Without it the board cannot
         say what anyone is holding.
       </p>
     {:else if cards === null}
-      <p class="crew-fail">
+      <p class="crew-fail load-failed">
         The crew cannot be derived: one of the car, gate or queue reads failed above.
       </p>
     {:else if realCrew.length === 0}
@@ -270,9 +270,9 @@
     <div class="crew-section">02 — TAKEN, NOT PROGRESSED</div>
 
     {#if crew.waits.kind === 'failed'}
-      <p class="crew-fail">Queue ages unavailable: {crew.waits.error}</p>
+      <p class="crew-fail load-failed">Queue ages unavailable: {crew.waits.error}</p>
     {:else if stalled === null}
-      <p class="crew-fail">Queue ages unavailable.</p>
+      <p class="crew-fail load-failed">Queue ages unavailable.</p>
     {:else if stalled.length === 0}
       <p class="crew-stage-blank">
         Nothing claimed has sat longer than {STALE_AFTER_DAYS} day without moving.

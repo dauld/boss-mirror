@@ -55,5 +55,61 @@ grep -qx "ExecStart=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 $repo/infr
 cmp -s "$repo/infra/ops/boss-ops-runner.service" "$tmp/etc/boss-ops-runner.service" \
     || fail "the installed ops unit differs from infra/ops/boss-ops-runner.service"
 
-echo "forge-install-covers-the-ops-runner: self-test ok — 6 unit pairs installed into a scratch root, the ops runner from infra/ops with a forge drop-in (HOST_ID=forge, ExecStart from this checkout), 6 timers enabled"
+# ---------------------------------------------------------------------
+# AND THE RUN SAYS WHAT IT DID, ON ITS PACKET.
+#
+# maintenance-forge-converge closed `result=ok` and carried nothing else,
+# exactly like its boss-gcp sibling — whose identical silence on
+# 2026-09-11 was enough to support a wrong conclusion about whether a
+# converge had installed the ops runner (it had, twice). The installer now
+# records what it installed in the run summary (infra/run-summary.sh),
+# which boss-step.sh merges onto the step.
+# ---------------------------------------------------------------------
+command -v jq >/dev/null || fail "jq is required to check the run summary"
+sum="$tmp/summary.json"
+mkdir -p "$tmp/etc-sum"
+if ! STUB_LOG="$tmp/systemctl-sum.log" INSTALL_ETC="$tmp/etc-sum" INSTALL_SYSTEMCTL="$tmp/bin/systemctl" \
+    INSTALL_KUBECTL=0 BOSS_RUN_SUMMARY_FILE="$sum" bash "$installer" >"$tmp/out-sum" 2>&1; then
+    echo "FAIL: install.sh exited non-zero with a summary file configured:" >&2
+    cat "$tmp/out-sum" >&2
+    exit 1
+fi
+sum_fail() { echo "FAIL: $*" >&2; echo "--- summary:" >&2; cat "$sum" 2>/dev/null >&2
+             echo "--- installer output:" >&2; cat "$tmp/out-sum" >&2; exit 1; }
+[ -f "$sum" ] || sum_fail "install.sh left no run summary, so forge-converge's packet can only
+    say result=ok — the shape that cost a wrong diagnosis on 2026-09-11"
+[ "$(jq -r '.units_installed // ""' "$sum")" -ge 6 ] 2>/dev/null \
+    || sum_fail "the summary does not count the unit pairs it installed"
+[ "$(jq -r '.ops_runner // ""' "$sum")" = "installed" ] \
+    || sum_fail "the summary does not record the ops-request runner's own verdict"
+
+# AND A RUNNER THAT DID NOT INSTALL MUST NOT REPORT THAT IT DID. With no
+# `set -e`, install-ops-runner.sh used to print its success line and exit
+# 0 after a refused `enable --now` — a claim made regardless of outcome,
+# which is the defect one layer under the silent packet.
+cat >"$tmp/bin/systemctl-refuses" <<'STUB'
+#!/usr/bin/env bash
+echo "systemctl $*" >>"$STUB_LOG"
+[[ "${1:-}" == "enable" ]] && { echo "Failed to enable unit: stub refusal" >&2; exit 1; }
+exit 0
+STUB
+chmod +x "$tmp/bin/systemctl-refuses"
+sum_bad="$tmp/summary-refused.json"
+mkdir -p "$tmp/etc-refused"
+if STUB_LOG="$tmp/systemctl-refused.log" INSTALL_ETC="$tmp/etc-refused" \
+    INSTALL_SYSTEMCTL="$tmp/bin/systemctl-refuses" BOSS_RUN_SUMMARY_FILE="$sum_bad" \
+    bash "$repo/infra/ops/install-ops-runner.sh" forge >"$tmp/out-refused" 2>&1; then
+    echo "FAIL: install-ops-runner.sh exited 0 after systemctl refused to enable its timer:" >&2
+    cat "$tmp/out-refused" >&2
+    echo "    Nothing fires the runner, so every ops-request for this host waits forever —" >&2
+    echo "    and the caller, and the converge's packet, read that as an install." >&2
+    exit 1
+fi
+case "$(jq -r '.ops_runner // ""' "$sum_bad" 2>/dev/null)" in
+failed*) ;;
+*) echo "FAIL: the failed ops-runner install is not recorded as failed on the run summary:" >&2
+   cat "$sum_bad" 2>/dev/null >&2; cat "$tmp/out-refused" >&2; exit 1 ;;
+esac
+
+echo "forge-install-covers-the-ops-runner: self-test ok — 6 unit pairs installed into a scratch root, the ops runner from infra/ops with a forge drop-in (HOST_ID=forge, ExecStart from this checkout), 6 timers enabled, and the run's own summary carries the counts plus the ops runner's verdict — 'failed: …' and a non-zero exit when its timer will not enable, never an unconditional success line"
 exit 0

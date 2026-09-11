@@ -51,6 +51,13 @@
 #      this checkout, and the CLUSTER as its system of record. Never
 #      127.0.0.1, which here is the legacy second stack: a runner
 #      pointed there answers nothing and looks healthy (c3d06016)
+#  10. the run SAYS WHAT IT INSTALLED on its own packet — counts, each
+#      sub-installer's verdict, every skip named verbatim, the sha and the
+#      remote, and the installer's exit status when it fails; and a
+#      summary from an earlier run is cleared before this one can refuse
+#      anything, so a stale record can never read as this run's. Measured
+#      2026-09-11: `result=ok` was the whole record, and answering "did it
+#      install?" took an ops-request plus 200 journal lines off the host
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
@@ -114,10 +121,14 @@ chmod +x "$tmp/bin/apt-get"
 mkdir -p "$tmp/unitlib" "$tmp/empty-unitlib" "$tmp/etc-absent"
 : >"$tmp/unitlib/systemd-journal-gatewayd.socket"
 
+# UNITS_REPO_ROOT and UNITS_SUMMARY are read from the environment rather
+# than taken as arguments so the three original call sites read as they
+# did; check 10 sets them.
 units_run() { # <systemctl-log> <etc> <unit-lib> <outfile>
     STUB_LOG="$1" INSTALL_ETC="$2" INSTALL_SYSTEMCTL="$tmp/bin/systemctl" \
         INSTALL_APT_GET="$tmp/bin/apt-get" INSTALL_UNIT_LIB="$3" \
-        BOSS_REPO_ROOT="$repo" BOSS_DEPLOY_ENV=/dev/null \
+        BOSS_REPO_ROOT="${UNITS_REPO_ROOT:-$repo}" BOSS_DEPLOY_ENV=/dev/null \
+        BOSS_RUN_SUMMARY_FILE="${UNITS_SUMMARY:-}" \
         bash "$deploy" units >"$4" 2>&1
 }
 
@@ -286,6 +297,108 @@ printf '%s\n' "$rows" | grep -q 'boss-ops-runner' \
     maintenance-wrap packet pair it deliberately does not have."
 
 # ---------------------------------------------------------------------
+# 10. THE PACKET SAYS WHAT IT INSTALLED.
+#
+# WHY, measured 2026-09-11. Car e09e30bd landed the ops-runner block
+# above at 15:40 UTC; the converges at 15:52 and 16:22 both closed their
+# packet `result=ok` and that is ALL either packet held. Asking the only
+# question that mattered next — did it actually install? — took filing
+# an ops-request, reading 200 journal lines off the host and parsing
+# them by hand, and in the meantime the estate unit observer (whose
+# roster is the TIMERS array, which this unit deliberately is not in)
+# was read as saying the unit was absent. It was not absent. A reader
+# with no host access could not tell "installed 14 pairs" from
+# "installed 12 and skipped 2", so the wrong conclusion was available
+# and got drawn.
+#
+# A single boolean IS the defect (CLAUDE.md §Diagnosis: a verdict must
+# name what failed; a record reduced before it is stored throws away the
+# only copy). So the run leaves a structured summary — counts, each
+# sub-installer's own verdict, and every anomaly VERBATIM — which
+# boss-step.sh merges onto the `run` step. The full log stays in the
+# journal; the packet carries the counted shape and the anomalies.
+#
+# A SKIP IS LOUD, NOT FATAL: a TIMERS row whose unit files this commit
+# does not carry is a legitimate state (observe-units.sh derives its
+# roster by skipping exactly those), and failing the converge over one
+# would stop the other thirteen pairs converging. It must be IN THE
+# RECORD, with the name, which is what this asserts.
+# ---------------------------------------------------------------------
+command -v jq >/dev/null || fail "jq is required to check the run summary"
+sum="$tmp/summary.json"
+mkdir -p "$tmp/etc-sum"
+UNITS_SUMMARY="$sum" units_run "$tmp/systemctl-sum.log" "$tmp/etc-sum" "$tmp/unitlib" "$tmp/units-sum.out" \
+    || { echo "FAIL: the units mode failed with a summary file configured:" >&2
+         cat "$tmp/units-sum.out" >&2; exit 1; }
+sum_out="$tmp/units-sum.out"
+sum_fail() { echo "FAIL: $*" >&2; echo "--- summary ($sum):" >&2; cat "$sum" 2>/dev/null >&2
+             echo "--- units-mode output:" >&2; cat "$sum_out" >&2; exit 1; }
+[ -f "$sum" ] || sum_fail "the units mode wrote no run summary to BOSS_RUN_SUMMARY_FILE.
+    Without it the converge's packet carries result=ok and nothing else, and 'did it
+    install?' is a question only a human on the host can answer (2026-09-11)."
+jq -e . "$sum" >/dev/null 2>&1 || sum_fail "the run summary is not valid JSON"
+got=$(jq -r '.units_installed // ""' "$sum")
+[ "$got" = "$installed" ] \
+    || sum_fail "the summary says units_installed='$got'; this lint installed $installed pairs.
+    A count that is the ROSTER LENGTH rather than what was installed is the false claim
+    this check exists for."
+[ "$(jq -r '.units_skipped // ""' "$sum")" = "0" ] \
+    || sum_fail "nothing was skipped, but the summary does not say units_skipped=0"
+[ "$(jq -r '.ops_runner // ""' "$sum")" = "installed" ] \
+    || sum_fail "the summary does not record that the ops-request runner installed —
+    the exact fact that took a journal read to establish on 2026-09-11"
+[ "$(jq -r '.journal_door // ""' "$sum")" = "active" ] \
+    || sum_fail "the summary does not record the journal read door's verdict"
+[ -n "$(jq -r '.summary // ""' "$sum")" ] \
+    || sum_fail "the summary carries no one-line summary for a reader of the packet"
+[ "$(jq -r '.anomalies // "none"' "$sum")" = "none" ] \
+    || sum_fail "a clean run reported anomalies: $(jq -r .anomalies "$sum")"
+
+# 10b. A SKIPPED PAIR IS COUNTED AND NAMED. The unit files are read from
+# BOSS_REPO_ROOT, so a copy of the tree missing one pair drives the real
+# SKIP branch of install_timer_units.
+skip_row=$(printf '%s\n' "$rows" | tail -n 1)
+skip_stem="${skip_row%%:*}"; skip_sub="${skip_row##*:}"
+partial="$tmp/partial"
+mkdir -p "$partial"
+cp -r "$repo/infra" "$partial/infra"
+[ "$skip_sub" = "." ] && skip_dir="$partial/infra" || skip_dir="$partial/infra/$skip_sub"
+rm -f "$skip_dir/$skip_stem.service" "$skip_dir/$skip_stem.timer"
+sum_skip="$tmp/summary-skip.json"
+mkdir -p "$tmp/etc-skip"
+if ! UNITS_SUMMARY="$sum_skip" UNITS_REPO_ROOT="$partial" \
+    units_run "$tmp/systemctl-skip.log" "$tmp/etc-skip" "$tmp/unitlib" "$tmp/units-skip.out"; then
+    echo "FAIL: the units mode FAILED because one TIMERS row's files were absent:" >&2
+    cat "$tmp/units-skip.out" >&2
+    echo "    A skip must be loud in the record, not fatal — failing here would stop the" >&2
+    echo "    other $((installed - 1)) pairs converging over a row this commit does not carry." >&2
+    exit 1
+fi
+sum="$sum_skip"; sum_out="$tmp/units-skip.out"
+[ "$(jq -r '.units_skipped // ""' "$sum_skip")" = "1" ] \
+    || sum_fail "one pair was missing and the summary does not say units_skipped=1"
+[ "$(jq -r '.units_installed // ""' "$sum_skip")" = "$((installed - 1))" ] \
+    || sum_fail "units_installed did not drop by one when a pair was skipped"
+jq -r '.anomalies // ""' "$sum_skip" | grep -q "$skip_stem" \
+    || sum_fail "the skipped unit ($skip_stem) is not NAMED in the summary's anomalies.
+    'something was skipped' sends the reader back to the host, which is the cost this
+    whole check removes."
+
+# 10c. THE DOOR'S VERDICT, when the distro package behind it is absent.
+# It still may not fail the converge (check 8) — but a reader must be
+# able to tell an active door from a down one WITHOUT the host.
+sum_door="$tmp/summary-door.json"
+mkdir -p "$tmp/etc-door"
+UNITS_SUMMARY="$sum_door" units_run "$tmp/systemctl-door.log" "$tmp/etc-door" "$tmp/empty-unitlib" "$tmp/units-door.out" \
+    || { echo "FAIL: the units mode aborted with the gateway package absent:" >&2
+         cat "$tmp/units-door.out" >&2; exit 1; }
+sum="$sum_door"; sum_out="$tmp/units-door.out"
+case "$(jq -r '.journal_door // ""' "$sum_door")" in
+down*) ;;
+*) sum_fail "the gateway unit was absent and the summary does not say the door is down" ;;
+esac
+
+# ---------------------------------------------------------------------
 # 4. WHERE IT CONVERGES FROM. GitHub is the mirror, never the source
 #    (27ab7680). boss-gcp's /opt/boss carries BOTH remotes, so the loop
 #    has to choose, and choosing wrong converges the host on a mirror
@@ -437,5 +550,63 @@ printf '%s' "$out" | grep -q "LINE-ONE-OF-MANY" \
     || fail "only part of the installer's output survived — no tails (CLAUDE.md §Diagnosis)
 $out"
 
-echo "boss-gcp-converges-itself: ok — $installed timer pairs install from \`deploy-services.sh units\` (the converge's own among them, nothing restarted), the journal read door on :19531 comes up with it and cannot abort it, the ops-request runner lands with HOST_ID=boss-gcp, this checkout and the CLUSTER as its system of record (never the legacy 127.0.0.1 stack) without being a TIMERS row, the loop converges from the forge and refuses the mirror, refuses a dirty tree, fast-forwards and drives the installer idempotently, and prints every line of a failed install"
+# ---------------------------------------------------------------------
+# 10d. THE CONVERGE'S OWN FACTS RIDE THE SAME SUMMARY — and a summary
+#      from a PREVIOUS run must never be mistaken for this one's.
+#
+# The summary is read by boss-step.sh in ExecStopPost, a separate
+# process; the only thing linking the two is the file. So a run that
+# dies before writing must leave NOTHING, or the packet reports the last
+# run's success over this run's failure — "a wrong target answers
+# instead of erroring", one layer in. The converge therefore clears the
+# file before it does anything at all, INCLUDING before the refusals.
+# ---------------------------------------------------------------------
+sum_conv="$tmp/summary-converge.json"
+run_converge_sum() { # <dir> <installer>
+    BOSS_GCP_REPO_DIR="$1" BOSS_GCP_CONVERGE_INSTALLER="$2" \
+        BOSS_RUN_SUMMARY_FILE="$sum_conv" \
+        STUB_CALLS="$tmp/calls.log" bash "$converge" 2>&1
+}
+conv_fail() { echo "FAIL: $*" >&2; echo "--- summary ($sum_conv):" >&2
+              cat "$sum_conv" 2>/dev/null >&2; exit 1; }
+
+echo '{"converge_sha":"STALE-FROM-A-PREVIOUS-RUN"}' >"$sum_conv"
+if out=$(run_converge_sum "$dirty" "$tmp/bin/installer-ok"); then
+    fail "the converge ran against a dirty checkout: $out"
+fi
+if [ -f "$sum_conv" ] && grep -q STALE-FROM-A-PREVIOUS-RUN "$sum_conv"; then
+    conv_fail "the converge REFUSED and left the previous run's summary in place. Its
+    ExecStopPost would then stamp that run's facts onto this run's packet — the refusal
+    would read as a successful converge."
+fi
+
+# The clean path records which remote, which sha, and what it moved from.
+: >"$tmp/calls.log"
+rm -f "$sum_conv"
+out=$(run_converge_sum "$clean" "$tmp/bin/installer-ok") \
+    || fail "the converge failed on the clean checkout with a summary file set:
+$out"
+[ -f "$sum_conv" ] || conv_fail "the converge left no summary for its packet"
+[ "$(jq -r '.converge_sha // ""' "$sum_conv")" = "$want" ] \
+    || conv_fail "the summary does not carry the sha converged on ($want)"
+[ "$(jq -r '.converge_remote // ""' "$sum_conv")" = "forge" ] \
+    || conv_fail "the summary does not name the remote it converged from"
+
+# 10e. A FAILED INSTALL SAYS SO ON THE PACKET, not only in the journal
+# the host may be unreadable from. Check 7 proves the journal keeps every
+# line; this proves the packet keeps the verdict.
+: >"$tmp/calls.log"
+rm -f "$sum_conv"
+if out=$(run_converge_sum "$clean" "$tmp/bin/installer-bad"); then
+    fail "the converge reported success over an installer that exited 3: $out"
+fi
+[ -f "$sum_conv" ] || conv_fail "a FAILED converge left no summary at all — the packet gets
+    systemd's exit code and nothing about where it died"
+[ "$(jq -r '.installer_exit // ""' "$sum_conv")" = "3" ] \
+    || conv_fail "the summary does not carry the installer's exit status"
+[ "$(jq -r '.converge_sha // ""' "$sum_conv")" = "$want" ] \
+    || conv_fail "a failed converge lost the sha it was installing from — record each fact
+    as soon as it is known, not at the end of a run that may not get there"
+
+echo "boss-gcp-converges-itself: ok — $installed timer pairs install from \`deploy-services.sh units\` (the converge's own among them, nothing restarted), the journal read door on :19531 comes up with it and cannot abort it, the ops-request runner lands with HOST_ID=boss-gcp, this checkout and the CLUSTER as its system of record (never the legacy 127.0.0.1 stack) without being a TIMERS row, the loop converges from the forge and refuses the mirror, refuses a dirty tree, fast-forwards and drives the installer idempotently, prints every line of a failed install, and leaves its packet a counted summary — units installed/skipped with every skip named, the ops runner's and the read door's own verdicts, the sha and remote it converged from, the installer's exit on failure, and nothing at all from a previous run"
 exit 0

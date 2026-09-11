@@ -30,6 +30,16 @@ User=root
 # daemon-reload. A generous ceiling in case the forge is briefly
 # unreachable.
 TimeoutStartSec=10min
+# WHAT THE RUN LEAVES FOR ITS PACKET — one path, declared once, for two
+# processes. `ExecStart=` (the converge and every installer under it)
+# writes structured facts here; `ExecStopPost=` (boss-step.sh) merges them
+# onto the `run` step and deletes the file. systemd gives every Exec line
+# this Environment=, so the two halves cannot disagree about the path
+# (CLAUDE.md §9a). /run is tmpfs, so a reboot cannot leave a stale one
+# either. Before this, the packet said `result=ok` and nothing else, and
+# on 2026-09-11 that was enough to support a wrong conclusion about what
+# the converge had installed — see infra/run-summary.sh.
+Environment=BOSS_RUN_SUMMARY_FILE=/run/boss-gcp-converge.summary.json
 # THE SYSTEM OF RECORD, PINNED INLINE WITH env(1). deploy-services'
 # shared jobs-url.conf drop-in points this host's timer fleet at the
 # legacy 127.0.0.1 instance, drop-in env outranks unit Environment=, and

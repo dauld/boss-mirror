@@ -19,7 +19,22 @@
 //!    ("a wrong target answers instead of erroring") in its most literal
 //!    form, and CLAUDE.md §Diagnosis: a verdict must name what failed.
 //!
-//! So this file pins FOUR distinct refusals and the derivation that
+//! 3. And the fix for (2) left the door still broken, because the check
+//!    it added read the repository IN ITS OWN PROCESS (`git -c
+//!    safe.directory=<repo> -C <repo> rev-parse`) while the publish
+//!    FETCHES from it. `-c` cannot exempt a fetch SOURCE: a local fetch
+//!    runs `git upload-pack` inside the source repository and git clears
+//!    the command-line config crossing into it — its own trace reads
+//!    `unset GIT_CONFIG_PARAMETERS … git-upload-pack '<src>'`. So on
+//!    2026-09-11 `--check` returned ok at 13:41 and the publish FAILED at
+//!    13:43 on the same host with "detected dubious ownership"
+//!    (ops-request c258d3b7), and the mirror sat 271 commits behind under
+//!    a green check. A `--check` that passes where the operation fails is
+//!    worse than no `--check`, so the exemption now travels through a
+//!    protected channel (a config file named by `GIT_CONFIG_GLOBAL`,
+//!    which the child inherits) and `--check` PERFORMS the fetch.
+//!
+//! So this file pins FIVE distinct refusals and the derivation that
 //! replaces the authored default: the path now comes from the compose
 //! file that DECLARES the host directory mounted at the container's
 //! `/data` (§9a — one definition, not a second copy in a shell default).
@@ -52,6 +67,11 @@ fn scratch(case: &str) -> PathBuf {
     dir
 }
 
+/// A bare repository WITH a `refs/heads/main`, because that is the ref
+/// the verb fetches. A fixture without one is not a stand-in for the
+/// forge — and an empty bare repository is exactly the fixture that let
+/// the `-c`-only check look right: `rev-parse --git-dir` answered and no
+/// fetch was ever attempted.
 fn git_init_bare(path: &Path) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let st = Command::new("git")
@@ -59,6 +79,86 @@ fn git_init_bare(path: &Path) {
         .status()
         .expect("git runs");
     assert!(st.success(), "git init --bare {}", path.display());
+    let tree = git_in(path, &["hash-object", "-t", "tree", "-w", "--stdin"]);
+    let commit = git_in(path, &["commit-tree", &tree, "-m", "seed"]);
+    git_in(path, &["update-ref", "refs/heads/main", &commit]);
+}
+
+/// One git command in `dir`, with an identity so `commit-tree` works, and
+/// its trimmed stdout. Panics with git's own words — never a bare status.
+fn git_in(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .env("GIT_AUTHOR_NAME", "fixture")
+        .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+        .env("GIT_COMMITTER_NAME", "fixture")
+        .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+        .output()
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {args:?} in {}: {}",
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// THE NEGATIVE CONTROL, measured in the test rather than assumed: one
+/// raw fetch from `src` as `uid`, exempting the source the way the script
+/// USED to (`-c safe.directory=<src>`) or not at all. A test that asserts
+/// the verb now succeeds proves nothing unless the same fetch, from the
+/// same fixture, as the same uid, still FAILS without the protected
+/// channel — so this is what tells those two apart.
+fn control_fetch(root: &Path, src: &Path, uid: u32, exempt_via_c: bool) -> (bool, String) {
+    let pen = root.join("control");
+    std::fs::create_dir_all(&pen).unwrap();
+    std::fs::set_permissions(&pen, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let dst = pen.join(if exempt_via_c {
+        "via-c.git"
+    } else {
+        "bare.git"
+    });
+    let _ = std::fs::remove_dir_all(&dst);
+    let exempt = if exempt_via_c {
+        "-c \"safe.directory=$SRC\""
+    } else {
+        ""
+    };
+    let body = format!(
+        "git init -q --bare \"$DST\" || exit 9\n\
+         exec git -C \"$DST\" {exempt} fetch \"$SRC\" \
+         \"+refs/heads/main:refs/control/main\"\n"
+    );
+    let out = Command::new("setpriv")
+        .args([
+            "--reuid".to_string(),
+            uid.to_string(),
+            "--regid".to_string(),
+            uid.to_string(),
+            "--clear-groups".to_string(),
+            "sh".to_string(),
+            "-c".to_string(),
+            body,
+        ])
+        .env_clear()
+        .env(
+            "PATH",
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),
+        )
+        // Nothing but the exemption under test may exempt anything.
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("SRC", src)
+        .env("DST", &dst)
+        .output()
+        .expect("setpriv runs");
+    let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), text)
 }
 
 /// `--check` only asks that `gh`/`jq`/`curl` EXIST. This box may lack
@@ -432,4 +532,144 @@ fn the_env_override_wins_over_the_derivation_and_says_so() {
         !out.contains("not-a-real-token"),
         "--check printed the token fixture: {out}"
     );
+}
+
+// ---------------------------------------------------------------------
+// Defect 3 — `--check` exercises the operation, not a cheaper cousin.
+// ---------------------------------------------------------------------
+
+/// `--check` FETCHES, and says what it read. The sha it reports is the
+/// fixture's own `main`, so the line is evidence the fetch happened
+/// rather than a claim that it would.
+#[test]
+fn the_check_performs_the_forge_fetch_and_names_what_it_read() {
+    let root = scratch("fetch-performed");
+    let repo = root.join("boss.git");
+    git_init_bare(&repo);
+    let head = git_in(&repo, &["rev-parse", "refs/heads/main"]);
+    let (ok, out) = check(&root, &[forge_path(&repo)], None);
+    assert!(ok, "--check failed on a fetchable repository: {out}");
+    assert!(
+        out.contains("forge fetch:"),
+        "--check does not report the fetch it performed: {out}"
+    );
+    assert!(
+        out.contains(&head),
+        "--check does not name the sha it fetched ({head}): {out}"
+    );
+}
+
+/// THE REGRESSION THAT LET THIS SHIP. A repository git reads perfectly
+/// well and the fetch cannot: an empty bare repository, where
+/// `rev-parse --git-dir` answers and `refs/heads/main` does not exist.
+/// The old `--check` said ok; the publish would have failed. So the pin
+/// is not "the exemption works" — it is "`--check` fails wherever the
+/// fetch fails", whatever the reason.
+#[test]
+fn a_forge_repository_whose_fetch_cannot_succeed_fails_the_check() {
+    let root = scratch("fetch-unfetchable");
+    let repo = root.join("boss.git");
+    // Deliberately NOT git_init_bare: no main, nothing to fetch.
+    std::fs::create_dir_all(repo.parent().unwrap()).unwrap();
+    let st = Command::new("git")
+        .args(["init", "-q", "--bare", repo.to_str().unwrap()])
+        .status()
+        .expect("git runs");
+    assert!(st.success());
+    let (ok, out) = check(&root, &[forge_path(&repo)], None);
+    assert!(
+        !ok,
+        "--check passed on a repository the publish cannot fetch from — \
+         the 2026-09-11 defect exactly: {out}"
+    );
+    assert!(
+        out.contains("the FETCH the publish performs fails"),
+        "the refusal does not say the FETCH is what failed: {out}"
+    );
+    assert!(
+        out.to_lowercase().contains("couldn't find remote ref")
+            || out.to_lowercase().contains("could not find remote ref"),
+        "the refusal does not carry git's own words about the fetch: {out}"
+    );
+    // And it is its OWN sentence — not one of the four path findings.
+    assert!(
+        !out.contains("nothing exists there") && !out.contains("is not a directory"),
+        "the fetch finding reads as a path finding: {out}"
+    );
+}
+
+/// A repository owned by ANOTHER account is FETCHED, not merely read —
+/// with the negative control measured alongside it. The control performs
+/// the same fetch, from the same fixture, as the same uid, exempting the
+/// source the way the script used to; it must FAIL with git's ownership
+/// refusal, or this test is vacuous. Then `--check` must succeed.
+#[test]
+fn a_foreign_owned_forge_repository_is_fetched_not_only_read() {
+    let Some(uid) = second_uid() else {
+        eprintln!("publish_github_pr_sh: SKIPPED — needs root + setpriv for a second uid");
+        return;
+    };
+    let root = scratch("fetch-foreign-owner");
+    let repo = root.join("boss.git");
+    git_init_bare(&repo); // root-owned; the check below runs as `uid`
+
+    // CONTROL A — no exemption at all. Establishes that this fixture
+    // really is foreign-owned from `uid`'s point of view.
+    let (ok, out) = control_fetch(&root, &repo, uid, false);
+    assert!(
+        !ok,
+        "an unexempted fetch from a foreign-owned source SUCCEEDED — the fixture is not foreign-owned, so nothing below is a test: {out}"
+    );
+    assert!(
+        out.to_lowercase().contains("dubious ownership"),
+        "the unexempted control failed for some other reason than ownership: {out}"
+    );
+
+    // CONTROL B — the script's former shape. `-c safe.directory=<src>`
+    // does not reach upload-pack, so this fails identically. This is the
+    // bug, reproduced, in the test that guards against it.
+    let (ok, out) = control_fetch(&root, &repo, uid, true);
+    assert!(
+        !ok,
+        "`-c safe.directory=<source>` exempted a fetch SOURCE on this git \
+         ({}) — the premise of the fix does not hold here and the fix must \
+         be re-argued: {out}",
+        git_version()
+    );
+    assert!(
+        out.to_lowercase().contains("dubious ownership"),
+        "the `-c`-only control failed for some other reason than ownership: {out}"
+    );
+
+    // AND THE VERB, through the protected channel, on the same fixture.
+    let (ok, out) = check(&root, &[forge_path(&repo)], Some(uid));
+    assert!(
+        !out.to_lowercase().contains("dubious ownership"),
+        "git's ownership refusal reached the verb's output: {out}"
+    );
+    assert!(
+        !out.contains("the FETCH the publish performs fails"),
+        "the verb could not fetch from a foreign-owned repository: {out}"
+    );
+    assert!(
+        out.contains("forge fetch:"),
+        "the verb did not report a fetch at all: {out}"
+    );
+    // The token fixture is root:root 0600, so `uid` cannot read it and
+    // --check still refuses overall — a DIFFERENT finding, and the one
+    // thing this case is not about.
+    assert!(
+        !ok && out.contains("github.token"),
+        "expected the token to be the only remaining finding: {out}"
+    );
+}
+
+/// `git --version`, for the one assertion whose premise is version-bound.
+fn git_version() -> String {
+    Command::new("git")
+        .arg("--version")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "git version unknown".into())
 }

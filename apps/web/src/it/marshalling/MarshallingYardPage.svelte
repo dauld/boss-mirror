@@ -123,12 +123,12 @@
   </div>
 
   {#if load.kind === 'failed'}
-    <p class="my-fail">
+    <p class="my-fail load-failed">
       The station load did not answer: {load.error}. An unreachable read is not an
       empty yard, so this page shows nothing rather than a clear one.
     </p>
   {:else if flow.kind === 'failed'}
-    <p class="my-fail">
+    <p class="my-fail load-failed">
       The station flow did not answer: {flow.error}. Depth without a rate cannot say
       whether anything is forming, so the constraint is not named.
     </p>
@@ -188,7 +188,7 @@
     <!-- 02 — THE WAITS. Step-level, wall clock, click opens the packet. -->
     <div class="my-section">02 — LONGEST-WAITING OBLIGATIONS</div>
     {#if waits.kind === 'failed'}
-      <p class="my-fail">The queue-age lens did not answer: {waits.error}.</p>
+      <p class="my-fail load-failed">The queue-age lens did not answer: {waits.error}.</p>
     {:else if waits.kind === 'loading'}
       <p class="my-quiet">Reading the obligations…</p>
     {:else if longest.length === 0}

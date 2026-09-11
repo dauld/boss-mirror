@@ -137,6 +137,10 @@ fn real_verbs(root: &Path) -> PathBuf {
 /// What `publish-github-pr.sh --check` needs to say ok without a
 /// network: a state dir, a bare repo standing in for the forge
 /// checkout, and a 0600 token file (the value is never printed).
+///
+/// The stand-in carries a `main` commit, because since 2026-09-11
+/// `--check` FETCHES `refs/heads/main` rather than only reading the
+/// directory — a cheaper check passed while the publish failed.
 fn publish_check_env(root: &Path) -> Vec<(&'static str, String)> {
     use std::os::unix::fs::PermissionsExt;
     let state = root.join("state");
@@ -149,6 +153,42 @@ fn publish_check_env(root: &Path) -> Vec<(&'static str, String)> {
         .status()
         .expect("git runs");
     assert!(st.success());
+    for args in [
+        vec!["hash-object", "-t", "tree", "-w", "--stdin"],
+        vec![
+            "commit-tree",
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+            "-m",
+            "seed",
+        ],
+    ] {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&forge)
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .env("GIT_AUTHOR_NAME", "fixture")
+            .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+            .env("GIT_COMMITTER_NAME", "fixture")
+            .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if args[0] == "commit-tree" {
+            let st = Command::new("git")
+                .arg("-C")
+                .arg(&forge)
+                .args(["update-ref", "refs/heads/main", &sha])
+                .status()
+                .expect("git runs");
+            assert!(st.success(), "update-ref refs/heads/main");
+        }
+    }
     let token = etc.join("github.token");
     std::fs::write(&token, "not-a-real-token\n").unwrap();
     std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();

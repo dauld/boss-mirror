@@ -17,6 +17,13 @@ User=root
 # pinning it on the unit that INSTALLS the drop-in avoids the bootstrap
 # gap where the first converge runs before its own drop-in exists.
 Environment=BOSS_JOBS_URL=http://10.20.0.34:7900
+# WHAT THE RUN LEAVES FOR ITS PACKET — one path, declared once, for two
+# processes: ExecStart (this script and install.sh under it) writes
+# structured facts here, ExecStopPost (boss-step.sh) merges them onto the
+# `run` step and deletes the file. Every Exec line inherits Environment=,
+# so producer and consumer cannot disagree about the path (CLAUDE.md §9a),
+# and /run being tmpfs means a reboot cannot leave a stale one.
+Environment=BOSS_RUN_SUMMARY_FILE=/run/forge-converge.summary.json
 # install.sh is fast (file copies + daemon-reload); the git fetch is the
 # only slow part and is a shallow main fetch. A generous ceiling in case
 # the forge is briefly unreachable.

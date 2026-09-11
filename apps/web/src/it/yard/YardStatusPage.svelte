@@ -55,7 +55,7 @@
   {#if status.kind === 'loading'}
     <p class="ys-quiet">Reading the yard…</p>
   {:else if status.kind === 'failed'}
-    <p class="ys-fail">
+    <p class="ys-fail load-failed">
       The yard did not answer: {status.error}. This page refuses to guess — an
       unreachable read is not an empty yard.
     </p>

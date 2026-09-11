@@ -137,7 +137,19 @@ mkdir -p "$tmp/bin" "$tmp/state" "$tmp/etc"
 # --check only asks that gh/jq/curl EXIST (this box may lack jq; the
 # forge and the gate image have it), so stubs stand in for all three.
 for t in gh jq curl; do printf '#!/bin/sh\nexit 0\n' > "$tmp/bin/$t"; chmod +x "$tmp/bin/$t"; done
+# The forge stand-in carries a `main` commit: since 2026-09-11 --check
+# FETCHES refs/heads/main from it, because `-c safe.directory=<src>`
+# cannot exempt a fetch SOURCE and a check that only READ the directory
+# passed twice while the publish failed (ops-request c258d3b7).
 git init -q --bare "$tmp/forge.git"
+fixture_git() { env -i PATH="$PATH" GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=f@example.invalid \
+    GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=f@example.invalid git -C "$tmp/forge.git" "$@"; }
+seed_tree=$(fixture_git hash-object -t tree -w --stdin </dev/null) \
+    || fail "could not write the fixture's empty tree"
+seed_commit=$(fixture_git commit-tree "$seed_tree" -m seed) \
+    || fail "could not write the fixture's seed commit"
+fixture_git update-ref refs/heads/main "$seed_commit" \
+    || fail "could not point the fixture's main at $seed_commit"
 printf 'not-a-real-token\n' > "$tmp/etc/github.token"; chmod 600 "$tmp/etc/github.token"
 checkenv=(env -i PATH="$tmp/bin:$PATH" BOSS_PUBLISH_STATE_DIR="$tmp/state" BOSS_FORGE_REPO_PATH="$tmp/forge.git")
 out=$("${checkenv[@]}" BOSS_GITHUB_TOKEN_FILE="$tmp/etc/github.token" bash "$pub" --check 2>&1) \

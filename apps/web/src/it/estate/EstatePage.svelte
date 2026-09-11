@@ -65,7 +65,7 @@
   {:else}
     <div class="estate-section">00 — THE MACHINES</div>
     {#if estate.nodes.kind === 'failed'}
-      <p class="estate-fail">The registry did not answer: {estate.nodes.error}. This page refuses to guess — an unreachable registry is not an empty estate.</p>
+      <p class="estate-fail load-failed">The registry did not answer: {estate.nodes.error}. This page refuses to guess — an unreachable registry is not an empty estate.</p>
     {:else if estate.nodes.kind === 'ready'}
       <table class="estate-table">
         <thead>
@@ -88,7 +88,7 @@
 
     <div class="estate-section">01 — OBSERVED vs DECLARED</div>
     {#if estate.observations.kind === 'failed'}
-      <p class="estate-fail">Observations unavailable: {estate.observations.error}</p>
+      <p class="estate-fail load-failed">Observations unavailable: {estate.observations.error}</p>
     {:else if estate.observations.kind === 'ready'}
       <div class="estate-obs">
         {#if clusterObs}
@@ -127,7 +127,7 @@
           <div class="estate-obs-row"><span class="estate-scope">host</span><span>no observation recorded yet</span></div>
         {/if}
         {#if estate.comparisons.kind === 'failed'}
-          <p class="estate-fail">Comparisons unavailable: {estate.comparisons.error}</p>
+          <p class="estate-fail load-failed">Comparisons unavailable: {estate.comparisons.error}</p>
         {:else if clusterCmp}
           {@const v = comparisonVerdict(clusterCmp)}
           <div class="estate-obs-row">

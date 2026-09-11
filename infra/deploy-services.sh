@@ -133,6 +133,11 @@ REPO_ROOT="${BOSS_REPO_ROOT:-/opt/boss}"
 # with infra/backup.sh — see infra/files-root.sh for why.
 # shellcheck source=infra/files-root.sh
 . "$(dirname "$0")/files-root.sh"
+# What this run leaves for its own packet. A no-op unless the caller set
+# BOSS_RUN_SUMMARY_FILE — boss-gcp-converge.service does, so its packet
+# says what the `units` mode installed instead of only `result=ok`.
+# shellcheck source=infra/run-summary.sh
+. "$(dirname "$0")/run-summary.sh"
 
 # ---------------------------------------------------------------------
 # Per-machine deploy configuration
@@ -318,6 +323,13 @@ TIMERS=(
     # behind them had already LANDED (4ef79606) and changed nothing,
     # because landing a car changes the tree, not the host.
     "boss-gcp-converge:gcp"
+    # The daily codebase trend (06048ade). It lives on THIS host because
+    # the measurement reads the first-parent history of main and this is
+    # the box that keeps a current checkout — the converge above is what
+    # keeps it current. Nothing had to start collecting: the first run
+    # backfills 467 landings out of git, which is the whole reason the
+    # cadence is cheap.
+    "boss-codebase-metrics:."
 )
 
 # Long-running daemons that aren't `boss-*-api` services. Each
@@ -1172,9 +1184,19 @@ do_revert() {
 TIMER_ETC="${INSTALL_ETC:-/etc/systemd/system}"
 TIMER_SYSTEMCTL="${INSTALL_SYSTEMCTL:-systemctl}"
 
+# WHAT IT INSTALLED IS COUNTED, NOT ASSUMED. These two are read by the
+# `units` mode to report the real outcome: the tail line used to print
+# `${#TIMERS[@]}` — the ROSTER LENGTH — so a run that skipped two pairs
+# still claimed it had installed every one of them. A count that cannot
+# disagree with the roster is not a count.
+TIMER_UNITS_INSTALLED=0
+TIMER_UNITS_SKIPPED=0
+
 # $1 = "stage" to also stage each timer's binary into the generation.
 install_timer_units() {
     local stage="${1:-}" entry stem subdir src_dir svc_src tmr_src
+    TIMER_UNITS_INSTALLED=0
+    TIMER_UNITS_SKIPPED=0
     for entry in "${TIMERS[@]}"; do
         IFS=: read -r stem subdir <<<"$entry"
         src_dir="$REPO_ROOT/infra"
@@ -1182,7 +1204,16 @@ install_timer_units() {
         svc_src="$src_dir/${stem}.service"
         tmr_src="$src_dir/${stem}.timer"
         if [[ ! -f "$svc_src" || ! -f "$tmr_src" ]]; then
+            # LOUD IN THE RECORD, NOT FATAL. A row whose unit files this
+            # commit does not carry is a legitimate state (observe-units.sh
+            # derives its watch roster by skipping exactly these), and
+            # failing here would stop every other pair converging. But it
+            # must reach the packet by NAME: "something was skipped" sends
+            # the reader back to the host, which is the cost this records
+            # away (2026-09-11).
             echo "  SKIP $stem (missing $svc_src or $tmr_src)"
+            TIMER_UNITS_SKIPPED=$((TIMER_UNITS_SKIPPED + 1))
+            run_summary_note "SKIP $stem — missing $svc_src or $tmr_src"
             continue
         fi
         install -m 0644 "$svc_src" "${TIMER_ETC}/${stem}.service"
@@ -1226,6 +1257,7 @@ install_timer_units() {
 Environment=BOSS_JOBS_URL=http://127.0.0.1:$(port_of jobs prod)
 UNIT
         echo "  installed $stem unit + timer"
+        TIMER_UNITS_INSTALLED=$((TIMER_UNITS_INSTALLED + 1))
     done
     "$TIMER_SYSTEMCTL" daemon-reload
 }
@@ -1257,6 +1289,14 @@ case "$MODE" in
         echo "==> install timer units from $REPO_ROOT (files only: no build, no schema, no restart)"
         install_timer_units
         enable_timer_units
+        # RECORDED THE MOMENT IT IS KNOWN, never at the end. What follows
+        # (the read door, the ops runner) can fail, and on this host the
+        # whole run's only off-host record is the packet: a summary
+        # assembled at the end is a summary a failure takes with it.
+        run_summary_field units_installed "$TIMER_UNITS_INSTALLED"
+        run_summary_field units_skipped "$TIMER_UNITS_SKIPPED"
+        run_summary_field summary \
+            "installed $TIMER_UNITS_INSTALLED of ${#TIMERS[@]} timer unit pair(s), skipped $TIMER_UNITS_SKIPPED"
         # THE JOURNAL READ DOOR, converged with the units.
         #
         # Backlog 68757702: boss-gcp had no read path from the pod for
@@ -1319,9 +1359,26 @@ case "$MODE" in
         # timer-list, journal-tail) and nothing else: every verb there
         # declares the hosts it serves, and the runner REFUSES one that
         # does not name this host — by name, on the packet.
+        # ITS FAILURE IS LOUD BUT LATE. A runner that did not install is a
+        # host that cannot answer an ops-request, which is worth a red unit
+        # and a packet on the `failed` terminal — but not at the price of
+        # abandoning the rest of this mode, so the exit is carried to the
+        # end rather than aborting here.
+        ops_runner_rc=0
         INSTALL_ETC="$TIMER_ETC" INSTALL_SYSTEMCTL="$TIMER_SYSTEMCTL" \
-            bash "$REPO_ROOT/infra/ops/install-ops-runner.sh" boss-gcp
-        echo "units: ${#TIMERS[@]} timer unit pair(s) installed and enabled from $REPO_ROOT"
+            bash "$REPO_ROOT/infra/ops/install-ops-runner.sh" boss-gcp || ops_runner_rc=$?
+        # THE TAIL LINE SAYS WHAT HAPPENED, not what the roster holds.
+        # It read `${#TIMERS[@]} timer unit pair(s) installed and enabled`
+        # until 2026-09-11 — the roster length, printed whether or not a
+        # pair was skipped, which is a false claim in the one line a
+        # reader would have believed.
+        echo "units: installed $TIMER_UNITS_INSTALLED of ${#TIMERS[@]} timer unit pair(s) from $REPO_ROOT ($TIMER_UNITS_SKIPPED skipped)"
+        if [[ "$ops_runner_rc" -ne 0 ]]; then
+            echo "units: the ops-request runner did NOT install (exit $ops_runner_rc) — it named" >&2
+            echo "    what failed above, and the run summary carries it. Every unit file above" >&2
+            echo "    converged; this host cannot answer an ops-request until that is fixed." >&2
+            exit "$ops_runner_rc"
+        fi
         exit 0
         ;;
     probe)

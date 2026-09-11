@@ -73,8 +73,49 @@ if [ -n "${SERVICE_RESULT:-}" ] && ! printf '%s\n' "$@" | grep -q '^result='; th
         set -- "$@" "result=$SERVICE_RESULT" "exit_status=${EXIT_STATUS:-unknown}"
     fi
 fi
+# WHAT THE RUN ITSELF RECORDED — the other half of the verdict.
+#
+# $SERVICE_RESULT says whether the run died; it cannot say what the run
+# DID. boss-gcp-converge's packet carried `result=ok` and nothing else
+# until 2026-09-11, and on the day an ops-runner install block landed that
+# was enough to support the wrong conclusion: both converges had installed
+# it, both packets said only "ok", and establishing which took an
+# ops-request and 200 journal lines off the host (infra/run-summary.sh
+# carries the measurement and the shape).
+#
+# So a unit may leave structured facts in $BOSS_RUN_SUMMARY_FILE — a path
+# its unit declares ONCE, in `Environment=`, which both `ExecStart=` and
+# this `ExecStopPost=` inherit, so producer and consumer cannot disagree
+# about where it is (CLAUDE.md §9a). They merge onto the step UNDER the
+# caller's explicit pairs, which still win.
+#
+# READ-AND-DELETE, and the file's absence is itself recorded. The run that
+# wrote it has ended; leaving it would let the NEXT run's ExecStopPost
+# stamp these facts on a packet they do not belong to — a stale record
+# reads exactly as confident as a true one. `summary_absent` rather than
+# silence for the same reason: "the run left no summary" is a finding, and
+# the alternative is a packet that looks like every other packet.
+#
+# Kept as JSON rather than flattened to key=value pairs: an anomaly field
+# holds the lines that caused it, verbatim, newlines and all, and a pair
+# list cannot carry those without losing exactly the detail they are there
+# for.
+SUMMARY_JSON=""
+if [ -n "${BOSS_RUN_SUMMARY_FILE:-}" ]; then
+    if [ ! -s "$BOSS_RUN_SUMMARY_FILE" ]; then
+        SUMMARY_JSON=$(jq -nc --arg f "$BOSS_RUN_SUMMARY_FILE" \
+            '{summary_absent: ($f + " was not written by this run")}')
+    elif ! SUMMARY_JSON=$(jq -ce 'if type == "object" then . else error("not an object") end' \
+            "$BOSS_RUN_SUMMARY_FILE" 2>/dev/null); then
+        SUMMARY_JSON=$(jq -nc --arg f "$BOSS_RUN_SUMMARY_FILE" \
+            '{summary_absent: ($f + " is not a JSON object")}')
+    fi
+    rm -f "$BOSS_RUN_SUMMARY_FILE" 2>/dev/null || true
+fi
+
 # The lint's self-test reads the pairs this run would record, and stops.
 if [ -n "${BOSS_STEP_DRY_RUN:-}" ]; then
+    [ -n "$SUMMARY_JSON" ] && printf 'run-summary=%s\n' "$SUMMARY_JSON"
     printf '%s\n' "$@"
     exit 0
 fi
@@ -168,6 +209,11 @@ if [ "$step_status" = "completed" ] || [ "$step_status" = "skipped" ]; then
 fi
 
 merged=$(printf '%s' "$step" | jq '.metadata // {}')
+# The run's own facts go under the caller's explicit pairs: a verdict the
+# unit line states wins over one a script left in a file.
+if [ -n "$SUMMARY_JSON" ]; then
+    merged=$(printf '%s' "$merged" | jq --argjson s "$SUMMARY_JSON" '. * $s')
+fi
 for pair in "$@"; do
     case "$pair" in
         *=*) ;;
