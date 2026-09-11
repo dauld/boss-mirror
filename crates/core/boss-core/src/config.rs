@@ -106,11 +106,33 @@ mod tests {
         }
     }
 
+    /// A scratch root this uid and process own outright — and the one
+    /// copy of `boss_testing::scratch` in the tree, because
+    /// `boss-testing` depends on `boss-core` and the dev-dependency
+    /// would be a cycle. The duplication is of a technique, not of a
+    /// shared fact: the two roots must each be unique, never equal to
+    /// one another, so there is nothing for an equality test to pin
+    /// (CLAUDE.md §9a). Why both the uid and the pid, and why the
+    /// panics name their path, is documented once in that module.
+    fn scratch_root() -> std::path::PathBuf {
+        use std::os::unix::fs::MetadataExt;
+        // /proc rather than libc, so a test-only helper adds no
+        // dependency to this crate.
+        let uid = std::fs::metadata("/proc/self")
+            .map(|m| m.uid())
+            .unwrap_or(u32::MAX);
+        std::env::temp_dir().join(format!(
+            "boss-core-config-test-{uid}-{}",
+            std::process::id()
+        ))
+    }
+
     fn write_tmp(name: &str, body: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join("boss-core-config-test");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = scratch_root();
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|e| panic!("create scratch dir {}: {e}", dir.display()));
         let path = dir.join(name);
-        std::fs::write(&path, body).unwrap();
+        std::fs::write(&path, body).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
         path
     }
 
@@ -127,7 +149,8 @@ http_bind = "0.0.0.0:7000""#,
 
     #[test]
     fn missing_file_is_io_error() {
-        let path = std::path::PathBuf::from("/tmp/boss-core-does-not-exist.toml");
+        let path = scratch_root().join("does-not-exist.toml");
+        assert!(!path.exists(), "{} must not exist", path.display());
         let err = load_toml::<Sample>(&path).unwrap_err();
         assert!(matches!(err, ConfigError::Io(..)));
     }

@@ -24,14 +24,86 @@
 # never reach the cluster: `image_boots` runs the image's own launcher
 # check before anything is applied.
 
+# THE CONVERGE APPLIES `*.yaml` AND NOTHING ELSE — one definition, two
+# readers (backlog e37a833d).
+#
+# `manifests_with_image` stages the apply directory with
+# `cp "$src"/*.yaml`, so a manifest committed as `.yml` or `.json`, filed
+# in a subdirectory, or named with a leading dot is in the tree,
+# reviewed, merged — and never reaches the cluster. Nothing said so: no
+# lint, no converge warning, and `kubectl apply` has no `--prune`, so
+# nothing downstream can see the omission either. That is a change that
+# looks delivered and is not, and it is indistinguishable from a manifest
+# that has merely not converged YET.
+#
+# `.yaml` stays the only legal name rather than the converge widening,
+# because SEVEN readers derive "what the tree declares to the cluster"
+# from this directory, each with its own `*.yaml` (undeclared-objects.sh,
+# check-manifests-applied.sh, the orphan lint's properties A and B,
+# a-workload-declares-the-user-it-runs-as.sh, timers-leave-a-packet.sh
+# twice, and this function). Widening leaves all seven free to disagree
+# about the set; refusing makes `*.yaml` select the WHOLE directory, so
+# they are equal by construction instead of by seven edits or seven pins
+# (CLAUDE.md §9a prefers the collapse).
+#
+# manifests_the_converge_ignores DIR
+#   Print every entry of DIR that `cp "$DIR"/*.yaml` would leave behind,
+#   one path per line. Nothing printed = the converge applies the whole
+#   directory. `*.md` is documentation and not a declaration, so it is
+#   the one thing deliberately not applied; everything else — `.yml`,
+#   `.json`, a nested directory, a dotfile that `*` never expands onto —
+#   is something the apply drops on the floor.
+#
+#   Read by infra/lint/a-manifest-the-converge-ignores-is-refused.sh,
+#   which is how this never fires in a converge: it fails the gate first.
+manifests_the_converge_ignores() {
+    local dir="$1"
+    # A SUBSHELL, so `shopt` does not leak into the runner that sources
+    # this. dotglob is on because `*.yaml` never expands onto a leading
+    # dot: `.boss.yaml` ENDS in .yaml and is still not applied, which is
+    # the spelling that survives a naive fix.
+    (
+        shopt -s nullglob dotglob
+        local entry
+        for entry in "$dir"/*; do
+            case "${entry##*/}" in
+                .*) printf '%s\n' "$entry"; continue ;;
+            esac
+            # A nested directory is the same defect: neither the `cp` nor
+            # `kubectl apply -f <dir>` recurses.
+            if [ -d "$entry" ]; then
+                printf '%s\n' "$entry"
+                continue
+            fi
+            case "$entry" in
+                *.yaml | *.md) continue ;;
+                *) printf '%s\n' "$entry" ;;
+            esac
+        done
+    )
+}
+
 # manifests_with_image SRC_DIR DST_DIR REGISTRY TAG
 #   Copy the manifests, rewriting the boss image tag to TAG so the
 #   apply carries the build that is already converged. TAG "none"
 #   (first ever converge) leaves the files untouched.
+#
+#   REFUSES, before it copies anything, a directory it could only partly
+#   apply: a converge that applies 20 of 21 manifests and exits 0 claims
+#   a convergence it did not perform. Refusing is self-clearing (rename
+#   the file to `.yaml`) and loud, where the old behaviour was silent.
 manifests_with_image() {
-    local src="$1" dst="$2" registry="$3" tag="$4"
+    local src="$1" dst="$2" registry="$3" tag="$4" ignored
+    ignored=$(manifests_the_converge_ignores "$src")
+    if [ -n "$ignored" ]; then
+        echo "cluster-deploy-runner: REFUSING to stage $src — the apply copies *.yaml only, so these would never reach the cluster:" >&2
+        printf '%s\n' "$ignored" | sed 's/^/  /' >&2
+        echo "  Rename each to .yaml (the only name the converge applies), or move it out of the manifests directory." >&2
+        echo "  Nothing was staged: a partial apply directory reads as a full convergence." >&2
+        return 1
+    fi
     mkdir -p "$dst"
-    cp "$src"/*.yaml "$dst"/
+    cp "$src"/*.yaml "$dst"/ || return 1
     [ "$tag" = "none" ] && return 0
     local f
     for f in "$dst"/*.yaml; do

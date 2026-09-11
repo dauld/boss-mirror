@@ -68,22 +68,19 @@ impl Validate for KbApiConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use boss_testing::{scratch_dir, scratch_path, write_file};
 
     #[test]
     fn loads_valid_toml() {
-        let dir = std::env::temp_dir().join("boss-catalog-config-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("valid.toml");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
+        let path = scratch_dir("boss-catalog-config-valid").join("valid.toml");
+        write_file(
+            &path,
             r#"postgres_url = "postgres://localhost/boss"
 http_bind = "0.0.0.0:7700"
 assets_api_url = "http://127.0.0.1:7600"
-classes_api_url = "http://127.0.0.1:7800""#
-        )
-        .unwrap();
+classes_api_url = "http://127.0.0.1:7800"
+"#,
+        );
 
         let cfg = KbApiConfig::load(&path).unwrap();
         assert_eq!(cfg.postgres_url, "postgres://localhost/boss");
@@ -93,18 +90,15 @@ classes_api_url = "http://127.0.0.1:7800""#
 
     #[test]
     fn rejects_empty_postgres_url() {
-        let dir = std::env::temp_dir().join("boss-catalog-config-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("empty_pg.toml");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
+        let path = scratch_dir("boss-catalog-config-empty-pg").join("empty_pg.toml");
+        write_file(
+            &path,
             r#"postgres_url = ""
 http_bind = "0.0.0.0:7700"
 assets_api_url = "http://127.0.0.1:7600"
-classes_api_url = "http://127.0.0.1:7800""#
-        )
-        .unwrap();
+classes_api_url = "http://127.0.0.1:7800"
+"#,
+        );
 
         let err = KbApiConfig::load(&path).unwrap_err();
         assert!(err.to_string().contains("postgres_url"));
@@ -116,17 +110,14 @@ classes_api_url = "http://127.0.0.1:7800""#
         // taxonomy codes (asset category, document kind, marketing
         // kind) now that the schema CHECKs are gone. Loading a config
         // without classes_api_url must fail at startup, not later.
-        let dir = std::env::temp_dir().join("boss-catalog-config-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("missing-classes.toml");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
+        let path = scratch_dir("boss-catalog-config-missing-classes").join("missing-classes.toml");
+        write_file(
+            &path,
             r#"postgres_url = "postgres://localhost/boss"
 http_bind = "0.0.0.0:7700"
-assets_api_url = "http://127.0.0.1:7600""#
-        )
-        .unwrap();
+assets_api_url = "http://127.0.0.1:7600"
+"#,
+        );
 
         let err = KbApiConfig::load(&path).unwrap_err();
         let msg = format!("{err}");
@@ -138,7 +129,8 @@ assets_api_url = "http://127.0.0.1:7600""#
 
     #[test]
     fn rejects_missing_file() {
-        let path = std::path::PathBuf::from("/tmp/does-not-exist-kb.toml");
+        let path = scratch_path("boss-catalog-config-absent").join("kb.toml");
+        assert!(!path.exists(), "{} must not exist", path.display());
         assert!(KbApiConfig::load(&path).is_err());
     }
 }

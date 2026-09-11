@@ -62,21 +62,18 @@ impl Validate for MessagesApiConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use boss_testing::{scratch_dir, scratch_path, write_file};
 
     #[test]
     fn loads_valid_toml() {
-        let dir = std::env::temp_dir().join("boss-messages-config-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("valid.toml");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
+        let path = scratch_dir("boss-messages-config-valid").join("valid.toml");
+        write_file(
+            &path,
             r#"postgres_url = "postgres://localhost/boss"
 http_bind = "0.0.0.0:7200"
-classes_api_url = "http://127.0.0.1:7800""#
-        )
-        .unwrap();
+classes_api_url = "http://127.0.0.1:7800"
+"#,
+        );
 
         let cfg = MessagesApiConfig::load(&path).unwrap();
         assert_eq!(cfg.http_bind, "0.0.0.0:7200");
@@ -88,16 +85,13 @@ classes_api_url = "http://127.0.0.1:7800""#
         // Class registry validation is the only defense for message
         // kind now that the schema CHECK is gone. Loading a config
         // without classes_api_url must fail at startup, not later.
-        let dir = std::env::temp_dir().join("boss-messages-config-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("missing-classes.toml");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
+        let path = scratch_dir("boss-messages-config-missing-classes").join("missing-classes.toml");
+        write_file(
+            &path,
             r#"postgres_url = "postgres://localhost/boss"
-http_bind = "0.0.0.0:7200""#
-        )
-        .unwrap();
+http_bind = "0.0.0.0:7200"
+"#,
+        );
 
         let err = MessagesApiConfig::load(&path).unwrap_err();
         let msg = format!("{err}");
@@ -109,7 +103,8 @@ http_bind = "0.0.0.0:7200""#
 
     #[test]
     fn rejects_missing_file() {
-        let path = std::path::PathBuf::from("/tmp/does-not-exist-messages.toml");
+        let path = scratch_path("boss-messages-config-absent").join("messages.toml");
+        assert!(!path.exists(), "{} must not exist", path.display());
         assert!(MessagesApiConfig::load(&path).is_err());
     }
 }

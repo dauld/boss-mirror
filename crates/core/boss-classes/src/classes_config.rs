@@ -36,20 +36,17 @@ impl Validate for ClassesApiConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use boss_testing::{scratch_dir, scratch_path, write_file};
 
     #[test]
     fn loads_valid_toml() {
-        let dir = std::env::temp_dir().join("boss-classes-config-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("valid.toml");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
+        let path = scratch_dir("boss-classes-config-valid").join("valid.toml");
+        write_file(
+            &path,
             r#"postgres_url = "postgres://localhost/boss"
-http_bind = "0.0.0.0:7800""#
-        )
-        .unwrap();
+http_bind = "0.0.0.0:7800"
+"#,
+        );
 
         let cfg = ClassesApiConfig::load(&path).unwrap();
         assert_eq!(cfg.http_bind, "0.0.0.0:7800");
@@ -57,7 +54,8 @@ http_bind = "0.0.0.0:7800""#
 
     #[test]
     fn rejects_missing_file() {
-        let path = std::path::PathBuf::from("/tmp/does-not-exist-classes.toml");
+        let path = scratch_path("boss-classes-config-absent").join("classes.toml");
+        assert!(!path.exists(), "{} must not exist", path.display());
         assert!(ClassesApiConfig::load(&path).is_err());
     }
 }

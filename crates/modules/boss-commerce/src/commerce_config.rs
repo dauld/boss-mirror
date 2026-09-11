@@ -65,22 +65,19 @@ impl Validate for CommerceApiConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use boss_testing::{scratch_dir, scratch_path, write_file};
 
     #[test]
     fn loads_valid_toml() {
-        let dir = std::env::temp_dir().join("boss-commerce-config-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("valid.toml");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
+        let path = scratch_dir("boss-commerce-config-valid").join("valid.toml");
+        write_file(
+            &path,
             r#"postgres_url = "postgres://localhost/boss"
 http_bind = "0.0.0.0:7400"
 people_api_url = "http://127.0.0.1:7500"
-classes_api_url = "http://127.0.0.1:7800""#
-        )
-        .unwrap();
+classes_api_url = "http://127.0.0.1:7800"
+"#,
+        );
 
         let cfg = CommerceApiConfig::load(&path).unwrap();
         assert_eq!(cfg.http_bind, "0.0.0.0:7400");
@@ -92,17 +89,14 @@ classes_api_url = "http://127.0.0.1:7800""#
         // Class registry validation is the only defense for invoice
         // status now that the schema CHECK is gone. Loading a config
         // without classes_api_url must fail at startup, not later.
-        let dir = std::env::temp_dir().join("boss-commerce-config-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("missing-classes.toml");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
+        let path = scratch_dir("boss-commerce-config-missing-classes").join("missing-classes.toml");
+        write_file(
+            &path,
             r#"postgres_url = "postgres://localhost/boss"
 http_bind = "0.0.0.0:7400"
-people_api_url = "http://127.0.0.1:7500""#
-        )
-        .unwrap();
+people_api_url = "http://127.0.0.1:7500"
+"#,
+        );
 
         let err = CommerceApiConfig::load(&path).unwrap_err();
         let msg = format!("{err}");
@@ -114,7 +108,8 @@ people_api_url = "http://127.0.0.1:7500""#
 
     #[test]
     fn rejects_missing_file() {
-        let path = std::path::PathBuf::from("/tmp/does-not-exist-commerce.toml");
+        let path = scratch_path("boss-commerce-config-absent").join("commerce.toml");
+        assert!(!path.exists(), "{} must not exist", path.display());
         assert!(CommerceApiConfig::load(&path).is_err());
     }
 }
