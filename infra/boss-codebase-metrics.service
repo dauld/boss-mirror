@@ -1,0 +1,51 @@
+# The daily codebase trend, filed onto a packet (backlog 06048ade).
+#
+# David, 2026-09-11: "once we have code base analysis statistics that we
+# can start to get a sense for whether we are getting simpler and more
+# reliable or more complex as we go."
+#
+# WHY THIS HOST. The measurement reads the first-parent history of main,
+# so it needs a git checkout, and this is the box that keeps one current:
+# boss-gcp-converge fetches forge main into /opt/boss every thirty
+# minutes. The cluster has no checkout, which is why this is a host timer
+# and not a CronJob.
+#
+# WHICH REF, PINNED. `--ref main` rather than the trunk walk
+# (forge/main → origin/main → main): remote names are PER CLONE, and in
+# THIS checkout `origin` is the public GitHub mirror, which lags the
+# forge — 238 commits behind on one measured day. The converge leaves the
+# local `main` branch fast-forwarded to forge main and refuses to run at
+# all unless the checkout is clean and on main, so `main` here is the
+# forge's main by construction. The row also carries `head` and `head_at`,
+# so a measurement taken against a stale checkout says how stale it was
+# instead of looking current.
+[Unit]
+Description=BOSS daily codebase metrics (delete:add, registry rows, totals by area)
+Documentation=file:/opt/boss/infra/codebase-metrics.sh
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# One git pass over ~470 landings plus one archive of the tree: about two
+# seconds measured. The ceiling is for a contended box, not the work.
+TimeoutStartSec=10min
+# THE SYSTEM OF RECORD, PINNED INLINE WITH env(1) on every line that
+# speaks to it. deploy-services' shared jobs-url.conf drop-in points this
+# host's timer fleet at the legacy 127.0.0.1 instance, drop-in env
+# outranks unit Environment=, and that instance has never heard of a
+# bundle-only kind: the packet would die 400 in ExecStartPre and the
+# measurement would be PATCHed onto an instance nobody reads. Same fix
+# the estate observers needed (91ddebfb), and timers-leave-a-packet
+# check 7 makes it the rule.
+#
+# ExecStartPre=- because the packet is VISIBILITY, NEVER A PRECONDITION —
+# except that here the packet is also where the work LANDS, so the
+# distinction is worth stating: if the API is unreachable the wrap exits
+# 0 and lets the run proceed, the run then finds no open packet, prints
+# the whole measurement to the journal and exits non-zero. The
+# measurement is never lost to a reduction (CLAUDE.md §Diagnosis), and
+# the failed unit is a state somebody notices.
+ExecStartPre=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-maintenance-wrap.sh maintenance-codebase-metrics "Codebase metrics"
+ExecStart=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/codebase-metrics.sh file --repo /opt/boss --ref main
+ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-step.sh maintenance-codebase-metrics run

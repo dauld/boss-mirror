@@ -318,6 +318,13 @@ TIMERS=(
     # behind them had already LANDED (4ef79606) and changed nothing,
     # because landing a car changes the tree, not the host.
     "boss-gcp-converge:gcp"
+    # The daily codebase trend (06048ade). It lives on THIS host because
+    # the measurement reads the first-parent history of main and this is
+    # the box that keeps a current checkout — the converge above is what
+    # keeps it current. Nothing had to start collecting: the first run
+    # backfills 467 landings out of git, which is the whole reason the
+    # cadence is cheap.
+    "boss-codebase-metrics:."
 )
 
 # Long-running daemons that aren't `boss-*-api` services. Each

@@ -1,0 +1,85 @@
+# ---------------------------------------------------------------------------
+# maintenance-codebase-metrics — the codebase states its own trend, daily,
+# onto a packet.
+#
+# David, 2026-09-11: "once we have code base analysis statistics that we can
+# start to get a sense for whether we are getting simpler and more reliable
+# or more complex as we go."
+#
+# WHY IT IS A PACKET AND NOT A DASHBOARD QUERY. The measurement is a pure
+# function of the log — `infra/codebase-metrics.sh` recomputes any window
+# from `git log --first-parent` in a second and a half — so nothing is lost
+# by NOT storing it, and that is exactly the problem: a number anybody can
+# recompute is a number nobody has. "Are we getting simpler?" is a question
+# about a series, and a series needs a place that accumulates. The packet is
+# that place: each run PATCHes its row onto the open packet, so the trend is
+# a query against the system of record instead of a shell pipeline somebody
+# writes in a hurry (which is how the first measurement was taken, and its
+# buckets counted 72,612 lines of inline `#[cfg(test)]` code as production
+# Rust).
+#
+# THE FIRST RUN BACKFILLS. Every landing on main is a first-parent commit
+# carrying a diffstat, so the series starts populated — 467 landings back to
+# 2026-06-18 — rather than becoming useful in a month. Nothing had to start
+# collecting, which is the whole reason this cadence is cheap.
+#
+# A UNIT-RUN CHORE, so `run`'s `result` routes the verdict: the timer's
+# ExecStopPost reads systemd's $SERVICE_RESULT, and a run that died closes
+# this packet "failed" instead of leaving it open looking like a run still in
+# progress. The measurement itself rides in job metadata under `measured`
+# (headline + totals + method) and `landings` (one row per landing), written
+# by the script through PATCH /api/jobs/{id}/metadata.
+#
+# WHAT THE ROW DELIBERATELY DOES NOT CARRY: a count of `match kind { … }`
+# branches in core code. The registry half of CLAUDE.md §9 is counted
+# exactly; the code-branch half is not countable with a regex, and the row
+# says so in words rather than shipping a proxy that would get quoted. See
+# `registry.code_branches_not_counted_why` on any filed packet.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "maintenance-codebase-metrics"
+label = "Codebase metrics"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "The daily codebase trend: delete:add per landing, registry rows, and totals by area, computed from the first-parent history and filed as a measured row. Backfills the whole history on its first run."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "systemd-timer" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Measure the tree and file the row"
+# Gated so the simulated workforce cannot role-match and "complete" a
+# measurement nobody took; the timer's boss-step call presents the
+# automation actor with this role.
+authority_role = "platform-admin"
+fields = [{ name = "result", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
+title_template = "Measurement filed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the service
+# result and exit status) and lands here. A measurement cadence that fails
+# silently is worse than one that does not exist: the series just stops, and
+# a flat trend reads as a calm fortnight.
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Measurement failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
