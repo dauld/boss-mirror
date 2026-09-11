@@ -10,8 +10,16 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 python3 - "$repo" <<'PY' || exit 1
 import json,re,sys,os
 repo=sys.argv[1]; v=json.load(open(f"{repo}/infra/ops/verbs.json"))["verbs"]
-for name in ("rollback-to","hold-converge","release-converge","publish-github-pr"):
-    spec=v.get(name) or sys.exit(f"FAIL: verb {name} missing")
+# THE ROSTER IS DERIVED, not listed here. It used to be four names typed
+# into this loop, which meant every mutating verb added after them —
+# reclaim-disk, converge, mirror-base-images, delete-orphan-object — was
+# outside the only check that says a mutating verb is bounded and
+# authorized. A roster that has to be edited in two places is the §9a
+# defect; a verb that declares itself MUTATING is the one definition.
+mutating=sorted(n for n,s in v.items() if "MUTATING" in s.get("about",""))
+len(mutating) >= 8 or sys.exit(f"FAIL: only {len(mutating)} verb(s) declare MUTATING — the roster derivation broke: {mutating}")
+for name in mutating:
+    spec=v[name]
     script=spec["argv"][0].replace("/home/david/boss/", f"{repo}/")
     os.path.isfile(script) or sys.exit(f"FAIL: {name} points at a script not in the tree: {spec['argv'][0]}")
     os.access(script, os.X_OK) or sys.exit(f"FAIL: {name}'s script is not executable")
@@ -52,10 +60,51 @@ lits=sorted(w for p in pub["params"] for w in p["one_of"])
 lits==["--check"] or sys.exit(f"FAIL: publish-github-pr must admit exactly the literal --check, got {lits}")
 all(p.get("optional") is True for p in pub["params"]) or sys.exit("FAIL: publish-github-pr's --check must be optional — the real run passes no arg")
 isinstance(pub.get("timeout"), int) and pub["timeout"] >= 120 or sys.exit("FAIL: publish-github-pr must declare a timeout of at least 120s")
+# delete-orphan-object: the one verb whose authority is DERIVED rather
+# than granted. There is deliberately no general `kubectl delete` verb,
+# so the properties that keep this one bounded are the properties that
+# keep the allowlist worth having: one object named in full, the kind
+# floor, and the derivation it re-runs at call time.
+dob=v["delete-orphan-object"]
+pats=[p for p in dob["params"] if "one_of" not in p]
+[p["name"] for p in pats]==["object"] or sys.exit(f"FAIL: delete-orphan-object must take exactly one pattern param, `object`, got {[p['name'] for p in pats]}")
+lits=sorted(w for p in dob["params"] if "one_of" in p for w in p["one_of"])
+lits==["--dry-run"] or sys.exit(f"FAIL: delete-orphan-object must admit exactly the literal --dry-run, got {lits}")
+all(p.get("optional") is True for p in dob["params"] if "one_of" in p) or sys.exit("FAIL: --dry-run must be optional — the real run passes no second arg")
+op=pats[0]["pattern"]
+"default" in pats[0] and sys.exit("FAIL: delete-orphan-object's object has a default — a delete must name its target")
+for ok in ("Service/boss/boss-docs-internal","ConfigMap/boss-dev/gate-runner-script"):
+    re.fullmatch(op, ok) or sys.exit(f"FAIL: the object pattern refuses {ok}")
+# A delete whose target is not fully named is a delete with a scope, and
+# a scope is what this verb must never accept.
+for bad in ("services/boss/x","Service/boss","boss-docs-internal","Service/boss/x/y","Service//x","*/boss/x","Service/boss/*"):
+    re.fullmatch(op, bad) and sys.exit(f"FAIL: the object pattern admits {bad}")
+isinstance(dob.get("timeout"), int) and dob["timeout"] >= 120 or sys.exit("FAIL: delete-orphan-object must declare a timeout — the derivation parses every manifest")
+for phrase in ("undeclared-objects.sh","DERIVED","--dry-run"):
+    phrase in dob["about"] or sys.exit(f"FAIL: delete-orphan-object's about does not say {phrase}")
+for n,s in v.items():
+    re.search(r"\bkubectl\b[^.\n]*\bdelete\b", " ".join(s["argv"])) and sys.exit(f"FAIL: verb {n} hands kubectl a delete directly — the allowlist must not carry an unbounded delete")
+# The derivation is the authority, so it has to be there, and the verb
+# has to be the thing that calls it.
+derive=f"{repo}/infra/cluster/undeclared-objects.sh"
+os.path.isfile(derive) and os.access(derive, os.X_OK) or sys.exit("FAIL: infra/cluster/undeclared-objects.sh is missing or not executable")
+dobsh=open(f"{repo}/infra/forge/delete-orphan-object.sh").read()
+"undeclared-objects.sh" in dobsh or sys.exit("FAIL: delete-orphan-object.sh does not call the derivation")
+re.search(r'delete "\$KIND" "\$NAME" -n "\$NS"', dobsh) or sys.exit("FAIL: delete-orphan-object.sh's delete does not use the derivation's own fields")
+'"$TARGET"' in dobsh.split("--- the delete")[-1] and sys.exit("FAIL: delete-orphan-object.sh's delete reads the packet's string instead of the derivation's answer")
+floor=re.search(r"^DELETABLE_KINDS=\(([^)]*)\)", dobsh, re.M) or sys.exit("FAIL: delete-orphan-object.sh declares no DELETABLE_KINDS floor")
+kinds=floor.group(1).split()
+# Bytes, credentials and privileges stay a named human step. A widening
+# here is a reviewed change to that file, and this is the review.
+for withheld in ("PersistentVolumeClaim","StatefulSet","Secret","ServiceAccount","Role","RoleBinding","Namespace","ClusterRole","ClusterRoleBinding"):
+    withheld in kinds and sys.exit(f"FAIL: the kind floor admits {withheld} — bytes, credentials and privileges stay a human step")
+kinds or sys.exit("FAIL: the kind floor is empty")
+print(f"verbs: the kind floor is {' '.join(kinds)}; the object pattern names one object in full")
+
 runner=open(f"{repo}/infra/ops/ops-runner.sh").read()
 "$spec.timeout" in runner and "verb_timeout" in runner or sys.exit("FAIL: ops-runner.sh does not honour a verb's declared timeout")
 "one_of" in runner and "optional" in runner or sys.exit("FAIL: ops-runner.sh does not read one_of/optional params — the literal allowlist is decoration")
-print("verbs: rollback-to, hold-converge, release-converge, publish-github-pr are bounded and authorized")
+print("verbs: " + ", ".join(mutating) + " are bounded and authorized")
 PY
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 export BOSS_CONVERGE_HOLD="$tmp/hold"
@@ -153,5 +202,25 @@ EOF
     grep -qF -- "refused aaaaaaaa — $reason" <<<"$out" || fail "the journal line does not carry the same reason: $out"
     runner_line="through the runner, publish-github-pr --check is answered and --force is refused with the reason on the step"
 fi
-echo "the-controls-are-bounded-verbs: self-test ok — four bounded, authorized ops verbs; the hold round-trips through the file the runner reads, with no HOME in the environment; a hold needs a reason; a rollback needs a sha; publish-github-pr --check passes on complete inputs, refuses by path without the token, refuses a world-readable token, and a run refuses without a system of record; $runner_line"
+# delete-orphan-object: the bounds that need no cluster, exercised. The
+# derivation's own behaviour against a stubbed kubectl is
+# boss-testing/tests/delete_orphan_object_sh.rs; here we pin only that
+# the argument bound refuses BEFORE anything looks at a cluster, under
+# the ops-runner's environment (no HOME).
+dob="$repo/infra/forge/delete-orphan-object.sh"
+der="$repo/infra/cluster/undeclared-objects.sh"
+env -i PATH="$PATH" bash -n "$dob" || fail "delete-orphan-object.sh does not parse"
+env -i PATH="$PATH" bash -n "$der" || fail "undeclared-objects.sh does not parse"
+grep -vE '^\s*#' "$dob" | grep -qE '\$HOME' && fail "delete-orphan-object.sh reads \$HOME (the ops runner has none)"
+grep -vE '^\s*#' "$der" | grep -qE '\$HOME' && fail "undeclared-objects.sh reads \$HOME (the ops runner has none)"
+for bad in "boss-docs-internal" "service/boss/x" "Service/boss"; do
+    out=$(env -i PATH="$PATH" bash "$dob" "$bad" 2>&1) \
+        && fail "delete-orphan-object.sh accepted the malformed target '$bad'"
+    grep -q '<Kind>/<namespace>/<name>' <<<"$out" || fail "the refusal of '$bad' does not name the shape: $out"
+done
+out=$(env -i PATH="$PATH" bash "$dob" "Service/boss/x" --force 2>&1) \
+    && fail "delete-orphan-object.sh accepted a second argument other than --dry-run"
+grep -q -- '--dry-run' <<<"$out" || fail "the refusal does not name the only allowed mode: $out"
+
+echo "the-controls-are-bounded-verbs: self-test ok — every MUTATING ops verb is bounded and authorized; the hold round-trips through the file the runner reads, with no HOME in the environment; a hold needs a reason; a rollback needs a sha; publish-github-pr --check passes on complete inputs, refuses by path without the token, refuses a world-readable token, and a run refuses without a system of record; $runner_line"
 exit 0

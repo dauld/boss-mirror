@@ -124,7 +124,17 @@ No ssh from the pod. Three doors, all read-only:
   sweep, with a floor), `rollback-to <sha>` (roll deploy/boss to a
   named build, verified Ready), `hold-converge <reason>` and
   `release-converge` (the runner builds and rolls nothing while a
-  hold stands), `mirror-base-images`, and `publish-github-pr` (the
+  hold stands), `mirror-base-images`, `delete-orphan-object
+  <Kind>/<namespace>/<name> [--dry-run]` (delete one cluster object the
+  TREE ALREADY PROVES is undeclared — the apply does not prune, so a
+  deleted manifest leaves its object running; there is deliberately no
+  general `kubectl delete` verb, and this one's authority is DERIVED: it
+  re-runs `infra/cluster/undeclared-objects.sh` at call time and acts
+  only on an object that computation names, refuses unless the manifests
+  directory is clean in git, withholds the kinds whose deletion destroys
+  bytes, credentials or privileges, and prints the object's YAML onto
+  the packet before deleting it; `--dry-run` runs every bound and
+  deletes nothing), and `publish-github-pr` (the
   machine step of publish-to-github v6: snapshot forge main onto the
   public mirror as a PR from the dauld fork; reads the dauld token at
   `/etc/boss-publish/github.token`, credentials registry

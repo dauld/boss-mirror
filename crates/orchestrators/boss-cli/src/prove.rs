@@ -311,8 +311,8 @@ pub(crate) fn rerunnable(
 /// The matching core `find_car` and `boss job` share: a row matches by
 /// exact `metadata.branch`, or by an id prefix of at least 8
 /// characters. Pure and message-free so each verb can refuse in its
-/// own vocabulary — `find_car`'s "no ship-a-change car" would be
-/// a lie coming from `boss job get`, which sees every kind.
+/// own vocabulary — `find_car`'s "no ship-a-change car" would be a lie
+/// coming from `boss job get`, which sees every kind.
 pub(crate) fn matching_jobs<'a>(rows: &'a [Value], given: &str) -> Vec<&'a Value> {
     rows.iter()
         .filter(|c| {
@@ -330,6 +330,46 @@ pub(crate) fn matching_jobs<'a>(rows: &'a [Value], given: &str) -> Vec<&'a Value
         .collect()
 }
 
+/// Which cars a lookup may legitimately resolve to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Eligible {
+    /// Recording a proof WRITES to the car, so a car the pipeline has
+    /// finished with is not a candidate: it cannot take a new proof.
+    Live,
+    /// `--recheck` re-runs a probe already recorded on the car and
+    /// writes nothing, so a finished car is a legitimate target — which
+    /// is the whole reason [`all_ship_a_change_cars`] pages over closed
+    /// cars instead of filtering `status=open` at the API.
+    AnyStatus,
+}
+
+/// The car's `status` as the jobs API spelled it, or `"?"` when the row
+/// carries none. For DISPLAY only — whether a car is live is
+/// `boss_jobs::car::is_open`'s single answer, never a second reading of
+/// this string.
+fn status_of(car: &Value) -> &str {
+    car.get("status").and_then(Value::as_str).unwrap_or("?")
+}
+
+/// One `id8  status  title` line per candidate, so a refusal that lists
+/// cars is answerable from the refusal.
+///
+/// The id is shortened by [`crate::train::id8`] rather than a second
+/// `[..8]` of its own: the bare slice panicked on any row whose id the
+/// reader could not find, which is the listing for a malformed row
+/// crashing instead of printing it.
+fn listed(rows: &[&Value]) -> String {
+    rows.iter().fold(String::new(), |mut out, c| {
+        out.push_str(&format!(
+            "\n  {}  {}  {}",
+            crate::train::id8(c.get("id").and_then(Value::as_str).unwrap_or("?")),
+            status_of(c),
+            c.get("title").and_then(Value::as_str).unwrap_or("?")
+        ));
+        out
+    })
+}
+
 /// Find the one car for `given` — a branch name, or an id prefix.
 ///
 /// Refuses on ambiguity rather than picking. `boss park` learned this
@@ -338,51 +378,68 @@ pub(crate) fn matching_jobs<'a>(rows: &'a [Value], given: &str) -> Vec<&'a Value
 /// receipt. Choosing among candidates is how that happens, so this
 /// does not choose.
 ///
-/// A CLOSED car is not a candidate, and dropping it is not choosing —
-/// it cannot take a new proof at all. Measured live 2026-09-10 05:02
-/// UTC (backlog 0a58827d): `boss prove feat/arrival-runs-the-probe-rerail`
-/// refused with "2 open cars match" over one live car and one closed and
-/// abandoned ("gated, then changed"). There was one candidate, so the
-/// refusal was wrong to fire, and the word "open" sent the reader to
-/// investigate a dead car — two queries spent learning what the message
-/// had already asserted falsely. So the candidates are narrowed by
-/// `boss_jobs::car::is_open`, the one definition of "this car is live"
-/// that `boss park`, `boss rerail` and the auto-park handler already
-/// decide on (CLAUDE.md §9a).
+/// It does DISCARD candidates that cannot take a proof at all — which
+/// is not choosing between live cars, and is what backlog 0a58827d asked
+/// for. Measured live 2026-09-10 05:02 UTC: `boss prove
+/// feat/arrival-runs-the-probe-rerail` refused with "2 open cars match"
+/// over one live car and one closed, abandoned twin ("gated, then
+/// changed"). There was one candidate, so the refusal was wrong to fire,
+/// and the word "open" sent the reader to investigate a dead car — two
+/// queries spent learning what the message had already asserted falsely.
 ///
-/// The narrowing is a PREFERENCE, not a `status=open` read: when no
-/// match is open the closed ones stand, because `--recheck` re-runs a
-/// recorded proof on a car that has landed and closed. And the refusal
-/// names the state it is talking about, since after narrowing the
-/// candidates are either all open or all closed.
-pub(crate) fn find_car<'a>(cars: &'a [Value], given: &str) -> Result<&'a Value> {
-    let all = matching_jobs(cars, given);
-    let open: Vec<&Value> = all
+/// Whether a car is live is `boss_jobs::car::is_open`, the one definition
+/// `boss park`, `boss rerail` and the auto-park handler already decide
+/// on (CLAUDE.md §9a) — this verb does not carry a second reading of
+/// `status`. What the CALLER's mode decides is what a finished car means
+/// here:
+///
+/// - [`Eligible::Live`] — recording a proof is a WRITE, so a finished
+///   car is discarded outright. With nothing left the refusal says the
+///   matches are finished, rather than sending the reader after a typo.
+/// - [`Eligible::AnyStatus`] — `--recheck` writes nothing, so a finished
+///   car is a legitimate target; a live match is still PREFERRED when
+///   the name has one, so a recheck resolves where it used to.
+///
+/// Either way every listed candidate is labelled with its status, so a
+/// refusal that must name a finished car stays answerable without a
+/// second query — the per-row label replaces the one collective "open"
+/// / "closed" word, which could only describe a homogeneous set.
+pub(crate) fn find_car<'a>(
+    cars: &'a [Value],
+    given: &str,
+    eligible: Eligible,
+) -> Result<&'a Value> {
+    let matched = matching_jobs(cars, given);
+    let live: Vec<&Value> = matched
         .iter()
         .copied()
         .filter(|c| boss_jobs::car::is_open(c))
         .collect();
-    let live = !open.is_empty();
-    let matches = if live { open } else { all };
+    let candidates: Vec<&Value> = match eligible {
+        Eligible::Live => live,
+        Eligible::AnyStatus if !live.is_empty() => live,
+        Eligible::AnyStatus => matched.clone(),
+    };
 
-    match matches.len() {
-        1 => Ok(matches[0]),
+    match candidates.len() {
+        1 => Ok(candidates[0]),
+        // Nothing live, but the name DID match — say so, rather than
+        // sending the operator to hunt a typo that is not there.
+        0 if !matched.is_empty() => bail!(
+            "no car for {given:?} that can take a proof — every match is finished:{}\n\n\
+             A closed or cancelled car is done, and recording a new proof on one would be \
+             writing to a terminal. Use --recheck to re-run the probe already recorded on \
+             it, or name the car that carries this work now.",
+            listed(&matched)
+        ),
         0 => bail!(
             "no ship-a-change car for {given:?}. Give the car's branch exactly \
              as it was parked, or at least 8 characters of its id."
         ),
-        n => {
-            let mut listed = String::new();
-            for c in &matches {
-                listed.push_str(&format!(
-                    "\n  {}  {}",
-                    &c.get("id").and_then(Value::as_str).unwrap_or("?")[..8],
-                    c.get("title").and_then(Value::as_str).unwrap_or("?")
-                ));
-            }
-            let state = if live { "open" } else { "closed" };
-            bail!("{n} {state} cars match {given:?} — say which:{listed}")
-        }
+        n => bail!(
+            "{n} cars match {given:?} — say which:{}",
+            listed(&candidates)
+        ),
     }
 }
 
@@ -396,8 +453,9 @@ pub(crate) fn find_car<'a>(cars: &'a [Value], given: &str) -> Result<&'a Value> 
 /// filter would not fix it — and is why this read is the one car lookup
 /// NOT built on `gate::all_open_cars`: `--recheck` re-runs the proof on
 /// a CLOSED car, so the reader must read closed cars too and let
-/// [`find_car`] prefer the open one among them. Paging on `total` keeps
-/// every car reachable, open or closed.
+/// [`find_car`] decide which statuses the caller's mode admits
+/// ([`Eligible`]). Paging on `total` keeps every car reachable, open or
+/// closed.
 async fn all_ship_a_change_cars(http: &reqwest::Client, base: &str) -> Result<Vec<Value>> {
     const PAGE: usize = 500;
     let mut cars: Vec<Value> = Vec::new();
@@ -722,7 +780,17 @@ pub(crate) async fn run(
 ) -> Result<()> {
     let http = reqwest::Client::new();
     let cars = all_ship_a_change_cars(&http, &crate::gate::resolve_jobs_base(None)?).await?;
-    let car = find_car(&cars, car_ref)?;
+    // `--recheck` RE-RUNS a recorded probe and writes nothing, so a
+    // finished car is a legitimate target for it and for nothing else.
+    // Every other path records a proof, which a closed or cancelled car
+    // cannot take — so those are not candidates, and naming them as
+    // "open" is what sent an operator after a dead twin (0a58827d).
+    let eligible = if recheck {
+        Eligible::AnyStatus
+    } else {
+        Eligible::Live
+    };
+    let car = find_car(&cars, car_ref, eligible)?;
     let car_id = car
         .get("id")
         .and_then(Value::as_str)
@@ -1355,6 +1423,14 @@ mod tests {
         assert!(proven_step(&car("11111111-a", "feat/x", "ready"), false).is_ok());
     }
 
+    /// A car at a named status — the shape the jobs API returns, which
+    /// `car()` predates.
+    fn car_at(id: &str, branch: &str, status: &str) -> Value {
+        let mut c = car(id, branch, "ready");
+        c["status"] = json!(status);
+        c
+    }
+
     /// Ambiguity is refused rather than resolved — the failure mode that
     /// cost two cars when `boss park` picked from a list instead.
     #[test]
@@ -1363,26 +1439,116 @@ mod tests {
             car("11111111-aaa", "feat/x", "ready"),
             car("11111111-bbb", "feat/x", "ready"),
         ];
-        let e = find_car(&cars, "feat/x").unwrap_err().to_string();
-        assert!(e.contains("2 open cars match"), "{e}");
+        let e = find_car(&cars, "feat/x", Eligible::Live)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("2 cars match"), "{e}");
     }
 
-    /// A CLOSED car is not a candidate for a new proof, so it must not
-    /// widen the candidate set into an ambiguity. Measured live
-    /// 2026-09-10 05:02 UTC (backlog 0a58827d): `boss prove
-    /// feat/arrival-runs-the-probe-rerail` refused with "2 open cars
-    /// match" and listed a car that was closed and abandoned. The
-    /// refusal shape was right — it stops rather than guessing — but the
-    /// word "open" sent the reader to investigate a dead car. One open
-    /// car among the matches IS the answer.
+    /// THE DEFECT (backlog 0a58827d). `boss prove` refused with "2 open
+    /// cars match" when only one was open: the other had been abandoned
+    /// ("gated, then changed"). A closed car cannot take a new proof, so
+    /// it was never a candidate — and with the dead twin gone the case
+    /// resolves to one car and needs no refusal at all. The refusal sent
+    /// an operator to investigate a dead car.
     #[test]
-    fn a_closed_twin_is_not_a_prove_candidate() {
+    fn a_closed_twin_is_not_a_candidate_for_a_new_proof() {
+        let cars = vec![
+            car_at("ef4eff3c-aaa", "feat/arrival-runs-the-probe-rerail", "open"),
+            car_at(
+                "538775dd-bbb",
+                "feat/arrival-runs-the-probe-rerail",
+                "closed",
+            ),
+        ];
+        let got = find_car(&cars, "feat/arrival-runs-the-probe-rerail", Eligible::Live)
+            .expect("one live car is not ambiguous");
+        assert_eq!(got.get("id").and_then(Value::as_str), Some("ef4eff3c-aaa"));
+    }
+
+    /// A cancelled car is as finished as a closed one — answered by
+    /// `boss_jobs::car::is_open`, so this verb carries no second reading
+    /// of `status` to drift from it.
+    #[test]
+    fn a_cancelled_twin_is_not_a_candidate_either() {
+        let cars = vec![
+            car_at("ef4eff3c-aaa", "feat/x", "open"),
+            car_at("538775dd-bbb", "feat/x", "cancelled"),
+        ];
+        assert!(find_car(&cars, "feat/x", Eligible::Live).is_ok());
+    }
+
+    /// And when the ONLY match is finished, the refusal says so. The
+    /// bare "no open car — check your spelling" would send the operator
+    /// hunting a typo that is not there.
+    #[test]
+    fn the_only_match_being_closed_is_said_out_loud() {
+        let cars = vec![car_at("538775dd-bbb", "feat/x", "closed")];
+        let e = find_car(&cars, "feat/x", Eligible::Live)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("538775dd"), "names the car: {e}");
+        assert!(e.contains("closed"), "names its status: {e}");
+        assert!(
+            e.contains("--recheck"),
+            "names what a closed car can do: {e}"
+        );
+    }
+
+    /// `--recheck` re-runs a probe already recorded on the car, which is
+    /// a read — so a closed car IS its candidate, and that is why the
+    /// reader pages over closed cars at all.
+    #[test]
+    fn a_recheck_can_still_name_a_closed_car() {
+        let cars = vec![car_at("538775dd-bbb", "feat/x", "closed")];
+        assert!(find_car(&cars, "feat/x", Eligible::AnyStatus).is_ok());
+    }
+
+    /// A listing is not homogeneous, so one collective word cannot
+    /// describe it: two finished matches can be finished DIFFERENTLY.
+    /// Each row carries its own status, which is what makes "say which"
+    /// answerable without a second query — and is why the refusal no
+    /// longer prefixes the count with a single "open" / "closed".
+    #[test]
+    fn a_refusal_labels_each_candidates_status() {
+        let cars = vec![
+            car_at("ef4eff3c-aaa", "feat/x", "cancelled"),
+            car_at("538775dd-bbb", "feat/x", "closed"),
+        ];
+        let e = find_car(&cars, "feat/x", Eligible::Live)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !e.contains("cars match"),
+            "nothing is a candidate, so nothing is ambiguous: {e}"
+        );
+        assert!(e.contains("ef4eff3c  cancelled"), "{e}");
+        assert!(e.contains("538775dd  closed"), "{e}");
+    }
+
+    /// A row whose status is absent is NOT assumed finished. Dropping a
+    /// candidate the code cannot see the state of would be guessing in
+    /// the direction that loses cars.
+    #[test]
+    fn a_car_with_no_status_stays_a_candidate() {
+        let cars = vec![car("abcdef12-3456", "feat/x", "ready")];
+        assert!(find_car(&cars, "feat/x", Eligible::Live).is_ok());
+    }
+
+    /// The live match is PREFERRED for a recheck too — the behaviour
+    /// that landed before this change and must not regress. A recheck
+    /// admits a finished car, but when the name also matches a live one
+    /// that is the one meant, so the abandoned twin does not turn a
+    /// resolvable recheck into an ambiguity.
+    #[test]
+    fn a_recheck_prefers_the_live_car_over_an_abandoned_twin() {
         let mut abandoned = car("22222222-bbb", "feat/x", "ready");
         abandoned["status"] = json!("closed");
         abandoned["metadata"]["skip_reason"] =
             json!("gate receipt is for fb973bd0 but the branch boards 0ec4521f");
         let cars = vec![car("11111111-aaa", "feat/x", "ready"), abandoned];
-        let found = find_car(&cars, "feat/x").expect("the one OPEN car is the candidate");
+        let found = find_car(&cars, "feat/x", Eligible::AnyStatus)
+            .expect("the one live car is the candidate");
         assert_eq!(
             found.get("id").and_then(Value::as_str),
             Some("11111111-aaa")
@@ -1395,47 +1561,40 @@ mod tests {
     #[test]
     fn two_genuinely_open_cars_still_refuse_and_list_both() {
         let cars = vec![
-            car("11111111-aaa", "feat/x", "ready"),
-            car("22222222-bbb", "feat/x", "ready"),
+            car_at("11111111-aaa", "feat/x", "open"),
+            car_at("22222222-bbb", "feat/x", "open"),
         ];
-        let e = find_car(&cars, "feat/x").unwrap_err().to_string();
-        assert!(e.contains("2 open cars match"), "{e}");
-        assert!(e.contains("11111111") && e.contains("22222222"), "{e}");
+        let e = find_car(&cars, "feat/x", Eligible::Live)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("2 cars match"), "{e}");
+        assert!(e.contains("11111111  open"), "{e}");
+        assert!(e.contains("22222222  open"), "{e}");
     }
 
-    /// `--recheck` re-runs a recorded proof on a CLOSED car, so closed
-    /// cars stay reachable when no open one matches — the filter is a
-    /// preference, not a `status=open` read.
-    #[test]
-    fn a_closed_car_is_still_reachable_when_no_open_one_matches() {
-        let mut closed = car("33333333-ccc", "feat/x", "completed");
-        closed["status"] = json!("closed");
-        let cars = vec![closed];
-        assert!(find_car(&cars, "feat/x").is_ok());
-    }
-
-    /// And when the ambiguity is among closed cars only, the refusal
-    /// must not call them open.
+    /// And when the ambiguity is among finished cars only — which only a
+    /// recheck can reach — no row is called open.
     #[test]
     fn an_ambiguity_among_closed_cars_is_not_called_open() {
-        let closed = |id: &str| {
-            let mut c = car(id, "feat/x", "completed");
-            c["status"] = json!("closed");
-            c
-        };
-        let cars = vec![closed("11111111-aaa"), closed("22222222-bbb")];
-        let e = find_car(&cars, "feat/x").unwrap_err().to_string();
-        assert!(e.contains("2 closed cars match"), "{e}");
+        let cars = vec![
+            car_at("11111111-aaa", "feat/x", "closed"),
+            car_at("22222222-bbb", "feat/x", "closed"),
+        ];
+        let e = find_car(&cars, "feat/x", Eligible::AnyStatus)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("2 cars match"), "{e}");
+        assert!(e.contains("11111111  closed"), "{e}");
         assert!(!e.contains("open"), "{e}");
     }
 
     #[test]
     fn a_car_is_found_by_branch_or_by_id_prefix() {
         let cars = vec![car("abcdef12-3456", "feat/x", "ready")];
-        assert!(find_car(&cars, "feat/x").is_ok());
-        assert!(find_car(&cars, "abcdef12").is_ok());
+        assert!(find_car(&cars, "feat/x", Eligible::Live).is_ok());
+        assert!(find_car(&cars, "abcdef12", Eligible::Live).is_ok());
         // Too short to be an id, and not a branch: refused, not guessed.
-        assert!(find_car(&cars, "abc").is_err());
+        assert!(find_car(&cars, "abc", Eligible::Live).is_err());
     }
 
     #[test]
@@ -1664,7 +1823,8 @@ mod tests {
             "every page must be read, not just the first {}",
             cars.len()
         );
-        let car = find_car(&cars, needle).expect("the open car past page 1 must be found");
+        let car = find_car(&cars, needle, Eligible::Live)
+            .expect("the open car past page 1 must be found");
         assert_eq!(
             car.get("metadata")
                 .and_then(|m| m.get("branch"))

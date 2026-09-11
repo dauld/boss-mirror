@@ -123,6 +123,47 @@ pub enum Phase {
     Cancel { handle: String, reason: String },
 }
 
+/// What a contended lock MEANS for the phase that gave up on it.
+///
+/// Whether to WAIT first is [`lock_wait_budget`]'s question. This one
+/// is asked only once waiting is over: did leaving finish the job, or
+/// abandon a request nobody else will pick up?
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Contended {
+    /// The holder is doing this very work right now: reconcile and
+    /// board are the standing loop, and a standalone preflight has
+    /// nothing further to prove while the locomotive is demonstrably
+    /// pulling. Nothing was abandoned — so a phase that left AT ONCE
+    /// leaves at 0. (A starvable phase that spent its whole budget
+    /// still never ran, and exits [`LOCK_CONTENDED_EXIT`] for that
+    /// separate reason.)
+    Covered,
+    /// Leave at [`LOCK_CONTENDED_EXIT`], saying what did not happen.
+    /// Nothing else in the system will do it.
+    Abandoned(String),
+}
+
+/// Classify a contended lock for `phase`.
+///
+/// `Cancel` is the one phase carrying an operator's specific request:
+/// release THESE cars from THAT train. No other run will cancel it, so
+/// leaving abandons the request — and returning `Ok(())` from here told
+/// the operator the opposite. That cost nothing the two times the verb
+/// was run on 2026-09-10 because the lock happened to be free; had it
+/// not been, the reader of "cancelled" would have believed three cars
+/// were back on the dock while they were still aboard a dead train
+/// holding the track.
+pub(crate) fn contended(phase: &Phase) -> Contended {
+    match phase {
+        Phase::Cancel { handle, .. } => Contended::Abandoned(format!(
+            "train {handle} NOT cancelled: another conductor run holds the lock. \
+             No car was released and the PR is still open — re-run the cancel once \
+             the run in progress finishes."
+        )),
+        Phase::Preflight | Phase::Reconcile | Phase::Board | Phase::Run => Contended::Covered,
+    }
+}
+
 pub(crate) fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -8306,12 +8347,24 @@ pub(crate) const CONDUCTOR_LOCK_WAIT: Duration = Duration::from_secs(120);
 /// so a one-second poll wins within a second of the lock being freed.
 const LOCK_POLL: Duration = Duration::from_secs(1);
 
-/// Exit code for a phase that waited its whole budget and still never
-/// ran. Distinct from 0 because the cadence loop records the child's
-/// exit code as the firing's `rc`, and 55 starved passes recording
-/// `rc=0 in 0s` is precisely how nine hours of dead maintenance read as
-/// nine hours of successes. Distinct from 3 (preflight failure) because
-/// two causes must not share one code.
+/// Preflight refused this box — distinct from a crash, loud in the
+/// unit's status. Named rather than written as a bare `3` at the exit
+/// site so the one test that has to know it is distinct from
+/// [`LOCK_CONTENDED_EXIT`] reads the code itself, not a literal copy
+/// of it.
+pub(crate) const PREFLIGHT_FAIL_EXIT: i32 = 3;
+
+/// Exit code for an invocation that gave up on the lock without doing
+/// the work it came to do — either because it waited its whole budget
+/// and never ran, or because it abandoned a request nobody else will
+/// pick up (see [`Contended`]).
+///
+/// Distinct from 0 because the cadence loop records the child's exit
+/// code as the firing's `rc`, and 55 starved passes recording `rc=0 in
+/// 0s` is precisely how nine hours of dead maintenance read as nine
+/// hours of successes — and because a `boss train cancel` that released
+/// no car printed success-shaped output at 0. Distinct from
+/// [`PREFLIGHT_FAIL_EXIT`] because two causes must not share one code.
 pub(crate) const LOCK_CONTENDED_EXIT: i32 = 4;
 
 /// How long this phase waits for the lock before leaving.
@@ -8396,13 +8449,34 @@ pub async fn run(phase: Phase, dry: bool, now: DateTime<Utc>) -> Result<()> {
             Err(TryLockError::WouldBlock) => {
                 let waited = since.elapsed();
                 if waited >= budget {
+                    // The line every journal reader and cadence.rs's own
+                    // doc comment greps for goes out first, for every
+                    // phase. A phase that abandoned a request then says
+                    // WHAT it abandoned.
                     log(lock_contended_line(waited));
-                    if budget > Duration::ZERO {
-                        // Waited the whole budget and never ran: the
-                        // firing must not record this as rc=0.
-                        std::process::exit(LOCK_CONTENDED_EXIT);
+                    match contended(&phase) {
+                        Contended::Covered => {
+                            if budget > Duration::ZERO {
+                                // Waited the whole budget and never ran:
+                                // the firing must not record this as
+                                // rc=0.
+                                std::process::exit(LOCK_CONTENDED_EXIT);
+                            }
+                            // Leaving at once finished the job: the
+                            // holder is doing this very work.
+                            return Ok(());
+                        }
+                        // But an operator's cancel is nobody else's
+                        // work. Say what did not happen, and exit
+                        // non-zero so a script, a unit or a person
+                        // reading the output cannot mistake it for done.
+                        Contended::Abandoned(msg) => {
+                            log(&msg);
+                            // (The lock releases with the process;
+                            // destructors are moot.)
+                            std::process::exit(LOCK_CONTENDED_EXIT);
+                        }
                     }
-                    return Ok(());
                 }
                 if waited < LOCK_POLL {
                     log(lock_waiting_line(budget));
@@ -8419,9 +8493,8 @@ pub async fn run(phase: Phase, dry: bool, now: DateTime<Utc>) -> Result<()> {
         for p in &problems {
             log(format!("preflight FAIL: {p}"));
         }
-        // Exit 3 — distinct from a crash, loud in the unit's status.
         // (The lock releases with the process; destructors are moot.)
-        std::process::exit(3);
+        std::process::exit(PREFLIGHT_FAIL_EXIT);
     }
     log("preflight ok");
     if matches!(phase, Phase::Preflight) {
@@ -8553,6 +8626,63 @@ mod tests {
     }
 
     use super::*;
+
+    // ---------------------------------------------------------------
+    // A cancel that cancelled nothing must not exit 0.
+    // ---------------------------------------------------------------
+
+    /// THE DEFECT (found 2026-09-10 by the builder of
+    /// `fix/a-refused-consist-opens-no-train`). Losing the conductor's
+    /// lock returned `Ok(())` from every phase, so `boss train cancel`
+    /// printed success-shaped output and exited 0 without releasing a
+    /// single car. An operator reads "cancelled", believes three cars
+    /// are back on the dock, and they are still aboard a dead train
+    /// holding the track — §Diagnosis's component that answered instead
+    /// of erroring.
+    ///
+    /// Leaving AT ONCE is correct and deliberate; cancel must never
+    /// wait on a contended lock. Only the report was wrong — so this
+    /// pins BOTH halves, because a fix to either one alone is wrong:
+    /// a zero budget that reports success is the defect, and a truthful
+    /// report bought by making the operator's verb queue behind the
+    /// loop is the regression.
+    #[test]
+    fn a_cancel_leaves_at_once_and_does_not_report_success() {
+        let phase = Phase::Cancel {
+            handle: "abcd1234".to_string(),
+            reason: "CI red on a consist nobody can fix".to_string(),
+        };
+        assert_eq!(
+            lock_wait_budget(&phase),
+            Duration::ZERO,
+            "an operator is standing at the prompt — cancel never waits"
+        );
+        let Contended::Abandoned(msg) = contended(&phase) else {
+            panic!("a cancel that released no car has not succeeded");
+        };
+        // The operator must be able to read WHAT did not happen from
+        // the line itself, without re-deriving it from the train.
+        assert!(msg.contains("abcd1234"), "names the train: {msg}");
+        assert!(msg.contains("NOT cancelled"), "names the omission: {msg}");
+        assert!(msg.contains("lock"), "names the cause: {msg}");
+    }
+
+    /// The standing loop's phases are a different case, and stay quiet.
+    /// The lock holder is running reconcile + board right now, so the
+    /// work this invocation came to do is being done by the process
+    /// that beat it here; a preflight has nothing further to prove
+    /// while the locomotive is demonstrably pulling. Nothing else in
+    /// the system will cancel an operator's named train.
+    ///
+    /// `Covered` is about abandonment, not about the exit code: a
+    /// reconcile that spent its whole budget is still covered by the
+    /// holder, and exits [`LOCK_CONTENDED_EXIT`] because it never ran.
+    #[test]
+    fn the_standing_loop_leaves_quietly_because_the_holder_covers_it() {
+        for phase in [Phase::Preflight, Phase::Reconcile, Phase::Board, Phase::Run] {
+            assert_eq!(contended(&phase), Contended::Covered);
+        }
+    }
 
     // ---------------------------------------------------------------
     // The adapter must match the remote (b9801aff).
@@ -13937,8 +14067,9 @@ mod stranded_green_tests {
 #[cfg(test)]
 mod no_departure_tests {
     use super::{
-        CONDUCTOR_LOCK_WAIT, LOCK_CONTENDED_EXIT, NoDeparture, Phase, lock_acquired_line,
-        lock_contended_line, lock_wait_budget, lock_waiting_line, no_departure_line,
+        CONDUCTOR_LOCK_WAIT, LOCK_CONTENDED_EXIT, NoDeparture, PREFLIGHT_FAIL_EXIT, Phase,
+        lock_acquired_line, lock_contended_line, lock_wait_budget, lock_waiting_line,
+        no_departure_line,
     };
     use std::time::Duration;
 
@@ -14066,8 +14197,8 @@ mod no_departure_tests {
             "a pass that waited its whole budget and still never ran must not record rc=0"
         );
         assert_ne!(
-            LOCK_CONTENDED_EXIT, 3,
-            "3 is the preflight-failure code — two causes must not share one exit"
+            LOCK_CONTENDED_EXIT, PREFLIGHT_FAIL_EXIT,
+            "preflight failure already owns its code — two causes must not share one exit"
         );
     }
 }

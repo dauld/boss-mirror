@@ -621,16 +621,26 @@ pub fn regate_patch(receipt: &Receipt, note: &str, delivery_channel: Option<&str
 
 /// Is this packet still open? Callers list `status=open`, so the field
 /// is usually redundant — and a fixture without one must still answer —
-/// but a list that also holds closed cars (the handler pages both) must
-/// not read a closed car as a live one.
+/// but a list that also holds finished cars (the handler pages both)
+/// must not read one of those as live.
+///
+/// BOTH terminal statuses, not just `closed`. The jobs API has two
+/// (`triage_on_park` and `sweep_settled` both already say
+/// `closed | cancelled`), and a cancelled car is as done as a closed
+/// one: it cannot be boarded, parked onto, rerailed, or take a proof.
+/// Reading one as live is the same defect this predicate exists to
+/// prevent, one status over.
 ///
 /// Public because `boss prove` asks it too: its read is deliberately
 /// `kind=ship-a-change` with NO status filter (`--recheck` re-runs a
 /// proof on a closed car), so it is the other caller holding a mixed
 /// list. One definition for "is this car live", not a fourth copy of
-/// `!= "closed"` (CLAUDE.md §9a).
+/// the terminal-status test (CLAUDE.md §9a).
 pub fn is_open(car: &Value) -> bool {
-    car.get("status").and_then(Value::as_str) != Some("closed")
+    !matches!(
+        car.get("status").and_then(Value::as_str),
+        Some("closed" | "cancelled")
+    )
 }
 
 /// A metadata stamp that is present: the conductor writes `train` as
@@ -1167,6 +1177,24 @@ mod open_car_tests {
         abandoned["status"] = json!("closed");
         abandoned["metadata"]["abandoned"] = json!("true");
         assert!(open_car_for(&[abandoned], BRANCH).is_none());
+    }
+
+    /// A CANCELLED CAR IS NOT LIVE EITHER. The jobs API has two terminal
+    /// statuses and `is_open` read only one, so an abandoned twin a
+    /// person cancelled — rather than closed — still answered "this
+    /// branch has a live car", which is the 02165b1d defect with the
+    /// other terminal word. Asserted on both shapes, because `is_open`
+    /// gates the boarded lookup and the parked one separately.
+    #[test]
+    fn a_cancelled_car_is_not_a_live_car() {
+        let mut cancelled = twin();
+        cancelled["status"] = json!("cancelled");
+        assert!(!is_open(&cancelled));
+        assert!(open_car_for(&[cancelled.clone()], BRANCH).is_none());
+        let mut cancelled_aboard = boarded();
+        cancelled_aboard["status"] = json!("cancelled");
+        assert!(!is_boarded(&cancelled_aboard));
+        assert!(open_car_for(&[cancelled_aboard], BRANCH).is_none());
     }
 }
 
