@@ -19,17 +19,8 @@
 //! Both are read here out of the scripts themselves, so deleting
 //! either line fails by name instead of by incident.
 
+use boss_testing::repo_root;
 use std::fs;
-use std::path::PathBuf;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .expect("crates/core/boss-testing -> repo root")
-        .to_path_buf()
-}
 
 fn read(rel: &str) -> String {
     let p = repo_root().join(rel);

@@ -24,16 +24,10 @@
 //! fetch losing a DNS race on this LAN, memory contention with a
 //! concurrent CI job) and a retry that PASSES is itself the finding.
 
+use boss_testing::repo_root;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
 
 struct Scratch(PathBuf);
 impl Drop for Scratch {

@@ -20,15 +20,9 @@
 //! The runner is sh + jq. A box without jq skips these with a line
 //! saying so; the gate image has it.
 
+use boss_testing::repo_root;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
 
 fn has(tool: &str) -> bool {
     Command::new("sh")

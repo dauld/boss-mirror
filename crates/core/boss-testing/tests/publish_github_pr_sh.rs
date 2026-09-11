@@ -42,16 +42,10 @@
 //! Nothing here touches the network, the forge, or a token: the token
 //! fixture holds a fixed non-secret string and is never printed.
 
+use boss_testing::repo_root;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
 
 fn script() -> PathBuf {
     repo_root().join("infra/forge/publish-github-pr.sh")

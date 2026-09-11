@@ -70,21 +70,17 @@ export type ActorLane = 'human' | 'agent' | 'automation' | 'sim';
 /// thousand times faster than the wall — simulated work measured against
 /// a real clock cannot share a lane with the real crew.
 ///
-/// The address form is the one documented exception to the delegation.
-/// Measured 2026-09-11 on the system of record: `claude@algedonic.dev`
-/// holds 250 step assignments and signs 5 completions, and it carries no
-/// colon, so `isHumanActor` reads it as a person. The `ActorId` union
-/// (crates/core/boss-core/src/actor.rs) has no address spelling, so this
-/// is a gap between the vocabulary and the live data. A board about who
-/// is working must not draw an agent's work as a person's; the real fix
-/// belongs in `actor.ts` or in the vocabulary, and is reported rather
-/// than papered over.
+/// The address form (`claude@algedonic.dev`, an agent's session login)
+/// is NOT an exception any more: `isHumanActor` reads an `@` as a
+/// machine since fix/one-actor-one-spelling, so it lands in the agent
+/// lane through the same delegation as every other machine id. The
+/// local `includes('@')` branch this function once carried is gone —
+/// it had become unreachable, and its comment sent readers to look for
+/// a fix that had already landed (2178203d).
 export function actorLane(actorId: string, simulated: boolean): ActorLane {
   if (simulated) return 'sim';
   if (actorId.startsWith('automation:')) return 'automation';
-  if (!isHumanActor(actorId)) return 'agent';
-  // Colon-free, so `actor.ts` says human. An address is an agent session.
-  return actorId.includes('@') ? 'agent' : 'human';
+  return isHumanActor(actorId) ? 'human' : 'agent';
 }
 
 // ---------------------------------------------------------------------
@@ -542,20 +538,15 @@ export type ActorCard = Readonly<{
 ///
 /// There is no `agents` table and no browser-reachable actor registry.
 /// `AgentSpec` is a type plus a TOML file with only an in-memory
-/// implementation; the observability service serves an agents listing,
-/// but it is not among the prefixes the gateway proxies. The agent-runs
-/// surface on the jobs API — which DOES have a table, an `actor_id` and
-/// a `branch`, and is the richest "what is this actor building and what
-/// did it cost" read in the system — is likewise unrouted at the
-/// gateway, so it cannot be reached from a browser without a server
-/// change this car is not allowed to make. The people roster covers
-/// HUMANS only: every row in `employees` is a person, and the machine
-/// actors that do most of the work are not employees.
-///
-/// (Those two paths are named without their `/api` prefix on purpose.
-/// `infra/lint/every-spa-api-path-is-routed` greps this file for API
-/// segments without stripping comments, so writing them in full would
-/// fail the gate on prose — see the report on this car.)
+/// implementation; the observability service serves `/api/agents`, but
+/// that prefix is not among the ones the gateway proxies. The
+/// `/api/agent-runs` surface on the jobs API — which DOES have a table,
+/// an `actor_id` and a `branch`, and is the richest "what is this actor
+/// building and what did it cost" read in the system — is likewise
+/// unrouted at the gateway, so it cannot be reached from a browser
+/// without a server change this car is not allowed to make. The people
+/// roster covers HUMANS only: every row in `employees` is a person, and
+/// the machine actors that do most of the work are not employees.
 ///
 /// So the crew is derived, which is the honest answer and is stated on
 /// the page: an actor exists here because it holds a step or signed a

@@ -11,15 +11,9 @@
 //! `no_credential_material_reaches_the_output` pins that neither ever reaches
 //! stdout. That property is the reason this script is allowed to exist.
 
+use boss_testing::repo_root;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
 
 fn script() -> PathBuf {
     repo_root().join("infra/maintenance/forge-token-audit.py")

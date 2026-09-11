@@ -326,10 +326,15 @@ describe('actorLane — the four lanes the board draws', () => {
       'automation:gate-runner',
       'automation:rule:complete-marker-on-step-ready',
       'claude:opus-5[1m]',
+      // The address form is a session login, not a person — and the
+      // lane learns that from the predicate, not from a local `@` check
+      // (2178203d removed the one this file used to need).
+      'claude@algedonic.dev',
     ]) {
       expect(isHumanActor(id)).toBe(false);
       expect(actorLane(id, false)).not.toBe('human');
     }
+    expect(actorLane('claude@algedonic.dev', false)).toBe('agent');
     expect(isHumanActor('emp-david')).toBe(true);
     expect(actorLane('emp-david', false)).toBe('human');
   });

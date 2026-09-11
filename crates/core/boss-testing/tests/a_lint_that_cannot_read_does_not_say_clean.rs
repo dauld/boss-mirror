@@ -44,6 +44,7 @@
 //! way to break ONE git call while leaving a lint's own git-using
 //! self-test working.
 
+use boss_testing::repo_root;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -53,13 +54,6 @@ use std::process::Command;
 /// distinction at the only point where it is still cheap to keep.
 /// `infra/lint/lib/git-answer.sh` carries the full argument.
 const CANNOT_ANSWER: i32 = 3;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
 
 /// The absolute path of the real git, resolved BEFORE the shim goes on
 /// `PATH` — a shim that found itself would loop.

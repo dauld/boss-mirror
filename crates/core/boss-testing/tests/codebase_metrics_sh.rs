@@ -37,6 +37,7 @@
 //! which is what breaks git in a gate workspace — cannot decide whether
 //! the test passes.
 
+use boss_testing::repo_root;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -44,13 +45,6 @@ use std::process::Command;
 /// series) and 1 (a real failure) on purpose; `infra/lint/lib/git-answer.sh`
 /// carries the argument.
 const CANNOT_ANSWER: i32 = 3;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
 
 fn script() -> PathBuf {
     repo_root().join("infra/codebase-metrics.sh")

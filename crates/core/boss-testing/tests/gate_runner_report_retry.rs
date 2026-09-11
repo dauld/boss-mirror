@@ -21,6 +21,7 @@
 //! Skips rather than fails when `python3` or `curl` is absent, so a
 //! machine without them does not manufacture a red.
 
+use boss_testing::repo_root;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -29,13 +30,6 @@ use std::time::{Duration, Instant};
 const PACKET: &str = "11111111-2222-4333-8444-555555555555";
 const BEGIN: &str = "# --- report-back (begin) ---";
 const END: &str = "# --- report-back (end) ---";
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
 
 /// The report-back block, lifted out of `run.sh` verbatim. It lives
 /// inline in the runner because the pod receives exactly one file (the

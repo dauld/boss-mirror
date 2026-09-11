@@ -63,6 +63,7 @@
 //! answers instead of erroring. It was caught by re-running the scan
 //! against a tree where every file had been `git add`ed.
 
+use boss_testing::repo_root;
 use boss_testing::scratch;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -80,13 +81,6 @@ const SHARED_VAR: &str = "/var/tmp";
 /// a fixture: `temp_dir().join("<literal>")` is the very shape the lint
 /// refuses, so this file cannot spell the two adjacent.
 const JOIN: &str = "join";
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
 
 fn lint() -> PathBuf {
     repo_root().join("infra/lint/a-fixture-path-cannot-be-a-literal.sh")

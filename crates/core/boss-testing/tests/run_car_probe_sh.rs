@@ -38,15 +38,9 @@
 //! see (61085a9e). Both are the same family — a probe whose evidence
 //! cannot be told apart from a false claim.
 
+use boss_testing::repo_root;
 use std::path::PathBuf;
 use std::process::Command;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
 
 const BEGIN: &str = "# PROBE-PRELUDE-BEGIN";
 const END: &str = "# PROBE-PRELUDE-END";

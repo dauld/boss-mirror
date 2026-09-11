@@ -34,14 +34,7 @@
 //! fail loudly on the first try; a closed socket is weather". The image
 //! build gets the same rule.
 
-use std::path::PathBuf;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
+use boss_testing::repo_root;
 
 fn workflow() -> String {
     let path = repo_root().join(".forgejo/workflows/ci.yml");

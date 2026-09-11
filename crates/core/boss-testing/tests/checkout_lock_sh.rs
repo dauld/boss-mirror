@@ -24,16 +24,10 @@
 //! in; `/proc` is how the sweep sees live git processes. Both are what
 //! the forge host has.
 
+use boss_testing::repo_root;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
 
 fn helper() -> PathBuf {
     repo_root().join("infra/forge/checkout-lock.sh")

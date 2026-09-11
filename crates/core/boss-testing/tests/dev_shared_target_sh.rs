@@ -8,15 +8,9 @@
 //! Every case here writes into a temp dir; the developer's own
 //! `~/.cargo/config.toml` is never touched.
 
+use boss_testing::repo_root;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
 
 /// Removes its directory on drop, so a panicking test leaves nothing.
 struct Scratch(PathBuf);
