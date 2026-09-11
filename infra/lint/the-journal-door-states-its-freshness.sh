@@ -91,6 +91,36 @@ grep -q 'SKIPPED, the question is NOT answered' "$tmp/out" || fail "the skip is 
 # 1e. A THRESHOLD WITH A STATED REASON, in the file, not in someone's head.
 grep -q 'THE THRESHOLD: 30 minutes' "$door" || fail "$door no longer states its threshold and why"
 
+# 1f. A SECOND HOST IS A NAMED TARGET, AND A REFUSAL ABOUT IT NAMES IT.
+#
+# backlog 68757702 adds boss-gcp's door (the WireGuard bastion, 10.99.0.1),
+# so this script now reads two hosts. `--host` carried the read fine, but
+# every line of guidance it printed named the FORGE regardless: a refusal
+# about boss-gcp told an operator to repair a gateway on another machine,
+# and to reach for an ops-request against a host whose runner is not
+# installed. That is CLAUDE.md §Diagnosis one notch down — a verdict
+# somebody must go re-derive — so the advice is derived from the target.
+rc=$(run --host boss-gcp --machine-file "$tmp/machine-stale.json" --tail-file "$tmp/tail-stale.json")
+[[ "$rc" == "4" ]] || fail "a stale door on a named second host exited $rc, not 4:
+$(cat "$tmp/out")"
+grep -q '10.99.0.1:19531' "$tmp/out" \
+    || fail "--host boss-gcp did not resolve to that host's door (10.99.0.1:19531). A named
+    target keeps the address in the tree once, the way 'forge' already does:
+$(cat "$tmp/out")"
+grep -q 'host=boss-gcp' "$tmp/out" \
+    || fail "the refusal about boss-gcp advises an ops-request with host=forge. It must name
+    the host it refused about — advice pointing at another machine is worse than none:
+$(cat "$tmp/out")"
+grep -qi 'boss-gcp' <(grep -i 'repair' -A2 "$tmp/out") \
+    || fail "the repair command in a boss-gcp refusal does not say it runs on boss-gcp:
+$(cat "$tmp/out")"
+# And the forge's own advice is unchanged — the default target still
+# reads as the forge, with the runbook that covers it.
+rc=$(run --machine-file "$tmp/machine-stale.json" --tail-file "$tmp/tail-stale.json")
+grep -q 'host=forge' "$tmp/out" \
+    || fail "the default target's refusal no longer advises host=forge:
+$(cat "$tmp/out")"
+
 # 2. The installer still enables the socket.
 mkdir -p "$tmp/etc" "$tmp/bin" "$tmp/unitlib"
 cat >"$tmp/bin/systemctl" <<'STUB'
@@ -136,5 +166,5 @@ grep -q 'apt-get install -y' "$tmp/log-absent" \
 grep -q 'the journal read door' "$tmp/install-out" \
     || fail "install.sh was silent about the read door being down: $(cat "$tmp/install-out")"
 
-echo "the-journal-door-states-its-freshness: ok — journal-read.sh refuses a 7h-stale door naming both timestamps, refuses when its two readings disagree, passes a 20s-behind one, skips loudly (exit 3) on an unreachable target; install.sh enables the gateway socket and stays non-fatal when the package is absent"
+echo "the-journal-door-states-its-freshness: ok — journal-read.sh refuses a 7h-stale door naming both timestamps, refuses when its two readings disagree, passes a 20s-behind one, skips loudly (exit 3) on an unreachable target, and resolves forge + boss-gcp as named targets whose advice names the host it refused about; install.sh enables the gateway socket and stays non-fatal when the package is absent"
 exit 0

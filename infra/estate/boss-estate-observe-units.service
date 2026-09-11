@@ -17,26 +17,30 @@ After=network-online.target
 Type=oneshot
 Environment=HOST_ID=boss-gcp
 Environment=JOBS_API=http://10.20.0.34:7900
-# What THIS host runs of the watched set; the script's default is the
-# union across hosts, and each host's unit file or drop-in names its
-# own share. boss-gcp's is the conductor — the unit whose quiet cost
-# 2+ hours of an unmerged CI-green train.
-# What boss-gcp still runs after the conductor cutover (2026-09-04): the
-# conductor lives in the cluster now, so boss-train.service here is
-# retired by design and watching it only raised
-# unit_unhealthy:boss-gcp/boss-train.service (72e410a5) forever. The
-# host's own estate observer timer is the unit that must stay alive for
-# the estate loop to see this host at all.
+# NO UNITS= LINE, ON PURPOSE — the roster is DERIVED.
 #
-# boss-gcp-converge.timer joins it (408c81f6): it is the loop that keeps
-# every OTHER unit on this host current, so its silence is the silence of
-# all of them — and an unloaded timer here is what "nobody ran the
-# bootstrap" looks like from outside. Watched from this observer on
-# purpose, because it does not report through the converge it watches.
+# This line used to read `Environment="UNITS=boss-estate-observe-host.timer
+# boss-gcp-converge.timer"`, and those two units were the whole of what
+# this host's observer watched. Everything else deploy-services.sh
+# installs here was outside the watch BY CONSTRUCTION, so its absence
+# from a clean observation said nothing — and on 2026-09-10 that is
+# exactly what went wrong (backlog 68757702): "is
+# boss-ml-inference-batch.timer installed?" had no read path, the tree
+# was reasoned from instead, and the answer was WRONG — the unit had been
+# firing and failing nightly since 2026-08-17.
 #
-# QUOTED, because a space in an unquoted Environment= line starts a
-# SECOND assignment: `Environment=UNITS=a b` sets UNITS=a and drops b.
-Environment="UNITS=boss-estate-observe-host.timer boss-gcp-converge.timer"
+# Unset, observe-units.sh derives the roster from deploy-services.sh's
+# TIMERS list — the same file, at the same commit, that boss-gcp-converge
+# runs to install those units every half hour — and watches both halves
+# of every pair. So a timer that lands on main is watched on the tick it
+# is installed, with no line here to remember to edit (CLAUDE.md §9a).
+# Run `infra/estate/observe-units.sh --roster` to see exactly what that
+# is for a checkout.
+#
+# A host that runs a DIFFERENT set still names its own, by drop-in — the
+# forge does, above. QUOTE any such UNITS=, because a space in an
+# unquoted Environment= line starts a SECOND assignment:
+# `Environment=UNITS=a b` sets UNITS=a and drops b.
 # The timers-leave-a-packet pair: a timer with no Job trail fails
 # silently, which is the exact class this observer exists to end.
 # BOSS_JOBS_URL pinned INLINE: deploy-services' shared jobs-url.conf

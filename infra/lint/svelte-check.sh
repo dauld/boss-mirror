@@ -45,11 +45,24 @@ if ! command -v bun >/dev/null 2>&1; then
     exit 1
 fi
 
+# The install log goes to a directory THIS RUN OWNS. It used to be a
+# fixed /tmp/boss-bun-install.log, which is fine on a single-user box and
+# wrong on the long-lived dev pod: the second uid to run the lint roster
+# cannot write the first uid's file, so the redirect fails, the `if !`
+# branch fires, and a working tree is reported as "bun install failed"
+# with a log it also cannot read. Measured in the sibling case on
+# 2026-09-11 (packet 5bf96e72).
+log_dir="$(mktemp -d)"
+trap 'rm -rf "$log_dir"' EXIT
+log="$log_dir/bun-install.log"
+
 # --frozen-lockfile so CI cannot silently resolve a different tree than
 # the lockfile records.
-if ! PUPPETEER_SKIP_DOWNLOAD=1 bun install --frozen-lockfile >/tmp/boss-bun-install.log 2>&1; then
+if ! PUPPETEER_SKIP_DOWNLOAD=1 bun install --frozen-lockfile >"$log" 2>&1; then
     echo "svelte-check: bun install failed" >&2
-    tail -20 /tmp/boss-bun-install.log >&2
+    # ALL of it, not a tail: the log dies with this run, so a reduction
+    # here throws away the only copy (CLAUDE.md §Diagnosis).
+    cat "$log" >&2
     exit 1
 fi
 

@@ -290,6 +290,17 @@ APPLY_DIR="$(mktemp -d -t cluster-deploy-manifests.XXXXXX)"
 manifests_with_image "$REPO/infra/cluster/manifests" "$APPLY_DIR" "$REGISTRY" "$LAST"
 KM="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro -v $APPLY_DIR:/manifests:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
 echo "cluster-deploy-runner: applying infra/cluster/manifests (boss image pinned to the converged $LAST)"
+# SAY WHAT THE APPLY DOES NOT DO. `kubectl apply` with no `--prune` is
+# ADDITIVE: it creates and updates the objects the files name and has no
+# opinion about anything else. So a manifest DELETED from the tree takes
+# its declaration away and leaves the object running, and a reader who
+# assumes prune semantics reads this line as a full reconciliation. It
+# is not one. The orphan is named by the verify step below instead, and
+# the `kubectl delete` is a human step on purpose — see the header of
+# infra/lint/a-deleted-manifest-leaves-no-object.sh for why `--prune` is
+# refused here (it takes a derived set, and that set contains the
+# StatefulSets and PVCs holding the audit log).
+echo "cluster-deploy-runner: apply is additive — NO --prune. An object whose manifest was deleted keeps running; the verify step below names it."
 $KM apply -f /manifests
 rm -rf "$APPLY_DIR"
 
@@ -436,3 +447,37 @@ if [ "$check_rc" -ne 0 ]; then
     exit 1
 fi
 echo "cluster-deploy-runner: manifests verified — the cluster holds what the tree declares"
+
+# AND THE OTHER DIRECTION. check-manifests-applied.sh asks "is every
+# DECLARED object present?" — a question no deleted manifest is in, and
+# one an orphan answers correctly by being absent from it. The apply
+# above does not prune, so the converge's own writes cannot close that
+# gap; naming it can. This is the same argument that put the check above
+# here: this is the one place with both the tree and a credential that
+# can read all 50 objects (the dev-session credential the lint usually
+# runs under reports 9 of 16 pairs unreadable), so it is the only place
+# the sweep means anything.
+#
+# It FAILS the unit like the check above, for the reason CLAUDE.md gives
+# under "a check nobody reads is a check that is not running": a finding
+# demoted to a printed warning in a passing converge is a finding nobody
+# reads. An undeclared object in a managed namespace is a real finding
+# and the message says the three things it can be.
+#
+# FIRST ADMIN-REACH RUN. Its exemption set was populated from the dev
+# pod's partial view, so this may be the first time anything has
+# enumerated live ConfigMaps, Roles, RoleBindings, ServiceAccounts and
+# PVCs in `boss`. If it names something nobody has looked at, that is
+# the check working: declare it, delete it, or add it to EXEMPT with the
+# reason — one car either way. The deploy is already stamped above, so a
+# finding here never rolls anything back.
+STAGE="check orphans"
+echo "cluster-deploy-runner: checking for objects the tree no longer declares"
+orphan_rc=0
+KUBECONFIG="$KUBECONFIG_PATH" bash "$REPO/infra/lint/a-deleted-manifest-leaves-no-object.sh" || orphan_rc=$?
+if [ "$orphan_rc" -ne 0 ]; then
+    rc=$orphan_rc
+    echo "cluster-deploy-runner: ORPHAN CHECK FAILED (rc=$rc) — something is running that no manifest declares; the apply cannot remove it (no --prune) so the delete is a named human step, printed above" >&2
+    exit 1
+fi
+echo "cluster-deploy-runner: no orphans — nothing is running that the tree cannot account for"

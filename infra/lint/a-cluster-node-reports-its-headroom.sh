@@ -76,6 +76,25 @@ awk '
 grep -q 'estate/observation' "$tmp/observe.sh" \
     || fail "the extracted block does not post an observation — the scraper found the wrong block"
 
+# ----- the block must write only where its caller says --------------
+# A FACT THAT LIVES TWICE (CLAUDE.md §9a): the manifest spells the
+# scratch directory `${BOSS_OBSERVE_WORK:-/tmp}` and this script supplies
+# the value. Nothing else makes the pair hold, so it is asserted here,
+# against the extracted text, on every run.
+#
+# WHY IT MATTERS HERE AND NOT IN THE POD. In the pod /tmp is the
+# container's own writable layer and the observer owns every byte of it.
+# This script runs the SAME text on the dev pod, which is long-lived and
+# shared: measured 2026-09-11 (packet 5bf96e72), root ran the roster and
+# a second uid's run then died writing root's `/tmp/nodes.json`
+# — reported, wrongly, as the observer breaking its best-effort
+# contract. Comment lines are skipped; any other fixed /tmp path in the
+# block is named with its line.
+stray="$(awk '
+    !/^[ \t]*#/ && /\/tmp/ && !/BOSS_OBSERVE_WORK:-\/tmp/ { printf "    line %d: %s\n", FNR, $0 }
+' "$tmp/observe.sh")"
+[[ -z "$stray" ]] || { printf '%s\n' "$stray" >&2; fail "the observer's shell names a fixed path under /tmp (above). Every scratch file must hang off \$WORK, which defaults to /tmp for the pod and is set by THIS script to a directory it owns — otherwise two uids running the lint roster on one long-lived host collide on a file neither can write"; }
+
 # ----- fixtures: the estate as `kubectl get nodes -o json` shows it ---
 # w-1's capacity is the real reading (974168604Ki → 929 GiB, the figure
 # the observation carried on the day the gap was measured). cp-9 stands
@@ -121,12 +140,22 @@ printf '{"recorded":true}\n202'
 STUB
 chmod +x "$tmp/bin/kubectl" "$tmp/bin/curl"
 
+# A directory of its own, NOT $tmp: the observer writes `nodes.json`
+# there and the kubectl stub reads the fixture of that name out of
+# $FIXTURES, so one directory for both would be `cat f > f`.
+work="$tmp/work"
+mkdir -p "$work"
 export FIXTURES="$tmp" CAPTURE="$tmp/posted.json"
-PATH="$tmp/bin:$PATH" JOBS_API="http://stub" bash "$tmp/observe.sh" >"$tmp/out" 2>&1
+PATH="$tmp/bin:$PATH" JOBS_API="http://stub" BOSS_OBSERVE_WORK="$work" \
+    bash "$tmp/observe.sh" >"$tmp/out" 2>&1
 rc=$?
 # ----- 3: losing one kubelet read must not cost the observation ------
 [[ $rc -eq 0 ]] || { cat "$tmp/out" >&2; fail "the observer exited $rc although only ONE node's kubelet read failed — a best-effort figure took the whole observation with it"; }
 [[ -s "$CAPTURE" ]] || { cat "$tmp/out" >&2; fail "nothing was posted"; }
+# The static pin above reads the text; this reads the behaviour. Both,
+# because a grep can be satisfied by a path that is never written and a
+# run can land its files anywhere.
+[[ -s "$work/observation.json" ]] || { cat "$tmp/out" >&2; fail "the observer built its observation somewhere other than the directory this run owns ($work) — BOSS_OBSERVE_WORK is not reaching every scratch path, so this check still writes where another uid may already have"; }
 
 n=$(jq '.nodes | length' "$CAPTURE")
 [[ "$n" == "2" ]] || { cat "$tmp/out" >&2; fail "expected 2 observed nodes, got $n"; }

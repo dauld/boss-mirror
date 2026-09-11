@@ -39,6 +39,12 @@
 #   7. a failed install prints the installer's COMPLETE captured output
 #      and exits non-zero (CLAUDE.md §Diagnosis: a record that says THAT
 #      it failed and not WHAT is the defect class that cost a day)
+#   8. the converge brings up this host's JOURNAL READ DOOR
+#      (systemd-journal-gatewayd on :19531) and stays non-fatal when the
+#      distro package behind it is absent — backlog 68757702: boss-gcp
+#      had no read path for logs OR unit state, so a timer there could
+#      only be diagnosed by a human on the box, and the forge's door was
+#      hand-installed and therefore one rebuild from gone
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
@@ -90,10 +96,26 @@ echo "systemctl $*" >>"$STUB_LOG"
 exit 0
 STUB
 chmod +x "$tmp/bin/systemctl"
+# The journal read door's package manager, stubbed for the same reason:
+# the units mode reaches for it only when the distro unit is absent, and
+# a lint must never run a real apt-get.
+cat >"$tmp/bin/apt-get" <<'STUB'
+#!/usr/bin/env bash
+echo "apt-get $*" >>"$STUB_LOG"
+exit 0
+STUB
+chmod +x "$tmp/bin/apt-get"
+mkdir -p "$tmp/unitlib" "$tmp/empty-unitlib" "$tmp/etc-absent"
+: >"$tmp/unitlib/systemd-journal-gatewayd.socket"
 
-if ! STUB_LOG="$tmp/systemctl.log" INSTALL_ETC="$tmp/etc" INSTALL_SYSTEMCTL="$tmp/bin/systemctl" \
-    BOSS_REPO_ROOT="$repo" BOSS_DEPLOY_ENV=/dev/null \
-    bash "$deploy" units >"$tmp/units.out" 2>&1; then
+units_run() { # <systemctl-log> <etc> <unit-lib> <outfile>
+    STUB_LOG="$1" INSTALL_ETC="$2" INSTALL_SYSTEMCTL="$tmp/bin/systemctl" \
+        INSTALL_APT_GET="$tmp/bin/apt-get" INSTALL_UNIT_LIB="$3" \
+        BOSS_REPO_ROOT="$repo" BOSS_DEPLOY_ENV=/dev/null \
+        bash "$deploy" units >"$4" 2>&1
+}
+
+if ! units_run "$tmp/systemctl.log" "$tmp/etc" "$tmp/unitlib" "$tmp/units.out"; then
     echo "FAIL: deploy-services.sh units exited non-zero in the scratch run:" >&2
     cat "$tmp/units.out" >&2
     exit 1
@@ -141,6 +163,59 @@ for word in "stage" "converge schema" "health probes" "activate generation"; do
     grep -qi -- "$word" "$tmp/units.out" \
         && units_fail "the units mode ran '$word' — it must install unit files only"
 done
+
+# ---------------------------------------------------------------------
+# 8. THE JOURNAL READ DOOR (:19531), CONVERGED.
+#
+# Backlog 68757702: boss-gcp had no read path from the pod for logs OR
+# unit state. `http://10.99.0.1:19531/machine` did not answer while the
+# forge's returned 200, so the only way to read a unit's journal on the
+# WireGuard bastion was a human with ssh — and on 2026-09-10 that cost a
+# WRONG conclusion about a nightly timer, reasoned from the tree because
+# the host could not be read.
+#
+# The forge's door was hand-enabled on 2026-09-03 and in the tree
+# nowhere, which is the class forge-converge closed: one rebuild away
+# from losing the one door that still works when the API is dark. So
+# boss-gcp's comes up through its CONVERGE, and the single definition of
+# how (infra/journal-door-ensure.sh) is shared with the forge installer
+# rather than copied beside it (CLAUDE.md §9a).
+#
+# WIDER THAN "UNIT FILES ONLY", DELIBERATELY AND BOUNDEDLY. The units
+# mode's restraint is about BOSS's own fleet: no build, no schema, no
+# service of the second (older) stack bounced. Enabling a distro socket
+# unit — and, once, installing the distro package that provides it —
+# bounces nothing of ours, and the alternative is a door that needs a
+# human on the box, which is the defect. It must never be able to stop
+# the converge, which is what the non-fatal path below asserts.
+# ---------------------------------------------------------------------
+grep -q 'enable --now systemd-journal-gatewayd.socket' "$tmp/systemctl.log" \
+    || units_fail "the units mode did not enable systemd-journal-gatewayd.socket. Without it
+    boss-gcp has no read path for any unit's journal and a failing timer there can only be
+    diagnosed by a human on the box (backlog 68757702).
+--- systemctl calls:
+$(cat "$tmp/systemctl.log")"
+grep -q 'apt-get' "$tmp/systemctl.log" "$tmp/units.out" \
+    && units_fail "the units mode reached for apt with the gateway unit already present —
+    that would run on every converge tick, every half hour, forever"
+
+# The package-absent path: try the install, say what is down in a line an
+# operator can act on, and CARRY ON. A visibility door that could abort
+# the converge would be the 2026-09-05 shape — a loop that cannot act
+# because of the thing it watches (CLAUDE.md §Diagnosis).
+if ! units_run "$tmp/systemctl-absent.log" "$tmp/etc-absent" "$tmp/empty-unitlib" "$tmp/units-absent.out"; then
+    echo "FAIL: the units mode ABORTED because the journal gateway unit was absent:" >&2
+    cat "$tmp/units-absent.out" >&2
+    echo "    The converge that keeps this host's units current must not hang on a read door." >&2
+    exit 1
+fi
+grep -q 'apt-get install -y' "$tmp/systemctl-absent.log" \
+    || { echo "FAIL: the units mode did not try to install systemd-journal-remote when the" >&2
+         echo "    gateway unit was absent. Nothing else on boss-gcp installs it." >&2
+         cat "$tmp/units-absent.out" >&2; exit 1; }
+grep -q 'journal read door' "$tmp/units-absent.out" \
+    || { echo "FAIL: the units mode was silent about the read door. Name what is down:" >&2
+         cat "$tmp/units-absent.out" >&2; exit 1; }
 
 # ---------------------------------------------------------------------
 # 4. WHERE IT CONVERGES FROM. GitHub is the mirror, never the source
@@ -294,5 +369,5 @@ printf '%s' "$out" | grep -q "LINE-ONE-OF-MANY" \
     || fail "only part of the installer's output survived — no tails (CLAUDE.md §Diagnosis)
 $out"
 
-echo "boss-gcp-converges-itself: ok — $installed timer pairs install from \`deploy-services.sh units\` (the converge's own among them, nothing restarted), the loop converges from the forge and refuses the mirror, refuses a dirty tree, fast-forwards and drives the installer idempotently, and prints every line of a failed install"
+echo "boss-gcp-converges-itself: ok — $installed timer pairs install from \`deploy-services.sh units\` (the converge's own among them, nothing restarted), the journal read door on :19531 comes up with it and cannot abort it, the loop converges from the forge and refuses the mirror, refuses a dirty tree, fast-forwards and drives the installer idempotently, and prints every line of a failed install"
 exit 0

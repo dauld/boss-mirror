@@ -22,10 +22,37 @@ spec:
       backoffLimit: 0
       template:
         spec:
+          # The uid this workload runs as, DECLARED rather than inherited from
+          # the image (backlog 5234cda4; the reasoning and the exemption list
+          # are in infra/lint/a-workload-declares-the-user-it-runs-as.sh, and
+          # the README section "Pod security" below it).
+          #
+          # MEASURED, not inferred from the image name: `id` inside the live
+          # boss-image pod answers uid=1500(boss) gid=1500(boss), the image's
+          # final directive is `USER boss` over `useradd --uid 1500`
+          # (infra/oss-quickstart/Dockerfile, which cluster-deploy-runner.sh
+          # builds this tag from), and no pod in this namespace overrides
+          # runAsUser. So this states what ALREADY happens and changes no
+          # behaviour — which is the whole point: the declaration is what
+          # survives a cluster-wide restricted default, the behaviour was
+          # never the gap.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1500
+            runAsGroup: 1500
+            seccompProfile: {type: RuntimeDefault}
           restartPolicy: Never
           containers:
             - name: chore
               image: 10.20.0.15:3000/david/boss:latest
+              # Baseline/restricted floor for a chore that needs neither: it shells
+              # out to boss binaries and curl, nothing setuid, no capability.
+              # readOnlyRootFilesystem is deliberately NOT set — boss-generate-configs
+              # writes files, so that one would change behaviour and belongs to a car
+              # that measured it.
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: {drop: ["ALL"]}
               command: ["/bin/bash", "-c"]
               args:
                 - |

@@ -250,6 +250,25 @@ spec:
         # boss-auth posture.
         fsGroup: 1500
         seccompProfile: {type: RuntimeDefault}
+        # The uid ITSELF, declared rather than left to the image (backlog
+        # 5234cda4). fsGroup above is the VOLUME half of the answer; this
+        # is the user half, and only the user half survives a cluster-wide
+        # restricted default — which is the one that matters here, because
+        # boss-dev declares no pod-security labels of its own, so the
+        # namespace inherits the Talos machine config's default from
+        # outside this repo.
+        #
+        # MEASURED on this exact pod, which is the measurement every other
+        # boss-image workload in this directory also rests on: `id` in the
+        # running boss-conductor container answers
+        # uid=1500(boss) gid=1500(boss) groups=1500(boss) — matching
+        # `USER boss` over `useradd --uid 1500` in
+        # infra/oss-quickstart/Dockerfile, the Dockerfile that
+        # cluster-deploy-runner.sh builds this tag from. Nothing here
+        # overrode runAsUser before, so this changes no behaviour.
+        runAsNonRoot: true
+        runAsUser: 1500
+        runAsGroup: 1500
       containers:
         - name: conductor
           # Placeholder tag — cluster-deploy-runner.sh rewrites this to the

@@ -124,11 +124,69 @@ fi
 
 [ -x "$DERIVE" ] || refuse "the derivation $DERIVE is missing or not executable, so there is no authority to act on"
 
-# --- bound 2: a committed declaration set ----------------------------------
-if ! git -C "$TREE" rev-parse --git-dir >/dev/null 2>&1; then
-    refuse "$TREE is not a git checkout, so the declaration set is not reviewable content"
+TMP=$(mktemp -d) || exit 1
+trap 'rm -rf "$TMP"' EXIT
+
+# --- EVERY git CALL RUNS AS THE CHECKOUT'S OWNER, READS INCLUDED -----------
+#
+# Measured on the forge, 2026-09-10 (ops-request c9877f75): the first live
+# run through the audited door refused with "/home/david/boss is not a git
+# checkout". It is one — forge-converge.sh fetches into it every tick. What
+# failed is that the ops-runner executes verbs AS ROOT, and since git
+# 2.35.2 a repository owned by somebody else is "dubious ownership" and
+# every command refuses. So a bound that was correct was also
+# unsatisfiable, and the only thing that could satisfy it was a human.
+#
+# Two reasons to drop, and the read is only the first: root git WRITES in a
+# user-owned clone leave root-owned objects that break the owner's later
+# pulls (forge-converge.sh says so eight lines from where it avoids it).
+# This script only reads, but silencing the ownership check with
+# safe.directory would buy the read at the price of making that second
+# hazard reachable by the next edit. Drop instead.
+#
+# The helper is infra/gcp/boss-gcp-converge.sh's `as_owner`, for the same
+# hazard on the same shape of host; the invocation is the probe runner's
+# non-login `runuser -u <user> --` with an explicit HOME
+# (run-car-probe.sh), because these are reads that need no credential
+# helper and a login shell's profile output would be captured as part of a
+# `rev-parse`. The owner is READ OFF THE DIRECTORY, never hardcoded, so a
+# host that lands the checkout under a different account does not silently
+# start failing — or, worse, corrupting.
+case "$TREE" in
+    *[[:space:]\'\"]*) refuse "the tree path \`$TREE\` contains whitespace or a quote; name one without" ;;
+esac
+[ -d "$TREE" ] || refuse "the tree $TREE does not exist, so there is no declaration set to read"
+OWNER="${BOSS_CLUSTER_TREE_OWNER:-$(stat -c %U "$TREE" 2>/dev/null)}"
+OWNER_UID="$(stat -c %u "$TREE" 2>/dev/null)"
+# `stat -c %U` prints UNKNOWN when no passwd entry exists for the owning
+# uid — a sibling car learned that the hard way. Proceeding would run git
+# as the caller again, which is the defect this block exists for, so
+# refuse and name what could not be resolved.
+if [ -z "$OWNER" ] || [ "$OWNER" = "UNKNOWN" ]; then
+    refuse "cannot resolve the owner of $TREE (stat says '${OWNER:-}', uid ${OWNER_UID:-?}) — no passwd entry, so there is no account to read git as"
 fi
-dirty=$(git -C "$TREE" status --porcelain -- "$MANIFEST_REL" 2>/dev/null)
+if ! id -u "$OWNER" >/dev/null 2>&1; then
+    refuse "the owner of $TREE is '$OWNER' (uid ${OWNER_UID:-?}), which is not an account on this host — refusing to read its git as $(id -un)"
+fi
+OWNER_HOME="$(getent passwd "$OWNER" | cut -d: -f6)"
+as_owner() { # <command string>
+    if [ "$(id -un)" = "$OWNER" ]; then
+        bash -c "$1"
+    else
+        runuser -u "$OWNER" -- env HOME="${OWNER_HOME:-/}" PATH="$PATH" bash -c "$1"
+    fi
+}
+
+# --- bound 2: a committed declaration set ----------------------------------
+if ! as_owner "git -C '$TREE' rev-parse --git-dir" >/dev/null 2>"$TMP/git.err"; then
+    say "REFUSED — cannot read $TREE as a git checkout (read as '$OWNER'), so the declaration set"
+    say "  is not reviewable content. git said:"
+    sed 's/^/    /' "$TMP/git.err" >&2
+    say "  If that mentions dubious ownership, the read did NOT drop to the owner — which is"
+    say "  the defect ops-request c9877f75 found, and what as_owner in this script prevents."
+    exit 2
+fi
+dirty=$(as_owner "git -C '$TREE' status --porcelain -- '$MANIFEST_REL'" 2>/dev/null)
 if [ -n "$dirty" ]; then
     say "REFUSED — $MANIFEST_REL has uncommitted changes, so the tree that would prove this object"
     say "  undeclared is not one anybody reviewed. A rename in progress is exactly this state:"
@@ -136,12 +194,11 @@ if [ -n "$dirty" ]; then
     say "  Commit or discard them, then ask again."
     exit 2
 fi
+# Read once, reported twice: the sha the declaration set came from.
+HEAD_SHA=$(as_owner "git -C '$TREE' rev-parse --short HEAD" 2>/dev/null)
 
 # --- bound 3: the derivation -----------------------------------------------
-TMP=$(mktemp -d) || exit 1
-trap 'rm -rf "$TMP"' EXIT
-
-say "deriving authority from $MANIFEST_REL at $(git -C "$TREE" rev-parse --short HEAD 2>/dev/null) via ${DERIVE#"$REPO"/}"
+say "deriving authority from $MANIFEST_REL at ${HEAD_SHA:-?} (owner $OWNER) via ${DERIVE#"$REPO"/}"
 BOSS_CLUSTER_TREE="$TREE" "$DERIVE" --check "$TARGET" >"$TMP/check.out" 2>"$TMP/check.err"
 rc=$?
 # The derivation's own words, always — on every path. A refusal whose
@@ -238,7 +295,7 @@ if [ "$DRY" -eq 1 ]; then
 fi
 
 # --- the delete -----------------------------------------------------------
-say "deleting $KIND \`$NAME\` in \`$NS\` — undeclared by ${MANIFEST_REL} at $(git -C "$TREE" rev-parse --short HEAD 2>/dev/null)"
+say "deleting $KIND \`$NAME\` in \`$NS\` — undeclared by ${MANIFEST_REL} at ${HEAD_SHA:-?}"
 if ! "${KUBECTL[@]}" delete "$KIND" "$NAME" -n "$NS" --request-timeout=60s > "$TMP/del.out" 2>&1; then
     cat "$TMP/del.out" >&2
     say "the delete FAILED. The object is still there as far as this run knows."

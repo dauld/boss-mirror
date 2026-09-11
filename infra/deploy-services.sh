@@ -1257,6 +1257,29 @@ case "$MODE" in
         echo "==> install timer units from $REPO_ROOT (files only: no build, no schema, no restart)"
         install_timer_units
         enable_timer_units
+        # THE JOURNAL READ DOOR, converged with the units.
+        #
+        # Backlog 68757702: boss-gcp had no read path from the pod for
+        # logs OR unit state. gatewayd was not installed there —
+        # `http://10.99.0.1:19531/machine` did not answer while the
+        # forge's returned 200 — so a failing timer on the WireGuard
+        # bastion could only be diagnosed by a human on the box, and on
+        # 2026-09-10 that cost a wrong conclusion about a nightly unit,
+        # reasoned from the tree because the host could not be read. The
+        # forge's equivalent was hand-installed and therefore one rebuild
+        # from gone; this one converges.
+        #
+        # WIDER THAN "UNIT FILES ONLY", DELIBERATELY AND BOUNDEDLY —
+        # worth stating, because the restraint above is load-bearing.
+        # That restraint is about BOSS's own fleet: no build, no schema,
+        # and above all no service of the second (older) stack this host
+        # carries getting bounced every half hour. Enabling a DISTRO
+        # socket unit — and, once, installing the distro package that
+        # provides it — bounces nothing of ours and stages nothing. It
+        # also cannot fail this mode: journal-door-ensure.sh always exits
+        # 0 and warns instead, because a visibility door must never stop
+        # the converge that keeps this host's units current.
+        "$REPO_ROOT/infra/journal-door-ensure.sh"
         echo "units: ${#TIMERS[@]} timer unit pair(s) installed and enabled from $REPO_ROOT"
         exit 0
         ;;

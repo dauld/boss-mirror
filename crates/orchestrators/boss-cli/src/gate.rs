@@ -707,142 +707,19 @@ pub struct ParkIntent {
     pub proof_event: Option<String>,
 }
 
-/// WHERE A RECORDED PROBE RUNS — the forge host's absence manifest.
-///
-/// A `--park-probe` is written HERE (the dev pod: kubectl, a
-/// kubeconfig, the cluster one hop away) and RUN THERE
-/// (`infra/forge/run-car-probe.sh` on the forge host, as david, in
-/// /home/david/boss, when the car's train arrives). Two machines. The
-/// forge is outside the cluster and holds no kubeconfig, so a probe
-/// that reaches for `kubectl` is correct and unrunnable — and its
-/// failure at arrival is an exit code, hours later, on a car.
-///
-/// This file lists the tools MEASURED absent from that host, so the
-/// refusal happens at gate time on the builder's terminal instead. It
-/// is data, not code: an absence measured next month is a line, not a
-/// release. Backlog f9304366.
-const FORGE_ABSENT_TOOLS: &str = include_str!("../../../../infra/forge/host-absent-tools.txt");
-
-/// The manifest's live lines: one tool name each, comments and blanks
-/// dropped.
-pub fn forge_absent_tools() -> Vec<&'static str> {
-    FORGE_ABSENT_TOOLS
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .collect()
-}
-
-/// The commands a shell line would RUN, in command position — the first
-/// word of the probe and of every segment after a `|`, `&&`, `||`, `;`,
-/// a newline, a subshell or a substitution. Leading environment
-/// assignments and flags are stepped over, as are the words that stand
-/// in front of a program rather than being one (`if`, `sudo`, `env`, …),
-/// and a path is reduced to its basename so `/usr/bin/kubectl` reads as
-/// `kubectl`.
-///
-/// Deliberately not a shell parser: it does not know quoting, so a tool
-/// name inside a quoted string that follows a separator can be read as
-/// a command. The cost of that is a refusal the builder can reword; the
-/// cost of the alternative is a shell parser to maintain in the CLI.
-pub fn commands_invoked(probe: &str) -> Vec<&str> {
-    const NOT_THE_PROGRAM: [&str; 17] = [
-        "if", "then", "elif", "else", "fi", "while", "until", "for", "do", "done", "case", "esac",
-        "!", "time", "sudo", "env", "command",
-    ];
-    probe
-        .split(['|', '&', ';', '\n', '(', ')', '`', '{', '}'])
-        .filter_map(|segment| {
-            segment
-                .split_whitespace()
-                .map(|w| w.trim_matches(['"', '\'', '$', '\\']))
-                .find(|w| {
-                    !w.is_empty()
-                        && !w.contains('=')
-                        && !w.starts_with('-')
-                        && !NOT_THE_PROGRAM.contains(w)
-                })
-                .map(|w| w.rsplit('/').next().unwrap_or(w))
-        })
-        .filter(|w| !w.is_empty())
-        .collect()
-}
-
-/// The tool the forge does not have that this probe would need, if any.
-pub fn probe_needs_absent_tool(probe: &str) -> Option<&'static str> {
-    let absent = forge_absent_tools();
-    commands_invoked(probe)
-        .into_iter()
-        .find_map(|c| absent.iter().find(|a| **a == c).copied())
-}
-
-/// HOW A PROBE READS THE SYSTEM OF RECORD — `infra/forge/probe-bin`,
-/// first on the probe's PATH, holding exactly this one reader.
-///
-/// THE DEFECT IT REPLACES (backlog 61085a9e, measured 2026-09-10). The
-/// probe's env carried only `BOSS_JOBS_URL` — never an identity header —
-/// so `curl $BOSS_JOBS_URL/api/...` read as `operator:unidentified` and
-/// policy answered a NARROWER WORLD in silence. Same backend, same
-/// commit: `?kind=ship-a-change&status=open` was 21 rows for the
-/// operator and 0 unidentified; `/api/yard/status` came back with
-/// trains, dock, held, recent and `dock_depth` ALL ZERO — a confident,
-/// well-formed, completely idle yard. `/api/workflows` was identical
-/// between the two readers, so the narrowing is per-surface and nothing
-/// in an answer says which kind you hit.
-///
-/// WHY IT IS A REFUSAL AND NOT A PARAGRAPH IN A RUNBOOK. A PRESENCE
-/// assertion fails for the wrong reason, and someone investigates. An
-/// ABSENCE assertion PASSES FALSELY: "no open job of kind X remains" is
-/// green against an empty page the probe was never allowed to see, and
-/// `run-car-probe.sh` records it as a proof on a car that then closes.
-/// The person who filed the item was caught by it twice in one hour,
-/// the second time ten minutes after writing the item down — which is
-/// the honest measure of how little knowing about it helps. The cheap
-/// thing to type has to be the right thing.
-pub const SOR_READER: &str = "boss-sor-read";
-
-/// The env var the runner exports the probe's READ-SCOPED actor under.
-/// A probe that sends it is identified (and, being `audit-readonly`,
-/// can change nothing), so it is allowed.
-pub const SOR_USER_VAR: &str = "BOSS_SOR_USER";
-
-/// The spellings a probe reaches the system of record by. All four were
-/// used by real probes: the env var the runner exports, the in-cluster
-/// service DNS (the second measured instance), the LAN address and port
-/// (the first), and a bare `/api/` path through any of them.
-const SOR_SPELLINGS: [&str; 4] = ["BOSS_JOBS_URL", "boss-jobs-internal", ":7900", "/api/"];
-
-/// Commands that can perform the read. `python`/`python3` are here
-/// because the first measured instance was `urllib.request.urlopen`,
-/// not a curl.
-const HTTP_CLIENTS: [&str; 4] = ["curl", "wget", "python", "python3"];
-
-/// Does this probe read the system of record WITHOUT saying who it is?
-/// Returns the client it would read with.
-///
-/// Two conditions, both required, because either alone is a false
-/// refusal: an HTTP client in COMMAND POSITION (the same scan
-/// [`probe_needs_absent_tool`] uses, so `grep -c BOSS_JOBS_URL <file>`
-/// and `test -n "$BOSS_JOBS_URL"` are mentions, not reads), and the
-/// text naming the system of record at all.
-///
-/// Identified reads are not this check's business: a probe that sends
-/// the runner's read-scoped actor is already a named reader. That is
-/// keyed on [`SOR_USER_VAR`] and not on the header name, so a probe
-/// cannot satisfy it by writing its own privileged header literal — the
-/// honest bound being that the forge can forge any header it likes, so
-/// this steers an accident rather than stopping an intent.
-pub fn probe_reads_the_sor_unidentified(probe: &str) -> Option<&'static str> {
-    if !SOR_SPELLINGS.iter().any(|s| probe.contains(s)) {
-        return None;
-    }
-    if probe.contains(SOR_USER_VAR) {
-        return None;
-    }
-    commands_invoked(probe)
-        .into_iter()
-        .find_map(|c| HTTP_CLIENTS.iter().find(|h| **h == c).copied())
-}
+/// WHICH PROBES ARE LEGAL — borrowed, not restated. The two rules this
+/// door applies to a `--park-probe` (the forge's absence manifest, and
+/// the unidentified read of the system of record) are `boss_jobs::probe`
+/// now, because `boss prove` and the arrival rule are doors onto the
+/// same recorded text and a rule enforced at one door only is the defect
+/// 23b2dffa filed: the gate refused both shapes, the hand verb refused
+/// neither, and the rule's only trace at the second door was a comment
+/// describing this one. Re-exported under their local names so this
+/// module's callers and tests read unchanged.
+pub use boss_jobs::probe::{
+    SOR_READER, SOR_USER_VAR, needs_absent_tool as probe_needs_absent_tool,
+    reads_the_sor_unidentified as probe_reads_the_sor_unidentified,
+};
 
 /// The gate-run key each proof flag stamps. The auto-park handler
 /// reads these and writes the car's `proof_*` keys
@@ -932,26 +809,15 @@ impl ParkIntent {
                 "--park-probe reads the system of record with `{client}` and NO identity, so \
                  it reads as operator:unidentified — and an unidentified reader is answered \
                  with a NARROWER WORLD, silently.\n\n\
-                 Measured 2026-09-10 (61085a9e), one backend, one commit: \
-                 ?kind=ship-a-change&status=open was 21 rows for the operator and 0 \
-                 unidentified; /api/yard/status came back trains, dock, held, recent and \
-                 dock_depth ALL ZERO — a confident, well-formed, completely idle yard. \
-                 /api/workflows was identical for both, so nothing in an answer tells you \
-                 which kind you hit.\n\n\
-                 Why that is refused rather than documented: a PRESENCE assertion fails for \
-                 the wrong reason and someone investigates, but an ABSENCE assertion PASSES \
-                 FALSELY — 'no open job of kind X remains' is green against an empty page \
-                 the probe was never allowed to see — and run-car-probe.sh records that as a \
-                 PROOF on a car that then closes.\n\n\
+                 {}\n\n\
                  Read it as a named reader instead. Either is fine:\n  \
                  {SOR_READER} /api/yard/status | grep -q '\"dock_depth\":1'\n  \
                  curl -fsS -H \"x-boss-user: ${SOR_USER_VAR}\" $BOSS_JOBS_URL/api/...\n\n\
                  {SOR_READER} is infra/forge/probe-bin/{SOR_READER}, first on the probe's \
                  PATH in the converged checkout; it is GET-only and signs as a read-scoped \
                  actor the runner supplies (audit-readonly — Read everywhere, write \
-                 nowhere). And prefer asserting the PRESENCE of a named thing over the \
-                 absence of any thing: a count-is-zero or flag-is-false claim against a \
-                 policy-scoped surface is what a narrowed read produces anyway."
+                 nowhere).",
+                boss_jobs::probe::UNIDENTIFIED_READ_EVIDENCE,
             );
         }
         let missing: Vec<&str> = [
@@ -3298,25 +3164,6 @@ mod tests {
                 probe_needs_absent_tool(probe),
                 None,
                 "false refusal: {probe}"
-            );
-        }
-    }
-
-    /// The manifest is DATA, and the measured absence is in it. A list
-    /// that lost its one measured entry would make the check silently
-    /// green (CLAUDE.md §Diagnosis: a check nobody reads is a check
-    /// that is not running).
-    #[test]
-    fn the_forge_absence_manifest_carries_the_measured_tool() {
-        let tools = forge_absent_tools();
-        assert!(
-            tools.contains(&"kubectl"),
-            "host-absent-tools.txt lost the tool f9304366 measured: {tools:?}"
-        );
-        for t in &tools {
-            assert!(
-                !t.contains('#') && !t.contains(' ') && !t.contains('/'),
-                "a manifest line must be a bare tool name, got {t:?}"
             );
         }
     }

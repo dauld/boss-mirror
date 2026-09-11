@@ -231,16 +231,122 @@ pub(crate) fn judge(o: &Outcome, expect: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// WHICH PROBES THIS DOOR WILL RUN (backlog 23b2dffa).
+///
+/// TWO DOORS RUN A CAR'S RECORDED PROBE AND ONLY ONE CHECKED IT. `boss
+/// gate --park-probe` refuses a probe that names a tool the forge host
+/// lacks, and one that reads the system of record unidentified. This
+/// verb — the HAND door onto the same text, and the one an operator
+/// reaches for while moving fast — applied neither, and the only trace
+/// of the rule here was a comment describing the gate's refusal. One
+/// rule, two enforcement sites, one of which is prose about the other,
+/// is CLAUDE.md §9a in its behavioural form, so the predicates are now
+/// `boss_jobs::probe` and both doors call them.
+///
+/// WHY IT REFUSES RATHER THAN WARNS. The operator IS present, and may
+/// have a reason the check cannot see — which is an argument for a
+/// warning until you notice `--recheck`: it re-runs this recorded probe
+/// later, when nobody is watching, so a probe admitted by hand BECOMES
+/// an unattended one. A refusal with a stated override keeps both — the
+/// operator gets through, and the next reader learns it was overridden
+/// and why.
+///
+/// AND WHY ONLY ONE OF THE TWO RULES REFUSES HERE. They are not the same
+/// kind of rule. "Can this text run where it is going" is host-relative:
+/// `host-absent-tools.txt` is a measurement of the FORGE, because a
+/// `--park-probe` runs there, while this verb runs the probe HERE, in
+/// front of the operator, one second later — and a pod-local `kubectl`
+/// proof is the established shape for a claim only the cluster can show
+/// (memory: proof probes from the pod). Refusing that would block
+/// exactly the case where a human must prove what the forge cannot, so a
+/// hand `--probe` is not judged against another machine's tools: the
+/// question the manifest predicts, this verb measures. "Can its answer
+/// be trusted" is host-independent, and refuses everywhere.
+///
+/// `--from-car` is the one path where both apply, because that text has
+/// a second destination: the arrival rule runs it on the forge. There
+/// the mismatch is NAMED and not refused — proving it by hand here is
+/// the right move; what needs fixing is the probe the car recorded.
+pub(crate) const OVERRIDE_FLAG: &str = "--probe-anyway";
+
+pub(crate) use boss_jobs::probe::{UNIDENTIFIED_RULE, override_record};
+
+/// What this door makes of a probe: a reason not to run it, something
+/// the operator should know, or neither.
+#[derive(Debug, Default)]
+pub(crate) struct Admission {
+    /// Why the probe must not run, unless the operator overrides it.
+    pub refusal: Option<String>,
+    /// Something worth saying that does not stop the probe.
+    pub warning: Option<String>,
+}
+
+/// Judge a probe at this door. `from_car` says the text came from the
+/// car's `proof_probe`, which means the forge will run it too.
+pub(crate) fn admit(probe: &str, from_car: bool) -> Admission {
+    let refusal = boss_jobs::probe::reads_the_sor_unidentified(probe).map(|client| {
+        format!(
+            "THE PROBE READS THE SYSTEM OF RECORD WITH `{client}` AND NO IDENTITY, so it \
+             reads as operator:unidentified — and an unidentified reader is answered with a \
+             NARROWER WORLD, silently. What this verb would record is a proof of nothing.\
+             \n\n{evidence}\n\n\
+             Read it as a named reader instead — `boss-api GET /api/...` where that door \
+             exists, `{reader} /api/...` on the forge, or a curl that sends an identity \
+             header.\n\n\
+             If this read IS identified in a way a text check cannot see, say so and it \
+             runs: {OVERRIDE_FLAG} '<reason>'. The reason is recorded in the proof, because \
+             `--recheck` re-runs this probe later when nobody is watching.",
+            evidence = boss_jobs::probe::UNIDENTIFIED_READ_EVIDENCE,
+            reader = boss_jobs::probe::SOR_READER,
+        )
+    });
+    let warning = if from_car {
+        boss_jobs::probe::needs_absent_tool(probe).map(|tool| {
+            format!(
+                "boss prove: NOTE — this car's recorded probe invokes `{tool}`, which the \
+                 forge host does not have (infra/forge/host-absent-tools.txt). It runs HERE, \
+                 so proving by hand is fine and is the point; but the arrival rule could not \
+                 have run it, and any later re-run on the forge will report `unrunnable` \
+                 rather than a verdict (f9304366). Re-park the car with a probe the forge \
+                 can run, or record it as --park-proof-event."
+            )
+        })
+    } else {
+        None
+    };
+    Admission { refusal, warning }
+}
+
+/// The override, resolved once: `None` when the flag was not given,
+/// refusing a flag given with no reason — an override with no stated
+/// reason is the silent yes the whole verb exists to end.
+pub(crate) fn override_reason(given: Option<&str>) -> Result<Option<&str>> {
+    match given.map(str::trim) {
+        Some("") => bail!(
+            "{OVERRIDE_FLAG} needs a reason: it is recorded in the proof, where the next \
+             reader — or `--recheck`, unattended — finds out why a refused probe was run."
+        ),
+        other => Ok(other),
+    }
+}
+
 /// The proof record. Serialised once, stored verbatim, re-read by
 /// `--recheck` — so its field names are a contract, not a detail.
+/// `overridden` is the one optional key: present only when the
+/// operator ran a probe this door refused, absent otherwise, so its
+/// presence means something to whoever reads the proof back. The forge
+/// runner records no such key because it has no override door — which
+/// is why `the_forge_runner_records_the_same_proof_shape` pins the
+/// plain shape and this key is not in it.
 pub(crate) fn proof_json(
     probe: &str,
     expect: Option<&str>,
     o: &Outcome,
     host: &str,
     at: &str,
+    overridden: Option<&Value>,
 ) -> Value {
-    json!({
+    let mut p = json!({
         "probe": probe,
         "expect": expect,
         "exit": o.exit,
@@ -259,7 +365,11 @@ pub(crate) fn proof_json(
             .map(|p| p.display().to_string())
             .unwrap_or_default(),
         "at": at,
-    })
+    });
+    if let Some(o) = overridden {
+        p["overridden"] = o.clone();
+    }
+    p
 }
 
 /// Can the recorded probe be re-run HERE, meaning the same thing?
@@ -547,6 +657,11 @@ pub(crate) struct Recorded {
     /// `None` on proofs written before the context was recorded.
     pub host: Option<String>,
     pub cwd: Option<String>,
+    /// The override this proof was admitted under, if the operator ran
+    /// a probe the door refused. Read back so `--recheck` — the
+    /// unattended re-run — says so instead of reporting a clean HOLDS
+    /// on a probe somebody had to argue past.
+    pub overridden: Option<Value>,
 }
 
 /// Read back a recorded proof so `--recheck` can re-run it.
@@ -641,6 +756,7 @@ fn read_proof(raw: &Value) -> Result<Recorded> {
         expect,
         host: text("host"),
         cwd: text("cwd"),
+        overridden: v.get("overridden").cloned(),
     })
 }
 
@@ -773,11 +889,14 @@ pub(crate) async fn run(
     replace: bool,
     dry: bool,
     from_car: bool,
+    // The stated override for a probe this door refuses — see [`admit`].
+    probe_anyway: Option<String>,
     // The operator's now, taken once at the CLI entry point and passed
     // in — the same shape `train::run` uses, so nothing down here reads
     // the wall clock on its own.
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
+    let overriding = override_reason(probe_anyway.as_deref())?;
     let http = reqwest::Client::new();
     let cars = all_ship_a_change_cars(&http, &crate::gate::resolve_jobs_base(None)?).await?;
     // `--recheck` RE-RUNS a recorded probe and writes nothing, so a
@@ -832,6 +951,32 @@ pub(crate) async fn run(
                  The claim has not been tested either way."
             ),
             Rerunnable::Here => {}
+        }
+        // THE RULES APPLY TO A RE-RUN TOO, and this is the path that
+        // most needs them: `--recheck` is the unattended re-run, so a
+        // recorded probe that reads the system of record unidentified
+        // would report a confident HOLDS against a narrowed world. The
+        // refusal says so instead, and names `--replace` — which exists
+        // to put a better probe under a claim already proven.
+        if let Some(r) = admit(&probe, true).refusal {
+            match overriding {
+                None => bail!(
+                    "CANNOT RE-CHECK THIS PROBE — {r}\n\n\
+                     A recorded proof is not evidence of itself: re-prove the car with \
+                     `--replace` and a probe that reads as a named reader, which leaves the \
+                     original on the step where a reader can see what used to be claimed."
+                ),
+                Some(reason) => println!(
+                    "boss prove: re-checking a probe this door refuses, on your stated \
+                     reason — {reason}"
+                ),
+            }
+        }
+        if let Some(o) = &rec.overridden {
+            println!(
+                "boss prove: this proof was recorded OVER A REFUSAL — {}",
+                serde_json::to_string(o).unwrap_or_else(|_| "(unreadable)".into())
+            );
         }
         println!("boss prove: re-running the recorded probe for {short}\n  $ {probe}");
         let o = match rec.cwd.as_deref() {
@@ -900,12 +1045,45 @@ pub(crate) async fn run(
         eprintln!("{w}");
     }
 
+    // THE SAME RULES THE GATE APPLIES, AT THIS DOOR (23b2dffa), before
+    // the probe runs and before anything is recorded.
+    let admission = admit(&probe, from_car);
+    if let Some(w) = &admission.warning {
+        eprintln!("{w}");
+    }
+    let overridden = match (&admission.refusal, overriding) {
+        (Some(r), None) => bail!("{r}"),
+        (Some(_), Some(reason)) => {
+            println!(
+                "boss prove: running a probe this door refuses, on your stated reason — \
+                 {reason}\n  It is recorded in the proof as `overridden`, so a later reader \
+                 (and `--recheck`) sees the claim was argued past rather than clean."
+            );
+            Some(override_record(UNIDENTIFIED_RULE, reason))
+        }
+        (None, Some(_)) => {
+            eprintln!(
+                "boss prove: {OVERRIDE_FLAG} was given but nothing refused this probe — \
+                 nothing is recorded as overridden."
+            );
+            None
+        }
+        (None, None) => None,
+    };
+
     println!("boss prove: {short}  $ {probe}");
     let o = execute(&probe)?;
     judge(&o, expect.as_deref())?;
 
     let at = now.to_rfc3339();
-    let proof = proof_json(&probe, expect.as_deref(), &o, &host(), &at);
+    let proof = proof_json(
+        &probe,
+        expect.as_deref(),
+        &o,
+        &host(),
+        &at,
+        overridden.as_ref(),
+    );
     let shown = o.stdout.trim();
     println!(
         "boss prove: probe exited 0{}\n  {}",
@@ -1245,7 +1423,7 @@ mod tests {
     #[test]
     fn the_forge_runner_records_the_same_proof_shape() {
         const SH: &str = include_str!("../../../../infra/forge/run-car-probe.sh");
-        let p = proof_json("true", Some("x"), &ok("x"), "h", "now");
+        let p = proof_json("true", Some("x"), &ok("x"), "h", "now", None);
         for k in p.as_object().unwrap().keys() {
             assert!(
                 SH.contains(&format!("{k}:${k}")),
@@ -1313,6 +1491,7 @@ mod tests {
             &o,
             "h",
             "2026-08-28T00:00:00Z",
+            None,
         );
         let step = json!({"metadata": {"proof": serde_json::to_string(&p).unwrap()}});
         let rec = recorded_probe(&step).unwrap();
@@ -1384,7 +1563,14 @@ mod tests {
             stdout: "ok".into(),
             stderr: String::new(),
         };
-        let proof = proof_json("echo ok", None, &o, "somehost", "2026-08-29T00:00:00Z");
+        let proof = proof_json(
+            "echo ok",
+            None,
+            &o,
+            "somehost",
+            "2026-08-29T00:00:00Z",
+            None,
+        );
         let step = json!({"metadata": {"proof": proof.to_string()}});
         let rec = recorded_probe(&step).expect("readable");
         assert_eq!(rec.host.as_deref(), Some("somehost"));
@@ -1711,8 +1897,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
         };
-        let first = proof_json("old-probe", None, &o, "h", "2026-08-29T00:00:00Z");
-        let better = proof_json("better-probe", None, &o, "h", "2026-08-30T00:00:00Z");
+        let first = proof_json("old-probe", None, &o, "h", "2026-08-29T00:00:00Z", None);
+        let better = proof_json("better-probe", None, &o, "h", "2026-08-30T00:00:00Z", None);
         let step = json!({"metadata": {"proof": first.to_string()}});
         let with_reproof = json!({"metadata": {"reproof": [
             {"proof": better.to_string(), "recorded_at": "2026-08-30T00:00:00Z"}
@@ -1830,6 +2016,130 @@ mod tests {
                 .and_then(|m| m.get("branch"))
                 .and_then(Value::as_str),
             Some(needle)
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // ONE RULE SET, BOTH DOORS (backlog 23b2dffa). `boss gate
+    // --park-probe` refuses a probe naming a tool the forge lacks, and
+    // one reading the system of record unidentified. This verb — the
+    // HAND door onto the same recorded probe — applied neither, and
+    // said so only in a comment describing the gate's refusal.
+    // ------------------------------------------------------------------
+
+    /// THE RULE THAT HOLDS ON EVERY HOST. An unidentified read of the
+    /// system of record is answered with a NARROWER WORLD, silently, so
+    /// an absence assertion passes falsely — measured twice in one hour
+    /// on 2026-09-10 (61085a9e), once on a probe that would have
+    /// recorded a green proof of nothing. That is true wherever the
+    /// probe runs, so the hand verb refuses it too, and names the way
+    /// out rather than leaving the operator to argue with a wall.
+    #[test]
+    fn a_probe_that_reads_the_sor_unidentified_is_refused_by_the_hand_verb() {
+        for probe in [
+            "curl -fsS $BOSS_JOBS_URL/api/jobs?kind=pr-train&status=open | grep -q b9302f90",
+            "curl -sf http://boss-jobs-internal.boss.svc.cluster.local:7900/api/yard/status | grep -q trains",
+            "wget -qO- http://10.20.0.34:7900/api/stations/loading-dock/queue | grep -q x",
+        ] {
+            let a = admit(probe, false);
+            let r = a.refusal.unwrap_or_else(|| panic!("admitted: {probe}"));
+            assert!(r.contains("unidentified"), "{r}");
+            assert!(
+                r.contains(OVERRIDE_FLAG),
+                "the refusal must name its override: {r}"
+            );
+        }
+    }
+
+    /// The same refusal on the path that runs the probe the CAR
+    /// recorded: a car's `proof_probe` can be written by hand with a
+    /// metadata PATCH, so it never had to meet a gate.
+    #[test]
+    fn a_car_carried_probe_that_reads_the_sor_unidentified_is_refused_too() {
+        let a = admit(
+            "curl -fsS $BOSS_JOBS_URL/api/yard/status | grep -q dock_depth",
+            true,
+        );
+        assert!(
+            a.refusal.is_some(),
+            "a car-carried probe gets the same rule"
+        );
+    }
+
+    /// AND THE RULE THAT DOES NOT. `host-absent-tools.txt` says what the
+    /// FORGE lacks, because a `--park-probe` runs there. This verb runs
+    /// the probe HERE, in front of the operator, one second later — and
+    /// a pod-local `kubectl` proof is the established shape for a claim
+    /// only the cluster can show, so refusing it would block exactly the
+    /// case where a human has to prove what the forge cannot.
+    #[test]
+    fn the_hand_verb_does_not_judge_a_hand_probe_against_the_forges_tools() {
+        let a = admit(
+            "kubectl -n boss get deploy boss-jobs -o json | grep -q boss-ci",
+            false,
+        );
+        assert!(a.refusal.is_none(), "{:?}", a.refusal);
+        assert!(a.warning.is_none(), "{:?}", a.warning);
+    }
+
+    /// But a probe that came from the CAR has a second destination — the
+    /// arrival rule runs that same text on the forge — so the mismatch
+    /// is named. Named, not refused: proving it by hand here is the
+    /// right move, and the car's recorded probe is what needs fixing.
+    #[test]
+    fn a_car_carried_probe_the_forge_cannot_run_is_named_but_not_refused() {
+        let a = admit(
+            "kubectl -n boss get deploy boss-jobs -o json | grep -q boss-ci",
+            true,
+        );
+        assert!(a.refusal.is_none(), "{:?}", a.refusal);
+        let w = a.warning.expect("the forge cannot run this car's probe");
+        assert!(w.contains("kubectl"), "{w}");
+        assert!(w.contains("forge"), "{w}");
+    }
+
+    /// A named read is not this rule's business, and a MENTION is not a
+    /// read — the shared command-position scan is what keeps both legal.
+    #[test]
+    fn named_reads_and_mere_mentions_are_admitted() {
+        for probe in [
+            "boss-sor-read /api/yard/status | grep -q dock_depth",
+            "boss-api GET /api/jobs?kind=pr-train | grep -q arrived",
+            "grep -c BOSS_JOBS_URL infra/forge/run-car-probe.sh",
+            "test -n \"$BOSS_JOBS_URL\" && echo claim-ok",
+        ] {
+            let a = admit(probe, true);
+            assert!(a.refusal.is_none(), "{probe}: {:?}", a.refusal);
+        }
+    }
+
+    /// AN OVERRIDE NOBODY CAN SEE IS THE SAME DEFECT AGAIN. The escape
+    /// hatch is recorded IN the proof — the one record `--recheck` and
+    /// every later reader already open — and absent entirely when it was
+    /// not used, so its presence means something.
+    #[test]
+    fn an_overridden_refusal_is_recorded_in_the_proof() {
+        let ov = override_record(
+            UNIDENTIFIED_RULE,
+            "the identity header comes from my shell profile",
+        );
+        let p = proof_json(
+            "curl $BOSS_JOBS_URL/api/x",
+            Some("x"),
+            &ok("x"),
+            "h",
+            "now",
+            Some(&ov),
+        );
+        assert_eq!(p["overridden"]["rule"], UNIDENTIFIED_RULE);
+        assert_eq!(
+            p["overridden"]["reason"],
+            "the identity header comes from my shell profile"
+        );
+        let plain = proof_json("true", Some("x"), &ok("x"), "h", "now", None);
+        assert!(
+            plain.get("overridden").is_none(),
+            "no override, no key — a reader must not read one to learn nothing"
         );
     }
 }

@@ -351,16 +351,31 @@ impl Case {
     }
 
     fn run(&self, args: &[&str]) -> (i32, String) {
+        self.run_env(args, &[])
+    }
+
+    fn run_env(&self, args: &[&str], extra: &[(&str, String)]) -> (i32, String) {
         let mut cmd = Command::new("bash");
         cmd.arg(repo_root().join("infra/forge/delete-orphan-object.sh"))
             .args(args)
             .env_clear()
-            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    self.root.join("bin").display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
             .env("BOSS_KUBECTL", &self.kubectl)
             .env("BOSS_CLUSTER_TREE", &self.tree)
             .env("STUB_LIVE", &self.live)
             .env("STUB_DELETED", &self.deleted)
-            .env("STUB_FORBID", self.root.join("forbid"));
+            .env("STUB_FORBID", self.root.join("forbid"))
+            .env("STUB_RUNUSER_LOG", self.runuser_log());
+        for (k, v) in extra {
+            cmd.env(k, v);
+        }
         let out = cmd.output().expect("delete-orphan-object.sh runs");
         (
             out.status.code().unwrap_or(-1),
@@ -374,6 +389,36 @@ impl Case {
 
     fn deletions(&self) -> String {
         std::fs::read_to_string(&self.deleted).unwrap_or_default()
+    }
+
+    fn runuser_log(&self) -> PathBuf {
+        self.root.join("runuser.log")
+    }
+
+    /// A `runuser` on PATH that RECORDS the privilege drop and then runs
+    /// the command as whoever is running the test. Standing in for the
+    /// real one is what makes the owner-dropping branch reachable from a
+    /// single account — the branch that, untested, shipped a verb that
+    /// refused on every real invocation.
+    fn stub_runuser(&self) -> PathBuf {
+        let bin = self.root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let path = bin.join("runuser");
+        write_exec(
+            &path,
+            "#!/bin/bash\n\
+             printf '%s\\n' \"$*\" >> \"$STUB_RUNUSER_LOG\"\n\
+             # `runuser -u <user> -- <cmd...>`: record who, then run the rest.\n\
+             [ \"${1:-}\" = \"-u\" ] || { echo \"stub runuser: unexpected form: $*\" >&2; exit 64; }\n\
+             shift 2\n\
+             [ \"${1:-}\" = \"--\" ] && shift\n\
+             exec \"$@\"\n",
+        );
+        path
+    }
+
+    fn runuser_calls(&self) -> String {
+        std::fs::read_to_string(self.runuser_log()).unwrap_or_default()
     }
 }
 
@@ -645,6 +690,110 @@ fn refuses_a_malformed_argument() {
             &["<Kind>/<namespace>/<name>"],
             &format!("the {bad:?} case"),
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// THE GIT READS RUN AS THE CHECKOUT'S OWNER.
+// ---------------------------------------------------------------------------
+// THE DEFECT (ops-request c9877f75, measured on the forge 2026-09-10). The
+// first live run through the audited door refused: "/home/david/boss is
+// not a git checkout, so the declaration set is not reviewable content."
+// It is a checkout — forge-converge.sh fetches into it every tick. What
+// failed is `git` run AS ROOT in a david-owned clone: since 2.35.2 git
+// refuses to read across an ownership boundary ("dubious ownership"), and
+// the ops-runner executes every verb as root. The bound was right and the
+// refusal was safe; it was also unsatisfiable.
+//
+// All sixteen cases above passed while that was true, because a test
+// creates its fixture as the user running it, so owner == caller and the
+// drop is never taken. That is the hole these three close.
+//
+// The pattern is infra/gcp/boss-gcp-converge.sh's `as_owner` — the same
+// hazard, already solved and already lint-enforced there
+// (infra/lint/boss-gcp-converges-itself.sh §2b), with the probe runner's
+// non-login `runuser -u <user> --` + explicit HOME for the invocation,
+// because these are reads that need no credential helper and a login
+// shell's profile output would land in a captured `rev-parse`.
+
+/// With an owner that is not the caller, every git read is issued through
+/// `runuser`, and the run still reaches its verdict.
+#[test]
+fn the_git_reads_drop_to_the_checkouts_owner() {
+    let c = Case::new(
+        "owner-drop",
+        &[("Service", "boss", "boss-docs-internal", "")],
+    );
+    c.stub_runuser();
+    let (rc, out) = c.run_env(
+        &["Service/boss/boss-docs-internal", "--dry-run"],
+        &[("BOSS_CLUSTER_TREE_OWNER", "nobody".into())],
+    );
+    assert_eq!(
+        rc, 0,
+        "the verb refused when the tree belongs to someone else:\n{out}"
+    );
+    assert_eq!(c.deletions(), "", "--dry-run deleted something:\n{out}");
+    let calls = c.runuser_calls();
+    assert!(
+        !calls.is_empty(),
+        "no git read went through runuser — it ran as the caller, which is the defect:\n{out}"
+    );
+    for needle in ["-u nobody", "rev-parse", "status --porcelain"] {
+        assert!(
+            calls.contains(needle),
+            "the dropped commands do not include {needle:?}:\n{calls}"
+        );
+    }
+    // And nothing ran git as the caller: every git invocation the script
+    // makes is inside a dropped command.
+    assert_eq!(
+        calls.matches("git -C").count(),
+        3,
+        "expected the three git reads (rev-parse --git-dir, status, rev-parse HEAD):\n{calls}"
+    );
+}
+
+/// When the caller already owns the checkout there is nothing to drop,
+/// and the script must not reach for `runuser` — the forge's converge
+/// skips it the same way, which is how a lint can drive the loop at all.
+#[test]
+fn it_does_not_drop_when_the_caller_owns_the_tree() {
+    let c = Case::new(
+        "owner-is-caller",
+        &[("Service", "boss", "boss-docs-internal", "")],
+    );
+    c.stub_runuser();
+    let (rc, out) = c.run(&["Service/boss/boss-docs-internal", "--dry-run"]);
+    assert_eq!(rc, 0, "the verb refused on a tree the caller owns:\n{out}");
+    assert_eq!(
+        c.runuser_calls(),
+        "",
+        "the script dropped privilege it did not need:\n{out}"
+    );
+}
+
+/// `stat -c %U` prints `UNKNOWN` when no passwd entry exists for the
+/// owning uid. Proceeding would run git as the caller again — the exact
+/// bug — so the verb refuses and names what it could not resolve.
+#[test]
+fn refuses_an_owner_it_cannot_resolve() {
+    let c = Case::new(
+        "owner-unknown",
+        &[("Service", "boss", "boss-docs-internal", "")],
+    );
+    c.stub_runuser();
+    for owner in ["UNKNOWN", "nosuchuser-zzz"] {
+        let (rc, out) = c.run_env(
+            &["Service/boss/boss-docs-internal", "--dry-run"],
+            &[("BOSS_CLUSTER_TREE_OWNER", owner.into())],
+        );
+        assert_ne!(
+            rc, 0,
+            "the verb proceeded with an unresolvable owner {owner:?}:\n{out}"
+        );
+        assert_eq!(c.deletions(), "", "something was deleted:\n{out}");
+        contains_all(&out, &[owner, "owner"], &format!("the {owner:?} case"));
     }
 }
 

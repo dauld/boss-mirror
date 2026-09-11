@@ -431,6 +431,19 @@ enum Commands {
         /// unrunnable in the other (f9304366).
         #[arg(long, conflicts_with_all = ["probe", "expect", "exit_only"])]
         from_car: bool,
+        /// Run a probe this verb REFUSES, stating why.
+        ///
+        /// The refusal it escapes is the one rule `boss gate
+        /// --park-probe` and this verb now share: a probe that reads the
+        /// system of record with no identity is answered a NARROWER
+        /// WORLD in silence, so an absence assertion passes falsely
+        /// (61085a9e). The escape exists because a text check cannot see
+        /// an identity supplied some other way — and it takes a REASON,
+        /// recorded in the proof as `overridden`, because `--recheck`
+        /// re-runs a recorded probe later when nobody is watching, and
+        /// an override nobody can find is the same defect again.
+        #[arg(long, value_name = "REASON")]
+        probe_anyway: Option<String>,
     },
     /// Publish a branch to the forge, in one verb, and verify it.
     ///
@@ -1207,6 +1220,7 @@ async fn main() -> Result<()> {
             replace,
             dry_run,
             from_car,
+            probe_anyway,
         } => {
             prove::run(
                 &car,
@@ -1219,6 +1233,7 @@ async fn main() -> Result<()> {
                 replace,
                 dry_run,
                 from_car,
+                probe_anyway,
                 chrono::Utc::now(),
             )
             .await

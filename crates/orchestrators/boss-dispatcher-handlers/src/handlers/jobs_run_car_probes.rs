@@ -30,7 +30,10 @@
 //! exit code with empty streams. `boss gate` now refuses a probe
 //! naming a tool in infra/forge/host-absent-tools.txt, and the runner
 //! records `unrunnable` with the tool named rather than a bare exit
-//! code. The forge already answers
+//! code. This rule does not restate either refusal; it applies the one
+//! of them nothing downstream can — see [`ship_refusal`], which is
+//! where that call is argued rather than described (23b2dffa).
+//! The forge already answers
 //! ops-request packets through a reviewed verb allowlist
 //! (`infra/ops/verbs.json`), so the run goes through that door:
 //! `infra/forge/run-car-probe.sh` re-reads the car, refuses unless it
@@ -55,7 +58,7 @@ use serde_json::{Value, json};
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext};
 use boss_jobs::car;
 
-use super::common::{api_client, get_json, post_json};
+use super::common::{api_client, get_json, post_json, write_json};
 
 /// The allowlisted verb (`infra/ops/verbs.json`) and the host that
 /// answers it. One definition each, read by the request builder and
@@ -151,11 +154,75 @@ fn proven_is_open(car: &Value) -> bool {
         .is_some_and(|s| matches!(s, "ready" | "active"))
 }
 
+/// What one arrival produces: requests to file, and cars this door will
+/// not ship.
+#[derive(Debug, Default)]
+pub(crate) struct Arrival {
+    /// The ops-request bodies to file, one per probed car.
+    pub requests: Vec<Value>,
+    /// Cars whose recorded probe this rule refuses, each with the
+    /// `proof_attempt` to record on the car — `(car id, attempt)`. A
+    /// refusal nobody can read is the same as not checking, so every one
+    /// of these is written where the car's other proof evidence lives.
+    pub refusals: Vec<(String, Value)>,
+}
+
+/// WHY THIS DOOR RE-CHECKS ONE RULE AND NOT THE OTHER (backlog
+/// 23b2dffa, settled here rather than described).
+///
+/// `boss gate --park-probe` refuses both shapes of bad probe at park
+/// time, so most cars reaching this rule were already checked. Most is
+/// not all: a car's `proof_probe` can be written straight onto it with a
+/// metadata PATCH (a documented door), and cars parked before the
+/// gate-side refusals existed still carry whatever they carried. So the
+/// question is what this rule owes a probe no gate ever saw.
+///
+/// THE ABSENT-TOOL RULE IS NOT RE-CHECKED, deliberately. The forge
+/// runner catches it empirically: fd 9 collects every command bash could
+/// not resolve, on a channel the probe's own redirections cannot reach,
+/// and the attempt is stamped `unrunnable` with the tool named. A
+/// measurement of the actual host beats this handler predicting it from
+/// a manifest — and a prediction that is wrong (a tool installed since
+/// the list was measured) would strand a car with nobody watching.
+///
+/// THE UNIDENTIFIED READ IS RE-CHECKED, because nothing downstream can.
+/// The probe runs, policy answers a NARROWER WORLD in silence, the
+/// absence assertion passes, and the runner records it as a PROOF on a
+/// car that then closes (61085a9e). By the time the text reaches the
+/// forge it is too late for anything but the refusal, and this is the
+/// last place that can make one.
+fn ship_refusal(probe: &str, expect: Option<&str>) -> Option<Value> {
+    let client = boss_jobs::probe::reads_the_sor_unidentified(probe)?;
+    // No `at`: this rule holds no clock (the dispatcher's time comes
+    // from the clock port, which this handler does not carry), and the
+    // PATCH that records the attempt is itself an audit-log event with
+    // one. The same attempt re-written on a redelivered arrival is
+    // idempotent by content, which is what at-least-once needs.
+    Some(json!({
+        "refused": boss_jobs::probe::UNIDENTIFIED_RULE,
+        "probe": probe,
+        "expect": expect.unwrap_or(""),
+        "unrunnable": false,
+        "why": format!(
+            "THE PROBE WAS NOT RUN: it reads the system of record with `{client}` and no \
+             identity, so it would read as operator:unidentified and be answered with a \
+             NARROWER WORLD, silently. {evidence} Re-park the car with a probe that reads as \
+             a named reader ({reader} /api/...), or prove it by hand.",
+            evidence = boss_jobs::probe::UNIDENTIFIED_READ_EVIDENCE,
+            reader = boss_jobs::probe::SOR_READER,
+        ),
+    }))
+}
+
 /// PURE: the ops-request bodies to file for one arrival — one per car
 /// aboard `train_id` that recorded a probe, still has `proven` open,
 /// and has no run-car-probe request already open. Everything the
 /// forge script needs rides in metadata: `host`/`verb`/`args` for the
 /// ops-runner, `car`/`branch`/`train` for a reader.
+///
+/// A car whose recorded probe this door refuses ([`ship_refusal`]) is
+/// not shipped, and comes back in `refusals` so the reason lands on the
+/// car instead of vanishing.
 pub(crate) fn probe_requests(
     train_id: &str,
     cars: &[Value],
@@ -163,19 +230,27 @@ pub(crate) fn probe_requests(
     rule_name: &str,
     event_id: &str,
     topic: &str,
-) -> Vec<Value> {
+) -> Arrival {
     let already_asked = |car_id: &str| {
         open_requests
             .iter()
             .any(|r| md(r, "verb") == Some(VERB) && md(r, "car") == Some(car_id))
     };
-    cars.iter()
+    let mut refusals: Vec<(String, Value)> = Vec::new();
+    let requests = cars
+        .iter()
         .filter(|c| md(c, "train") == Some(train_id))
         .filter(|c| md(c, PROOF_PROBE).is_some())
         .filter(|c| proven_is_open(c))
         .filter_map(|c| {
             let id = c.get("id").and_then(Value::as_str)?;
             if already_asked(id) {
+                return None;
+            }
+            if let Some(probe) = md(c, PROOF_PROBE)
+                && let Some(attempt) = ship_refusal(probe, md(c, car::PROOF_EXPECT))
+            {
+                refusals.push((id.to_string(), attempt));
                 return None;
             }
             let title = c.get("title").and_then(Value::as_str).unwrap_or("");
@@ -203,7 +278,8 @@ pub(crate) fn probe_requests(
                 },
             }))
         })
-        .collect()
+        .collect();
+    Arrival { requests, refusals }
 }
 
 #[async_trait]
@@ -222,7 +298,7 @@ impl Handler for JobsRunCarProbes {
         };
         let cars = self.all_open("ship-a-change", &ctx.rule_name).await?;
         let open_requests = self.all_open("ops-request", &ctx.rule_name).await?;
-        let bodies = probe_requests(
+        let arrival = probe_requests(
             train_id,
             &cars,
             &open_requests,
@@ -230,7 +306,22 @@ impl Handler for JobsRunCarProbes {
             &ctx.triggering_event_id,
             &ctx.triggering_topic,
         );
-        for body in &bodies {
+        // The refusals go first, and they are recorded rather than
+        // logged: a car this rule will not probe must LOOK like one, on
+        // the car, beside the attempts the forge runner writes — a
+        // refusal only a journal knows about is indistinguishable from
+        // a rule that never ran (CLAUDE.md §Diagnosis).
+        for (car_id, attempt) in &arrival.refusals {
+            write_json(
+                &self.client,
+                reqwest::Method::PATCH,
+                &format!("{}/api/jobs/{car_id}/metadata", self.base()),
+                &json!({"proof_attempt": attempt}),
+                &ctx.rule_name,
+            )
+            .await?;
+        }
+        for body in &arrival.requests {
             post_json(
                 &self.client,
                 &format!("{}/api/jobs", self.base()),
@@ -262,8 +353,14 @@ mod tests {
         })
     }
 
+    /// A car carrying a GOOD probe: the named reader the forge puts on
+    /// the probe's PATH. This fixture used to be
+    /// `curl -s http://sor/api/yard | grep -c x` — exactly the shape
+    /// 61085a9e measured, an unidentified read answered with a narrower
+    /// world — so the fixture was itself an example of the defect.
     fn probed() -> Value {
-        json!({"proof_probe": "curl -s http://sor/api/yard | grep -c x", "proof_expect": "1"})
+        json!({"proof_probe": "boss-sor-read /api/yard/status | grep -q dock_depth",
+               "proof_expect": "dock_depth"})
     }
 
     /// THE TRIGGER: only a pr-train closing `arrived` names a train.
@@ -296,8 +393,8 @@ mod tests {
             "ev",
             "jobs.job.closed",
         );
-        assert_eq!(got.len(), 1);
-        let r = &got[0];
+        assert_eq!(got.requests.len(), 1);
+        let r = &got.requests[0];
         assert_eq!(r["kind"], "ops-request");
         assert_eq!(r["subject"]["id"], "c1");
         assert_eq!(r["metadata"]["host"], "forge");
@@ -338,9 +435,70 @@ mod tests {
         })];
         let got = probe_requests("t1", &cars, &open, "r", "ev", "jobs.job.closed");
         let ids: Vec<&str> = got
+            .requests
             .iter()
             .map(|r| r["metadata"]["car"].as_str().unwrap())
             .collect();
         assert_eq!(ids, vec!["fresh"], "{ids:?}");
+    }
+
+    /// THE RULE WITH NO BACKSTOP DOWNSTREAM (backlog 23b2dffa). The
+    /// forge runner catches a missing TOOL empirically — fd 9 collects
+    /// what bash could not resolve — so a probe naming `kubectl` comes
+    /// back as `unrunnable` with the tool named, which is better than
+    /// any prediction this handler could make. Nothing downstream
+    /// catches an UNIDENTIFIED READ: the probe runs, policy answers a
+    /// narrower world, the absence assertion passes, and the runner
+    /// records a green proof of nothing (61085a9e). So this door checks
+    /// that one rule, on the car's own recorded text, and refuses to
+    /// ship it — because a car can carry a probe no gate ever saw (a
+    /// metadata PATCH is a door, and cars parked before the gate-side
+    /// refusal existed still carry theirs).
+    #[test]
+    fn a_car_whose_probe_reads_the_sor_unidentified_is_refused_not_shipped() {
+        let bad = json!({
+            "proof_probe": "curl -fsS $BOSS_JOBS_URL/api/jobs?kind=gate-run | grep -q c0ffee",
+            "proof_expect": "c0ffee",
+        });
+        let cars = [car("c1", "t1", bad, "ready")];
+        let got = probe_requests("t1", &cars, &[], "r", "ev", "jobs.job.closed");
+        assert!(
+            got.requests.is_empty(),
+            "a probe that reads unidentified must not be shipped to the forge: {:?}",
+            got.requests
+        );
+        assert_eq!(got.refusals.len(), 1);
+        let (id, attempt) = &got.refusals[0];
+        assert_eq!(id, "c1");
+        assert_eq!(attempt["refused"], boss_jobs::probe::UNIDENTIFIED_RULE);
+        assert!(
+            attempt["why"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("unidentified"),
+            "the attempt must say what was wrong: {attempt}"
+        );
+        assert_eq!(
+            attempt["probe"],
+            "curl -fsS $BOSS_JOBS_URL/api/jobs?kind=gate-run | grep -q c0ffee"
+        );
+    }
+
+    /// And the absent-tool rule is deliberately NOT re-checked here: the
+    /// runner measures the actual host, which is strictly better than
+    /// this handler predicting it from a manifest. A `kubectl` probe is
+    /// still shipped, and comes back `unrunnable` naming the tool.
+    #[test]
+    fn a_probe_naming_a_tool_the_forge_lacks_is_still_shipped_for_the_runner_to_measure() {
+        let cars = [car(
+            "c1",
+            "t1",
+            json!({"proof_probe": "kubectl -n boss get deploy | grep -q boss-jobs",
+                   "proof_expect": "boss-jobs"}),
+            "ready",
+        )];
+        let got = probe_requests("t1", &cars, &[], "r", "ev", "jobs.job.closed");
+        assert_eq!(got.requests.len(), 1);
+        assert!(got.refusals.is_empty());
     }
 }

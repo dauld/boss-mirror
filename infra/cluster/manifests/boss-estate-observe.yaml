@@ -117,6 +117,26 @@ spec:
               args:
                 - |
                   set -e
+                  # WHERE THE SCRATCH FILES GO — a parameter whose default is
+                  # this pod's own path, so nothing the deployed observer does
+                  # changes. In the pod WORK is /tmp and the pod owns every
+                  # byte of it: no volume is mounted, so that is the
+                  # container's own writable layer, and restartPolicy Never +
+                  # concurrencyPolicy Forbid mean no two runs share it.
+                  #
+                  # It is a PARAMETER because this text has a second runner.
+                  # infra/lint/a-cluster-node-reports-its-headroom.sh extracts
+                  # this block and EXECUTES it — inline shell nothing executes
+                  # is untested shell — on the long-lived dev pod, where a
+                  # fixed path is shared with every other uid on the box.
+                  # Measured 2026-09-11 (packet 5bf96e72): root ran the lint
+                  # roster, then a second uid ran it and died on `Permission
+                  # denied` writing a file root already owned — reported as the
+                  # observer breaking its best-effort contract, which is not
+                  # what had happened. The lint now sets BOSS_OBSERVE_WORK to
+                  # its own mktemp -d; the pod sets nothing and gets /tmp.
+                  WORK="${BOSS_OBSERVE_WORK:-/tmp}"
+                  mkdir -p "$WORK"
                   # Transport-retry curl, INLINE. This pod runs the
                   # alpine/k8s image, which does NOT carry
                   # /usr/local/bin/boss-api-curl.sh (that script is baked
@@ -151,7 +171,7 @@ spec:
                   }
                   # In-cluster credentials: the ServiceAccount token is
                   # mounted, so kubectl needs no kubeconfig.
-                  kubectl get nodes -o json > /tmp/nodes.json
+                  kubectl get nodes -o json > "$WORK/nodes.json"
                   # FREE SPACE, per node, from the kubelet's own statfs
                   # (a520737f). Until this loop existed the observation
                   # carried capacity and nothing else, so
@@ -184,27 +204,27 @@ spec:
                   # node and the reason are printed; estate_compare turns
                   # the null into `disk_unmeasured` so going blind stays
                   # distinguishable from having plenty of room.
-                  mkdir -p /tmp/fs && rm -f /tmp/fs/*.json
-                  for n in $(jq -r '(.items // [])[] | .metadata.name' /tmp/nodes.json); do
-                    if kubectl get --raw "/api/v1/nodes/$n/proxy/stats/summary" >"/tmp/fs/$n.raw" 2>"/tmp/fs/$n.err"; then
+                  mkdir -p "$WORK/fs" && rm -f "$WORK"/fs/*.json
+                  for n in $(jq -r '(.items // [])[] | .metadata.name' "$WORK/nodes.json"); do
+                    if kubectl get --raw "/api/v1/nodes/$n/proxy/stats/summary" >"$WORK/fs/$n.raw" 2>"$WORK/fs/$n.err"; then
                       jq --arg id "$n" '{ id: $id, disk_free_gb:
                         (if (.node.fs.availableBytes | type) == "number"
                          then ((.node.fs.availableBytes + 536870912) / 1073741824 | floor)
-                         else null end) }' "/tmp/fs/$n.raw" > "/tmp/fs/$n.json"
+                         else null end) }' "$WORK/fs/$n.raw" > "$WORK/fs/$n.json"
                     else
-                      echo "no free-space reading for $n: $(cat "/tmp/fs/$n.err")"
-                      jq -n --arg id "$n" '{ id: $id, disk_free_gb: null }' > "/tmp/fs/$n.json"
+                      echo "no free-space reading for $n: $(cat "$WORK/fs/$n.err")"
+                      jq -n --arg id "$n" '{ id: $id, disk_free_gb: null }' > "$WORK/fs/$n.json"
                     fi
                   done
-                  if ls /tmp/fs/*.json >/dev/null 2>&1; then
+                  if ls "$WORK"/fs/*.json >/dev/null 2>&1; then
                     jq -s 'map({ key: .id, value: .disk_free_gb }) | from_entries' \
-                      /tmp/fs/*.json > /tmp/free.json
+                      "$WORK"/fs/*.json > "$WORK/free.json"
                   else
                     # No nodes listed at all. The door refuses an
                     # observation that saw nothing, and that refusal is
                     # the report we want — not a jq error on an unmatched
                     # glob three lines earlier.
-                    echo '{}' > /tmp/free.json
+                    echo '{}' > "$WORK/free.json"
                   fi
                   # jq, not python: directive 26d61c97 retired python
                   # from the estate's shell, and infra/estate/observe-host.sh
@@ -216,7 +236,7 @@ spec:
                   # python this replaces used round-half-even, so an
                   # exact .5-GiB tie now rounds up instead of to the
                   # nearest even integer.
-                  jq --slurpfile free /tmp/free.json '
+                  jq --slurpfile free "$WORK/free.json" '
                     def gib:
                       if . == null then null
                       elif endswith("Ki") then (((rtrimstr("Ki") | tonumber) + 524288) / 1048576 | floor)
@@ -243,13 +263,13 @@ spec:
                             ready: (([($st.conditions // [])[] | select(.type == "Ready") | .status] | (.[0] // "Unknown")) == "True")
                           }
                       ] | sort_by(.id // ""))
-                    }' /tmp/nodes.json > /tmp/observation.json
-                  echo "observed $(jq -r '.nodes | length' /tmp/observation.json) node(s)"
+                    }' "$WORK/nodes.json" > "$WORK/observation.json"
+                  echo "observed $(jq -r '.nodes | length' "$WORK/observation.json") node(s)"
                   # Per node, the two numbers the floor is computed from,
                   # so whoever is next in front of a disk failure can
                   # read the reading instead of re-deriving it.
                   jq -r '.nodes[] | "  \(.id): kubelet nodefs disk=\(.disk_gb)G free=\(if .disk_free_gb == null then "UNREAD" else "\(.disk_free_gb)G" end)"' \
-                    /tmp/observation.json
+                    "$WORK/observation.json"
                   # The door refuses an observation that saw nothing, so a
                   # denied or broken probe fails loudly here rather than
                   # recording an empty estate.
@@ -273,7 +293,7 @@ spec:
                   resp=$(api_curl -s -w '\n%{http_code}' -X POST \
                     -H "content-type: application/json" \
                     -H "x-boss-user: {\"id\":\"automation:estate-observer\",\"role\":\"platform-admin\",\"access_tier\":\"operator\"}" \
-                    --data-binary @/tmp/observation.json \
+                    --data-binary @"$WORK/observation.json" \
                     "$JOBS_API/api/estate/observation") \
                     || { rc=$?; echo "curl failed (exit $rc, target $JOBS_API/api/estate/observation)"; exit 1; }
                   code=$(printf '%s\n' "$resp" | tail -n 1)

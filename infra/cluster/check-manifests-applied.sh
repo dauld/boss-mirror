@@ -18,6 +18,15 @@
 # cluster — and for the kinds where a present-but-WRONG object is the
 # realistic failure, that its contents match too.
 #
+# ONE DIRECTION ONLY, and the other one has its own observer. This walks
+# the TREE and asks "is each declared object present?". A manifest that
+# was DELETED is not in that walk at all, and the object it left behind
+# answers the question correctly by being absent from it — so this script
+# is structurally blind to an orphan, and the converge's `kubectl apply`
+# has no `--prune` to remove one. That direction is
+# infra/lint/a-deleted-manifest-leaves-no-object.sh, which the converge
+# runs immediately after this one.
+#
 # EXISTENCE WAS NOT ENOUGH, measured (95f6aba5). The dev-session Role
 # was granted batch/jobs create,get,list,watch by hand on 2026-08-28 to
 # close a car, and proven by launching a real gate. The grant was never

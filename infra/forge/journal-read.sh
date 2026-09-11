@@ -84,13 +84,26 @@
 # wedges again for hours, the repair is the one-line human command the
 # refusal prints.
 #
+# TWO HOSTS, AND THE ADVICE FOLLOWS THE TARGET. `forge` and `boss-gcp`
+# are named targets, so each door's address lives in this file once
+# instead of in whoever types it. boss-gcp's door was added by backlog
+# 68757702: that host is the WireGuard bastion, it carries a second,
+# older BOSS stack, and it had NO read path from the pod for either logs
+# or unit state — so a failing timer there could only be diagnosed by a
+# human on the box, which on 2026-09-10 produced a wrong conclusion
+# reasoned from the tree instead. Every line of guidance below is derived
+# from the resolved target, because a refusal about one host that tells
+# you to repair another is a verdict somebody has to go re-derive
+# (CLAUDE.md §Diagnosis).
+#
 # USAGE
-#   journal-read.sh [--host <ip[:port]>|forge] [--max-age <seconds>]
+#   journal-read.sh [--host <ip[:port]>|forge|boss-gcp] [--max-age <seconds>]
 #                   [--count <n>] [--check] [FIELD=VALUE ...]
 #
 #   journal-read.sh --check
 #   journal-read.sh _SYSTEMD_UNIT=disk-floor-sweep.service --count 50
 #   journal-read.sh SYSLOG_IDENTIFIER=forge-converge
+#   journal-read.sh --host boss-gcp _SYSTEMD_UNIT=boss-ml-inference-batch.service
 #
 # EXITS  0 fresh (entries printed; zero rows is then a true answer)
 #        2 usage
@@ -99,6 +112,9 @@
 set -uo pipefail
 
 DEFAULT_HOST="10.20.0.15:19531"
+# boss-gcp over the WireGuard overlay: the hub is 10.99.0.1, and from the
+# pod that is the only route to the bastion (the-dev-door-is-lan-only).
+BOSS_GCP_HOST="10.99.0.1:19531"
 MAX_AGE_S="${BOSS_JOURNAL_MAX_AGE_S:-1800}"
 HOST=""
 COUNT=100
@@ -133,8 +149,17 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-[ -n "$HOST" ] || HOST="$DEFAULT_HOST"
-[ "$HOST" = "forge" ] && HOST="$DEFAULT_HOST"
+# THE NAMED TARGETS. One place per door's address, and the LABEL survives
+# resolution so every message below can say which host it is talking
+# about. An unnamed target keeps its own spelling as the label — there is
+# nothing truer to call it — and gets the ops-runner caveat, because the
+# independent path needs a runner installed on that specific host.
+[ -n "$HOST" ] || HOST="forge"
+HOST_LABEL="$HOST"
+case "$HOST" in
+    forge)    HOST="$DEFAULT_HOST" ;;
+    boss-gcp) HOST="$BOSS_GCP_HOST" ;;
+esac
 case "$HOST" in *:*) : ;; *) HOST="${HOST}:19531" ;; esac
 
 [[ "$MAX_AGE_S" =~ ^[0-9]+$ ]] || { echo "journal-read: --max-age wants whole seconds, got '$MAX_AGE_S'" >&2; usage; }
@@ -160,15 +185,38 @@ human() {
 # are different facts and the second is the wrong-target mistake
 # CLAUDE.md §Doors warns about. Both are the same POSTURE: skip, never
 # pass.
+# THE INDEPENDENT PATH, NAMED FOR THE TARGET. Printed by both postures
+# that leave the question unanswered, on stdout so each caller redirects
+# it once. It used to say `host=forge` whatever was asked for, which
+# since boss-gcp's door exists would send an operator at the wrong
+# machine — and the caveat is there because the independent path needs an
+# ops runner installed on THAT host, which is not true everywhere
+# (boss-gcp's has never been installed; the-dev-door-is-lan-only).
+independent_path() {
+    echo "    The independent path, which shells local journalctl on the host and so"
+    echo "    cannot be affected by this door at all:"
+    echo "      boss-api POST /api/jobs with kind=ops-request, host=${HOST_LABEL},"
+    echo "      verb=journal-tail, args='<unit> <lines>'  (infra/ops/verbs.json)"
+    if [ "$HOST_LABEL" != "forge" ]; then
+        echo "    CAVEAT: only the forge's ops runner is known installed. On ${HOST_LABEL} that"
+        echo "    request may sit at ready with nothing behind it — which is not an answer"
+        echo "    either. Check for a boss-ops-runner there before you wait on one."
+    fi
+}
+
+# The repair, on the host that actually owns the door.
+repair_command() {
+    echo "    To repair the door (a human command on ${HOST_LABEL}, as root; the process has"
+    echo "    no periodic restart by design — infra/forge/OPERATIONS.md §The BOSS units):"
+    echo "      systemctl restart systemd-journal-gatewayd.service"
+}
+
 skip() {
     local what="$1"; shift
     echo "journal-door: ${HOST} ${what} — SKIPPED, the question is NOT answered" >&2
     for line in "$@"; do [ -n "$line" ] && printf '    %s\n' "$line" >&2; done
     echo "    A door that did not answer is not a door that said 'nothing to report'." >&2
-    echo "    The independent path, which shells local journalctl on the host and so" >&2
-    echo "    cannot be affected by this door at all:" >&2
-    echo "      boss-api POST /api/jobs with kind=ops-request, host=forge," >&2
-    echo "      verb=journal-tail, args='<unit> <lines>'  (infra/ops/verbs.json)" >&2
+    independent_path >&2
     exit "$SKIP"
 }
 
@@ -240,13 +288,8 @@ if [ "$age_s" -gt "$MAX_AGE_S" ]; then
         fi
         echo "    An empty or short result from this door right now is NOT evidence that a"
         echo "    unit did not run. It is evidence that this reader is $(human "$age_s") behind."
-        echo "    Read the same journal through the path that does not use this door — the"
-        echo "    ops runner shells local journalctl on the host itself:"
-        echo "      boss-api POST /api/jobs with kind=ops-request, host=forge,"
-        echo "      verb=journal-tail, args='<unit> <lines>'  (infra/ops/verbs.json)"
-        echo "    To repair the door (a human command on the forge, as root; the process has"
-        echo "    no periodic restart by design — infra/forge/OPERATIONS.md §The BOSS units):"
-        echo "      systemctl restart systemd-journal-gatewayd.service"
+        independent_path
+        repair_command
     } >&2
     exit "$STALE"
 fi
