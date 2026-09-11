@@ -46,6 +46,80 @@ cd "$(dirname "$0")/.."
 # this script is untouched and keeps incremental.
 export CARGO_INCREMENTAL=0
 
+# THE GATE'S GIT READS MUST WORK FOR WHATEVER UID THE GATE RUNS AS.
+#
+# Since #310 (2026-09-11) the gate runs as uid 65534 / gid 1500, and
+# every builder brief says to verify work under `setpriv --reuid=65534`.
+# This pod's checkout is root-owned (`drwxrwsr-x root 1500`), so since
+# git 2.35.2 every git command run by any other uid refuses it:
+#
+#     fatal: detected dubious ownership in repository at '/work/boss'
+#
+# MEASURED as 65534 on this tree (packet 8674c440): `--quick` exits 1
+# naming three pre-flight lints, and the defect is NOT three loud
+# failures — it is five lints, failing three different ways:
+#
+#   no-secrets                 `git ls-files` refuses; the lint FAILS,
+#                              printing the refusal. The honest one.
+#   migrations-append-only     the trunk `rev-parse` is `2>/dev/null`,
+#   steptype-bundle-ratchet    so the refusal is swallowed and the lint
+#                              fails with "no trunk ref found … Fetch
+#                              the trunk" — a confident WRONG diagnosis
+#                              of an environment problem.
+#   no-session-paths           `git grep` through pattern-scan.sh and
+#   one-palette                one-palette's own call both end `|| true`.
+#                              The scan returns nothing and the lint
+#                              reports `clean`. A SILENT FALSE PASS:
+#                              the gate certifies a tree it never read.
+#
+# The last pair is why the fix belongs HERE and not in the lints. A
+# per-lint fix is three edits that have to FIND all five, and the two
+# that matter most announce nothing when they are broken (CLAUDE.md §9a
+# — that is the drift shape, not the fix). One exported env slot reaches
+# every git in the child tree, including the lints nobody has written
+# yet, and cannot drift from itself.
+#
+# git's env-var config channel, not a `git -c` on each call site, for
+# the same reason: a call site list is the pair this repo keeps paying
+# for.
+#
+# SCOPED TO THE RESOLVED ROOT, never `*`. Blessing one known path is a
+# statement about this checkout; a wildcard would bless every repository
+# any child ever reaches — the throwaway `git init` fixtures that
+# migrations-append-only and an-expectation-names-a-rule build, the
+# clones a probe makes — and those are exactly the repositories whose
+# ownership nobody has vouched for.
+#
+# APPENDED after whatever `GIT_CONFIG_*` the caller already exports,
+# the way `boss-cli`'s `git_auth::apply_at` appends:
+# `infra/cluster/manifests/boss-dev.yaml` uses slot 0 for the forge
+# credential helper, so a flat `GIT_CONFIG_COUNT=1` here would silently
+# take that helper away from every child of the gate.
+#
+# WHY `safe.directory` IS RIGHT HERE AND WRONG IN
+# `infra/forge/delete-orphan-object.sh`, which rejects it by name and
+# drops to the tree's owner instead: that verb runs as root inside
+# somebody else's clone, and a root WRITE there leaves root-owned
+# objects that break the owner's later pulls — silencing the check would
+# buy its read at the price of making that hazard reachable by the next
+# edit. NOTHING IN THE GATE WRITES TO GIT: `--auto` diffs, the receipt
+# reads HEAD, the lints read history and the index. That is the same
+# distinction `infra/forge/publish-github-pr.sh` drew when it DID accept
+# `safe.directory` for its fetch. Do not copy this to a path that
+# writes, and do not widen it.
+#
+# It is not new trust, either: the gate is already EXECUTING this
+# checkout's scripts, so declining to read its history was never a
+# safety property — only a refusal in the wrong place.
+GATE_REPO_ROOT="$(pwd -P)"
+gate_git_slot="${GIT_CONFIG_COUNT:-0}"
+case "$gate_git_slot" in
+    ''|*[!0-9]*) gate_git_slot=0 ;;
+esac
+export "GIT_CONFIG_KEY_${gate_git_slot}=safe.directory"
+export "GIT_CONFIG_VALUE_${gate_git_slot}=${GATE_REPO_ROOT}"
+export GIT_CONFIG_COUNT=$((gate_git_slot + 1))
+
 SCOPE=()
 NAMED=()
 AUTO=0
@@ -1229,21 +1303,84 @@ check_stdin_self_test() {
     fi
 }
 
+# THE GATE'S GIT READS SURVIVE A FOREIGN-OWNED CHECKOUT — the pin on the
+# `safe.directory` slot this script exports at the top.
+#
+# Same class as the two self-tests above: a mechanism whose failure is
+# INVISIBLE. A gate whose git reads refuse does not stop — two lints
+# report `clean` on a tree they never read (`no-session-paths` and
+# `one-palette`, both through a `git grep` that ends `|| true`) and two
+# more mis-diagnose it as a missing trunk ref. There is no red to notice,
+# which is why the property needs a pin rather than a comment.
+#
+# It is NOT a restatement of the export. The probes below set no
+# `safe.directory` of their own; they run git as a CHILD of this script,
+# which is the inheritance every lint depends on. Delete the export at
+# the top and step 2 fails.
+#
+# `GIT_TEST_ASSUME_DIFFERENT_OWNER` is git's own "pretend another user
+# owns this" knob, and using it is what makes this pin UID-INDEPENDENT:
+# it reproduces the uid-65534 refusal while running as root, so the pin
+# holds on the runner, on a workstation, and under `setpriv` alike — no
+# `chown`, and so no root, required to prove it.
+gate_git_reads_self_test() {
+    # No git, or no repository here at all: there is nothing to pin, and
+    # refusing would invent a precondition the gate never had (it reads
+    # HEAD as `|| echo unknown` for exactly this case). Deliberately a
+    # WORKING-TREE test — `git rev-parse --git-dir` would be answered by
+    # the ownership check itself, so a refused tree would skip the pin
+    # that exists to catch the refusal.
+    command -v git >/dev/null 2>&1 || return 0
+    [ -e .git ] || return 0
+
+    # `ls-files` rather than `rev-parse HEAD`: it is ownership-checked,
+    # it is what two of the five affected lints actually call, and it
+    # answers on a repository with no commit yet — so a failure here is
+    # the ownership refusal and not an empty history.
+    #
+    # 1. THE SIMULATION IS REAL. With every config channel that could
+    #    carry a `safe.directory` silenced, the knob MUST produce the
+    #    refusal. If it does not, this git cannot simulate a foreign
+    #    owner and step 2 would be vacuously green — say so rather than
+    #    bank a proof that did not happen (CLAUDE.md §Diagnosis: a check
+    #    nobody can read is a check that is not running).
+    if env GIT_CONFIG_COUNT=0 GIT_CONFIG_GLOBAL=/dev/null \
+           GIT_CONFIG_SYSTEM=/dev/null GIT_TEST_ASSUME_DIFFERENT_OWNER=1 \
+           git ls-files >/dev/null 2>&1; then
+        echo "gate.sh: $(git --version) did not refuse a checkout it was told another user owns \
+(GIT_TEST_ASSUME_DIFFERENT_OWNER had no effect) — the foreign-owner pin is UNPROVEN on this host, not green" >&2
+        return 0
+    fi
+
+    # 2. THE DOOR OPENS ANYWAY, through the environment this script
+    #    exports and a child inherits.
+    if ! GIT_TEST_ASSUME_DIFFERENT_OWNER=1 git ls-files >/dev/null 2>&1; then
+        echo "gate.sh git self-test FAIL: a child of the gate cannot read git in $GATE_REPO_ROOT when another \
+user owns it. On a root-owned checkout the gate's own uid (65534 since #310) hits this for real, and it does not \
+surface as one failure: no-secrets fails, migrations-append-only and steptype-bundle-ratchet fail claiming \
+\"no trunk ref found\", and no-session-paths and one-palette report \`clean\` on a tree they never read. The \
+scoped safe.directory slot exported at the top of this script is what prevents it (packet 8674c440)" >&2
+        exit 2
+    fi
+}
+
 # Runnable on its own, because a pin whose only output is silence is a
 # pin nobody can check is still a pin. `roster_loop_self_test` exits 2
 # with a named failure, so reaching the line below means it held.
 if [ "$SELFTEST" -eq 1 ]; then
     roster_loop_self_test
     check_stdin_self_test
+    gate_git_reads_self_test
     echo "gate.sh: roster self-test ok — a check that reads stdin cannot truncate the roster, \
-every check is handed an empty stdin (inside the roster loop and out), and a truncation by any \
-other route is refused by count"
+every check is handed an empty stdin (inside the roster loop and out), a truncation by any \
+other route is refused by count, and a child's git reads survive a foreign-owned checkout"
     exit 0
 fi
 
 run_preflight() {
     roster_loop_self_test
     check_stdin_self_test
+    gate_git_reads_self_test
     check "fmt" cargo fmt -- --check
     local roster
     if ! roster=$(preflight_roster); then

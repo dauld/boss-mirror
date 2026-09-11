@@ -1,0 +1,45 @@
+-- A car can declare the car it must land BEHIND.
+--
+-- THE ORDERING CONSTRAINT WAS ALREADY BEING STATED, BY HAND. Four cars
+-- were held by hand on 2026-09-10 and every one of them was an ordering
+-- constraint. `fix/the-reclaim-follows-the-build` was gated `--hold` and
+-- parked by hand when the dock happened to be empty, purely so it would
+-- board SOLO as a gate-blind ci.yml change;
+-- `feat/a-deleted-manifest-leaves-no-object` spent a day waiting for a
+-- human to notice both halves of a two-part sequence were satisfied.
+-- Nothing in the system held the constraint, so the operator was the
+-- mechanism — and the mechanism was a person re-reading the dock.
+--
+-- WHY AN EDGE AND NOT METADATA PROSE, AND NOT THE GATE-RUN (design doc
+-- 364f892e, all three questions accepted as proposed by David on
+-- 2026-09-11; backlog d3320278):
+--
+--   - A declared edge is REF-CHECKED and PREFIX-NORMALIZED by
+--     `check_job_edges` (104 + 125): a mistyped car id is refused at the
+--     write with a foreign_key_violation instead of silently pointing at
+--     nothing, and an 8-char prefix is stored as the full id so the read
+--     path can use it. Loose metadata would be a fourth place a car's
+--     identity is written, unchecked.
+--   - The gate-run is the wrong LIFETIME. The constraint outlives the
+--     gate: a car waits at the dock long after its gate-run closed on
+--     its verdict.
+--
+-- `job_id`, not `job_id_list`: one predecessor. A car that genuinely
+-- waits on two is a different relation and should be filed as one when
+-- it actually happens — the filter would then be a fold over the list,
+-- which is a change to the reader, not to this row.
+--
+-- WHY NOT REUSE `('*', 'waiting_on')`, WHICH ALREADY SAYS "the Job whose
+-- closure this Job waits on" (110). Because something already ACTS on
+-- it: the dispatcher rule behind `jobs_clear_waiting` CLEARS
+-- `metadata.waiting_on` when the blocker Job closes, whatever it closed
+-- as. An ABANDONED predecessor closes too, so reusing that edge would
+-- silently satisfy the constraint in exactly the case a human has to
+-- break it — the quiet hold this feature exists to remove. `boards_after`
+-- is read by the conductor's boarding filter and cleared by nobody.
+--
+-- on_missing takes the table default, `abort` since 202608291630.
+INSERT INTO job_edges (source_kind, field_path, field_kind, description) VALUES
+  ('ship-a-change', 'boards_after', 'job_id',
+   'The car this one must land behind — the dock will not board it until that car has landed')
+ON CONFLICT (source_kind, field_path) DO NOTHING;

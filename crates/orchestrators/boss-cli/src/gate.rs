@@ -836,6 +836,10 @@ pub struct ParkIntent {
     pub partial_item: Option<String>,
     /// Why this car answers no item at all.
     pub no_item: Option<String>,
+    /// The car this one must land BEHIND — `--park-after`. Written on the
+    /// car as the declared `boards_after` job edge, which the conductor's
+    /// boarding filter reads (`boss_jobs::car::BOARDS_AFTER`).
+    pub boards_after: Option<String>,
     pub probe: Option<String>,
     pub expect: Option<String>,
     pub proof_event: Option<String>,
@@ -869,6 +873,23 @@ pub const PARK_PROOF_EVENT: &str = "park_proof_event";
 pub const PARK_NO_ITEM: &str = "park_no_item";
 pub const PARK_PARTIAL_ITEM: &str = "park_partial_item";
 
+/// The gate-run key `--park-after` stamps. The auto-park handler copies
+/// it onto the car as the declared `boss_jobs::car::BOARDS_AFTER` edge,
+/// which is what the conductor's boarding filter reads.
+///
+/// WHY THE GATE IS WHERE A CAR SAYS THIS. It is where every other fact
+/// about a car is already stated — its summary, its boundary, its item,
+/// its proof — so an ordering constraint said here costs the builder one
+/// flag on a command they are already typing. The alternatives were
+/// measured worse: four cars on 2026-09-10 stated theirs by a human
+/// holding the dock, and `--hold` (which stays, as the escape hatch)
+/// states only "not yet", never "after what".
+///
+/// Borrowed from core rather than spelled here: the reader is a
+/// dispatcher handler in a crate this one cannot import, and a key that
+/// agreed by coincidence would be a hold nothing enforces (§9a).
+pub use boss_jobs::car::PARK_BOARDS_AFTER;
+
 impl ParkIntent {
     /// True when no `--park-*` flag was given: a plain gate.
     pub fn is_empty(&self) -> bool {
@@ -879,6 +900,7 @@ impl ParkIntent {
             && self.backlog_item.is_none()
             && self.partial_item.is_none()
             && self.no_item.is_none()
+            && self.boards_after.is_none()
             && self.probe.is_none()
             && self.expect.is_none()
             && self.proof_event.is_none()
@@ -895,6 +917,26 @@ impl ParkIntent {
     /// `boss prove` refuses that shape too), and a car is EITHER probed
     /// or event-bound — a probe next to a `--park-proof-event` says the
     /// builder did not decide which.
+    /// THE TWO SHAPE WARNINGS ON A `--park-probe` (backlog 4fccc595).
+    ///
+    /// This door is where the probe that cost 18 hours was ADMITTED, and
+    /// the moment a builder is still typing it is the only moment the
+    /// shape is cheap to fix — by the time the arrival rule runs the
+    /// text, unattended on the forge, nothing there reads a warning. So
+    /// the same two findings `boss prove`'s `admit` says are said here,
+    /// from the one definition in `boss_jobs::probe`. They WARN rather
+    /// than refuse, for the reason argued at that door: both shapes fail
+    /// closed, so the worst they do is strand a car, and both detectors
+    /// are coarse text scans a false refusal would be too expensive for.
+    pub fn probe_warnings(&self) -> Vec<String> {
+        match &self.probe {
+            None => Vec::new(),
+            Some(probe) => crate::prove::shape_warnings(probe)
+                .map(|w| format!("boss gate: --park-probe {w}"))
+                .collect(),
+        }
+    }
+
     pub fn require_complete(&self) -> Result<()> {
         if self.is_empty() {
             return Ok(());
@@ -1077,6 +1119,21 @@ impl ParkIntent {
                 );
             }
         }
+        // The ordering edge gets its own refusal, because a blank one
+        // fails DIFFERENTLY from a blank item: the ref check reads `''`
+        // as "no claim to check" (104), so the car would be filed with a
+        // constraint the dock cannot see and the builder would believe it
+        // was held. A hold nobody enforces is worse than no hold.
+        if let Some(after) = &self.boards_after
+            && after.trim().is_empty()
+        {
+            anyhow::bail!(
+                "--park-after names no car: a blank id passes the ref check as \"no claim to \
+                 check\" (migration 104), so this car would be filed with an ordering \
+                 constraint the dock cannot see and would board in the next window. Give the \
+                 car's id, or drop the flag."
+            );
+        }
         Ok(())
     }
 
@@ -1096,6 +1153,7 @@ impl ParkIntent {
         put("park_backlog_item", &self.backlog_item);
         put(PARK_PARTIAL_ITEM, &self.partial_item);
         put(PARK_NO_ITEM, &self.no_item);
+        put(PARK_BOARDS_AFTER, &self.boards_after);
         put(PARK_PROBE, &self.probe);
         put(PARK_EXPECT, &self.expect);
         put(PARK_PROOF_EVENT, &self.proof_event);
@@ -1115,6 +1173,7 @@ impl ParkIntent {
             "park_backlog_item": Value::Null,
             PARK_PARTIAL_ITEM: Value::Null,
             PARK_NO_ITEM: Value::Null,
+            PARK_BOARDS_AFTER: Value::Null,
             PARK_PROBE: Value::Null,
             PARK_EXPECT: Value::Null,
             PARK_PROOF_EVENT: Value::Null,
@@ -1894,6 +1953,12 @@ pub async fn run(
         .as_deref()
         .and_then(crate::prove::bare_number_warning)
     {
+        eprintln!("{w}");
+    }
+    // And the two SHAPE warnings on the probe itself, said here for the
+    // same reason: this text is judged by a machine at arrival, hours
+    // later, where no warning has a reader (4fccc595).
+    for w in park.probe_warnings() {
         eprintln!("{w}");
     }
     let hold = hold_guard(hold.as_deref(), &park)?;
@@ -3038,23 +3103,45 @@ mod tests {
         for k in stamped.as_object().unwrap().keys() {
             assert!(p[k].is_null(), "{k} must be nulled so the door deletes it");
         }
-        // Every key a FULL intent can stamp — the four, the backlog
-        // edge, and the three proof keys — must be cleared, or a
-        // re-gate of a landed branch inherits a stale probe.
-        let mut everything = park_full();
-        everything.backlog_item = Some("7c9e376d".into());
-        // Both non-closing answers too: `clear_patch` must cover every
-        // key an intent CAN stamp, not every combination it may stamp at
-        // once (the three answers are mutually exclusive at the guard).
-        everything.partial_item = Some("cf0f5e2d".into());
-        everything.no_item = Some("asked in chat".into());
-        everything.probe = Some("true".into());
-        everything.expect = Some("x".into());
-        for k in everything.metadata_patch().as_object().unwrap().keys() {
+        // EVERY KEY AN INTENT CAN STAMP, AS A SET — because the two
+        // halves of this are one fact living twice (CLAUDE.md §9a) and a
+        // re-gate of a landed branch that inherited a stale key would be
+        // silent. Exhaustive struct literal on purpose: a new `park_*`
+        // field makes this line fail to COMPILE, which is a better pin
+        // than the magic `10` that used to stand here and had to be
+        // bumped by hand. Combinations the guards forbid are set together
+        // deliberately — `metadata_patch` is pure and stamps what is set,
+        // so it is the honest source for "every key that CAN be stamped".
+        let everything = ParkIntent {
+            summary: Some("does a thing. and more.".into()),
+            excludes: Some("not that".into()),
+            test: Some("ran it".into()),
+            verified: Some("seen working".into()),
+            backlog_item: Some("7c9e376d".into()),
+            partial_item: Some("cf0f5e2d".into()),
+            no_item: Some("asked in chat".into()),
+            boards_after: Some("a1b2c3d4".into()),
+            probe: Some("true".into()),
+            expect: Some("x".into()),
+            proof_event: Some("a red train".into()),
+        };
+        let stampable: std::collections::BTreeSet<String> = everything
+            .metadata_patch()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let cleared: std::collections::BTreeSet<String> =
+            p.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(
+            cleared, stampable,
+            "clear_patch and metadata_patch must name the same keys, or a re-gate of a \
+             landed branch inherits stale intent under the key nobody cleared"
+        );
+        for k in &cleared {
             assert!(p[k].is_null(), "{k} must be nulled so the door deletes it");
         }
-        assert!(p[PARK_PROOF_EVENT].is_null());
-        assert_eq!(p.as_object().unwrap().len(), 10);
     }
 
     /// THE CAR CARRIES ITS PROBE (28ac45ab). A complete intent may add
@@ -3195,6 +3282,49 @@ mod tests {
         }
     }
 
+    /// THE SHAPE THAT COULD NOT PASS, NAMED AT THE DOOR THAT ADMITTED IT
+    /// (backlog 4fccc595). Car a0ab90a5's probe was parked through this
+    /// flag and then run, unattended, on the forge for 18 hours. It is
+    /// not REFUSED — it fails closed, and the detector is a coarse text
+    /// scan — but a builder typing it hears about it here, which is the
+    /// only place a warning about probe text has a reader.
+    #[test]
+    fn a_park_probe_that_asserts_its_own_negation_is_warned_about_not_refused() {
+        let mut p = park_full();
+        p.probe = Some(
+            "boss-sor-read /api/workflows/x | jq -e 'if (.category==\"platform\") \
+             then empty else error(\"no\") end' || exit 1"
+                .into(),
+        );
+        p.expect = Some("claim:ok".into());
+        assert!(
+            p.require_complete().is_ok(),
+            "a warning must not become a refusal: {:?}",
+            p.require_complete()
+        );
+        let said = p.probe_warnings().join("\n");
+        assert!(said.contains("jq -e"), "{said}");
+        assert!(said.contains("empty"), "{said}");
+        assert!(
+            said.contains("|| exit 1"),
+            "both findings are said, not just the first: {said}"
+        );
+        // And a probe with neither shape says nothing at all. A door that
+        // warns on every probe is a door nobody reads.
+        let mut clean = park_full();
+        clean.probe = Some("boss-sor-read /api/workflows/x | grep -q claim:ok".into());
+        clean.expect = Some("claim:ok".into());
+        assert!(
+            clean.probe_warnings().is_empty(),
+            "{:?}",
+            clean.probe_warnings()
+        );
+        assert!(
+            park_full().probe_warnings().is_empty(),
+            "no probe, no warning"
+        );
+    }
+
     /// THE MENTION-ONLY GUARD, the same one the absent-tool scan needs.
     /// Naming the URL is not reading it: a probe that greps the checkout
     /// for `BOSS_JOBS_URL`, or tests that it is set, runs fine and is
@@ -3331,6 +3461,57 @@ mod tests {
         assert!(!p.is_empty());
         let e = p.require_complete().unwrap_err().to_string();
         assert!(e.contains("--park-summary"), "{e}");
+    }
+
+    /// THE ORDERING EDGE RIDES THE GATE-RUN (d3320278). `--park-after`
+    /// stamps `park_boards_after`, which the auto-park handler copies onto
+    /// the car as its `boards_after` edge — the key the conductor's
+    /// boarding filter reads. Four cars were held by hand on 2026-09-10
+    /// for want of exactly this.
+    #[test]
+    fn an_ordering_edge_rides_the_park_intent() {
+        let mut p = park_full();
+        p.backlog_item = Some("7c9e376d".into());
+        p.boards_after = Some("a1b2c3d4".into());
+        p.require_complete().expect("a full receipt");
+        p.require_item_answer().expect("an item answer");
+        let m = p.metadata_patch();
+        assert_eq!(m[PARK_BOARDS_AFTER], "a1b2c3d4");
+        assert_eq!(
+            PARK_BOARDS_AFTER,
+            boss_jobs::car::PARK_BOARDS_AFTER,
+            "the CLI writes and a dispatcher handler reads this key from two crates that \
+             cannot import each other — one const, not two literals (§9a)"
+        );
+    }
+
+    /// A plain `--park-*` intent carries NO ordering edge: every car in
+    /// flight today declares none, and must keep behaving as it did.
+    #[test]
+    fn an_intent_with_no_after_flag_stamps_no_ordering_edge() {
+        let mut p = park_full();
+        p.no_item = Some("asked in chat".into());
+        assert!(
+            p.metadata_patch().get(PARK_BOARDS_AFTER).is_none(),
+            "absent, not blank: a blank would read as an edge the dock cannot see"
+        );
+    }
+
+    /// A BLANK `--park-after` IS REFUSED, and the refusal says why it is
+    /// worse than no flag at all: `''` passes the ref check as "no claim
+    /// to check" (migration 104), so the car would be filed with a
+    /// constraint nothing enforces and the builder would believe it held.
+    #[test]
+    fn a_blank_after_is_refused_because_nothing_would_enforce_it() {
+        let mut p = park_full();
+        p.no_item = Some("asked in chat".into());
+        p.boards_after = Some("   ".into());
+        let e = p.require_item_answer().unwrap_err().to_string();
+        assert!(e.contains("--park-after names no car"), "{e}");
+        assert!(
+            e.contains("the dock cannot see"),
+            "say what goes wrong, not just that it is invalid: {e}"
+        );
     }
 
     /// An event-bound car records the event instead of a probe; the two

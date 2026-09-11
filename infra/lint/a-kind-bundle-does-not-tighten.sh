@@ -55,27 +55,27 @@
 # delete this check.
 
 set -uo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
+LINT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$LINT_DIR/../.." || exit 1
+# shellcheck source=infra/lint/lib/trunk-ref.sh
+. "$LINT_DIR/lib/trunk-ref.sh"
 
+LINT=a-kind-bundle-does-not-tighten
 SEEDS="crates/core/boss-jobs/seeds/step_types.toml"
 
-# Same trunk resolution as migrations-append-only.sh: in CI `origin` IS
-# the forge, so the first hit there is correct.
-resolve_base() {
-    local ref
-    for ref in ${BOSS_TRUNK_REF:-} forge/main origin/main main; do
-        if git rev-parse --verify --quiet "$ref" >/dev/null 2>&1; then
-            echo "$ref"; return 0
-        fi
-    done
-    return 1
-}
-
-BASE=$(resolve_base) || {
-    echo "a-kind-bundle-does-not-tighten: no trunk ref found — skipping"
+# Trunk resolution is lib/trunk-ref.sh, shared with the other three
+# baseline-comparing lints (§9a: four copies of this walk, one defect in
+# all four). An absent trunk ref stays a skip; a git that could not
+# answer does not, because that skip exits 0 and a gate reads 0 as a pass
+# on a tree nothing looked at (measured 2026-09-11, backlog 6b2f4a1a).
+BASE=$(resolve_trunk_ref "$LINT"); rc=$?
+if [ "$rc" -eq "$LINT_CANNOT_ANSWER" ]; then
+    exit "$LINT_CANNOT_ANSWER"
+elif [ "$rc" -ne 0 ]; then
+    echo "$LINT: no trunk ref found (tried $(trunk_candidates)) — skipping"
     exit 0
-}
-MB=$(git merge-base "$BASE" HEAD 2>/dev/null) || MB="$BASE"
+fi
+MB=$(resolve_merge_base "$LINT" "$BASE" HEAD) || exit $?
 
 # Emits "<kind>\t<field>" for every REQUIRED field. Hand-parsed rather
 # than via tomllib, which is 3.11+ and this runs on whatever the gate
@@ -139,9 +139,15 @@ print("\n".join(sorted(set(out))))
 '
 }
 
-BASE_FILE=$(git show "$MB:$SEEDS" 2>/dev/null)
+# This read already refused rather than passing vacuously — it is the one
+# place in these four lints that did. What it could not say is WHY, because
+# `2>/dev/null` dropped git's words: "could not read" covered an absent
+# baseline, an unreadable repository and a full disk alike. `git_answer`
+# keeps git's own message and separates the branch-shaped failure (exit 1,
+# below) from the machine-shaped one (exit 3, printed there).
+BASE_FILE=$(git_answer "$LINT" 0 show "$MB:$SEEDS") || exit $?
 if [ -z "$BASE_FILE" ]; then
-    echo "a-kind-bundle-does-not-tighten: could not read $SEEDS at $MB — refusing rather than" >&2
+    echo "$LINT: $SEEDS is empty at $MB — refusing rather than" >&2
     echo "  passing vacuously. An unreadable baseline proves nothing, and this check's whole" >&2
     echo "  job is to compare against one." >&2
     exit 1

@@ -231,6 +231,78 @@ pub(crate) fn judge(o: &Outcome, expect: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// WHAT FAILED, NOT WHAT MIGHT HAVE — the verdict half of 4fccc595.
+///
+/// `judge` says the probe exited nonzero and quotes the streams. That
+/// was not enough twice over on car a0ab90a5: the recorded verdict
+/// offered two possibilities ("the claim is not holding, or the probe is
+/// wrong"), and the evidence under it was an empty string and a
+/// rewritten exit code. A reader had to re-derive what the system
+/// already held, which is the defect class, not the incident.
+///
+/// So this names ONE thing when the record supports naming one, and
+/// nothing when it does not. Order matters: the self-contradictory shape
+/// is checked FIRST because a probe carrying it never had a verdict to
+/// give — its nonzero exit says nothing about production either way, and
+/// the measured probe carried both findings at once.
+pub(crate) fn failure_diagnosis(probe: &str, o: &Outcome) -> Option<String> {
+    if o.exit == 0 {
+        return None;
+    }
+    if boss_jobs::probe::asserts_its_own_negation(probe) {
+        let rewritten = match boss_jobs::probe::rewrites_its_exit_status(probe) {
+            Some(n) => format!(
+                "\n  AND THE NUMBER THAT WOULD PROVE IT IS GONE: a bare `|| exit {n}` replaced \
+                 jq's own status with {n}, so 4 (produced nothing — the claim HELD) and 5 \
+                 (called `error` — the claim FAILED) read identically. Keep it: \
+                 `|| {{ echo \"<what failed> (exit $?)\"; exit 1; }}`."
+            ),
+            None => String::new(),
+        };
+        return Some(format!(
+            "THE PROBE IS SELF-CONTRADICTORY, so this exit code is not a verdict on the \
+             claim. It runs `jq -e` over a filter whose success branch is `empty`.\
+             \n  {evidence}{rewritten}\n  \
+             Nothing here says whether the change is in production. Fix the probe and \
+             re-run — and if the car is parked, re-park it so the arrival rule does not \
+             run this text again.",
+            evidence = boss_jobs::probe::SELF_CONTRADICTORY_EVIDENCE,
+        ));
+    }
+    if o.stdout.trim().is_empty() && o.stderr.trim().is_empty() {
+        let rewritten = match boss_jobs::probe::rewrites_its_exit_status(probe) {
+            Some(n) => format!(
+                " A bare `|| exit {n}` in the probe is the usual cause: it replaces the \
+                 failing command's status with {n} and prints nothing, so the one number \
+                 that named the cause is gone."
+            ),
+            None => String::new(),
+        };
+        return Some(format!(
+            "THE FAILURE CANNOT BE READ: the probe exited {exit} and printed NOTHING on \
+             either stream, so this is not a verdict on the claim — it is a missing \
+             record.{rewritten}\n  \
+             Make each outcome speak: print a named token on success, and on failure echo \
+             what failed with the status that caused it before exiting. A probe whose \
+             failure is silent costs its next reader the whole diagnosis (4fccc595: 18 \
+             hours, on a probe that could not pass).",
+            exit = o.exit,
+        ));
+    }
+    None
+}
+
+/// [`judge`], with the diagnosis attached when the record supports one.
+/// Every path that runs a probe goes through here rather than `judge`,
+/// so a refusal the operator reads and a refusal `--recheck` records
+/// cannot say different things.
+pub(crate) fn judge_probe(probe: &str, o: &Outcome, expect: Option<&str>) -> Result<()> {
+    judge(o, expect).map_err(|e| match failure_diagnosis(probe, o) {
+        Some(d) => anyhow::anyhow!("{e}\n\n{d}"),
+        None => e,
+    })
+}
+
 /// WHICH PROBES THIS DOOR WILL RUN (backlog 23b2dffa).
 ///
 /// TWO DOORS RUN A CAR'S RECORDED PROBE AND ONLY ONE CHECKED IT. `boss
@@ -267,18 +339,45 @@ pub(crate) fn judge(o: &Outcome, expect: Option<&str>) -> Result<()> {
 /// a second destination: the arrival rule runs it on the forge. There
 /// the mismatch is NAMED and not refused — proving it by hand here is
 /// the right move; what needs fixing is the probe the car recorded.
+///
+/// AND WHY THE TWO SHAPE CHECKS ONLY WARN (backlog 4fccc595). They are
+/// host-independent like the unidentified read, so they are checked on
+/// every probe at every door a person is standing at — but they are said,
+/// not refused, and the reason is the DIRECTION OF THE LIE. An
+/// unidentified read fails OPEN: the probe passes, the absence assertion
+/// is green against a world it was never allowed to see, and a car closes
+/// on a proof of nothing. A `jq -e` whose success branch is `empty`, and
+/// a bare `|| exit n`, fail CLOSED: `judge` records nothing on a nonzero
+/// exit, so the worst they can do is strand a car and misdescribe why —
+/// which is exactly what they did for 18 hours, and which a line of text
+/// in front of the operator fixes. Both detectors are also deliberately
+/// coarse text scans (`boss_jobs::probe` says where they are wrong), and
+/// a refusal cannot be spent that cheaply: a false refusal blocks a
+/// correct probe, while a false warning costs a line someone ignores.
+///
+/// The SAME two warnings are said by `boss gate --park-probe`
+/// (`ParkIntent::probe_warnings`), because that is the door where the
+/// measured probe was admitted and the one moment the shape is cheap to
+/// fix. Neither is said at the two UNATTENDED doors — the arrival rule
+/// and the forge runner — because nothing there reads a warning, and a
+/// check nobody reads is a check that is not running (CLAUDE.md
+/// §Diagnosis). What those two got instead is a VERDICT that names one
+/// thing: [`failure_diagnosis`] here, and run-car-probe.sh's `why`.
 pub(crate) const OVERRIDE_FLAG: &str = "--probe-anyway";
 
 pub(crate) use boss_jobs::probe::{UNIDENTIFIED_RULE, override_record};
 
-/// What this door makes of a probe: a reason not to run it, something
-/// the operator should know, or neither.
+/// What this door makes of a probe: a reason not to run it, things the
+/// operator should know, or neither.
 #[derive(Debug, Default)]
 pub(crate) struct Admission {
     /// Why the probe must not run, unless the operator overrides it.
     pub refusal: Option<String>,
-    /// Something worth saying that does not stop the probe.
-    pub warning: Option<String>,
+    /// Things worth saying that do not stop the probe. A list because
+    /// they are independent findings and a probe can trip more than one
+    /// — the measured 18-hour probe (4fccc595) tripped two, and showing
+    /// the operator only the first would have hidden the other.
+    pub warnings: Vec<String>,
 }
 
 /// Judge a probe at this door. `from_car` says the text came from the
@@ -300,21 +399,51 @@ pub(crate) fn admit(probe: &str, from_car: bool) -> Admission {
             reader = boss_jobs::probe::SOR_READER,
         )
     });
-    let warning = if from_car {
-        boss_jobs::probe::needs_absent_tool(probe).map(|tool| {
-            format!(
-                "boss prove: NOTE — this car's recorded probe invokes `{tool}`, which the \
-                 forge host does not have (infra/forge/host-absent-tools.txt). It runs HERE, \
-                 so proving by hand is fine and is the point; but the arrival rule could not \
-                 have run it, and any later re-run on the forge will report `unrunnable` \
-                 rather than a verdict (f9304366). Re-park the car with a probe the forge \
-                 can run, or record it as --park-proof-event."
-            )
-        })
-    } else {
-        None
-    };
-    Admission { refusal, warning }
+    let mut warnings: Vec<String> = Vec::new();
+    if from_car && let Some(tool) = boss_jobs::probe::needs_absent_tool(probe) {
+        warnings.push(format!(
+            "boss prove: NOTE — this car's recorded probe invokes `{tool}`, which the \
+             forge host does not have (infra/forge/host-absent-tools.txt). It runs HERE, \
+             so proving by hand is fine and is the point; but the arrival rule could not \
+             have run it, and any later re-run on the forge will report `unrunnable` \
+             rather than a verdict (f9304366). Re-park the car with a probe the forge \
+             can run, or record it as --park-proof-event."
+        ));
+    }
+    warnings.extend(shape_warnings(probe).map(|w| format!("boss prove: {w}")));
+    Admission { refusal, warnings }
+}
+
+/// THE TWO SHAPE WARNINGS, in the wording every door can use (the
+/// prefix is the door's). Both read the probe TEXT, like the two rules
+/// above them, and both are host-independent — so they are said at every
+/// door a human is standing at, `--from-car` or not.
+pub(crate) fn shape_warnings(probe: &str) -> impl Iterator<Item = String> {
+    let inverted = boss_jobs::probe::asserts_its_own_negation(probe).then(|| {
+        format!(
+            "THIS PROBE MAY ASSERT ITS OWN NEGATION — it runs `jq -e` over a filter whose \
+             success branch is `empty`. `jq -e` exits 4 when the filter produces no output, \
+             and `empty` is no output, so the claim HOLDING is what makes jq exit nonzero.\
+             \n  {evidence}\n  \
+             This is a warning, not a refusal: the shape fails CLOSED, so it can strand a \
+             car but never record a proof of nothing. Check it if the filter is doing \
+             something else.",
+            evidence = boss_jobs::probe::SELF_CONTRADICTORY_EVIDENCE,
+        )
+    });
+    let rewritten = boss_jobs::probe::rewrites_its_exit_status(probe).map(|n| {
+        format!(
+            "THIS PROBE DISCARDS THE STATUS THAT WOULD EXPLAIN ITS FAILURE — a bare \
+             `|| exit {n}` replaces the failing command's exit code with {n} and prints \
+             nothing, so jq's 4 (the filter produced nothing) and 5 (the filter called \
+             `error`), or curl's 7 (could not connect) and 22 (the server said no), all \
+             arrive as {n}. That is the reduction CLAUDE.md §Diagnosis names: it suppresses \
+             OUTPUT, not work, and it is paid for by whoever is next in front of the \
+             failure.\n  \
+             Keep the evidence first: `|| {{ echo \"<what failed> (exit $?)\"; exit 1; }}`."
+        )
+    });
+    inverted.into_iter().chain(rewritten)
 }
 
 /// The override, resolved once: `None` when the flag was not given,
@@ -624,6 +753,24 @@ pub(crate) fn proven_step(car: &Value, replace: bool) -> Result<&Value> {
         })?;
 
     match step.get("status").and_then(Value::as_str) {
+        // --replace WITH NOTHING TO REPLACE (backlog 251dba77, measured
+        // 2026-09-11). The flag's write path appends to `reproof` in JOB
+        // metadata and never touches the step, because a COMPLETED step
+        // is frozen — so given an open step it recorded a second-class
+        // copy of a proof nobody had yet, printed "re-proven — recorded
+        // as reproof #1. The original proof is untouched on the step"
+        // (two assertions, both false), and left the step `ready`. The
+        // car did not advance and nothing said so.
+        Some(open @ ("ready" | "active")) if replace && recorded_proof_on(step).is_none() => bail!(
+            "--replace has nothing to replace: the `{PROVEN}` step is {open} and carries no \
+             recorded proof, so there is no first proof to keep beside a second one.\n\n\
+             Run the same command WITHOUT --replace. That is the path that records a FIRST \
+             proof: it writes the proof on the step and completes it, which is what makes \
+             the car advance.\n\n\
+             --replace is for a step already COMPLETED, whose proof is frozen and must not \
+             be erased — a proof that used to hold and no longer does is evidence, not a \
+             mistake (2b30eff4)."
+        ),
         Some("ready") | Some("active") => Ok(step),
         // A PROOF THAT STOPPED HOLDING IS EVIDENCE, NOT A MISTAKE.
         // Car 932aa956's probe observed a real production refusal and
@@ -647,6 +794,19 @@ pub(crate) fn proven_step(car: &Value, replace: bool) -> Result<&Value> {
         ),
         other => bail!("the `{PROVEN}` step is {other:?}, which this verb does not fill"),
     }
+}
+
+/// The proof already recorded on this step, if there is one.
+///
+/// The step's own `proof` field — required by the workflow when the step
+/// completes, so a completed step always has one — read here to answer
+/// the only question `--replace` needs: is there anything to replace?
+pub(crate) fn recorded_proof_on(step: &Value) -> Option<&str> {
+    step.get("metadata")
+        .and_then(|m| m.get("proof"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
 }
 
 /// A recorded proof, as much of it as the writer stored.
@@ -983,7 +1143,7 @@ pub(crate) async fn run(
             Some(dir) if !dir.is_empty() => execute_in(&probe, Some(Path::new(dir)))?,
             _ => execute(&probe)?,
         };
-        return match judge(&o, expect.as_deref()) {
+        return match judge_probe(&probe, &o, expect.as_deref()) {
             Ok(()) => {
                 println!("boss prove: HOLDS — {short} is still true in production");
                 Ok(())
@@ -1048,7 +1208,7 @@ pub(crate) async fn run(
     // THE SAME RULES THE GATE APPLIES, AT THIS DOOR (23b2dffa), before
     // the probe runs and before anything is recorded.
     let admission = admit(&probe, from_car);
-    if let Some(w) = &admission.warning {
+    for w in &admission.warnings {
         eprintln!("{w}");
     }
     let overridden = match (&admission.refusal, overriding) {
@@ -1073,7 +1233,7 @@ pub(crate) async fn run(
 
     println!("boss prove: {short}  $ {probe}");
     let o = execute(&probe)?;
-    judge(&o, expect.as_deref())?;
+    judge_probe(&probe, &o, expect.as_deref())?;
 
     let at = now.to_rfc3339();
     let proof = proof_json(
@@ -1446,12 +1606,41 @@ mod tests {
         // forge can be correct and unrunnable, and exit-plus-empty-
         // streams reads exactly like a false claim. The script must
         // record which of the two it saw.
-        for k in ["at", "exit", "output", "why", "unrunnable", "missing_tools"] {
+        //
+        // Read out of the ATTEMPT's own jq record, not the whole file:
+        // `stdout:$stdout` appears in the proof record too, so a
+        // file-wide `contains` would pass for an attempt that dropped
+        // both streams — the pin would be green about the very thing
+        // 4fccc595 lost.
+        let attempt = SH
+            .split_once("attempt=$(jq -cn")
+            .expect("run-car-probe.sh builds a proof_attempt record")
+            .1
+            .split_once("proof_attempt")
+            .expect("…and PATCHes it onto the car")
+            .0;
+        for k in [
+            "at",
+            "exit",
+            "stdout",
+            "stderr",
+            "why",
+            "unrunnable",
+            "missing_tools",
+        ] {
             assert!(
-                SH.contains(&format!("{k}:${k}")),
-                "run-car-probe.sh's proof_attempt lacks `{k}`"
+                attempt.contains(&format!("{k}:${k}")),
+                "run-car-probe.sh's proof_attempt lacks `{k}`:\n{attempt}"
             );
         }
+        // AND NOT ONE MERGED FIELD. The attempt recorded `output` —
+        // stdout and stderr printf'd together — and the case that cost
+        // 18 hours read `output: ""`, which cannot tell a reader whether
+        // both streams were empty or the record dropped them (4fccc595).
+        assert!(
+            !attempt.contains("output:$output"),
+            "the two streams are recorded separately, as the proof record does:\n{attempt}"
+        );
         assert!(
             SH.contains("command_not_found_handle"),
             "run-car-probe.sh must give the probe's shell a channel its own \
@@ -2079,7 +2268,7 @@ mod tests {
             false,
         );
         assert!(a.refusal.is_none(), "{:?}", a.refusal);
-        assert!(a.warning.is_none(), "{:?}", a.warning);
+        assert!(a.warnings.is_empty(), "{:?}", a.warnings);
     }
 
     /// But a probe that came from the CAR has a second destination — the
@@ -2093,7 +2282,10 @@ mod tests {
             true,
         );
         assert!(a.refusal.is_none(), "{:?}", a.refusal);
-        let w = a.warning.expect("the forge cannot run this car's probe");
+        let w = a
+            .warnings
+            .first()
+            .expect("the forge cannot run this car's probe");
         assert!(w.contains("kubectl"), "{w}");
         assert!(w.contains("forge"), "{w}");
     }
@@ -2111,6 +2303,244 @@ mod tests {
             let a = admit(probe, true);
             assert!(a.refusal.is_none(), "{probe}: {:?}", a.refusal);
         }
+    }
+
+    // -----------------------------------------------------------------
+    // THE PROBE THAT COULD NOT PASS (backlog 4fccc595)
+    // -----------------------------------------------------------------
+
+    /// jq is a declared required tool of the CI image
+    /// (infra/forge/boss-ci/required-tools.txt), and this section is
+    /// about jq's own exit codes — so its absence is a failure, never a
+    /// skip. A suite that passes by skipping is the check-nobody-reads
+    /// defect with extra steps.
+    fn require_jq() {
+        let ok = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("command -v jq >/dev/null")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(
+            ok,
+            "jq is missing and this test would otherwise pass by skipping — \
+             jq is declared in infra/forge/boss-ci/required-tools.txt"
+        );
+    }
+
+    /// The shape off car a0ab90a5, reduced to one claim so the test needs
+    /// no network: `if <claim> then empty else error(…) end` under
+    /// `jq -e`. The claim HOLDS in this fixture.
+    const INVERTED_FILTER: &str = "printf '%s' '{\"category\":\"platform\"}' | \
+         jq -e 'if (.category==\"platform\") then empty else error(\"category=\\(.category)\") end'";
+
+    /// THE ANCHOR (4fccc595). Eighteen hours were spent on a probe that
+    /// reported failure precisely when its claim held, and the record
+    /// said "not holding, or the probe is wrong" over an empty output and
+    /// a rewritten exit code. Three things must now be true of that
+    /// exact shape: the door NAMES it, the recorded attempt carries jq's
+    /// OWN exit status, and the verdict names ONE thing.
+    #[test]
+    fn the_inverted_jq_e_probe_is_named_and_its_real_exit_is_recorded() {
+        require_jq();
+
+        // 1. The door says so, before anything runs — and warns rather
+        //    than refuses, because this shape cannot record a false
+        //    proof (see `admit`).
+        let a = admit(INVERTED_FILTER, false);
+        assert!(a.refusal.is_none(), "{:?}", a.refusal);
+        let w = a
+            .warnings
+            .iter()
+            .find(|w| w.contains("jq -e"))
+            .unwrap_or_else(|| panic!("the inverted shape is not named: {:?}", a.warnings));
+        assert!(w.contains("empty"), "{w}");
+        assert!(w.contains("4"), "the warning must name jq's exit 4: {w}");
+
+        // 2. THE CLAIM HOLDS AND THE PROBE FAILS, with jq's own 4 —
+        //    the number that identifies the defect. Recorded verbatim.
+        let o = execute(INVERTED_FILTER).unwrap();
+        assert_eq!(
+            o.exit, 4,
+            "jq -e exits 4 when its filter produces no output; `empty` produces none"
+        );
+        let p = proof_json(INVERTED_FILTER, Some("claim:ok"), &o, "h", "now", None);
+        assert_eq!(p["exit"], 4, "the proof record carries the REAL status");
+        assert!(
+            p.get("stderr").is_some(),
+            "stderr is recorded as its own field"
+        );
+
+        // 3. And the verdict names the self-contradiction instead of
+        //    offering the reader two possibilities.
+        let e = judge_probe(INVERTED_FILTER, &o, Some("claim:ok"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("exited 4"), "{e}");
+        assert!(
+            e.contains("SELF-CONTRADICTORY"),
+            "the verdict must name what failed: {e}"
+        );
+        assert!(
+            e.contains("4fccc595"),
+            "and carry the measured evidence: {e}"
+        );
+    }
+
+    /// THE OTHER HALF OF THE SAME PROBE: jq's stderr, which exists the
+    /// moment the claim actually fails. `error(…)` prints to stderr and
+    /// exits 5 — a DIFFERENT number from the 4 above, which is the whole
+    /// reason a rewritten exit code costs a diagnosis.
+    #[test]
+    fn jq_names_the_failing_row_on_stderr_and_exits_five() {
+        require_jq();
+        let failing = "printf '%s' '{\"category\":\"a sentence\"}' | \
+             jq -e 'if (.category==\"platform\") then empty else \
+             error(\"maintenance-backup: category=\\(.category)\") end'";
+        let o = execute(failing).unwrap();
+        assert_eq!(o.exit, 5, "jq exits 5 when the filter calls error()");
+        assert!(
+            o.stderr.contains("maintenance-backup: category=a sentence"),
+            "jq's own diagnosis, captured: {:?}",
+            o.stderr
+        );
+        let p = proof_json(failing, Some("claim:ok"), &o, "h", "now", None);
+        assert!(
+            p["stderr"].as_str().unwrap().contains("maintenance-backup"),
+            "and recorded: {p}"
+        );
+    }
+
+    /// `|| exit 1` IS WHY THE NUMBER WAS GONE. The same filter with the
+    /// trailing bare exit records a 1, and 4 and 5 — two different
+    /// causes — become the same digit. The diagnosis says so, naming the
+    /// reduction rather than leaving a reader to find it.
+    #[test]
+    fn a_bare_exit_rewrite_is_named_as_the_reason_the_status_is_gone() {
+        require_jq();
+        let rewritten = format!("{INVERTED_FILTER} || exit 1");
+        let o = execute(&rewritten).unwrap();
+        assert_eq!(o.exit, 1, "jq's 4 is gone — this is the measured record");
+        let d = failure_diagnosis(&rewritten, &o).expect("a failure this shape is diagnosable");
+        assert!(d.contains("SELF-CONTRADICTORY"), "{d}");
+        assert!(
+            d.contains("|| exit 1"),
+            "the reduction that erased jq's status must be named: {d}"
+        );
+        let a = admit(&rewritten, false);
+        assert!(
+            a.warnings.iter().any(|w| w.contains("|| exit")),
+            "the door names it too: {:?}",
+            a.warnings
+        );
+    }
+
+    /// A FAILURE THAT CANNOT BE READ is its own finding. Exit code, both
+    /// streams empty, nothing to go on — the verdict must say THAT,
+    /// rather than asserting which of several causes it was.
+    #[test]
+    fn a_failure_with_no_output_at_all_is_named_as_unreadable() {
+        let o = Outcome {
+            exit: 1,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        let d = failure_diagnosis("some-command --quiet", &o).expect("silence is diagnosable");
+        assert!(
+            d.contains("printed NOTHING"),
+            "the reader must be told the record is empty, not left to infer it: {d}"
+        );
+        assert!(
+            d.contains("not a verdict on the claim"),
+            "an unreadable failure is not evidence against the claim: {d}"
+        );
+    }
+
+    /// And an honest failure — a probe that ran, disagreed, and SAID so —
+    /// gets no invented diagnosis. A verdict that speculates on every
+    /// failure is noise, and noise is what gets ignored.
+    #[test]
+    fn a_probe_that_explains_its_own_failure_is_left_alone() {
+        let o = Outcome {
+            exit: 1,
+            stdout: "CLAIM FAILS for maintenance-backup (jq exit 5)".into(),
+            stderr: String::new(),
+        };
+        assert!(
+            failure_diagnosis(
+                "boss-sor-read /api/x | grep -q y || { echo x; exit 1; }",
+                &o
+            )
+            .is_none(),
+            "the probe already named what failed"
+        );
+        // Nor on a pass: `judge_probe` adds nothing when there is
+        // nothing to explain.
+        assert!(judge_probe("true", &ok("claim:ok"), Some("claim:ok")).is_ok());
+    }
+
+    // -----------------------------------------------------------------
+    // --replace WITH NOTHING TO REPLACE (backlog 251dba77)
+    // -----------------------------------------------------------------
+
+    /// THE MEASURED DEFECT. `boss prove <car> --replace` on a car whose
+    /// `proven` step had never been proven printed "re-proven — recorded
+    /// as reproof #1. The original proof is untouched on the step" —
+    /// two assertions, both false — and left the step `ready`, so the
+    /// car never advanced and nothing said so.
+    #[test]
+    fn replace_refuses_when_there_is_no_proof_to_replace() {
+        let car = json!({"steps": [{
+            "id": "s1", "title": PROVEN, "status": "ready",
+            "metadata": {"authority_role": "platform-admin", "procedure": "boss prove"}
+        }]});
+        let e = proven_step(&car, true).unwrap_err().to_string();
+        assert!(
+            e.contains("no recorded proof"),
+            "it must say what is missing: {e}"
+        );
+        assert!(e.contains("ready"), "and that the step has not moved: {e}");
+        assert!(
+            e.contains("WITHOUT --replace"),
+            "and name the plain form, which is what records a FIRST proof: {e}"
+        );
+        // The plain form is unaffected: this is the path that records it.
+        assert!(proven_step(&car, false).is_ok());
+    }
+
+    /// AND THE FLAG STILL DOES WHAT IT WAS BUILT FOR (2b30eff4): a
+    /// completed step's proof is frozen, and `--replace` is how a better
+    /// probe lands beside it without erasing what used to hold.
+    #[test]
+    fn replace_still_works_on_a_step_whose_proof_is_frozen() {
+        let proven = json!({"steps": [{
+            "id": "s1", "title": PROVEN, "status": "completed",
+            "metadata": {"verified": "it held", "proof": "{\"exit\":0}"}
+        }]});
+        assert!(
+            proven_step(&proven, true).is_ok(),
+            "a completed step is exactly what --replace is for"
+        );
+        assert!(
+            proven_step(&proven, false)
+                .unwrap_err()
+                .to_string()
+                .contains("--replace"),
+            "and the plain form still points at it"
+        );
+    }
+
+    /// A step that is OPEN but already carries a proof is the one
+    /// non-obvious case: the plain form would overwrite the recorded
+    /// proof, which is the erasure 2b30eff4 exists to prevent — so
+    /// `--replace` is accepted there and appends instead.
+    #[test]
+    fn replace_is_accepted_on_an_open_step_that_does_carry_a_proof() {
+        let car = json!({"steps": [{
+            "id": "s1", "title": PROVEN, "status": "ready",
+            "metadata": {"proof": "{\"exit\":0,\"probe\":\"true\"}"}
+        }]});
+        assert!(proven_step(&car, true).is_ok());
     }
 
     /// AN OVERRIDE NOBODY CAN SEE IS THE SAME DEFECT AGAIN. The escape

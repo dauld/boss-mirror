@@ -189,6 +189,160 @@ fn an_unwritable_not_found_channel_does_not_break_the_probe() {
 }
 
 // =====================================================================
+// THE VERDICT NAMES ONE THING (4fccc595).
+//
+// THE DEFECT, measured 2026-09-11. Car a0ab90a5 sat unproven for 18
+// hours, and what the record held was
+// `{"exit": 1, "output": "", "why": "the probe RAN on
+// david-asus-minipc and exited 1 — the claim it makes is not holding,
+// or the probe is wrong."}`. Every word of that is true and none of it
+// is actionable: the real cause was a probe that could not pass (`jq
+// -e` over a filter whose success branch is `empty` exits 4, and a
+// trailing `|| exit 1` rewrote the 4), and nothing in the record
+// distinguished that from a regression, an unreachable service, or a
+// policy-narrowed read. A verdict that lists possibilities is not a
+// verdict (CLAUDE.md §Diagnosis).
+//
+// So the script's verdict block is lifted out between its markers and
+// RUN here over all four outcomes. The block is shell, in one place, and
+// this is what keeps it from drifting back into prose.
+// =====================================================================
+
+const VERDICT_BEGIN: &str = "# PROBE-VERDICT-BEGIN";
+const VERDICT_END: &str = "# PROBE-VERDICT-END";
+
+/// The verdict the script would record, for one outcome. Lifts the block
+/// from the script, supplies exactly the variables the script has in
+/// scope at that point, and prints `$why`.
+fn verdict(
+    case: &str,
+    rc: i32,
+    stdout: &str,
+    stderr: &str,
+    unrunnable: bool,
+    expect: &str,
+) -> String {
+    let sh = std::fs::read_to_string(repo_root().join("infra/forge/run-car-probe.sh"))
+        .expect("run-car-probe.sh is readable");
+    let block = sh
+        .split_once(VERDICT_BEGIN)
+        .unwrap_or_else(|| panic!("run-car-probe.sh has no {VERDICT_BEGIN} marker"))
+        .1
+        .split_once(VERDICT_END)
+        .unwrap_or_else(|| panic!("run-car-probe.sh has no {VERDICT_END} marker"))
+        .0;
+    let dir = scratch(case);
+    std::fs::write(dir.join("out"), stdout).expect("stdout fixture");
+    std::fs::write(dir.join("errs"), stderr).expect("stderr fixture");
+    let script = format!(
+        "set -uo pipefail\n\
+         workdir={dir}\n\
+         rc={rc}\n\
+         unrunnable={unrunnable}\n\
+         missing_list='kubectl'\n\
+         host='david-asus-minipc'\n\
+         PROBE_USER=david\n\
+         PROBE_DIR=/home/david/boss\n\
+         expect={expect:?}\n\
+         {block}\n\
+         printf '%s' \"$why\"\n",
+        dir = dir.display(),
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .expect("bash runs the lifted verdict");
+    assert!(
+        out.status.success(),
+        "the lifted verdict block must run: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// THE MEASURED RECORD, and the one branch that did not exist: a nonzero
+/// exit with both streams empty is a MISSING RECORD, not a verdict on
+/// the claim. The old wording asserted the claim might not be holding,
+/// which sent a reader after a regression that was not there.
+#[test]
+fn a_nonzero_exit_with_nothing_printed_is_named_as_an_unreadable_failure() {
+    let why = verdict("silent", 1, "", "", false, "SOME-TOKEN");
+    assert!(
+        why.contains("CANNOT BE READ") && why.contains("NOTHING on either stream"),
+        "the verdict must name the empty record: {why}"
+    );
+    assert!(
+        !why.contains("not holding, or the probe is wrong"),
+        "the two-possibility wording is what cost 18 hours: {why}"
+    );
+    assert!(
+        why.contains("4fccc595") && why.contains("jq -e"),
+        "and point at the shape that produces it: {why}"
+    );
+}
+
+/// A probe that DID speak gets its own words in the verdict — the first
+/// line of stderr, because that is where jq, curl and bash put their
+/// diagnosis. Nothing is guessed on top of it.
+#[test]
+fn a_probe_that_explained_itself_has_its_own_words_in_the_verdict() {
+    let why = verdict(
+        "spoke",
+        5,
+        "",
+        "jq: error (at <stdin>:1): maintenance-backup: category=a sentence\n",
+        false,
+        "SOME-TOKEN",
+    );
+    assert!(why.contains("exited 5"), "{why}");
+    assert!(
+        why.contains("maintenance-backup: category=a sentence"),
+        "the probe's own diagnosis is the verdict: {why}"
+    );
+    assert!(
+        !why.contains("or the probe is wrong"),
+        "one thing, not two: {why}"
+    );
+}
+
+/// Exit 0 and the expectation absent is a third, different fact — and it
+/// splits again on whether the probe printed anything at all.
+#[test]
+fn a_zero_exit_without_the_expected_token_says_what_was_printed_instead() {
+    let printed = verdict("printed", 0, "dock_depth=0\n", "", false, "dock_depth=1");
+    assert!(printed.contains("exited 0"), "{printed}");
+    assert!(printed.contains("dock_depth=1"), "{printed}");
+    assert!(
+        printed.contains("dock_depth=0"),
+        "what it printed instead is the evidence: {printed}"
+    );
+
+    let silent = verdict("zero-silent", 0, "", "", false, "dock_depth=1");
+    assert!(
+        silent.contains("printed NOTHING"),
+        "a silent pass asserts nothing, and the verdict says so: {silent}"
+    );
+}
+
+/// AND THE BRANCH THAT ALREADY WORKED STILL WORKS. An unrunnable probe
+/// names the tool and says the claim is untested (f9304366) — it is not
+/// evidence against the change, and the other branches must not have
+/// taken it over.
+#[test]
+fn an_unrunnable_probe_still_names_the_tool_and_not_the_claim() {
+    let why = verdict("unrunnable", 1, "", "", true, "SOME-TOKEN");
+    assert!(
+        why.contains("DID NOT RUN") && why.contains("kubectl"),
+        "{why}"
+    );
+    assert!(
+        why.contains("says nothing about whether the change works"),
+        "{why}"
+    );
+}
+
+// =====================================================================
 // A PROBE READS THE SYSTEM OF RECORD AS A NAMED READER (61085a9e).
 //
 // THE DEFECT, measured 2026-09-10 against one backend at one commit.

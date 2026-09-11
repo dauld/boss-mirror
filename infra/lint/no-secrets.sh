@@ -48,11 +48,17 @@
 # every line of output. `--self-test` runs just that and stops.
 #
 # Usage: infra/lint/no-secrets.sh [--self-test]
-# Exit:  0 clean / 1 findings or self-test failure
+# Exit:  0 clean / 1 findings or self-test failure / 3 git could not
+#        list the tracked files, so NOTHING was scanned — an
+#        infrastructure refusal, see lib/git-answer.sh
 
 set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+LINT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$LINT_DIR/../.." || exit 1
+# shellcheck source=infra/lint/lib/git-answer.sh
+. "$LINT_DIR/lib/git-answer.sh"
 
+LINT=no-secrets
 REPO_ALLOW_FILE="infra/lint/no-secrets-allow.txt"
 
 PATTERN_IDS="private-key kubeconfig-data talos-cert-bundle wireguard-key token-assignment url-token gcp-sa-json"
@@ -259,7 +265,30 @@ main_scan() {
     viol=$(mktemp); supp=$(mktemp)
     trap 'rm -f "'"$viol"'" "'"$supp"'"' EXIT
 
-    git ls-files -z | scan_paths "$REPO_ALLOW_FILE" "$viol" "$supp"
+    # The ONE lint of the five that reached git and already failed rather
+    # than certifying — `set -euo pipefail` carried git's 128 out. What it
+    # did not do is SAY anything: the operator got git's fatal with no
+    # lint name, no statement that zero files were scanned, and exit 128,
+    # which no reader of this roster has a meaning for.
+    #
+    # The list lands in a FILE first rather than a pipe, because in
+    # `git ls-files -z | scan_paths …` the status bash reports belongs to
+    # the scanner. (A variable is not an option: -z separates paths with
+    # NUL, which no shell variable can hold — and -z is why this lint can
+    # read a path with a newline in it at all.)
+    local paths ls_status=0
+    paths=$(mktemp)
+    git ls-files -z > "$paths" || ls_status=$?
+    if [ "$ls_status" -ne 0 ]; then
+        rm -f "$paths"
+        echo "$LINT: CANNOT ANSWER — \`git ls-files -z\` exited $ls_status, so no file was scanned." >&2
+        echo "  git's own message is above. An INFRASTRUCTURE refusal (exit $LINT_CANNOT_ANSWER), not" >&2
+        echo "  a verdict on the branch: a scan of zero files is not a repository" >&2
+        echo "  without secrets in it." >&2
+        exit "$LINT_CANNOT_ANSWER"
+    fi
+    scan_paths "$REPO_ALLOW_FILE" "$viol" "$supp" < "$paths"
+    rm -f "$paths"
 
     supp_count=$(wc -l < "$supp" | tr -d ' ')
     viol_count=$(wc -l < "$viol" | tr -d ' ')

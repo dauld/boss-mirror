@@ -88,6 +88,30 @@ All three converge: the company *is* its event log + its current state
 + the rules connecting them. Design choices that respect that
 convergence land cleanly; ones that don't accumulate fragility.
 
+### Mostly sure vs. absolutely sure
+
+Being **mostly sure** a step was done properly and being **absolutely
+sure** differ in kind, not in degree. *Mostly sure* is a belief someone
+holds: beliefs degrade silently, cannot be audited, and are not
+inherited by the next shift. *Absolutely sure* is a property of the
+record the step leaves. Crossing that gap is not more carefulness — it
+is rebuilding the step until doing it and proving it are the same act.
+
+**Four phrases already in use here, read as one rule.** *Receipt copied,
+not retyped* · *the merge observed, never assumed* · *proven requires a
+machine-run probe* · *no evidence is not a pass*. Each one refuses a
+belief where an artifact was available — the gate's own receipt rather
+than the operator's account of it, the forge's evidence rather than an
+assumed departure, a probe rather than "it works", silence refused
+exactly like failure. Check every new verb, alarm, and surface against
+all four.
+
+**The one-sentence version:** mostly sure is a feeling about the past;
+absolutely sure is an artifact in the record. Build every step to
+convert the first into the second, make silence the only forbidden
+failure mode, and reliability stops being a virtue you hope for and
+becomes a number you read.
+
 ### Reading frame: the three layers
 
 **The network is the substrate. The fat protocols dictate the current

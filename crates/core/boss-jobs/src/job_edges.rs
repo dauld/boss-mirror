@@ -78,6 +78,12 @@ impl JobEdgesRegistry for InMemoryJobEdges {
                 "The pr-train Job this change boarded",
             ),
             mk(
+                "ship-a-change",
+                "boards_after",
+                "job_id",
+                "The car this one must land behind — the dock will not board it until that car has landed",
+            ),
+            mk(
                 "design-doc",
                 "translated_from",
                 "job_id",
@@ -213,6 +219,58 @@ mod tests {
             "the migration's description must match the in-memory one, or the two \
              registries disagree about what the edge means: {}",
             edge.description
+        );
+    }
+
+    /// THE SAME PIN FOR THE ORDERING EDGE (d3320278, design doc
+    /// 364f892e). A car may name the car it must land BEHIND, and the
+    /// conductor's boarding filter refuses to board it until that one
+    /// has landed. The value has to be ref-checked — an id that resolves
+    /// to nothing would be a hold no predecessor can ever clear — so the
+    /// edge is declared, and this is the test that keeps the declaration
+    /// and the migration saying the same thing.
+    ///
+    /// ALSO PINNED: this is a NEW field_path and not a reuse of
+    /// `('*', 'waiting_on')`. The dispatcher clears `waiting_on` when the
+    /// blocker Job closes, whatever it closed as, so an abandoned
+    /// predecessor would silently satisfy the constraint — the one case
+    /// that needs a human.
+    #[tokio::test]
+    async fn the_boards_after_edge_matches_the_migration_that_seeds_it() {
+        const MIGRATION: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../infra/postgres/schema/",
+            "20260911150000-a-car-declares-what-it-boards-after.sql"
+        ));
+        let edges = InMemoryJobEdges.list().await.expect("list");
+        let edge = edges
+            .iter()
+            .find(|e| e.source_kind == "ship-a-change" && e.field_path == crate::car::BOARDS_AFTER)
+            .expect("ship-a-change.boards_after must be in the in-memory defaults");
+
+        assert_eq!(
+            edge.field_kind, "job_id",
+            "a car declares ONE predecessor; two is a different relation"
+        );
+        assert_eq!(
+            edge.on_missing, "abort",
+            "an ordering edge pointing at nothing is a hold nobody can clear — refuse it \
+             at the write"
+        );
+        assert!(
+            MIGRATION.contains("'ship-a-change', 'boards_after', 'job_id'"),
+            "the migration must seed the same triple the in-memory list serves"
+        );
+        assert!(
+            MIGRATION.contains(&edge.description),
+            "the migration's description must match the in-memory one, or the two \
+             registries disagree about what the edge means: {}",
+            edge.description
+        );
+        assert_ne!(
+            edge.field_path, "waiting_on",
+            "boards_after must not be folded into waiting_on: the dispatcher CLEARS \
+             waiting_on on any close, including an abandonment"
         );
     }
 

@@ -69,7 +69,11 @@ export type ProbeRun =
       at: string | null;
       exit: number | null;
       host: string | null;
-      output: string | null;
+      /** Both streams, and the runner's one-sentence verdict. Never a
+       *  merged stream: see `ProofAttempt` (4fccc595). */
+      stdout: string | null;
+      stderr: string | null;
+      why: string | null;
       missingTools: readonly string[];
     }>
   | Readonly<{ kind: 'waiting' }>;
@@ -107,7 +111,16 @@ export function probeRun(
   }
   const a = proof?.attempt ?? null;
   if (a !== null) {
-    return { kind: 'ran', at: a.at, exit: a.exit, host: a.host, output: a.output, missingTools: a.missingTools };
+    return {
+      kind: 'ran',
+      at: a.at,
+      exit: a.exit,
+      host: a.host,
+      stdout: a.stdout,
+      stderr: a.stderr,
+      why: a.why,
+      missingTools: a.missingTools,
+    };
   }
   return { kind: 'waiting' };
 }

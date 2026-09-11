@@ -394,6 +394,43 @@ pub const PARTIAL_ITEM: &str = "partial_item";
 /// omission e1325456 measured thirteen times in nineteen.
 pub const NO_ITEM_REASON: &str = "no_item_reason";
 
+/// THE ORDERING EDGE A CAR DECLARES: the car this one must land BEHIND.
+///
+/// A declared job edge (`('ship-a-change', 'boards_after', 'job_id')`,
+/// migration 20260911-a-car-declares-what-it-boards-after), so the id is
+/// ref-checked and prefix-normalised at the write the way `backlog_item`
+/// is — a mistyped car is refused, not silently pointed at nothing.
+///
+/// WHY AN EDGE AND NOT A HOLD. Four cars were held by hand on
+/// 2026-09-10 and every one of them was an ordering constraint:
+/// `fix/the-reclaim-follows-the-build` had to be gated `--hold` and
+/// parked by hand purely so it would board solo, and
+/// `feat/a-deleted-manifest-leaves-no-object` spent a day waiting for a
+/// human to notice both halves of a two-part sequence were satisfied.
+/// An edge states the constraint once, in the one place a car's other
+/// facts are already stated, and the dock enforces it every 60 seconds
+/// without anyone watching. `--hold` stays: a declared edge and a human
+/// brake are different tools (design doc 364f892e, backlog d3320278).
+///
+/// The READ side is the conductor's — `boss train board` filters its
+/// candidates on it and names which of four situations holds when it
+/// refuses. The key lives here because the writers (`boss gate
+/// --park-after`, the auto-park handler) and that reader must not keep
+/// two spellings of one fact (CLAUDE.md §9a).
+pub const BOARDS_AFTER: &str = "boards_after";
+
+/// The gate-run key `boss gate --park-after` stamps, which the auto-park
+/// handler reads and copies onto the car as [`BOARDS_AFTER`].
+///
+/// IN CORE, NOT SPELLED TWICE. The writer is the CLI and the reader is a
+/// dispatcher handler, in two crates that cannot import each other; every
+/// other `park_*` key is a string literal in both places, agreeing by
+/// coincidence. One `pub const` cannot drift from itself (CLAUDE.md §9a),
+/// and a typo on either side would be a car filed with an ordering
+/// constraint the dock never sees — a hold the builder believes in and
+/// nothing enforces.
+pub const PARK_BOARDS_AFTER: &str = "park_boards_after";
+
 /// The item provenance a car carries beyond the closing edge: the item
 /// it is one piece of, or the reason it names none. Absent and blank
 /// values are omitted (never nulled), so merging this into a car body

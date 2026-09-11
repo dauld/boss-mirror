@@ -47,11 +47,17 @@
 # entry IS the record that someone checked.
 #
 # Usage: infra/lint/migrations-append-only.sh [--self-test]
-# Exit:  0 clean / 1 violations or self-test failure
+# Exit:  0 clean / 1 violations, a self-test failure, or no trunk ref in
+#        this checkout / 3 git could not answer, so NOTHING was read —
+#        an infrastructure refusal, see lib/git-answer.sh
 
 set -uo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+LINT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$LINT_DIR/../.." || exit 1
+# shellcheck source=infra/lint/lib/trunk-ref.sh
+. "$LINT_DIR/lib/trunk-ref.sh"
 
+LINT=migrations-append-only
 SCHEMA_DIR="infra/postgres/schema"
 
 # One entry per line: "<filename> <YYYY-MM-DD> <reason>"
@@ -63,33 +69,28 @@ is_allowed() {
     printf '%s\n' "$ALLOW" | grep -q "^$1 "
 }
 
-# Resolve the trunk to compare against. In CI the PR branch is checked
-# out with main available as a remote ref; on a dev box `main` is
-# usually local. A missing trunk is a hard error, not a silent pass —
-# a check that quietly skips is the under-covering gate this repo has
-# already shipped twice.
-# Order matters. The forge is the trunk every car actually merges
-# into; `origin` on a dev box is the GitHub mirror, which is a
-# periodic backup and was 24 commits stale the day this was written —
-# comparing against it reports every already-merged migration as a
-# fresh modification. In CI the checkout's `origin` IS the forge, so
-# the first hit there is correct. BOSS_TRUNK_REF overrides for the
-# case where neither name applies.
-resolve_base() {
-    local ref
-    for ref in ${BOSS_TRUNK_REF:-} forge/main origin/main main; do
-        if git rev-parse --verify --quiet "$ref" >/dev/null 2>&1; then
-            echo "$ref"; return 0
-        fi
-    done
-    return 1
-}
+# The trunk to compare against is resolved by lib/trunk-ref.sh — the
+# same walk all four baseline-comparing lints used to carry a copy of,
+# with the reason for the order and the absent-vs-unreadable split
+# written there. A missing trunk is a hard error HERE, not a silent
+# pass: a check that quietly skips is the under-covering gate this repo
+# has already shipped twice.
 
 # $1 = base ref, $2 = tree-ish to compare (default HEAD)
+#
+# Both git reads below go through `git_answer`, which exits this script
+# with $LINT_CANNOT_ANSWER rather than returning: this function's return
+# value IS the violation count, so a status could not carry "I could not
+# look" without colliding with "three violations". `git diff
+# --name-status` used to run in a process substitution under
+# `2>/dev/null`, which made an unreadable repo indistinguishable from a
+# branch that touched no migration — zero lines read, zero violations,
+# `clean`.
 check_against() {
     local base="$1" head="${2:-HEAD}" violations=0 status file
-    local mb
-    mb=$(git merge-base "$base" "$head" 2>/dev/null) || mb="$base"
+    local mb diff_out
+    mb=$(resolve_merge_base "$LINT" "$base" "$head") || exit $?
+    diff_out=$(git_answer "$LINT" 0 diff --name-status "$mb" "$head" -- "$SCHEMA_DIR") || exit $?
 
     while read -r status file; do
         [ -z "${file:-}" ] && continue
@@ -110,7 +111,9 @@ check_against() {
         echo "    has never been applied anywhere, add it to ALLOW in this script"
         echo "    with the reason."
         violations=$((violations+1))
-    done < <(git diff --name-status "$mb" "$head" -- "$SCHEMA_DIR" 2>/dev/null)
+    done <<EOF
+$diff_out
+EOF
 
     return "$violations"
 }
@@ -157,7 +160,7 @@ self_test() {
     ( cd "$tmp" && git checkout -q -b edit main \
         && printf -- '-- a comment\nCREATE TABLE a();\n' > "$SCHEMA_DIR/100-a.sql" \
         && git commit -qam edit ) >/dev/null 2>&1
-    out=$( cd "$tmp" && SCHEMA_DIR="$SCHEMA_DIR" bash -c "$(declare -f is_allowed check_against); ALLOW=''; check_against main" 2>&1 ) && rc=0 || rc=$?
+    out=$( cd "$tmp" && SCHEMA_DIR="$SCHEMA_DIR" LINT="$LINT" bash -c "$(declare -f is_allowed check_against resolve_merge_base git_answer _git_answer_refuse); ALLOW=''; check_against main" 2>&1 ) && rc=0 || rc=$?
     if [ "$rc" -eq 0 ]; then
         echo "SELF-TEST FAIL: a modified migration was not caught"; fails=$((fails+1))
     elif ! printf '%s' "$out" | grep -q "VIOLATION"; then
@@ -169,7 +172,7 @@ self_test() {
         && printf 'CREATE TABLE b();\n' > "$SCHEMA_DIR/101-b.sql" \
         && printf '100-a.sql\n101-b.sql\n' > "$SCHEMA_DIR/manifest.txt" \
         && git add -A && git commit -qm add ) >/dev/null 2>&1
-    out=$( cd "$tmp" && SCHEMA_DIR="$SCHEMA_DIR" bash -c "$(declare -f is_allowed check_against); ALLOW='manifest.txt 2026-08-13 x'; check_against main" 2>&1 ) && rc=0 || rc=$?
+    out=$( cd "$tmp" && SCHEMA_DIR="$SCHEMA_DIR" LINT="$LINT" bash -c "$(declare -f is_allowed check_against resolve_merge_base git_answer _git_answer_refuse); ALLOW='manifest.txt 2026-08-13 x'; check_against main" 2>&1 ) && rc=0 || rc=$?
     if [ "$rc" -ne 0 ]; then
         echo "SELF-TEST FAIL: adding a new migration (+ manifest append) was reported: $out"; fails=$((fails+1))
     fi
@@ -177,7 +180,7 @@ self_test() {
     # Fixture 3: deleting a migration must be caught.
     ( cd "$tmp" && git checkout -q -b del main \
         && git rm -q "$SCHEMA_DIR/100-a.sql" && git commit -qm del ) >/dev/null 2>&1
-    out=$( cd "$tmp" && SCHEMA_DIR="$SCHEMA_DIR" bash -c "$(declare -f is_allowed check_against); ALLOW=''; check_against main" 2>&1 ) && rc=0 || rc=$?
+    out=$( cd "$tmp" && SCHEMA_DIR="$SCHEMA_DIR" LINT="$LINT" bash -c "$(declare -f is_allowed check_against resolve_merge_base git_answer _git_answer_refuse); ALLOW=''; check_against main" 2>&1 ) && rc=0 || rc=$?
     if [ "$rc" -eq 0 ]; then
         echo "SELF-TEST FAIL: a deleted migration was not caught"; fails=$((fails+1))
     fi
@@ -219,13 +222,51 @@ if [ "${1:-}" = "--self-test" ]; then
     exit $?
 fi
 
-self_test >/dev/null || { echo "migrations-append-only: SELF-TEST FAILED — refusing to report on the tree"; exit 1; }
+# CAPTURED, not discarded. `self_test >/dev/null` threw away the only
+# copy of why it failed: with git refusing every command (measured under
+# GIT_TEST_ASSUME_DIFFERENT_OWNER=1) the fixtures cannot be built at all,
+# and the operator saw five words that named neither the fixture nor git.
+# Quiet on success, the whole record on failure (CLAUDE.md §Diagnosis).
+# Ask git the one question whose answer is already known FIRST. The
+# self-test builds git fixtures in a temp directory, so on a machine where
+# git refuses everything it fails there — and "SELF-TEST FAILED" blames
+# this script's detectors for a broken machine. Measured under
+# GIT_TEST_ASSUME_DIFFERENT_OWNER=1, which is what a gate workspace looked
+# like on 2026-09-11.
+git_can_answer "$LINT" || exit $?
 
-BASE=$(resolve_base) || {
-    echo "migrations-append-only: no trunk ref found (tried origin/main, forge/main, main)" >&2
+if ! self_test_out=$(self_test 2>&1); then
+    # A refusal INSIDE the self-test is still a refusal: the fixtures are
+    # driven through the same `git_answer`, so one git call failing
+    # mid-fixture reaches here as a self-test failure. Told apart by the
+    # marker the refusal carries, not by guessing.
+    if printf '%s' "$self_test_out" | grep -qF "$LINT_CANNOT_ANSWER_MARKER"; then
+        echo "$LINT: CANNOT ANSWER — the self-test's git fixtures could not be built," >&2
+        echo "  so the detectors were never proven and the tree was never read." >&2
+        printf '%s\n' "$self_test_out" | sed 's/^/  /' >&2
+        exit "$LINT_CANNOT_ANSWER"
+    fi
+    echo "$LINT: SELF-TEST FAILED — refusing to report on the tree" >&2
+    printf '%s\n' "$self_test_out" | sed 's/^/  /' >&2
+    exit 1
+fi
+
+# Two different answers, and telling them apart is the whole point. git
+# saying "that ref is not here" is a fact about the CHECKOUT and "fetch
+# the trunk" is the right advice. git saying nothing at all — exit 128 on
+# a dubious-ownership refusal, which is what a gate workspace produced on
+# 2026-09-11 — is a fact about the MACHINE, and printing "fetch the
+# trunk" there sent an operator after a ref that was already present
+# (backlog 6b2f4a1a). resolve_trunk_ref returns 1 for the first and 3 for
+# the second, having already printed git's own words.
+BASE=$(resolve_trunk_ref "$LINT"); rc=$?
+if [ "$rc" -eq "$LINT_CANNOT_ANSWER" ]; then
+    exit "$LINT_CANNOT_ANSWER"
+elif [ "$rc" -ne 0 ]; then
+    echo "$LINT: no trunk ref found (tried $(trunk_candidates))" >&2
     echo "  Cannot tell which migrations are history without one. Fetch the trunk." >&2
     exit 1
-}
+fi
 
 if check_against "$BASE"; then
     echo "migrations-append-only: clean — no existing migration modified against $BASE"

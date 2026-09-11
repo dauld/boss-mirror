@@ -132,6 +132,11 @@ struct AutoParkInputs {
     /// and read by nothing downstream — which is the point, because the
     /// arrival rule follows `backlog_item` alone.
     item_provenance: serde_json::Map<String, Value>,
+    /// The car this one must land BEHIND (`--park-after`), copied onto
+    /// the car as the declared `car::BOARDS_AFTER` job edge. The
+    /// conductor's boarding filter reads it and refuses to board this car
+    /// until the named one has landed (d3320278).
+    boards_after: Option<String>,
     delivery_channel: Option<String>,
     receipt: Receipt,
     /// The car's proof intent, copied VERBATIM from the gate-run's
@@ -207,6 +212,17 @@ fn auto_park_inputs(
             md.get("park_partial_item").and_then(Value::as_str),
             md.get("park_no_item").and_then(Value::as_str),
         ),
+        // The ordering edge the gate's `--park-after` stamped. Blank is
+        // no edge: the ref check reads `''` as "no claim to check", so a
+        // blank written onto the car would be a constraint the dock
+        // cannot see — `boss gate` refuses one, and this is the second
+        // door on the same rule.
+        boards_after: md
+            .get(car::PARK_BOARDS_AFTER)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
         receipt,
         proof: car::proof_intent(
             md.get("park_probe").and_then(Value::as_str),
@@ -531,6 +547,37 @@ fn adopt_edge_patch(car: &Value, inputs: &AutoParkInputs) -> Option<Value> {
     Some(json!({ "backlog_item": item }))
 }
 
+/// PURE: the ORDERING edge the gate's `--park-after` adds, for either way
+/// a car arrives — `existing` is the car an open already filed, or `None`
+/// for one this green is about to create. `None` = nothing to write.
+///
+/// A SEPARATE, BEST-EFFORT WRITE, for exactly the reason
+/// [`adopt_edge_patch`] is: `boards_after` is a DECLARED job edge, so an
+/// id that will not resolve is a 400, and `write_json` maps anything but
+/// a 422 to `Downstream`, which REDELIVERS. Folded into the car's POST it
+/// would cost the car itself on every attempt; folded into `adopt_patch`
+/// it would cost the car its receipt and its proof. A car that exists
+/// with a missing ordering edge is repairable by one metadata PATCH; a
+/// car that does not exist is not. So the edge goes last and a failure is
+/// a warning naming the repair.
+///
+/// It is also why the gate refuses a BLANK `--park-after` rather than
+/// letting it through: `''` resolves as "no claim to check", which would
+/// succeed here and leave a constraint the dock cannot see.
+fn boards_after_patch(existing: Option<&Value>, inputs: &AutoParkInputs) -> Option<Value> {
+    let after = inputs.boards_after.as_deref()?;
+    // Already carried (an open given `--after`, or a re-gate restating
+    // the same edge) — the value was ref-checked when it was written.
+    if existing
+        .and_then(|c| c.pointer(&format!("/metadata/{}", car::BOARDS_AFTER)))
+        .and_then(Value::as_str)
+        == Some(after)
+    {
+        return None;
+    }
+    Some(json!({ car::BOARDS_AFTER: after }))
+}
+
 /// How many cars one page of the open-car read asks for. The dock and
 /// the trains together hold 22 open cars today, so one page answers —
 /// but a page is still a page, and the read below walks `total`
@@ -776,6 +823,25 @@ impl Handler for JobsAutoPark {
                 &ctx.rule_name,
             )
             .await?;
+            // A re-gate may also be the run where the builder first said
+            // which car this one lands behind. Separate and best-effort
+            // for the reason `boards_after_patch` documents: this packet
+            // has just had a fresh receipt written onto it and must not
+            // lose that to a redelivery over an edge.
+            if let Some(edge) = boards_after_patch(Some(parked), &inputs)
+                && let Err(e) = write_json(
+                    &self.client,
+                    reqwest::Method::PATCH,
+                    &format!("{}/api/jobs/{}/metadata", self.base(), id),
+                    &edge,
+                    &ctx.rule_name,
+                )
+                .await
+            {
+                tracing::warn!(rule = %ctx.rule_name, car = %id,
+                    "the re-gate's --park-after edge would not attach: {e} — this car is NOT \
+                     held behind that one; PATCH /api/jobs/{id}/metadata with boards_after");
+            }
             // A re-gate restates the route too: the item may still be
             // un-triaged from the first park (this is new), and a
             // second pass over an item already routed writes nothing.
@@ -887,6 +953,31 @@ impl Handler for JobsAutoPark {
             &ctx.rule_name,
         )
         .await?;
+
+        // THE ORDERING EDGE, BEFORE THE CAR IS PARKED. The gate step's
+        // completion below is what makes `review` ready, which is what
+        // puts the car on the dock — so the edge has to be on the packet
+        // by now or the first board after this could ride a car whose
+        // constraint had not landed yet. Best-effort and last among the
+        // metadata writes: see `boards_after_patch` for why a declared
+        // edge must never ride inside a write the car cannot afford to
+        // lose.
+        if let Some(edge) = boards_after_patch(Some(&car), &inputs)
+            && let Err(e) = write_json(
+                &self.client,
+                reqwest::Method::PATCH,
+                &format!("{}/api/jobs/{}/metadata", self.base(), car_id),
+                &edge,
+                &ctx.rule_name,
+            )
+            .await
+        {
+            tracing::warn!(rule = %ctx.rule_name, car = %car_id,
+                after = %inputs.boards_after.as_deref().unwrap_or_default(),
+                "the gate's --park-after edge would not attach: {e} — this car is NOT held \
+                 behind that one and will board in the next window; PATCH \
+                 /api/jobs/{car_id}/metadata with boards_after to restore it");
+        }
 
         // In order (scope → build → gate): each completion re-evaluates
         // readiness so the next is ready. A step the OPEN already
@@ -1020,6 +1111,81 @@ mod tests {
         // The rest of the body is the shared builder's, untouched.
         assert_eq!(md["branch"], "fix/x");
         assert_eq!(body["kind"], "ship-a-change");
+    }
+
+    /// THE ORDERING EDGE REACHES THE CAR (d3320278). `--park-after`
+    /// stamps `park_boards_after` on the gate-run; the car must end up
+    /// carrying `boards_after`, because that is the key the conductor's
+    /// boarding filter reads and an edge that stops at the gate-run is a
+    /// constraint nobody enforces.
+    ///
+    /// NOT in the car BODY, and that is deliberate: a declared edge whose
+    /// id will not resolve is a 400, `write_json` redelivers anything but
+    /// a 422, and a POST that keeps failing means NO CAR. A car filed
+    /// without its edge is repairable with one PATCH; a car that was never
+    /// filed is not. So it rides a separate best-effort write.
+    #[test]
+    fn an_ordering_edge_reaches_the_car_but_not_through_its_body() {
+        let gr = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+            car::PARK_BOARDS_AFTER: "a1b2c3d4",
+        }));
+        let got = auto_park_inputs(&gr, &green_step_meta()).expect("parks");
+        assert_eq!(got.boards_after.as_deref(), Some("a1b2c3d4"));
+        assert!(
+            car_body_with_proof(&got)["metadata"]
+                .get(car::BOARDS_AFTER)
+                .is_none(),
+            "the edge must not ride the POST: an unresolvable id would redeliver forever \
+             and the car would never exist"
+        );
+        let patch = boards_after_patch(None, &got).expect("a fresh car needs the edge written");
+        assert_eq!(patch[car::BOARDS_AFTER], "a1b2c3d4");
+    }
+
+    /// IDEMPOTENT, AND NOTHING WRITTEN WHEN NOTHING WAS SAID. A re-gate
+    /// restating the same edge writes nothing (the value was ref-checked
+    /// when it was first stored), and a gate with no `--park-after` must
+    /// not touch an edge a car already carries — an absent flag is not an
+    /// instruction to clear.
+    #[test]
+    fn the_ordering_edge_is_written_once_and_never_invented() {
+        let gr = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+            car::PARK_BOARDS_AFTER: "a1b2c3d4",
+        }));
+        let with_edge = auto_park_inputs(&gr, &green_step_meta()).expect("parks");
+        let already = json!({"metadata": {car::BOARDS_AFTER: "a1b2c3d4"}});
+        assert_eq!(
+            boards_after_patch(Some(&already), &with_edge),
+            None,
+            "the same edge restated is not a write"
+        );
+        let moved = json!({"metadata": {car::BOARDS_AFTER: "99999999"}});
+        assert!(
+            boards_after_patch(Some(&moved), &with_edge).is_some(),
+            "a DIFFERENT edge on the latest green supersedes the old one"
+        );
+
+        // No flag at all — the overwhelmingly common case, and the
+        // regression that would matter most.
+        let plain = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+        }));
+        let no_edge = auto_park_inputs(&plain, &green_step_meta()).expect("parks");
+        assert_eq!(no_edge.boards_after, None);
+        assert_eq!(boards_after_patch(Some(&already), &no_edge), None);
+        assert_eq!(boards_after_patch(None, &no_edge), None);
+
+        // A BLANK is no edge: the ref check reads `''` as "no claim to
+        // check", so writing one would file a constraint the dock cannot
+        // see. `boss gate` refuses it; this is the second door.
+        let blank = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+            car::PARK_BOARDS_AFTER: "  ",
+        }));
+        let blank = auto_park_inputs(&blank, &green_step_meta()).expect("parks");
+        assert_eq!(blank.boards_after, None);
     }
 
     /// An event-bound car records the event; a car with no proof
@@ -1663,6 +1829,7 @@ mod building_car_tests {
             verified: "seen working".into(),
             backlog_item: None,
             item_provenance: serde_json::Map::new(),
+            boards_after: None,
             delivery_channel: Some("software".into()),
             receipt: Receipt {
                 raw: "{\"verdict\":\"green\",\"head\":\"deadbeef\",\"mode\":\"full\"}".into(),
@@ -1719,6 +1886,7 @@ mod building_car_tests {
                 Some("cf0f5e2d-0000-0000-0000-000000000000"),
                 None,
             ),
+            boards_after: None,
             delivery_channel: None,
             receipt: Receipt {
                 raw: "{}".into(),
@@ -1770,6 +1938,7 @@ mod building_car_tests {
             verified: "v".into(),
             backlog_item: None,
             item_provenance: car::item_provenance(None, Some("one piece of a bigger item")),
+            boards_after: None,
             delivery_channel: None,
             receipt: Receipt {
                 raw: "{}".into(),
@@ -1835,6 +2004,7 @@ mod building_car_tests {
             verified: "v".into(),
             backlog_item: None,
             item_provenance: provenance,
+            boards_after: None,
             delivery_channel: None,
             receipt: Receipt {
                 raw: "{}".into(),
@@ -1905,6 +2075,7 @@ mod building_car_tests {
                 verified: "v".into(),
                 backlog_item: backlog_item.map(str::to_string),
                 item_provenance: provenance,
+                boards_after: None,
                 delivery_channel: None,
                 receipt: Receipt {
                     raw: "{}".into(),
@@ -1975,6 +2146,7 @@ mod building_car_tests {
                 verified: "v".into(),
                 backlog_item: backlog_item.map(str::to_string),
                 item_provenance: provenance,
+                boards_after: None,
                 delivery_channel: None,
                 receipt: Receipt {
                     raw: "{}".into(),
@@ -2023,6 +2195,7 @@ mod building_car_tests {
             verified: "v".into(),
             backlog_item: Some("be025b44-2725-4db5-90d9-f16aba3844c6".into()),
             item_provenance: serde_json::Map::new(),
+            boards_after: None,
             delivery_channel: None,
             receipt: Receipt {
                 raw: "{}".into(),

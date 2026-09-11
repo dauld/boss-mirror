@@ -73,7 +73,19 @@ export type ProofAttempt = Readonly<{
   at: string | null;
   exit: number | null;
   host: string | null;
-  output: string | null;
+  /** The two streams, SEPARATELY, as the runner records them and as the
+   *  proof record has always carried them. They used to arrive merged in
+   *  one `output`, and the case that cost 18 hours read `output: ""` —
+   *  which cannot say whether both streams were empty or the record
+   *  dropped them (backlog 4fccc595). An attempt written before the
+   *  split carries `output`; it is read into `stdout`, since that is
+   *  where most of it came from. */
+  stdout: string | null;
+  stderr: string | null;
+  /** The runner's verdict — one sentence naming what failed, never a
+   *  list of possibilities (CLAUDE.md §Diagnosis). The first thing a
+   *  reader of a failed attempt wants. */
+  why: string | null;
   /** Tools the probe needed and the host did not have. */
   missingTools: readonly string[];
 }>;
@@ -109,7 +121,9 @@ function proofAttempt(v: unknown): ProofAttempt | null {
     at: text(a.at),
     exit: typeof a.exit === 'number' ? a.exit : null,
     host: text(a.host),
-    output: text(a.output),
+    stdout: text(a.stdout) ?? text(a.output),
+    stderr: text(a.stderr),
+    why: text(a.why),
     missingTools: tools,
   };
 }

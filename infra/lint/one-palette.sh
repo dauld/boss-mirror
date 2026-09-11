@@ -41,9 +41,17 @@ cd "$(dirname "$0")/../.."
 # lint alone was not enough: one-palette.mocked.spec.ts documents the
 # rule in a comment, and the train that first carried both went red on
 # it while the branch passed alone (2026-08-24).
-hits=$(git grep -nE 'prefers-color-scheme' -- 'apps/' 'libs/' \
-    ':!infra/lint/one-palette.sh' \
-    ':!apps/web/tests/mocked/one-palette.mocked.spec.ts' || true)
+#
+# That exemption is now DISCOVERED rather than listed: lib/pattern-scan.sh
+# exempts this file and any tracked path that names this lint and lives
+# where tests live, which is exactly `apps/web/tests/mocked/
+# one-palette.mocked.spec.ts` and nothing else in the tree. Collapsing
+# onto the shared scan is §9a — the hand-written `|| true` here printed
+# `clean` and exited 0 on a tree git had refused to read (measured
+# 2026-09-11, backlog 6b2f4a1a), and it would have had to be fixed twice
+# otherwise. `|| exit $?` carries the scan's refusal out.
+. "$(dirname "$0")/lib/pattern-scan.sh"
+hits=$(pattern_scan 'prefers-color-scheme' -- 'apps/' 'libs/') || exit $?
 if [ -n "$hits" ]; then
     echo "one-palette: a frontend surface branches on the viewer's OS theme:" >&2
     echo "$hits" >&2

@@ -50,29 +50,49 @@
 # lines that turn an invisible hazard into a refused commit.
 set -uo pipefail
 
-cd "$(dirname "$0")/../.." || exit 1
+LINT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$LINT_DIR/../.." || exit 1
+# shellcheck source=infra/lint/lib/trunk-ref.sh
+. "$LINT_DIR/lib/trunk-ref.sh"
 
+LINT=steptype-bundle-ratchet
 BUNDLE="crates/core/boss-jobs/seeds/step_types.toml"
-[ -f "$BUNDLE" ] || { echo "steptype-bundle-ratchet: $BUNDLE not found" >&2; exit 1; }
+[ -f "$BUNDLE" ] || { echo "$LINT: $BUNDLE not found" >&2; exit 1; }
 
-# Trunk resolution, exactly the migrations-append-only walk: the first
-# ref that exists wins; none found is a refusal, not a silent pass.
-trunk=""
-for ref in ${BOSS_TRUNK_REF:-} forge/main origin/main main; do
-    if git rev-parse --verify --quiet "$ref" >/dev/null; then trunk="$ref"; break; fi
-done
-if [ -z "$trunk" ]; then
-    echo "steptype-bundle-ratchet: no trunk ref found (tried origin/main, forge/main, main)" >&2
+# Trunk resolution is lib/trunk-ref.sh, shared with the other three
+# baseline-comparing lints. Absent trunk refs are a refusal here, not a
+# silent pass — a ratchet that cannot see the trunk certifies nothing.
+# A git that could not ANSWER is a different refusal, and saying "fetch
+# the trunk" at it is a wrong remediation: measured on 2026-09-11 in a
+# gate workspace where the trunk was present and every git command was
+# exiting 128 (backlog 6b2f4a1a).
+trunk=$(resolve_trunk_ref "$LINT"); rc=$?
+if [ "$rc" -eq "$LINT_CANNOT_ANSWER" ]; then
+    exit "$LINT_CANNOT_ANSWER"
+elif [ "$rc" -ne 0 ]; then
+    echo "$LINT: no trunk ref found (tried $(trunk_candidates))" >&2
     echo "  A ratchet that cannot see the trunk cannot certify anything; refusing." >&2
     exit 1
 fi
-mb=$(git merge-base "$trunk" HEAD 2>/dev/null) || mb="$trunk"
+mb=$(resolve_merge_base "$LINT" "$trunk" HEAD) || exit $?
 
 # The trunk may predate the bundle file itself (it does not today, but
 # a ratchet should say what it assumes): no trunk copy = nothing to
 # tighten against.
-if ! git cat-file -e "$mb:$BUNDLE" 2>/dev/null; then
-    echo "steptype-bundle-ratchet: $BUNDLE absent at merge-base — nothing to ratchet"
+#
+# `git ls-tree`, NOT `git cat-file -e`, and the difference is the whole
+# packet: `cat-file -e <tree>:<path>` exits 128 both for "that path is
+# not in that tree" and for "this repository is unreadable", so the two
+# cannot be told apart and an unreadable repo took this `exit 0`.
+# `ls-tree --name-only` answers absence with exit 0 and empty output,
+# and reserves non-zero for a real failure.
+#
+# The status is bound to a variable rather than tested inside `[ -z
+# "$(…)" ]`: a command substitution inside a test discards the exit
+# status, which is the same mistake one layer down.
+bundle_at_base=$(git_answer "$LINT" 0 ls-tree --name-only "$mb" -- "$BUNDLE") || exit $?
+if [ -z "$bundle_at_base" ]; then
+    echo "$LINT: $BUNDLE absent at merge-base — nothing to ratchet"
     exit 0
 fi
 
@@ -102,7 +122,13 @@ flatten() {
     '
 }
 
-base_rows=$(git show "$mb:$BUNDLE" | flatten)
+# Read the baseline file, THEN flatten it. `git show … | flatten` put git
+# inside a pipeline, where its status is not the one bash reports, so a
+# failed read arrived as an empty parse — caught below by the non-vacuity
+# guard, but reported as "the parse broke, fix the scraper", which is a
+# wrong diagnosis a reader then has to go disprove.
+base_file=$(git_answer "$LINT" 0 show "$mb:$BUNDLE") || exit $?
+base_rows=$(printf '%s\n' "$base_file" | flatten)
 head_rows=$(flatten < "$BUNDLE")
 
 # Non-vacuity: the trunk bundle has dozens of kinds; a parse that sees

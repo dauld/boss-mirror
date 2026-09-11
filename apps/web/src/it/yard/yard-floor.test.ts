@@ -679,7 +679,15 @@ describe('the signals along the track', () => {
     const failed = car('p2', 'feat/failed', {
       proof: proofOf({
         probe: 'bash y.sh',
-        attempt: { at: '2026-09-07T22:00:00Z', exit: 1, host: 'forge', output: 'boom', missingTools: [] },
+        attempt: {
+          at: '2026-09-07T22:00:00Z',
+          exit: 1,
+          host: 'forge',
+          stdout: null,
+          stderr: 'boom',
+          why: 'it exited 1',
+          missingTools: [],
+        },
       }),
     });
     expect(scene(yardOf({ awaitingProof: [failed] }), statusOf(), NOW).signals[6]).toBe('err');

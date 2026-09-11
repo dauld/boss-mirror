@@ -72,7 +72,9 @@ describe('readCarProof', () => {
           at: '2026-09-10T21:20:54Z',
           exit: 1,
           host: 'david-asus-minipc',
-          output: 'jq: error — category=null',
+          stdout: '',
+          stderr: 'jq: error — category=null',
+          why: 'the probe RAN on david-asus-minipc and exited 1. What it said: jq: error — category=null',
           missing_tools: ['jq'],
           probe: 'bash infra/lint/x.sh --self-test',
           expect: 'MAINTENANCE-PROTOCOLS-STATE-THEIR-CATEGORY',
@@ -87,7 +89,9 @@ describe('readCarProof', () => {
         at: '2026-09-10T21:20:54Z',
         exit: 1,
         host: 'david-asus-minipc',
-        output: 'jq: error — category=null',
+        stdout: null,
+        stderr: 'jq: error — category=null',
+        why: 'the probe RAN on david-asus-minipc and exited 1. What it said: jq: error — category=null',
         missingTools: ['jq'],
       },
       stamped: null,
@@ -211,14 +215,24 @@ describe('the run the forge drains', () => {
     const ran = proofOf({
       probe: 'bash x.sh',
       expect: 'ok',
-      attempt: { at: '2026-09-10T21:20:54Z', exit: 1, host: 'david-asus-minipc', output: 'boom', missingTools: [] },
+      attempt: {
+        at: '2026-09-10T21:20:54Z',
+        exit: 1,
+        host: 'david-asus-minipc',
+        stdout: null,
+        stderr: 'boom',
+        why: 'it exited 1',
+        missingTools: [],
+      },
     });
     expect(probeRun('a', ran, [request('r1', 'a', 'closed')])).toEqual({
       kind: 'ran',
       at: '2026-09-10T21:20:54Z',
       exit: 1,
       host: 'david-asus-minipc',
-      output: 'boom',
+      stdout: null,
+      stderr: 'boom',
+      why: 'it exited 1',
       missingTools: [],
     });
   });
@@ -226,7 +240,15 @@ describe('the run the forge drains', () => {
   test('an open request outranks an attempt — the live fact is the retry', () => {
     const ran = proofOf({
       probe: 'bash x.sh',
-      attempt: { at: '2026-09-10T21:20:54Z', exit: 1, host: null, output: null, missingTools: [] },
+      attempt: {
+        at: '2026-09-10T21:20:54Z',
+        exit: 1,
+        host: null,
+        stdout: null,
+        stderr: null,
+        why: null,
+        missingTools: [],
+      },
     });
     expect(probeRun('a', ran, [request('r1', 'a', 'open')]).kind).toBe('queued');
   });
@@ -256,7 +278,15 @@ describe('the shed as a whole', () => {
     proofOf({
       probe: 'bash b.sh',
       expect: 'B-OK',
-      attempt: { at: '2026-09-10T21:20:54Z', exit: 1, host: 'forge', output: 'boom', missingTools: [] },
+      attempt: {
+        at: '2026-09-10T21:20:54Z',
+        exit: 1,
+        host: 'forge',
+        stdout: null,
+        stderr: 'boom',
+        why: 'it exited 1',
+        missingTools: [],
+      },
     }),
   );
   const evented = car('c', proofOf({ event: 'the next train in flight' }));
@@ -313,7 +343,15 @@ describe('the shed as a whole', () => {
       'e',
       proofOf({
         probe: 'bash e.sh',
-        attempt: { at: '2026-09-10T21:20:54Z', exit: 0, host: null, output: 'A-OK', missingTools: [] },
+        attempt: {
+          at: '2026-09-10T21:20:54Z',
+          exit: 0,
+          host: null,
+          stdout: 'A-OK',
+          stderr: null,
+          why: null,
+          missingTools: [],
+        },
       }),
     );
     const shed = inspectionShed([odd], null);

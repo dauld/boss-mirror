@@ -67,10 +67,13 @@ async fn set_meta(
 /// `on_missing` is asserted because leaving it out let a real defect
 /// ship the same day: the fifth edge landed as `warn` while every other
 /// row said `abort` and `InMemoryJobEdges` hardcoded `abort` for all of
-/// them. The column DEFAULT is `warn`; 105 was a one-time UPDATE of the
-/// three rows that existed then, so "edges abort" was a property of
-/// those rows and not of the table. This test now fails if a new edge
-/// arrives with the weaker dial, which is the only way that stays true.
+/// them. When that happened the column DEFAULT was `warn` and 105 was a
+/// one-time UPDATE of the three rows existing then, so "edges abort" was
+/// a property of those rows and not of the table. 202608291630 has since
+/// done `ALTER COLUMN on_missing SET DEFAULT 'abort'`, so a new row now
+/// inherits the strong dial by default — but this assertion is still the
+/// only thing that would catch that default being weakened again, which
+/// is why it stays.
 #[tokio::test]
 async fn registry_seeds_exactly_the_declared_edges() {
     let db = TestDb::new().await;
@@ -111,6 +114,15 @@ async fn registry_seeds_exactly_the_declared_edges() {
             (
                 "ship-a-change".into(),
                 "backlog_item".into(),
+                "job_id".into()
+            ),
+            // The car this car must land BEHIND (d3320278). Sorts here
+            // by field_path. on_missing is the table DEFAULT, which is
+            // `abort` since 202608291630 — the dials assertion above is
+            // what keeps that true if the default is ever weakened.
+            (
+                "ship-a-change".into(),
+                "boards_after".into(),
                 "job_id".into()
             ),
             // An item a car is ONE PIECE of — declared so the value is

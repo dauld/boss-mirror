@@ -18,9 +18,19 @@
 # host, cwd, at, as a JSON string under `proof`, with `verified`
 # defaulting to the car's summary — so `boss prove <car> --recheck`
 # can re-run it later. Otherwise it stamps `proof_attempt` {at, exit,
-# output, host, probe, expect} on the car's metadata, leaves `proven`
+# stdout, stderr, host, probe, expect} on the car's metadata, leaves `proven`
 # ready, and exits 1 so the ops-request's exit_code carries the
 # verdict too. Backlog 28ac45ab.
+#
+# THE ATTEMPT RECORDS THE TWO STREAMS SEPARATELY — `stdout` and
+# `stderr`, the same two keys the proof record carries, never one merged
+# `output`. It used to merge them, and the one field then read `""` for
+# the case that matters most: a probe that exited nonzero and said
+# NOTHING (backlog 4fccc595, car a0ab90a5 — 18 hours unproven). An empty
+# merged field cannot tell a reader whether both streams were empty or
+# the record dropped them, and which stream a line came from is half of
+# reading it. Same reason the `why` below now names ONE thing rather than
+# offering a reader two possibilities to go re-derive.
 #
 # WHERE A PROBE RUNS — AND WHERE IT WAS WRITTEN. Here: the forge host,
 # as david, in the converged checkout, with the forge's tools. NOT the
@@ -340,19 +350,42 @@ fi
 #     ops-request carries the verdict in its exit_code.
 # The verdict names what failed, in one sentence a reader does not have
 # to re-derive (CLAUDE.md §Diagnosis).
+# THE VERDICT — one sentence a reader does not have to re-derive
+# (CLAUDE.md §Diagnosis, and backlog 4fccc595 for what the old wording
+# cost). The markers are the extraction point: boss-testing's
+# run_car_probe_sh.rs lifts what lies between them and RUNS it over the
+# four outcomes, so the verdict cannot rot into a comment.
+#
+# WHAT THE PROBE SAID, in one line: the first non-empty line of stderr,
+# else of stdout. stderr first because that is where a tool puts its
+# diagnosis — jq's `error(…)`, curl's message, bash's command-not-found.
+# PROBE-VERDICT-BEGIN
+said=$(sed -n '/[^[:space:]]/{s/^[[:space:]]*//;p;q;}' "$workdir/errs" "$workdir/out" 2>/dev/null | cut -c1-300)
 if [[ "$unrunnable" == true ]]; then
     why="THE PROBE DID NOT RUN on $host: $missing_list not found. A recorded probe runs on the forge host as $PROBE_USER in $PROBE_DIR, with this host's tools — not on the dev pod where it was written, which is where cluster tools like kubectl live. This says nothing about whether the change works; re-probe from a vantage this host has, or record the car as event-bound."
+elif [[ "$rc" -ne 0 && -z "$said" ]]; then
+    # A NONZERO EXIT WITH BOTH STREAMS EMPTY IS NOT A VERDICT — it is a
+    # missing record, and saying so is the whole of 4fccc595. Car
+    # a0ab90a5 sat 18 hours on exactly this: `jq -e` exited 4 because
+    # the claim HELD (its success branch emitted `empty`, which is no
+    # output), a trailing `|| exit 1` rewrote the 4 to a 1, and the old
+    # wording here — "not holding, or the probe is wrong" — read
+    # identically to a real regression.
+    why="THE FAILURE CANNOT BE READ: the probe ran on $host and exited $rc, printing NOTHING on either stream. That is a missing record, not a verdict on the claim — nothing here says whether the change is in production. The usual causes are a bare '|| exit <n>', which replaces the status that named the cause and prints nothing, and a swallowed stderr ('2>&1 | grep -q'). Re-park with a probe that echoes what failed, with \$?, before it exits — and check for the shape 4fccc595 measured: under 'jq -e' a success branch of 'empty' exits 4, so the probe fails PRECISELY when the claim holds."
 elif [[ "$rc" -ne 0 ]]; then
-    why="the probe RAN on $host and exited $rc — the claim it makes is not holding, or the probe is wrong."
+    why="the probe RAN on $host and exited $rc. What it said: $said"
+elif [[ -z "$said" ]]; then
+    why="the probe RAN on $host and exited 0 and printed NOTHING, so it cannot have printed '$expect'. An exit code alone is a weak assertion — 'echo hi' exits 0 too. Re-park with a probe that prints a named token on success."
 else
-    why="the probe RAN on $host and exited 0, but neither stream contained '$expect' — the claim it makes is not holding, or the expected string is wrong."
+    why="the probe RAN on $host and exited 0, but neither stream contained '$expect'. What it printed: $said"
 fi
+# PROBE-VERDICT-END
 attempt=$(jq -cn --arg at "$at" --argjson exit "$rc" --arg host "$host" \
     --arg probe "$probe" --arg expect "$expect" --arg why "$why" \
     --argjson unrunnable "$unrunnable" --argjson missing_tools "$missing_json" \
-    --arg output "$(printf '%s\n%s' "$stdout" "$stderr")" \
-    '{at:$at, exit:$exit, output:$output, host:$host, probe:$probe, expect:$expect,
-      why:$why, unrunnable:$unrunnable, missing_tools:$missing_tools}')
+    --arg stdout "$stdout" --arg stderr "$stderr" \
+    '{at:$at, exit:$exit, stdout:$stdout, stderr:$stderr, host:$host, probe:$probe,
+      expect:$expect, why:$why, unrunnable:$unrunnable, missing_tools:$missing_tools}')
 printf '%s' "$attempt" | jq -c '{proof_attempt: .}' > "$workdir/payload"
 if ! curl -fsS -X PATCH -H "content-type: application/json" -H "x-boss-user: $BOSS_USER" \
         ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \

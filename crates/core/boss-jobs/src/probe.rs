@@ -12,13 +12,29 @@
 //! describing the first (CLAUDE.md §9a in its behavioural form — one
 //! rule, two enforcement sites, one of which is prose about the other).
 //!
-//! TWO RULES, AND THEY ARE NOT THE SAME KIND OF RULE. One asks whether
-//! the text can RUN where it is going, which is host-relative; the
-//! other asks whether its answer can be TRUSTED, which is true
-//! everywhere. Each door applies the first only about the host it is
-//! actually sending the probe to, and the second always. The predicates
-//! below are shared; the wording of a refusal belongs to the door,
-//! because what to do instead differs by door.
+//! THREE QUESTIONS, AND THEY ARE NOT THE SAME KIND OF QUESTION. The
+//! first asks whether the text can RUN where it is going, which is
+//! host-relative ([`needs_absent_tool`]). The second asks whether its
+//! answer can be TRUSTED, which is true everywhere
+//! ([`reads_the_sor_unidentified`]). The third asks whether the text
+//! says what its author meant — a `jq -e` whose success branch is
+//! `empty` ([`asserts_its_own_negation`]), a bare `|| exit n` that
+//! throws away the status naming the cause
+//! ([`rewrites_its_exit_status`]) — which is also true everywhere.
+//!
+//! Each door applies the first only about the host it is actually
+//! sending the probe to, and the other two always. The second REFUSES,
+//! because it fails open: the probe passes, the absence assertion is
+//! green against a world it was never allowed to see, and a car closes
+//! on a proof of nothing. The third only WARNS, because it fails
+//! closed — `boss prove` records nothing on a nonzero exit, so the worst
+//! it does is strand a car and misdescribe why (18 hours of that,
+//! 4fccc595) — and because both its detectors are coarse text scans a
+//! false refusal would be too expensive for.
+//!
+//! The predicates below are shared; the wording of a refusal or a
+//! warning belongs to the door, because what to do instead differs by
+//! door.
 
 use serde_json::Value;
 
@@ -169,6 +185,165 @@ and a recorded proof of nothing closes a car. Prefer asserting the PRESENCE of a
 thing over the absence of any thing: a count-is-zero or flag-is-false claim against a \
 policy-scoped surface is what a narrowed read produces anyway.";
 
+/// WHEN A PROBE REPORTS FAILURE PRECISELY BECAUSE THE CLAIM HOLDS —
+/// the third shape, and the only one whose lie points the other way.
+///
+/// THE DEFECT (backlog 4fccc595, measured 2026-09-11). Car a0ab90a5 sat
+/// unproven for 18 hours on a probe that COULD NOT PASS. Its success
+/// path was `jq -e '… | if (<claim holds>) then empty else error(…) end'`
+/// — and `jq -e` exits **4** when the filter produces no output, while
+/// `empty` is not output at all. So the claim holding made jq exit 4,
+/// the trailing `|| exit 1` turned that into 1, and the recorded verdict
+/// read "the claim it makes is not holding, or the probe is wrong". The
+/// filter was re-run against correct live data the next day and exited 4
+/// on all three rows it checks: the probe asserted the negation of what
+/// its author meant.
+///
+/// It is a WARNING wherever it is checked, not a refusal — the doors
+/// argue that themselves (`boss prove`'s `admit`), but the fact behind
+/// the argument is here: this shape cannot record a false proof. It
+/// fails CLOSED, and `boss prove` records nothing on a nonzero exit, so
+/// the damage is a stranded car and a misread verdict, never a car
+/// closed on evidence of nothing. That is the opposite direction from
+/// [`reads_the_sor_unidentified`], which is why the two doors treat them
+/// differently.
+pub const SELF_CONTRADICTORY_RULE: &str = "jq-e-whose-success-is-empty";
+
+/// The measured evidence for [`asserts_its_own_negation`], in one copy,
+/// quoted by every door that says anything about it. The doors differ in
+/// what to do instead; they must not differ on what happened
+/// (CLAUDE.md §9a).
+pub const SELF_CONTRADICTORY_EVIDENCE: &str = "\
+Measured 2026-09-11 (4fccc595): `jq -e` exits 4 when its filter produces NO output, and \
+`empty` produces none — so `if <claim> then empty else error(…) end` under `-e` exits \
+nonzero exactly when the claim HOLDS. Car a0ab90a5 sat unproven for 18 hours on that \
+shape; the filter was re-run against correct live data and exited 4 on every row.\n\
+The shape that cannot invert asserts positively and prints a token: \
+`jq -e '<claim> or error(\"…\")' >/dev/null && echo claim:ok`.";
+
+/// Does this `jq -e` assert the negation of what its author meant?
+///
+/// Two conditions: a `jq` invocation carrying an exit-status flag
+/// (`-e`, a bundled `-re`, or `--exit-status`), and the word `empty`
+/// somewhere after it. `-e` means "exit nonzero when the output is
+/// false or absent", so a branch that emits `empty` makes success the
+/// failing case.
+///
+/// DELIBERATELY COARSE, and a warning because of it: this does not
+/// parse jq, so `jq -e '.name == "empty"'` reads as the shape and gets
+/// warned about. The cost when it is wrong is one line a builder reads
+/// and ignores; the cost of the alternative is a jq parser to maintain,
+/// or 18 hours (4fccc595). A refusal could not be spent this cheaply,
+/// which is a second reason this one only warns.
+pub fn asserts_its_own_negation(probe: &str) -> bool {
+    jq_tails(probe)
+        .into_iter()
+        .any(|tail| jq_has_exit_status_flag(tail) && has_word(tail, "empty"))
+}
+
+/// The text after each `jq` token, where `jq` stands in command
+/// position. Not `commands_invoked`'s split: a jq filter is full of
+/// `|`, `(` and `)`, so splitting on those takes the flags and the
+/// filter into different pieces.
+fn jq_tails(probe: &str) -> Vec<&str> {
+    let bytes = probe.as_bytes();
+    let boundary = |i: usize| -> bool {
+        i == 0 || (!(bytes[i - 1] as char).is_alphanumeric() && bytes[i - 1] != b'_')
+    };
+    probe
+        .match_indices("jq")
+        .filter(|(i, _)| boundary(*i))
+        .filter(|(i, _)| {
+            // `jq` itself, not the tail of `jqlang` — and not a path
+            // component, which `rsplit('/')` already reduces elsewhere.
+            probe[i + 2..]
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+        })
+        .map(|(i, _)| &probe[i + 2..])
+        .collect()
+}
+
+/// Is there an exit-status flag among this invocation's flags?
+///
+/// Walks the words in front of the filter, stepping over the values of
+/// the flags that take them — `--arg k v` is two words that are not
+/// flags, and stopping at the first of them would miss a `-e` written
+/// after it.
+fn jq_has_exit_status_flag(tail: &str) -> bool {
+    const TWO_VALUES: [&str; 2] = ["--arg", "--argjson"];
+    const ONE_VALUE: [&str; 6] = [
+        "--slurpfile",
+        "--rawfile",
+        "--indent",
+        "-f",
+        "--from-file",
+        "--jsonarg",
+    ];
+    let mut words = tail.split_whitespace();
+    while let Some(w) = words.next() {
+        if !w.starts_with('-') {
+            // The filter. Flags are over.
+            return false;
+        }
+        if w == "--exit-status" || (!w.starts_with("--") && w.contains('e')) {
+            return true;
+        }
+        if TWO_VALUES.contains(&w) {
+            words.next();
+            words.next();
+        } else if ONE_VALUE.contains(&w) {
+            words.next();
+        }
+    }
+    false
+}
+
+/// Does `word` appear in `text` as a whole word?
+fn has_word(text: &str, word: &str) -> bool {
+    text.match_indices(word).any(|(i, _)| {
+        let before = text[..i]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+        let after = text[i + word.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+        before && after
+    })
+}
+
+/// Does this probe throw away the exit status that would explain its own
+/// failure? Returns the status it substitutes.
+///
+/// The shape is a BARE `|| exit <n>`: the left-hand command's status is
+/// replaced by `n` and nothing is printed, so jq's 4-versus-5 (filter
+/// produced nothing / filter called `error`) and curl's 7-versus-22
+/// (could not connect / the server said no) all arrive as the same
+/// number. That is the reduction CLAUDE.md §Diagnosis names: it
+/// suppresses OUTPUT, not work, and the cost is paid by whoever is next
+/// in front of the failure.
+///
+/// `|| { echo "…$?"; exit 1; }` is NOT this shape and is not reported:
+/// it keeps the evidence before collapsing the status, which is the
+/// form the replacement probe on a0ab90a5 used.
+pub fn rewrites_its_exit_status(probe: &str) -> Option<i32> {
+    probe.split("||").skip(1).find_map(|tail| {
+        let mut words = tail.split_whitespace();
+        if words.next()? != "exit" {
+            return None;
+        }
+        words
+            .next()?
+            .trim_end_matches([';', '}', ')'])
+            .parse::<i32>()
+            .ok()
+            .filter(|n| *n != 0)
+    })
+}
+
 /// The rule id a door records when an operator overrides a refusal on
 /// it. Short, stable, and greppable across recorded proofs — an
 /// override nobody can find later is the defect it was meant to avoid.
@@ -295,6 +470,105 @@ mod tests {
                 "not an unidentified read: {probe}"
             );
         }
+    }
+
+    /// THE PROBE THAT COST 18 HOURS, verbatim off car a0ab90a5's
+    /// `proof_probe` (4fccc595). Both shapes are in it: a `jq -e` whose
+    /// success branch is `empty`, and a bare `|| exit 1` that overwrote
+    /// jq's 4 with a 1.
+    const THE_INVERTED_PROBE: &str = "for k in maintenance-backup maintenance-audit-integrity maintenance-ledger-replay; do curl -fsS \"$BOSS_JOBS_URL/api/workflows/$k\" | jq -e --arg k \"$k\" '(.data // .) as $w | if ($w.category==\"platform\" and ($w.description|type)==\"string\" and ($w.description|length)>0) then empty else error(\"\\($k): category=\\($w.category) description=\\($w.description)\") end' || exit 1; done; echo MAINTENANCE-PROTOCOLS-STATE-THEIR-CATEGORY";
+
+    /// THE PROBE THAT REPLACED IT, also verbatim off the car's
+    /// `reproof`. It asserts positively (`or error(…)`), prints a token,
+    /// and keeps the status before collapsing it — so neither check may
+    /// fire on it. A check that flags the CORRECT shape teaches the next
+    /// builder to ignore it.
+    const THE_PROBE_THAT_REPLACED_IT: &str = "for k in maintenance-backup maintenance-audit-integrity maintenance-ledger-replay; do body=$(boss-api GET \"/api/workflows/$k\" 2>/dev/null) || { echo \"PROBE CANNOT READ $k via boss-api (exit $?) - a reachability failure, NOT a verdict on the claim\"; exit 1; }; printf '%s' \"$body\" | jq -e --arg k \"$k\" '(.data // .) as $w | (($w.category==\"platform\") and (($w.description|type)==\"string\") and (($w.description|length)>0)) or error(\"\\($k): category=\\($w.category) description=\\($w.description)\")' >/dev/null || { echo \"CLAIM FAILS for $k (jq exit $?)\"; exit 1; }; done; echo MAINTENANCE-PROTOCOLS-STATE-THEIR-CATEGORY";
+
+    /// The measured instance is seen, in the text the car actually
+    /// carried — flags before the filter, `--arg` values in between, and
+    /// the whole thing inside a `for` loop and a pipeline.
+    #[test]
+    fn the_inverted_jq_e_that_cost_eighteen_hours_is_seen() {
+        assert!(
+            asserts_its_own_negation(THE_INVERTED_PROBE),
+            "the shape 4fccc595 measured must be detectable: {THE_INVERTED_PROBE}"
+        );
+        assert_eq!(
+            rewrites_its_exit_status(THE_INVERTED_PROBE),
+            Some(1),
+            "`|| exit 1` replaced jq's 4, which is the number that named the cause"
+        );
+    }
+
+    /// And the probe that FIXED it is clean on both checks.
+    #[test]
+    fn the_probe_that_replaced_it_trips_neither_check() {
+        assert!(
+            !asserts_its_own_negation(THE_PROBE_THAT_REPLACED_IT),
+            "`or error(…)` asserts positively: {THE_PROBE_THAT_REPLACED_IT}"
+        );
+        assert_eq!(
+            rewrites_its_exit_status(THE_PROBE_THAT_REPLACED_IT),
+            None,
+            "`|| {{ echo …; exit 1; }}` keeps the evidence before collapsing the status"
+        );
+    }
+
+    /// `-e` is what makes `empty` a failure, so neither half alone is
+    /// the shape. A `jq` without the flag prints nothing and exits 0; an
+    /// `-e` over a filter that emits a value is the normal, correct use.
+    #[test]
+    fn neither_half_of_the_inverted_shape_is_the_shape_alone() {
+        for probe in [
+            "curl -fsS x | jq 'if (.a==1) then empty else error(\"no\") end'",
+            "curl -fsS x | jq -e '.a == 1'",
+            "curl -fsS x | jq -e --arg k v '.a == $k'",
+            "grep -c empty infra/forge/run-car-probe.sh",
+        ] {
+            assert!(
+                !asserts_its_own_negation(probe),
+                "not the inverted shape: {probe}"
+            );
+        }
+    }
+
+    /// Every spelling of the flag that makes `empty` fail: bare, bundled
+    /// with another short flag, long, and written AFTER an `--arg` pair
+    /// (which is why the flag walk steps over flag values instead of
+    /// stopping at the first non-flag word).
+    #[test]
+    fn the_exit_status_flag_is_seen_in_every_spelling() {
+        for probe in [
+            "jq -e 'if .a then empty else error(\"x\") end' f.json",
+            "jq -re 'if .a then empty else error(\"x\") end' f.json",
+            "jq --exit-status 'if .a then empty else error(\"x\") end' f.json",
+            "jq --arg k v -e 'if .a == $k then empty else error(\"x\") end' f.json",
+        ] {
+            assert!(asserts_its_own_negation(probe), "the shape: {probe}");
+        }
+    }
+
+    /// A bare `|| exit n` is the reduction; anything that SPEAKS first
+    /// is not. `exit 0` is not reported either — it is a probe choosing
+    /// to pass, which is a different defect and not this one's business.
+    #[test]
+    fn only_a_bare_rewrite_of_the_exit_status_is_reported() {
+        assert_eq!(rewrites_its_exit_status("false || exit 7"), Some(7));
+        assert_eq!(
+            rewrites_its_exit_status("a && b || exit 1; echo x"),
+            Some(1)
+        );
+        assert_eq!(
+            rewrites_its_exit_status("false || { echo \"jq said $?\"; exit 1; }"),
+            None
+        );
+        assert_eq!(rewrites_its_exit_status("false || echo claim:no"), None);
+        assert_eq!(rewrites_its_exit_status("true || exit 0"), None);
+        assert_eq!(
+            rewrites_its_exit_status("boss-sor-read /api/x | grep -q y"),
+            None
+        );
     }
 
     /// The override record is the same shape wherever a door writes it,

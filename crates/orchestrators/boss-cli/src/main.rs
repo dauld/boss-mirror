@@ -223,6 +223,26 @@ enum Commands {
         /// a forgotten one.
         #[arg(long, value_name = "REASON")]
         park_no_item: Option<String>,
+        /// Auto-park: the CAR this one must land BEHIND. The dock will not
+        /// board this car until that one has landed, and says so by name
+        /// on every board attempt until it does.
+        ///
+        /// Recorded as the car's `boards_after` job edge — ref-checked at
+        /// the write, so a mistyped id is refused here rather than
+        /// becoming a hold nobody can clear. Use it for an ordering
+        /// constraint the change itself creates: a car that must not share
+        /// a consist with another, a two-part sequence whose halves must
+        /// land in order. Measured 2026-09-10: four cars stated exactly
+        /// this by a human holding the dock and re-reading it
+        /// (d3320278) — `fix/the-reclaim-follows-the-build` was gated
+        /// `--hold` and parked by hand purely so it would board solo.
+        ///
+        /// NOT the same tool as `--hold`, which still exists: a hold says
+        /// "not yet" and needs a person to release it; an edge says "after
+        /// THAT" and releases itself. A gate-blind change that must board
+        /// SOLO is still the solo rule's business, not this flag's.
+        #[arg(long, value_name = "CAR")]
+        park_after: Option<String>,
         /// Auto-park: the probe that proves this change in production,
         /// written now by the builder who knows what it does. Recorded
         /// on the car as `proof_probe` and RUN — by `boss prove <car>
@@ -1281,6 +1301,7 @@ async fn main() -> Result<()> {
             park_backlog_item,
             park_partial_item,
             park_no_item,
+            park_after,
             park_probe,
             park_expect,
             park_proof_event,
@@ -1295,6 +1316,7 @@ async fn main() -> Result<()> {
                 backlog_item: park_backlog_item,
                 partial_item: park_partial_item,
                 no_item: park_no_item,
+                boards_after: park_after,
                 probe: park_probe,
                 expect: park_expect,
                 proof_event: park_proof_event,

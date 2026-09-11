@@ -37,29 +37,33 @@
 # comment and this passes.
 
 set -uo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
+LINT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$LINT_DIR/../.." || exit 1
+# shellcheck source=infra/lint/lib/trunk-ref.sh
+. "$LINT_DIR/lib/trunk-ref.sh"
 
+LINT=a-new-style-has-a-caller
 CSS="apps/web/src/styles.css"
 [ -f "$CSS" ] || {
-    echo "a-new-style-has-a-caller: $CSS not found — skipping"
+    echo "$LINT: $CSS not found — skipping"
     exit 0
 }
 
-resolve_base() {
-    local ref
-    for ref in ${BOSS_TRUNK_REF:-} forge/main origin/main main; do
-        if git rev-parse --verify --quiet "$ref" >/dev/null 2>&1; then
-            echo "$ref"; return 0
-        fi
-    done
-    return 1
-}
-
-BASE=$(resolve_base) || {
-    echo "a-new-style-has-a-caller: no trunk ref found — skipping"
+# Trunk resolution is lib/trunk-ref.sh (§9a: this walk was copied into
+# four lints and had the same defect in all four). A trunk ref that is
+# genuinely absent stays a SKIP here — with no baseline, "every class is
+# new" would blame this branch for hundreds of pre-existing selectors —
+# but a git that could not answer is not an absent ref, and skipping on
+# it exits 0, which a gate records as a pass on a tree nothing read
+# (measured 2026-09-11, backlog 6b2f4a1a).
+BASE=$(resolve_trunk_ref "$LINT"); rc=$?
+if [ "$rc" -eq "$LINT_CANNOT_ANSWER" ]; then
+    exit "$LINT_CANNOT_ANSWER"
+elif [ "$rc" -ne 0 ]; then
+    echo "$LINT: no trunk ref found (tried $(trunk_candidates)) — skipping"
     exit 0
-}
-MB=$(git merge-base "$BASE" HEAD 2>/dev/null) || MB="$BASE"
+fi
+MB=$(resolve_merge_base "$LINT" "$BASE" HEAD) || exit $?
 
 # Class selectors present now, minus those present at the base. Parsed
 # the same way in both directions so a reformat is not read as an add.
@@ -72,14 +76,33 @@ print("\n".join(sorted(set(
 }
 
 NOW=$(selectors < "$CSS")
-WAS=$(git show "$MB:$CSS" 2>/dev/null | selectors)
-if [ -z "$WAS" ]; then
+# Is there a baseline AT ALL, asked separately from reading it. `git show
+# "$MB:$CSS" 2>/dev/null | selectors` answered "no baseline" for three
+# different situations — the file is new on this branch, the repo is
+# unreadable, python3 is missing — and skipped with exit 0 for all three.
+# `ls-tree` answers only the first: present, or absent, or a real failure.
+BASE_HAS_CSS=$(git_answer "$LINT" 0 ls-tree --name-only "$MB" -- "$CSS") || exit $?
+if [ -z "$BASE_HAS_CSS" ]; then
     # No baseline to diff against. Skipping is right here and refusing
     # is not: unlike a ratchet over a whole file, "every class is new"
     # would flag hundreds of pre-existing selectors as this change's
     # fault.
-    echo "a-new-style-has-a-caller: no baseline for $CSS at $MB — skipping"
+    echo "$LINT: no baseline for $CSS at $MB — skipping"
     exit 0
+fi
+# Two statements, not a pipeline: in `git_answer … | selectors` the status
+# bash reports is the PARSER's, so the read's refusal would be lost again.
+WAS_FILE=$(git_answer "$LINT" 0 show "$MB:$CSS") || exit $?
+WAS=$(printf '%s\n' "$WAS_FILE" | selectors)
+if [ -z "$WAS" ]; then
+    # The baseline EXISTS and parsed to nothing, which is a different
+    # fact and not a skip: the selector parse is how both sides are read,
+    # so a parse that sees no class in a 1,500-line stylesheet would make
+    # every selector look new.
+    echo "$LINT: $CSS exists at $MB but parsed to zero class selectors —" >&2
+    echo "  the parse broke, so neither a clean result nor an addition can be" >&2
+    echo "  claimed. Fix the selector scraper in this script." >&2
+    exit 1
 fi
 
 ADDED=$(comm -13 <(printf '%s\n' "$WAS") <(printf '%s\n' "$NOW"))
