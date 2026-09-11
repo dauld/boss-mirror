@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+mod brief;
 mod cadence;
 mod car;
 mod census;
@@ -362,6 +363,19 @@ enum Commands {
     /// one read, with the startup checklist at the end (CLAUDE.md
     /// §Engineering Session Startup; automation of acedf981's L1).
     Orient,
+    /// The handover a builder is dispatched with: the packet verbatim
+    /// from the system of record, and the invariants derived from the
+    /// files that decide them.
+    ///
+    /// Ten briefs in one session restated the same invariants from
+    /// memory and the uid one was wrong in all ten (cc9ddc5d). A brief
+    /// references this instead of retyping it; nothing printed here is
+    /// a sentence somebody typed about the gate.
+    Brief {
+        /// The packet: its full uuid, 8+ characters of its id, or its
+        /// branch. Omit it to print the invariants alone.
+        packet: Option<String>,
+    },
     /// Where the IT department's work comes from — the input-channel
     /// mix (user-feedback vs monitoring/error-discovery), the algedonic
     /// reading over recent work (docs/design/it-delivery-channels.md).
@@ -1231,6 +1245,7 @@ async fn main() -> Result<()> {
             JobAction::Patch { job, patch } => job::patch(&job, &patch).await,
         },
         Commands::Orient => orient::run().await,
+        Commands::Brief { packet } => brief::run(packet).await,
         Commands::Channels => channels::run().await,
         Commands::Design {
             title,

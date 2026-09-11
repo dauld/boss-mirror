@@ -388,7 +388,7 @@ fn width() -> usize {
 
 /// Fetch rows to resolve a reference against: open first (most lookups
 /// are live work), closed only if nothing matched.
-async fn fetch_and_resolve(http: &reqwest::Client, job_ref: &str) -> Result<String> {
+pub(crate) async fn fetch_and_resolve(http: &reqwest::Client, job_ref: &str) -> Result<String> {
     if looks_like_uuid(job_ref) {
         return Ok(job_ref.to_string());
     }

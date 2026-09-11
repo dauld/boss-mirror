@@ -761,6 +761,15 @@ a door that stops being true is a defect worth a car.
   cost 17 minutes of cluster time to learn that `cargo fmt` had been run
   on one crate and not another.
 
+- **Briefing a builder — `boss brief <packet>`.** The packet verbatim
+  from the system of record, plus the invariants *derived* from the files
+  that decide them — the gate's uid/gid, the cargo bound, the phase list,
+  the forbidden database, and the method for a uid-owned workspace
+  (`infra/dev/as-gate-uid.sh`, which is a command, not a paragraph). A
+  brief references this output; it never restates it. Ten briefs in one
+  session retyped those invariants from memory and the uid one was wrong
+  in all ten (`cc9ddc5d`).
+
 - **Gating a branch — `boss gate <branch> [--wait]`.** Files or reuses
   the packet, renders the runner, creates the Job. `--wait` polls to a
   verdict; hand-rolled pollers have been written three times and two
