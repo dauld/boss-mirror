@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod brief;
+mod built_from;
 mod cadence;
 mod car;
 mod census;
@@ -38,7 +39,7 @@ mod upgrade;
 mod workflow;
 
 #[derive(Parser)]
-#[command(name = "boss", about = "Boss operator + developer CLI", version)]
+#[command(name = "boss", about = "Boss operator + developer CLI", version = built_from::VERSION)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

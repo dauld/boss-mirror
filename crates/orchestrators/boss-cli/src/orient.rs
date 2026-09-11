@@ -221,6 +221,15 @@ pub async fn run(all: bool) -> Result<()> {
         "  jobs api  {}",
         std::env::var("BOSS_JOBS_URL").unwrap_or_default()
     );
+    // The tool reading the approach must say what IT is: a binary that
+    // lags main runs older verbs silently (895c9a3b).
+    println!(
+        "{}",
+        crate::built_from::freshness_line(
+            crate::built_from::BUILT_FROM,
+            crate::built_from::origin_main_head().as_deref()
+        )
+    );
 
     // Trains in transit.
     let trains = rows(
