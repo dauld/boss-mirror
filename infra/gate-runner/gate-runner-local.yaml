@@ -75,8 +75,18 @@ spec:
       imagePullSecrets:
         - {name: forgejo-registry}
       automountServiceAccountToken: false
+      # The restricted profile, met rather than warned about — the same
+      # change as gate-runner.yaml's, which carries the full reasoning
+      # (backlog bb5a902e). The short form: the cluster's PodSecurity
+      # default WARNS restricted and enforces baseline, so this was noise
+      # today and a cliff tomorrow — an `enforce: restricted` label would
+      # make every gate Job uncreatable at admission. Both manifests are
+      # fixed together because this one is the variant a human reaches
+      # for by hand, and the hand-run case is exactly when a refusal is
+      # least expected.
       securityContext:
         fsGroup: 1500
+        runAsNonRoot: true
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: gate
@@ -94,8 +104,22 @@ spec:
             # against each other rather than working (db127cb4).
             - {name: CARGO_BUILD_JOBS, value: "4"}
             - {name: BOSS_TEST_POSTGRES_ADMIN_URL, value: "postgres://boss:boss@127.0.0.1:5432/postgres"}
+            # boss-ci declares no USER, so a named uid is handed no HOME
+            # of its own: run.sh's first act — `git config --global`,
+            # under set -e — would write to an unwritable `/`. /gate-target
+            # is the workspace mount, present before the container starts
+            # and group-writable through fsGroup.
+            - {name: HOME, value: /gate-target}
+          # uid 65534 (`nobody`) with group 1500, so the build's files are
+          # owned by the group that owns the volumes. The uid has to be one
+          # the image can NAME — uid 1500 matched fsGroup and looked right,
+          # and a full gate on it failed `boss-gcp-converges-itself` with
+          # `id: cannot find name for user ID 1500`. See gate-runner.yaml
+          # for the measurement and for what else a non-root gate needs.
           securityContext:
             allowPrivilegeEscalation: false
+            runAsUser: 65534
+            runAsGroup: 1500
             capabilities: {drop: ["ALL"]}
           resources:
             requests: {cpu: "4", memory: 8Gi}
@@ -109,9 +133,19 @@ spec:
           # (forgejo-registry) covers every container in the pod. Pinned
           # by infra/lint/the-build-pulls-only-mirrored-bases.sh.
           image: 10.20.0.15:3000/david/postgres:16
+          # uid 999 is the image's own `postgres` user — the uid the
+          # entrypoint's gosu hop ends at anyway (measured on the live
+          # dev sidecar: every postgres process Uid: 999). Entered
+          # directly, `id -u` is not 0, the chown-and-gosu branch is
+          # skipped, and nothing needs CHOWN/SETUID/SETGID — which is
+          # what made `drop: ["NET_RAW"]` the only safe drop before.
+          # PGDATA stays a subdirectory of the mount so uid 999 can own
+          # it and chmod it 0700.
           securityContext:
             allowPrivilegeEscalation: false
-            capabilities: {drop: ["NET_RAW"]}
+            runAsUser: 999
+            runAsGroup: 999
+            capabilities: {drop: ["ALL"]}
           env:
             - {name: POSTGRES_USER, value: boss}
             - {name: POSTGRES_PASSWORD, value: boss}

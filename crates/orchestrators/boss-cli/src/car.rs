@@ -22,12 +22,169 @@
 //! first minute, which closes the twinning failure mode by construction:
 //! there is no window in which "no car" is the right answer.
 //!
+//! AND IT STATES WHICH ITEM IT IS FOR (backlog 90d291bb). Exactly one of
+//! `--backlog-item` (this car IS that item's build — the item closes when
+//! the car lands), `--partial-item` (one piece of it — provenance only,
+//! the item stays open) or `--no-item <REASON>`. The refusal when none is
+//! given is `boss gate`'s own, shared rather than copied: see
+//! [`ItemAnswer::check`].
+//!
+//! WHAT `--park-*` DOES NOW. It confirms. Saying the same thing again at
+//! the gate is ACCEPTED SILENTLY — requiring a builder to repeat
+//! themselves would be friction with no safety gain, and the adopt
+//! rewrites the same value it finds. Saying something DIFFERENT still
+//! goes through `supersede` in the auto-park handler rather than being
+//! refused: a gate that refuses at green wastes the whole build, where
+//! superseding costs one warn line, and the gate's answer is the later
+//! one made with the finished diff. `supersede` therefore becomes dead
+//! code in the common case — the right direction for a guard that exists
+//! only because two verbs could state different things about one fact.
+//!
 //! NOT THE BOARD. This is the fact a board needs, and nothing more
 //! (the item's own scope line: *"Not the board itself."*).
 
 use anyhow::{Result, bail};
 use boss_jobs::car::{self, BUILD, BUILD_SLUG};
 use serde_json::Value;
+
+/// WHICH ITEM THIS CAR IS FOR — exactly one of three answers, stated at
+/// BUILD START.
+///
+/// WHY HERE AND NOT ONLY AT THE GATE (backlog 90d291bb). `boss gate
+/// --park-*` already demands one of three answers, but this verb took
+/// only `--backlog-item`: the CLOSING edge. A builder opening a car for
+/// ONE PIECE of a multi-piece item therefore had to either name the
+/// closing edge — which is wrong, because the arrival rule follows that
+/// key and would close an item with work outstanding — or say nothing,
+/// losing the provenance for the whole build, which is exactly the
+/// window the middle third exists to render.
+///
+/// THE DEEPER REASON IS THAT TWO VERBS COULD CONTRADICT EACH OTHER. An
+/// open saying "close item X" and a gate saying "do not close X" were
+/// both accepted, an hour apart, with nothing rejecting the pair; the
+/// landed defence is `supersede` in the auto-park handler, which resolves
+/// the disagreement in the safe direction. The builder who wrote it named
+/// the better fix: *not being able to disagree is stronger than a guard
+/// that resolves a disagreement.* So the answer is stated ONCE, here, at
+/// build start, and `--park-*` merely confirms it.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ItemAnswer {
+    /// This car IS that item's build — the one key the arrival rule
+    /// follows, so the item CLOSES when the car lands.
+    pub(crate) backlog_item: Option<String>,
+    /// This car is ONE PIECE of that item: recorded as provenance under
+    /// a key no rule reads, so the item stays open for its other pieces.
+    pub(crate) partial_item: Option<String>,
+    /// This car answers no item, and which kind of item-less car it is.
+    pub(crate) no_item: Option<String>,
+}
+
+impl ItemAnswer {
+    /// REFUSED BY THE GATE'S OWN FUNCTION — one definition of which
+    /// answers are legal and what the refusal says (CLAUDE.md §9a).
+    ///
+    /// `ParkIntent::require_item_answer` is purely SYNTACTIC: it reads
+    /// which of the three were given and nothing else — never the branch,
+    /// never the diff — which is what makes it safe to share between a
+    /// verb that runs before the work and one that runs after it. A
+    /// second copy here would be the same fact living twice, and the
+    /// copies would drift in the direction that matters most: what the
+    /// refusal tells the builder to type.
+    ///
+    /// THE SCOPE IS PASSED IN because it is what makes the intent
+    /// non-empty. `require_item_answer` returns `Ok` for an EMPTY intent
+    /// — no `--park-*` flag at all is a plain gate, which does not file a
+    /// car and owes no answer. An open always carries its summary and
+    /// excludes (both required), so an open's intent is never empty and
+    /// the check always runs.
+    ///
+    /// ONLY THE FLAG PREFIX IS ADAPTED. The gate spells these
+    /// `--park-backlog-item`; this verb spells them `--backlog-item`. The
+    /// rewrite is one mechanical substitution, pinned by
+    /// `an_open_with_no_item_answer_is_refused_naming_all_three`, so a
+    /// reworded gate refusal that stopped naming its flags reds a test
+    /// rather than printing flags that do not exist.
+    fn check(&self, summary: &str, excludes: &str) -> Result<()> {
+        crate::gate::ParkIntent {
+            summary: Some(summary.to_string()),
+            excludes: Some(excludes.to_string()),
+            backlog_item: self.backlog_item.clone(),
+            partial_item: self.partial_item.clone(),
+            no_item: self.no_item.clone(),
+            ..Default::default()
+        }
+        .require_item_answer()
+        .map_err(|e| anyhow::anyhow!(in_this_verbs_spelling(&e.to_string())))
+    }
+
+    /// The provenance keys this answer writes on the car — the core
+    /// builder, so the open records them in exactly the shape the gate's
+    /// auto-park and `boss park` write (CLAUDE.md §9a). Blank values are
+    /// omitted, never nulled.
+    fn provenance(&self) -> serde_json::Map<String, Value> {
+        car::item_provenance(self.partial_item.as_deref(), self.no_item.as_deref())
+    }
+
+    /// Both item ids resolved from a short prefix to the full id, BEFORE
+    /// anything is filed — so a typo costs a line of output.
+    ///
+    /// `backlog_item` is a declared edge the API ref-checks at the POST;
+    /// `partial_item` is NOT checked by anything, which is precisely why
+    /// it is resolved here. An unresolvable id in the one field nothing
+    /// validates would otherwise record provenance pointing at nothing,
+    /// and the next reader would have no way to tell that from a real
+    /// link (never write an id you did not read).
+    async fn resolve_ids(self, http: &reqwest::Client) -> Result<Self> {
+        if self.backlog_item.is_none() && self.partial_item.is_none() {
+            return Ok(self);
+        }
+        // Both kinds a car can answer, concatenated so an id matching one
+        // of each is reported ambiguous rather than resolved by whichever
+        // query ran first (381a4872).
+        let mut all = Vec::new();
+        for kind in ["backlog-item", "user-feedback"] {
+            all.extend(crate::gate::rows(
+                crate::gate::api(
+                    http,
+                    reqwest::Method::GET,
+                    &format!("/api/jobs?kind={kind}&limit=200"),
+                    None,
+                )
+                .await?,
+            ));
+        }
+        let resolve = |flag: &str, given: Option<String>| -> Result<Option<String>> {
+            let Some(given) = given else {
+                return Ok(None);
+            };
+            let full = crate::park::resolve_job_id(&all, &given)?;
+            if full != given {
+                println!("boss car: {flag} {given} -> {full}");
+            }
+            Ok(Some(full))
+        };
+        Ok(Self {
+            backlog_item: resolve("--backlog-item", self.backlog_item)?,
+            partial_item: resolve("--partial-item", self.partial_item)?,
+            no_item: self.no_item,
+        })
+    }
+}
+
+/// The gate's refusal, in this verb's flag spelling: `--park-backlog-item`
+/// is `--backlog-item` here. One mechanical substitution over a shared
+/// message, rather than a second message to keep in step with it.
+///
+/// The one line of our own says WHEN the answer is being asked for, which
+/// the shared text cannot: it was written for a verb that runs after the
+/// build, and here the build has not started.
+fn in_this_verbs_spelling(refusal: &str) -> String {
+    format!(
+        "a car states which item it is for when its build STARTS — the gate then only \
+         has to confirm it.\n{}",
+        refusal.replace("--park-", "--")
+    )
+}
 
 /// What `boss car open` does about a branch, decided from the system of
 /// record alone — so "does it ever file a second car" is a unit test and
@@ -105,15 +262,16 @@ fn check_branch(branch: &str) -> Result<&str> {
 fn open_body(
     branch: &str,
     summary: &str,
-    backlog_item: Option<&str>,
+    item: &ItemAnswer,
     actor: &str,
     host: &str,
     worktree: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Value {
-    let mut body = car::car_body(branch, summary, backlog_item, None);
+    let mut body = car::car_body(branch, summary, item.backlog_item.as_deref(), None);
     if let Some(md) = body.get_mut("metadata").and_then(Value::as_object_mut) {
         md.extend(car::build_start(actor, host, worktree, now));
+        md.extend(item.provenance());
     }
     body
 }
@@ -123,7 +281,7 @@ pub(crate) async fn open(
     branch: &str,
     summary: &str,
     excludes: &str,
-    backlog_item: Option<String>,
+    item: ItemAnswer,
     dry: bool,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
@@ -136,6 +294,10 @@ pub(crate) async fn open(
              keeps a PR small."
         );
     }
+    // WHICH ITEM — before the actor, the reads and the POST, so a missing
+    // answer costs a line of output rather than a half-filled packet. The
+    // refusal is the GATE'S OWN (see `ItemAnswer::check`).
+    item.check(summary, excludes)?;
     let http = reqwest::Client::new();
 
     // The actor FIRST, before anything is created: a write nobody names
@@ -148,28 +310,7 @@ pub(crate) async fn open(
     // a line rather than a rejected POST. Both kinds a car can answer,
     // concatenated so an id matching one of each is reported ambiguous
     // rather than resolved by whichever query ran first (381a4872).
-    let backlog_item = match backlog_item {
-        None => None,
-        Some(given) => {
-            let mut all = Vec::new();
-            for kind in ["backlog-item", "user-feedback"] {
-                all.extend(crate::gate::rows(
-                    crate::gate::api(
-                        &http,
-                        reqwest::Method::GET,
-                        &format!("/api/jobs?kind={kind}&limit=200"),
-                        None,
-                    )
-                    .await?,
-                ));
-            }
-            let full = crate::park::resolve_job_id(&all, &given)?;
-            if full != given {
-                println!("boss car: backlog-item {given} -> {full}");
-            }
-            Some(full)
-        }
-    };
+    let item = item.resolve_ids(&http).await?;
 
     // EVERY OPEN CAR, PAGED. A limit is not a filter, and the question
     // "does this branch already have a car" must not answer `None`
@@ -227,13 +368,7 @@ pub(crate) async fn open(
         reqwest::Method::POST,
         "/api/jobs",
         Some(open_body(
-            branch,
-            summary,
-            backlog_item.as_deref(),
-            &actor,
-            &host,
-            &worktree,
-            now,
+            branch, summary, &item, &actor, &host, &worktree, now,
         )),
     )
     .await?;
@@ -324,8 +459,8 @@ pub(crate) async fn open(
     // THE CAR IS THE ITEM'S BUILD — and saying so at OPEN rather than at
     // green is the point: the item's `build` step opens when the build
     // starts. Last, so a failure here costs the routing and not the car.
-    if let Some(item) = backlog_item.as_deref() {
-        crate::park::route_linked_item(&http, item, &id, branch, "car").await;
+    if let Some(closes) = item.backlog_item.as_deref() {
+        crate::park::route_linked_item(&http, closes, &id, branch, "car").await;
     }
     Ok(())
 }
@@ -339,6 +474,33 @@ mod tests {
 
     fn at(s: &str) -> chrono::DateTime<chrono::Utc> {
         chrono::DateTime::parse_from_rfc3339(s).unwrap().into()
+    }
+
+    /// The three answers, each on its own — the shape the CLI hands in.
+    fn closes(id: &str) -> ItemAnswer {
+        ItemAnswer {
+            backlog_item: Some(id.into()),
+            ..Default::default()
+        }
+    }
+    fn partial(id: &str) -> ItemAnswer {
+        ItemAnswer {
+            partial_item: Some(id.into()),
+            ..Default::default()
+        }
+    }
+    fn no_item(reason: &str) -> ItemAnswer {
+        ItemAnswer {
+            no_item: Some(reason.into()),
+            ..Default::default()
+        }
+    }
+    /// The scope every open carries — what makes an open's intent never
+    /// empty, which is why the gate's refusal runs on it.
+    const SUMMARY: &str = "A car states its item at build start";
+    const EXCLUDES: &str = "Not the gate's own refusal, which is reused";
+    fn check(a: &ItemAnswer) -> Result<()> {
+        a.check(SUMMARY, EXCLUDES)
     }
 
     /// A car as this verb leaves it: scope declared, build claimed, gate
@@ -432,7 +594,7 @@ mod tests {
         let body = open_body(
             BRANCH,
             "A car opens when the build starts. And more.",
-            None,
+            &no_item("asked for in conversation"),
             "claude@algedonic.dev",
             "boss-dev-0",
             "/work/boss/.claude/worktrees/agent-a23",
@@ -465,7 +627,7 @@ mod tests {
         let body = open_body(
             BRANCH,
             "s",
-            Some("be025b44-2725-4db5-90d9-f16aba3844c6"),
+            &closes("be025b44-2725-4db5-90d9-f16aba3844c6"),
             "claude@algedonic.dev",
             "",
             "",
@@ -493,5 +655,116 @@ mod tests {
         let e = check_branch("  ").unwrap_err().to_string();
         assert!(e.contains("branch"), "{e}");
         assert!(check_branch(BRANCH).is_ok());
+    }
+
+    /// A CAR WITH NO ITEM ANSWER IS REFUSED, AND THE REFUSAL NAMES ALL
+    /// THREE — in THIS verb's flag spelling.
+    ///
+    /// The refusal itself is `boss gate`'s: one definition of which
+    /// answers are legal and what the refusal says (CLAUDE.md §9a). What
+    /// is adapted here is only the flag prefix, and this test is the pin
+    /// on that adaptation — a reworded gate refusal that stopped naming
+    /// the flags would red here rather than silently printing the wrong
+    /// ones.
+    #[test]
+    fn an_open_with_no_item_answer_is_refused_naming_all_three() {
+        let e = check(&ItemAnswer::default()).unwrap_err().to_string();
+        for flag in ["--backlog-item", "--partial-item", "--no-item"] {
+            assert!(e.contains(flag), "the refusal names {flag}: {e}");
+        }
+        assert!(
+            !e.contains("--park-"),
+            "this verb's flags have no `park` in them — the gate's spelling must not leak \
+             into a refusal printed by `boss car open`: {e}"
+        );
+    }
+
+    /// EACH ANSWER, ALONE, IS ACCEPTED — and lands on the packet under
+    /// the key its semantics demand. The closing edge is the ONLY key the
+    /// arrival rule follows, so the other two must never write it.
+    #[test]
+    fn each_of_the_three_answers_is_recorded_under_its_own_key() {
+        let body = |a: &ItemAnswer| {
+            check(a).expect("one answer is enough");
+            open_body(
+                BRANCH,
+                SUMMARY,
+                a,
+                "claude@algedonic.dev",
+                "boss-dev-0",
+                "/w",
+                at("2026-09-11T09:00:00Z"),
+            )
+        };
+
+        let closing = body(&closes("90d291bb-9772-4ccb-b520-6d934f0860b8"));
+        assert_eq!(
+            closing["metadata"]["backlog_item"],
+            "90d291bb-9772-4ccb-b520-6d934f0860b8"
+        );
+        for k in [car::PARTIAL_ITEM, car::NO_ITEM_REASON] {
+            assert!(closing["metadata"].get(k).is_none(), "{closing}");
+        }
+
+        let piece = body(&partial("cf0f5e2d-0000-0000-0000-000000000000"));
+        assert_eq!(
+            piece["metadata"][car::PARTIAL_ITEM],
+            "cf0f5e2d-0000-0000-0000-000000000000"
+        );
+        assert!(
+            piece["metadata"].get("backlog_item").is_none(),
+            "ONE PIECE must never write the key that closes the item: {piece}"
+        );
+        assert!(piece["metadata"].get(car::NO_ITEM_REASON).is_none());
+
+        let none = body(&no_item("David asked for this in conversation"));
+        assert_eq!(
+            none["metadata"][car::NO_ITEM_REASON],
+            "David asked for this in conversation"
+        );
+        assert!(none["metadata"].get("backlog_item").is_none());
+        assert!(none["metadata"].get(car::PARTIAL_ITEM).is_none());
+    }
+
+    /// TWO ANSWERS AT ONCE ARE REFUSED RATHER THAN RANKED. Which one is
+    /// given decides whether the item CLOSES when the car lands, so
+    /// there is nothing to rank.
+    #[test]
+    fn two_answers_at_once_are_refused_rather_than_ranked() {
+        let id = "cf0f5e2d-0000-0000-0000-000000000000";
+        let pairs = [
+            (Some(id), Some(id), None),
+            (Some(id), None, Some("asked in chat")),
+            (None, Some(id), Some("asked in chat")),
+            (Some(id), Some(id), Some("asked in chat")),
+        ];
+        for (b, p, n) in pairs {
+            let a = ItemAnswer {
+                backlog_item: b.map(str::to_string),
+                partial_item: p.map(str::to_string),
+                no_item: n.map(str::to_string),
+            };
+            let e = check(&a).unwrap_err().to_string();
+            assert!(
+                e.contains("exactly one"),
+                "{b:?}/{p:?}/{n:?} must be refused, not ranked: {e}"
+            );
+            assert!(!e.contains("--park-"), "{e}");
+        }
+    }
+
+    /// A BLANK ANSWER IS NOT AN ANSWER. A blank id records nothing and
+    /// passes the ref check as "no claim to check"; a blank reason is the
+    /// silent omission again with a flag in front of it.
+    #[test]
+    fn a_blank_id_or_a_blank_reason_is_refused() {
+        for a in [closes("   "), partial("  "), no_item("   "), no_item("")] {
+            let e = check(&a).unwrap_err().to_string();
+            assert!(
+                e.contains("--no-item"),
+                "the refusal points at the escape: {e}"
+            );
+            assert!(!e.contains("--park-"), "{e}");
+        }
     }
 }

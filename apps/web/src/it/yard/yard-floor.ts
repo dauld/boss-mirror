@@ -905,8 +905,16 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
   // them, in the server's words, or that they depart on the next tick.
   const dockHeld = b?.held_because ?? null;
   const cooling = cooldown !== null && cooldown > 0;
-  const dockLabel =
-    parked === 0
+  // NO READING comes first, because every sentence below is a claim
+  // about what stands on the dock and an unserved station queue is
+  // evidence for none of them. `empty` is the dangerous one: it reads
+  // calm, and the case that produces it is a rollback past the row's
+  // hold clause — somebody is already mid-incident. Same posture as the
+  // conductor lamp's "no reading": state the absence, never a default.
+  const unread = yard.dockStation.source !== 'station';
+  const dockLabel = unread
+    ? 'no reading · the station queue did not serve'
+    : parked === 0
       ? cooling
         ? `empty · cooldown ${cooldown} min`
         : dockHeld === null && b?.next_board
@@ -948,7 +956,7 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
         held: dockHeld,
         next: b?.next_board ?? null,
         cooldownMinutes: cooldown,
-        lamp: parked > 0 ? 'ok' : 'off',
+        lamp: !unread && parked > 0 ? 'ok' : 'off',
       },
       queue: { label: queueLaneLabel(queue), count: queue.length },
       garage: { label: garageCount > 0 ? `${garageCount} gated red` : 'empty', count: garageCount },

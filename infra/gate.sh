@@ -219,11 +219,30 @@ require_headroom "to start"
 #            pre-flight or is named in its exclusion set. Omitting these would let `--auto` skip the only
 #            test guarding the file being edited — which this very car
 #            would have done to itself.
+#            infra/lint/* ALSO implies boss-cli (added with backlog
+#            294bb7c9): train.rs's `the_roster_is_the_lint_directory
+#            _itself` reads infra/lint/ and asserts every lint the
+#            delivery policy excuses is STILL a file there, so deleting
+#            or renaming a lint reddens the conductor's consist check.
+#            The gate already compiles boss-testing for these paths;
+#            compiling the other reader too is the cheap half.
 #     infra/dispatcher/rules/*.toml -> boss-dispatcher, which owns
 #            dispatcher_rules_seed.rs. It compares the seeded registry
 #            against that directory in BOTH directions, and skipping the
 #            authored half is what reddened the 13-car train
 #            20260815-0621.
+#            AND boss-brewery-engine, decided with backlog 294bb7c9.
+#            protocol_holds_e2e.rs's `overhead_absorption_rules_agree`
+#            reads three NAMED rule files and asserts the three overhead
+#            drivers and their rates match the brewery's own table — a
+#            §9a pin on a fact that lives twice, whose own doc comment
+#            says "change a rate → change it here + in the rule's own
+#            file". Scoped out, a rate edit passes the gate and the two
+#            halves disagree silently. It is listed rather than derived
+#            because the test assembles the filename at run time
+#            (`rules_dir.join(format!("{name}.toml"))`), so no scan of
+#            the source can see which rule files it reads; the derivation
+#            below finds literals, not format strings.
 #     examples/<tenant>/seeds/* -> boss-jobs for workflows.toml (its
 #            seed_loader parses BOTH tenants' bundles through the
 #            viability lint), boss-sim for tenant.toml (seven of its
@@ -320,7 +339,155 @@ crates_from_paths() {
 #
 # The fixtures are path lists rather than real trees on purpose. The
 # rule under test is paths -> crates; staging files would test git.
+# ---------------------------------------------------------------------
+# Files a crate READS: derived from the tree, never listed here
+# ---------------------------------------------------------------------
+# The rules below are hand-written path shapes, and hand-written shapes
+# only cover the couplings somebody noticed. On 2026-09-10 a survey found
+# the cost (backlog 294bb7c9): nine infra paths that a crate compiles in
+# or a test executes mapped to NO crate, and one —
+# infra/deploy-services.sh — was positively asserted to map to none while
+# boss-ports `include_str!`s it. A car editing it scoped away the very
+# test CLAUDE.md §9a cites as the fix for "two services silently absent
+# from a deploy".
+#
+# So don't list them: DERIVE them. A crate that reads a file names that
+# file, and the name is in the source. Two scans answer it, and each is
+# one fact, not a roster:
+#
+#   A COMPILE INPUT escapes its own crate. `include_str!("../../../..
+#   /infra/deploy-services.sh")`, a build.rs `.join("../../../infra/
+#   estate/observe-lib.sh")`, a `#[cfg(test)]` read of `../../../infra/
+#   gate-runner/gate-runner.yaml` — all are relative literals that climb
+#   out of the crate, which is a shape nothing else has. Anywhere in the
+#   crate's .rs, because `include_str!` and build.rs are not confined to
+#   tests/.
+#
+#   A TEST SUBJECT is named repo-relative. boss-testing's script tests do
+#   `read("infra/ops/ops-runner.sh")` from a root joined separately, so
+#   there is no `../` to key on — but a plain repo path literal inside a
+#   crate's tests/ directory that names an existing file is a fixture by
+#   construction. Restricted to tests/ deliberately: the same literal in
+#   src/ is usually prose (boss-content's 503 body mentions
+#   infra/deploy-services.sh in a help string, and boss-policy's and
+#   boss-jobs' port defaults mention it in comments), and mapping those
+#   would compile three crates for a shell-script edit.
+#
+# RESOLVED AGAINST TWO BASES because the two idioms differ:
+# `include_str!` is relative to the source FILE, while
+# `env!("CARGO_MANIFEST_DIR").join("../../../x")` is relative to the
+# crate ROOT. A literal that lands on a real file under either is a
+# reference to it; one that lands nowhere (`"../../etc/passwd"` in a
+# traversal test, `"../fixtures/upstream.git"` in an assertion) is not,
+# and the existence test is what separates them — no allow-list.
+#
+# TWO EXCLUSIONS, both measured, both deliberate:
+#
+#   infra/postgres/schema/** — boss-testing's build.rs compiles every
+#   migration in, and boss-jobs names one in a test, so this scan would
+#   map migrations to crates. It must not: `--auto` asks `schema_touched`
+#   separately and the unscoped `check "fixture"` below is what judges a
+#   schema change in every mode. Mapping it here would compile two crates
+#   per migration and answer a question the fixture already answers.
+#
+#   docs/design/** — boss-jobs' subject_existence_pg.rs uses
+#   "docs/design/subject-identity-and-relationships.md" as a Subject ID,
+#   not as a file it reads. It is a path-shaped string that happens to
+#   name a real file, so the existence test cannot tell it apart, and
+#   including it would compile boss-jobs for any docs-only car. The one
+#   real dependency in the docs tree (gate_sh.rs reads
+#   docs/runbooks/dev-environment-bootstrap.md) is outside design/ and is
+#   picked up normally.
+#
+# Cost: one awk pass over 843 .rs files, ~0.12s, once per invocation.
+# `[ -f ]` is a builtin, so filtering the candidates costs no processes.
+#
+# `/dev/null` is passed to awk as a guaranteed file argument, and it is
+# not decoration: GNU xargs runs the command once even with no input, and
+# an awk with no file arguments reads STDIN — which here is the gate's own
+# stdin. That is the same defect this car fixes on the other side (a
+# check inheriting the gate's stdin), so the scanner must not commit it.
+# A fixed file argument closes it portably, where `xargs -r` would not
+# (BSD xargs has no -r).
+file_input_index() {
+    local path crate
+    find crates -name '*.rs' -print0 2>/dev/null | xargs -0 awk '
+        # `a/b/../c` -> `a/c`, iteratively, with no realpath: GNU
+        # realpath --relative-to does not exist on a Mac, and the Mac
+        # gate and the runner must derive the same scope.
+        function resolve(base, rel) {
+            if (rel !~ /^\.\.\//) return rel
+            while (sub(/^\.\.\//, "", rel)) {
+                if (base ~ /\//) sub(/\/[^\/]*$/, "", base); else base = ""
+            }
+            return (base == "" ? rel : base "/" rel)
+        }
+        FNR == 1 {
+            crate = ""
+            n = split(FILENAME, p, "/")
+            if (n >= 4 && p[1] == "crates") {
+                crate = p[3]
+                root = p[1] "/" p[2] "/" p[3]
+                dir = FILENAME
+                sub(/\/[^\/]*$/, "", dir)
+                intests = (index(FILENAME, root "/tests/") == 1)
+            }
+        }
+        crate == "" { next }
+        /^[[:space:]]*\/\// { next }
+        {
+            rest = $0
+            while (match(rest, /"[^"]*"/)) {
+                spec = substr(rest, RSTART + 1, RLENGTH - 2)
+                rest = substr(rest, RSTART + RLENGTH)
+                if (spec !~ /\//) continue
+                # A literal with whitespace in it is a sentence that
+                # mentions a path, not a path.
+                if (spec ~ /[[:space:]]/) continue
+                # Outside tests/, only an ESCAPING literal counts.
+                if (!intests && spec !~ /^\.\.\//) continue
+                print resolve(dir, spec) " " crate
+                print resolve(root, spec) " " crate
+            }
+        }
+    ' /dev/null | sort -u | while read -r path crate; do
+        case "$path" in
+            crates/*|infra/postgres/schema*|docs/design/*) continue ;;
+        esac
+        if [ -f "$path" ]; then printf '%s %s\n' "$path" "$crate"; fi
+    done
+}
+
+# Computed ONCE and read by `path_map` out of the environment: path_map
+# runs inside a command substitution on every call, and the self-test
+# calls it a few dozen times.
+GATE_FILE_INPUTS="$(file_input_index)"
+
+# The derived half of the map: which crates read the paths on stdin.
+input_crates() {
+    awk -v idx="${GATE_FILE_INPUTS}" '
+        BEGIN {
+            n = split(idx, rows, "\n")
+            for (i = 1; i <= n; i++) {
+                split(rows[i], f, " ")
+                if (f[1] != "") map[f[1]] = map[f[1]] " " f[2]
+            }
+        }
+        $0 != "" && ($0 in map) { print map[$0] }
+    '
+}
+
 path_map() {
+    # Stdin is read ONCE and handed to both halves: the hand-written
+    # shapes below, and the derivation above that reads the tree.
+    local paths
+    paths="$(cat)"
+    { printf '%s\n' "$paths" | path_shapes
+      printf '%s\n' "$paths" | input_crates
+    } | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' '
+}
+
+path_shapes() {
     # An expression REWRITES the pattern space, so the one that matches
     # first wins and the later ones never see the original path. That is
     # why the two specific bundle files sit above the catch-all below
@@ -329,16 +496,16 @@ path_map() {
     # named once.
     sed -n -e 's|^crates/[^/]*/\([^/]*\)/.*|\1|p' \
            -e 's|^infra/gate\.sh$|boss-testing|p' \
-           -e 's|^infra/lint/.*|boss-testing|p' \
+           -e 's|^infra/lint/.*|boss-cli boss-testing|p' \
            -e 's|^\.forgejo/workflows/ci\.yml$|boss-testing|p' \
-           -e 's|^infra/dispatcher/rules/[^/]*\.toml$|boss-dispatcher|p' \
+           -e 's|^infra/dispatcher/rules/[^/]*\.toml$|boss-brewery-engine boss-dispatcher|p' \
            -e 's|^infra/platform/workflows/[^/]*\.toml$|boss-jobs|p' \
            -e 's|^examples/\([^/]*\)/seeds/workflows\.toml$|boss-jobs boss-\1-engine|p' \
            -e 's|^examples/\([^/]*\)/seeds/tenant\.toml$|boss-sim boss-\1-engine|p' \
            -e 's|^examples/\([^/]*\)/seeds/policy_rules\.toml$|boss-policy-client boss-\1-engine|p' \
-           -e 's|^examples/\([^/]*\)/seeds/.*|boss-\1-engine|p' \
-           | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' '
+           -e 's|^examples/\([^/]*\)/seeds/.*|boss-\1-engine|p'
 }
+
 
 scope_self_test() {
     local fails=0 label want got seeds tenant
@@ -381,9 +548,9 @@ scope_self_test() {
     # the lints already run repo-wide.
     # gate.sh and ci.yml are READ by boss-testing's gate_sh.rs, so a
     # change to either must compile and run that crate.
-    _case "the gate's own files imply boss-testing" "boss-testing" \
+    _case "the gate's own files imply boss-testing" "boss-cli boss-testing" \
         "infra/gate.sh" ".forgejo/workflows/ci.yml" "infra/lint/no-secrets.sh"
-    _case "a dispatcher rule file implies boss-dispatcher" "boss-dispatcher" \
+    _case "a dispatcher rule file implies boss-dispatcher" "boss-brewery-engine boss-dispatcher" \
         "infra/dispatcher/rules/converge-on-merge.toml"
     # A TENANT seed bundle is the same shape as the platform bundle one
     # case up, and it was missed for the same reason: the rule was
@@ -430,9 +597,49 @@ scope_self_test() {
     # a malformed one degrades rather than failing a test.
     _case "examples outside a seed bundle imply no crate" "" \
         "examples/used-device-shop/DOMAIN.md" "examples/brewery/data/assets.json"
+    # Infra no crate READS. Both are real scripts, and that is the point:
+    # "unmapped" has to be a fact about the tree, not a fact about which
+    # paths nobody got round to listing.
     _case "other infra implies no crate" "" \
-        "infra/forge/locomotive.sh" "infra/deploy-services.sh"
+        "infra/forge/locomotive.sh" "infra/forge/cluster-watchdog.sh"
+    # THE RE-PIN (backlog 294bb7c9). Until this car, the case above also
+    # asserted `infra/deploy-services.sh` implies no crate — and that
+    # answer was WRONG, not merely incomplete. boss-ports `include_str!`s
+    # that script and reads its fallback arrays out of the text
+    # (`solo_fallback_matches_the_registry`,
+    # `paired_fallback_matches_the_registry`), so it is a COMPILE INPUT
+    # of boss-ports and boss-testing's file_store_config_sh.rs reads it
+    # too. CLAUDE.md §9a's own table lists this pair — consequence "two
+    # services silently absent from a deploy", fix "pinned by a test" —
+    # so the gate was scoping out the documented mechanism for a defect
+    # that has already bitten. Nothing was missing; the wrong answer was
+    # asserted, which is why it needed un-asserting rather than adding to.
+    _case "a script a crate include_str!s is that crate's compile input" \
+        "boss-ports boss-testing" "infra/deploy-services.sh"
+    # A build script's read is a compile input too: boss-dispatcher-
+    # handlers' build.rs `.expect`s infra/estate/observe-lib.sh to exist
+    # and compiles its text in.
+    _case "a build script's input implies its crate" \
+        "boss-dispatcher-handlers" "infra/estate/observe-lib.sh"
+    # Two crates read this manifest — boss-cli defaults to it and asserts
+    # against the real file, boss-testing's gate_runner_manifests.rs pins
+    # it — and the map owes both, not whichever was noticed first.
+    _case "a file two crates read implies both" \
+        "boss-cli boss-testing" "infra/gate-runner/gate-runner.yaml"
+    # The wide set the old map simply omitted: boss-testing owns tests
+    # that EXECUTE infra scripts, and the map gave it only infra/gate.sh
+    # and infra/lint/*. Editing one of these scoped to NO crate, so the
+    # only test that runs the script never ran on the car that changed it.
+    _case "a script boss-testing executes implies boss-testing" "boss-testing" \
+        "infra/ops/ops-runner.sh" "infra/forge/checkout-lock.sh" \
+        "infra/maintenance/forge-token-audit.py" "infra/prep-github-publish.sh"
     _case "docs outside design/ imply no crate" "" "docs/invariants/x.toml" "README.md"
+    # …unless a crate READS it. gate_sh.rs asserts this runbook tells a
+    # developer to set core.hooksPath, so editing the runbook can redden
+    # boss-testing. Derived, not listed — the point of the rule is that
+    # nobody had to notice this one.
+    _case "a runbook a test reads implies that crate" "boss-testing" \
+        "docs/runbooks/dev-environment-bootstrap.md"
     _case "the web app implies no crate" "" "apps/web/src/me/MePage.svelte"
     # Schema files imply no CRATE, which is why --auto asks
     # `schema_touched` separately rather than reading it off this map.
@@ -455,6 +662,33 @@ scope_self_test() {
             fails=1
         fi
     done
+    # And pin the OTHER derivation the same way: the file-input index is
+    # read out of the tree, so the two ways it can rot are rotting to
+    # nothing and naming a crate cargo cannot build.
+    #
+    # A GREP THAT MATCHES NOTHING IS A MAP THAT COVERS NOTHING, and it
+    # fails exactly like the defect this car fixes — silently, with every
+    # infra file implying no crate. The floor is deliberately a round
+    # number well under the live count rather than an exact total: an
+    # exact total is a second copy of the tree (CLAUDE.md §9a) that every
+    # car adding a test would have to edit.
+    local idx_rows idx_path idx_crate idx_manifest idx_found
+    idx_rows=$(printf '%s\n' "${GATE_FILE_INPUTS}" | grep -c '[^[:space:]]')
+    if [ "$idx_rows" -lt 20 ]; then
+        echo "gate.sh scope self-test FAIL: the file-input index found ${idx_rows} crate/file pairs in this tree, which is too few to be a real answer — the scan is broken and every infra path now implies no crate (backlog 294bb7c9)" >&2
+        fails=1
+    fi
+    while read -r idx_path idx_crate; do
+        [ -n "$idx_crate" ] || continue
+        idx_found=0
+        for idx_manifest in crates/*/"$idx_crate"/Cargo.toml; do
+            [ -f "$idx_manifest" ] && idx_found=1
+        done
+        if [ "$idx_found" -eq 0 ]; then
+            echo "gate.sh scope self-test FAIL: ${idx_path} was derived as an input of ${idx_crate}, which is not a crate — the map would demand a -p cargo cannot satisfy" >&2
+            fails=1
+        fi
+    done <<< "${GATE_FILE_INPUTS}"
     if [ "$fails" -ne 0 ]; then
         echo "gate.sh: the scope check cannot be trusted — fix it before relying on -p" >&2
         exit 2
@@ -660,6 +894,19 @@ RECEIPT
 
 # Each check runs even if an earlier one failed — a red gate should
 # report every failure it can see, not make the author fix serially.
+#
+# EVERY CHECK GETS AN EMPTY STDIN, and it is declared here rather than at
+# the call sites so the property holds for phases nobody has written yet.
+# The roster loop does its own `< /dev/null` (for the separate reason
+# written there), but twelve direct `check "…"` calls — the cargo phases,
+# the web phases, svelte-check — inherited whatever stdin the GATE got: a
+# pipe under the gate-runner, a terminal when a person runs it by hand.
+# A check that reads stdin would then read different bytes, or block
+# forever, depending on how the gate was invoked rather than on anything
+# in the tree (backlog f1369b3b, the small sibling of 9d5797d4). No
+# present check wants stdin — cargo, bun and svelte-check all read none —
+# and if one ever does, that is the finding: a gate phase that can block
+# on input cannot run unattended. `check_stdin_self_test` pins this.
 check() {
     local name="$1"; shift
     # The poll. Growth during the run is what wedges the box, so the
@@ -670,7 +917,7 @@ check() {
     # has to be what the check cost, not what the gate's own bookkeeping
     # cost around it.
     local t0=$SECONDS
-    if "$@"; then
+    if "$@" < /dev/null; then
         echo "::endgroup::"
         RAN+=("${name}:pass:$((SECONDS - t0))")
     else
@@ -929,18 +1176,74 @@ last $tmp/quiet.sh"
     fi
 }
 
+# The SAME property, one layer out: the roster loop is not the only
+# caller of `check`. The cargo phases, the web phases and svelte-check
+# are direct `check "…"` calls outside that loop, and until this car they
+# inherited whatever stdin the GATE got — a pipe under the gate-runner, a
+# terminal by hand. Same class as the defect above, one step smaller: a
+# phase whose behaviour depends on a file descriptor nobody declared, so
+# a check that reads stdin reads different bytes on the runner than on a
+# workstation, or blocks forever (backlog f1369b3b).
+#
+# Fixing the twelve call sites one by one would have been a list, not a
+# fix; the redirection lives inside `check` so every FUTURE phase
+# inherits it too. That makes this the pin on `check`'s own contract, and
+# it exercises the REAL `check` rather than a copy of it (CLAUDE.md §9a)
+# — which is why it has to put the two ledgers back afterwards.
+check_stdin_self_test() {
+    local tmp bad=0 failed_before saved_ran=() saved_failed=()
+    tmp="$(mktemp -d)" || { echo "gate.sh: the check self-test cannot make a temp dir" >&2; exit 2; }
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmp'" RETURN
+    printf 'if IFS= read -r l; then echo "stdin carried: $l" >&2; exit 1; fi\nexit 0\n' \
+        > "$tmp/demands-empty-stdin.sh"
+    printf 'a line the gate itself was handed\n' > "$tmp/as-stdin"
+    # A df OF ITS OWN, because `check` polls the disk and gate_sh.rs tests
+    # that poll with a fake df that shrinks on every call. A fixture that
+    # ate one of those readings would move the refusal that test expects
+    # — which is exactly what it did on the first attempt, turning a
+    # green receipt-timing test red. The self-test is about stdin; it must
+    # leave the poll's own fixture untouched.
+    printf '#!/usr/bin/env bash\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/check-self-test 1 1 943718400 1%% /"\n' \
+        > "$tmp/df"
+    chmod +x "$tmp/df"
+    saved_ran=(${RAN+"${RAN[@]}"})
+    saved_failed=(${FAILED+"${FAILED[@]}"})
+    failed_before=${#FAILED[@]}
+    # The gate's own stdin is NOT empty here — that is the environment
+    # being modelled. Only a redirection inside `check` can give the
+    # child EOF.
+    BOSS_GATE_DF_CMD="$tmp/df" \
+        check "check-stdin-self-test" bash "$tmp/demands-empty-stdin.sh" \
+        < "$tmp/as-stdin" > /dev/null
+    if [ "${#FAILED[@]}" -ne "$failed_before" ]; then
+        echo "gate.sh check self-test FAIL: a check was handed the gate's own stdin instead of an empty one, so every phase outside the roster loop behaves one way under the runner and another by hand (backlog f1369b3b)" >&2
+        bad=1
+    fi
+    # Put the ledgers back: a fixture must not appear in the receipt.
+    RAN=(${saved_ran+"${saved_ran[@]}"})
+    FAILED=(${saved_failed+"${saved_failed[@]}"})
+    if [ "$bad" -ne 0 ]; then
+        echo "gate.sh: a gate phase that can block on input cannot run unattended — fix \`check\` before trusting this run" >&2
+        exit 2
+    fi
+}
+
 # Runnable on its own, because a pin whose only output is silence is a
 # pin nobody can check is still a pin. `roster_loop_self_test` exits 2
 # with a named failure, so reaching the line below means it held.
 if [ "$SELFTEST" -eq 1 ]; then
     roster_loop_self_test
+    check_stdin_self_test
     echo "gate.sh: roster self-test ok — a check that reads stdin cannot truncate the roster, \
-every check is handed an empty stdin, and a truncation by any other route is refused by count"
+every check is handed an empty stdin (inside the roster loop and out), and a truncation by any \
+other route is refused by count"
     exit 0
 fi
 
 run_preflight() {
     roster_loop_self_test
+    check_stdin_self_test
     check "fmt" cargo fmt -- --check
     local roster
     if ! roster=$(preflight_roster); then

@@ -154,3 +154,136 @@ fn the_manifests_point_at_the_mechanism_not_at_a_ritual() {
         );
     }
 }
+
+/// Container blocks of the pod spec, as (name, block text).
+///
+/// Hand-scanned rather than YAML-parsed because the workspace carries no
+/// YAML parser and one dependency for one lint is a poor trade; the
+/// structure needed here is shallow. `volumes:` entries look exactly
+/// like containers at this indentation, so the scan is bounded to the
+/// `containers:` / `initContainers:` sections — a postgres native
+/// sidecar lives in the latter, and a check that silently skipped it
+/// would pass on the very container the warning named.
+fn pod_containers(text: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut in_section = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let indent = line.len() - trimmed.len();
+        if indent == 6 && trimmed.ends_with(':') {
+            in_section = matches!(trimmed, "containers:" | "initContainers:");
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if indent == 8
+            && let Some(name) = trimmed.strip_prefix("- name: ")
+        {
+            out.push((name.trim().to_string(), String::new()));
+            continue;
+        }
+        if let Some(last) = out.last_mut() {
+            last.1.push_str(line);
+            last.1.push('\n');
+        }
+    }
+    out
+}
+
+/// THE GATE MUST MEET THE RESTRICTED PROFILE, NOT WARN ABOUT IT.
+///
+/// Every launch printed `Warning: would violate PodSecurity
+/// "restricted:latest"` — the postgres sidecar dropped only NET_RAW and
+/// nothing set runAsNonRoot. A warning is the whole consequence while
+/// the cluster default enforces `baseline`, which is what made this a
+/// CLIFF rather than a slope: tighten that default, or label boss-dev
+/// `enforce: restricted`, and every gate Job becomes uncreatable at
+/// admission. The gate is the only path a car has to a green receipt,
+/// so that is all delivery stopping at once, in a shape (pods refused
+/// before any container starts) that reads like a code defect and gets
+/// diagnosed as one (backlog bb5a902e).
+///
+/// `infra/gate.sh` never renders or applies this manifest, so nothing
+/// in the gate's own check roster can catch a regression here — a car
+/// that re-opened the gap would go green. This test is where that gets
+/// read. It asserts the properties, not their formatting, so the
+/// manifests stay free to explain themselves.
+#[test]
+fn both_runners_meet_the_restricted_profile() {
+    for rel in [SHARED, LOCAL] {
+        let text = read(rel);
+        assert!(
+            text.contains("runAsNonRoot: true"),
+            "{rel} must set runAsNonRoot: true on the POD, so a container added later \
+             inherits it instead of silently re-opening the gap"
+        );
+        assert!(
+            text.contains("seccompProfile: {type: RuntimeDefault}"),
+            "{rel} must keep the RuntimeDefault seccomp profile the restricted profile requires"
+        );
+        let containers = pod_containers(&text);
+        assert!(
+            containers.iter().any(|(n, _)| n == "gate")
+                && containers.iter().any(|(n, _)| n == "postgres"),
+            "{rel}: the scan found {:?}, not the gate + postgres pair — either a container was \
+             renamed or this scan no longer sees the sections it must cover",
+            containers.iter().map(|(n, _)| n).collect::<Vec<_>>()
+        );
+        for (name, block) in &containers {
+            assert!(
+                block.contains("allowPrivilegeEscalation: false"),
+                "{rel}: container {name} must set allowPrivilegeEscalation: false"
+            );
+            assert!(
+                block.contains(r#"capabilities: {drop: ["ALL"]}"#),
+                "{rel}: container {name} must drop ALL capabilities. NET_RAW-only was the \
+                 right read of the postgres entrypoint's root-then-gosu hop and the wrong \
+                 fix: name uid 999 and the root phase never happens, so nothing needs \
+                 CHOWN/SETUID/SETGID"
+            );
+            let uid = block
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("runAsUser: ").map(str::trim))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{rel}: container {name} names no runAsUser. runAsNonRoot alone makes \
+                         the kubelet REFUSE an image whose user is root, and boss-ci declares \
+                         no USER — so the uid has to be explicit here or the pod never starts"
+                    )
+                });
+            assert_ne!(
+                uid, "0",
+                "{rel}: container {name} runs as uid 0, which runAsNonRoot forbids"
+            );
+        }
+    }
+}
+
+/// A named uid needs a writable HOME, and boss-ci has no passwd entry
+/// for one.
+///
+/// `run.sh`'s first act is `git config --global credential.helper`,
+/// under `set -e`: it writes `$HOME/.gitconfig`. containerd hands an
+/// unresolvable uid `HOME=/`, which is not writable, so the gate would
+/// die before the clone — on EVERY branch, with a message about git
+/// config rather than about a uid. The fix has to be an env var in the
+/// manifest and not a `mkdir` in run.sh, because the script reaches the
+/// pod through a separately-applied ConfigMap: a manifest depending on
+/// a run.sh change would be live before the change was.
+#[test]
+fn the_non_root_gate_is_given_a_writable_home() {
+    for rel in [SHARED, LOCAL] {
+        let text = read(rel);
+        let (_, gate) = pod_containers(&text)
+            .into_iter()
+            .find(|(n, _)| n == "gate")
+            .unwrap_or_else(|| panic!("{rel} has no container named gate"));
+        assert!(
+            gate.contains("{name: HOME, value: /gate-target}"),
+            "{rel}: the gate container must set HOME to the workspace mount. It exists before \
+             the container starts and fsGroup has already made it group-writable, which an \
+             arbitrary path would not be"
+        );
+    }
+}

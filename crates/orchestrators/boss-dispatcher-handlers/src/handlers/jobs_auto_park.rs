@@ -363,13 +363,61 @@ fn adopt_patch(car: &Value, inputs: &AutoParkInputs) -> Value {
     let mut patch = serde_json::Map::new();
     patch.extend(inputs.proof.clone());
     patch.extend(inputs.item_provenance.clone());
+    patch.extend(clear_stale_item_answer(car, inputs));
     if let Some(dc) = inputs.delivery_channel.as_deref() {
         patch.insert("delivery_channel".to_string(), json!(dc));
     }
+    // LAST, so the id `supersede` preserves wins over a clear: the two
+    // overlap only on a hand-edited packet, and keeping the id is the
+    // whole point of superseding rather than dropping.
     for (k, v) in supersede(car, inputs) {
         patch.insert(k, v);
     }
     Value::Object(patch)
+}
+
+/// PURE: the non-closing item answers an OPEN recorded that the gate has
+/// since answered DIFFERENTLY — nulled, which is how the job-metadata
+/// door deletes a key.
+///
+/// ONE CAR, ONE ITEM ANSWER. Since `boss car open` gained the same three
+/// answers the gate has (backlog 90d291bb), a car can arrive at its green
+/// already carrying `PARTIAL_ITEM` or `NO_ITEM_REASON`. When the gate
+/// restates the same answer — the common case, and the point of stating
+/// it at build start — nothing here fires and the recorded value stands.
+/// When the gate answers something else, its answer is written and the
+/// open's must go, or the car reads "this car answers no item" beside the
+/// edge that closes one.
+///
+/// THIS IS RESIDUE, NOT THE HARM `supersede` PREVENTS. The dangerous
+/// direction is an open that named the CLOSING edge against a gate that
+/// said do not close it, because that buries work; `supersede` owns that
+/// case and records it in prose. This one only leaves a packet saying two
+/// things, which costs the next reader a re-derivation rather than a
+/// buried piece of work — so it is a quiet delete plus a warn, not a
+/// narrative.
+///
+/// NOTHING IS DELETED UNLESS THE GATE REALLY STATED AN ANSWER. The three
+/// `--park-*` answers are mutually exclusive and one is required, so a
+/// gate-run with no answer at all can only come from a hand-edited
+/// packet — and there the recorded answer is the only answer there is. A
+/// destructive write that fires when it should not is worse than the
+/// residue it removes.
+fn clear_stale_item_answer(car: &Value, inputs: &AutoParkInputs) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    if inputs.backlog_item.is_none() && inputs.item_provenance.is_empty() {
+        return out;
+    }
+    for key in [car::PARTIAL_ITEM, car::NO_ITEM_REASON] {
+        let recorded = car
+            .pointer(&format!("/metadata/{key}"))
+            .and_then(Value::as_str)
+            .is_some_and(|v| !v.trim().is_empty());
+        if recorded && !inputs.item_provenance.contains_key(key) {
+            out.insert(key.to_string(), Value::Null);
+        }
+    }
+    out
 }
 
 /// PURE: the one case where an adopt OVERWRITES what the open recorded —
@@ -767,6 +815,19 @@ impl Handler for JobsAutoPark {
                     .and_then(Value::as_str)
                 {
                     tracing::warn!(rule = %ctx.rule_name, car = %id, "{why}");
+                }
+                // The quieter half of the same disagreement: the open
+                // recorded a non-closing answer and the gate answered
+                // otherwise, so the stale one is being removed. Said out
+                // loud, because a key that vanishes without a record is a
+                // re-derivation for whoever notices.
+                for key in [car::PARTIAL_ITEM, car::NO_ITEM_REASON] {
+                    if patch.as_object().and_then(|m| m.get(key)) == Some(&Value::Null) {
+                        tracing::warn!(rule = %ctx.rule_name, car = %id,
+                            "the open recorded `{key}` and the gate answered differently — \
+                             the stale answer was removed so the car states one item \
+                             answer, not two");
+                    }
                 }
                 if patch.as_object().is_some_and(|m| !m.is_empty()) {
                     write_json(
@@ -1741,6 +1802,160 @@ mod building_car_tests {
             "aaaa1111-0000-0000-0000-000000000000"
         );
         assert!(patch["backlog_item"].is_null());
+    }
+
+    /// AN ANSWER STATED AT OPEN SURVIVES THE ADOPT, UNCHANGED.
+    ///
+    /// `boss car open --partial-item X` / `--no-item "<reason>"` writes
+    /// the answer on the car at build start, where the `scope` and
+    /// `build` steps are completed too. The green then ADOPTS that
+    /// packet, and an adopt that dropped the answer would lose the
+    /// provenance for the whole build — which is what a sibling car was
+    /// found doing with the gate's copy of exactly these keys.
+    ///
+    /// The common case is AGREEMENT: the builder states the answer once
+    /// at open and `--park-*` confirms it. Verified, not assumed.
+    #[test]
+    fn an_item_answer_stated_at_open_survives_the_adopt() {
+        let partial = "cf0f5e2d-0000-0000-0000-000000000000";
+        let opened = |key: &str, value: &str| {
+            let mut c = building();
+            c["metadata"][key] = json!(value);
+            c
+        };
+        let inputs = |provenance: serde_json::Map<String, Value>| AutoParkInputs {
+            branch: BRANCH.to_string(),
+            summary: "s".into(),
+            excludes: "e".into(),
+            test: "t".into(),
+            verified: "v".into(),
+            backlog_item: None,
+            item_provenance: provenance,
+            delivery_channel: None,
+            receipt: Receipt {
+                raw: "{}".into(),
+                head: "deadbeef".into(),
+                mode: "full".into(),
+            },
+            proof: serde_json::Map::new(),
+        };
+
+        // ONE PIECE, stated at open and confirmed at the gate.
+        let car = opened(car::PARTIAL_ITEM, partial);
+        let same = inputs(car::item_provenance(Some(partial), None));
+        assert!(
+            supersede(&car, &same).is_empty(),
+            "agreement is not a contradiction"
+        );
+        let patch = adopt_patch(&car, &same);
+        assert_eq!(
+            patch[car::PARTIAL_ITEM],
+            partial,
+            "the answer the open recorded is still on the car after the adopt: {patch}"
+        );
+        assert!(
+            patch.get("backlog_item").is_none(),
+            "and the adopt never turns it into the key that closes the item: {patch}"
+        );
+        assert!(patch.get(car::NO_ITEM_REASON).is_none(), "{patch}");
+
+        // NO ITEM, stated at open and confirmed at the gate.
+        let reason = "David asked for this in conversation";
+        let car = opened(car::NO_ITEM_REASON, reason);
+        let same = inputs(car::item_provenance(None, Some(reason)));
+        assert!(supersede(&car, &same).is_empty());
+        let patch = adopt_patch(&car, &same);
+        assert_eq!(patch[car::NO_ITEM_REASON], reason, "{patch}");
+        assert!(patch.get("backlog_item").is_none(), "{patch}");
+        assert!(patch.get(car::PARTIAL_ITEM).is_none(), "{patch}");
+    }
+
+    /// AFTER AN ADOPT A CAR STATES ONE ITEM ANSWER, NOT TWO.
+    ///
+    /// Now that an open can record a NON-closing answer, the
+    /// contradiction has a second direction `supersede` does not cover:
+    /// the open said `--no-item "<reason>"` (or `--partial-item X`) and
+    /// the gate then said something else. The gate's answer is written,
+    /// and without this the open's would simply stay beside it — a car
+    /// reading "this car answers no item" next to the edge that closes
+    /// one. Nothing is buried, so this is residue rather than harm, but
+    /// residue on a packet is read as fact by the next session.
+    ///
+    /// DELETED ONLY WHEN THE GATE REALLY STATED AN ANSWER. A destructive
+    /// write that fires when it should not is worse than the residue it
+    /// removes, so a gate-run carrying no item answer at all (only
+    /// reachable by hand-editing the packet) removes nothing.
+    #[test]
+    fn a_gate_that_answers_differently_leaves_the_car_stating_one_answer() {
+        let partial = "cf0f5e2d-0000-0000-0000-000000000000";
+        let closing = "90d291bb-0000-0000-0000-000000000000";
+        let reason = "found while building something else";
+        let inputs = |backlog_item: Option<&str>,
+                      provenance: serde_json::Map<String, Value>|
+         -> AutoParkInputs {
+            AutoParkInputs {
+                branch: BRANCH.to_string(),
+                summary: "s".into(),
+                excludes: "e".into(),
+                test: "t".into(),
+                verified: "v".into(),
+                backlog_item: backlog_item.map(str::to_string),
+                item_provenance: provenance,
+                delivery_channel: None,
+                receipt: Receipt {
+                    raw: "{}".into(),
+                    head: "deadbeef".into(),
+                    mode: "full".into(),
+                },
+                proof: serde_json::Map::new(),
+            }
+        };
+        let opened = |key: &str, value: &str| {
+            let mut c = building();
+            c["metadata"][key] = json!(value);
+            c
+        };
+
+        // DELETED means PRESENT AND NULL. `patch[key]` on a serde_json
+        // object answers `Null` for a key that is simply ABSENT, so
+        // `is_null()` alone asserts nothing — the assertion has to
+        // distinguish "the door is told to delete this" from "the patch
+        // never mentioned it".
+        let deleted = |patch: &Value, key: &str| {
+            patch.as_object().and_then(|m| m.get(key)) == Some(&Value::Null)
+        };
+
+        // The open said NO ITEM; the gate names the closing edge. The
+        // edge is written by `adopt_edge_patch`; the stale reason must go.
+        let car = opened(car::NO_ITEM_REASON, reason);
+        let patch = adopt_patch(&car, &inputs(Some(closing), serde_json::Map::new()));
+        assert!(
+            deleted(&patch, car::NO_ITEM_REASON),
+            "present-and-null is the metadata door's DELETE: a car cannot both answer no \
+             item and carry the edge that closes one: {patch}"
+        );
+
+        // The open said ONE PIECE; the gate says no item at all.
+        let car = opened(car::PARTIAL_ITEM, partial);
+        let patch = adopt_patch(
+            &car,
+            &inputs(None, car::item_provenance(None, Some(reason))),
+        );
+        assert_eq!(patch[car::NO_ITEM_REASON], reason, "{patch}");
+        assert!(
+            deleted(&patch, car::PARTIAL_ITEM),
+            "the gate's answer replaces the open's, rather than sitting next to it: {patch}"
+        );
+
+        // A gate that states NOTHING about the item deletes nothing — the
+        // hand-edited-packet case, where the recorded answer is the only
+        // answer there is.
+        let car = opened(car::PARTIAL_ITEM, partial);
+        let patch = adopt_patch(&car, &inputs(None, serde_json::Map::new()));
+        assert!(
+            patch.get(car::PARTIAL_ITEM).is_none(),
+            "nothing stated, nothing removed: {patch}"
+        );
     }
 
     /// AND NOTHING IS SUPERSEDED WHEN THE ANSWERS AGREE. The common case

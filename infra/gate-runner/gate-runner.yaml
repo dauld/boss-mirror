@@ -135,8 +135,30 @@ spec:
       imagePullSecrets:
         - {name: forgejo-registry}
       automountServiceAccountToken: false
+      # THE RESTRICTED PROFILE, MET RATHER THAN WARNED ABOUT.
+      #
+      # Every gate launch used to print `Warning: would violate
+      # PodSecurity "restricted:latest"` — unrestricted capabilities on
+      # the postgres sidecar, and runAsNonRoot unset on both containers.
+      # The cluster's PodSecurity default is Talos's (enforce baseline,
+      # WARN restricted), and boss-dev carries no namespace label of its
+      # own, so the warning was the whole consequence. That made it a
+      # CLIFF, not a slope: the day anyone tightens the default or
+      # labels this namespace `enforce: restricted`, every gate Job
+      # becomes uncreatable at admission, and since the gate is the only
+      # path a car has to a green receipt, all delivery stops — with a
+      # failure shape (pods refused before any container starts) that
+      # looks nothing like a code defect. Nine identical warnings a day
+      # also scrolled past the line naming the packet that was created,
+      # which is how an operator learns to stop reading gate output
+      # (backlog bb5a902e).
+      #
+      # runAsNonRoot is set HERE, at the pod, so a container added later
+      # inherits it and a root image is refused rather than silently
+      # re-opening the gap. Each container names its own uid below.
       securityContext:
         fsGroup: 1500
+        runAsNonRoot: true
         seccompProfile: {type: RuntimeDefault}
       initContainers:
         # Postgres as a NATIVE SIDECAR (initContainer + restartPolicy
@@ -155,9 +177,35 @@ spec:
           # does. Pinned by infra/lint/the-build-pulls-only-mirrored-bases.sh.
           image: 10.20.0.15:3000/david/postgres:16
           restartPolicy: Always
+          # UID 999 IS WHERE THIS PROCESS ENDS UP ANYWAY, so start there.
+          #
+          # The dev pod's sibling sidecar drops only NET_RAW, and its
+          # comment is correct about why: the official image's entrypoint
+          # starts as ROOT, chowns PGDATA, and execs gosu to become the
+          # postgres user, so dropping CHOWN/SETUID/SETGID would take
+          # away the very capabilities it uses to stop being root.
+          #
+          # Naming the uid removes that argument instead of fighting it.
+          # `if [ "$(id -u)" = 0 ]` is the entrypoint's own gate for the
+          # chown-and-gosu branch; entered as 999 it skips the branch
+          # entirely, needs no capability at all, and `drop: ["ALL"]`
+          # costs nothing. 999 is not a guess: it is the uid the image's
+          # own `postgres` user has, measured on the live dev sidecar
+          # through the shared pid namespace (six postgres processes,
+          # every one Uid: 999) — so this is the same final uid the
+          # gosu path reaches, with the root phase removed.
+          #
+          # PGDATA stays a SUBDIRECTORY of the mount (/pgdata/data, not
+          # /pgdata). The pod's fsGroup makes the emptyDir root:1500
+          # g+rwxs and puts 1500 in this container's supplementary
+          # groups, so uid 999 can create the subdirectory; owning it
+          # lets the entrypoint chmod it 0700, which postgres refuses to
+          # start without and which cannot be done to the mount itself.
           securityContext:
             allowPrivilegeEscalation: false
-            capabilities: {drop: ["NET_RAW"]}
+            runAsUser: 999
+            runAsGroup: 999
+            capabilities: {drop: ["ALL"]}
           env:
             - {name: POSTGRES_USER, value: boss}
             - {name: POSTGRES_PASSWORD, value: boss}
@@ -196,8 +244,78 @@ spec:
             # so the suite could not have run at all (ade5d82b).
             - {name: PLAYWRIGHT_BROWSERS_PATH, value: /opt/ms-playwright}
             - {name: BOSS_TEST_POSTGRES_ADMIN_URL, value: "postgres://boss:boss@127.0.0.1:5432/postgres"}
+            # HOME IS NAMED BECAUSE THE UID IS. boss-ci declares no USER,
+            # so this container ran as root with HOME=/root; 65534's own
+            # passwd entry points at /nonexistent, and an uncatalogued uid
+            # gets `/` — neither is writable. The first thing run.sh
+            # does is `git config --global credential.helper`, i.e. write
+            # $HOME/.gitconfig, under `set -e`: an unwritable HOME would
+            # kill every gate before the clone. /gate-target is the
+            # per-run workspace mount, so it exists before the container
+            # starts and fsGroup has already made it group-writable —
+            # and bun's install cache ($HOME/.bun) then lands on the
+            # volume that has a sizeLimit instead of on the node's
+            # container store. This must be an env var, not a mkdir in
+            # run.sh: the script reaches the pod through a ConfigMap
+            # applied separately, so a manifest that depended on a
+            # run.sh change would be live before the change was.
+            - {name: HOME, value: /gate-target}
+          # uid 65534 (`nobody`) WITH GROUP 1500, so everything this build
+          # writes is owned by the group that owns the volumes. The gate's
+          # capability posture was already compliant; only the uid was
+          # missing.
+          #
+          # THE UID MUST BE ONE THE IMAGE CAN NAME, and that is measured,
+          # not assumed: the first full gate on this branch ran as uid
+          # 1500 — matching fsGroup, which looked like the obvious
+          # choice — and the `boss-gcp-converges-itself` lint failed with
+          #   id: cannot find name for user ID 1500
+          #   runuser: user UNKNOWN does not exist
+          # because boss-ci has no passwd entry for 1500, so the
+          # converge's `as_owner` got `UNKNOWN` out of `stat -c %U` on a
+          # fixture the gate itself owns. Every other check passed. The
+          # fix is the uid, NOT the lint: the lint is exercising a real
+          # script that runs on a real host as a real named user, and
+          # bending it to tolerate a nameless one would be changing
+          # production code to suit the test environment. 65534 exists in
+          # the base image, so `id -un` and `stat -c %U` both answer.
+          # Adding a 1500 user to boss-ci would also work and is worse:
+          # the gate never builds its own image, so the manifest would be
+          # live a train before the image that supports it.
+          #
+          # What a non-root gate needs, and why each is satisfied:
+          #   - /gate-target (emptyDir) and /gate-seed (the PVC holding
+          #     the warm target + CARGO_HOME): fsGroup chowns both to
+          #     group 1500 recursively and ORs g+rw onto files, g+rwxs
+          #     onto dirs, at every mount — which is the stated reason
+          #     the dev pod carries the same fsGroup. Seed files written
+          #     by the root era stay writable for exactly that reason,
+          #     and so do files written by a run at a different uid.
+          #   - /etc/forge/token (secret, defaultMode 0400): the kubelet
+          #     ORs group-read onto a read-only secret under fsGroup, so
+          #     it lands root:1500 0440 — the same arrangement boss.yaml
+          #     relies on for boss-auth's key.
+          #   - the Rust toolchain: the official rust image ends its
+          #     install with `chmod -R a+w $RUSTUP_HOME $CARGO_HOME`, so
+          #     /usr/local/rustup is readable and writable by any uid.
+          #   - `cp -a` of the seed: GNU cp tolerates a failed
+          #     preserve-ownership when the process has no CAP_CHOWN
+          #     (owner_failure_ok), so the seeding copy does not turn
+          #     into a cold build — measured on the first run of this
+          #     branch, "target seeded from head ... in 86s", the same
+          #     shape as a root run.
+          #   - git identity: the three lints that commit into fixture
+          #     repos export GIT_AUTHOR_*/GIT_COMMITTER_* or set
+          #     per-repo user.email, so none of them has to ask git to
+          #     auto-detect an author from the running uid.
+          # Proven by full gate runs on this branch, not by reading: the
+          # manifest is rendered from the working tree, so a wrong uid
+          # fails its own gate first — which is exactly how the 1500
+          # attempt above was caught.
           securityContext:
             allowPrivilegeEscalation: false
+            runAsUser: 65534
+            runAsGroup: 1500
             capabilities: {drop: ["ALL"]}
           resources:
             # CPU/memory: three concurrent gates request 12 CPU / 24Gi

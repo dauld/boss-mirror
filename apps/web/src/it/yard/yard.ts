@@ -130,11 +130,20 @@ export type StationQueueEnvelope = Readonly<{
 // is a dead button and an href with no label is an unlabelled one.
 export type StationUpstream = Readonly<{ label: string; href: string }>;
 
-// Where the dock's rows came from, plus the station's own facts when
-// the registry served them. `derived` is the fallback for a deployed
-// cluster that predates the station registry — the yard renders
-// whole either way, it just can't show ordering rule or bandwidth
-// state it never received.
+// Where the dock's rows came from: the station registry served, with
+// the row's own facts, or it did not — and then the lane has NO
+// reading. There is no third case. The dock's membership rule lives in
+// the loading-dock row (the predicate, and since 36c3d4ca the
+// `metadata_unmarked: ["hold"]` clause that drops a held car), and a
+// copy of it here could not follow the row: a RELEASED hold is written
+// `false`, not deleted, so absent-semantics get it backwards, and
+// `stranded::marked` — the one definition of that rule — is Rust this
+// file cannot call. So the client asks, and when the answer does not
+// come it says so. The situation that made the old local derivation
+// dangerous rather than merely duplicated: `StepMatch` is
+// `deny_unknown_fields`, so an image rolled back past that clause
+// cannot deserialize the row and `/queue` refuses — a stale copy would
+// then list held cars as boardable, to somebody already mid-incident.
 export type DockStation =
   | Readonly<{
       source: 'station';
@@ -144,7 +153,7 @@ export type DockStation =
       total: number;
       upstream: StationUpstream | null;
     }>
-  | Readonly<{ source: 'derived' }>;
+  | Readonly<{ source: 'unavailable' }>;
 
 // Q2's resolution rendered: the ordering rule sits in the lens
 // header in the mono-caps idiom — an operator should never wonder
@@ -196,8 +205,8 @@ export function upstreamButton(up: StationUpstream | null | undefined): Upstream
 }
 
 /** The dock's walk upstream. Same shape as `wipAdvisory`: a station
- *  fact off the envelope, or null for the derived fallback — which has
- *  no registry row and therefore nothing to say about upstream. */
+ *  fact off the envelope, or null when the queue did not serve — no
+ *  row read, so nothing honest to say about upstream. */
 export function dockUpstream(station: DockStation): UpstreamButton | null {
   return station.source === 'station' ? upstreamButton(station.upstream) : null;
 }
@@ -949,9 +958,10 @@ export function headOf(j: JobLite): string | null {
   }
 }
 
-// One packet → one card, whoever chose the packet. Both dock paths —
-// the station envelope and the local derivation — map through here,
-// so the card grammar cannot fork between them.
+// One packet → one card, whoever chose the packet: the station
+// envelope, the publish queue, the awaiting-proof set and the open-car
+// set all map through here, so the card grammar cannot fork between
+// lanes.
 function carRow(j: JobLite): CarRow {
   const md = (j.metadata ?? {}) as { branch?: string; skip_reason?: string };
   return {
@@ -964,21 +974,6 @@ function carRow(j: JobLite): CarRow {
     skipReason: md.skip_reason ?? null,
     head: headOf(j),
   };
-}
-
-// The fallback derivation: the loading-dock predicate hand-rolled in
-// code, kept only for clusters that predate the station registry.
-// When `GET /api/stations/loading-dock/queue` serves, the registry
-// row (predicate + discipline) replaces all of this.
-export function dockRows(ships: readonly JobLite[]): CarRow[] {
-  return ships
-    .filter(j => {
-      const md = (j.metadata ?? {}) as { branch?: string; train?: string };
-      if (j.status !== 'open' || !md.branch || md.train) return false;
-      const review = step(j, 'review', 'Open for review');
-      return !!review && (review.status === 'ready' || review.status === 'active');
-    })
-    .map(carRow);
 }
 
 /** How many arrivals the board shows, and how many cancellations. */
@@ -1012,11 +1007,13 @@ export function assembleYard(
   const liveId = open.find(t => trainStatus(t) !== 'ARRIVED')?.id;
   return {
     inFlight: open.map(t => toTrainRow(t, shipById, t.id === liveId, medians, nowMs)),
-    // The envelope is authoritative when it served: membership came
-    // from the registry predicate and order from the declared
-    // discipline — a client re-sort would silently overrule the
-    // station row, so the rows map 1:1 in server order.
-    dock: dockQueue ? dockQueue.data.map(carRow) : dockRows(ships),
+    // The envelope is the ONLY source: membership came from the registry
+    // predicate and order from the declared discipline — a client
+    // re-sort would silently overrule the station row, so the rows map
+    // 1:1 in server order. No envelope, no rows: the lane renders
+    // "cannot be read" off `dockStation`, which is the honest answer
+    // and the one a stale local predicate could not give.
+    dock: dockQueue ? dockQueue.data.map(carRow) : [],
     dockStation: dockQueue
       ? {
           source: 'station',
@@ -1026,7 +1023,7 @@ export function assembleYard(
           total: dockQueue.total,
           upstream: dockQueue.upstream ?? null,
         }
-      : { source: 'derived' },
+      : { source: 'unavailable' },
     arrivals: arrived
       .slice(0, ARRIVALS_SHOWN)
       .map(t => toTrainRow(t, shipById, false, medians, nowMs)),
@@ -1047,10 +1044,9 @@ export function assembleYard(
 
 // The dock's station row, or null when the cluster can't serve one —
 // 404 (no such station), 503 (registry not configured), a network
-// fault, or a 200 that isn't the envelope all mean the same thing:
-// fall back to deriving the dock locally. Never an error the yard
-// surfaces; the fallback costs nothing because the ships list is
-// fetched anyway for the consist join.
+// fault, or a 200 that isn't the envelope all mean the same thing: no
+// reading. Never an error that fails the page; the lane that depends
+// on it says it cannot see, and the rest of the yard renders whole.
 async function fetchStationQueue(name: string): Promise<StationQueueEnvelope | null> {
   try {
     const r = await fetch(`/api/stations/${name}/queue`);

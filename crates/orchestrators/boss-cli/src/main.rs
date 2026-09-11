@@ -559,10 +559,35 @@ enum CarAction {
         #[arg(long)]
         excludes: String,
         /// Backlog item this change answers (a ref-checked job edge).
-        /// Routed to `build` when the car opens, because that is when
-        /// the build starts.
+        /// This car IS that item's build: the item is routed to `build`
+        /// when the car opens — that is when the build starts — and the
+        /// arrival rule CLOSES it when the car lands.
+        ///
+        /// Exactly ONE of this, --partial-item or --no-item is required.
+        /// The same three answers `boss gate --park-*` demands, asked
+        /// here so the answer is stated once, at build start, with the
+        /// gate merely confirming it (90d291bb).
         #[arg(long)]
         backlog_item: Option<String>,
+        /// The item this change is ONE PIECE of — recorded as
+        /// provenance, NOT as the closing edge.
+        ///
+        /// For an item that is several separable pieces. `backlog_item`
+        /// is one-to-one and the arrival rule closes what it names, so
+        /// naming a multi-piece item there closes it with work
+        /// outstanding. This records which item the car belongs to under
+        /// a key no rule follows, and leaves the item open for the rest.
+        #[arg(long)]
+        partial_item: Option<String>,
+        /// This car answers NO item, and why.
+        ///
+        /// The escape for the item-less cars that legitimately exist — a
+        /// fix David asks for in conversation, a defect found while
+        /// building something else. The reason is the answer: it records
+        /// which kind, so a later reader can tell a deliberate one from
+        /// a forgotten one.
+        #[arg(long, value_name = "REASON")]
+        no_item: Option<String>,
         /// Report what would be filed, without filing it.
         #[arg(long)]
         dry_run: bool,
@@ -1093,13 +1118,19 @@ async fn main() -> Result<()> {
                 summary,
                 excludes,
                 backlog_item,
+                partial_item,
+                no_item,
                 dry_run,
             } => {
                 car::open(
                     &branch,
                     &summary,
                     &excludes,
-                    backlog_item,
+                    car::ItemAnswer {
+                        backlog_item,
+                        partial_item,
+                        no_item,
+                    },
                     dry_run,
                     chrono::Utc::now(),
                 )

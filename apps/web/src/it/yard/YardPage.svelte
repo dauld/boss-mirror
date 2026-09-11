@@ -721,18 +721,32 @@
                (David, feedback 3ccb79f5) sits beside them: a queue that
                isn't filling is diagnosed upstream. Navigation, not
                content. -->
-          <div class="yard-entity-title">{yard.dock.length} car{yard.dock.length === 1 ? '' : 's'} parked</div>
-          <div class="yard-entity-sub yard-dock-facts">
-            {#if upstream}
-              <button type="button" class="yard-upstream" title={upstream.title} onclick={() => navigate(upstream.href)}>{upstream.label}</button>
-            {/if}
-            {#if yard.dockStation.source === 'station'}
+          {#if yard.dockStation.source !== 'station'}
+            <!-- NO READING. The dock's membership is the loading-dock
+                 row's to state — the predicate plus the hold clause —
+                 and this page keeps no copy to fall back on, because a
+                 copy could not follow the row. So an unserved queue
+                 renders as not-seen, never as "the dock is clear": the
+                 case that produces it is an image rolled back past that
+                 clause, which is exactly when a calm wrong list costs
+                 the most. -->
+            <div class="yard-entity-title">The dock cannot be read</div>
+            <div class="yard-entity-sub">
+              the loading-dock station queue did not serve — what stands on the dock is the station row's
+              reading, and this page will not guess it. Cars still show on the approach and in their own packets.
+            </div>
+          {:else}
+            <div class="yard-entity-title">{yard.dock.length} car{yard.dock.length === 1 ? '' : 's'} parked</div>
+            <div class="yard-entity-sub yard-dock-facts">
+              {#if upstream}
+                <button type="button" class="yard-upstream" title={upstream.title} onclick={() => navigate(upstream.href)}>{upstream.label}</button>
+              {/if}
               <span class="yard-discipline" title="queue discipline">{disciplineLabel(yard.dockStation.discipline)}</span>
               {#if wipAdvisory(yard.dockStation)}
                 <span class="yard-wip" title="over the station's advisory WIP limit">{wipAdvisory(yard.dockStation)}</span>
               {/if}
-            {/if}
-          </div>
+            </div>
+          {/if}
           <dl class="yard-kv">
             {#if hold}
               <dt>boards</dt>
@@ -747,7 +761,9 @@
               <dd class="yard-cond-v" data-tone="muted" title="the live cadence rule — never a predicted time">{boardingRule}</dd>
             {/if}
           </dl>
-          {#if yard.dock.length === 0}
+          {#if yard.dockStation.source !== 'station'}
+            <div class="yard-empty">No rows — the station queue is what lists them.</div>
+          {:else if yard.dock.length === 0}
             <div class="yard-empty">The dock is clear.</div>
           {:else}
             <div class="yard-dock">

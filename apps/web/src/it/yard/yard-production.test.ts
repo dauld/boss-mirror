@@ -13,7 +13,16 @@ const NOW = Date.parse('2026-09-08T02:35:20Z');
 const yardOf = (over: Partial<YardState> = {}): YardState => ({
   inFlight: [],
   dock: [],
-  dockStation: { source: 'derived' },
+  // The dock as the station served it — the only way the dock lane
+  // is read now (the client-side re-derivation is gone).
+  dockStation: {
+    source: 'station',
+    discipline: ['priority', 'age'],
+    wipLimit: null,
+    overLimit: false,
+    total: 0,
+    upstream: null,
+  },
   arrivals: [],
   cancelled: [],
   delivery: [],

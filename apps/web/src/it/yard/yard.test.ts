@@ -102,10 +102,11 @@ describe('assembleYard', () => {
       opened_on: '2026-08-12', metadata: { branch: 'feat/b', train: 't1' },
       steps: [s('review', 'completed')] },
   ];
-  test('dock holds only parked, unboarded cars; consists join by id', () => {
+  test('the dock is the station\'s rows; consists join by id', () => {
     const y = assembleYard(
       [train({ metadata: { boarded_jobs: ['c2'] }, steps: [s('pr', 'completed')] })],
       ships,
+      envelope({ total: 1, data: [ships[0] as JobLite] }),
     );
     expect(y.dock.map(c => c.id)).toEqual(['c1']);
     expect(y.inFlight[0]?.cars[0]?.branch).toBe('feat/b');
@@ -123,6 +124,7 @@ describe('assembleYard', () => {
     const y = assembleYard(
       [train({ metadata: { boarded_jobs: ['c2'] }, steps: [s('pr', 'completed')] })],
       ships,
+      envelope({ total: 1, data: [ships[0] as JobLite] }),
     );
     expect(y.dock[0]?.kind).toBe('ship-a-change');
     expect(y.dock[0]?.sim).toBe(false);
@@ -156,7 +158,7 @@ const dockJob = (id: string, over: Partial<JobLite> = {}): JobLite => ({
 });
 
 describe('the dock from the station envelope', () => {
-  test('envelope rows map to the same packet-card grammar as dockRows', () => {
+  test('envelope rows map to the packet-card grammar', () => {
     const env = envelope({
       total: 2,
       data: [
@@ -179,7 +181,8 @@ describe('the dock from the station envelope', () => {
   });
 
   test('the envelope is authoritative: membership does not re-derive from ships', () => {
-    // A ship that dockRows would park, but the station did not serve.
+    // A ship the old client predicate would have parked, which the
+    // station did not serve.
     const parked: JobLite = {
       id: 'c1', kind: 'ship-a-change', title: 'A car', status: 'open',
       opened_on: '2026-08-12', metadata: { branch: 'feat/a' },
@@ -215,17 +218,24 @@ describe('the dock from the station envelope', () => {
     });
   });
 
-  test('without an envelope the dock falls back to the derived rows', () => {
+  test('without an envelope the dock cannot be read — never a derived list', () => {
+    // The membership rule is the station ROW's (predicate + the hold
+    // clause 36c3d4ca taught it). A client copy of it was a fourth
+    // definition that could not follow the row, so there is none: the
+    // lane says it cannot see rather than listing a car the row would
+    // no longer admit.
     const parked: JobLite = {
       id: 'c1', kind: 'ship-a-change', title: 'A car', status: 'open',
       opened_on: '2026-08-12', metadata: { branch: 'feat/a' },
       steps: [s('review', 'ready')],
     };
     const y = assembleYard([], [parked], null);
-    expect(y.dock.map(c => c.id)).toEqual(['c1']);
-    expect(y.dockStation).toEqual({ source: 'derived' });
+    expect(y.dock).toEqual([]);
+    expect(y.dockStation).toEqual({ source: 'unavailable' });
     // The 2-arg call sites mean the same thing.
-    expect(assembleYard([], [parked]).dockStation).toEqual({ source: 'derived' });
+    expect(assembleYard([], [parked]).dockStation).toEqual({ source: 'unavailable' });
+    // The rest of the yard still renders: the car is still a car.
+    expect(y.cars.map(c => c.id)).toEqual(['c1']);
   });
 });
 
@@ -245,8 +255,8 @@ describe('the station header idiom', () => {
     // No declared limit -> never a chip, whatever the flag says.
     const limitless = assembleYard([], [], envelope({ over_limit: true, total: 9 }));
     expect(wipAdvisory(limitless.dockStation)).toBeNull();
-    // The derived dock has no station facts to advertise.
-    expect(wipAdvisory({ source: 'derived' })).toBeNull();
+    // A dock with no reading has no station facts to advertise.
+    expect(wipAdvisory({ source: 'unavailable' })).toBeNull();
   });
 });
 
@@ -285,8 +295,8 @@ describe('the upstream button', () => {
     expect(dockUpstream(assembleYard([], [], envelope()).dockStation)).toBeNull();
   });
 
-  test('the derived dock has no station row, so no upstream', () => {
-    expect(dockUpstream({ source: 'derived' })).toBeNull();
+  test('a dock with no reading has no station row, so no upstream', () => {
+    expect(dockUpstream({ source: 'unavailable' })).toBeNull();
   });
 
   test('a half-declared pointer is not a button — a dead link is worse than none', () => {
@@ -353,26 +363,26 @@ describe('fetchYard against the station endpoint', () => {
     expect(y?.dockStation.source).toBe('station');
   });
 
-  test('a cluster that predates the registry still renders the yard whole', async () => {
-    // 404 (no station row), 503 (registry not configured), and a
-    // thrown network error all mean the same thing: derive locally.
+  test('an endpoint that will not serve leaves the dock unreadable, not empty', async () => {
+    // 404 (no station row), 503 (registry not configured), a thrown
+    // network error, and a 200 that is not the envelope all mean the
+    // same thing — and it is NOT "no cars are parked". A rollback to an
+    // image that cannot deserialize the row (StepMatch is
+    // deny_unknown_fields) lands here, mid-incident, which is exactly
+    // when a confident wrong list costs the most.
     for (const station of [
       () => json('no such station', 404),
       () => json('station registry not configured', 503),
       () => Promise.reject(new Error('connection refused')),
+      () => json({ hello: 'not an envelope' }),
     ]) {
       stub(station as () => Response | Promise<Response>);
       const y = await fetchYard();
-      expect(y?.dock.map(c => c.id)).toEqual(['c1']);
-      expect(y?.dockStation).toEqual({ source: 'derived' });
+      expect(y?.dock).toEqual([]);
+      expect(y?.dockStation).toEqual({ source: 'unavailable' });
+      // And the yard still renders: the car read is independent.
+      expect(y?.cars.map(c => c.id)).toEqual(['c1']);
     }
-  });
-
-  test('a 200 that is not a queue envelope falls back too', async () => {
-    stub(() => json({ hello: 'not an envelope' }));
-    const y = await fetchYard();
-    expect(y?.dock.map(c => c.id)).toEqual(['c1']);
-    expect(y?.dockStation).toEqual({ source: 'derived' });
   });
 });
 

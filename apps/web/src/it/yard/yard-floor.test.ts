@@ -26,7 +26,16 @@ const NOW_ISO = '2026-09-07T23:20:00.000Z';
 const yardOf = (over: Partial<YardState> = {}): YardState => ({
   inFlight: [],
   dock: [],
-  dockStation: { source: 'derived' },
+  // The dock as the station served it — the only way the dock lane
+  // is read now (the client-side re-derivation is gone).
+  dockStation: {
+    source: 'station',
+    discipline: ['priority', 'age'],
+    wipLimit: null,
+    overLimit: false,
+    total: 0,
+    upstream: null,
+  },
   arrivals: [],
   cancelled: [],
   delivery: [],
@@ -771,6 +780,30 @@ describe('the machines', () => {
     // An older server that sends no hold: the count, and no guess.
     expect(scene(yardOf(), statusOf(), NOW).machines.dock.label).toBe('empty');
     expect(scene(yardOf({ dock: [car('d1', 'x')] }), statusOf(), NOW).machines.dock.label).toBe('1 parked');
+  });
+
+  test('a dock the station queue could not serve reads as NO READING, never as empty', () => {
+    // `empty` is a claim, and an unavailable station queue is no
+    // evidence for it — the same posture the protocols lint takes when
+    // the registry is unreachable: skip loudly rather than pass. A
+    // rollback to an image that cannot deserialize the loading-dock row
+    // lands here, so the one thing the lane must not do is look calm.
+    const unread = scene(
+      yardOf({ dockStation: { source: 'unavailable' } }),
+      statusOf({ boarding: { ...statusOf().boarding, next_board: 'boards on the next tick' } }),
+      NOW,
+    );
+    expect(unread.machines.dock.label).toBe('no reading · the station queue did not serve');
+    expect(unread.machines.dock.parked).toBe(0);
+    expect(unread.machines.dock.lamp).toBe('off');
+    // The held lane is a SEPARATE read (the server's status), so what it
+    // holds is still stated beside the missing reading.
+    const withHeld = scene(
+      yardOf({ dockStation: { source: 'unavailable' } }),
+      statusOf({ held_cars: [{ id: 'h1', branch: 'feat/h', title: 'Held car', parked_since: '2026-09-07T22:00:00Z', reason: 'waiting on a person' }] }),
+      NOW,
+    );
+    expect(withHeld.machines.dock.label).toBe('no reading · the station queue did not serve · 1 held');
   });
 
   test("the conductor's clock: last seen, the next tick from its own heartbeat, silence as an alarm", () => {
