@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# boss-sor-read /api/path — the ONE way a car's recorded probe reads the
+# system of record. GET only, as a NAMED reader, against the deployment
+# the runner pinned.
+#
+# WHY THIS EXISTS — backlog 61085a9e, measured 2026-09-10 against one
+# backend at one commit. run-car-probe.sh builds the right `x-boss-user`
+# header for its own three calls and handed the probe an env carrying
+# only BOSS_JOBS_URL. So a probe doing `curl $BOSS_JOBS_URL/api/...`
+# read as `operator:unidentified`, and policy answered a NARROWER WORLD
+# without saying so:
+#
+#   /api/jobs?kind=pr-train&status=open        operator 1  → 0
+#   /api/jobs?kind=ship-a-change&status=open           21  → 0
+#   /api/jobs?kind=backlog-item&status=open            30  → 0
+#   /api/yard/status  trains/dock/recent/dock_depth 1/1/8/1 → all 0
+#   /api/workflows                                     84  → 84 (same)
+#
+# Per-surface, and nothing in the answer says which kind you hit.
+# /api/yard/status comes back a confident, well-formed, completely idle
+# yard: no trains, nothing on the dock, threshold not met.
+#
+# THE SHAPE THAT MAKES IT DANGEROUS. A PRESENCE assertion fails for the
+# wrong reason, which someone then investigates. An ABSENCE assertion
+# PASSES FALSELY — "no open job of kind X remains" is green against an
+# empty page the probe was never allowed to see — and that is a proof
+# that vouches for nothing, recorded as a proof, on a car that closes.
+# It caught the person who filed the item twice in one hour: once in a
+# throwaway watcher that announced a train had arrived when it had not,
+# once in a car's release probe written as "dock_depth is 0 and
+# threshold_met is false", which passes on an empty read either way.
+#
+# WHY NOT JUST PASS THE RUNNER'S OWN ACTOR. The runner signs as
+# `platform-admin` / `operator`, which can WRITE. A probe is program
+# text a builder authored upstream, run as david on the forge; the
+# privilege should match the job. So the runner builds a SECOND,
+# read-scoped actor — role `audit-readonly`, which core policy
+# (boss-policy-client::defaults) grants Read at Scope::All on every
+# shipped resource and NO other action anywhere — and exports only that
+# as BOSS_SOR_USER. Verified by effect the same day, same deployment:
+# PATCH /api/jobs/{id}/metadata and PUT a step with that actor both
+# answered 403 "no active rule for role audit-readonly on job:update" /
+# "…on step:update", while every list read matched the operator's
+# exactly.
+#
+# WHY A READER AND NOT A DOCUMENTED HEADER. The cheap thing to type has
+# to be the right thing, which is the honest lesson of being caught
+# twice while knowing about the defect. So: no method argument exists
+# here (a write is not expressible), the base comes from the runner (a
+# probe cannot point itself at boss-gcp's older stack and get a
+# well-formed answer about different data), and the identity comes from
+# the env the runner set (a probe cannot choose its own privilege).
+# `boss gate --park-probe` refuses a probe that reads the system of
+# record any other way, at the builder's terminal.
+#
+# WHERE IT COMES FROM. This file is in the tree, so the converged
+# checkout at /home/david/boss carries it by construction — no install
+# step, nothing to drift. run-car-probe.sh puts this directory first on
+# the probe's PATH. A checkout too old to have it makes the probe fail
+# as `boss-sor-read: command not found`, which the runner's fd-9 channel
+# records and reports as `unrunnable` with the tool named, rather than
+# as a false claim.
+#
+# Env (all set by infra/forge/run-car-probe.sh):
+#   BOSS_JOBS_URL  the system of record's base URL
+#   BOSS_SOR_USER  the read-scoped actor, as x-boss-user JSON
+#
+# Exit: 0 and the body on stdout; 2 on a refusal (nothing was read);
+# curl's own exit otherwise (22 on a 4xx/5xx, because -f).
+set -uo pipefail
+
+me="boss-sor-read"
+refuse() { echo "$me: REFUSED — $*" >&2; exit 2; }
+
+[[ $# -eq 1 ]] || refuse \
+    "usage: $me /api/path — exactly one argument, and it is a PATH. There is no method
+  argument: this reads, and a probe proves a claim about production by reading it.
+  Got $# argument(s)."
+
+path="$1"
+case "$path" in
+    /*) ;;
+    *://*) refuse \
+        "'$path' is a URL. The base comes from BOSS_JOBS_URL, which the runner pins to the
+  system of record, because a probe that names its own host can read the OTHER, older
+  stack and get a well-formed answer about different data (CLAUDE.md §Doors: a wrong
+  target answers instead of erroring). Pass the path alone: $me /api/yard/status" ;;
+    *) refuse "the path must start with '/': got '$path'" ;;
+esac
+
+[[ -n "${BOSS_JOBS_URL:-}" ]] || refuse \
+    "BOSS_JOBS_URL is not set, and there is no safe default — the ops-runner's unit pins it
+  for run-car-probe.sh. If you are running this by hand, set it to the system of record."
+
+# THE REFUSAL THIS WHOLE FILE EXISTS FOR. Reading on with no identity is
+# exactly the defect: a narrowed answer that looks like a quiet system.
+# So stop, and say which half is missing.
+[[ -n "${BOSS_SOR_USER:-}" ]] || refuse \
+    "BOSS_SOR_USER is not set, so this read would go out as operator:unidentified — and an
+  unidentified reader is answered with a NARROWER WORLD, silently (backlog 61085a9e:
+  21 open cars read as 0, a busy yard read as idle). Refusing rather than returning an
+  answer that cannot be told apart from 'nothing is there'. run-car-probe.sh exports
+  this; by hand, export the read-scoped actor yourself."
+
+exec curl -fsS -H "x-boss-user: ${BOSS_SOR_USER}" "${BOSS_JOBS_URL%/}${path}"

@@ -43,9 +43,67 @@ kubectl
 # `boss prove` by hand, or is rewritten against the checkout the forge
 # does have.
 #
-# NOT listed, deliberately: `boss-api`. It is almost certainly absent
-# too — it is a wrapper that ships to the Mac and the pod, not to the
-# forge — but nothing here has MEASURED it, and this file's own rule
-# is that a guess which refuses a builder's gate is worse than the
-# failure it prevents. Add it the first time a probe proves it.
+# NOT listed, and now for a stated reason: `boss-api`. Asked properly
+# on 2026-09-10 (61085a9e), and the honest answer is that it is still
+# DERIVED, not measured:
+#
+#   - `git ls-files | grep boss-api` has exactly one hit,
+#     infra/boss-api-curl.sh — a retrying curl wrapper with no identity
+#     header, not a reader. So the converged checkout, which is the
+#     only BOSS file set this host receives, does not carry boss-api.
+#   - infra/forge/install.sh, this host's own installer, installs
+#     systemd units and kubectl. Never a boss-api wrapper.
+#   - the forge journal's current boot (261k entries) contains
+#     `boss-api-curl` twice — the in-tree script, running here — and
+#     `boss-api` as a command zero times. It has never been invoked, so
+#     nothing has measured it.
+#
+# The only door that runs an arbitrary read on this host is a car's
+# recorded probe, so taking the measurement means landing a car whose
+# probe is `command -v boss-api`. Until then the line stays off the
+# list, because this file's rule is that a guess which refuses a
+# builder's gate is worse than the failure it prevents.
+#
+# It also stopped mattering. A probe no longer needs boss-api, or any
+# hand-installed tool, to read the system of record — see the next
+# block.
 boss
+
+# WHAT ELSE `boss gate --park-probe` REFUSES, and why it is here: this
+# file is where the gate's refusals send a builder, so the other one
+# should be readable in the same place.
+#
+# A probe that reads the system of record with curl/wget/python and NO
+# identity is refused. Backlog 61085a9e, measured 2026-09-10 on one
+# backend at one commit: an unidentified reader is answered with a
+# NARROWER WORLD, silently — ?kind=ship-a-change&status=open was 21
+# rows for the operator and 0 unidentified, and /api/yard/status came
+# back with trains, dock, held, recent and dock_depth ALL ZERO: a
+# confident, well-formed, completely idle yard. /api/workflows was
+# identical for both readers, so nothing in an answer says which kind
+# you hit.
+#
+# A PRESENCE assertion then fails for the wrong reason, which someone
+# investigates. An ABSENCE assertion PASSES FALSELY, and
+# run-car-probe.sh records it as a proof on a car that closes. So
+# prefer asserting the presence of a NAMED thing over the absence of
+# any thing — a count-is-zero or flag-is-false claim against a
+# policy-scoped surface is exactly what a narrowed read produces.
+#
+# Read it as a named reader instead. This one is IN THE TREE, so the
+# converged checkout has it with no install step, and
+# run-car-probe.sh puts it first on the probe's PATH:
+#
+#   boss-sor-read /api/yard/status | grep -q '"dock_depth":1'
+#
+# It is GET-only (no method argument exists), the base comes from the
+# runner, and the identity is a read-scoped actor the runner exports —
+# `audit-readonly`, which core policy grants Read at Scope::All on
+# every shipped resource and no other action anywhere. Verified by
+# effect against the live deployment: a metadata PATCH and a step PUT
+# with that actor both answered 403 "no active rule for role
+# audit-readonly on job:update" / "…on step:update".
+#
+# `curl -fsS -H "x-boss-user: $BOSS_SOR_USER" $BOSS_JOBS_URL/api/...`
+# is accepted too — the refusal is about reading UNIDENTIFIED, not
+# about curl.

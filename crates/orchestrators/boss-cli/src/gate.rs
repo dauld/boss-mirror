@@ -776,6 +776,74 @@ pub fn probe_needs_absent_tool(probe: &str) -> Option<&'static str> {
         .find_map(|c| absent.iter().find(|a| **a == c).copied())
 }
 
+/// HOW A PROBE READS THE SYSTEM OF RECORD — `infra/forge/probe-bin`,
+/// first on the probe's PATH, holding exactly this one reader.
+///
+/// THE DEFECT IT REPLACES (backlog 61085a9e, measured 2026-09-10). The
+/// probe's env carried only `BOSS_JOBS_URL` — never an identity header —
+/// so `curl $BOSS_JOBS_URL/api/...` read as `operator:unidentified` and
+/// policy answered a NARROWER WORLD in silence. Same backend, same
+/// commit: `?kind=ship-a-change&status=open` was 21 rows for the
+/// operator and 0 unidentified; `/api/yard/status` came back with
+/// trains, dock, held, recent and `dock_depth` ALL ZERO — a confident,
+/// well-formed, completely idle yard. `/api/workflows` was identical
+/// between the two readers, so the narrowing is per-surface and nothing
+/// in an answer says which kind you hit.
+///
+/// WHY IT IS A REFUSAL AND NOT A PARAGRAPH IN A RUNBOOK. A PRESENCE
+/// assertion fails for the wrong reason, and someone investigates. An
+/// ABSENCE assertion PASSES FALSELY: "no open job of kind X remains" is
+/// green against an empty page the probe was never allowed to see, and
+/// `run-car-probe.sh` records it as a proof on a car that then closes.
+/// The person who filed the item was caught by it twice in one hour,
+/// the second time ten minutes after writing the item down — which is
+/// the honest measure of how little knowing about it helps. The cheap
+/// thing to type has to be the right thing.
+pub const SOR_READER: &str = "boss-sor-read";
+
+/// The env var the runner exports the probe's READ-SCOPED actor under.
+/// A probe that sends it is identified (and, being `audit-readonly`,
+/// can change nothing), so it is allowed.
+pub const SOR_USER_VAR: &str = "BOSS_SOR_USER";
+
+/// The spellings a probe reaches the system of record by. All four were
+/// used by real probes: the env var the runner exports, the in-cluster
+/// service DNS (the second measured instance), the LAN address and port
+/// (the first), and a bare `/api/` path through any of them.
+const SOR_SPELLINGS: [&str; 4] = ["BOSS_JOBS_URL", "boss-jobs-internal", ":7900", "/api/"];
+
+/// Commands that can perform the read. `python`/`python3` are here
+/// because the first measured instance was `urllib.request.urlopen`,
+/// not a curl.
+const HTTP_CLIENTS: [&str; 4] = ["curl", "wget", "python", "python3"];
+
+/// Does this probe read the system of record WITHOUT saying who it is?
+/// Returns the client it would read with.
+///
+/// Two conditions, both required, because either alone is a false
+/// refusal: an HTTP client in COMMAND POSITION (the same scan
+/// [`probe_needs_absent_tool`] uses, so `grep -c BOSS_JOBS_URL <file>`
+/// and `test -n "$BOSS_JOBS_URL"` are mentions, not reads), and the
+/// text naming the system of record at all.
+///
+/// Identified reads are not this check's business: a probe that sends
+/// the runner's read-scoped actor is already a named reader. That is
+/// keyed on [`SOR_USER_VAR`] and not on the header name, so a probe
+/// cannot satisfy it by writing its own privileged header literal — the
+/// honest bound being that the forge can forge any header it likes, so
+/// this steers an accident rather than stopping an intent.
+pub fn probe_reads_the_sor_unidentified(probe: &str) -> Option<&'static str> {
+    if !SOR_SPELLINGS.iter().any(|s| probe.contains(s)) {
+        return None;
+    }
+    if probe.contains(SOR_USER_VAR) {
+        return None;
+    }
+    commands_invoked(probe)
+        .into_iter()
+        .find_map(|c| HTTP_CLIENTS.iter().find(|h| **h == c).copied())
+}
+
 /// The gate-run key each proof flag stamps. The auto-park handler
 /// reads these and writes the car's `proof_*` keys
 /// (`boss_jobs::car::PROOF_*`).
@@ -850,11 +918,40 @@ impl ParkIntent {
                  kubeconfig. Measured 2026-09-09 (f9304366): the first two cars ever to \
                  record a probe both used `kubectl`, both were right from this pod, and \
                  both came back as an exit code with empty streams.\n\n\
-                 Give a probe the forge can run — the system of record over HTTP (curl \
-                 $BOSS_JOBS_URL/api/...), the forge's own journal, the converged checkout \
-                 — or, if only the cluster can show it, record the car as \
-                 --park-proof-event and prove it by hand.\n\n\
+                 Give a probe the forge can run — the system of record through the reader \
+                 the runner puts on the probe's PATH (`{SOR_READER} /api/...`), the forge's \
+                 own journal, the converged checkout — or, if only the cluster can show it, \
+                 record the car as --park-proof-event and prove it by hand.\n\n\
                  The absence list is infra/forge/host-absent-tools.txt."
+            );
+        }
+        if let Some(probe) = &self.probe
+            && let Some(client) = probe_reads_the_sor_unidentified(probe)
+        {
+            anyhow::bail!(
+                "--park-probe reads the system of record with `{client}` and NO identity, so \
+                 it reads as operator:unidentified — and an unidentified reader is answered \
+                 with a NARROWER WORLD, silently.\n\n\
+                 Measured 2026-09-10 (61085a9e), one backend, one commit: \
+                 ?kind=ship-a-change&status=open was 21 rows for the operator and 0 \
+                 unidentified; /api/yard/status came back trains, dock, held, recent and \
+                 dock_depth ALL ZERO — a confident, well-formed, completely idle yard. \
+                 /api/workflows was identical for both, so nothing in an answer tells you \
+                 which kind you hit.\n\n\
+                 Why that is refused rather than documented: a PRESENCE assertion fails for \
+                 the wrong reason and someone investigates, but an ABSENCE assertion PASSES \
+                 FALSELY — 'no open job of kind X remains' is green against an empty page \
+                 the probe was never allowed to see — and run-car-probe.sh records that as a \
+                 PROOF on a car that then closes.\n\n\
+                 Read it as a named reader instead. Either is fine:\n  \
+                 {SOR_READER} /api/yard/status | grep -q '\"dock_depth\":1'\n  \
+                 curl -fsS -H \"x-boss-user: ${SOR_USER_VAR}\" $BOSS_JOBS_URL/api/...\n\n\
+                 {SOR_READER} is infra/forge/probe-bin/{SOR_READER}, first on the probe's \
+                 PATH in the converged checkout; it is GET-only and signs as a read-scoped \
+                 actor the runner supplies (audit-readonly — Read everywhere, write \
+                 nowhere). And prefer asserting the PRESENCE of a named thing over the \
+                 absence of any thing: a count-is-zero or flag-is-false claim against a \
+                 policy-scoped surface is what a narrowed read produces anyway."
             );
         }
         let missing: Vec<&str> = [
@@ -2964,13 +3061,16 @@ mod tests {
     /// a probe + expect pair; both ride the gate-run under `park_*`
     /// keys so the auto-park handler copies them onto the car.
     ///
-    /// The probe here is a `curl` against the system of record because
-    /// that is a probe the forge host can RUN — this case used to be
-    /// written with `kubectl`, which is the shape f9304366 measured
-    /// unrunnable and the next case now refuses.
+    /// The probe here reads the system of record through the reader the
+    /// runner puts on the probe's PATH, because that is a probe the
+    /// forge host can RUN and can be BELIEVED. It was written with
+    /// `kubectl` once (the shape f9304366 measured unrunnable) and with
+    /// a bare `curl $BOSS_JOBS_URL` after that — the shape 61085a9e
+    /// measured reading a narrower world in silence. Both are refused
+    /// below.
     #[test]
     fn a_probe_and_its_expectation_ride_the_park_intent_together() {
-        let probe = "curl -fsS $BOSS_JOBS_URL/api/jobs/x | grep -q PARK_PROBE_OK";
+        let probe = "boss-sor-read /api/jobs/x | grep -q PARK_PROBE_OK";
         let mut p = park_full();
         p.probe = Some(probe.into());
         p.expect = Some("PARK_PROBE_OK".into());
@@ -3009,7 +3109,7 @@ mod tests {
     #[test]
     fn a_probe_that_only_mentions_an_absent_tool_is_allowed() {
         let mut p = park_full();
-        p.probe = Some("curl -fsS $BOSS_JOBS_URL/api/estate/nodes | grep -c kubectl".into());
+        p.probe = Some("boss-sor-read /api/estate/nodes | grep -c kubectl".into());
         p.expect = Some("1".into());
         assert!(p.require_complete().is_ok(), "{:?}", p.require_complete());
     }
@@ -3054,6 +3154,122 @@ mod tests {
                 "the forge has no boss binary: {probe}"
             );
         }
+    }
+
+    /// A PROBE READS THE SYSTEM OF RECORD AS A NAMED READER (61085a9e).
+    /// The probe env carries no identity header, so a hand-rolled
+    /// `curl $BOSS_JOBS_URL/...` reads as `operator:unidentified` and
+    /// policy answers a NARROWER WORLD silently. Measured 2026-09-10,
+    /// one backend, one commit: `?kind=ship-a-change&status=open` was
+    /// 21 rows for the operator and 0 unidentified; `/api/yard/status`
+    /// came back trains/dock/recent/dock_depth all zero — a confident,
+    /// well-formed, completely idle yard.
+    ///
+    /// A presence assertion then fails for the wrong reason, which is
+    /// recoverable. An ABSENCE assertion PASSES FALSELY, which is a
+    /// recorded proof of nothing. Refused here, at the builder's
+    /// terminal, not hours later as an exit code on a car.
+    #[test]
+    fn a_probe_that_reads_the_sor_unidentified_is_refused_at_gate_time() {
+        // Every spelling the measured instances used: the env var, the
+        // in-cluster service DNS, the LAN address and port, and a bare
+        // `/api/` path through the gateway.
+        for probe in [
+            "curl -fsS $BOSS_JOBS_URL/api/jobs?kind=pr-train&status=open | grep -q b9302f90",
+            "curl -sf http://boss-jobs-internal.boss.svc.cluster.local:7900/api/yard/status | grep -q trains",
+            "curl -fsS http://10.20.0.34:7900/api/jobs/health | grep -q ok",
+            "python3 -c \"import urllib.request,os; print(urllib.request.urlopen(os.environ['BOSS_JOBS_URL']+'/api/yard/status').read())\" | grep -q trains",
+            "wget -qO- $BOSS_JOBS_URL/api/stations/loading-dock/queue | grep -q x",
+        ] {
+            assert!(
+                probe_reads_the_sor_unidentified(probe).is_some(),
+                "an unidentified read of the system of record: {probe}"
+            );
+            let mut p = park_full();
+            p.probe = Some(probe.into());
+            p.expect = Some("x".into());
+            let e = p.require_complete().unwrap_err().to_string();
+            assert!(e.contains(SOR_READER), "{e}");
+            assert!(e.contains("unidentified"), "{e}");
+            assert!(e.contains("BOSS_SOR_USER"), "{e}");
+        }
+    }
+
+    /// THE MENTION-ONLY GUARD, the same one the absent-tool scan needs.
+    /// Naming the URL is not reading it: a probe that greps the checkout
+    /// for `BOSS_JOBS_URL`, or tests that it is set, runs fine and is
+    /// not refused. A refusal a builder cannot act on is worse than the
+    /// arrival failure it replaces.
+    #[test]
+    fn a_probe_that_only_mentions_the_sor_is_not_refused() {
+        for probe in [
+            "grep -c BOSS_JOBS_URL /home/david/boss/infra/forge/run-car-probe.sh",
+            "test -n \"$BOSS_JOBS_URL\" && echo claim-ok",
+            "grep -q 'boss-jobs-internal' /home/david/boss/infra/cluster/manifests/boss.yaml && echo claim-ok",
+            "git -C /home/david/boss log -1 --format=%s | grep -q /api/yard",
+        ] {
+            assert_eq!(
+                probe_reads_the_sor_unidentified(probe),
+                None,
+                "naming the system of record is not reading it: {probe}"
+            );
+        }
+    }
+
+    /// THE TWO WAYS THROUGH. The reader the runner puts on the probe's
+    /// PATH, or a curl that sends the read-scoped actor the runner
+    /// exported. Both are identified, so both are allowed.
+    #[test]
+    fn a_probe_that_reads_as_a_named_reader_is_allowed() {
+        for probe in [
+            "boss-sor-read /api/yard/status | grep -q '\"dock_depth\":1'",
+            "boss-sor-read /api/jobs?kind=pr-train&status=open | grep -q b9302f90",
+            "curl -fsS -H \"x-boss-user: $BOSS_SOR_USER\" $BOSS_JOBS_URL/api/yard/status | grep -q trains",
+        ] {
+            assert_eq!(
+                probe_reads_the_sor_unidentified(probe),
+                None,
+                "a named reader must not be refused: {probe}"
+            );
+            let mut p = park_full();
+            p.probe = Some(probe.into());
+            p.expect = Some("x".into());
+            assert!(p.require_complete().is_ok(), "{probe}");
+        }
+    }
+
+    /// A probe that curls something ELSE is none of this check's
+    /// business — the forge's journal door, the registry, a health port.
+    /// Over-reach here would refuse most honest probes.
+    #[test]
+    fn a_probe_that_curls_another_host_is_not_refused() {
+        for probe in [
+            "curl -fsS http://10.20.0.15:19531/machine | grep -q david-asus-minipc",
+            "curl -fsS http://127.0.0.1:5000/v2/_catalog | grep -q boss",
+        ] {
+            assert_eq!(
+                probe_reads_the_sor_unidentified(probe),
+                None,
+                "not the system of record: {probe}"
+            );
+        }
+    }
+
+    /// The reader the refusal names must be the one that ships, at the
+    /// path the runner puts on PATH. Advice pointing at a tool nobody
+    /// installed is worse than no advice (CLAUDE.md §Doors: a door that
+    /// stops being true is a defect).
+    #[test]
+    fn the_refusal_names_a_reader_that_exists_in_the_tree() {
+        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join("infra/forge/probe-bin")
+            .join(SOR_READER);
+        assert!(
+            p.exists(),
+            "the refusal advises `{SOR_READER}`, which is not in the tree at {}",
+            p.display()
+        );
     }
 
     /// An absent tool is caught wherever it sits in the pipeline, and

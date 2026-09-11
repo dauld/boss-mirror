@@ -73,6 +73,14 @@
 #   BOSS_OPS_ACTOR     (default automation:run-car-probe)
 #   BOSS_MACHINE_TOKEN (optional) forwarded as x-boss-machine-token
 #   BOSS_PROBE_NOTFOUND (set here) the file fd 9 records unfound commands in
+#   BOSS_PROBE_READER_ACTOR (default automation:run-car-probe-reader)
+#                      the id the probe's READ-ONLY actor signs as
+#
+# What the probe's own env gets, and nothing else: BOSS_JOBS_URL,
+# BOSS_PROBE_NOTFOUND, BOSS_SOR_USER (a read-scoped actor — never this
+# script's platform-admin one), and a PATH led by
+# infra/forge/probe-bin, which holds `boss-sor-read`. See the
+# READ-ONLY READER block below (backlog 61085a9e).
 set -uo pipefail
 
 me="run-car-probe"
@@ -95,6 +103,58 @@ PROBE_TIMEOUT="${BOSS_PROBE_TIMEOUT:-60}"
 MAX_STREAM=4000
 ACTOR="${BOSS_OPS_ACTOR:-automation:run-car-probe}"
 BOSS_USER="{\"id\":\"$ACTOR\",\"role\":\"platform-admin\",\"access_tier\":\"operator\",\"territory_account_ids\":[],\"direct_report_ids\":[],\"department\":\"platform\"}"
+
+# HOW THE PROBE READS THE SYSTEM OF RECORD — as a NAMED, READ-ONLY
+# reader. Backlog 61085a9e.
+#
+# The header above is this script's, for its own three calls (read the
+# car, write the verdict, patch the attempt). It was never given to the
+# probe, and the probe's env carried only BOSS_JOBS_URL — so a probe
+# doing `curl $BOSS_JOBS_URL/api/...` read as `operator:unidentified`
+# and policy answered a NARROWER WORLD in silence. Measured 2026-09-10,
+# one backend, one commit: ?kind=ship-a-change&status=open was 21 rows
+# for the operator and 0 unidentified; /api/yard/status came back with
+# trains, dock, held, recent and dock_depth ALL ZERO — a confident,
+# well-formed, completely idle yard. /api/workflows was byte-identical
+# between the two readers, so there is nothing in an answer to say
+# which kind you hit.
+#
+# That is worse than a broken read. A PRESENCE assertion fails for the
+# wrong reason and someone investigates. An ABSENCE assertion PASSES
+# FALSELY — "no open job of kind X remains" is green against an empty
+# page the probe was never allowed to see — and the script above then
+# records it as a proof, on a car that closes.
+#
+# NOT this script's own actor, one line though it would be: that is
+# platform-admin with WRITE capability, handed to program text a
+# builder authored upstream and run here as $PROBE_USER. The privilege
+# matches the job instead — `audit-readonly`, which core policy
+# (boss-policy-client::defaults) grants Read at Scope::All on every
+# shipped resource and NO other action anywhere. Verified by effect on
+# the live deployment: with this actor, PATCH /api/jobs/{id}/metadata
+# and a step PUT both answered 403 "no active rule for role
+# audit-readonly on job:update" / "…on step:update", while every list
+# read matched the operator's exactly. boss-testing's
+# run_car_probe_sh.rs pins the role below against those default rules,
+# because the fact lives in two places and cannot be collapsed
+# (CLAUDE.md §9a).
+#
+# The markers are the extraction point for that test.
+# PROBE-READER-BEGIN
+READER_ACTOR="${BOSS_PROBE_READER_ACTOR:-automation:run-car-probe-reader}"
+READER_USER="{\"id\":\"$READER_ACTOR\",\"role\":\"audit-readonly\",\"access_tier\":\"auditor\",\"territory_account_ids\":[],\"direct_report_ids\":[],\"department\":\"platform\"}"
+# PROBE-READER-END
+
+# And the reader itself, first on the probe's PATH: GET-only, base and
+# identity supplied from here rather than by the probe's text, because
+# the cheap thing to type has to be the right thing. It is IN THE TREE,
+# so the converged checkout carries it with no install step; a checkout
+# too old to have it makes the probe fail as
+# `boss-sor-read: command not found`, which fd 9 turns into an
+# `unrunnable` verdict naming the tool instead of a false claim.
+# `boss gate --park-probe` refuses a probe that reads the system of
+# record any other way.
+PROBE_BIN="$PROBE_DIR/infra/forge/probe-bin"
 for t in curl jq timeout; do
     command -v "$t" >/dev/null 2>&1 || refuse "$t is not installed on this host"
 done
@@ -168,15 +228,19 @@ if [[ "$(id -u)" -eq 0 ]]; then
     id -u "$PROBE_USER" >/dev/null 2>&1 || refuse "probe user '$PROBE_USER' does not exist on this host; refusing to run a car's probe as root"
     home=$(getent passwd "$PROBE_USER" | cut -d: -f6)
     timeout -k 5 "$PROBE_TIMEOUT" runuser -u "$PROBE_USER" -- \
-        env --chdir="$PROBE_DIR" HOME="$home" USER="$PROBE_USER" PATH="$PATH" \
+        env --chdir="$PROBE_DIR" HOME="$home" USER="$PROBE_USER" \
+            PATH="$PROBE_BIN:$PATH" \
             BOSS_JOBS_URL="$BASE" BOSS_PROBE_NOTFOUND="$notfound" \
+            BOSS_SOR_USER="$READER_USER" \
             bash -c "$probe_prelude$probe" \
         > "$workdir/out" 2> "$workdir/errs" < /dev/null
     rc=$?
 else
     # Run by hand, by a person who is already the probe user.
     timeout -k 5 "$PROBE_TIMEOUT" env --chdir="$PROBE_DIR" BOSS_JOBS_URL="$BASE" \
-        BOSS_PROBE_NOTFOUND="$notfound" bash -c "$probe_prelude$probe" \
+        PATH="$PROBE_BIN:$PATH" \
+        BOSS_PROBE_NOTFOUND="$notfound" BOSS_SOR_USER="$READER_USER" \
+        bash -c "$probe_prelude$probe" \
         > "$workdir/out" 2> "$workdir/errs" < /dev/null
     rc=$?
 fi

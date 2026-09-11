@@ -1686,6 +1686,7 @@ dependencies = [
  "async-trait",
  "axum",
  "boss-core",
+ "boss-policy-client",
  "http-body-util",
  "serde",
  "serde_json",

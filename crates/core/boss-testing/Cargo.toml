@@ -22,6 +22,12 @@ uuid = { version = "1", features = ["v4"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+# Test-only, and only for `run_car_probe_sh.rs`: the probe's reader role
+# is written in infra/forge/run-car-probe.sh and DEFINED in core policy's
+# default rules. Two homes for one fact, so the test pins them equal
+# (CLAUDE.md §9a) — `audit-readonly` must grant Read everywhere a probe
+# reads and no non-Read action anywhere. Core → core; no tier crossing.
+boss-policy-client = { path = "../boss-policy-client" }
 
 [[test]]
 name = "migrate_sh"
