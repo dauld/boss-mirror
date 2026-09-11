@@ -48,16 +48,66 @@ fn has(tool: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// `id <args>` as a trimmed string. The test reads its own account the
+/// same way the script under test reads the tree's.
+fn id_out(args: &[&str]) -> String {
+    let out = Command::new("id").args(args).output().expect("id runs");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A real account on this box that is NOT the account running the test.
+///
+/// `as_owner` in the script runs the command directly when `id -un`
+/// equals the owner, so the owner-dropping branch is only REACHABLE with
+/// an owner the caller is not. A literal name makes that premise a
+/// property of whoever runs the suite: this test was written with
+/// `"nobody"` hardcoded under a gate that still ran as root, and the
+/// moment the gate pod moved to uid 65534 — which IS `nobody` in the
+/// base image — the drop correctly stopped happening and the test failed
+/// on branches that touched nothing. So the name is MEASURED, not
+/// spelled: the first candidate that resolves through `id -u` (the
+/// script refuses an owner with no passwd entry) and is not the caller.
+/// `nobody` stays first so a root run is unchanged.
+fn an_owner_other_than_the_caller() -> Option<String> {
+    let me = id_out(&["-un"]);
+    ["nobody", "daemon", "bin", "sys", "mail", "root"]
+        .into_iter()
+        .find(|candidate| {
+            *candidate != me
+                && Command::new("id")
+                    .args(["-u", candidate])
+                    .output()
+                    .is_ok_and(|o| o.status.success())
+        })
+        .map(str::to_string)
+}
+
+/// A scratch root PER PROCESS, not per case name. A fixed
+/// `/tmp/delete-orphan-object-<case>` is shared by every account on the
+/// box: a dir left by a root run is one `remove_dir_all` a later run as
+/// another uid cannot do — and that failure was discarded, so the run
+/// carried on and died 130 lines later on an unreadable bare
+/// `PermissionDenied` from a fixture write. The pid makes the root ours,
+/// and every failure here names the path it was at.
 fn scratch(case: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("delete-orphan-object-{case}"));
+    let dir = std::env::temp_dir().join(format!(
+        "delete-orphan-object-{case}-{}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch dir");
+    std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("scratch dir {}: {e}", dir.display()));
     dir
+}
+
+/// Write, naming the path when it fails. A bare `unwrap()` on a write
+/// reports the errno and not the file, which is the whole diagnosis.
+fn write_file(path: &Path, body: &str) {
+    std::fs::write(path, body).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }
 
 fn write_exec(path: &Path, body: &str) {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, body).unwrap();
+    write_file(path, body);
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
@@ -95,8 +145,10 @@ fn doc(kind: &str, ns: &str, name: &str) -> String {
 fn fixture_tree(root: &Path) -> PathBuf {
     let tree = root.join("tree");
     let dir = tree.join("infra/cluster/manifests");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::create_dir_all(tree.join("infra/gate-runner")).unwrap();
+    std::fs::create_dir_all(&dir)
+        .unwrap_or_else(|e| panic!("fixture manifests dir {}: {e}", dir.display()));
+    std::fs::create_dir_all(tree.join("infra/gate-runner"))
+        .unwrap_or_else(|e| panic!("fixture gate-runner dir under {}: {e}", tree.display()));
 
     let mut files: Vec<(String, String)> = vec![
         (
@@ -182,7 +234,7 @@ fn fixture_tree(root: &Path) -> PathBuf {
         ));
     }
     for (name, body) in &files {
-        std::fs::write(dir.join(name), body).unwrap();
+        write_file(&dir.join(name), body);
     }
 
     git(&tree, &["init", "-q", "-b", "main"]);
@@ -718,8 +770,25 @@ fn refuses_a_malformed_argument() {
 
 /// With an owner that is not the caller, every git read is issued through
 /// `runuser`, and the run still reaches its verdict.
+///
+/// The owner is MEASURED, not spelled — see `an_owner_other_than_the_caller`.
+/// Naming it `nobody` made this case pass only while the gate ran as root,
+/// and it failed for two branches that touched nothing the night the gate
+/// pod moved to uid 65534 — `nobody` itself — because the drop it asserts
+/// had correctly stopped being the thing the script does.
 #[test]
 fn the_git_reads_drop_to_the_checkouts_owner() {
+    let Some(owner) = an_owner_other_than_the_caller() else {
+        eprintln!(
+            "SKIPPING the_git_reads_drop_to_the_checkouts_owner AND ASSERTING NOTHING: \
+             this box has no resolvable account other than the caller ({} / uid {}), \
+             so the owner-drop branch cannot be reached — the privilege drop is \
+             UNCOVERED on this run",
+            id_out(&["-un"]),
+            id_out(&["-u"])
+        );
+        return;
+    };
     let c = Case::new(
         "owner-drop",
         &[("Service", "boss", "boss-docs-internal", "")],
@@ -727,19 +796,22 @@ fn the_git_reads_drop_to_the_checkouts_owner() {
     c.stub_runuser();
     let (rc, out) = c.run_env(
         &["Service/boss/boss-docs-internal", "--dry-run"],
-        &[("BOSS_CLUSTER_TREE_OWNER", "nobody".into())],
+        &[("BOSS_CLUSTER_TREE_OWNER", owner.clone())],
     );
     assert_eq!(
         rc, 0,
-        "the verb refused when the tree belongs to someone else:\n{out}"
+        "the verb refused when the tree belongs to someone else ({owner}):\n{out}"
     );
     assert_eq!(c.deletions(), "", "--dry-run deleted something:\n{out}");
     let calls = c.runuser_calls();
     assert!(
         !calls.is_empty(),
-        "no git read went through runuser — it ran as the caller, which is the defect:\n{out}"
+        "no git read went through runuser — it ran as the caller ({}, owner {owner}), \
+         which is the defect:\n{out}",
+        id_out(&["-un"])
     );
-    for needle in ["-u nobody", "rev-parse", "status --porcelain"] {
+    let dropped_to = format!("-u {owner}");
+    for needle in [dropped_to.as_str(), "rev-parse", "status --porcelain"] {
         assert!(
             calls.contains(needle),
             "the dropped commands do not include {needle:?}:\n{calls}"
