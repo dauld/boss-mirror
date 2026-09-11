@@ -19,7 +19,7 @@ use anyhow::Result;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-use crate::gate::{api, rows};
+use crate::gate::{AbandonedPlace, abandoned_places, api, queue_order, rows};
 
 fn md_str<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get("metadata")
@@ -111,6 +111,68 @@ fn held_dock_cars(cars: &[Value]) -> Vec<(String, String)> {
     out
 }
 
+/// The lines naming every queued gate-run NO PROCESS HOLDS — empty when
+/// there are none.
+///
+/// A TROUBLED PACKET MUST LOOK TROUBLED (CLAUDE.md §Diagnosis; 76d41004).
+/// This verb used to list every queued run in one lane as "since
+/// <stamp>", so a run whose waiter had been dead for ten minutes —
+/// with no Job, and nothing left that would ever launch it — rendered
+/// exactly like a run two minutes from its slot. Measured 2026-09-10
+/// 22:41–22:51Z; the yard's queued lane still reads the same way.
+///
+/// Each line carries what the operator's next move needs: the branch,
+/// the packet, how long nobody has held it, whether a car is owed, and
+/// the verb that recovers it. The recovery is the BARE verb on purpose —
+/// a re-gate REUSES the open packet (`reusable_packet`) and an empty
+/// `ParkIntent` stamps nothing, so the `park_*` keys already on the
+/// packet survive; only a branch that has LANDED has them cleared
+/// (610537b2). Pinned by gate.rs's
+/// `a_bare_regate_stamps_nothing_so_a_reused_packets_intent_survives`,
+/// because this is advice a tired operator will follow verbatim.
+fn abandoned_report(places: &[AbandonedPlace]) -> Vec<String> {
+    if places.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![format!(
+        "\n  ABANDONED IN THE QUEUE — {} queued gate-run(s) NO PROCESS HOLDS. A queued \
+         run is launched by the `--wait` process holding its place, so a waiter that \
+         died leaves an open packet with no Job and nothing to start it (76d41004):",
+        places.len()
+    )];
+    for p in places {
+        let idle = match p.idle_secs {
+            Some(secs) => format!("idle {}m", secs / 60),
+            // Never an invented age: a place whose stamps do not parse
+            // cannot be ordered by the queue either, which is itself why
+            // it is stranded.
+            None => format!("idle unknown — an unreadable queued_at ({})", p.queued_at),
+        };
+        let owed = if p.park_intent {
+            "  (park intent stamped — a car is owed on green)"
+        } else {
+            ""
+        };
+        let branch = if p.branch.is_empty() {
+            "(no branch recorded)"
+        } else {
+            &p.branch
+        };
+        out.push(format!(
+            "    {branch}  packet {}  {idle}{owed}",
+            &p.packet[..8.min(p.packet.len())],
+        ));
+        if !p.branch.is_empty() {
+            out.push(format!(
+                "      recover: boss gate {} --wait  — reuses this packet and keeps its \
+                 park intent (a bare re-gate stamps nothing over it)",
+                p.branch
+            ));
+        }
+    }
+    out
+}
+
 fn bases_behind(checks: &[(String, Option<i32>)]) -> Vec<&str> {
     checks
         .iter()
@@ -168,15 +230,35 @@ pub async fn run() -> Result<()> {
     for g in &running {
         println!("    {}", md_str(g, "branch"));
     }
+    // A PLACE NOBODY HOLDS IS NOT A QUEUE. The two readings are the
+    // system of record's own: `queue_order` is every place a live
+    // process is still heartbeating for, and `abandoned_places` is the
+    // rest of the marked runs — one definition, split (§9a). Wall time,
+    // because the heartbeat that keeps a place is wall-stamped by the
+    // waiter; `wall_now()` is the sanctioned source (the no-wallclock
+    // lint's rule 1) and keeps this read-only verb's signature out of
+    // the contended boundary in main.rs.
+    let now = boss_clock_client::wall_now();
+    let in_line = queue_order(&gating, now, crate::gate::QUEUE_PLACE_TTL_SECS);
+    let abandoned = abandoned_places(&gating, now, crate::gate::QUEUE_PLACE_TTL_SECS);
     if !waiting.is_empty() {
-        println!("\n  QUEUED FOR A SLOT — {} run(s)", waiting.len());
-        for g in &waiting {
+        println!(
+            "\n  QUEUED FOR A SLOT — {} place(s) held by a live process",
+            in_line.len()
+        );
+        for g in waiting.iter().filter(|g| {
+            let id = g.get("id").and_then(Value::as_str).unwrap_or_default();
+            in_line.iter().any(|held| held == id)
+        }) {
             println!(
                 "    {}  since {}",
                 md_str(g, "branch"),
                 md_str(g, boss_jobs::yard::QUEUED_AT)
             );
         }
+    }
+    for line in abandoned_report(&abandoned) {
+        println!("{line}");
     }
 
     // Stranded greens: gated, never parked — the census cross-ref, not a
@@ -557,6 +639,86 @@ mod tests {
     /// Only a car still AT the dock can be held there. A boarded car
     /// (review completed, or a train stamp) and a closed one are gone
     /// from the dock, and a hold left on their record is history.
+    /// A TROUBLED PACKET MUST LOOK TROUBLED (CLAUDE.md §Diagnosis;
+    /// 76d41004). A queued gate-run whose waiter died has no launcher at
+    /// all, and until this split it rendered in this verb's QUEUED FOR A
+    /// SLOT lane identically to a run waiting its turn — "since
+    /// <stamp>", indefinitely. The report must name the packet, how long
+    /// nobody has held it, and the recovery that keeps the park intent.
+    #[test]
+    fn an_abandoned_place_is_reported_as_troubled_with_its_recovery() {
+        let lines = abandoned_report(&[AbandonedPlace {
+            packet: "fafe8ba4-0000-0000-0000-000000000000".to_string(),
+            branch: "fix/two-operator-verbs-stop-lying".to_string(),
+            queued_at: "2026-09-10T22:40:00Z".to_string(),
+            idle_secs: Some(11 * 60),
+            park_intent: true,
+        }]);
+        let all = lines.join("\n");
+        assert!(all.contains("ABANDONED"), "{all}");
+        assert!(all.contains("fix/two-operator-verbs-stop-lying"), "{all}");
+        assert!(all.contains("fafe8ba4"), "{all}");
+        assert!(all.contains("11m"), "how long nobody has held it: {all}");
+        assert!(
+            all.contains("boss gate fix/two-operator-verbs-stop-lying --wait"),
+            "the recovery is a verb the operator can run: {all}"
+        );
+        assert!(
+            all.contains("park intent"),
+            "a strand that also owes a car must say so: {all}"
+        );
+    }
+
+    /// NO STRAND, NO SECTION — and no alarm language for a healthy
+    /// queue. An empty report prints nothing: the queue lane above
+    /// already says how many places are held.
+    #[test]
+    fn a_healthy_queue_reports_no_abandoned_section() {
+        assert!(abandoned_report(&[]).is_empty());
+    }
+
+    /// A RECOVERY LINE THAT NAMES NO BRANCH IS NOT ADVICE. A packet with
+    /// no `branch` cannot be re-gated by name, so the strand is still
+    /// reported — an operator has to see it — but without a verb that
+    /// would run `boss gate  --wait` and fail on an empty argument.
+    #[test]
+    fn a_place_with_no_branch_is_named_without_a_verb_to_run() {
+        let lines = abandoned_report(&[AbandonedPlace {
+            packet: "c0ffee00-0000-0000-0000-000000000000".to_string(),
+            branch: String::new(),
+            queued_at: "2026-09-10T22:40:00Z".to_string(),
+            idle_secs: Some(600),
+            park_intent: false,
+        }]);
+        let all = lines.join("\n");
+        assert!(
+            all.contains("c0ffee00"),
+            "the strand is still reported: {all}"
+        );
+        assert!(!all.contains("recover:"), "no verb without a branch: {all}");
+    }
+
+    /// AN UNREADABLE STAMP IS STILL A STRAND. A place whose `queued_at`
+    /// does not parse can never be launched (the queue cannot order it),
+    /// so it is reported — with its idle time named as unknown rather
+    /// than guessed.
+    #[test]
+    fn an_unreadable_place_is_reported_without_inventing_an_age() {
+        let lines = abandoned_report(&[AbandonedPlace {
+            packet: "deadbeef-0000-0000-0000-000000000000".to_string(),
+            branch: "fix/x".to_string(),
+            queued_at: "yesterday".to_string(),
+            idle_secs: None,
+            park_intent: false,
+        }]);
+        let all = lines.join("\n");
+        assert!(
+            all.contains("unreadable") || all.contains("unknown"),
+            "{all}"
+        );
+        assert!(!all.contains("0m"), "never an invented age: {all}");
+    }
+
     #[test]
     fn a_car_that_left_the_dock_is_not_held_on_it() {
         let held = json!({ "hold": "x" });

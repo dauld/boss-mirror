@@ -64,6 +64,39 @@
 //! failure the queue exists to survive, where a poll re-derives it every
 //! time. And a place held by a live process cannot outlive its
 //! session, which is the second defect above, structurally.
+//!
+//! AND THE PRICE OF THAT CHOICE: A QUEUED RUN IS ONLY AS ALIVE AS ITS
+//! WAITER (76d41004). The place expiring is the design working; the
+//! PACKET outliving it is not. Measured 2026-09-10 22:41–22:51Z: a
+//! `--wait` process was killed for memory while its run was queued, and
+//! the open gate-run sat with no Job, no holder, and nothing that would
+//! ever launch it — for ten minutes, and indefinitely if nobody looked,
+//! rendered the whole time as a run patiently waiting its turn. That is
+//! exactly what the `!wait` refusal above exists to prevent, reached by
+//! any interruption of the client. Contrast 464309ee: a waiter killed
+//! AFTER the launch costs nothing, because the `--park-*` intent is on
+//! the packet where the dispatcher can read it. Intent recorded outside
+//! the process survives; intent that IS the process does not.
+//!
+//! [`abandoned_places`] makes the strand a named, purely SoR-computable
+//! fact (`boss orient` reports it), which turns an indefinite silence
+//! into a line within [`QUEUE_PLACE_TTL_SECS`]. What it deliberately
+//! does NOT do is relaunch. A resident launcher needs three things this
+//! car cannot put in place: a Kubernetes credential for whatever process
+//! holds it (the two arguments above still stand — and an unsupervised
+//! launcher makes them sharper, not softer); a re-validation of the
+//! branch at launch time, since an adopted place may have landed or
+//! grown a green twin since it was taken; and, above all, an ATOMIC
+//! claim on the packet. Today's exclusion is a cluster read
+//! (`live_gate_for_packet`) plus clear-then-create, which is adequate
+//! for one process launching its own place and NOT adequate for two
+//! unsynchronised launchers — two Jobs for one packet is a worse failure
+//! than the strand, because it crosses receipts. The existing primitive
+//! with the right shape is the cadence loop's firing claim (a firing id
+//! that is a pure function of its inputs, deduped by a primary key), so
+//! a launcher should claim `(packet, window)` there rather than invent a
+//! lock. Adoption by another WAITER is not the fix either: in the
+//! measured incident the dead waiter was the only one in line.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -346,7 +379,7 @@ const QUEUE_CAP: usize = 12;
 /// being refreshed is skipped, so the line behind a dead holder moves
 /// instead of waiting on a ghost. Ten poll intervals of slack, which
 /// comfortably absorbs an SoR roll.
-const QUEUE_PLACE_TTL_SECS: i64 = 300;
+pub(crate) const QUEUE_PLACE_TTL_SECS: i64 = 300;
 
 /// How often a waiting gate re-reads the line and the cluster.
 const QUEUE_POLL: std::time::Duration = std::time::Duration::from_secs(30);
@@ -561,6 +594,107 @@ pub(crate) fn queue_place_patch(now: chrono::DateTime<chrono::Utc>) -> Value {
 /// a genuinely running gate from the yard's bays.
 pub(crate) fn queue_clear_patch() -> Value {
     json!({ QUEUED_AT: Value::Null, QUEUE_HEARTBEAT_AT: Value::Null })
+}
+
+/// A place in the gate queue that NO LIVE PROCESS HOLDS — a gate-run
+/// that is marked queued, has no Job behind it, and has nothing left
+/// that would ever launch it.
+///
+/// WHY THIS IS A TYPE AND NOT A NUMBER (76d41004). Measured 2026-09-10
+/// 22:41–22:51Z: a `boss gate --wait` was killed for memory while its
+/// run was queued at the bound. The place expired on schedule and the
+/// line behind it moved — that half works — but the PACKET stayed open,
+/// and since [`wait_for_slot`] is the only thing that launches a queued
+/// run, nothing was left to start it. Ten minutes, and it would have
+/// been indefinite. Every surface rendered it as a run patiently waiting
+/// its turn, which is CLAUDE.md §Diagnosis inverted: a troubled packet
+/// must look troubled. So the report carries what an operator needs to
+/// act — which branch, which packet, how long nobody has held it, and
+/// whether a car is owed on green.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AbandonedPlace {
+    /// The gate-run packet still open with no launcher.
+    pub packet: String,
+    pub branch: String,
+    /// The place's ordering stamp, verbatim — including a stamp that
+    /// does not parse, which is itself a reason the run is stranded.
+    pub queued_at: String,
+    /// Seconds since anything said it was held, from the heartbeat or,
+    /// failing that, from the place itself. `None` when neither stamp
+    /// parses: an age that cannot be read is never guessed.
+    pub idle_secs: Option<i64>,
+    /// Does this run carry a `--park-*` intent? Then the strand is also
+    /// an unfiled car, and the intent is ON the packet — which is the
+    /// whole asymmetry 464309ee names: intent recorded where another
+    /// actor can read it survives a dead waiter. A re-gate reuses the
+    /// packet and inherits it.
+    pub park_intent: bool,
+}
+
+/// The queued runs nobody holds, oldest first.
+///
+/// THE COMPLEMENT OF [`queue_order`], DELIBERATELY (CLAUDE.md §9a).
+/// "In line" has exactly one definition — live heartbeat inside the TTL,
+/// readable ordering stamp — and this is every marked run that
+/// definition excludes. Written as a complement rather than as a second
+/// predicate so the two cannot disagree about the same run: a change to
+/// the TTL, to the stamp parsing, or to the heartbeat fallback moves
+/// runs across the line and keeps the sum.
+///
+/// READS THE SYSTEM OF RECORD ONLY — no cluster access needed, which is
+/// what lets `boss orient` (and anything else that can read the jobs
+/// API) report it. A run that LAUNCHES has its queue keys cleared before
+/// its Job is created, so "still marked queued" is already "has no Job",
+/// and the narrow window between the clear and the create leaves a
+/// packet with no marker at all — a different residue class, not this
+/// one.
+pub(crate) fn abandoned_places(
+    open: &[Value],
+    now: chrono::DateTime<chrono::Utc>,
+    ttl_secs: i64,
+) -> Vec<AbandonedPlace> {
+    let in_line = queue_order(open, now, ttl_secs);
+    let mut out: Vec<(Option<chrono::DateTime<chrono::Utc>>, AbandonedPlace)> = open
+        .iter()
+        .filter_map(|j| {
+            let id = j.get("id").and_then(Value::as_str)?;
+            let md = j.get("metadata")?;
+            // The queued MARKER, the same reading the yard's gate bays
+            // make: a blank string is no marker (boss_jobs::yard).
+            let queued_at = md
+                .get(QUEUED_AT)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())?;
+            if in_line.iter().any(|held| held == id) {
+                return None;
+            }
+            let last_seen = md
+                .get(QUEUE_HEARTBEAT_AT)
+                .and_then(Value::as_str)
+                .and_then(parse_instant)
+                .or_else(|| parse_instant(queued_at));
+            Some((
+                last_seen,
+                AbandonedPlace {
+                    packet: id.to_string(),
+                    branch: md
+                        .get("branch")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    queued_at: queued_at.to_string(),
+                    idle_secs: last_seen.map(|at| (now - at).num_seconds()),
+                    park_intent: boss_jobs::stranded::park_intent(md),
+                },
+            ))
+        })
+        .collect();
+    // Oldest first, and an unreadable stamp (`None`) first of all — it
+    // is the one that has been stranded longest by construction, since
+    // no launcher could ever order it. Packet id breaks a tie so two
+    // readers list them the same way.
+    out.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.packet.cmp(&b.1.packet)));
+    out.into_iter().map(|(_, p)| p).collect()
 }
 
 /// Substitute the runner manifest's placeholders and return the single
@@ -3724,6 +3858,156 @@ mod tests {
         let now = at("2026-09-08T20:00:00Z");
         let open = vec![queued_run("bad", "yesterday", None)];
         assert!(queue_order(&open, now, QUEUE_PLACE_TTL_SECS).is_empty());
+    }
+
+    /// A PLACE NOBODY HOLDS IS A STRAND, NOT A QUEUE (76d41004).
+    /// Measured 2026-09-10 22:41–22:51Z: a `--wait` poller was killed
+    /// for memory while its run was queued, and the packet sat open with
+    /// no Job and no holder for ten minutes — rendered, the whole time,
+    /// exactly like a run patiently waiting its turn.
+    #[test]
+    fn a_queued_place_whose_holder_died_is_abandoned() {
+        let now = at("2026-09-08T20:00:00Z");
+        let open = vec![
+            queued_run("dead", "2026-09-08T18:00:00Z", Some("2026-09-08T18:02:00Z")),
+            queued_run(
+                "alive",
+                "2026-09-08T19:50:00Z",
+                Some("2026-09-08T19:59:40Z"),
+            ),
+            json!({ "id": "gating", "metadata": { "branch": "feat/y" } }),
+        ];
+        let found = abandoned_places(&open, now, QUEUE_PLACE_TTL_SECS);
+        assert_eq!(
+            found.iter().map(|p| p.packet.as_str()).collect::<Vec<_>>(),
+            vec!["dead"],
+            "only the place with no live holder is abandoned"
+        );
+        assert_eq!(found[0].branch, "feat/x");
+        assert_eq!(
+            found[0].idle_secs,
+            Some(118 * 60),
+            "idle is measured from the last heartbeat, not from the place"
+        );
+    }
+
+    /// THE THRESHOLD IS NOT A GUESS ABOUT GATE DURATION. A place can be
+    /// legitimately queued for over an hour (cap 12, bound 3, measured
+    /// median 15.7 min / p90 25.8 min / max 135.8 over the 200 most
+    /// recent runs, 2026-09-11), so any age-based threshold that avoids
+    /// false alarms is ~100 minutes wide and still misses the tail. The
+    /// heartbeat answers the question directly and in 300s.
+    #[test]
+    fn an_hours_long_wait_with_a_live_holder_is_not_abandoned() {
+        let now = at("2026-09-08T21:00:00Z");
+        let open = vec![queued_run(
+            "patient",
+            "2026-09-08T19:00:00Z",
+            Some("2026-09-08T20:59:30Z"),
+        )];
+        assert!(
+            abandoned_places(&open, now, QUEUE_PLACE_TTL_SECS).is_empty(),
+            "two hours in line with a fresh heartbeat is a healthy queue"
+        );
+    }
+
+    /// A PLACE JUST TAKEN IS HELD. `queue_place_patch` writes the
+    /// ordering key and the first heartbeat together, but a packet whose
+    /// heartbeat key is somehow absent is dated from the place itself —
+    /// the same fallback `queue_order` makes, or the two predicates would
+    /// disagree about the same run.
+    #[test]
+    fn a_place_just_taken_is_not_abandoned_for_want_of_a_heartbeat() {
+        let now = at("2026-09-08T20:00:00Z");
+        let fresh = vec![queued_run("new", "2026-09-08T19:59:50Z", None)];
+        assert!(abandoned_places(&fresh, now, QUEUE_PLACE_TTL_SECS).is_empty());
+        let old = vec![queued_run("never-beat", "2026-09-08T18:00:00Z", None)];
+        assert_eq!(
+            abandoned_places(&old, now, QUEUE_PLACE_TTL_SECS).len(),
+            1,
+            "a place taken two hours ago that never beat once has no holder"
+        );
+    }
+
+    /// ONE DEFINITION OF "IN LINE", AND ABANDONED IS ITS COMPLEMENT
+    /// (§9a). Every run carrying the queued marker is either in
+    /// `queue_order` or abandoned — never both, never neither. Written as
+    /// a partition so the two readers cannot drift: a change to the TTL,
+    /// the stamp parsing, or the heartbeat fallback moves runs from one
+    /// side to the other and keeps the sum.
+    #[test]
+    fn every_queued_run_is_either_in_line_or_abandoned() {
+        let now = at("2026-09-08T20:00:00Z");
+        let open = vec![
+            queued_run(
+                "alive",
+                "2026-09-08T19:59:00Z",
+                Some("2026-09-08T19:59:40Z"),
+            ),
+            queued_run("dead", "2026-09-08T18:00:00Z", Some("2026-09-08T18:02:00Z")),
+            // An unparseable stamp is marked queued, so the yard shows it
+            // queued, and `queue_order` cannot see it: nothing will ever
+            // launch it. That is the strand, not a third category.
+            queued_run("bad", "yesterday", None),
+            // Not marked: a run actually gating. In neither set.
+            json!({ "id": "gating", "metadata": { "branch": "feat/y" } }),
+        ];
+        let in_line = queue_order(&open, now, QUEUE_PLACE_TTL_SECS);
+        let abandoned: Vec<String> = abandoned_places(&open, now, QUEUE_PLACE_TTL_SECS)
+            .into_iter()
+            .map(|p| p.packet)
+            .collect();
+        for id in ["alive", "dead", "bad"] {
+            let queued = in_line.iter().any(|i| i == id);
+            let stranded = abandoned.iter().any(|i| i == id);
+            assert!(
+                queued ^ stranded,
+                "{id}: in line {queued}, abandoned {stranded} — a marked run is exactly one"
+            );
+        }
+        assert!(!abandoned.iter().any(|i| i == "gating"));
+        assert_eq!(
+            abandoned,
+            vec!["bad".to_string(), "dead".to_string()],
+            "oldest readable place first, unreadable stamps first of all"
+        );
+    }
+
+    /// THE RECOVERY MUST NOT COST THE PARK INTENT, which is why the
+    /// report names whether there is one. The intent is already stamped
+    /// on the packet (that is why a killed waiter costs nothing once a
+    /// run has LAUNCHED — 464309ee), so a re-gate that reuses the packet
+    /// inherits it.
+    #[test]
+    fn an_abandoned_place_says_whether_a_car_is_owed() {
+        let now = at("2026-09-08T20:00:00Z");
+        let mut with_intent = queued_run("owed", "2026-09-08T18:00:00Z", None);
+        with_intent["metadata"]["park_summary"] = json!("A queued gate does not need its waiter");
+        let plain = queued_run("plain", "2026-09-08T18:00:00Z", None);
+        let found = abandoned_places(&[with_intent, plain], now, QUEUE_PLACE_TTL_SECS);
+        let owed: std::collections::BTreeMap<&str, bool> = found
+            .iter()
+            .map(|p| (p.packet.as_str(), p.park_intent))
+            .collect();
+        assert!(owed["owed"], "this strand is also an unfiled car");
+        assert!(!owed["plain"]);
+    }
+
+    /// AND THE RECOVERY IS THE BARE VERB. A reused packet keeps its
+    /// `park_*` keys because an EMPTY intent stamps nothing at all — the
+    /// `clear_patch` that nulls them runs only for a branch that has
+    /// LANDED (610537b2). Pinned here because `boss orient` tells an
+    /// operator so in as many words.
+    #[test]
+    fn a_bare_regate_stamps_nothing_so_a_reused_packets_intent_survives() {
+        let bare = ParkIntent::default();
+        assert!(bare.is_empty());
+        assert!(bare.require_complete().is_ok());
+        assert_eq!(
+            bare.metadata_patch().as_object().map(serde_json::Map::len),
+            Some(0),
+            "an empty intent must have no keys to overwrite a reused packet's with"
+        );
     }
 
     /// A RETURNING BUILDER IS NOT REFUSED BY THEIR OWN PLACE. The
