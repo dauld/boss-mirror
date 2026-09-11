@@ -505,7 +505,7 @@ timer_interval_minutes() {
 
 # The sweep's declared roster, as `<kind> <minutes>` lines. Read off the
 # rule row mirrored in its own file under infra/dispatcher/rules/ — the
-# same text the migration seeds and dispatcher_rules_seed_matches_toml
+# same text the rule registry publishes and the seed's equality test
 # pins to the live table.
 declared=$(grep -oE '"interval_minutes\.[a-z0-9-]+" = "[0-9]+"' "$RULES_TOML" \
     | sed -E 's/"interval_minutes\.([a-z0-9-]+)" = "([0-9]+)"/\1 \2/')

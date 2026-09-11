@@ -42,9 +42,10 @@
 # The interval also lives in the timer files that execute the chores, so
 # it is pinned: infra/lint/timers-leave-a-packet.sh check 8 fails CI when
 # a timer's schedule and this roster disagree, or when a rostered timer's
-# kind is missing here (CLAUDE.md §9a). Seeded by
-# 202609082300-a-silent-cadence-files-an-alarm.sql; present here because
-# dispatcher_rules_seed_matches_toml compares BOTH directions.
+# kind is missing here (CLAUDE.md §9a). First seeded by
+# 202609082300-a-silent-cadence-files-an-alarm.sql, applied history: this
+# FILE is now the definition, and the registry row is published from
+# it at boot (rules::seed — backlog 41ba00cd).
 #
 # THESE ARGS ARE THE TIMER HALF OF THE ROSTER. The other half — every
 # daily CLOCK RULE that spawns a chore packet — is DERIVED from the rule
@@ -86,10 +87,9 @@ silent kind. (Ratchet history: 59 -> 60, 2026-09-08, migration
 202609082300.)
 """
 # v2 carries one more declaration (maintenance-boss-gcp-converge, 30) and
-# nothing else. The version lives here because load_active_rules reads it
-# off the row and dispatcher_rules_seed_matches_toml compares the
-# serialized rule, version included: a bumped row against a file that
-# still says v1 is a red gate, not a silent drift.
+# nothing else. CHANGING A RULE IS BUMPING THIS INTEGER: the seed writes
+# the row at the version this file declares, retiring the incumbent, so
+# a bump is the whole act and no migration follows it.
 version = 2
 schedule = { cadence = "daily", anchor_date = "2026-09-09" }
 [[rule.do]]

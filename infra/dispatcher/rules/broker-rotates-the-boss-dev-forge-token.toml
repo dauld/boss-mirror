@@ -23,9 +23,10 @@
 # identifier-only evidence. Consumers pick the new value up from the
 # Secret's mounts (boss-dev.yaml) or `boss credential pull forge`.
 #
-# Seeded by 202609021500-the-broker-rotates-the-forge-token.sql;
-# present here because `dispatcher_rules_seed_matches_toml` compares
-# in BOTH directions.
+# First seeded by
+# 202609021500-the-broker-rotates-the-forge-token.sql, applied history: this
+# FILE is now the definition, and the registry row is published from
+# it at boot (rules::seed — backlog 41ba00cd).
 [[rule]]
 name = "broker-rotates-the-boss-dev-forge-token"
 why = """

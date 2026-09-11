@@ -6,8 +6,10 @@
 //! then `Registry::from_raw` — and drives `match_event` → `dispatch`
 //! with `RecordingHandler` standing in for the HTTP handlers. So the
 //! assertions are about what the SHIPPED rows do, not about a fixture
-//! copy of them. (`dispatcher_rules_seed_matches_toml` separately pins
-//! the seeded table against `infra/dispatcher/rules/`.)
+//! copy of them. (`infra/dispatcher/rules/` is the definition those rows
+//! are published from;
+//! `the_registry_equals_the_authored_directory_after_a_seed` proves the
+//! derivation.)
 //!
 //! Three things are worth a test at this layer, and none of them are
 //! visible from a handler unit test:

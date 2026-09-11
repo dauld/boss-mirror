@@ -18,10 +18,22 @@
 //!
 //! Both are authored here — a documented, central "what each side-effect
 //! causes" — and served by `GET /api/dispatcher/rules`. Kept in sync
-//! with the handlers in `rules::handlers::*`; the
-//! `dispatcher_rules`-registry migration will fold this into first-class
-//! rule/handler metadata. `cascade_handlers_match_rules` (tests) guards
-//! against a rule referencing a handler this map forgot.
+//! with the handlers in `rules::handlers::*`;
+//! `cascade_handlers_match_rules` (tests) guards against a rule
+//! referencing a handler this map forgot, reading the authored registry
+//! directory that IS the rule definition.
+//!
+//! THIS IS NOT THE RULE REGISTRY'S SECOND COPY, and the question was
+//! settled when the registry collapsed to one home (backlog 41ba00cd).
+//! The note that used to stand here said the `dispatcher_rules`-registry
+//! migration "will fold this into first-class rule/handler metadata". It
+//! will not, because the fact is a different one: a rule row says which
+//! handler it invokes, and this map says what that HANDLER emits, which
+//! is a property of the handler's Rust and of nothing a rule author
+//! writes. Moving it onto the rule row would make every rule naming the
+//! same handler restate it — CLAUDE.md §9a's duplication, created rather
+//! than removed. So it stays one declaration, in the crate whose code it
+//! describes, pinned to the rule registry by the guard below.
 
 use serde::Serialize;
 use std::collections::BTreeMap;

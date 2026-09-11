@@ -422,8 +422,24 @@ dispatcher's registry watch for those emissions and invoke
 handlers.** Rules are rows in the append-only versioned **`dispatcher_rules`
 registry** (`on_event`, `when`, `do`, over the shared expression
 DSL) — the step_plugins-style draft → active → retired lifecycle,
-authored in-app at `/system/dispatcher/rules` (`infra/dispatcher/rules/`
-is now just the human-authored seed source, not the runtime read).
+authored in-app at `/system/dispatcher/rules`. **`infra/dispatcher/rules/`
+— one `<rule-name>.toml` per rule — is the registry's DEFINITION, and
+the table is derived from it:** the dispatcher publishes every authored
+rule the table lacks at boot and retires every enforced rule no file
+names (`rules::seed`, 2026-09-11, backlog 41ba00cd). Adding a rule is
+dropping a file in; changing one is bumping its `version`; retiring one
+is deleting the file; **no migration writes rules**. Until then a rule
+was declared twice — a file here and an `INSERT INTO dispatcher_rules`
+in a migration, compared by a test and derived from nothing — the worst
+shape of CLAUDE.md §9a, since one copy lived in the production database
+where no test could reach it. The direction was decided on measurement:
+nothing reconciles `dispatcher_rules` at boot (so the hazard that forced
+the Workflow move did not apply), a reviewed `why` cannot live in a row,
+and only the tree can supply a fresh database. Live authoring is
+untouched — the seed is insert-if-absent and never walks a version back,
+so `POST /api/dispatcher/rules` + publish still changes a rule with no
+deploy, and the tree owns which rules exist rather than moment-to-moment
+control of the rows.
 The reactive wiring is visualized as a cascade — trigger event →
 rule → handler → emitted event → re-triggered rule, feedback cycles
 highlighted, filterable by trigger event — at `/system/dispatcher`. The

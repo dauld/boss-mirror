@@ -11,9 +11,10 @@
 # A cross-protocol reactor (pr-train -> ship-a-change -> ops-request ->
 # a verb on the forge host), which no single Workflow `on` consequence
 # can express. Cars without a probe — event-bound ones included — stay
-# hand-proven. Seeded by 202609082215-arrival-runs-the-probe.sql;
-# present here because dispatcher_rules_seed_matches_toml compares BOTH
-# directions.
+# hand-proven. First seeded by
+# 202609082215-arrival-runs-the-probe.sql, applied history: this
+# FILE is now the definition, and the registry row is published from
+# it at boot (rules::seed — backlog 41ba00cd).
 [[rule]]
 name = "run-car-probes-on-train-arrived"
 why = """

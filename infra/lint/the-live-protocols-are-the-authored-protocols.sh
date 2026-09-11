@@ -81,7 +81,68 @@
 # EMPTY one — a registry admitting zero kinds is dead air, not a clean
 # bill.
 #
+# THE SECOND CHECKED PROPERTY — a live row still SAYS what its file says
+# ----------------------------------------------------------------------
+# The property above is about existence: whatever the registry admits,
+# the tree can show you. It is satisfied by a file that exists and is
+# WRONG, and on 2026-09-10 one was. `design-doc-review`'s live v1
+# `description` described `boss-docs-api` parsing `### Qn:` headings,
+# `/api/design/pending-decisions` and the flush jobs — every one of them
+# deleted that day — while the tree file carried the corrected text.
+# TWO mechanisms each declined to close the gap: the bundle seed is
+# insert-if-missing, so a present row is skipped whole, and
+# `bootstrap_reconcile`'s `kind_body_matches` excludes `description` as
+# cosmetic, so it saw no drift and republished nothing (backlog
+# e882b74c). The row was corrected by an operator publish at 02:53Z on
+# 2026-09-11; this half is the mechanism that names the next one.
+#
+# THREE FIELDS, all scalar strings an operator reads and none of which
+# changes what the protocol does: `description`, `label`, `category`.
+# Structural fields are deliberately out, and so is `owning_team` — the
+# loader overrides the file's key, so a disagreement there could never
+# be cleared by a publish. The comparator's own comment carries the
+# reason for each inclusion and each exclusion.
+#
+# NOT A CASE FOR WIDENING `kind_body_matches`. That function governs
+# every bootstrap-created row, so widening it would change reconcile's
+# behaviour for rows this problem is not about — and since
+# `platform_workflows()` went empty on 2026-09-11 it iterates nothing,
+# so widening it would compare nothing here either. Worth being exact:
+# `label` and `category` ARE already in it and `description` alone is
+# not, so for a bundle-authored kind nothing compares any of the three.
+# That is the gap this half fills.
+#
+# A DRIFT IS REPORTED, NOT FAILED ON, under a bare invocation — the same
+# tolerance the kind half gives the same window, read one field deeper:
+# a car edits a description, merges, and the row does not move until an
+# operator publishes. Failing would red every car in between, which is
+# the churn argument that excluded the field from reconcile arriving
+# again as a red gate. `--require-live` is the mode for a caller that
+# can act on a verdict.
+#
 # Usage:  infra/lint/the-live-protocols-are-the-authored-protocols.sh
+#           [--require-live] [--self-test]
+#
+#   --require-live  For a caller with somewhere to put the answer (a
+#                   sweep, a cadence, an operator asking the question
+#                   directly). The live comparison MUST happen: an
+#                   unreachable registry exits 75 instead of skipping to
+#                   0, and a field drift is a verdict (2) rather than a
+#                   report. A check that passes when it could not read
+#                   is worse than no check.
+#   --self-test     Run the fixture cases and say what they proved.
+#                   They run on every invocation regardless; the flag
+#                   only makes them speak.
+#
+#   Exit codes:  0 clean (or drift, reported, bare invocation)
+#                1 a failure of the tree — an unauthored live kind, a
+#                  Rust literal, a stale exemption, an unreadable
+#                  bundle file, or a comparison refused as vacuous
+#                2 field drift, under --require-live only
+#               64 unknown argument
+#               75 EX_TEMPFAIL — the live comparison could not run;
+#                  under --require-live only, bare exits 0
+#
 #   BOSS_JOBS_URL  read surface base (default: the in-cluster machine
 #                  door, boss-jobs-internal:7900)
 
@@ -110,8 +171,329 @@ URL="$BASE/api/workflows"
 # exemption list is how this class of gap got here in the first place.
 EXEMPT=()
 
+NAME="the-live-protocols-are-the-authored-protocols"
+
+# How many kinds the field comparison must actually compare before its
+# silence means anything. See the floor's own comment below.
+FIELD_FLOOR=20
+
+REQUIRE_LIVE=0
+SELF_TEST=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --require-live) REQUIRE_LIVE=1 ;;
+        --self-test)    SELF_TEST=1 ;;
+        *) echo "$NAME: unknown argument: $1" >&2; exit 64 ;;
+    esac
+    shift
+done
+
 fail() { echo "the-live-protocols-are-the-authored-protocols: $*" >&2; problems=$((problems + 1)); }
 problems=0
+
+# ---------------------------------------------------------------------------
+# The field comparator, and the self-test that proves it can refuse.
+# ---------------------------------------------------------------------------
+# `fields_report <bundle_dir> <live_json>` is the whole of the second
+# property, factored out so it can be driven from fixtures with no
+# network. It prints one machine-readable line per finding:
+#
+#   COUNTS  parsed=<n>  compared=<n>  drifted=<n>
+#   DRIFT   <kind>  <field>  v<live_version>  at=<offset>  tree=<len>  live=<len>  <tree window>  <live window>
+#   ABSENT  <kind>  <field>          the FILE makes no claim
+#   NOROW   <kind>                   no ACTIVE live row for this kind
+#
+# Exit codes are the vocabulary the self-test asserts against, because a
+# comparator that cannot say WHICH way it failed sends the next reader
+# to re-derive it (CLAUDE.md §Diagnosis, "a verdict must name what
+# failed"): 0 compared cleanly or with drift, 3 the live answer did not
+# parse, 6 a bundle file did not parse or held no [[workflow]], 7 the
+# non-vacuity floor refused.
+fields_report() {
+    python3 - "$1" "$2" "$FIELD_FLOOR" <<'PY'
+import json, sys, tomllib, pathlib
+
+bundle_dir, live_path, floor = pathlib.Path(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+
+# The fields compared, and the reason each one is on the list. All four
+# are SCALAR STRINGS an operator reads, and none of them changes what
+# the protocol DOES — which is exactly why nothing else compares them.
+#
+#   description  the sentence an operator reads to know what a protocol
+#                is for. The measured instance: design-doc-review's live
+#                v1 described `boss-docs-api`, `/api/design/pending-
+#                decisions` and the flush jobs, all deleted on
+#                2026-09-10, so the row sent a reader looking for a
+#                service that is gone (backlog e882b74c). It is also
+#                the ONE field `kind_body_matches` names as cosmetic and
+#                skips.
+#   label        the protocol's name in every list and tab that renders
+#                it. A label disagreeing with its file means an operator
+#                and a reviewer are talking about differently-named
+#                things.
+#   category     groups protocols in the UI, and has a measured defect
+#                of its own: `maintenance_spec` put the DESCRIPTION in
+#                the category column for all three chores (6c796f75).
+#
+# `owning_team` WAS on this list and came off it, which is worth keeping:
+# the file's key is decorative. `seed_loader` ends its conversion with
+# `spec.owning_team = default_owner` — "platform" for this bundle, the
+# tenant id for a tenant's — so the TOML key is read and thrown away,
+# and `boss workflow publish` reads the same loader. A disagreement
+# there is therefore not a row lagging its file; it is a file claiming
+# something the loader will not honour, and NO publish could ever clear
+# it. A finding no action can close trains a reader to skip the whole
+# report (§Diagnosis, "a check nobody reads").
+#
+# DELIBERATELY NOT COMPARED: `steps`, `subject_kinds`, `metadata_schema`,
+# `entitlements`, `metadata`, `on_complete_create`. Those are
+# STRUCTURAL — they decide what the protocol does — and a live row
+# legitimately leads its file between a published version and the car
+# that writes it down, so comparing them here would report the normal
+# case as drift. They also need the same normalisation the publish path
+# applies (defaults filled, predicates parsed) before an equality means
+# anything, which is a check of its own, not a line in this one. Also
+# out: `version`, `status`, `created_at`, `authoring_job_id` — four
+# columns with no TOML key at all, so the file cannot disagree with
+# them.
+FIELDS = ("label", "description", "category")
+
+try:
+    doc = json.load(open(live_path))
+except Exception as e:
+    print(f"the live answer did not parse: {e}", file=sys.stderr)
+    sys.exit(3)
+rows = doc.get("workflows") if isinstance(doc, dict) else doc
+if not isinstance(rows, list):
+    print("the live answer is not an array of workflow rows", file=sys.stderr)
+    sys.exit(3)
+active = {
+    r["kind"]: r
+    for r in rows
+    if isinstance(r, dict) and "kind" in r and r.get("status", "active") == "active"
+}
+
+def window(s, at, width=90):
+    """The text around the first difference, on one line.
+
+    Both full copies stay readable at named locations — the file in
+    this tree, the row at GET /api/workflows — so this reduction
+    discards no only-copy (§Diagnosis). It exists so a 1,200-character
+    description does not make the finding unreadable.
+    """
+    if s is None:
+        return "<absent>"
+    start = max(0, at - 20)
+    cut = s[start:start + width]
+    cut = cut.replace("\t", " ").replace("\n", "\\n").replace("\r", " ")
+    return ("…" if start else "") + cut + ("…" if start + width < len(s) else "")
+
+def first_diff(a, b):
+    a, b = a or "", b or ""
+    for i, (x, y) in enumerate(zip(a, b)):
+        if x != y:
+            return i
+    return min(len(a), len(b))
+
+files = sorted(bundle_dir.glob("*.toml"))
+parsed = compared = drifted = 0
+lines = []
+for f in files:
+    try:
+        with open(f, "rb") as fh:
+            body = tomllib.load(fh)
+        blocks = body["workflow"]
+        if not isinstance(blocks, list) or not blocks:
+            raise KeyError("workflow")
+    except Exception as e:
+        print(f"{f}: not a readable [[workflow]] file: {e}", file=sys.stderr)
+        sys.exit(6)
+    for wf in blocks:
+        kind = wf.get("kind")
+        if not kind:
+            print(f"{f}: a [[workflow]] block with no kind", file=sys.stderr)
+            sys.exit(6)
+        parsed += 1
+        row = active.get(kind)
+        if row is None:
+            # Not drift, and not counted as compared: the tree leading
+            # the deployment is the expected window between a protocol
+            # car's merge and the converge + seed behind it.
+            lines.append(f"NOROW\t{kind}")
+            continue
+        compared += 1
+        for field in FIELDS:
+            if field not in wf:
+                lines.append(f"ABSENT\t{kind}\t{field}")
+                continue
+            tree, live = wf[field], row.get(field)
+            if tree == live:
+                continue
+            drifted += 1
+            at = first_diff(tree, live)
+            lines.append(
+                "DRIFT\t{}\t{}\tv{}\tat={}\ttree={}\tlive={}\t{}\t{}".format(
+                    kind, field, row.get("version", "?"), at,
+                    len(tree) if isinstance(tree, str) else "-",
+                    len(live) if isinstance(live, str) else "-",
+                    window(tree if isinstance(tree, str) else str(tree), at),
+                    window(live if isinstance(live, str) else str(live), at),
+                )
+            )
+
+print(f"COUNTS\tparsed={parsed}\tcompared={compared}\tdrifted={drifted}")
+print("\n".join(lines)) if lines else None
+
+# THE NON-VACUITY FLOOR. A comparison of nothing is the failure mode
+# this whole check is written against: an empty bundle, a reader whose
+# idiom moved, or a registry answering about a different world all
+# produce "no drift found", which reads exactly like a clean bill
+# (backlog 024c0db2; and the falsely-passing absence assertion of
+# 61085a9e). The floor is deliberately far below the bundle's real size
+# so that adding or retiring a protocol never edits it — it is a
+# parse-sanity floor, not a ratchet with a number to bump (§9a).
+if parsed != len(files):
+    print(
+        f"REFUSED\tread {parsed} [[workflow]] block(s) from {len(files)} file(s) — "
+        "one kind per file is pinned by the loader, so the reader is broken",
+        file=sys.stderr,
+    )
+    sys.exit(7)
+if compared < floor:
+    print(
+        f"REFUSED\tcompared {compared} kind(s), floor is {floor} — "
+        "a comparison this small proves nothing, whatever it found",
+        file=sys.stderr,
+    )
+    sys.exit(7)
+PY
+}
+
+# Fixtures, then the six refusals the comparator owes. Run on EVERY
+# invocation, not behind a flag: on the forge host the live half below
+# SKIPS, and without this the gate would exercise none of this code at
+# all — a check that is not running (§Diagnosis). It is hermetic and
+# costs one python per case.
+self_test() {
+    local t rc out
+    t=$(mktemp -d) || return 1
+    mkdir -p "$t/bundle"
+    cat > "$t/bundle/alpha.toml" <<'FX'
+[[workflow]]
+kind = "alpha"
+label = "Alpha"
+category = "platform"
+owning_team = "platform"
+description = "The first protocol."
+FX
+    cat > "$t/bundle/beta.toml" <<'FX'
+[[workflow]]
+kind = "beta"
+label = "Beta"
+category = "platform"
+owning_team = "platform"
+description = "The second protocol."
+FX
+    printf '%s' '[{"kind":"alpha","version":1,"status":"active","label":"Alpha","category":"platform","owning_team":"platform","description":"The first protocol."},
+                  {"kind":"beta","version":3,"status":"active","label":"Beta","category":"platform","owning_team":"platform","description":"The second protocol."}]' > "$t/match.json"
+    printf '%s' '[{"kind":"alpha","version":1,"status":"active","label":"Alpha","category":"platform","owning_team":"platform","description":"The first protocol."},
+                  {"kind":"beta","version":3,"status":"active","label":"Beta","category":"platform","owning_team":"platform","description":"The second protocol, as described by a service deleted last week."}]' > "$t/drift.json"
+    printf '%s' '[{"kind":"gamma","version":1,"status":"active","label":"Gamma","description":"Another world entirely."}]' > "$t/elsewhere.json"
+    printf '%s' '[{"kind":"alpha","version":1,"status":"retired","label":"Alpha","category":"platform","owning_team":"platform","description":"The first protocol."}]' > "$t/retired.json"
+    printf '%s' 'not json at all' > "$t/garbage.json"
+
+    local FIELD_FLOOR_SAVED="$FIELD_FLOOR"
+    FIELD_FLOOR=2
+
+    # 1. Agreement is silence — and it still says how much it compared.
+    out=$(fields_report "$t/bundle" "$t/match.json" 2>&1); rc=$?
+    [ "$rc" -eq 0 ] || { echo "self-test FAILED: matching fixtures exited $rc: $out" >&2; rm -rf "$t"; return 1; }
+    printf '%s\n' "$out" | grep -qF "COUNTS	parsed=2	compared=2	drifted=0" \
+        || { echo "self-test FAILED: matching fixtures did not report 2 compared / 0 drifted: $out" >&2; rm -rf "$t"; return 1; }
+
+    # 2. THE RED THIS CHECK EXISTS FOR: one description differs, and the
+    #    finding must NAME the kind and the field.
+    out=$(fields_report "$t/bundle" "$t/drift.json" 2>&1); rc=$?
+    [ "$rc" -eq 0 ] || { echo "self-test FAILED: a drifting description exited $rc: $out" >&2; rm -rf "$t"; return 1; }
+    printf '%s\n' "$out" | grep -qF "DRIFT	beta	description	v3" \
+        || { echo "self-test FAILED: the drift was not named by kind, field and live version: $out" >&2; rm -rf "$t"; return 1; }
+    printf '%s\n' "$out" | grep -qF "drifted=1" \
+        || { echo "self-test FAILED: the drift was not counted: $out" >&2; rm -rf "$t"; return 1; }
+    printf '%s\n' "$out" | grep -qF "deleted last week" \
+        || { echo "self-test FAILED: the finding carries no excerpt of the live text: $out" >&2; rm -rf "$t"; return 1; }
+
+    # 3. A FIELD THE FILE DOES NOT CLAIM is named rather than quietly
+    #    dropped — the same vacuity one field down.
+    cat > "$t/bundle/beta.toml" <<'FX'
+[[workflow]]
+kind = "beta"
+label = "Beta"
+category = "platform"
+FX
+    out=$(fields_report "$t/bundle" "$t/drift.json" 2>&1); rc=$?
+    [ "$rc" -eq 0 ] || { echo "self-test FAILED: an absent claim exited $rc: $out" >&2; rm -rf "$t"; return 1; }
+    printf '%s\n' "$out" | grep -qF "ABSENT	beta	description" \
+        || { echo "self-test FAILED: a file claiming no description was not named: $out" >&2; rm -rf "$t"; return 1; }
+    printf '%s\n' "$out" | grep -qF "drifted=0" \
+        || { echo "self-test FAILED: an absent claim was counted as drift: $out" >&2; rm -rf "$t"; return 1; }
+    cat > "$t/bundle/beta.toml" <<'FX'
+[[workflow]]
+kind = "beta"
+label = "Beta"
+category = "platform"
+owning_team = "platform"
+description = "The second protocol."
+FX
+
+    # 4. THE FLOOR. A registry answering about kinds this bundle does
+    #    not hold finds no drift, which must never read as clean.
+    out=$(fields_report "$t/bundle" "$t/elsewhere.json" 2>&1); rc=$?
+    [ "$rc" -eq 7 ] || { echo "self-test FAILED: a zero-kind comparison exited $rc, expected 7: $out" >&2; rm -rf "$t"; return 1; }
+    printf '%s\n' "$out" | grep -qF "REFUSED" \
+        || { echo "self-test FAILED: the floor refusal does not say so: $out" >&2; rm -rf "$t"; return 1; }
+
+    # 5. A retired row is not an active one — it must not stand in for
+    #    the comparison, and here that empties it below the floor.
+    out=$(fields_report "$t/bundle" "$t/retired.json" 2>&1); rc=$?
+    [ "$rc" -eq 7 ] || { echo "self-test FAILED: a retired-only row exited $rc, expected the floor's 7: $out" >&2; rm -rf "$t"; return 1; }
+
+    # 6. An answer that is not JSON is no answer.
+    out=$(fields_report "$t/bundle" "$t/garbage.json" 2>&1); rc=$?
+    [ "$rc" -eq 3 ] || { echo "self-test FAILED: an unparseable live answer exited $rc, expected 3: $out" >&2; rm -rf "$t"; return 1; }
+
+    # 7. A bundle file the reader cannot read is a broken reader, not an
+    #    agreeing protocol.
+    printf '%s' 'kind = "gamma"' > "$t/bundle/gamma.toml"
+    out=$(fields_report "$t/bundle" "$t/match.json" 2>&1); rc=$?
+    [ "$rc" -eq 6 ] || { echo "self-test FAILED: a file with no [[workflow]] exited $rc, expected 6: $out" >&2; rm -rf "$t"; return 1; }
+    rm -f "$t/bundle/gamma.toml"
+
+    FIELD_FLOOR="$FIELD_FLOOR_SAVED"
+
+    # 8. THE UNREACHABLE CASE, end to end, because it is the one that
+    #    must never read as success. `--require-live` is the mode for a
+    #    caller with somewhere to put the answer, and it must exit 75
+    #    (EX_TEMPFAIL) rather than 0 when the registry cannot be read.
+    #    A link-local port nothing listens on: refused in ~6ms, and no
+    #    DNS lookup, so the resolver flake cannot make this hang.
+    if [ -z "${BOSS_LINT_SELFTEST_CHILD:-}" ]; then
+        out=$(BOSS_LINT_SELFTEST_CHILD=1 BOSS_JOBS_URL="http://[::1]:9" bash "$0" --require-live 2>&1); rc=$?
+        [ "$rc" -eq 75 ] || { echo "self-test FAILED: --require-live against an unreachable registry exited $rc, expected 75: $out" >&2; rm -rf "$t"; return 1; }
+        printf '%s\n' "$out" | grep -qF "SKIPPED the live comparison" \
+            || { echo "self-test FAILED: the skip is not loud: $out" >&2; rm -rf "$t"; return 1; }
+        printf '%s\n' "$out" | grep -qF "[::1]:9" \
+            || { echo "self-test FAILED: the skip does not name what it could not reach: $out" >&2; rm -rf "$t"; return 1; }
+        printf '%s\n' "$out" | grep -qi "OK —" \
+            && { echo "self-test FAILED: a skip printed an OK line: $out" >&2; rm -rf "$t"; return 1; }
+    fi
+
+    rm -rf "$t"
+    [ "$SELF_TEST" -eq 1 ] && echo "$NAME: self-test ok — agreement is silent and counted, a drifting description is named by kind/field/version with an excerpt, a field the file does not claim is named and not counted as drift, a comparison below the floor and a retired-only row are refused, an unparseable answer and an unreadable bundle file each refuse distinctly, and --require-live exits 75 naming the target it could not reach"
+    return 0
+}
+
+self_test || exit 1
+[ "$SELF_TEST" -eq 0 ] || exit 0
 
 [ -d "$BUNDLE" ] || { echo "the-live-protocols-are-the-authored-protocols: $BUNDLE does not exist" >&2; exit 1; }
 
@@ -286,8 +668,20 @@ skip() {
     echo "  target: $URL (override with BOSS_JOBS_URL)" >&2
     echo "  The exemption set was still checked against the tree" >&2
     echo "  (${#EXEMPT[@]} exemptions, $(printf '%s\n' "$authored" | wc -l | tr -d ' ') authored kinds)." >&2
-    echo "  Nothing is claimed about what the running registry admits." >&2
+    echo "  NOTHING IS CLAIMED about what the running registry admits, or about" >&2
+    echo "  whether any live row still says what its file says — the field" >&2
+    echo "  comparison did not run, so ZERO kinds were compared." >&2
     [ "$problems" -eq 0 ] || exit 1
+    # A caller with somewhere to put the answer runs `--require-live`,
+    # and for it "I could not read the registry" must not be the same
+    # exit as "I read it and it agrees". 75 is EX_TEMPFAIL, the code
+    # this tree already uses for a run that could not happen rather
+    # than one that failed (infra/gate-runner/run.sh, checkout-lock.sh).
+    # The bare invocation keeps exiting 0: the gate runs on the forge
+    # host, which has no route to the in-cluster read surface, and a
+    # lint that reds there would red every car for an infrastructure
+    # refusal that says nothing about the branch.
+    [ "$REQUIRE_LIVE" -eq 0 ] || exit 75
     exit 0
 }
 
@@ -388,11 +782,126 @@ if [ -n "$unauthored" ]; then
     echo "  decision, and it belongs in the diff a reviewer reads." >&2
 fi
 
+# ---------------------------------------------------------------------------
+# Field half — a live row still says what its FILE says.
+# ---------------------------------------------------------------------------
+# The half above asks whether the tree can DESCRIBE every live protocol.
+# This one asks whether the description is still TRUE, which is a
+# different question with its own measured instance: design-doc-review's
+# live v1 `description` named `boss-docs-api`, `/api/design/pending-
+# decisions` and the flush jobs — every one deleted on 2026-09-10 — while
+# the tree file carried the corrected text, and TWO mechanisms each
+# declined to notice. The bundle seed is insert-if-missing, so a present
+# row is skipped whole. `bootstrap_reconcile`'s `kind_body_matches`
+# excludes `description` as cosmetic, so it saw no drift and
+# republished nothing (backlog e882b74c).
+#
+# NOT A CASE FOR WIDENING `kind_body_matches`, and the reason is
+# stronger than the churn argument that excluded the field: since
+# 2026-09-11 `platform_workflows()` is EMPTY, so reconcile iterates
+# nothing and touches none of these rows. Widening its comparison
+# today would change behaviour only for rows this problem is not
+# about, and would still compare nothing here. It is also worth being
+# exact about what that function already covers — `label`, `category`
+# and `owning_team` ARE in it, and `description` alone is not — which
+# is why all three are compared here: for a bundle-authored kind,
+# nothing compares any of them.
+#
+# REPORTED, NEVER FAILED ON, in the bare invocation. The direction is
+# the same legitimate window the half above tolerates, read one field
+# deeper: a car edits a description in the tree, merges, and the live
+# row does not change until an operator publishes a new version. Failing
+# would red every car from that merge until the publish — the churn
+# argument that excluded the field from reconcile, re-arriving as a red
+# gate. `--require-live` is the mode for a reader that can act: there a
+# drift exits 2.
+fields_out=""
+fields_rc=0
+if [ -n "$live_kinds" ]; then
+    fields_out=$(fields_report "$BUNDLE" "$body" 2>&1)
+    fields_rc=$?
+fi
+case "$fields_rc" in
+    0) ;;
+    3) fail "the live answer could not be read for the field comparison: \
+$(printf '%s' "$fields_out" | head -1)"
+       echo "" >&2
+       echo "  The kind comparison above read this same body, so this is a shape" >&2
+       echo "  change, not an unreachable registry. Nothing was compared." >&2 ;;
+    6) fail "a bundle file under $BUNDLE could not be read: \
+$(printf '%s' "$fields_out" | head -1)"
+       echo "" >&2
+       echo "  One [[workflow]] per file, named for the kind — the loader pins" >&2
+       echo "  it (platform_bundle.rs) and this reader needs it too." >&2 ;;
+    7) fail "the field comparison refused rather than report a vacuous clean bill:"
+       printf '    %s\n' "$(printf '%s' "$fields_out" | sed -n 's/^REFUSED\t//p')" >&2
+       echo "" >&2
+       echo "  A comparison of nothing finds no drift, which reads exactly like" >&2
+       echo "  agreement. Either the bundle reader broke or the registry is" >&2
+       echo "  answering about a different world; in both cases a green here" >&2
+       echo "  would be the confident wrong answer (CLAUDE.md §Doors)." >&2 ;;
+    *) fail "the field comparison exited $fields_rc: $(printf '%s' "$fields_out" | head -1)" ;;
+esac
+
+drift_lines=$(printf '%s\n' "$fields_out" | LC_ALL=C sed -n 's/^DRIFT\t//p')
+fields_compared=$(printf '%s\n' "$fields_out" | LC_ALL=C sed -n 's/.*\tcompared=\([0-9]*\).*/\1/p' | head -1)
+fields_compared=${fields_compared:-0}
+drift_n=0
+if [ -n "$drift_lines" ]; then
+    drift_n=$(printf '%s\n' "$drift_lines" | wc -l | tr -d ' ')
+    echo "$NAME: $drift_n operator-facing field(s) where the live row disagrees with its file:" >&2
+    printf '%s\n' "$drift_lines" | while IFS=$'\t' read -r kind field ver at tlen llen twin lwin; do
+        echo "    $kind.$field — live $ver, first differs $at ($tlen vs $llen chars)" >&2
+        echo "      file: $twin" >&2
+        echo "      live: $lwin" >&2
+    done
+    echo "" >&2
+    echo "  A description is what an operator reads to know what a protocol is" >&2
+    echo "  for, so a stale one sends somebody looking for a surface that may" >&2
+    echo "  not exist — which is exactly what design-doc-review's live v1 did" >&2
+    echo "  (backlog e882b74c). Clear one by publishing a new version FROM the" >&2
+    echo "  file, which is the only write that moves a live row:" >&2
+    echo "" >&2
+    echo "    boss workflow publish <kind> $BUNDLE/<kind>.toml" >&2
+    echo "" >&2
+    echo "  In-flight packets are safe: publish adds a version, and every open" >&2
+    echo "  Job stays pinned to the one it was admitted under." >&2
+    echo "" >&2
+    echo "  If the FILE is the wrong copy, fix the file — but do not retype a" >&2
+    echo "  sentence you know to be false to make this quiet. The tree carrying" >&2
+    echo "  the corrected text while the row lags is the safe direction, and it" >&2
+    echo "  is the state this check exists to make visible rather than to" >&2
+    echo "  forbid." >&2
+fi
+
+# A file that makes NO claim about a field is not drift — the row can
+# hardly disagree with a sentence nobody wrote — but it is the quiet
+# half of the same gap: nothing would compare that field ever again.
+# Counted and named, because silence that nobody can see is how this
+# class of defect gets in.
+absent_lines=$(printf '%s\n' "$fields_out" | LC_ALL=C sed -n 's/^ABSENT\t//p')
+if [ -n "$absent_lines" ]; then
+    echo "  $(printf '%s\n' "$absent_lines" | wc -l | tr -d ' ') field(s) the file does not claim, and so cannot be compared:" >&2
+    printf '%s\n' "$absent_lines" | while IFS=$'\t' read -r kind field; do
+        echo "    $BUNDLE/$kind.toml has no \`$field\`" >&2
+    done
+fi
+
 [ "$problems" -eq 0 ] || exit 1
+
+# A drift is a verdict only for a caller that can act on it.
+if [ "$drift_n" -gt 0 ] && [ "$REQUIRE_LIVE" -eq 1 ]; then
+    echo "$NAME: $fields_compared kinds compared, $drift_n field(s) adrift — exiting 2 because --require-live was asked for a verdict" >&2
+    exit 2
+fi
 
 live_n=$(printf '%s\n' "$live_kinds" | wc -l | tr -d ' ')
 authored_n=$(printf '%s\n' "$authored" | wc -l | tr -d ' ')
-msg="the-live-protocols-are-the-authored-protocols: OK — $live_n admitted kinds, $authored_n authored"
+if [ "$drift_n" -eq 0 ]; then
+    msg="$NAME: OK — $live_n admitted kinds, $authored_n authored, $fields_compared live rows agree with their file"
+else
+    msg="$NAME: $live_n admitted kinds, $authored_n authored — $drift_n operator-facing field(s) adrift across $fields_compared compared (named above; REPORTED, not failed)"
+fi
 [ ${#EXEMPT[@]} -eq 0 ] || msg="$msg, ${#EXEMPT[@]} exempt (${EXEMPT[*]})"
 echo "$msg"
 

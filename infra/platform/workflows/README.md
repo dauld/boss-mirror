@@ -105,6 +105,44 @@ is the window between a protocol car's merge and the converge behind
 it, and the permanent state of whichever tenant a deployment does not
 run.
 
+## A live row that no longer says what its file says is a defect too
+
+The check above is satisfied by a file that exists and is WRONG, and one
+was: `design-doc-review`'s live v1 `description` named `boss-docs-api`,
+`/api/design/pending-decisions` and the flush jobs — all deleted on
+2026-09-10 — while the file here carried the corrected text (backlog
+e882b74c). Two mechanisms each declined to close it: the seed is
+insert-if-missing, so a present row is skipped whole, and
+`bootstrap_reconcile`'s `kind_body_matches` excludes `description` as
+cosmetic. The same lint now compares **`description`, `label` and
+`category`** — the scalar strings an operator reads — between each file
+here and the live ACTIVE row for that kind, and names every
+disagreement with the kind, the field, the live version and an excerpt
+either side of the first differing character.
+
+`owning_team` is deliberately NOT compared: the loader overrides the
+file's key (`spec.owning_team = default_owner`), so a disagreement there
+is a file claiming something no publish could ever make true. Structural
+fields (`steps`, `subject_kinds`, `metadata_schema`, `entitlements`,
+`metadata`) are out as well — they decide what the protocol does, a live
+row legitimately leads its file between a publish and the car that
+writes it down, and comparing them means first applying the same
+normalisation the publish path does.
+
+A drift is **REPORTED, never failed on** under a bare invocation, for
+the same reason the existence check tolerates its own direction: a car
+edits a description, merges, and the row does not move until an operator
+runs `boss workflow publish <kind> infra/platform/workflows/<kind>.toml`.
+Redding every car in between would be the churn argument that excluded
+the field from reconcile, arriving again as a red gate. Run the lint
+with `--require-live` to get a verdict instead: drift exits 2, and an
+unreachable registry exits **75** rather than skipping to 0, because a
+check that passes when it could not read is worse than no check. The
+comparison also refuses (exit 1) rather than report a vacuous clean
+bill if it compared fewer than 20 kinds — an empty bundle, a broken
+reader, or a registry answering about a different world all find no
+drift, which reads exactly like agreement.
+
 **Render a backfill from the live row; do not retype it.** A file that
 disagrees with the live row replaces one problem with a worse one. Four
 columns have no TOML key and so cannot round-trip — `version`,

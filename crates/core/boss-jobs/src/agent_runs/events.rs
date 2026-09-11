@@ -65,6 +65,11 @@ pub fn run_recorded_event(
 mod tests {
     use super::*;
     use crate::agent_runs::types::RunOutcome;
+    // "Explicit null, not an absent key" is this payload's stated
+    // contract (see `run_recorded_event` above), and
+    // `payload[key].is_null()` cannot check it: `Index` answers `Null`
+    // for a key nobody wrote (backlog 2e4c200f).
+    use boss_testing::assert_explicit_null;
 
     fn a_run() -> NewAgentRun {
         NewAgentRun {
@@ -110,9 +115,16 @@ mod tests {
     #[test]
     fn an_unpriced_run_says_null_rather_than_omitting_the_key() {
         let ev = run_recorded_event(&ActorId::agent("claude", "mystery"), &a_run(), &None);
-        assert!(ev.payload.get("usd_micros").is_some());
-        assert!(ev.payload["usd_micros"].is_null());
-        assert!(ev.payload["priced_by"].is_null());
+        assert_explicit_null!(
+            ev.payload,
+            "usd_micros",
+            "nothing priced this, said out loud"
+        );
+        assert_explicit_null!(
+            ev.payload,
+            "priced_by",
+            "nothing priced this, said out loud"
+        );
     }
 
     #[test]
@@ -121,9 +133,9 @@ mod tests {
         run.tokens = crate::agent_runs::types::TokenUsage::TotalOnly { total: 142_982 };
         let ev = run_recorded_event(&ActorId::agent("claude", "opus-5"), &run, &None);
         assert_eq!(ev.payload["total_tokens"], 142_982);
-        assert!(ev.payload["input_tokens"].is_null());
-        assert!(ev.payload["output_tokens"].is_null());
-        assert!(ev.payload["usd_micros"].is_null());
+        assert_explicit_null!(ev.payload, "input_tokens", "the split was not measured");
+        assert_explicit_null!(ev.payload, "output_tokens", "the split was not measured");
+        assert_explicit_null!(ev.payload, "usd_micros", "a total cannot be priced");
     }
 
     #[test]

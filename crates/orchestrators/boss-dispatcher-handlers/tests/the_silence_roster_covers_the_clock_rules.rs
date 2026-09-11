@@ -22,9 +22,11 @@
 //! a cadence" would be a second definition of exactly the thing §9a
 //! warns about, and it would drift the first time the parser learns a
 //! new guard shape. So the preconditions are pinned where the
-//! derivation lives, over the SHIPPED registry directory
-//! (`dispatcher_rules_seed_matches_toml` separately pins that directory
-//! against the `dispatcher_rules` table, in both directions).
+//! derivation lives, over the SHIPPED registry directory — which is the
+//! registry's definition: `boss_dispatcher::rules::seed` publishes it
+//! into the `dispatcher_rules` table at boot, and
+//! `the_registry_equals_the_authored_directory_after_a_seed` proves the
+//! two are the same set.
 //!
 //! Measured 2026-09-10 (backlog cf0f5e2d): eight clock-rule cadences
 //! existed, all eight were outside the roster, and three families of

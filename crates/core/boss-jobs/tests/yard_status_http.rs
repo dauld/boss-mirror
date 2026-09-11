@@ -158,16 +158,26 @@ fn app_with(
 
 /// `app_with`, but over a cadence repository the test has already
 /// written firings into.
+///
+/// The `loading-dock` station row is wired, because the dock has exactly
+/// one membership rule and the handler reads it there — a test that
+/// listed cars without the row was testing a hand-rolled predicate that
+/// no deployment ran (backlog 52fed017). A test ABOUT the row's absence
+/// passes `None` to [`app_with_parts`].
 fn app_with_cadence(
     cadence: InMemoryCadence,
     policy: Vec<StoredPolicy>,
 ) -> (axum::Router, Arc<InMemoryJobs>) {
-    app_with_parts(cadence, policy, None)
+    let stations = Arc::new(boss_jobs::InMemoryStations::new());
+    stations
+        .seed(dock_station_row())
+        .expect("seed the dock row");
+    app_with_parts(cadence, policy, Some(stations))
 }
 
-/// `app_with_cadence`, plus a station registry — so a test can drive the
-/// dock through the registry row the deployment reads instead of the
-/// handler's station-less fallback.
+/// `app_with_cadence`, with the station registry named explicitly — so a
+/// test can withhold the dock's row and assert what the payload says
+/// when the dock cannot be read.
 fn app_with_parts(
     cadence: InMemoryCadence,
     policy: Vec<StoredPolicy>,
@@ -319,7 +329,10 @@ async fn seed_full(jobs: &InMemoryJobs) {
         jobs.add_step_at(&s, now, &[]).await.unwrap();
     }
 
-    // Two parked cars on the dock (open ship-a-change, branch, no train).
+    // Two parked cars on the dock: the row's predicate is an open
+    // ship-a-change with a branch, no `train` marker, and a review step
+    // at ready/active carrying no hold — so the review step is part of
+    // the seed, not decoration.
     for (id, branch, title) in [
         ("22222222-2222-2222-2222-222222222222", "feat/a", "A fix"),
         ("44444444-4444-4444-4444-444444444444", "feat/b", "B fix"),
@@ -332,11 +345,23 @@ async fn seed_full(jobs: &InMemoryJobs) {
             json!({ "branch": branch }),
         );
         jobs.create_job_at(&car, now, &[]).await.unwrap();
+        jobs.add_step_at(
+            &step(
+                &car.id,
+                "review",
+                "Open for review",
+                StepStatus::Ready,
+                json!({}),
+            ),
+            now,
+            &[],
+        )
+        .await
+        .unwrap();
     }
     // Note: feat/a IS a boarded car (on the train above) but stays open;
-    // the fallback dock predicate excludes cars with a `train` marker,
-    // and this one has none, so both read as parked here — the station
-    // registry is not wired in this test, so the fallback runs.
+    // it carries no `train` marker of its own, so the row admits it and
+    // both read as parked here.
 
     // A stranded green gate-run: a branch with a green verdict, no car.
     let gr = job(
@@ -461,6 +486,20 @@ async fn seed_dock_only(jobs: &InMemoryJobs) {
             json!({ "branch": branch }),
         );
         jobs.create_job_at(&car, now, &[]).await.unwrap();
+        // The review step the dock's row reads: ready, no hold.
+        jobs.add_step_at(
+            &step(
+                &car.id,
+                "review",
+                "Open for review",
+                StepStatus::Ready,
+                json!({}),
+            ),
+            now,
+            &[],
+        )
+        .await
+        .unwrap();
     }
 }
 
@@ -620,15 +659,7 @@ async fn seed_held_dock(jobs: &InMemoryJobs, holds: [Value; 2]) {
 async fn a_dock_of_only_held_cars_is_not_a_met_threshold() {
     let mut d = depth_rule();
     d.min_dock_depth = Some(1);
-    let stations = Arc::new(boss_jobs::InMemoryStations::new());
-    stations
-        .seed(dock_station_row())
-        .expect("seed the dock row");
-    let (app, jobs) = app_with_parts(
-        InMemoryCadence::new(vec![d]),
-        vec![policy_row()],
-        Some(stations),
-    );
+    let (app, jobs) = app_with_cadence(InMemoryCadence::new(vec![d]), vec![policy_row()]);
     // One held with a reason, one held with no reason recorded — both
     // shapes an operator writes, and `boss gate --hold` writes the first.
     seed_held_dock(&jobs, [json!("waiting on a kubectl delete"), json!(true)]).await;
@@ -666,15 +697,7 @@ async fn a_dock_of_only_held_cars_is_not_a_met_threshold() {
 async fn a_released_hold_returns_the_car_to_the_dock() {
     let mut d = depth_rule();
     d.min_dock_depth = Some(1);
-    let stations = Arc::new(boss_jobs::InMemoryStations::new());
-    stations
-        .seed(dock_station_row())
-        .expect("seed the dock row");
-    let (app, jobs) = app_with_parts(
-        InMemoryCadence::new(vec![d]),
-        vec![policy_row()],
-        Some(stations),
-    );
+    let (app, jobs) = app_with_cadence(InMemoryCadence::new(vec![d]), vec![policy_row()]);
     // One released by writing false, one that never carried a hold.
     seed_held_dock(&jobs, [json!(false), Value::Null]).await;
 
@@ -682,6 +705,56 @@ async fn a_released_hold_returns_the_car_to_the_dock() {
     let b = &body["boarding"];
     assert_eq!(b["dock_depth"], 2, "both cars are boardable");
     assert_eq!(b["threshold_met"], true);
+    // And the payload names where the dock came from: the row was read,
+    // so the lane it produced is a reading rather than a guess.
+    assert_eq!(body["dock_source"], "station");
+}
+
+/// The dock has ONE definition — the `loading-dock` station row — and a
+/// server that cannot read it owes the operator that sentence, not an
+/// empty lane. The handler used to hand-roll the predicate as a fallback
+/// (the THIRD copy of it; backlog 52fed017, after the client's in
+/// c0708d66), which on the station-less path turned an unreadable dock
+/// into an apparently empty one, under a LAXER rule than the row's — no
+/// review-step term at all, so a car that could not board still counted.
+///
+/// "Empty" is a claim. An operator reading `dock: []` reads a fact about
+/// the yard; the honest answer is that the dock could not be read, which
+/// is what the client lane chose in c0708d66 and what CLAUDE.md §Doors
+/// means by "a wrong target answers instead of erroring".
+///
+/// Three cars stand here, one of them held. With no station registry
+/// wired, none is listed in either lane and `dock_source` says why.
+#[tokio::test]
+async fn an_unreadable_dock_row_says_unavailable_rather_than_empty() {
+    let (app, jobs) = app_with_parts(
+        InMemoryCadence::new(vec![depth_rule()]),
+        vec![policy_row()],
+        None,
+    );
+    seed_dock_with_holds(&jobs).await;
+
+    let (status, body) = get(&app, "operator").await;
+    assert_eq!(status, StatusCode::OK, "the rest of the yard still answers");
+    assert_eq!(
+        body["dock_source"], "unavailable",
+        "the dock's row could not be read, and the payload says so: {body}"
+    );
+    assert_eq!(
+        body["dock"].as_array().unwrap().len(),
+        0,
+        "no membership rule was available to list a car under: {}",
+        body["dock"]
+    );
+    assert_eq!(
+        body["held_cars"].as_array().unwrap().len(),
+        0,
+        "the held lane is a split of the same unread dock: {}",
+        body["held_cars"]
+    );
+    // The trains are a different read and are unaffected — the dock is
+    // the one lane that degrades.
+    assert!(body["trains"].is_array());
 }
 
 /// 2026-09-07, twice: the operator watched a threshold-met dock not
@@ -949,8 +1022,10 @@ async fn an_unreadable_caller_gets_an_empty_well_formed_yard_not_a_403() {
 
 #[tokio::test]
 async fn no_cadence_or_policy_wired_degrades_gracefully() {
-    // The trains and dock are what the operator came for; a yard with no
-    // cadence configured still answers, saying so plainly.
+    // The trains are what this one is about; a yard with no cadence
+    // configured still answers, saying so plainly. No station registry is
+    // wired either, so the dock reads `unavailable` — asserted on its own
+    // in `an_unreadable_dock_row_says_unavailable_rather_than_empty`.
     let jobs = Arc::new(InMemoryJobs::new());
     let policy_client: Arc<dyn PolicyClient> = Arc::new(
         FakePolicyClient::builder()

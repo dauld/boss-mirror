@@ -5,8 +5,9 @@
 # for host=forge verb=converge — the boss-ops-runner (~1-min poll) runs
 # it. Latency accelerator ONLY: the timer + cluster-watchdog remain the
 # independent floor, and the converge is idempotent + STAMP-guarded.
-# Seeded by 202609071700-converge-on-merge.sql; present here because
-# dispatcher_rules_seed_matches_toml compares BOTH directions.
+# First seeded by 202609071700-converge-on-merge.sql, applied history: this FILE is
+# now the definition, and the registry row is published from it at
+# boot (rules::seed — backlog 41ba00cd).
 [[rule]]
 name = "converge-on-merge"
 why = """

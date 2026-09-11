@@ -1601,6 +1601,10 @@ mod park_routes_its_item_tests {
 #[cfg(test)]
 mod building_car_tests {
     use super::*;
+    // PRESENT-AND-NULL IS THE DOOR'S DELETE, and `patch[key].is_null()`
+    // cannot see the difference between that and a key the patch never
+    // wrote (backlog 2e4c200f). These two say which instruction is meant.
+    use boss_testing::{assert_absent, assert_explicit_null};
 
     const BRANCH: &str = "feat/a-car-opens-when-the-build-starts";
 
@@ -1775,10 +1779,10 @@ mod building_car_tests {
             proof: serde_json::Map::new(),
         };
         let patch = adopt_patch(&opened, &inputs);
-        assert!(
-            patch["backlog_item"].is_null(),
-            "present-and-null is the metadata door's DELETE — the arrival rule must find \
-             no edge to close: {patch}"
+        assert_explicit_null!(
+            patch,
+            "backlog_item",
+            "the arrival rule must find no edge to close"
         );
         assert_eq!(
             patch[car::PARTIAL_ITEM],
@@ -1801,7 +1805,7 @@ mod building_car_tests {
             patch[car::PARTIAL_ITEM],
             "aaaa1111-0000-0000-0000-000000000000"
         );
-        assert!(patch["backlog_item"].is_null());
+        assert_explicit_null!(patch, "backlog_item");
     }
 
     /// AN ANSWER STATED AT OPEN SURVIVES THE ADOPT, UNCHANGED.
@@ -1916,23 +1920,14 @@ mod building_car_tests {
             c
         };
 
-        // DELETED means PRESENT AND NULL. `patch[key]` on a serde_json
-        // object answers `Null` for a key that is simply ABSENT, so
-        // `is_null()` alone asserts nothing — the assertion has to
-        // distinguish "the door is told to delete this" from "the patch
-        // never mentioned it".
-        let deleted = |patch: &Value, key: &str| {
-            patch.as_object().and_then(|m| m.get(key)) == Some(&Value::Null)
-        };
-
         // The open said NO ITEM; the gate names the closing edge. The
         // edge is written by `adopt_edge_patch`; the stale reason must go.
         let car = opened(car::NO_ITEM_REASON, reason);
         let patch = adopt_patch(&car, &inputs(Some(closing), serde_json::Map::new()));
-        assert!(
-            deleted(&patch, car::NO_ITEM_REASON),
-            "present-and-null is the metadata door's DELETE: a car cannot both answer no \
-             item and carry the edge that closes one: {patch}"
+        assert_explicit_null!(
+            patch,
+            car::NO_ITEM_REASON,
+            "a car cannot both answer no item and carry the edge that closes one"
         );
 
         // The open said ONE PIECE; the gate says no item at all.
@@ -1942,9 +1937,10 @@ mod building_car_tests {
             &inputs(None, car::item_provenance(None, Some(reason))),
         );
         assert_eq!(patch[car::NO_ITEM_REASON], reason, "{patch}");
-        assert!(
-            deleted(&patch, car::PARTIAL_ITEM),
-            "the gate's answer replaces the open's, rather than sitting next to it: {patch}"
+        assert_explicit_null!(
+            patch,
+            car::PARTIAL_ITEM,
+            "the gate's answer replaces the open's, rather than sitting next to it"
         );
 
         // A gate that states NOTHING about the item deletes nothing — the
@@ -1952,10 +1948,10 @@ mod building_car_tests {
         // answer there is.
         let car = opened(car::PARTIAL_ITEM, partial);
         let patch = adopt_patch(&car, &inputs(None, serde_json::Map::new()));
-        assert!(
-            patch.get(car::PARTIAL_ITEM).is_none(),
-            "nothing stated, nothing removed: {patch}"
-        );
+        // ABSENT, not deleted: the contrast with the two assertions above
+        // is the whole point — `assert_explicit_null!` would pass here if the
+        // door's two instructions were interchangeable, and they are not.
+        assert_absent!(patch, car::PARTIAL_ITEM, "nothing stated, nothing removed");
     }
 
     /// AND NOTHING IS SUPERSEDED WHEN THE ANSWERS AGREE. The common case

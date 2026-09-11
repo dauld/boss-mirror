@@ -369,7 +369,7 @@ scan_tree() {
     scraped_names "$tree" > "$tmp/scraped"
 
     # NON-VACUITY. Every declared rule is seeded by a migration (the
-    # rules README requires it and `dispatcher_rules_seed_matches_toml`
+    # rules README requires it and the authored registry's loader
     # pins it), so the scrape must find all of them. If it does not,
     # either the scrape stopped recognising a statement shape — and then
     # RETIRED is wrong in the silent direction — or a rule arrived with
@@ -385,7 +385,7 @@ scan_tree() {
         echo "" >&2
         echo "  Either the rule arrived without the ON CONFLICT-safe INSERT a fresh" >&2
         echo "  database needs (see $RULES_REL/README.md; the DB test" >&2
-        echo "  dispatcher_rules_seed_matches_toml fails the same way, later), or this" >&2
+        echo "  parse_raw_dir refuses the file the same way, later), or this" >&2
         echo "  script's scrape no longer recognises the statement's shape — in which" >&2
         echo "  case the retired set below is wrong in the quiet direction and must" >&2
         echo "  not be trusted. Refusing rather than reporting a clean tree." >&2

@@ -147,10 +147,12 @@ pub fn parse_raw(src: &str) -> Result<RawRegistry, RegistryError> {
 
 /// `why` is AUTHORING metadata, deliberately outside [`RawRule`]: the
 /// runtime registry is the `dispatcher_rules` table, whose rows carry no
-/// justification, and `dispatcher_rules_seed_matches_toml` compares the
-/// serialized rules in both directions. A `why` on `RawRule` would make
-/// every rule read as drifted. So it is parsed from the same text by its
-/// own shape and checked here, at the door.
+/// justification, and [`super::seed`] publishes a `RawRule` into it
+/// verbatim. A `why` on `RawRule` would be a column the table does not
+/// have. So it is parsed from the same text by its own shape and checked
+/// here, at the door — which is also why the `why` is the second of the
+/// three measurements that made this directory the DEFINITION rather
+/// than the table: a reviewed justification cannot live in a row.
 #[derive(Debug, Deserialize)]
 struct RuleFileMeta {
     #[serde(default, rename = "rule")]

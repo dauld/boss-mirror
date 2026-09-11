@@ -5,10 +5,10 @@
 # subscription (like the marker completer) and self-filters to that one
 # checklist: it counts the approval decisions that completed empty in
 # the window, completes the checklist, and stamps action_needed so the
-# packet routes to Remediate or Clear. Seeded by
-# 202609052030-the-empty-decisions-sweep-inspects-itself.sql; present
-# here because dispatcher_rules_seed_matches_toml compares BOTH
-# directions.
+# packet routes to Remediate or Clear. First seeded by
+# 202609052030-the-empty-decisions-sweep-inspects-itself.sql, applied history: this
+# FILE is now the definition, and the registry row is published from
+# it at boot (rules::seed — backlog 41ba00cd).
 [[rule]]
 name = "inspect-empty-decisions-sweep-on-step-ready"
 why = """

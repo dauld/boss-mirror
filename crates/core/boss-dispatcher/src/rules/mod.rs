@@ -24,3 +24,4 @@ pub mod payload_contract;
 pub mod registry;
 pub mod runner;
 pub mod schedule_runner;
+pub mod seed;

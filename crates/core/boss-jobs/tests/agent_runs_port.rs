@@ -15,6 +15,7 @@ use boss_jobs::agent_runs::{
     AGENT_RUN_RECORDED, AgentRunLog, InMemoryAgentRuns, NewAgentRun, RateCardRow, RunFilter,
     RunOutcome, TokenUsage, summarize,
 };
+use boss_testing::assert_explicit_null;
 use chrono::{DateTime, Duration, Utc};
 
 fn card() -> Vec<RateCardRow> {
@@ -413,8 +414,11 @@ async fn a_run_that_only_knows_its_total_is_still_a_record() {
     let events = log.recorded_events().await;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].payload["total_tokens"], 142_982);
-    assert!(events[0].payload["input_tokens"].is_null());
-    assert!(events[0].payload["usd_micros"].is_null());
+    // EXPLICIT nulls, not absent keys — a rebuild reads this payload back
+    // and "not measured" must not arrive as "the payload forgot to say".
+    // `payload[key].is_null()` is true for both (backlog 2e4c200f).
+    assert_explicit_null!(events[0].payload, "input_tokens");
+    assert_explicit_null!(events[0].payload, "usd_micros");
 }
 
 #[tokio::test]

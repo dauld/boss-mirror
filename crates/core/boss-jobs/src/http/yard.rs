@@ -145,12 +145,11 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
         .filter_map(branch_of)
         .collect();
 
-    // The dock, via the station registry when it serves — the same
-    // authoritative path the departure board uses. When no station
-    // registry is wired (the in-memory spike), fall back to the parked
-    // predicate over the cars we already fetched, so the dock is never
-    // silently empty.
-    let dock_cars = dock_cars(&state, scope.clone(), &user, &cars).await;
+    // The dock, via the station registry — the one authoritative path,
+    // the same one the departure board uses. `None` when the row cannot
+    // be read: the dock is then UNREAD, which the payload says rather
+    // than drawing an empty lane (see [`dock_cars`]).
+    let dock_read = dock_cars(&state, scope.clone(), &user).await;
 
     // The cadence rows and the delivery policy — read straight from the
     // repositories this process holds. A read failure degrades to
@@ -240,7 +239,7 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
     let status = yard::build_status(yard::YardInputs {
         open_trains: &open_trains,
         closed_trains: &closed_trains,
-        dock_cars: &dock_cars,
+        dock_cars: dock_read.as_deref().unwrap_or(&[]),
         rules: &rules,
         last_board: last_board.as_ref(),
         policy: policy.as_ref(),
@@ -260,26 +259,37 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
         heartbeat_minutes,
         Some(now),
     );
-    Json(with_conductor(with_now(status, now), health)).into_response()
+    Json(with_dock_source(
+        with_conductor(with_now(status, now), health),
+        dock_read.is_some(),
+    ))
+    .into_response()
 }
 
-/// The cars standing ON the dock, with their steps: the loading-dock
-/// station queue when a station registry is wired, else the parked
-/// predicate over the fetched cars. The steps ride along because the
-/// HOLD — the fact that decides whether a car can board — is written on
-/// the review step, so [`yard::dock_lanes`] cannot split the dock without
-/// them; the station path fetches them already, to evaluate the
-/// predicate.
+/// The cars standing ON the dock, with their steps, read from the
+/// `loading-dock` station row — the ONE place the dock's membership rule
+/// lives. The steps ride along because the HOLD — the fact that decides
+/// whether a car can board — is written on the review step, so
+/// [`yard::dock_lanes`] cannot split the dock without them; the station
+/// read fetches them already, to evaluate the predicate.
 ///
 /// Membership asks [`yard::on_the_dock`], which is the row's predicate
 /// with the HOLD disregarded — a held car is on the dock and must be
 /// listed there, even once the row stops admitting it for boarding.
+///
+/// `None` when the row cannot be read — no station registry wired (the
+/// in-memory spike path), or the read failed. This used to hand-roll the
+/// predicate instead and return the cars it matched, which made it the
+/// THIRD copy of a rule the row defines (backlog 52fed017, after the
+/// client's in c0708d66) and, worse, answered where it should have
+/// erred: the hand-rolled rule carried no review-step term, so an
+/// unreadable dock came back populated under a LAXER rule — or empty,
+/// and "empty" is a claim an operator reads as a fact.
 async fn dock_cars<R: JobsRepository + 'static, B: EventBus + 'static>(
     state: &JobsApiState<R, B>,
     scope: crate::port::JobScope,
     user: &boss_policy_client::User,
-    fallback_cars: &[boss_core::job::Job],
-) -> Vec<(boss_core::job::Job, Vec<boss_core::job::Step>)> {
+) -> Option<Vec<(boss_core::job::Job, Vec<boss_core::job::Step>)>> {
     if let Some(reg) = state.stations.as_ref()
         && let Ok(row) = reg.get_active("loading-dock").await
         && let Some(spec) = row.bind_self(self_id(user))
@@ -298,22 +308,29 @@ async fn dock_cars<R: JobsRepository + 'static, B: EventBus + 'static>(
                     members.push((job, steps));
                 }
             }
-            return members;
+            return Some(members);
         }
     }
-    // Fallback: the loading-dock predicate hand-rolled — an open
-    // ship-a-change with a branch, not yet on a train, at review
-    // ready/active. Kept only for the station-less spike path.
-    let mut out = Vec::new();
-    for job in fallback_cars.iter().filter(|j| {
-        j.status == JobStatus::Open
-            && j.metadata.get("branch").is_some()
-            && j.metadata.get("train").is_none()
-    }) {
-        let steps = state.jobs.list_steps(&job.id).await.unwrap_or_default();
-        out.push((job.clone(), steps));
+    None
+}
+
+/// Where the dock's rows came from, stated on the payload: the station
+/// row served (`station`), or it could not be read (`unavailable`).
+/// Injected beside the read-model the way [`with_conductor`] is, so the
+/// marker composes without widening [`yard::build_status`].
+///
+/// The same two cases the web lens settled on when its own copy of the
+/// predicate was deleted (c0708d66). There is no third case: a dock read
+/// from the row is a reading, and anything else is an admission — never
+/// an empty lane that reads as a fact.
+fn with_dock_source(mut v: serde_json::Value, read: bool) -> serde_json::Value {
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert(
+            "dock_source".to_string(),
+            serde_json::json!(if read { "station" } else { "unavailable" }),
+        );
     }
-    out
+    v
 }
 
 /// The status with the clock instant attached — the same `now` field

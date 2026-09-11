@@ -6,16 +6,22 @@
 # A Rust literal (`design_doc_review_spec()`) until 2026-09-11, which
 # made a change to this governance protocol a deploy.
 #
-# ONE FIELD IS DELIBERATELY NOT THE LIVE ROW'S. The live v1 row's
-# `description` still describes the `/api/design/pending-decisions` +
-# flush-jobs corpus surface that was deleted on 2026-09-10 (backlog
-# f5da586c). The Rust literal's description was corrected in the same
-# change and never reached the row, because `kind_body_matches` —
-# bootstrap_reconcile's drift test — excludes `description` as
-# cosmetic. The corrected text is what is written down here; authoring
-# the stale sentence would be writing a known-false statement into the
-# tree. The live row keeps its own until someone publishes a new
-# version from this file.
+# THE FILE LED THE ROW HERE, AND THAT IS WHY THE LINT EXISTS. Until
+# 02:53Z on 2026-09-11 the live v1 row's `description` still described
+# the `/api/design/pending-decisions` + flush-jobs corpus surface
+# deleted on 2026-09-10 (backlog f5da586c), while this file carried the
+# corrected text: the Rust literal was fixed in the same change and the
+# correction never reached the row, because `kind_body_matches` —
+# bootstrap_reconcile's drift test — excludes `description` as cosmetic,
+# and the seed is insert-if-missing so it skipped the existing row.
+# Nothing was going to notice. Authoring the stale sentence to match
+# would have written a known-false statement into the tree, so the
+# disagreement was left standing in the safe direction and filed
+# (backlog e882b74c). It was cleared by `boss workflow publish
+# design-doc-review` (live v2), and the general case is now caught:
+# `infra/lint/the-live-protocols-are-the-authored-protocols.sh` compares
+# this file's description, label and category against the live active
+# row and names any that disagree.
 [[workflow]]
 kind = "design-doc-review"
 label = "Review a design doc"

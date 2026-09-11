@@ -18,6 +18,7 @@ use boss_dispatcher::rules::registry::{
 };
 use boss_dispatcher::rules::runner::RulesRunner;
 use boss_dispatcher::rules::schedule_runner::{DEFAULT_CATCHUP_CAP, ScheduleRunner};
+use boss_dispatcher::rules::seed::seed_authored_rules;
 use boss_dispatcher_handlers::handlers::{
     bill_payment_batch::BillPaymentBatch, cadence_silence::CadenceSilenceSweep,
     commerce_invoice_issue::CommerceInvoiceIssue, credential_issuer,
@@ -43,6 +44,46 @@ use boss_dispatcher_handlers::handlers::{
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
+
+/// Publish the authored rule registry into `dispatcher_rules`, waiting
+/// out a boot race rather than accepting one as final.
+///
+/// The pool above connects or the process exits, so the database is
+/// reachable by the time this runs — but on a BRAND NEW deployment the
+/// `dispatcher_rules` table may not exist yet, because `migrate.sh` is
+/// still applying. A single attempt that lost that race would leave
+/// every rule this tree authors and no migration seeds absent until
+/// something restarted the dispatcher, and nothing would: the same shape
+/// as the one-shot rule load that dead-aired the runner forever
+/// (backlog 823fcb22). So it retries a bounded number of times and then
+/// reports, loudly.
+async fn seed_rules_with_retry(
+    pool: &sqlx::PgPool,
+    dir: &std::path::Path,
+) -> Result<boss_dispatcher::rules::seed::SeedReport, boss_dispatcher::rules::registry::RegistryError>
+{
+    const ATTEMPTS: usize = 5;
+    const BETWEEN: std::time::Duration = std::time::Duration::from_secs(3);
+    let mut last = None;
+    for attempt in 1..=ATTEMPTS {
+        match seed_authored_rules(pool, dir).await {
+            Ok(report) => return Ok(report),
+            Err(e) => {
+                if attempt < ATTEMPTS {
+                    tracing::warn!(
+                        attempt,
+                        error = %e,
+                        "seeding the dispatcher-rule registry failed — retrying (the \
+                         schema may still be applying on a fresh deployment)"
+                    );
+                    tokio::time::sleep(BETWEEN).await;
+                }
+                last = Some(e);
+            }
+        }
+    }
+    Err(last.expect("at least one attempt ran"))
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -110,6 +151,82 @@ async fn main() -> Result<()> {
         .connect(&cfg.postgres_url)
         .await
         .with_context(|| "connecting to Postgres for the dispatcher rule registry")?;
+
+    // THE REGISTRY IS DERIVED FROM THE TREE, and this is where the
+    // derivation runs (backlog 41ba00cd, CLAUDE.md §9a). A dispatcher
+    // rule used to be written twice — a file under
+    // `infra/dispatcher/rules/` and a hand-written row INSERTed into the
+    // table by a migration — with nothing deriving one from the other,
+    // so the tree
+    // could say a rule existed while the running system enforced
+    // something else and nothing reported a difference. The authored
+    // directory is now the single definition: this seeds what it declares
+    // and the table does not have, and retires what it no longer names.
+    // Adding a rule is dropping a file in; no migration writes rules.
+    //
+    // IT RUNS HERE because the dispatcher is the one process that already
+    // holds both halves — the pool and `BOSS_DISPATCHER_RULES` (the image
+    // carries it at /opt/boss/infra/dispatcher/rules, which the read
+    // surface already reads each rule's `why` from) — and it restarts on
+    // every converge, so a merged rule file is live one deploy later with
+    // no separate seed container to schedule.
+    //
+    // IT LOGS AND STARTS, NEVER REFUSES. A boot guard that declines to
+    // start over registry content took the system of record down twice on
+    // 2026-09-07; the rules this seed could not write are named in the
+    // journal and the dispatcher proceeds on whatever the table holds.
+    // Its failure mode is therefore "no change", never "no rules".
+    match cfg.authored_rules_dir.as_deref() {
+        Some(dir) => match seed_rules_with_retry(&pool, dir).await {
+            Ok(report) => {
+                if report.wrote_anything() {
+                    info!(
+                        dir = %dir.display(),
+                        inserted = ?report.inserted,
+                        retired = ?report.retired,
+                        present = report.present.len(),
+                        "seeded the dispatcher-rule registry from the authored directory"
+                    );
+                } else {
+                    info!(
+                        dir = %dir.display(),
+                        present = report.present.len(),
+                        "dispatcher-rule registry already matches the authored directory"
+                    );
+                }
+                for (name, authored, live) in &report.behind {
+                    tracing::warn!(
+                        rule = %name,
+                        authored_version = authored,
+                        live_version = live,
+                        "the authored rule file is BEHIND the live registry — someone \
+                         published this rule through the API without writing the file \
+                         back; the live version is left alone"
+                    );
+                }
+                for (name, reason) in &report.rejected {
+                    tracing::error!(
+                        rule = %name,
+                        reason = %reason,
+                        "an authored rule did NOT reach the registry"
+                    );
+                }
+            }
+            Err(e) => tracing::error!(
+                error = %e,
+                dir = %dir.display(),
+                "could not seed the dispatcher-rule registry from the authored \
+                 directory — NOTHING was written; the registry is whatever the \
+                 table already holds, which may be missing rules this tree authors"
+            ),
+        },
+        None => tracing::error!(
+            "BOSS_DISPATCHER_RULES is unset, so the authored rule registry cannot be \
+             read and the `dispatcher_rules` table cannot be derived from it — this \
+             deployment enforces whatever rows it already has, and a rule added to the \
+             tree will never arrive"
+        ),
+    }
 
     // Load the rule registry from `dispatcher_rules` and start the rules
     // runner alongside the legacy role-assignment loop. They share the NATS

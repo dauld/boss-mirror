@@ -533,6 +533,11 @@ fn fold(into: &mut GroupSpend, run: &AgentRun) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // An EXPLICIT null is the wire's "nothing measured this"; an absent
+    // key is a payload that forgot to say. `total[key].is_null()` cannot
+    // tell those apart (backlog 2e4c200f), and this serializer's whole
+    // contract is that it writes the first and never the second.
+    use boss_testing::assert_explicit_null;
 
     /// The four published Anthropic prices this test uses are the same
     /// ones the migration seeds; see that file for the source.
@@ -904,9 +909,15 @@ mod tests {
 
         let total = serde_json::to_value(a_total_run("claude:opus-5", 142_982)).unwrap();
         assert_eq!(total["total_tokens"], 142_982);
-        assert!(
-            total["input_tokens"].is_null() && total["output_tokens"].is_null(),
-            "an absent split is an explicit null, not a missing key: {total}"
+        // `total["input_tokens"].is_null()` cannot state this: `Index` on
+        // an object answers `Null` for a key that was never serialized,
+        // so it is true for the explicit null AND for the missing key the
+        // prose forbids — the two things this line exists to separate.
+        assert_explicit_null!(total, "input_tokens", "an absent split is an EXPLICIT null");
+        assert_explicit_null!(
+            total,
+            "output_tokens",
+            "an absent split is an EXPLICIT null"
         );
     }
 
