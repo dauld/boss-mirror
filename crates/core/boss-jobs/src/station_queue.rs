@@ -114,6 +114,31 @@ pub struct StepMatch {
     /// could see it — is the duplication CLAUDE.md 9a exists to stop.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata_equals: BTreeMap<String, String>,
+    /// Step metadata keys carrying NO MARKER — the clause that lets a
+    /// station row express a brake.
+    ///
+    /// A marker is a fact only an actor can know, written as an
+    /// annotation: `hold` on a car's review step says "this is gated
+    /// green and still must not ride yet". The dock needs it because the
+    /// conductor has refused to board a held car since one repointing
+    /// the gate rig at a since-cordoned node nearly landed, and a
+    /// station row that cannot say so overstates its own queue —
+    /// measured 2026-09-10 18:07Z: `dock_depth: 2, threshold_met: true`
+    /// with both cars held and neither able to board (backlog 36c3d4ca).
+    ///
+    /// **Not `metadata_absent` on a step.** The Job-level clause reads
+    /// "missing or null", and a marker is RELEASED by writing `false`,
+    /// not by deleting the key. Under missing-or-null a released car
+    /// would read as held forever and never board — the brake would
+    /// become a parking brake with no lever. So the semantics here are
+    /// [`crate::stranded::marked`]'s, the definition the whole system
+    /// already reads markers by: `null`, `false` and blank are no
+    /// marker; `true` is a marker with no reason; a non-blank string is
+    /// the reason. Reused, not re-derived — a second answer to "is this
+    /// marker set" is how the conductor and this row drifted apart to
+    /// begin with (CLAUDE.md 9a).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata_unmarked: Vec<String>,
 }
 
 impl StepMatch {
@@ -138,6 +163,13 @@ impl StepMatch {
         }
         for (key, want) in &self.metadata_equals {
             if step.metadata.get(key).and_then(Value::as_str) != Some(want.as_str()) {
+                return false;
+            }
+        }
+        // ONE definition of "is this marker set" (`stranded::marked`),
+        // not a second copy of it here. See `metadata_unmarked`.
+        for key in &self.metadata_unmarked {
+            if crate::stranded::marked(&step.metadata, key).is_some() {
                 return false;
             }
         }
@@ -674,6 +706,110 @@ mod tests {
         assert!(!p.matches(&job("pr-train", Priority::Standard, 1), &[pending]));
     }
 
+    /// THE DOCK'S BRAKE, as registry data. A car parked green can still
+    /// be deliberately held — `hold` on its review step — and a held car
+    /// must not be counted as boardable. The conductor has excluded one
+    /// since a car repointing the gate rig at a since-cordoned node
+    /// nearly landed; the station row did not, so `/api/yard/status`
+    /// reported `dock_depth: 2, threshold_met: true` at 18:07Z on
+    /// 2026-09-10 with BOTH remaining cars held and neither able to
+    /// board (backlog 36c3d4ca).
+    ///
+    /// Every value below is one an operator has actually written.
+    #[test]
+    fn step_clause_excludes_a_marked_step() {
+        let p = StationPredicate {
+            step: Some(StepMatch {
+                slug: Some("review".into()),
+                metadata_unmarked: vec!["hold".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let car = job("ship-a-change", Priority::Standard, 1);
+
+        // A reason: the normal way a hold is written.
+        let mut reasoned = step("review", StepStatus::Ready);
+        reasoned.metadata = serde_json::json!({"hold": "waiting on a kubectl delete"});
+        assert!(!p.matches(&car, &[reasoned]));
+
+        // No reason recorded — `boss gate --hold` with no text.
+        let mut bare = step("review", StepStatus::Ready);
+        bare.metadata = serde_json::json!({"hold": true});
+        assert!(!p.matches(&car, &[bare]));
+
+        // No marker at all: an ordinary parked car.
+        assert!(p.matches(&car, &[step("review", StepStatus::Ready)]));
+    }
+
+    /// THE TRAP. A RELEASED hold is written `hold: false`, not deleted —
+    /// that is how car 04520403 was released on 2026-09-10 — and `null`
+    /// and `""` arrive the same way. A clause built on
+    /// `metadata_absent`'s "missing or null" semantics would read every
+    /// one of these as still held, and the car would never board again:
+    /// a brake turned into a parking brake nobody can find. The
+    /// semantics are [`crate::stranded::marked`]'s, reused rather than
+    /// re-derived — `null` / `false` / blank are NO marker.
+    #[test]
+    fn a_released_marker_is_unmarked() {
+        let p = StationPredicate {
+            step: Some(StepMatch {
+                slug: Some("review".into()),
+                metadata_unmarked: vec!["hold".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let car = job("ship-a-change", Priority::Standard, 1);
+        for released in [
+            serde_json::json!({"hold": false}),
+            serde_json::json!({"hold": null}),
+            serde_json::json!({"hold": ""}),
+            serde_json::json!({"hold": "   "}),
+        ] {
+            let mut s = step("review", StepStatus::Ready);
+            s.metadata = released.clone();
+            assert!(
+                p.matches(&car, &[s]),
+                "a released hold must board again: {released}"
+            );
+        }
+    }
+
+    /// ONE definition of "is this marker set", shared with the
+    /// conductor's `parked_ready` and the yard's held-green lane. Pinned
+    /// here so an edit to either cannot quietly introduce a third answer
+    /// (CLAUDE.md 9a) — the exact way this pair drifted in the first
+    /// place.
+    #[test]
+    fn the_unmarked_clause_agrees_with_the_marker_definition() {
+        let p = StationPredicate {
+            step: Some(StepMatch {
+                metadata_unmarked: vec!["hold".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let car = job("ship-a-change", Priority::Standard, 1);
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"hold": false}),
+            serde_json::json!({"hold": null}),
+            serde_json::json!({"hold": ""}),
+            serde_json::json!({"hold": true}),
+            serde_json::json!({"hold": "a reason"}),
+            serde_json::json!({"hold": 1}),
+        ] {
+            let mut s = step("review", StepStatus::Ready);
+            s.metadata = value.clone();
+            assert_eq!(
+                p.matches(&car, &[s]),
+                crate::stranded::marked(&value, "hold").is_none(),
+                "the station clause and `stranded::marked` disagree on {value}"
+            );
+        }
+    }
+
     /// The self placeholder must be honoured wherever it can be
     /// written, not only where it was first supported. Adding a new
     /// string-valued clause without extending `binds_self`/`bind_self`
@@ -892,14 +1028,14 @@ mod tests {
         spec.lens = Some(crate::stations::StationLens {
             eyebrow: Some("System Model · Design review".into()),
             title: "Design review".into(),
-            subtitle: Some("Open questions, pending decisions, ADRs".into()),
-            panels: vec!["rejections".into(), "corpus".into()],
+            subtitle: Some("Design docs waiting on a decision".into()),
+            panels: vec!["queue".into(), "flow-strip".into()],
             with_steps: false,
         });
         let q = evaluate_station(&spec, vec![], day(20));
         let lens = q.lens.expect("declared, so present");
         assert_eq!(lens.title, "Design review");
-        assert_eq!(lens.panels, vec!["rejections", "corpus"]);
+        assert_eq!(lens.panels, vec!["queue", "flow-strip"]);
     }
 
     /// A lens that places packets at the stop they reached needs their
@@ -1076,6 +1212,44 @@ mod tests {
         let p: StationPredicate = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(p, watchlist_predicate());
         assert_eq!(serde_json::to_value(&p).unwrap(), json);
+    }
+
+    #[test]
+    fn a_dismissed_packet_leaves_its_filers_watchlist() {
+        // The production `my-watchlist` predicate as 130-watchlist-dismiss.sql
+        // writes it: filed by me AND not dismissed. Dismissing writes the
+        // `watchlist_dismissed` key onto the packet (through the metadata
+        // merge), and this `metadata_absent` clause is what makes the row
+        // vanish from the list — no per-actor table, no new route.
+        let p = StationPredicate {
+            metadata_equals: BTreeMap::from([("submitted_by".into(), "emp-7".to_string())]),
+            metadata_absent: vec!["watchlist_dismissed".into()],
+            ..Default::default()
+        };
+
+        // A packet I filed and have not dismissed is on my list.
+        assert!(p.matches(&filed_by("emp-7"), &[]));
+
+        // Once I dismiss it, the same packet drops out — and it is
+        // idempotent: the flag is only ever "set", so a second dismiss
+        // writes the same value and the packet stays gone.
+        let dismissed = job("user-feedback", Priority::Standard, 1).with_metadata(
+            serde_json::json!({ "submitted_by": "emp-7", "watchlist_dismissed": "true" }),
+        );
+        assert!(!p.matches(&dismissed, &[]));
+
+        // A single shared flag is safe here precisely because membership
+        // is already narrowed to the packet's own filer: no second actor
+        // ever sees this packet through this station, so there is no
+        // "dismissed by someone else, still shows for me" case to model —
+        // someone else's packet is not mine to begin with, dismissed or
+        // not. (An array of per-actor ids would be the answer on a station
+        // several actors shared; here it would be dead weight.)
+        assert!(!p.matches(&filed_by("emp-9"), &[]));
+        let theirs_dismissed = job("user-feedback", Priority::Standard, 1).with_metadata(
+            serde_json::json!({ "submitted_by": "emp-9", "watchlist_dismissed": "true" }),
+        );
+        assert!(!p.matches(&theirs_dismissed, &[]));
     }
 
     // ------------------------------------------------------------

@@ -1,0 +1,90 @@
+[[workflow]]
+kind = "workflow-design"
+label = "Design a Workflow"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Meta-kind: every Workflow in the registry is authored by a Job of this kind. The terminal `workflow-publish` step writes the spec into the registry and emits `jobs.kind.published` into audit_log. See docs/architecture-decisions.md (Jobs, Workflows, Steps)."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "author"
+kind = "task"
+ready_when = "true"
+title_template = "Author WorkflowSpec"
+
+[[workflow.step]]
+title = "validate"
+kind = "task"
+ready_when = "steps.author.done"
+title_template = "Validate spec"
+# The next step is a sign-off, and required metadata is checked at
+# COMPLETION — so the constraint that guarantees the approver has
+# something to read lives HERE, not there. Phase 4 of the viability
+# lint refuses the alternative.
+fields = [{ name = "sign_off_context", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "approve"
+kind = "sign-off"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
+ready_when = "steps.validate.done"
+title_template = "Approve spec"
+authority_role = "workflow-approver"
+sign_offs_required = ["workflow-approver"]
+metadata_defaults = { authority_role = "workflow-approver" }
+
+[[workflow.step]]
+title = "publish"
+kind = "workflow-publish"
+# THE DECISION IS READ, NOT JUST WAITED FOR.
+#
+# 8686485c, measured 2026-09-09: this said `steps.approve.done` and
+# nothing else, so a spec the approver REJECTED reached this step
+# exactly as an approved one did, and completing it wrote the rejected
+# spec into the registry. Same class as af28e250 on `backlog-item`,
+# harm reversed: there a decision to build was dropped, here a decision
+# NOT to publish was. `approve` has declared a required `decision`
+# enum since 2026-08-31; nothing read it.
+#
+# Only an explicit `approved` publishes. Every other value — and an
+# unreadable one — falls to `not-published` below.
+ready_when = "steps.approve.done AND steps.approve.metadata.decision = \"approved\""
+title_template = "Publish to registry"
+terminal = { outcome = "published" }
+
+[[workflow.step]]
+title = "not-published"
+kind = "outcome"
+# WHERE A REJECTION GOES. Until now: nowhere. The protocol had four
+# steps and exactly one terminal, so gating `publish` on the decision
+# without adding this would leave a rejected packet open forever —
+# every reference terminal, every predicate false, nothing reachable.
+# Closure is the property being restored here, not just the gate.
+#
+# STATED AS THE NEGATIVE OF `approved`, deliberately, not as a list of
+# the other three enum values. A decision outside the enum, or absent,
+# would miss a positive list and miss `publish` too, and the packet
+# would wedge. Negated, the unreadable case lands here. A missing
+# metadata path is `Absent` in boss-expr — false against every literal
+# — so `NOT (decision = "approved")` reads true and the packet ends.
+#
+# ONE terminal, not one per value. `rejected`, `changes-requested` and
+# `pending` end this packet identically; which one it was is on the
+# approve step's metadata and in the audit log. Splitting them would
+# add rows saying the same thing and reopen the hole an unreadable
+# value falls through.
+#
+# `changes-requested` ends the packet rather than looping to `author`:
+# a predicate cannot un-complete a step, so there is no loop to offer.
+# The revision is a NEW workflow-design packet — a terminal for one
+# packet is an admission edge for the next.
+#
+# It leads with `steps.approve.done` because an outcome step that
+# reads ready on a freshly created Job is auto-completed by the
+# dispatcher's complete-on-ready rule and closes the packet before any
+# work happens. That shape has bitten twice.
+ready_when = "steps.approve.done AND NOT (steps.approve.metadata.decision = \"approved\")"
+title_template = "Closed without publishing"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "not-published" }

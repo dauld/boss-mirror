@@ -88,6 +88,30 @@ All three converge: the company *is* its event log + its current state
 + the rules connecting them. Design choices that respect that
 convergence land cleanly; ones that don't accumulate fragility.
 
+### Mostly sure vs. absolutely sure
+
+Being **mostly sure** a step was done properly and being **absolutely
+sure** differ in kind, not in degree. *Mostly sure* is a belief someone
+holds: beliefs degrade silently, cannot be audited, and are not
+inherited by the next shift. *Absolutely sure* is a property of the
+record the step leaves. Crossing that gap is not more carefulness — it
+is rebuilding the step until doing it and proving it are the same act.
+
+**Four phrases already in use here, read as one rule.** *Receipt copied,
+not retyped* · *the merge observed, never assumed* · *proven requires a
+machine-run probe* · *no evidence is not a pass*. Each one refuses a
+belief where an artifact was available — the gate's own receipt rather
+than the operator's account of it, the forge's evidence rather than an
+assumed departure, a probe rather than "it works", silence refused
+exactly like failure. Check every new verb, alarm, and surface against
+all four.
+
+**The one-sentence version:** mostly sure is a feeling about the past;
+absolutely sure is an artifact in the record. Build every step to
+convert the first into the second, make silence the only forbidden
+failure mode, and reliability stops being a virtue you hope for and
+becomes a number you read.
+
 ### Reading frame: the three layers
 
 **The network is the substrate. The fat protocols dictate the current
@@ -212,6 +236,8 @@ real failure:
 | `boss-ports` ↔ `deploy-services.sh` fallback arrays | two services silently absent from a deploy | pinned by a test — the fallback must stand alone when the binary is unbuilt |
 | `manifest.txt` ↔ `boss-testing::SCHEMA_FILES` | every DB-backed test ran without two tables | **collapsed twice** — `build.rs` generated the list from the manifest, then the manifest itself was deleted and the schema directory became the definition |
 | `MODEL_ROUTES` ↔ `MODEL_KINDS` | pages rendered under the wrong tab, silently | **collapsed** — one `nav-catalog.ts` answers both questions |
+| gate.sh `PREFLIGHT_LINTS` ↔ `infra/lint/` | four cars collided on the roster's tail line in one day, one left behind by #218 | **collapsed** — the roster is the directory minus a four-entry exclusion set, read the way the consist check already read it |
+| `infra/dispatcher/rules.toml` ↔ the ratchet's `BASELINE=<n>` | two rule cars could not ride one train (07e72962): both appended to the file AND bumped the same integer | **collapsed** — one file per rule under `infra/dispatcher/rules/`, and the count is derived from the directory; the justification the baseline bump used to force is now a required `why` in each rule's own file |
 
 All three are now either collapsed to one definition or pinned by a
 test that names the offending entry when it drifts. Prefer collapsing:
@@ -235,9 +261,9 @@ file still had a contended tail line, so any two cars carrying a
 migration still conflicted on merge — two more were stranded on
 2026-08-14 ("left for the next train"). The second collapse deleted
 `manifest.txt` outright: the ordered list is `schema/*.sql` sorted by
-the `NNN-` prefix, which every reader derives independently. Adding a
-migration is now dropping a file in a directory, touching no shared
-line at all. The lesson to carry: when a collapse leaves one
+its leading numeric prefix, which every reader derives independently.
+Adding a migration is now dropping a file in a directory, touching no
+shared line at all. The lesson to carry: when a collapse leaves one
 authoritative copy that everyone still has to *edit*, ask whether that
 copy holds any information its source does not. This one held none.
 
@@ -245,7 +271,7 @@ copy holds any information its source does not. This one held none.
 The core state-machine OS lives under `crates/core/` (
 among them `boss-core`, `boss-events`, `boss-jobs`, `boss-policy`,
 `boss-gateway`, `boss-observability`, `boss-cybernetics`,
-`boss-docs`, `boss-ml`, `boss-content`, `boss-testing`,
+`boss-ml`, `boss-content`, `boss-testing`,
 `boss-dispatcher`, `boss-clock`, `boss-expr`, `boss-locations`, the
 two taxonomy registries (`boss-classes`, `boss-subject-kinds`),
 `boss-calendar`, `boss-nats`, `boss-ports`,
@@ -334,7 +360,7 @@ the tier it touches.**
   the two taxonomy registries (`boss-classes`, `boss-subject-kinds`),
   `boss-calendar`,
   `boss-content`, the ML stack, `boss-cybernetics`,
-  `boss-testing`, `boss-ports`, `boss-docs`, plus matching
+  `boss-testing`, `boss-ports`, plus matching
   `*-client` crates.
 
 - **`crates/modules/` — Tier 2: Company-modeling layer**.
@@ -374,7 +400,7 @@ the tier it touches.**
 
 The `infra/lint/tier-import-audit.sh` script enforces the
 Tier-1-can't-depend-on-Tier-2 rule (orchestrators excluded);
-runs cleanly today (0 violations across 29 core crates).
+runs cleanly today (0 violations across 28 core crates).
 
 Each domain crate has a matching `*-client` for cross-service
 HTTP calls + a `Pg*` adapter behind the `postgres` feature.
@@ -465,9 +491,42 @@ Read that to know which layer a new test belongs in.
 
 ## Design docs
 
-When writing or editing a file under `docs/design/*.md`, follow the in-repo convention: open questions must be authored as `### Qn: <title>` subheadings (not numbered lists), **inside a `## Open questions` section** — the tracker ingests questions from that section only, and the reindex rejects a doc with a live `Qn:` heading anywhere else (resolved ones may live in a Decision-history section). If you use numbered lists instead, the review workflow silently falls back to positional ids and the open questions you wrote don't show up in the UI.
+**The packet is the doc.** A reviewable design doc is a `design-doc`
+packet: its prose rides in step metadata as `markdown`, and its open
+questions ride as structured metadata — `[{anchor, title, proposal}]`,
+enforced by the Workflow registry (`infra/platform/workflows/design-doc.toml`,
+`item_keys = ["anchor", "title", "proposal"]`). `boss design` files one.
+It is reviewable the second it exists: the review surface
+(`infra/step-plugins/review-design.js`) reads the questions off the
+packet, resolutions are recorded on the step, and the step IS the
+record. Open packets queue at the `design-review` station, rendered at
+`/it/design`.
 
-Resolutions flush into the source doc's Decision-history section via the tracker. Each release, settled material folds into [docs/architecture-decisions.md](docs/architecture-decisions.md) — the Baseline Architecture Decisions, the one current-truth decision record — and the flattened source doc is deleted. Docs that survive under `docs/design/` are living references (reading frames, contracts, governance rules), not decision archives.
+**Nothing parses a markdown heading for a question.** `### Qn:`,
+`## Open questions` and the `**Status**:` line were conventions of a
+corpus indexer that walked `docs/design/*.md`, parsed them into rows,
+and handed the rows to a review — deleted in two halves on 2026-09-10
+(backlog `f5da586c`; the decision is in
+[docs/architecture-decisions.md](docs/architecture-decisions.md),
+"Design docs and the decision record"). With it went the flush pipeline
+that wrote answers back into the file, the `boss-docs-api` service, the
+three read-cache tables, `boss docs reindex`, and the lint that enforced
+the heading shape. **No gate checks the shape of a design doc's prose
+any longer** — the only remaining check on this flow is the Workflow
+registry's validation of a `design-doc` packet's question metadata,
+which is structured data, not text. Writing `### Qn:` headings in a file
+is not wrong; it is just not read by anything, so do not expect a
+question authored in a file to reach a review.
+
+**Files under `docs/design/` survive as human-read living references** —
+reading frames, contracts, governance rules — and as the residue of a
+settled discussion, written at the END of one rather than as its venue.
+Each release, settled material folds into
+[docs/architecture-decisions.md](docs/architecture-decisions.md), the
+Baseline Architecture Decisions and the one current-truth decision
+record, and the flattened source doc is deleted. Writing the file is a
+car's job, after the decision; a doc still under discussion has no
+business in git.
 
 ---
 
@@ -478,6 +537,257 @@ Resolutions flush into the source doc's Decision-history section via the tracker
 - Fix branches: `fix/{short-description}`
 - Small PRs. If it's hard to review, it's too big.
 - Commit messages: imperative mood, concise. "Add order event schema" not "Added order event schema"
+
+---
+
+## Engineering Session Startup — orient before you build
+
+A new session starts blind, and the queue does not un-blind it. **This
+protocol exists because the durable pod session — the one meant to make
+work smoother — was clunky for hours on 2026-09-01 for want of it:** it
+built from a local `main` seven commits behind `origin/main` and so
+rebuilt a fix that had already landed; it closed five "open" packets
+whose fixes were already on main; and it duplicated a branch that was
+sitting green-gated and unparked, because it never read the approach.
+Every one of those was visible at startup. Run these first, before
+picking up any work:
+
+1. **Vantage.** cwd `/work/boss` = the cluster dev pod (builder,
+   gatekeeper, publisher — see §Doors for what that can and cannot do).
+
+2. **Sync to the source of truth.** `git fetch origin`. Branch, edit,
+   and diff against **`origin/main`** — never a stale local `main`. A
+   fix built on an old base rebuilds landed work, and once parked it
+   reverts the trains: a branch on an old base merges clean and wrong.
+
+3. **Read the approach — the whole car pipeline, not just the queue.**
+   The Train Yard shows only the last third of a car's life; read the
+   rest from the API:
+   - In-flight trains — `boss-api GET /api/jobs?kind=pr-train&status=open`
+     — and where each sits (CI / merge / deploy).
+   - Gate-runs INCLUDING closed ones (`kind=gate-run&limit=40`; a
+     gate-run closes on its verdict, so green/red ones are *closed* and a
+     `status=open` query misses them). A **green gate-run whose branch
+     has no car is stranded** — rescue it (rebase onto current main +
+     re-gate, since its base has likely moved) or note it, but never
+     rebuild it blind. A **red** may be a superseded earlier attempt, not
+     a live failure.
+   - Parked cars — `GET /api/stations/loading-dock/queue`.
+
+4. **Before building any packet's fix, verify the claim still holds on
+   `origin/main`.** The queue's "open" count is inflated by
+   landed-but-unclosed residue. Ask: is this already fixed on main? Is
+   there already a branch — stranded green, or in flight — for it? If so,
+   close the packet `stale`/`duplicate`; do not rebuild.
+
+5. **The queue is a worklist, not the truth.** Measure current reality,
+   not the reality a packet was filed against — the discipline the
+   correctness protocol asks of the system, asked of the operator.
+
+**`boss orient` runs steps 2–4 for you** — trains in transit, gates
+running, stranded greens with rescue guidance, the dock, and the task
+queue, one read (needs `BOSS_JOBS_URL`, like every SoR verb). Run it
+first; this section is the checklist behind it, and the reason each
+line exists. On its first live run it named three stranded greens —
+one of which was rescued onto the next train instead of rebuilt blind.
+Residue auto-detection (the L3 half) is still design work on acedf981.
+
+## Diagnosis — what a stopped pipeline owes you
+
+On 2026-09-02 delivery stopped for most of a day, and much of that time
+went to questions the system already held the answers to. The lessons
+below are not about the individual faults (a bad boot, a full disk);
+they are about **how much re-derivation a failure is allowed to cost.**
+Each is now a defect class with a fix, and each is worth checking any
+new surface against.
+
+- **A verdict must name what failed.** A red train recorded
+  `?:SUCCESS, ?:SUCCESS, ?:FAILURE`. Learning that the failing job was
+  `test`, and that `test` had died on a disk floor rather than on any
+  code, took three calls to the forge API — the adapter had been
+  dropping the check's name one layer below the code that wanted it.
+  A verdict someone must go re-derive is not a verdict.
+
+- **Quiet is not free — it is a loan against the next diagnosis.** On
+  2026-09-09 the same defect was found three times before lunch, and
+  each instance was a deliberate reduction that discarded the only
+  copy. A red train's alert carried the last forty lines of a 778 KB
+  log — svelte warnings printed five minutes *after* the failure —
+  because only the last 16 KB was ever fetched, and the panic was at
+  byte 460,000. The gate writes a ten-field receipt naming every check
+  and the runner reduced it to 101 characters before the packet saw
+  it, while the full log died with the Job's per-run disk. The converge
+  built with `docker build -q`, so four consecutive failures left the
+  Dockerfile context, one ERROR line, and nothing the compiler said;
+  establishing even the exit code meant reading an untruncated journal
+  line by hand, and ruling out a compile error and a full disk took two
+  separate investigations on two other machines.
+  **`-q`, a tail, and a digest suppress OUTPUT, not work.** None of them
+  saves time; they buy a quiet log. Capturing to a file and printing it
+  only on failure buys the same quiet and keeps the evidence, so prefer
+  that every time — and treat any code that reduces a record *before*
+  storing it as throwing away the only copy. The cost is never paid by
+  the person who writes the reduction; it is paid by whoever is next in
+  front of the failure, usually at speed, usually with something
+  stopped.
+
+- **Detection is not diagnosis, and they fail separately.** The same
+  incident had a working alarm: the 30-minute convergence arm fired on
+  time, named the train and the elapsed minutes, and was correct. It
+  carried no cause, though four failures had already been logged where
+  it could read them. An alarm that reports a symptom sends a human to
+  re-derive what the system already recorded. When you add an arm, ask
+  what it will carry, not only when it will fire.
+
+- **An infrastructure refusal is not a consist failure.** The gate's
+  disk floor refuses *before any check runs* — a correct refusal that
+  says nothing about the branch. Recorded as a plain CI failure it
+  strikes every car aboard, and two strikes hold a car out of the
+  queue until a human looks. The same thing happened on 2026-08-22 and
+  cost four clean cars five departures.
+
+- **A troubled packet must look troubled.** A train wedged four hours,
+  with an urgent overdue alarm already filed, still rendered in the
+  yard exactly like a healthy two-minute transit; two more sat at a
+  step they could never complete. If a state has crossed its own alarm
+  threshold, the surface showing it must say so — an alarm packet
+  existing elsewhere is not the same as the thing looking wrong.
+
+- **An alarm that reports through its subject dies with it.** The
+  estate chain observes, compares and files, all through the jobs API.
+  During the outage it was silent about an outage. A monitor needs a
+  path to a reader that does not depend on what it watches, or at
+  minimum must retain and replay so the gap is visible afterwards.
+
+- **A check nobody reads is a check that is not running.** The audit
+  integrity alarm exited nonzero nightly over benign sequence gaps
+  until it was correctly demoted to a warning. Then a real finding — an
+  emitted-but-undeclared event kind — rode inside a *passing* run for
+  days, unread. Permanently-red and green-with-warnings fail the same
+  way: decide where a warning is read, or do not emit it.
+
+- **"Roll back" is a target, not a verb.** `rollout undo` moved between
+  two revisions carrying the *same* broken image, so the first rollback
+  was a no-op that read as a rollback. Roll to the last known-good
+  artifact, named and verified — never to "the previous one".
+
+- **An arm that needs the patient is not an arm.** On 2026-09-05 a build
+  bricked the cluster's boot and the system of record was dark for
+  four hours. Detection took four minutes; nothing that could act was
+  free to: the converge that deploys a fix opens its packet through the
+  jobs API as a hard ExecStartPre, so it never started; its boot-failure
+  rollback targeted the revision its own apply had just created from
+  the manifest's placeholder image, which cannot boot; the gate never
+  builds the image, so the missing file was green; and the estate
+  observer reports through the API it observes. Every loop that can
+  ACT must owe nothing to what it watches — visibility is best-effort
+  (`ExecStartPre=-`, a wrap that exits 0 on an unreachable API), the
+  rollback target is a NAMED last-converged build, the image proves it
+  boots before it rolls, and a watchdog reads the API from outside and
+  rolls to that build on its own (`infra/forge/cluster-watchdog.sh`).
+  A system that knows it is working states so from a loop that does
+  not need the thing it is stating to be alive. David's rule for every
+  manual command since: say what makes it the last time.
+
+- **Mechanical operations belong to the machine.** Five times in one day
+  an operator was the transport for a command whose output the system
+  could have read itself. The foothold already exists — the cadence loop
+  runs supervised on each host and takes its schedule from registry
+  data — and the only gap is that its verb vocabulary is closed
+  (`ee8ec68a`). Reads and bounded reclaims are mechanical;
+  destructive-by-policy actions are not, and keeping that line sharp is
+  what makes handing over the first kind safe.
+
+**What held, and is worth protecting:** the seed's baseline guard
+refused to stamp over a failed prepare and saved the tenant model; the
+trains refused to claim convergence they could not evidence and filed
+loud packets instead; the disk floor refused rather than wedging a
+host. Each is a component choosing to stop rather than guess. The
+failures above are the same shape in reverse — a component that
+answered instead of erroring, or waited instead of speaking.
+
+## Doors — the supported way in
+
+A door is a path already made safe: correct target, correct actor,
+pre-approved so it does not prompt. **Every expensive mistake this
+pipeline has made was building a path by hand when a door existed**, so
+the doors are listed here, in the one document every session reads.
+
+This list is load-bearing for how much gets delegated. David,
+2026-08-28: *"As we get more confident that the protocol prevents big
+mistakes, we can let you handle more steps. The protocol is our
+constraint."* An agent is trusted with a step because the protocol makes
+that step hard to get wrong — not because it promised to be careful. So
+a door that stops being true is a defect worth a car.
+
+- **The jobs API — `boss-api METHOD /api/path [body.json]`**
+  (`/Users/david/bin/boss-api`). Pinned to the system of record, signs
+  as the session's own actor, allowlisted so it never prompts. Invoke it
+  **bare**: `boss-api GET … > file` stays inside the allowlist, `boss-api
+  GET … | python3` falls out of it and gets adjudicated. Speaks
+  GET/POST/PUT/PATCH/DELETE. **Annotate a packet with `PATCH
+  /api/jobs/{id}/metadata`** — it MERGES top-level keys, and a key set to
+  `null` is deleted (both verified against a live packet, 2026-08-28).
+  Prefer it over a full job PUT: the PUT is safe, but it REPLACES, so
+  every annotation depends on reconstructing the whole job body
+  correctly. The step API refuses metadata writes to a completed step and
+  its 409 names this endpoint as the way to annotate instead — which is
+  how it was found, in the conductor's journal, failing every ten minutes
+  for weeks (`f402a681`). On 2026-08-27 a session made ~28 hand-built
+  calls before finding this door at all, ~14 of them writes carrying a
+  forged `emp-david` actor, so the audit log credits a human with an
+  agent's work.
+
+- **Which deployment.** The system of record is
+  **`http://10.20.0.34:7900`**. boss-gcp's `127.0.0.1:7900` is a
+  *second, older, complete stack* with different data. The conductor's
+  systemd unit sets `BOSS_JOBS_URL` explicitly for this reason; a verb
+  run by hand inherits no unit.
+
+- **Who a verb signs as — `BOSS_ACTOR`.** Every `boss` verb signs its
+  jobs-API calls as the actor RUNNING it, read from `BOSS_ACTOR` or,
+  failing that, `$HOME/.config/boss/actor` (one line, the id). Name
+  yourself once per box. Unnamed, a WRITE is refused — it names both
+  fixes — and a read goes out marked `operator:unidentified`; neither
+  is ever signed as the conductor. The conductor's own `boss train …`
+  verbs still sign `automation:train-conductor`, which its unit sets
+  explicitly. This exists because the opposite was true until
+  2026-09-08: every CLI write carried the conductor, so the first read
+  of the new `completed_by` column showed an operator's `boss prove`
+  credited to the train automation (backlog 5083d6f5).
+
+- **Before pushing — `infra/gate.sh --quick`.** fmt plus every
+  build-free lint, ~11s. It is not a gate and says so. Skipping it once
+  cost 17 minutes of cluster time to learn that `cargo fmt` had been run
+  on one crate and not another.
+
+- **Briefing a builder — `boss brief <packet>`.** The packet verbatim
+  from the system of record, plus the invariants *derived* from the files
+  that decide them — the gate's uid/gid, the cargo bound, the phase list,
+  the forbidden database, and the method for a uid-owned workspace
+  (`infra/dev/as-gate-uid.sh`, which is a command, not a paragraph). A
+  brief references this output; it never restates it. Ten briefs in one
+  session retyped those invariants from memory and the uid one was wrong
+  in all ten (`cc9ddc5d`).
+
+- **Gating a branch — `boss gate <branch> [--wait]`.** Files or reuses
+  the packet, renders the runner, creates the Job. `--wait` polls to a
+  verdict; hand-rolled pollers have been written three times and two
+  were broken.
+
+- **Publishing a branch to the forge.** A workstation has no forge
+  credential. Push to the conductor clone (`gcp` remote) under
+  `refs/tmp/*`, push that to `origin` from there, delete the temp ref.
+  Never push a car branch to a push-mirror target — it force-syncs from
+  the forge and the branch disappears.
+
+**And the rule behind all of them: a wrong target answers instead of
+erroring.** A query against the wrong deployment returns `total: 0`. A
+non-existent systemd unit is `inactive`. A service checked on the wrong
+host is `inactive`. All three happened in one session, all three are
+well-formed and confident and wrong. Before concluding something *does
+not exist*, run a query on the same connection whose answer you already
+know.
 
 ---
 

@@ -1,75 +1,75 @@
-//! Boot-time quarantine of unviable ACTIVE stations — the station
-//! counterpart to [`crate::workflow_quarantine`].
+//! Boot-time viability check of ACTIVE stations — the station
+//! counterpart to [`crate::workflow_quarantine`], and the same contract.
 //!
-//! [`crate::station_lint::gate_active`] makes this pass rare by
-//! construction: no API path can set an unviable row active. Quarantine
+//! [`crate::station_lint::gate_active`] makes a finding here rare by
+//! construction: no API path can set an unviable row active. This pass
 //! exists for the paths that never touch publish — rows INSERTed by the
 //! SQL seeds (`116-stations.sql` and friends), rows that predate the
 //! gate, and rows edited directly in the database.
 //!
-//! **Why retiring is safe here, and why this is simpler than the
-//! Workflow pass.** A Workflow row cannot be auto-retired when open Jobs
-//! are pinned to it — retiring would strand live work, so that case
-//! refuses to start. Stations have no such case *by construction*:
-//! membership is DERIVED, evaluated from the predicate at read time
-//! against open Jobs, with no station field on the packet
-//! (`116-stations.sql`). Nothing is ever pinned to a station version, so
-//! retiring one strands nothing. There is no refuse-to-start path in
-//! this file at all.
+//! **What this pass does:** re-lint every active row and log each
+//! failure at ERROR — name, version, the problems. Then let the
+//! service start. It writes nothing and it refuses nothing.
+//! Quarantine — retiring the row — is a deliberate act an operator or
+//! a packet takes through the registry; boot only says, loudly, that
+//! it is needed.
 //!
-//! **Why retire rather than leave it live.** Every rule the lint
-//! enforces describes a queue that is either permanently empty or actively
-//! misleading — an `actor` row that never binds `@me` shows every
-//! executor the same list while claiming to be personal. An absent
-//! queue is a question an operator asks; a wrong queue is one they
-//! trust. The marker event carries the problems, and `upstream` gives
-//! them somewhere to look.
+//! **Why it does nothing more.** Until 2026-09-08 this pass retired
+//! each unviable row at boot, on the argument that station membership
+//! is DERIVED (evaluated from the predicate at read time, no station
+//! field on the packet) so nothing is pinned to a station version and
+//! retiring strands nothing. That argument is true and beside the
+//! point. The Workflow pass took the system of record down twice on
+//! 2026-09-07 (outage packet 7752e636) — once by refusing to start,
+//! once by retiring a live protocol nobody had asked to retire — and
+//! the defect in both was the same one this file had: a boot check
+//! that ACTS on a data condition. A persisted, non-idempotent write
+//! from a boot path is a write that happens on every roll, credited
+//! to an automation, that no packet filed. A check may not take an
+//! action of its own. It reports; the report is the value.
+//!
+//! An `actor` row that never binds `@me` still shows every executor
+//! the same list while claiming to be personal — a wrong queue is one
+//! operators trust. That is exactly why the finding is at ERROR and
+//! names the row: so the operator files the retirement, deliberately.
 
-use chrono::{DateTime, Utc};
-
-use crate::port::JobsRepository;
 use crate::station_lint::{StationLintError, validate_station};
-use crate::stations::{StationRegistry, StationSpec};
+use crate::stations::StationRegistry;
 
-/// The actor every quarantine write is stamped with — a named platform
-/// automation, so the log says who retired the row.
-pub const QUARANTINE_ACTOR: &str = "station-quarantine";
-
-/// A station row this pass retired.
+/// An ACTIVE station row that fails the viability lint. Boot reports
+/// it and does nothing to it.
 #[derive(Debug, Clone)]
-pub struct QuarantinedStation {
+pub struct UnviableStation {
     pub name: String,
     pub version: i32,
     pub problems: Vec<StationLintError>,
 }
 
-/// What one pass did.
-#[derive(Debug, Default)]
-pub struct StationQuarantineReport {
+/// What one boot check found.
+#[derive(Debug, Clone, Default)]
+pub struct StationViabilityReport {
     /// How many ACTIVE rows were examined.
     pub checked: usize,
-    pub quarantined: Vec<QuarantinedStation>,
+    pub unviable: Vec<UnviableStation>,
 }
 
-/// Run one quarantine pass over every active station.
+/// Check every active station against the viability lint. Each
+/// failure is logged at ERROR with its name, version and problems,
+/// and collected in the report. Nothing is written and nothing is
+/// refused: the caller starts either way.
 ///
-/// Retires each unviable row and records a `jobs.station.quarantined`
-/// marker for it. `Err` is reserved for the pass itself failing
-/// (registry unreachable, retire write failed) — the caller cannot tell
-/// whether the registry is clean, so it must decide what to do about
-/// that. A row that is merely unviable is never an `Err`.
-pub async fn quarantine_unviable_active_stations<R: JobsRepository + ?Sized>(
+/// `Err` is reserved for the check itself failing (registry
+/// unreachable). That is not a reason to refuse to start either — the
+/// caller logs it and continues.
+pub async fn check_active_stations_viable(
     registry: &dyn StationRegistry,
-    jobs: &R,
-    actor: &boss_core::actor::ActorId,
-    now: DateTime<Utc>,
-) -> Result<StationQuarantineReport, String> {
+) -> Result<StationViabilityReport, String> {
     let active = registry
         .list_active()
         .await
         .map_err(|e| format!("could not list active stations: {e}"))?;
 
-    let mut report = StationQuarantineReport {
+    let mut report = StationViabilityReport {
         checked: active.len(),
         ..Default::default()
     };
@@ -79,47 +79,26 @@ pub async fn quarantine_unviable_active_stations<R: JobsRepository + ?Sized>(
         if problems.is_empty() {
             continue;
         }
+        // The problems are the operator's first clue — one line each.
         for p in &problems {
             tracing::error!("boot station check: {p}");
         }
-        retire_and_mark(registry, jobs, spec, &problems, actor, now).await?;
-        report.quarantined.push(QuarantinedStation {
+        tracing::error!(
+            name = %spec.name,
+            version = spec.version,
+            problems = problems.len(),
+            "unviable active station — NOT retired at boot; quarantine is a deliberate act, \
+             file it (publish a viable version, or retire the row)"
+        );
+        report.unviable.push(UnviableStation {
             name: spec.name.clone(),
             version: spec.version,
             problems,
         });
     }
 
-    if report.quarantined.is_empty() {
+    if report.unviable.is_empty() {
         tracing::info!(active = report.checked, "boot station check passed");
     }
     Ok(report)
-}
-
-/// Retire the row through the registry (recording
-/// `jobs.station.retired` in the same transaction as the flip) and
-/// record the loud `jobs.station.quarantined` marker.
-async fn retire_and_mark<R: JobsRepository + ?Sized>(
-    registry: &dyn StationRegistry,
-    jobs: &R,
-    spec: &StationSpec,
-    problems: &[StationLintError],
-    actor: &boss_core::actor::ActorId,
-    now: DateTime<Utc>,
-) -> Result<(), String> {
-    registry
-        .retire(&spec.name, actor, now)
-        .await
-        .map_err(|e| format!("could not quarantine station `{}`: {e}", spec.name))?;
-
-    let event = crate::events::station_quarantined_event(actor, spec, problems);
-    jobs.record_events(std::slice::from_ref(&event))
-        .await
-        .map_err(|e| {
-            format!(
-                "quarantined station `{}` but could not record the marker event: {e}",
-                spec.name
-            )
-        })?;
-    Ok(())
 }

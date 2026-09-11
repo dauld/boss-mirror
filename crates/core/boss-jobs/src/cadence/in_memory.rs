@@ -48,6 +48,14 @@ impl CadenceRepository for InMemoryCadence {
             .map(|f| LastFiring {
                 firing_id: f.firing_id.clone(),
                 fired_at: f.fired_at,
+                // Mirrors the Postgres adapter's `detail->>'rc'`:
+                // record_outcome merges rc into detail, so an absent key is
+                // "no outcome recorded yet", not a failure.
+                rc: f
+                    .detail
+                    .get("rc")
+                    .and_then(serde_json::Value::as_i64)
+                    .map(|v| v as i32),
             }))
     }
 

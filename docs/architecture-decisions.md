@@ -10,15 +10,22 @@ design documents whose work has shipped. There is no separate
 history to cross-reference: what this document says is what the
 code does.
 
-**How decisions evolve.** Open questions are authored as
-`### Qn:` anchors in living docs under `docs/design/`; the in-app
-decision tracker (`/system/design`, backed by `boss-docs`) manages
-them; resolutions flush into the source doc's Decision history.
-Each release, settled material folds into this document and the
-source doc is deleted — the baseline is the canonical post-flatten
-record. Docs that survive under `docs/design/` are living
-references (reading frames, contracts, governance rules), not
-decision archives.
+**How decisions evolve.** A design doc **is a packet**, not a file.
+Its prose and its open questions ride on a `design-doc` Job, so it is
+reviewable the moment it exists rather than after it ships, and the
+answers are recorded on the packet — which is the record. A revision
+is a **new packet carrying `translated_from`**, never a mutation, so a
+doc's life is a chain and the chain is its decision history, with an
+actor and a timestamp on every answer. **This document is the fold**:
+current truth per topic, assembled from those packets, with the
+history beside it rather than inlined. It stays hand-maintained
+because merging prose has nuance a generator cannot judge — but the
+`fold` step of the `design-doc` workflow makes updating it an
+obligation the protocol enforces rather than an intention somebody
+holds. Files under `docs/design/` are the legacy corpus, being
+translated into packets; a generated tree at release keeps `git grep`
+and the OSS install honest, and because it is generated nobody
+hand-edits it and it cannot drift.
 
 ---
 
@@ -415,8 +422,24 @@ dispatcher's registry watch for those emissions and invoke
 handlers.** Rules are rows in the append-only versioned **`dispatcher_rules`
 registry** (`on_event`, `when`, `do`, over the shared expression
 DSL) — the step_plugins-style draft → active → retired lifecycle,
-authored in-app at `/system/dispatcher/rules` (`infra/dispatcher/rules.toml`
-is now just the human-authored seed source, not the runtime read).
+authored in-app at `/system/dispatcher/rules`. **`infra/dispatcher/rules/`
+— one `<rule-name>.toml` per rule — is the registry's DEFINITION, and
+the table is derived from it:** the dispatcher publishes every authored
+rule the table lacks at boot and retires every enforced rule no file
+names (`rules::seed`, 2026-09-11, backlog 41ba00cd). Adding a rule is
+dropping a file in; changing one is bumping its `version`; retiring one
+is deleting the file; **no migration writes rules**. Until then a rule
+was declared twice — a file here and an `INSERT INTO dispatcher_rules`
+in a migration, compared by a test and derived from nothing — the worst
+shape of CLAUDE.md §9a, since one copy lived in the production database
+where no test could reach it. The direction was decided on measurement:
+nothing reconciles `dispatcher_rules` at boot (so the hazard that forced
+the Workflow move did not apply), a reviewed `why` cannot live in a row,
+and only the tree can supply a fresh database. Live authoring is
+untouched — the seed is insert-if-absent and never walks a version back,
+so `POST /api/dispatcher/rules` + publish still changes a rule with no
+deploy, and the tree owns which rules exist rather than moment-to-moment
+control of the rows.
 The reactive wiring is visualized as a cascade — trigger event →
 rule → handler → emitted event → re-triggered rule, feedback cycles
 highlighted, filterable by trigger event — at `/system/dispatcher`. The
@@ -1037,6 +1060,114 @@ log-copy migration both ride that wire. The cluster is a *client* of
 identity and a consumer of intent, never the host of either: moving
 the company is copying its log and its rules, and everything else
 regenerates.
+
+## Design docs and the decision record
+
+The markdown corpus stopped being the source of truth and kept the
+title, and everything that broke around design review followed from
+that. **The packet is the doc.** Decided in review `87f5bc84`
+(2026-08-29), on evidence: 146 recorded answers had never reached a
+file (11 queued, 135 in failed flush jobs); a terminal step named
+*"Settled — carry it to a file"* completed twice and wrote nothing;
+and a doc's status was a hand-written line nothing updated, so 20 docs
+claimed live discussion while having no open questions. None of those
+were independent bugs — they were the cost of keeping an authored file
+and a projection of it in agreement when the decisions already lived
+somewhere else.
+
+**Generation runs from the packet outward.** Previously a human
+authored `docs/design/x.md`, an indexer parsed it into rows, decisions
+were recorded against those rows, and a flush job tried to write them
+back — the file was the source and the database the projection. Now
+the packet is authored and the file, where one exists, is a generated
+artifact. This is the rule the rest of the system already lives by;
+design docs were the one place it was inverted.
+
+**The legacy corpus is translated once, not indexed forever.** All 52
+markdown docs become packets and the directory stops being read;
+leaving it as a parallel source recreates the two-sources problem the
+change removes. The 49 legacy `design-doc-review` packets are archived
+as they are, and their stranded decisions are **not** flushed — the
+answers are already on the packets, which is where the fold reads
+them, so writing them into files is work in the direction being
+abandoned.
+
+What this deletes, and the deletion is the point: the pending-decision
+table and the whole flush pipeline (including a service that ran `git
+commit` and `git push`), `boss docs flush-pending` and `boss docs
+reindex`, the prose parser and its conventions (`**Status**:` in the
+first thirty lines, `## Open questions`, `### Qn:`, `(resolved)`), the
+corpus lint that enforced them, and the `stale-statuses` and
+`rejections` reports — with them the concept of a "drifted" doc, since
+a packet's status *is* its status.
+
+**The write-back half was deleted on 2026-09-10** (backlog `f5da586c`,
+filed because this record had described the deletion in the present
+tense for twelve days while the pipeline kept running). Gone: the flush
+pipeline end to end — `design_flush_jobs`, the four `/api/design/
+flush-jobs` routes, `boss docs flush-pending`, the markdown surgery it
+applied, and the `git commit`/`git push` it ran; `POST`/`DELETE
+/api/design/pending-decisions` and the step plugin's mirror into them;
+the `stale-statuses` and `rejections` routes, their two SPA panels, and
+`design_docs.pending_count`; and the two dispatcher rules that existed
+only to serve that half (`design-decision-flush-queue`, and
+`maintenance-sweep-doc-status-daily`, whose entire content was the
+drifted-status report).
+
+Part 1 stopped at the read half and left two findings, both now
+settled. First, the pending-decision rows were **load-bearing for the
+read half**: `upsert_doc` read them on every reindex and force-resolved
+their anchors, because reindex rebuilt the question set from the parse
+and an answer known only outside the file was otherwise erased on every
+boot. Measured then: dropping both tables would have re-opened 25
+questions across 6 docs and handed back six review packets for questions
+already answered. So the table survived one day, renamed
+`design_recorded_decisions` and backfilled from the stranded flush
+payloads — a closed ledger with no writers. Second, `boss docs reindex`
+and the corpus index stayed, because the daily
+`design-review-level-sweep` read them and retiring a working rule was
+not a call to make inside a deletion.
+
+**The read half was deleted on 2026-09-10, the same day** — the
+sequencing had to run that way round, because the ledger exists only to
+stop a reindex from re-opening an answered question, and with no
+reindexer there is nothing for it to stop. Gone: the whole `boss-docs`
+crate and the `boss-docs-api` service (the parser, the reindexer, the
+port and both adapters, the remaining `/api/design/docs` routes and the
+gateway's proxy to them), the three read-cache tables
+(`design_docs`, `design_questions`, `design_doc_rejections`) and the
+ledger with them, `boss docs reindex`, the `docs.design.sweep` handler
+and the two dispatcher rules it served (`design-review-spawn`,
+`design-review-level-sweep`) plus the one-kind
+`open_review_exists` helper the first of them used, the `corpus` panel
+on `/it/design`, and the corpus lint (`docs_corpus_presents.rs`) that
+enforced the file conventions. **No history is lost**: `audit_log` is
+the system of record and every `docs.design.indexed` /
+`docs.design.decision_recorded` event stays in it; these were
+projections and read-caches.
+
+Three things that deletion established, worth keeping:
+
+- **The `### Qn:` / `## Open questions` / `**Status**:` conventions were
+  FILE-WORLD ONLY**, and the world they described is gone. A
+  `design-doc` packet's questions are registry-enforced structured
+  metadata (`design-doc.toml`, `item_keys = ["anchor", "title",
+  "proposal"]`); `review-design.js` returns before any docs-API call
+  when the packet carries its own, and a mocked test routes
+  `**/api/design/**` to 500 and asserts zero calls. So nothing anywhere
+  parses a markdown heading for a question any more, and CLAUDE.md's
+  §"Design docs" was corrected from "author your questions like this" to
+  what is actually true.
+- **Docs under `docs/design/` survive as human-read living references.**
+  Nothing indexes them, no lint enforces their shape, and a docs-only
+  change now implies no crate to compile (`infra/gate.sh`'s path map).
+  The file is the residue of a settled discussion, not its venue.
+- **`/it/design` became only what it claimed to be.** The page
+  advertised itself as a lens over the `design-review` station's queue
+  while rendering a table of files; its one use of the queue was a join
+  on `subject.id` = doc path, which no `design-doc` packet can satisfy
+  (its subject is the literal `boss-platform`), so the station's real
+  packets rendered nowhere. It renders the queue now.
 
 ## Open findings — where two live decisions disagree
 

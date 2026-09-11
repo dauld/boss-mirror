@@ -35,6 +35,7 @@ import type { Certification, Employee, SessionState, SessionEnvelope, ProbeBody 
 import { guestEmployee, classifyProbe } from './classify';
 export type { Certification, Employee, SessionState, SessionEnvelope, ProbeBody };
 export { guestEmployee, classifyProbe };
+export { BREAK_GLASS_ROLE, breakGlassOperator } from './classify';
 
 export const session = $state<SessionEnvelope>({
   value: { kind: 'loading' },

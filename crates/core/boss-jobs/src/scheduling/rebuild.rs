@@ -125,12 +125,17 @@ pub async fn rebuild_scheduling(pool: &PgPool) -> Result<RebuildReport, RebuildE
                         .and_then(|v| v.as_str())
                         .map(String::from);
                     if let (Some(id), Some(status)) = (id, status) {
+                        // ev.ts is the instant the live write bound
+                        // into updated_at (stamp.timestamp) — replay
+                        // reproduces the row byte-identically instead
+                        // of stamping replay-time NOW().
                         let n = sqlx::query(
-                            "UPDATE scheduled_assignments SET status = $2, updated_at = NOW() \
+                            "UPDATE scheduled_assignments SET status = $2, updated_at = $3 \
                              WHERE id = $1",
                         )
                         .bind(id)
                         .bind(&status)
+                        .bind(ev.ts)
                         .execute(&mut *conn)
                         .await
                         .map_err(|e| e.to_string())?
@@ -171,14 +176,17 @@ pub async fn rebuild_scheduling(pool: &PgPool) -> Result<RebuildReport, RebuildE
                         .and_then(|v| v.as_str())
                         .map(String::from);
                     if let (Some(emp_id), Some(token)) = (emp_id, token) {
+                        // ev.ts = the instant the live mint bound into
+                        // created_at; NOW() here stamped replay time.
                         sqlx::query(
                             "INSERT INTO tech_calendar_tokens (employee_id, token, created_at) \
-                             VALUES ($1, $2, NOW()) \
+                             VALUES ($1, $2, $3) \
                              ON CONFLICT (employee_id) DO UPDATE SET \
                                 token = EXCLUDED.token, created_at = EXCLUDED.created_at",
                         )
                         .bind(&emp_id)
                         .bind(&token)
+                        .bind(ev.ts)
                         .execute(&mut *conn)
                         .await
                         .map_err(|e| e.to_string())?;

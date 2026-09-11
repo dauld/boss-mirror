@@ -13,6 +13,7 @@
 
   import GenericSurface from './GenericSurface.svelte';
   import DecisionContext from './DecisionContext.svelte';
+  import StepProcedure from './StepProcedure.svelte';
   import ApprovalSurface from './ApprovalSurface.svelte';
   import RepairSurface from './RepairSurface.svelte';
   import InspectionSurface from './InspectionSurface.svelte';
@@ -118,6 +119,15 @@
      StepFocusPage, DecideModal all mount it), so gating HERE is the
      one edit instead of one per surface. -->
 <WriteGate>
+<!-- The step's authored instructions, above BOTH sides of the plugin
+     fork (backlog 3c640ac3). The decision panel below is exempt for
+     plugin-backed steps because a mounted plugin is its own
+     presentation of the case — but none of the thirteen bundles under
+     infra/step-plugins reads `procedure` at all, so exempting them here
+     would leave a plugin-backed step as blind to its own instructions
+     as the generic surface was. A procedure is what the protocol says
+     about doing the work; it is not a presentation choice. -->
+<StepProcedure {step} />
 {#if pluginAvailable === true}
   <!-- Plugin-backed steps can also take the whole viewport. Reading
        tasks (a design review is a document plus decisions) compete

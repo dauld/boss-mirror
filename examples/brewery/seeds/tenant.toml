@@ -531,6 +531,75 @@ weekday_multiplier = 1.3
 weekend_multiplier = 0.25
 subject_distribution = { "acc-bigseed-0000" = 1.0 }
 
+# ---------------------------------------------------------------------------
+# THE ROSTER ACTS (1533872f) — creation rates for the operating-rhythm
+# Workflows that wake the dormant departments. Deterministic where the
+# rhythm is a fixed daily shift (a taproom does not Poisson-skip
+# opening); Poisson where volume is genuinely stochastic (events,
+# account touches). Weekly cycles live under [periodic.*] below.
+# ---------------------------------------------------------------------------
+
+# Taproom service shifts. Three shift sections per operating day (a
+# 36-head taproom staffs several stations), seven days — the taproom,
+# unlike the brewhouse, is open weekends and holidays.
+[job_rates.taproom-service-shift]
+rate = 3.0
+deterministic = true
+weekday_multiplier = 1.0
+weekend_multiplier = 1.0
+subject_distribution = { "brewery" = 1.0 }
+
+# Outbound distribution routes. Two staged routes per dock day; the
+# per-order last-mile stays on wholesale-keg-order/deliver.
+[job_rates.route-delivery-run]
+rate = 2.0
+deterministic = true
+weekday_multiplier = 1.0
+weekend_multiplier = 0.0
+subject_distribution = { "brewery" = 1.0 }
+
+# Cellar rounds. Two per working day (morning + afternoon walk) — 24
+# cellar-techs cover a 250-BBL house's conditioning side.
+[job_rates.cellar-daily-round]
+rate = 2.0
+deterministic = true
+weekday_multiplier = 1.0
+weekend_multiplier = 0.0
+subject_distribution = { "brewery" = 1.0 }
+
+# Facility maintenance walkround + IT day shift: one each per working
+# day.
+[job_rates.facility-maintenance-round]
+rate = 1.0
+deterministic = true
+weekday_multiplier = 1.0
+weekend_multiplier = 0.0
+subject_distribution = { "brewery" = 1.0 }
+
+[job_rates.it-support-shift]
+rate = 1.0
+deterministic = true
+weekday_multiplier = 1.0
+weekend_multiplier = 0.0
+subject_distribution = { "brewery" = 1.0 }
+
+# Account check-ins: ~2 touches/weekday across 12 account-managers ≈ a
+# monthly cadence per active wholesale account. Uniform over the
+# active account pool (no subject_distribution).
+[job_rates.account-checkin]
+rate = 2.0
+weekday_multiplier = 1.4
+weekend_multiplier = 0.0
+
+# Taproom events: tours, trivia, release parties — ~2-3/week, weekend
+# heavy, tracking the taproom's seasonal traffic.
+[job_rates.taproom-event]
+rate = 0.4
+weekday_multiplier = 0.8
+weekend_multiplier = 1.5
+month_multipliers = { 1 = 0.7, 2 = 0.7, 3 = 0.9, 4 = 1.0, 5 = 1.2, 6 = 1.4, 7 = 1.5, 8 = 1.3, 9 = 1.0, 10 = 0.9, 11 = 1.1, 12 = 1.3 }
+subject_distribution = { "brewery" = 1.0 }
+
 # brewery-hire + brewery-terminate are RATE = 0 today.
 #
 # The Workflow has `subject_kinds = ["employee"]`, which means the
@@ -1053,6 +1122,48 @@ anchor_date = "2024-01-15"
 business_calendar = "us-banking"
 action.kind = "open_job"
 action.workflow = "excise-tax-filing"
+action.subject_kind = "company"
+action.subject_id = "brewery"
+
+# ---------------------------------------------------------------------------
+# THE ROSTER ACTS (1533872f) — weekly staff cycles. These three wake
+# the finance-collections, leadership, and people blocs; the daily
+# rhythms live under [job_rates.*] above. Anchors stagger across the
+# week (Mon / Tue / Wed) so the weekly cycles don't all land on one
+# sim-day.
+# ---------------------------------------------------------------------------
+
+# Weekly leadership review — Mondays. FP&A compiles, functions read
+# out, COO decides, CEO signs the week.
+[periodic.weekly-leadership-review]
+cadence = "weekly"
+anchor_date = "2024-01-08"
+business_calendar = "us-banking"
+action.kind = "open_job"
+action.workflow = "weekly-leadership-review"
+action.subject_kind = "company"
+action.subject_id = "brewery"
+
+# Weekly A/R collections run — Tuesdays (aging is freshest after the
+# Monday cash posting). ar-clerks chase receivables, the controller
+# reviews escalations.
+[periodic.weekly-ar-collections]
+cadence = "weekly"
+anchor_date = "2024-01-09"
+business_calendar = "us-banking"
+action.kind = "open_job"
+action.workflow = "ar-collections-run"
+action.subject_kind = "company"
+action.subject_id = "brewery"
+
+# Weekly people-ops cycle — Wednesdays (timekeeping audit lands ahead
+# of the Thursday-anchored biweekly payroll run).
+[periodic.weekly-people-ops]
+cadence = "weekly"
+anchor_date = "2024-01-10"
+business_calendar = "us-banking"
+action.kind = "open_job"
+action.workflow = "people-ops-cycle"
 action.subject_kind = "company"
 action.subject_id = "brewery"
 

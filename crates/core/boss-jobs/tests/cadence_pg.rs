@@ -87,11 +87,69 @@ async fn seeded_rules_serve_the_thresholds_the_schema_declares() {
     assert_eq!(depth.basis, "queue-depth");
     assert_eq!(
         depth.min_dock_depth,
-        Some(4),
+        // 3 since 202609032030-cadence-supersede-by-name.sql. It was 4;
+        // board-on-three (202609031515) tried 3 and SILENTLY NO-OP'd —
+        // its version-keyed retire missed the real active row against a
+        // diverged version history, so the live value stayed 4 and both
+        // this pin and its boss-cli sibling kept asserting 4, documenting
+        // the breakage. The supersede-by-name migration retires the
+        // active row BY NAME (correct from any version history) so 3
+        // actually takes; both pins now assert 3. This one is the FOURTH
+        // place the number lives — the gate found it after the sibling
+        // was moved, exactly as this comment warned.
+        // 1 since 202609042110-a-lone-car-still-ships.sql: the threshold
+        // stopped being a batch SIZE and became a latency BOUND. At 3, a
+        // car whose neighbours had not arrived waited for one of two
+        // daily clock windows — on 2026-09-04 two green cars sat with
+        // the next window nine hours out — so the yard's constraint was
+        // quorum rather than readiness. Now: whatever is waiting, at
+        // most every 45 minutes.
+        //
+        // This pin caught the change, exactly as the comment above
+        // predicted: the migration was gated `--auto` (fixture + lints,
+        // tests SKIPPED), went green, and reddened the train's CI on the
+        // assembled tree instead. Cheap here, expensive there — the
+        // lesson is that a schema-only change still owns its pins.
+        Some(1),
         "boarding threshold drifted from the schema — this is the \
          2026-08-13 split-brain, and it made the operator's answer wrong"
     );
-    assert_eq!(depth.cooldown_minutes, Some(120));
+    assert_eq!(depth.cooldown_minutes, Some(45));
+}
+
+/// A calendar rule must be served WHOLE — cadence, anchor_date and
+/// business_calendar included.
+///
+/// The conductor's cutover onto `/api/cadence/*` (protocol-cadence.md
+/// sequencing step 3, backlog a516f1f1) makes this adapter the loop's
+/// only source of rules. The loop already lived through the shape of
+/// this failure once on the SQL side: `load_rules`' SELECT was not
+/// widened when the calendar basis landed, and protocol-retro-daily
+/// was skipped loudly on every tick while the registry showed it
+/// active. Serving the row without its calendar columns would replay
+/// that scar one door over.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_calendar_rule_is_served_whole() {
+    let db = TestDb::new().await;
+    let repo = PgCadence::new(db.pool.clone());
+    let rules = repo.active_rules().await.unwrap();
+
+    let retro = rules
+        .iter()
+        .find(|r| r.name == "protocol-retro-daily")
+        .expect("seed rule protocol-retro-daily missing");
+    assert_eq!(retro.basis, "calendar");
+    assert_eq!(
+        retro.cadence.as_deref(),
+        Some("daily"),
+        "a calendar rule served without its cadence is unreadable to the loop"
+    );
+    assert_eq!(
+        retro.anchor_date,
+        chrono::NaiveDate::from_ymd_opt(2026, 8, 28),
+        "the anchor is the recurrence's whole identity"
+    );
+    assert_eq!(retro.business_calendar, None);
 }
 
 #[tokio::test(flavor = "multi_thread")]

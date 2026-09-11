@@ -23,6 +23,15 @@ pub enum JobsError {
         holder: Option<String>,
         status: String,
     },
+    /// A metadata merge targeted a terminal (completed/skipped) step.
+    /// `update_step_at` freezes those fields SILENTLY — its callers
+    /// re-send whole rows and must stay idempotent — but a merge's
+    /// entire purpose is changing metadata, so a freeze here would be
+    /// the 204-that-wrote-nothing defect (job 903e6b90) reborn. The
+    /// adapters refuse instead, atomically with the row check, and the
+    /// handler turns this into the 409 the caller can act on.
+    #[error("step {id} is {status} — a terminal step's metadata is frozen")]
+    TerminalStep { id: StepId, status: String },
 }
 
 /// Optional filters for listing jobs.
@@ -143,7 +152,7 @@ pub struct LaunchCalendarRow {
     pub launch_channel: Option<String>,
 }
 
-/// One version's block in the per-kind terminal report — Tier 1 of
+/// One cohort's block in the per-kind terminal report — Tier 1 of
 /// the experiments program (docs/design/network-experiments.md):
 /// measure what version pinning already records. The version
 /// dimension is the packet's PINNED `workflow_version`, so the report
@@ -151,6 +160,12 @@ pub struct LaunchCalendarRow {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct VersionTerminalReport {
     pub version: i32,
+    /// The arm dimension (Tier 2, packet 6ea5a12a): the
+    /// `experiment_arm` stamp split admission writes on every packet
+    /// it admits (`control` / `candidate`), `None` for packets that
+    /// ran outside any experiment window. Grouped alongside the
+    /// version so a cohort never blends with same-version bystanders.
+    pub arm: Option<String>,
     /// Every packet pinned to this version (any status).
     pub total: i64,
     /// Packet count per status — the six job statuses, zero-count
@@ -164,15 +179,17 @@ pub struct VersionTerminalReport {
     /// Counted separately rather than under a sentinel key so a
     /// machine reading `outcomes` only ever sees real outcome values.
     pub closed_without_outcome: i64,
-    /// Open→close cycle time over closed packets, in days, from the
-    /// dates the jobs row itself carries (`opened_on` / `closed_on` —
-    /// both reproduced by the rebuilder).
+    /// Open→close cycle time over closed packets, in days. Fractional
+    /// when the packet carries the precise `opened_at` / `closed_at`
+    /// metadata stamps; otherwise whole days from the row's dates
+    /// (`opened_on` / `closed_on` — both reproduced by the rebuilder).
     pub cycle_time_days: CycleTimeDays,
 }
 
 /// Median + p90 with the sample count they were computed over. A
-/// closed packet without a `closed_on` date is not a sample, which is
-/// why `samples` can undercut `by_status["closed"]`.
+/// closed packet without a `closed_on` date (or a pair of precise
+/// metadata stamps) is not a sample, which is why `samples` can
+/// undercut `by_status["closed"]`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CycleTimeDays {
     pub samples: i64,
@@ -220,6 +237,28 @@ fn outcome_key(metadata: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// The packet's cycle-time sample, in fractional days. The precise
+/// `opened_at` / `closed_at` metadata stamps (RFC3339 instants,
+/// written at admission and at the close hooks) win when both parse —
+/// the row's dates have one-day resolution by construction, so a
+/// same-day close measured 0 days no matter how long it really took.
+/// Packets that predate the stamps, or carry only one, keep the
+/// `closed_on - opened_on` date arithmetic. Mirrors the SQL override's
+/// `EXTRACT(EPOCH ...) / 86400.0` COALESCEd to the date form
+/// (postgres.rs), pinned by tests/terminal_report_pg.rs.
+fn cycle_days_sample(job: &Job) -> Option<f64> {
+    let stamp = |key: &str| -> Option<chrono::DateTime<chrono::FixedOffset>> {
+        chrono::DateTime::parse_from_rfc3339(job.metadata.get(key)?.as_str()?).ok()
+    };
+    if let (Some(opened), Some(closed)) = (stamp("opened_at"), stamp("closed_at"))
+        && let Some(us) = (closed - opened).num_microseconds()
+    {
+        return Some(us as f64 / 86_400_000_000.0);
+    }
+    job.closed_on
+        .map(|closed| (closed - job.opened_on).num_days() as f64)
+}
+
 /// Pure aggregation behind [`JobsRepository::workflow_terminal_report`]
 /// — a function of the packets, so any adapter's answer is checkable
 /// against it. Versions sort newest first.
@@ -237,20 +276,33 @@ pub fn terminal_report_from_jobs(
         cycle_days: Vec<f64>,
     }
 
-    let mut per_version: BTreeMap<i32, Acc> = BTreeMap::new();
+    // Cohort key: (pinned version, experiment_arm stamp). The arm is
+    // the second axis so a BTreeMap's reverse iteration yields
+    // version-desc, and within a version the stamped cohorts before
+    // the unstamped bystanders (`None` sorts below `Some` and last
+    // after `.rev()`) — matching the Postgres override's
+    // `ORDER BY workflow_version DESC, arm DESC NULLS LAST`.
+    let mut per_version: BTreeMap<(i32, Option<String>), Acc> = BTreeMap::new();
     for job in jobs {
         if let Some(since) = since
             && job.opened_on < since
         {
             continue;
         }
-        let acc = per_version.entry(job.workflow_version).or_insert(Acc {
-            total: 0,
-            by_status: BTreeMap::new(),
-            outcomes: BTreeMap::new(),
-            closed_without_outcome: 0,
-            cycle_days: Vec::new(),
-        });
+        let arm = job
+            .metadata
+            .get(crate::experiments::ARM_KEY)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let acc = per_version
+            .entry((job.workflow_version, arm))
+            .or_insert(Acc {
+                total: 0,
+                by_status: BTreeMap::new(),
+                outcomes: BTreeMap::new(),
+                closed_without_outcome: 0,
+                cycle_days: Vec::new(),
+            });
         acc.total += 1;
         *acc.by_status.entry(job_status_key(job.status)).or_insert(0) += 1;
         if job.status == JobStatus::Closed {
@@ -258,9 +310,8 @@ pub fn terminal_report_from_jobs(
                 Some(outcome) => *acc.outcomes.entry(outcome).or_insert(0) += 1,
                 None => acc.closed_without_outcome += 1,
             }
-            if let Some(closed_on) = job.closed_on {
-                acc.cycle_days
-                    .push((closed_on - job.opened_on).num_days() as f64);
+            if let Some(days) = cycle_days_sample(job) {
+                acc.cycle_days.push(days);
             }
         }
     }
@@ -268,11 +319,12 @@ pub fn terminal_report_from_jobs(
     per_version
         .into_iter()
         .rev()
-        .map(|(version, mut acc)| {
+        .map(|((version, arm), mut acc)| {
             acc.cycle_days
                 .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             VersionTerminalReport {
                 version,
+                arm,
                 total: acc.total,
                 by_status: acc.by_status,
                 outcomes: acc.outcomes,
@@ -321,6 +373,66 @@ pub struct AssignmentRow {
     pub step: Step,
 }
 
+/// One outstanding obligation — a `ready` or `active` step on an
+/// `open` packet — and the instant it has been waiting since. The row
+/// type of the queue-age lens (`GET /api/jobs/queue-age`, packet
+/// 2a0b034e).
+///
+/// A LENS, NOT A FIELD. The wait instant lives one layer below the
+/// domain types (`steps.became_ready_at` / `steps.updated_at` in
+/// Postgres; the write-instant maps in the in-memory adapter), and
+/// hoisting timestamps onto `Job` / `Step` was measured at a
+/// 97-struct-literal-site mechanical change to Tier-1 core — so the
+/// lens returns its own shape and the domain types stay untouched,
+/// the same trade [`VersionTerminalReport`] made.
+///
+/// `since` semantics, stated rather than implied: when the projection
+/// recorded the ready flip (`became_ready_at`, written once, never
+/// moved by later writes) `exact` is `true` and `since` IS the moment
+/// the step became an obligation. For rows that predate the stamp,
+/// `since` falls back to `updated_at` and `exact` is `false`: any
+/// write bumps `updated_at` — annotating a packet is enough
+/// (2a77e5fc) — so `now - since` is then a LOWER BOUND on the wait.
+/// A lower bound still sorts a queue by staleness; it just may
+/// under-report, never over-report, a labelled direction.
+#[derive(Debug, Clone, Serialize)]
+pub struct QueueAgeRow {
+    pub job_id: JobId,
+    /// Protocol + title, so a reader can name the packet without a
+    /// second fetch — a bare UUID is not an answer.
+    pub job_kind: String,
+    pub job_title: String,
+    pub step_id: StepId,
+    pub spec_slug: Option<String>,
+    pub step_title: String,
+    pub status: StepStatus,
+    pub assignee_id: Option<String>,
+    /// Rides along for the same reason it rides on [`AssignmentRow`]:
+    /// a simulated packet has to look simulated in every lens.
+    pub simulated: bool,
+    /// The instant this obligation has been waiting since.
+    pub since: DateTime<Utc>,
+    /// `true` when `since` is the recorded ready-flip instant;
+    /// `false` when it is the `updated_at` lower bound.
+    pub exact: bool,
+}
+
+/// A machine BOSS runs on, as the estate registry declares it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EstateNode {
+    pub id: String,
+    pub label: String,
+    pub address: String,
+    pub role: String,
+    pub cpu: Option<i32>,
+    pub memory_gb: Option<i32>,
+    pub disk_gb: Option<i32>,
+    pub notes: Option<String>,
+    /// Retired machines stay readable so history resolves, exactly as
+    /// retired subject kinds do.
+    pub retired: bool,
+}
+
 /// Persistence port for jobs and steps.
 ///
 /// **Timestamp threading.** The four mutation methods come in two
@@ -363,6 +475,15 @@ pub trait JobsRepository: Send + Sync {
 
     async fn get_job(&self, id: &JobId) -> Result<Option<Job>, JobsError>;
 
+    /// Resolve a lowercase hex id prefix to the ids it matches, capped
+    /// at two — enough for the caller to tell none from one from many
+    /// without scanning the whole table. The prefix is the canonical
+    /// text form (`id::text`): lowercase, hyphenated, so a bare 8-char
+    /// prefix and a hyphen-bearing longer one both match. The read
+    /// handler owns the none→404 / one→200 / many→409 decision; the
+    /// store only reports what matched.
+    async fn resolve_job_id_prefix(&self, prefix: &str) -> Result<Vec<JobId>, JobsError>;
+
     async fn update_job(&self, job: &Job) -> Result<(), JobsError> {
         self.update_job_at(job, Utc::now(), &[]).await
     }
@@ -402,6 +523,111 @@ pub trait JobsRepository: Send + Sync {
         stamp: &boss_core::publisher::EventStamp,
     ) -> Result<Job, JobsError>;
 
+    /// Every machine the estate declares.
+    ///
+    /// READ ONLY, AND DELIBERATELY SO. `nodes` is seeded by schema
+    /// migration — declaring a machine is a change to the tree that
+    /// converges, not an API write — so there is no create/update here
+    /// and there should not be. What is missing today is any way to
+    /// READ it: the tables have existed since 144-estate-subjects.sql
+    /// and no service has ever served them, so "what hardware is
+    /// running" was unanswerable from inside BOSS and had to be
+    /// re-derived by shelling into machines (59ef456a).
+    ///
+    /// DECLARED capacity, not observed. Free space now is a
+    /// measurement with a timestamp and belongs on the log, which is
+    /// what the `node` subject kind's own description says.
+    async fn list_estate_nodes(&self) -> Result<Vec<EstateNode>, JobsError>;
+
+    /// Recent recorded events of ONE exact kind, newest first, as the
+    /// raw rows `{event_id, timestamp, source, kind, payload}`.
+    ///
+    /// The read half of `record_events`: the estate doors record
+    /// observations and comparisons as events, and until this method
+    /// existed those series were readable only through an in-pod
+    /// port-forward to the events service — two proven arbiters were
+    /// SATISFIED and unprobeable for exactly that reason (d471a8ce).
+    /// Raw `Value` rows on purpose: the readers serve their instrument
+    /// verbatim, and a port type per payload shape would be a second
+    /// instrument.
+    ///
+    /// `scope`, when given, keeps only rows whose payload carries that
+    /// exact top-level `scope` — and it is applied BEFORE `limit`, not
+    /// after. One kind carries many series at different cadences: the
+    /// estate observer records `kubernetes-nodes` every 15 minutes
+    /// while `codebase` is recorded once a night. A limit taken across
+    /// all of them is spent by whichever series ticks fastest, so the
+    /// slow one is unreadable through the reader that is supposed to
+    /// serve it — invisible by construction rather than by outage
+    /// (measured 2026-09-02: the 50-row ceiling held 49
+    /// `kubernetes-nodes` rows and 1 `host`, spanning half a day).
+    /// This is the same rule `TailQuery::simulated` states in
+    /// boss-events: a filter has to be where the LIMIT is applied, or
+    /// it does not really filter.
+    async fn recent_events_by_kind(
+        &self,
+        kind: &str,
+        scope: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>, JobsError>;
+
+    /// The station flow cube over `[since, now]` — how many
+    /// obligations of each `(job kind, step kind, spec slug, authority
+    /// role)` shape became ready, and how many were completed, inside
+    /// a WALL-CLOCK window.
+    ///
+    /// `since` is wall clock, deliberately NOT the sim clock: the
+    /// question is how long real people and agents actually waited,
+    /// and event time is sim-authoritative on a demo deployment
+    /// (`boss-views/src/flow.rs` owns that doctrine).
+    ///
+    /// Deliberately NO default impl, for the same reason
+    /// [`Self::queue_age`] has none: the window is a storage-level
+    /// instant (`audit_log.created_at`, the in-memory adapter's
+    /// recorded write instants) that `list_jobs` + `list_steps` cannot
+    /// see, so a default would have to invent one. An adapter with no
+    /// log answers with no cells, and the surface says "flow not
+    /// countable" rather than printing a zero rate.
+    async fn step_flow_cube(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<crate::station_flow::FlowCell>, JobsError>;
+
+    /// Everything the log holds about ONE job, oldest first: every
+    /// recorded event whose payload names the job (step events under
+    /// `job_id`, the job's own lifecycle events under `id`). The
+    /// per-packet audit read (c17871fe) — the provenance the log already
+    /// holds, one read from the step. `limit` keeps the NEWEST rows:
+    /// a long history answers with its most recent `limit` events in
+    /// the order they happened.
+    async fn events_for_job(
+        &self,
+        job_id: &JobId,
+        limit: i64,
+    ) -> Result<Vec<boss_core::event::Event>, JobsError>;
+
+    /// Re-pin a packet to a different protocol version.
+    ///
+    /// A DELIBERATELY SEPARATE VERB, not a field on `update_job`.
+    /// `workflow_version` is excluded from that UPDATE's SET list
+    /// alongside `simulated`, because the storage enforces pinning
+    /// rather than trusting every caller to respect it — and that
+    /// immutability is what makes "in-flight packets stay on the
+    /// version they were admitted under" true rather than aspirational.
+    ///
+    /// So conversion gets its own door, and the door is narrow: it
+    /// changes exactly one column, and the caller is expected to have
+    /// asked [`crate::protocol_conversion::convertibility_for_packet`]
+    /// first. Widening `update_job` instead would have let any PUT
+    /// re-pin a packet by accident, which is the failure this shape
+    /// exists to prevent (bfc74b3a).
+    async fn repin_workflow_version_at(
+        &self,
+        id: &JobId,
+        to_version: i32,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<Job, JobsError>;
+
     async fn list_jobs(
         &self,
         filter: &JobFilter,
@@ -434,6 +660,30 @@ pub trait JobsRepository: Send + Sync {
         now: DateTime<Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError>;
+
+    /// Merge `patch`'s top-level keys into the Step's `metadata`,
+    /// atomically, touching no other field. Same contract as
+    /// [`JobsRepository::merge_job_metadata_at`]: a `null` value
+    /// REMOVES the key, any other value replaces that key wholesale,
+    /// and the returned Step is the post-merge row. Takes the
+    /// [`boss_core::publisher::EventStamp`] rather than pre-built
+    /// events for the same reason the job merge does: the
+    /// STEP_UPDATED payload is full row state, so it must be built
+    /// from the POST-merge row, which only the adapter's transaction
+    /// knows.
+    ///
+    /// A terminal (Completed/Skipped) step's metadata is frozen —
+    /// `update_step_at`'s invariant — and the merge refuses with
+    /// [`JobsError::TerminalStep`] rather than silently keeping the
+    /// row: the check rides the same statement as the write, so a
+    /// step completing between the caller's read and this write is
+    /// still refused, never half-honored.
+    async fn merge_step_metadata_at(
+        &self,
+        id: &StepId,
+        patch: &serde_json::Map<String, serde_json::Value>,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<Step, JobsError>;
 
     /// Claim a ready step for an actor — the Ready→Active
     /// compare-and-set (queue-visibility Q2). Succeeds only while
@@ -628,6 +878,19 @@ pub trait JobsRepository: Send + Sync {
         Ok(terminal_report_from_jobs(&jobs, since))
     }
 
+    /// Every outstanding obligation in `scope` — `ready` / `active`
+    /// steps on `open` packets — longest-waiting first. The read
+    /// surface behind the queue-age lens (`GET /api/jobs/queue-age`,
+    /// packet 2a0b034e); [`QueueAgeRow`] documents what `since` /
+    /// `exact` honestly mean.
+    ///
+    /// Deliberately NO default impl: the wait instant is adapter
+    /// storage (`became_ready_at` / `updated_at` columns, the
+    /// in-memory write-instant maps), invisible to `Job` / `Step` —
+    /// so there is no honest way to derive it from `list_jobs` +
+    /// `list_steps`, and a default would have to invent one.
+    async fn queue_age(&self, scope: &JobScope) -> Result<Vec<QueueAgeRow>, JobsError>;
+
     /// Count steps whose kind matches `step_kind` and whose status is
     /// still non-terminal (pending, ready, active). Used by the Step
     /// UX plugin retire path to surface a blast-radius preview.
@@ -734,6 +997,42 @@ pub trait JobsRepository: Send + Sync {
     async fn restart_sim_clock_epoch(&self) -> Result<(), JobsError> {
         Ok(())
     }
+
+    // ----- Refused writes -----
+    //
+    // The denominator for step reliability. A completed step is the
+    // only thing the record holds today, and required-at-done
+    // validation guarantees every completed step is conformant — so
+    // conformance measures 100% and always will. What it cannot see is
+    // the attempt that never became a completion. See
+    // `crate::refusals` for the classifier and the two readings this
+    // is for (unrecovered refusals; distinct actors per error class).
+
+    /// Record a refused step write.
+    ///
+    /// Recording is a side-channel: it must never turn a refusal the
+    /// caller can act on into a 500 it cannot. Callers log the error
+    /// and continue.
+    async fn record_step_write_refusal(
+        &self,
+        refusal: &crate::refusals::StepWriteRefusal,
+    ) -> Result<(), JobsError> {
+        self.record_step_write_refusal_at(refusal, Utc::now()).await
+    }
+
+    async fn record_step_write_refusal_at(
+        &self,
+        refusal: &crate::refusals::StepWriteRefusal,
+        now: DateTime<Utc>,
+    ) -> Result<(), JobsError>;
+
+    /// Recent refusals, newest first. The read side — without it the
+    /// table is a black hole and "let's try it and see how it goes"
+    /// has nothing to look at.
+    async fn step_write_refusals(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::refusals::RecordedRefusal>, JobsError>;
 }
 
 /// Snapshot of the simulated clock for read-side surfaces. All

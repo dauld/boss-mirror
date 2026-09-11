@@ -3,7 +3,9 @@
 # Born 2026-08-23 from a day of gates dying deaths that were not
 # theirs: pod replacements, exec-scope reaping, shared-disk exhaustion,
 # cold-start timeouts (the history is in run.sh's header and
-# post-mortem #2). The shape that ended it:
+# post-mortem #2). The shape that ended it, amended 2026-09-03 when the
+# one-gate-at-a-time serialization became the pipeline's bottleneck
+# (packet 28de3845: nine cars through one runner at ~14 min each):
 #
 #   - OWN CLONE from the forge — no dependency on the boss-dev
 #     workspace PVC, and therefore no requirement to run on cp-2,
@@ -15,9 +17,20 @@
 #     planes together, and not a control plane at all, so a gate
 #     cannot starve etcd however hard it runs. The ceiling below is
 #     sized for that box.
-#   - OWN DISK, wiped per run. One job gates one branch; a cold
-#     workspace build needs ~74G and two branches' targets do not
-#     fit in one 100Gi volume (measured the hard way, twice).
+#   - OWN DISK, per run. /gate-target is an emptyDir: born with the
+#     pod, dead with it. Two concurrent gates cannot see each other's
+#     workspace AT ALL — the 2026-08-24 crossed-receipts incident is
+#     structurally impossible, not merely guarded against, which is
+#     what lets gates run in parallel (bounded by `boss gate`,
+#     BOSS_GATE_MAX_CONCURRENT, default 3).
+#   - WARM SEED on the surviving PVC. run.sh copies a warm target/
+#     (snapshotted at main's tip by the previous green near-tip run)
+#     into the workspace before building, and CARGO_HOME lives on the
+#     same volume. The math: a cold workspace build is ~74G of target
+#     and 20+ minutes of compile; the seed copy is the same bytes at
+#     disk speed, a few minutes, and it parallelizes. Without the
+#     seed, "parallel" gates would each pay the cold build — slower
+#     than the serial rig they replace.
 #   - DATABASE SIDECAR with the 1Gi /dev/shm the dev pod's sidecar
 #     earned on 2026-08-22.
 #   - SELF-REPORTING: run.sh completes the gate-run packet with the
@@ -30,12 +43,15 @@
 #   kubectl -n boss-dev create -f - <<EOF
 #   $(sed -e 's/\$GATE_BRANCH/fix\/my-branch/' \
 #         -e 's/\$GATE_RUN_JOB_ID/<packet-uuid>/' \
+#         -e 's/\$GATE_NAME_HINT/my-branch/g' \
 #         -e 's/\$GATE_MODE//' gate-runner.yaml)
 #   EOF
 #
-# or template the three env values by hand. Register the gate-run
-# packet FIRST (kind gate-run, due_on a few hours out); the packet is
-# the record, the Job is just the muscle.
+# ($GATE_NAME_HINT is the branch sanitized to label/name characters —
+# `boss gate` derives it; by hand, keep it short, lowercase, and
+# alphanumeric-with-dashes.) Register the gate-run packet FIRST (kind
+# gate-run, due_on a few hours out); the packet is the record, the Job
+# is just the muscle.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -47,20 +63,50 @@ spec:
   storageClassName: longhorn-dev-disposable
   resources:
     requests:
-      # One branch's cold target (~74G) + a shallow clone + logs,
-      # with honest headroom. NOT shared between concurrent jobs:
-      # RWO plus the wipe-per-run in run.sh means one gate at a time,
-      # which is also what the node's disk can afford.
+      # No longer the workspace — the WARM SEED (target/ snapshot,
+      # ~74G measured cold; a warm one is comparable) + CARGO_HOME's
+      # registry cache (a few G) + the refresh's staging copy is
+      # rm-first so peak stays near one target's worth. The claim
+      # KEEPS ITS OLD NAME on purpose: the volume already holds the
+      # warm target and crate cache from the serial era, and renaming
+      # the claim would orphan that warmth and make the first
+      # parallel gates cold for no reason.
+      #
+      # RWO is now a placement rule, not a serialization rule: every
+      # concurrent gate co-mounts this volume, which Kubernetes allows
+      # only on ONE node — so all gates land together on the build
+      # node (the affinity below already prefers it). A gate scheduled
+      # to a different node waits on attach (Multi-Attach error in
+      # `kubectl describe pod`) rather than corrupting anything; if
+      # the build node is cordoned, gating degrades toward serial on
+      # whichever node takes the volume, honestly and visibly.
       storage: 120Gi
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  generateName: gate-
+  # The branch rides in the NAME (gate-<branch-hint>-<rand>) so three
+  # concurrent gates are tellable apart in `kubectl get jobs` — a
+  # refusal or a status line that names `gate-8kx2p` three times names
+  # nothing. `boss gate` fills the hint from the branch.
+  generateName: gate-$GATE_NAME_HINT-
   namespace: boss-dev
-  labels: {app: gate-runner}
+  # The packet label is what lets a second `boss gate` SEE the Job the
+  # first one launched. Without it a Job carried no link back to its
+  # gate-run packet, so a re-invocation could not tell "this packet is
+  # already being gated" from "this packet is idle" — and created a
+  # second Job that raced the first on the same packet. The branch
+  # label is the same fact for humans and selectors.
+  labels:
+    app: gate-runner
+    boss.dev/packet: $GATE_RUN_JOB_ID
+    boss.dev/branch: $GATE_NAME_HINT
 spec:
   backoffLimit: 0
+  # 3h. Room for a lock-wait on the seed (bounded at 15 min), the
+  # gate itself (measured ~35 -> ~93 min under five-way concurrency),
+  # and the post-verdict seed refresh — the verdict is reported before
+  # the refresh starts, so a refresh never delays a `--wait`.
   activeDeadlineSeconds: 10800
   ttlSecondsAfterFinished: 86400
   template:
@@ -76,7 +122,9 @@ spec:
       # w-1 was cordoned for an NVMe thermal fault, a hard pin would
       # have left this with no schedulable node and stopped gating
       # entirely. Preferred affinity degrades to a slower build on a
-      # control plane instead of no build at all.
+      # control plane instead of no build at all. (The seed PVC's RWO
+      # attach is what actually herds concurrent gates onto one node —
+      # see the claim's comment.)
       affinity:
         nodeAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -87,8 +135,30 @@ spec:
       imagePullSecrets:
         - {name: forgejo-registry}
       automountServiceAccountToken: false
+      # THE RESTRICTED PROFILE, MET RATHER THAN WARNED ABOUT.
+      #
+      # Every gate launch used to print `Warning: would violate
+      # PodSecurity "restricted:latest"` — unrestricted capabilities on
+      # the postgres sidecar, and runAsNonRoot unset on both containers.
+      # The cluster's PodSecurity default is Talos's (enforce baseline,
+      # WARN restricted), and boss-dev carries no namespace label of its
+      # own, so the warning was the whole consequence. That made it a
+      # CLIFF, not a slope: the day anyone tightens the default or
+      # labels this namespace `enforce: restricted`, every gate Job
+      # becomes uncreatable at admission, and since the gate is the only
+      # path a car has to a green receipt, all delivery stops — with a
+      # failure shape (pods refused before any container starts) that
+      # looks nothing like a code defect. Nine identical warnings a day
+      # also scrolled past the line naming the packet that was created,
+      # which is how an operator learns to stop reading gate output
+      # (backlog bb5a902e).
+      #
+      # runAsNonRoot is set HERE, at the pod, so a container added later
+      # inherits it and a root image is refused rather than silently
+      # re-opening the gap. Each container names its own uid below.
       securityContext:
         fsGroup: 1500
+        runAsNonRoot: true
         seccompProfile: {type: RuntimeDefault}
       initContainers:
         # Postgres as a NATIVE SIDECAR (initContainer + restartPolicy
@@ -98,12 +168,44 @@ spec:
         # be deleted by hand - `kubectl get job` lied about a gate that
         # had passed. A native sidecar starts before the gate, runs
         # beside it, and the kubelet tears it down when the gate exits.
+        # Per-pod, so every concurrent gate gets its own database.
         - name: postgres
-          image: postgres:16
+          # From the forge, not docker.io — the last public pull on a
+          # gate's path. The pod-level imagePullSecrets (forgejo-registry)
+          # applies to every container in the pod, initContainers
+          # included, so this pulls the way the gate container's boss-ci
+          # does. Pinned by infra/lint/the-build-pulls-only-mirrored-bases.sh.
+          image: 10.20.0.15:3000/david/postgres:16
           restartPolicy: Always
+          # UID 999 IS WHERE THIS PROCESS ENDS UP ANYWAY, so start there.
+          #
+          # The dev pod's sibling sidecar drops only NET_RAW, and its
+          # comment is correct about why: the official image's entrypoint
+          # starts as ROOT, chowns PGDATA, and execs gosu to become the
+          # postgres user, so dropping CHOWN/SETUID/SETGID would take
+          # away the very capabilities it uses to stop being root.
+          #
+          # Naming the uid removes that argument instead of fighting it.
+          # `if [ "$(id -u)" = 0 ]` is the entrypoint's own gate for the
+          # chown-and-gosu branch; entered as 999 it skips the branch
+          # entirely, needs no capability at all, and `drop: ["ALL"]`
+          # costs nothing. 999 is not a guess: it is the uid the image's
+          # own `postgres` user has, measured on the live dev sidecar
+          # through the shared pid namespace (six postgres processes,
+          # every one Uid: 999) — so this is the same final uid the
+          # gosu path reaches, with the root phase removed.
+          #
+          # PGDATA stays a SUBDIRECTORY of the mount (/pgdata/data, not
+          # /pgdata). The pod's fsGroup makes the emptyDir root:1500
+          # g+rwxs and puts 1500 in this container's supplementary
+          # groups, so uid 999 can create the subdirectory; owning it
+          # lets the entrypoint chmod it 0700, which postgres refuses to
+          # start without and which cannot be done to the mount itself.
           securityContext:
             allowPrivilegeEscalation: false
-            capabilities: {drop: ["NET_RAW"]}
+            runAsUser: 999
+            runAsGroup: 999
+            capabilities: {drop: ["ALL"]}
           env:
             - {name: POSTGRES_USER, value: boss}
             - {name: POSTGRES_PASSWORD, value: boss}
@@ -121,35 +223,166 @@ spec:
       containers:
         - name: gate
           image: 10.20.0.15:3000/david/boss-ci:rust1.96
+          # Always, not the default IfNotPresent: :rust1.96 is a mutable
+          # tag, and a node that cached an older build keeps serving it —
+          # the stale-runner-cache split that redded the browser-bake
+          # keystone (6aa603ef), here for the gate-runner. Always makes
+          # the gate pull the current baked image (chromium + system deps
+          # at /opt/ms-playwright); layers are cached, so only changed
+          # ones transfer.
+          imagePullPolicy: Always
           command: ["bash", "/repo-script/run.sh"]
           env:
             - {name: GATE_BRANCH, value: "$GATE_BRANCH"}
             - {name: GATE_RUN_JOB_ID, value: "$GATE_RUN_JOB_ID"}
             - {name: GATE_MODE, value: "$GATE_MODE"}
-            - {name: PLAYWRIGHT_BROWSERS_PATH, value: /gate-target/ms-playwright}
+            # The BAKED browser, not a per-run PVC download. The keystone
+            # bakes chromium + its libs into boss-ci at /opt/ms-playwright;
+            # pointing here lets gate.sh's web suite run the mocked
+            # Playwright specs with no run-time download. The old
+            # /gate-target/ms-playwright value was never seeded by run.sh,
+            # so the suite could not have run at all (ade5d82b).
+            - {name: PLAYWRIGHT_BROWSERS_PATH, value: /opt/ms-playwright}
             - {name: BOSS_TEST_POSTGRES_ADMIN_URL, value: "postgres://boss:boss@127.0.0.1:5432/postgres"}
+            # HOME IS NAMED BECAUSE THE UID IS. boss-ci declares no USER,
+            # so this container ran as root with HOME=/root; 65534's own
+            # passwd entry points at /nonexistent, and an uncatalogued uid
+            # gets `/` — neither is writable. The first thing run.sh
+            # does is `git config --global credential.helper`, i.e. write
+            # $HOME/.gitconfig, under `set -e`: an unwritable HOME would
+            # kill every gate before the clone. /gate-target is the
+            # per-run workspace mount, so it exists before the container
+            # starts and fsGroup has already made it group-writable —
+            # and bun's install cache ($HOME/.bun) then lands on the
+            # volume that has a sizeLimit instead of on the node's
+            # container store. This must be an env var, not a mkdir in
+            # run.sh: the script reaches the pod through a ConfigMap
+            # applied separately, so a manifest that depended on a
+            # run.sh change would be live before the change was.
+            - {name: HOME, value: /gate-target}
+          # uid 65534 (`nobody`) WITH GROUP 1500, so everything this build
+          # writes is owned by the group that owns the volumes. The gate's
+          # capability posture was already compliant; only the uid was
+          # missing.
+          #
+          # THE UID MUST BE ONE THE IMAGE CAN NAME, and that is measured,
+          # not assumed: the first full gate on this branch ran as uid
+          # 1500 — matching fsGroup, which looked like the obvious
+          # choice — and the `boss-gcp-converges-itself` lint failed with
+          #   id: cannot find name for user ID 1500
+          #   runuser: user UNKNOWN does not exist
+          # because boss-ci has no passwd entry for 1500, so the
+          # converge's `as_owner` got `UNKNOWN` out of `stat -c %U` on a
+          # fixture the gate itself owns. Every other check passed. The
+          # fix is the uid, NOT the lint: the lint is exercising a real
+          # script that runs on a real host as a real named user, and
+          # bending it to tolerate a nameless one would be changing
+          # production code to suit the test environment. 65534 exists in
+          # the base image, so `id -un` and `stat -c %U` both answer.
+          # Adding a 1500 user to boss-ci would also work and is worse:
+          # the gate never builds its own image, so the manifest would be
+          # live a train before the image that supports it.
+          #
+          # What a non-root gate needs, and why each is satisfied:
+          #   - /gate-target (emptyDir) and /gate-seed (the PVC holding
+          #     the warm target + CARGO_HOME): fsGroup chowns both to
+          #     group 1500 recursively and ORs g+rw onto files, g+rwxs
+          #     onto dirs, at every mount — which is the stated reason
+          #     the dev pod carries the same fsGroup. Seed files written
+          #     by the root era stay writable for exactly that reason,
+          #     and so do files written by a run at a different uid.
+          #   - /etc/forge/token (secret, defaultMode 0400): the kubelet
+          #     ORs group-read onto a read-only secret under fsGroup, so
+          #     it lands root:1500 0440 — the same arrangement boss.yaml
+          #     relies on for boss-auth's key.
+          #   - the Rust toolchain: the official rust image ends its
+          #     install with `chmod -R a+w $RUSTUP_HOME $CARGO_HOME`, so
+          #     /usr/local/rustup is readable and writable by any uid.
+          #   - `cp -a` of the seed: GNU cp tolerates a failed
+          #     preserve-ownership when the process has no CAP_CHOWN
+          #     (owner_failure_ok), so the seeding copy does not turn
+          #     into a cold build — measured on the first run of this
+          #     branch, "target seeded from head ... in 86s", the same
+          #     shape as a root run.
+          #   - git identity: the three lints that commit into fixture
+          #     repos export GIT_AUTHOR_*/GIT_COMMITTER_* or set
+          #     per-repo user.email, so none of them has to ask git to
+          #     auto-detect an author from the running uid.
+          # Proven by full gate runs on this branch, not by reading: the
+          # manifest is rendered from the working tree, so a wrong uid
+          # fails its own gate first — which is exactly how the 1500
+          # attempt above was caught.
           securityContext:
             allowPrivilegeEscalation: false
+            runAsUser: 65534
+            runAsGroup: 1500
             capabilities: {drop: ["ALL"]}
           resources:
-            requests: {cpu: "4", memory: 8Gi}
+            # CPU/memory: three concurrent gates request 12 CPU / 24Gi
+            # against w-1's 32 / 64Gi; the 20-CPU limit lets a lone
+            # gate use the box. ephemeral-storage is the DISK half of
+            # the concurrency bound: each workspace is seed (~74G) +
+            # rebuild delta + clone, and the request makes the
+            # SCHEDULER refuse a gate the node's disk cannot hold —
+            # the containerd store (39G measured) and other tenants
+            # share that disk, and 2026-08-23 proved what silent
+            # exhaustion does (fake code failures for everyone).
+            requests: {cpu: "4", memory: 8Gi, ephemeral-storage: 90Gi}
             limits: {cpu: "20", memory: 32Gi}
           volumeMounts:
-            - {name: gate-runner-disk, mountPath: /gate-target}
+            - {name: gate-workspace, mountPath: /gate-target}
+            - {name: gate-seed, mountPath: /gate-seed}
             - {name: run-script, mountPath: /repo-script}
             - {name: forge-token, mountPath: /etc/forge, readOnly: true}
       volumes:
-        - name: gate-runner-disk
+        # The per-run workspace: clone + CARGO_TARGET_DIR + logs +
+        # receipt. Nothing here outlives the pod, and nothing here is
+        # visible to any other gate. The sizeLimit is the eviction
+        # backstop behind the scheduler-level request above: a runaway
+        # run is evicted alone instead of taking the node's disk down
+        # with it.
+        #
+        # 160Gi, not 100Gi. At 100 the backstop was firing on ORDINARY
+        # full runs rather than runaway ones: a cold workspace needs
+        # ~74GB of target/ before the clone, the test binaries and the
+        # logs, and 2026-09-04 evicted four full gates in a day
+        # (`Usage of EmptyDir volume "gate-workspace" exceeds the limit
+        # "100Gi"`, exit 137). Every SCOPED gate that day passed and
+        # every UNSCOPED one died, which is the signature of a cap set
+        # below the real cost of the work rather than of a leak.
+        #
+        # An eviction here is worse than a slow build, because the pod
+        # dies without recording a verdict: the gate-run packet stays
+        # open forever, holding a slot and reading as "still gating"
+        # (three such ghosts accumulated that day, one of which silently
+        # ate a car). A backstop that fires on normal work does not
+        # protect the node, it just loses runs.
+        #
+        # w-1 carries 929GB and gate concurrency is 3, so the worst case
+        # is ~480GB of workspace — comfortable. The scheduler request
+        # below stays at 90Gi deliberately: it reflects the typical run
+        # for placement, while this limit reflects the worst one.
+        # TODO: measure a full run's actual peak and set both from it.
+        - name: gate-workspace
+          emptyDir: {sizeLimit: 160Gi}
+        # The warm seed + crate cache (see the PVC's comment). Mounted
+        # read-write because run.sh's post-verdict refresh writes the
+        # next snapshot here; reads and writes coordinate through
+        # flock on the volume, never by luck.
+        - name: gate-seed
           persistentVolumeClaim: {claimName: gate-runner-disk}
         - name: pgdata
           emptyDir: {}
         - name: pg-shm
           emptyDir: {medium: Memory, sizeLimit: 1Gi}
-        # run.sh ships in the repo; the ConfigMap is created from it at
-        # apply time so the Job needs no clone to BOOTSTRAP itself:
-        #   kubectl -n boss-dev create configmap gate-runner-script \
-        #     --from-file=run.sh=infra/gate-runner/run.sh \
-        #     --dry-run=client -o yaml | kubectl apply -f -
+        # run.sh ships in the repo and reaches the pod through this
+        # ConfigMap, because run.sh is what performs the clone and so
+        # cannot come FROM the clone. Regenerate it from the tree with
+        #   ./infra/gate-runner/apply-script-configmap.sh
+        # and ask whether it has drifted with --check. This used to be
+        # a kubectl command in a comment; on 2026-08-26 the live copy
+        # turned out to hold an unlanded branch is script, and ten gates
+        # issued receipts from a gate that is not in this repository.
         - name: run-script
           configMap: {name: gate-runner-script, defaultMode: 0755}
         # Read-only forge credential. NOT optional: without it the clone

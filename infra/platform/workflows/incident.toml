@@ -1,0 +1,87 @@
+# ---------------------------------------------------------------------------
+# incident — something broke; stabilize it, learn from it, prevent it.
+#
+# stabilize → diagnose → prevent → review, and the review step is the
+# point: a packet that stops at "it works again" has recorded an outage
+# and learned nothing. The prevention is a step of the incident rather
+# than a follow-up someone remembers to file.
+#
+# Authored live through the API and never written back until 2026-09-10,
+# which is the gap `infra/lint/the-live-protocols-are-the-authored-
+# protocols.sh` now closes. Rendered from the live row rather than
+# retyped; the seed is insert-if-missing, so the live lineage keeps its
+# own version and this file is what a FRESH database gets.
+#
+# `owning_team` below records the live row's value. The bundle loader
+# stamps every row it reads with the bundle's default (`platform`) and
+# ignores the key, so a fresh database gets `platform` — the one field
+# of the row the tree cannot currently express.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "incident"
+label = "Incident"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "it"
+description = "An outage or degradation, worked as a packet: raise what was seen, stabilize the live system first, diagnose honestly, ship the prevention, ratify. Authored 2026-08-13 from the boot-viability outage, using the validate-before-publish discipline that incident taught."
+metadata = { surfaces = ["system-design"] }
+
+[[workflow.step]]
+title = "raised"
+kind = "trigger"
+ready_when = "true"
+title_template = "Incident raised"
+fields = [
+  { name = "symptom", field_type = "string", required = true },
+  { name = "detected_by", field_type = "string", required = true },
+  { name = "started_at", field_type = "string" },
+]
+
+[[workflow.step]]
+title = "stabilize"
+kind = "task"
+ready_when = "steps.raised.done"
+title_template = "Restore service (live site first)"
+fields = [
+  { name = "action", field_type = "string", required = true },
+  { name = "restored_at", field_type = "string", required = true },
+  { name = "downtime", field_type = "string" },
+]
+
+[[workflow.step]]
+title = "diagnose"
+kind = "task"
+ready_when = "steps.stabilize.done"
+title_template = "Name the root cause"
+fields = [
+  { name = "root_cause", field_type = "string", required = true },
+  { name = "blast_radius", field_type = "string", required = true },
+  { name = "why_now", field_type = "string" },
+]
+
+[[workflow.step]]
+title = "prevent"
+kind = "task"
+ready_when = "steps.diagnose.done"
+title_template = "Ship the prevention"
+fields = [
+  { name = "prevention", field_type = "string", required = true },
+  { name = "carried_by", field_type = "string" },
+]
+
+[[workflow.step]]
+title = "review"
+kind = "sign-off"
+ready_when = "steps.prevent.done"
+title_template = "Ratify the prevention"
+authority_role = "platform-admin"
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
+
+[[workflow.step]]
+title = "closed"
+kind = "outcome"
+ready_when = "steps.review.done"
+title_template = "Closed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "closed" }

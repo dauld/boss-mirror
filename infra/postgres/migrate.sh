@@ -2,13 +2,17 @@
 # migrate.sh — the only path schema takes into a database.
 #
 # The ordered migration list IS schema/*.sql, sorted by its numeric
-# prefix. NEW migrations take a UTC `YYYYMMDDHHMM-` prefix; the legacy
-# `NNN-` files keep theirs forever (renaming an applied migration
-# changes its checksum, which is the 2026-08-13 outage). Both sort
-# correctly together because every timestamp exceeds every legacy
-# number under `sort -t- -k1,1n`. A timestamp is not allocated from a
-# shared counter, so two branches cannot collide on one — which the
-# `NNN-` scheme could not promise and twice did not.
+# prefix. NEW migrations take a UTC `YYYYMMDDHHMMSS-` prefix, taken
+# with `date -u +%Y%m%d%H%M%S` when you write the file; the legacy
+# `NNN-` and minute-resolution files keep theirs forever (renaming an
+# applied migration changes its checksum, which is the 2026-08-13
+# outage). All of them sort correctly together because every timestamp
+# exceeds every legacy number under `sort -t- -k1,1n`. A timestamp is
+# not allocated from a shared counter, so two branches cannot collide
+# on one — which the `NNN-` scheme could not promise and twice did
+# not. SECONDS, not minutes: two builders took `202609082130` in the
+# same minute on 2026-09-08 and a train refused the assembly
+# (bc7cac00). The name was the last contended resource left.
 # Files not yet recorded in schema_migrations are applied in order, each
 # in one transaction WITH its bookkeeping row — so a re-run never
 # re-applies, and a failed migration leaves nothing behind. A schema
@@ -78,6 +82,28 @@ if [ -z "$(migration_order)" ]; then
 fi
 
 fail() { echo "migrate.sh: $*" >&2; exit 1; }
+
+# TWO RUNNERS, ONE LEDGER. Two pods booting together race this script
+# — named as RollingUpdate blocker #2 in boss.yaml's strategy comment,
+# and the expand half of getting off Recreate. The WHOLE RUN holds a
+# session advisory lock on a dedicated connection, taken before the
+# first read: the losing run blocks on the SELECT below, and when it
+# proceeds it computes its pending set against the winner's COMMITTED
+# bookkeeping and applies nothing. Serializing at any finer grain
+# (per-migration) would let the loser re-apply files it listed as
+# pending before the winner finished.
+#
+# The lock tag includes the database OID, so TestDb's per-test scratch
+# databases never serialize on each other — only real contenders for
+# one schema do. The lock dies with this process's connection; there
+# is no unlock to forget. The key is an arbitrary fixed 64-bit id
+# unique to this runner.
+MIG_LOCK_KEY=477201126
+coproc MIGLOCK { "${PSQL[@]}" -X -q -A -t; }
+printf 'SELECT pg_advisory_lock(%d);\n' "$MIG_LOCK_KEY" >&"${MIGLOCK[1]}" \
+    || fail "could not reach the database to take the migration lock"
+IFS= read -r _ <&"${MIGLOCK[0]}" \
+    || fail "taking the migration advisory lock failed (is the database reachable?)"
 
 # One shape for bookkeeping statements; migration files themselves go
 # through apply() below so BEGIN/…/COMMIT arrives as a single stream.

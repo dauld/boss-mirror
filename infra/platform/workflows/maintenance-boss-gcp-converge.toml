@@ -1,0 +1,45 @@
+# boss-gcp-converge.service (boss-gcp, the bastion + demo host)
+[[workflow]]
+kind = "maintenance-boss-gcp-converge"
+label = "boss-gcp host self-converge"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Fast-forwards /opt/boss to forge main and runs `deploy-services.sh units`, so a unit that lands on main installs itself on the next tick. The 2026-09-04 conductor cutover retired the deploy hop that was the ONLY thing installing units on this host and nothing replaced it: the five-minute estate unit observer's last packet was filed ON the cutover day, the hourly conservation-invariants timer's on 2026-08-19, and boss-ml-inference-batch has never filed one (408c81f6). Unit files only - no build, no schema, no restart, because this host is the WireGuard bastion and still carries a second, older BOSS stack."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "systemd-timer" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Run to completion"
+authority_role = "platform-admin"
+fields = [{ name = "result", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
+title_template = "Maintenance completed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. A refused converge is the common case
+# worth seeing: the loop declines a dirty or off-main checkout rather
+# than discarding what a human left there.
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }

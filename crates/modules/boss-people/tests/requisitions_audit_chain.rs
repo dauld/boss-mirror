@@ -28,11 +28,16 @@ struct RequisitionRow {
     status: String,
     headcount: i16,
     hiring_manager_id: String,
+    // Byte-identity includes the timestamp: before packet d7b8158e
+    // `created_at` fell to the DEFAULT NOW() on both the live insert
+    // and the replay, so a rebuild silently re-dated every
+    // requisition.
+    created_at: chrono::DateTime<chrono::Utc>,
 }
 
 async fn snapshot_requisitions(pool: &PgPool) -> Vec<RequisitionRow> {
     sqlx::query_as(
-        "SELECT id, role, department, status, headcount, hiring_manager_id \
+        "SELECT id, role, department, status, headcount, hiring_manager_id, created_at \
          FROM requisitions ORDER BY id",
     )
     .fetch_all(pool)

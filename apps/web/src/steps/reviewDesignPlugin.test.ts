@@ -1,13 +1,19 @@
-// The review-design bundle's fetch fallback, at the failure point the
-// cluster actually serves (6f40b23f): a front that does not route
-// /api/design/* answers HTTP 200 with a ZERO-BYTE body — the docs
-// service runs on the operator instance only. The bundle's 404 branch
-// explains itself; the empty 200 fell through to r.json(), whose parse
-// error renders as "Failed to load doc: Unexpected end of JSON input" —
-// which reads like a broken doc, not an absent service. Same test
-// posture as correctionVerdictPlugin.test.ts: load the REAL bundle
-// against a stubbed host, because nothing compiles or type-checks these
-// files and a broken bundle renders nothing rather than degrading.
+// The review-design bundle's behaviour when the packet carries nothing
+// it can review.
+//
+// This file was three tests about the docs-API fetch: a real 404 ("docs
+// ride trains"), the empty 200 a front that does not route
+// /api/design/* answers (6f40b23f), and the job-metadata last resort.
+// The fetch is gone — the corpus index it called was deleted on
+// 2026-09-10 (backlog f5da586c) and the packet is the doc — so the
+// first two are replaced by one test on what a pointer-only packet now
+// says, and the third is unchanged because the job metadata is still
+// the last place the bundle looks.
+//
+// Same test posture as correctionVerdictPlugin.test.ts: load the REAL
+// bundle against a stubbed host, because nothing compiles or
+// type-checks these files and a broken bundle renders nothing rather
+// than degrading.
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -93,55 +99,75 @@ async function settled() {
   for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
-describe('the review-design bundle against a docs API that is not there', () => {
+describe('the review-design bundle with nothing to review', () => {
   test('registers the review-design kind', () => {
     const { kind } = loadBundle(() => Promise.reject(new Error('offline')));
     expect(kind).toBe('review-design');
   });
 
-  test('an empty 200 names the absent service, not a JSON parse error', async () => {
-    // The cluster front's exact behavior, measured on 6f40b23f:
-    // HTTP 200, zero bytes, for every /api/design/* path.
+  test('a pointer-only packet names the pointer and never fetches a docs API', async () => {
+    // The packet carries `doc_path` and nothing else. Until 2026-09-10
+    // this fetched the corpus index; now there is no service to ask, so
+    // the surface must say that plainly and say what replaces it. Any
+    // fetch at all is a failure, so the stub rejects everything.
+    const asked: string[] = [];
     const { mount } = loadBundle((url: string) => {
-      if (url.includes('/api/design/docs/')) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          text: async () => '',
-          json: async () => JSON.parse(''),
-        });
-      }
-      return Promise.reject(new Error(`unexpected fetch: ${url}`));
+      asked.push(url);
+      return Promise.reject(new Error(`nothing may be fetched: ${url}`));
     });
     const container = new FakeNode();
     mount(container, { step: pointerOnlyStep(), jobId: 'job-1', onUpdate() {} });
     await settled();
 
     const text = allText(container);
-    expect(text).toContain('does not serve the docs API');
-    expect(text).toContain('carry their questions');
-    expect(text).not.toContain('Unexpected end of JSON input');
-    // The harness's second find: with `questions` empty the completion
-    // gate read a failed load as "no questions" and offered to mark the
-    // review done on top of the error. An unloaded doc is not reviewable.
+    expect(text).toContain('carries only a pointer');
+    expect(text).toContain('docs/design/example.md');
+    // It points at the verb that files a reviewable packet rather than
+    // telling the reader to wait for a train that will not help.
+    expect(text).toContain('boss design');
+    expect(text).not.toContain('docs ride');
+    expect(asked.filter((u) => u.includes('/api/design/'))).toEqual([]);
+    // Carried over from the empty-200 test, which is where it was
+    // found: with `questions` empty the completion gate read a failed
+    // load as "no questions" and offered to mark the review done on top
+    // of the error. An unreadable doc is not reviewable.
     expect(text).not.toContain('Mark reviewed');
   });
 
-  test('a real 404 keeps its docs-ride-trains explanation', async () => {
+  // A design-doc packet filed with its questions/prose on the JOB
+  // metadata rather than the step reaches review as an empty step.
+  // acedf981 and the `[sim] decision-routing probe` packets did exactly
+  // this and dead-ended at "nothing to review" while their content sat
+  // one fetch away. The job is the last place the bundle looks.
+  test('content on the job renders instead of dead-ending at nothing-to-review', async () => {
+    const emptyStep = {
+      id: 'step-1',
+      kind: 'review-design',
+      status: 'ready',
+      metadata: { resolutions: [] },
+    };
     const { mount } = loadBundle((url: string) => {
-      if (url.includes('/api/design/docs/')) {
+      if (url.includes('/api/jobs/job-1')) {
         return Promise.resolve({
-          ok: false,
-          status: 404,
-          text: async () => 'not found',
+          ok: true,
+          status: 200,
+          json: async () => ({
+            metadata: {
+              title: 'Agent orientation',
+              markdown: '# Orientation\n\nbody',
+              questions: [{ anchor: 'Q1', title: 'First brick?' }],
+            },
+          }),
         });
       }
       return Promise.reject(new Error(`unexpected fetch: ${url}`));
     });
     const container = new FakeNode();
-    mount(container, { step: pointerOnlyStep(), jobId: 'job-1', onUpdate() {} });
+    mount(container, { step: emptyStep, jobId: 'job-1', onUpdate() {} });
     await settled();
 
-    expect(allText(container)).toContain('docs ride');
+    const text = allText(container);
+    expect(text).toContain('First brick?');
+    expect(text).not.toContain('nothing to review');
   });
 });

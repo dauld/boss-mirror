@@ -133,7 +133,7 @@ SERVICES=(
     boss-cybernetics
     boss-dispatcher
     # 2026-05-27: products / classes / locations / subject-kinds /
-    # calendar / docs were missing from this list, so the
+    # calendar were missing from this list, so the
     # brewery-data-seed step ran against unreachable downstream
     # services and silently skipped its finished-product-inventory
     # seed — leaving 0 FP rows, 0 COGS, and 0 production-side ledger
@@ -145,7 +145,6 @@ SERVICES=(
     boss-locations-api
     boss-subject-kinds-api
     boss-calendar-api
-    boss-docs-api
 )
 for svc in "${SERVICES[@]}"; do
     sudo systemctl stop "$svc" 2>/dev/null || true
@@ -213,7 +212,6 @@ START_ORDER=(
     boss-locations-api
     boss-subject-kinds-api
     boss-calendar-api
-    boss-docs-api
     boss-policy-api
     boss-people-api
     boss-products-api
@@ -429,7 +427,7 @@ fi
 #
 # v1.0.10 F15: boss-step-effects-runner retired. Step-completion
 # side effects route through the dispatcher's rule registry now
-# (infra/dispatcher/rules.toml). The brewery-engine runs WITHOUT
+# (infra/dispatcher/rules/). The brewery-engine runs WITHOUT
 # --local-side-effects so the in-process bridges stay silent —
 # every domain-write side effect flows engine → jobs-api PUT
 # step → jobs-api `step.done.<kind>` NATS event → dispatcher

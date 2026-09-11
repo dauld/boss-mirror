@@ -1,0 +1,25 @@
+# Machine door for the BOSS dispatcher API — the rule registry at
+# /api/dispatcher/*. Same posture as boss-jobs-internal: an
+# infrastructure door for in-cluster machinery (proof-in-prod probes,
+# the durable dev pod), never a human door.
+#
+# Unlike docs and jobs, boss-dispatcher binds LOOPBACK by default
+# (crates/core/boss-dispatcher/src/config.rs: "the gateway is the sole
+# trust boundary and is co-located in every deployment"). This door
+# needs BOSS_DISPATCHER_BIND=0.0.0.0:7950 set on the pod (boss.yaml) —
+# the sanctioned widening knob that same config comment names. Reads
+# (GET /api/dispatcher/rules) are open, matching the jobs door's read
+# posture. ClusterIP, not LoadBalancer: in-cluster automation only,
+# narrower than the jobs door's LAN LoadBalancer.
+#
+# Born 2026-09-01 (backlog a757b72a).
+apiVersion: v1
+kind: Service
+metadata:
+  name: boss-dispatcher-internal
+  namespace: boss
+spec:
+  type: ClusterIP
+  selector: {app: boss}
+  ports:
+    - {port: 7950, targetPort: 7950, name: dispatcher}

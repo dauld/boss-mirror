@@ -67,9 +67,27 @@ impl JobEdgesRegistry for InMemoryJobEdges {
             ),
             mk(
                 "ship-a-change",
+                "partial_item",
+                "job_id",
+                "An item this change is ONE PIECE of — provenance only; it does not close on merge",
+            ),
+            mk(
+                "ship-a-change",
                 "train",
                 "job_id",
                 "The pr-train Job this change boarded",
+            ),
+            mk(
+                "ship-a-change",
+                "boards_after",
+                "job_id",
+                "The car this one must land behind — the dock will not board it until that car has landed",
+            ),
+            mk(
+                "design-doc",
+                "translated_from",
+                "job_id",
+                "The design-doc packet this one revises — the previous link in the chain",
             ),
         ])
     }
@@ -122,6 +140,139 @@ mod pg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// THE PAIR THIS MODULE'S HEADER CLAIMS IS PINNED.
+    ///
+    /// The doc comment on `InMemoryJobEdges` says the list is "kept in
+    /// deliberate agreement with migration 104's seeds (the pg test
+    /// asserts the table matches this shape)". No such test was in the
+    /// tree — the comment was standing where the mechanism belonged,
+    /// which is the exact thing CLAUDE.md §9a says not to do.
+    ///
+    /// This pins the edge added for design-doc revision chains against
+    /// the migration that seeds it, by READING the migration rather than
+    /// restating it. Narrow on purpose: the older edges are seeded across
+    /// four migrations (104 seeds, 105 defaults, 125 normalizes, 136
+    /// backfills), and parsing all of them would be a fragile test
+    /// pretending to be a general one.
+    #[tokio::test]
+    async fn the_translation_edge_matches_the_migration_that_seeds_it() {
+        const MIGRATION: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../infra/postgres/schema/",
+            "202608291430-a-design-doc-can-name-what-it-revises.sql"
+        ));
+        let edges = InMemoryJobEdges.list().await.expect("list");
+        let edge = edges
+            .iter()
+            .find(|e| e.source_kind == "design-doc" && e.field_path == "translated_from")
+            .expect("design-doc.translated_from must be in the in-memory defaults");
+
+        assert_eq!(
+            edge.field_kind, "job_id",
+            "a revision revises exactly one packet"
+        );
+        assert!(
+            MIGRATION.contains("'design-doc', 'translated_from', 'job_id'"),
+            "the migration must seed the same triple the in-memory list serves"
+        );
+        assert!(
+            MIGRATION.contains(&edge.description),
+            "the migration's description must match the in-memory one, or the two \
+             registries disagree about what the edge means: {}",
+            edge.description
+        );
+    }
+
+    /// THE SAME PIN FOR THE PARTIAL-ITEM EDGE (e1325456), and for the
+    /// same reason: this list and the migration that seeds it are one
+    /// fact living twice, so the agreement is a test and not a comment.
+    ///
+    /// The edge exists so a car can name an item it only PARTLY fixes.
+    /// `backlog_item` is one-to-one and the arrival rule closes what it
+    /// names, so an item that is several separable pieces needs a key
+    /// nothing follows — declared all the same, so the value is
+    /// ref-checked and normalised rather than being loose prose.
+    #[tokio::test]
+    async fn the_partial_item_edge_matches_the_migration_that_seeds_it() {
+        const MIGRATION: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../infra/postgres/schema/",
+            "20260910210000-a-car-can-name-an-item-it-only-partly-fixes.sql"
+        ));
+        let edges = InMemoryJobEdges.list().await.expect("list");
+        let edge = edges
+            .iter()
+            .find(|e| e.source_kind == "ship-a-change" && e.field_path == "partial_item")
+            .expect("ship-a-change.partial_item must be in the in-memory defaults");
+
+        assert_eq!(
+            edge.field_kind, "job_id",
+            "a car is one piece of exactly one item"
+        );
+        assert!(
+            MIGRATION.contains("'ship-a-change', 'partial_item', 'job_id'"),
+            "the migration must seed the same triple the in-memory list serves"
+        );
+        assert!(
+            MIGRATION.contains(&edge.description),
+            "the migration's description must match the in-memory one, or the two \
+             registries disagree about what the edge means: {}",
+            edge.description
+        );
+    }
+
+    /// THE SAME PIN FOR THE ORDERING EDGE (d3320278, design doc
+    /// 364f892e). A car may name the car it must land BEHIND, and the
+    /// conductor's boarding filter refuses to board it until that one
+    /// has landed. The value has to be ref-checked — an id that resolves
+    /// to nothing would be a hold no predecessor can ever clear — so the
+    /// edge is declared, and this is the test that keeps the declaration
+    /// and the migration saying the same thing.
+    ///
+    /// ALSO PINNED: this is a NEW field_path and not a reuse of
+    /// `('*', 'waiting_on')`. The dispatcher clears `waiting_on` when the
+    /// blocker Job closes, whatever it closed as, so an abandoned
+    /// predecessor would silently satisfy the constraint — the one case
+    /// that needs a human.
+    #[tokio::test]
+    async fn the_boards_after_edge_matches_the_migration_that_seeds_it() {
+        const MIGRATION: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../infra/postgres/schema/",
+            "20260911150000-a-car-declares-what-it-boards-after.sql"
+        ));
+        let edges = InMemoryJobEdges.list().await.expect("list");
+        let edge = edges
+            .iter()
+            .find(|e| e.source_kind == "ship-a-change" && e.field_path == crate::car::BOARDS_AFTER)
+            .expect("ship-a-change.boards_after must be in the in-memory defaults");
+
+        assert_eq!(
+            edge.field_kind, "job_id",
+            "a car declares ONE predecessor; two is a different relation"
+        );
+        assert_eq!(
+            edge.on_missing, "abort",
+            "an ordering edge pointing at nothing is a hold nobody can clear — refuse it \
+             at the write"
+        );
+        assert!(
+            MIGRATION.contains("'ship-a-change', 'boards_after', 'job_id'"),
+            "the migration must seed the same triple the in-memory list serves"
+        );
+        assert!(
+            MIGRATION.contains(&edge.description),
+            "the migration's description must match the in-memory one, or the two \
+             registries disagree about what the edge means: {}",
+            edge.description
+        );
+        assert_ne!(
+            edge.field_path, "waiting_on",
+            "boards_after must not be folded into waiting_on: the dispatcher CLEARS \
+             waiting_on on any close, including an abandonment"
+        );
+    }
 
     /// The wire shape the Links panel reads — a rename is breaking.
     #[tokio::test]

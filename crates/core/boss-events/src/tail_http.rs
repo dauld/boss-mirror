@@ -43,6 +43,7 @@ pub fn audit_tail_router(pool: PgPool) -> Router {
     };
     Router::new()
         .route("/api/events/health", get(events_health))
+        .route("/api/events/stats", get(stats))
         .route("/api/events/tail", get(tail))
         .route("/api/events/stream", get(stream))
         // Operator-on-demand export. Streams matching audit_log
@@ -73,8 +74,285 @@ pub struct AuditEntry {
 
 /// Liveness probe — used by deploy-services.sh + IT Monitoring
 /// page to confirm the service is reachable. No auth gate.
+/// How big the log is and how fast it grows (168b3f25). David,
+/// 2026-09-02: "We need size and growth stats on audit log to make
+/// sure it isn't growing unsustainably." Until now the only size
+/// reading was `total_rows` inside the nightly integrity checker's
+/// pod log — a number nobody reads is a number nobody has. One read,
+/// six SQL statements, all over the log itself; the per-day buckets
+/// and top kinds cover the last 30 days, which is the horizon a trend
+/// needs and cheap enough to answer on demand.
+///
+/// Every window is anchored at the log's OWN newest row, not the wall
+/// clock (no-wallclock): "last 24h" is the day before the newest event.
+/// For a live log the two are the same instant; for a quiet or
+/// replayed one this is the honest reading — growth measured against
+/// the log's head, and an empty log has no windows at all.
+#[derive(Debug, Serialize)]
+pub struct AuditStats {
+    pub total_rows: i64,
+    /// `pg_total_relation_size('audit_log')`: heap + indexes + toast.
+    pub table_bytes: i64,
+    pub oldest_at: Option<DateTime<Utc>>,
+    pub newest_at: Option<DateTime<Utc>>,
+    pub rows_last_24h: i64,
+    pub rows_last_7d: i64,
+    /// One bucket per UTC day with rows in the last 30 days, oldest first.
+    pub per_day: Vec<DayRows>,
+    /// The kinds writing most in the last 30 days, busiest first.
+    pub top_kinds: Vec<KindRows>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DayRows {
+    pub day: String,
+    pub rows: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct KindRows {
+    pub kind: String,
+    pub rows: i64,
+}
+
+pub async fn audit_stats(pool: &PgPool) -> Result<AuditStats, String> {
+    let (total_rows, oldest_at, newest_at): (i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>) =
+        sqlx::query_as("SELECT COUNT(*)::BIGINT, MIN(timestamp), MAX(timestamp) FROM audit_log")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    let (table_bytes,): (i64,) =
+        sqlx::query_as("SELECT pg_total_relation_size('audit_log')::BIGINT")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    let Some(head) = newest_at else {
+        return Ok(AuditStats {
+            total_rows,
+            table_bytes,
+            oldest_at,
+            newest_at,
+            rows_last_24h: 0,
+            rows_last_7d: 0,
+            per_day: Vec::new(),
+            top_kinds: Vec::new(),
+        });
+    };
+    let (rows_last_24h,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*)::BIGINT FROM audit_log \
+         WHERE timestamp >= $1::timestamptz - INTERVAL '24 hours'",
+    )
+    .bind(head)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let (rows_last_7d,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*)::BIGINT FROM audit_log \
+         WHERE timestamp >= $1::timestamptz - INTERVAL '7 days'",
+    )
+    .bind(head)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let per_day: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT to_char(date_trunc('day', timestamp AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day, \
+         COUNT(*)::BIGINT FROM audit_log \
+         WHERE timestamp >= $1::timestamptz - INTERVAL '30 days' GROUP BY 1 ORDER BY 1",
+    )
+    .bind(head)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let top_kinds: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT kind, COUNT(*)::BIGINT FROM audit_log \
+         WHERE timestamp >= $1::timestamptz - INTERVAL '30 days' GROUP BY kind ORDER BY 2 DESC LIMIT 12",
+    )
+    .bind(head)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(AuditStats {
+        total_rows,
+        table_bytes,
+        oldest_at,
+        newest_at,
+        rows_last_24h,
+        rows_last_7d,
+        per_day: per_day
+            .into_iter()
+            .map(|(day, rows)| DayRows { day, rows })
+            .collect(),
+        top_kinds: top_kinds
+            .into_iter()
+            .map(|(kind, rows)| KindRows { kind, rows })
+            .collect(),
+    })
+}
+
+/// `GET /api/events/stats` — the same door as the tail: operator or
+/// auditor tier, or a role with global read.
+async fn stats(State(state): State<AuditTailState>, CurrentUser(user): CurrentUser) -> Response {
+    let tier_ok = matches!(user.access_tier, AccessTier::Operator | AccessTier::Auditor);
+    let role_ok = boss_core::roles::has_global_read(&user.role);
+    if !(tier_ok || role_ok) {
+        return (
+            StatusCode::FORBIDDEN,
+            "operator tier or executive role required",
+        )
+            .into_response();
+    }
+    match audit_stats(&state.pool).await {
+        Ok(stats) => Json(stats).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
 async fn events_health() -> Response {
     Json(serde_json::json!({"status": "ok"})).into_response()
+}
+
+/// Recent rows of ONE exact kind, newest first — the crate-level read
+/// other services call so the SQL against `audit_log` stays in the
+/// crate that owns the table (this router's own header names that
+/// ownership). First consumer: boss-jobs' estate readers (d471a8ce) —
+/// the estate loop's events were observable only through an in-pod
+/// port-forward, which left two satisfied proven arbiters with no
+/// surface a recorded probe could re-run against.
+///
+/// EXACT kind, deliberately not the tail's ILIKE substring: a reader
+/// serving one declared kind must not grow neighbours when a new kind
+/// shares a prefix.
+///
+/// `scope` narrows to one series within that kind, and does it IN THE
+/// WHERE CLAUSE — the rule [`TailQuery::simulated`] states for the
+/// same reason. One kind carries series at wildly different cadences
+/// (the estate observer records `kubernetes-nodes` every 15 minutes,
+/// `codebase` once a night), so a LIMIT taken across all of them is
+/// spent entirely by the fastest and the slow series is unreadable
+/// through its own reader. Filtering the returned page in Rust would
+/// not fix that: by then the slow rows are already gone.
+///
+/// One statement with a nullable bind rather than the tail's dynamic
+/// composition — there is exactly one optional filter here, and
+/// `$2::text IS NULL` says "no filter" without building SQL by hand.
+pub async fn recent_by_kind(
+    pool: &PgPool,
+    kind: &str,
+    scope: Option<&str>,
+    limit: i64,
+) -> Result<Vec<AuditEntry>, String> {
+    sqlx::query_as::<_, AuditEntry>(
+        "SELECT event_id, timestamp, source, kind, payload FROM audit_log \
+         WHERE kind = $1 AND ($2::text IS NULL OR payload->>'scope' = $2) \
+         ORDER BY timestamp DESC LIMIT $3",
+    )
+    .bind(kind)
+    .bind(scope)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// One `(job kind, step kind, spec slug, authority role)` cell of the
+/// station flow cube: how many obligations of that exact shape became
+/// READY and how many were COMPLETED inside a wall-clock window.
+///
+/// Why this read exists at all: `GET /api/stations/load` answers a
+/// station's depth, and its own header says depth is close to
+/// meaningless without a drain rate. The rate needs no new stamp —
+/// `step.ready.<kind>` and `step.done.<kind>` are already the two
+/// transitions a step-waiting station's membership turns on. This is
+/// the read that counts them; `boss-jobs`' `station_flow` module maps
+/// the cells onto stations using each station's own predicate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct StepFlowRow {
+    pub job_kind: String,
+    pub step_kind: String,
+    pub spec_slug: String,
+    pub authority_role: String,
+    pub arrived: i64,
+    pub served: i64,
+}
+
+/// The flow cube over `[since, now]` — wall clock, deliberately.
+///
+/// `created_at`, NEVER `timestamp`. Event time is sim-authoritative on
+/// a demo deployment, where the epoch runs 366 sim-days in about nine
+/// real hours; a ten-minute triage measured on it reads as a week.
+/// `boss-views/src/flow.rs` owns the doctrine and the incident behind
+/// it, and this obeys it. `created_at` is a plain write instant nothing
+/// overwrites, and the epoch trim DELETEs simulated rows rather than
+/// rewriting survivors, so a real packet's wall-clock history is intact
+/// across laps.
+///
+/// The join into `steps` / `jobs` is not decoration: the log's
+/// `step.ready` payload carries neither the Job's kind nor the step's
+/// `spec_slug`, so the two coordinates a station predicate needs most
+/// have to come from the projection. DISTINCT on the step id, because
+/// a step re-promoted to ready records a second event and is still one
+/// obligation.
+pub async fn step_flow_cube(
+    pool: &PgPool,
+    since: DateTime<Utc>,
+) -> Result<Vec<StepFlowRow>, String> {
+    sqlx::query_as::<_, StepFlowRow>(
+        "WITH win AS (
+             SELECT payload->>'step_id' AS sid,
+                    kind LIKE 'step.ready.%' AS is_arrival
+             FROM audit_log
+             WHERE created_at > $1
+               AND (kind LIKE 'step.ready.%' OR kind LIKE 'step.done.%')
+               AND payload->>'step_id' IS NOT NULL
+         )
+         SELECT j.kind AS job_kind,
+                s.kind AS step_kind,
+                COALESCE(NULLIF(s.spec_slug, ''), '') AS spec_slug,
+                COALESCE(s.metadata->>'authority_role', '') AS authority_role,
+                COUNT(DISTINCT win.sid) FILTER (WHERE win.is_arrival)::BIGINT AS arrived,
+                COUNT(DISTINCT win.sid) FILTER (WHERE NOT win.is_arrival)::BIGINT AS served
+         FROM win
+         JOIN steps s ON s.id::text = win.sid
+         JOIN jobs j ON j.id = s.job_id
+         GROUP BY 1, 2, 3, 4",
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Everything the log holds about ONE job, oldest first — the
+/// per-packet audit read behind boss-jobs' `GET /api/jobs/{id}/events`
+/// (c17871fe). Lives here for the same reason [`recent_by_kind`] does:
+/// the SQL against `audit_log` stays in the crate that owns the table.
+///
+/// A job's slice is every row whose payload names it: step events
+/// carry the job under `job_id`, the job's own lifecycle events carry
+/// it as `id`. Both are expression-indexed (migration 202609081700).
+///
+/// `limit` is applied to the NEWEST rows (`ORDER BY id DESC LIMIT`)
+/// and the page is then reversed, so a packet with a long history
+/// answers with its most recent `limit` events in the order they
+/// happened — not its first `limit`, which would hide the completion
+/// the reader came for.
+pub async fn recent_for_job(
+    pool: &PgPool,
+    job_id: &str,
+    limit: i64,
+) -> Result<Vec<AuditEntry>, String> {
+    let mut rows = sqlx::query_as::<_, AuditEntry>(
+        "SELECT event_id, timestamp, source, kind, payload FROM audit_log \
+         WHERE payload->>'job_id' = $1 OR payload->>'id' = $1 \
+         ORDER BY id DESC LIMIT $2",
+    )
+    .bind(job_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    rows.reverse();
+    Ok(rows)
 }
 
 #[derive(Debug, Deserialize, Default)]

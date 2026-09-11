@@ -1,0 +1,65 @@
+# Hourly disk maintenance for the forge host, two passes with different
+# triggers — see disk-floor-sweep.sh for the exact order and the hard
+# bounds:
+#   * EVERY run prunes the SYSTEM daemon's per-train `boss-ci:<sha>`
+#     images older than six hours (keeping the newest three). Nothing
+#     else ever removes one, and until 2026-09-10 only a below-floor run
+#     did: 81GB of them on 2026-09-05 (backlog e5dc60e4).
+#   * BELOW BOSS_DISK_FLOOR_GB it goes on to the emergency remediations,
+#     regenerable caches only, stopping as soon as the floor is met.
+# An unmet floor after every bounded remediation is a FAILED unit,
+# deliberately — and so is an age pass that could not reach the daemon
+# it was asked to prune, because the alternative is a sweep that reports
+# success and frees nothing.
+#
+# Install (forge host): in install.sh's UNITS list, so —
+#   ssh 10.20.0.15 'cd /home/david/boss && git pull && sudo infra/forge/install.sh'
+# or by hand, once:
+#   sudo cp /home/david/boss/infra/forge/disk-floor-sweep.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now disk-floor-sweep.timer
+[Unit]
+Description=BOSS forge: prune aged per-train CI images, and keep the root volume above the disk floor (regenerable caches only)
+
+[Service]
+Type=oneshot
+# THE SWEEP FLOOR SITS ABOVE THE CI FLOOR. The script's default floor
+# (70) is the same number the locomotive refuses under
+# (BOSS_CI_MIN_FREE_GB, 70), so a sweep reclaimed to 70 and stopped —
+# and the next train's build ate the margin before the check ran:
+# 2026-09-05, 74GB free at 02:07 after the sweep, 65GB at 02:55 when
+# train #204 was refused at the door, with the sweep declaring itself
+# done at exactly the floor an hour earlier. A floor only buys headroom
+# if it is HIGHER than the one being defended. 100 leaves ~30GB — three
+# to five train+converge cycles (5-9GB each, measured) — between sweeps.
+# The script stops at the floor and touches only regenerable caches, so
+# a higher number costs nothing when the disk is already above it.
+Environment=BOSS_DISK_FLOOR_GB=100
+# WHICH SYSTEM OF RECORD THE PRUNE ASKS. The routine pass collects a
+# per-train CI image whose `pr-train` packet is CLOSED, which it can only
+# know by reading the record; unset, it falls back to the age window that
+# could legally collect nothing at the current train rate (backlog
+# 9195a2a6). Pinned INLINE on the sibling ExecStartPre/ExecStopPost lines
+# below for the same reason it is pinned here — systemd does not inherit
+# a sibling's `env` — and stated once more as a [Service] Environment so
+# ExecStart itself has it. There is no default in the script: boss-gcp
+# runs a second, older, complete stack on 127.0.0.1:7900 and a read
+# against the wrong one answers "no trains" instead of erroring. An
+# unreachable or unset URL costs reclaim, never safety: the pass prunes
+# less, and the below-floor remediations owe the record nothing.
+Environment=BOSS_JOBS_URL=http://10.20.0.34:7900
+# Rootless docker, same as cluster-deploy-runner; the script defaults
+# DOCKER_HOST itself.
+User=david
+# A cold builder-cache prune can take minutes; nowhere near the
+# converge's build times, but not seconds either.
+TimeoutStartSec=30min
+# The wrap pair: the timer is the EXECUTOR, the Job is the VISIBILITY
+# (timers-leave-a-packet). A failed sweep — floor unmet after every
+# bounded remediation — completes nothing, so the packet stays open on
+# the fleet view until a later run succeeds or a human decides.
+# BOSS_JOBS_URL pinned INLINE, the boss-estate-observe-host idiom: the
+# helpers refuse without one, and inheriting a per-unit drop-in from a
+# sibling is not a thing systemd does.
+ExecStartPre=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /home/david/boss/infra/boss-maintenance-wrap.sh maintenance-disk-floor-sweep "Forge disk floor sweep"
+ExecStart=/home/david/boss/infra/forge/disk-floor-sweep.sh
+ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /home/david/boss/infra/boss-step.sh maintenance-disk-floor-sweep run

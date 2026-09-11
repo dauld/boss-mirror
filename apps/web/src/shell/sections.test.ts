@@ -7,7 +7,7 @@
 // The route→section half of this fact is enforced at typecheck time
 // (`Record<Route['kind'], string>` refuses a missing kind). This file
 // pins the other half, which was unpinned and drifted: the IT tab's
-// own landing page (/system/monitoring) rendered under Home chrome
+// own landing page (/it/operate/audit) rendered under Home chrome
 // because the section id was the camelCase route kind rather than the
 // kebab-case catalog key. Reported as "I just clicked on the IT app
 // and it is showing me still in home" (CLAUDE.md §9a).

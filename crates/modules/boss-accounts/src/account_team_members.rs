@@ -210,10 +210,12 @@ async fn batch_assign_account_team(
             Ok(tx) => tx,
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         };
-        if let Err(e) = upsert_team_member(&mut *tx, &evt).await {
+        // Stamp minted before the row write: created_at and the
+        // event's timestamp must be ONE instant or replay diverges.
+        let stamp = crate::events::event_stamp(&state.publisher).await;
+        if let Err(e) = upsert_team_member(&mut *tx, &evt, stamp.timestamp).await {
             return (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response();
         }
-        let stamp = crate::events::event_stamp(&state.publisher).await;
         let event = stamp.event(
             ACCOUNT_TEAM_ASSIGNED,
             serde_json::to_value(&evt).unwrap_or_default(),
@@ -236,17 +238,23 @@ async fn batch_assign_account_team(
 /// Single canonical UPSERT for `account_team_members`. Used by
 /// every write path so the SQL stays in one place; the rebuilder
 /// uses a near-identical query against a transaction.
+///
+/// `created_at` is the event's recorded instant — the live caller
+/// passes `stamp.timestamp`, the rebuilder passes `ev.ts`. On
+/// conflict the column keeps the first insert's instant, live and
+/// replayed alike (packet d7b8158e).
 pub(crate) async fn upsert_team_member<'e, E>(
     executor: E,
     evt: &AccountTeamAssignmentEvent,
+    created_at: chrono::DateTime<chrono::Utc>,
 ) -> sqlx::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     sqlx::query(
         "INSERT INTO account_team_members \
-            (id, account_id, employee_id, role, assigned_on, notes) \
-         VALUES ($1, $2, $3, $4, $5, $6) \
+            (id, account_id, employee_id, role, assigned_on, notes, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) \
          ON CONFLICT (account_id, role) DO UPDATE SET \
             employee_id = EXCLUDED.employee_id, \
             assigned_on = EXCLUDED.assigned_on, \
@@ -258,6 +266,7 @@ where
     .bind(&evt.role)
     .bind(evt.assigned_on)
     .bind(&evt.notes)
+    .bind(created_at)
     .execute(executor)
     .await
     .map(|_| ())
@@ -323,9 +332,14 @@ async fn assign_account_team(
         notes: req.notes.clone(),
     };
 
+    // Stamp minted before the row writes: created_at on both rows
+    // and the events' timestamps must be ONE instant or replay
+    // diverges.
+    let stamp = crate::events::event_stamp(&state.publisher).await;
+
     // UPSERT on (account_id, role) so a re-assign cleanly replaces
     // the prior CS without an explicit DELETE round-trip.
-    if let Err(e) = upsert_team_member(&mut *tx, &evt).await {
+    if let Err(e) = upsert_team_member(&mut *tx, &evt, stamp.timestamp).await {
         return (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response();
     }
 
@@ -351,14 +365,13 @@ async fn assign_account_team(
         body,
         occurred_at: now,
     };
-    if let Err(e) = upsert_note(&mut *tx, &note_evt).await {
+    if let Err(e) = upsert_note(&mut *tx, &note_evt, stamp.timestamp).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
 
     // OUTBOX (phase 2): the assignment + its auto-posted note record
     // in the SAME transaction as their rows — team change, audit
     // note, and both events succeed or fail together.
-    let stamp = crate::events::event_stamp(&state.publisher).await;
     for (kind, payload) in [
         (
             ACCOUNT_TEAM_ASSIGNED,
@@ -436,7 +449,10 @@ async fn unassign_account_team(
         body,
         occurred_at: now,
     };
-    if let Err(e) = upsert_note(&mut *tx, &note_evt).await {
+    // Stamp minted before the note insert: created_at and the
+    // events' timestamps must be ONE instant or replay diverges.
+    let stamp = crate::events::event_stamp(&state.publisher).await;
+    if let Err(e) = upsert_note(&mut *tx, &note_evt, stamp.timestamp).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
 
@@ -448,7 +464,6 @@ async fn unassign_account_team(
         employee_id: removed_employee,
         unassigned_at: now,
     };
-    let stamp = crate::events::event_stamp(&state.publisher).await;
     for (kind, payload) in [
         (
             ACCOUNT_TEAM_UNASSIGNED,

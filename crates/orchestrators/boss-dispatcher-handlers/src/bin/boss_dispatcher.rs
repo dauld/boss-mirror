@@ -10,6 +10,7 @@ use boss_dispatcher::config::DispatcherConfig;
 use boss_dispatcher::dispatcher::{DispatcherCtx, run_loop};
 use boss_dispatcher::http::{HttpState, router};
 use boss_dispatcher::liveness::DispatcherLiveness;
+use boss_dispatcher::rules::dead_letter::{DeadLetterSink, JobsApiDeadLetters};
 use boss_dispatcher::rules::handler::HandlerRegistry;
 use boss_dispatcher::rules::helpers_inventory::InventoryHelpers;
 use boss_dispatcher::rules::jobs_spawn::JobsSpawn;
@@ -18,27 +19,72 @@ use boss_dispatcher::rules::registry::{
 };
 use boss_dispatcher::rules::runner::RulesRunner;
 use boss_dispatcher::rules::schedule_runner::{DEFAULT_CATCHUP_CAP, ScheduleRunner};
+use boss_dispatcher::rules::seed::seed_authored_rules;
 use boss_dispatcher_handlers::handlers::{
-    bill_payment_batch::BillPaymentBatch, commerce_invoice_issue::CommerceInvoiceIssue,
-    docs_design_sweep::DocsDesignSweep, docs_flush_queue::DocsFlushQueue,
-    gate_resolve::GateResolve, inventory_bill_approve::InventoryBillApprove,
+    bill_payment_batch::BillPaymentBatch, cadence_silence::CadenceSilenceSweep,
+    commerce_invoice_issue::CommerceInvoiceIssue, credential_issuer,
+    credential_rotate_forgejo::CredentialRotateForgejo, estate_alarm::EstateAlarm,
+    estate_compare::EstateCompare, gate_resolve::GateResolve,
+    inventory_bill_approve::InventoryBillApprove,
     inventory_overhead_absorb::InventoryOverheadAbsorb,
     inventory_parts_consume::InventoryPartsConsume, inventory_parts_produce::InventoryPartsProduce,
     inventory_po_place::InventoryPoPlace, inventory_receive::InventoryReceive,
-    jobs_clear_waiting::JobsClearWaiting, jobs_complete_linked_step::JobsCompleteLinkedStep,
-    jobs_complete_step::JobsCompleteStep, jobs_subjob_resolve::JobsSubjobResolve,
-    ledger_bill_approve::LedgerBillApprove, ledger_payroll_run_submit::LedgerPayrollRunSubmit,
-    ledger_tax_accrue::LedgerTaxAccrue, ledger_tax_remit::LedgerTaxRemit,
-    messages_expire_for_job::MessagesExpireForJob, messages_notify::MessagesNotify,
-    messages_notify_job_terminal::MessagesNotifyJobTerminal, network_census::NetworkCensus,
-    packaging_allocate::PackagingAllocate, people_hire::PeopleHire,
+    jobs_auto_park::JobsAutoPark, jobs_clear_waiting::JobsClearWaiting,
+    jobs_complete_linked_step::JobsCompleteLinkedStep, jobs_complete_step::JobsCompleteStep,
+    jobs_run_car_probes::JobsRunCarProbes, jobs_subjob_resolve::JobsSubjobResolve,
+    ledger_bill_approve::LedgerBillApprove, ledger_keg_deposit_settle::LedgerKegDepositSettle,
+    ledger_payroll_run_submit::LedgerPayrollRunSubmit, ledger_tax_accrue::LedgerTaxAccrue,
+    ledger_tax_remit::LedgerTaxRemit, messages_expire_for_job::MessagesExpireForJob,
+    messages_notify::MessagesNotify, messages_notify_job_terminal::MessagesNotifyJobTerminal,
+    network_census::NetworkCensus, packaging_allocate::PackagingAllocate, people_hire::PeopleHire,
     people_terminate::PeopleTerminate, products_consume::ProductsConsume,
     products_consume_from_invoice::ProductsConsumeFromInvoice, products_produce::ProductsProduce,
-    shipping_create::ShippingCreate, webhook_notify::WebhookNotify,
+    shipping_create::ShippingCreate, sweep_empty_decisions::MaintenanceSweepInspect,
+    webhook_notify::WebhookNotify,
 };
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
+
+/// Publish the authored rule registry into `dispatcher_rules`, waiting
+/// out a boot race rather than accepting one as final.
+///
+/// The pool above connects or the process exits, so the database is
+/// reachable by the time this runs — but on a BRAND NEW deployment the
+/// `dispatcher_rules` table may not exist yet, because `migrate.sh` is
+/// still applying. A single attempt that lost that race would leave
+/// every rule this tree authors and no migration seeds absent until
+/// something restarted the dispatcher, and nothing would: the same shape
+/// as the one-shot rule load that dead-aired the runner forever
+/// (backlog 823fcb22). So it retries a bounded number of times and then
+/// reports, loudly.
+async fn seed_rules_with_retry(
+    pool: &sqlx::PgPool,
+    dir: &std::path::Path,
+) -> Result<boss_dispatcher::rules::seed::SeedReport, boss_dispatcher::rules::registry::RegistryError>
+{
+    const ATTEMPTS: usize = 5;
+    const BETWEEN: std::time::Duration = std::time::Duration::from_secs(3);
+    let mut last = None;
+    for attempt in 1..=ATTEMPTS {
+        match seed_authored_rules(pool, dir).await {
+            Ok(report) => return Ok(report),
+            Err(e) => {
+                if attempt < ATTEMPTS {
+                    tracing::warn!(
+                        attempt,
+                        error = %e,
+                        "seeding the dispatcher-rule registry failed — retrying (the \
+                         schema may still be applying on a fresh deployment)"
+                    );
+                    tokio::time::sleep(BETWEEN).await;
+                }
+                last = Some(e);
+            }
+        }
+    }
+    Err(last.expect("at least one attempt ran"))
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -107,6 +153,82 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| "connecting to Postgres for the dispatcher rule registry")?;
 
+    // THE REGISTRY IS DERIVED FROM THE TREE, and this is where the
+    // derivation runs (backlog 41ba00cd, CLAUDE.md §9a). A dispatcher
+    // rule used to be written twice — a file under
+    // `infra/dispatcher/rules/` and a hand-written row INSERTed into the
+    // table by a migration — with nothing deriving one from the other,
+    // so the tree
+    // could say a rule existed while the running system enforced
+    // something else and nothing reported a difference. The authored
+    // directory is now the single definition: this seeds what it declares
+    // and the table does not have, and retires what it no longer names.
+    // Adding a rule is dropping a file in; no migration writes rules.
+    //
+    // IT RUNS HERE because the dispatcher is the one process that already
+    // holds both halves — the pool and `BOSS_DISPATCHER_RULES` (the image
+    // carries it at /opt/boss/infra/dispatcher/rules, which the read
+    // surface already reads each rule's `why` from) — and it restarts on
+    // every converge, so a merged rule file is live one deploy later with
+    // no separate seed container to schedule.
+    //
+    // IT LOGS AND STARTS, NEVER REFUSES. A boot guard that declines to
+    // start over registry content took the system of record down twice on
+    // 2026-09-07; the rules this seed could not write are named in the
+    // journal and the dispatcher proceeds on whatever the table holds.
+    // Its failure mode is therefore "no change", never "no rules".
+    match cfg.authored_rules_dir.as_deref() {
+        Some(dir) => match seed_rules_with_retry(&pool, dir).await {
+            Ok(report) => {
+                if report.wrote_anything() {
+                    info!(
+                        dir = %dir.display(),
+                        inserted = ?report.inserted,
+                        retired = ?report.retired,
+                        present = report.present.len(),
+                        "seeded the dispatcher-rule registry from the authored directory"
+                    );
+                } else {
+                    info!(
+                        dir = %dir.display(),
+                        present = report.present.len(),
+                        "dispatcher-rule registry already matches the authored directory"
+                    );
+                }
+                for (name, authored, live) in &report.behind {
+                    tracing::warn!(
+                        rule = %name,
+                        authored_version = authored,
+                        live_version = live,
+                        "the authored rule file is BEHIND the live registry — someone \
+                         published this rule through the API without writing the file \
+                         back; the live version is left alone"
+                    );
+                }
+                for (name, reason) in &report.rejected {
+                    tracing::error!(
+                        rule = %name,
+                        reason = %reason,
+                        "an authored rule did NOT reach the registry"
+                    );
+                }
+            }
+            Err(e) => tracing::error!(
+                error = %e,
+                dir = %dir.display(),
+                "could not seed the dispatcher-rule registry from the authored \
+                 directory — NOTHING was written; the registry is whatever the \
+                 table already holds, which may be missing rules this tree authors"
+            ),
+        },
+        None => tracing::error!(
+            "BOSS_DISPATCHER_RULES is unset, so the authored rule registry cannot be \
+             read and the `dispatcher_rules` table cannot be derived from it — this \
+             deployment enforces whatever rows it already has, and a rule added to the \
+             tree will never arrive"
+        ),
+    }
+
     // Load the rule registry from `dispatcher_rules` and start the rules
     // runner alongside the legacy role-assignment loop. They share the NATS
     // connection but subscribe to disjoint topics — the legacy loop owns
@@ -115,27 +237,81 @@ async fn main() -> Result<()> {
     // as final (823fcb22 mechanism 2: the one-shot load raced the
     // seed and the runner dead-aired forever). 60s covers any honest
     // init; past it we proceed empty, loudly.
+    // The RAW rows are kept alongside the compiled registry: the
+    // cadence-silence sweep derives half its roster from the rules the
+    // dispatcher is ENFORCING (their schedules and dedup guards), and
+    // `Registry::from_raw` compiles the `when` source away.
     match wait_for_rules(
         &pool,
         std::time::Duration::from_secs(2),
         std::time::Duration::from_secs(60),
     )
     .await
-    .and_then(RuleRegistry::from_raw)
-    {
-        Ok(registry) => {
+    .and_then(|raw| {
+        let enforced = raw.rules.clone();
+        RuleRegistry::from_raw(raw).map(|registry| (registry, enforced))
+    }) {
+        Ok((registry, enforced_rules)) => {
             info!(
                 rule_count = registry.rules().len(),
                 "rules registry loaded from dispatcher_rules"
             );
             let mut handlers = HandlerRegistry::new();
             handlers.register(JobsSpawn::new(cfg.jobs_api_url.clone()));
+            // Auto-park: on a gate-run's green `gate-verdict` step, file
+            // the car the `--park-*` intent describes, so a gate-green
+            // branch never strands unparked. Needs the clock for a
+            // precise gate-step stamp (dock-queue-time). Inert until a
+            // rule on `step.done.gate-verdict` is published.
+            // The raiser the estate series was recorded for: a HARD
+            // finding persisting N consecutive comparisons becomes an
+            // urgent packet (a5adfb99). Inert until a rule on
+            // jobs.estate.compared is published.
+            handlers.register(EstateAlarm::new(
+                cfg.jobs_api_url.clone(),
+                cfg.clock_api_url.clone(),
+            ));
+            // A DECLARED cadence with no packet files an alarm
+            // (ecca2f43). The estate alarm hears a host that stopped
+            // being observed; this hears a CHORE that stopped running —
+            // the ML batch dead 23 nights (e109f57e) and the
+            // five-minute unit observer quiet four days (408c81f6),
+            // both found by hand. Its roster has two sources, both
+            // registry data: the declared intervals on its own rule
+            // row's args (the timer-executed chores) and the cadences
+            // DERIVED from the clock rules that spawn packets — eight of
+            // which were off the roster by construction until cf0f5e2d,
+            // three families of them silent for nine to nineteen days.
+            // That is why it is handed the enforced rules: it also reads
+            // each one's dedup guard, so a cadence blocked by an
+            // undrained packet is reported as SUPPRESSED, naming the
+            // packet. Needs the clock for the ages it measures.
+            handlers.register(CadenceSilenceSweep::new(
+                cfg.jobs_api_url.clone(),
+                cfg.clock_api_url.clone(),
+                enforced_rules,
+            ));
+            handlers.register(JobsAutoPark::new(
+                cfg.jobs_api_url.clone(),
+                cfg.clock_api_url.clone(),
+            ));
             // D7 delegate-subjob write-back: on a child Job's
             // close, resolve the parent delegate-subjob step.
             handlers.register(JobsSubjobResolve::new(cfg.jobs_api_url.clone()));
             // A closed Job wakes its waiters: clears metadata.waiting_on
             // (the '*' job edge) so blocked steps re-evaluate (e9291570).
             handlers.register(JobsClearWaiting::new(cfg.jobs_api_url.clone()));
+            // A train arriving runs each boarded car's recorded probe:
+            // files one ops-request per probed car for the forge's
+            // ops-runner (28ac45ab). Inert until a rule on
+            // jobs.job.closed names it.
+            handlers.register(JobsRunCarProbes::new(cfg.jobs_api_url.clone()));
+            // The empty-decisions sweep runs itself: on the sweep's
+            // Inspect checklist becoming ready, scan open packets for
+            // approval decisions that recorded nothing, complete the
+            // checklist, and route (action_needed) to Remediate or Clear
+            // (ee8ec68a — mechanical inspections become automation).
+            handlers.register(MaintenanceSweepInspect::new(cfg.jobs_api_url.clone()));
             // A closing Job completes the open step it was authorized
             // by, on the Job its declared edge names — the merged car
             // → feedback-packet obligation (2c4ae549). Generic: which
@@ -161,6 +337,39 @@ async fn main() -> Result<()> {
                 cfg.products_api_url.clone(),
                 ctx.registry.clone(),
             ));
+            // The credential broker's Forgejo rotation (7ee101aa first
+            // leg): on a rotation packet's scope step
+            // (step.done.credential-rotation), mint→install→verify→
+            // revoke via the issuer's admin API + a name-scoped k8s
+            // Secret write, recording each phase on the packet itself.
+            // Both dependencies degrade to Unconfigured — the handler
+            // stays registered (an UnknownHandler aborts EVERY co-fired
+            // rule's dispatch) and a firing rule dead-letters naming
+            // the missing knob instead.
+            {
+                use credential_issuer::{
+                    ForgeTokenIssuer, ForgejoAdmin, KubeSecretStore, SecretStore, Unconfigured,
+                };
+                let issuer: Arc<dyn ForgeTokenIssuer> = match &cfg.broker_forgejo_token {
+                    Some(root) => ForgejoAdmin::new(cfg.broker_forge_url.clone(), root.clone()),
+                    None => Arc::new(Unconfigured(
+                        "credential broker unconfigured: BOSS_BROKER_FORGEJO_TOKEN unset \
+                         (secret boss-credential-broker-root, key forgejo-token)"
+                            .to_string(),
+                    )),
+                };
+                let secrets: Arc<dyn SecretStore> = match KubeSecretStore::in_cluster() {
+                    Ok(s) => s,
+                    Err(e) => Arc::new(Unconfigured(format!(
+                        "credential broker has no in-cluster k8s credential: {e}"
+                    ))),
+                };
+                handlers.register(CredentialRotateForgejo::new(
+                    cfg.jobs_api_url.clone(),
+                    issuer,
+                    secrets,
+                ));
+            }
             // Packaging allocation — splits a brewed batch across formats by
             // demand and writes the packaged quantities, so the whole batch
             // always packages (WIP → FG, never dumped).
@@ -224,6 +433,14 @@ async fn main() -> Result<()> {
             // federal beer excise liability accrues at packaging time,
             // drained quarterly by the excise-tax-filing Workflow.
             handlers.register(LedgerTaxAccrue::new(cfg.ledger_api_url.clone()));
+            // A reconciled keg-return packet settles its deposit:
+            // DR 1000 / CR 2400 at the fleet-out date, DR 2400 /
+            // CR 1000 refund + CR 4150 forfeiture at the return date
+            // (93f936b9, the full balance-sheet keg model).
+            handlers.register(LedgerKegDepositSettle::new(
+                cfg.jobs_api_url.clone(),
+                cfg.ledger_api_url.clone(),
+            ));
             handlers.register(LedgerPayrollRunSubmit::new(cfg.ledger_api_url.clone()));
             // General AP bills (rent/utilities/…) → ledger subledger.
             handlers.register(LedgerBillApprove::new(cfg.ledger_api_url.clone()));
@@ -237,23 +454,17 @@ async fn main() -> Result<()> {
             // Push notifier: step.ready.* -> message the role's
             // on-call member (the pull-side assignments query is
             // the actual work driver; this is awareness).
-            // A recorded design decision queues its doc's flush
-            // (cea82de0 link 1; the worker stays operator-run until
-            // its tree/remote question is decided).
-            handlers.register(DocsFlushQueue::new(cfg.docs_api_url.clone()));
-            // Reads the docs corpus AND the jobs board: the level
-            // question spans both, which is why it is a sweep rather
-            // than anything either service could answer alone.
-            handlers.register(DocsDesignSweep::new(
-                cfg.docs_api_url.clone(),
-                cfg.jobs_api_url.clone(),
-            ));
             // The packet-loss census (packet-loss.md, 9fb9904f): count
             // the network's conservation invariant on a clock and land
             // the counts as one jobs.network.census event per firing.
             // Report first — no raiser, no threshold; the series this
             // accumulates is what calibrates one later.
             handlers.register(NetworkCensus::new(cfg.jobs_api_url.clone()));
+            // The estate comparison (59ef456a): declared vs observed,
+            // fired by each jobs.estate.observed event, recorded as one
+            // jobs.estate.compared event per observation. Report first
+            // — the raiser comes later, calibrated on this series.
+            handlers.register(EstateCompare::new(cfg.jobs_api_url.clone()));
             handlers.register(MessagesNotify::new(
                 cfg.people_api_url.clone(),
                 cfg.messages_api_url.clone(),
@@ -309,6 +520,8 @@ async fn main() -> Result<()> {
             let calendar = Arc::new(ReqwestCalendarClient::new(cfg.calendar_api_url.clone()));
             let live_rules = live.clone();
             let pool_rules = pool.clone();
+            let dead_letters: Arc<dyn DeadLetterSink> =
+                JobsApiDeadLetters::new(cfg.jobs_api_url.clone());
             tokio::spawn(async move {
                 let mut registry = registry;
                 let mut fp = fp;
@@ -317,6 +530,14 @@ async fn main() -> Result<()> {
                         registry: registry.clone(),
                         handlers: handlers.clone(),
                         helpers: helpers.clone(),
+                        // A dead-letter lands on its packet (`a9c498eb`):
+                        // a step a machine owed and did not deliver is
+                        // annotated with the rule, handler, attempt count
+                        // and error, so it stops looking like a step whose
+                        // turn has not come — and so the record outlives
+                        // this pod's log. Best-effort; see
+                        // boss_dispatcher::rules::dead_letter.
+                        dead_letters: Some(dead_letters.clone()),
                     });
                     let ev = {
                         let live = live_rules.clone();
@@ -388,7 +609,14 @@ async fn main() -> Result<()> {
         }
     }
 
-    let app = router(HttpState { live, pool });
+    // The authored registry directory travels into the read surface so
+    // `GET /api/dispatcher/rules` can answer WHY each enforced rule
+    // exists — the one field the `dispatcher_rules` row does not hold.
+    let app = router(HttpState {
+        live,
+        pool,
+        authored_rules_dir: cfg.authored_rules_dir.clone(),
+    });
     let bind: SocketAddr = cfg
         .http_bind
         .parse()

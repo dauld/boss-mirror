@@ -31,8 +31,17 @@ fn storage(e: sqlx::Error) -> CadenceError {
 #[async_trait]
 impl CadenceRepository for PgCadence {
     async fn active_rules(&self) -> Result<Vec<CadenceRuleRow>, CadenceError> {
+        // EVERY COLUMN A BASIS NEEDS MUST BE SELECTED HERE. The
+        // calendar basis (202608282135) added `cadence`, `anchor_date`
+        // and `business_calendar`; the conductor's own SELECT was not
+        // widened when they landed, and the loop skipped
+        // protocol-retro-daily on every tick — the rule was in the
+        // table and visible over the API the whole time. Now that this
+        // adapter is what serves the loop, an unserved column is a
+        // rule the loop cannot read.
         let rows = sqlx::query(
-            "SELECT name, verb, basis, every_minutes, at_times, min_dock_depth, cooldown_minutes \
+            "SELECT name, verb, basis, every_minutes, at_times, min_dock_depth, cooldown_minutes, \
+                    cadence, anchor_date, business_calendar \
              FROM cadence_rules WHERE status = 'active' ORDER BY name",
         )
         .fetch_all(&self.pool)
@@ -49,15 +58,23 @@ impl CadenceRepository for PgCadence {
                     at_times: row.try_get("at_times").map_err(storage)?,
                     min_dock_depth: row.try_get("min_dock_depth").map_err(storage)?,
                     cooldown_minutes: row.try_get("cooldown_minutes").map_err(storage)?,
+                    cadence: row.try_get("cadence").map_err(storage)?,
+                    anchor_date: row.try_get("anchor_date").map_err(storage)?,
+                    business_calendar: row.try_get("business_calendar").map_err(storage)?,
                 })
             })
             .collect()
     }
 
     async fn last_firing(&self, rule: &str) -> Result<Option<LastFiring>, CadenceError> {
+        // `rc` is merged into `detail` by record_outcome rather than held in
+        // a column of its own, so it is read back out of the JSON here. A
+        // firing with no outcome yet has no `rc` key and reads as NULL —
+        // which is the "still in flight" case evaluation must distinguish
+        // from a failure.
         let row = sqlx::query(
-            "SELECT firing_id, fired_at FROM cadence_firings WHERE rule_name = $1 \
-             ORDER BY fired_at DESC LIMIT 1",
+            "SELECT firing_id, fired_at, (detail->>'rc')::int AS rc FROM cadence_firings \
+             WHERE rule_name = $1 ORDER BY fired_at DESC LIMIT 1",
         )
         .bind(rule)
         .fetch_optional(&self.pool)
@@ -69,6 +86,7 @@ impl CadenceRepository for PgCadence {
             Some(r) => Ok(Some(LastFiring {
                 firing_id: r.try_get("firing_id").map_err(storage)?,
                 fired_at: r.try_get("fired_at").map_err(storage)?,
+                rc: r.try_get("rc").map_err(storage)?,
             })),
         }
     }

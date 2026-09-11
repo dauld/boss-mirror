@@ -12,7 +12,7 @@ use boss_jobs::registry::{PgWorkflows, WorkflowRegistry, WorkflowStatus};
 use boss_jobs::seed_loader::load_workflows;
 use boss_testing::TestDb;
 
-const BUNDLE: &str = "../../../infra/platform/workflows.toml";
+const BUNDLE: &str = "../../../infra/platform/workflows";
 
 fn seed_actor() -> ActorId {
     ActorId::Automation("platform-workflow-seed".into())

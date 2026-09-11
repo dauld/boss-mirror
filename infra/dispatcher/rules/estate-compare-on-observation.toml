@@ -1,0 +1,34 @@
+# The estate comparison (59ef456a): the compare half of the
+# declared/observed split. Fires on each `jobs.estate.observed` event
+# — the observation rides in the payload, so there is no tail read and
+# no second clock; the comparison inherits the observer's own daily
+# cadence. The handler reads GET /api/estate/nodes, applies the scope
+# rule (only `talos-*` declared rows participate — the forge host and
+# boss-gcp can never appear in a kubernetes-nodes observation), and
+# lands one `jobs.estate.compared` event via the comparison door.
+# The raiser (`estate.alarm`, calibrated on this series) listens on
+# that topic: hard findings that persist across consecutive same-series
+# comparisons become urgent packets, and its silence sweep raises when
+# an expected observation series stops arriving. Details in the module
+# docs (boss-dispatcher-handlers handlers/estate_compare.rs and
+# estate_alarm.rs).
+#
+# First seeded by 202608302200-the-estate-is-compared.sql, applied history: this FILE is
+# now the definition, and the registry row is published from it at
+# boot (rules::seed — backlog 41ba00cd).
+[[rule]]
+name = "estate-compare-on-observation"
+why = """
+EXTERNAL INGRESS, the standing exemption: `jobs.estate.observed` is
+posted by a CronJob looking at the cluster, so no packet causes an
+observation and no Workflow definition can declare the reaction to
+one. It adds no routing — one firing reads the estate registry and
+writes one `jobs.estate.compared` event, the compare half of the
+declared/observed split (59ef456a). Reacting to the event rather than
+a second clock is what makes the comparison inherit the observer's own
+cadence. (Ratchet history: 51 -> 52, 2026-08-30, migration
+202608302200.)
+"""
+on_event = "jobs.estate.observed"
+[[rule.do]]
+handler = "estate.compare"

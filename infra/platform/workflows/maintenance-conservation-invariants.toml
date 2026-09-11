@@ -1,0 +1,72 @@
+# THE FIVE UNWATCHED CHORES.
+#
+# boss-maintenance-wrap.sh states the contract already: "the timer is
+# the EXECUTOR, the Job is the VISIBILITY". ExecStartPre opens (or
+# reuses) a Job and ExecStopPost records its verdict — `ok` closes it
+# "Maintenance completed", anything else "Maintenance failed" (since
+# 2026-09-05; before that a failed run recorded nothing and its Job sat
+# open looking like a run in progress). Three chores were wired that
+# way: backup, audit-integrity, ledger-replay.
+#
+# Five were not, and had no packet, no findings, no event-log trace and
+# nobody's queue. A silent failure in any of them looks exactly like a
+# success. That is the whole defect class of the day, running nightly.
+#
+# David, 2026-08-16: "Let's make sure we have a job to handle each."
+#
+# In the BUNDLE and not in platform_workflows(), deliberately, and the
+# comment in registry.rs argues it better than this one can: a kind in
+# Rust is a protocol that cannot change without a deploy and that
+# bootstrap_reconcile will rewrite over an operator's edit; a kind in
+# the bundle is data. The three existing maintenance kinds are still in
+# Rust and should follow — separately, since moving a kind with live
+# packets is its own change.
+
+# boss-conservation-invariants.service
+[[workflow]]
+kind = "maintenance-conservation-invariants"
+label = "Conservation-invariant sweep"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "The hourly conservation-invariant scan (infra/lint/conservation-invariants.sh). Hourly rather than nightly because a conservation break is a correctness fault, not housekeeping."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "systemd-timer" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Run to completion"
+# Gated so the simulated workforce cannot role-match and "complete"
+# real maintenance; the timer's boss-step call presents the automation
+# actor with this role.
+authority_role = "platform-admin"
+fields = [{ name = "result", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
+title_template = "Maintenance completed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }

@@ -173,7 +173,7 @@ to level 3. Two pieces ship together:
    StepType row is pure schema; any side effect a step fires on
    completion lives in a dispatcher rule keyed `step.done.<kind>`
    (a row in the `dispatcher_rules` registry, seeded from
-   `infra/dispatcher/rules.toml`), not on the StepType itself.
+   `infra/dispatcher/rules/`), not on the StepType itself.
 
 2. **The Step UX plugin.** A plain JS bundle (IIFE) that calls
    `window.__boss_register_step_plugin(kind, mount)` on load.

@@ -1,0 +1,71 @@
+# ---------------------------------------------------------------------------
+# gate-run — one full-gate execution as a tracked unit of work.
+#
+# THE PROTOCOL EVERY CAR RUNS ON. The runner registers the packet at
+# launch, heartbeats while running, and closes it with the receipt; an
+# OVERDUE open packet is the alarm that the runner died. Three terminals
+# because `lost` is an honest verdict and must not be filed as a red: an
+# infrastructure refusal is not a consist failure (CLAUDE.md §Diagnosis),
+# and a pod replacement recorded as `failed` would strike every car
+# aboard for something the branch did not do.
+#
+# The relaunch procedure lives in the `description` below, where the
+# operator standing in front of an overdue packet will actually read it.
+#
+# Authored live through the API and never written back until 2026-09-10,
+# which is the gap `infra/lint/the-live-protocols-are-the-authored-
+# protocols.sh` now closes. Rendered from the live row rather than
+# retyped; the seed is insert-if-missing, so the live lineage keeps its
+# own version and this file is what a FRESH database gets.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "gate-run"
+label = "Gate run"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "A full-gate execution as a tracked unit of work. The runner registers the packet at launch, heartbeats while running, and closes it with the receipt - green, failed, or lost (lost is an honest verdict). An OVERDUE open gate-run packet is the alarm: it means the runner died (pod replacement, OOM, node bounce). RELAUNCH PROTOCOL, learned 2026-08-22/23: the chain script lives on the PVC at /work/gate-out-launcher.sh and is resumable (each gate skips itself if its receipt exists in /work/gate-out/); on any overdue packet, re-exec it in a fresh tmux session, PATCH a relaunch_note onto the packet, and bump due_on. Receipts on the PVC, never /scratch. Throttle: CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=2 nice 10 under the container's 8/16Gi bounds."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "launched"
+kind = "trigger"
+ready_when = "true"
+title_template = "Gate launched"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "gate-runner-registers" }
+
+[[workflow.step]]
+title = "record-verdict"
+kind = "gate-verdict"
+ready_when = "steps.launched.done"
+title_template = "Record the receipt"
+metadata_defaults = { heartbeat_at = "" }
+fields = [
+  { name = "verdict", field_type = "green|failed|lost", required = true },
+  { name = "receipt", field_type = "string" },
+]
+
+[[workflow.step]]
+title = "green"
+kind = "outcome"
+ready_when = "steps.record-verdict.done AND steps.record-verdict.metadata.verdict = \"green\""
+title_template = "Gate green"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.record-verdict.done AND steps.record-verdict.metadata.verdict = \"failed\""
+title_template = "Gate failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }
+
+[[workflow.step]]
+title = "lost"
+kind = "outcome"
+ready_when = "steps.record-verdict.done AND steps.record-verdict.metadata.verdict = \"lost\""
+title_template = "Gate lost (environment died)"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "lost" }

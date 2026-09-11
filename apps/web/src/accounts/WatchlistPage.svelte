@@ -2,6 +2,7 @@
   // Full churn watchlist — port of apps/web/src/accounts/WatchlistPage.tsx.
 
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
+  import { RiskScoreListSchema } from './schemas';
   import FilterGroup from '@boss/web-kit/ui/FilterGroup.svelte';
   import FilterButton from '@boss/web-kit/ui/FilterButton.svelte';
   import SearchInput from '@boss/web-kit/ui/SearchInput.svelte';
@@ -56,8 +57,21 @@
           fetch('/api/people/accounts'),
         ]);
         if (!rResp.ok) throw new Error(`${rResp.status}`);
-        const body = (await rResp.json()) as { accounts: RiskScore[] };
-        if (!cancelled) loadState = { kind: 'ready', scores: body.accounts };
+        // PARSE, DO NOT CAST. This read `(await rResp.json()) as {
+        // accounts: RiskScore[] }`, which the compiler trusts and the
+        // runtime does not: a payload without `accounts` made `scores`
+        // undefined and `rows.length` threw "Cannot read properties of
+        // undefined (reading 'length')" (feedback 2fe1c8c1). That is the
+        // exact failure class data/parseResponse.ts was written for, and
+        // this was one of its unconverted call sites.
+        //
+        // A WRONG SHAPE IS AN ERROR, NOT AN EMPTY LIST. Falling back to
+        // `[]` would render "0 accounts scored" over a broken backend —
+        // a confident, wrong answer, which is worse than saying so.
+        const parsed = RiskScoreListSchema.safeParse(await rResp.json());
+        if (!parsed.success) throw new Error('unexpected risk-score payload');
+        if (!cancelled)
+          loadState = { kind: 'ready', scores: parsed.data.accounts as RiskScore[] };
         if (pResp.ok) {
           const pBody = await pResp.json();
           if (!cancelled) accounts = Array.isArray(pBody) ? pBody : (pBody.data ?? []);

@@ -1,0 +1,30 @@
+# EMPTY DECISIONS. A completed decision that recorded nothing is a
+# human judgement lost silently — 62 of 100 completed sign-offs carried
+# neither authored metadata nor notes when first measured (cdfe2e1a),
+# and three sat unnoticed for nine days. The lint (workflow_lint
+# Phase 5) stops NEW versions from shipping the gap; this sweep is for
+# packets already in flight on old pinned versions, whose completion
+# contract is frozen. Detector first, per the packet: it is what makes
+# the fix verifiable — the count staying zero is how we know it worked.
+[[rule]]
+name = "maintenance-sweep-empty-decisions-daily"
+why = """
+A TIMER, the standing exemption: no packet causes "a completed decision recorded nothing", so no
+Workflow definition can declare it — a sweep's whole point is to run
+when NO event fired. It adds no routing: one firing spawns one
+maintenance-sweep packet, and what happens next is that protocol's own
+row. The packets it watches are pinned to OLD versions whose
+completion contracts are frozen, so the workflow lint cannot reach
+them and a clock has to look: 62 of 100 completed sign-offs
+carried neither authored metadata nor notes when first measured
+(cdfe2e1a). (Ratchet history: 52 -> 53, 2026-08-31.)
+"""
+version = 2
+schedule = { cadence = "daily", anchor_date = "2026-09-01" }
+# One outstanding packet per target (0517387b): yesterday's sweep
+# still open means today has nothing new to say - spawning a twin
+# duplicates the obligation, it does not discharge it.
+when = 'NOT open_job_exists("maintenance-sweep", "empty-decisions")'
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"empty-decisions\"", title = "\"Empty decision sweep\"", "metadata.target" = "\"empty-decisions\"", "metadata.area" = "\"protocols\"", "metadata.procedure" = "\"Count completed steps of approval-surface kinds (ask the step registry for surface, never a kind name) that carry neither authored metadata content nor notes, completed since the previous sweep. Materialization keys (authority_role, context_md, procedure, outcome_kind, started_at, completed_at, sign_off_context) are not content. Zero new: clear, record the count. Any new: action_needed - each one is a human judgement that was recorded nowhere, and the packet it belongs to may still be warm enough to ask. Baseline at first firing: 62 of 100 historical sign-offs are empty (cdfe2e1a); count NEW ones only.\"" }

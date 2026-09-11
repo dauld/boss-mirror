@@ -1,4 +1,4 @@
-// The design-review lens — /system/design as a view onto a station's
+// The design-review lens — /it/design as a view onto a station's
 // queue rather than a page with its own idea of what that queue is.
 //
 // Origin (David, feedback 3f5f7f63): "the Design Review page should
@@ -37,13 +37,16 @@ export type StationLens = Readonly<{
 
 /** A packet as the station queue serves it. No `steps`: the queue
  *  endpoint fetches steps only when the predicate reads step state,
- *  and `design-review`'s predicate is a kind match. */
+ *  and `design-review`'s predicate is a kind match.
+ *
+ *  No `subject` either, though the envelope carries one. Nothing on
+ *  this page reads it any more — see `queueRows` for the join that
+ *  used to and why it could never have worked. */
 export type QueuePacket = Readonly<{
   id: string;
   title: string;
   status: string;
   opened_on: string;
-  subject?: Readonly<{ id?: string }> | null;
 }>;
 
 /** The `GET /api/stations/{name}/queue` envelope, design-review's
@@ -58,7 +61,7 @@ export type DesignQueueEnvelope = Readonly<{
   data: readonly QueuePacket[];
 }>;
 
-/** An open review packet, keyed to the doc it is about. */
+/** An open review packet as the queue panel renders it. */
 export type ReviewPacket = Readonly<{
   id: string;
   status: string;
@@ -74,7 +77,7 @@ export type ReviewPacket = Readonly<{
 export const FALLBACK_HEADER = {
   eyebrow: 'System Model · Design review',
   title: 'Design review',
-  subtitle: 'Open questions, pending decisions, ADRs',
+  subtitle: 'Open questions and ADRs',
 } as const;
 
 export type PageHeader = Readonly<{
@@ -97,10 +100,21 @@ export function pageHeader(lens: StationLens | null | undefined): PageHeader {
 }
 
 /** Panel renderers this surface ships, in the order they read when the
- *  registry declares nothing. `rejections` first is deliberate: it
- *  names docs the indexer refused, so the corpus below it is known to
- *  be incomplete until that panel is empty. */
-export const KNOWN_PANELS = ['rejections', 'corpus'] as const;
+ *  registry declares nothing.
+ *
+ *  There were three, and `queue` is what is left. `rejections` (the
+ *  indexer's refusals plus the drifted-status report) went on
+ *  2026-09-10 with the write-back half of the tracker; `corpus` (the
+ *  table of markdown files under docs/design/) went the same day with
+ *  the read half — the corpus index, its parser and the service that
+ *  served them (backlog f5da586c). Both panels described FILES. Under
+ *  "the packet is the doc" the thing worth rendering is the station's
+ *  queue, which this page was already fetching and using only for a
+ *  join that could never match: a `design-doc` packet's subject is
+ *  `boss-platform`, never a doc path, so `reviewsByDocPath` keyed
+ *  nothing and the live packets were invisible on the page that
+ *  exists to show them. */
+export const KNOWN_PANELS = ['queue'] as const;
 export type PanelKey = (typeof KNOWN_PANELS)[number];
 
 /** Which panels to render, in the row's declared order.
@@ -112,41 +126,49 @@ export type PanelKey = (typeof KNOWN_PANELS)[number];
  *
  *  No lens (or a lens declaring no panels) falls back to everything
  *  this surface ships — the behaviour before the column existed. An
- *  install that has not migrated keeps its whole page. */
+ *  install that has not migrated keeps its whole page.
+ *
+ *  A row declaring ONLY keys this build does not know falls back the
+ *  same way, rather than rendering an empty page. That case stopped
+ *  being hypothetical on 2026-09-10: renaming the last panel from
+ *  `corpus` to `queue` left both the live row (`["corpus"]`, authored
+ *  through the API) and the tree's own seed (`["rejections",
+ *  "corpus"]`, 138-station-lens.sql) declaring nothing this build
+ *  ships. A migration moves the live row; the fallback is what makes
+ *  the window between deploy and migrate — and any install that never
+ *  takes the migration — render the page instead of a header over
+ *  blank space. Declaring nothing and declaring only unknowns are the
+ *  same state from the renderer's side: no honourable instruction. */
 export function panelsFor(lens: StationLens | null | undefined): readonly PanelKey[] {
   const declared = lens?.panels;
   if (!declared || declared.length === 0) return KNOWN_PANELS;
   const known = new Set<string>(KNOWN_PANELS);
-  return declared.filter((p): p is PanelKey => known.has(p));
+  const kept = declared.filter((p): p is PanelKey => known.has(p));
+  return kept.length > 0 ? kept : KNOWN_PANELS;
 }
 
-/** Open review packets keyed by the doc path they are about.
+/** The queue's packets, in the order the station handed them over.
  *
- *  The doc path IS the packet's subject id (identity-first Subject),
- *  which is why this join needs no metadata read. A packet whose
- *  subject carries no id is dropped: it is a review of nothing this
- *  page can show a row for. */
-export function reviewsByDocPath(
-  packets: readonly QueuePacket[],
-): Readonly<Record<string, ReviewPacket>> {
-  const byPath: Record<string, ReviewPacket> = {};
-  for (const p of packets) {
-    const path = p.subject?.id;
-    if (!path) continue;
-    // First wins. The queue arrives in the station's declared
-    // discipline (priority, then age), so when two packets somehow
-    // exist for one doc the operator is sent to the one the station
-    // would hand out first — not to whichever the loop saw last.
-    if (byPath[path] === undefined) {
-      byPath[path] = {
-        id: p.id,
-        status: p.status,
-        opened_on: p.opened_on,
-        title: p.title,
-      };
-    }
-  }
-  return byPath;
+ *  This replaced `reviewsByDocPath` on 2026-09-10. That function keyed
+ *  packets by `subject.id` on the belief that a review's subject is
+ *  the doc path it is about — true of the `design-doc-review` packets
+ *  the corpus page opened, and false of every `design-doc` packet the
+ *  station actually holds, whose subject is the literal
+ *  `{"custom","boss-platform"}` its Workflow stamps. So the join
+ *  silently produced an empty map and the page rendered files instead
+ *  of packets. There is no key to join on, which is why the panel
+ *  renders the queue directly rather than joining it to anything.
+ *
+ *  The station's declared discipline (priority, then age) is the
+ *  order; this preserves it rather than sorting again, so what the
+ *  page shows first is what the station would hand out first. */
+export function queueRows(packets: readonly QueuePacket[]): readonly ReviewPacket[] {
+  return packets.map((p) => ({
+    id: p.id,
+    status: p.status,
+    opened_on: p.opened_on,
+    title: p.title,
+  }));
 }
 
 /// Step kind backing the review surface (`step_plugins` row
@@ -156,7 +178,7 @@ export const REVIEW_STEP_KIND = 'review-design';
 /** Where Back returns to from the review surface. Without it the step
  *  surface fell back to the job page — the one place the reviewer was
  *  deliberately not sent (David, feedback 40fe7291). */
-export const BACK_HERE = `from=${encodeURIComponent('/system/design')}&from_label=${encodeURIComponent('Design Review')}`;
+export const BACK_HERE = `from=${encodeURIComponent('/it/design')}&from_label=${encodeURIComponent('Design Review')}`;
 
 /** The route into a review.
  *

@@ -135,7 +135,7 @@ test.describe('feedback triage board', () => {
   test('builds its columns from the Workflow fork, labelled by each next step', async ({
     page,
   }) => {
-    await mountPage(page, '/system/feedback', { titleMatch: /feedback triage/i });
+    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
 
     await expect(page.locator('section[aria-label="Waiting on triage"]')).toBeVisible();
     // One column per disposition, named for the step it opens — not
@@ -156,7 +156,7 @@ test.describe('feedback triage board', () => {
   });
 
   test('sorts each item by its fork step, not a stored column', async ({ page }) => {
-    await mountPage(page, '/system/feedback', { titleMatch: /feedback triage/i });
+    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
 
     const waiting = page.locator('section[aria-label="Waiting on triage"]');
     await expect(waiting).toContainText('Column picker forgets my choice');
@@ -186,7 +186,7 @@ test.describe('feedback triage board', () => {
       return route.fulfill({ json: {} });
     });
 
-    await mountPage(page, '/system/feedback', { titleMatch: /feedback triage/i });
+    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
     const card = page.locator('article', { hasText: 'Column picker forgets my choice' });
     await card.getByLabel('Route this item').selectOption('build');
     await card.getByRole('button', { name: /^route$/i }).click();
@@ -209,7 +209,7 @@ test.describe('feedback triage board', () => {
       return route.fulfill({ json: {} });
     });
 
-    await mountPage(page, '/system/feedback', { titleMatch: /feedback triage/i });
+    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
     await page
       .locator('article', { hasText: 'Column picker forgets my choice' })
       .dragTo(page.locator('section[aria-label="Reproduce and investigate"]'));
@@ -221,7 +221,7 @@ test.describe('feedback triage board', () => {
   });
 
   test('lifting a card offers every route as a drop target', async ({ page }) => {
-    await mountPage(page, '/system/feedback', { titleMatch: /feedback triage/i });
+    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
     await expect(page.locator('.tb-drop-zone')).toHaveCount(0);
 
     const card = page.locator('article', { hasText: 'Column picker forgets my choice' });
@@ -242,7 +242,7 @@ test.describe('feedback triage board', () => {
   });
 
   test('an already-routed card cannot be dragged or re-routed', async ({ page }) => {
-    await mountPage(page, '/system/feedback', { titleMatch: /feedback triage/i });
+    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
 
     const routed = page.locator('section[aria-label="Decide the design"]').locator('article');
     // A completed fork step does not un-complete.
@@ -290,7 +290,7 @@ test.describe('feedback triage board', () => {
       return route.fulfill({ json: {} });
     });
 
-    await mountPage(page, '/system/feedback', { titleMatch: /feedback triage/i });
+    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
 
     const card = page.locator('article', { hasText: 'Filed before the fork' });
     await expect(page.locator('section[aria-label="Waiting on triage"]')).toContainText(
@@ -325,7 +325,7 @@ test.describe('feedback triage board', () => {
     await page.route(/\/api\/jobs\?kind=user-feedback/, (r) =>
       r.fulfill({ json: { data: withFinding, total: 1 } }),
     );
-    await mountPage(page, '/system/feedback', { titleMatch: /feedback triage/i });
+    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
 
     const card = page.locator('article', { hasText: 'Button is unreadable' });
     await expect(card).toContainText('color: inherit on a bar that sets none');
@@ -343,7 +343,7 @@ test.describe('feedback triage board', () => {
       return route.fulfill({ json: {} });
     });
 
-    await mountPage(page, '/system/feedback', { titleMatch: /feedback triage/i });
+    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
     const card = page.locator('article', { hasText: 'Column picker forgets my choice' });
     await card.getByRole('button', { name: /record finding/i }).click();
     await card.getByLabel(/what did you find/i).fill('Root cause: the picker never persists.');
@@ -378,7 +378,7 @@ test.describe('feedback triage board', () => {
     await page.route(/\/api\/jobs\?kind=user-feedback/, (r) =>
       r.fulfill({ json: { data: routed, total: 1 } }),
     );
-    await mountPage(page, '/system/feedback', { titleMatch: /feedback triage/i });
+    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
 
     const column = page.locator('section[aria-label="Decide the design"]');
     await expect(column).toContainText('Generalises past feedback');
@@ -394,7 +394,7 @@ test.describe('feedback triage board', () => {
       return route.fulfill({ json: {} });
     });
 
-    await mountPage(page, '/system/feedback', { titleMatch: /feedback triage/i });
+    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
     const card = page.locator('article', { hasText: 'Column picker forgets my choice' });
     await card.getByRole('button', { name: /hand to agent/i }).click();
 

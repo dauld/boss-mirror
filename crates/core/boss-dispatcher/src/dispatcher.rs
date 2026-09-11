@@ -180,13 +180,13 @@ pub async fn run_loop(
                 // consumer, and it was the last hop losing the marker:
                 // its writes landed `_simulated: false` on simulated
                 // Jobs because nothing here ever set the task-local.
-                let simulated = inner
-                    .get("_simulated")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                // The SAME bit also gates who may be assigned (see
+                // `partition_permits`), so it is threaded into
+                // handle_event explicitly rather than re-read there.
+                let simulated = event_is_simulated(&inner);
                 let outcome = boss_core::sim_origin::with_sim_chain(
                     simulated,
-                    handle_event(&ctx, &subject, &inner),
+                    handle_event(&ctx, &subject, &inner, simulated),
                 )
                 .await;
                 // ACK on success; NAK (→ redeliver) on failure; dead-letter
@@ -205,7 +205,51 @@ pub async fn run_loop(
     Ok(())
 }
 
-async fn handle_event(ctx: &DispatcherCtx, subject: &str, payload: &Value) -> Result<()> {
+/// The assignment-side sim boundary, one checkable question — the exact
+/// mirror of the workforce's `row_is_simulated` (boss-sim/workforce.rs):
+/// `true` only when the event SAYS `_simulated: true`; absent, null,
+/// false, or a mis-typed value all read as REAL.
+///
+/// The mirror direction is load-bearing. "Absent means real" is the
+/// partition's one documented posture, and both halves must agree on
+/// which side an ambiguous packet falls: the workforce reads ambiguous
+/// as real (so the sim never touches it), and if the dispatcher read
+/// ambiguous as SIM instead, an ambiguous operator-gated step would be
+/// refused by the sim workforce AND kept away from every operator —
+/// workable by nobody, a silent conservation leak. Reading it as real
+/// keeps the packet routable; a mis-labeled sim packet reaching a human
+/// is the filing exercise's defect (9c23395c's prevention finding:
+/// exercises must set simulated=true or tear down what they file), and
+/// costs the human a glance, not lost work.
+fn event_is_simulated(payload: &Value) -> bool {
+    payload.get("_simulated").and_then(Value::as_bool) == Some(true)
+}
+
+/// The role that marks an operator identity — a real login/agent, not a
+/// simulated employee. Same literal the sim workforce builds its
+/// excluded-assignee set from (`employees_by_role.get("platform-admin")`
+/// in boss-brewery-engine/src/lib.rs + the live-roster filter in
+/// boss_brewery_sim.rs): the workforce refuses to ACT as these
+/// identities; this side refuses to ROUTE sim work to them. One
+/// partition, two enforcement points.
+const OPERATOR_ROLE: &str = "platform-admin";
+
+/// May a packet from this partition be assigned to an employee with this
+/// role? The one rule of the 9c23395c fix: a SIMULATED packet must never
+/// be assigned to an operator identity — the five `[sim]
+/// decision-routing probe` packets landed in David's real queue through
+/// the owner-preference path because no assignment route checked the
+/// partition. Real packets are untouched in every direction.
+fn partition_permits(simulated: bool, employee_role: &str) -> bool {
+    !simulated || employee_role != OPERATOR_ROLE
+}
+
+async fn handle_event(
+    ctx: &DispatcherCtx,
+    subject: &str,
+    payload: &Value,
+    simulated: bool,
+) -> Result<()> {
     let step: StepEventPayload =
         serde_json::from_value(payload.clone()).context("parsing step payload")?;
     let Some(status) = step.status.as_deref() else {
@@ -276,16 +320,21 @@ async fn handle_event(ctx: &DispatcherCtx, subject: &str, payload: &Value) -> Re
     // this only decides whether the packet arrives pre-nominated or
     // waits in a queue. It is protocol data, so making a step
     // claimable is a Workflow edit rather than a deploy (§9).
-    if step
-        .metadata
-        .as_ref()
-        .and_then(|m| m.get("claimable"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    //
+    // HUMAN-ONLY is the same shape with a stronger reason (c17871fe).
+    // The protocol asked for a PERSON, and every nomination below —
+    // the executor pick, the owner pick, the hash pick — can name an
+    // agent: the executor is one by definition, and the roster's
+    // `platform-admin` holders have included the agent session. On
+    // 2026-09-08 `Kill the old one` (destructive, human_only) reached
+    // the executor that way. So a human-only step is never nominated:
+    // it waits in its role queue, and the jobs API refuses any
+    // non-person who tries to take it. Read off the step's metadata
+    // because that is where materialisation put the declaration.
+    if let Some(reason) = left_for_role_queue(step.metadata.as_ref()) {
         debug!(
             job_id,
-            step_id, "step is claimable — leaving it for its role queue"
+            step_id, reason, "step is left for its role queue, not nominated"
         );
         return Ok(());
     }
@@ -355,6 +404,7 @@ async fn handle_event(ctx: &DispatcherCtx, subject: &str, payload: &Value) -> Re
         .map(|t| t.decision_shaped)
         .unwrap_or(true);
     if let Some(executor) = executor_for(
+        simulated,
         decision_shaped,
         std::env::var("BOSS_DISPATCH_EXECUTOR_ID").ok().as_deref(),
         std::env::var("BOSS_DISPATCH_EXECUTOR_ROLES")
@@ -369,7 +419,38 @@ async fn handle_event(ctx: &DispatcherCtx, subject: &str, payload: &Value) -> Re
         );
         return Ok(());
     }
-    let chosen = pick_employee_with_role_fallback(ctx, &role_candidates, step_id).await?;
+    // A DECISION-SHAPED step prefers the packet OWNER when the owner
+    // holds the authority (be264fa2). The owner is fetched here rather
+    // than carried on the event — the step payload has no owner_id — and
+    // this is the rare human path, not the hot per-step assign. Every
+    // failure to learn the owner or their eligibility falls through to
+    // the role pick below: a decision that reaches a role holder is
+    // exactly the prior behavior, never worse.
+    if decision_shaped {
+        let owner = match fetch_job_owner(ctx, job_id).await {
+            Ok(o) => o,
+            Err(e) => {
+                debug!(job_id, step_id, error = %e, "owner lookup failed; using the role pick");
+                None
+            }
+        };
+        let owner_holds = match owner.as_deref() {
+            Some(o) => owner_is_active_holder(ctx, o, &role_candidates, simulated)
+                .await
+                .unwrap_or(false),
+            None => false,
+        };
+        if let Some(owner_id) = owner_assignee(decision_shaped, owner.as_deref(), owner_holds) {
+            assign(ctx, job_id, step_id, &owner_id).await?;
+            debug!(
+                job_id,
+                step_id, owner_id, "decision-shaped step assigned to its packet owner"
+            );
+            return Ok(());
+        }
+    }
+    let chosen =
+        pick_employee_with_role_fallback(ctx, &role_candidates, step_id, simulated).await?;
     let Some((emp_id, role_used)) = chosen else {
         // A role IS required (role_candidates is non-empty) but no active
         // holder was found. This is virtually always transient: at sim start
@@ -380,13 +461,18 @@ async fn handle_event(ctx: &DispatcherCtx, subject: &str, payload: &Value) -> Re
         // roster warms the reassignment succeeds, and the assignee-already-set
         // guard above keeps redelivery idempotent. A genuinely unfillable role
         // exhausts the budget and dead-letters loudly — the correct outcome.
+        // A SIMULATED step whose only role holders are operator identities
+        // is unfillable BY DESIGN (`partition_permits`): it dead-letters
+        // loudly instead of polluting a real queue, and the exercise that
+        // filed it learns immediately.
         // The old `Ok(())` here dropped the step on the floor: it was never
         // assigned, so its Job never closed, silently losing work (a
         // conservation violation). This was the brewery day-1 ap-payment-run
         // hang — the first AP run opened before the roster was queryable.
         anyhow::bail!(
             "no eligible employee for step {step_id} (job {job_id}); \
-             candidates={role_candidates:?} — NAK for redelivery once the roster warms"
+             candidates={role_candidates:?} simulated={simulated} — \
+             NAK for redelivery once the roster warms"
         );
     };
     assign(ctx, job_id, step_id, &emp_id).await?;
@@ -411,18 +497,41 @@ async fn handle_event(ctx: &DispatcherCtx, subject: &str, payload: &Value) -> Re
 /// is testable without a roster or an env-mutating test. `Some(id)` =
 /// assign the executor; `None` = fall through to the human pick.
 ///
-/// Never fires for a decision-shaped step, never fires without a
-/// configured executor, and only fires when one of the step's candidate
-/// roles is a role the executor is declared to execute for — a brewery
-/// `brewer` step must not land on the platform agent just because the
-/// agent exists.
+/// Never fires for a simulated step (the executor is a REAL registered
+/// agent — a deployment fact, not a sim identity — and the 9c23395c rule
+/// is that sim packets never enter a real actor's queue), never fires
+/// for a decision-shaped step, never fires without a configured
+/// executor, and only fires when one of the step's candidate roles is a
+/// role the executor is declared to execute for — a brewery `brewer`
+/// step must not land on the platform agent just because the agent
+/// exists.
+/// Why a ready step is left in its role queue instead of being
+/// nominated to one actor, or `None` to nominate as usual. Two
+/// declarations on the materialized step say so: `claimable` (the
+/// protocol asked for a queue) and `human_only` (the protocol asked
+/// for a person — c17871fe; read through the one reader for that key,
+/// `boss_jobs::human_only::declared`, in both spellings the live
+/// registry carries). Pure so the rule is testable without an event.
+fn left_for_role_queue(metadata: Option<&Value>) -> Option<&'static str> {
+    let metadata = metadata?;
+    if boss_jobs::human_only::declared(metadata) {
+        return Some("human-only");
+    }
+    metadata
+        .get("claimable")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        .then_some("claimable")
+}
+
 fn executor_for(
+    simulated: bool,
     decision_shaped: bool,
     executor_id: Option<&str>,
     executor_roles: Option<&str>,
     role_candidates: &[&str],
 ) -> Option<String> {
-    if decision_shaped {
+    if simulated || decision_shaped {
         return None;
     }
     let id = executor_id?.trim();
@@ -436,17 +545,54 @@ fn executor_for(
     if eligible { Some(id.to_string()) } else { None }
 }
 
+/// A decision-shaped step routes to the packet OWNER when the owner is
+/// an active holder of one of its authority roles — the owner is who the
+/// work is *for*. Pure so the routing rule is testable without a roster
+/// or a live packet, exactly like `executor_for`.
+///
+/// WHY (be264fa2). A decision step declares an `authority_role` and no
+/// assignee, so the dispatcher picked a role holder by
+/// `stable_hash(step_id) % holders`. When a role has more than one
+/// holder — `platform-admin` is held by both David and the agent — the
+/// hash lands on the agent for ~half the steps, and the packet's
+/// `owner_id` was never consulted. Nine design decisions filed 08-28/29
+/// routed to the agent, who cannot answer them, and never reached the
+/// owner's queue. Triaging an item to a decision is an explicit
+/// statement that *someone else* must choose; handing it back to a hash
+/// pick is exactly backwards. The owner is on every packet and is the
+/// right default when they hold the authority.
+///
+/// `None` = fall through to the role pick (no owner, owner holds no
+/// candidate role, or the step is not a decision): today's behavior
+/// unchanged. Only fires for a decision-shaped step — the caller gates
+/// on that, and passes it here so the rule reads in one place.
+fn owner_assignee(
+    decision_shaped: bool,
+    owner_id: Option<&str>,
+    owner_holds_candidate_role: bool,
+) -> Option<String> {
+    if !decision_shaped || !owner_holds_candidate_role {
+        return None;
+    }
+    let id = owner_id?.trim();
+    if id.is_empty() {
+        return None;
+    }
+    Some(id.to_string())
+}
+
 async fn pick_employee_with_role_fallback(
     ctx: &DispatcherCtx,
     role_candidates: &[&str],
     step_id: &str,
+    simulated: bool,
 ) -> Result<Option<(String, String)>> {
     if role_candidates.is_empty() {
-        let chosen = pick_employee(ctx, None, step_id).await?;
+        let chosen = pick_employee(ctx, None, step_id, simulated).await?;
         return Ok(chosen.map(|id| (id, String::new())));
     }
     for r in role_candidates {
-        if let Some(id) = pick_employee(ctx, Some(r), step_id).await? {
+        if let Some(id) = pick_employee(ctx, Some(r), step_id, simulated).await? {
             return Ok(Some((id, (*r).to_string())));
         }
     }
@@ -458,6 +604,118 @@ struct Employee {
     id: String,
     role: String,
     status: String,
+}
+
+/// Roster cache TTL: short enough that a new hire becomes assignable
+/// within ~one sim-day at warp; long enough to keep the roster off the
+/// hot per-assignment path. One definition, shared by every reader.
+const ROSTER_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn roster_is_stale(cache: &RosterCache) -> bool {
+    cache
+        .fetched_at
+        .map(|t| t.elapsed() >= ROSTER_TTL)
+        .unwrap_or(true)
+}
+
+/// The active roster, fetched from the people API. The one HTTP call
+/// every roster reader shares; the TTL cache in `ctx.roster` is what
+/// keeps it off the hot path.
+async fn fetch_active_roster(ctx: &DispatcherCtx) -> Result<Vec<Employee>> {
+    let url = format!("{}/api/people", ctx.people_api_url.trim_end_matches('/'));
+    let resp = ctx
+        .client
+        .get(&url)
+        .header("x-sim-origin", sim_origin_value())
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?
+        .error_for_status()
+        .with_context(|| format!("GET {url}"))?;
+    resp.json().await.context("decode /api/people response")
+}
+
+/// Is `owner_id` an active holder of any of `roles`? Reads the SAME
+/// TTL-cached roster `pick_employee` uses (same `roster_is_stale` +
+/// `fetch_active_roster`), so the owner check and the role pick can
+/// never see a different roster.
+async fn owner_is_active_holder(
+    ctx: &DispatcherCtx,
+    owner_id: &str,
+    roles: &[&str],
+    simulated: bool,
+) -> Result<bool> {
+    let mut cache = ctx.roster.lock().await;
+    if roster_is_stale(&cache) {
+        cache.employees = fetch_active_roster(ctx).await?;
+        cache.fetched_at = Some(std::time::Instant::now());
+    }
+    Ok(is_active_holder(
+        &cache.employees,
+        owner_id,
+        roles,
+        simulated,
+    ))
+}
+
+/// The membership question, pure: is `owner_id` an ACTIVE employee whose
+/// role is one of `roles`, reachable from this partition? An inactive
+/// holder, a wrong role, a different id, or an operator identity on a
+/// SIMULATED packet all read false — the same eligibility
+/// `pick_employee`'s candidate filter uses, so the owner is preferred
+/// only when they could have been picked anyway. (The partition leg is
+/// the 9c23395c fix: the five `[sim]` probes reached emp-david through
+/// exactly this owner-preference route.)
+fn is_active_holder(
+    employees: &[Employee],
+    owner_id: &str,
+    roles: &[&str],
+    simulated: bool,
+) -> bool {
+    employees.iter().any(|e| {
+        e.status == "active"
+            && e.id == owner_id
+            && roles.contains(&e.role.as_str())
+            && partition_permits(simulated, &e.role)
+    })
+}
+
+/// The packet's `owner_id`, read from the jobs API. `None` for any shape
+/// the owner-routing must not act on — missing job, absent/empty owner —
+/// so the decision falls through to a role holder, never to nobody.
+async fn fetch_job_owner(ctx: &DispatcherCtx, job_id: &str) -> Result<Option<String>> {
+    let url = format!(
+        "{}/api/jobs/{}",
+        ctx.jobs_api_url.trim_end_matches('/'),
+        job_id
+    );
+    let body: serde_json::Value = ctx
+        .client
+        .get(&url)
+        .header("x-sim-origin", sim_origin_value())
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?
+        .error_for_status()
+        .with_context(|| format!("GET {url}"))?
+        .json()
+        .await
+        .context("decode job response")?;
+    Ok(owner_id_from_job_body(&body))
+}
+
+/// Read `owner_id` out of a job response, pure. Tolerates the two shapes
+/// the jobs API returns a job in — bare, or wrapped in `{data: ...}` —
+/// and treats an absent or blank owner as `None` so the routing falls
+/// through rather than assigning to an empty id.
+fn owner_id_from_job_body(body: &serde_json::Value) -> Option<String> {
+    body.get("data")
+        .unwrap_or(body)
+        .get("owner_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// FNV-1a hash of a byte slice (64-bit). A fixed, dependency-free, fully
@@ -535,43 +793,42 @@ async fn pick_employee(
     ctx: &DispatcherCtx,
     role: Option<&str>,
     step_id: &str,
+    simulated: bool,
 ) -> Result<Option<String>> {
-    // Short enough that a new hire becomes assignable within ~one sim-day
-    // at warp; long enough to remove the per-assignment fetch entirely.
-    const ROSTER_TTL: std::time::Duration = std::time::Duration::from_secs(10);
     let mut cache = ctx.roster.lock().await;
-    let fresh = cache
-        .fetched_at
-        .map(|t| t.elapsed() < ROSTER_TTL)
-        .unwrap_or(false);
-    if !fresh {
-        let url = format!("{}/api/people", ctx.people_api_url.trim_end_matches('/'));
-        let resp = ctx
-            .client
-            .get(&url)
-            .header("x-sim-origin", sim_origin_value())
-            .send()
-            .await
-            .with_context(|| format!("GET {url}"))?
-            .error_for_status()
-            .with_context(|| format!("GET {url}"))?;
-        cache.employees = resp.json().await.context("decode /api/people response")?;
+    if roster_is_stale(&cache) {
+        cache.employees = fetch_active_roster(ctx).await?;
         cache.fetched_at = Some(std::time::Instant::now());
     }
-    let mut candidates: Vec<&Employee> = cache
-        .employees
-        .iter()
-        .filter(|e| e.status == "active")
-        .filter(|e| role.map(|r| e.role == r).unwrap_or(true))
-        .collect();
-    // Stable candidate ordering so the index below is reproducible.
-    candidates.sort_by(|a, b| a.id.cmp(&b.id));
+    let candidates = eligible_candidates(&cache.employees, role, simulated);
     if candidates.is_empty() {
         // No eligible holder — preserve the None contract; never `% 0`.
         return Ok(None);
     }
     let idx = pick_index_for(ctx.strategy, step_id, candidates.len());
     Ok(candidates.get(idx).map(|e| e.id.clone()))
+}
+
+/// The candidate pool, pure: active, role-matched (when a role
+/// constrains the step), reachable from the packet's partition
+/// (`partition_permits` — a SIMULATED packet's pool never contains an
+/// operator identity), in stable id order so the strategy index above is
+/// reproducible. Factored out of `pick_employee` so the eligibility
+/// rule — the surface the 9c23395c defect lived on — is testable
+/// without the roster cache / HTTP.
+fn eligible_candidates<'a>(
+    employees: &'a [Employee],
+    role: Option<&str>,
+    simulated: bool,
+) -> Vec<&'a Employee> {
+    let mut candidates: Vec<&Employee> = employees
+        .iter()
+        .filter(|e| e.status == "active")
+        .filter(|e| role.map(|r| e.role == r).unwrap_or(true))
+        .filter(|e| partition_permits(simulated, &e.role))
+        .collect();
+    candidates.sort_by(|a, b| a.id.cmp(&b.id));
+    candidates
 }
 
 /// PUT /api/jobs/{job_id}/steps/{step_id} with the assignee.
@@ -631,10 +888,46 @@ async fn assign(ctx: &DispatcherCtx, job_id: &str, step_id: &str, emp_id: &str) 
 
 #[cfg(test)]
 mod tests {
-    use super::{executor_for, pick_index, pick_index_for, stable_hash};
+    use super::{
+        eligible_candidates, event_is_simulated, executor_for, is_active_holder,
+        left_for_role_queue, owner_assignee, owner_id_from_job_body, partition_permits, pick_index,
+        pick_index_for, stable_hash,
+    };
     use crate::config::AssignmentStrategy;
     use boss_jobs::step_registry::StepRegistry;
     use std::collections::HashMap;
+
+    /// A human-only step is never nominated — not to the executor, not
+    /// by the hash pick — it waits in its role queue for a person to
+    /// claim (c17871fe). Read off the materialized step's metadata, the
+    /// same way `claimable` is, in both spellings the live registry
+    /// carries.
+    #[test]
+    fn a_human_only_step_is_left_for_its_role_queue() {
+        use serde_json::json;
+        assert_eq!(
+            left_for_role_queue(Some(&json!({ "human_only": "true" }))),
+            Some("human-only")
+        );
+        assert_eq!(
+            left_for_role_queue(Some(&json!({ "human_only": true }))),
+            Some("human-only")
+        );
+        assert_eq!(
+            left_for_role_queue(Some(&json!({ "claimable": true }))),
+            Some("claimable")
+        );
+        // Neither declared: the step is nominated as before.
+        assert_eq!(
+            left_for_role_queue(Some(&json!({ "human_only": false }))),
+            None
+        );
+        assert_eq!(
+            left_for_role_queue(Some(&json!({ "authority_role": "platform-admin" }))),
+            None
+        );
+        assert_eq!(left_for_role_queue(None), None);
+    }
 
     /// FNV-1a is a fixed function of the input bytes — the SAME bytes hash to
     /// the SAME value on every call, host, and process (no per-process seed).
@@ -673,6 +966,7 @@ mod tests {
         assert_eq!(
             executor_for(
                 false,
+                false,
                 Some("claude@algedonic.dev"),
                 Some("platform-admin"),
                 &platform
@@ -682,6 +976,7 @@ mod tests {
         // A DECISION never goes to the executor, whatever the config.
         assert_eq!(
             executor_for(
+                false,
                 true,
                 Some("claude@algedonic.dev"),
                 Some("platform-admin"),
@@ -695,6 +990,7 @@ mod tests {
         assert_eq!(
             executor_for(
                 false,
+                false,
                 Some("claude@algedonic.dev"),
                 Some("platform-admin"),
                 &brewer
@@ -703,14 +999,209 @@ mod tests {
         );
         // Unconfigured deployments behave exactly as before.
         assert_eq!(
-            executor_for(false, None, Some("platform-admin"), &platform),
+            executor_for(false, false, None, Some("platform-admin"), &platform),
             None
         );
         assert_eq!(
-            executor_for(false, Some(""), Some("platform-admin"), &platform),
+            executor_for(false, false, Some(""), Some("platform-admin"), &platform),
             None
         );
-        assert_eq!(executor_for(false, Some("x"), None, &platform), None);
+        assert_eq!(executor_for(false, false, Some("x"), None, &platform), None);
+    }
+
+    /// The owner-routing pick (be264fa2), in every direction it must and
+    /// must not fire.
+    #[test]
+    fn a_decision_routes_to_its_owner_only_when_the_owner_holds_the_role() {
+        // The case the rule exists for: a decision, owner holds the role.
+        assert_eq!(
+            owner_assignee(true, Some("emp-david"), true),
+            Some("emp-david".to_string())
+        );
+        // The owner does NOT hold a candidate role — they cannot decide
+        // it, so fall through to the role pick (a car owned by someone
+        // without finance authority must not park a finance verdict on
+        // them, unclaimable).
+        assert_eq!(owner_assignee(true, Some("emp-david"), false), None);
+        // NOT a decision — executable work uses the executor / role pick,
+        // never the owner. This is what keeps `build` inheritance intact.
+        assert_eq!(owner_assignee(false, Some("emp-david"), true), None);
+        // No owner, or an empty owner id: fall through, unchanged.
+        assert_eq!(owner_assignee(true, None, true), None);
+        assert_eq!(owner_assignee(true, Some(""), true), None);
+        assert_eq!(owner_assignee(true, Some("  "), true), None);
+    }
+
+    /// The job-body parse, over the two shapes the API returns and the
+    /// blanks that must read as no-owner.
+    #[test]
+    fn owner_id_reads_bare_and_wrapped_job_bodies() {
+        use serde_json::json;
+        assert_eq!(
+            owner_id_from_job_body(&json!({"owner_id": "emp-david"})),
+            Some("emp-david".to_string())
+        );
+        assert_eq!(
+            owner_id_from_job_body(&json!({"data": {"owner_id": "emp-david"}})),
+            Some("emp-david".to_string())
+        );
+        assert_eq!(
+            owner_id_from_job_body(&json!({"kind": "backlog-item"})),
+            None
+        );
+        assert_eq!(owner_id_from_job_body(&json!({"owner_id": null})), None);
+        assert_eq!(owner_id_from_job_body(&json!({"owner_id": "   "})), None);
+    }
+
+    /// Owner eligibility is the SAME filter pick_employee uses: active,
+    /// id-matched, role-matched.
+    #[test]
+    fn is_active_holder_matches_id_role_and_active_status() {
+        let emp = |id: &str, role: &str, status: &str| super::Employee {
+            id: id.into(),
+            role: role.into(),
+            status: status.into(),
+        };
+        let roster = vec![
+            emp("emp-david", "platform-admin", "active"),
+            emp("emp-gone", "platform-admin", "inactive"),
+            emp("emp-brewer", "brewer", "active"),
+        ];
+        let admin = ["platform-admin"];
+        assert!(is_active_holder(&roster, "emp-david", &admin, false));
+        assert!(!is_active_holder(&roster, "emp-gone", &admin, false)); // inactive
+        assert!(!is_active_holder(&roster, "emp-brewer", &admin, false)); // wrong role
+        assert!(!is_active_holder(&roster, "emp-ghost", &admin, false)); // not on roster
+        assert!(!is_active_holder(&roster, "emp-david", &[], false)); // no candidate roles
+    }
+
+    /// The assignment-side sim boundary predicate mirrors the workforce's
+    /// `row_is_simulated` EXACTLY: only a literal `_simulated: true` reads
+    /// as simulated; absent, null, false, or a mis-typed value all read
+    /// as REAL. See `event_is_simulated` for why the mirror direction is
+    /// load-bearing (the two halves must agree on which side an ambiguous
+    /// packet falls, or it becomes workable by nobody).
+    #[test]
+    fn the_assignment_boundary_fails_closed_on_shape() {
+        use serde_json::json;
+        assert!(event_is_simulated(&json!({"_simulated": true})));
+        assert!(!event_is_simulated(&json!({"_simulated": false})));
+        assert!(!event_is_simulated(&json!({})), "absent means real");
+        assert!(!event_is_simulated(&json!({"_simulated": null})));
+        assert!(
+            !event_is_simulated(&json!({"_simulated": "true"})),
+            "a string is not a claim - fail closed on shape too"
+        );
+    }
+
+    /// The partition rule itself: only the (simulated, operator-role)
+    /// pair is refused. Real packets reach operators; sim packets reach
+    /// every non-operator role.
+    #[test]
+    fn the_partition_refuses_exactly_sim_cross_operator() {
+        assert!(!partition_permits(true, "platform-admin"));
+        assert!(partition_permits(false, "platform-admin"));
+        assert!(partition_permits(true, "brewer"));
+        assert!(partition_permits(false, "brewer"));
+    }
+
+    fn partition_roster() -> Vec<super::Employee> {
+        let emp = |id: &str, role: &str, status: &str| super::Employee {
+            id: id.into(),
+            role: role.into(),
+            status: status.into(),
+        };
+        vec![
+            emp("emp-aa-100", "brewer", "active"),
+            emp("emp-agent", "platform-admin", "active"),
+            emp("emp-david", "platform-admin", "active"),
+        ]
+    }
+
+    /// The 9c23395c defect, pinned: a SIMULATED packet's step is never
+    /// assigned to an operator identity, even when the operator is the
+    /// only holder of the step's authority role. The candidate pool
+    /// empties instead (→ the caller's no-eligible-employee path, which
+    /// dead-letters loudly) rather than polluting a real queue.
+    #[test]
+    fn a_sim_packet_never_reaches_an_operator_even_holding_the_role() {
+        let roster = partition_roster();
+        let ids = |v: Vec<&super::Employee>| v.iter().map(|e| e.id.clone()).collect::<Vec<_>>();
+        // The exact probe shape: authority_role=platform-admin, sim event.
+        assert!(
+            eligible_candidates(&roster, Some("platform-admin"), true).is_empty(),
+            "sim packets must never route to operator identities"
+        );
+        // Unconstrained sim steps still reach the sim-workable roster.
+        assert_eq!(
+            ids(eligible_candidates(&roster, None, true)),
+            vec!["emp-aa-100"]
+        );
+        // Non-operator roles are untouched by the partition.
+        assert_eq!(
+            ids(eligible_candidates(&roster, Some("brewer"), true)),
+            vec!["emp-aa-100"]
+        );
+        // And a sim OWNER who is an operator is no longer an active
+        // holder for a sim packet — the owner-preference path (the route
+        // the five [sim] probes actually took) closes with the same rule.
+        assert!(!is_active_holder(
+            &roster,
+            "emp-david",
+            &["platform-admin"],
+            true
+        ));
+    }
+
+    /// REAL packets are byte-for-byte unaffected: same candidates, same
+    /// stable ordering, operators fully reachable.
+    #[test]
+    fn a_real_packet_reaches_operators_exactly_as_before() {
+        let roster = partition_roster();
+        let ids = |v: Vec<&super::Employee>| v.iter().map(|e| e.id.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            ids(eligible_candidates(&roster, Some("platform-admin"), false)),
+            vec!["emp-agent", "emp-david"]
+        );
+        assert_eq!(
+            ids(eligible_candidates(&roster, None, false)),
+            vec!["emp-aa-100", "emp-agent", "emp-david"]
+        );
+        assert!(is_active_holder(
+            &roster,
+            "emp-david",
+            &["platform-admin"],
+            false
+        ));
+    }
+
+    /// The executor is a REAL registered agent (a deployment fact, not a
+    /// sim identity): a simulated packet never routes to it, even when
+    /// the step is executable and the role matches.
+    #[test]
+    fn a_sim_packet_never_reaches_the_executor() {
+        let platform = ["platform-admin"];
+        assert_eq!(
+            executor_for(
+                true,
+                false,
+                Some("claude@algedonic.dev"),
+                Some("platform-admin"),
+                &platform
+            ),
+            None
+        );
+        // Real packets keep the executor path exactly as before.
+        assert_eq!(
+            executor_for(
+                false,
+                false,
+                Some("claude@algedonic.dev"),
+                Some("platform-admin"),
+                &platform
+            ),
+            Some("claude@algedonic.dev".to_string())
+        );
     }
 
     /// An UNKNOWN kind counts as a decision: the registry lookup that

@@ -1,0 +1,110 @@
+# ---------------------------------------------------------------------------
+# protocol-retro — the standing review of how the protocols themselves
+# are working, at v7 live.
+#
+# The `gaps` step is the one that earned the version bumps: CLAUDE.md's
+# standing check is "what did I do by hand, how often?", and frequency
+# decides rather than memorability. collect → analyze → gaps → report →
+# review, with `cancelled` for a period with nothing to say.
+#
+# Authored live through the API and never written back until 2026-09-10,
+# which is the gap `infra/lint/the-live-protocols-are-the-authored-
+# protocols.sh` now closes. Rendered from the live row rather than
+# retyped; the seed is insert-if-missing, so the live lineage keeps its
+# own version and this file is what a FRESH database gets.
+#
+# `owning_team` below records the live row's value. The bundle loader
+# stamps every row it reads with the bundle's default (`platform`) and
+# ignores the key, so a fresh database gets `platform` — the one field
+# of the row the tree cannot currently express.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "protocol-retro"
+label = "Protocol retrospective"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "it"
+description = "Periodic review of how the work actually ran: train timings AND whether the protocols we have still fit the work we did. Measures stage durations and red rounds from train jobs, cadence_firings and the telemetry logbook; names the bottleneck; asks what was done by hand that should not have been; proposes protocol changes for ratification.\n\nv3 ADDS THE `gaps` STEP, AND IT IS THE POINT OF THE RETRO NOW. v2 measured timings only, which meant it could report a slow pipeline in perfect detail and never notice that the slowness was seven manual steps nobody had turned into a verb.\n\nTHE FAILURE THAT BOUGHT THIS (2026-08-26). A join-a-node protocol was authored that day for a task performed TWICE IN A FORTNIGHT, while launching a gate — seven manual steps, performed TEN TIMES THAT DAY — stayed hand-cranked. The protocol got built for the MEMORABLE task and skipped for the FREQUENT one. On the same day protocol-experiment had to go v4 then v5 mid-use because its arms could only be workflow versions, and the gate-runner manifest was found asking operators in a COMMENT to keep a ConfigMap in sync with the tree, which it had not been for at least a day.\n\nTHE TEST IS A COUNT, NOT A FEELING. How many times has this been done by hand? Something done ten times in a day with no protocol is a gap however easy each instance felt; something done twice a month is usually not, however badly it went the time it went badly. Difficulty is what makes work memorable and frequency is what makes it expensive, and the retro exists to stop the first from crowding out the second.\n\nA protocol that had to be edited mid-use is also a finding, not an embarrassment: it means the work moved and the protocol did not. Protocols are cheap — publish fast, edit often — so `protocol_updates` naming three is a healthy retro, and naming none across a busy window is worth a second look rather than a pass mark.\n\nv2 added the terminals v1 lacked (the boot viability lint refused to start with v1 active — incident 2026-08-13)."
+metadata = { surfaces = ["system-design"] }
+
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+title_template = "Retro window opens"
+
+[[workflow.step]]
+title = "collect"
+kind = "task"
+ready_when = "steps.opened.done"
+title_template = "Collect train and cadence timings"
+metadata_defaults = { human_only = false, procedure = "Gather NUMBERS, not impressions. Every source below already exists and answers without being asked nicely:\n  - GET /api/workflows/{kind}/terminal-report - per workflow VERSION: total packets, status split, cycle time (median and p90 with a sample count), and the outcome breakdown. This is how a procedure change is compared against the versions before it instead of argued about.\n  - GET /api/jobs?kind=gate-run - the verdict split. `lost` matters as much as `failed`: it means the environment died before saying anything, so there is no evidence either way.\n  - Packets carrying a `correction`, `proof_note` or `awaiting_proof` field - these are errors and caveats recorded against the packet they belong to, so they can be counted instead of remembered.\n  - `boss prove <car> --recheck` across recently-closed cars - a proof that no longer holds is a reliability signal, and the cause is usually more interesting than the failure.\n\nSTATE THE WINDOW AND WHAT IS NOT COUNTABLE. As of 2026-08-28 the biggest reliability signal has NO data source: how often a question was answered by a fresh shell pipeline rather than a verb. Half of one session's fourteen errors were exactly that, and none of them are in the audit log. Say so in `sources` rather than letting the countable things stand in for the whole picture." }
+fields = [
+  { name = "window", field_type = "string", required = true },
+  { name = "trains_covered", field_type = "string", required = true },
+  { name = "sources", field_type = "string" },
+]
+
+[[workflow.step]]
+title = "analyze"
+kind = "task"
+ready_when = "steps.collect.done"
+title_template = "Assess bottlenecks"
+metadata_defaults = { human_only = false, procedure = "Find where time and correctness actually went. Two questions:\n\nWHERE IS THE BOTTLENECK? Stage timings across the window, not the worst single memory. On 2026-08-28 the bottleneck was cars sitting at `proven` - merged, deployed, and unverified - which is invisible on the Train Yard because it partitions into open trains, arrived trains and the dock, and a merged-but-unproven car is none of those.\n\nCLASSIFY THE ERRORS, because the distribution is the finding and it is never what recall says. The classification that worked on 2026-08-28, over fourteen errors in one session:\n  A. an ad-hoc check answered confidently and WRONGLY (7 - half of everything)\n  B. a value typed instead of read (2)\n  C. acted on state that was never declared (2)\n  D. asserted about another environment without checking (2)\n  E. a test whose assertion was wrong (1)\nNote the DIRECTION of each failure: five of the seven Class A errors answered 'no' for reasons unrelated to the question. A check that fails closed reads as a finding; one that fails open reads as success. Both are worse than an error.\n\nAND NOTE WHERE THEY HAPPENED. Every Class A and B failure that day occurred in the SHELL; not one occurred inside a tested verb. If that holds across windows it is the single most useful fact this retro produces." }
+fields = [
+  { name = "bottleneck", field_type = "string", required = true },
+  { name = "stage_timings", field_type = "string", required = true },
+  { name = "red_rounds", field_type = "string" },
+]
+
+[[workflow.step]]
+title = "gaps"
+kind = "task"
+ready_when = "steps.analyze.done"
+title_template = "Protocol gaps in this window"
+authority_role = "platform-admin"
+metadata_defaults = { human_only = false, procedure = "FREQUENCY DECIDES, NOT MEMORABILITY. The standing question is: what did I do by hand, and how many times? Count it, rank it, and let the top of the list choose itself. The most annoying task and the most repeated task are rarely the same one, and only the second is worth a verb.\n\nTHE OUTPUT IS FILED WORK, NOT PROSE. For each candidate, file a backlog-item carrying the COUNT and the failure it caused, and record the ids in `protocol_updates`. A retro whose proposals live only in its own report is a retro nobody acts on - on 2026-08-27 one produced four proposals and two were still unfiled a day later.\n\nPROMOTE A REPEATED HAND-CHECK INTO A VERB WITH TESTS. This is the mechanism that demonstrably works: three verbs shipped on 2026-08-28 and each retired a failure class AND caught a real error on first use - `boss park` refused a car whose branch had moved past its receipt, `boss prove` refused a stale binary, `boss publish` caught a wrong assertion in its own test. A verb is reliable because it is tested code; a shell pipeline written fresh per question is not, and it answers confidently either way.\n\nPREFER FIXING AN EXISTING PROTOCOL TO ADDING ONE. The codebase is supposed to shrink, and that applies to the registry too. Before proposing a new kind, check whether one already covers it and is merely undescribed or untriggered - this workflow itself was in exactly that state until v4: active since 2026-08-13, run three times, always by hand, with no procedure on any step.\n\nASK WHAT COULD NOT BE MEASURED, and file that too. An unmeasurable failure class stays unmeasured until someone builds the instrument; naming it is how that gets prioritised." }
+fields = [
+  { name = "repeated_manual_work", field_type = "string", required = true },
+  { name = "protocol_gaps", field_type = "string", required = true },
+  { name = "protocol_updates", field_type = "string", required = true },
+  { name = "verbs_filed", field_type = "string" },
+]
+
+[[workflow.step]]
+title = "report"
+kind = "task"
+ready_when = "steps.gaps.done"
+title_template = "Write the retro report"
+metadata_defaults = { human_only = false, procedure = "Write what a reader who was not there needs: the window, the numbers, the classification, and the filed ids. Quote counts rather than adjectives - 'half of fourteen errors were ad-hoc shell checks' survives being reread in a month; 'reliability was poor' does not.\n\nSEPARATE WHAT IS ALREADY DONE FROM WHAT IS BEING ASKED FOR. The sign-off that follows is a person's time, and it is wasted re-reading decisions that were already taken and shipped during the window.\n\nTHEN WRITE `context_md` ONTO THE `review` STEP. This is not optional and it is not a nicety: the UI renders THE STEP THE READER IS ON, so a sign-off step carrying only `authority_role` is an empty screen, whatever the work steps hold.\n\nMEASURED, three times in a row. On 2026-08-28 retro fb9cd063 opened empty for David: collect/analyze/gaps/report carried 6,654 characters between them and `review` carried 14. It had been hand-patched on an earlier retro, treated as done, and never formalised — which is why it happened again, and again. The `gaps` step of this very workflow says frequency decides rather than memorability; a thing hand-patched twice is exactly what that means.\n\nWHAT context_md MUST CONTAIN, so the reviewer can decide without opening anything else: what they are signing off, the finding in one line, the numbers, what was already done during the window versus what is being asked for, and the filed ids. If the honest answer is 'nothing needs deciding except the sign-off itself', say that first — a reviewer's scarcest input is re-reading decisions already taken.\n\nTHE CONSTRAINT LIVES HERE, NOT ON THE SIGN-OFF. `sign_off_context` is REQUIRED on THIS step, so this step cannot complete without it — and `review` only becomes ready once this completes. The reviewer therefore cannot be handed an empty packet, because the packet cannot reach them until the context exists.\n\nDavid, 2026-08-28: \"The constraint to have the necessary info filled in for me should be in the previous step.\" That is the correction to a wrong reading on my part — required metadata is validated AT COMPLETION, which is useless on the sign-off step itself (it would refuse only after the human had already opened nothing) and exactly right one step earlier." }
+fields = [
+  { name = "report", field_type = "string", required = true },
+  { name = "proposed_changes", field_type = "string", required = true },
+  { name = "sign_off_context", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "review"
+kind = "sign-off"
+ready_when = "steps.report.done"
+title_template = "Ratify or decline the proposals"
+authority_role = "platform-admin"
+metadata_defaults = { procedure = "A HUMAN READS THIS STEP AND NOTHING ELSE. Whatever the packet's other steps hold, the reviewer sees what is on THIS one — so it must arrive carrying `context_md`, written by the `report` step before this becomes ready.\n\nIF YOU ARE LOOKING AT THIS STEP AND IT IS EMPTY, that is the defect (filed 02274573), not the retro. The content is on the collect/analyze/gaps/report steps; read it there, and say so, because an empty sign-off has now been shipped three times and each time the fix was a hand patch rather than a protocol change.\n\nNOTE FOR EVERY OTHER KIND: 14 of the 16 workflows with a sign-off step declare no content field at all, so this is a product defect rather than a retro one — a brewery owner approving a tap-launch sees the same empty screen. The durable fix is a dispatcher rule projecting the work steps onto the sign-off, which fixes all sixteen at once." }
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
+
+[[workflow.step]]
+title = "recorded"
+kind = "outcome"
+ready_when = "steps.review.done"
+title_template = "Recorded"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "recorded" }
+
+[[workflow.step]]
+title = "cancelled"
+kind = "outcome"
+ready_when = "steps.collect.done AND job.metadata.cancelled = \"true\""
+title_template = "Cancelled"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "cancelled" }

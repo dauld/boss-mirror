@@ -27,20 +27,18 @@ import { readFileSync } from 'node:fs';
 
 const read = (p: string) => readFileSync(new URL(p, import.meta.url), 'utf8');
 
-/// BOTH workflows, because for a long time this test read only the
-/// first one — and the first one does not gate anything.
-///
-/// `.github` runs on GitHub Actions against the PUBLIC MIRROR, which
-/// is pushed by hand with David's sign-off. `.forgejo` runs on the
-/// internal forge and is what a train must pass before it merges. The
-/// mirror had a `web` job (typecheck, unit, build, mocked smoke) from
-/// 2026-08-08; the forge had none until 2026-08-16. So this test
-/// asserted a real property of a workflow nobody's branch had to
-/// satisfy, and the mocked suite went unrun for long enough that its
-/// route-smoke drift test was sitting red against the `/it/*` rename.
+/// THE FORGE WORKFLOW, and only it. For a long time this test read the
+/// GitHub workflow — which ran on GitHub Actions against the PUBLIC
+/// MIRROR and gated nothing: the mirror had a `web` job (typecheck,
+/// unit, build, mocked smoke) from 2026-08-08; the forge had none until
+/// 2026-08-16, so the test asserted a property of a workflow nobody's
+/// branch had to satisfy, and the mocked suite went unrun for long
+/// enough that its route-smoke drift test sat red against the `/it/*`
+/// rename. `.forgejo` is what a train must pass before it merges. The
+/// mirror is a backup of source, not CI/CD (design 7b59af2c,
+/// 2026-09-08), and its ci.yml was deleted with that decision.
 const workflows = {
   forge: read('../../../../.forgejo/workflows/ci.yml'),
-  mirror: read('../../../../.github/workflows/ci.yml'),
 };
 
 const pkg = JSON.parse(read('../../package.json')) as {
@@ -52,10 +50,10 @@ const scriptsIn = (yml: string) =>
     [...yml.matchAll(/run:\s*bun run ([a-z:]+)/g)].map((m) => m[1]!).filter((s) => s !== 'gate'),
   );
 
-/// Every `bun run <script>` invoked anywhere in either workflow, minus
+/// Every `bun run <script>` invoked anywhere in the workflow, minus
 /// `gate` itself (CI runs the steps individually so a failure names the
 /// step that broke rather than one opaque red X).
-const ciScripts = new Set([...scriptsIn(workflows.forge), ...scriptsIn(workflows.mirror)]);
+const ciScripts = new Set([...scriptsIn(workflows.forge)]);
 
 const gate = pkg.scripts['gate'] ?? '';
 const gateScripts = new Set([...gate.matchAll(/bun run ([a-z:]+)/g)].map((m) => m[1]!));
@@ -93,11 +91,11 @@ describe('the local gate matches CI', () => {
   });
 });
 
-// The union above is the right check for "can this fail after I push",
-// but it hides WHICH workflow runs what — and that distinction is the
-// whole defect. A script present only on the mirror runs only when
-// somebody pushes the mirror by hand.
-describe('the forge — not the mirror — is what gates a train', () => {
+// The set above answers "can this fail after I push"; this names the
+// scripts the forge must run, so a frontend check cannot quietly drop
+// out of the workflow that gates a train (which is what happened while
+// the mirror's workflow still existed and carried them instead).
+describe('the forge is what gates a train', () => {
   const forge = scriptsIn(workflows.forge);
 
   test('the forge runs the frontend suite', () => {
@@ -111,7 +109,7 @@ describe('the forge — not the mirror — is what gates a train', () => {
         forge.has(script),
         `.forgejo/workflows/ci.yml does not run \`bun run ${script}\` — ` +
           `the internal forge is what a train must pass, so a frontend check ` +
-          `that lives only in .github runs only when the mirror is pushed by hand`,
+          `missing there runs nowhere`,
       ).toBe(true);
     }
   });

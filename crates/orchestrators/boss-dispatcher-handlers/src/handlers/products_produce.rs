@@ -44,7 +44,7 @@
 //! rule) — nothing is a percentage-of-price estimate.
 //!
 //! The basis is **selected by data** (the `cost_basis` arg in
-//! `infra/dispatcher/rules.toml`); code provides the named bases. The
+//! `infra/dispatcher/rules/`); code provides the named bases. The
 //! legacy `current-avg-cost` basis (whole-Job inputs at current avg) stays
 //! reachable as a data-selected basis. A failed **or partial** ledger
 //! read is NOT silently degraded around: the handler errs, the event

@@ -58,7 +58,7 @@ tracing-subscriber = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true }
 async-nats = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 sqlx = { version = "0.8", default-features = false, features = ["macros", "runtime-tokio", "postgres", "chrono", "json", "uuid"], optional = true }
 
 [dev-dependencies]
@@ -67,16 +67,29 @@ tower = { workspace = true }
 http-body-util = "0.1"
 sqlx = { version = "0.8", default-features = false, features = ["macros", "runtime-tokio", "postgres", "chrono", "json", "uuid"] }
 proptest = "1"
+tempfile = "3"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "agent_runs_pg"
+required-features = ["postgres"]
 
 [[test]]
 name = "cadence_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "credentials_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "delivery_policy_pg"
+required-features = ["postgres"]
+
+[[test]]
+name = "estate_readers_pg"
 required-features = ["postgres"]
 
 [[test]]
@@ -88,11 +101,19 @@ name = "job_metadata_patch_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "step_fields_survive_an_update"
+required-features = ["postgres"]
+
+[[test]]
 name = "platform_seed_loader"
 required-features = ["postgres"]
 
 [[test]]
 name = "postgres_filter"
+required-features = ["postgres"]
+
+[[test]]
+name = "queue_age_pg"
 required-features = ["postgres"]
 
 [[test]]
@@ -129,6 +150,10 @@ required-features = ["postgres"]
 
 [[test]]
 name = "step_plugin_registry_events_pg"
+required-features = ["postgres"]
+
+[[test]]
+name = "step_metadata_patch_pg"
 required-features = ["postgres"]
 
 [[test]]

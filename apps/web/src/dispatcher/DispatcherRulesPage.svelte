@@ -1,6 +1,6 @@
 <script lang="ts">
-  // /system/dispatcher/rules — list the ACTIVE dispatcher rules, each linking
-  // to its editor. Authoring sibling of the /system/dispatcher cascade viz.
+  // /it/registry/rules — list the ACTIVE dispatcher rules, each linking
+  // to its editor. Authoring sibling of the /it/registry/dispatcher cascade viz.
   // Models the step-plugins list page (PageHeader/Section + data-table +
   // load/error state). Writes flow through ./ruleAuthoring.
 
@@ -35,7 +35,7 @@
 </script>
 
 <div class="catalog theme-exec">
-  <Breadcrumb to={href('/system/dispatcher')}>← Dispatcher cascade</Breadcrumb>
+  <Breadcrumb to={href('/it/registry/dispatcher')}>← Dispatcher cascade</Breadcrumb>
   <PageHeader
     eyebrow="Platform · Dispatcher rules"
     title="Dispatcher rules"
@@ -45,7 +45,7 @@
   />
 
   <div style="padding:0 24px 16px; display:flex; gap:12px; align-items:center">
-    <Link to={href('/system/dispatcher/rules/new')} className="wb-btn wb-btn-primary">
+    <Link to={href('/it/registry/rules/new')} className="wb-btn wb-btn-primary">
       + New rule
     </Link>
   </div>
@@ -57,7 +57,7 @@
   {#if rules.length === 0 && !loading && !error}
     <p class="empty" style="padding:0 24px">
       No active dispatcher rules. Create one with
-      <Link to={href('/system/dispatcher/rules/new')}>+ New rule</Link>.
+      <Link to={href('/it/registry/rules/new')}>+ New rule</Link>.
     </p>
   {/if}
 
@@ -77,7 +77,7 @@
             {#each sorted as r (r.name)}
               <tr>
                 <td>
-                  <Link to={href(`/system/dispatcher/rules/${encodeURIComponent(r.name)}`)}>
+                  <Link to={href(`/it/registry/rules/${encodeURIComponent(r.name)}`)}>
                     <span class="mono">{r.name}</span>
                   </Link>
                 </td>

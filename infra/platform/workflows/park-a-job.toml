@@ -1,0 +1,60 @@
+# ---------------------------------------------------------------------------
+# park-a-job — a packet that cannot proceed, parked with its reason, and
+# resumed when the reason goes away.
+#
+# One terminal, deliberately: a parked packet either resumes or the thing
+# it was waiting on was never real, and in the second case the packet
+# being parked is itself the record. The `unblock` step is what keeps a
+# park from becoming an abandonment — nothing closes until someone says
+# what changed.
+#
+# Authored live through the API and never written back until 2026-09-10,
+# which is the gap `infra/lint/the-live-protocols-are-the-authored-
+# protocols.sh` now closes. Rendered from the live row rather than
+# retyped; the seed is insert-if-missing, so the live lineage keeps its
+# own version and this file is what a FRESH database gets.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "park-a-job"
+label = "Park a set of jobs"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Parking is an operation on packets, so it is a packet (design e78bfd60, David 2026-09-05). One park packet carries one required reason and an explicit set of subject job ids; each target is marked Blocked pending a manual unblock and points back at this packet. Parking is not progress: only the job's status changes, no step completes, and the flow measurement sees a pause rather than work. The unblock is an action someone takes, not a status edit, so the audit log carries who and when."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "raised"
+kind = "trigger"
+ready_when = "true"
+title_template = "Park raised"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "operator" }
+
+[[workflow.step]]
+title = "park"
+kind = "task"
+ready_when = "steps.raised.done"
+title_template = "Park the set — mark each Blocked"
+authority_role = "platform-admin"
+metadata_defaults = {}
+fields = [
+  { name = "reason", field_type = "string", required = true },
+  { name = "subject_count", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "unblock"
+kind = "task"
+ready_when = "steps.park.done"
+title_template = "Unblock the set — return each to Open"
+authority_role = "platform-admin"
+metadata_defaults = {}
+
+[[workflow.step]]
+title = "resumed"
+kind = "outcome"
+ready_when = "steps.unblock.done"
+title_template = "Resumed — the set is unblocked"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "resumed" }

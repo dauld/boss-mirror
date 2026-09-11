@@ -60,7 +60,7 @@ const ACK_WAIT: Duration = Duration::from_secs(30);
 /// gate stayed green (2026-07-10): the filter accepted the topic, the
 /// stream never stored the messages. The
 /// `stream_covers_every_rule_topic` test in boss-dispatcher pins this
-/// list against the shipped rules.toml — and writing that test
+/// list against the shipped rule registry — and writing that test
 /// immediately surfaced a SECOND casualty: the tax-filing webhook
 /// forward (`ledger.tax_filing_filed`) had been dead air the same
 /// way. Domain families with no rule topic still flow over core NATS
@@ -81,12 +81,29 @@ pub fn stream_subjects() -> Vec<String> {
         "ledger.>",
         "asset.>",
         // `docs.>` joined 2026-08-10 (dogfooding arc e556c000, S2):
-        // the design-review-spawn rule consumes `docs.design.indexed`,
+        // the design-review-spawn rule consumed `docs.design.indexed`,
         // and the coverage tripwire below this comment's lineage
         // (stream_covers_every_rule_topic) failed the build until the
         // family flowed into the stream — the exact silent-zero class
         // it was written for, caught at compile-adjacent time instead
         // of in production.
+        //
+        // ITS ONE CONSUMER IS GONE (2026-09-10, backlog f5da586c): the
+        // rule was retired with the corpus index, and nothing publishes
+        // a `docs.*` event any more. The subject is KEPT ANYWAY, which
+        // is a deliberate exception to deleting what has no caller.
+        // `ensure_stream` reconciles a LIVE broker's subject list on
+        // every service start, so narrowing this array is not an edit
+        // to a config file — it is a stream update against production,
+        // and a stream update that drops a subject a persisted durable
+        // consumer still filters on can be refused. A refusal here
+        // fails `ensure_stream`, which fails the start of every service
+        // that calls it. That trade — an outage risk on every boot
+        // against one unmatched subject pattern, which costs nothing
+        // because nothing publishes to it — is not worth taking inside
+        // a deletion. Retained `docs.*` messages also still sit in the
+        // buffer until the age cap expires them, and a subject the
+        // stream no longer lists is a message nothing can replay.
         "docs.>",
     ]
     .iter()

@@ -2,6 +2,7 @@
   // /manual — port of apps/web/src/content/ManualPage.tsx.
 
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
+  import { formatDate } from '@boss/web-kit/ui/date';
   import RichBody from './RichBody.svelte';
   import type { ManualSection } from './types';
   import { href, navigate } from '../router';
@@ -207,7 +208,7 @@
             <h2>{active.title}</h2>
             <div class="manual-article-meta">
               Version {active.current_version} · updated
-              {active.updated_at.slice(0, 10)}
+              {formatDate(active.updated_at)}
             </div>
           </header>
           <div class="manual-article-body">

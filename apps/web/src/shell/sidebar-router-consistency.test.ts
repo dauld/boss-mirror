@@ -46,8 +46,8 @@ afterAll(() => {
 // have no catalog entry of their own) and the two always-available
 // surfaces reachable outside the sidebar.
 const INLINE_SUBPAGE_PATHS: ReadonlyArray<string> = [
-  '/system/monitoring/events', // "Audit Log" — plain sub-page link in the Run group
-  '/system/monitoring/atlas', // "Atlas" — plain sub-page link in the Run group
+  '/it/operate/audit', // "Audit Log" — plain sub-page link in the Run group
+  '/it/operate/atlas', // "Atlas" — plain sub-page link in the Run group
   '/ux/manual',
   '/ux/me',
 ];

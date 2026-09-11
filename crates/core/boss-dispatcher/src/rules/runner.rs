@@ -7,6 +7,9 @@
 //! binary starts both; they share the same NATS connection but
 //! subscribe to disjoint topic sets.
 
+use super::dead_letter::{
+    DeadLetterClass, DeadLetterNote, DeadLetterSink, HandlerFailure, annotation_target,
+};
 use super::expr::HelperResolver;
 use super::handler::{self, HandlerRegistry};
 use super::registry::{self, Registry};
@@ -35,6 +38,11 @@ pub struct RulesRunner {
     pub registry: Registry,
     pub handlers: HandlerRegistry,
     pub helpers: Arc<dyn HelperResolver + Send + Sync>,
+    /// Where a dead-letter is recorded so it outlives this pod (see
+    /// [`super::dead_letter`]). `None` runs the loop with the log as the
+    /// only record — the pre-`a9c498eb` behaviour, kept for the tests
+    /// that are about matching and settling rather than about visibility.
+    pub dead_letters: Option<Arc<dyn DeadLetterSink>>,
 }
 
 impl RulesRunner {
@@ -79,8 +87,8 @@ impl RulesRunner {
         info!("rules runner: tailing audit_log as 'dispatcher-rules-log' (BOSS_RULES_SOURCE=log)");
         loop {
             let report = tail
-                .drain_once(500, |topic, event_id, payload| async move {
-                    self.handle(&topic, &event_id, &payload).await
+                .drain_once(500, |topic, event_id, payload, attempt| async move {
+                    self.handle(&topic, &event_id, &payload, attempt).await
                 })
                 .await;
             match report {
@@ -172,7 +180,18 @@ impl RulesRunner {
                         .unwrap_or("unknown")
                         .to_string();
                     let payload = envelope.get("payload").cloned().unwrap_or(envelope);
-                    let outcome = self.handle(&subject, &event_id, &payload).await;
+                    // The delivery count `settle` will read, read here so
+                    // `handle` knows whether a failure now is the last
+                    // one the budget allows. Same fallback as `settle`:
+                    // an unreadable count counts as the final attempt, so
+                    // a broken message records its dead-letter rather
+                    // than vanishing into a Term.
+                    let attempt = msg
+                        .info()
+                        .map(|i| i.delivered)
+                        .unwrap_or(boss_nats::durable::MAX_DELIVER)
+                        .max(1) as u32;
+                    let outcome = self.handle(&subject, &event_id, &payload, attempt).await;
                     // ACK on success; NAK (→ redeliver) on transient failure —
                     // dead-letter once the budget is spent; immediate Term on a
                     // permanent failure (deterministic data error — every
@@ -191,11 +210,21 @@ impl RulesRunner {
         Ok(())
     }
 
+    /// Match and dispatch one event.
+    ///
+    /// `attempt` is the 1-based delivery count of THIS presentation, and
+    /// it is a parameter rather than something the transport keeps to
+    /// itself because the dead-letter has to be recorded here: this is
+    /// the only moment the rule, the handler, the attempt count and the
+    /// error are all in one place (`a9c498eb`). The transport still owns
+    /// the settling; `handle` only has to know that a failure now is the
+    /// last one the budget allows.
     async fn handle(
         &self,
         topic: &str,
         event_id: &str,
         payload: &Value,
+        attempt: u32,
     ) -> boss_nats::durable::Settle {
         use boss_nats::durable::Settle;
         let registry::MatchOutcome { matched, skipped } =
@@ -243,7 +272,7 @@ impl RulesRunner {
         // subjects (`step.done.production-produce`, `step.done.shipment`)
         // the handlers must therefore be idempotent on their source key, or
         // a partial failure double-applies the survivors on retry.
-        let mut failures = Vec::new();
+        let mut failures: Vec<HandlerFailure> = Vec::new();
         let mut all_permanent = true;
         for r in results {
             match &r.outcome {
@@ -263,7 +292,11 @@ impl RulesRunner {
                     if !e.is_permanent() {
                         all_permanent = false;
                     }
-                    failures.push(format!("{}/{}: {}", r.rule_name, r.handler, e));
+                    failures.push(HandlerFailure {
+                        rule: r.rule_name.clone(),
+                        handler: r.handler.clone(),
+                        error: e.to_string(),
+                    });
                 }
             }
         }
@@ -271,20 +304,121 @@ impl RulesRunner {
             let msg = format!(
                 "{} handler(s) failed on {topic}: {}",
                 failures.len(),
-                failures.join("; ")
+                failures
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
             );
             // Term only when EVERY failure is deterministic: if any
             // transient failure is present, NAK — the idempotent re-run
             // lets the transients converge, and the ride-along permanent
             // failures re-fail harmlessly until the event either fully
             // converges or Terms on a later all-permanent pass.
-            return if all_permanent {
+            let settle = if all_permanent {
                 boss_nats::durable::Settle::Permanent(msg)
             } else {
                 boss_nats::durable::Settle::Retry(msg)
             };
+            // A dead-letter lands on its packet (`a9c498eb`). The settle
+            // is already decided above and this cannot change it — see
+            // `record_dead_letter`.
+            let class = match &settle {
+                boss_nats::durable::Settle::Permanent(_) => Some(DeadLetterClass::Permanent),
+                boss_nats::durable::Settle::Retry(_)
+                    if boss_nats::durable::is_dead_letter(attempt as i64) =>
+                {
+                    Some(DeadLetterClass::BudgetExhausted)
+                }
+                // Budget left: the NAK will redeliver and the work may
+                // still self-heal. Annotating here would mark a packet
+                // troubled that is about to be fine.
+                _ => None,
+            };
+            if let Some(class) = class {
+                self.record_dead_letter(topic, event_id, payload, attempt, class, failures)
+                    .await;
+            }
+            return settle;
         }
         boss_nats::durable::Settle::Ack
+    }
+
+    /// Land a dead-letter on the packet whose step the handler owed.
+    ///
+    /// BEST-EFFORT, DELIBERATELY, in three ways — this is the arm, and an
+    /// arm that needs the patient is not an arm (CLAUDE.md §Diagnosis):
+    ///
+    /// 1. It returns `()`. The settle is computed by the caller BEFORE
+    ///    this runs and is returned regardless, so a failed annotation
+    ///    can never re-enter the redelivery budget it is reporting on —
+    ///    which would mean a down jobs API turned every dead-letter into
+    ///    eight more deliveries of the same event.
+    /// 2. Its own failure is logged and dropped. The `DEAD-LETTER:` line
+    ///    the transport writes is still the floor; this only adds a
+    ///    record that outlives the pod.
+    /// 3. The write carries a timeout (see the sink), so a jobs API that
+    ///    accepts and never answers costs the loop seconds, not the loop.
+    ///
+    /// With no target (a topic whose subject is not a packet) there is
+    /// nothing to annotate, and saying so out loud is the honest answer —
+    /// pointing the annotation at whatever packet shares the subject's
+    /// uuid would file a false record.
+    async fn record_dead_letter(
+        &self,
+        topic: &str,
+        event_id: &str,
+        payload: &Value,
+        attempt: u32,
+        class: DeadLetterClass,
+        failures: Vec<HandlerFailure>,
+    ) {
+        let Some(sink) = &self.dead_letters else {
+            return;
+        };
+        let Some(target) = annotation_target(topic, payload) else {
+            warn!(
+                topic = %topic,
+                triggering_event = %event_id,
+                attempts = attempt,
+                class = class.as_str(),
+                "dead-letter carries no packet to annotate: this topic's subject is not a Job, \
+                 so the log line above is the only record (a dead-letter counter is the follow-up)"
+            );
+            return;
+        };
+        let note = DeadLetterNote {
+            topic: topic.to_string(),
+            event_id: event_id.to_string(),
+            attempts: attempt,
+            class,
+            failures,
+            // The same read `handler::dispatch` makes per invocation, so
+            // an annotation about simulated work is simulated state.
+            simulated: payload
+                .get("_simulated")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        };
+        match sink.record(&target, &note).await {
+            Ok(()) => info!(
+                job_id = %target.job_id,
+                step_id = ?target.step_id,
+                topic = %topic,
+                attempts = attempt,
+                class = class.as_str(),
+                "dead-letter recorded on its packet"
+            ),
+            // Not an error! return and not a retry: see (1) above.
+            Err(e) => error!(
+                job_id = %target.job_id,
+                topic = %topic,
+                attempts = attempt,
+                error = %e,
+                "DEAD-LETTER annotation failed; the packet still looks untouched and this \
+                 pod's log is the only record"
+            ),
+        }
     }
 }
 
@@ -296,6 +430,51 @@ impl RulesRunner {
 mod tests {
     use super::super::expr::NoHelpers;
     use super::*;
+    use crate::rules::dead_letter::Target;
+
+    /// The first delivery — a failure here still has budget left.
+    const FIRST: u32 = 1;
+    /// The last delivery the budget allows: a failure here dead-letters.
+    const FINAL: u32 = boss_nats::durable::MAX_DELIVER as u32;
+
+    /// A sink that records what it was asked to land, and can be made to
+    /// fail the way a down jobs API would.
+    struct RecordingDeadLetters {
+        landed: tokio::sync::Mutex<Vec<(Target, DeadLetterNote)>>,
+        fails: bool,
+    }
+
+    impl RecordingDeadLetters {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                landed: tokio::sync::Mutex::new(Vec::new()),
+                fails: false,
+            })
+        }
+        fn failing() -> Arc<Self> {
+            Arc::new(Self {
+                landed: tokio::sync::Mutex::new(Vec::new()),
+                fails: true,
+            })
+        }
+        async fn landed(&self) -> Vec<(Target, DeadLetterNote)> {
+            self.landed.lock().await.clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DeadLetterSink for RecordingDeadLetters {
+        async fn record(&self, target: &Target, note: &DeadLetterNote) -> Result<(), String> {
+            self.landed
+                .lock()
+                .await
+                .push((target.clone(), note.clone()));
+            if self.fails {
+                return Err("PATCH /api/jobs/j-1/metadata: connection refused".into());
+            }
+            Ok(())
+        }
+    }
 
     #[test]
     fn subscriptions_dedupes_repeated_topics() {
@@ -321,6 +500,7 @@ handler = "h3"
             registry: reg,
             handlers: HandlerRegistry::new(),
             helpers: Arc::new(NoHelpers),
+            dead_letters: None,
         };
         let subs = runner.subscriptions();
         assert_eq!(subs.len(), 2);
@@ -334,6 +514,7 @@ handler = "h3"
             registry: Registry::empty(),
             handlers: HandlerRegistry::new(),
             helpers: Arc::new(NoHelpers),
+            dead_letters: None,
         };
         assert!(runner.subscriptions().is_empty());
     }
@@ -359,11 +540,14 @@ handler = "boom"
             registry: reg,
             handlers,
             helpers: Arc::new(NoHelpers),
+            dead_letters: None,
         };
         let payload = serde_json::json!({
             "job_id": "j1", "step_id": "s1", "kind": "billing"
         });
-        let res = runner.handle("step.done.billing", "evt-1", &payload).await;
+        let res = runner
+            .handle("step.done.billing", "evt-1", &payload, FIRST)
+            .await;
         // A transient failure must surface as Retry so the message NAKs.
         match res {
             boss_nats::durable::Settle::Retry(msg) => assert!(
@@ -382,9 +566,10 @@ handler = "boom"
             registry: Registry::empty(),
             handlers: HandlerRegistry::new(),
             helpers: Arc::new(NoHelpers),
+            dead_letters: None,
         };
         let res = runner
-            .handle("step.done.unmatched", "evt", &serde_json::json!({}))
+            .handle("step.done.unmatched", "evt", &serde_json::json!({}), FIRST)
             .await;
         assert!(
             matches!(res, boss_nats::durable::Settle::Ack),
@@ -425,6 +610,7 @@ handler = "boom"
             registry: Registry::from_toml(rules_toml).unwrap(),
             handlers: reg,
             helpers: Arc::new(NoHelpers),
+            dead_letters: None,
         }
     }
 
@@ -459,7 +645,7 @@ handler = "h.trans"
             TWO_HANDLER_RULES,
         );
         match runner
-            .handle("step.done.x", "e1", &serde_json::json!({}))
+            .handle("step.done.x", "e1", &serde_json::json!({}), FIRST)
             .await
         {
             boss_nats::durable::Settle::Permanent(msg) => {
@@ -484,7 +670,7 @@ handler = "h.trans"
             TWO_HANDLER_RULES,
         );
         match runner
-            .handle("step.done.x", "e1", &serde_json::json!({}))
+            .handle("step.done.x", "e1", &serde_json::json!({}), FIRST)
             .await
         {
             boss_nats::durable::Settle::Retry(msg) => {
@@ -502,10 +688,257 @@ handler = "h.trans"
         );
         assert!(matches!(
             runner
-                .handle("step.done.x", "e1", &serde_json::json!({}))
+                .handle("step.done.x", "e1", &serde_json::json!({}), FIRST)
                 .await,
             boss_nats::durable::Settle::Ack
         ));
+    }
+
+    // -----------------------------------------------------------------
+    // A dead-letter lands on its packet (`a9c498eb`)
+    // -----------------------------------------------------------------
+
+    const ONE_RULE: &str = r#"
+[[rule]]
+name = "inspect-empty-decisions-sweep-on-step-ready"
+on_event = "step.ready.checklist"
+[[rule.do]]
+handler = "maintenance.sweep.inspect"
+"#;
+
+    fn sweep_payload() -> Value {
+        // The shape `step.ready.*` publishes, as the measured instance
+        // carried it: packet f8dedadf's Inspect checklist.
+        serde_json::json!({
+            "job_id": "f8dedadf-0000-0000-0000-000000000001",
+            "step_id": "5ca1ab1e-0000-0000-0000-000000000002",
+            "kind": "checklist",
+        })
+    }
+
+    fn sweep_runner(
+        result: fn() -> Result<(), crate::rules::handler::HandlerError>,
+        sink: Arc<RecordingDeadLetters>,
+    ) -> RulesRunner {
+        let mut runner = runner_with(vec![("maintenance.sweep.inspect", result)], ONE_RULE);
+        runner.dead_letters = Some(sink);
+        runner
+    }
+
+    /// THE DEFECT. A handler that fails past its budget left the packet
+    /// exactly as it was: the step sitting `ready`, and the only record of
+    /// the failure in a pod log that a converge roll erases. The
+    /// dead-letter must land on the packet, naming the rule, the handler,
+    /// the attempt count and the error.
+    #[tokio::test]
+    async fn a_budget_exhausted_failure_lands_on_the_packet() {
+        use crate::rules::handler::HandlerError;
+        let sink = RecordingDeadLetters::new();
+        let runner = sweep_runner(
+            || {
+                Err(HandlerError::Downstream(
+                    "GET /api/jobs returned 503".into(),
+                ))
+            },
+            sink.clone(),
+        );
+        let settle = runner
+            .handle("step.ready.checklist", "evt-sweep", &sweep_payload(), FINAL)
+            .await;
+        assert!(
+            matches!(settle, boss_nats::durable::Settle::Retry(_)),
+            "the settle is unchanged: the transport still Terms the spent message"
+        );
+        let landed = sink.landed().await;
+        assert_eq!(landed.len(), 1, "one dead-letter, landed once");
+        let (target, note) = &landed[0];
+        assert_eq!(target.job_id, "f8dedadf-0000-0000-0000-000000000001");
+        assert_eq!(
+            target.step_id.as_deref(),
+            Some("5ca1ab1e-0000-0000-0000-000000000002"),
+            "the troubled step is named: it is the one a reader finds `ready`"
+        );
+        assert_eq!(note.attempts, FINAL);
+        assert_eq!(note.class, DeadLetterClass::BudgetExhausted);
+        assert_eq!(note.topic, "step.ready.checklist");
+        assert_eq!(note.event_id, "evt-sweep");
+        let f = note.failures.first().expect("one failure");
+        assert_eq!(f.rule, "inspect-empty-decisions-sweep-on-step-ready");
+        assert_eq!(f.handler, "maintenance.sweep.inspect");
+        assert!(
+            f.error.contains("503"),
+            "the note carries what failed, not that something did: {}",
+            f.error
+        );
+    }
+
+    /// A permanent failure dead-letters on its FIRST delivery (it skips
+    /// the budget), so the annotation must not wait for the count.
+    #[tokio::test]
+    async fn a_permanent_failure_lands_on_its_first_delivery() {
+        use crate::rules::handler::HandlerError;
+        let sink = RecordingDeadLetters::new();
+        let runner = sweep_runner(
+            || Err(HandlerError::Permanent("422 unknown sweep target".into())),
+            sink.clone(),
+        );
+        let settle = runner
+            .handle("step.ready.checklist", "evt-sweep", &sweep_payload(), FIRST)
+            .await;
+        assert!(matches!(settle, boss_nats::durable::Settle::Permanent(_)));
+        let landed = sink.landed().await;
+        assert_eq!(landed.len(), 1, "a Term IS a dead-letter: {landed:?}");
+        assert_eq!(landed[0].1.class, DeadLetterClass::Permanent);
+        assert_eq!(landed[0].1.attempts, FIRST);
+    }
+
+    /// With budget left the NAK may still converge. Marking the packet
+    /// troubled now would cry wolf on work that is about to be fine.
+    #[tokio::test]
+    async fn a_transient_failure_with_budget_left_annotates_nothing() {
+        use crate::rules::handler::HandlerError;
+        let sink = RecordingDeadLetters::new();
+        let runner = sweep_runner(|| Err(HandlerError::Downstream("503".into())), sink.clone());
+        for attempt in FIRST..FINAL {
+            let settle = runner
+                .handle(
+                    "step.ready.checklist",
+                    "evt-sweep",
+                    &sweep_payload(),
+                    attempt,
+                )
+                .await;
+            assert!(matches!(settle, boss_nats::durable::Settle::Retry(_)));
+        }
+        assert!(
+            sink.landed().await.is_empty(),
+            "nothing is annotated while redelivery can still succeed"
+        );
+    }
+
+    /// BEST-EFFORT. The annotation is itself a jobs-API write, and the
+    /// jobs API may be the very thing that failed. Its failure must not
+    /// change the settle — or a down API would turn one dead-letter into
+    /// eight more deliveries of the same event.
+    #[tokio::test]
+    async fn an_annotation_that_fails_does_not_change_the_settle() {
+        use crate::rules::handler::HandlerError;
+        let sink = RecordingDeadLetters::failing();
+        let runner = sweep_runner(|| Err(HandlerError::Downstream("503".into())), sink.clone());
+        let settle = runner
+            .handle("step.ready.checklist", "evt-sweep", &sweep_payload(), FINAL)
+            .await;
+        match settle {
+            boss_nats::durable::Settle::Retry(msg) => assert!(
+                msg.contains("maintenance.sweep.inspect"),
+                "the settle still names the handler that failed: {msg}"
+            ),
+            other => panic!(
+                "a failed annotation must leave the settle alone, got {}",
+                settle_name(&other)
+            ),
+        }
+        assert_eq!(
+            sink.landed().await.len(),
+            1,
+            "it was attempted once and not retried"
+        );
+    }
+
+    /// IDEMPOTENCE. A redelivery (or a restart re-presenting the row with
+    /// a fresh budget) must leave one annotation's worth of metadata: one
+    /// top-level key, overwritten. See `dead_letter::annotation_patch`
+    /// for the merge itself.
+    #[tokio::test]
+    async fn two_dead_letter_deliveries_write_one_metadata_key() {
+        use crate::rules::dead_letter::{METADATA_KEY, annotation_patch};
+        use crate::rules::handler::HandlerError;
+        let sink = RecordingDeadLetters::new();
+        let runner = sweep_runner(|| Err(HandlerError::Downstream("503".into())), sink.clone());
+        for _ in 0..2 {
+            runner
+                .handle("step.ready.checklist", "evt-sweep", &sweep_payload(), FINAL)
+                .await;
+        }
+        let landed = sink.landed().await;
+        assert_eq!(landed.len(), 2, "both deliveries annotate");
+        let mut metadata = serde_json::Map::new();
+        for (_, note) in &landed {
+            for (k, v) in annotation_patch(note, chrono::Utc::now())
+                .as_object()
+                .expect("patch is an object")
+            {
+                metadata.insert(k.clone(), v.clone());
+            }
+        }
+        assert_eq!(
+            metadata.keys().collect::<Vec<_>>(),
+            vec![METADATA_KEY],
+            "two deliveries, one annotation's worth of metadata"
+        );
+    }
+
+    /// A topic whose subject is not a packet has nothing to annotate. The
+    /// honest answer is the log line, NOT a guess at which job shares the
+    /// subject's uuid.
+    #[tokio::test]
+    async fn an_event_with_no_packet_annotates_nothing() {
+        use crate::rules::handler::HandlerError;
+        let sink = RecordingDeadLetters::new();
+        let mut runner = runner_with(
+            vec![("h.invoice", || Err(HandlerError::Downstream("503".into())))],
+            r#"
+[[rule]]
+name = "r-invoice"
+on_event = "commerce.invoice.paid"
+[[rule.do]]
+handler = "h.invoice"
+"#,
+        );
+        runner.dead_letters = Some(sink.clone());
+        let settle = runner
+            .handle(
+                "commerce.invoice.paid",
+                "evt-inv",
+                &serde_json::json!({"id": "inv-1"}),
+                FINAL,
+            )
+            .await;
+        assert!(matches!(settle, boss_nats::durable::Settle::Retry(_)));
+        assert!(
+            sink.landed().await.is_empty(),
+            "no packet means no annotation, not a fabricated one"
+        );
+    }
+
+    /// Sim-ness is inherited from the triggering event, the same read
+    /// `handler::dispatch` makes, so an annotation about simulated work
+    /// is simulated state.
+    #[tokio::test]
+    async fn the_annotation_inherits_the_events_sim_ness() {
+        use crate::rules::handler::HandlerError;
+        let sink = RecordingDeadLetters::new();
+        let runner = sweep_runner(|| Err(HandlerError::Downstream("503".into())), sink.clone());
+        let mut payload = sweep_payload();
+        payload["_simulated"] = serde_json::json!(true);
+        runner
+            .handle("step.ready.checklist", "evt-sweep", &payload, FINAL)
+            .await;
+        assert!(sink.landed().await[0].1.simulated);
+    }
+
+    /// Both transports must agree on when the budget is spent, because
+    /// the runner predicts the dead-letter from the attempt count. The
+    /// log tail derives its budget from the JetStream one; this is the
+    /// assertion that the derivation is the whole of it.
+    #[test]
+    fn both_transports_share_one_retry_budget() {
+        assert_eq!(
+            crate::rules::log_tail::MAX_ATTEMPTS as i64,
+            boss_nats::durable::MAX_DELIVER
+        );
+        assert!(boss_nats::durable::is_dead_letter(FINAL as i64));
+        assert!(!boss_nats::durable::is_dead_letter(FINAL as i64 - 1));
     }
 
     fn settle_name(s: &boss_nats::durable::Settle) -> &'static str {

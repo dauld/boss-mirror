@@ -87,7 +87,7 @@
   <p class="inc-msg">Loading incidents…</p>
 {:else if load.kind === 'failed'}
   <div class="inc-failed" role="alert">
-    <p class="inc-failed-text">
+    <p class="inc-failed-text load-failed">
       Could not load the incident queue — {load.message}. This page will not guess:
       an unreadable queue is not an empty one.
     </p>

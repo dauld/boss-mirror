@@ -1,0 +1,33 @@
+# Federal beer excise tax accrual. Each brew batch's package step
+# accrues its `excise_bbl` (step metadata, seeded per beer) as
+# DR 6550 Excise Tax Expense / CR 2320 Excise Tax Payable, exactly
+# the way sales tax accrues per invoice line. The quarterly
+# excise-tax-filing Workflow drains 2320 → 1000 Cash. A batch with
+# no taxable barrels is a no-op.
+#
+# THE RATE IS REGISTRY DATA (brewery-fidelity Q4): the handler sends
+# barrels, and the ledger resolves the jurisdiction's graduated tier
+# schedule from `excise_rate_schedules` against year-to-date taxed
+# barrels — the real TTB curve ($3.50/bbl for the first 60,000 bbl of
+# the calendar year, $16.00/bbl above; the brewery seeds it via
+# examples/brewery/seeds/excise_rates.toml). `rate_cents_per_bbl`
+# here is only the flat FALLBACK for a jurisdiction with no registry
+# row — applied loudly, kept so pre-registry deployments accrue
+# exactly as before. It understates real TTB liability ~3.7× at the
+# demo tenant's volume; the registry row is the fix, not this arg.
+[[rule]]
+name = "excise-accrue-on-production-produce-step-done"
+why = """
+Step-completion side effect: a completed `production-produce` step accrues federal beer excise
+on the barrels it packaged.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.production-produce"
+[[rule.do]]
+handler = "ledger.tax.accrue"
+args = { rate_cents_per_bbl = "350", liability_account = "\"2320\"", expense_account = "\"6550\"", jurisdiction = "\"US-FEDERAL\"" }

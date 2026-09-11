@@ -21,16 +21,17 @@
   // action row) — never read chrome like filters or navigation.
   import type { Snippet } from 'svelte';
   import { session } from '../session/session.svelte';
+  import { loginUrlFor } from '../session/deadSession';
 
   type Props = Readonly<{ children: Snippet }>;
   let { children }: Props = $props();
 
   // Sign-in returns the visitor to the page they were reading —
-  // /login's `safeNext` admits in-app paths only.
+  // /login's `safeNext` admits in-app paths only. Same target and
+  // same ?next= encoding the 401 redirect uses, from the same
+  // definition, so the two cannot drift.
   let loginHref = $derived(
-    `/login?next=${encodeURIComponent(
-      window.location.pathname + window.location.search,
-    )}`,
+    loginUrlFor(window.location.pathname, window.location.search),
   );
 </script>
 

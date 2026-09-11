@@ -1,0 +1,92 @@
+# ops-request — a host-side debug read is a packet (729329c6, PULL half).
+#
+# David: "I am really tired of the copy pasting after sshing." The
+# operator was the transport: ssh to the host, run the command, paste
+# the output back to whoever asked. This kind deletes the middle hop.
+# The requester files a packet naming a host and an ALLOWLISTED
+# read-only verb; a runner ON that host (infra/ops/ops-runner.sh, on a
+# ~1-minute timer) polls the SoR for its own host's open packets,
+# executes the verb, and completes `execute` with stdout/stderr and the
+# exit code. The answer lands in the system of record with provenance,
+# and "what has been asked of this host" is a Subject-history question.
+#
+# THE ALLOWLIST IS THE AUTHORITY. The packet carries only a verb NAME
+# and pattern-validated args; the command words live in
+# infra/ops/verbs.json — in-tree, reviewed, versioned. The runner never
+# executes a packet-supplied string, only allowlisted argv templates.
+# Phase 1 is read-only; mutating verbs are phase 2, behind per-verb
+# policy, and are deliberately absent.
+#
+# FILING CONVENTION. Subject: custom/<host id> (the estate node id).
+# Job metadata carries the request:
+#   host — estate node id (boss-gcp, forge); the runner acts only on
+#          an exact match, so a packet for a host with no runner sits
+#          open and VISIBLY unanswered rather than being guessed at
+#   verb — a key of infra/ops/verbs.json
+#   args — JSON array of strings, positional; each validated against
+#          its param's pattern before anything runs
+#
+# The fork on `execute` is a closed enum — the correct-the-record
+# lesson, "an enum makes the fork total": every disposition a runner
+# can write leads to exactly one terminal. `exit_code` is authored
+# OPTIONAL because field requiredness cannot depend on the
+# disposition, and a refusal has no exit code — nothing ran. The
+# runner (in-tree, reviewed code) always writes it on the answered
+# path; `output` is required on both paths, so an answer always
+# carries its text and a refusal always carries its reason.
+
+[[workflow]]
+kind = "ops-request"
+label = "Ops request"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "A host-side debug read, as a packet instead of an ssh session. The requester names a host (the Subject: custom/<estate node id>) and an allowlisted read-only verb in job metadata (`host`, `verb`, `args`); the runner on that host polls about once a minute, executes the verb from infra/ops/verbs.json — never a packet-supplied string — and completes `execute` with the output and exit code. `answered` is the output arriving in the system of record with provenance; `refused` is the runner declining a verb outside the allowlist or an arg outside its pattern, with the reason in `output`. Phase 1 is read-only; mutating verbs are phase 2, behind per-verb policy. The operator stops being the transport."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "filed"
+kind = "trigger"
+ready_when = "true"
+title_template = "Host read requested: {metadata.verb} on {metadata.host}"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "operator-requests-a-host-read" }
+
+[[workflow.step]]
+title = "execute"
+kind = "task"
+ready_when = "steps.filed.done"
+title_template = "Run {metadata.verb} on {metadata.host}"
+# Gated the way the maintenance kinds gate `run`: the simulated
+# workforce must not role-match onto a real host read. The runner's
+# actor presents platform-admin.
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "disposition"
+field_type = "answered|refused"
+required = true
+[[workflow.step.fields]]
+name = "output"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "exit_code"
+field_type = "string"
+required = false
+
+[[workflow.step]]
+title = "answered"
+kind = "outcome"
+ready_when = "steps.execute.done AND steps.execute.metadata.disposition = \"answered\""
+title_template = "Answered"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "answered" }
+
+[[workflow.step]]
+title = "refused"
+kind = "outcome"
+ready_when = "steps.execute.done AND steps.execute.metadata.disposition = \"refused\""
+title_template = "Refused — outside the allowlist"
+# `aborted`, matching backlog-item's `declined`: the request was turned
+# down, not taken back by its filer.
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "refused" }

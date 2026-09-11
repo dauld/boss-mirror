@@ -1,0 +1,30 @@
+[[rule]]
+name = "products-produce-on-production-produce-step-done"
+why = """
+Step-completion side effect: a completed `production-produce` step moves the packaged batch
+from WIP to finished goods.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.production-produce"
+[[rule.do]]
+handler = "products.produce"
+# Cost basis selected by data: `drain-actual-wip` values the finished
+# goods at the WIP that was actually capitalized — this format's own
+# packaging (current avg_cost) plus its volume-share of the brew's real
+# mash cost, read back from the ledger's DR-1310 facts. This is what keeps
+# WIP from trending negative (a brew mashes once but packages per-format;
+# re-deriving the drain from current avg_cost double-drained the shared
+# mash and drifted with restock prices). Code provides the named bases;
+# `current-avg-cost` stays reachable as the legacy basis + the fallback.
+# `overhead_accounts` is the drain-set half of the absorption contract:
+# the mash-step facts to reconstruct are keyed by these credit accounts —
+# the same accounts the `inventory.overhead.absorb` dos above capitalize.
+args = { cost_basis = "\"drain-actual-wip\"", overhead_accounts = "\"6100,6300,6900\"" }
+[[rule.do]]
+handler = "inventory.parts.consume"
+args = { reason = "\"morning-brew-packaging\"" }

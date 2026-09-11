@@ -1,5 +1,5 @@
 <script lang="ts">
-  // /system/workflows/new — name a new kind, then open the authoring
+  // /it/registry/new — name a new kind, then open the authoring
   // workspace. Under D6 a Workflow is authored *through* a
   // `workflow-design` Job: this page collects the identity + headline
   // fields, creates the design Job (the slug becomes its immutable
@@ -132,7 +132,7 @@
       const jobId = await startDesignJob(seed, ownerId, appToday(), {
         title: forkSource ? `Fork ${forkSource} → ${kindSlug}` : `Design ${kindSlug}`,
       });
-      navigate(href(`/system/workflows/authoring/${encodeURIComponent(jobId)}`));
+      navigate(href(`/it/registry/authoring/${encodeURIComponent(jobId)}`));
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       starting = false;
@@ -141,7 +141,7 @@
 </script>
 
 <div class="catalog theme-exec">
-  <Breadcrumb to={href('/system/workflows')}>← All job kinds</Breadcrumb>
+  <Breadcrumb to={href('/it/registry')}>← All job kinds</Breadcrumb>
   <PageHeader
     eyebrow="Platform · Job kind"
     title={forkSource ? `New job kind (forked from ${forkSource})` : 'New job kind'}

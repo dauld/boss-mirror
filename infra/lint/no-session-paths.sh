@@ -24,8 +24,13 @@ cd "$(dirname "$0")/../.."
 # and any test that must name the pattern to prove the rule. The docs/
 # exemption below is this lint's own judgement and stays visible here —
 # runbooks legitimately TELL the story of a machine-local path.
+#
+# `|| exit $?` is load-bearing: the scan returns 3 when git could not
+# run, and on 2026-09-11 this lint printed `clean` and exited 0 in a
+# workspace where every git command was refusing (backlog 6b2f4a1a).
+# A scan that did not happen is not a clean tree.
 . "$(dirname "$0")/lib/pattern-scan.sh"
-hits=$(pattern_scan '/Users/[a-z]+/|\.claude/jobs/' -- 'apps/' 'crates/' 'infra/')
+hits=$(pattern_scan '/Users/[a-z]+/|\.claude/jobs/' -- 'apps/' 'crates/' 'infra/') || exit $?
 if [ -n "$hits" ]; then
     echo "no-session-paths: tracked source names a machine-local or session path:" >&2
     echo "$hits" >&2

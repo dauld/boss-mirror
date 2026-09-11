@@ -81,6 +81,8 @@ fn build_app(
         subject_existence: None,
         roster: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
+        cadence: None,
+        delivery: None,
     };
     (router(state), jobs, bus)
 }
@@ -118,6 +120,8 @@ async fn seed_publish_step(
         sign_offs: Vec::new(),
         fields: Vec::new(),
         completed_on: None,
+        completed_by: None,
+        completed_at: None,
         metadata,
         notes: None,
         step_plugin_version: 0,
@@ -363,6 +367,8 @@ async fn publish_step_without_kind_registry_returns_503() {
         subject_existence: None,
         roster: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
+        cadence: None,
+        delivery: None,
     };
     let app = router(state);
 

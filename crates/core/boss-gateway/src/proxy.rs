@@ -32,11 +32,6 @@ pub struct ProxyConfig {
     /// Service slug, e.g. `"commerce"`. Used in log messages and to
     /// derive the environment variable name (`BOSS_<NAME>_UPSTREAM`).
     pub name: &'static str,
-    /// Optional alias for the boss_ports lookup. `None` = use `name`
-    /// directly (with `_` → `-` normalized). `Some("people")` is how
-    /// the `events` proxy slug routes to the people-api port (the
-    /// audit-tail endpoint rides on the people binary).
-    pub port_alias: Option<&'static str>,
     /// OnceLock storing the resolved upstream URL (env var or
     /// `boss_ports::url(name)`).
     pub upstream: OnceLock<String>,
@@ -54,19 +49,6 @@ impl ProxyConfig {
     pub const fn new(name: &'static str) -> Self {
         Self {
             name,
-            port_alias: None,
-            upstream: OnceLock::new(),
-            fallback: None,
-        }
-    }
-
-    /// Build a config whose `boss_ports` lookup uses a different slug
-    /// than the proxy `name`. Used for `events` → `people` (the audit
-    /// tail rides on people-api).
-    pub const fn aliased(name: &'static str, port_alias: &'static str) -> Self {
-        Self {
-            name,
-            port_alias: Some(port_alias),
             upstream: OnceLock::new(),
             fallback: None,
         }
@@ -79,7 +61,6 @@ impl ProxyConfig {
     ) -> Self {
         Self {
             name,
-            port_alias: None,
             upstream: OnceLock::new(),
             fallback: Some(fallback),
         }
@@ -93,8 +74,17 @@ impl ProxyConfig {
             }
             // boss_ports uses kebab-case slugs; this proxy table has a
             // few snake_case ones (subject_kinds). Normalize.
-            let lookup = self.port_alias.unwrap_or(self.name).replace('_', "-");
-            boss_ports::url(&lookup)
+            //
+            // A `port_alias` field used to sit beside `name` for a
+            // proxy slug that looks up a DIFFERENT service's port. It
+            // had one user in its life — `aliased("design", "docs")`,
+            // the design corpus on boss-docs-api — and went with that
+            // service on 2026-09-10 (backlog f5da586c) rather than
+            // staying as a mechanism with nothing to mech. The next
+            // proxy that needs one is ten lines; a constructor no
+            // caller reaches is a dead_code warning and a reader's
+            // wrong turn.
+            boss_ports::url(&self.name.replace('_', "-"))
         })
     }
 }
@@ -329,7 +319,6 @@ pub static COMMERCE: ProxyConfig = ProxyConfig::new("commerce");
 /// through boss_ports::prod("events") = 7150.
 pub static EVENTS: ProxyConfig = ProxyConfig::new("events");
 pub static CONTENT: ProxyConfig = ProxyConfig::new("content");
-pub static DESIGN: ProxyConfig = ProxyConfig::aliased("design", "docs");
 pub static ASSETS: ProxyConfig = ProxyConfig::new("assets");
 pub static INVENTORY: ProxyConfig = ProxyConfig::new("inventory");
 pub static JOBS: ProxyConfig = ProxyConfig::new("jobs");
@@ -395,14 +384,6 @@ mod tests {
         assert_eq!(cfg.upstream_url(), "http://127.0.0.1:7830");
     }
 
-    /// `aliased` lets a proxy slug route to a different port-table
-    /// entry than its name. The audit-log tail rides on people-api.
-    #[test]
-    fn aliased_routes_to_alias_port() {
-        let cfg = ProxyConfig::aliased("events", "people");
-        assert_eq!(cfg.upstream_url(), "http://127.0.0.1:7500");
-    }
-
     /// Vanilla case: name maps directly to the port table.
     #[test]
     fn name_resolves_via_boss_ports() {
@@ -418,7 +399,6 @@ mod tests {
         let _ = COMMERCE.upstream_url();
         let _ = EVENTS.upstream_url();
         let _ = CONTENT.upstream_url();
-        let _ = DESIGN.upstream_url();
         let _ = ASSETS.upstream_url();
         let _ = INVENTORY.upstream_url();
         let _ = JOBS.upstream_url();

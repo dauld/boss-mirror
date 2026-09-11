@@ -1,0 +1,107 @@
+[[workflow]]
+kind = "regenerate-deployment"
+label = "Regenerate a deployment"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Drop a deployment's database and rebuild it: schema, seed, backfilled history, then live. The Subject is the deployment, so \"what regens has this box had, and why\" answers from Subject history. Two steps are gated on a person \u2014 declaring why it is happening, and the destructive reset itself \u2014 and the rest record what was done at each stage. Note the bootstrap gap: a deployment cannot run the Workflow that regenerates it, so the Job lives wherever the operator is."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "requested"
+kind = "trigger"
+ready_when = "true"
+title_template = "Regen requested"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "operator-requests-a-regen" }
+
+[[workflow.step]]
+title = "scope"
+kind = "task"
+ready_when = "steps.requested.done"
+title_template = "Why, and what it destroys"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "reason"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "destroying"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "build"
+kind = "task"
+ready_when = "steps.scope.done"
+title_template = "Build release artifacts"
+[[workflow.step.fields]]
+name = "source_ref"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "artifacts"
+kind = "task"
+ready_when = "steps.build.done"
+title_template = "Prove the built thing is the deployed thing"
+[[workflow.step.fields]]
+name = "verified"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "deploy"
+kind = "task"
+ready_when = "steps.artifacts.done"
+title_template = "Install"
+[[workflow.step.fields]]
+name = "deployed"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "reset"
+kind = "task"
+ready_when = "steps.deploy.done"
+title_template = "Drop and reseed"
+authority_role = "platform-admin"
+[[workflow.step.fields]]
+name = "baseline"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "backfill"
+kind = "task"
+ready_when = "steps.reset.done"
+title_template = "Backfill, then go live"
+[[workflow.step.fields]]
+name = "went_live"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "verify"
+kind = "task"
+ready_when = "steps.backfill.done"
+title_template = "Verify the new world"
+[[workflow.step.fields]]
+name = "checks"
+field_type = "string"
+required = true
+
+[[workflow.step]]
+title = "complete"
+kind = "outcome"
+ready_when = "steps.verify.done"
+title_template = "Regen complete"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "regenerated" }
+
+[[workflow.step]]
+title = "abandoned"
+kind = "outcome"
+ready_when = "steps.scope.done AND job.metadata.abandoned = \"true\""
+title_template = "Abandoned"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "abandoned" }

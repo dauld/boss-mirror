@@ -19,9 +19,31 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 sqlx = { version = "0.8", default-features = false, features = ["macros", "runtime-tokio", "postgres"], optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
+# `leaked_policy` (and the `boss-leaked-policy` bin): CLAUDE.md §9's code
+# half is counted over an AST, never a regex — a string-literal match arm
+# is equally a leaked workflow policy, the dispatcher's own handler table,
+# a serde round trip or a MIME lookup, and arms span lines and nest.
+# `full` parses whole files rather than just item signatures; `visit` is
+# the read-only walker. `toml` reads the registry seeds the kind
+# vocabulary comes from, so the vocabulary cannot drift from the
+# registries (§9a).
+syn = { version = "2", features = ["full", "visit"] }
+# A site without a line number is a number nobody can go and check by
+# hand, and hand-checking is the only evidence this count is worth
+# filing daily. `span-locations` is what makes `Span::start()` answer.
+# Resolver 3 decouples proc-macro dependencies' features from normal
+# ones, so this does not reach the host-side `syn` the derive macros use.
+proc-macro2 = { version = "1", features = ["span-locations"] }
+toml = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+# Test-only, and only for `run_car_probe_sh.rs`: the probe's reader role
+# is written in infra/forge/run-car-probe.sh and DEFINED in core policy's
+# default rules. Two homes for one fact, so the test pins them equal
+# (CLAUDE.md §9a) — `audit-readonly` must grant Read everywhere a probe
+# reads and no non-Read action anywhere. Core → core; no tier crossing.
+boss-policy-client = { path = "../boss-policy-client" }
 
 [[test]]
 name = "migrate_sh"

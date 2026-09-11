@@ -14,6 +14,7 @@
 //! is echoed back: the brewery experiments are simulated traffic and
 //! must stay visible in the report that exists to measure them.
 
+use boss_policy_client::types::{AccessTier, User};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -31,16 +32,22 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+// SERIALISE THE REAL TYPE, never a copy of its wire shape. A test
+// that hand-builds the header is testing a copy: if a field loses its
+// serde default or a new required one lands, a hand-built payload keeps
+// passing here while production rejects it — the failure surfaces as a
+// live 4xx instead of a red test, which is the wrong way round
+// (7c3649e2).
 fn user_header(id: &str, role: &str) -> String {
-    serde_json::json!({
-        "id": id,
-        "role": role,
-        "access_tier": "user",
-        "territory_account_ids": [],
-        "direct_report_ids": [],
-        "department": "it",
+    serde_json::to_string(&User {
+        id: id.to_string(),
+        role: role.to_string(),
+        access_tier: AccessTier::User,
+        territory_account_ids: Vec::new(),
+        direct_report_ids: Vec::new(),
+        department: Some("it".to_string()),
     })
-    .to_string()
+    .expect("a User always serialises")
 }
 
 fn app() -> (axum::Router, Arc<InMemoryJobs>) {
@@ -70,6 +77,8 @@ fn app() -> (axum::Router, Arc<InMemoryJobs>) {
         subject_existence: None,
         roster: None,
         clock: Arc::new(boss_clock_client::WallClockClient),
+        cadence: None,
+        delivery: None,
     };
     (router(state), jobs)
 }
@@ -236,6 +245,125 @@ fn tasting_panel_fixture() -> Vec<Job> {
 
 fn approx(v: &serde_json::Value, want: f64) -> bool {
     v.as_f64().is_some_and(|x| (x - want).abs() < 1e-9)
+}
+
+fn with_metadata(mut job: Job, metadata: serde_json::Value) -> Job {
+    job.metadata = metadata;
+    job
+}
+
+/// A packet closed 30 minutes after opening spent 30 minutes in
+/// flight, not 0 days — the dates have one-day resolution by
+/// construction. The precise `opened_at` / `closed_at` metadata
+/// stamps (RFC3339 instants, written at admission and at the close
+/// hooks) win when both parse; a packet that predates the stamps, or
+/// carries only one, keeps the date arithmetic.
+#[tokio::test]
+async fn precise_stamps_beat_the_one_day_date_resolution() {
+    let (app, jobs) = app();
+    seed(
+        &jobs,
+        vec![
+            // v2: one stamped packet, closed 30 minutes after opening.
+            // Date math reads it as 0 days.
+            with_metadata(
+                packet(
+                    "cold-crash",
+                    2,
+                    JobStatus::Closed,
+                    d(2026, 8, 20),
+                    Some(d(2026, 8, 20)),
+                    None,
+                    false,
+                ),
+                serde_json::json!({
+                    "outcome": "done",
+                    "opened_at": "2026-08-20T09:00:00+00:00",
+                    "closed_at": "2026-08-20T09:30:00+00:00",
+                }),
+            ),
+            // v1, pre-stamp: keeps `closed_on - opened_on` = 2.
+            packet(
+                "cold-crash",
+                1,
+                JobStatus::Closed,
+                d(2026, 8, 20),
+                Some(d(2026, 8, 22)),
+                Some("done"),
+                false,
+            ),
+            // v1, half a stamp: no `opened_at`, so the dates answer = 1.
+            with_metadata(
+                packet(
+                    "cold-crash",
+                    1,
+                    JobStatus::Closed,
+                    d(2026, 8, 20),
+                    Some(d(2026, 8, 21)),
+                    None,
+                    false,
+                ),
+                serde_json::json!({
+                    "outcome": "done",
+                    "closed_at": "2026-08-21T09:00:00+00:00",
+                }),
+            ),
+            // v1, stamped but never dated: the stamps alone make it a
+            // sample (12 hours = 0.5), where an undated close was none.
+            with_metadata(
+                packet(
+                    "cold-crash",
+                    1,
+                    JobStatus::Closed,
+                    d(2026, 8, 20),
+                    None,
+                    None,
+                    false,
+                ),
+                serde_json::json!({
+                    "outcome": "done",
+                    "opened_at": "2026-08-20T10:00:00+00:00",
+                    "closed_at": "2026-08-20T22:00:00+00:00",
+                }),
+            ),
+        ],
+    )
+    .await;
+
+    let (status, body) = get_report(
+        &app,
+        "/api/workflows/cold-crash/terminal-report",
+        "emp-1",
+        "reporter",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body:#}");
+    let versions = body["versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 2);
+
+    let v2 = &versions[0];
+    assert_eq!(v2["cycle_time_days"]["samples"], 1);
+    assert!(
+        approx(&v2["cycle_time_days"]["median"], 1800.0 / 86400.0),
+        "30 stamped minutes is ~0.0208 days, not 0: {:#}",
+        v2["cycle_time_days"]
+    );
+
+    let v1 = &versions[1];
+    assert_eq!(
+        v1["cycle_time_days"]["samples"], 3,
+        "the stamped-but-undated close is a sample: {v1:#}"
+    );
+    assert!(
+        approx(&v1["cycle_time_days"]["median"], 1.0),
+        "median of [0.5, 1, 2]: {:#}",
+        v1["cycle_time_days"]
+    );
+    assert!(
+        approx(&v1["cycle_time_days"]["p90"], 1.8),
+        "percentile_cont(0.9) of [0.5, 1, 2]: {:#}",
+        v1["cycle_time_days"]
+    );
 }
 
 #[tokio::test]
@@ -481,4 +609,92 @@ async fn the_report_wears_the_workflow_read_gate() {
         StatusCode::FORBIDDEN,
         "same gate as every sibling GET under /api/workflows — nothing weaker"
     );
+}
+
+/// Tier 2 (packet 6ea5a12a): the report grows an ARM dimension. A
+/// version-vs-version experiment stamps `experiment_arm` on every
+/// packet it admits, and the report groups by (version, arm) — so the
+/// candidate cohort, the control cohort, and the bystanders (same
+/// version, admitted outside the window) are three separate rows
+/// rather than one blended number. Rows sort version-desc, then arm
+/// desc with the unstamped row last.
+#[tokio::test]
+async fn arm_stamped_packets_report_as_their_own_cohorts() {
+    let (app, jobs) = app();
+    let arm = |a: &str, outcome: &str| serde_json::json!({ "outcome": outcome, "experiment_arm": a, "experiment_id": "e-1" });
+    seed(
+        &jobs,
+        vec![
+            // Candidate cohort: pinned v3, closed in 1 day.
+            with_metadata(
+                packet(
+                    "keg-return",
+                    3,
+                    JobStatus::Closed,
+                    d(2026, 8, 20),
+                    Some(d(2026, 8, 21)),
+                    None,
+                    false,
+                ),
+                arm("candidate", "returned"),
+            ),
+            // Control cohort: pinned v2, closed in 5 days.
+            with_metadata(
+                packet(
+                    "keg-return",
+                    2,
+                    JobStatus::Closed,
+                    d(2026, 8, 20),
+                    Some(d(2026, 8, 25)),
+                    None,
+                    false,
+                ),
+                arm("control", "returned"),
+            ),
+            // A bystander on the control version — admitted before the
+            // window, no stamp. It must NOT blend into the control arm.
+            packet(
+                "keg-return",
+                2,
+                JobStatus::Open,
+                d(2026, 8, 1),
+                None,
+                None,
+                false,
+            ),
+        ],
+    )
+    .await;
+
+    let (status, body) = get_report(
+        &app,
+        "/api/workflows/keg-return/terminal-report",
+        "emp-1",
+        "reporter",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let versions = body["versions"].as_array().expect("versions array");
+    assert_eq!(
+        versions.len(),
+        3,
+        "three cohorts: (v3, candidate), (v2, control), (v2, unstamped) — got {versions:?}"
+    );
+
+    assert_eq!(versions[0]["version"], 3);
+    assert_eq!(versions[0]["arm"], "candidate");
+    assert_eq!(versions[0]["outcomes"]["returned"], 1);
+    assert!(approx(&versions[0]["cycle_time_days"]["median"], 1.0));
+
+    assert_eq!(versions[1]["version"], 2);
+    assert_eq!(versions[1]["arm"], "control");
+    assert!(approx(&versions[1]["cycle_time_days"]["median"], 5.0));
+
+    assert_eq!(versions[2]["version"], 2);
+    assert_eq!(
+        versions[2]["arm"],
+        serde_json::Value::Null,
+        "bystanders report under a null arm, apart from both cohorts"
+    );
+    assert_eq!(versions[2]["by_status"]["open"], 1);
 }

@@ -1,0 +1,38 @@
+[Unit]
+Description=BOSS forge host adopts its own infra/forge + infra/ops units from forge main
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Root: install.sh writes /etc/systemd/system. The script itself drops
+# to the checkout owner (runuser -l) for the git operations, so the
+# clone never accumulates root-owned objects.
+User=root
+# The system of record, pinned inline exactly like boss-ops-runner and
+# boss-estate-observe-host: the maintenance-wrap helper has no localhost
+# default (it refuses without this), and the forge host carries no
+# deploy-services jobs-url drop-in. Reap failed on 2026-09-03 for want
+# of exactly this line; install.sh now also writes it as a drop-in, but
+# pinning it on the unit that INSTALLS the drop-in avoids the bootstrap
+# gap where the first converge runs before its own drop-in exists.
+Environment=BOSS_JOBS_URL=http://10.20.0.34:7900
+# WHAT THE RUN LEAVES FOR ITS PACKET — one path, declared once, for two
+# processes: ExecStart (this script and install.sh under it) writes
+# structured facts here, ExecStopPost (boss-step.sh) merges them onto the
+# `run` step and deletes the file. Every Exec line inherits Environment=,
+# so producer and consumer cannot disagree about the path (CLAUDE.md §9a),
+# and /run being tmpfs means a reboot cannot leave a stale one.
+Environment=BOSS_RUN_SUMMARY_FILE=/run/forge-converge.summary.json
+# install.sh is fast (file copies + daemon-reload); the git fetch is the
+# only slow part and is a shallow main fetch. A generous ceiling in case
+# the forge is briefly unreachable.
+TimeoutStartSec=10min
+# The timer is the executor; the Job is the visibility. ExecStartPre
+# opens (or reuses) the maintenance-forge-converge packet; ExecStopPost
+# records the verdict whether ExecStart succeeded or not, so a failed
+# converge closes its packet "Maintenance failed" — the alarm, naming
+# the exit status. (timers-leave-a-packet)
+ExecStartPre=/home/david/boss/infra/boss-maintenance-wrap.sh maintenance-forge-converge "Forge host converges on its own units"
+ExecStart=/home/david/boss/infra/forge/forge-converge.sh
+ExecStopPost=-/home/david/boss/infra/boss-step.sh maintenance-forge-converge run

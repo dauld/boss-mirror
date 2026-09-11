@@ -351,10 +351,30 @@ fn validate_field_type(
         "date" => value.as_str().is_some_and(|s| s.len() == 10), // loose date check
         "date-time" => value.as_str().is_some_and(|s| s.len() >= 19),
         "uri" => value.is_string(),
-        // Enum types (pipe-separated values)
+        // Enum types (pipe-separated values). The refusal names the
+        // offending value and the whole set, because the caller who
+        // sent `verdict = "__probe__"` needs to know what would have
+        // been accepted, not only that a string was the wrong string.
         s if s.contains('|') => {
             let allowed: Vec<&str> = s.split('|').collect();
-            value.as_str().is_some_and(|v| allowed.contains(&v))
+            return match value.as_str() {
+                Some(v) if allowed.contains(&v) => Ok(()),
+                Some(v) => Err(ValidationError {
+                    field: name.to_string(),
+                    message: format!(
+                        "'{v}' is not one of the allowed values [{}]",
+                        allowed.join(", ")
+                    ),
+                }),
+                None => Err(ValidationError {
+                    field: name.to_string(),
+                    message: format!(
+                        "expected one of [{}], got {}",
+                        allowed.join(", "),
+                        value_type_name(value)
+                    ),
+                }),
+            };
         }
         _ => true, // unknown type spec — accept
     };
@@ -515,7 +535,7 @@ impl LoadedStepType {
 // expects. The split exists so a non-company tenant can opt out
 // of company verbs without forking core (`StepRegistry::core_v1()`).
 //
-// The partition criterion lives in infra/dispatcher/rules.toml now —
+// The partition criterion lives in infra/dispatcher/rules/ now —
 // a step kind is "company-modeling" if any rule's `on_event` matches
 // `step.done.<kind>`. step_types.toml is pure schema declaration.
 
@@ -560,10 +580,40 @@ mod tests {
     fn registry_has_43_types() {
         // Test name predates the count bumps; leaving the name alone
         // keeps blame-diff churn down. Count is just "length of
-        // seeded types", not any load-bearing invariant. 45 since
-        // `answer-question` (the approval Workflow's decide step).
+        // seeded types", not any load-bearing invariant. 48 since
+        // `credential-rotation` (the rotation packet's dedicated scope
+        // kind, so the credential broker's rule can target
+        // `step.done.credential-rotation` instead of firing on every
+        // `task` — the same reasoning as `gate-verdict` before it).
         let reg = StepRegistry::v1();
-        assert_eq!(reg.all().len(), 45);
+        assert_eq!(reg.all().len(), 48);
+    }
+
+    /// The reason `scope-declaration` is registered at all.
+    ///
+    /// The dispatcher decides DECIDES vs EXECUTES from this registry
+    /// and defaults an UNKNOWN kind to decision-shaped
+    /// (dispatcher.rs, `unwrap_or(true)`). So leaving this kind
+    /// unregistered is not neutral: the moment ship-a-change points
+    /// its `scope` step at it, every new car's boundary step becomes a
+    /// "decision", gets nominated to the single human holder of
+    /// `platform-admin`, and lands in that person's queue — moments
+    /// before `boss park` fills it anyway.
+    ///
+    /// A count assertion cannot catch that. This pins the property the
+    /// entry exists for, so deleting the flag or the block fails here
+    /// with the reason rather than as an off-by-one.
+    #[test]
+    fn declaring_a_boundary_is_work_not_a_verdict() {
+        let reg = StepRegistry::v1();
+        let scope = reg
+            .get("scope-declaration")
+            .expect("scope-declaration registered — an unregistered kind reads as a decision");
+        assert!(
+            !scope.decision_shaped,
+            "declaring what a change contains is executable work; marking it \
+             decision-shaped routes every car's scope step to a human queue"
+        );
     }
 
     #[test]
@@ -608,29 +658,83 @@ mod tests {
         // which silently fails the "required at done" contract.
         //
         // Tenant-specific kinds live in per-tenant TOMLs, linted at
-        // load time by the seed_loader test. `platform_workflows()` carries
-        // just `workflow-design`.
+        // load time by the seed_loader test.
+        //
+        // Reads the bundle as well as the roster since 2026-09-11
+        // (`seedable_platform_workflows()` is the union). The roster is
+        // empty now that every platform protocol is a file, and this
+        // loop over it would have kept passing while ranging over
+        // nothing — the quietest way for a closed-alphabet invariant to
+        // stop being held.
+        //
+        // POINTING IT AT THE REAL SET FOUND ONE EXCEPTION IMMEDIATELY,
+        // and it is a deliberate one. `correct-the-record`'s review step
+        // declares `correction-verdict` precisely because a StepPlugin
+        // registers BY KIND and the SPA mounts by kind: registering the
+        // corrections UX against `task` would hijack every task step in
+        // the system. The concern this invariant is about does not apply
+        // to it — the validator it would lose is the kind bundle's, and
+        // its completion contract is authored inline as the step's own
+        // `fields`, which ARE enforced at done. `StepRegistry` is
+        // permissive for unknown kinds by design, and the dispatcher's
+        // `executor_for` already treats an unknown kind as
+        // decision-shaped so the verdict still reaches a person.
+        //
+        // Named rather than silently skipped. An exemption nobody can
+        // see is how a rule stops covering what it was written for, so a
+        // SECOND unregistered kind is a decision that lands in a diff —
+        // and the entry is checked for staleness both ways, the same
+        // discipline `the-live-protocols-are-the-authored-protocols.sh`
+        // applies to its own list.
+        const PLUGIN_ONLY_KINDS: [&str; 1] = ["correction-verdict"];
+
         let reg = StepRegistry::v1();
         let defined: std::collections::HashSet<&str> = reg.all().iter().map(|t| t.kind).collect();
 
+        let specs = crate::registry::seedable_platform_workflows();
+        assert!(!specs.is_empty(), "an empty set would prove nothing");
         let mut missing: Vec<(String, String)> = Vec::new();
-        for spec in crate::registry::platform_workflows() {
+        let mut seen_exempt: Vec<&str> = Vec::new();
+        for spec in &specs {
             for step in &spec.steps {
-                if !defined.contains(step.kind.as_str()) {
-                    missing.push((spec.kind.clone(), step.kind.clone()));
+                if defined.contains(step.kind.as_str()) {
+                    continue;
                 }
+                if let Some(k) = PLUGIN_ONLY_KINDS.iter().find(|k| **k == step.kind.as_str()) {
+                    seen_exempt.push(k);
+                    continue;
+                }
+                missing.push((spec.kind.clone(), step.kind.clone()));
             }
         }
         assert!(
             missing.is_empty(),
-            "platform Workflows reference undefined StepType kinds: {missing:?}"
+            "platform Workflows reference undefined StepType kinds: {missing:?} — define \
+             each in StepRegistry::v1(), or, if it exists only to mount a StepPlugin whose \
+             contract is the step's own `fields`, add it to PLUGIN_ONLY_KINDS above with why"
         );
+        for kind in PLUGIN_ONLY_KINDS {
+            assert!(
+                !defined.contains(kind),
+                "`{kind}` is in the StepType registry now — drop it from \
+                 PLUGIN_ONLY_KINDS, or the exemption silently excuses the next \
+                 unregistered kind of that name"
+            );
+            assert!(
+                seen_exempt.contains(&kind),
+                "no platform Workflow declares a `{kind}` step any more — drop it from \
+                 PLUGIN_ONLY_KINDS"
+            );
+        }
     }
 
     #[test]
     fn all_kinds_are_unique() {
         let reg = StepRegistry::v1();
         let kinds: Vec<&str> = reg.all().iter().map(|t| t.kind).collect();
+        // Uniqueness is satisfied by the empty set, so the alphabet has
+        // to state a floor or this test is about nothing.
+        boss_testing::assert_roster_floor!(kinds, 30, "the StepType alphabet (48 on 2026-09-11)");
         let mut deduped = kinds.clone();
         deduped.sort();
         deduped.dedup();
@@ -706,6 +810,115 @@ mod tests {
         assert!(err.iter().any(|e| e.field == "currency"));
     }
 
+    /// The completion contract of a design-review step, read from the
+    /// platform bundle: the union of the `answer-question` bundle's
+    /// fields and the step's own authored fields — exactly what
+    /// `PUT /api/jobs/{id}/steps/{step_id}` checks at `completed`.
+    fn design_review_contract(workflow: &str) -> Vec<boss_core::job::StepField> {
+        crate::seed_loader::load_workflows(crate::registry::platform_bundle_path())
+            .expect("the platform Workflow bundle parses")
+            .into_iter()
+            .find(|w| w.kind == workflow)
+            .unwrap_or_else(|| panic!("the bundle carries {workflow}"))
+            .steps
+            .into_iter()
+            .find(|s| s.title == "design-review")
+            .unwrap_or_else(|| panic!("{workflow} has a design-review step"))
+            .fields
+    }
+
+    fn complete_design_review(
+        workflow: &str,
+        meta: &serde_json::Value,
+    ) -> Result<(), Vec<ValidationError>> {
+        let reg = StepRegistry::v1();
+        reg.validate_metadata("answer-question", meta)
+            .and_then(|()| {
+                StepRegistry::validate_authored_fields(&design_review_contract(workflow), meta)
+            })
+    }
+
+    /// The live defect (backlog item cb9661fe, defect 2). backlog-item's
+    /// and user-feedback's design-review steps are `answer-question`
+    /// steps that authored no fields of their own, so only the kind
+    /// bundle applied at completion — and the bundle declares `verdict`
+    /// as a bare `string` with the vocabulary living in its description.
+    /// A PUT completing the step with `verdict = "__probe__"` returned
+    /// 204 (a305385b). The bundle cannot be tightened (it is unversioned
+    /// — steptype-bundle-ratchet), so the vocabulary is authored on the
+    /// workflow steps, the versioned path `approval` already uses, and
+    /// the refusal names the field, the offending value, and the set.
+    #[test]
+    fn a_design_review_verdict_outside_its_set_is_refused() {
+        for workflow in ["backlog-item", "user-feedback"] {
+            let meta = serde_json::json!({"verdict": "__probe__", "answer": "a placeholder"});
+            let err = match complete_design_review(workflow, &meta) {
+                Err(err) => err,
+                Ok(()) => panic!("{workflow} accepted __probe__"),
+            };
+            let e = err
+                .iter()
+                .find(|e| e.field == "verdict")
+                .expect("the refusal names the field");
+            for needle in ["'__probe__'", "approved", "declined", "answered"] {
+                assert!(
+                    e.message.contains(needle),
+                    "{workflow}: the refusal names the value and the allowed set: {}",
+                    e.message
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_design_review_verdict_in_its_set_is_accepted() {
+        for workflow in ["backlog-item", "user-feedback"] {
+            for v in ["approved", "declined", "answered"] {
+                let meta = serde_json::json!({"verdict": v, "answer": "why"});
+                assert!(
+                    complete_design_review(workflow, &meta).is_ok(),
+                    "{workflow}: {v} is in the set"
+                );
+            }
+        }
+    }
+
+    /// `answer` is free text; the enum check must not leak onto a plain
+    /// `string` field beside the enum.
+    #[test]
+    fn a_non_enum_string_field_beside_an_enum_is_untouched() {
+        let meta = serde_json::json!({"verdict": "approved", "answer": "__probe__"});
+        assert!(complete_design_review("backlog-item", &meta).is_ok());
+    }
+
+    /// Same contract on a step-authored field: the message carries the
+    /// field, the value, and the set, and a non-string says what it got.
+    #[test]
+    fn an_enum_refusal_names_field_value_and_set() {
+        let fields = vec![boss_core::job::StepField {
+            name: "disposition".into(),
+            field_type: "verify|design|build".into(),
+            required: true,
+            filled_by: Default::default(),
+            item_keys: Vec::new(),
+        }];
+        let meta = serde_json::json!({"disposition": "ship"});
+        let err = StepRegistry::validate_authored_fields(&fields, &meta).unwrap_err();
+        assert_eq!(err.len(), 1);
+        assert_eq!(err[0].field, "disposition");
+        for needle in ["'ship'", "verify", "design", "build"] {
+            assert!(err[0].message.contains(needle), "{}", err[0].message);
+        }
+
+        let meta = serde_json::json!({"disposition": 7});
+        let err = StepRegistry::validate_authored_fields(&fields, &meta).unwrap_err();
+        assert!(
+            err[0].message.contains("number"),
+            "a non-string on an enum field says what it got: {}",
+            err[0].message
+        );
+    }
+
     #[test]
     fn shipment_validates_direction_enum() {
         let reg = StepRegistry::v1();
@@ -759,8 +972,8 @@ mod tests {
         let v = all_v1_types();
         assert_eq!(
             v.len(),
-            45,
-            "step_types.toml should have 45 [[step_type]] blocks"
+            48,
+            "step_types.toml should have 48 [[step_type]] blocks"
         );
     }
 
@@ -772,11 +985,15 @@ mod tests {
                 name: "counter_offer_cents".into(),
                 field_type: "integer".into(),
                 required: true,
+                filled_by: boss_core::job::FilledBy::Executor,
+                item_keys: Vec::new(),
             },
             StepField {
                 name: "notes".into(),
                 field_type: "string".into(),
                 required: false,
+                filled_by: boss_core::job::FilledBy::Executor,
+                item_keys: Vec::new(),
             },
         ];
         // Missing required authored field → error naming it.

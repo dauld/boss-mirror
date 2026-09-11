@@ -7,7 +7,7 @@
 //! handlers so the test asserts *what fired with which resolved args*
 //! without a live jobs-api.
 //!
-//! The rule bodies here mirror `infra/dispatcher/rules.toml` exactly —
+//! The rule bodies here mirror `infra/dispatcher/rules/` exactly —
 //! if the production arg expressions drift, this test drifts with them.
 
 use boss_dispatcher::rules::expr::{NoHelpers, Value};
@@ -15,7 +15,7 @@ use boss_dispatcher::rules::handler::{HandlerRegistry, RecordingHandler, dispatc
 use boss_dispatcher::rules::registry::{Registry, match_event};
 use serde_json::json;
 
-/// The two D7 rules, copied verbatim from infra/dispatcher/rules.toml.
+/// The two D7 rules, copied verbatim from infra/dispatcher/rules/.
 const D7_RULES: &str = r#"
 [[rule]]
 name = "spawn-subjob-on-delegate-subjob-step-ready"

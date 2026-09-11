@@ -1,0 +1,13 @@
+[[rule]]
+name = "spawn-subjob-on-delegate-subjob-step-ready"
+why = """
+A CROSS-PROTOCOL REACTOR by construction — the SPAWN half of Workflow
+v2's delegate-subjob loop. A protocol row can declare its own
+delegating step; it cannot open a packet of ANOTHER kind, which is
+exactly what delegation is. The child's kind comes from the parent
+step's own metadata, so no new rule is needed per delegation.
+"""
+on_event = "step.ready.delegate-subjob"
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "metadata.subworkflow", subject_kind = "subject_kind", subject = "subject_id", parent_step_id = "step_id" }

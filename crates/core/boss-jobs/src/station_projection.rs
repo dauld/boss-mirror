@@ -168,46 +168,91 @@ pub fn derived_stations(
 
 #[cfg(test)]
 mod tests {
+
+    /// One floor for one derivation, declared once rather than four times
+    /// — the per-test copies were the same fact living four places, which
+    /// is what §9a is about, and which this car is about in the first
+    /// place. Six against a real ten on 2026-09-11 (off 46 protocols):
+    /// low enough that retiring a protocol or two is not an edit here,
+    /// high enough that a projection which collapsed would red.
+    const QUEUE_FLOOR: usize = 6;
+    const QUEUES: &str = "the constraint queues the platform protocol bundle declares \
+                          (10 on 2026-09-11, off 46 protocols)";
     use super::*;
-    use crate::registry::platform_workflows;
+    use crate::registry::seedable_platform_workflows;
 
     fn now() -> DateTime<Utc> {
         DateTime::from_timestamp(1_760_000_000, 0).expect("fixed instant")
     }
 
-    /// What the CODE-SEEDED platform set declares — exactly three.
+    /// TWO PROTOCOLS, ONE QUEUE — measured on the real platform set.
     ///
-    /// Pinned at the real number rather than a comfortable inequality.
     /// The 51 constraints in this module's header are the RUNNING
-    /// registry: 45 active Workflows, which is the 7 platform kinds
-    /// plus the bundle plus the tenant's. A unit test cannot reach
-    /// those, and this assertion started life as `>= 4` — an overclaim
-    /// that measured 2 and had to be corrected. The gap between 2 and
-    /// 51 is not a defect; it is the reason the projection reads the
-    /// live registry at runtime and not `platform_workflows()`.
+    /// registry, which a unit test cannot reach; this reads the set a
+    /// deployment seeds (`seedable_platform_workflows()` — the roster,
+    /// empty since 2026-09-11, plus every file in the platform bundle).
+    /// The gap between the two is not a defect: it is the reason the
+    /// projection reads the live registry at runtime and not this
+    /// function.
     ///
-    /// One of the two is the interesting case: `review-design` is
-    /// declared by BOTH `design-doc-review` and the `design-doc` kind
-    /// added the same day, and the projection yields ONE queue for the
-    /// pair. The authored `design-review` station names
-    /// `kind = "design-doc-review"` and therefore missed the second.
+    /// It pinned an exact two-name list until 2026-09-11, when
+    /// `design-doc-review` was the last protocol to leave the Rust
+    /// roster and the "code-seeded half" this measured stopped existing.
+    /// Re-pinning the list over the whole bundle would have put a
+    /// contended tail line in the path of every protocol car (§9a) while
+    /// saying nothing the assertions below do not — so what is pinned is
+    /// the property the list was carrying.
+    ///
+    /// The shared case is DERIVED rather than named. The original list
+    /// documented one — `review-design`, declared by both
+    /// `design-doc-review` and `design-doc`, where the authored
+    /// `design-review` station named `kind = "design-doc-review"` and
+    /// therefore missed the second — and naming it back would have been
+    /// a kind-name match, which `no-step-kind-match` refuses for the
+    /// right reason (step-kind names are data). So this finds every
+    /// (role, step kind) two or more protocols declare and asserts each
+    /// collapses to one queue: the property holds for whichever pair the
+    /// bundle happens to contain, and it cannot quietly become vacuous
+    /// because it fails when there is no such pair at all.
     #[test]
     fn the_platform_set_declares_exactly_the_constraints_it_declares() {
-        let found = constraints_of(&platform_workflows());
-        let names: Vec<String> = found.iter().map(station_name).collect();
-        assert_eq!(
-            names,
-            vec![
-                // user-feedback v11's design-review (0ab5fa3a): the
-                // decision steps of the feedback protocol became a
-                // constraint queue of their own the moment their kind
-                // stopped being generic `task` — which is the docket.
-                "q.platform-admin.answer-question",
-                "q.platform-admin.review-design",
-                "q.platform-admin.task",
-            ],
-            "the code-seeded platform set's constraints changed"
+        let specs = seedable_platform_workflows();
+        let found = constraints_of(&specs);
+        assert!(!found.is_empty(), "an empty constraint set proves nothing");
+
+        // (role, step kind) → how many distinct protocols declare it.
+        let mut declarers: std::collections::BTreeMap<(&str, &str), Vec<&str>> =
+            std::collections::BTreeMap::new();
+        for w in &specs {
+            for s in w.steps.iter().filter(|s| s.authority_role.is_some()) {
+                let role = s.authority_role.as_deref().expect("filtered");
+                declarers
+                    .entry((role, s.kind.as_str()))
+                    .or_default()
+                    .push(w.kind.as_str());
+            }
+        }
+        let shared: Vec<_> = declarers.iter().filter(|(_, ws)| ws.len() > 1).collect();
+        assert!(
+            !shared.is_empty(),
+            "no (role, step kind) is declared by two protocols, so the one-queue-for-the-pair \
+             property is untested rather than held"
         );
+        for ((role, step_kind), protocols) in shared {
+            let matching: Vec<&Constraint> = found
+                .iter()
+                .filter(|c| c.role == *role && c.step_kind == *step_kind)
+                .collect();
+            assert_eq!(
+                matching.len(),
+                1,
+                "{} protocols declare ({role}, {step_kind}) and must share ONE queue, not \
+                 {}: {protocols:?}",
+                protocols.len(),
+                matching.len()
+            );
+        }
+
         // Every constraint names both halves — a queue with no role is
         // not a constraint queue, and a role with no step kind cannot
         // be matched against a packet.
@@ -224,7 +269,7 @@ mod tests {
     /// exists to remove, so the projection yields rather than merging.
     #[test]
     fn an_authored_name_wins_and_the_derived_row_is_dropped() {
-        let wf = platform_workflows();
+        let wf = seedable_platform_workflows();
         let all = derived_stations(&wf, &[], now());
         assert!(!all.is_empty(), "expected some derived stations");
 
@@ -247,7 +292,9 @@ mod tests {
     /// decoration. `capability` is what M and the claim CAS read.
     #[test]
     fn the_constraint_reaches_the_capability_gate() {
-        for s in derived_stations(&platform_workflows(), &[], now()) {
+        let derived = derived_stations(&seedable_platform_workflows(), &[], now());
+        boss_testing::assert_roster_floor!(derived, QUEUE_FLOOR, "{QUEUES}");
+        for s in derived {
             let cap = s.capability.as_ref().unwrap_or_else(|| {
                 panic!(
                     "{} has no capability — its constraint is decorative",
@@ -278,7 +325,9 @@ mod tests {
     /// make a load number useless to M.
     #[test]
     fn only_actionable_steps_are_queued() {
-        for s in derived_stations(&platform_workflows(), &[], now()) {
+        let derived = derived_stations(&seedable_platform_workflows(), &[], now());
+        boss_testing::assert_roster_floor!(derived, QUEUE_FLOOR, "{QUEUES}");
+        for s in derived {
             let step = s
                 .predicate
                 .step
@@ -302,7 +351,7 @@ mod tests {
     /// one job each, which is how a queue layer becomes noise.
     #[test]
     fn the_same_constraint_in_two_protocols_is_one_queue() {
-        let mut a = platform_workflows()
+        let mut a = seedable_platform_workflows()
             .into_iter()
             .find(|w| !w.steps.is_empty())
             .expect("a platform kind with steps");
@@ -329,7 +378,7 @@ mod tests {
     /// station ever required".
     #[test]
     fn a_retired_protocol_declares_nothing() {
-        let mut wf = platform_workflows()
+        let mut wf = seedable_platform_workflows()
             .into_iter()
             .find(|w| w.steps.iter().any(|s| s.authority_role.is_some()))
             .expect("a platform kind with a constrained step");
@@ -352,7 +401,9 @@ mod tests {
     /// unit tests would stay green.
     #[test]
     fn a_derived_name_survives_a_url_path_segment() {
-        for s in derived_stations(&platform_workflows(), &[], now()) {
+        let derived = derived_stations(&seedable_platform_workflows(), &[], now());
+        boss_testing::assert_roster_floor!(derived, QUEUE_FLOOR, "{QUEUES}");
+        for s in derived {
             assert!(
                 !s.name.contains('/'),
                 "`{}` would not match /api/stations/{{name}}/queue",
@@ -379,7 +430,9 @@ mod tests {
     /// across the network, not by reading the code.
     #[test]
     fn a_derived_queue_matches_the_role_not_just_the_kind() {
-        for s in derived_stations(&platform_workflows(), &[], now()) {
+        let derived = derived_stations(&seedable_platform_workflows(), &[], now());
+        boss_testing::assert_roster_floor!(derived, QUEUE_FLOOR, "{QUEUES}");
+        for s in derived {
             let step = s
                 .predicate
                 .step
@@ -403,7 +456,7 @@ mod tests {
     /// nine copies of one list.
     #[test]
     fn two_roles_on_one_step_kind_get_disjoint_predicates() {
-        let mut a = platform_workflows()
+        let mut a = seedable_platform_workflows()
             .into_iter()
             .find(|w| !w.steps.is_empty())
             .expect("a platform kind with steps");

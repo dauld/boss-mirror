@@ -47,8 +47,9 @@ struct Cli {
     #[arg(long, env = "BOSS_POSTGRES_URL")]
     database_url: String,
 
-    /// The bundle. Defaults to the in-tree platform bundle.
-    #[arg(long, default_value = "infra/platform/workflows.toml")]
+    /// The bundle: a directory of `<kind>.toml` files (or one bundle
+    /// file). Defaults to the in-tree platform bundle.
+    #[arg(long, default_value = "infra/platform/workflows")]
     seed_path: PathBuf,
 
     /// Report what would be inserted and write nothing.

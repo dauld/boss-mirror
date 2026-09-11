@@ -1,6 +1,6 @@
 # Seeds vs. emergent state — what belongs in seed data and what doesn't
 
-**Status:** living guidance. Treat any seed file that violates this as a known stop-gap, not a target.
+**Status**: living guidance. Treat any seed file that violates this as a known stop-gap, not a target.
 
 ## Frame
 
@@ -103,8 +103,8 @@ live once Job steps emit facts directly (the planned end state
 where a Step's `done` transition is the fact's provenance).
 
 ### 2. Bypass-smell lint — CI
-`infra/lint/seed-bypass-smell.sh` (wired into CI at
-`.github/workflows/ci.yml`) scans every
+`infra/lint/seed-bypass-smell.sh` (on the gate's lint roster,
+`infra/gate.sh`) scans every
 `examples/<tenant>/seeds/sql/*.sql` file and rejects
 `INSERT INTO` statements against a flat denylist: `invoices`,
 `invoice_line_items`, `gl_journal_entries`, `gl_journal_lines`,

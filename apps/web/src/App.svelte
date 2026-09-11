@@ -2,12 +2,13 @@
   // Root component — parses the URL, dispatches to the matched
   // page inside AppShell.
   //
-  // Phase 1 wires /me, /jobs, /jobs/:id, /service, /sales, /refurb,
+  // Phase 1 wires /me, /jobs, /jobs/:id, /service, /sales,
   // /assets, /assets/:id. Unmatched URLs fall back to My Day
   // (same as the React app's default).
 
   import { onMount } from 'svelte';
   import { parseRoute, type Route } from './router';
+  import { goToLogin } from '@boss/web-kit/session/deadSession';
   import { loadSession } from '@boss/web-kit/session/session.svelte';
   import { loadManifest } from '@boss/web-kit/session/manifest.svelte';
   import { loadStepTypeRegistry } from './steps/surfaceRegistry.svelte';
@@ -58,11 +59,13 @@
   import DispatcherRulesPage from './dispatcher/DispatcherRulesPage.svelte';
   import DispatcherRuleEditPage from './dispatcher/DispatcherRuleEditPage.svelte';
   import SubjectsClassesPage from './it/subjects/SubjectsClassesPage.svelte';
-  import SystemModelPage from './it/system/SystemModelPage.svelte';
-  import FlowPage from './it/flow/FlowPage.svelte';
   import YardPage from './it/yard/YardPage.svelte';
-  import StationMapPage from './it/map/StationMapPage.svelte';
-  import FleetPage from './it/fleet/FleetPage.svelte';
+  import YardStatusPage from './it/yard/YardStatusPage.svelte';
+  import CrewBoardPage from './it/crew/CrewBoardPage.svelte';
+  import EstatePage from './it/estate/EstatePage.svelte';
+  import FleetPage from './it/monitoring/FleetPage.svelte';
+  import MarshallingYardPage from './it/marshalling/MarshallingYardPage.svelte';
+  import ItTabs from './it/ItTabs.svelte';
   import DesignReviewPage from './it/design/DesignReviewPage.svelte';
   import ExperimentsPage from './it/experiments/ExperimentsPage.svelte';
   import InboxPage from './inbox/InboxPage.svelte';
@@ -77,9 +80,9 @@
   import AssetPage from './assets/AssetPage.svelte';
   import ManualPage from './content/ManualPage.svelte';
   import WorkflowsPage from './kb/WorkflowsPage.svelte';
-  import MonitoringPage from './it/monitoring/MonitoringPage.svelte';
   import PerfPage from './it/monitoring/PerfPage.svelte';
   import EventsPage from './it/monitoring/EventsPage.svelte';
+  import ConductorPage from './it/monitoring/ConductorPage.svelte';
   import PoPage from './po/PoPage.svelte';
   import VendorInvoicePage from './po/VendorInvoicePage.svelte';
   import WatchlistPage from './accounts/WatchlistPage.svelte';
@@ -89,6 +92,7 @@
   import SearchResultsPage from './search/SearchResultsPage.svelte';
   import ViewsPage from './views/ViewsPage.svelte';
   import FeedbackTriagePage from './it/feedback/FeedbackTriagePage.svelte';
+  import BacklogBoardPage from './it/backlog/BacklogBoardPage.svelte';
   import IncidentsPage from './it/incidents/IncidentsPage.svelte';
   import LoginPage from './auth/LoginPage.svelte';
   import AuthAdminPage from './auth/AuthAdminPage.svelte';
@@ -105,7 +109,6 @@
     switch (kind) {
       case 'support':
       case 'service':
-      case 'refurb':          return { id: 'support',   label: 'Support / Service' };
       case 'shipping':
       case 'shipmentDetail':  return { id: 'shipping',  label: 'Shipments' };
       case 'calendar':        return { id: 'calendar',  label: 'Release calendar' };
@@ -152,6 +155,14 @@
   // the state could ever render, so MePage's advice for that state
   // ("reload to log in") described a loop, not a way in. Data reads
   // and writes still redirect — that is the interceptor's real job.
+  //
+  // Still only /api/* here: a non-API 401 belongs to the call that
+  // made it, which knows whether the status means a dead session
+  // (a step-plugin bundle) or something else. Those callers reach
+  // `goToLogin` directly — web-kit's session/deadSession.ts holds the
+  // target, the ?next= encoding and the on-/login guard ONCE, so this
+  // interceptor, steps/pluginHost.ts and WriteGate's sign-in link
+  // cannot drift (§9a).
   {
     const isIdentityProbe = (url: string): boolean =>
       url.startsWith('/api/session') || url.startsWith('/api/auth/');
@@ -161,15 +172,12 @@
       init?: RequestInit,
     ): Promise<Response> => {
       const resp = await _origFetch(input, init);
-      if (resp.status === 401 && window.location.pathname !== '/login') {
+      if (resp.status === 401) {
         const url = typeof input === 'string'
           ? input
           : input instanceof URL ? input.href : input.url;
-        // Only redirect on /api/* — let app-internal 401 handling
-        // for non-API resources stay where the call was made.
         if (url.startsWith('/api/') && !isIdentityProbe(url)) {
-          const next = encodeURIComponent(window.location.pathname + window.location.search);
-          window.location.href = `/login?next=${next}`;
+          goToLogin();
         }
       }
       return resp;
@@ -236,7 +244,11 @@
     {:else if route.kind === 'views'}
       <ViewsPage />
     {:else if route.kind === 'systemFeedback'}
+      <ItTabs group="design" active="/it/design/feedback" />
       <FeedbackTriagePage />
+    {:else if route.kind === 'systemBacklog'}
+      <ItTabs group="design" active="/it/design/backlog" />
+      <BacklogBoardPage />
     {:else if route.kind === 'authAdmin'}
       <AuthAdminPage />
     {:else if route.kind === 'me'}
@@ -266,15 +278,6 @@
         initialKind="sale"
         initialStatus="open"
         pageTitle="Sales pipeline"
-      />
-    {:else if route.kind === 'refurb'}
-      <!-- /refurb is the device-shop tenant's service queue.
-           Page title generalizes — tenants that don't run a
-           refurb pipeline (brewery) just see an empty list. -->
-      <JobsListPage
-        initialKindPrefix="refurb"
-        initialStatus="open"
-        pageTitle="Service queue"
       />
     {:else if route.kind === 'assets'}
       <AssetsList />
@@ -321,6 +324,7 @@
     {:else if route.kind === 'systemKb'}
       <ItKnowledgeBasePage />
     {:else if route.kind === 'policy'}
+      <ItTabs group="registry" active="/it/registry/policy" />
       <PolicyPage />
     {:else if route.kind === 'workflowsAdmin'}
       <WorkflowsAdminPage />
@@ -331,31 +335,43 @@
     {:else if route.kind === 'workflowDetail'}
       <WorkflowDetailPage kindSlug={route.kindSlug} />
     {:else if route.kind === 'systemStepPlugins'}
+      <ItTabs group="registry" active="/it/registry/step-plugins" />
       <StepPluginsPage />
     {:else if route.kind === 'systemStepPluginDetail'}
       <StepPluginDetailPage pluginSlug={route.pluginSlug} />
     {:else if route.kind === 'systemDesign'}
+      <ItTabs group="design" active="/it/design" />
       <DesignReviewPage />
     {:else if route.kind === 'systemYard'}
       <YardPage />
-    {:else if route.kind === 'systemMap'}
-      <StationMapPage />
-    {:else if route.kind === 'systemFlow'}
-      <FlowPage />
+    {:else if route.kind === 'systemCrew'}
+      <!-- No ItTabs: the Crew Board is its own sidebar row, not a tab on
+           an existing family (backlog 04c5bbc0, David 2026-09-11). -->
+      <CrewBoardPage />
+    {:else if route.kind === 'systemEstate'}
+      <EstatePage />
     {:else if route.kind === 'systemFleet'}
+      <ItTabs group="operate" active="/it/operate/bottlenecks" />
       <FleetPage />
+    {:else if route.kind === 'systemMarshallingYard'}
+      <ItTabs group="operate" active="/it/operate/marshalling" />
+      <MarshallingYardPage />
+    {:else if route.kind === 'systemYardStatus'}
+      <ItTabs group="operate" active="/it/operate/yard-status" />
+      <YardStatusPage />
     {:else if route.kind === 'experiments'}
+      <ItTabs group="design" active="/it/design/experiments" />
       <ExperimentsPage />
     {:else if route.kind === 'dispatcherRules'}
+      <ItTabs group="registry" active="/it/registry/dispatcher" />
       <DispatcherCascadePage />
     {:else if route.kind === 'dispatcherRulesList'}
       <DispatcherRulesPage />
     {:else if route.kind === 'dispatcherRuleEdit'}
       <DispatcherRuleEditPage ruleName={route.ruleName} />
     {:else if route.kind === 'systemSubjects'}
+      <ItTabs group="registry" active="/it/registry/subjects" />
       <SubjectsClassesPage />
-    {:else if route.kind === 'systemModel'}
-      <SystemModelPage />
     {:else if route.kind === 'inbox'}
       <InboxPage />
     {:else if route.kind === 'calendar'}
@@ -381,15 +397,20 @@
     {:else if route.kind === 'manualSection'}
       <ManualPage slug={route.slug} />
     {:else if route.kind === 'workflows'}
+      <ItTabs group="registry" active="/it/registry" />
       <WorkflowsPage />
-    {:else if route.kind === 'systemMonitoring'}
-      <MonitoringPage />
     {:else if route.kind === 'systemMonitoringPerf'}
+      <ItTabs group="operate" active="/it/operate/perf" />
       <PerfPage />
     {:else if route.kind === 'systemMonitoringEvents'}
+      <ItTabs group="operate" active="/it/operate/audit" />
       <EventsPage />
     {:else if route.kind === 'systemMonitoringAtlas'}
+      <ItTabs group="operate" active="/it/operate/atlas" />
       <AtlasPage />
+    {:else if route.kind === 'systemMonitoringConductor'}
+      <ItTabs group="operate" active="/it/operate/conductor" />
+      <ConductorPage />
     {:else if route.kind === 'po'}
       <PoPage poId={route.poId} />
     {:else if route.kind === 'vendorInvoice'}
@@ -397,6 +418,7 @@
     {:else if route.kind === 'watchlist'}
       <WatchlistPage />
     {:else if route.kind === 'incidents'}
+      <ItTabs group="operate" active="/it/operate" />
       <IncidentsPage />
     {:else if route.kind === 'shop'}
       <ShopHome />

@@ -51,11 +51,30 @@ pub const PLATFORM_ADMIN_ROLE: &str = "platform-admin";
 /// gateway perf, etc.) don't reject anonymous OSS visitors.
 pub const AUDIT_READONLY_ROLE: &str = "audit-readonly";
 
+/// Break-glass role — the emergency session minted by the gateway's
+/// hardware-key WebAuthn ceremony (docs/design/break-glass-is-a-key-
+/// you-hold.md). Deliberately NARROW (Q4): it carries exactly the
+/// three emergency levers — deploy rollback, merge approval, auth
+/// administration — and is not platform-admin. It must never join
+/// [`has_global_read`]: an emergency key is a door key, not a data
+/// key.
+pub const BREAK_GLASS_ROLE: &str = "break-glass";
+
 /// True for any role that has full read across the deployment —
 /// the platform admin, audit-readonly, or any role the tenant has
 /// flagged executive via `metadata.is_executive = true`.
 pub fn has_global_read(role: &str) -> bool {
     role == PLATFORM_ADMIN_ROLE || role == AUDIT_READONLY_ROLE || is_executive(role)
+}
+
+/// True for roles allowed to administer the gateway's auth surface
+/// (onboard local credentials, issue resets). Global-read roles keep
+/// the authority they have always had; `break-glass` joins them
+/// because auth administration is one of its three named levers —
+/// without it, a lockout emergency could not repair the door it came
+/// in through.
+pub fn can_administer_auth(role: &str) -> bool {
+    has_global_read(role) || role == BREAK_GLASS_ROLE
 }
 
 // ---------------------------------------------------------------------------
@@ -148,5 +167,26 @@ mod tests {
         assert!(has_global_read(AUDIT_READONLY_ROLE));
         assert!(!has_global_read("service-tech"));
         assert!(!has_global_read("admin")); // legacy "admin" is not platform-admin
+    }
+
+    /// Q4 (break-glass-is-a-key-you-hold): the emergency role is
+    /// NARROW. If it ever gains global read, every "admin-ish" gate
+    /// keyed on `has_global_read` silently widens the emergency key
+    /// into a data key.
+    #[test]
+    fn break_glass_never_has_global_read() {
+        seed_executive_set();
+        assert!(!has_global_read(BREAK_GLASS_ROLE));
+    }
+
+    /// Auth administration is one of break-glass's three levers; the
+    /// gateway's admin gates ask this instead of `has_global_read`.
+    #[test]
+    fn break_glass_can_administer_auth_without_global_read() {
+        seed_executive_set();
+        assert!(can_administer_auth(BREAK_GLASS_ROLE));
+        assert!(can_administer_auth(PLATFORM_ADMIN_ROLE));
+        assert!(can_administer_auth("ceo"));
+        assert!(!can_administer_auth("service-tech"));
     }
 }

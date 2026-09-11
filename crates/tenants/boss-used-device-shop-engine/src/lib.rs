@@ -17,6 +17,8 @@
 //!   running against a `LiveApiOutput` pointed at a real API
 //!   stack.
 
+pub mod prepare;
+
 use std::path::Path;
 
 use anyhow::{Context, Result};

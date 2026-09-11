@@ -1,0 +1,75 @@
+# ---------------------------------------------------------------------------
+# maintenance-sweep — a recurring inspection of one piece of
+# infrastructure, admitted on a cadence rather than remembered.
+#
+# The chore family seven dispatcher clock rules spawn. It is the one
+# `maintenance-*` protocol that is NOT unit-run: there is no `run` step
+# whose `result` routes the verdict, because the executor is a person or
+# an agent doing an inspection, not a systemd unit reporting an exit
+# status. It forks on what the inspection FINDS — `remediated` when
+# something had to change, `clear` when it did not — and the ratio is the
+# measurement: a sweep that always remediates is a threshold set too
+# tight, one that never does is a sweep nobody needed. That is why
+# `every_unit_run_maintenance_kind_ends_in_its_verdict` is scoped by the
+# trigger's executor rather than by the `maintenance-` prefix, and why
+# `only_the_sweep_is_exempt_from_the_verdict_rule` names this kind.
+#
+# Authored live through the API and never written back until 2026-09-10,
+# which is the gap `infra/lint/the-live-protocols-are-the-authored-
+# protocols.sh` now closes. Rendered from the live row rather than
+# retyped; the seed is insert-if-missing, so the live lineage keeps its
+# own version and this file is what a FRESH database gets.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "maintenance-sweep"
+label = "Maintenance sweep"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "A recurring inspection of one piece of infrastructure, admitted on a cadence rather than remembered. Forks on what the inspection finds: remediate when it must change, clear when it need not. Either way the log carries the measurement, so a threshold trend is a query instead of someone's recollection."
+
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+title_template = "Maintenance sweep due"
+authority_role = "platform-admin"
+
+[[workflow.step]]
+title = "inspect"
+kind = "checklist"
+ready_when = "steps.opened.done"
+title_template = "Inspect: {metadata.target}"
+authority_role = "platform-admin"
+fields = [
+  { name = "findings", field_type = "string", required = true },
+  { name = "measured", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "remediate"
+kind = "task"
+ready_when = "steps.inspect.done AND job.metadata.action_needed = \"true\""
+title_template = "Remediate: {metadata.target}"
+authority_role = "platform-admin"
+fields = [
+  { name = "what_changed", field_type = "string", required = true },
+  { name = "verified", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "remediated"
+kind = "outcome"
+ready_when = "steps.remediate.done"
+title_template = "Remediated: {metadata.target}"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "remediated" }
+
+[[workflow.step]]
+title = "clear"
+kind = "outcome"
+ready_when = "steps.inspect.done AND job.metadata.action_needed = \"false\""
+title_template = "Clear: {metadata.target} within thresholds"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "clear" }

@@ -13,8 +13,8 @@
 #     commerce, people, assets, catalog, calendar, jobs. These share
 #     a DB + NATS and the scratch variant runs on +1000 ports
 #     against boss_scratch.
-#   - Solo (prod only): sim, ml, docs. No scratch variants (sim is
-#     the scratch driver; ml/docs are read-only stateless consumers).
+#   - Solo (prod only): sim, ml. No scratch variants (sim is
+#     the scratch driver; ml is a read-only stateless consumer).
 #
 # Per run the script:
 #   1. Writes /etc/boss-<name>-api[-scratch].toml
@@ -46,6 +46,16 @@
 #       strict health probes — exit 1 on any failure. This is the
 #       roster boss-deploy-confirm evaluates, so the confirm cannot
 #       drift from the deploy list (defaults to prod).
+#   sudo ./infra/deploy-services.sh units
+#       install + enable the TIMERS unit pairs and nothing else: no
+#       build, no staging, no schema, no restart. This is the mode the
+#       host's self-converge loop runs every half hour
+#       (infra/gcp/boss-gcp-converge.sh), so a unit that lands on main
+#       reaches this host without a human. The full deploy is not safe
+#       to run unattended — it bounces ~24 services of the second,
+#       older stack boss-gcp still carries — and unit FILES are the
+#       part that rotted: every timer authored or fixed after the
+#       2026-09-04 conductor cutover sat inert on main (408c81f6).
 #   sudo ./infra/deploy-services.sh revert
 #       flip current <-> previous and restart the prod fleet — the
 #       make-before-break rollback (seconds, no build)
@@ -58,6 +68,7 @@ usage() {
     echo "usage: $0 <prod|scratch|both>" >&2
     echo "       $0 check <prod|scratch|both>" >&2
     echo "       $0 probe [prod|scratch|both]" >&2
+    echo "       $0 units" >&2
     echo "       $0 revert" >&2
     echo "       $0 prune" >&2
     exit 2
@@ -71,12 +82,15 @@ MODE="apply"
 case "${1:-}" in
     check)  MODE="check";  shift; [[ $# -ge 1 ]] || usage ;;
     probe)  MODE="probe";  shift ;;
+    units)  MODE="units";  shift ;;
     revert) MODE="revert"; shift ;;
     prune)  MODE="prune";  shift ;;
 esac
 
-if [[ "$MODE" == "revert" || "$MODE" == "prune" ]]; then
-    # No env argument: both operate on the generation store itself.
+if [[ "$MODE" == "revert" || "$MODE" == "prune" || "$MODE" == "units" ]]; then
+    # No env argument: revert and prune operate on the generation store
+    # itself, and `units` on timer unit files, which are
+    # environment-agnostic (they always land in prod).
     # TARGET drives the restart roster on revert — prod, because the
     # confirm (the caller that matters) is prod-scoped; scratch units
     # pick the reverted generation up on their next restart.
@@ -110,11 +124,20 @@ NATS_URL="nats://127.0.0.1:4222"
 # image + statement-cache compatibility surface isn't worth carrying).
 PROD_DB_URL="postgres://boss:boss@127.0.0.1/boss"
 SCRATCH_DB_URL="postgres://boss:boss@127.0.0.1/boss_scratch"
-REPO_ROOT="/opt/boss"
+# The checkout this deploy installs FROM. Overridable so the installer
+# can be exercised against a scratch tree — infra/lint/boss-gcp-
+# converges-itself.sh runs the `units` mode on every gate and asserts
+# what it would put on the host. On boss-gcp it is the default.
+REPO_ROOT="${BOSS_REPO_ROOT:-/opt/boss}"
 # Attachment bytes for the file_refs surface. One definition, shared
 # with infra/backup.sh — see infra/files-root.sh for why.
 # shellcheck source=infra/files-root.sh
 . "$(dirname "$0")/files-root.sh"
+# What this run leaves for its own packet. A no-op unless the caller set
+# BOSS_RUN_SUMMARY_FILE — boss-gcp-converge.service does, so its packet
+# says what the `units` mode installed instead of only `result=ok`.
+# shellcheck source=infra/run-summary.sh
+. "$(dirname "$0")/run-summary.sh"
 
 # ---------------------------------------------------------------------
 # Per-machine deploy configuration
@@ -196,7 +219,6 @@ else
         # bin/boss_events_api.rs + boss-ports.events entry).
         "events:7150"
         "policy:7250"
-        "docs:7050"
         # accounts:7550 — accounts + account_notes + account_team +
         # account_next_actions + account_risk_scores + support_cases.
         # Split out of boss-people-api 2026-06; mirrors the
@@ -242,6 +264,15 @@ fi
 # (audit-integrity, ml-inference-batch, ledger-recognize,
 # conservation-invariants — all caught by hand).
 TIMERS=(
+    # The estate's host observer (a5d14977): the cluster CronJob covers
+    # kubernetes-nodes; this covers the machine it runs on — the
+    # conductor VM whose registry note said "nothing watches it".
+    "boss-estate-observe-host:estate"
+    # The unit half (729329c6): the host observer answers what the
+    # machine is; this answers what its units are doing, so "is
+    # boss-train.service alive" is a SoR read instead of a human on
+    # the host.
+    "boss-estate-observe-units:estate"
     "boss-messages-events-purge:."
     "boss-audit-integrity-check:."
     "boss-ledger-recognize:."
@@ -275,6 +306,30 @@ TIMERS=(
     # unit, never in-process waiting inside the deployer — a dead-man
     # that dies with the deployer reverts nothing.
     "boss-deploy-confirm:."
+    # The host's own self-converge loop (408c81f6). It fetches forge
+    # main into this checkout and re-runs THIS script's `units` mode, so
+    # a unit that lands on main installs itself on the next tick. It is
+    # in this list on purpose: the loop that does the installing is
+    # installed BY the thing it runs, so the single hand-run bootstrap
+    # never has to be repeated — the same property that ends the
+    # treadmill on the forge host (infra/forge/install.sh, forge-converge).
+    #
+    # WHY IT EXISTS AT ALL. The 2026-09-04 conductor cutover retired the
+    # deploy hop that ran this script on boss-gcp, and nothing replaced
+    # it. Measured 2026-09-10: the five-minute estate unit observer's
+    # last packet was filed ON the cutover day (and was still open), the
+    # hourly conservation-invariants timer's on 2026-08-19, and
+    # boss-ml-inference-batch has never filed one. The fix for the 400s
+    # behind them had already LANDED (4ef79606) and changed nothing,
+    # because landing a car changes the tree, not the host.
+    "boss-gcp-converge:gcp"
+    # The daily codebase trend (06048ade). It lives on THIS host because
+    # the measurement reads the first-parent history of main and this is
+    # the box that keeps a current checkout — the converge above is what
+    # keeps it current. Nothing had to start collecting: the first run
+    # backfills 467 landings out of git, which is the whole reason the
+    # cadence is cheap.
+    "boss-codebase-metrics:."
 )
 
 # Long-running daemons that aren't `boss-*-api` services. Each
@@ -285,7 +340,7 @@ TIMERS=(
 #
 # v1.0.10 F15: boss-step-effects-runner retired — step-completion
 # side effects now route through the dispatcher's rule registry
-# (infra/dispatcher/rules.toml).
+# (infra/dispatcher/rules/).
 #
 # boss-event-relay: drains the transactional event outbox into
 # audit_log + NATS (docs/design/transactional-audit-log.md). Inert
@@ -351,7 +406,6 @@ description_of() {
         content)   echo "HR Content API" ;;
         policy)    echo "Policy API" ;;
         clock)     echo "Clock API" ;;
-        docs)          echo "Docs API" ;;
         classes)       echo "Class Registry API" ;;
         locations)     echo "Locations Registry API" ;;
         subject-kinds) echo "Subject Kind Registry API" ;;
@@ -559,14 +613,6 @@ EOF
 port = $port
 EOF
             ;;
-        docs)
-            cat <<EOF
-# Managed by infra/deploy-services.sh — edits will be overwritten.
-postgres_url = "$PROD_DB_URL"
-http_bind = "127.0.0.1:$port"
-repo_root = "$REPO_ROOT"
-EOF
-            ;;
         classes|locations|subject-kinds|events)
             # Read-only registry / read-surface services. Just need
             # a Postgres URL + bind. No NATS (no event publishing —
@@ -707,16 +753,23 @@ emit_unit() {
     desc="Boss $(description_of "$name")${label}"
 
     # After= ordering. Paired services all use NATS + Postgres.
-    # Solo services use Postgres only (ml, docs, sim).
+    # Solo services use Postgres only (ml, sim).
     after="network-online.target postgresql.service"
     if [[ "$kind" == "paired" ]]; then
         after="$after nats-server.service"
     fi
 
-    # sim and docs need the repo as CWD so they can read local files.
-    if [[ "$name" == "sim" || "$name" == "docs" ]]; then
-        working_dir="WorkingDirectory=$REPO_ROOT"
-    fi
+    # sim needs the repo as CWD so it can read local files.
+    #
+    # `docs` was the other one until 2026-09-10, and it is worth saying
+    # why it is gone rather than just dropping the name: boss-docs-api
+    # INDEXED THE WORKING TREE. It walked `{repo_root}/docs/design/*.md`
+    # on every boot and every reindex, which is the only reason a
+    # service in this list ever needed to be told where the checkout
+    # is. That whole read half was deleted with the corpus index
+    # (backlog f5da586c) — the packet is the doc — so `sim` is the last
+    # service whose CWD means anything, and a deployment no longer has
+    # to place a git checkout where a read API can see it.
 
     # Per-service environment injection. Policy takes its port from env;
     # the config file is a stub for uniformity.
@@ -924,14 +977,12 @@ probe_one() {
     local kind="$1" name="$2" env="$3"
     local port
     port=$(port_of "$name" "$env")
-    # Most services mount routes under /api/<name>; boss-docs-api is
-    # named "docs" internally but serves at /api/design/*; boss-
-    # observability is a non-`-api` service that mounts /api/health
-    # directly (no per-service prefix) — it's a NATS aggregator, not
-    # a domain-CRUD service.
+    # Most services mount routes under /api/<name>; boss-observability
+    # is a non-`-api` service that mounts /api/health directly (no
+    # per-service prefix) — it's a NATS aggregator, not a domain-CRUD
+    # service.
     local url
     case "$name" in
-        docs)          url="http://127.0.0.1:${port}/api/design/health" ;;
         simulator)     url="http://127.0.0.1:${port}/simulator/api/health" ;;
         observability) url="http://127.0.0.1:${port}/api/health" ;;
         *)             url="http://127.0.0.1:${port}/api/${name}/health" ;;
@@ -1119,7 +1170,217 @@ do_revert() {
     echo "(scratch units, if running, pick the reverted generation up on their next restart)"
 }
 
+# ---------------------------------------------------------------------
+# Timer units. ONE definition, two callers: the full deploy (which also
+# stages each timer's binary) and `units` mode (which stages nothing).
+#
+# Where they land and who reloads them is overridable ONLY so the
+# installer can be exercised into a scratch directory with a stub
+# systemctl — infra/lint/boss-gcp-converges-itself.sh runs `units` on
+# every gate and asserts what it would put on the host, the same way
+# infra/lint/forge-install-covers-the-ops-runner.sh drives the forge
+# installer. On the host both are the defaults.
+# ---------------------------------------------------------------------
+TIMER_ETC="${INSTALL_ETC:-/etc/systemd/system}"
+TIMER_SYSTEMCTL="${INSTALL_SYSTEMCTL:-systemctl}"
+
+# WHAT IT INSTALLED IS COUNTED, NOT ASSUMED. These two are read by the
+# `units` mode to report the real outcome: the tail line used to print
+# `${#TIMERS[@]}` — the ROSTER LENGTH — so a run that skipped two pairs
+# still claimed it had installed every one of them. A count that cannot
+# disagree with the roster is not a count.
+TIMER_UNITS_INSTALLED=0
+TIMER_UNITS_SKIPPED=0
+
+# $1 = "stage" to also stage each timer's binary into the generation.
+install_timer_units() {
+    local stage="${1:-}" entry stem subdir src_dir svc_src tmr_src
+    TIMER_UNITS_INSTALLED=0
+    TIMER_UNITS_SKIPPED=0
+    for entry in "${TIMERS[@]}"; do
+        IFS=: read -r stem subdir <<<"$entry"
+        src_dir="$REPO_ROOT/infra"
+        [[ "$subdir" != "." ]] && src_dir="$src_dir/$subdir"
+        svc_src="$src_dir/${stem}.service"
+        tmr_src="$src_dir/${stem}.timer"
+        if [[ ! -f "$svc_src" || ! -f "$tmr_src" ]]; then
+            # LOUD IN THE RECORD, NOT FATAL. A row whose unit files this
+            # commit does not carry is a legitimate state (observe-units.sh
+            # derives its watch roster by skipping exactly these), and
+            # failing here would stop every other pair converging. But it
+            # must reach the packet by NAME: "something was skipped" sends
+            # the reader back to the host, which is the cost this records
+            # away (2026-09-11).
+            echo "  SKIP $stem (missing $svc_src or $tmr_src)"
+            TIMER_UNITS_SKIPPED=$((TIMER_UNITS_SKIPPED + 1))
+            run_summary_note "SKIP $stem — missing $svc_src or $tmr_src"
+            continue
+        fi
+        install -m 0644 "$svc_src" "${TIMER_ETC}/${stem}.service"
+        install -m 0644 "$tmr_src" "${TIMER_ETC}/${stem}.timer"
+        # Stage the timer's binary if it's been built. The unit stem
+        # matches the binary name (e.g. boss-ledger-recognize); pure-
+        # script timers (boss-deploy-confirm) have no binary and SKIP
+        # there, which is fine. Never in `units` mode: that mode runs
+        # unattended from a host that does no build, and staging from a
+        # stale release dir is how a converge would ship old code.
+        if [[ "$stage" == "stage" ]]; then
+            stage_binary "$stem"
+        fi
+        # A CHORE REPORTS TO THE INSTANCE WHOSE DATA IT MAINTAINS.
+        #
+        # These units' binaries run against the LOCAL database (their
+        # BOSS_POSTGRES_URL is 127.0.0.1), so their packets belong on
+        # the LOCAL jobs API — hard-set here, no ambient override.
+        #
+        # History, because this line has now been wrong in both
+        # directions. 2026-08-17: nothing set BOSS_JOBS_URL, packets
+        # opened and closed on the local instance "where nobody
+        # looks", and the fix pointed reporting at the cluster SoR.
+        # That fixed the visibility and broke the truth: the chore
+        # still worked the LOCAL database, so the SoR's packet claimed
+        # `result=ok` for work the SoR never received — measured
+        # 2026-08-19, the cluster's search_index was EMPTY while its
+        # reindex packets were being completed ok (and when the local
+        # chore crashed, the SoR packet just sat at run=ready with no
+        # SoR-side runner behind it). Work the SoR needs runs ON the
+        # SoR: infra/cluster/manifests/boss-search-reindex.yaml is the
+        # pattern, one CronJob per chore as each migrates.
+        #
+        # A unit whose kind only the platform bundle defines must
+        # therefore pin the system of record INLINE with env(1), which
+        # outranks this drop-in — see the estate observers, and
+        # timers-leave-a-packet.sh check 7, which makes it the rule.
+        install -d -m 0755 "${TIMER_ETC}/${stem}.service.d"
+        cat > "${TIMER_ETC}/${stem}.service.d/jobs-url.conf" <<UNIT
+[Service]
+Environment=BOSS_JOBS_URL=http://127.0.0.1:$(port_of jobs prod)
+UNIT
+        echo "  installed $stem unit + timer"
+        TIMER_UNITS_INSTALLED=$((TIMER_UNITS_INSTALLED + 1))
+    done
+    "$TIMER_SYSTEMCTL" daemon-reload
+}
+
+enable_timer_units() {
+    local entry stem
+    for entry in "${TIMERS[@]}"; do
+        IFS=: read -r stem _ <<<"$entry"
+        if [[ -f "${TIMER_ETC}/${stem}.timer" ]]; then
+            "$TIMER_SYSTEMCTL" enable --now "${stem}.timer" >/dev/null 2>&1 || true
+            echo "  enabled ${stem}.timer"
+        fi
+    done
+}
+
 case "$MODE" in
+    units)
+        # UNIT FILES ONLY. No build, no staging, no schema, no restart —
+        # which is what makes this mode safe to run unattended every half
+        # hour from infra/gcp/boss-gcp-converge.sh. boss-gcp is the
+        # WireGuard bastion and still carries a second, older BOSS stack;
+        # a loop that bounced its fleet would be a worse defect than the
+        # stale units it fixes. Code and schema on this host stay a
+        # deliberate human-run `deploy-services.sh prod`.
+        if [[ "$TIMER_ETC" == "/etc/systemd/system" && "$(id -u)" != "0" ]]; then
+            echo "error: units mode needs root to write $TIMER_ETC — re-run with sudo" >&2
+            exit 1
+        fi
+        echo "==> install timer units from $REPO_ROOT (files only: no build, no schema, no restart)"
+        install_timer_units
+        enable_timer_units
+        # RECORDED THE MOMENT IT IS KNOWN, never at the end. What follows
+        # (the read door, the ops runner) can fail, and on this host the
+        # whole run's only off-host record is the packet: a summary
+        # assembled at the end is a summary a failure takes with it.
+        run_summary_field units_installed "$TIMER_UNITS_INSTALLED"
+        run_summary_field units_skipped "$TIMER_UNITS_SKIPPED"
+        run_summary_field summary \
+            "installed $TIMER_UNITS_INSTALLED of ${#TIMERS[@]} timer unit pair(s), skipped $TIMER_UNITS_SKIPPED"
+        # THE JOURNAL READ DOOR, converged with the units.
+        #
+        # Backlog 68757702: boss-gcp had no read path from the pod for
+        # logs OR unit state. gatewayd was not installed there —
+        # `http://10.99.0.1:19531/machine` did not answer while the
+        # forge's returned 200 — so a failing timer on the WireGuard
+        # bastion could only be diagnosed by a human on the box, and on
+        # 2026-09-10 that cost a wrong conclusion about a nightly unit,
+        # reasoned from the tree because the host could not be read. The
+        # forge's equivalent was hand-installed and therefore one rebuild
+        # from gone; this one converges.
+        #
+        # WIDER THAN "UNIT FILES ONLY", DELIBERATELY AND BOUNDEDLY —
+        # worth stating, because the restraint above is load-bearing.
+        # That restraint is about BOSS's own fleet: no build, no schema,
+        # and above all no service of the second (older) stack this host
+        # carries getting bounced every half hour. Enabling a DISTRO
+        # socket unit — and, once, installing the distro package that
+        # provides it — bounces nothing of ours and stages nothing. It
+        # also cannot fail this mode: journal-door-ensure.sh always exits
+        # 0 and warns instead, because a visibility door must never stop
+        # the converge that keeps this host's units current.
+        "$REPO_ROOT/infra/journal-door-ensure.sh"
+        # THE THIRD LOOP: THIS HOST ANSWERS ops-request PACKETS.
+        #
+        # BOSS runs three loops on a managed host — converge (it adopts
+        # its units from forge main), observe (the estate observers
+        # report what it is and what its units do), and ACT (the
+        # ops-runner answers ops-request packets). On boss-gcp the first
+        # two were live and the third had never been installed, so an
+        # ops-request filed against `host: boss-gcp` sat at `ready` with
+        # nothing behind it — and every operational read on the
+        # WireGuard bastion went back through a human (David: "I am
+        # really tired of the copy pasting after sshing"; CLAUDE.md
+        # §Diagnosis: mechanical operations belong to the machine).
+        # Backlog c3d06016; David, design 9e3e093f: boss-gcp "isn't part
+        # of the kubernetes cluster... I still want it fully managed and
+        # maintained by BOSS and protocol".
+        #
+        # NOT A TIMERS ROW, AND NOT BECAUSE OF A LINT. The ops runner
+        # has no boss-maintenance-wrap packet pair on purpose: it fires
+        # every minute, a packet per firing would drown the board, its
+        # product IS packets, and its failure modes are a red unit plus
+        # a filed packet aging visibly unanswered (see
+        # infra/ops/ops-runner.sh's header). timers-leave-a-packet.sh
+        # scrapes the TIMERS array and rightly demands that pair of
+        # every row, so this unit is installed from its own block —
+        # the same shape infra/forge/install.sh uses, and the same ONE
+        # definition: infra/ops/install-ops-runner.sh.
+        #
+        # CONSISTENT WITH "UNIT FILES ONLY", like the read door above.
+        # The restraint that keeps this mode safe to run unattended
+        # every half hour is about BOSS's own fleet: no build, no
+        # schema, and above all no service of the second (older) stack
+        # this host carries getting bounced. A ~1-minute read-only
+        # answering loop bounces nothing and stages nothing; it adds one
+        # oneshot that polls the system of record and runs allowlisted
+        # reads. What it may run on this host is the five host-agnostic
+        # reads in infra/ops/verbs.json (df, uptime, unit-status,
+        # timer-list, journal-tail) and nothing else: every verb there
+        # declares the hosts it serves, and the runner REFUSES one that
+        # does not name this host — by name, on the packet.
+        # ITS FAILURE IS LOUD BUT LATE. A runner that did not install is a
+        # host that cannot answer an ops-request, which is worth a red unit
+        # and a packet on the `failed` terminal — but not at the price of
+        # abandoning the rest of this mode, so the exit is carried to the
+        # end rather than aborting here.
+        ops_runner_rc=0
+        INSTALL_ETC="$TIMER_ETC" INSTALL_SYSTEMCTL="$TIMER_SYSTEMCTL" \
+            bash "$REPO_ROOT/infra/ops/install-ops-runner.sh" boss-gcp || ops_runner_rc=$?
+        # THE TAIL LINE SAYS WHAT HAPPENED, not what the roster holds.
+        # It read `${#TIMERS[@]} timer unit pair(s) installed and enabled`
+        # until 2026-09-11 — the roster length, printed whether or not a
+        # pair was skipped, which is a false claim in the one line a
+        # reader would have believed.
+        echo "units: installed $TIMER_UNITS_INSTALLED of ${#TIMERS[@]} timer unit pair(s) from $REPO_ROOT ($TIMER_UNITS_SKIPPED skipped)"
+        if [[ "$ops_runner_rc" -ne 0 ]]; then
+            echo "units: the ops-request runner did NOT install (exit $ops_runner_rc) — it named" >&2
+            echo "    what failed above, and the run summary carries it. Every unit file above" >&2
+            echo "    converged; this host cannot answer an ops-request until that is fixed." >&2
+            exit "$ops_runner_rc"
+        fi
+        exit 0
+        ;;
     probe)
         echo "==> strict health probes (env=$TARGET)"
         run_probes "$TARGET"
@@ -1159,9 +1420,10 @@ echo "==> systemctl daemon-reload"
 systemctl daemon-reload
 
 # boss-dispatcher's rule registry now lives in the `dispatcher_rules`
-# table (seeded by 41-dispatcher.sql, authored from infra/dispatcher/
-# rules.toml via gen-seed.py) and is loaded at startup — no rules.toml
-# file deploy.
+# table (seeded by 41-dispatcher.sql plus one timestamped migration per
+# rule added since, authored one-file-per-rule under
+# infra/dispatcher/rules/) and is loaded at startup — no rule file
+# deploy.
 
 # Resolve target dir — may be a symlink (`/opt/boss/target` →
 # `/var/lib/boss-build/target` per `infra/dev-bootstrap`) or a real
@@ -1466,50 +1728,7 @@ if [[ "$TARGET" == "prod" || "$TARGET" == "both" ]]; then
     done
 
     echo "==> install timer units + stage their binaries"
-    for entry in "${TIMERS[@]}"; do
-        IFS=: read -r stem subdir <<<"$entry"
-        src_dir="$REPO_ROOT/infra"
-        [[ "$subdir" != "." ]] && src_dir="$src_dir/$subdir"
-        svc_src="$src_dir/${stem}.service"
-        tmr_src="$src_dir/${stem}.timer"
-        if [[ ! -f "$svc_src" || ! -f "$tmr_src" ]]; then
-            echo "  SKIP $stem (missing $svc_src or $tmr_src)"
-            continue
-        fi
-        install -m 0644 "$svc_src" "/etc/systemd/system/${stem}.service"
-        install -m 0644 "$tmr_src" "/etc/systemd/system/${stem}.timer"
-        # Stage the timer's binary if it's been built. The unit stem
-        # matches the binary name (e.g. boss-ledger-recognize); pure-
-        # script timers (boss-deploy-confirm) have no binary and SKIP
-        # here, which is fine.
-        stage_binary "$stem"
-        # A CHORE REPORTS TO THE INSTANCE WHOSE DATA IT MAINTAINS.
-        #
-        # These units' binaries run against the LOCAL database (their
-        # BOSS_POSTGRES_URL is 127.0.0.1), so their packets belong on
-        # the LOCAL jobs API — hard-set here, no ambient override.
-        #
-        # History, because this line has now been wrong in both
-        # directions. 2026-08-17: nothing set BOSS_JOBS_URL, packets
-        # opened and closed on the local instance "where nobody
-        # looks", and the fix pointed reporting at the cluster SoR.
-        # That fixed the visibility and broke the truth: the chore
-        # still worked the LOCAL database, so the SoR's packet claimed
-        # `result=ok` for work the SoR never received — measured
-        # 2026-08-19, the cluster's search_index was EMPTY while its
-        # reindex packets were being completed ok (and when the local
-        # chore crashed, the SoR packet just sat at run=ready with no
-        # SoR-side runner behind it). Work the SoR needs runs ON the
-        # SoR: infra/cluster/manifests/boss-search-reindex.yaml is the
-        # pattern, one CronJob per chore as each migrates.
-        install -d -m 0755 "/etc/systemd/system/${stem}.service.d"
-        cat > "/etc/systemd/system/${stem}.service.d/jobs-url.conf" <<UNIT
-[Service]
-Environment=BOSS_JOBS_URL=http://127.0.0.1:$(port_of jobs prod)
-UNIT
-        echo "  installed $stem unit + timer"
-    done
-    systemctl daemon-reload
+    install_timer_units stage
 fi
 
 # ---------------------------------------------------------------------
@@ -1617,13 +1836,7 @@ if [[ "$TARGET" == "prod" || "$TARGET" == "both" ]]; then
     restart_prod_daemons
 
     echo "==> enable timers"
-    for entry in "${TIMERS[@]}"; do
-        IFS=: read -r stem _ <<<"$entry"
-        if [[ -f "/etc/systemd/system/${stem}.timer" ]]; then
-            systemctl enable --now "${stem}.timer" >/dev/null 2>&1 || true
-            echo "  enabled ${stem}.timer"
-        fi
-    done
+    enable_timer_units
 
     # Retire the train's timer pair wherever it survives: the schedule
     # lives in cadence_rules now, and an enabled timer would keep the

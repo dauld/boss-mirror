@@ -651,3 +651,206 @@ fn tax_remitted_rejects_zero_amount() {
         Err(LedgerError::InvalidPayload { .. })
     ));
 }
+
+// --- keg deposits (93f936b9: full balance-sheet keg model) -----------------
+
+#[test]
+fn keg_deposit_charged_credits_the_liability() {
+    // Fleet out: the customer's deposit is cash in, owed back — DR 1000
+    // Cash / CR 2400 Keg Deposits Payable.
+    let payload = json!({
+        "charge_id": "keg-charge-job-1",
+        "job_id": "job-1",
+        "account_id": "account-00042",
+        "kegs_out": 12,
+        "deposit_cents": 36_000,
+        "shipped_on": "2026-03-01",
+    });
+    let draft = evaluate(&BossRuleSet, &fact("finance.keg_deposit.charged", &payload)).unwrap();
+    assert!(draft.is_balanced());
+    assert_eq!(line_for(&draft.lines, "1000").debit_cents, 36_000i64);
+    assert_eq!(line_for(&draft.lines, "2400").credit_cents, 36_000i64);
+    assert_eq!(
+        draft.memo.as_deref(),
+        Some("Keg deposit charged (12 kegs out, account-00042): job-1")
+    );
+}
+
+#[test]
+fn keg_deposit_charged_missing_amount_fails() {
+    let payload = json!({
+        "charge_id": "keg-charge-job-2",
+        "job_id": "job-2",
+        "kegs_out": 4,
+    });
+    assert!(matches!(
+        evaluate(&BossRuleSet, &fact("finance.keg_deposit.charged", &payload)),
+        Err(LedgerError::InvalidPayload { .. })
+    ));
+}
+
+#[test]
+fn keg_deposit_charged_rejects_non_positive_inputs() {
+    for (kegs_out, deposit_cents) in [(0i64, 1_000i64), (-3, 1_000), (4, 0), (4, -500)] {
+        let payload = json!({
+            "charge_id": "keg-charge-bad",
+            "job_id": "job-bad",
+            "kegs_out": kegs_out,
+            "deposit_cents": deposit_cents,
+        });
+        assert!(
+            matches!(
+                evaluate(&BossRuleSet, &fact("finance.keg_deposit.charged", &payload)),
+                Err(LedgerError::InvalidPayload { .. })
+            ),
+            "kegs_out={kegs_out} deposit_cents={deposit_cents} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn keg_deposit_released_full_return_refunds_everything() {
+    // Every keg came back: the whole liability drains to a cash refund;
+    // no forfeiture line at all.
+    let payload = json!({
+        "release_id": "keg-release-job-1",
+        "job_id": "job-1",
+        "account_id": "account-00042",
+        "kegs_out": 12,
+        "kegs_returned": 12,
+        "kegs_lost": 0,
+        "deposit_cents": 36_000,
+        "returned_on": "2026-03-15",
+    });
+    let draft = evaluate(
+        &BossRuleSet,
+        &fact("finance.keg_deposit.released", &payload),
+    )
+    .unwrap();
+    assert!(draft.is_balanced());
+    assert_eq!(line_for(&draft.lines, "2400").debit_cents, 36_000i64);
+    assert_eq!(line_for(&draft.lines, "1000").credit_cents, 36_000i64);
+    assert!(
+        !draft.lines.iter().any(|l| l.account_code == "4150"),
+        "no forfeiture line when nothing was lost: {:?}",
+        draft.lines
+    );
+}
+
+#[test]
+fn keg_deposit_released_partial_return_splits_refund_and_forfeiture() {
+    // 7 of 10 kegs back: refund 7/10 of the deposit, forfeit the rest
+    // as income. The liability drains in FULL — a lost keg's deposit is
+    // the brewery's to keep, not a balance owed to nobody forever.
+    let payload = json!({
+        "release_id": "keg-release-job-3",
+        "job_id": "job-3",
+        "account_id": "account-00007",
+        "kegs_out": 10,
+        "kegs_returned": 7,
+        "kegs_lost": 3,
+        "deposit_cents": 30_000,
+        "returned_on": "2026-03-20",
+    });
+    let draft = evaluate(
+        &BossRuleSet,
+        &fact("finance.keg_deposit.released", &payload),
+    )
+    .unwrap();
+    assert!(draft.is_balanced());
+    assert_eq!(line_for(&draft.lines, "2400").debit_cents, 30_000i64);
+    assert_eq!(line_for(&draft.lines, "1000").credit_cents, 21_000i64);
+    assert_eq!(line_for(&draft.lines, "4150").credit_cents, 9_000i64);
+}
+
+#[test]
+fn keg_deposit_released_all_lost_forfeits_everything() {
+    let payload = json!({
+        "release_id": "keg-release-job-4",
+        "job_id": "job-4",
+        "kegs_out": 5,
+        "kegs_returned": 0,
+        "kegs_lost": 5,
+        "deposit_cents": 15_000,
+    });
+    let draft = evaluate(
+        &BossRuleSet,
+        &fact("finance.keg_deposit.released", &payload),
+    )
+    .unwrap();
+    assert!(draft.is_balanced());
+    assert_eq!(line_for(&draft.lines, "2400").debit_cents, 15_000i64);
+    assert_eq!(line_for(&draft.lines, "4150").credit_cents, 15_000i64);
+    assert!(
+        !draft.lines.iter().any(|l| l.account_code == "1000"),
+        "no refund line when nothing came back: {:?}",
+        draft.lines
+    );
+}
+
+#[test]
+fn keg_deposit_released_rounding_remainder_lands_in_forfeiture() {
+    // 1000¢ over 3 kegs doesn't divide: refund floors to 666¢ for the 2
+    // returned, forfeiture absorbs the remainder (334¢) so the entry
+    // balances to the cent and the liability drains exactly.
+    let payload = json!({
+        "release_id": "keg-release-job-5",
+        "job_id": "job-5",
+        "kegs_out": 3,
+        "kegs_returned": 2,
+        "kegs_lost": 1,
+        "deposit_cents": 1_000,
+    });
+    let draft = evaluate(
+        &BossRuleSet,
+        &fact("finance.keg_deposit.released", &payload),
+    )
+    .unwrap();
+    assert!(draft.is_balanced());
+    assert_eq!(line_for(&draft.lines, "2400").debit_cents, 1_000i64);
+    assert_eq!(line_for(&draft.lines, "1000").credit_cents, 666i64);
+    assert_eq!(line_for(&draft.lines, "4150").credit_cents, 334i64);
+}
+
+#[test]
+fn keg_deposit_released_rejects_non_conserving_counts() {
+    // kegs_out = kegs_returned + kegs_lost is the fleet's conservation
+    // invariant. A payload that violates it is a wrong input event —
+    // reject loudly, never book a partial or inflated drain.
+    for (out, returned, lost) in [(1i64, 1i64, 1i64), (10, 4, 3), (3, 4, -1)] {
+        let payload = json!({
+            "release_id": "keg-release-bad",
+            "job_id": "job-bad",
+            "kegs_out": out,
+            "kegs_returned": returned,
+            "kegs_lost": lost,
+            "deposit_cents": 3_000,
+        });
+        assert!(
+            matches!(
+                evaluate(
+                    &BossRuleSet,
+                    &fact("finance.keg_deposit.released", &payload)
+                ),
+                Err(LedgerError::InvalidPayload { .. })
+            ),
+            "out={out} returned={returned} lost={lost} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn keg_deposit_released_missing_counts_fail() {
+    let payload = json!({
+        "release_id": "keg-release-job-6",
+        "job_id": "job-6",
+        "deposit_cents": 3_000,
+    });
+    assert!(matches!(
+        evaluate(
+            &BossRuleSet,
+            &fact("finance.keg_deposit.released", &payload)
+        ),
+        Err(LedgerError::InvalidPayload { .. })
+    ));
+}

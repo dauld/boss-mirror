@@ -22,3 +22,14 @@ tmux
 # 2026-08-16, which cost a red train; listed so it cannot go missing
 # again without ci-tools-declared.sh noticing.
 bunx
+# jq — the ops-runner is sh + jq, and two lints exercise the runner
+# through it. Absent from this image until 2026-09-08, so both lints
+# skipped their runner branch on every gate while printing "no jq on
+# this box; the gate image has it" — a check that was not running and
+# said so as reassurance (5942f205).
+jq
+# python3 — the stub system-of-record that gate_runner_report_retry.rs
+# stands up to prove the runner's report-back retry (the fix for four
+# verdicts lost during a roll). Without it that test skipped entirely,
+# so the gate did not exercise its own report path.
+python3

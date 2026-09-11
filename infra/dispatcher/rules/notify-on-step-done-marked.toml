@@ -1,0 +1,21 @@
+# BOSS alerts its operators that a wait is over (David, 2026-08-09).
+# Opt-in per step: only steps whose metadata carries
+# `notify_on_done: true` fire — the pr-train Workflow marks ci /
+# merged / deployed. The `when` matches a TOP-LEVEL payload field the
+# step.done builder always emits (default false): the expr binder
+# resolves flat identifiers only, and an absent identifier is a
+# PredicateFailed retry-storm, not a quiet false. id_prefix keeps the
+# dedup id distinct from the same step's READY notification.
+# Seeded live by 106-notify-on-step-done.sql (41 is applied history).
+[[rule]]
+name = "notify-on-step-done-marked"
+why = """
+A CROSS-DOMAIN reaction — BOSS alerts its operators that a wait is
+over (David, 2026-08-09). Opt-in per step through step metadata, so
+which steps notify is protocol data and this rule never grows a list.
+"""
+on_event = "step.done.*"
+when = "notify_on_done = true"
+[[rule.do]]
+handler = "messages.notify"
+args = { id_prefix = "\"done\"" }

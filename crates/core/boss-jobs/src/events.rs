@@ -32,6 +32,9 @@ pub const WORKFLOW_PUBLISHED: &str = "jobs.kind.published";
 pub const WORKFLOW_DRAFT_SAVED: &str = "jobs.kind.draft_saved";
 /// The active row of a kind was retired with no successor.
 pub const WORKFLOW_RETIRED: &str = "jobs.kind.retired";
+/// A draft row deleted before it ever went live (ebd7bb70): the
+/// armed-draft hazard removed, with the discard on the record.
+pub const WORKFLOW_DRAFT_DISCARDED: &str = "jobs.kind.draft_discarded";
 /// A draft StepPlugin row was appended to the registry (author
 /// saved, not live). Recorded by the registry adapter atomically
 /// with the step_plugins row; payload is the full `StepPluginSpec`.
@@ -65,18 +68,21 @@ pub const STEP_SIGNED_OFF: &str = "jobs.step.signed_off";
 /// named roles must re-sign before the step can complete.
 pub const STEP_STAMPS_INVALIDATED: &str = "jobs.step.stamps_invalidated";
 pub const JOB_CLOSED: &str = "jobs.job.closed";
-/// Boot found an ACTIVE Workflow that fails the viability lint and
-/// retired it so the service could start (`workflow_quarantine`).
+/// A quarantine pass found an ACTIVE Workflow that fails the viability
+/// lint and retired it. Boot no longer emits this: it checks and logs
+/// but never retires (`workflow_quarantine`).
 /// The sibling state event is the registry's own
 /// `jobs.kind.retired`; this marker is the loud one — it carries the
 /// problems that condemned the row, so the log answers "why is this
 /// kind gone?" without a re-lint. Rebuild ignores it.
 pub const WORKFLOW_QUARANTINED: &str = "jobs.kind.quarantined";
-/// Boot found an ACTIVE station that fails the viability lint
-/// (`station_quarantine`) and retired it. Same contract as
-/// [`WORKFLOW_QUARANTINED`]: the sibling state event is the
+/// A quarantine pass found an ACTIVE station that fails the viability
+/// lint and retired it. Boot no longer emits this: it checks and logs
+/// but never retires (`station_quarantine`, 2026-09-08). Same contract
+/// as [`WORKFLOW_QUARANTINED`]: the sibling state event is the
 /// registry's own `jobs.station.retired`, and this marker is the loud
-/// one carrying the problems that condemned the row. Rebuild ignores
+/// one carrying the problems that condemned the row. Declared in
+/// migration 120; nothing in the tree emits it today. Rebuild ignores
 /// it.
 pub const STATION_QUARANTINED: &str = "jobs.station.quarantined";
 /// One firing of the packet-loss census (packet-loss.md Q3): the
@@ -85,6 +91,16 @@ pub const STATION_QUARANTINED: &str = "jobs.station.quarantined";
 /// projects nothing; the payload IS the datum, and lenses read the
 /// series from the log instead of recomputing it. Rebuild ignores it.
 pub const NETWORK_CENSUS: &str = "jobs.network.census";
+/// One observation of the estate: what machines were actually there
+/// when someone looked. Paired with the `nodes` registry, which says
+/// what we MEANT to have — the difference between the two is the
+/// finding (59ef456a).
+pub const ESTATE_OBSERVED: &str = "jobs.estate.observed";
+/// One estate comparison: declared vs observed for one observation.
+/// The compare handler computes it, the comparison door records it,
+/// and neither writes the registry — the difference stays a finding,
+/// never a silent correction (59ef456a).
+pub const ESTATE_COMPARED: &str = "jobs.estate.compared";
 
 /// The state-event payload for a Step: the serialized struct plus a
 /// top-level `step_id` — the same key every marker event uses.
@@ -128,8 +144,8 @@ pub fn workflow_registry_event(
     boss_core::event::Event::new("jobs", kind, payload, boss_clock_client::wall_now())
 }
 
-/// The `jobs.kind.quarantined` marker: which Workflow row boot
-/// retired, and the lint problems that condemned it. Payload keys
+/// The `jobs.kind.quarantined` marker: which Workflow row a
+/// quarantine retired, and the lint problems that condemned it. Payload keys
 /// mirror the registry events (`kind`, `version`, `label`) plus a
 /// `problems` list in the same `{step, reason, message}` wire shape
 /// `POST /api/workflows/_validate` returns, so one reader parses
@@ -156,31 +172,6 @@ pub fn workflow_quarantined_event(
     )
 }
 
-/// The loud marker for a station retired by the boot viability pass.
-/// Carries the problems that condemned the row so the log answers
-/// "why did this queue disappear?" without a re-lint.
-pub fn station_quarantined_event(
-    actor: &boss_core::actor::ActorId,
-    spec: &crate::stations::StationSpec,
-    problems: &[crate::station_lint::StationLintError],
-) -> boss_core::event::Event {
-    let payload = boss_core::publisher::inject_actor(
-        serde_json::json!({
-            "name": spec.name,
-            "version": spec.version,
-            "title": spec.title,
-            "problems": crate::station_lint::problems_json(problems),
-        }),
-        actor,
-    );
-    boss_core::event::Event::new(
-        "jobs",
-        STATION_QUARANTINED,
-        payload,
-        boss_clock_client::wall_now(),
-    )
-}
-
 /// One packet-loss census firing — same contract as the quarantine
 /// markers: built where the write happens, actor riding as `_actor`
 /// exactly as EventStamp injects it. `counts` is the census payload
@@ -195,6 +186,40 @@ pub fn network_census_event(
     boss_core::event::Event::new(
         "jobs",
         NETWORK_CENSUS,
+        payload,
+        boss_clock_client::wall_now(),
+    )
+}
+
+/// One estate observation, recorded verbatim.
+///
+/// DUMB ON PURPOSE, exactly like the census: the honesty lives in the
+/// thing that looked, and a door that second-guesses its instrument is
+/// a second instrument.
+pub fn estate_observed_event(
+    actor: &boss_core::actor::ActorId,
+    observation: serde_json::Value,
+) -> boss_core::event::Event {
+    let payload = boss_core::publisher::inject_actor(observation, actor);
+    boss_core::event::Event::new(
+        "jobs",
+        ESTATE_OBSERVED,
+        payload,
+        boss_clock_client::wall_now(),
+    )
+}
+
+/// One estate comparison, recorded verbatim — the same dumb-door
+/// contract as the observation above: the handler computed it, this
+/// only records what it was handed.
+pub fn estate_compared_event(
+    actor: &boss_core::actor::ActorId,
+    comparison: serde_json::Value,
+) -> boss_core::event::Event {
+    let payload = boss_core::publisher::inject_actor(comparison, actor);
+    boss_core::event::Event::new(
+        "jobs",
+        ESTATE_COMPARED,
         payload,
         boss_clock_client::wall_now(),
     )

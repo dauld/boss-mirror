@@ -1,0 +1,27 @@
+# The host half of the estate observation loop (a5d14977). Installed
+# on boss-gcp by deploy-services.sh (TIMERS row). The forge host runs
+# the SAME pair with two overrides, installed by hand until its
+# config-not-in-repo debt is paid:
+#   sudo install -m644 infra/estate/boss-estate-observe-host.{service,timer} /etc/systemd/system/
+#   sudo mkdir -p /etc/systemd/system/boss-estate-observe-host.service.d
+#   printf '[Service]\nEnvironment=HOST_ID=forge\n' | sudo tee /etc/systemd/system/boss-estate-observe-host.service.d/host.conf
+#   sudo systemctl daemon-reload && sudo systemctl enable --now boss-estate-observe-host.timer
+[Unit]
+Description=BOSS estate: observe this host and record what was there
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HOST_ID=boss-gcp
+Environment=JOBS_API=http://10.20.0.34:7900
+# The timers-leave-a-packet pair: a timer with no Job trail fails
+# silently, which is the exact class this observer exists to end.
+# BOSS_JOBS_URL pinned INLINE: deploy-services' shared jobs-url.conf
+# drop-in points the timer fleet at the legacy 127.0.0.1 instance
+# (91ddebfb) and drop-in env wins over unit env - the first scheduled
+# firing died 400 registering its packet against a registry that has
+# never heard of this kind. env(1) on the Exec line outranks both.
+ExecStartPre=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-maintenance-wrap.sh maintenance-estate-observe-host "estate host observation"
+ExecStart=/opt/boss/infra/estate/observe-host.sh
+ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-step.sh maintenance-estate-observe-host run

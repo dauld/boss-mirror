@@ -46,20 +46,17 @@ impl Validate for CalendarApiConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use boss_testing::{scratch_dir, scratch_path, write_file};
 
     #[test]
     fn loads_valid_toml() {
-        let dir = std::env::temp_dir().join("boss-calendar-config-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("valid.toml");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
+        let path = scratch_dir("boss-calendar-config-valid").join("valid.toml");
+        write_file(
+            &path,
             r#"postgres_url = "postgres://localhost/boss"
-http_bind = "0.0.0.0:7860""#
-        )
-        .unwrap();
+http_bind = "0.0.0.0:7860"
+"#,
+        );
 
         let cfg = CalendarApiConfig::load(&path).unwrap();
         assert_eq!(cfg.http_bind, "0.0.0.0:7860");
@@ -67,21 +64,20 @@ http_bind = "0.0.0.0:7860""#
 
     #[test]
     fn rejects_missing_file() {
-        let path = std::path::PathBuf::from("/tmp/does-not-exist-calendar.toml");
+        let path = scratch_path("boss-calendar-config-absent").join("calendar.toml");
+        assert!(!path.exists(), "{} must not exist", path.display());
         assert!(CalendarApiConfig::load(&path).is_err());
     }
 
     #[test]
     fn rejects_empty_postgres_url() {
-        let dir = std::env::temp_dir().join("boss-calendar-config-test-empty");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("bad.toml");
-        std::fs::write(
+        let path = scratch_dir("boss-calendar-config-bad").join("bad.toml");
+        write_file(
             &path,
             r#"postgres_url = ""
-http_bind = "0.0.0.0:7860""#,
-        )
-        .unwrap();
+http_bind = "0.0.0.0:7860"
+"#,
+        );
         assert!(CalendarApiConfig::load(&path).is_err());
     }
 }

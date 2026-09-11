@@ -8,15 +8,9 @@
 //! Every case here writes into a temp dir; the developer's own
 //! `~/.cargo/config.toml` is never touched.
 
+use boss_testing::repo_root;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("repo root resolves")
-}
 
 /// Removes its directory on drop, so a panicking test leaves nothing.
 struct Scratch(PathBuf);
@@ -27,9 +21,10 @@ impl Drop for Scratch {
 }
 
 fn scratch(name: &str) -> (Scratch, PathBuf) {
-    let root = std::env::temp_dir().join(format!("boss-dst-{name}"));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(root.join("cargo")).expect("mkdir");
+    // Per-uid and per-process, and it REFUSES by name if a leftover
+    // cannot be cleared — see `boss_testing::scratch`.
+    let root = boss_testing::scratch_dir(&format!("boss-dst-{name}"));
+    boss_testing::create_dir(&root.join("cargo"));
     (Scratch(root.clone()), root)
 }
 

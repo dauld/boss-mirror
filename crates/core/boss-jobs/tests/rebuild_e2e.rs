@@ -62,6 +62,9 @@ struct StepSnapshot {
     embedded_job: Option<Uuid>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+    /// The queue-age stamp (2a0b034e): written once at the ready
+    /// flip, reproduced on replay from the event that carried it.
+    became_ready_at: Option<DateTime<Utc>>,
 }
 
 async fn snapshot_jobs(pool: &PgPool) -> Vec<JobSnapshot> {
@@ -79,7 +82,7 @@ async fn snapshot_steps(pool: &PgPool) -> Vec<StepSnapshot> {
     sqlx::query_as::<_, StepSnapshot>(
         "SELECT id, job_id, kind, title, assignee_id, status, sort_order, blocked_by, \
                 sign_offs_required, assurance_required, sign_offs, completed_on, metadata, notes, \
-                step_plugin_version, embedded_job, created_at, updated_at \
+                step_plugin_version, embedded_job, created_at, updated_at, became_ready_at \
          FROM steps ORDER BY id",
     )
     .fetch_all(pool)
@@ -145,6 +148,8 @@ fn build_app(pool: PgPool) -> Router {
         subject_existence: None,
         roster: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
+        cadence: None,
+        delivery: None,
     };
     router(state)
 }
@@ -192,6 +197,8 @@ fn fixture_step(step_id: &str, job_id: &str, sort_order: i32, title: &str) -> St
         sign_offs: Vec::new(),
         fields: Vec::new(),
         completed_on: None,
+        completed_by: None,
+        completed_at: None,
         metadata: serde_json::json!({}),
         notes: None,
         step_plugin_version: 0,
@@ -267,12 +274,17 @@ async fn rebuild_reproduces_jobs_and_steps_after_drop() {
         1,
         "intake",
     );
-    let step2 = fixture_step(
+    // step2 requires presence assurance — the column landed with the
+    // WebAuthn work but the rebuilder never reproduced it, so a
+    // replay silently downgraded the step to session assurance
+    // (packet d7b8158e). The snapshot equality below pins it.
+    let mut step2 = fixture_step(
         "22222222-0000-4000-8000-000000000002",
         "aaaaaaaa-0000-4000-8000-000000000001",
         2,
         "diagnose",
     );
+    step2.assurance_required = Some(boss_core::job::Assurance::Presence);
     let step3 = fixture_step(
         "33333333-0000-4000-8000-000000000003",
         "aaaaaaaa-0000-4000-8000-000000000001",
@@ -320,11 +332,33 @@ async fn rebuild_reproduces_jobs_and_steps_after_drop() {
     )
     .await;
 
+    // 4b. Promote step2 to Ready — the queue-age stamp
+    //     (`became_ready_at`, 2a0b034e) is a projection column like
+    //     any other and must survive the drop + replay.
+    let mut step2_ready = step2.clone();
+    step2_ready.status = StepStatus::Ready;
+    http_json(
+        &app,
+        "PUT",
+        &format!("/api/jobs/{}/steps/{}", step2.job_id, step2.id),
+        &ceo,
+        Some(&serde_json::to_value(&step2_ready).unwrap()),
+    )
+    .await;
+
     // 5. Snapshot.
     let jobs_before = snapshot_jobs(&db.pool).await;
     let steps_before = snapshot_steps(&db.pool).await;
     assert_eq!(jobs_before.len(), 2);
     assert_eq!(steps_before.len(), 3);
+    // The promotion stamped step2 and nothing else — an all-NULL
+    // column would make the after-rebuild equality below vacuous.
+    let stamped: Vec<Uuid> = steps_before
+        .iter()
+        .filter(|s| s.became_ready_at.is_some())
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(stamped, vec![*step2.id.inner().as_uuid()]);
 
     // 6. Drain the outbox, then verify expected events landed in
     //    audit_log.
@@ -336,11 +370,12 @@ async fn rebuild_reproduces_jobs_and_steps_after_drop() {
     .fetch_one(&db.pool)
     .await
     .unwrap();
-    // 2 created + 1 updated + 3 step.created + 1 step.updated + 1
-    // step.completed marker = 8 minimum. Auto-transition path not
-    // triggered here (job_a still has pending steps).
+    // 2 created + 1 updated + 3 step.created + 2 step.updated (step1
+    // done, step2 ready) + 1 step.completed marker = 9 minimum.
+    // Auto-transition path not triggered here (job_a still has
+    // pending steps).
     assert!(
-        event_count.0 >= 8,
+        event_count.0 >= 9,
         "got only {} audit events",
         event_count.0
     );
@@ -362,7 +397,10 @@ async fn rebuild_reproduces_jobs_and_steps_after_drop() {
     assert_eq!(report.jobs_inserted, 2);
     assert_eq!(report.jobs_updated, 1, "job_b's update event");
     assert_eq!(report.steps_inserted, 3);
-    assert_eq!(report.steps_updated, 1, "step1's done update");
+    assert_eq!(
+        report.steps_updated, 2,
+        "step1's done update + step2's ready promotion"
+    );
     // STEP_COMPLETED marker should land in events_skipped.
     assert!(report.events_skipped >= 1);
 

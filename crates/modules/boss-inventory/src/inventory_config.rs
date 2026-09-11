@@ -71,24 +71,21 @@ impl Validate for InventoryApiConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use boss_testing::{scratch_dir, scratch_path, write_file};
 
     #[test]
     fn loads_valid_toml() {
-        let dir = std::env::temp_dir().join("boss-inventory-config-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("valid.toml");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
+        let path = scratch_dir("boss-inventory-config-valid").join("valid.toml");
+        write_file(
+            &path,
             r#"postgres_url = "postgres://localhost/boss"
 http_bind = "0.0.0.0:7300"
 jobs_api_url = "http://127.0.0.1:7900"
 assets_api_url = "http://127.0.0.1:7600"
 shipping_api_url = "http://127.0.0.1:7100"
-classes_api_url = "http://127.0.0.1:7800""#
-        )
-        .unwrap();
+classes_api_url = "http://127.0.0.1:7800"
+"#,
+        );
 
         let cfg = InventoryApiConfig::load(&path).unwrap();
         assert_eq!(cfg.http_bind, "0.0.0.0:7300");
@@ -101,19 +98,17 @@ classes_api_url = "http://127.0.0.1:7800""#
         // vendor_invoices.discrepancy_kind now that the schema CHECK is
         // gone. Loading a config without classes_api_url must fail at
         // startup, not later.
-        let dir = std::env::temp_dir().join("boss-inventory-config-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("missing-classes.toml");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
+        let path =
+            scratch_dir("boss-inventory-config-missing-classes").join("missing-classes.toml");
+        write_file(
+            &path,
             r#"postgres_url = "postgres://localhost/boss"
 http_bind = "0.0.0.0:7300"
 jobs_api_url = "http://127.0.0.1:7900"
 assets_api_url = "http://127.0.0.1:7600"
-shipping_api_url = "http://127.0.0.1:7100""#
-        )
-        .unwrap();
+shipping_api_url = "http://127.0.0.1:7100"
+"#,
+        );
 
         let err = InventoryApiConfig::load(&path).unwrap_err();
         let msg = format!("{err}");
@@ -125,7 +120,8 @@ shipping_api_url = "http://127.0.0.1:7100""#
 
     #[test]
     fn rejects_missing_file() {
-        let path = std::path::PathBuf::from("/tmp/does-not-exist-inventory.toml");
+        let path = scratch_path("boss-inventory-config-absent").join("inventory.toml");
+        assert!(!path.exists(), "{} must not exist", path.display());
         assert!(InventoryApiConfig::load(&path).is_err());
     }
 }

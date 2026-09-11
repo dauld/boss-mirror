@@ -1,0 +1,110 @@
+# Brewery demo tenant (Algedonic Ales). THE SOURCE FOR THIS RULE'S
+# INTENT is docs/design/brewery-fidelity.md §The live experiment, which
+# names this exact reaction as one of two protocols published live on
+# 2026-08-21: "**`keg-return` v1** (active 2026-08-21): a delivered
+# wholesale order spawns the fleet-return leg — log-fleet-out (kegs,
+# deposit) → receive-returns (returned/lost counts) → wash-and-restock →
+# reconciled. Measures a *keg loss rate* — the first thread of program
+# item 1." The same section records how it was authored: "Spawn rules
+# ride the dispatcher registry (`jobs.job.closed` filtered by kind)."
+#
+# WHAT IT WAS FOR. Program item 1 of that doc — the highest-leverage
+# entry — is "Keg economics. Deposit liability account + returnable-float
+# asset + kegs-out ≡ kegs-returned + kegs-lost conservation + the return
+# leg. First thread is already live (`keg-return` v1, below)". The audit
+# it answers: "Keg economics are absent entirely — no deposit liability
+# …, no loss/reconciliation, no return leg on the delivery route, no keg
+# conservation invariant. The one quantity a keg brewer obsesses over is
+# the one quantity nothing conserves."
+#
+# WHY THE PREDICATE IS WHAT IT IS. `wholesale-keg-order` has two
+# terminals: `delivered-invoiced` (`terminal = { outcome = "completed" }`,
+# examples/brewery/seeds/workflows.toml) and `backordered`
+# (`outcome = "skipped"`). So `outcome = "completed"` is precisely "the
+# kegs actually went out" — a backordered order has no fleet in the field
+# and must not open a return packet. It is also what keeps the deposit
+# liability honest in the direction the settlement migration demands:
+# "The release REQUIRES kegs_returned + kegs_lost == kegs_out, so 2400's
+# standing balance is exactly the deposits of fleets still in the field —
+# never a liability owed to nobody"
+# (202609021400-a-keg-deposit-is-a-liability.sql). A delivered order that
+# spawned no return would be that liability owed to nobody.
+#
+# WHY THE ORDER'S CLOSE AND NOT ITS `deliver` STEP. The downstream
+# handler states the same structural reason for the same fleet: "The
+# keg-return protocol's field-bearing steps are plain `task` kind, so
+# there is no precise `step.done.<kind>` topic to ride — the packet's
+# terminal close is the honest trigger" (ledger_keg_deposit_settle.rs).
+# Every middle step of `wholesale-keg-order` that could be ridden instead
+# belongs to another domain's rule already.
+#
+# ITS SIBLING ON THE SAME FLEET. `keg-deposit-settle-on-keg-return-closed`
+# fires on the close of the packet this rule OPENS and books the deposit.
+# This rule is that rule's only producer: with no return packet, the 2400
+# liability account, the two GL projection rules and the settlement
+# endpoint all have zero inputs.
+#
+# WHY `id` AND NOT `job_id` — a dated scar. v1 of this rule referenced
+# `job_id`, which is not in the `jobs.job.closed` payload, and on
+# 2026-08-24 that arg-resolution failure aborted matching for the ENTIRE
+# topic, taking `expire-signals-on-job-closed`, `jobs-clear-waiting-on`
+# and `resolve-subjob-on-child-job-closed` down with it as collateral.
+# That incident is why `MatchOutcome` is not a `Result`, and it is pinned
+# by a regression test naming this rule (boss-dispatcher
+# rules/registry.rs). The v2 below is the fix.
+#
+# AUTHORED LIVE, NOT WRITTEN BACK. Both the protocol and the rule were
+# published through the API during the 2026-08-21 experiment week and
+# neither reached the tree: there is no `keg-return` WorkflowSpec in this
+# repo, no commit message names this rule, and until this file there was
+# no migration for it either. So it ran with no `why` until backlog
+# 8d471ec5. The row below is the live v2 row, copied from
+# `GET /api/dispatcher/rules`.
+[[rule]]
+name = "spawn-keg-return-on-delivery"
+why = """
+A CROSS-PROTOCOL REACTOR: a delivered `wholesale-keg-order` admits a
+`keg-return` packet. Two protocols, so no single Workflow definition
+can declare it — the same standing exemption
+`spawn-car-on-sweep-remediated` claims, and the mirror of
+`keg-deposit-settle-on-keg-return-closed`, which fires on the close of
+the packet this rule opens and for which this rule is the only
+producer.
+
+WHAT IT IS FOR, in the design doc that published it: "a delivered
+wholesale order spawns the fleet-return leg … Measures a *keg loss
+rate* — the first thread of program item 1"
+(docs/design/brewery-fidelity.md §The live experiment). Program item 1
+is keg economics, and the audit it answers reads "no
+loss/reconciliation, no return leg on the delivery route, no keg
+conservation invariant. The one quantity a keg brewer obsesses over is
+the one quantity nothing conserves."
+
+Fires on the order's TERMINAL OUTCOME rather than its `deliver` step:
+`outcome = "completed"` selects `delivered-invoiced` and excludes
+`backordered`, whose terminal outcome is `skipped` — an order that
+never shipped has no fleet in the field, and a return packet for it
+would put a deposit on the books that is "a liability owed to nobody"
+(202609021400-a-keg-deposit-is-a-liability.sql). The keg-return
+protocol's own field-bearing steps are plain `task` kind, so there is
+no narrower topic to ride either. It adds no routing: one delivered
+order, one return packet, carrying `metadata.order_job_id` as the
+back-edge.
+
+HONEST CAVEAT ON THE EXEMPTION. `on_complete_create` is a shipped
+WorkflowSpec field and docs/design/protocol-policy-publish.md calls it
+"the precedent that [consequences] belong in the protocol … a
+cross-protocol spawn the definition owns, not a rule the dispatcher
+owns". Nothing in the repo records that alternative being weighed for
+THIS rule; the account is historical — protocol and rule were authored
+live together in the 2026-08-21 experiment week, when "spawn rules
+ride the dispatcher registry" was the working pattern. Moving it onto
+the `wholesale-keg-order` spec is a live option, not a defect being
+argued away here.
+"""
+version = 2
+on_event = "jobs.job.closed"
+when = "kind = \"wholesale-keg-order\" AND outcome = \"completed\""
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"keg-return\"", subject_kind = "\"account\"", subject = "subject_id", title = "\"Keg fleet return\"", "metadata.order_job_id" = "id" }

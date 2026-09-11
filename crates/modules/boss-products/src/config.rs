@@ -48,21 +48,18 @@ impl Validate for ProductsApiConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use boss_testing::{scratch_dir, write_file};
 
     #[test]
     fn loads_valid_toml() {
-        let dir = std::env::temp_dir().join("boss-products-config-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("valid.toml");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
+        let path = scratch_dir("boss-products-config-valid").join("valid.toml");
+        write_file(
+            &path,
             r#"postgres_url = "postgres://localhost/boss"
 http_bind = "0.0.0.0:7840"
-classes_api_url = "http://127.0.0.1:7800""#
-        )
-        .unwrap();
+classes_api_url = "http://127.0.0.1:7800"
+"#,
+        );
 
         let cfg = ProductsApiConfig::load(&path).unwrap();
         assert_eq!(cfg.http_bind, "0.0.0.0:7840");
@@ -75,16 +72,13 @@ classes_api_url = "http://127.0.0.1:7800""#
         // product_kind + package_unit now that neither has a DB CHECK.
         // Loading a config without classes_api_url must fail at startup,
         // not on the first upsert.
-        let dir = std::env::temp_dir().join("boss-products-config-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("missing-classes.toml");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
+        let path = scratch_dir("boss-products-config-missing-classes").join("missing-classes.toml");
+        write_file(
+            &path,
             r#"postgres_url = "postgres://localhost/boss"
-http_bind = "0.0.0.0:7840""#
-        )
-        .unwrap();
+http_bind = "0.0.0.0:7840"
+"#,
+        );
 
         let err = ProductsApiConfig::load(&path).unwrap_err();
         let msg = format!("{err}");

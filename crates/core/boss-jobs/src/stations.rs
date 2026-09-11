@@ -128,9 +128,9 @@ pub struct StationUpstream {
 /// row names the bundle, the bundle knows its own source). Putting
 /// fetch URLs in the registry would let a row point a browser
 /// anywhere, and putting the panel *contents* here would make
-/// `boss-jobs` a client of every service a page reads from — the
-/// design corpus is `boss-docs-api`'s to serve, not the station
-/// registry's to carry.
+/// `boss-jobs` a client of every service a page reads from. A panel
+/// fetches its own data; the station registry carries the queue and
+/// how it is framed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StationLens {
     /// Small type above the title (`System Model · Design review`).
@@ -1065,13 +1065,13 @@ mod tests {
         spec.lens = Some(StationLens {
             eyebrow: Some("System Model · Design review".into()),
             title: "Design review".into(),
-            subtitle: Some("Open questions, pending decisions, ADRs".into()),
-            panels: vec!["rejections".into(), "corpus".into()],
+            subtitle: Some("Design docs waiting on a decision".into()),
+            panels: vec!["queue".into(), "flow-strip".into()],
             with_steps: false,
         });
         let json = serde_json::to_value(&spec).unwrap();
         assert_eq!(json["lens"]["title"], "Design review");
-        assert_eq!(json["lens"]["panels"][0], "rejections");
+        assert_eq!(json["lens"]["panels"][0], "queue");
         let back: StationSpec = serde_json::from_value(json).unwrap();
         assert_eq!(back.lens, spec.lens);
     }

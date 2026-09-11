@@ -84,7 +84,7 @@ when an install misbehaves:
    starting services against a half-migrated database.
 2. `==> [2/4] seeding the platform Workflow bundle (insert-if-missing)`
    — `boss-platform-workflow-seed` loads the protocol kinds
-   shipped as data in `infra/platform/workflows.toml` and reports
+   shipped as data in `infra/platform/workflows/` and reports
    `platform-workflow-seed: 15 inserted, 0 already present` on a
    fresh database. If this step fails, services still start, but
    tenant prepare will name the first missing kind it hits.

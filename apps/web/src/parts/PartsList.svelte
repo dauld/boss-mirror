@@ -7,11 +7,12 @@
   import FilterButton from '@boss/web-kit/ui/FilterButton.svelte';
   import SearchInput from '@boss/web-kit/ui/SearchInput.svelte';
   import Link from '@boss/web-kit/ui/Link.svelte';
-  import StatusChip from './StatusChip.svelte';
+  import StatusChip from '@boss/web-kit/ui/StatusChip.svelte';
   import {
     collectParts,
     kindFromSku,
     stockStatus,
+    stockTone,
     type CatalogPart,
     type DeviceModel,
     type InventoryItem,
@@ -272,7 +273,7 @@
                 <td class="num">{r.item.allocated}</td>
                 <td class="num">{r.item.reorder_point}</td>
                 <td class="num">{r.on_order > 0 ? r.on_order : '—'}</td>
-                <td><StatusChip status={r.status} /></td>
+                <td><StatusChip value={r.status} tone={stockTone(r.status)} /></td>
                 <td class="num">
                   {catalogSkuSet.has(r.item.part_sku) ? '—' : r.used_by}
                 </td>

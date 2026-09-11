@@ -1,18 +1,19 @@
 // review-design.js — custom Step UX for the design-doc-review JobKind.
 //
-// Reads step.metadata.doc_path, fetches /api/design/docs/{path} to
-// get the design doc + its parsed open questions (### Qn: <title>
-// headings under ## Open Questions). Renders a per-question
-// resolution textarea. Step completion is GATED on every question
-// having a non-empty resolution recorded.
+// Reads the questions the PACKET carries — `metadata.questions` on
+// the step, or on the Job when an author put them there — and renders
+// a per-question resolution textarea. Step completion is GATED on
+// every question having a non-empty resolution recorded.
 //
-// Resolutions are saved as pending-decisions via
-// /api/design/pending-decisions; the follow-up
-// /api/design/flush-jobs endpoint writes them into the source
-// doc's Decision-history section (each release, settled material
-// folds into docs/architecture-decisions.md and the source doc is
-// deleted). Brings back the "system models its own development"
-// workflow that existed pre-2026-05-03.
+// Resolutions are saved onto the STEP, which IS the record. Two round
+// trips through markdown files used to hang off this surface and both
+// are gone (backlog f5da586c): the mirror into
+// /api/design/pending-decisions that fed a flush job rewriting the
+// source doc (deleted 2026-09-10, part 1), and the fallback fetch of
+// /api/design/docs/{path} for a packet carrying only a pointer
+// (deleted 2026-09-10, part 2, with the corpus index itself). The
+// packet is the doc. Settled material folds into
+// docs/architecture-decisions.md each release.
 //
 // Plugin contract: window.__boss_register_step_plugin(kind, mount).
 // Host calls mount(container, props) with { step, jobId, onUpdate }.
@@ -257,8 +258,7 @@
   function mount(container, { step, jobId, onUpdate }) {
     const docPath = (step.metadata && step.metadata.doc_path) || '';
     // resolutions: [{ anchor, decision }] — anchor matches the
-    // question anchor returned by /api/design/docs/{path}
-    // (e.g. "Q1", "Q2", ...).
+    // anchor the packet's question carries (e.g. "Q1", "Q2", ...).
     let resolutions = Array.isArray(step.metadata && step.metadata.resolutions)
       ? step.metadata.resolutions.map((r) => ({
           anchor: String(r.anchor || ''),
@@ -269,10 +269,9 @@
     let doc = null;
     let questions = [];
     // True when the questions came from the packet rather than the
-    // docs API. Decides whether answers are mirrored to
-    // pending-decisions: a self-carried packet's answers live in step
-    // metadata, which IS the record, so mirroring them into the flush
-    // pipeline would create a second copy that can disagree.
+    // docs API. Kept because the loader's four branches need to know
+    // which of them answered; it no longer decides where answers go,
+    // since every answer now lives only on the step.
     let selfCarried = false;
     let loadError = null;
     let saving = false;
@@ -311,7 +310,8 @@
     /// nothing, which is most of the corpus' older questions and every
     /// question whose author left the answer open on purpose.
     ///
-    /// `q.proposal` is parsed by boss-docs from a `Proposed:` line.
+    /// `q.proposal` is a declared field of the packet's question
+    /// metadata (`design-doc.toml`, `item_keys`).
     /// That extractor recognised only `**Proposal**:` until 2026-08-14
     /// — a spelling no doc uses — so this field was null on every
     /// question in the corpus and the rail below carries a comment
@@ -564,55 +564,48 @@
       }
     }
 
-    async function persistPendingDecisions() {
-      // Mirror each non-empty resolution to /api/design/pending-decisions
-      // so the existing flush-jobs path can extract them to ADRs. We
-      // POST one at a time — the endpoint is upsert-style.
-      // PendingDecisionInput wants {doc_path, anchor, kind, resolution}.
-      // The old body sent `proposal` with no kind — a 422 this catch
-      // swallowed, so flush-jobs always saw zero pending decisions.
-      //
-      // `kind` is now a fact rather than a constant. It used to be
-      // hardcoded to override because no question ever carried a
-      // proposal to accept (the parser looked for a spelling the corpus
-      // does not use), which made the accept/override split carry no
-      // information at all. It is derived from what the reviewer
-      // submitted: identical to the doc's proposal means he took it,
-      // anything else means he wrote his own. That is a claim about his
-      // text, not about who drafted it — nothing here records that a
-      // proposal was pre-filled.
-      const proposalFor = (anchor) => {
-        const q = questions.find((x) => x.anchor === anchor);
-        return q && typeof q.proposal === 'string' ? q.proposal.trim() : '';
-      };
-      const writes = resolutions
-        .filter((r) => r.decision.trim().length > 0)
-        .map((r) =>
-          fetch('/api/design/pending-decisions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              doc_path: docPath,
-              anchor: r.anchor,
-              kind: r.decision.trim() === proposalFor(r.anchor) ? 'accept' : 'override',
-              resolution: r.decision,
-            }),
-          }),
-        );
-      const results = await Promise.allSettled(writes);
-      const failed = results.filter((r) => r.status === 'rejected' || (r.value && !r.value.ok));
-      if (failed.length > 0) {
-        // Don't block step save on a pending-decision write failure;
-        // the resolution is still persisted on the step itself.
-        console.warn('[review-design] pending-decisions writes failed:', failed.length);
-      }
+    async function mergeOwnedKeys() {
+      // Merge ONLY the keys this surface owns, server-side. The old
+      // idiom PUT `{ ...step.metadata, doc_path, resolutions }` — the
+      // page-load snapshot plus our keys — and PUT metadata is
+      // replaced WHOLESALE, so any key another writer added after this
+      // page loaded (the carried title, the markdown) rode the stale
+      // snapshot back out of existence: the lost update that reverted
+      // a review's title/markdown and 400'd the reviewer twice on
+      // 2026-09-02. The metadata PATCH merges top-level keys against
+      // the row as it stands and preserves every key it does not name
+      // (a null value would DELETE its key — never send one to keep).
+      const r = await fetch(`/api/jobs/${jobId}/steps/${step.id}/metadata`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ doc_path: docPath, resolutions }),
+      });
+      if (!r.ok) throw new Error(`step metadata merge HTTP ${r.status}: ${await r.text()}`);
     }
 
-    async function putStep(status, metadata) {
+    async function freshStep() {
+      // The metadata PATCH answers 204 with no body, so the post-merge
+      // row must be read back before completing: the completion PUT
+      // still replaces metadata wholesale, and completing with this
+      // page's snapshot would re-introduce the exact lost update the
+      // PATCH just avoided. There is no single-step GET; the job's
+      // steps list is the read the API offers.
+      const r = await fetch(`/api/jobs/${jobId}/steps`);
+      if (!r.ok) throw new Error(`step read-back HTTP ${r.status}: ${await r.text()}`);
+      const steps = await r.json();
+      const fresh = Array.isArray(steps) ? steps.find((s) => s.id === step.id) : null;
+      if (!fresh) throw new Error('step read-back: step missing from its own job');
+      return fresh;
+    }
+
+    async function putStep(base, status) {
+      // The step PUT overlays: any field the body omits keeps its
+      // current value, so a status-only body (base = {}) moves the
+      // status and touches nothing else — metadata included.
       const r = await fetch(`/api/jobs/${jobId}/steps/${step.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...step, job_id: jobId, status, metadata }),
+        body: JSON.stringify({ ...base, job_id: jobId, status }),
       });
       if (!r.ok) throw new Error(`step save HTTP ${r.status}: ${await r.text()}`);
     }
@@ -622,18 +615,24 @@
       saveError = null;
       renderActions();
       try {
-        if (!selfCarried) await persistPendingDecisions();
         const completing = autoComplete && (allAnswered() || questions.length === 0);
-        const workingStatus = step.status === 'pending' ? 'active' : step.status;
-        const finalMeta = { ...step.metadata, doc_path: docPath, resolutions };
 
-        // 1. Persist the FINAL shape first (title + metadata are what
+        // 1. Land ALL metadata writes first (title + metadata are what
         //    sign-off stamps attest — a stamp taken before the last
         //    metadata write goes stale and the completion 409s).
-        await putStep(workingStatus, finalMeta);
+        await mergeOwnedKeys();
+
+        // 2. A save has always flipped a pending step active before
+        //    any stamp lands. Status cannot travel through the
+        //    metadata PATCH, so it rides a status-only PUT.
+        if (step.status === 'pending') await putStep({}, 'active');
 
         if (completing) {
-          // 2. Stamp every required sign-off role in the step's now-
+          // 3. Read the post-merge row back — the stamps and the
+          //    completion must attest the step's true final shape,
+          //    not this page's snapshot.
+          const fresh = await freshStep();
+          // 4. Stamp every required sign-off role in the step's now-
           //    final shape. Policy gates each on `step-signoff:<role>`
           //    — a 403 here means the signed-in user lacks that
           //    authority, and we SAY so instead of silently dropping
@@ -654,8 +653,9 @@
               );
             }
           }
-          // 3. Complete with the identical metadata the stamps attest.
-          await putStep('completed', finalMeta);
+          // 5. Complete with the identical metadata the stamps attest
+          //    — the fresh row verbatim.
+          await putStep(fresh, 'completed');
         }
         onUpdate();
       } catch (e) {
@@ -736,63 +736,110 @@
         renderActions();
         return;
       }
-      if (!docPath) {
-        loadError =
-          'this step carries neither metadata.questions nor metadata.doc_path — ' +
-          'nothing to review';
+      // A DOC WITH NO OPEN QUESTIONS IS STILL A DOC.
+      //
+      // The self-carried branch above requires a NON-EMPTY questions
+      // array, so a design-doc packet whose prose is carried inline but
+      // which has no open questions — settled, or never had any — fell
+      // through to the error below and reported "nothing to review"
+      // while its markdown sat in the very metadata this plugin had
+      // already read. c4b7c904 is that packet: step metadata carrying
+      // `markdown` and `title`, no questions, no doc_path.
+      //
+      // This is the third time this file has had to learn that the
+      // content may be somewhere it did not look. First the doc pane
+      // was empty because the prose was on the other metadata bag
+      // (2026-08-16, four questions answered blind). Then the questions
+      // had to be allowed to ride the packet at all. Now: having
+      // questions is not what makes a doc reviewable — having the doc
+      // is. Reading it and settling it is a review.
+      const inlineMarkdown = String((step.metadata && step.metadata.markdown) || '');
+      if (!docPath && inlineMarkdown) {
+        selfCarried = true;
+        questions = [];
+        doc = {
+          title: String((step.metadata && step.metadata.title) || 'Design doc'),
+          content_html: null,
+          markdown: inlineMarkdown,
+        };
+        renderHeader();
         renderBody();
         renderProgress();
         renderActions();
         return;
       }
-      try {
-        const r = await fetch(`/api/design/docs/${docPath}`);
-        if (r.status === 404) {
-          // The honest miss (2e6dfde7): review Jobs are instant data
-          // but docs ride trains, so a review can exist before its
-          // doc reaches deployed main. A bare 404 read as a dead end
-          // to the first operator who hit it; say what is actually
-          // happening and when it resolves.
-          loadError =
-            `${docPath} is not on the deployed main yet — docs ride ` +
-            `release trains, and this review was opened ahead of its ` +
-            `doc's landing. It becomes reviewable when the train ` +
-            `carrying the doc merges and deploys. If this persists ` +
-            `after a landing, the doc may have been REJECTED at ` +
-            `reindex (stray questions outside '## Open questions') — ` +
-            `the rejection reason is recorded at /system/design.`;
-          renderBody();
-          renderProgress();
-          renderActions();
-          return;
+      if (!docPath) {
+        // LAST RESORT: the questions and prose may be on the JOB
+        // metadata rather than the step. That is the natural place an
+        // author puts them, and the same guess the markdown fallback
+        // above already forgives — "the cost of guessing wrong should be
+        // nothing rather than a silently unreadable review". acedf981
+        // and the `[sim] decision-routing probe` packets hit exactly
+        // this: a design-doc filed with its content on the job reached
+        // review as an empty step and dead-ended here. Answers still
+        // write to the step, so the review stays self-carried.
+        try {
+          const jr = await fetch(`/api/jobs/${jobId}`, {
+            headers: { accept: 'application/json' },
+          });
+          if (jr.ok) {
+            const jm = ((await jr.json()) || {}).metadata || {};
+            const jq = Array.isArray(jm.questions) ? jm.questions : [];
+            const jmd = String(jm.markdown || '');
+            if (jq.length > 0 || jmd) {
+              selfCarried = true;
+              questions = jq.map((q, i) => ({
+                anchor: String(q.anchor || `Q${i + 1}`),
+                title: String(q.title || q.question || ''),
+                proposal: typeof q.proposal === 'string' ? q.proposal : '',
+                body: typeof q.body === 'string' ? q.body : '',
+              }));
+              doc = {
+                title: String(jm.title || 'Design doc'),
+                content_html: null,
+                markdown: jmd,
+              };
+              renderHeader();
+              renderBody();
+              renderProgress();
+              renderActions();
+              return;
+            }
+          }
+        } catch (_) {
+          // Fall through to the honest error below.
         }
-        if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
-        // The other honest miss (6f40b23f): a front that does not
-        // route /api/design/* answers 200 with a ZERO-BYTE body — the
-        // docs service runs on the operator instance only. Left to
-        // r.json() this rendered as a JSON parse error, which reads
-        // like a broken doc rather than an absent service.
-        const raw = await r.text();
-        if (!raw.trim()) {
-          loadError =
-            `this instance does not serve the docs API (an empty reply ` +
-            `for ${docPath}) — the docs service runs on the operator ` +
-            `instance only. Reviews spawned since 2026-08-18 carry ` +
-            `their questions in the packet and never need this fetch; ` +
-            `this older packet carries only a pointer. Open it on the ` +
-            `operator instance, or re-spawn the review to get a ` +
-            `self-carried packet.`;
-          renderBody();
-          renderProgress();
-          renderActions();
-          return;
-        }
-        const detail = JSON.parse(raw);
-        doc = detail;
-        questions = Array.isArray(detail.questions) ? detail.questions : [];
-      } catch (e) {
-        loadError = e instanceof Error ? e.message : String(e);
+        loadError =
+          'this step carries neither metadata.questions, metadata.markdown, nor ' +
+          'metadata.doc_path, and the job carries none either — nothing to review';
+        renderBody();
+        renderProgress();
+        renderActions();
+        return;
       }
+      // A POINTER-ONLY PACKET IS NO LONGER READABLE, and says so.
+      //
+      // Until 2026-09-10 this branch fetched `/api/design/docs/{path}`
+      // — the corpus index that parsed `### Qn:` headings out of the
+      // file on deployed main. That whole read half was deleted with
+      // the rest of the markdown-corpus machinery (backlog f5da586c):
+      // the packet is the doc, so a packet that carries only a pointer
+      // carries nothing to review. Every review spawned since
+      // 2026-08-18 carries its questions, and the three branches above
+      // read both metadata bags.
+      //
+      // Named honestly rather than left as a fetch that 404s. The old
+      // message apologised that "docs ride trains" and told the reader
+      // to wait for a landing; waiting no longer helps, and a message
+      // that sends someone to wait for something that will not happen
+      // is worse than one that says what to do instead.
+      loadError =
+        `this packet carries only a pointer (metadata.doc_path = ` +
+        `${docPath}) and no questions or prose of its own. The design ` +
+        `corpus index that used to read the file was deleted on ` +
+        `2026-09-10 — the packet is the doc now. Read ${docPath} in ` +
+        `the repo, and file a fresh design-doc packet (\`boss design\`) ` +
+        `carrying its questions to review it here.`;
       renderBody();
       renderProgress();
       renderActions();

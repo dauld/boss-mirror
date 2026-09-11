@@ -17,6 +17,18 @@ cluster config, and it converges the same way code does:
   next converge, and the next converge is at most ten minutes after
   the next merge to forge main. If it matters, it goes through the
   train.
+- **The apply is additive — there is no `--prune`.** Deleting a file
+  here removes the *declaration* and leaves the *object* running.
+  Removing it is a named human step (`kubectl -n <ns> delete
+  <kind> <name>`), and
+  `infra/lint/a-deleted-manifest-leaves-no-object.sh` is what makes
+  sure you are told: the converge runs it after the apply, it names
+  every object the tree deleted that is still live and every live
+  object in `boss`/`boss-dev` that no manifest declares, and its
+  header carries the argument for why `--prune` is refused rather
+  than configured. So: a deletion lands as a car like any other
+  change, and the converge hands whoever reads it the one command to
+  finish the job.
 - **Secrets never live here.** Every manifest references its
   secrets by name only (`boss-secrets`, `boss-oidc`, `resend`,
   `boss-backup-key`, `forgejo-registry`, `cloudflare-api-token`,
@@ -65,6 +77,42 @@ sidecar is the load-bearing part — `boss_testing::TestDb` defaults to
 `127.0.0.1`, which in that pod can only be the sidecar, so the
 "port-forward turned my test suite on production" incident of
 2026-08-14 is removed by construction rather than by discipline.
+
+**Pod security — a workload declares the uid it runs as**
+
+A manifest here states its uid rather than inheriting it from its
+image. The gate never builds or applies this directory, so a green
+pre-flight says nothing about it; the thing that holds the invariant is
+`infra/lint/a-workload-declares-the-user-it-runs-as.sh`, which also
+carries the exemption list and the reason for each entry. That lint is
+the authority — this paragraph deliberately does not repeat the list
+(CLAUDE.md §9a).
+
+Why it is the *declaration* that matters and not the behaviour: most
+workloads here run the BOSS image, which is already uid 1500, so
+declaring it changes nothing at runtime. But the pod-security cliff is
+cluster-wide rather than per-namespace — `boss.yaml` enforces the
+baseline profile on the `boss` namespace only, `boss-dev` declares no
+labels at all, and `restricted:latest` is the Talos machine-config
+default, outside this repo. A workload that states `runAsNonRoot` +
+`runAsUser` survives that default being tightened; one that inherits
+its uid from an image is admitted or refused on a property no file in
+this tree records.
+
+**Measure the uid, never infer it from the image name.** The two halves
+are separate answers: `fsGroup` is what makes a *volume* writable, and
+`runAsUser` is who the process is — a manifest can carry one and still
+be missing the other, as `boss.yaml` and `boss-conductor.yaml` both
+were. For a running pod, read it from the live cluster; for a CronJob
+that is not running, read what the image actually does (the BOSS image
+ends on `USER boss` over `useradd --uid 1500` in
+`infra/oss-quickstart/Dockerfile`, the Dockerfile
+`infra/forge/cluster-deploy-runner.sh` builds these tags from). Where
+the uid a workload's *data or credentials* require has not been
+established — Postgres, NATS, Caddy, lego, cloud-sdk, and the backup
+pod whose ship-key only ever worked because it runs as root — guessing
+breaks the service rather than one check. That is an exemption with a
+reason and its own car, not a declaration.
 
 Note on the one-shot Jobs in `boss-tls.yaml`: `kubectl apply` on an
 existing completed Job with an unchanged spec is a no-op; the Jobs

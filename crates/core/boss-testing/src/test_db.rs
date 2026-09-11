@@ -12,6 +12,14 @@
 //! [`ensure_template`] for the measurement that motivated it and the
 //! two properties that make reusing a template safe.
 //!
+//! Before any of that, every `TestDb::new` checks that the compiled
+//! `SCHEMA_FILES` still describes the schema directory on disk, and
+//! REFUSES if it does not — see [`assert_compiled_schema_is_current`].
+//! A compiled list that is one migration behind does not announce
+//! itself: the test that drops a column, renames a table or adds a
+//! constraint simply passes, against the old schema, which is a false
+//! green on exactly the change a DB-backed test exists to cover.
+//!
 //! On `Drop`, the database is dropped via a
 //! best-effort background task — if that fails (test process killed,
 //! runtime already shut down), the random name prefix makes orphans
@@ -41,7 +49,9 @@
 //! }
 //! ```
 
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use sqlx::{Connection, Executor, PgConnection};
@@ -232,6 +242,182 @@ pub(crate) fn production_refusal(server_has_boss_db: bool, override_set: bool) -
 // `new_without` can skip a module, mirroring migrate.sh's `--without`.
 include!(concat!(env!("OUT_DIR"), "/schema_files.rs"));
 
+// The migration ORDER and the one fingerprint function, shared with
+// `build.rs` by inclusion so the two readers cannot disagree. They did
+// once, over the width of an integer, and it redded a train — see the
+// file's own header.
+include!("../schema_order.rs");
+
+/// Where `infra/postgres/schema` is, found from the RUNNING checkout.
+///
+/// Deliberately NOT `env!("CARGO_MANIFEST_DIR")`. That is baked in when
+/// the crate is compiled and names the checkout that COMPILED it —
+/// which in the failure this guards is a different checkout than the one
+/// running the test, so the comparison would be a stale list against its
+/// own stale directory, agreeing with itself. Cargo sets
+/// `CARGO_MANIFEST_DIR` in the test PROCESS's environment too, and that
+/// one names the crate under test here and now.
+fn locate_schema_dir() -> Option<PathBuf> {
+    let start = std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())?;
+    start
+        .ancestors()
+        .map(|dir| dir.join("infra/postgres/schema"))
+        .find(|candidate| candidate.is_dir())
+}
+
+/// The ordered `(name, sql)` list as the directory holds it right now.
+///
+/// Same derivation as `build.rs`, same sort key, from the same file —
+/// the directory is the definition and every reader derives the list
+/// independently rather than consulting a copy.
+fn read_schema_dir(dir: &Path) -> Result<Vec<(String, String)>, String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map_err(|e| format!("reading {}: {e}", dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_file())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".sql"))
+        .collect();
+    names.sort_by_key(|name| schema_sort_key(name));
+    names
+        .into_iter()
+        .map(|file| {
+            let sql = std::fs::read_to_string(dir.join(&file))
+                .map_err(|e| format!("reading {}: {e}", dir.join(&file).display()))?;
+            Ok((file.strip_suffix(".sql").unwrap_or(&file).to_string(), sql))
+        })
+        .collect()
+}
+
+/// Does the schema list compiled into this binary still describe the
+/// directory on disk? `None` when it does; otherwise the whole story.
+///
+/// Three readings are compared, not two:
+/// - `SCHEMA_FILES_FINGERPRINT` — what `build.rs` read,
+/// - `SCHEMA_FILES` — what rustc actually linked,
+/// - `disk` — what is there now, in the checkout being tested.
+///
+/// The first pair disagreeing means the generator and the compiler saw
+/// different files; the second means the artifact belongs to a
+/// different tree or a different moment. Both end the same way: the
+/// schema about to be applied is not the schema under test.
+fn schema_disagreement(dir: &Path, disk: &[(String, String)]) -> Option<String> {
+    let compiled_fp = schema_set_fingerprint(SCHEMA_FILES.iter().copied());
+    let disk_fp =
+        schema_set_fingerprint(disk.iter().map(|(name, sql)| (name.as_str(), sql.as_str())));
+    if compiled_fp == disk_fp && compiled_fp == SCHEMA_FILES_FINGERPRINT {
+        return None;
+    }
+
+    let compiled_names: Vec<&str> = SCHEMA_FILES.iter().map(|(name, _)| *name).collect();
+    let disk_names: Vec<&str> = disk.iter().map(|(name, _)| name.as_str()).collect();
+    let only_compiled: Vec<&str> = compiled_names
+        .iter()
+        .filter(|name| !disk_names.contains(name))
+        .copied()
+        .collect();
+    let only_disk: Vec<&str> = disk_names
+        .iter()
+        .filter(|name| !compiled_names.contains(name))
+        .copied()
+        .collect();
+    let changed: Vec<&str> = SCHEMA_FILES
+        .iter()
+        .filter_map(|(name, sql)| {
+            disk.iter()
+                .find(|(disk_name, _)| disk_name == name)
+                .filter(|(_, disk_sql)| disk_sql != sql)
+                .map(|_| *name)
+        })
+        .collect();
+    let reordered = only_compiled.is_empty()
+        && only_disk.is_empty()
+        && changed.is_empty()
+        && compiled_names != disk_names;
+
+    let list = |label: &str, names: &[&str]| {
+        if names.is_empty() {
+            String::new()
+        } else {
+            format!("  {label}: {}\n", names.join(", "))
+        }
+    };
+    let generator_note = if compiled_fp != SCHEMA_FILES_FINGERPRINT {
+        "  build.rs and rustc disagreed: the generated list and the SQL compiled\n  \
+         into it came from different readings of the directory.\n"
+    } else {
+        ""
+    };
+
+    Some(format!(
+        "boss-testing: the schema compiled into this test binary is not the schema on disk.\n\
+         \n\
+         Every TestDb would load the compiled one, so a migration under test can be\n\
+         silently ABSENT and its assertions evaluated against the old schema. That is a\n\
+         false green on exactly the change a DB-backed test exists to cover, so this\n\
+         refuses instead.\n\
+         \n\
+         compiled: {compiled_count} files, fingerprint {compiled_fp:#018x} \
+         (build.rs read {SCHEMA_FILES_FINGERPRINT:#018x})\n\
+         on disk:  {disk_count} files, fingerprint {disk_fp:#018x}  {dir}\n\
+         {only_compiled_line}{only_disk_line}{changed_line}{reordered_line}{generator_note}\
+         \n\
+         Known cause, measured on the dev pod 2026-09-10: infra/dev-shared-target.sh points\n\
+         every worktree on a machine at ONE CARGO_TARGET_DIR, and cargo's unit hash for\n\
+         boss-testing is identical in each, so the rlib and build.rs's OUT_DIR are one\n\
+         shared artifact owned by whichever checkout built last. This checkout is then\n\
+         reported `Finished` with nothing recompiled, against its neighbour's schema list.\n\
+         \n\
+         Fix: `touch crates/core/boss-testing/build.rs` and rebuild, or give this checkout\n\
+         its own CARGO_TARGET_DIR.\n",
+        compiled_count = compiled_names.len(),
+        disk_count = disk_names.len(),
+        dir = dir.display(),
+        only_compiled_line = list("only in the compiled list", &only_compiled),
+        only_disk_line = list("only on disk", &only_disk),
+        changed_line = list("same name, different SQL", &changed),
+        reordered_line = if reordered {
+            "  same files, different apply ORDER\n"
+        } else {
+            ""
+        },
+    ))
+}
+
+/// Refuse to load a schema that is not the one on disk.
+///
+/// Runs once per process — the answer cannot change while the binary
+/// does not — and panics on disagreement so the refusal reaches the
+/// test as a failure rather than a line in a log nobody reads. A panic
+/// leaves the cell unset, so every later `TestDb::new` refuses too
+/// instead of the first one carrying the whole message.
+///
+/// It does NOT refuse when the directory cannot be found or read:
+/// absence is not disagreement, and a test binary run outside a checkout
+/// has nothing to compare. That case warns and proceeds.
+fn assert_compiled_schema_is_current() {
+    static CHECKED: OnceLock<()> = OnceLock::new();
+    CHECKED.get_or_init(|| match locate_schema_dir() {
+        None => eprintln!(
+            "TestDb: infra/postgres/schema not found above {:?} — the compiled schema \
+             list could not be verified against disk",
+            std::env::var_os("CARGO_MANIFEST_DIR")
+        ),
+        Some(dir) => match read_schema_dir(&dir) {
+            Err(e) => eprintln!(
+                "TestDb: {e} — the compiled schema list could not be verified against disk"
+            ),
+            Ok(disk) => {
+                if let Some(report) = schema_disagreement(&dir, &disk) {
+                    panic!("{report}");
+                }
+            }
+        },
+    });
+}
+
 /// Concatenate the schema files in manifest order, omitting any whose name
 /// contains an entry in `without`.
 fn schema_sql(without: &[&str]) -> String {
@@ -261,16 +447,11 @@ const BUILDING_PREFIX: &str = "boss_tmpl_building_";
 
 /// A stable fingerprint of the schema SQL, for naming its template.
 ///
-/// FNV-1a. Not a security primitive and not trying to be — the only
-/// property required is that the same SQL yields the same name and
-/// different SQL does not, across processes and across runs, with no
-/// dependency added to a crate that every test in the workspace links.
+/// FNV-1a, from `schema_order.rs` — one implementation, because this
+/// function used to hold a second copy of the same five lines and a hash
+/// that lives twice can drift (CLAUDE.md §9a).
 fn schema_fingerprint(schema: &str) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in schema.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
+    let hash = fnv1a(FNV1A_OFFSET, schema.as_bytes());
     format!("{TEMPLATE_PREFIX}{hash:016x}")
 }
 
@@ -297,6 +478,11 @@ impl TestDb {
     }
 
     async fn new_with(without: &[&str]) -> Self {
+        // Before anything is created: is the schema about to be applied
+        // the schema in this checkout? Refuses loudly if not, because
+        // the alternative is a test that passes against the old one.
+        assert_compiled_schema_is_current();
+
         let admin_url = std::env::var("BOSS_TEST_POSTGRES_ADMIN_URL")
             .unwrap_or_else(|_| DEFAULT_ADMIN_URL.to_string());
 
@@ -751,7 +937,10 @@ async fn drop_database(admin_url: &str, db_name: &str) {
 
 #[cfg(test)]
 mod generated_schema_list {
-    use super::SCHEMA_FILES;
+    use super::{
+        SCHEMA_FILES, locate_schema_dir, read_schema_dir, schema_disagreement,
+        schema_set_fingerprint, schema_sort_key,
+    };
 
     /// The generated list must name the manifest's files, in order.
     ///
@@ -768,44 +957,74 @@ mod generated_schema_list {
     /// test would be comparing the directory to itself. The test is
     /// kept, repurposed, because generation introduces a *new* failure
     /// the hand-maintained arrangement could not have: a stale or empty
-    /// `OUT_DIR` artifact. Reading the directory here at run time means
-    /// that if the build script's `rerun-if-changed` coverage ever
-    /// regresses, the real schema meets the stale generated list and
-    /// this fails — with the same symptom it always guarded against,
-    /// caught at the same place.
+    /// `OUT_DIR` artifact.
+    ///
+    /// It now asserts exactly what `TestDb::new` asserts, through the
+    /// same function — which is the point. Before, the guard lived only
+    /// here, in a `#[cfg(test)]` module of boss-testing itself, so a
+    /// builder running `cargo test -p boss-jobs --features postgres`
+    /// never executed it and a stale list reached every one of those
+    /// tests unchecked. This is the pin; `assert_compiled_schema_is_current`
+    /// is the refusal the rest of the workspace gets.
     #[test]
     fn generated_list_matches_the_schema_directory() {
-        let schema_dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../infra/postgres/schema");
-        let mut expected: Vec<String> = std::fs::read_dir(&schema_dir)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", schema_dir.display()))
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_file())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.ends_with(".sql"))
-            .collect();
-        // Same key as build.rs and migrate.sh's `sort -t- -k1,1n`.
-        expected.sort_by_key(|n| {
-            let num: u32 = n
-                .split('-')
-                .next()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(u32::MAX);
-            (num, n.clone())
-        });
-        let expected: Vec<String> = expected
-            .iter()
-            .map(|n| n.trim_end_matches(".sql").to_string())
-            .collect();
-
-        let actual: Vec<&str> = SCHEMA_FILES.iter().map(|(name, _)| *name).collect();
+        let dir = locate_schema_dir().expect("infra/postgres/schema is above this crate");
+        let disk = read_schema_dir(&dir).expect("the schema directory reads");
         assert!(
-            !actual.is_empty(),
+            !SCHEMA_FILES.is_empty(),
             "SCHEMA_FILES is empty — every TestDb would load an empty schema"
         );
+        if let Some(report) = schema_disagreement(&dir, &disk) {
+            panic!("{report}");
+        }
+    }
+
+    /// The fingerprint must separate lists that a naive concatenation
+    /// would hash alike — a byte moved across an entry boundary is a
+    /// different migration set, not the same one spelled differently.
+    #[test]
+    fn a_byte_moved_across_an_entry_boundary_is_a_different_schema() {
+        assert_ne!(
+            schema_set_fingerprint([("ab", "c")]),
+            schema_set_fingerprint([("a", "bc")]),
+            "length-prefixing is what keeps these apart"
+        );
+        assert_ne!(
+            schema_set_fingerprint([("01-a", "x"), ("02-b", "y")]),
+            schema_set_fingerprint([("02-b", "y"), ("01-a", "x")]),
+            "apply ORDER is part of the schema, so it is part of the fingerprint"
+        );
         assert_eq!(
-            actual, expected,
-            "generated SCHEMA_FILES is stale against infra/postgres/schema/*.sql"
+            schema_set_fingerprint([("01-a", "x")]),
+            schema_set_fingerprint([("01-a", "x")]),
+            "the same list must fingerprint the same, in any process"
+        );
+    }
+
+    /// The shape that redded train a20dd59f on 2026-09-09: a
+    /// fourteen-digit prefix beside a twelve-digit one. Numeric order
+    /// and string order disagree here, so a reader that overflows its
+    /// integer and falls back to the string sorts them the other way
+    /// round. Two files, one assertion, and the class cannot come back
+    /// silently.
+    #[test]
+    fn a_wider_prefix_still_sorts_by_its_number() {
+        let mut names = vec![
+            "202609090025-a-flush-job-records-who-worked-it.sql".to_string(),
+            "20260908234904-migration-prefixes-carry-seconds.sql".to_string(),
+            "03-jobs.sql".to_string(),
+            "reference-data.sql".to_string(),
+        ];
+        names.sort_by_key(|n| schema_sort_key(n));
+        assert_eq!(
+            names,
+            vec![
+                "03-jobs.sql".to_string(),
+                "202609090025-a-flush-job-records-who-worked-it.sql".to_string(),
+                "20260908234904-migration-prefixes-carry-seconds.sql".to_string(),
+                "reference-data.sql".to_string(),
+            ],
+            "the numeric prefix decides, a wider one sorts later, and a file with no prefix sorts last"
         );
     }
 }

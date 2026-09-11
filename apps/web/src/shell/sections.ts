@@ -15,7 +15,7 @@
 //     highlight and for `appForSection` to find the owning app. That
 //     agreement was unpinned, and it drifted: 'systemMonitoring' and
 //     'systemStepPlugins' (camelCase route kinds used as section ids)
-//     miss their kebab-case catalog keys, so /system/monitoring — the
+//     miss their kebab-case catalog keys, so /it/operate/audit — the
 //     IT tab's own landing page — rendered under Home chrome.
 //     `sections.test.ts` pins every value now (CLAUDE.md §9a).
 
@@ -31,16 +31,10 @@ export const HOME_CHROME_SECTIONS: ReadonlyMap<string, string> = new Map([
     'the personal fallback: login/stepFocus/home render outside AppShell ' +
       'entirely, and search is cross-cutting with no sidebar row',
   ],
-  [
-    'hr',
-    'HrPage has no catalog entry or sidebar row; it renders under Home ' +
-      'chrome until a department claims it',
-  ],
-  [
-    'manual',
-    'the operator manual has no catalog entry or sidebar row; it renders ' +
-      'under Home chrome until a department claims it',
-  ],
+  // 'hr' and 'manual' graduated out of this map on 2026-09-02 (CAR-6):
+  // People claimed HR and Home claimed the manual, so both are real
+  // catalog entries now — exactly the departure their rows here said
+  // they were waiting for.
 ]);
 
 export const SECTION_FOR_ROUTE: Readonly<Record<Route['kind'], string>> = {
@@ -60,7 +54,6 @@ export const SECTION_FOR_ROUTE: Readonly<Record<Route['kind'], string>> = {
   jobDetail: 'jobs',
   service: 'service',
   sales: 'sales',
-  refurb: 'refurb',
   assets: 'assets',
   asset: 'assets',
   accounts: 'accounts',
@@ -99,19 +92,25 @@ export const SECTION_FOR_ROUTE: Readonly<Record<Route['kind'], string>> = {
   shopProduct: 'shop',
   views: 'views',
 
-  systemModel: 'system-model',
-  systemMonitoring: 'system-monitoring',
-  systemMonitoringPerf: 'system-monitoring',
-  systemMonitoringEvents: 'system-monitoring',
-  systemMonitoringAtlas: 'system-monitoring',
+  // Operate-family kinds highlight the Operate row (2026-08-31
+  // consolidation); registry- and design-family kinds highlight
+  // theirs the same way, via their own catalog ids whose paths now
+  // live under the family surface.
+  systemMonitoringPerf: 'system-incidents',
+  systemMonitoringEvents: 'system-incidents',
+  systemMonitoringAtlas: 'system-incidents',
+  systemMonitoringConductor: 'system-incidents',
+  systemFleet: 'system-incidents',
+  systemMarshallingYard: 'system-incidents',
+  systemYardStatus: 'system-incidents',
   systemStepPlugins: 'system-step-plugins',
   systemStepPluginDetail: 'system-step-plugins',
   systemSubjects: 'system-subjects',
   systemFeedback: 'system-feedback',
+  systemBacklog: 'system-backlog',
   systemYard: 'system-yard',
-  systemMap: 'system-map',
-  systemFlow: 'system-flow',
-  systemFleet: 'system-fleet',
+  systemCrew: 'system-crew',
+  systemEstate: 'system-estate',
   incidents: 'system-incidents',
   systemKb: 'system-kb',
   systemDesign: 'system-design',

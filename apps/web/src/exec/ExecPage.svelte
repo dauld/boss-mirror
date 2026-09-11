@@ -9,6 +9,7 @@
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import Link from '@boss/web-kit/ui/Link.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
+  import { formatMoney } from '@boss/web-kit/ui/money';
   import { href } from '../router';
   import { appNow } from '@boss/web-kit/sim-clock';
   import {
@@ -20,13 +21,7 @@
   // --- Shared formatting ---------------------------------------------------
 
   function fmtUsd(cents: number): string {
-    if (Math.abs(cents) >= 100_000_000) {
-      return `$${(cents / 100_000_000).toFixed(1)}M`;
-    }
-    if (Math.abs(cents) >= 100_000) {
-      return `$${(cents / 100_000).toFixed(0)}K`;
-    }
-    return `$${(cents / 100).toFixed(0)}`;
+    return formatMoney({ amount_cents: cents, currency: 'USD' }, { precision: 'compact' });
   }
   function pluralize(n: number, word: string): string {
     return n === 1 ? `${n} ${word}` : `${n} ${word}s`;

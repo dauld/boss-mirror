@@ -1,0 +1,48 @@
+# ---------------------------------------------------------------------
+# Three more maintenance areas (migration 122). 121 seeded the protocol
+# and one area and noted that David expects several; this is the
+# follow-through, filed as d0092947.
+#
+# Seeded together on purpose. David, 2026-08-14: "introducing and
+# changing protocol is cheap, so we can create as many as we need and
+# edit them to find the right operating cadence." The `clear` vs
+# `remediated` counts are what say which cadence is wrong — that is a
+# query, not an opinion, and it needs rows to run against.
+#
+# All three are invisible-until-expensive, and each was found by paying
+# for it once. Cadence `daily` per David's standing instruction; if the
+# dock floods, the fix is a `schedule` edit on these rows, not a deploy.
+# ---------------------------------------------------------------------
+
+# 1. STALE BUILD CACHES. The disk problem 121 was written about had a
+# cause a disk sweep would not have found: 69GB of cargo target dirs
+# under .claude/worktrees for branches that shipped days earlier, 48GB
+# in one worktree. The main tree gave back 9GB, the worktrees 67GB — so
+# an inspection pointed at the repo reports the small number and moves
+# on. Deliberately its own area rather than a bigger disk check: the two
+# look in different places, and collapsing them is how the 67GB stayed
+# invisible the first time.
+[[rule]]
+name = "maintenance-sweep-build-caches-daily"
+why = """
+A TIMER, the standing exemption: no packet causes "a day passed", so no
+Workflow definition can declare it — a sweep's whole point is to run
+when NO event fired. It adds no routing: one firing spawns one
+maintenance-sweep packet, and what happens next is that protocol's own
+row. Stale build caches are invisible until expensive: the
+disk problem migration 121 was written about had 69GB of cargo
+target dirs under worktrees for branches that shipped days
+earlier. Deliberately its own area — collapsing it into the disk
+sweep is how the 67GB stayed invisible the first time.
+(Ratchet history: 42 -> 45 with the two below, 2026-08-14,
+migration 122.)
+"""
+version = 2
+schedule = { cadence = "daily", anchor_date = "2026-08-14" }
+# One outstanding packet per target (0517387b): yesterday's sweep
+# still open means today has nothing new to say - spawning a twin
+# duplicates the obligation, it does not discharge it.
+when = 'NOT open_job_exists("maintenance-sweep", "stale-build-caches")'
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"maintenance-sweep\"", subject_kind = "\"custom\"", subject = "\"stale-build-caches\"", title = "\"Stale build cache sweep\"", "metadata.target" = "\"stale-build-caches\"", "metadata.area" = "\"infra\"" }

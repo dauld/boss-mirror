@@ -23,8 +23,15 @@
      *  one the card keeps navigating to the job page, so surfaces that
      *  have not adopted the modal behave exactly as before. */
     onOpen?: (id: string) => void;
+    /** Opt-in dismiss affordance. A lens that lets the reader take a
+     *  packet off a personal list (the watchlist) passes it, and the
+     *  card grows a small × that calls it with the packet id. Absent
+     *  everywhere else, so no other queue surface sprouts a control it
+     *  has no meaning for — the card stays a pure read wherever a lens
+     *  does not opt in. */
+    onDismiss?: (id: string) => void;
   }>;
-  let { card, size = 'dock', onOpen }: Props = $props();
+  let { card, size = 'dock', onOpen, onDismiss }: Props = $props();
 
   const hue = $derived(protocolHue(card.kind));
   const shownTags = $derived(
@@ -42,6 +49,19 @@
     if (e.key === 'Enter') {
       e.preventDefault();
       open();
+    }
+  }
+  // The × is a real button nested in the card. Its click, double-click
+  // and Enter/Space must not also reach the card's open() — dismissing
+  // a packet is the opposite of opening it — so each is stopped from
+  // bubbling to the card handlers above.
+  function dismiss(e: MouseEvent): void {
+    e.stopPropagation();
+    onDismiss?.(card.id);
+  }
+  function onDismissKeydown(e: KeyboardEvent): void {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.stopPropagation();
     }
   }
 </script>
@@ -63,6 +83,17 @@
   <div class="pk-head">
     <span class="pk-kind">{card.kind}</span>
     {#if card.sim}<span class="pk-sim">SIM</span>{/if}
+    {#if onDismiss}
+      <button
+        type="button"
+        class="pk-dismiss"
+        title="Remove from watchlist"
+        aria-label="Remove from watchlist: {card.title}"
+        onclick={dismiss}
+        ondblclick={dismiss}
+        onkeydown={onDismissKeydown}
+      >×</button>
+    {/if}
   </div>
   <div class="pk-title">{card.title}</div>
   <div class="pk-foot">
@@ -101,6 +132,32 @@
     display: flex;
     align-items: center;
     gap: 8px;
+  }
+  /* The dismiss control sits at the end of the head row, pushed right,
+     so the × lands in the card's top corner clear of the kind chip.
+     Quiet until hover/focus — an affordance the reader reaches for, not
+     one that competes with the packet's own facts. Colors are the same
+     status/text tokens the rest of the card reads. */
+  .pk-dismiss {
+    margin-left: auto;
+    flex: none;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: 15px;
+    line-height: 1;
+    color: var(--static, #7a838c);
+    opacity: 0.55;
+    transition:
+      opacity 120ms ease,
+      color 120ms ease;
+  }
+  .pk-dismiss:hover,
+  .pk-dismiss:focus-visible {
+    opacity: 1;
+    color: var(--text, #1b1f23);
+    outline: none;
   }
   .pk-kind {
     font-family: var(--font-mono, ui-monospace, monospace);

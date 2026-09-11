@@ -2,6 +2,7 @@
   // Field-service schedule — port of apps/web/src/schedule/SchedulePage.tsx.
 
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
+  import { formatDate } from '@boss/web-kit/ui/date';
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import { appNow } from '@boss/web-kit/sim-clock';
 
@@ -214,7 +215,7 @@
       Next week →
     </button>
     <span style="margin-left:auto; font-size:12px; color:#78716c">
-      {from.slice(0, 10)} → {addDays(weekEnd, -1).toISOString().slice(0, 10)}
+      {formatDate(from)} → {formatDate(addDays(weekEnd, -1).toISOString())}
     </span>
   </div>
 

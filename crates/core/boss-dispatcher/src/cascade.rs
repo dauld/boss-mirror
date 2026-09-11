@@ -1,9 +1,9 @@
 //! Static cascade metadata for the dispatcher-rules visualization.
 //!
-//! `rules.toml` declares the reactive layer as `trigger event → rule →
+//! The rule registry declares the reactive layer as `trigger event → rule →
 //! handler(s)`. To render the full *cascade* — the feedback loops that
 //! make the state machine self-drive — the graph also needs two facts
-//! that aren't in `rules.toml`:
+//! that are not in the rule registry:
 //!
 //!   1. **What each handler causes to be emitted** downstream (by the
 //!      API it calls). A loop closes wherever an emitted kind matches
@@ -18,16 +18,28 @@
 //!
 //! Both are authored here — a documented, central "what each side-effect
 //! causes" — and served by `GET /api/dispatcher/rules`. Kept in sync
-//! with the handlers in `rules::handlers::*`; the
-//! `dispatcher_rules`-registry migration will fold this into first-class
-//! rule/handler metadata. `cascade_handlers_match_rules` (tests) guards
-//! against a rule referencing a handler this map forgot.
+//! with the handlers in `rules::handlers::*`;
+//! `cascade_handlers_match_rules` (tests) guards against a rule
+//! referencing a handler this map forgot, reading the authored registry
+//! directory that IS the rule definition.
+//!
+//! THIS IS NOT THE RULE REGISTRY'S SECOND COPY, and the question was
+//! settled when the registry collapsed to one home (backlog 41ba00cd).
+//! The note that used to stand here said the `dispatcher_rules`-registry
+//! migration "will fold this into first-class rule/handler metadata". It
+//! will not, because the fact is a different one: a rule row says which
+//! handler it invokes, and this map says what that HANDLER emits, which
+//! is a property of the handler's Rust and of nothing a rule author
+//! writes. Moving it onto the rule row would make every rule naming the
+//! same handler restate it — CLAUDE.md §9a's duplication, created rather
+//! than removed. So it stays one declaration, in the crate whose code it
+//! describes, pinned to the rule registry by the guard below.
 
 use serde::Serialize;
 use std::collections::BTreeMap;
 
 /// Event kind(s) each handler causes to be emitted downstream, keyed by
-/// the handler's registered name (the `handler = "..."` in `rules.toml`).
+/// the handler's registered name (the `handler = "..."` in a rule file).
 /// An empty list is a pure sink (notifier / webhook — emits nothing).
 pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
     BTreeMap::from([
@@ -68,6 +80,13 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         ),
         ("ledger.bill.payment_batch", vec!["ledger.bill.paid"]),
         ("ledger.tax.accrue", vec!["ledger.tax.accrued"]),
+        // One POST, two facts: the settlement endpoint records the
+        // charge and release legs in one transaction, each with its
+        // own audit event for the rebuild bridge (93f936b9).
+        (
+            "ledger.keg_deposit.settle",
+            vec!["ledger.keg_deposit.charged", "ledger.keg_deposit.released"],
+        ),
         // Two emits: the handler POSTs the filing (which records
         // `ledger.tax.filing.created` — the event `tax_filings` is
         // projected from) and then, when `remit=true`, follows with the
@@ -81,14 +100,37 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         ("people.terminate", vec!["people.employee.updated"]),
         ("shipping.create", vec!["shipping.shipment.created"]),
         ("jobs.spawn", vec!["jobs.job.created"]),
-        // Delegates to jobs.spawn per orphaned doc, so it emits
-        // whatever that emits — and nothing of its own.
-        ("docs.design.sweep", vec!["jobs.job.created"]),
+        // Files one ops-request per probed car aboard an arrived
+        // train (28ac45ab); the probe itself runs on the forge and
+        // writes back through the jobs API as its own actor, so the
+        // only emit this handler owns is the packet it creates.
+        ("jobs.run-car-probes", vec!["jobs.job.created"]),
+        // Auto-park (898e41b1): on a gate-run's GREEN gate-verdict step
+        // it files the ship-a-change car (`jobs.job.created`), completes
+        // that car's three receipt steps (`jobs.step.completed`), and —
+        // on the skip/re-gate branches, and when `--park-backlog-item`
+        // routes the linked item to `build` — PATCHes metadata
+        // (`jobs.job.updated`). Every one is a car or backlog-item write,
+        // so the only rule that can re-enter on them is the backlog-item
+        // advance rule; nothing it writes is a gate-run, so the park
+        // cannot trigger its own trigger.
+        (
+            "jobs.auto-park",
+            vec![
+                "jobs.job.created",
+                "jobs.step.completed",
+                "jobs.job.updated",
+            ],
+        ),
         ("jobs.complete_step", vec!["jobs.step.completed"]),
         // Clears waiting_on via PUT /api/jobs — the update emits
         // jobs.job.updated (and wakes metadata-gated steps in the
         // same write, aa9980c8).
         ("jobs.clear_waiting", vec!["jobs.job.updated"]),
+        (
+            "maintenance.sweep.inspect",
+            vec!["jobs.step.completed", "jobs.job.updated"],
+        ),
         ("jobs.subjob_resolve", vec!["jobs.step.completed"]),
         // Completes the open branch on the Job a declared edge names
         // (a merged car answering its feedback packet). The completion
@@ -105,6 +147,50 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // not for the cascade — so the loop terminates here by design
         // (packet-loss.md Q2: report first, raise later).
         ("network.census", vec!["jobs.network.census"]),
+        // The estate comparison (59ef456a): fires on each
+        // `jobs.estate.observed`, reads the registry through the jobs
+        // API, and lands one `jobs.estate.compared` event via the
+        // comparison door. No rule listens on that topic — the series
+        // is for lenses and for calibrating the eventual raiser, so
+        // the loop terminates here by design, same as the census.
+        ("estate.compare", vec!["jobs.estate.compared"]),
+        // The raiser on that series (a5adfb99): it POSTs an urgent
+        // backlog-item when a hard finding persists or a watched series
+        // goes stale, and nothing else — the dedup read is a GET and a
+        // non-raise is a no-op. A backlog-item write, so it cannot make
+        // the estate series it watches look any different, and the loop
+        // terminates at the operator's queue by design (delivery beyond
+        // the queue is channel work, not this handler's).
+        ("estate.alarm", vec!["jobs.job.created"]),
+        // The cadence silence sweep (ecca2f43): a daily clock rule
+        // that reconciles each DECLARED cadence against the newest
+        // ACTUAL packet of that kind. Three writes, all through the
+        // jobs API — it FILES an alarm (`jobs.job.created`), REFRESHES
+        // a standing one's metadata (`jobs.job.updated`), and CLOSES
+        // its own alarm when the kind comes back by completing the
+        // packet's triage step (`jobs.step.completed`, which carries
+        // the backlog-item to its `stale` terminal). Every one of them
+        // is a backlog-item write, so the only rule that can re-enter
+        // on them is the backlog-item advance rule, and none of that
+        // reaches a maintenance kind: the sweep cannot make the
+        // cadences it watches look busier.
+        (
+            "cadence.silence.sweep",
+            vec![
+                "jobs.job.created",
+                "jobs.job.updated",
+                "jobs.step.completed",
+            ],
+        ),
+        // The credential broker (7ee101aa): fires on a rotation
+        // packet's scope step, speaks to the forge admin API + the
+        // k8s Secret store, and records issue/install/verify/revoke
+        // by completing that same packet's steps — so its only
+        // in-system emission is `jobs.step.completed`, same as the
+        // other step-completing executors above. Deliberately NOT
+        // `step.done.credential-rotation`: the steps it completes are
+        // `task` kind, so the loop cannot re-enter its own trigger.
+        ("credential.rotate.forgejo", vec!["jobs.step.completed"]),
         ("messages.notify", vec![]),
         // Tells the filer how their packet ended. A sink, like every
         // other notifier — the message is the end of the cascade, not
@@ -117,10 +203,6 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // notification must not wake anything up, which is the whole
         // point of archiving it.
         ("messages.expire_for_job", vec![]),
-        // Queues a docs flush job (rule 109) — a docs-api write, no
-        // event emitted back into the cascade (the flush WORKER's
-        // eventual commit is outside the dispatcher's loop).
-        ("docs.flush_queue", vec![]),
         ("webhook.notify", vec![]),
     ])
 }
@@ -181,7 +263,7 @@ pub fn system_edges() -> Vec<SystemEdge> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::registry::parse_raw;
+    use crate::rules::registry::parse_raw_path;
 
     #[test]
     fn emits_and_system_edges_present() {
@@ -195,18 +277,17 @@ mod tests {
         assert!(!system_edges().is_empty());
     }
 
-    /// Drift guard: every handler the shipped `rules.toml` references must
+    /// Drift guard: every handler the shipped registry references must
     /// have a `handler_emits` entry, so the cascade graph never silently
-    /// drops a handler. Reads the real rules file via CARGO_MANIFEST_DIR so
-    /// it tracks the deployed registry, not a fixture.
+    /// drops a handler. Reads the real rule directory via CARGO_MANIFEST_DIR
+    /// so it tracks the deployed registry, not a fixture.
     #[test]
     fn cascade_handlers_match_rules() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../infra/dispatcher/rules.toml"
+            "/../../../infra/dispatcher/rules"
         );
-        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-        let raw = parse_raw(&src).expect("parse rules.toml");
+        let raw = parse_raw_path(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
         let emits = handler_emits();
         for rule in &raw.rules {
             for step in &rule.do_steps {

@@ -20,6 +20,13 @@
     workflowSurfaces,
     type WorkflowSpec,
   } from '../workflows/workflowTypes';
+  import { fetchRemote } from '../data/remote';
+  import {
+    fetchEmployeeTasks,
+    fetchStepProgress,
+    hrJobRows,
+    type TasksRead,
+  } from './hr-tasks';
   import { href } from '../router';
 
   type Tab = 'overview' | 'requisitions' | 'certs' | 'headcount' | 'workflows';
@@ -106,26 +113,18 @@
   // (no tenant Workflow slugs baked in).
   // ------------------------------------------------------------
 
+  /// `total_tasks` / `done_tasks` are NULL when the Job's step read
+  /// failed. They used to be zeroed by a `.catch(() => [])`, which the
+  /// progress column then drew as "0/0 tasks (0%)" — a statement about
+  /// how far along a person's onboarding is, made by a read that never
+  /// happened (backlog a704c5eb).
   type ActiveWorkflow = {
     employee_id: string;
     employee_name: string;
     workflow: string;
     job_id: string;
-    total_tasks: number;
-    done_tasks: number;
-  };
-  type WorkflowTask = {
-    id: string;
-    job_id: string;
-    employee_id: string;
-    workflow: string;
-    task: string;
-    category: string;
-    assignee_id: string | null;
-    status: string;
-    due_date: string | null;
-    completed_at: string | null;
-    notes: string | null;
+    total_tasks: number | null;
+    done_tasks: number | null;
   };
 
   const CATEGORY_LABEL: Record<string, string> = {
@@ -152,7 +151,12 @@
 
   let workflows = $state<ActiveWorkflow[]>([]);
   let selectedEmp = $state<string | null>(null);
-  let tasks = $state<WorkflowTask[]>([]);
+  /// The task read as a discriminated union, not a list. There is no
+  /// fourth option: `ready` (with a possibly-empty list), `failed`, or
+  /// `no-job`, and the template has to branch to render anything — so a
+  /// failed read can no longer borrow the empty state's words.
+  let tasks = $state<TasksRead | null>(null);
+  let tasksLoading = $state(false);
   let workflowsLoading = $state(true);
   let startTarget = $state('');
 
@@ -196,42 +200,33 @@
     try {
       const results: ActiveWorkflow[] = [];
       for (const { kind, label } of hrKinds) {
-        const r = await fetch(
-          `/api/jobs?kind=${kind}&status=open&limit=200`,
+        // `hrJobRows` owns the envelope and the subject read, and it
+        // THROWS on a shape it does not recognise — so a wrong key
+        // lands here as a failure instead of as an empty department.
+        // See ./hr-tasks for the two it was getting wrong.
+        const res = await fetchRemote(
+          `/api/jobs?kind=${encodeURIComponent(kind)}&status=open&limit=200`,
+          hrJobRows,
         );
-        if (!r.ok) {
+        if (res.kind === 'failed') {
           // A failed kind is a failed list — skipping it would render
           // the remainder as if it were everything.
-          workflowsFailed = `${kind} jobs: HTTP ${r.status}`;
+          workflowsFailed = `${kind} jobs: ${res.error}`;
           continue;
         }
-        const payload = (await r.json()) as {
-          jobs?: Array<{
-            id: string;
-            subject_kind?: string;
-            subject_id?: string;
-            kind?: string;
-          }>;
-        };
-        const jobs = Array.isArray(payload.jobs) ? payload.jobs : [];
-        for (const j of jobs) {
-          if (j.subject_kind !== 'employee' || !j.subject_id) continue;
-          const steps = await fetch(`/api/jobs/${j.id}/steps`)
-            .then((sr) => (sr.ok ? sr.json() : []))
-            .catch(() => []);
-          const stepArr = Array.isArray(steps) ? steps : [];
-          const total = stepArr.length;
-          const done = stepArr.filter(
-            (s: { status?: string }) => s.status === 'completed',
-          ).length;
-          const empMatch = roster.find((e) => e.id === j.subject_id);
+        for (const j of res.data) {
+          // `null` when the step read failed — the progress column says
+          // "unknown" rather than drawing a 0% bar over a read that
+          // never landed.
+          const progress = await fetchStepProgress(j.id);
+          const empMatch = roster.find((e) => e.id === j.employeeId);
           results.push({
-            employee_id: j.subject_id,
-            employee_name: empMatch?.name ?? j.subject_id,
+            employee_id: j.employeeId,
+            employee_name: empMatch?.name ?? j.employeeId,
             workflow: label,
             job_id: j.id,
-            total_tasks: total,
-            done_tasks: done,
+            total_tasks: progress?.total ?? null,
+            done_tasks: progress?.done ?? null,
           });
         }
       }
@@ -253,50 +248,20 @@
     }
   });
 
-  async function fetchTasks(empId: string): Promise<void> {
+  async function loadTasks(empId: string): Promise<void> {
     // #101 — Tasks = Steps of the employee's open HR Job. Pick
     // the most recent matching Job and fetch its Steps. Lower
     // resolution than the prior /api/people/{id}/tasks endpoint
     // (which surfaced the per-employee task aggregation across
     // all workflows) but accurate against the Job model. A
     // future enhancement could merge multiple Jobs' steps.
+    //
+    // The read itself lives in ./hr-tasks — one `TasksRead`, three
+    // outcomes kept apart. See that module for why.
     selectedEmp = empId;
-    try {
-      const w = workflows.find((x) => x.employee_id === empId);
-      if (!w) {
-        tasks = [];
-        return;
-      }
-      const r = await fetch(`/api/jobs/${w.job_id}/steps`);
-      if (!r.ok) {
-        tasks = [];
-        return;
-      }
-      const stepArr = (await r.json()) as Array<{
-        id: string;
-        kind: string;
-        title: string;
-        status: string;
-        assignee_id?: string | null;
-        completed_on?: string | null;
-        metadata?: Record<string, unknown>;
-      }>;
-      tasks = stepArr.map((s) => ({
-        id: s.id,
-        job_id: w.job_id,
-        employee_id: empId,
-        workflow: w.workflow,
-        task: s.title,
-        category: s.kind,
-        assignee_id: s.assignee_id ?? null,
-        status: s.status,
-        due_date: null,
-        completed_at: s.completed_on ?? null,
-        notes: null,
-      }));
-    } catch {
-      tasks = [];
-    }
+    tasksLoading = true;
+    tasks = await fetchEmployeeTasks(empId, workflows);
+    tasksLoading = false;
   }
 
   async function updateTask(taskId: string, status: string): Promise<void> {
@@ -308,7 +273,7 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status }),
     });
-    if (selectedEmp) await fetchTasks(selectedEmp);
+    if (selectedEmp) await loadTasks(selectedEmp);
     await fetchWorkflows();
   }
 
@@ -453,7 +418,11 @@
                 </thead>
                 <tbody>
                   {#each workflows as w (`${w.employee_id}-${w.workflow}`)}
-                    {@const pct = w.total_tasks > 0 ? Math.round((w.done_tasks / w.total_tasks) * 100) : 0}
+                    {@const counted = w.total_tasks !== null && w.done_tasks !== null}
+                    {@const pct =
+                      w.total_tasks !== null && w.done_tasks !== null && w.total_tasks > 0
+                        ? Math.round((w.done_tasks / w.total_tasks) * 100)
+                        : 0}
                     <tr>
                       <td>
                         <Link to={entityHref('employee', w.employee_id)}>
@@ -466,15 +435,21 @@
                         </span>
                       </td>
                       <td>
-                        <div class="hr-progress">
-                          <div class="hr-progress-bar" style={`width:${pct}%`}></div>
-                        </div>
-                        <span style="font-size:11px; color:#78716c">
-                          {w.done_tasks}/{w.total_tasks} tasks ({pct}%)
-                        </span>
+                        {#if counted}
+                          <div class="hr-progress">
+                            <div class="hr-progress-bar" style={`width:${pct}%`}></div>
+                          </div>
+                          <span style="font-size:11px; color:#78716c">
+                            {w.done_tasks}/{w.total_tasks} tasks ({pct}%)
+                          </span>
+                        {:else}
+                          <span class="load-failed" style="font-size:11px">
+                            Progress unknown — this Job's steps could not be read.
+                          </span>
+                        {/if}
                       </td>
                       <td>
-                        <button class="hr-detail-btn" onclick={() => fetchTasks(w.employee_id)}>
+                        <button class="hr-detail-btn" onclick={() => loadTasks(w.employee_id)}>
                           View tasks
                         </button>
                       </td>
@@ -485,9 +460,34 @@
             {/if}
         </Section>
 
-        {#if selectedEmp && tasks.length > 0}
+        <!-- Three outcomes, three different things on screen. The old
+             guard was `selectedEmp && tasks.length > 0`, which hid the
+             section for a failed read exactly as it hid it for an
+             employee with no tasks — so an outage read as a finished
+             onboarding. -->
+        {#if selectedEmp && tasks !== null}
           {@const empName = roster.find((e) => e.id === selectedEmp)?.name ?? selectedEmp}
           <Section title={`Tasks — ${empName}`}>
+            {#if tasksLoading}
+              <p style="color:#78716c; font-size:13px">Loading…</p>
+            {:else if tasks.kind === 'failed'}
+              <p class="load-failed" role="alert" style="font-size:13px">
+                Couldn't read {empName}'s onboarding steps — {tasks.error}.
+                This is a failed read, not an empty onboarding: the tasks
+                below this line are unknown, not absent.
+              </p>
+            {:else if tasks.kind === 'no-job'}
+              <p style="color:#78716c; font-size:13px">
+                {empName} has no open HR workflow in the list above, so
+                there are no steps to show. Start one from
+                <strong>Start Workflow</strong> above.
+              </p>
+            {:else if tasks.data.length === 0}
+              <p style="color:#78716c; font-size:13px">
+                This workflow has no steps — the Job was read and it is
+                genuinely empty.
+              </p>
+            {:else}
               <table class="data-table">
                 <thead>
                   <tr>
@@ -498,7 +498,7 @@
                   </tr>
                 </thead>
                 <tbody>
-                  {#each tasks as t (t.id)}
+                  {#each tasks.data as t (t.id)}
                     <tr>
                       <td><span class="chip">{CATEGORY_LABEL[t.category] ?? t.category}</span></td>
                       <td>{t.task}</td>
@@ -514,6 +514,7 @@
                   {/each}
                 </tbody>
               </table>
+            {/if}
           </Section>
         {/if}
       </div>

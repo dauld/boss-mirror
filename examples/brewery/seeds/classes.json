@@ -371,6 +371,69 @@
     "sort_order": 304
   },
   {
+    "subject_kind": "employee",
+    "code": "ceo",
+    "display_name": "Chief Executive Officer",
+    "member_attribute": "role",
+    "sort_order": 310
+  },
+  {
+    "subject_kind": "employee",
+    "code": "cfo",
+    "display_name": "Chief Financial Officer",
+    "member_attribute": "role",
+    "sort_order": 320
+  },
+  {
+    "subject_kind": "employee",
+    "code": "coo",
+    "display_name": "Chief Operating Officer",
+    "member_attribute": "role",
+    "sort_order": 330
+  },
+  {
+    "subject_kind": "employee",
+    "code": "cto",
+    "display_name": "Chief Technology Officer",
+    "member_attribute": "role",
+    "sort_order": 340
+  },
+  {
+    "subject_kind": "employee",
+    "code": "controller",
+    "display_name": "Controller",
+    "member_attribute": "role",
+    "sort_order": 350
+  },
+  {
+    "subject_kind": "employee",
+    "code": "hr-generalist",
+    "display_name": "HR Generalist",
+    "member_attribute": "role",
+    "sort_order": 360
+  },
+  {
+    "subject_kind": "employee",
+    "code": "recruiter",
+    "display_name": "Recruiter",
+    "member_attribute": "role",
+    "sort_order": 370
+  },
+  {
+    "subject_kind": "employee",
+    "code": "sales-rep",
+    "display_name": "Sales Rep",
+    "member_attribute": "role",
+    "sort_order": 380
+  },
+  {
+    "subject_kind": "employee",
+    "code": "warehouse-mgr",
+    "display_name": "Warehouse Manager",
+    "member_attribute": "role",
+    "sort_order": 390
+  },
+  {
     "subject_kind": "vendor",
     "code": "grain-supplier",
     "display_name": "Grain / Malthouse",

@@ -1,0 +1,54 @@
+# infra/cluster/manifests/boss-ledger-replay-check.yaml (CronJob), and
+# infra/boss-ledger-replay-check.service on a host that runs it under
+# systemd.
+#
+# A `maintenance_spec(...)` Rust literal until 2026-09-11 — see
+# maintenance-backup.toml's header for the defect that form made
+# self-reproducing (6c796f75).
+[[workflow]]
+kind = "maintenance-ledger-replay"
+label = "Ledger replay check"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "The 03:30 rooted-at-audit-log replay comparison."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "systemd-timer" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Run to completion"
+# Gated so the simulated workforce cannot role-match and "complete"
+# real maintenance; the timer's boss-step call presents the automation
+# actor with this role.
+authority_role = "platform-admin"
+fields = [{ name = "result", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
+title_template = "Maintenance completed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status), and lands here instead of looking
+# like a run still in progress. Before 2026-09-05 this terminal did
+# not exist and a failed run's packet stayed open until a later run
+# closed it "ok".
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }

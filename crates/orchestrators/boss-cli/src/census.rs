@@ -69,11 +69,13 @@ use boss_jobs::job_edges::{InMemoryJobEdges, JobEdgeSpec, JobEdgesRegistry};
 use boss_jobs::registry::WorkflowStatus;
 use boss_jobs::stations::StationSpec;
 
-/// Reads are policy-gated. The census claims operator scope because
-/// its subject IS the whole instance — a scoped read would report
-/// "orphan" for every packet the reader merely cannot see. Read-only:
-/// this module issues GETs and nothing else.
-const CENSUS_USER: &str = r#"{"id":"automation:packet-census","role":"platform-admin","access_tier":"operator","territory_account_ids":[],"direct_report_ids":[],"department":"platform"}"#;
+// Reads are policy-gated. The census claims operator scope because
+// its subject IS the whole instance — a scoped read would report
+// "orphan" for every packet the reader merely cannot see. Read-only:
+// this module issues GETs and nothing else, so the id it presents
+// names whoever ran `boss packet census` rather than the old fixed
+// `automation:packet-census` slug — the scope that matters is the
+// role, which `identity::header` carries for every verb alike.
 
 /// Job statuses that mean "still in the network". Terminal is the
 /// complement: closed + cancelled.
@@ -494,7 +496,10 @@ impl Api {
         let resp = self
             .client
             .get(&url)
-            .header("x-boss-user", CENSUS_USER)
+            .header(
+                "x-boss-user",
+                crate::identity::header(&crate::identity::reader()),
+            )
             .send()
             .await
             .with_context(|| format!("GET {url}"))?;
@@ -559,9 +564,13 @@ pub async fn run(opts: Options, now: DateTime<Utc>) -> Result<()> {
 /// printing so a test can drive the whole collection against a stubbed
 /// jobs-api and assert on the findings.
 async fn collect(opts: Options, now: DateTime<Utc>) -> Result<Census> {
-    let base = opts
-        .jobs_url
-        .unwrap_or_else(|| crate::train::env_or("BOSS_JOBS_URL", "http://127.0.0.1:7900"));
+    // No default on purpose: with neither `--jobs-url` nor
+    // `BOSS_JOBS_URL` set, this refuses and names the system of record
+    // rather than silently reading boss-gcp's second, older stack at
+    // 127.0.0.1 and reporting conservation/orphan findings about the
+    // wrong deployment (packet aa783636). Shared with every read verb
+    // via gate::resolve_jobs_base.
+    let base = crate::gate::resolve_jobs_base(opts.jobs_url.as_deref())?;
     let base = base.trim_end_matches('/').to_string();
     let mut api = Api::new(base.clone());
     let mut notes: Vec<String> = Vec::new();
@@ -766,6 +775,35 @@ async fn collect(opts: Options, now: DateTime<Utc>) -> Result<Census> {
             Resolution::Dangling | Resolution::Ambiguous => dangling.push(row),
             Resolution::Unknown => unknown.push(row),
             Resolution::Present => {}
+        }
+    }
+
+    // --- stranded gate-runs: green verdicts no car ever claimed -------
+    // A change that gated green but was never parked never reaches the
+    // dock, so it cannot board — the "why did a green gate never load"
+    // question, as a number. Reads closed gate-runs and cars, which the
+    // open-packet slice above never sees. BEST-EFFORT: it is one hygiene
+    // note, not a hard dependency, so a failed read skips it rather than
+    // failing the whole census.
+    let gate_run_read = api.get("/api/jobs?kind=gate-run&limit=60").await;
+    let car_read = api.get("/api/jobs?kind=ship-a-change&limit=800").await;
+    if let (Ok(gate_run_body), Ok(car_body)) = (gate_run_read, car_read) {
+        let car_branches: BTreeSet<String> = rows(&car_body)
+            .iter()
+            .filter_map(|c| {
+                c.get("metadata")
+                    .and_then(|m| m.get("branch"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect();
+        let stranded = stranded_gate_runs(&rows(&gate_run_body), &car_branches);
+        if !stranded.is_empty() {
+            notes.push(format!(
+                "{} stranded gate-run(s) — gated green, never parked, so never on the dock: {}",
+                stranded.len(),
+                stranded.join(", ")
+            ));
         }
     }
 
@@ -1177,6 +1215,77 @@ fn render(c: &Census) -> String {
     o.join("\n")
 }
 
+/// Green gate-runs whose branch has no ship-a-change car: a change that
+/// gated but was never parked, so it never reached the dock and could
+/// not board. The hygiene number behind "a green gate that never
+/// loaded" — nothing turned the verdict into a car, which is the gap
+/// gate-green auto-park closes. Read-only: it names the branches so an
+/// operator can park the good ones or drop the obsolete.
+/// ONE DEFINITION, shared with the yard read-model and the conductor's
+/// stranded-green alarm (CLAUDE.md §9a): the markers that make a green
+/// spent (`superseded`, `rerailed_to`, `park_skipped`) and the `hold`
+/// that makes it deliberate live in `boss_jobs::stranded`. This
+/// function is the JSON shape adapter plus the census's own
+/// de-dup/sort. The copies drifted once — the yard excluded a
+/// re-railed or held green and the alarm did not, filing four false
+/// STRANDED GREEN packets on 2026-09-09 (e60398dc).
+pub(crate) fn stranded_gate_runs(
+    gate_runs: &[Value],
+    car_branches: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut out: Vec<String> = unparked_greens(gate_runs, car_branches)
+        .into_iter()
+        .filter(|u| u.is_stranded())
+        .map(|u| u.branch)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Every green gate-run no car claims, in the order the runs were
+/// read — stranded AND held, each carrying its hold reason and park
+/// intent. The alarm needs the held ones to tell "deliberately waiting"
+/// from "forgotten", and both callers need the intent to tell a gate
+/// that owed itself a car from one a human parked by hand.
+pub(crate) fn unparked_greens(
+    gate_runs: &[Value],
+    car_branches: &BTreeSet<String>,
+) -> Vec<boss_jobs::stranded::UnparkedGreen> {
+    let empty = Value::Object(serde_json::Map::new());
+    gate_runs
+        .iter()
+        .filter_map(|g| {
+            let md = g.get("metadata").unwrap_or(&empty);
+            let steps: Vec<&Value> = g
+                .get("steps")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|s| s.get("metadata"))
+                .collect();
+            boss_jobs::stranded::unparked_green(md, steps, |b| car_branches.contains(b))
+        })
+        .collect()
+}
+
+/// Forge heads no packet claims — work that cannot board, and until
+/// this cross-ref nothing reported it (281f9842: measured at 60 of 80
+/// heads the day it was built). Input is `git ls-remote --heads`
+/// verbatim; `claimed` is every branch any packet names, so stranded
+/// greens and in-flight gates keep their own categories and never
+/// appear twice. A lingering merged train branch lands here too —
+/// honest, because it is exactly unclaimed residue to delete.
+pub(crate) fn orphan_branches(ls_remote: &str, claimed: &BTreeSet<String>) -> Vec<String> {
+    ls_remote
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(1))
+        .filter_map(|r| r.strip_prefix("refs/heads/"))
+        .filter(|b| *b != "main" && !claimed.contains(*b))
+        .map(str::to_string)
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1188,6 +1297,24 @@ mod tests {
     use boss_jobs::station_queue::{StationPredicate, StepMatch};
     use boss_jobs::stations::StationKind;
     use serde_json::json;
+
+    /// Orphans are forge heads no packet claims — main is not work, and
+    /// a claimed branch belongs to whichever category claimed it
+    /// (car / gate-run), never here. Parses `git ls-remote --heads`
+    /// verbatim: sha, tab, refs/heads/name.
+    #[test]
+    fn orphans_are_unclaimed_heads_minus_main() {
+        let ls = "aaa\trefs/heads/main\n\
+                  bbb\trefs/heads/feat/claimed\n\
+                  ccc\trefs/heads/docs/lost-work\n\
+                  ddd\trefs/heads/feat/also-lost\n";
+        let claimed: BTreeSet<String> = ["feat/claimed".to_string()].into();
+        assert_eq!(
+            orphan_branches(ls, &claimed),
+            vec!["docs/lost-work".to_string(), "feat/also-lost".to_string()]
+        );
+        assert!(orphan_branches("", &claimed).is_empty());
+    }
 
     fn day(d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 8, d).unwrap()
@@ -1237,6 +1364,95 @@ mod tests {
     }
 
     // -----------------------------------------------------------
+    // Stranded gate-runs — green verdicts no car claimed
+    // -----------------------------------------------------------
+
+    #[test]
+    fn a_green_gate_run_with_no_car_is_stranded() {
+        let gate_runs = vec![
+            json!({"metadata": {"branch": "fix/parked"},   "steps": [{"metadata": {"verdict": "green"}}]}),
+            json!({"metadata": {"branch": "fix/stranded"}, "steps": [{"metadata": {"verdict": "green"}}]}),
+            json!({"metadata": {"branch": "fix/redded"},   "steps": [{"metadata": {"verdict": "failed"}}]}),
+        ];
+        let mut cars = BTreeSet::new();
+        cars.insert("fix/parked".to_string());
+        // Only the green gate-run whose branch never became a car is
+        // stranded: the parked one has a car, the red one never vouched.
+        assert_eq!(
+            stranded_gate_runs(&gate_runs, &cars),
+            vec!["fix/stranded".to_string()]
+        );
+    }
+
+    #[test]
+    fn nothing_is_stranded_when_every_green_branch_has_a_car() {
+        let gate_runs = vec![
+            json!({"metadata": {"branch": "fix/a"}, "steps": [{"metadata": {"verdict": "green"}}]}),
+        ];
+        let mut cars = BTreeSet::new();
+        cars.insert("fix/a".to_string());
+        assert!(stranded_gate_runs(&gate_runs, &cars).is_empty());
+    }
+
+    /// A green marked `superseded` is dead, not waiting (754b01b5): the
+    /// branch was deleted, or the change landed via another branch —
+    /// facts only git can see, recorded as an annotation. Listing it as
+    /// stranded hands the operator rescue guidance for a corpse.
+    #[test]
+    fn a_superseded_green_is_not_stranded() {
+        let gate_runs = vec![
+            json!({"metadata": {"branch": "fix/corpse", "superseded": true},
+                   "steps": [{"metadata": {"verdict": "green"}}]}),
+            json!({"metadata": {"branch": "fix/live"},
+                   "steps": [{"metadata": {"verdict": "green"}}]}),
+            // Explicit false = not superseded; still stranded.
+            json!({"metadata": {"branch": "fix/kept", "superseded": false},
+                   "steps": [{"metadata": {"verdict": "green"}}]}),
+        ];
+        assert_eq!(
+            stranded_gate_runs(&gate_runs, &BTreeSet::new()),
+            vec!["fix/kept".to_string(), "fix/live".to_string()]
+        );
+    }
+
+    /// A green marked `hold` is deliberately waiting, not stranded: the
+    /// operator gated it and chose not to park (a car that must land at
+    /// a timed restart, or behind another). Orient must not offer it as
+    /// rescuable, and the alarm rides this same function.
+    #[test]
+    fn a_held_green_is_not_stranded() {
+        let gate_runs = vec![
+            json!({"metadata": {"branch": "fix/held", "hold": "lands at the next restart"},
+                   "steps": [{"metadata": {"verdict": "green"}}]}),
+            json!({"metadata": {"branch": "fix/live"},
+                   "steps": [{"metadata": {"verdict": "green"}}]}),
+        ];
+        assert_eq!(
+            stranded_gate_runs(&gate_runs, &BTreeSet::new()),
+            vec!["fix/live".to_string()]
+        );
+    }
+
+    /// A green `boss rerail --finish` stamped `rerailed_to` is spent —
+    /// its car rides the new branch — so orient must not offer the
+    /// original branch as rescuable (69daaba2). Same rule as the yard
+    /// read-model's `stranded_greens`, pinned on both sides (§9a).
+    #[test]
+    fn a_rerailed_green_is_not_stranded() {
+        let gate_runs = vec![
+            json!({"metadata": {"branch": "fix/x", "rerailed_to": "fix/x-rerail"},
+                   "steps": [{"metadata": {"verdict": "green"}}]}),
+            json!({"metadata": {"branch": "fix/x-rerail", "rerailed_from": "fix/x"},
+                   "steps": [{"metadata": {"verdict": "green"}}]}),
+            json!({"metadata": {"branch": "fix/empty-stamp", "rerailed_to": ""},
+                   "steps": [{"metadata": {"verdict": "green"}}]}),
+        ];
+        assert_eq!(
+            stranded_gate_runs(&gate_runs, &BTreeSet::new()),
+            vec!["fix/empty-stamp".to_string(), "fix/x-rerail".to_string()]
+        );
+    }
+
     // Orphan detection — a packet against a station set
     // -----------------------------------------------------------
 
@@ -1979,6 +2195,24 @@ mod tests {
     fn envelope(data: Vec<Value>) -> Value {
         let total = data.len();
         json!({"data": data, "total": total})
+    }
+
+    /// The census used to default `BOSS_JOBS_URL` to
+    /// `http://127.0.0.1:7900`, so run on boss-gcp without an instance
+    /// set it read the SECOND, older stack and reported conservation and
+    /// orphan findings about the wrong deployment — then exited 0
+    /// (packet aa783636). It now resolves through
+    /// `gate::resolve_jobs_base(opts.jobs_url)`, which refuses when
+    /// neither the flag nor the env names an instance and points at the
+    /// system of record. `a_full_census_...` covers the flag path
+    /// end-to-end; this pins the refusal the census wires in.
+    #[test]
+    fn without_an_instance_the_census_refuses_and_names_the_record() {
+        let m = crate::gate::resolve_jobs_base_from(None, None)
+            .expect_err("no --jobs-url and no BOSS_JOBS_URL must refuse, not default")
+            .to_string();
+        assert!(m.contains("10.20.0.34:7900"), "must name the record: {m}");
+        assert!(m.contains("127.0.0.1:7900"), "must warn of the trap: {m}");
     }
 
     fn opts(base: &str) -> Options {

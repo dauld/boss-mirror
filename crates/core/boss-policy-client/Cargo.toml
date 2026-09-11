@@ -19,5 +19,12 @@ futures = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tracing = { workspace = true }
 
+[dev-dependencies]
+# For `assert_roster_floor!`. `default_rules()` is a derived roster four
+# tests range over, and a per-item assertion over it is vacuous the moment
+# it thins (backlog 024c0db2). boss-testing dev-depends on THIS crate in
+# turn; both edges are dev-only, so the library graph stays acyclic.
+boss-testing = { path = "../boss-testing" }
+
 [lints]
 workspace = true

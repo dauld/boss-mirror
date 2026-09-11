@@ -69,20 +69,32 @@ impl Validate for JobsApiConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+
+    /// These fixtures write into a scratch root that is per-uid AND
+    /// per-process. They used to share a fixed `/tmp/boss-jobs-config-test`,
+    /// and on 2026-09-11 a leftover from another account made both of them
+    /// fail with a bare `PermissionDenied` that named no path at all —
+    /// `create_dir_all` returns `Ok` on an existing directory regardless of
+    /// who owns it, so the failure surfaced at the first write instead.
+    /// See `boss_testing::scratch`.
+    /// `case` must be unique per test: `cargo test` runs these in
+    /// parallel threads of ONE process, so two tests sharing a root would
+    /// have one of them clear the other's file.
+    fn fixture(case: &str, body: &str) -> std::path::PathBuf {
+        let dir = boss_testing::scratch_dir(&format!("boss-jobs-config-{case}"));
+        let path = dir.join("config.toml");
+        boss_testing::write_file(&path, body);
+        path
+    }
 
     #[test]
     fn loads_valid_toml() {
-        let dir = std::env::temp_dir().join("boss-jobs-config-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("valid.toml");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
+        let path = fixture(
+            "valid",
             r#"nats_url = "nats://127.0.0.1:4222"
-http_bind = "0.0.0.0:7900""#
-        )
-        .unwrap();
+http_bind = "0.0.0.0:7900"
+"#,
+        );
 
         let cfg = JobsApiConfig::load(&path).unwrap();
         assert_eq!(cfg.nats_url, "nats://127.0.0.1:4222");
@@ -91,16 +103,12 @@ http_bind = "0.0.0.0:7900""#
 
     #[test]
     fn rejects_empty_nats_url() {
-        let dir = std::env::temp_dir().join("boss-jobs-config-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("empty_nats.toml");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
+        let path = fixture(
+            "empty-nats",
             r#"nats_url = ""
-http_bind = "0.0.0.0:7900""#
-        )
-        .unwrap();
+http_bind = "0.0.0.0:7900"
+"#,
+        );
 
         let err = JobsApiConfig::load(&path).unwrap_err();
         assert!(err.to_string().contains("nats_url"));
@@ -108,7 +116,11 @@ http_bind = "0.0.0.0:7900""#
 
     #[test]
     fn rejects_missing_file() {
-        let path = std::path::PathBuf::from("/tmp/does-not-exist-jobs.toml");
+        // Derived from this process's own scratch root so the path is
+        // genuinely absent. A shared `/tmp/does-not-exist-jobs.toml` is an
+        // absence assertion on a path any account can create.
+        let path = boss_testing::scratch_path("boss-jobs-config-absent").join("no.toml");
+        assert!(!path.exists(), "{} must not exist", path.display());
         assert!(JobsApiConfig::load(&path).is_err());
     }
 }

@@ -9,7 +9,7 @@
     "build": "bun run src/build.ts",
     "typecheck": "svelte-check --tsconfig ./tsconfig.json",
     "test:unit": "bun test src/",
-    "test:mocked": "playwright test -c playwright.mocked.config.ts",
+    "test:mocked": "bun tests/run-mocked.ts",
     "gate": "bun run typecheck && bun run test:unit && bun run build && bun run test:mocked"
   },
   "dependencies": {

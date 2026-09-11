@@ -98,11 +98,6 @@ export const PORTS: ReadonlyArray<PortRow> = [
     "scratch": null
   },
   {
-    "name": "docs",
-    "prod": 7050,
-    "scratch": null
-  },
-  {
     "name": "classes",
     "prod": 7800,
     "scratch": null

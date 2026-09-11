@@ -13,6 +13,7 @@
 // bundle their own micro-library. The host has zero runtime
 // dependency on React or any other framework.
 
+import { goToLogin } from '@boss/web-kit/session/deadSession';
 import type { StepPluginSpec } from '../it/step-plugins/stepPluginTypes';
 
 export type PluginCurrentUser = {
@@ -87,6 +88,18 @@ function loadActiveSpecs(): Promise<Map<string, StepPluginSpec>> {
   return activeSpecsPromise;
 }
 
+// Per-kind reason the LAST bundle load failed, for surfaces to say.
+// "No plugin registered" and "the registered bundle failed to load"
+// are different facts with different remedies, and the second used to
+// wear the first's message (ff87f782: a decision surface fell back
+// silently and a spoken "answered" got recorded as `approved` through
+// the generic form). Cleared when a load gets past the preflight.
+const loadFailures: Map<string, string> = new Map();
+
+export function pluginLoadFailure(kind: string): string | null {
+  return loadFailures.get(kind) ?? null;
+}
+
 export type PluginProbe =
   | { kind: 'ok'; active: boolean }
   | { kind: 'failed'; error: string };
@@ -151,6 +164,38 @@ async function loadPlugin(kind: string): Promise<StepPluginMountFn | null> {
   if (!spec) return null;
   const url = `/plugins/${spec.frontend_url.replace(/^\//, '')}`;
 
+  // Preflight with fetch to LEARN why a load fails — a <script> tag
+  // reports only "error", so a 401 at the gateway, a CF redirect and
+  // a missing file were all indistinguishable and all silent. Same
+  // origin, so the session cookie rides; the script src below is
+  // served from the cache this warmed.
+  try {
+    const resp = await fetch(url);
+    // A 401 is not a broken bundle, it is a dead session — the one
+    // status whose remedy is elsewhere. App.svelte's interceptor
+    // redirects on /api/* and deliberately does not watch this path,
+    // so without these two lines an expired session rendered "plugin
+    // failed to load" with a Retry button that could never succeed
+    // (David, 2026-09-10, after switching computers). Only 401: a 403
+    // is authenticated-but-denied and a 404 is a missing file, and
+    // both keep the loud named failure this preflight exists to
+    // produce. If the redirect is refused — already on /login, or
+    // already leaving — fall through and say what we know rather than
+    // leaving the surface blank.
+    if (resp.status === 401 && goToLogin()) return null;
+    if (!resp.ok) {
+      loadFailures.set(kind, `HTTP ${resp.status} fetching ${url}`);
+      return null;
+    }
+  } catch (e) {
+    loadFailures.set(
+      kind,
+      `${url} unreachable: ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return null;
+  }
+  loadFailures.delete(kind);
+
   return new Promise<StepPluginMountFn | null>((resolve) => {
     const prev = pending.get(kind) ?? [];
     prev.push(resolve);
@@ -160,6 +205,9 @@ async function loadPlugin(kind: string): Promise<StepPluginMountFn | null> {
     script.src = url;
     script.async = true;
     script.onerror = () => {
+      // The preflight said 200, so this is the rarer half: the
+      // bytes arrived and failed to execute as a script.
+      loadFailures.set(kind, `script error executing ${url}`);
       const bucket = pending.get(kind);
       if (bucket) {
         const idx = bucket.indexOf(resolve);
@@ -175,5 +223,6 @@ export function _resetPluginRegistryForTests(): void {
   registry.clear();
   pending.clear();
   inflight.clear();
+  loadFailures.clear();
   activeSpecsPromise = null;
 }

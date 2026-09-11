@@ -8,7 +8,8 @@ export type DispatcherRuleDo = Readonly<{
   args: Readonly<Record<string, string>>;
 }>;
 
-/** One dispatcher rule, verbatim from `rules.toml`. */
+/** One rule the dispatcher is ENFORCING: the `dispatcher_rules` row,
+ *  plus the justification its authored file records. */
 export type DispatcherRule = Readonly<{
   name: string;
   on_event: string;
@@ -17,6 +18,24 @@ export type DispatcherRule = Readonly<{
   do: ReadonlyArray<DispatcherRuleDo>;
   delay?: string | null;
   version: number;
+  /** Registry status these rows were selected on — always `"active"`
+   *  today, stated so a row says what it is. */
+  status?: string;
+  /** Why this reaction could not be a protocol consequence, from the
+   *  rule's `infra/dispatcher/rules/` file. `null` when no file records
+   *  it — check `authored` before reading that as "no reason given". */
+  why?: string | null;
+  /** Whether the authored registry holds a file for this rule at all.
+   *  `false` = a reaction the system enforces that nobody wrote down. */
+  authored?: boolean;
+}>;
+
+/** Where the `why` values came from, so `why: null` everywhere can be
+ *  told apart from an authored registry that could not be read. */
+export type AuthoredRegistry = Readonly<{
+  dir: string | null;
+  rules: number;
+  error: string | null;
 }>;
 
 /** A cascade edge that closes a loop but isn't a dispatcher rule — a
@@ -35,6 +54,8 @@ export type DispatcherRules = Readonly<{
   /** handler name → event kinds it causes to be emitted (empty = sink). */
   handler_emits: Readonly<Record<string, ReadonlyArray<string>>>;
   system_edges: ReadonlyArray<SystemEdge>;
-  /** Present only when the dispatcher couldn't read/parse the rules file. */
+  /** `null` when the rules query itself failed (see `error`). */
+  authored_registry?: AuthoredRegistry | null;
+  /** Present only when the dispatcher couldn't read the registry table. */
   error?: string;
 }>;

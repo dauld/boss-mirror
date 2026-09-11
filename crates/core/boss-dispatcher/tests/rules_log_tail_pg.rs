@@ -68,7 +68,7 @@ async fn new_only_init_then_per_item_advance() {
     let seen: Arc<Mutex<Vec<String>>> = Arc::default();
     let seen2 = seen.clone();
     let report = tail
-        .drain_once(200, move |topic, _event_id, payload| {
+        .drain_once(200, move |topic, _event_id, payload, _attempt| {
             let seen = seen2.clone();
             let label = format!("{topic}:{}", payload["n"].as_str().unwrap_or("?"));
             async move {
@@ -105,8 +105,12 @@ async fn retry_blocks_then_budget_dead_letters_and_advances() {
     // must NOT be reached while the budget lasts.
     for attempt in 1..MAX_ATTEMPTS {
         let report: DrainReport = tail
-            .drain_once(200, |_t, _e, payload| async move {
+            .drain_once(200, |_t, _e, payload, handed| async move {
                 if payload["n"] == "poison" {
+                    // The handler is handed THIS presentation's count,
+                    // which is what lets it know a failure is the last
+                    // one the budget allows (`a9c498eb`).
+                    assert_eq!(handed, attempt, "the handler sees its own attempt");
                     Settle::Retry("still failing".into())
                 } else {
                     Settle::Ack
@@ -128,8 +132,12 @@ async fn retry_blocks_then_budget_dead_letters_and_advances() {
     // The budget's final presentation: dead-letter, advance, and the
     // row behind flows.
     let report = tail
-        .drain_once(200, |_t, _e, payload| async move {
+        .drain_once(200, |_t, _e, payload, handed| async move {
             if payload["n"] == "poison" {
+                assert_eq!(
+                    handed, MAX_ATTEMPTS,
+                    "the final presentation is handed the spent budget"
+                );
                 Settle::Retry("still failing".into())
             } else {
                 Settle::Ack
@@ -152,7 +160,7 @@ async fn permanent_is_not_retried() {
     let bad = seed_audit(pool, "step.done.task", serde_json::json!({"n": "bad-data"})).await;
 
     let report = tail
-        .drain_once(200, |_t, _e, _p| async move {
+        .drain_once(200, |_t, _e, _p, _attempt| async move {
             Settle::Permanent("deterministic data error".into())
         })
         .await

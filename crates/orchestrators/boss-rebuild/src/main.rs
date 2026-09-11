@@ -186,6 +186,10 @@ async fn main() -> Result<()> {
         "scheduling",
         boss_jobs::scheduling::rebuild_scheduling(&pool)
     );
+    step!(
+        "agent-runs",
+        boss_jobs::agent_runs::rebuild_agent_runs(&pool)
+    );
     step!("shipping", boss_shipping::rebuild_shipping(&pool));
     step!("calendar", boss_calendar::rebuild_calendar(&pool));
     step!("commerce", boss_commerce::rebuild_commerce(&pool));

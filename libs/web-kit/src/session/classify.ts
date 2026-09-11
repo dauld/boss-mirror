@@ -65,6 +65,38 @@ export function guestEmployee(username: string): Employee {
   };
 }
 
+/// The role a break-glass session carries. Mirrors
+/// `boss_core::roles::BREAK_GLASS_ROLE` — the same string the gateway
+/// signs into the cookie in `break_glass::mint_session`.
+export const BREAK_GLASS_ROLE = 'break-glass';
+
+/// The renderable identity of a break-glass session.
+///
+/// A break-glass session is deliberately NOT an employee (Q4 of
+/// docs/design/break-glass-is-a-key-you-hold.md): the door mints a
+/// narrow role with no employee id, because resolving one would make
+/// the emergency path depend on boss-people being up. It still has an
+/// identity — a hardware key someone is holding — so the chrome gets
+/// one to render, the same way the guest does. It is not read-only:
+/// the role exists in order to act (deploy rollback, merge approval,
+/// auth administration), and claiming otherwise would make the chrome
+/// disagree with what the server grants.
+export function breakGlassOperator(username: string): Employee {
+  return {
+    id: username,
+    name: 'Break-glass operator',
+    email: username,
+    role: BREAK_GLASS_ROLE,
+    department: 'emergency',
+    hire_date: '',
+    status: 'active',
+    location: '—',
+    employment_type: 'break-glass',
+    skills: [],
+    certifications: [],
+  };
+}
+
 export type ProbeBody = {
   username?: string;
   employee_id?: string;
@@ -87,6 +119,17 @@ export function classifyProbe(
     return {
       value: { kind: 'ready', user: guestEmployee(username) },
       readonly: true,
+    };
+  }
+  // A session with no employee and the break-glass role is the
+  // emergency operator — a session that is a KEY, not a person. It
+  // used to fall through to `unrecognized`, so the one door that only
+  // opens when everything else has failed answered with an error the
+  // moment it worked (packet 2ef7726b).
+  if (username && body.role === BREAK_GLASS_ROLE) {
+    return {
+      value: { kind: 'ready', user: breakGlassOperator(username) },
+      readonly: false,
     };
   }
   if (username) return { value: { kind: 'unrecognized', username }, readonly: false };

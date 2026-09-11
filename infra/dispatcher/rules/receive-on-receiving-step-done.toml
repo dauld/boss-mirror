@@ -1,0 +1,14 @@
+[[rule]]
+name = "receive-on-receiving-step-done"
+why = """
+Step-completion side effect: a completed `receiving` step receives the shipment into inventory.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.receiving"
+[[rule.do]]
+handler = "inventory.receive"

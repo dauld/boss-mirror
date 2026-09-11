@@ -1,0 +1,17 @@
+# Packaging allocation — a brewed batch is fungible wort. On step.ready the
+# dispatcher reads real FG stock, splits the whole batch across its formats
+# by demand shortfall, writes the packaged keg quantities + excise onto the
+# produce steps, and stamps per-format outcomes the Workflow forks on — so
+# the whole batch always packages (WIP → FG, never dumped). Same
+# computer-speed agent pattern as the gate above.
+[[rule]]
+name = "allocate-packaging-on-step-ready"
+why = """
+An ACTOR registration, same class as the agent gate above: a brewed
+batch is fungible wort and the split across formats is a computed
+decision against live finished-goods stock, not a human's. A protocol
+row can declare the step; it cannot execute it.
+"""
+on_event = "step.ready.packaging-allocate"
+[[rule.do]]
+handler = "packaging.allocate"

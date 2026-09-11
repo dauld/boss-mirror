@@ -19,21 +19,21 @@
 // had the brewery's name hardcoded at three render sites, so a second
 // tenant rendered someone else's brand in its top bar.
 
-type ManifestState =
-  | { kind: 'loading' }
-  | {
-      kind: 'ready';
-      /// What the tenant calls itself, from tenant.toml `[meta]`.
-      /// Undefined for a deployment that has not named itself.
-      displayName?: string;
-      tenantId?: string;
-      modules: Readonly<Record<string, boolean>>;
-      labels: Readonly<Record<string, string>>;
-    }
-  | { kind: 'error' };
+import {
+  manifestFromInline,
+  readyFrom,
+  type ManifestBody,
+  type ManifestState,
+} from './manifest-inline';
+
+export { manifestFromInline, type ManifestState };
+
+const inlined = manifestFromInline(
+  (globalThis as { __BOSS_TENANT_MANIFEST__?: unknown }).__BOSS_TENANT_MANIFEST__,
+);
 
 export const manifest = $state<{ value: ManifestState }>({
-  value: { kind: 'loading' },
+  value: inlined ?? { kind: 'loading' },
 });
 
 export async function loadManifest(): Promise<void> {
@@ -43,19 +43,8 @@ export async function loadManifest(): Promise<void> {
       manifest.value = { kind: 'error' };
       return;
     }
-    const body = (await r.json()) as {
-      display_name?: string;
-      tenant_id?: string;
-      modules?: Record<string, boolean>;
-      labels?: Record<string, string>;
-    };
-    manifest.value = {
-      kind: 'ready',
-      displayName: body.display_name,
-      tenantId: body.tenant_id,
-      modules: body.modules ?? {},
-      labels: body.labels ?? {},
-    };
+    const body = (await r.json()) as ManifestBody;
+    manifest.value = readyFrom(body);
   } catch {
     manifest.value = { kind: 'error' };
   }

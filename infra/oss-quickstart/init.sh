@@ -99,7 +99,7 @@ if ! "$REPO/infra/postgres/migrate.sh"; then
 fi
 
 # ---- platform Workflow bundle, every start ----------------------------------
-# Protocols shipped as DATA (infra/platform/workflows.toml) reach the
+# Protocols shipped as DATA (infra/platform/workflows/) reach the
 # registry through boss-platform-workflow-seed — insert-if-missing, so
 # re-running converges rather than overwrites, and a bundle kind that
 # arrives with an image update seeds on the restart that delivers it.
@@ -114,7 +114,7 @@ echo "==> [2/4] seeding the platform Workflow bundle (insert-if-missing)"
 SEED_URL="postgres://${PGUSER}:${PGPASSWORD:-}@${PGHOST}:${PGPORT:-5432}/${PGDATABASE:-$PGUSER}"
 if ! boss-platform-workflow-seed \
     --database-url "$SEED_URL" \
-    --seed-path "$REPO/infra/platform/workflows.toml"; then
+    --seed-path "$REPO/infra/platform/workflows"; then
     {
         echo
         echo "!! PLATFORM BUNDLE SEED FAILED — bundle-supplied Workflow kinds"

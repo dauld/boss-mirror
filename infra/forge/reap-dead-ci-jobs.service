@@ -13,4 +13,4 @@ User=root
 # this checkout, which is where the installed units already point.
 ExecStartPre=/home/david/boss/infra/boss-maintenance-wrap.sh maintenance-reap-ci-jobs "Reap dead CI jobs"
 ExecStart=/home/david/boss/infra/forge/reap-dead-ci-jobs.sh
-ExecStartPost=/home/david/boss/infra/boss-step.sh maintenance-reap-ci-jobs run result=ok
+ExecStopPost=-/home/david/boss/infra/boss-step.sh maintenance-reap-ci-jobs run

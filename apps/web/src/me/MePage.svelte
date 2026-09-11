@@ -12,7 +12,7 @@
   //   $effect   → a transition that reads/writes the world
   // This page uses all three.
 
-  import { session } from '@boss/web-kit/session/session.svelte';
+  import { BREAK_GLASS_ROLE, session } from '@boss/web-kit/session/session.svelte';
   import GuestHome from './GuestHome.svelte';
   import { appNow } from '@boss/web-kit/sim-clock';
   import {
@@ -47,6 +47,14 @@
   let userRole = $derived(
     session.value.kind === 'ready' ? session.value.user.role : null,
   );
+
+  // A break-glass session is a key someone is holding, not a person on
+  // the roster (Q4, docs/design/break-glass-is-a-key-you-hold.md). It
+  // resolves — the chrome renders it — but My Day is an employee's
+  // board, and rendering it here would repeat the guest's defect: three
+  // empty employee panels and a failed watchlist under a tenure it
+  // does not have. So it forks before the queues are ever fetched.
+  let isBreakGlass = $derived(userRole === BREAK_GLASS_ROLE);
 
   // My Day is the assignments lens now (queue-visibility Q1): one
   // indexed call whose WHERE clause IS the queue definition, instead
@@ -119,7 +127,7 @@
   $effect(() => {
     const uid = userId;
     const role = userRole;
-    if (!uid || !role) return;
+    if (!uid || !role || isBreakGlass) return;
     if (lastUid !== null && lastUid !== uid) {
       protocol = null;
       queues = null;
@@ -184,7 +192,7 @@
   }
 
   $effect(() => {
-    if (!userId) return;
+    if (!userId || isBreakGlass) return;
     // A different person's page starts loading, not showing the
     // previous reader's receipts.
     watchlist = { kind: 'loading' };
@@ -257,6 +265,28 @@
     <p class="empty">
       Signed in as <strong>{session.value.username}</strong>, but no
       matching employee in the roster.
+    </p>
+  </div>
+{:else if isBreakGlass}
+  <!-- The emergency door opened. The session is real and narrow: it
+       carries the break-glass role and no roster record, so what it
+       gets here is its identity said plainly, not an employee's board
+       and not the "no matching employee" error it used to get the
+       moment the ceremony succeeded (packet 2ef7726b). What the role
+       can actually do — rollback, merge approval, auth admin — is its
+       own surface, not this one. -->
+  <div class="theme-exec" style="padding: 0 32px 32px">
+    <PageHeader
+      eyebrow="Emergency session"
+      title="Break-glass operator"
+      subtitle="break-glass · hardware key · no employee record"
+      motif="glass"
+    />
+    <p class="empty">
+      This session is a key someone is holding, not a person on the
+      roster — there is no day to show. It carries the narrow
+      break-glass role and expires an hour after the touch that opened
+      it.
     </p>
   </div>
 {:else if session.readonly}
@@ -481,7 +511,7 @@
                   </div>
                   {#each stop.entries as entry (entry.card.id)}
                     <div class="watch-stop-card">
-                      <PacketCard card={entry.card} />
+                      <PacketCard card={entry.card} onDismiss={dismiss} />
                     </div>
                   {:else}
                     <p class="watch-stop-empty">—</p>
@@ -494,7 +524,7 @@
                 <span class="watch-offtrack-h">Read, not taken up</span>
                 {#each track.offTrack as entry (entry.card.id)}
                   <div class="watch-row">
-                    <PacketCard card={entry.card} />
+                    <PacketCard card={entry.card} onDismiss={dismiss} />
                     {#if entry.outcome}
                       <span class="watch-outcome watch-{entry.outcome.tone}">
                         {entry.outcome.label}
@@ -508,7 +538,7 @@
           <div class="myday-jobs-list">
             {#each watchlist.entries.filter((e) => !dismissing.has(e.card.id)) as entry (entry.card.id)}
               <div class="watch-row">
-                <PacketCard card={entry.card} />
+                <PacketCard card={entry.card} onDismiss={dismiss} />
                 {#if entry.outcome}
                   <!-- The terminal state IS the information this
                        section exists for, so it sits beside the card
@@ -518,12 +548,6 @@
                     {entry.outcome.label}
                   </span>
                 {/if}
-                <button
-                  type="button"
-                  class="watch-dismiss"
-                  title="Stop watching this packet"
-                  aria-label="Stop watching {entry.card.title}"
-                  onclick={() => dismiss(entry.card.id)}>×</button>
               </div>
             {/each}
           </div>
@@ -711,29 +735,15 @@
     margin-bottom: 8px;
   }
   .watch-row {
-    /* Third column for the dismiss control. It keeps its cell whether
-       or not the packet has an outcome chip, so the × sits on one
-       vertical line down the list instead of jittering per row. */
+    /* Card, then its outcome chip. The dismiss × now lives inside the
+       card itself (PacketCard's opt-in onDismiss), so it rides along
+       wherever the card is drawn — the flat list here, the track's
+       stop cards, and the off-track rows alike — instead of being a
+       sibling only this one list carried. */
     display: grid;
-    grid-template-columns: 1fr auto auto;
+    grid-template-columns: 1fr auto;
     gap: 8px;
     align-items: center;
-  }
-  .watch-dismiss {
-    background: none;
-    border: none;
-    cursor: pointer;
-    padding: 0 4px;
-    font-size: 16px;
-    line-height: 1;
-    color: var(--static, #7a838c);
-    opacity: 0.55;
-    transition: opacity 0.12s ease;
-  }
-  .watch-dismiss:hover,
-  .watch-dismiss:focus-visible {
-    opacity: 1;
-    color: var(--text, #1b1f23);
   }
   .watch-window {
     font-size: 12px;

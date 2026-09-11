@@ -1,0 +1,105 @@
+# A DECLARED cadence with no packet files an alarm (backlog ecca2f43).
+#
+# THE SILENCE NOTHING SPOKE ABOUT. Measured 2026-09-08:
+# `maintenance-ml-inference-batch` had been dead 23 nights (e109f57e —
+# its unit died in ExecStartPre, so ZERO packets of that kind exist) and
+# the five-minute `maintenance-estate-observe-units` observer had been
+# quiet four days (408c81f6). Both are declared cadences whose packets
+# simply stopped arriving, and both were found by a human looking. The
+# estate alarm's silence sweep watches OBSERVATION series, so it sees a
+# host that stopped being observed and cannot see a chore that stopped
+# running: a chore's evidence is a packet.
+#
+# A TIMER, the ratchet's standing exemption, and the purest form of it:
+# no packet causes "a day passed with nothing arriving". A sweep's whole
+# point is to run when NO event fired, and this one's subject is
+# precisely the events that did NOT happen — nothing in any Workflow
+# definition can declare it. It adds no routing: one firing reads the
+# newest packet of each declared kind and files, refreshes, or closes
+# one alarm packet per kind.
+#
+# THE ARGS ARE THE DECLARATION, and that is deliberate. CLAUDE.md §9
+# prefers the interval on the Workflow row; that does not work today,
+# because `boss-platform-workflow-seed` is INSERT-IF-MISSING by design
+# (protocols-as-data Q1) — editing an already-seeded kind's metadata in
+# infra/platform/workflows.toml never reaches the registry, and minting
+# a new workflow VERSION for seventeen kinds to carry one integer each
+# is not proportionate. The rule row is registry data with the same
+# properties (append-only, versioned, editable through
+# /api/dispatcher/rules with no deploy), same idiom as
+# `broker-rotates-the-boss-dev-forge-token`, whose args are one
+# credential's registry declaration.
+#
+# EACH VALUE IS THE LOOSEST rostered executor for that kind, in minutes:
+# `maintenance-estate-observe-host` is opened by a 15-minute forge timer
+# AND a daily boss-gcp one, so 1440 is what the SoR can honestly expect.
+# Silence is judged at 2x the interval, floored at six hours (the sweep
+# fires once a sim-day; see MIN_SILENCE_WINDOW_MIN). Two kinds are
+# deliberately absent: `maintenance-deploy-confirm` is an armed dead-man
+# with no OnCalendar at all — not a cadence — and
+# `maintenance-forge-token-audit` is authored but on no host's roster.
+#
+# The interval also lives in the timer files that execute the chores, so
+# it is pinned: infra/lint/timers-leave-a-packet.sh check 8 fails CI when
+# a timer's schedule and this roster disagree, or when a rostered timer's
+# kind is missing here (CLAUDE.md §9a). First seeded by
+# 202609082300-a-silent-cadence-files-an-alarm.sql, applied history: this
+# FILE is now the definition, and the registry row is published from
+# it at boot (rules::seed — backlog 41ba00cd).
+#
+# THESE ARGS ARE THE TIMER HALF OF THE ROSTER. The other half — every
+# daily CLOCK RULE that spawns a chore packet — is DERIVED from the rule
+# registry by the handler (cadence_roster::clock_cadences) and is
+# deliberately NOT declared here: the rule row already states the
+# cadence, the kind, the target and the dedup guard, and a second
+# declaration would be both redundant and coarser, since seven
+# maintenance-sweep-*-daily rules share one kind and differ only in
+# target (CLAUDE.md §9a — collapse it if you can). Adding an
+# `interval_minutes.<kind>` arg for a kind a clock rule already spawns is
+# therefore a CI failure, not a tightening:
+# `no_clock_rule_kind_is_also_declared_on_the_sweeps_args` names it.
+# Measured 2026-09-10 (cf0f5e2d): eight clock-rule cadences existed, all
+# eight were outside this roster, and the daily mirror check had been
+# suppressed by one undrained packet for nineteen days while the public
+# mirror drifted 238 commits behind.
+#
+# v3, 2026-09-11: `maintenance-codebase-metrics` at 1440, the daily
+# codebase-trend measurement (06048ade). It belongs here for a reason
+# specific to what it is: the chore's whole output is a SERIES, and a
+# series whose cadence stops does not look broken — it looks like a calm
+# fortnight. Every other declared kind fails loudly when it stops doing
+# its work; this one fails by flattening a trend somebody will later read
+# as evidence. That is the silence this sweep exists to name.
+#
+# v2, 2026-09-10 (20260910024611-boss-gcp-converge-is-a-declared-cadence.sql):
+# `maintenance-boss-gcp-converge` at 30, the new self-converge loop that
+# ends "landed but never installed" on boss-gcp (408c81f6). A loop whose
+# whole job is to stop units rotting must not be able to stop quietly
+# itself — that is the same defect one level up, and its silence would
+# hide every unit fix behind it.
+[[rule]]
+name = "cadence-silence-sweep-daily"
+why = """
+A TIMER, the standing exemption, and the purest form of it: the
+condition it watches is the packets that did NOT arrive. No packet
+causes "a day passed with nothing arriving", and a sweep whose subject
+is precisely the events that did not happen cannot be declared in any
+Workflow definition. Measured 2026-09-08: the ML inference batch dead
+23 nights (e109f57e, zero packets of its kind ever filed) and the
+five-minute unit observer quiet four days (408c81f6), both found by a
+human looking. The estate alarm watches OBSERVATION series and cannot
+see a chore that stopped running, because a chore's evidence is a
+packet. It adds no routing: one firing reads the newest packet of each
+declared kind and files, refreshes, or closes ONE alarm packet per
+silent kind. (Ratchet history: 59 -> 60, 2026-09-08, migration
+202609082300.)
+"""
+# v3 carries one more declaration (maintenance-codebase-metrics, 1440) and
+# nothing else. CHANGING A RULE IS BUMPING THIS INTEGER: the seed writes
+# the row at the version this file declares, retiring the incumbent, so
+# a bump is the whole act and no migration follows it.
+version = 3
+schedule = { cadence = "daily", anchor_date = "2026-09-09" }
+[[rule.do]]
+handler = "cadence.silence.sweep"
+args = { "interval_minutes.maintenance-audit-integrity" = "1440", "interval_minutes.maintenance-backup" = "1440", "interval_minutes.maintenance-boss-gcp-converge" = "30", "interval_minutes.maintenance-cluster-converge" = "10", "interval_minutes.maintenance-cluster-watchdog" = "5", "interval_minutes.maintenance-codebase-metrics" = "1440", "interval_minutes.maintenance-conservation-invariants" = "60", "interval_minutes.maintenance-disk-floor-sweep" = "60", "interval_minutes.maintenance-estate-observe-host" = "1440", "interval_minutes.maintenance-estate-observe-units" = "5", "interval_minutes.maintenance-files-gc" = "1440", "interval_minutes.maintenance-forge-converge" = "10", "interval_minutes.maintenance-ledger-recognize" = "1440", "interval_minutes.maintenance-ledger-replay" = "1440", "interval_minutes.maintenance-messages-purge" = "1440", "interval_minutes.maintenance-ml-inference-batch" = "1440", "interval_minutes.maintenance-reap-ci-jobs" = "1440", "interval_minutes.maintenance-search-reindex" = "10", "interval_minutes.maintenance-views-catchup" = "5" }

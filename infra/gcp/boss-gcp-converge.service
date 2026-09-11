@@ -1,0 +1,57 @@
+# boss-gcp adopts its own systemd units from forge main (408c81f6).
+#
+# The boss-gcp deploy hop retired with the 2026-09-04 conductor cutover
+# and nothing replaced it, so every unit authored or FIXED after that day
+# sat inert on main: the five-minute estate unit observer last filed a
+# packet ON the cutover day, the hourly conservation-invariants timer
+# last filed one on 2026-08-19, and the ML inference batch has never
+# filed one at all. Same disease the forge host had, same cure
+# (infra/forge/forge-converge.service is the sibling).
+#
+# ONE-TIME BOOTSTRAP — the hand action that ends the hand actions. Run
+# once on boss-gcp, as root; idempotent, and the `units` mode installs
+# THIS unit pair among the rest, so it never needs repeating:
+#
+#   cd /opt/boss && git fetch forge main && git merge --ff-only FETCH_HEAD \
+#     && sudo ./infra/deploy-services.sh units
+[Unit]
+Description=BOSS boss-gcp adopts its own systemd units from forge main
+Documentation=file:/opt/boss/infra/gcp/boss-gcp-converge.sh
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Root: deploy-services.sh writes /etc/systemd/system. The script drops
+# to the checkout's owner for every git operation, so /opt/boss never
+# accumulates root-owned objects.
+User=root
+# The whole run is one shallow fetch of main, file copies and a
+# daemon-reload. A generous ceiling in case the forge is briefly
+# unreachable.
+TimeoutStartSec=10min
+# WHAT THE RUN LEAVES FOR ITS PACKET — one path, declared once, for two
+# processes. `ExecStart=` (the converge and every installer under it)
+# writes structured facts here; `ExecStopPost=` (boss-step.sh) merges them
+# onto the `run` step and deletes the file. systemd gives every Exec line
+# this Environment=, so the two halves cannot disagree about the path
+# (CLAUDE.md §9a). /run is tmpfs, so a reboot cannot leave a stale one
+# either. Before this, the packet said `result=ok` and nothing else, and
+# on 2026-09-11 that was enough to support a wrong conclusion about what
+# the converge had installed — see infra/run-summary.sh.
+Environment=BOSS_RUN_SUMMARY_FILE=/run/boss-gcp-converge.summary.json
+# THE SYSTEM OF RECORD, PINNED INLINE WITH env(1). deploy-services'
+# shared jobs-url.conf drop-in points this host's timer fleet at the
+# legacy 127.0.0.1 instance, drop-in env outranks unit Environment=, and
+# that instance has never heard of a bundle-only kind: the packet dies
+# 400 in ExecStartPre. That is the bug 4ef79606 fixed for the estate
+# observers, and env(1) on the Exec line outranks both (91ddebfb).
+#
+# ExecStartPre=- because the packet is VISIBILITY, NEVER A PRECONDITION.
+# An arm that needs the patient is not an arm: boss-ml-inference-batch
+# lost 23 nights to a hard ExecStartPre, and on 2026-09-05 the cluster
+# converge could not run at all because its own packet-opener refused.
+# A converge that cannot be seen still converges.
+ExecStartPre=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-maintenance-wrap.sh maintenance-boss-gcp-converge "boss-gcp adopts its own units"
+ExecStart=/opt/boss/infra/gcp/boss-gcp-converge.sh
+ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-step.sh maintenance-boss-gcp-converge run

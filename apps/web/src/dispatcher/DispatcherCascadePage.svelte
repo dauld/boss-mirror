@@ -1,5 +1,5 @@
 <!--
-  /system/dispatcher — the dispatcher rule cascade.
+  /it/registry/dispatcher — the dispatcher rule cascade.
 
   Renders the reactive layer the boss-dispatcher runs: trigger event →
   rule → handler(s) → emitted events → (loop back). Loops close where an
@@ -172,11 +172,11 @@
       {/if}
       <a
         class="dx-edit-link"
-        href={href('/system/dispatcher/rules')}
+        href={href('/it/registry/rules')}
         onclick={(e) => {
           if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
           e.preventDefault();
-          navigate(href('/system/dispatcher/rules'));
+          navigate(href('/it/registry/rules'));
         }}
       >
         Edit rules →

@@ -1,0 +1,21 @@
+# Agent gate executor. Rides the SAME `step.ready.*` subscription as the
+# marker-completer + notifier (one NATS consumer, no double-delivery). The
+# handler self-filters to agent gates (executor = Agent + an `outcome`
+# field): it reads real finished-goods stock, decides the outcome
+# (brew/oversupply, fulfill/backorder), and completes the gate with it at
+# computer speed — so a release valve costs no labor and resolves the moment
+# it's ready instead of queuing behind the human workforce at warp. Agents
+# are CPUs in the same machine: the sim drives only labor, the gate decides
+# itself. See docs/architecture-decisions.md.
+[[rule]]
+name = "resolve-agent-gate-on-step-ready"
+why = """
+An ACTOR registration, not routing. CLAUDE.md's three layers: humans
+and registered agents are the CPUs, and a gate whose executor is an
+Agent decides itself at computer speed instead of queueing behind the
+human workforce. Nothing in a protocol row can BE the executor. Rides
+the shared `step.ready.*` consumer so NATS delivers each event once.
+"""
+on_event = "step.ready.*"
+[[rule.do]]
+handler = "gate.resolve"

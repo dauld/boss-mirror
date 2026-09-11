@@ -21,14 +21,31 @@
 # because runbooks legitimately tell that story) states it as an extra
 # argument, in its own file, where a reader can see the judgement.
 #
+# AND THE SECOND THING THEY ALL FORGOT (backlog 6b2f4a1a, measured
+# 2026-09-11). The scan ended `|| true`, so a `git grep` that could not
+# RUN — exit 128 on a dubious-ownership refusal, a corrupt object, an
+# unreadable index — produced no hits and the caller printed `clean` and
+# exited 0 on a tree nothing had looked at. `git grep` already tells the
+# two apart (1 = no match, >1 = error) and `|| true` was throwing exactly
+# that away. So does `git ls-files` below, whose failure emptied the
+# exemption list instead. Both now refuse through `git_answer`, which
+# prints git's own words and returns 3; see lib/git-answer.sh for why the
+# status is 3 and not 1.
+#
 # USAGE
 #   . "$(dirname "$0")/lib/pattern-scan.sh"
-#   hits=$(pattern_scan 'prefers-color-scheme' -- 'apps/' 'libs/')
-#   hits=$(pattern_scan 'X' --exclude ':!docs/' -- 'crates/')
+#   hits=$(pattern_scan 'prefers-color-scheme' -- 'apps/' 'libs/') || exit $?
+#   hits=$(pattern_scan 'X' --exclude ':!docs/' -- 'crates/') || exit $?
 #
 # Returns hits on stdout (empty when clean); the caller decides the
 # message, because the remediation text is the part that has to be
-# written by someone who understands the rule.
+# written by someone who understands the rule. A non-zero return is
+# $LINT_CANNOT_ANSWER with the refusal already on stderr — `|| exit $?`
+# is the whole of the caller's duty, and leaving it off is a shell error
+# under `set -e` rather than a silent green.
+
+# shellcheck source=infra/lint/lib/git-answer.sh
+. "$(dirname "${BASH_SOURCE[0]}")/git-answer.sh"
 
 pattern_scan() {
     local pattern="$1"; shift
@@ -48,8 +65,15 @@ pattern_scan() {
     # a proof of THIS lint if its path names the lint and it lives
     # where tests live. `git ls-files` so it matches what git grep
     # searches, and so a file nobody tracked cannot buy an exemption.
-    local f
+    #
+    # Read into a variable rather than through a process substitution:
+    # `done < <(git ls-files)` discards the status, so a git that
+    # refused produced an EMPTY exemption list — the loop simply never
+    # ran — and the scan carried on as if the repo tracked nothing.
+    local tracked f
+    tracked=$(git_answer "$name" 0 ls-files) || return "$LINT_CANNOT_ANSWER"
     while IFS= read -r f; do
+        [ -n "$f" ] || continue
         case "$f" in
             *"$name"*)
                 case "$f" in
@@ -57,7 +81,15 @@ pattern_scan() {
                         excludes+=(":!${f}") ;;
                 esac ;;
         esac
-    done < <(git ls-files)
+    done <<EOF
+$tracked
+EOF
 
-    git grep -nE "$pattern" -- "$@" "${excludes[@]}" || true
+    # 0 = hits, 1 = no hits, anything else = the scan did not happen.
+    local hits status
+    hits=$(git_answer "$name" 0,1 grep -nE "$pattern" -- "$@" "${excludes[@]}")
+    status=$?
+    [ "$status" -eq "$LINT_CANNOT_ANSWER" ] && return "$LINT_CANNOT_ANSWER"
+    if [ -n "$hits" ]; then printf '%s\n' "$hits"; fi
+    return 0
 }

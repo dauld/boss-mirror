@@ -1,0 +1,25 @@
+# The empty-decisions sweep inspects itself. A cross-protocol reactor:
+# the daily `maintenance-sweep-empty-decisions-daily` spawn files a
+# sweep whose `Inspect: empty-decisions` checklist nothing was
+# completing, so it piled up. This rides the shared `step.ready.*`
+# subscription (like the marker completer) and self-filters to that one
+# checklist: it counts the approval decisions that completed empty in
+# the window, completes the checklist, and stamps action_needed so the
+# packet routes to Remediate or Clear. First seeded by
+# 202609052030-the-empty-decisions-sweep-inspects-itself.sql, applied history: this
+# FILE is now the definition, and the registry row is published from
+# it at boot (rules::seed — backlog 41ba00cd).
+[[rule]]
+name = "inspect-empty-decisions-sweep-on-step-ready"
+why = """
+A CROSS-PROTOCOL REACTOR: the daily empty-decisions spawn filed a
+sweep whose `Inspect: empty-decisions` checklist nothing was
+completing, so it piled up. The inspection reads approval decisions
+across every other protocol's packets, which the maintenance-sweep
+definition cannot declare. Rides the shared `step.ready.*` consumer
+and self-filters to that one checklist. (Ratchet history: 55 -> 56,
+2026-09-05.)
+"""
+on_event = "step.ready.*"
+[[rule.do]]
+handler = "maintenance.sweep.inspect"

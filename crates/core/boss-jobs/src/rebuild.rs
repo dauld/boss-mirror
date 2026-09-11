@@ -216,10 +216,12 @@ async fn upsert_step(
     let result = sqlx::query(
         r#"
         INSERT INTO steps (id, job_id, kind, title, spec_slug, assignee_id, status, sort_order,
-                           blocked_by, sign_offs_required, sign_offs, fields,
+                           blocked_by, sign_offs_required, assurance_required, sign_offs, fields,
                            completed_on, metadata, notes, step_plugin_version,
-                           embedded_job, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $18)
+                           embedded_job, created_at, updated_at, became_ready_at,
+                           completed_by, completed_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19,
+                CASE WHEN $7 = 'ready' THEN $19 END, $20, $21)
         ON CONFLICT (id) DO UPDATE SET
             job_id = EXCLUDED.job_id,
             kind = EXCLUDED.kind,
@@ -230,6 +232,7 @@ async fn upsert_step(
             sort_order = EXCLUDED.sort_order,
             blocked_by = EXCLUDED.blocked_by,
             sign_offs_required = EXCLUDED.sign_offs_required,
+            assurance_required = EXCLUDED.assurance_required,
             sign_offs = EXCLUDED.sign_offs,
             fields = EXCLUDED.fields,
             completed_on = EXCLUDED.completed_on,
@@ -237,7 +240,21 @@ async fn upsert_step(
             notes = EXCLUDED.notes,
             step_plugin_version = EXCLUDED.step_plugin_version,
             embedded_job = EXCLUDED.embedded_job,
-            updated_at = EXCLUDED.updated_at
+            updated_at = EXCLUDED.updated_at,
+            -- First event that shows the row in `ready` wins, exactly
+            -- as the live UPDATE's COALESCE writes the stamp once at
+            -- the flip — replay reproduces `became_ready_at` from the
+            -- event-time the log carried all along (2a0b034e). Rows
+            -- that PREDATE the column even get it backfilled here,
+            -- which is the rebuilder doing its one job: reproducing
+            -- truth from the log.
+            became_ready_at = COALESCE(steps.became_ready_at, EXCLUDED.became_ready_at),
+            -- The completion stamps replay verbatim from the event
+            -- that carried them: the STEP_UPDATED payload is the whole
+            -- Step, so a rebuild reproduces who and when exactly as the
+            -- live write stamped them (c17871fe).
+            completed_by = EXCLUDED.completed_by,
+            completed_at = EXCLUDED.completed_at
         RETURNING (xmax = 0) AS inserted
         "#,
     )
@@ -251,6 +268,14 @@ async fn upsert_step(
     .bind(step.sort_order)
     .bind(blocked_by_uuids(&step.blocked_by))
     .bind(serde_json::to_value(&step.sign_offs_required).unwrap_or_default())
+    // Same TEXT encoding as the live save path — the omission of
+    // this column silently downgraded replayed steps to session
+    // assurance (packet d7b8158e).
+    .bind(
+        step.assurance_required
+            .and_then(|a| serde_json::to_value(a).ok())
+            .and_then(|v| v.as_str().map(str::to_string)),
+    )
     .bind(serde_json::to_value(&step.sign_offs).unwrap_or_default())
     .bind(serde_json::to_value(&step.fields).unwrap_or_default())
     .bind(step.completed_on)
@@ -259,6 +284,8 @@ async fn upsert_step(
     .bind(step.step_plugin_version)
     .bind(step.embedded_job.map(|j| *j.inner().as_uuid()))
     .bind(ts)
+    .bind(step.completed_by.as_ref().map(ToString::to_string))
+    .bind(step.completed_at)
     .fetch_one(&mut *conn)
     .await
     .map_err(|e| RebuildError::Storage(e.to_string()))?;

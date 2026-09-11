@@ -66,7 +66,7 @@ pub async fn rebuild_products(pool: &PgPool) -> Result<RebuildReport, RebuildErr
                             return Ok(Applied::Skipped);
                         }
                     };
-                    upsert_product(&mut *conn, &product)
+                    upsert_product(&mut *conn, &product, ev.ts)
                         .await
                         .map_err(|e| e.to_string())?;
                     report.products_upserted += 1;
@@ -80,7 +80,7 @@ pub async fn rebuild_products(pool: &PgPool) -> Result<RebuildReport, RebuildErr
                             return Ok(Applied::Skipped);
                         }
                     };
-                    upsert_inventory_row(&mut *conn, &row)
+                    upsert_inventory_row(&mut *conn, &row, ev.ts)
                         .await
                         .map_err(|e| e.to_string())?;
                     report.inventory_rows_upserted += 1;
@@ -107,10 +107,15 @@ pub async fn rebuild_products(pool: &PgPool) -> Result<RebuildReport, RebuildErr
 async fn upsert_product(
     tx: &mut sqlx::PgConnection,
     product: &Product,
+    ts: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), RebuildError> {
+    // ts = the event's audit_log.timestamp — the instant the live
+    // write bound into created_at/updated_at. Stamping NOW() here
+    // re-dated the whole catalog to rebuild time (packet d7b8158e).
+    // On conflict created_at keeps the first event's instant.
     sqlx::query(
-        "INSERT INTO products (sku, name, product_kind, package_unit, description, metadata, active) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+        "INSERT INTO products (sku, name, product_kind, package_unit, description, metadata, active, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8) \
          ON CONFLICT (sku) DO UPDATE SET \
             name = EXCLUDED.name, \
             product_kind = EXCLUDED.product_kind, \
@@ -118,7 +123,7 @@ async fn upsert_product(
             description = EXCLUDED.description, \
             metadata = EXCLUDED.metadata, \
             active = EXCLUDED.active, \
-            updated_at = NOW()",
+            updated_at = EXCLUDED.updated_at",
     )
     .bind(&product.sku)
     .bind(&product.name)
@@ -127,6 +132,7 @@ async fn upsert_product(
     .bind(&product.description)
     .bind(&product.metadata)
     .bind(product.active)
+    .bind(ts)
     .execute(&mut *tx)
     .await
     .map_err(|e| RebuildError::Storage(e.to_string()))?;
@@ -136,22 +142,24 @@ async fn upsert_product(
 async fn upsert_inventory_row(
     tx: &mut sqlx::PgConnection,
     row: &ProductInventory,
+    ts: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), RebuildError> {
     sqlx::query(
         "INSERT INTO finished_product_inventory \
-            (product_sku, location_id, on_hand, reserved, value_cents) \
-         VALUES ($1, $2, $3, $4, $5) \
+            (product_sku, location_id, on_hand, reserved, value_cents, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6) \
          ON CONFLICT (product_sku, location_id) DO UPDATE SET \
             on_hand = EXCLUDED.on_hand, \
             reserved = EXCLUDED.reserved, \
             value_cents = EXCLUDED.value_cents, \
-            updated_at = NOW()",
+            updated_at = EXCLUDED.updated_at",
     )
     .bind(&row.product_sku)
     .bind(&row.location_id)
     .bind(row.on_hand)
     .bind(row.reserved)
     .bind(row.value_cents)
+    .bind(ts)
     .execute(&mut *tx)
     .await
     .map_err(|e| RebuildError::Storage(e.to_string()))?;

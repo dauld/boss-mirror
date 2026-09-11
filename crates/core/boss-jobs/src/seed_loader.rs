@@ -49,7 +49,7 @@
 //! Tenants override `owning_team` to their tenant id. Pass `default_owner`
 //! into [`load_workflows_with_owning_team`] to set it for every row.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -91,6 +91,17 @@ struct WorkflowToml {
     /// tenant could supply for `metadata_schema` / `entitlements`.
     #[serde(default)]
     metadata: serde_json::Value,
+    /// JSON Schema over the JOB's metadata, mirroring the registry's
+    /// `metadata_schema` column. Authorable because a protocol whose
+    /// admission contract lives only in the live row is a protocol the
+    /// tree cannot describe — `publish-request` is the worked case, and
+    /// the bundle could not express it until 2026-09-10.
+    #[serde(default)]
+    metadata_schema: serde_json::Value,
+    /// Policy hooks on the Workflow itself; mirrors the `entitlements`
+    /// column. Same reason, same shape.
+    #[serde(default)]
+    entitlements: serde_json::Value,
     /// Inline step list — flat; the DAG is implicit in each step's
     /// `ready_when` predicate.
     #[serde(default, rename = "step")]
@@ -128,6 +139,11 @@ struct StepToml {
     /// "the kind's typical duration". See `StepSpec::duration_hours`.
     #[serde(default)]
     duration_hours: Option<f64>,
+    /// The labor / wall-clock split — see `StepSpec::labor_hours`.
+    #[serde(default)]
+    labor_hours: Option<f64>,
+    #[serde(default)]
+    wall_clock_hours: Option<f64>,
     #[serde(default)]
     fields: Vec<boss_core::job::StepField>,
     #[serde(default)]
@@ -145,7 +161,10 @@ struct TerminalToml {
     outcome: String,
 }
 
-/// Load a tenant's `workflows.toml` and materialize `WorkflowSpec`s.
+/// Load a Workflow bundle and materialize `WorkflowSpec`s. The bundle
+/// is either one file (`examples/<tenant>/seeds/workflows.toml`) or a
+/// DIRECTORY of kind files (`infra/platform/workflows/<kind>.toml`) —
+/// see [`load_workflows_with_owning_team`] for the directory rules.
 /// Owning team defaults to `"platform"` (matching `WorkflowSpec::platform_seed`).
 pub fn load_workflows(path: impl AsRef<Path>) -> Result<Vec<WorkflowSpec>, SeedLoaderError> {
     load_workflows_with_owning_team(path, "platform")
@@ -154,15 +173,85 @@ pub fn load_workflows(path: impl AsRef<Path>) -> Result<Vec<WorkflowSpec>, SeedL
 /// Same as [`load_workflows`] but stamps every spec with
 /// `owning_team = default_owner` (typically the tenant id, e.g.
 /// `"brewery"` or `"used-device-shop"`).
+///
+/// A DIRECTORY is a bundle too: every `*.toml` file in it, read in
+/// filename order, each holding exactly ONE `[[workflow]]` whose
+/// `kind` is the file's stem. The platform bundle is shaped this way
+/// so that adding a protocol is dropping a file in — two cars adding
+/// kinds touch no shared line (CLAUDE.md §9a; the same collapse
+/// `infra/postgres/schema/` had). The one-kind-per-file rule is what
+/// makes the listing the definition: `ls` answers "which kinds", and
+/// a file named for a kind it does not hold is refused, not read.
+/// Non-TOML files (a README) are ignored.
 pub fn load_workflows_with_owning_team(
     path: impl AsRef<Path>,
     default_owner: &str,
 ) -> Result<Vec<WorkflowSpec>, SeedLoaderError> {
     let path_ref = path.as_ref();
-    let path_str = path_ref.display().to_string();
-    let text = std::fs::read_to_string(path_ref)
+    if path_ref.is_dir() {
+        return load_workflow_dir(path_ref, default_owner);
+    }
+    load_workflow_file(path_ref, default_owner)
+}
+
+fn load_workflow_file(
+    path: &Path,
+    default_owner: &str,
+) -> Result<Vec<WorkflowSpec>, SeedLoaderError> {
+    let path_str = path.display().to_string();
+    let text = std::fs::read_to_string(path)
         .map_err(|e| SeedLoaderError::Io(path_str.clone(), e.to_string()))?;
     parse_workflows(&text, default_owner, &path_str)
+}
+
+/// The kind files of a bundle directory, in the order the loader
+/// reads them: every `*.toml` directly inside `dir`, sorted by file
+/// name. An empty listing is an error — a bundle directory with no
+/// kinds is a wrong path, not an empty bundle.
+pub fn bundle_files(dir: &Path) -> Result<Vec<PathBuf>, SeedLoaderError> {
+    let dir_str = dir.display().to_string();
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| SeedLoaderError::Io(dir_str.clone(), e.to_string()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("toml"))
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        return Err(SeedLoaderError::Io(
+            dir_str,
+            "no *.toml kind files in the bundle directory".into(),
+        ));
+    }
+    Ok(files)
+}
+
+fn load_workflow_dir(
+    dir: &Path,
+    default_owner: &str,
+) -> Result<Vec<WorkflowSpec>, SeedLoaderError> {
+    let mut specs = Vec::new();
+    for file in bundle_files(dir)? {
+        let file_str = file.display().to_string();
+        let stem = file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let loaded = load_workflow_file(&file, default_owner)?;
+        let kinds: Vec<&str> = loaded.iter().map(|s| s.kind.as_str()).collect();
+        if kinds != [stem.as_str()] {
+            return Err(SeedLoaderError::Parse(
+                file_str,
+                format!(
+                    "a kind file holds exactly one [[workflow]] named after the file \
+                     (expected kind `{stem}`, found {kinds:?})"
+                ),
+            ));
+        }
+        specs.extend(loaded);
+    }
+    Ok(specs)
 }
 
 /// Parse TOML text directly. Useful for inline tests; the file
@@ -210,6 +299,8 @@ fn workflow_toml_to_spec(toml: WorkflowToml, default_owner: &str) -> WorkflowSpe
             kind: s.kind,
             assurance_required: s.assurance_required,
             duration_hours: s.duration_hours,
+            labor_hours: s.labor_hours,
+            wall_clock_hours: s.wall_clock_hours,
             ready_when: s.ready_when,
             terminal: s.terminal.map(|t| Terminal { outcome: t.outcome }),
             title_template: s.title_template,
@@ -236,6 +327,15 @@ fn workflow_toml_to_spec(toml: WorkflowToml, default_owner: &str) -> WorkflowSpe
     // (never overwritten here) carry.
     if !toml.metadata.is_null() {
         spec.metadata = toml.metadata;
+    }
+    // Same null-means-default rule, for the same reason: these two
+    // columns carry `{}` by default and an absent TOML key must not
+    // turn that into a JSON null.
+    if !toml.metadata_schema.is_null() {
+        spec.metadata_schema = toml.metadata_schema;
+    }
+    if !toml.entitlements.is_null() {
+        spec.entitlements = toml.entitlements;
     }
     spec.owning_team = default_owner.to_string();
     spec
@@ -360,6 +460,54 @@ terminal = { outcome = "brewed" }
         assert_eq!(step.metadata_defaults["mash_temp_f"], 152);
         assert_eq!(step.metadata_defaults["mash_minutes"], 60);
         assert_eq!(specs[0].owning_team, "brewery");
+    }
+
+    #[test]
+    fn carries_field_filled_by_through_and_defaults_it_to_executor() {
+        // The filer-field TOML shape: `filled_by = "filer"` on a
+        // `[[workflow.step.fields]]` row marks a field admission
+        // validates against the FILER. Absent, the field keeps the
+        // executor's required-at-done contract — every seed authored
+        // before the key existed parses unchanged.
+        let text = r#"
+[[workflow]]
+kind = "with-filer-field"
+label = "With Filer Field"
+category = "platform"
+subject_kinds = ["custom"]
+
+[[workflow.step]]
+title = "start"
+kind = "task"
+ready_when = "true"
+title_template = "Open"
+
+[[workflow.step]]
+title = "review"
+kind = "task"
+ready_when = "steps.start.done"
+title_template = "Review it"
+terminal = { outcome = "done" }
+
+[[workflow.step.fields]]
+name = "markdown"
+field_type = "string"
+required = true
+filled_by = "filer"
+
+[[workflow.step.fields]]
+name = "decision"
+field_type = "string"
+required = true
+"#;
+        let specs = parse_workflows(text, "platform", "<test>").unwrap();
+        let fields = &specs[0].steps[1].fields;
+        assert_eq!(fields[0].filled_by, boss_core::job::FilledBy::Filer);
+        assert_eq!(
+            fields[1].filled_by,
+            boss_core::job::FilledBy::Executor,
+            "an unmarked field stays executor-filled — required-at-done, unchanged"
+        );
     }
 
     #[test]
@@ -695,5 +843,166 @@ title_template = "Open"
             errs.is_empty(),
             "used-device-shop Workflows failed Workflow lint: {errs:#?}"
         );
+    }
+
+    /// A directory is a bundle: every `*.toml` in it, in file-name
+    /// order regardless of the order they were written, one kind per
+    /// file, named for it. Anything that is not a kind file (a README)
+    /// is ignored.
+    #[test]
+    fn a_bundle_directory_loads_its_kind_files_in_name_order() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("zeta.toml"), viable_row("zeta")).unwrap();
+        std::fs::write(dir.path().join("alpha.toml"), viable_row("alpha")).unwrap();
+        std::fs::write(dir.path().join("README.md"), "# not a kind file\n").unwrap();
+        let specs = load_workflows_with_owning_team(dir.path(), "platform").unwrap();
+        let kinds: Vec<&str> = specs.iter().map(|s| s.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["alpha", "zeta"]);
+        assert!(specs.iter().all(|s| s.owning_team == "platform"));
+        let files = bundle_files(dir.path()).unwrap();
+        let names: Vec<_> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["alpha.toml", "zeta.toml"]);
+    }
+
+    /// The file name IS the kind list. A file named for a kind it does
+    /// not hold, or holding two, is refused by name — read wrong, it
+    /// would seed a protocol nobody can find by `ls`.
+    #[test]
+    fn a_kind_file_must_hold_exactly_the_kind_it_is_named_for() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("liar.toml"), viable_row("truth")).unwrap();
+        let e = load_workflows(dir.path()).unwrap_err().to_string();
+        assert!(e.contains("liar.toml"), "{e}");
+        assert!(e.contains("expected kind `liar`"), "{e}");
+        assert!(e.contains("[\"truth\"]"), "{e}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let two = format!("{}\n{}", viable_row("pair"), viable_row("other"));
+        std::fs::write(dir.path().join("pair.toml"), two).unwrap();
+        let e = load_workflows(dir.path()).unwrap_err().to_string();
+        assert!(
+            e.contains("pair.toml") && e.contains("exactly one [[workflow]]"),
+            "{e}"
+        );
+    }
+
+    /// A bundle directory with no kind files is a wrong path, not an
+    /// empty bundle — the seed must not report "nothing to do" over a
+    /// typo.
+    #[test]
+    fn an_empty_bundle_directory_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "# nothing here\n").unwrap();
+        let e = load_workflows(dir.path()).unwrap_err().to_string();
+        assert!(e.contains("no *.toml kind files"), "{e}");
+    }
+
+    /// A lint failure inside a directory names the FILE, so the author
+    /// of a thirty-file bundle is not sent to grep for the row.
+    #[test]
+    fn a_directory_lint_failure_names_the_kind_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ok.toml"), viable_row("ok")).unwrap();
+        std::fs::write(
+            dir.path().join("broken.toml"),
+            r#"
+[[workflow]]
+kind = "broken"
+label = "Broken"
+category = "platform"
+subject_kinds = ["custom"]
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+"#,
+        )
+        .unwrap();
+        match load_workflows(dir.path()) {
+            Err(SeedLoaderError::LintFailed { file, .. }) => {
+                assert!(file.ends_with("broken.toml"), "{file}")
+            }
+            other => panic!("expected a lint failure naming broken.toml, got {other:?}"),
+        }
+    }
+
+    /// `metadata_schema` and `entitlements` are authorable.
+    ///
+    /// They were not until 2026-09-10, and the gap was found backfilling
+    /// `publish-request`: its live row carries a JSON Schema over the
+    /// Job metadata (`branch`, `head_sha`, `base_sha`, `bundle_b64`),
+    /// and with no TOML key for it the bundle file would have described
+    /// the protocol while silently dropping the half that says what a
+    /// packet must carry. A fresh database would have got a
+    /// `publish-request` with `metadata_schema = {}`. That is the "a
+    /// file that disagrees with the live row replaces one problem with
+    /// a worse one" failure, and an exemption would have hidden it.
+    ///
+    /// Absent keys still deserialize to `Value::Null` and so keep
+    /// `platform_seed`'s `{}` — every file authored before this reads
+    /// exactly as it did.
+    #[test]
+    fn a_row_can_author_its_metadata_schema_and_entitlements() {
+        let text = r#"
+[[workflow]]
+kind = "schema-bearing"
+label = "Schema bearing"
+category = "platform"
+subject_kinds = ["custom"]
+metadata_schema = { type = "object", required = ["branch"], properties = { branch = { type = "string" } } }
+entitlements = { approve = ["platform-admin"] }
+
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+
+[[workflow.step]]
+title = "done"
+kind = "outcome"
+ready_when = "steps.opened.done"
+terminal = { outcome = "completed" }
+"#;
+        let specs = parse_workflows(text, "platform", "<test>").unwrap();
+        assert_eq!(
+            specs[0].metadata_schema,
+            serde_json::json!({
+                "type": "object",
+                "required": ["branch"],
+                "properties": { "branch": { "type": "string" } },
+            })
+        );
+        assert_eq!(
+            specs[0].entitlements,
+            serde_json::json!({ "approve": ["platform-admin"] })
+        );
+
+        // Omitted means the seed default, not null.
+        let plain = parse_workflows(&viable_row("plain"), "platform", "<test>").unwrap();
+        assert_eq!(plain[0].metadata_schema, serde_json::json!({}));
+        assert_eq!(plain[0].entitlements, serde_json::json!({}));
+    }
+
+    fn viable_row(kind: &str) -> String {
+        format!(
+            r#"[[workflow]]
+kind = "{kind}"
+label = "{kind}"
+category = "platform"
+subject_kinds = ["custom"]
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+[[workflow.step]]
+title = "done"
+kind = "outcome"
+ready_when = "steps.opened.done"
+terminal = {{ outcome = "completed" }}
+"#
+        )
     }
 }

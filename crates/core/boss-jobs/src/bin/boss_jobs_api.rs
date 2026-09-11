@@ -184,6 +184,15 @@ async fn main() -> Result<()> {
         // (docs/design/delivery-as-protocol.md).
         let delivery: Arc<dyn boss_jobs::delivery::DeliveryPolicyRepository> =
             Arc::new(boss_jobs::delivery::PgDeliveryPolicy::new(pool.clone()));
+        // The credentials registry: knowledge about credentials —
+        // scopes, storage locations, consumers — never values
+        // (packet 7ee101aa, second leg).
+        let credentials: Arc<dyn boss_jobs::credentials::CredentialsRegistry> =
+            Arc::new(boss_jobs::credentials::PgCredentials::new(pool.clone()));
+        // The agent-run record (backlog 83344e16): what an actor's run
+        // cost, on the one door `boss-api` already reaches.
+        let agent_runs: Arc<dyn boss_jobs::agent_runs::AgentRunLog> =
+            Arc::new(boss_jobs::agent_runs::PgAgentRuns::new(pool.clone()));
         // Q7: human job-owner resolution over the people roster.
         let people_url =
             std::env::var("BOSS_PEOPLE_URL").unwrap_or_else(|_| boss_ports::url("people"));
@@ -193,7 +202,7 @@ async fn main() -> Result<()> {
         info!(%people_url, "human job-owner resolution wired (Q7)");
         let stations: Arc<dyn boss_jobs::StationRegistry> =
             Arc::new(boss_jobs::PgStations::new(pool.clone()));
-        verify_station_viability(stations.as_ref(), jobs.as_ref(), &clock).await;
+        verify_station_viability(stations.as_ref()).await;
         return run_server(
             Some(
                 std::sync::Arc::new(boss_jobs::job_edges::PgJobEdges::new(pool.clone()))
@@ -208,6 +217,8 @@ async fn main() -> Result<()> {
             Some(scheduling),
             Some(cadence),
             Some(delivery),
+            Some(credentials),
+            Some(agent_runs),
             calendar,
             subject_kinds,
             subject_existence,
@@ -244,6 +255,10 @@ async fn main() -> Result<()> {
         None,
         None,
         None,
+        None,
+        // In-memory spike path: the agent-run record is a projection of
+        // the log and has no in-memory story worth wiring here.
+        None,
         calendar,
         subject_kinds,
         subject_existence,
@@ -269,6 +284,8 @@ async fn run_server<R: JobsRepository + 'static>(
     scheduling: Option<Arc<dyn boss_jobs::scheduling::SchedulingRepository>>,
     cadence: Option<Arc<dyn boss_jobs::cadence::CadenceRepository>>,
     delivery: Option<Arc<dyn boss_jobs::delivery::DeliveryPolicyRepository>>,
+    credentials: Option<Arc<dyn boss_jobs::credentials::CredentialsRegistry>>,
+    agent_runs: Option<Arc<dyn boss_jobs::agent_runs::AgentRunLog>>,
     calendar: Option<Arc<dyn boss_calendar_client::CalendarClient>>,
     subject_kinds: Option<Arc<dyn boss_subject_kinds_client::SubjectKindsClient>>,
     subject_existence: Option<Arc<dyn boss_jobs::subject_existence::SubjectExistenceCheck>>,
@@ -329,6 +346,12 @@ async fn run_server<R: JobsRepository + 'static>(
         subject_existence,
         roster,
         clock: clock.clone(),
+        // The yard-status read-model reads these registries directly (the
+        // /api/cadence and /api/delivery doors are operator-only, so the
+        // browser cannot). Clone the Arc — the same repos back both the
+        // operator doors below and this read-model.
+        cadence: cadence.clone(),
+        delivery: delivery.clone(),
     };
     let mut app = router(state);
     if let Some(repo) = scheduling {
@@ -351,6 +374,20 @@ async fn run_server<R: JobsRepository + 'static>(
         info!("delivery policy routes mounted at /api/delivery/policy/*");
         app = app.merge(boss_jobs::delivery::http::router(
             boss_jobs::delivery::http::DeliveryPolicyApiState { repo },
+        ));
+    }
+    if let Some(registry) = credentials {
+        info!("credentials registry routes mounted at /api/credentials (locations, never values)");
+        app = app.merge(boss_jobs::credentials::http::router(
+            boss_jobs::credentials::http::CredentialsApiState { registry },
+        ));
+    }
+    if let Some(log) = agent_runs {
+        info!(
+            "agent-run record mounted at /api/agent-runs (+ /cost) and /api/agent-rate-card              (read-only card)"
+        );
+        app = app.merge(boss_jobs::agent_runs::http::router(
+            boss_jobs::agent_runs::http::AgentRunsApiState { log },
         ));
     }
     // Sim-origin middleware: extract x-sim-origin header and set the
@@ -411,17 +448,26 @@ async fn run_server<R: JobsRepository + 'static>(
     Ok(())
 }
 
-/// Reconcile the platform-supplied Workflows (today: just
-/// `workflow-design`) against the live registry. Insert if
-/// missing, refresh bootstrap-owned drift, preserve operator
-/// edits — same shape as
+/// Reconcile the code-resident platform Workflows against the live
+/// registry: insert if missing, refresh bootstrap-owned drift, preserve
+/// operator edits — same shape as
 /// `boss_policy_client::PolicyRepository::bootstrap_reconcile`.
 ///
+/// `platform_workflows()` IS EMPTY since 2026-09-11, so this is a no-op
+/// on every boot and logs `total=0`. That is the destination, not a
+/// regression: every platform protocol is a file under
+/// infra/platform/workflows/ seeded by `boss-platform-workflow-seed`
+/// (insert-if-missing), and the four rows that were reconciled until
+/// then are simply no longer reconciled — they keep the version they
+/// reached, and an operator's edit to one now survives a pod roll.
+///
+/// The call stays because the reconcile contract is still a port method
+/// with two adapters and its own tests, and because the stats line is
+/// where a platform kind reappearing as a Rust literal would announce
+/// itself. Retiring reconcile outright is a separate change.
+///
 /// Logs the stats line on every boot so operators can see the
-/// reconcile decision land in real time. The platform list is
-/// short (just one kind in v1) so a missing default surfaces
-/// instantly: the next boot logs `inserted=1` if someone
-/// retired the meta-kind by hand.
+/// reconcile decision land in real time.
 ///
 /// Each inserted/republished row records `jobs.kind.published`
 /// with the row (registry-events invariant), attributed to the
@@ -461,46 +507,34 @@ async fn reconcile_platform_workflows<R: JobsRepository>(
             tracing::warn!(error = %e, "platform Workflow reconcile failed");
         }
     }
-    verify_registry_viability(registry, jobs, clock).await;
+    verify_registry_viability(registry, jobs).await;
 }
 
 /// Boot-time viability check over the station registry — the sibling
 /// of [`verify_registry_viability`], for the queues rather than the
-/// protocols.
+/// protocols, under the same contract.
 ///
-/// Never exits. A Workflow quarantine can be forced to refuse (open
-/// Jobs pinned to the bad row would be stranded by an auto-retire);
-/// station membership is derived from the predicate at read time and
-/// nothing is ever pinned to a station version, so retiring one
-/// strands nothing and there is no case that warrants refusing to
-/// start. A failure of the PASS itself is logged and start continues:
-/// the station registry is a read surface over packets, and losing the
-/// check is not a reason to take the jobs API down.
-async fn verify_station_viability<R: JobsRepository>(
-    stations: &dyn boss_jobs::StationRegistry,
-    jobs: &R,
-    clock: &Arc<dyn boss_clock_client::ClockClient>,
-) {
-    let actor = boss_core::actor::ActorId::Automation(
-        boss_jobs::station_quarantine::QUARANTINE_ACTOR.into(),
-    );
-    let now = boss_clock_client::now_from(clock).await;
-    match boss_jobs::station_quarantine::quarantine_unviable_active_stations(
-        stations, jobs, &actor, now,
-    )
-    .await
-    {
-        Ok(report) if !report.quarantined.is_empty() => {
+/// Never exits and never writes. Until 2026-09-08 this retired each
+/// unviable row at boot — a persisted write from a boot path, the
+/// same defect class that took the system of record down twice on
+/// 2026-09-07 through the Workflow check (packet 7752e636). A boot
+/// check reports; it does not act. A failure of the CHECK itself is
+/// logged and start continues: the station registry is a read surface
+/// over packets, and losing the check is not a reason to take the
+/// jobs API down. See `boss_jobs::station_quarantine`.
+async fn verify_station_viability(stations: &dyn boss_jobs::StationRegistry) {
+    match boss_jobs::station_quarantine::check_active_stations_viable(stations).await {
+        Ok(report) if !report.unviable.is_empty() => {
             tracing::error!(
-                quarantined = report.quarantined.len(),
+                unviable = report.unviable.len(),
                 active = report.checked,
-                "retired station(s) that failed the viability lint — those queues are \
-                 gone until a viable version is published; service is up"
+                "started with unviable active station(s) — each is named above; nothing was \
+                 retired, service is up"
             );
         }
         Ok(_) => {}
         Err(e) => {
-            tracing::error!(error = %e, "boot station viability check could not complete");
+            tracing::error!(error = %e, "boot station viability check could not complete; starting anyway");
         }
     }
 }
@@ -510,42 +544,31 @@ async fn verify_station_viability<R: JobsRepository>(
 /// spec can become invalid if an upstream StepType's enum domain
 /// changes.
 ///
-/// This used to `exit(1)` on the first bad row, which made one
-/// registry row a whole-service outage (2026-08-13). It now
-/// quarantines — see `boss_jobs::workflow_quarantine` for the
-/// semantics and the one case that still refuses to start.
+/// Never exits and never writes. This used to `exit(1)` on the first
+/// bad row — one registry row, whole-service outage (2026-08-13) —
+/// and then to auto-retire unpinned rows and refuse to start over
+/// pinned ones, which on 2026-09-07 crash-looped the system of record
+/// over one pinned `incident-post-mortem` Job and silently retired a
+/// live `publish-to-github`. A boot check reports; it does not act.
+/// See `boss_jobs::workflow_quarantine`.
 async fn verify_registry_viability<R: JobsRepository>(
     registry: &dyn boss_jobs::WorkflowRegistry,
     jobs: &R,
-    clock: &Arc<dyn boss_clock_client::ClockClient>,
 ) {
-    let actor = boss_core::actor::ActorId::Automation(
-        boss_jobs::workflow_quarantine::QUARANTINE_ACTOR.into(),
-    );
-    let now = boss_clock_client::now_from(clock).await;
-    let report = match boss_jobs::workflow_quarantine::quarantine_unviable_active_workflows(
-        registry, jobs, &actor, now,
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            // The pass itself failed, so we can't tell whether the
-            // registry is sound. Same rule as before: don't open for
-            // writes we can't reason about.
-            tracing::error!(error = %e, "refusing to start: boot viability check could not complete");
-            std::process::exit(1);
+    match boss_jobs::workflow_quarantine::check_active_workflows_viable(registry, jobs).await {
+        Ok(report) if !report.unviable.is_empty() => {
+            tracing::error!(
+                unviable = report.unviable.len(),
+                active = report.checked,
+                "started with unviable active Workflow(s) — each is named above; nothing was \
+                 retired, service is up"
+            );
         }
-    };
-    if let Some(msg) = report.refusal_message() {
-        tracing::error!("{msg}");
-        std::process::exit(1);
-    }
-    if !report.quarantined.is_empty() {
-        tracing::error!(
-            quarantined = report.quarantined.len(),
-            active = report.checked,
-            "started with quarantined Workflow(s) — retired and marked, service is up"
-        );
+        Ok(_) => {}
+        Err(e) => {
+            // The check itself could not run. Losing the check is not
+            // a reason to take the system of record down.
+            tracing::error!(error = %e, "boot viability check could not complete; starting anyway");
+        }
     }
 }

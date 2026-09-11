@@ -85,13 +85,15 @@ async fn create_requisition(
         Ok(tx) => tx,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    if let Err(e) = upsert_requisition(&mut *tx, &req).await {
+    // Stamp minted before the row write: created_at and the event's
+    // timestamp must be ONE instant or replay diverges.
+    let stamp = crate::events::event_stamp(&state.publisher).await;
+    if let Err(e) = upsert_requisition(&mut *tx, &req, stamp.timestamp).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
     // OUTBOX (phase 2): the opened event (full row state; status
     // transitions ride the same kind via the ON CONFLICT DO UPDATE
     // path) records with the row.
-    let stamp = crate::events::event_stamp(&state.publisher).await;
     let event = stamp.event(
         REQUISITION_OPENED,
         serde_json::to_value(&req).unwrap_or_default(),
@@ -114,13 +116,22 @@ async fn create_requisition(
 /// requisition opening at "open" can later transition to
 /// "interviewing"/"filled" via the same event kind without a
 /// separate status-change family.
-pub(crate) async fn upsert_requisition<'e, E>(executor: E, req: &Requisition) -> sqlx::Result<()>
+///
+/// `created_at` is the event's recorded instant — the live caller
+/// passes `stamp.timestamp`, the rebuilder passes `ev.ts`. On
+/// conflict the column keeps the first insert's instant, live and
+/// replayed alike (packet d7b8158e).
+pub(crate) async fn upsert_requisition<'e, E>(
+    executor: E,
+    req: &Requisition,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> sqlx::Result<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     sqlx::query(
-        "INSERT INTO requisitions (id, role, department, status, opened_on, target_fill_date, location, headcount, hiring_manager_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+        "INSERT INTO requisitions (id, role, department, status, opened_on, target_fill_date, location, headcount, hiring_manager_id, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
          ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status",
     )
     .bind(&req.id)
@@ -132,6 +143,7 @@ where
     .bind(&req.location)
     .bind(req.headcount)
     .bind(&req.hiring_manager_id)
+    .bind(created_at)
     .execute(executor)
     .await
     .map(|_| ())

@@ -82,9 +82,13 @@ impl HelperResolver for InventoryHelpers {
             // runner binds and it already holds jobs_base; the module
             // outgrew its name the day a second domain needed a dedup
             // helper (design-review-spawn, dogfooding arc e556c000).
-            "open_review_exists" => open_review_exists(self, args),
             "open_car_exists" => open_car_exists(self, args),
             "open_publish_exists" => open_publish_exists(self, args),
+            // The generalization the three guards above were converging
+            // on: any (kind, subject) pair, so the NEXT daily spawner
+            // gets its dedup as rule data instead of a fourth one-off
+            // helper (0517387b — the sweep spawners had none at all).
+            "open_job_exists" => open_job_exists(self, args),
             other => Err(EvalError::UnknownHelper(other.to_string())),
         }
     }
@@ -102,6 +106,34 @@ fn first_string<'a>(args: &'a [Value], helper: &str) -> Result<&'a str, EvalErro
             msg: "missing required arg".into(),
         }),
     }
+}
+
+fn second_string<'a>(args: &'a [Value], helper: &str) -> Result<&'a str, EvalError> {
+    match args.get(1) {
+        Some(Value::String(s)) => Ok(s.as_str()),
+        Some(other) => Err(EvalError::TypeError {
+            expected: "string subject id",
+            got: other.kind(),
+        }),
+        None => Err(EvalError::HelperFailed {
+            name: helper.to_string(),
+            msg: "missing required second arg".into(),
+        }),
+    }
+}
+
+/// Minimal percent-encoding for a query value, no new crate: the
+/// values are slugs and repo paths, this guards the day one carries a
+/// space or '&'.
+fn percent_encode(raw: &str) -> String {
+    raw.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 #[derive(serde::Deserialize)]
@@ -149,34 +181,6 @@ struct JobsListResponse {
 /// on the Job's `metadata.part_sku` (stamped by the reorder rule via
 /// `jobs.spawn`'s `metadata.<field>` args), since the restock's subject is
 /// the vendor, not the part.
-/// Is there an open design-doc-review Job for this doc path? The
-/// spawn rule's dedup: `docs.design.indexed` re-fires on every
-/// question-count change, and each firing must not open another
-/// review. Subject-filtered server-side — the doc path IS the Job's
-/// subject id.
-fn open_review_exists(h: &InventoryHelpers, args: &[Value]) -> Result<Value, EvalError> {
-    let doc_path = first_string(args, "open_review_exists")?;
-    // Minimal percent-encoding, no new crate: doc paths are repo
-    // paths (`docs/design/x.md` — slashes are legal in query values),
-    // this guards the day one carries a space or '&'.
-    let encoded: String = doc_path
-        .bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect();
-    let url = format!(
-        "{}/api/jobs?kind=design-doc-review&status=open&subject_id={}&limit=1",
-        h.jobs_base.trim_end_matches('/'),
-        encoded,
-    );
-    let r: JobsListResponse = h.get_json(&url, "open_review_exists")?;
-    Ok(Value::Bool(!r.data.is_empty()))
-}
-
 /// Is there already an open `ship-a-change` car for this recurring
 /// finding? The dedup for `spawn-car-on-sweep-remediated`.
 ///
@@ -194,9 +198,11 @@ fn open_review_exists(h: &InventoryHelpers, args: &[Value]) -> Result<Value, Eva
 /// Keyed on the sweep's SUBJECT (`stale-build-caches`), not its id or
 /// title: the id is fresh every firing, and the title is templated per
 /// target, so neither separates "the same finding again" from "a
-/// different finding". `design-review-spawn` has had exactly this
-/// guard — `NOT open_review_exists(path)` — since it was written; this
-/// rule simply never got one.
+/// different finding". `design-review-spawn` had exactly this guard
+/// — `NOT open_review_exists(path)` — from the day it was written;
+/// this rule simply never got one. (That rule and its one-kind helper
+/// were retired with the corpus index on 2026-09-10; `open_job_exists`
+/// below is the generic form that outlived both.)
 fn open_car_exists(h: &InventoryHelpers, args: &[Value]) -> Result<Value, EvalError> {
     let target = first_string(args, "open_car_exists")?;
     let url = format!(
@@ -212,6 +218,14 @@ fn open_car_exists(h: &InventoryHelpers, args: &[Value]) -> Result<Value, EvalEr
     });
     Ok(Value::Bool(exists))
 }
+
+/// The packet kind `open_publish_exists` asks about. The guard names
+/// only a SUBJECT, so the kind lives here — and it is a `pub const`
+/// rather than a literal in the URL below because a second reader now
+/// needs the same fact: `cadence_roster::parse_guard` normalizes this
+/// guard to the `(kind, subject)` question the cadence-silence sweep
+/// asks, and one constant cannot drift from itself (CLAUDE.md §9a).
+pub const PUBLISH_JOB_KIND: &str = "publish-to-github";
 
 /// True if a `publish-to-github` packet for this mirror subject is
 /// already open — the dedup for `publish-to-github-daily`.
@@ -230,7 +244,7 @@ fn open_car_exists(h: &InventoryHelpers, args: &[Value]) -> Result<Value, EvalEr
 fn open_publish_exists(h: &InventoryHelpers, args: &[Value]) -> Result<Value, EvalError> {
     let subject = first_string(args, "open_publish_exists")?;
     let url = format!(
-        "{}/api/jobs?kind=publish-to-github&status=open&limit=200",
+        "{}/api/jobs?kind={PUBLISH_JOB_KIND}&status=open&limit=200",
         h.jobs_base.trim_end_matches('/')
     );
     let r: JobsListResponse = h.get_json(&url, "open_publish_exists")?;
@@ -241,6 +255,31 @@ fn open_publish_exists(h: &InventoryHelpers, args: &[Value]) -> Result<Value, Ev
             == Some(subject)
     });
     Ok(Value::Bool(exists))
+}
+
+/// True if an open Job of `kind` with subject id `subject_id` exists —
+/// the generic (kind, subject) dedup guard.
+///
+/// Born as the fix for 0517387b: every daily maintenance-sweep spawner
+/// fired unconditionally, so an undischargeable obligation accumulated
+/// one packet per day (5 open cluster-conformance sweeps when
+/// measured). The three domain guards above each solved this for one
+/// kind; a fourth one-off (`open_sweep_exists`) would have continued
+/// the pattern this module's own comment calls outgrown. Keyed on the
+/// packet's SUBJECT like `open_publish_exists` — for sweeps the
+/// subject IS the target — and filtered server-side rather than
+/// paged and scanned, so the answer costs one row.
+fn open_job_exists(h: &InventoryHelpers, args: &[Value]) -> Result<Value, EvalError> {
+    let kind = first_string(args, "open_job_exists")?;
+    let subject_id = second_string(args, "open_job_exists")?;
+    let url = format!(
+        "{}/api/jobs?kind={}&status=open&subject_id={}&limit=1",
+        h.jobs_base.trim_end_matches('/'),
+        percent_encode(kind),
+        percent_encode(subject_id),
+    );
+    let r: JobsListResponse = h.get_json(&url, "open_job_exists")?;
+    Ok(Value::Bool(!r.data.is_empty()))
 }
 
 fn open_restock_exists(h: &InventoryHelpers, args: &[Value]) -> Result<Value, EvalError> {

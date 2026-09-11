@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# dispatcher-rules-ratchet — the shrink-only guard on reactive rules
+# dispatcher-rules-ratchet — the justification guard on reactive rules
 # (protocol-policy-publish.md, the rule census).
 #
 # THE PRINCIPLE
@@ -11,136 +11,103 @@
 # into WorkflowSpec `on` blocks whole, ~22 domain effects that become
 # admission-staged obligations, and nine external-glue reactions that
 # stay. Every migration deletes its rule; nothing should quietly add
-# one. So the roster is a ratchet: the count may fall, and any rise
-# fails CI with this explanation in the output.
+# one.
 #
 # THE CHECKED PROPERTY
 # --------------------
-# The number of `[[rule]]` entries in infra/dispatcher/rules.toml is
-# <= the baseline recorded below. When a migration lands, lower the
-# baseline in the same car — the same one-definition discipline the
-# outbox ratchet used, and like it, this line is the entire state.
+# Every rule in infra/dispatcher/rules/ says WHY it exists: one file
+# per rule, holding exactly one `[[rule]]` named for the file, with a
+# non-empty `why`. The count is REPORTED, derived from the directory.
 #
-# A genuinely NEW reaction is still possible — timers, external
-# ingress, cross-protocol reactors are legitimate residents — but it
-# costs raising the baseline here, in a diff a reviewer sees, with a
-# sentence in rules.toml saying why it cannot be a protocol
-# consequence.
+# This used to be a shrink-only ceiling — `count <= BASELINE`, with
+# BASELINE a hand-typed integer raised in the same diff as the rule,
+# and a sentence here saying why the reaction could not be a protocol
+# consequence. The ceiling was never the point; the sentence was. And
+# the ceiling was a contended tail line: on 2026-09-08 two rule cars
+# could not ride one train because both appended to rules.toml and both
+# bumped the same integer here, and the second needed a re-rail
+# (backlog 07e72962). So the sentence moved into the rule's own file,
+# where it is per-rule instead of per-bump, covers all sixty rules
+# instead of the twenty-two that arrived after this script was written,
+# and cannot be edited by two cars at once. The count fell out of the
+# directory at the same time, because a number derived from the files
+# cannot drift from them (CLAUDE.md §9a: collapse it if you can).
+#
+# The loader enforces the same property at the door
+# (`registry::parse_raw_dir` refuses a rule file with no `why`, and the
+# unit test `a_rule_file_must_say_why_the_rule_exists` pins it). This
+# script is the ~1s front door that names the offending file without a
+# compile.
 #
 # Usage:  infra/lint/dispatcher-rules-ratchet.sh
 
 set -euo pipefail
 
-# 38 -> 40 (2026-08-13). Train #20 landed the two feedback-obligation
-# reactors — `complete-feedback-branch-on-car-merged` and
-# `notify-filer-on-feedback-terminal` — without raising this line,
-# which nothing caught because forge CI did not yet run the gate. Both
-# qualify under the cross-protocol-reactor exemption above and both
-# carry their "why" in rules.toml: one advances a `user-feedback` job
-# from a `ship-a-change` close, the other notifies the filer on ANY
-# terminal. Neither can be declared as a consequence inside a single
-# Workflow definition, because each spans two protocols by
-# construction. Raised here rather than on that train because the
-# violation only became visible when the gate was wired in.
-#
-# 42 -> 45 (2026-08-14, migration 122). Three more maintenance areas:
-# `maintenance-sweep-build-caches-daily`,
-# `maintenance-sweep-image-freshness-daily`,
-# `maintenance-sweep-converge-lag-daily`.
-#
-# All three are CLOCK rules, which is the first of the dispatcher's
-# three sanctioned roles under its narrowed charter (David, 2026-08-14:
-# the dispatcher "is essentially the queue watcher for us now" — clock,
-# threshold, matchmaking, and nothing else). They qualify under the
-# timer exemption above for the reason that exemption exists: there is
-# no Workflow whose definition could declare them, because nothing has
-# happened yet. A sweep's whole point is to run when NO event fired.
-#
-# Note this ratchet counts in the right direction for once. It exists to
-# stop routing leaking into the dispatcher, and these rules add none:
-# every one of them only admits a packet, and what happens next is
-# `maintenance-sweep`'s own protocol row. The number to watch is not
-# this total but the 22 `step.done.*` rules underneath it, which ARE
-# routing and are owed back to the protocol.
-#
-# 45 -> 46 (2026-08-14, migration 128). `expire-signals-on-job-closed`.
-# A CROSS-PROTOCOL REACTOR, which is the exemption above and not the
-# routing this ratchet exists to stop: no single Workflow definition
-# can express "when a job of ANY kind closes, retire the inbox
-# messages about it", because those messages are not part of the
-# job's protocol — they belong to a different domain that merely
-# observed it. Declaring it inside every Workflow would be the
-# duplication, not the discipline.
-# 46 -> 47 (2026-08-15, migration 129). `publish-to-github-daily`.
-# A TIMER, the exemption above: "publish a batch to the public mirror
-# once a day" is triggered by the clock, and there is no Workflow whose
-# definition could declare it because no packet causes it. Note the
-# rule was ALREADY seeded and running — this change only adds it to
-# rules.toml, where it should have been from the start. The count rose
-# because the file caught up with the registry, not because a new
-# reaction was introduced, and the drift guard
-# (`dispatcher_rules_seed_matches_toml`) is what forced the catch-up
-# after it reddened the 13-car train 20260815-0621.
-# 47 -> 48 (2026-08-16, migration 141). `design-review-level-sweep`.
-# A TIMER, the exemption above, and the clearest case of it yet: the
-# condition it watches is a standing STATE of the corpus — "docs with
-# open questions and nobody reviewing them" — which no Workflow
-# definition can declare because no packet causes it. That is not a
-# technicality; asking a level question only on an edge IS the defect
-# (ae8a14f7), and roughly twenty-three questions were unreachable
-# because of it. It adds no routing: the sweep only admits packets the
-# existing `design-review-spawn` rule would have admitted, and hands
-# them to the same `jobs.spawn` args.
-# 48 -> 49 (2026-08-16). `maintenance-sweep-cluster-conformance-daily`.
-# A TIMER under the exemption above, and the same shape as the four
-# maintenance sweeps already here: no packet causes "a day passed", so
-# no Workflow definition can declare it. It adds no routing — it hands
-# `jobs.spawn` the same maintenance-sweep args the other four use, with
-# a different target.
-#
-# What it buys: infra/cluster/manifests/ describes what should be
-# running and nothing checked that any of it was. boss-dev.yaml was
-# merged, applied by hand, and a day later a design doc asserted in
-# review that the pod had never run while it had 25 hours of uptime.
-# The check that answers this existed as a script; a script nobody runs
-# is not a mechanism. David, 2026-08-16: "let's try and get as much
-# maintenance and management into job protocols rather than floating
-# around scripts or system timers elsewhere."
-# 49 -> 50 (2026-08-17). `maintenance-sweep-doc-status-daily`.
-# A TIMER under the exemption above, same shape as the five sweeps
-# already here: no packet causes "a day passed". It adds no routing —
-# `jobs.spawn` with the same maintenance-sweep args, a different
-# target. Buys a caller for /api/design/stale-statuses, which has
-# existed and reported to nobody (feedback 0b8ae875).
-# 50 -> 51 (2026-08-20, migration 152). `network-census-daily`.
-# A TIMER under the exemption above, and the purest case: it spawns
-# nothing and routes nothing — one firing writes one
-# `jobs.network.census` event, the packet-loss census's measured
-# series (packet-loss.md, decided 9fb9904f). The condition it watches
-# is a standing state of the network — what is NOT moving — which no
-# Workflow definition can declare, because no packet causes it; a
-# census's whole point is to run when no event fired.
-BASELINE=51
-RULES_FILE="infra/dispatcher/rules.toml"
+RULES_DIR="infra/dispatcher/rules"
 
-count=$(grep -c '^\[\[rule\]\]' "$RULES_FILE")
-
-if (( count > BASELINE )); then
-    echo "dispatcher-rules-ratchet: $RULES_FILE has $count rules; baseline is $BASELINE" >&2
-    echo "" >&2
-    echo "  A new dispatcher rule is a reaction the protocol definition could" >&2
-    echo "  not express (protocol-policy-publish.md). If this reaction truly" >&2
-    echo "  cannot be a protocol consequence (timer / external ingress /" >&2
-    echo "  cross-protocol reactor), raise BASELINE in this script in the same" >&2
-    echo "  change and say why next to the rule. Otherwise: declare it in the" >&2
-    echo "  Workflow definition instead." >&2
+if [ ! -d "$RULES_DIR" ]; then
+    echo "dispatcher-rules-ratchet: $RULES_DIR does not exist" >&2
     exit 1
 fi
 
-if (( count < BASELINE )); then
-    echo "dispatcher-rules-ratchet: $count rules (baseline $BASELINE) — a migration landed; lower BASELINE to $count in the same car"
-    # Advisory, not fatal: the migration car that forgets to tighten
-    # the ratchet gets told, loudly, without blocking the migration.
+shopt -s nullglob
+files=("$RULES_DIR"/*.toml)
+shopt -u nullglob
+
+if [ ${#files[@]} -eq 0 ]; then
+    echo "dispatcher-rules-ratchet: no *.toml rule files in $RULES_DIR" >&2
+    echo "" >&2
+    echo "  An empty registry directory is a wrong path, not an empty" >&2
+    echo "  registry — a reader must not report 'no rules' over a typo." >&2
+    exit 1
 fi
 
-echo "dispatcher-rules-ratchet: OK ($count rules <= baseline $BASELINE)"
+problems=0
+
+for f in "${files[@]}"; do
+    name="$(basename "$f" .toml)"
+
+    blocks=$(grep -c '^\[\[rule\]\]' "$f" || true)
+    if [ "$blocks" -ne 1 ]; then
+        echo "dispatcher-rules-ratchet: $f holds $blocks [[rule]] blocks; expected exactly one" >&2
+        echo "" >&2
+        echo "  One file per rule is what makes the listing the definition:" >&2
+        echo "  \`ls $RULES_DIR\` answers 'which rules', and adding one touches" >&2
+        echo "  no shared line. Split the extra rule into its own file." >&2
+        problems=$((problems + 1))
+        continue
+    fi
+
+    if ! grep -q "^name = \"$name\"\$" "$f"; then
+        echo "dispatcher-rules-ratchet: $f does not hold a rule named \`$name\`" >&2
+        echo "" >&2
+        echo "  The file name IS the rule name. Read wrong, the file would" >&2
+        echo "  carry a reaction nobody can find by \`ls\`." >&2
+        problems=$((problems + 1))
+        continue
+    fi
+
+    # `why` is authored as a multi-line basic string. Non-empty means at
+    # least one line of prose between the delimiters — a `why = """"""`
+    # would satisfy a grep for the key and say nothing.
+    why=$(awk '/^why = """$/{f=1;next} /^"""$/{f=0} f' "$f" | tr -d '[:space:]')
+    if [ -z "$why" ]; then
+        echo "dispatcher-rules-ratchet: rule \`$name\` has no \`why\` ($f)" >&2
+        echo "" >&2
+        echo "  A new dispatcher rule is a reaction the protocol definition" >&2
+        echo "  could not express (protocol-policy-publish.md). Say in a" >&2
+        echo "  why = \"\"\"…\"\"\" field which standing exemption it claims —" >&2
+        echo "  timer, threshold, external ingress/glue, or cross-protocol" >&2
+        echo "  reactor — and why. Otherwise: declare it in the Workflow" >&2
+        echo "  definition instead. See $RULES_DIR/README.md." >&2
+        problems=$((problems + 1))
+    fi
+done
+
+if [ "$problems" -ne 0 ]; then
+    echo "" >&2
+    echo "dispatcher-rules-ratchet: $problems rule file(s) failed" >&2
+    exit 1
+fi
+
+echo "dispatcher-rules-ratchet: OK (${#files[@]} rules, each saying why it exists)"

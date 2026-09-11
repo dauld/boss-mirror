@@ -1,0 +1,14 @@
+[[rule]]
+name = "forward-invoice-paid-to-webhook"
+why = """
+External glue, the census class for reactions whose EFFECT LIVES OUTSIDE
+the system: forwards `commerce.invoice.paid` to the configured webhook so an external
+party — the simulator's CounterpartyEngine standing in for banks,
+suppliers, the keg courier, the tax authority — reacts without
+subscribing to the event stream. No Workflow definition can declare a
+consequence that happens off-system. No-op wherever
+BOSS_EVENT_WEBHOOK_URL is unset.
+"""
+on_event = "commerce.invoice.paid"
+[[rule.do]]
+handler = "webhook.notify"

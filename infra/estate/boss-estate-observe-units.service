@@ -1,0 +1,54 @@
+# The unit half of the host observation loop (729329c6): observe-host
+# records what the machine IS, this records what its units are DOING —
+# so "is boss-train.service alive" is a SoR read, not a human with ssh.
+# Installed on boss-gcp by deploy-services.sh (TIMERS row). The forge
+# host runs the SAME pair with drop-in overrides, installed by hand
+# until its config-not-in-repo debt is paid:
+#   sudo install -m644 infra/estate/boss-estate-observe-units.{service,timer} /etc/systemd/system/
+#   sudo mkdir -p /etc/systemd/system/boss-estate-observe-units.service.d
+#   printf '[Service]\nEnvironment=HOST_ID=forge\nEnvironment="UNITS=forgejo.service cluster-deploy-runner.timer cluster-deploy-runner.service"\n' | sudo tee /etc/systemd/system/boss-estate-observe-units.service.d/host.conf
+#   sudo systemctl daemon-reload && sudo systemctl enable --now boss-estate-observe-units.timer
+[Unit]
+Description=BOSS estate: observe this host's units and record what they were doing
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HOST_ID=boss-gcp
+Environment=JOBS_API=http://10.20.0.34:7900
+# NO UNITS= LINE, ON PURPOSE — the roster is DERIVED.
+#
+# This line used to read `Environment="UNITS=boss-estate-observe-host.timer
+# boss-gcp-converge.timer"`, and those two units were the whole of what
+# this host's observer watched. Everything else deploy-services.sh
+# installs here was outside the watch BY CONSTRUCTION, so its absence
+# from a clean observation said nothing — and on 2026-09-10 that is
+# exactly what went wrong (backlog 68757702): "is
+# boss-ml-inference-batch.timer installed?" had no read path, the tree
+# was reasoned from instead, and the answer was WRONG — the unit had been
+# firing and failing nightly since 2026-08-17.
+#
+# Unset, observe-units.sh derives the roster from deploy-services.sh's
+# TIMERS list — the same file, at the same commit, that boss-gcp-converge
+# runs to install those units every half hour — and watches both halves
+# of every pair. So a timer that lands on main is watched on the tick it
+# is installed, with no line here to remember to edit (CLAUDE.md §9a).
+# Run `infra/estate/observe-units.sh --roster` to see exactly what that
+# is for a checkout.
+#
+# A host that runs a DIFFERENT set still names its own, by drop-in — the
+# forge does, above. QUOTE any such UNITS=, because a space in an
+# unquoted Environment= line starts a SECOND assignment:
+# `Environment=UNITS=a b` sets UNITS=a and drops b.
+# The timers-leave-a-packet pair: a timer with no Job trail fails
+# silently, which is the exact class this observer exists to end.
+# BOSS_JOBS_URL pinned INLINE: deploy-services' shared jobs-url.conf
+# drop-in points the timer fleet at the legacy 127.0.0.1 instance
+# (91ddebfb) and drop-in env wins over unit env — observe-host's first
+# scheduled firing died 400 registering its packet against a registry
+# that has never heard of this kind. env(1) on the Exec line outranks
+# both.
+ExecStartPre=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-maintenance-wrap.sh maintenance-estate-observe-units "estate unit observation"
+ExecStart=/opt/boss/infra/estate/observe-units.sh
+ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-step.sh maintenance-estate-observe-units run

@@ -1,6 +1,6 @@
 # Design: protocol cadence — the clock coordinates, systemd supervises
 
-**Status:** in-review — open questions tracked at `/system/design`
+**Status**: decided — all 4 questions resolved 2026-08-14, two folds superseded by David 2026-08-15; see Decisions.
 **Origin:** David, 2026-08-12 (verbatim, `bacca14e`): "We should be
 using dispatcher to coordinate the conductor as well rather than
 systemd. We want every protocol internalized so we can measure,
@@ -80,7 +80,7 @@ Steps 1–3 shipped between 2026-08-12 and 08-13, against the separate
 is left, and the order matters because the loop that would be migrated
 is the one scheduling its own migration:
 
-1. **`[[cadence]]` in `rules.toml`, read-only.** Add the shape and
+1. **`[[cadence]]` in a rule file under `infra/dispatcher/rules/`, read-only.** Add the shape and
    parse it; the loop still obeys `cadence_rules`. Nothing changes
    behaviourally, so this cannot break a window.
 2. **Serve cadence from the jobs API**, the surface car `c083a38e`
@@ -88,7 +88,13 @@ is the one scheduling its own migration:
 3. **Switch the loop to the API and delete the pool.** This is where
    the split-brain dies: one reader, one registry, and the database
    the operator reads becomes the database the loop obeys. Do it
-   between windows, never with a train in flight.
+   between windows, never with a train in flight. *Shipped 2026-08-31
+   (backlog a516f1f1): the pool had been recording every firing in a
+   database the last-firing surface never reads, so
+   `/api/cadence/rules/{name}/last-firing` answered `null` for every
+   rule while the loop fired on schedule. The loop now refuses to
+   start without `BOSS_JOBS_URL` — a local default here is the same
+   silent redirect the maintenance wrappers already paid for.*
 4. **Retire `cadence_rules`** once no reader remains, and fold its
    rows in as `[[cadence]]` entries under the same ratchet as
    `[[rule]]`.

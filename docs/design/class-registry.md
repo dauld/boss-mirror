@@ -1,6 +1,6 @@
 # Design: Class registry
 
-**Status:** living — the registry-backed taxonomy pattern; current-truth reference.
+**Status**: living — the registry-backed taxonomy pattern; current-truth reference.
 
 A **Class** is a logical grouping of Subjects, identified by a stable
 `code` within a `subject_kind`. Roles ('ceo', 'service-tech', …) are

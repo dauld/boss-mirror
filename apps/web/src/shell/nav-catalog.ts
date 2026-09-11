@@ -63,13 +63,33 @@ export type NavGroup = Readonly<{ label: string; items: ReadonlyArray<NavItem> }
 /// without widening the PERMISSION vocabulary — the catalog still
 /// answers "which app owns this surface" and "which sidebar row
 /// highlights" for them.
-export type UngatedSurfaceId = 'system-incidents';
+// 'system-fleet' left the permission vocabulary with the 2026-08-31
+// consolidation (its tab gates under system-monitoring), but the
+// catalog still answers "which app / which row" for its route kind.
+// 'hr', 'watchlist', 'manual' (CAR-6, 6edb1b77): routable since their
+// pages shipped but never listed here, so a 574-line HR page and the
+// app's best list were typed-URL-only. Like system-fleet they borrow
+// gate parity from the surface they sit beside (hr → 'people',
+// watchlist → 'accounts') rather than widening the vocabulary; the
+// manual is permKey-less like the docs it renders.
+export type UngatedSurfaceId =
+  | 'system-incidents'
+  // 'system-crew' (the Crew Board): permKey-less like the Operate row
+  // above, and for the same reason — it is a read-only observation
+  // surface over the delivery pipeline, readable by any operator, and
+  // adding a permKey would mean widening the RouteName vocabulary in
+  // libs/web-kit and hand-editing four role entries in ROUTE_ACCESS.
+  | 'system-crew'
+  | 'system-fleet'
+  | 'system-backlog'
+  | 'hr'
+  | 'watchlist'
+  | 'manual';
 
 export const ROUTE_CATALOG: Readonly<Record<RouteName | UngatedSurfaceId, NavItem>> = {
   jobs:      { id: 'jobs',      label: 'All jobs',         path: '/ux/jobs',      permKey: 'jobs',      app: 'home' },
   sales:     { id: 'sales',     label: 'Sales pipeline',   path: '/ux/sales',     permKey: 'sales',     app: 'sales' },
   service:   { id: 'service',   label: 'Service queue',    path: '/ux/service',   permKey: 'service',   module: 'support', app: 'service' },
-  refurb:    { id: 'refurb',    label: 'Refurbishment',    path: '/ux/refurb',    permKey: 'refurb',    module: 'support', app: 'refurb' },
   qa:        { id: 'qa',        label: 'QA',               path: '/ux/qa',        permKey: 'qa',        module: 'qa',      app: 'qa' },
   finance:   { id: 'finance',   label: 'Finance',          path: '/ux/finance',   permKey: 'finance',   module: 'finance', app: 'finance' },
   warehouse: { id: 'warehouse', label: 'Inventory',        path: '/ux/warehouse', permKey: 'warehouse', module: 'warehouse', app: 'warehouse' },
@@ -89,57 +109,46 @@ export const ROUTE_CATALOG: Readonly<Record<RouteName | UngatedSurfaceId, NavIte
   views:     { id: 'views',     label: 'Views',            path: '/ux/views',     permKey: 'views',     app: 'home' },
   'marketing-assets': { id: 'marketing-assets', label: 'Marketing assets', path: '/ux/marketing-assets', permKey: 'marketing-assets', module: 'marketing-assets', app: 'marketing' },
   calendar:  { id: 'calendar',  label: 'Release calendar', path: '/ux/calendar',  permKey: 'calendar',  module: 'calendar', app: 'production' },
+  hr:        { id: 'hr',        label: 'HR',               path: '/hr',           permKey: 'people',    app: 'people' },
+  watchlist: { id: 'watchlist', label: 'Churn watchlist',  path: '/watchlist',    permKey: 'accounts',  app: 'sales' },
+  manual:    { id: 'manual',    label: 'Manual',           path: '/manual',       app: 'home' },
 
-  // Modeling surfaces — operator-tier (no separate /admin tier).
-  // policy + workflows are dept-head + COO authority (per the
-  // "engineers are operators like anyone else" frame). Step
-  // plugins are JS bundle authoring → IT engineering work.
+  // The IT department — SIX surfaces (the 2026-08-31 consolidation,
+  // packet 1f6d55e0; was 17 pages, four of them dual-routed). The
+  // catalog keeps non-sidebar entries only where a RouteName still
+  // exists (tab pages, unlisted doors) so appForSection() can answer
+  // for them; map/flow/model died outright and fleet became Operate's
+  // Bottlenecks tab.
   // First IT surface in catalog order = the IT app's landing
-  // (departure-board.md Q1, David's call: the yard is the front
-  // door, guest-visible).
-  'system-yard':              { id: 'system-yard',              label: 'Train Yard',          path: '/it/yard',         permKey: 'system-yard',             app: 'it' },
-  // The network map — every registry station as a node (stations.md:
-  // priority queues, stations, and network nodes are one concept).
-  // After the yard: the yard is one batch station rendered deep, the
-  // map is every station rendered wide.
-  'system-map':               { id: 'system-map',               label: 'Network map',         path: '/it/map',          permKey: 'system-map',              app: 'it' },
-  'system-monitoring':       { id: 'system-monitoring',       label: 'Monitoring',          path: '/it/monitoring',   permKey: 'system-monitoring',       app: 'it' },
-  policy:                    { id: 'policy',                  label: 'Policy',              path: '/it/policy',       permKey: 'policy',                  app: 'it' },
-  'system-step-plugins':     { id: 'system-step-plugins',     label: 'Step plugins',        path: '/it/step-plugins', permKey: 'system-step-plugins',     app: 'it' },
-  'system-dispatcher':       { id: 'system-dispatcher',       label: 'Dispatcher rules',    path: '/it/dispatcher',   permKey: 'system-dispatcher',       app: 'it' },
-  'system-model':            { id: 'system-model',            label: 'System Model',        path: '/it',              permKey: 'system-model',            app: 'it' },
-  'system-subjects':         { id: 'system-subjects',         label: 'Subjects & Classes',  path: '/it/subjects',     permKey: 'system-subjects',         app: 'it' },
-  // The rule-authoring list + editor are reached via a link FROM the
-  // cascade viz (the system-dispatcher Surface entry), not their own
-  // sidebar rows — so these catalog entries exist to satisfy the
-  // Record<RouteName,…> type but are intentionally absent from
-  // SURFACE_ORDER (no sidebar item ⇒ no sidebar-consistency entry).
-  'system-dispatcher-rules': { id: 'system-dispatcher-rules', label: 'Dispatcher rules — authoring', path: '/it/dispatcher/rules', permKey: 'system-dispatcher-rules', app: 'it' },
-  'system-dispatcher-rule':  { id: 'system-dispatcher-rule',  label: 'Dispatcher rule — editor',     path: '/it/dispatcher/rules', permKey: 'system-dispatcher-rule',  app: 'it' },
-  'system-design':           { id: 'system-design',           label: 'Design review',       path: '/it/design',       permKey: 'system-design',           app: 'it' },
-  'system-flow':             { id: 'system-flow',             label: 'Flow',                path: '/it/flow',         permKey: 'system-flow',             app: 'it' },
-  'system-fleet':            { id: 'system-fleet',            label: 'Bottlenecks',               path: '/it/fleet',        permKey: 'system-fleet',            app: 'it' },
-  'system-feedback':         { id: 'system-feedback',         label: 'Feedback triage',     path: '/it/feedback',     permKey: 'system-feedback',         app: 'it' },
-  // The incidents surface — active incident-post-mortem packets plus
-  // the closed ones as a durable archive (David: "both where we
-  // respond to active incidents and document post mortems for
-  // posterity"). PermKey-less: readable by any operator, like the
-  // feedback board; the Job/step writes behind it stay policy-gated.
-  'system-incidents':        { id: 'system-incidents',        label: 'Incidents',           path: '/it/incidents',    app: 'it' },
-  // The "Evolve" surface — controlled, sandboxed model modifications
-  // (placeholder for now; visible to every role via canSeeRoute).
-  'system-experiments':      { id: 'system-experiments',      label: 'Experiments',         path: '/it/experiments',  permKey: 'system-experiments',      app: 'it' },
+  // (departure-board.md Q1): the yard, now AT /it itself.
+  'system-yard':              { id: 'system-yard',              label: 'Train Yard',          path: '/it',              permKey: 'system-yard',             app: 'it' },
+  // The Operate row is permKey-less like the incidents surface it
+  // leads with — readable by any operator; the tabs behind it keep
+  // their own gates.
+  'system-incidents':        { id: 'system-incidents',        label: 'Operate',             path: '/it/operate',      app: 'it' },
+  'system-monitoring':       { id: 'system-monitoring',       label: 'Monitoring',          path: '/it/operate/audit', permKey: 'system-monitoring',      app: 'it' },
+  'system-fleet':            { id: 'system-fleet',            label: 'Bottlenecks',         path: '/it/operate/bottlenecks', permKey: 'system-monitoring', app: 'it' },
+  workflows:                 { id: 'workflows',               label: 'Registry',            path: '/it/registry',     permKey: 'workflows',               app: 'it' },
+  policy:                    { id: 'policy',                  label: 'Policy',              path: '/it/registry/policy', permKey: 'policy',               app: 'it' },
+  'system-step-plugins':     { id: 'system-step-plugins',     label: 'Step plugins',        path: '/it/registry/step-plugins', permKey: 'system-step-plugins', app: 'it' },
+  'system-dispatcher':       { id: 'system-dispatcher',       label: 'Dispatcher rules',    path: '/it/registry/dispatcher', permKey: 'system-dispatcher', app: 'it' },
+  'system-subjects':         { id: 'system-subjects',         label: 'Subjects & Classes',  path: '/it/registry/subjects', permKey: 'system-subjects',    app: 'it' },
+  'system-dispatcher-rules': { id: 'system-dispatcher-rules', label: 'Dispatcher rules — authoring', path: '/it/registry/rules', permKey: 'system-dispatcher-rules', app: 'it' },
+  'system-dispatcher-rule':  { id: 'system-dispatcher-rule',  label: 'Dispatcher rule — editor',     path: '/it/registry/rules', permKey: 'system-dispatcher-rule',  app: 'it' },
+  'system-design':           { id: 'system-design',           label: 'Design',              path: '/it/design',       permKey: 'system-design',           app: 'it' },
+  'system-experiments':      { id: 'system-experiments',      label: 'Experiments',         path: '/it/design/experiments', permKey: 'system-experiments', app: 'it' },
+  'system-feedback':         { id: 'system-feedback',         label: 'Feedback triage',     path: '/it/design/feedback', permKey: 'system-feedback',      app: 'it' },
+  'system-backlog':          { id: 'system-backlog',          label: 'IT backlog',          path: '/it/design/backlog', permKey: 'system-feedback',      app: 'it' },
+  // The hardware registry — declared beside observed beside the
+  // difference, plus the dev-workspace door (59ef456a).
+  // The Crew Board — the middle third of the operator surface. A SIDEBAR
+  // ROW, not a tab: David's decision on backlog 04c5bbc0 (2026-09-11)
+  // reversed the proposal to fold it into an existing IT family.
+  'system-crew':             { id: 'system-crew',             label: 'Crew Board',          path: '/it/crew',         app: 'it' },
+  'system-estate':           { id: 'system-estate',           label: 'Estate',              path: '/it/estate',       permKey: 'system-estate',           app: 'it' },
   'system-kb':               { id: 'system-kb',               label: 'Knowledge Base',      path: '/it/kb',           permKey: 'system-kb',               app: 'it' },
+  // Unlisted door: reachable, never a sidebar row.
   'auth-admin':              { id: 'auth-admin',              label: 'Auth admin',          path: '/it/auth-admin',   permKey: 'auth-admin',              app: 'it' },
-  // The single Workflow surface. There were two entries before the
-  // rename — a 'Job kinds' authoring row and a 'Workflows' catalog
-  // row — pointing at the same path; the authoring row had already
-  // been dropped from the sidebar (authoring is reached FROM here),
-  // and renaming collapsed the keys, which is what surfaced it.
-  // KB view of every active Workflow — read-only catalog, visible to
-  // every role via canSeeRoute() short-circuit. Editing lives at
-  // /system/workflows, reached FROM Workflows.
-  workflows:                 { id: 'workflows',               label: 'Workflows',           path: '/it/workflows',    permKey: 'workflows',               app: 'it' },
 };
 
 /// The apps this host offers: Home, Simulator, and one per department
@@ -244,7 +253,7 @@ export const APP_SUBJECT_KINDS: Readonly<Partial<Record<AppId, ReadonlyArray<str
   simulator: [],
   // `custom` is the escape hatch for Jobs about things that are not
   // domain Subjects — a design doc is the shipped example, and
-  // /system/design is an IT surface.
+  // /it/design is an IT surface.
   it: ['workflow', 'company', 'custom'],
   // Was one `crm` bucket. Split along the departments that actually do
   // the work: Sales owns the accounts and the shop, Marketing owns the

@@ -1,9 +1,10 @@
 <script lang="ts">
-  // /system/workflows — port of apps/web/src/admin/WorkflowsPage.tsx.
+  // /it/registry — port of apps/web/src/admin/WorkflowsPage.tsx.
 
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
   import Link from '@boss/web-kit/ui/Link.svelte';
+  import StatusChip from '@boss/web-kit/ui/StatusChip.svelte';
   import type { WorkflowSpec } from './workflowTypes';
   import { href } from '../router';
 
@@ -55,7 +56,7 @@
   {/if}
 
   <div style="padding:0 24px 16px">
-    <Link to={href('/system/workflows/new')} className="wb-btn wb-btn-primary">
+    <Link to={href('/it/registry/new')} className="wb-btn wb-btn-primary">
       + Create new kind
     </Link>
   </div>
@@ -78,7 +79,7 @@
               {#each byCategory.get(cat) ?? [] as k (k.kind)}
                 <tr>
                   <td>
-                    <Link to={href(`/system/workflows/${encodeURIComponent(k.kind)}`)}>
+                    <Link to={href(`/it/registry/${encodeURIComponent(k.kind)}`)}>
                       <span class="mono">{k.kind}</span>
                     </Link>
                   </td>
@@ -94,7 +95,7 @@
                   <td class="num">{k.steps.length}</td>
                   <td>
                     {#each k.subject_kinds as s (s)}
-                      <span class="chip chip-stage chip-stage-muted" style="margin-right:4px">{s}</span>
+                      <span style="margin-right:4px"><StatusChip value={s} tone="muted" /></span>
                     {/each}
                   </td>
                 </tr>

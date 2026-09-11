@@ -12,6 +12,7 @@
   } from '../jobs/types';
   import type { Employee } from '../people/types';
   import { putStep } from './stepWrite';
+  import { PROCEDURE_KEY } from './procedure';
 
   type StepData = {
     id: string;
@@ -195,6 +196,14 @@
     // one screen — the second time as a flattened raw-markdown wall
     // (browser-verified on the live gateway, 2026-08-19).
     'context_md',
+    // The step's procedure, for the same reason one line up: StepProcedure
+    // (mounted by StepSurface above every surface) renders it as the
+    // step's instructions, with its paragraphs intact. This list is
+    // where it used to land — unstyled prose under its own lowercase
+    // key, below the assignee and due-date rows, newlines collapsed
+    // into one wall. The key is imported so the panel and this
+    // exclusion cannot disagree about its name (CLAUDE.md §9a).
+    PROCEDURE_KEY,
   ]);
   let contextEntries = $derived.by(() => {
     const declared = new Set((step.fields ?? []).map((f) => f.name));

@@ -10,7 +10,7 @@ Environment=RUST_LOG=info
 Environment=BOSS_POSTGRES_URL=postgres://boss:boss@127.0.0.1/boss
 ExecStartPre=/opt/boss/infra/boss-maintenance-wrap.sh maintenance-views-catchup "event_facts catch-up"
 ExecStart=/usr/local/bin/boss-views-catchup
-ExecStartPost=/opt/boss/infra/boss-step.sh maintenance-views-catchup run result=ok
+ExecStopPost=-/opt/boss/infra/boss-step.sh maintenance-views-catchup run
 User=david
 
 [Install]

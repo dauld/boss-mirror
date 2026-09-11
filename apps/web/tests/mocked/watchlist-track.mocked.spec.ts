@@ -17,7 +17,7 @@ const J = (id: string, about: string, status: string, meta: Record<string, unkno
      tags: [], metadata: { submitted_by: 'emp-david', ...meta }, simulated: false });
 
 const DATA = [
-  J('w1', '/system/yard', 'open'),
+  J('w1', '/it', 'open'),
   J('w2', '/ux/jobs', 'open'),
   J('w3', '/shop', 'open'),
   J('w4', '/it/design', 'closed', { outcome: 'completed' }),
@@ -56,7 +56,7 @@ test('packets stand at the stop their steps say they reached', async ({ page }) 
 
   const stop = (label: string) =>
     track.locator('.watch-stop').filter({ has: page.getByText(label, { exact: true }) });
-  await expect(stop('Being read')).toContainText('/system/yard');
+  await expect(stop('Being read')).toContainText('/it');
   await expect(stop('Being worked out')).toContainText('/ux/jobs');
   await expect(stop('Being built')).toContainText('/shop');
   await expect(stop('Done')).toContainText('/it/design');

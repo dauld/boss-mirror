@@ -9,10 +9,12 @@
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import Link from '@boss/web-kit/ui/Link.svelte';
   import OverflowBanner from '@boss/web-kit/ui/OverflowBanner.svelte';
+  import StatusChip from '@boss/web-kit/ui/StatusChip.svelte';
+  import SortHeader from '@boss/web-kit/ui/SortHeader.svelte';
+  import { createSortState } from '@boss/web-kit/ui/sort-state.svelte';
   import { fetchPaged, isCapped, type Paged } from '../data/paginated';
   import {
     CARRIER_LABEL,
-    DIRECTION_LABEL,
     STATUS_LABEL,
     type Shipment,
     type ShipmentDirection,
@@ -92,13 +94,49 @@
     }),
   );
 
-  function directionClass(d: ShipmentDirection): string {
+  // Fixed-order shipment lists were useless at seed scale (CAR-4).
+  // Created-newest-first is the landing order; count/date columns
+  // default descending.
+  type SortKey =
+    | 'id'
+    | 'direction'
+    | 'status'
+    | 'carrier'
+    | 'tracking'
+    | 'origin'
+    | 'destination'
+    | 'items'
+    | 'created'
+    | 'eta';
+  const DESC_FIRST: ReadonlyArray<SortKey> = ['items', 'created', 'eta'];
+  const sort = createSortState<SortKey>({ key: 'created', dir: 'desc' }, (k) =>
+    DESC_FIRST.includes(k) ? 'desc' : 'asc',
+  );
+  let visibleSorted = $derived(
+    sort.sorted(visible, {
+      id: (s) => s.id,
+      direction: (s) => s.direction,
+      status: (s) => s.status,
+      carrier: (s) => s.carrier,
+      tracking: (s) => s.tracking_number,
+      origin: (s) => s.origin,
+      destination: (s) => s.destination,
+      items: (s) => s.asset_ids.length,
+      created: (s) => s.created_on,
+      eta: (s) => s.estimated_delivery,
+    }),
+  );
+
+  function directionTone(d: ShipmentDirection): 'ok' | 'muted' {
     return d === 'inbound' ? 'ok' : 'muted';
   }
-  function statusClass(s: ShipmentStatus): string {
+  // delivered = terminal success → ok; exception = needs attention →
+  // warn; in-transit = literally in progress → active; label-created /
+  // picked-up = not moving yet → muted.
+  function statusTone(s: ShipmentStatus): 'ok' | 'warn' | 'active' | 'muted' {
     if (s === 'delivered') return 'ok';
     if (s === 'exception') return 'warn';
-    if (s === 'in-transit') return 'ok';
+    if (s === 'in-transit') return 'active';
     return 'muted';
   }
 
@@ -180,31 +218,27 @@
         <table class="data-table data-table-striped">
           <thead>
             <tr>
-              <th>Shipment</th>
-              <th>Direction</th>
-              <th>Status</th>
-              <th>Carrier</th>
-              <th>Tracking</th>
-              <th>Origin</th>
-              <th>Destination</th>
-              <th>Items</th>
-              <th>Created</th>
-              <th>ETA</th>
+              <SortHeader {sort} key="id">Shipment</SortHeader>
+              <SortHeader {sort} key="direction">Direction</SortHeader>
+              <SortHeader {sort} key="status">Status</SortHeader>
+              <SortHeader {sort} key="carrier">Carrier</SortHeader>
+              <SortHeader {sort} key="tracking">Tracking</SortHeader>
+              <SortHeader {sort} key="origin">Origin</SortHeader>
+              <SortHeader {sort} key="destination">Destination</SortHeader>
+              <SortHeader {sort} key="items" num={true}>Items</SortHeader>
+              <SortHeader {sort} key="created">Created</SortHeader>
+              <SortHeader {sort} key="eta">ETA</SortHeader>
             </tr>
           </thead>
           <tbody>
-            {#each visible as s (s.id)}
+            {#each visibleSorted as s (s.id)}
               <tr id={`shipment-${s.id}`}>
                 <td class="mono"><EntityLink kind="shipment" id={s.id} /></td>
                 <td>
-                  <span class="chip chip-stage chip-stage-{directionClass(s.direction)}">
-                    {DIRECTION_LABEL[s.direction]}
-                  </span>
+                  <StatusChip value={s.direction} tone={directionTone(s.direction)} />
                 </td>
                 <td>
-                  <span class="chip chip-stage chip-stage-{statusClass(s.status)}">
-                    {STATUS_LABEL[s.status]}
-                  </span>
+                  <StatusChip value={s.status} tone={statusTone(s.status)} />
                 </td>
                 <td>{s.carrier ? CARRIER_LABEL[s.carrier] : '—'}</td>
                 <td class="mono">{s.tracking_number ?? '—'}</td>

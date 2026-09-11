@@ -35,15 +35,31 @@ pub struct SessionResponse {
     pub role: Option<String>,
 }
 
-pub async fn session(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    match extract_session(&headers, &state.session_key) {
-        Some(s) => Json(SessionResponse {
+impl From<Session> for SessionResponse {
+    /// The endpoint's whole answer, as a value.
+    ///
+    /// It relays the signed session and invents nothing — which is
+    /// what makes a break-glass session answerable here at all: that
+    /// session carries the narrow `break-glass` role and NO employee
+    /// id by design (Q4, docs/design/break-glass-is-a-key-you-hold.md),
+    /// because resolving one would make the emergency door depend on
+    /// boss-people being up. A reader that treats "no employee" as a
+    /// broken login is reading this answer wrong; the answer itself is
+    /// complete. Pulled out of the handler so that contract is a
+    /// tested value rather than a shape assembled inline.
+    fn from(s: Session) -> Self {
+        Self {
             username: s.username,
             expires_at: s.expiry,
             employee_id: s.employee_id,
             role: s.role,
-        })
-        .into_response(),
+        }
+    }
+}
+
+pub async fn session(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    match extract_session(&headers, &state.session_key) {
+        Some(s) => Json(SessionResponse::from(s)).into_response(),
         None => (StatusCode::UNAUTHORIZED, "not signed in").into_response(),
     }
 }
@@ -102,21 +118,27 @@ pub struct TenantManifest {
 /// missing or unparseable file falls back to that all-enabled default
 /// rather than blanking the UI.
 pub async fn tenant_manifest() -> Response {
+    Json(tenant_manifest_now()).into_response()
+}
+
+/// The manifest as a value — what `/api/tenant/manifest` answers, and
+/// what the static server inlines into `index.html` so the first
+/// paint already knows the tenant (5578e42d). One reader of
+/// tenant.toml, two doors.
+pub fn tenant_manifest_now() -> TenantManifest {
     match load_tenant_toml() {
-        Some(parsed) => Json(TenantManifest {
+        Some(parsed) => TenantManifest {
             display_name: parsed.meta.display_name,
             tenant_id: parsed.meta.tenant_id,
             modules: parsed.modules,
             labels: parsed.labels,
-        })
-        .into_response(),
-        None => Json(TenantManifest {
+        },
+        None => TenantManifest {
             display_name: None,
             tenant_id: None,
             modules: Default::default(),
             labels: Default::default(),
-        })
-        .into_response(),
+        },
     }
 }
 
@@ -324,6 +346,40 @@ shop = true
             .unwrap();
         let rows: Vec<RevenueCategory> = serde_json::from_slice(&body).unwrap();
         assert!(rows.is_empty());
+    }
+
+    /// The identity read path, from the cookie the break-glass
+    /// ceremony mints to the JSON the SPA classifies.
+    ///
+    /// The emergency session is not an employee and never will be
+    /// (Q4). This pins the endpoint's half of packet 2ef7726b: the
+    /// answer names the break-glass actor and the narrow role, and
+    /// omits `employee_id` rather than inventing one. The defect that
+    /// packet reports was on the reading side — the SPA filed this
+    /// answer under "unrecognized" — so this test is the statement
+    /// that the answer being read was right.
+    #[test]
+    fn a_break_glass_session_answers_as_the_break_glass_actor_with_no_employee() {
+        let (_set_cookie, sess) = boss_gateway::break_glass::mint_session(KEY);
+        let headers = headers_with_cookie(&sess.encode(KEY));
+        let decoded = extract_session(&headers, KEY).expect("the minted cookie decodes");
+
+        let r = SessionResponse::from(decoded);
+        assert_eq!(r.username, boss_gateway::break_glass::BREAK_GLASS_ACTOR);
+        assert_eq!(r.role.as_deref(), Some(boss_core::roles::BREAK_GLASS_ROLE));
+        assert_eq!(
+            r.employee_id, None,
+            "resolving an employee would make the emergency door depend on boss-people"
+        );
+
+        // The wire shape the SPA reads: no `employee_id` key at all,
+        // which is what `classifyProbe` sees.
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(
+            !json.contains("employee_id"),
+            "a break-glass session must not carry an employee id: {json}"
+        );
+        assert!(json.contains(r#""role":"break-glass""#), "{json}");
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use boss_core::job::{Job, JobId, JobStatus, Priority, Step, StepId, StepStatus, Subject};
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use crate::port::{
@@ -51,6 +52,19 @@ impl PgJobs {
 // ---------------------------------------------------------------------------
 
 #[derive(sqlx::FromRow)]
+struct EstateNodeRow {
+    id: String,
+    label: String,
+    address: String,
+    role: String,
+    cpu: Option<i32>,
+    memory_gb: Option<i32>,
+    disk_gb: Option<i32>,
+    notes: Option<String>,
+    retired: bool,
+}
+
+#[derive(sqlx::FromRow)]
 struct JobRow {
     id: uuid::Uuid,
     kind: String,
@@ -89,6 +103,8 @@ struct StepRow {
     notes: Option<String>,
     step_plugin_version: i32,
     embedded_job: Option<uuid::Uuid>,
+    completed_by: Option<String>,
+    completed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Joined row backing [`PgJobs::list_assignments`] — a `StepRow`
@@ -155,6 +171,15 @@ fn row_to_step(r: StepRow) -> Result<Step, JobsError> {
         sign_offs: serde_json::from_value(r.sign_offs).unwrap_or_default(),
         fields: serde_json::from_value(r.fields).unwrap_or_default(),
         completed_on: r.completed_on,
+        // `ActorId::from_str` is infallible: a stored id parses to the
+        // typed actor it was written from (bare → Human,
+        // `automation:` → Automation, `<mode>:<model>` → Agent).
+        completed_by: r
+            .completed_by
+            .as_deref()
+            .map(str::parse)
+            .and_then(Result::ok),
+        completed_at: r.completed_at,
         metadata: r.metadata,
         notes: r.notes,
         step_plugin_version: r.step_plugin_version,
@@ -389,6 +414,22 @@ impl JobsRepository for PgJobs {
         Ok(row.map(row_to_job))
     }
 
+    async fn resolve_job_id_prefix(&self, prefix: &str) -> Result<Vec<JobId>, JobsError> {
+        // LIKE on the canonical text form; LIMIT 2 is all the caller
+        // needs to tell one match from many, and keeps a short prefix
+        // from scanning the table. `%` and `_` cannot appear in the
+        // hex-and-hyphen prefix the handler admits, so no escaping is
+        // needed — but the prefix is still bound, never interpolated.
+        let ids = sqlx::query_scalar::<_, uuid::Uuid>(
+            "SELECT id FROM jobs WHERE id::text LIKE $1 || '%' LIMIT 2",
+        )
+        .bind(prefix)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+        Ok(ids.into_iter().map(JobId::from_uuid).collect())
+    }
+
     async fn update_job_at(
         &self,
         job: &Job,
@@ -518,6 +559,146 @@ impl JobsRepository for PgJobs {
         Ok(job)
     }
 
+    async fn list_estate_nodes(&self) -> Result<Vec<crate::port::EstateNode>, JobsError> {
+        let rows = sqlx::query_as::<_, EstateNodeRow>(
+            r#"
+            SELECT id, label, address, role, cpu, memory_gb, disk_gb, notes,
+                   (retired_at IS NOT NULL) AS retired
+            FROM nodes
+            ORDER BY role, id
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::port::EstateNode {
+                id: r.id,
+                label: r.label,
+                address: r.address,
+                role: r.role,
+                cpu: r.cpu,
+                memory_gb: r.memory_gb,
+                disk_gb: r.disk_gb,
+                notes: r.notes,
+                retired: r.retired,
+            })
+            .collect())
+    }
+
+    async fn recent_events_by_kind(
+        &self,
+        kind: &str,
+        scope: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>, JobsError> {
+        // The SQL lives in boss-events, which owns audit_log — this
+        // crate already writes through its `record_event_in_tx`, and
+        // reading through its helper keeps the table's ownership in
+        // one place rather than growing a second copy of the query.
+        // `scope` travels down WITH the limit rather than being applied
+        // to the page that comes back: filtering here would leave a
+        // slow series exactly as unreadable as it was before.
+        let rows = boss_events::tail_http::recent_by_kind(&self.pool, kind, scope, limit)
+            .await
+            .map_err(JobsError::Storage)?;
+        rows.into_iter()
+            .map(|r| serde_json::to_value(r).map_err(|e| JobsError::Storage(e.to_string())))
+            .collect()
+    }
+
+    async fn step_flow_cube(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<crate::station_flow::FlowCell>, JobsError> {
+        // Same ownership rule as `recent_events_by_kind`: the SQL
+        // against `audit_log` lives in boss-events. What comes back is
+        // the log's own row shape; the mapping into the station-facing
+        // cell happens here, at the adapter boundary.
+        let rows = boss_events::tail_http::step_flow_cube(&self.pool, since)
+            .await
+            .map_err(JobsError::Storage)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::station_flow::FlowCell {
+                job_kind: r.job_kind,
+                step_kind: r.step_kind,
+                spec_slug: r.spec_slug,
+                authority_role: r.authority_role,
+                arrived: r.arrived,
+                served: r.served,
+            })
+            .collect())
+    }
+
+    async fn events_for_job(
+        &self,
+        job_id: &JobId,
+        limit: i64,
+    ) -> Result<Vec<boss_core::event::Event>, JobsError> {
+        // Same ownership rule as `recent_events_by_kind`: the SQL
+        // against `audit_log` lives in boss-events. Rows come back
+        // oldest first, already the newest `limit` of the job's slice.
+        let rows = boss_events::tail_http::recent_for_job(&self.pool, &job_id.to_string(), limit)
+            .await
+            .map_err(JobsError::Storage)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| boss_core::event::Event {
+                id: r.event_id,
+                timestamp: r.timestamp,
+                source: r.source,
+                kind: r.kind,
+                payload: r.payload,
+            })
+            .collect())
+    }
+
+    async fn repin_workflow_version_at(
+        &self,
+        id: &JobId,
+        to_version: i32,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<Job, JobsError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| JobsError::Storage(e.to_string()))?;
+        // The one column update_job deliberately cannot reach, in its
+        // own statement, so re-pinning is always an explicit act.
+        let row = sqlx::query_as::<_, JobRow>(
+            r#"
+            UPDATE jobs SET workflow_version = $2, updated_at = $3
+            WHERE id = $1
+            RETURNING id, kind, workflow_version, subject_kind, subject_id, title, owner_id,
+                      status, priority, opened_on, due_on, closed_on, metadata, tags, simulated
+            "#,
+        )
+        .bind(*id.inner().as_uuid())
+        .bind(to_version)
+        .bind(stamp.timestamp)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+        let Some(row) = row else {
+            return Err(JobsError::NotFound(*id));
+        };
+        let job = row_to_job(row);
+        let event = stamp.event(
+            crate::events::JOB_UPDATED,
+            serde_json::to_value(&job).unwrap_or_default(),
+        );
+        boss_events::outbox::record_event_in_tx(&mut tx, &event)
+            .await
+            .map_err(JobsError::Storage)?;
+        tx.commit()
+            .await
+            .map_err(|e| JobsError::Storage(e.to_string()))?;
+        Ok(job)
+    }
+
     async fn list_jobs(
         &self,
         filter: &JobFilter,
@@ -603,7 +784,14 @@ impl JobsRepository for PgJobs {
               -- packets are simulated, so a post-fetch filter returns
               -- a nearly empty page and a wrong total.
               AND ($14::bool IS NULL OR simulated = $14)
-            ORDER BY opened_on DESC
+              -- opened_on is a DATE: a busy day is one big tie, and a
+              -- LIMIT over an arbitrary order returns an arbitrary
+              -- subset (2026-09-07 held 398 closed pr-trains; the
+              -- yard's window of 60 showed the morning and dropped
+              -- the evening). Admission instant, then id, makes the
+              -- page deterministic. The in-memory adapter sorts the
+              -- same way — pinned by tests on both sides.
+            ORDER BY opened_on DESC, created_at DESC, id
             LIMIT $5 OFFSET $6
         "#;
 
@@ -709,8 +897,15 @@ impl JobsRepository for PgJobs {
             INSERT INTO steps (id, job_id, kind, title, spec_slug, assignee_id, status, sort_order,
                                blocked_by, sign_offs_required, assurance_required, sign_offs, fields,
                                completed_on, metadata, notes, step_plugin_version,
-                               embedded_job, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19)
+                               embedded_job, created_at, updated_at, became_ready_at,
+                               completed_by, completed_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19,
+                    -- Born ready IS the ready flip: a step materialized
+                    -- straight into `ready` (the open-time readiness
+                    -- pass) became an obligation at this INSERT. The
+                    -- queue-age lens (2a0b034e) reads this stamp.
+                    CASE WHEN $7 = 'ready' THEN $19 END,
+                    $20, $21)
             ON CONFLICT (id) DO NOTHING
             "#,
         )
@@ -737,6 +932,8 @@ impl JobsRepository for PgJobs {
         .bind(version)
         .bind(step.embedded_job.map(|j| *j.inner().as_uuid()))
         .bind(now)
+        .bind(step.completed_by.as_ref().map(ToString::to_string))
+        .bind(step.completed_at)
         .execute(&mut *tx)
         .await
         .map_err(|e| JobsError::Storage(e.to_string()))?;
@@ -758,7 +955,7 @@ impl JobsRepository for PgJobs {
 
     async fn get_step(&self, id: &StepId) -> Result<Option<Step>, JobsError> {
         let row = sqlx::query_as::<_, StepRow>(
-            "SELECT id, job_id, kind, title, spec_slug, assignee_id, status, sort_order, blocked_by, sign_offs_required, assurance_required, sign_offs, fields, completed_on, metadata, notes, step_plugin_version, embedded_job FROM steps WHERE id = $1",
+            "SELECT id, job_id, kind, title, spec_slug, assignee_id, status, sort_order, blocked_by, sign_offs_required, assurance_required, sign_offs, fields, completed_on, metadata, notes, step_plugin_version, embedded_job, completed_by, completed_at FROM steps WHERE id = $1",
         )
         .bind(*id.inner().as_uuid())
         .fetch_optional(&self.pool)
@@ -800,7 +997,42 @@ impl JobsRepository for PgJobs {
                     WHEN status IN ('completed', 'skipped') THEN metadata
                     ELSE $9
                 END,
-                notes = $10, embedded_job = $11, updated_at = $12
+                notes = $10, embedded_job = $11, updated_at = $12,
+                -- The ready stamp is written ONCE, at the write that
+                -- lands the step in `ready` (a pending → ready
+                -- promotion arrives here), and no later write moves it
+                -- — the property `updated_at` cannot have, and the one
+                -- the queue-age lens (2a0b034e) exists to read. The
+                -- inner CASE reads the OLD `status`: a terminal row
+                -- keeps its status above, so it must not gain a stamp
+                -- here either.
+                became_ready_at = COALESCE(became_ready_at, CASE
+                    WHEN status NOT IN ('completed', 'skipped')
+                         AND $5 = 'ready' THEN $12
+                END),
+                -- The authored completion contract (`fields`) takes
+                -- the same freeze as metadata: live rows accept the
+                -- write, terminal rows keep theirs. This column was
+                -- absent from the list entirely, so a 204'd update
+                -- silently dropped it and every step's contract was
+                -- write-once at materialization (a07cfddd).
+                fields = CASE
+                    WHEN status IN ('completed', 'skipped') THEN fields
+                    ELSE $13
+                END,
+                -- Who and when (c17871fe): the handler stamps both at
+                -- the flip to `completed`, and the row freezes them
+                -- with the status — the same CASE `completed_on` takes,
+                -- so a stale re-PUT can no more re-attribute a finished
+                -- step than it can demote one.
+                completed_by = CASE
+                    WHEN status IN ('completed', 'skipped') THEN completed_by
+                    ELSE $14
+                END,
+                completed_at = CASE
+                    WHEN status IN ('completed', 'skipped') THEN completed_at
+                    ELSE $15
+                END
             WHERE id = $1
             "#,
         )
@@ -816,6 +1048,9 @@ impl JobsRepository for PgJobs {
         .bind(&step.notes)
         .bind(step.embedded_job.map(|j| *j.inner().as_uuid()))
         .bind(now)
+        .bind(serde_json::to_value(&step.fields).unwrap_or_default())
+        .bind(step.completed_by.as_ref().map(ToString::to_string))
+        .bind(step.completed_at)
         .execute(&mut *tx)
         .await
         .map_err(|e| JobsError::Storage(e.to_string()))?;
@@ -834,6 +1069,88 @@ impl JobsRepository for PgJobs {
             .await
             .map_err(|e| JobsError::Storage(e.to_string()))?;
         Ok(())
+    }
+
+    async fn merge_step_metadata_at(
+        &self,
+        id: &StepId,
+        patch: &serde_json::Map<String, serde_json::Value>,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<Step, JobsError> {
+        // Same split as merge_job_metadata_at: null values are
+        // removals, everything else upserts. Top-level only.
+        let removals: Vec<String> = patch
+            .iter()
+            .filter(|(_, v)| v.is_null())
+            .map(|(k, _)| k.clone())
+            .collect();
+        let upserts: serde_json::Map<String, serde_json::Value> = patch
+            .iter()
+            .filter(|(_, v)| !v.is_null())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| JobsError::Storage(e.to_string()))?;
+        // ONE statement is the atomicity, and the terminal freeze
+        // rides its WHERE clause: a step that completed between the
+        // caller's read and this write matches no row, instead of
+        // being silently frozen by a CASE the way `update_step_at`'s
+        // full-row re-sends are. The 0-row case is disambiguated
+        // below inside the same transaction.
+        let row = sqlx::query_as::<_, StepRow>(
+            r#"
+            UPDATE steps SET
+                metadata = (CASE WHEN jsonb_typeof(metadata) = 'object'
+                                 THEN metadata ELSE '{}'::jsonb END
+                            || $2::jsonb) - $3::text[],
+                updated_at = $4
+            WHERE id = $1 AND status NOT IN ('completed', 'skipped')
+            RETURNING id, job_id, kind, title, spec_slug, assignee_id, status, sort_order,
+                      blocked_by, sign_offs_required, assurance_required, sign_offs, fields,
+                      completed_on, metadata, notes, step_plugin_version, embedded_job,
+                      completed_by, completed_at
+            "#,
+        )
+        .bind(*id.inner().as_uuid())
+        .bind(serde_json::Value::Object(upserts))
+        .bind(&removals)
+        .bind(stamp.timestamp)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+        let Some(row) = row else {
+            // Missing, or terminal? The refusal must say which — a
+            // false "not found" for a frozen row is the confident
+            // wrong answer this crate keeps relearning to avoid.
+            let status: Option<String> =
+                sqlx::query_scalar("SELECT status FROM steps WHERE id = $1")
+                    .bind(*id.inner().as_uuid())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| JobsError::Storage(e.to_string()))?;
+            return Err(match status {
+                Some(status) => JobsError::TerminalStep { id: *id, status },
+                None => JobsError::StepNotFound(*id),
+            });
+        };
+        let step = row_to_step(row)?;
+        // OUTBOX (phase 2): the STEP_UPDATED state event is built from
+        // the POST-merge row this transaction just produced and
+        // records with it — same rule as the job merge.
+        let event = stamp.event(
+            crate::events::STEP_UPDATED,
+            crate::events::step_state_payload(&step),
+        );
+        boss_events::outbox::record_event_in_tx(&mut tx, &event)
+            .await
+            .map_err(JobsError::Storage)?;
+        tx.commit()
+            .await
+            .map_err(|e| JobsError::Storage(e.to_string()))?;
+        Ok(step)
     }
 
     async fn claim_step_at(
@@ -959,7 +1276,7 @@ impl JobsRepository for PgJobs {
 
     async fn list_steps(&self, job_id: &JobId) -> Result<Vec<Step>, JobsError> {
         let rows = sqlx::query_as::<_, StepRow>(
-            "SELECT id, job_id, kind, title, spec_slug, assignee_id, status, sort_order, blocked_by, sign_offs_required, assurance_required, sign_offs, fields, completed_on, metadata, notes, step_plugin_version, embedded_job FROM steps WHERE job_id = $1 ORDER BY sort_order",
+            "SELECT id, job_id, kind, title, spec_slug, assignee_id, status, sort_order, blocked_by, sign_offs_required, assurance_required, sign_offs, fields, completed_on, metadata, notes, step_plugin_version, embedded_job, completed_by, completed_at FROM steps WHERE job_id = $1 ORDER BY sort_order",
         )
         .bind(*job_id.inner().as_uuid())
         .fetch_all(&self.pool)
@@ -977,11 +1294,14 @@ impl JobsRepository for PgJobs {
         // One indexed JOIN: open Jobs × their workable steps, filtered
         // to (assigned-to-me) OR (unassigned with a role I hold). The
         // `authority_role` lives in step metadata JSONB. Ordered by
-        // (opened_on, sort_order) for a stable executor queue.
+        // (opened_on, created_at, id, sort_order) for a stable
+        // executor queue: opened_on is a DATE, so without the
+        // admission-instant tiebreak the LIMIT cut a busy day at an
+        // arbitrary point (same defect as list_jobs, same fix).
         let rows = sqlx::query_as::<_, AssignmentRowSql>(
             "SELECT s.id, s.job_id, s.kind, s.title, s.spec_slug, s.assignee_id, s.status, \
                     s.sort_order, s.blocked_by, s.sign_offs_required, s.assurance_required, s.sign_offs, \
-                    s.fields, s.completed_on, s.metadata, s.notes, \
+                    s.fields, s.completed_on, s.metadata, s.notes, s.completed_by, s.completed_at, \
                     s.step_plugin_version, s.embedded_job, \
                     j.title AS job_title, j.due_on, j.kind AS workflow, j.workflow_version, \
                     j.subject_kind, j.subject_id, j.priority, \
@@ -995,7 +1315,7 @@ impl JobsRepository for PgJobs {
                   OR ( (s.metadata ->> 'authority_role') = ANY($2) \
                        AND (s.assignee_id IS NULL OR s.status = 'active') ) \
                ) \
-             ORDER BY j.opened_on, s.sort_order \
+             ORDER BY j.opened_on, j.created_at, j.id, s.sort_order \
              LIMIT $3",
         )
         .bind(assignee_id)
@@ -1031,7 +1351,7 @@ impl JobsRepository for PgJobs {
         let rows = sqlx::query_as::<_, AssignmentRowSql>(
             "SELECT s.id, s.job_id, s.kind, s.title, s.spec_slug, s.assignee_id, s.status, \
                     s.sort_order, s.blocked_by, s.sign_offs_required, s.assurance_required, s.sign_offs, \
-                    s.fields, s.completed_on, s.metadata, s.notes, \
+                    s.fields, s.completed_on, s.metadata, s.notes, s.completed_by, s.completed_at, \
                     s.step_plugin_version, s.embedded_job, \
                     j.title AS job_title, j.due_on, j.kind AS workflow, j.workflow_version, \
                     j.subject_kind, j.subject_id, j.priority, \
@@ -1041,7 +1361,7 @@ impl JobsRepository for PgJobs {
              WHERE j.status = 'open' \
                AND s.status IN ('ready', 'active') \
                AND s.assignee_id IS NOT NULL AND s.assignee_id <> '' \
-             ORDER BY j.opened_on, s.sort_order \
+             ORDER BY j.opened_on, j.created_at, j.id, s.sort_order \
              LIMIT $1",
         )
         .bind(limit)
@@ -1110,12 +1430,21 @@ impl JobsRepository for PgJobs {
         // fan-out. Contract pinned against the port's pure
         // `terminal_report_from_jobs` by tests/terminal_report_pg.rs:
         // outcomes read `metadata->>'outcome'` over closed rows only,
-        // cycle days are `(closed_on - opened_on)` — the dates the
-        // row carries and the rebuilder reproduces — and the
-        // percentiles are `percentile_cont`, which the port helper
-        // mirrors formula-for-formula.
+        // cycle days prefer the precise `opened_at` / `closed_at`
+        // metadata stamps (RFC3339 instants written at admission and
+        // at the close hooks — the dates have one-day resolution by
+        // construction), COALESCEd to `(closed_on - opened_on)` for
+        // packets that predate the stamps, and the percentiles are
+        // `percentile_cont`, which the port helper mirrors
+        // formula-for-formula.
+        // The arm axis (Tier 2, 6ea5a12a) rides in every GROUP BY, and
+        // the joins compare it with IS NOT DISTINCT FROM because the
+        // unstamped cohort's arm is NULL and `NULL = NULL` would drop
+        // its rows. Ordering matches the port helper's BTreeMap
+        // reverse-iteration: version desc, then arm desc, NULLS LAST.
         let rows: Vec<(
             i32,
+            Option<String>,
             i64,
             serde_json::Value,
             serde_json::Value,
@@ -1127,47 +1456,54 @@ impl JobsRepository for PgJobs {
             r#"
             WITH base AS (
               SELECT workflow_version,
+                     metadata->>'experiment_arm' AS arm,
                      status,
                      metadata->>'outcome' AS outcome,
-                     (closed_on - opened_on)::float8 AS cycle_days
+                     COALESCE(
+                       (EXTRACT(EPOCH FROM ((metadata->>'closed_at')::timestamptz
+                                          - (metadata->>'opened_at')::timestamptz))
+                          / 86400.0)::float8,
+                       (closed_on - opened_on)::float8
+                     ) AS cycle_days
               FROM jobs
               WHERE kind = $1
                 AND ($2::date IS NULL OR opened_on >= $2)
                 AND ($3::bool IS NULL OR simulated = $3)
             ),
             statuses AS (
-              SELECT workflow_version,
+              SELECT workflow_version, arm,
                      jsonb_object_agg(status, n) AS by_status,
                      SUM(n)::BIGINT AS total
               FROM (
-                SELECT workflow_version, status, COUNT(*) AS n
-                FROM base GROUP BY workflow_version, status
+                SELECT workflow_version, arm, status, COUNT(*) AS n
+                FROM base GROUP BY workflow_version, arm, status
               ) t
-              GROUP BY workflow_version
+              GROUP BY workflow_version, arm
             ),
             outcomes AS (
-              SELECT workflow_version,
+              SELECT workflow_version, arm,
                      jsonb_object_agg(outcome, n)
                        FILTER (WHERE outcome IS NOT NULL) AS outcomes,
                      COALESCE(SUM(n) FILTER (WHERE outcome IS NULL), 0)::BIGINT
                        AS closed_without_outcome
               FROM (
-                SELECT workflow_version, outcome, COUNT(*) AS n
+                SELECT workflow_version, arm, outcome, COUNT(*) AS n
                 FROM base WHERE status = 'closed'
-                GROUP BY workflow_version, outcome
+                GROUP BY workflow_version, arm, outcome
               ) t
-              GROUP BY workflow_version
+              GROUP BY workflow_version, arm
             ),
             cycles AS (
-              SELECT workflow_version,
+              SELECT workflow_version, arm,
                      COUNT(*)::BIGINT AS samples,
                      percentile_cont(0.5) WITHIN GROUP (ORDER BY cycle_days) AS median,
                      percentile_cont(0.9) WITHIN GROUP (ORDER BY cycle_days) AS p90
               FROM base
               WHERE status = 'closed' AND cycle_days IS NOT NULL
-              GROUP BY workflow_version
+              GROUP BY workflow_version, arm
             )
             SELECT s.workflow_version,
+                   s.arm,
                    s.total,
                    s.by_status,
                    COALESCE(o.outcomes, '{}'::jsonb) AS outcomes,
@@ -1176,9 +1512,13 @@ impl JobsRepository for PgJobs {
                    c.median,
                    c.p90
             FROM statuses s
-            LEFT JOIN outcomes o USING (workflow_version)
-            LEFT JOIN cycles c USING (workflow_version)
-            ORDER BY s.workflow_version DESC
+            LEFT JOIN outcomes o
+              ON o.workflow_version = s.workflow_version
+             AND o.arm IS NOT DISTINCT FROM s.arm
+            LEFT JOIN cycles c
+              ON c.workflow_version = s.workflow_version
+             AND c.arm IS NOT DISTINCT FROM s.arm
+            ORDER BY s.workflow_version DESC, s.arm DESC NULLS LAST
             "#,
         )
         .bind(kind)
@@ -1210,6 +1550,7 @@ impl JobsRepository for PgJobs {
             .map(
                 |(
                     version,
+                    arm,
                     total,
                     by_status,
                     outcomes,
@@ -1220,6 +1561,7 @@ impl JobsRepository for PgJobs {
                 )| {
                     Ok(crate::port::VersionTerminalReport {
                         version,
+                        arm,
                         total,
                         by_status: counts_map(by_status)?,
                         outcomes: counts_map(outcomes)?,
@@ -1229,6 +1571,106 @@ impl JobsRepository for PgJobs {
                             median,
                             p90,
                         },
+                    })
+                },
+            )
+            .collect()
+    }
+
+    async fn queue_age(
+        &self,
+        scope: &JobScope,
+    ) -> Result<Vec<crate::port::QueueAgeRow>, JobsError> {
+        // Same short-circuit as `list_jobs`: policy said "nothing",
+        // so no round trip.
+        if matches!(scope, JobScope::None) {
+            return Ok(Vec::new());
+        }
+        // The three scope binds are `list_jobs`'s $7..$9, verbatim —
+        // the lens must not grow a second definition of whose packets
+        // these are. Membership is the packet 2a0b034e query:
+        // ready/active steps of open packets. `since` is the recorded
+        // ready flip when the projection has it, else `updated_at` —
+        // an honest lower bound, labelled by `exact`.
+        let (scope_owner, scope_owners, scope_accounts): (
+            Option<&str>,
+            Option<Vec<String>>,
+            Option<Vec<String>>,
+        ) = match scope {
+            JobScope::All => (None, None, None),
+            JobScope::None => unreachable!("short-circuited above"),
+            JobScope::OwnerIs(u) => (Some(u.as_str()), None, None),
+            JobScope::OwnerIn(us) => (None, Some(us.clone()), None),
+            JobScope::AccountIn(ps) => (None, None, Some(ps.clone())),
+        };
+        type Row = (
+            uuid::Uuid,
+            String,
+            String,
+            bool,
+            uuid::Uuid,
+            Option<String>,
+            String,
+            String,
+            Option<String>,
+            chrono::DateTime<chrono::Utc>,
+            bool,
+        );
+        let rows: Vec<Row> = sqlx::query_as(
+            r#"
+            SELECT j.id, j.kind, j.title, j.simulated,
+                   s.id, s.spec_slug, s.title, s.status, s.assignee_id,
+                   COALESCE(s.became_ready_at, s.updated_at) AS since,
+                   (s.became_ready_at IS NOT NULL) AS exact
+            FROM steps s
+            JOIN jobs j ON j.id = s.job_id
+            WHERE s.status IN ('ready', 'active')
+              AND j.status = 'open'
+              AND ($1::text IS NULL OR j.owner_id = $1)
+              AND ($2::text[] IS NULL OR j.owner_id = ANY($2))
+              AND (
+                $3::text[] IS NULL
+                OR (j.subject_kind IN ('account', 'employee')
+                    AND j.subject_id = ANY($3))
+              )
+            ORDER BY since ASC, s.id ASC
+            "#,
+        )
+        .bind(scope_owner)
+        .bind(scope_owners.as_deref())
+        .bind(scope_accounts.as_deref())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+
+        rows.into_iter()
+            .map(
+                |(
+                    job_id,
+                    job_kind,
+                    job_title,
+                    simulated,
+                    step_id,
+                    spec_slug,
+                    step_title,
+                    status,
+                    assignee_id,
+                    since,
+                    exact,
+                )| {
+                    Ok(crate::port::QueueAgeRow {
+                        job_id: JobId::from_uuid(job_id),
+                        job_kind,
+                        job_title,
+                        step_id: StepId::from_uuid(step_id),
+                        spec_slug,
+                        step_title,
+                        status: parse_step_status(&status)
+                            .ok_or_else(|| step_status_err(&status))?,
+                        assignee_id,
+                        simulated,
+                        since,
+                        exact,
                     })
                 },
             )
@@ -1583,6 +2025,91 @@ impl JobsRepository for PgJobs {
         });
 
         Ok(())
+    }
+
+    async fn record_step_write_refusal_at(
+        &self,
+        refusal: &crate::refusals::StepWriteRefusal,
+        now: DateTime<Utc>,
+    ) -> Result<(), JobsError> {
+        sqlx::query(
+            "INSERT INTO step_write_refusals \
+             (refused_at, job_id, step_id, actor_id, method, path, status_code, error_class, detail) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(now)
+        .bind(refusal.job_id)
+        .bind(refusal.step_id)
+        .bind(&refusal.actor_id)
+        .bind(&refusal.method)
+        .bind(&refusal.path)
+        .bind(i32::from(refusal.status_code))
+        .bind(refusal.error_class.as_str())
+        .bind(&refusal.detail)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn step_write_refusals(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::refusals::RecordedRefusal>, JobsError> {
+        let rows = sqlx::query_as::<_, RefusalRow>(
+            "SELECT id, refused_at, job_id, step_id, actor_id, method, path, status_code, \
+             error_class, detail FROM step_write_refusals ORDER BY refused_at DESC, id DESC \
+             LIMIT $1",
+        )
+        .bind(limit.max(0))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+        Ok(rows.into_iter().map(RefusalRow::into_domain).collect())
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct RefusalRow {
+    id: i64,
+    refused_at: DateTime<Utc>,
+    job_id: Option<uuid::Uuid>,
+    step_id: Option<uuid::Uuid>,
+    actor_id: String,
+    method: String,
+    path: String,
+    status_code: i32,
+    error_class: String,
+    detail: String,
+}
+
+impl RefusalRow {
+    fn into_domain(self) -> crate::refusals::RecordedRefusal {
+        use crate::refusals::ErrorClass;
+        // The column is CHECK-constrained to this vocabulary, so an
+        // unknown value means the constraint and the enum drifted.
+        // Degrade to `Other` rather than failing the read — a
+        // measurement surface that 500s is worse than one row landing
+        // in a coarser bucket, and the pinning test in `refusals` is
+        // what catches the drift.
+        let error_class = ErrorClass::ALL
+            .into_iter()
+            .find(|c| c.as_str() == self.error_class)
+            .unwrap_or(ErrorClass::Other);
+        crate::refusals::RecordedRefusal {
+            id: self.id,
+            refused_at: self.refused_at,
+            refusal: crate::refusals::StepWriteRefusal {
+                job_id: self.job_id,
+                step_id: self.step_id,
+                actor_id: self.actor_id,
+                method: self.method,
+                path: self.path,
+                status_code: self.status_code as u16,
+                error_class,
+                detail: self.detail,
+            },
+        }
     }
 }
 

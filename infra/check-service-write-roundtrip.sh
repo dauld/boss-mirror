@@ -9,7 +9,10 @@
 #
 # Why this exists: 2026-04-28 boss-docs-api was running in-memory
 # only because it was built without `--features postgres`. POSTs
-# returned 200; the design_pending_decisions table stayed empty.
+# returned 200; the design_pending_decisions table stayed empty. (That
+# table, that POST and the whole boss-docs service are gone since
+# 2026-09-10 — the crate that named this bug class no longer exists,
+# but the class does; see below.)
 # Option (1) of the fix (boss_core::startup::require_postgres_or_explicit_inmemory)
 # stops the next regression at *boot*. This script is the
 # defense-in-depth check that catches the same class of bug at
@@ -20,8 +23,9 @@
 #
 # Exit codes:
 #   0 — all round-trips succeeded
-#   1 — at least one round-trip failed (POST returned 200 but
-#       Postgres has no row, OR POST itself failed)
+#   1 — at least one check failed (a write returned 200 but Postgres
+#       has no row, a list disagreed with its table, or the call
+#       itself failed)
 
 set -euo pipefail
 
@@ -33,32 +37,6 @@ psql_run() {
 }
 
 declare -a FAILURES=()
-
-# ---------- boss-docs-api ----------
-# A pending decision is the cheapest write to round-trip: one row in
-# `design_pending_decisions`, no events emitted, no projections to
-# rebuild. Anchor field doubles as our sentinel.
-check_docs() {
-    local doc_path="docs/design/_heartbeat.md"
-    local anchor="$SENTINEL"
-    local resp
-    resp=$(curl -sS -o /dev/null -w "%{http_code}" \
-        -X POST -H 'content-type: application/json' \
-        -H 'x-boss-employee-id: heartbeat' \
-        -d "{\"doc_path\":\"${doc_path}\",\"anchor\":\"${anchor}\",\"kind\":\"accept\",\"resolution\":\"heartbeat\",\"rationale\":null}" \
-        http://127.0.0.1:7050/api/design/pending-decisions || echo "0")
-    if [[ "$resp" != "200" ]]; then
-        FAILURES+=("boss-docs-api: POST /api/design/pending-decisions returned $resp")
-        return
-    fi
-    local rows
-    rows=$(psql_run "SELECT COUNT(*) FROM design_pending_decisions WHERE anchor = '${anchor}'")
-    if [[ "$rows" != "1" ]]; then
-        FAILURES+=("boss-docs-api: POST returned 200 but Postgres has $rows rows for anchor=${anchor} (silent in-memory fallback?)")
-    fi
-    # Cleanup — direct DB delete avoids needing the API to be healthy.
-    psql_run "DELETE FROM design_pending_decisions WHERE anchor = '${anchor}'" >/dev/null
-}
 
 # ---------- read-consistency check ----------
 # For services whose HTTP surface is read-only at the platform level
@@ -91,7 +69,15 @@ check_read_consistency() {
     fi
 }
 
-check_docs
+# boss-docs-api was the original subject of this whole script (the
+# 2026-04-28 in-memory-fallback bug above) and it is no longer checked,
+# because it no longer exists. Part 1 of the corpus deletion took its
+# only write endpoint; part 2, the same day, took the service, its
+# three tables and the parser behind them (backlog f5da586c) — the
+# packet is the doc, so there is no corpus to keep consistent with
+# anything. The two read-consistency checks below carry the signal it
+# used to: a list endpoint that disagrees with its table is an
+# in-memory fallback, and no fallback can fake agreement.
 # `boss-classes-api` requires ?subject_kind=… — pick `employee`, the
 # largest classes namespace today.
 check_read_consistency "boss-classes-api" \
@@ -107,7 +93,9 @@ check_read_consistency "boss-locations-api" \
 # Services that emit `/health.capabilities.storage` get a third
 # layer: confirm the binary running self-reports `storage="postgres"`.
 # This catches the boss-docs class of bug at the layer closest to
-# truth — the binary itself tells you what it built with.
+# truth — the binary itself tells you what it built with. (The crate
+# that named the class was deleted on 2026-09-10; the class did not go
+# with it, which is why these checks stay.)
 check_capability() {
     local service="$1"
     local url="$2"
@@ -120,7 +108,6 @@ check_capability() {
     fi
 }
 
-check_capability "boss-docs-api"     "http://127.0.0.1:7050/api/design/health"
 check_capability "boss-people-api"   "http://127.0.0.1:7500/api/people/health"
 check_capability "boss-jobs-api"     "http://127.0.0.1:7900/api/jobs/health"
 check_capability "boss-messages-api" "http://127.0.0.1:7200/api/messages/health"
@@ -128,7 +115,7 @@ check_capability "boss-assets-api"    "http://127.0.0.1:7600/api/assets/health"
 check_capability "boss-calendar-api" "http://127.0.0.1:7860/api/calendar/health"
 
 if [[ ${#FAILURES[@]} -eq 0 ]]; then
-    echo "ok: 9 checks passed (1 round-trip, 2 read-consistency, 6 capability handshake)."
+    echo "ok: 9 checks passed (3 read-consistency, 6 capability handshake)."
     exit 0
 fi
 

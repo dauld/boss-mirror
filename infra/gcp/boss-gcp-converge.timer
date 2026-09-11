@@ -1,0 +1,23 @@
+[Unit]
+Description=Converge boss-gcp on its own units from forge main every 30 minutes
+
+[Timer]
+# Offset from this host's other boot-time timers (the estate unit
+# observer is OnBootSec=2min) so a reboot does not have them all reach
+# for the network in the same instant.
+OnBootSec=6min
+# THIRTY MINUTES, not the forge's ten. What this loop converges is unit
+# FILES — config that changes a few times a week — so the number that
+# matters is "how long may a landed unit fix sit unapplied", and half an
+# hour answers the defect (a unit fix sat unapplied for SIX DAYS) at a
+# quarter of the packet volume of a ten-minute loop. The interval lives
+# twice by design and is pinned: infra/lint/timers-leave-a-packet.sh
+# check 9 fails CI if it disagrees with the cadence-silence sweep's
+# declaration for maintenance-boss-gcp-converge.
+OnUnitActiveSec=30min
+# A missed window needs no catch-up (no Persistent=): the next firing IS
+# the catch-up, because a converge measures the tree as it is now.
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

@@ -176,5 +176,9 @@ is one failure domain, and a gate that dies with the node still dies.
 It leaves cp-1/2/3 carrying the control plane, etcd, and the SoR
 replicas, which is what those machines are for. And it does not
 change the gate-runner's disk discipline: one job, one branch, one
-wiped target, because ~74 GB per cold build is a property of the
-workspace, not of where it runs.
+private per-run workspace (an emptyDir seeded from the shared warm
+target on the seed PVC), because ~74 GB per cold build is a property
+of the workspace, not of where it runs. Concurrent gates all co-mount
+the seed PVC, so its RWO attach herds them onto the node that holds
+it — moving the build label moves the whole pack once the volume
+follows.

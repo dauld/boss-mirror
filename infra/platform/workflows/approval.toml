@@ -1,0 +1,66 @@
+# ---------------------------------------------------------------------------
+# approval — a decision asked of a named authority, recorded.
+#
+# Three terminals rather than two: `approved` and `declined` are the
+# decision, and `answered` is the case where what was asked for was an
+# ANSWER and not a verdict. Collapsing the third into `approved` would
+# make "how often do we ask for a decision we did not need" unanswerable,
+# which is the same reasoning as the sweep's clear/remediated split.
+#
+# Authored live through the API and never written back until 2026-09-10,
+# which is the gap `infra/lint/the-live-protocols-are-the-authored-
+# protocols.sh` now closes. Rendered from the live row rather than
+# retyped; the seed is insert-if-missing, so the live lineage keeps its
+# own version and this file is what a FRESH database gets.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "approval"
+label = "Approval"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "A second set of eyes, or an answer to a question, as a packet of its own (David, 2026-08-14: \"a small but useful sub-job protocol ... it just encodes some data from another person into the job\"). Anyone — human or agent — who needs a decision they should not make alone opens one of these instead of guessing, staging a note somewhere unread, or completing a step on someone else's behalf. It exists because the alternative kept being invisible: a question parked in job metadata is only found by opening the job. This lands in the answerer's queue like any other work. Delegable: a `delegate-subjob` step naming `subworkflow: approval` spawns one and pauses until it closes, and the verdict is written back into the parent step as `subjob_outcome`. The decide step is an `answer-question` step so it renders the asker's markdown context beside the question and its proposed answer, rather than a bare metadata form."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "asked"
+kind = "trigger"
+ready_when = "true"
+title_template = "Asked"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "someone-asks" }
+
+[[workflow.step]]
+title = "decide"
+kind = "answer-question"
+ready_when = "steps.asked.done"
+title_template = "Answer the question"
+metadata_defaults = { notify_on_done = true }
+fields = [
+  { name = "verdict", field_type = "approved|declined|answered", required = true },
+  { name = "answer", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "approved"
+kind = "outcome"
+ready_when = "steps.decide.done AND steps.decide.metadata.verdict = \"approved\""
+title_template = "Approved"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "approved" }
+
+[[workflow.step]]
+title = "declined"
+kind = "outcome"
+ready_when = "steps.decide.done AND steps.decide.metadata.verdict = \"declined\""
+title_template = "Declined"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "declined" }
+
+[[workflow.step]]
+title = "answered"
+kind = "outcome"
+ready_when = "steps.decide.done AND steps.decide.metadata.verdict = \"answered\""
+title_template = "Answered"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "answered" }

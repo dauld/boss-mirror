@@ -12,71 +12,42 @@
 import { test, expect } from '@playwright/test';
 import { installSmokeMocks } from './_smokeMocks';
 import { installAuthoringMocks, JOB_ID } from './_mockApi';
+// The roster lives in _routes.ts, not here: outage-crawl.mocked.spec.ts
+// reads the same list, and a second copy would reproduce the very defect
+// the drift test at the bottom of this file exists to stop (CLAUDE.md
+// §9a — collapse, do not pin).
+import { ROUTES } from './_routes';
 
-// Every top-level surface a ceo persona reaches, from the router's
-// exact-match routes. Pure-action / form-submit routes (/login,
-// /finance/new, /finance/journal-entries/new) are excluded — this asserts
-// surfaces RENDER without throwing, not that forms submit. Two detail
-// routes are included (a Workflow + a marketing asset) because the mock
-// seeds them, and that is where the omitted-field crashes live.
-const ROUTES: ReadonlyArray<string> = [
-  // User Experiences perspective — bare / is the public home alias; the
-  // operator surfaces are re-rooted under /ux/*.
-  '/', '/ux/me', '/ux/inbox', '/ux/views', '/ux/jobs', '/ux/accounts', '/ux/vendors', '/ux/people', '/ux/parts',
-  '/ux/products', '/ux/shipping', '/ux/assets', '/ux/catalog',
-  '/ux/marketing-assets', '/ux/marketing-assets/ma-1', '/ux/calendar', '/ux/calendar/me',
-  '/ux/support', '/ux/service', '/ux/refurb', '/ux/qa', '/ux/hr', '/ux/sales',
-  '/ux/shop', '/ux/manual',
-  // System Model perspective — the "read the running model" surfaces.
-  //
-  // CANONICAL PATHS ARE `/it/*`, which is what ROUTE_CATALOG registers
-  // and what a browser's address bar holds. `/system/*` still answers:
-  // router.ts rewrites the `/it` prefix to `/system` before matching,
-  // so an old bookmark keeps working. This list crawled the `/system/*`
-  // alias for three releases and therefore never rendered a single
-  // canonical URL, while the drift test below reported all twenty as
-  // uncovered. Both halves of that were true at once, which is why the
-  // fix is to crawl what the catalog declares. The alias itself is
-  // pinned in src/router.test.ts, where it costs one line instead of a
-  // browser.
-  '/it', '/it/subjects', '/it/dispatcher', '/it/dispatcher/rules',
-  '/it/monitoring/perf', '/it/monitoring/events',
-  '/it/monitoring/atlas', '/it/step-plugins', '/it/kb', '/it/design',
-  '/it/experiments',
-  // Modeling + admin surfaces (System Model).
-  '/it/workflows', '/it/workflows/new',
-  '/it/workflows/seasonal-release', '/it/policy', '/it/auth-admin',
-  // IT surfaces added since the app split. They were absent for three
-  // releases and the crawl reported success the whole time — see the
-  // drift test at the bottom of this file for why that can no longer
-  // happen quietly.
-  '/it/feedback', '/it/flow', '/it/yard',
-  // Incidents renders both panels' empty states under the mock's `[]`
-  // catch-all (an array where the {data} envelope should be reads as
-  // zero packets) — chrome + empty states, no crash.
-  '/it/incidents',
-  // The network map under the mock's `[]` catch-all: an array where
-  // the {data} envelope should be reads as zero stations — chrome +
-  // empty state, no crash.
-  '/it/map',
-  // Fleet renders its no-Workflows empty state under the mock's
-  // empty /api/workflows — a real crawl of the page chrome + picker.
-  '/it/fleet',
-];
 
 // DEFERRED, group 1 — aggregation dashboards that read OBJECT-shaped
 // responses (statements, snapshots, summaries) the generic `[]` catch-all
 // can't fake; they need faithful per-endpoint fixtures before they can be
 // gated without false positives:
 //   /ux/finance (statements .reduce) · /ux/warehouse (summary.below_reorder_count)
-//   /ux/exec (.find/.length) · /ux/watchlist (.length) · /system/monitoring (snapshot .length)
+//   /ux/exec (.find/.length) · /it/operate/audit (snapshot .length)
+//
+// The watchlist LEFT THIS GROUP on 2026-08-28: its `.length` crash was
+// not a fixture problem but a CAST — the page read
+// `(await r.json()) as { accounts: RiskScore[] }` and a payload without
+// `accounts` made the value undefined. It now parses through
+// RiskScoreListSchema and renders its error state on a wrong shape, so
+// no faithful fixture is needed to gate it (feedback 2fe1c8c1).
+//
+// THAT COMMENT WAS TRUE AND THE PAGE WAS STILL NOT CRAWLED, for a full
+// day, because it named `/ux/watchlist` and the route is `/watchlist`
+// (router.ts:251). It was in neither ROUTES nor DEFERRED, and the drift
+// test could not catch the omission because the page has no
+// nav-catalog entry and that test only walks ROUTE_CATALOG. So the
+// deferral was lifted in prose while the coverage it described never
+// existed — a green suite reporting on a page it never opened. The
+// route is now in ROUTES (_routes.ts), spelled the way the router spells it.
 //
 // Resolved: the marketing-assets no-shell this harness first caught was a
 // real effect_update_depth_exceeded loop in loadClasses() called from a
 // tracked $effect — fixed in session/classes.svelte.ts. The /calendar +
 // /calendar/me failures seen alongside it were that loop bleeding across a
-// shared page (pre-fix); both render cleanly in isolation and are gated
-// above. All four routes are now in ROUTES.
+// shared page (pre-fix); both render cleanly in isolation and are gated.
+// All four routes are now in ROUTES (_routes.ts).
 
 type Issue = { route: string; kind: string; text: string };
 
@@ -150,7 +121,7 @@ test.describe('route smoke — every surface renders without a runtime crash', (
     const errors: string[] = [];
     page.on('pageerror', (e) => errors.push(e.message));
 
-    await page.goto(`/system/workflows/authoring/${JOB_ID}`, { timeout: 20_000 });
+    await page.goto(`/it/registry/authoring/${JOB_ID}`, { timeout: 20_000 });
     await expect(page.locator('.app-shell')).toBeVisible({ timeout: 10_000 });
     // Wait for the lazy graph + the step-authoring surface (which mounts
     // StepDagEditor) to render the seeded spec.
@@ -161,8 +132,8 @@ test.describe('route smoke — every surface renders without a runtime crash', (
 });
 
 // A crawl that silently omits a surface reports success for a page it
-// never loaded. That is not hypothetical: `/system/feedback`,
-// `/system/os-map` and `/system/flow` were each added to the app, each
+// never loaded. That is not hypothetical: `/it/design/feedback`,
+// `/system/os-map` and `/it/operate/atlas` were each added to the app, each
 // wired into the sidebar, and none of them appeared here — the harness
 // stayed green across all three because a hardcoded list cannot know
 // what it is missing.
@@ -175,7 +146,7 @@ test.describe('the crawl covers every registered surface', () => {
   /// Routes the crawl cannot cover yet, each with why. Shrinking this
   /// list is the work; adding to it is a decision.
   const DEFERRED: ReadonlyMap<string, string> = new Map([
-    ['/it/monitoring', 'aggregation dashboard: snapshot .length needs a faithful fixture'],
+    ['/it/operate/audit', 'aggregation dashboard: snapshot .length needs a faithful fixture'],
     ['/ux/finance', 'statements .reduce needs object-shaped fixtures'],
     ['/ux/warehouse', 'summary.below_reorder_count needs a faithful fixture'],
     ['/ux/exec', '.find/.length over object-shaped summaries'],

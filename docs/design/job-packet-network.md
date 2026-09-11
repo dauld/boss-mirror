@@ -1,6 +1,6 @@
 # Design: the job packet — envelopes, protocols, and queues all the way down
 
-**Status:** draft — open questions tracked at `/system/design`
+**Status**: decided — all 7 questions resolved 2026-08-12 via the in-app tracker; see Decisions.
 **Origin:** four feedback items, David, 2026-08-11/12 (verbatim):
 "Jobs don't have owners or status anymore. They sit in queues. The
 nature of that queue will explain the responsibility for the work and

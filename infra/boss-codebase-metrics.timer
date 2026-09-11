@@ -1,0 +1,22 @@
+[Unit]
+Description=Daily codebase trend measurement
+
+[Timer]
+# 05:10, after the 03:30 integrity scan and the 04:00 backup window, so
+# the measurement is the quiet tail of the maintenance night rather than
+# one more thing contending with them. The exact minute does not matter:
+# the window it measures is "every landing since the last filed row", so
+# a late or missed firing changes the row's shape, never its totals.
+OnCalendar=*-*-* 05:10:00
+# Cover a host-down window. A missed night means two days in one row,
+# which is correct — the landings are still all there — and the
+# alternative is a hole in the series.
+Persistent=true
+RandomizedDelaySec=300
+# The interval lives twice by design and is pinned:
+# infra/lint/timers-leave-a-packet.sh check 9 fails CI if this schedule
+# disagrees with the cadence-silence sweep's declaration for
+# maintenance-codebase-metrics (CLAUDE.md §9a).
+
+[Install]
+WantedBy=timers.target

@@ -166,6 +166,102 @@ async fn rebuild_reproduces_shipments_and_systems() {
     assert_eq!(systems_before, systems_after, "shipment_assets mismatch");
 }
 
+/// Tracking-scan rows and the status rollup they trigger must replay
+/// byte-identical. Before packet d7b8158e both sides leaked wall
+/// time: the live scan row's `created_at` fell to the column DEFAULT
+/// NOW(), the live rollup stamped `updated_at = NOW()`, and the
+/// rebuild re-stamped both at replay time — three different instants
+/// for one recorded fact.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+struct TrackingEventRow {
+    // `id` (BIGSERIAL) deliberately excluded: TRUNCATE does not
+    // restart the sequence, so replayed rows draw fresh serials.
+    shipment_id: String,
+    status: String,
+    occurred_on: chrono::NaiveDate,
+    stage_index: Option<i16>,
+    detail: Option<String>,
+    created_at: DateTime<Utc>,
+}
+
+async fn snapshot_tracking_events(pool: &PgPool) -> Vec<TrackingEventRow> {
+    sqlx::query_as(
+        "SELECT shipment_id, status, occurred_on, stage_index, detail, created_at \
+         FROM shipment_tracking_events ORDER BY shipment_id, occurred_on, status",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rebuild_reproduces_tracking_scans_byte_identical() {
+    let db = TestDb::new().await;
+    let app = build_app(db.pool.clone());
+
+    let s = fixture(
+        "ship-scan",
+        ShipmentStatus::LABEL_CREATED.into(),
+        vec!["SYS-T"],
+    );
+    TestRequest::post("/api/shipping/shipments")
+        .json(&s)
+        .send(&app)
+        .await
+        .assert_status(StatusCode::CREATED);
+
+    // Two carrier scans through the port — an in-transit ping and the
+    // final delivery. The delivered scan also rolls up the shipment's
+    // status + delivered_on + updated_at.
+    let shipping = PgShipping::new(db.pool.clone());
+    let stamp = boss_core::publisher::EventStamp::new(
+        "shipping",
+        boss_core::actor::ActorId::Automation("test".into()),
+    );
+    boss_shipping::port::ShippingRepository::record_tracking_scan(
+        &shipping,
+        "ship-scan",
+        "in-transit",
+        chrono::NaiveDate::from_ymd_opt(2026, 4, 3).unwrap(),
+        Some(1),
+        &stamp,
+    )
+    .await
+    .expect("in-transit scan");
+    boss_shipping::port::ShippingRepository::record_tracking_scan(
+        &shipping,
+        "ship-scan",
+        "delivered",
+        chrono::NaiveDate::from_ymd_opt(2026, 4, 5).unwrap(),
+        Some(2),
+        &stamp,
+    )
+    .await
+    .expect("delivered scan");
+
+    let delivered = drain_outbox(&db.pool).await;
+    assert_eq!(delivered, 3, "create + 2 scans arrive via the outbox");
+
+    let shipments_before = snapshot_shipments(&db.pool).await;
+    let scans_before = snapshot_tracking_events(&db.pool).await;
+    assert_eq!(scans_before.len(), 2);
+    assert_eq!(shipments_before[0].status, "delivered");
+
+    // Rebuild wipes all four shipping projections and replays.
+    rebuild_shipping(&db.pool).await.expect("rebuild");
+
+    let shipments_after = snapshot_shipments(&db.pool).await;
+    let scans_after = snapshot_tracking_events(&db.pool).await;
+    assert_eq!(
+        shipments_before, shipments_after,
+        "shipments must replay byte-identical (updated_at included)"
+    );
+    assert_eq!(
+        scans_before, scans_after,
+        "tracking scans must replay byte-identical (created_at included)"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn rebuild_handles_shipment_delete() {
     let db = TestDb::new().await;

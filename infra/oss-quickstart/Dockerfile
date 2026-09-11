@@ -82,7 +82,33 @@ RUN cargo chef cook --release --workspace --features postgres --recipe-path reci
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY examples ./examples
+# EVERY PATH THE CRATES READ AT BUILD TIME MUST BE HERE — through a
+# build.rs, which RUNS in this stage, or an `include_str!`, which is
+# read by rustc while compiling in it. This stage is a SUBSET of the
+# repo, so a crate reaching outside `crates/` compiles on any full
+# checkout and fails here, where nobody is looking. Both bit us on
+# 2026-09-09, in consecutive trains:
+# boss-dispatcher-handlers/build.rs derives the observer's spool
+# directory and cap from infra/estate/observe-lib.sh so the shell and
+# the Rust side cannot drift (CLAUDE.md §9a, a collapse rather than a
+# pin). It landed green through a gate that builds from a full
+# checkout, and then every converge from 04:30 failed on the build
+# script's own `must exist relative to the crate root` panic. Before
+# it, train 283 added infra/forge/host-absent-tools.txt, which
+# boss-cli's gate.rs `include_str!`s in PRODUCTION code, and its
+# converge failed four times from 03:46. Both were invisible, because
+# the build was quiet.
+# infra/lint/the-image-carries-what-build-scripts-read.sh now derives
+# this list from the build scripts themselves and fails when they
+# disagree.
 COPY infra/postgres ./infra/postgres
+# Named FILES, not their directories, on purpose: infra/forge changes
+# several times a day and a directory COPY would invalidate the whole
+# Rust build layer every time a shell script moved.
+COPY infra/estate/observe-lib.sh ./infra/estate/observe-lib.sh
+COPY infra/forge/host-absent-tools.txt ./infra/forge/host-absent-tools.txt
+COPY infra/deploy-services.sh ./infra/deploy-services.sh
+COPY infra/forge/run-car-probe.sh ./infra/forge/run-car-probe.sh
 
 # The commit this image is built from, exported to the cargo build so
 # `Capabilities` self-reports it from every service's health endpoint
@@ -189,6 +215,33 @@ FROM debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf8
 # Runtime deps: ca-certs for outbound HTTPS (the gateway), libssl
 # for rustls's native bridge, postgresql-client for the init
 # script's psql calls, tini as PID 1 so signal forwarding works.
+# git: the cluster-resident train conductor (`boss train cadence`)
+# clones the repo and asks `git merge-base --is-ancestor` to verify a
+# train's merge is in the running commit. It used to run on boss-gcp,
+# which had host git; moved into this image by the 2026-09-04 cutover,
+# it silently lost git — exact-match convergence still worked (a string
+# compare) but ancestry did not, so every superseded train wedged at
+# `converged`. Named by the conductor's own log once ensure_clone
+# stopped swallowing the error.
+#
+# python3: the SAME LOSS, found the same way one cutover later. The
+# conductor runs the consist check — the 34 cheap lints, against the
+# assembled tree — before it opens a PR, and
+# `a-kind-bundle-does-not-tighten.sh` parses the platform manifest with
+# a small inline python3 (deliberately hand-rolled rather than tomllib,
+# which is 3.11+). On a box without python3 that lint cannot RUN, and
+# the conductor reported the result as "1 of 34 checks disagree with
+# the assembled tree" — refusing to board, striking no car, and
+# blocking every train behind an infrastructure gap dressed as a
+# consist failure (CLAUDE.md: an infrastructure refusal is not a
+# consist failure).
+#
+# It hid until 2026-09-04 21:15 because every earlier board that day
+# ran from the dev pod, which has python3; that firing was the first
+# time the CONDUCTOR boarded from its own container since the cutover.
+# The lesson both entries share: a component moved into this image
+# loses every host tool it never declared, and it discovers which ones
+# only when it next needs them.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \
@@ -198,6 +251,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
     jq \
+    git \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # BOSS runs as a non-root user. UID 1500 matches the systemd-deploy
@@ -243,7 +298,7 @@ COPY infra/postgres /opt/boss/infra/postgres
 COPY infra/operator-baseline /opt/boss/infra/operator-baseline
 # The platform Workflow bundle — protocols shipped as DATA
 # (protocols-as-data step 1). bootstrap-db.sh seeds it insert-if-
-# missing at ../platform/workflows.toml relative to itself, and until
+# missing at ../platform/workflows/ relative to itself, and until
 # this COPY existed that path was absent from the image, so the seed
 # SILENTLY SKIPPED on every cluster boot: ten bundle kinds (the eight
 # timer-maintenance protocols among them) never reached the SoR, and
@@ -254,16 +309,18 @@ COPY infra/operator-baseline /opt/boss/infra/operator-baseline
 COPY infra/platform /opt/boss/infra/platform
 # Dispatcher rule registry — boss-dispatcher's side-effect runner reads
 # BOSS_DISPATCHER_RULES (set in docker-compose.yml) which points at
-# /opt/boss/infra/dispatcher/rules.toml. Without this dir the rules runner
+# /opt/boss/infra/dispatcher/rules/. Without this dir the rules runner
 # can't start and Jobs get assigned + worked but never close.
 COPY infra/dispatcher /opt/boss/infra/dispatcher
 COPY examples /opt/boss/examples
-# The design decision tracker (boss-docs-api, repo_root=/opt/boss)
-# reads docs/design/*.md from the image. Without this COPY the
-# tracker serves only DB-cached content, reindex finds zero docs,
-# and design reviews never spawn on a container deploy - exactly
-# how the cluster SoR went review-blind on 2026-08-12.
-COPY docs /opt/boss/docs
+# `COPY docs /opt/boss/docs` stood here until 2026-09-10, and it was
+# load-bearing for one reader only: boss-docs-api ran with
+# repo_root=/opt/boss and walked docs/design/*.md on every boot, so
+# without the prose in the image a container deploy went review-blind
+# (2026-08-12). That service, its corpus index and its parser were
+# deleted with the rest of the markdown-corpus machinery (backlog
+# f5da586c) — the packet is the doc — and nothing in the image reads
+# /opt/boss/docs any more, so the image stops carrying the prose.
 
 # Post-API seed scripts boss-launch (services-launcher) runs once the
 # API stack is up: the platform operator-baseline, then the brewery
@@ -277,11 +334,20 @@ COPY infra/seed-brewery-tenant.sh /opt/boss/infra/seed-brewery-tenant.sh
 # Quickstart launcher + init scripts.
 COPY infra/oss-quickstart/init.sh /usr/local/bin/boss-init
 COPY infra/oss-quickstart/services-launcher.sh /usr/local/bin/boss-launch
+# What the launcher SOURCES must land beside it: services-launcher.sh
+# reads tenant-launch.sh from its own directory, which in this image is
+# /usr/local/bin, not infra/oss-quickstart. On 2026-09-05 the launcher
+# landed without this line and the pod crash-looped on "No such file"
+# before any API started — the system of record was dark for the
+# duration of a rollback. The gate cannot see the image's file set
+# (it never builds the image), so infra/lint/the-image-carries-what-
+# the-launcher-sources.sh pins this pairing instead.
+COPY infra/oss-quickstart/tenant-launch.sh /usr/local/bin/tenant-launch.sh
 # The maintenance-packet wrap scripts, so in-cluster CronJob chores
 # (boss-search-reindex first) open and complete their packets the same
 # way the boss-gcp timers do — one script pair, both hosts (jq above
 # is theirs).
-COPY infra/boss-maintenance-wrap.sh infra/boss-step.sh /usr/local/bin/
+COPY infra/boss-maintenance-wrap.sh infra/boss-step.sh infra/boss-api-curl.sh /usr/local/bin/
 COPY infra/oss-quickstart/generate-configs.sh /usr/local/bin/boss-generate-configs
 RUN chmod +x /usr/local/bin/boss-init /usr/local/bin/boss-launch \
     /usr/local/bin/boss-generate-configs \

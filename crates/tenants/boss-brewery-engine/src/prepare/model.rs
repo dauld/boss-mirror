@@ -151,6 +151,7 @@ pub fn prepare_model(gateway_base: Option<&str>, seeds_dir: &Path) -> Result<()>
     publish_workflows(
         &jobs_base,
         &seeds_dir.join("workflows.toml"),
+        "brewery-bootstrap",
         true,
         false,
         None,

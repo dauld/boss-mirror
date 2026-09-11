@@ -34,7 +34,14 @@ ASSIGNMENT=crates/core/boss-dispatcher/src
 #
 #   webhook_notify.rs — outbound to a counterparty's URL, not a BOSS
 #   service: there is no internal identity to stamp.
-ALLOW="webhook_notify.rs"
+#
+#   credential_issuer.rs — the credential broker's EXTERNAL adapters
+#   (7ee101aa): the forge's admin API (authenticated by the broker
+#   root token) and the cluster API server (authenticated by the pod
+#   ServiceAccount bearer). Neither is a BOSS service, so there is no
+#   actor or sim-origin to present. The broker HANDLER's jobs-api
+#   calls live in credential_rotate_forgejo.rs, which stays covered.
+ALLOW="webhook_notify.rs credential_issuer.rs"
 
 failures=""
 

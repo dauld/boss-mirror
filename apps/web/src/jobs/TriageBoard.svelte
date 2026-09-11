@@ -460,7 +460,7 @@
 {#if loading}
   <p class="tb-msg">Loading…</p>
 {:else if error}
-  <p class="tb-msg tb-err">{error}</p>
+  <p class="tb-msg tb-err load-failed">{error}</p>
 {:else if jobs.length === 0}
   <p class="tb-msg">{emptyMessage}</p>
   {@render archiveNote()}

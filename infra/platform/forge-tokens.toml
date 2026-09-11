@@ -1,0 +1,88 @@
+# Declared inventory of Forgejo access tokens for user `david`.
+#
+# WHY THIS FILE EXISTS. On 2026-08-27 a forge token was disclosed and had to
+# be revoked. The question "which of these nine tokens is the one to delete?"
+# could not be answered: Forgejo's UI lists only name and scope, the names
+# encode dates rather than consumers (`push-20260818`), and nothing anywhere
+# recorded which process holds which token. It took a read-only query against
+# the forge's own SQLite database to settle it, and even then the answer came
+# from elimination rather than from a record.
+#
+# A credential nobody can attribute to a consumer cannot be safely revoked,
+# which means in practice it is never revoked. That is how nine tokens
+# accumulate, three of them carrying write:repository.
+#
+# So the inventory is declared here and `forge-token-audit.py` reports DRIFT
+# between this file and the forge. The audit never deletes anything: pruning a
+# credential is administration, and stays with David, for the same reason
+# `issue` and `revoke` are the human steps of the rotate-a-credential protocol.
+# The audit's job is to make the decision answerable, not to make it.
+#
+# `consumer = "UNKNOWN"` is deliberate and is NOT a placeholder to be quietly
+# filled in with a guess. It records that a live credential exists which no one
+# can attribute — the actual debt. The audit counts those separately and loudly.
+# Retire one by identifying the holder, or by deleting the token and seeing what
+# breaks (in that order, and not on a Friday).
+
+[[token]]
+name = "boss-gcp"
+consumer = "boss-train.service on boss-gcp (the conductor), plus boss-pr-train and boss-pr-train-reconcile"
+scope = "write:repository"
+installed_at = "/etc/boss-train/forge.token (root:david 0640), read by the ForgejoForge adapter and by the credential helper configured in /var/lib/boss-train/repo/.git/config"
+notes = "Minted 2026-08-27 replacing the disclosed token `conductor`. Also currently serving the cluster-side consumers below, which is a merge that should be undone — see boss-dev/forge-read."
+
+[[token]]
+name = "boss-dev-read"
+consumer = "UNKNOWN"
+scope = "read:repository"
+installed_at = "UNKNOWN"
+notes = "Name and scope both suggest it backed Secret boss-dev/forge-read (the dev pod and gate-runner clone path). Last used 2026-08-27 22:24 UTC, which is shortly BEFORE that Secret was overwritten with the boss-gcp token, so this is the most likely former holder. Not asserted as fact. If confirmed, this is the token to restore into that Secret."
+
+[[token]]
+name = "push-20260818"
+consumer = "UNKNOWN"
+scope = "write:repository"
+installed_at = "UNKNOWN"
+notes = "Last-used jumped to 2026-08-27 23:17 UTC, the minute of the post-rotation dev-pod check, and has not moved since — evidence it was the value in Secret boss-dev/forge-read until that Secret was overwritten. If so it is now unheld, and it carries write:repository for a consumer that only ever clones."
+
+[[token]]
+name = "dev-pod-push-20260821"
+consumer = "UNKNOWN"
+scope = "write:repository"
+installed_at = "UNKNOWN"
+notes = "Name implies pushes from the boss-dev pod. Last used 2026-08-27 03:37 UTC."
+
+[[token]]
+name = "boss-ci-package"
+consumer = "UNKNOWN"
+scope = "write:package,read:repository"
+installed_at = "UNKNOWN"
+notes = "Last used 2026-08-27 21:21 UTC. Name implies the CI image build/push path."
+
+[[token]]
+name = "k8s-pull"
+consumer = "UNKNOWN"
+scope = "read:package"
+installed_at = "UNKNOWN"
+notes = "Likely behind Secret boss/forgejo-registry, the imagePullSecret. Last used 2026-08-27 21:45 UTC."
+
+[[token]]
+name = "image-push-20260812"
+consumer = "UNKNOWN"
+scope = "write:package"
+installed_at = "UNKNOWN"
+notes = "Last used 2026-08-27 21:45 UTC, the same minute as k8s-pull — suggests both are exercised by the image path."
+
+[[token]]
+name = "cluster-registry2"
+consumer = "UNKNOWN"
+scope = "write:package"
+installed_at = "UNKNOWN"
+notes = "Last used 2026-08-27 16:18 UTC."
+
+[[token]]
+name = "cluster-registry"
+consumer = "UNKNOWN"
+scope = "write:package"
+installed_at = "UNKNOWN"
+notes = "Created and last used 2026-08-10 21:13 UTC — never used since the minute it was minted. Superseded by cluster-registry2 one minute later. Strongest deletion candidate in the inventory."

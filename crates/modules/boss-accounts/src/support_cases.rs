@@ -179,7 +179,10 @@ async fn create_case(
         Ok(tx) => tx,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    let inserted = match upsert_case(&mut *tx, &req).await {
+    // Stamp minted before the row write: created_at and the event's
+    // timestamp must be ONE instant or replay diverges.
+    let stamp = crate::events::event_stamp(&state.publisher).await;
+    let inserted = match upsert_case(&mut *tx, &req, stamp.timestamp).await {
         Ok(n) => n > 0,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
@@ -189,7 +192,6 @@ async fn create_case(
     // replayed create collapses and records nothing (before, every
     // replay published a duplicate opened event).
     if inserted {
-        let stamp = crate::events::event_stamp(&state.publisher).await;
         let event = stamp.event(
             SUPPORT_CASE_OPENED,
             serde_json::to_value(&req).unwrap_or_default(),
@@ -207,15 +209,24 @@ async fn create_case(
 /// Single canonical INSERT for `support_cases`. Used by both the
 /// handler and the rebuilder. ON CONFLICT DO NOTHING so re-replay
 /// of the same `id` is idempotent.
-pub(crate) async fn upsert_case<'e, E>(executor: E, case: &SupportCase) -> sqlx::Result<u64>
+///
+/// `created_at` is the event's recorded instant — the live caller
+/// passes `stamp.timestamp`, the rebuilder passes `ev.ts` — so the
+/// replayed row matches the live one byte-for-byte instead of
+/// falling to the column DEFAULT NOW() (packet d7b8158e).
+pub(crate) async fn upsert_case<'e, E>(
+    executor: E,
+    case: &SupportCase,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> sqlx::Result<u64>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     sqlx::query(
         "INSERT INTO support_cases (
             id, account_id, channel, category, subject, body, opened_on,
-            assignee_id, status, resolved_on, resolution_notes, csat
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            assignee_id, status, resolved_on, resolution_notes, csat, created_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(&case.id)
@@ -230,6 +241,7 @@ where
     .bind(case.resolved_on)
     .bind(&case.resolution_notes)
     .bind(case.csat)
+    .bind(created_at)
     .execute(executor)
     .await
     .map(|r| r.rows_affected())

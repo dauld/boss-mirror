@@ -74,7 +74,7 @@ The survey's strongest finding is how good the accounting engine is:
 
 - **Full absorption process costing.** Raw → WIP at real `avg_cost`;
   labor/utilities/depreciation overhead capitalized DR 1310 at runtime
-  from rule args (`infra/dispatcher/rules.toml:141-165`); COGS at sale
+  from rule args (`infra/dispatcher/rules/excise-accrue-on-production-produce-step-done.toml`); COGS at sale
   is a drain of the row's conserved value, never a percentage plug.
 - **The excise *mechanism* is exemplary** — accrual on measured barrels
   computed from actual keg allocations

@@ -2,11 +2,11 @@
   // Public unauth landing surface at `/`. A marketing hero over the
   // live System-Model view — Jobs in flight right now plus the
   // per-Workflow step-graph each Job is walking. The live view itself
-  // is the shared SystemModelLiveView component (also the /system
+  // is the SystemModelLiveView component (this page's own since the
   // perspective root); this page wraps it with the landing chrome
   // (hero + sign-in CTA).
 
-  import SystemModelLiveView from '../it/system/SystemModelLiveView.svelte';
+  import SystemModelLiveView from './SystemModelLiveView.svelte';
 </script>
 
 <div class="landing">

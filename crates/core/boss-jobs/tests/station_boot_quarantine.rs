@@ -1,189 +1,141 @@
-//! Boot-time quarantine of unviable ACTIVE stations.
+//! Boot-time viability check of ACTIVE stations — what boot owes the
+//! operator when a seeded queue can never match, and what it may NOT
+//! do about it.
 //!
 //! `station_lint::gate_active` closes the publish edge, but the rows
 //! that actually exist in a deployed cluster got there by SQL seed
 //! (`116-stations.sql`, `118-watchlist-station.sql`) and never passed
 //! through publish at all. This pass is what covers them.
 //!
-//! The Workflow equivalent had to grow a refuse-to-start case, because
-//! auto-retiring a Workflow with open Jobs pinned to it strands live
-//! work. Stations cannot reach that state: membership is derived from
-//! the predicate at read time and no packet carries a station version,
-//! so retiring one strands nothing. These tests pin that difference —
-//! the pass retires and continues, always.
+//! Until 2026-09-08 this pass RETIRED each unviable row at boot — a
+//! persisted, non-idempotent write from a boot path, the same defect
+//! class that took the system of record down twice on 2026-09-07
+//! through the Workflow pass (outage packet 7752e636). The argument
+//! for it was that nothing is pinned to a station version, so
+//! retiring strands nothing. That is true and beside the point: a
+//! boot check that ACTS on a data condition has taken an action
+//! nobody asked for, and it takes it again on every roll.
+//!
+//! The contract now, the same one the Workflow pass keeps: boot
+//! CHECKS and LOGS. It never writes. Quarantine is a deliberate act
+//! (retire through the registry), not a boot side-effect. These tests
+//! pin that the two passes read the same.
+
+mod common;
 
 use std::sync::Arc;
 
-use boss_core::job::JobStatus;
+use boss_jobs::events::{STATION_QUARANTINED, STATION_RETIRED};
 use boss_jobs::registry::WorkflowStatus;
-use boss_jobs::station_quarantine::{QUARANTINE_ACTOR, quarantine_unviable_active_stations};
+use boss_jobs::station_quarantine::check_active_stations_viable;
 use boss_jobs::station_queue::{SELF, StationPredicate};
-use boss_jobs::{InMemoryJobs, InMemoryStations, StationKind, StationRegistry, StationSpec};
+use boss_jobs::{InMemoryStations, StationKind, StationRegistry, StationSpec};
 use std::collections::BTreeMap;
 
-fn now() -> chrono::DateTime<chrono::Utc> {
-    use chrono::TimeZone;
-    chrono::Utc.with_ymd_and_hms(2026, 8, 13, 12, 0, 0).unwrap()
-}
+use common::{always_empty, now, seed_active, viable};
 
-fn actor() -> boss_core::actor::ActorId {
-    boss_core::actor::ActorId::Automation(QUARANTINE_ACTOR.into())
-}
-
-/// Seeded straight to ACTIVE, exactly as the SQL migrations do —
-/// bypassing publish, which is the whole point of this pass.
-fn seed_active(stations: &InMemoryStations, mut spec: StationSpec) {
-    spec.status = WorkflowStatus::Active;
-    stations.seed(spec).unwrap();
-}
-
-fn viable(name: &str) -> StationSpec {
-    StationSpec::draft(
-        name,
-        "A real queue",
-        StationKind::Batch,
-        StationPredicate {
-            kind: Some("ship-a-change".into()),
-            status: Some(JobStatus::Open),
-            ..Default::default()
-        },
-        now(),
-    )
-}
-
-/// A contradiction: the same key demanded present and absent.
-fn always_empty(name: &str) -> StationSpec {
-    let mut s = viable(name);
-    s.predicate.metadata_present = vec!["train".into()];
-    s.predicate.metadata_absent = vec!["train".into()];
-    s
+/// The row is still active afterwards, and no retirement or
+/// quarantine marker was recorded anywhere — boot touched nothing.
+async fn assert_untouched(stations: &InMemoryStations, name: &str) {
+    assert_eq!(
+        stations
+            .get_active(name)
+            .await
+            .unwrap_or_else(|e| panic!("`{name}` must still be active after boot: {e}"))
+            .status,
+        WorkflowStatus::Active,
+        "`{name}` must still be active after boot"
+    );
+    let recorded = stations.recorded_events();
+    let kinds: Vec<&str> = recorded.iter().map(|e| e.kind.as_str()).collect();
+    assert!(
+        !kinds.contains(&STATION_RETIRED),
+        "boot must not retire anything: {kinds:?}"
+    );
+    assert!(
+        !kinds.contains(&STATION_QUARANTINED),
+        "boot must not write a quarantine marker: {kinds:?}"
+    );
 }
 
 #[tokio::test]
-async fn a_clean_registry_is_left_alone() {
+async fn a_clean_registry_reports_nothing_and_is_left_alone() {
     let stations = Arc::new(InMemoryStations::new());
-    let jobs = InMemoryJobs::new();
     seed_active(&stations, viable("dock"));
     seed_active(&stations, viable("review"));
 
-    let report = quarantine_unviable_active_stations(
-        stations.as_ref() as &dyn StationRegistry,
-        &jobs,
-        &actor(),
-        now(),
-    )
-    .await
-    .unwrap();
+    let report = check_active_stations_viable(stations.as_ref() as &dyn StationRegistry)
+        .await
+        .expect("boot check completes");
 
     assert_eq!(report.checked, 2);
-    assert!(report.quarantined.is_empty());
+    assert!(report.unviable.is_empty());
     assert_eq!(stations.list_active().await.unwrap().len(), 2);
+    assert!(
+        stations.recorded_events().is_empty(),
+        "boot wrote nothing at all"
+    );
 }
 
 #[tokio::test]
-async fn a_seeded_row_that_can_never_match_is_retired_and_the_rest_keep_serving() {
+async fn a_seeded_row_that_can_never_match_is_reported_and_left_untouched() {
     let stations = Arc::new(InMemoryStations::new());
-    let jobs = InMemoryJobs::new();
     seed_active(&stations, viable("dock"));
     seed_active(&stations, always_empty("broken"));
 
-    let report = quarantine_unviable_active_stations(
-        stations.as_ref() as &dyn StationRegistry,
-        &jobs,
-        &actor(),
-        now(),
-    )
-    .await
-    .unwrap();
+    let report = check_active_stations_viable(stations.as_ref() as &dyn StationRegistry)
+        .await
+        .expect("an unviable row is a report, not a refusal");
 
     assert_eq!(report.checked, 2);
-    assert_eq!(report.quarantined.len(), 1);
-    assert_eq!(report.quarantined[0].name, "broken");
-    assert!(!report.quarantined[0].problems.is_empty());
+    assert_eq!(report.unviable.len(), 1);
+    assert_eq!(report.unviable[0].name, "broken");
+    assert_eq!(report.unviable[0].version, 1);
+    assert!(
+        report.unviable[0]
+            .problems
+            .iter()
+            .any(|p| p.reason.contains("train")),
+        "the report carries the problems the log printed: {:?}",
+        report.unviable[0].problems
+    );
 
-    // The blast radius is the one row, not the registry.
+    // Until 2026-09-08 this is the row boot retired. It must not.
+    assert_untouched(&stations, "broken").await;
     let live = stations.list_active().await.unwrap();
-    assert_eq!(live.len(), 1);
-    assert_eq!(live[0].name, "dock");
-}
-
-#[tokio::test]
-async fn the_retirement_and_the_loud_marker_are_both_recorded() {
-    let stations = Arc::new(InMemoryStations::new());
-    let jobs = InMemoryJobs::new();
-    seed_active(&stations, always_empty("broken"));
-
-    quarantine_unviable_active_stations(
-        stations.as_ref() as &dyn StationRegistry,
-        &jobs,
-        &actor(),
-        now(),
-    )
-    .await
-    .unwrap();
-
-    // The registry's own state event, through its normal path.
-    let kinds: Vec<String> = stations
-        .recorded_events()
-        .iter()
-        .map(|e| e.kind.clone())
-        .collect();
-    assert!(
-        kinds.contains(&"jobs.station.retired".to_string()),
-        "the retirement must witness itself like any other: {kinds:?}"
-    );
-
-    // And the loud marker, carrying why.
-    let recorded = jobs.recorded_events();
-    let marker = recorded
-        .iter()
-        .find(|e| e.kind == "jobs.station.quarantined")
-        .expect("the quarantine marker must be recorded");
-    assert_eq!(marker.payload["name"], "broken");
-    let problems = marker.payload["problems"].as_array().unwrap();
-    assert!(!problems.is_empty(), "the marker must carry the problems");
-    assert!(
-        problems[0]["message"].as_str().unwrap().contains("train"),
-        "the log must answer 'why did this queue disappear' without a re-lint: {problems:?}"
-    );
-    // `_actor` is a flat string — ActorId serializes as one, not as an
-    // object with an `id` field. Worth an explicit assertion: reading
-    // an actor out of the wrong shape is exactly how I built a wrong
-    // finding on 2026-08-13 (d53374cc, withdrawn).
     assert_eq!(
-        marker.payload["_actor"], "automation:station-quarantine",
-        "the log must say who retired it"
+        live.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        vec!["broken", "dock"],
+        "both rows are still serving; the finding is in the log, not the registry"
+    );
+    assert!(
+        stations.recorded_events().is_empty(),
+        "boot wrote nothing at all"
     );
 }
 
 #[tokio::test]
-async fn a_station_that_lies_about_being_personal_is_caught() {
+async fn a_station_that_lies_about_being_personal_is_reported_not_retired() {
     // The shape that made the census misreport orphaned packets: an
     // `actor` row every executor sees identically.
     let stations = Arc::new(InMemoryStations::new());
-    let jobs = InMemoryJobs::new();
     let mut impostor = viable("my-queue");
     impostor.kind = StationKind::Actor;
     seed_active(&stations, impostor);
 
-    let report = quarantine_unviable_active_stations(
-        stations.as_ref() as &dyn StationRegistry,
-        &jobs,
-        &actor(),
-        now(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(report.quarantined.len(), 1);
+    let report = check_active_stations_viable(stations.as_ref() as &dyn StationRegistry)
+        .await
+        .expect("boot check completes");
+    assert_eq!(report.unviable.len(), 1);
+    assert_eq!(report.unviable[0].name, "my-queue");
+    assert_untouched(&stations, "my-queue").await;
 }
 
 #[tokio::test]
 async fn the_real_watchlist_row_survives_the_pass() {
-    // 118-watchlist-station.sql, as deployed. A regression here means
-    // the pass would delete a live queue on the next pod roll — so this
-    // test is the one standing between this file and an outage.
+    // 118-watchlist-station.sql, as deployed. A regression here would
+    // flag a live queue at ERROR on every pod roll.
     let stations = Arc::new(InMemoryStations::new());
-    let jobs = InMemoryJobs::new();
     seed_active(
         &stations,
         StationSpec::draft(
@@ -198,18 +150,13 @@ async fn the_real_watchlist_row_survives_the_pass() {
         ),
     );
 
-    let report = quarantine_unviable_active_stations(
-        stations.as_ref() as &dyn StationRegistry,
-        &jobs,
-        &actor(),
-        now(),
-    )
-    .await
-    .unwrap();
+    let report = check_active_stations_viable(stations.as_ref() as &dyn StationRegistry)
+        .await
+        .expect("boot check completes");
     assert!(
-        report.quarantined.is_empty(),
-        "the deployed watchlist row must survive: {:?}",
-        report.quarantined
+        report.unviable.is_empty(),
+        "the deployed watchlist row must pass: {:?}",
+        report.unviable
     );
     assert_eq!(stations.list_active().await.unwrap().len(), 1);
 }

@@ -118,6 +118,24 @@ pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Respons
         }
     };
 
+    // THE FIRST PAINT KNOWS THE TENANT (5578e42d). The SPA fetched the
+    // manifest after first paint and rendered placeholder truth until
+    // it arrived — every module, generic labels — so an operator
+    // watched the application change its mind and read the first
+    // frame as a stale view. The manifest rides the document instead:
+    // no extra round trip, no flash. index.html is never cached, so
+    // this is recomputed on every load, like the API answer it mirrors.
+    let content = if serving_path.ends_with("index.html") {
+        match (
+            std::str::from_utf8(&content),
+            serde_json::to_string(&crate::api::tenant_manifest_now()),
+        ) {
+            (Ok(html), Ok(json)) => inline_tenant_manifest(html, &json).into_bytes(),
+            _ => content,
+        }
+    } else {
+        content
+    };
     let content_type = guess_content_type(&serving_path);
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, content_type);
@@ -192,12 +210,64 @@ fn has_file_extension(path: &str) -> bool {
     last_segment.contains('.')
 }
 
+/// Put the tenant manifest on the document, as `window.__BOSS_TENANT_MANIFEST__`,
+/// just before `</head>` so it is defined before any module script
+/// runs. Pure: the same html and json always give the same page. A
+/// document with no `</head>` is returned untouched — nowhere safe to
+/// put it. `</` inside the JSON becomes `<\/` so a label can never
+/// close the script tag early; JSON reads it back as the same string.
+pub(crate) fn inline_tenant_manifest(html: &str, manifest_json: &str) -> String {
+    let Some(idx) = html.find("</head>") else {
+        return html.to_string();
+    };
+    let safe = manifest_json.replace("</", "<\\/");
+    let tag = format!("<script>window.__BOSS_TENANT_MANIFEST__ = {safe};</script>\n");
+    let mut out = String::with_capacity(html.len() + tag.len());
+    out.push_str(&html[..idx]);
+    out.push_str(&tag);
+    out.push_str(&html[idx..]);
+    out
+}
+
 fn unauthorized() -> Response {
     (StatusCode::UNAUTHORIZED, "authentication required").into_response()
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_manifest_rides_the_document_before_the_head_closes() {
+        let html = "<html><head><title>x</title></head><body><script type=\"module\" src=\"/m.js\"></script></body></html>";
+        let out = super::inline_tenant_manifest(
+            html,
+            r#"{"modules":{"hr":false},"labels":{"assets.entity_singular":"vessel"}}"#,
+        );
+        let script = out
+            .find("window.__BOSS_TENANT_MANIFEST__")
+            .expect("the global is defined");
+        let head_end = out.find("</head>").unwrap();
+        let module = out.find("type=\"module\"").unwrap();
+        assert!(script < head_end, "defined inside <head>");
+        assert!(script < module, "defined before any module script runs");
+        assert!(out.contains(r#""hr":false"#) && out.contains("vessel"));
+    }
+
+    #[test]
+    fn a_document_with_no_head_is_left_alone() {
+        let html = "<div>not a document</div>";
+        assert_eq!(super::inline_tenant_manifest(html, "{}"), html);
+    }
+
+    #[test]
+    fn a_label_cannot_close_the_script_early() {
+        let json = r#"{"labels":{"x":"</script><script>alert(1)</script>"}}"#;
+        let out = super::inline_tenant_manifest("<head></head>", json);
+        // Exactly one closing tag: ours. The label's `</` is escaped so
+        // the browser never sees a second one.
+        assert_eq!(out.matches("</script>").count(), 1, "{out}");
+        assert!(out.contains(r"<\/script>"), "{out}");
+    }
+
     use super::*;
 
     /// Regression, and the expensive kind: a signed-out visitor asked

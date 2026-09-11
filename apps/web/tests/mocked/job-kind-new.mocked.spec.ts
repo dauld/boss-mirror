@@ -13,7 +13,7 @@ test.beforeEach(async ({ page }) => {
 
 test.describe('Admin new job kind — name-it entry', () => {
   test('identity fields render and persist input', async ({ page }) => {
-    await mountPage(page, '/system/workflows/new');
+    await mountPage(page, '/it/registry/new');
 
     const slug = page.getByPlaceholder('seasonal-release', { exact: true });
     await slug.fill(KIND_SLUG);
@@ -32,7 +32,7 @@ test.describe('Admin new job kind — name-it entry', () => {
   });
 
   test('subject-kind checkboxes toggle', async ({ page }) => {
-    await mountPage(page, '/system/workflows/new');
+    await mountPage(page, '/it/registry/new');
     // Named subject kind rather than `.first()`: the checkboxes are
     // already wrapped in real <label> elements, so the accessible name
     // is a stable handle, and the assertion now says which box it
@@ -44,7 +44,7 @@ test.describe('Admin new job kind — name-it entry', () => {
   });
 
   test('Create & author → creates the design Job and opens the workspace', async ({ page }) => {
-    await mountPage(page, '/system/workflows/new');
+    await mountPage(page, '/it/registry/new');
 
     await page.getByPlaceholder('seasonal-release', { exact: true }).fill(KIND_SLUG);
     await page
@@ -55,7 +55,7 @@ test.describe('Admin new job kind — name-it entry', () => {
     await expect(create).toBeEnabled();
 
     await Promise.all([
-      page.waitForURL(new RegExp(`/system/workflows/authoring/${JOB_ID}`), { timeout: 15_000 }),
+      page.waitForURL(new RegExp(`/it/registry/authoring/${JOB_ID}`), { timeout: 15_000 }),
       create.click(),
     ]);
     // Landed on the workspace for the new design Job.

@@ -83,25 +83,22 @@ impl Validate for AssetsApiConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use boss_testing::{scratch_dir, scratch_path, write_file};
 
     #[test]
     fn loads_valid_toml() {
-        let dir = std::env::temp_dir().join("boss-assets-config-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("valid.toml");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
+        let path = scratch_dir("boss-assets-config-valid").join("valid.toml");
+        write_file(
+            &path,
             r#"nats_url = "nats://127.0.0.1:4222"
 http_bind = "0.0.0.0:7600"
 people_api_url = "http://127.0.0.1:7500"
 classes_api_url = "http://127.0.0.1:7800"
 catalog_api_url = "http://127.0.0.1:7750"
 jobs_api_url = "http://127.0.0.1:7900"
-inventory_api_url = "http://127.0.0.1:7300""#
-        )
-        .unwrap();
+inventory_api_url = "http://127.0.0.1:7300"
+"#,
+        );
 
         let cfg = AssetsApiConfig::load(&path).unwrap();
         assert_eq!(cfg.nats_url, "nats://127.0.0.1:4222");
@@ -111,17 +108,14 @@ inventory_api_url = "http://127.0.0.1:7300""#
 
     #[test]
     fn rejects_empty_nats_url() {
-        let dir = std::env::temp_dir().join("boss-assets-config-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("empty_nats.toml");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
+        let path = scratch_dir("boss-assets-config-empty-nats").join("empty_nats.toml");
+        write_file(
+            &path,
             r#"nats_url = ""
 http_bind = "0.0.0.0:7600"
-people_api_url = "http://127.0.0.1:7500""#
-        )
-        .unwrap();
+people_api_url = "http://127.0.0.1:7500"
+"#,
+        );
 
         let err = AssetsApiConfig::load(&path).unwrap_err();
         assert!(err.to_string().contains("nats_url"));
@@ -133,20 +127,17 @@ people_api_url = "http://127.0.0.1:7500""#
         // event taxonomy fields — they live in JSONB with no schema
         // CHECK. Loading a config without classes_api_url must fail at
         // startup, not later at the first bad event.
-        let dir = std::env::temp_dir().join("boss-assets-config-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("missing-classes.toml");
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(
-            f,
+        let path = scratch_dir("boss-assets-config-missing-classes").join("missing-classes.toml");
+        write_file(
+            &path,
             r#"nats_url = "nats://127.0.0.1:4222"
 http_bind = "0.0.0.0:7600"
 people_api_url = "http://127.0.0.1:7500"
 catalog_api_url = "http://127.0.0.1:7750"
 jobs_api_url = "http://127.0.0.1:7900"
-inventory_api_url = "http://127.0.0.1:7300""#
-        )
-        .unwrap();
+inventory_api_url = "http://127.0.0.1:7300"
+"#,
+        );
 
         let err = AssetsApiConfig::load(&path).unwrap_err();
         let msg = format!("{err}");
@@ -158,7 +149,8 @@ inventory_api_url = "http://127.0.0.1:7300""#
 
     #[test]
     fn rejects_missing_file() {
-        let path = std::path::PathBuf::from("/tmp/does-not-exist-assets.toml");
+        let path = scratch_path("boss-assets-config-absent").join("assets.toml");
+        assert!(!path.exists(), "{} must not exist", path.display());
         assert!(AssetsApiConfig::load(&path).is_err());
     }
 }

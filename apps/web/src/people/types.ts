@@ -41,6 +41,17 @@ export function humanizeClassCode(code: string | null | undefined): string {
 }
 
 export type EmploymentStatus = 'active' | 'on-leave' | 'terminated';
+
+/// Tone for the web-kit StatusChip; mirrors the retired chip-emp-*
+/// CSS colors (active was --ok, on-leave --warn, terminated muted).
+/// `null` is identity-first "not yet onboarded into a status" —
+/// muted, and call sites render it as "unknown".
+export function employmentTone(status: EmploymentStatus | null): 'ok' | 'warn' | 'muted' {
+  if (status === 'active') return 'ok';
+  if (status === 'on-leave') return 'warn';
+  return 'muted';
+}
+
 export type EmploymentType = 'full-time' | 'part-time' | 'contractor';
 /// Location id (FK to the Locations registry, e.g. `loc-hq`,
 /// `loc-remote-default`). Pretty-name lookup against the locations

@@ -38,7 +38,7 @@ import { readFileSync } from 'node:fs';
 /// surface into or out of the set, this list is the thing to update,
 /// deliberately.
 const LEGACY_MODEL_ROUTES: ReadonlyArray<string> = [
-  'system-model', 'system-monitoring', 'system-step-plugins', 'system-dispatcher',
+  'system-monitoring', 'system-step-plugins', 'system-dispatcher',
   'system-subjects', 'system-dispatcher-rules', 'system-dispatcher-rule',
   'system-kb', 'system-design', 'system-experiments', 'policy',
   // One entry, not two. `workflows` (the authoring row, already
@@ -70,17 +70,26 @@ describe('nav catalog — app assignment', () => {
     // The feedback triage board — user-feedback Jobs, worked Kanban
     // style. New surface, not a moved one.
     'system-feedback',
+    // The IT backlog board — the same TriageBoard pointed at
+    // backlog-item Jobs (c1624b94: the backlog lost its page in the
+    // consolidation). A route and a filter, not another board.
+    'system-backlog',
     // The Operating System map — the executor network. Sits beside
     // the dispatcher cascade: same IT audience, different question
     // (job traffic, not rule wiring).
     // Flow — the team's own throughput, in wall-clock time. Distinct
     // from System Monitoring on purpose: monitoring answers what the
     // machine is doing, Flow answers what the people got through.
-    'system-flow',
     // Fleet — every in-flight Job of a kind on its Workflow's DAG.
     // Beside Flow deliberately: Flow is throughput, Fleet is where
     // the work is piling up (queue-visibility Q4's depth signal).
     'system-fleet',
+    // The Crew Board — the middle third of the operator surface: who is
+    // building what, right now. New surface, and a new SIDEBAR ROW,
+    // which the test below was written to forbid: David's decision on
+    // backlog 04c5bbc0 (2026-09-11) read the proposal to make it a tab
+    // in an existing family and overrode it.
+    'system-crew',
     // The train yard — the departure board over the pipeline's queues
     // and the IT app's guest-visible landing (departure-board.md Q1).
     // Its car landed without this line; added when the map arrived.
@@ -88,12 +97,14 @@ describe('nav catalog — app assignment', () => {
     // The network map — every registry station as a node
     // (stations.md: priority queues, stations, and network nodes are
     // one concept). No edges until motion is evented.
-    'system-map',
     // Incidents — active incident-post-mortem packets to respond to,
     // plus the closed ones rendered as a durable archive (David:
     // "both where we respond to active incidents and document post
     // mortems for posterity").
     'system-incidents',
+    // The hardware registry page — declared beside observed, plus the
+    // dev-workspace ssh door (59ef456a).
+    'system-estate',
   ];
 
   it('the IT app contains the System Model set plus what we added deliberately', () => {
@@ -114,7 +125,14 @@ describe('nav catalog — app assignment', () => {
   // Source-level because the groups live inside a component. Crude,
   // but it fails when someone adds an IT surface and forgets the
   // sidebar, which is exactly the mistake it exists for.
-  it('every IT surface is reachable from the IT sidebar', () => {
+  it('the IT sidebar holds exactly the seven rows, and every other IT surface is a tab or a documented door', () => {
+    // The 2026-08-31 consolidation (packet 1f6d55e0): David — "we do
+    // have too many IT pages though. We should consolidate." The
+    // sidebar is EXACTLY seven rows; every remaining IT catalog entry
+    // must be reachable as a tab on one of them (ItTabs.svelte) or be
+    // on the short documented list of parent-reached doors. This test
+    // is also the executable "17 pages became 6, plus one decided since"
+    // claim.
     const shell = readFileSync(
       new URL('./AppShell.svelte', import.meta.url),
       'utf8',
@@ -123,29 +141,54 @@ describe('nav catalog — app assignment', () => {
       shell.indexOf('const IT_GROUPS'),
       shell.indexOf('// Home —'),
     );
-    // Surfaces deliberately reached FROM another page rather than
-    // from the sidebar. Each needs a parent that links to it.
-    const REACHED_FROM_A_PARENT: ReadonlyArray<string> = [
-      // Authoring is reached from Workflows, by design — see the
-      // comment on the Define group.
-      'workflows',
-      // Sub-pages of the dispatcher cascade.
-      'system-dispatcher-rules',
-      'system-dispatcher-rule',
+    const SIDEBAR_ROWS: ReadonlyArray<string> = [
+      'system-yard',      // /it — the landing
+      'system-incidents', // Operate
+      'workflows',        // Registry
+      'system-design',    // Design
+      'system-crew',      // Crew Board — see below
+      'system-estate',    // Estate
+      'system-kb',        // Knowledge Base
     ];
+    for (const k of SIDEBAR_ROWS) {
+      expect(
+        groups.includes(`'${k}'`) || groups.includes(`ROUTE_CATALOG.${k}`),
+        `sidebar row missing: ${k}`,
+      ).toBe(true);
+    }
+    // No EIGHTH row: count the catalog references inside IT_GROUPS.
+    //
+    // This was six until 2026-09-11. The seventh is the Crew Board, and
+    // the bar for adding it was a decision, not a convenience: the
+    // proposal on backlog 04c5bbc0 was a tab inside an existing family,
+    // citing this very count, and David answered "Port the Crew Board as
+    // a new sidebar page in IT" with `accepted_as_proposed: false`. The
+    // count still exists and still bites — the consolidation's point was
+    // that a family belongs behind one row — so a new row needs the same
+    // kind of answer, not an edit to this line.
+    const rowRefs = (groups.match(/ROUTE_CATALOG(\.\w[\w-]*|\['[^']+'\])/g) ?? []).length;
+    expect(rowRefs, 'the IT sidebar must hold exactly seven rows').toBe(7);
 
+    const tabs = readFileSync(
+      new URL('../it/ItTabs.svelte', import.meta.url),
+      'utf8',
+    );
+    // Doors reached from a parent page rather than sidebar or tabs.
+    const DOCUMENTED_DOORS: ReadonlyArray<string> = [
+      'system-dispatcher-rules', // reached from the cascade
+      'system-dispatcher-rule',
+      'auth-admin',              // unlisted by design (1f6d55e0)
+      'system-monitoring',       // the permKey behind Operate's gated tabs
+    ];
     const unreachable = entries
       .filter(([, v]) => v.app === 'it')
-      .map(([k]) => k)
-      .filter((k) => !REACHED_FROM_A_PARENT.includes(k))
-      // The shell references entries BOTH ways — `ROUTE_CATALOG.policy`
-      // and `ROUTE_CATALOG['system-design']` — so check both spellings.
-      // Matching only the bracket form is how this test first reported
-      // five false positives.
-      .filter((k) => !groups.includes(`'${k}'`) && !groups.includes(`ROUTE_CATALOG.${k}`));
-    expect(unreachable, `IT routes with no sidebar entry: ${unreachable.join(', ')}`).toEqual(
-      [],
-    );
+      .map(([k, v]) => [k, v.path] as const)
+      .filter(([k]) => !SIDEBAR_ROWS.includes(k) && !DOCUMENTED_DOORS.includes(k))
+      .filter(([, path]) => !tabs.includes(`'${path}'`));
+    expect(
+      unreachable.map(([k]) => k),
+      `IT surfaces neither sidebar, tab, nor documented door: ${unreachable.map(([k]) => k).join(', ')}`,
+    ).toEqual([]);
   });
 
   it('nothing from the original System Model set has left the IT app', () => {
@@ -210,7 +253,7 @@ describe('nav catalog — app assignment', () => {
 
 describe('appForSection — the App.svelte tab derivation', () => {
   it('resolves surfaces to their app', () => {
-    expect(appForSection('system-model')).toBe('it');
+    expect(appForSection('system-yard')).toBe('it');
     expect(appForSection('accounts')).toBe('sales');
     expect(appForSection('finance')).toBe('finance');
     // 'All jobs' stays on Home deliberately. It is the cross-cutting
@@ -326,7 +369,14 @@ describe('departments map to apps', () => {
     // reading as covered. These are real departments with real people
     // and no screen built for them yet; they land on Home.
     const bare = [...departmentsWithoutSurfaces()].sort();
-    expect(bare).toEqual(['audit', 'packaging', 'taproom']);
+    // `refurb` joined this list on 2026-08-28 when the /ux/refurb route
+    // was removed from the shared shell (feedback 96c37dbe): it was a
+    // device-shop surface every other tenant saw as an empty list, and
+    // David's reason was that tenants connect at the boundary through
+    // agreed protocols rather than sharing one multi-tenant shell. The
+    // DEPARTMENT still exists and its people still exist — they just
+    // land on Home, which is what this report is for.
+    expect(bare).toEqual(['audit', 'packaging', 'refurb', 'taproom']);
   });
 });
 

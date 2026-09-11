@@ -2,12 +2,14 @@
 // the packet exists — no file on deployed main, no reindex, no round
 // trip.
 //
-// This is the property the whole change is for. `review-design.js`
-// carries a 404 message apologising that "review Jobs are instant data
+// This is the property the whole change is for. `review-design.js` used
+// to carry a 404 message apologising that "review Jobs are instant data
 // but docs ride trains, so a review can exist before its doc reaches
 // deployed main"; David, 2026-08-16: "our lack of good protocol around
 // design docs, and the plumbing being broken too, is causing major
-// slowdowns in my design review handling speed."
+// slowdowns in my design review handling speed." That message and the
+// fetch behind it are gone (2026-09-10) — the second test below is what
+// replaced them.
 //
 // Rendered rather than reasoned about, because nothing else mounts this
 // bundle: nine step-plugin bundles ship and CI mounts exactly one, in
@@ -111,33 +113,30 @@ test('a self-carried design doc renders its questions without touching the docs 
   expect(docsApiCalls, 'the packet reached for the docs API').toEqual([]);
 });
 
-// BACKWARD COMPATIBILITY, asserted rather than asserted-to-David. Ten
-// design-doc-review Jobs are in flight, none of which carries
-// `metadata.questions`; they must still take the docs-API path exactly
-// as before. A change that fixes the new shape by breaking the old one
-// would be worse than the round trip.
-test('a step with no carried questions still reads the docs API', async ({ page }) => {
+// THE POINTER-ONLY PACKET, now that the docs API is gone.
+//
+// This test used to assert the opposite: that a step carrying only
+// `doc_path` still fetched `/api/design/docs/{path}` and rendered the
+// questions parsed out of the file. That fallback — and the corpus
+// index behind it — was deleted on 2026-09-10 (backlog f5da586c); the
+// packet is the doc. What is worth pinning is that such a packet fails
+// LEGIBLY rather than hanging on a fetch that 404s, and that the
+// message says what to do instead. A surface that dead-ends is the
+// defect this file has caught three times.
+test('a step carrying only a pointer says so, and never calls a docs API', async ({ page }) => {
   const docsApiCalls: string[] = [];
   const errs: string[] = [];
   page.on('pageerror', (e) => errs.push(String(e)));
 
   await installSmokeMocks(page);
-  await page.route('**/api/design/docs/**', (r) => {
+  // Any call to the deleted service is a failure, so it answers 500.
+  await page.route('**/api/design/**', (r) => {
     docsApiCalls.push(r.request().url());
-    return r.fulfill({
-      json: {
-        path: 'docs/design/legacy.md',
-        title: 'A doc that lives in git',
-        status: 'in-review',
-        word_count: 900,
-        content_html: '<h1>A doc that lives in git</h1>',
-        questions: [{ anchor: 'Q1', title: 'Fetched from the file, not the packet' }],
-      },
-    });
+    return r.fulfill({ status: 500, body: 'the docs API is deleted' });
   });
   const legacyStep = {
     ...STEP,
-    metadata: { doc_path: 'docs/design/legacy.md' }, // no `questions`
+    metadata: { doc_path: 'docs/design/legacy.md' }, // no `questions`, no `markdown`
   };
   await page.route('**/api/jobs/job-dd-1', (r) =>
     r.fulfill({ json: { ...JOB, kind: 'design-doc-review', steps: [legacyStep] } }),
@@ -164,9 +163,8 @@ test('a step with no carried questions still reads the docs API', async ({ page 
   await page.waitForTimeout(2000);
 
   expect(errs, `plugin threw: ${errs.join(' | ')}`).toEqual([]);
-  await expect(page.getByText('Fetched from the file, not the packet')).toBeVisible();
-  // The file's own meta line, not the packet's.
+  // It names the pointer it was given and the verb that replaces it.
+  await expect(page.getByText(/carries only a pointer/)).toBeVisible();
   await expect(page.getByText(/docs\/design\/legacy\.md/)).toBeVisible();
-  expect(docsApiCalls.length, 'the legacy path stopped reading the docs API').toBeGreaterThan(0);
+  expect(docsApiCalls, 'nothing may call the deleted docs API').toEqual([]);
 });
-

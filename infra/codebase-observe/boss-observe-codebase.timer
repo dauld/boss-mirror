@@ -1,0 +1,11 @@
+# 10:00Z — after the 09:30Z install-smoke window opens, before the
+# estate observers' 10:2xZ slots; the nightly journals stay readable.
+[Unit]
+Description=Nightly BOSS codebase observation
+
+[Timer]
+OnCalendar=*-*-* 10:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

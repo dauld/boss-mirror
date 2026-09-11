@@ -1,0 +1,409 @@
+# Look at the estate, and write down what was there.
+#
+# `nodes` (144-estate-subjects.sql) says what machines we MEANT to
+# have. Nothing has ever recorded what is ACTUALLY there, so the two
+# could not be compared — and on 2026-08-30 three separate accounts of
+# the estate were wrong in the same direction, because none of them was
+# connected to the machines. w-1, the 32-core node that compiles this
+# repository, was missing from the registry for five days (59ef456a).
+#
+# WHY A CRONJOB AND NOT A DISPATCHER HANDLER. Handlers speak HTTP to
+# the jobs API and own no private view — that is a deliberate property,
+# and it means a handler can COMPARE but cannot OBSERVE. Only something
+# inside the cluster can list nodes without a credential being placed
+# somewhere it does not belong. So the split is: this observes and
+# posts, the API records, and a handler on cadence compares the
+# observation against the registry and opens a packet on the difference.
+#
+# IT DOES NOT WRITE THE REGISTRY, and must not. If the observer updated
+# `nodes` directly, the cluster would become the source of truth for its
+# own declaration and nothing could ever be found MISSING — only
+# silently added. Declared and observed stay apart; the difference is
+# the finding.
+#
+# Pins: reads nodes cluster-wide (read-only), posts to the jobs API by
+# service DNS. Secrets are referenced by name only.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: estate-observer
+  namespace: boss
+---
+# Node listing is cluster-scoped, so this is the one ClusterRole in the
+# tree — and it is READ-ONLY. An observer that could change anything
+# would be a different kind of thing, and `get` is the only verb here:
+# the kubelet's write paths (/exec, /run, /attach, /portForward) are all
+# POST, so none of them is reachable with this rule set.
+#
+# WHY nodes/proxy, added 2026-09-10 (a520737f). FREE SPACE IS NOT ON THE
+# NODE OBJECT. `status.capacity.ephemeral-storage` is a total;
+# `status.allocatable.ephemeral-storage` is that total minus kube-reserved
+# and the eviction threshold — a static figure, not a measurement, and
+# reading it as "free" would produce a number that never moves. The
+# kubelet's own statfs is published at /stats/summary, reached through the
+# API server at /api/v1/nodes/<name>/proxy/..., which the API server
+# authorizes as `get` on the `nodes/proxy` subresource.
+#
+# Two alternatives were weighed and rejected:
+# - The `DiskPressure` condition is free with the rule above and needs no
+#   arithmetic, but kubelet raises it at its eviction threshold — 10% of
+#   nodefs by default. estate_compare's floor is deliberately 35%
+#   BECAUSE 8% arrived hours after CI had already gone red (2026-09-05);
+#   adopting a 10% signal as the only cluster-node disk alarm would
+#   reintroduce exactly what that change fixed. It fires when the node is
+#   already evicting, which on w-1 means gate pods dying.
+# - A DaemonSet reading `df` off a hostPath needs no cluster-wide RBAC,
+#   but mounting the kubelet's filesystem into a pod is a LARGER
+#   privilege than reading stats through the API server, and it replaces
+#   one CronJob with a per-node workload.
+#
+# State plainly what this widens: `get nodes/proxy` reaches the kubelet's
+# whole read surface (/pods, /runningpods, /metrics, /containerLogs), so
+# the observer can now read pod logs cluster-wide. RBAC cannot scope a
+# proxy grant by path. The narrower grant — talking to port 10250
+# directly, where the kubelet's own check is `nodes/stats` and nothing
+# else — was not taken because it needs a TLS trust decision and a
+# per-node network path of its own, to save a read the API server already
+# audits. Revisit if the observer ever needs a second kubelet endpoint.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: estate-observer
+rules:
+  - apiGroups: [""]
+    resources: [nodes, nodes/proxy]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: estate-observer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: estate-observer
+subjects:
+  - kind: ServiceAccount
+    name: estate-observer
+    namespace: boss
+---
+# THE ONE OTHER THING THE OBSERVER MAY READ: gate runner Jobs, in the
+# gate namespace only. A runner that dies with its node (cp-2 and w-1
+# together, 2026-09-11 18:58Z, incident a398c4d3) never reports, and the
+# conductor that reaps dead runs has no Kubernetes access by design —
+# it reaps by CLOCK, three hours after opened_at. Kubernetes states the
+# death the second it happens (`status.failed`), and this observer is
+# the one actor with both `kubectl` and a signed write to the system of
+# record, so it carries that one fact across. Namespaced, read-only,
+# jobs only: it can see that a runner died, not touch it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: estate-observer-gate-jobs
+  namespace: boss-dev
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: estate-observer-gate-jobs
+  namespace: boss-dev
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: estate-observer-gate-jobs
+subjects:
+  - kind: ServiceAccount
+    name: estate-observer
+    namespace: boss
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: boss-estate-observe
+  namespace: boss
+spec:
+  # Daily, an hour after the backup, so a quiet window stays quiet.
+  # Every 15 minutes, not daily: this series feeds the estate ALARM
+  # (estate.alarm raises after 3 consecutive findings), and a daily
+  # reading makes that a 3-DAY alarm — the 2026-08-27 outage lasted 25
+  # minutes. 15min x 3 = a condition raises in ~30-45min (a5adfb99).
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: estate-observer
+          containers:
+            - name: observe
+              image: alpine/k8s:1.33.3
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  # WHERE THE SCRATCH FILES GO — a parameter whose default is
+                  # this pod's own path, so nothing the deployed observer does
+                  # changes. In the pod WORK is /tmp and the pod owns every
+                  # byte of it: no volume is mounted, so that is the
+                  # container's own writable layer, and restartPolicy Never +
+                  # concurrencyPolicy Forbid mean no two runs share it.
+                  #
+                  # It is a PARAMETER because this text has a second runner.
+                  # infra/lint/a-cluster-node-reports-its-headroom.sh extracts
+                  # this block and EXECUTES it — inline shell nothing executes
+                  # is untested shell — on the long-lived dev pod, where a
+                  # fixed path is shared with every other uid on the box.
+                  # Measured 2026-09-11 (packet 5bf96e72): root ran the lint
+                  # roster, then a second uid ran it and died on `Permission
+                  # denied` writing a file root already owned — reported as the
+                  # observer breaking its best-effort contract, which is not
+                  # what had happened. The lint now sets BOSS_OBSERVE_WORK to
+                  # its own mktemp -d; the pod sets nothing and gets /tmp.
+                  WORK="${BOSS_OBSERVE_WORK:-/tmp}"
+                  mkdir -p "$WORK"
+                  # Transport-retry curl, INLINE. This pod runs the
+                  # alpine/k8s image, which does NOT carry
+                  # /usr/local/bin/boss-api-curl.sh (that script is baked
+                  # only into the all-in-one boss image). Wiring the
+                  # shared script in here (25e518c0) therefore broke the
+                  # observer with exit 127 — no kubernetes-nodes
+                  # observation landed, and the estate ALARM correctly
+                  # raised on the silence. A container that cannot source
+                  # the shared helper inlines its contract instead: retry
+                  # only transport-level curl exits (6/7/28/35/52/55/56 —
+                  # DNS/refused/timeout/TLS/empty/send/recv) under a 150s
+                  # deadline (well under the 15-min schedule), so a deploy
+                  # roll reads as a wait, not an Error pod. An HTTP answer
+                  # is a real result and returns as curl wrote it. Kept
+                  # byte-faithful to infra/boss-api-curl.sh.
+                  api_curl() {
+                    local deadline=150 start delay=5 rc out now left sleep_for
+                    start=$(date +%s)
+                    while :; do
+                      rc=0; out=$(curl "$@") || rc=$?
+                      case "$rc" in
+                        0) printf '%s' "$out"; return 0 ;;
+                        6|7|28|35|52|55|56) ;;
+                        *) return "$rc" ;;
+                      esac
+                      now=$(date +%s); left=$((deadline - (now - start)))
+                      [ "$left" -le 0 ] && { echo "api_curl: transport failure past ${deadline}s (curl $rc)" >&2; return "$rc"; }
+                      sleep_for=$((delay < left ? delay : left))
+                      echo "api_curl: transport error (curl $rc) — retry in ${sleep_for}s" >&2
+                      sleep "$sleep_for"; delay=$((delay * 2))
+                    done
+                  }
+                  # In-cluster credentials: the ServiceAccount token is
+                  # mounted, so kubectl needs no kubeconfig.
+                  kubectl get nodes -o json > "$WORK/nodes.json"
+                  # FREE SPACE, per node, from the kubelet's own statfs
+                  # (a520737f). Until this loop existed the observation
+                  # carried capacity and nothing else, so
+                  # estate_compare's disk floor — free below 16 GiB or
+                  # below 35% of capacity — had no numerator and could
+                  # never fire for cp-1, cp-2, cp-3 or w-1. w-1 is THE
+                  # BUILD NODE: every gate's warm target lives on its
+                  # nodefs and every gate Job prefers it by affinity, so
+                  # the one machine whose disk stops the pipeline was the
+                  # one machine nothing watched.
+                  #
+                  # WHICH FILESYSTEM. `.node.fs` of /stats/summary is the
+                  # kubelet root filesystem — "nodefs" — which holds the
+                  # image store, emptyDirs and the gate's warm target. It
+                  # is the same filesystem the kubelet measures to publish
+                  # status.capacity.ephemeral-storage, so the free figure
+                  # below and the disk_gb further down are one volume's
+                  # available and total, exactly as `df -k /` gives the
+                  # host observer its pair. A cluster node's own `/` is a
+                  # read-only Talos squashfs and is not what fills; a
+                  # volume as seen from inside a pod is a third thing
+                  # again, and reading one of those as a node-level
+                  # figure is how this gap stayed hidden.
+                  #
+                  # BEST-EFFORT, AND LOUD ABOUT IT. The same POST carries
+                  # the readings declared_not_observed, not_ready and the
+                  # alarm's silence sweep all depend on, so a denied or
+                  # unreachable kubelet must cost the free figure for one
+                  # node and nothing else — never the observation. The
+                  # node and the reason are printed; estate_compare turns
+                  # the null into `disk_unmeasured` so going blind stays
+                  # distinguishable from having plenty of room.
+                  mkdir -p "$WORK/fs" && rm -f "$WORK"/fs/*.json
+                  for n in $(jq -r '(.items // [])[] | .metadata.name' "$WORK/nodes.json"); do
+                    if kubectl get --raw "/api/v1/nodes/$n/proxy/stats/summary" >"$WORK/fs/$n.raw" 2>"$WORK/fs/$n.err"; then
+                      jq --arg id "$n" '{ id: $id, disk_free_gb:
+                        (if (.node.fs.availableBytes | type) == "number"
+                         then ((.node.fs.availableBytes + 536870912) / 1073741824 | floor)
+                         else null end) }' "$WORK/fs/$n.raw" > "$WORK/fs/$n.json"
+                    else
+                      echo "no free-space reading for $n: $(cat "$WORK/fs/$n.err")"
+                      jq -n --arg id "$n" '{ id: $id, disk_free_gb: null }' > "$WORK/fs/$n.json"
+                    fi
+                  done
+                  if ls "$WORK"/fs/*.json >/dev/null 2>&1; then
+                    jq -s 'map({ key: .id, value: .disk_free_gb }) | from_entries' \
+                      "$WORK"/fs/*.json > "$WORK/free.json"
+                  else
+                    # No nodes listed at all. The door refuses an
+                    # observation that saw nothing, and that refusal is
+                    # the report we want — not a jq error on an unmatched
+                    # glob three lines earlier.
+                    echo '{}' > "$WORK/free.json"
+                  fi
+                  # jq, not python: directive 26d61c97 retired python
+                  # from the estate's shell, and infra/estate/observe-host.sh
+                  # (the host-scope sibling) is the shape to match.
+                  # Kubernetes reports Ki/Mi; the registry declares GiB.
+                  # Capacity rounds to the NEAREST GiB, ties half-UP
+                  # (add half a GiB, then floor) — THE one stated
+                  # rounding rule, shared with observe-host.sh. The
+                  # python this replaces used round-half-even, so an
+                  # exact .5-GiB tie now rounds up instead of to the
+                  # nearest even integer.
+                  jq --slurpfile free "$WORK/free.json" '
+                    def gib:
+                      if . == null then null
+                      elif endswith("Ki") then (((rtrimstr("Ki") | tonumber) + 524288) / 1048576 | floor)
+                      elif endswith("Mi") then (((rtrimstr("Mi") | tonumber) + 512) / 1024 | floor)
+                      else null end;
+                    ($free[0] // {}) as $fs |
+                    {
+                      observed_at: (now | todate),
+                      observer: "boss-estate-observe",
+                      scope: "kubernetes-nodes",
+                      nodes: ([ (.items // [])[]
+                        | (.metadata // {}) as $md
+                        | (.status // {}) as $st
+                        | ($md.labels // {}) as $labels
+                        | {
+                            id: $md.name,
+                            address: ([($st.addresses // [])[] | select(.type == "InternalIP") | .address] | .[0]),
+                            cpu: (($st.capacity.cpu // "0" | tonumber) | if . == 0 then null else . end),
+                            memory_gb: ($st.capacity.memory | gib),
+                            disk_gb: ($st.capacity["ephemeral-storage"] | gib),
+                            disk_free_gb: ($fs[$md.name] // null),
+                            purpose: $labels["boss.dev/purpose"],
+                            control_plane: ($labels | has("node-role.kubernetes.io/control-plane")),
+                            ready: (([($st.conditions // [])[] | select(.type == "Ready") | .status] | (.[0] // "Unknown")) == "True")
+                          }
+                      ] | sort_by(.id // ""))
+                    }' "$WORK/nodes.json" > "$WORK/observation.json"
+                  echo "observed $(jq -r '.nodes | length' "$WORK/observation.json") node(s)"
+                  # Per node, the two numbers the floor is computed from,
+                  # so whoever is next in front of a disk failure can
+                  # read the reading instead of re-deriving it.
+                  jq -r '.nodes[] | "  \(.id): kubelet nodefs disk=\(.disk_gb)G free=\(if .disk_free_gb == null then "UNREAD" else "\(.disk_free_gb)G" end)"' \
+                    "$WORK/observation.json"
+                  # The door refuses an observation that saw nothing, so a
+                  # denied or broken probe fails loudly here rather than
+                  # recording an empty estate.
+                  # `set -e` + a bare command substitution swallowed the
+                  # first real failure without a word: curl exited 6 on a
+                  # dead DNS name and the script died before its own
+                  # report line (3ddd8333). Failing is fine; failing
+                  # SILENTLY in a script that promises to fail loudly is
+                  # not — so curl's own exit is caught and spoken, with
+                  # the real exit code and the real target in the
+                  # message. The response body rides the same capture as
+                  # the status code (body, newline, code) instead of a
+                  # tempfile.
+                  # api_curl (inlined above) retries transport errors
+                  # for up to 150s (25e518c0): a deploy roll takes the
+                  # API away for ~45s and must read as a wait, not an
+                  # Error pod. The capture-and-speak contract below is
+                  # unchanged — api_curl owns only connection-level
+                  # exits; stdout still carries body+code exactly as
+                  # curl wrote them.
+                  resp=$(api_curl -s -w '\n%{http_code}' -X POST \
+                    -H "content-type: application/json" \
+                    -H "x-boss-user: {\"id\":\"automation:estate-observer\",\"role\":\"platform-admin\",\"access_tier\":\"operator\"}" \
+                    --data-binary @"$WORK/observation.json" \
+                    "$JOBS_API/api/estate/observation") \
+                    || { rc=$?; echo "curl failed (exit $rc, target $JOBS_API/api/estate/observation)"; exit 1; }
+                  code=$(printf '%s\n' "$resp" | tail -n 1)
+                  body=$(printf '%s\n' "$resp" | sed '$d')
+                  echo "jobs api: $code $body"
+                  test "$code" = "202"
+                  # A DEAD RUNNER IS SETTLED BY WHOEVER CAN SEE IT DIE.
+                  # A gate runner that dies with its node never reports
+                  # its verdict (cp-2 and w-1 together, 2026-09-11 18:58Z,
+                  # incident a398c4d3): Kubernetes marks the Job Failed
+                  # that second, but the only reader of a gate Job was
+                  # the Job, and the conductor that reaps dead runs has no
+                  # Kubernetes access by design, so it reaps by CLOCK —
+                  # three hours after opened_at — while the yard draws
+                  # the corpse as a healthy run and a re-gate shows two
+                  # rows for one branch. This observer has kubectl AND a
+                  # signed write, so it carries the one fact across: for
+                  # every runner Job with status.failed > 0 whose packet
+                  # is still open with no verdict, record `lost` — the
+                  # verdict the gate-run protocol already has for "the
+                  # environment died" — naming the Job and its Failed
+                  # condition, because a verdict must name what failed.
+                  # A Job that failed AFTER reporting (a red gate's runner
+                  # exits non-zero) already carries its verdict and is
+                  # left alone: the report is the truth, the exit code is
+                  # not a second verdict. Namespaced to the gate namespace
+                  # and scoped to app=gate-runner, so no other Job's death
+                  # can ever read as a lost gate.
+                  #
+                  # BEST-EFFORT, after the observation has landed: the
+                  # node observation is this pod's first duty, and a
+                  # refused or failed read here costs one spoken line,
+                  # never the run — the same contract as a lost kubelet
+                  # read above.
+                  GATE_NS="${BOSS_GATE_NAMESPACE:-boss-dev}"
+                  if kubectl get jobs -n "$GATE_NS" -l app=gate-runner -o json >"$WORK/gate-jobs.json" 2>"$WORK/gate-jobs.err"; then
+                    jq -r '(.items // [])[]
+                      | select((.status.failed // 0) > 0)
+                      | ((.status.conditions // []) | map(select(.type == "Failed")) | .[0] // {}) as $c
+                      | [ .metadata.name,
+                          (.metadata.labels["boss.dev/packet"] // ""),
+                          ($c.reason // "unknown reason"),
+                          ($c.lastTransitionTime // "unknown time"),
+                          ($c.message // "") ]
+                      | @tsv' "$WORK/gate-jobs.json" >"$WORK/dead-gates.tsv"
+                    while IFS="$(printf '\t')" read -r job packet reason at message; do
+                      [ -n "$packet" ] || continue
+                      if ! api_curl -sf -H "x-boss-user: {\"id\":\"automation:estate-observer\",\"role\":\"platform-admin\",\"access_tier\":\"operator\"}" \
+                          "$JOBS_API/api/jobs/$packet" >"$WORK/packet.json" 2>/dev/null; then
+                        echo "dead runner $job: packet $packet could not be read — left for the clock reaper"
+                        continue
+                      fi
+                      step=$(jq -r 'select(.status == "open")
+                                    | (.steps // [])[]
+                                    | select(.kind == "gate-verdict" and .status != "completed")
+                                    | .id' "$WORK/packet.json" | head -n 1)
+                      [ -n "$step" ] || continue
+                      jq -n --arg job "$job" --arg reason "$reason" --arg at "$at" --arg message "$message" '{
+                        status: "completed",
+                        metadata: {
+                          verdict: "lost",
+                          receipt: ("NO VERDICT WAS PRODUCED. Runner Job " + $job + " is Failed in Kubernetes (" + $reason + " at " + $at + (if $message == "" then "" else ": " + $message end) + "), so the checks never finished and this run says nothing about the branch. Settled as LOST by the cluster observer from the Job status; an infrastructure death is not a consist failure. Re-gate for a real verdict.")
+                        }
+                      }' >"$WORK/settle.json"
+                      scode=$(api_curl -s -o /dev/null -w '%{http_code}' -X PUT \
+                        -H "content-type: application/json" \
+                        -H "x-boss-user: {\"id\":\"automation:estate-observer\",\"role\":\"platform-admin\",\"access_tier\":\"operator\"}" \
+                        --data-binary @"$WORK/settle.json" \
+                        "$JOBS_API/api/jobs/$packet/steps/$step") || scode="curl $?"
+                      echo "dead runner $job ($reason at $at): packet $packet settled lost -> $scode"
+                    done <"$WORK/dead-gates.tsv"
+                  else
+                    echo "gate jobs unread — no dead runner can be settled this pass: $(cat "$WORK/gate-jobs.err")"
+                  fi
+              env:
+                - name: JOBS_API
+                  # boss-jobs-internal is the in-cluster door; ns boss has
+                  # no Service named `boss` — the original value resolved
+                  # to nothing and no observation could ever land.
+                  value: "http://boss-jobs-internal.boss.svc.cluster.local:7900"

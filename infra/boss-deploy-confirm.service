@@ -9,9 +9,14 @@ Type=oneshot
 WorkingDirectory=/opt/boss
 # Root: a green reading only curls, but a red one flips the generation
 # symlinks and restarts the prod fleet (deploy-services.sh revert).
-ExecStartPre=/opt/boss/infra/boss-maintenance-wrap.sh maintenance-deploy-confirm "Deploy confirm"
+# Packet pinned to the system of record, best-effort. The dead-man's
+# kind is bundle-only, so the local drop-in target answered 400 to
+# both readings of the 2026-09-03 deploy and the dead-man never read
+# the generation at all — a revert that cannot start is no revert
+# (see boss-ml-inference-batch.service, e109f57e).
+ExecStartPre=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-maintenance-wrap.sh maintenance-deploy-confirm "Deploy confirm"
 ExecStart=/opt/boss/infra/deploy-confirm.sh
-ExecStartPost=/opt/boss/infra/boss-step.sh maintenance-deploy-confirm run result=ok
+ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-step.sh maintenance-deploy-confirm run
 # Probes are seconds; a revert (flip + fleet restart) is minutes. Set
 # explicitly so the dead-man can never be SIGTERMed mid-revert by the
 # 90s default — the same kill-the-thing-doing-the-work class as the
