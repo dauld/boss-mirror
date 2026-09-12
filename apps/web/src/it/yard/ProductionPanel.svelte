@@ -36,11 +36,15 @@
 </h2>
 
 <div class="tiles">
-  <div class="tile" title={production.carsWindowed ? 'the arrivals window is full and every train in it landed today — there may be more' : 'cars landed today, from the arrivals window'}>
+  <div class="tile" title={production.source === 'record'
+      ? (production.carsWindowed ? 'the record\'s day page was cut off — there are more' : 'cars landed today, every train the record closed today')
+      : (production.carsWindowed ? 'the arrivals window is full and every train in it landed today — there may be more' : 'cars landed today, from the arrivals window (the record\'s day page could not be read)')}>
     <div class="n mono">{ge(production.carsWindowed)}{production.carsLanded}</div>
     <div class="l">cars landed</div>
   </div>
-  <div class="tile" title={production.trainsWindowed ? 'the window is full — there may be more' : 'trains that arrived / were cancelled today'}>
+  <div class="tile" title={production.source === 'record'
+      ? (production.trainsWindowed ? 'the record\'s day page was cut off — there are more' : 'trains that arrived / were cancelled today, from the record')
+      : (production.trainsWindowed ? 'the window is full — there may be more' : 'trains that arrived / were cancelled today, from the arrivals window')}>
     <div class="n mono">{ge(production.trainsWindowed)}{production.trainsArrived} <small>/</small> {production.trainsCancelled}</div>
     <div class="l">trains arrived / cancelled</div>
   </div>

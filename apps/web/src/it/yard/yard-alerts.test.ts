@@ -31,6 +31,7 @@ const yardOf = (over: Partial<YardState> = {}): YardState => ({
   publishing: [],
   cars: [],
   packets: { trains: [], gateRuns: [] },
+  day: null,
   ...over,
 });
 

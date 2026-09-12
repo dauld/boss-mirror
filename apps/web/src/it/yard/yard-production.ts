@@ -29,6 +29,9 @@ export type Production = Readonly<{
   journeySamples: number;
   /** Cars landed per UTC hour of the day, 24 buckets. */
   perHour: readonly number[];
+  /** Where the counts came from: the record's own day page, or the
+   *  five-train window as a floor when the page could not be read. */
+  source: 'record' | 'window';
 }>;
 
 export function utcDay(ms: number): string {
@@ -53,8 +56,18 @@ function median(xs: readonly number[]): number | null {
 
 export function production(yard: YardState, status: YardStatus | null, nowMs: number): Production {
   const day = utcDay(nowMs);
-  const arrivedToday = yard.arrivals.filter(t => onDay(t, day));
-  const cancelledToday = yard.cancelled.filter(t => onDay(t, day));
+  // The record's own day when the yard carries it (every train closed
+  // today on the authoritative clock); the five-train window — a floor
+  // — only when it does not. See `YardState.day`.
+  const fromRecord = yard.day !== null;
+  const arrivedToday = fromRecord ? yard.day!.arrived : yard.arrivals.filter(t => onDay(t, day));
+  const cancelledToday = fromRecord ? yard.day!.cancelled : yard.cancelled.filter(t => onDay(t, day));
+  const cutOff = fromRecord
+    ? !yard.day!.complete
+    : windowed(yard.arrivals, ARRIVALS_SHOWN, day);
+  const cutOffAny = fromRecord
+    ? !yard.day!.complete
+    : windowed(yard.arrivals, ARRIVALS_SHOWN, day) || windowed(yard.cancelled, CANCELLED_SHOWN, day);
   const perHour = arrivedToday.reduce<number[]>((acc, t) => {
     const h = new Date(t.arrivedAt.ms).getUTCHours();
     acc[h] = (acc[h] ?? 0) + t.cars.length;
@@ -66,14 +79,15 @@ export function production(yard: YardState, status: YardStatus | null, nowMs: nu
   return {
     day,
     carsLanded: arrivedToday.reduce((n, t) => n + t.cars.length, 0),
-    carsWindowed: windowed(yard.arrivals, ARRIVALS_SHOWN, day),
+    carsWindowed: cutOff,
     trainsArrived: arrivedToday.length,
     trainsCancelled: cancelledToday.length,
-    trainsWindowed: windowed(yard.arrivals, ARRIVALS_SHOWN, day) || windowed(yard.cancelled, CANCELLED_SHOWN, day),
+    trainsWindowed: cutOffAny,
     awaitingProof: yard.awaitingProof.length,
     medianJourneyS: median(journeys),
     journeySamples: journeys.length,
     perHour,
+    source: fromRecord ? 'record' : 'window',
   };
 }
 

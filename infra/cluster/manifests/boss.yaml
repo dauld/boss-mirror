@@ -233,6 +233,26 @@ spec:
       # pinned; the app was not.
       nodeSelector:
         node-role.kubernetes.io/control-plane: ""
+      # …but NOT cp-2, until its disk is replaced. Every converge rolls
+      # this pod: a 309 MB image pull and layer extraction onto whichever
+      # control-plane node holds it. On cp-2 that disk is a DRAM-less
+      # PM991a (SAMSUNG MZALQ256HBJD) that also carries etcd's WAL, and
+      # the extraction stalled the WHOLE node — etcd, containerd and the
+      # kubelet together, /proc/pressure/io full ≈ 6.7 h — until the
+      # kubelet missed its lease: cp-2 and w-1 (routed to cp-2's
+      # apiserver) NotReady 18:58–19:19Z on 2026-09-11, the SoR dark 22
+      # min (incident a398c4d3). Keeping the roll off that disk is
+      # decision (2) of the incident's prevention; David replaces the
+      # drive (3), and this exclusion is DELETED in the same car that
+      # records the new disk in the estate registry. A hostname here on
+      # purpose: it is the one node with that part, and a label would be
+      # a second, imperative place for the same fact.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - {key: kubernetes.io/hostname, operator: NotIn, values: ["cp-2"]}
       # The image runs as uid/gid 1500 (boss), but a freshly provisioned
       # Longhorn volume mounts root:root 0755 — so the credential store
       # was unwritable and boss-auth failed on the temp file. fsGroup

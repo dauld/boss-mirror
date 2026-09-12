@@ -94,6 +94,14 @@
 #   undeclared-objects.sh --kubectl
 #       the resolved kubectl argv, so a caller needing its own kubectl
 #       call uses the same one rather than a second resolution.
+#   undeclared-objects.sh --objects-of <kubectl-json-file>
+#       kind<TAB>ns<TAB>name for every object ONE parsed manifest declares
+#       (the JSON `kubectl create --dry-run=client -o json` prints for it),
+#       volumeClaimTemplate PVCs included. No cluster, no tree: python3
+#       only. This is the ONE definition of "what does a manifest declare"
+#       — the deleted-manifest lint parses blobs that exist only in git
+#       history, which this script cannot reach, and used to carry its own
+#       copy of this parser for that reason (582cefe9).
 #   exit 1 in any mode — a usage error. Nothing was computed.
 #
 # ENV
@@ -215,54 +223,6 @@ resolve_kubectl() {
 
 MODE=""
 TARGET=""
-case "${1:-}" in
-    --list|--declared|--exemptions|--kubectl) MODE="$1" ;;
-    --check)
-        MODE="--check"
-        TARGET="${2:-}"
-        [ -n "$TARGET" ] || { say "--check needs <Kind>/<namespace>/<name>"; exit 1; }
-        ;;
-    *)
-        say "usage: $ME --list | --check <Kind>/<ns>/<name> | --declared | --exemptions | --kubectl"
-        exit 1
-        ;;
-esac
-
-if [ "$MODE" = "--exemptions" ]; then
-    printf '%s\n' "${EXEMPT_ANY_NS[@]}" "${EXEMPT[@]}"
-    exit 0
-fi
-
-KUBECTL_LINE=$(resolve_kubectl) || exit "$CANNOT_ANSWER"
-read -r -a KUBECTL <<<"$KUBECTL_LINE"
-if [ "$MODE" = "--kubectl" ]; then
-    printf '%s\n' "$KUBECTL_LINE"
-    exit 0
-fi
-
-[ -d "$DIR" ] || cannot_answer "$DIR does not exist"
-command -v python3 >/dev/null 2>&1 \
-    || cannot_answer "python3 is not on this box — cannot read the manifests"
-
-TMP=$(mktemp -d) || cannot_answer "cannot make a scratch directory to parse into"
-trap 'rm -rf "$TMP"' EXIT
-
-shopt -s nullglob
-MANIFESTS=("$DIR"/*.yaml)
-# Every other Kubernetes manifest in the tree. These are applied by
-# something other than the converge (the gate runner applies its own PVC
-# and Job), so an object they declare IS declared — just not converged.
-# Reading them is what keeps `gate-runner-disk` from reading as an
-# orphan, and it collapses two more exemption lines.
-OTHER_MANIFESTS=("$TREE"/infra/gate-runner/*.yaml)
-shopt -u nullglob
-
-if [ "${#MANIFESTS[@]}" -lt 10 ]; then
-    cannot_answer \
-        "found only ${#MANIFESTS[@]} manifest(s) in $DIR — the scrape broke" \
-        "  Refusing rather than reporting every live object as undeclared."
-fi
-
 # kind<TAB>ns<TAB>name<TAB>file for every object in one manifest's JSON.
 #
 # A StatefulSet also declares the PVCs its volumeClaimTemplates create —
@@ -315,6 +275,71 @@ for d in docs:
                 print(f"PersistentVolumeClaim\t{ns}\t{tn}-{name}-{ordinal}\t{src} (volumeClaimTemplate)")
 PY
 }
+
+case "${1:-}" in
+    --list|--declared|--exemptions|--kubectl) MODE="$1" ;;
+    --objects-of)
+        MODE="--objects-of"
+        TARGET="${2:-}"
+        [ -n "$TARGET" ] || { say "--objects-of needs <kubectl-json-file>"; exit 1; }
+        [ -f "$TARGET" ] || { say "--objects-of: no such file: $TARGET"; exit 1; }
+        ;;
+    --check)
+        MODE="--check"
+        TARGET="${2:-}"
+        [ -n "$TARGET" ] || { say "--check needs <Kind>/<namespace>/<name>"; exit 1; }
+        ;;
+    *)
+        say "usage: $ME --list | --check <Kind>/<ns>/<name> | --declared | --exemptions | --kubectl | --objects-of <json>"
+        exit 1
+        ;;
+esac
+
+if [ "$MODE" = "--objects-of" ]; then
+    # Three columns, not four: the caller names the source, this only
+    # says what the JSON declares. Needs python3 and nothing else — no
+    # tree, no cluster — so it runs from a copy of this file anywhere.
+    command -v python3 >/dev/null 2>&1 \
+        || cannot_answer "python3 is not on this box — cannot read the manifest"
+    objects_from_json "$TARGET" "" | cut -f1-3
+    exit 0
+fi
+
+if [ "$MODE" = "--exemptions" ]; then
+    printf '%s\n' "${EXEMPT_ANY_NS[@]}" "${EXEMPT[@]}"
+    exit 0
+fi
+
+KUBECTL_LINE=$(resolve_kubectl) || exit "$CANNOT_ANSWER"
+read -r -a KUBECTL <<<"$KUBECTL_LINE"
+if [ "$MODE" = "--kubectl" ]; then
+    printf '%s\n' "$KUBECTL_LINE"
+    exit 0
+fi
+
+[ -d "$DIR" ] || cannot_answer "$DIR does not exist"
+command -v python3 >/dev/null 2>&1 \
+    || cannot_answer "python3 is not on this box — cannot read the manifests"
+
+TMP=$(mktemp -d) || cannot_answer "cannot make a scratch directory to parse into"
+trap 'rm -rf "$TMP"' EXIT
+
+shopt -s nullglob
+MANIFESTS=("$DIR"/*.yaml)
+# Every other Kubernetes manifest in the tree. These are applied by
+# something other than the converge (the gate runner applies its own PVC
+# and Job), so an object they declare IS declared — just not converged.
+# Reading them is what keeps `gate-runner-disk` from reading as an
+# orphan, and it collapses two more exemption lines.
+OTHER_MANIFESTS=("$TREE"/infra/gate-runner/*.yaml)
+shopt -u nullglob
+
+if [ "${#MANIFESTS[@]}" -lt 10 ]; then
+    cannot_answer \
+        "found only ${#MANIFESTS[@]} manifest(s) in $DIR — the scrape broke" \
+        "  Refusing rather than reporting every live object as undeclared."
+fi
+
 
 # One manifest file's objects, via kubectl's own parser rather than a
 # YAML implementation grown here — the same choice

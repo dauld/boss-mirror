@@ -51,6 +51,7 @@
 #
 # Tunables (env, with in-sidecar defaults):
 #   BOSS_SCRATCH_FLOOR_GB    free GB to keep on /scratch     (default 50)
+#   BOSS_STALE_TARGET_H      hours before a sibling target dir is dead (default 12)
 #   BOSS_WORK_FLOOR_GB       free GB to keep on /work        (default 6)
 #   BOSS_WORKTREE_MAX_AGE_H  only prune worktrees older than (default 48)
 # Paths (env, defaulted to the boss-dev layout):
@@ -60,6 +61,11 @@
 set -euo pipefail
 
 SCRATCH_FLOOR_GB="${BOSS_SCRATCH_FLOOR_GB:-50}"
+# Hours a SIBLING target dir may go untouched before it is a dead cache.
+# Every builder gets its own CARGO_TARGET_DIR under the scratch mount
+# (boss brief says so), and a landed branch's target outlives it by
+# days; 12h is longer than any build and shorter than the next morning.
+STALE_TARGET_H="${BOSS_STALE_TARGET_H:-12}"
 WORK_FLOOR_GB="${BOSS_WORK_FLOOR_GB:-6}"
 WORKTREE_MAX_AGE_H="${BOSS_WORKTREE_MAX_AGE_H:-48}"
 
@@ -69,7 +75,7 @@ TARGET_DIR="${CARGO_TARGET_DIR:-/scratch/target}"
 SCRATCH_MOUNT="${SCRATCH_MOUNT:-/scratch}"
 WORK_MOUNT="${WORK_MOUNT:-/work}"
 
-for name in SCRATCH_FLOOR_GB WORK_FLOOR_GB WORKTREE_MAX_AGE_H; do
+for name in SCRATCH_FLOOR_GB WORK_FLOOR_GB WORKTREE_MAX_AGE_H STALE_TARGET_H; do
     case "${!name}" in
         ''|*[!0-9]*)
             echo "dev-scratch-reclaim: $name must be a whole number, got '${!name}'" >&2
@@ -241,7 +247,56 @@ reclaim_scratch() {
     fi
 }
 
+# ---------------------------------------------------------------------
+# SCRATCH, the other 62 GB: every OTHER builder's target dir.
+# ---------------------------------------------------------------------
+# Measured 2026-09-11 01:40Z (backlog 0efbd69e): /scratch held 90 GB,
+# $TARGET_DIR was 28 GB of it, and twenty sibling dirs — one per coding
+# agent, as their briefs instruct — held 62 GB for branches that had
+# landed the day before. The floor pass above scans one path and would
+# not have fired anyway at 304 GB free: a dead cache is not a headroom
+# problem, it is an AGE problem, so this pass runs on age regardless of
+# free space. A target dir is one that carries cargo's CACHEDIR.TAG or
+# a debug/ or release/ profile; the primary $TARGET_DIR is never a
+# candidate (the floor pass owns it, and only ever trims incremental/).
+#
+# NO build_running() GUARD HERE, on purpose: a build in progress writes
+# to its target continuously, so a dir untouched for STALE_TARGET_H
+# hours has no live build in it — the mtime IS the liveness check, per
+# dir, which the process scan cannot be (it sees every builder's cargo
+# at once and would defer this pass forever on a busy pod).
+reclaim_stale_targets() {
+    local d n=0 kb since
+    [ -d "$SCRATCH_MOUNT" ] || return 0
+    since="@$(( $(date +%s) - STALE_TARGET_H * 3600 ))"
+    for d in "$SCRATCH_MOUNT"/*/; do
+        d="${d%/}"
+        [ -d "$d" ] || continue
+        [ "$d" = "$TARGET_DIR" ] && continue
+        if [ ! -f "$d/CACHEDIR.TAG" ] && [ ! -d "$d/debug" ] && [ ! -d "$d/release" ]; then
+            continue
+        fi
+        # Anything inside touched within the window means a builder is
+        # (or was just) using it. Depth-bounded: a target dir has
+        # hundreds of thousands of files and the fingerprints at depth 3
+        # move on every compile.
+        if [ -n "$(find "$d" -maxdepth 3 -newermt "$since" -print -quit 2>/dev/null)" ]; then
+            continue
+        fi
+        kb=$(du -sk "$d" 2>/dev/null | awk '{print $1}')
+        if rm -rf "$d"; then
+            n=$((n + 1))
+            log "stale target reclaimed: $d ($((${kb:-0} / 1024))MiB, untouched for more than ${STALE_TARGET_H}h)"
+        else
+            log "could not remove stale target $d" >&2
+            problems=$((problems + 1))
+        fi
+    done
+    log "stale-target pass: $n stale target dir(s) reclaimed under $SCRATCH_MOUNT (age > ${STALE_TARGET_H}h, $TARGET_DIR exempt)"
+}
+
 reclaim_work
+reclaim_stale_targets
 reclaim_scratch
 
 if [ "$problems" -gt 0 ]; then

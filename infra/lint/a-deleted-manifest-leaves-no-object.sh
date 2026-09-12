@@ -190,45 +190,16 @@ command -v python3 >/dev/null 2>&1 || {
 # this function's stdin (`python3 - <<PY`), so a script that also read
 # stdin would read an empty string and report a clean cluster. It did,
 # the first time this ran.
+# THE ONE PARSER. What a manifest declares is decided in ONE place —
+# infra/cluster/undeclared-objects.sh, whose --objects-of mode reads the
+# JSON kubectl printed for a blob and needs neither the cluster nor the
+# tree. This lint used to carry a near-verbatim copy (~105 lines with
+# its self-test) because it parses manifests that exist only in git
+# history, which the derivation cannot reach; the parse of the BLOB
+# stays here, the parse of the JSON does not (582cefe9, CLAUDE.md §9a).
+DERIVATION="infra/cluster/undeclared-objects.sh"  # repo-relative: the script cd-ed to the repo root above
 objects_from_json() { # json-file
-    python3 - "$1" <<'PY'
-import json, sys
-
-dec = json.JSONDecoder()
-s = open(sys.argv[1]).read()
-docs, i, n = [], 0, len(s)
-while i < n:
-    while i < n and s[i] in " \n\r\t":
-        i += 1
-    if i >= n:
-        break
-    obj, i = dec.raw_decode(s, i)
-    docs.append(obj)
-
-for d in docs:
-    if not isinstance(d, dict):
-        continue
-    kind = d.get("kind")
-    md = d.get("metadata") or {}
-    name, ns = md.get("name"), md.get("namespace") or ""
-    # No name means a generateName template (the gate Job). It declares
-    # no specific object, so it can neither be found nor be missed.
-    if not kind or not name:
-        continue
-    print(f"{kind}\t{ns}\t{name}")
-    if kind == "StatefulSet":
-        spec = d.get("spec") or {}
-        try:
-            replicas = 1 if spec.get("replicas") is None else int(spec["replicas"])
-        except (TypeError, ValueError):
-            replicas = 1
-        for tmpl in spec.get("volumeClaimTemplates") or []:
-            tn = ((tmpl.get("metadata") or {}).get("name"))
-            if not tn:
-                continue
-            for ordinal in range(replicas):
-                print(f"PersistentVolumeClaim\t{ns}\t{tn}-{name}-{ordinal}")
-PY
+    bash "$DERIVATION" --objects-of "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -274,7 +245,7 @@ StatefulSet	boss	postgres'
     got=$(objects_from_json "$fixture" | LC_ALL=C sort)
     rm -f "$fixture"
     if [ "$got" != "$(printf '%s\n' "$want" | LC_ALL=C sort)" ]; then
-        echo "a-deleted-manifest-leaves-no-object: SELF-TEST FAILED — the manifest parser does not read what it claims to." >&2
+        echo "a-deleted-manifest-leaves-no-object: SELF-TEST FAILED — the manifest parser (undeclared-objects.sh --objects-of) does not read what it claims to." >&2
         echo "  got:" >&2
         printf '    %s\n' "$got" >&2
         echo "  Refusing to compare the cluster against a parse this broken:" >&2

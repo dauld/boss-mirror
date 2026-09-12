@@ -322,6 +322,15 @@ export type YardState = Readonly<{
   /** Closed without arriving. Kept visible — a train that cancelled is
    *  a fact about the day, it just isn't an arrival. */
   cancelled: readonly TrainRow[];
+  /** THE DAY, FROM THE RECORD: every pr-train the system of record
+   *  closed today on its own clock (`closed_within=0`), split by
+   *  outcome, and whether that page was complete. The production tile
+   *  counts over this. `null` when the read failed or the server is
+   *  older — the tile then falls back to the five-train window and says
+   *  it is a floor. Additive, like `delivery`: a yard that cannot read
+   *  its day is still a yard. (2026-09-11: the tile read '≥ 5 trains'
+   *  on a day the record held 29 arrived and 66 cars.) */
+  day: Readonly<{ arrived: readonly TrainRow[]; cancelled: readonly TrainRow[]; complete: boolean }> | null;
   /** The scoreboard. Empty when the report is unavailable or has
    *  resolved nothing — the yard renders nothing rather than zeros. */
   delivery: readonly DeliveryStat[];
@@ -1087,6 +1096,25 @@ function carRow(j: JobLite): CarRow {
 export const ARRIVALS_SHOWN = 5;
 export const CANCELLED_SHOWN = 3;
 
+/** The record's day page as TrainRows, split by outcome. A page shorter
+ *  than its own `total` is cut off — a limit is not a filter — and the
+ *  tile renders '≥' on it rather than a smaller day. */
+function dayOf(
+  page: Readonly<{ data: readonly JobLite[]; total: number }>,
+  shipById: ReadonlyMap<string, JobLite>,
+  medians: ArrivalMedians,
+  nowMs: number,
+): NonNullable<YardState['day']> {
+  const closed = page.data.filter(t => t.status === 'closed').map(t => ({ t, outcome: trainOutcome(t) }));
+  const rows = (pick: (o: ReturnType<typeof trainOutcome>) => boolean): TrainRow[] =>
+    closed.filter(c => pick(c.outcome)).map(c => toTrainRow(c.t, shipById, false, medians, nowMs));
+  return {
+    arrived: rows(o => o === 'arrived'),
+    cancelled: rows(o => o !== 'arrived'),
+    complete: page.data.length >= page.total,
+  };
+}
+
 export function assembleYard(
   trains: readonly JobLite[],
   ships: readonly JobLite[],
@@ -1098,6 +1126,9 @@ export function assembleYard(
   report: TerminalReport | null = null,
   gateRuns: readonly JobLite[] = [],
   publishQueue: StationQueueEnvelope | null = null,
+  // The day's closed trains as the record served them, with the list's
+  // own `total` so a cut-off page is known to be one. Last, additive.
+  dayPage: Readonly<{ data: readonly JobLite[]; total: number }> | null = null,
 ): YardState {
   const shipById = new Map(ships.map(j => [j.id, j]));
   const open = trains.filter(t => t.status === 'open');
@@ -1140,6 +1171,7 @@ export function assembleYard(
       .map(c => toTrainRow(c.t, shipById, false, medians, nowMs)),
     delivery: deliveryStats(report),
     awaitingProof: awaitingProof(ships).map(carRow),
+    day: dayPage === null ? null : dayOf(dayPage, shipById, medians, nowMs),
     publishing: publishRows(publishQueue),
     packets: { trains, gateRuns },
     cars: ships
@@ -1166,7 +1198,7 @@ async function fetchStationQueue(name: string): Promise<StationQueueEnvelope | n
 }
 
 export async function fetchYard(): Promise<YardState | null> {
-  const [tr, sr, dockQueue, report, gateRuns, publishQueue] = await Promise.all([
+  const [tr, sr, dockQueue, report, gateRuns, publishQueue, dayPage] = await Promise.all([
     // 40, not 20: the window has to hold the open trains, the five
     // arrivals the board shows, AND the arrivals the ETA medians are
     // taken over — cancelled trains sit in the same list and would
@@ -1190,11 +1222,19 @@ export async function fetchYard(): Promise<YardState | null> {
       .then((b) => b?.data ?? [])
       .catch(() => [] as JobLite[]),
     fetchStationQueue('publish-dock'),
+    // THE DAY FROM THE RECORD, for the production tile: every pr-train
+    // closed today on the authoritative clock (`closed_within=0`). Its
+    // `total` rides along so a cut-off page is known. Additive: null on
+    // any failure, and the tile falls back to the window as a floor.
+    fetch('/api/jobs?kind=pr-train&closed_within=0&limit=500')
+      .then((r) => (r.ok ? (r.json() as Promise<{ data?: JobLite[]; total?: number }>) : null))
+      .then((b) => (b && Array.isArray(b.data) && typeof b.total === 'number' ? { data: b.data, total: b.total } : null))
+      .catch(() => null),
   ]);
   if (!tr.ok || !sr.ok) return null;
   const trains = ((await tr.json()) as { data?: JobLite[] }).data ?? [];
   const ships = ((await sr.json()) as { data?: JobLite[] }).data ?? [];
-  return assembleYard(trains, ships, dockQueue, Date.now(), report, gateRuns, publishQueue);
+  return assembleYard(trains, ships, dockQueue, Date.now(), report, gateRuns, publishQueue, dayPage);
 }
 
 // ---------------------------------------------------------------------
