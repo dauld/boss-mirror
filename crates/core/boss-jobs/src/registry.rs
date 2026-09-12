@@ -326,6 +326,7 @@ fn workflow_design_spec() -> WorkflowSpec {
                 required: true,
                 filled_by: boss_core::job::FilledBy::Executor,
                 item_keys: Vec::new(),
+                covers: None,
             }],
             ..Default::default()
         },
@@ -361,6 +362,7 @@ fn workflow_design_spec() -> WorkflowSpec {
                 required: true,
                 filled_by: boss_core::job::FilledBy::Executor,
                 item_keys: Vec::new(),
+                covers: None,
             }],
             ..Default::default()
         },
@@ -496,6 +498,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
                     item_keys: Vec::new(),
+                    covers: None,
                 },
                 // Required, deliberately. See the doc comment: the
                 // sentence that keeps a change small is the one about
@@ -508,6 +511,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
                     item_keys: Vec::new(),
+                    covers: None,
                 },
             ],
             ..Default::default()
@@ -529,6 +533,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
                     item_keys: Vec::new(),
+                    covers: None,
                 },
             ],
             ..Default::default()
@@ -546,6 +551,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
                     item_keys: Vec::new(),
+                    covers: None,
                 },
                 // How the change was seen working on a running system
                 // — or why there is nothing to observe. Required
@@ -559,6 +565,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
                     item_keys: Vec::new(),
+                    covers: None,
                 },
                 // The gate's OWN account of the run, not the author's.
                 //
@@ -595,6 +602,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
                     item_keys: Vec::new(),
+                    covers: None,
                 },
                 // What the change LOOKS like, for a car that changes a
                 // rendered surface — a screenshot path, or what was
@@ -619,6 +627,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     required: false,
                     filled_by: boss_core::job::FilledBy::Executor,
                     item_keys: Vec::new(),
+                    covers: None,
                 },
             ],
             ..Default::default()
@@ -635,6 +644,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                 required: true,
                 filled_by: boss_core::job::FilledBy::Executor,
                 item_keys: Vec::new(),
+                covers: None,
             }],
             ..Default::default()
         },
@@ -665,6 +675,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
                     item_keys: Vec::new(),
+                    covers: None,
                 },
                 boss_core::job::StepField {
                     name: "method".into(),
@@ -672,6 +683,7 @@ fn ship_a_change_spec() -> WorkflowSpec {
                     required: false,
                     filled_by: boss_core::job::FilledBy::Executor,
                     item_keys: Vec::new(),
+                    covers: None,
                 },
             ],
             ..Default::default()
@@ -824,6 +836,7 @@ fn regenerate_deployment_spec() -> WorkflowSpec {
                 required: true,
                 filled_by: boss_core::job::FilledBy::Executor,
                 item_keys: Vec::new(),
+                covers: None,
             }],
             ..Default::default()
         }
@@ -856,6 +869,7 @@ fn regenerate_deployment_spec() -> WorkflowSpec {
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
                     item_keys: Vec::new(),
+                    covers: None,
                 },
                 boss_core::job::StepField {
                     name: "destroying".into(),
@@ -863,6 +877,7 @@ fn regenerate_deployment_spec() -> WorkflowSpec {
                     required: true,
                     filled_by: boss_core::job::FilledBy::Executor,
                     item_keys: Vec::new(),
+                    covers: None,
                 },
             ],
             ..Default::default()
@@ -1097,6 +1112,7 @@ fn maintenance_spec(kind: &str, label: &str, description: &str) -> WorkflowSpec 
                 required: true,
                 filled_by: boss_core::job::FilledBy::Executor,
                 item_keys: Vec::new(),
+                covers: None,
             }],
             ..Default::default()
         },
@@ -4001,6 +4017,7 @@ mod tests {
                 required: true,
                 filled_by: FilledBy::Filer,
                 item_keys: Vec::new(),
+                covers: None,
             },
             StepField {
                 name: "markdown".into(),
@@ -4008,6 +4025,7 @@ mod tests {
                 required: true,
                 filled_by: FilledBy::Filer,
                 item_keys: Vec::new(),
+                covers: None,
             },
             StepField {
                 name: "resolutions".into(),
@@ -4015,6 +4033,7 @@ mod tests {
                 required: true,
                 filled_by: FilledBy::Executor,
                 item_keys: Vec::new(),
+                covers: None,
             },
         ];
         step.metadata = serde_json::json!({ "title": "Packet loss" });
@@ -4042,6 +4061,7 @@ mod tests {
             required: true,
             filled_by: FilledBy::Filer,
             item_keys: Vec::new(),
+            covers: None,
         }];
 
         // An explicit null is not a value.
@@ -4081,6 +4101,7 @@ mod tests {
             required: true,
             filled_by: FilledBy::Filer,
             item_keys: vec!["anchor".into(), "title".into(), "proposal".into()],
+            covers: None,
         }];
 
         // A title-less element is named by index and key.
@@ -4135,6 +4156,7 @@ mod tests {
             required: false,
             filled_by: FilledBy::Filer,
             item_keys: Vec::new(),
+            covers: None,
         }];
         assert!(
             missing_filer_fields(std::slice::from_ref(&step)).is_empty(),

@@ -239,6 +239,7 @@ async fn executor_fields_stay_create_legal_and_required_at_done() {
                     required: true,
                     filled_by: FilledBy::Executor,
                     item_keys: Vec::new(),
+                    covers: None,
                 }],
                 ..Default::default()
             },

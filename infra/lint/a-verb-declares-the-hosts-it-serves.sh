@@ -47,7 +47,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 
 python3 - "$repo" <<'PY' || exit 1
-import json, re, sys, glob
+import json, os, re, sys, glob
 
 repo = sys.argv[1]
 verbs = json.load(open(f"{repo}/infra/ops/verbs.json"))["verbs"]
@@ -102,19 +102,23 @@ for name in sorted(verbs):
                 f"verb nobody can reach.")
     argv0 = spec["argv"][0]
     if argv0.startswith("/"):
-        # An absolute argv[0] is one host's filesystem. The only
-        # checkout path the allowlist names is the forge's.
-        if argv0.startswith("/home/david/boss/"):
-            if hosts != ["forge"]:
-                problems.append(
-                    f"{name} runs {argv0} — a path that exists only in the FORGE's checkout — "
-                    f"but is scoped to {hosts}. On any other host that is an ENOENT dressed up "
-                    f"as an answer. Scope it to forge, or give the verb a path the other host has.")
-        else:
+        # An absolute argv[0] is ONE host's filesystem baked into a file
+        # every host reads. Until 2026-09-12 eleven verbs carried the
+        # forge checkout's path and could run nowhere else (66077f9c).
+        # The runner resolves a repo-relative script against its own
+        # checkout, so every managed host can carry every script.
+        problems.append(
+            f"{name}'s argv[0] is the absolute path {argv0}. Name the script relative to "
+            f"the repo (infra/forge/reach.sh); the runner resolves it against its own "
+            f"checkout, on whichever host runs it. A bare command stays a bare command.")
+    elif "/" in argv0:
+        script = os.path.join(repo, argv0)
+        if not os.path.isfile(script):
             problems.append(
-                f"{name}'s argv[0] is the absolute path {argv0}, which no host is known to "
-                f"carry. Either use a bare command (host-agnostic, resolved on PATH) or a path "
-                f"under a checkout whose host this lint can name.")
+                f"{name}'s argv[0] {argv0} is not a file in this tree — the runner would refuse "
+                f"it as 'not in this checkout' on every host.")
+        elif not os.access(script, os.X_OK):
+            problems.append(f"{name}'s argv[0] {argv0} is in the tree but not executable.")
     if "boss-gcp" in hosts:
         serving_gcp.append(name)
         if "MUTATING" in spec.get("about", ""):
@@ -147,5 +151,5 @@ mutating = sorted(n for n, s in verbs.items() if "MUTATING" in s.get("about", ""
 print(f"a-verb-declares-the-hosts-it-serves: ok — {len(verbs)} verbs each name the hosts they "
       f"serve, from the {len(node_ids)} estate node ids in the tree; boss-gcp serves "
       f"{', '.join(sorted(serving_gcp))} and none of the {len(mutating)} MUTATING verbs; every "
-      f"forge-path verb is scoped to forge; the runner refuses on the field")
+      f"script is repo-relative and in the tree; the runner refuses on the field")
 PY

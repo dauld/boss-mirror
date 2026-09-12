@@ -519,6 +519,7 @@ mod tests {
             required,
             filled_by: boss_core::job::FilledBy::Executor,
             item_keys: Vec::new(),
+            covers: None,
         }
     }
 

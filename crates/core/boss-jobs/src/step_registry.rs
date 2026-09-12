@@ -283,6 +283,62 @@ impl StepRegistry {
             {
                 errors.push(e);
             }
+            // SHAPE at done, the executor-side twin of the filer-time
+            // check in registry.rs: every element carries each item key
+            // as a non-empty string, a miss named by index.
+            if let Some(items) = obj.get(&field.name).and_then(|v| v.as_array())
+                && !field.item_keys.is_empty()
+            {
+                for (i, item) in items.iter().enumerate() {
+                    for key in &field.item_keys {
+                        let present = item
+                            .get(key.as_str())
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|s| !s.trim().is_empty());
+                        if !present {
+                            errors.push(ValidationError {
+                                field: format!("{}[{i}].{key}", field.name),
+                                message: format!("element {i} of '{}' has no '{key}'", field.name),
+                            });
+                        }
+                    }
+                }
+            }
+            // COVERAGE: every anchor of the covered field has an element
+            // here with the same anchor. The refusal names the anchors
+            // still unanswered, so the reader knows which questions are
+            // open rather than only that some are.
+            if let Some(covered) = &field.covers {
+                let wanted: Vec<&str> = obj
+                    .get(covered.as_str())
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|q| q.get("anchor").and_then(|a| a.as_str()))
+                    .collect();
+                let have: Vec<&str> = obj
+                    .get(&field.name)
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|r| r.get("anchor").and_then(|a| a.as_str()))
+                    .collect();
+                let missing: Vec<&str> = wanted
+                    .iter()
+                    .copied()
+                    .filter(|a| !have.contains(a))
+                    .collect();
+                if !missing.is_empty() {
+                    errors.push(ValidationError {
+                        field: field.name.clone(),
+                        message: format!(
+                            "'{}' must cover every anchor of '{covered}'; unanswered: {}",
+                            field.name,
+                            missing.join(", ")
+                        ),
+                    });
+                }
+            }
         }
         if errors.is_empty() {
             Ok(())
@@ -901,6 +957,7 @@ mod tests {
             required: true,
             filled_by: Default::default(),
             item_keys: Vec::new(),
+            covers: None,
         }];
         let meta = serde_json::json!({"disposition": "ship"});
         let err = StepRegistry::validate_authored_fields(&fields, &meta).unwrap_err();
@@ -977,6 +1034,95 @@ mod tests {
         );
     }
 
+    /// `covers`: an array field's anchors must cover another field's
+    /// anchors at done. The design doc's `resolutions` over its
+    /// `questions` is the case (0ef658e6: four reviews completed with
+    /// zero resolutions against twelve questions).
+    #[test]
+    fn a_covering_field_must_answer_every_anchor_of_the_field_it_covers() {
+        use boss_core::job::{FilledBy, StepField};
+        let fields = vec![
+            StepField {
+                name: "questions".into(),
+                field_type: "array".into(),
+                required: true,
+                filled_by: FilledBy::Filer,
+                item_keys: vec!["anchor".into(), "title".into(), "proposal".into()],
+                covers: None,
+            },
+            StepField {
+                name: "resolutions".into(),
+                field_type: "array".into(),
+                required: true,
+                filled_by: FilledBy::Executor,
+                item_keys: vec!["anchor".into(), "decision".into()],
+                covers: Some("questions".into()),
+            },
+        ];
+        let questions = serde_json::json!([
+            {"anchor": "host", "title": "t", "proposal": "p"},
+            {"anchor": "credentials", "title": "t", "proposal": "p"},
+            {"anchor": "acts", "title": "t", "proposal": "p"},
+        ]);
+        // Zero resolutions: refused, and the refusal names every anchor.
+        let err = StepRegistry::validate_authored_fields(
+            &fields,
+            &serde_json::json!({ "questions": questions, "resolutions": [] }),
+        )
+        .unwrap_err();
+        let msg = err
+            .iter()
+            .find(|e| e.field == "resolutions")
+            .map(|e| e.message.clone())
+            .unwrap_or_default();
+        assert!(
+            msg.contains("host") && msg.contains("credentials") && msg.contains("acts"),
+            "the refusal names the unanswered anchors: {msg}"
+        );
+        // One answered of three: refused, naming the two left.
+        let err = StepRegistry::validate_authored_fields(
+            &fields,
+            &serde_json::json!({ "questions": questions, "resolutions": [
+                {"anchor": "host", "decision": "forge now"}
+            ]}),
+        )
+        .unwrap_err();
+        let msg = err
+            .iter()
+            .find(|e| e.field == "resolutions")
+            .unwrap()
+            .message
+            .clone();
+        assert!(
+            !msg.contains("host") && msg.contains("credentials") && msg.contains("acts"),
+            "{msg}"
+        );
+        // An element missing its `decision` is a shape miss, named by index.
+        let err = StepRegistry::validate_authored_fields(
+            &fields,
+            &serde_json::json!({ "questions": questions, "resolutions": [
+                {"anchor": "host", "decision": "forge now"},
+                {"anchor": "credentials", "decision": ""},
+                {"anchor": "acts", "decision": "reads now, node-converge bounded"}
+            ]}),
+        )
+        .unwrap_err();
+        assert!(
+            err.iter().any(|e| e.field == "resolutions[1].decision"),
+            "{err:?}"
+        );
+        // All three answered: ok.
+        StepRegistry::validate_authored_fields(
+            &fields,
+            &serde_json::json!({ "questions": questions, "resolutions": [
+                {"anchor": "host", "decision": "forge now"},
+                {"anchor": "credentials", "decision": "/etc/boss-ops, root 0600, David places"},
+                {"anchor": "acts", "decision": "reads now, node-converge bounded"}
+            ]}),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn authored_fields_validate_in_union_with_the_bundle() {
         use boss_core::job::StepField;
@@ -987,6 +1133,7 @@ mod tests {
                 required: true,
                 filled_by: boss_core::job::FilledBy::Executor,
                 item_keys: Vec::new(),
+                covers: None,
             },
             StepField {
                 name: "notes".into(),
@@ -994,6 +1141,7 @@ mod tests {
                 required: false,
                 filled_by: boss_core::job::FilledBy::Executor,
                 item_keys: Vec::new(),
+                covers: None,
             },
         ];
         // Missing required authored field → error naming it.

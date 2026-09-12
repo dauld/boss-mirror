@@ -45,6 +45,7 @@ fn field(name: &str, required: bool) -> StepField {
         required,
         filled_by: boss_core::job::FilledBy::Executor,
         item_keys: Vec::new(),
+        covers: None,
     }
 }
 

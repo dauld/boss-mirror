@@ -106,6 +106,16 @@ fi
 BASE="$BOSS_JOBS_URL"
 
 VERBS_FILE="${OPS_VERBS_FILE:-$(dirname "$0")/verbs.json}"
+# THE CHECKOUT THIS RUNNER IS PART OF. A verb's script is named in
+# verbs.json RELATIVE to the repo (infra/forge/reach.sh) and resolved
+# here, against the checkout the runner itself runs from — never an
+# absolute path baked into the allowlist. Until 2026-09-12 eleven of
+# sixteen verbs carried /home/david/boss/…, the FORGE's checkout path,
+# so none could run on boss-gcp (/opt/boss) and every reader of the
+# file — two lints, the test harness — substituted that prefix for its
+# own: one assumption in four places (66077f9c, CLAUDE.md §9a). A bare
+# command (systemctl, df) stays a bare command, resolved on PATH.
+OPS_REPO_ROOT="${OPS_REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 OPS_TIMEOUT="${OPS_TIMEOUT:-30}"
 OPS_OUTPUT_CAP="${OPS_OUTPUT_CAP:-102400}"
 
@@ -223,6 +233,7 @@ while [ "$i" -lt "$n" ]; do
           end' "$VERBS_FILE")
 
     outf="$workdir/out"
+    disp=""; rc_str=""; script=""
     reason=$(printf '%s' "$decision" | jq -r '.refuse // empty')
     if [ -n "$reason" ]; then
         disp="refused"; rc_str=""
@@ -238,6 +249,26 @@ while [ "$i" -lt "$n" ]; do
         done <<ARGV
 $(printf '%s' "$decision" | jq -r '.argv[]')
 ARGV
+        # argv[0]: a repo-relative script resolves against this checkout
+        # and must exist there — an absent script is a REFUSAL naming the
+        # path, not an exec error dressed up as an answer. A word with no
+        # slash is a bare command for PATH; an absolute path is left as
+        # the allowlist wrote it (the lint refuses those).
+        script=""
+        case "$1" in
+            /*) script="$1" ;;
+            */*) script="$OPS_REPO_ROOT/$1" ;;
+        esac
+        if [ -n "$script" ] && [ ! -x "$script" ]; then
+            reason="verb $verb names a script not in this checkout: $1 (resolved to $script under OPS_REPO_ROOT=$OPS_REPO_ROOT)"
+            disp="refused"; rc_str=""
+            printf '%s' "$reason" > "$outf"
+        fi
+    fi
+    if [ "$disp" != "refused" ]; then
+        if [ -n "$script" ]; then
+            shift; set -- "$script" "$@"
+        fi
         # A verb may declare its own `timeout` in the allowlist (a
         # reviewed number, like its argv); otherwise the runner's
         # default applies. publish-github-pr's first push of the whole

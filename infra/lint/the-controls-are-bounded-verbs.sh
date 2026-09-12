@@ -20,7 +20,10 @@ mutating=sorted(n for n,s in v.items() if "MUTATING" in s.get("about",""))
 len(mutating) >= 8 or sys.exit(f"FAIL: only {len(mutating)} verb(s) declare MUTATING — the roster derivation broke: {mutating}")
 for name in mutating:
     spec=v[name]
-    script=spec["argv"][0].replace("/home/david/boss/", f"{repo}/")
+    # argv[0] is repo-relative (66077f9c); the runner resolves it against
+    # its own checkout, and so does this lint — one rule, no substitution.
+    argv0=spec["argv"][0]
+    script=argv0 if argv0.startswith("/") else os.path.join(repo, argv0)
     os.path.isfile(script) or sys.exit(f"FAIL: {name} points at a script not in the tree: {spec['argv'][0]}")
     os.access(script, os.X_OK) or sys.exit(f"FAIL: {name}'s script is not executable")
     for p in spec["params"]:
@@ -188,7 +191,9 @@ for a in "$@"; do case "$a" in @*) cp "${a#@}" "$STUB_PUT"; exit 0;; esac; done
 cat "$STUB_JOBS"
 EOF
     chmod +x "$tmp/rbin/curl"
-    sed "s#/home/david/boss/#$repo/#g" "$repo/infra/ops/verbs.json" > "$tmp/verbs.json"
+    # The allowlist is used VERBATIM: its scripts are repo-relative and
+    # the runner resolves them against OPS_REPO_ROOT (66077f9c).
+    cp "$repo/infra/ops/verbs.json" "$tmp/verbs.json"
     packet() { # $1 = args JSON array
         printf '{"data":[{"id":"aaaaaaaa-0000-4000-8000-000000000000","status":"open","metadata":{"host":"forge","verb":"publish-github-pr","args":%s},"steps":[{"id":"s-execute","spec_slug":"execute","status":"ready","metadata":{"authority_role":"platform-admin"}}]}]}' "$1" > "$tmp/jobs.json"
     }

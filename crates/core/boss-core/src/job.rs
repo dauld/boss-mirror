@@ -277,6 +277,20 @@ pub struct StepField {
     /// this existed already meant.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub item_keys: Vec<String>,
+    /// For an `array` field of `{anchor, …}` elements: the name of
+    /// another array field on the same step whose every element's
+    /// `anchor` must appear as the `anchor` of one element here, checked
+    /// required-at-done. Registry data for a cross-field contract: a
+    /// design doc's `resolutions` COVER its `questions`, so the review
+    /// cannot complete with a question unanswered. Measured 2026-09-11
+    /// (0ef658e6): four design packets reached `fold` with their review
+    /// completed and ZERO resolutions against 2, 3, 3 and 4 questions —
+    /// twelve judgements recorded nowhere — because `resolutions` was
+    /// not a declared field and nothing related it to `questions`. None
+    /// (the default) means no coverage contract, which is what every
+    /// field authored before this existed already meant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covers: Option<String>,
 }
 
 /// Who supplies a step field's value — the enforcement point follows
@@ -746,6 +760,7 @@ mod tests {
             required: true,
             filled_by: FilledBy::Filer,
             item_keys: Vec::new(),
+            covers: None,
         };
         let json = serde_json::to_value(&f).unwrap();
         assert_eq!(json["filled_by"], serde_json::json!("filer"));
@@ -758,6 +773,7 @@ mod tests {
         let exec = StepField {
             filled_by: FilledBy::Executor,
             item_keys: Vec::new(),
+            covers: None,
             ..f
         };
         let json = serde_json::to_value(&exec).unwrap();

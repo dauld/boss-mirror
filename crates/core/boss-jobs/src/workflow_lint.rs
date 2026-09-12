@@ -77,6 +77,7 @@ pub fn validate_workflow(spec: &WorkflowSpec, registry: &StepRegistry) -> Vec<Wo
     for step in &spec.steps {
         check_metadata_defaults_values(spec, step, registry, &mut errs);
         check_item_keys_name_an_array(spec, step, &mut errs);
+        check_covers_names_an_array_on_the_same_step(spec, step, &mut errs);
     }
     // Phases 1–3 — viability of the predicate graph.
     check_viability(spec, registry, &mut errs);
@@ -969,6 +970,55 @@ fn check_item_keys_name_an_array(
     }
 }
 
+/// `covers` relates two ARRAY fields on ONE step — the anchors of the
+/// covered field must each be answered by an element of this one. A
+/// `covers` that names a missing field, a non-array, or itself would be
+/// stored and never checked (or checked vacuously); refuse the spec.
+fn check_covers_names_an_array_on_the_same_step(
+    spec: &WorkflowSpec,
+    step: &StepSpec,
+    errs: &mut Vec<WorkflowLintError>,
+) {
+    for field in &step.fields {
+        let Some(covered) = &field.covers else {
+            continue;
+        };
+        let reason = if field.field_type != "array" {
+            Some(format!(
+                "field '{}' declares covers = '{covered}' but is a '{}', not an array — \
+                 coverage is a relation between element anchors and would never be checked",
+                field.name, field.field_type
+            ))
+        } else if covered == &field.name {
+            Some(format!(
+                "field '{}' declares covers = itself, which is vacuously true and checks nothing",
+                field.name
+            ))
+        } else {
+            match step.fields.iter().find(|f| &f.name == covered) {
+                None => Some(format!(
+                    "field '{}' declares covers = '{covered}', but this step has no field of that \
+                     name — coverage is checked at done against a field on the SAME step",
+                    field.name
+                )),
+                Some(f) if f.field_type != "array" => Some(format!(
+                    "field '{}' declares covers = '{covered}', which is a '{}', not an array — \
+                     there are no element anchors to cover",
+                    field.name, f.field_type
+                )),
+                Some(_) => None,
+            }
+        };
+        if let Some(reason) = reason {
+            errs.push(WorkflowLintError {
+                workflow: spec.kind.clone(),
+                step: step.title.clone(),
+                reason,
+            });
+        }
+    }
+}
+
 fn is_placeholder_default(field_type: &str, value: &Value) -> bool {
     match (field_type, value) {
         ("date" | "date-time" | "uri", Value::String(s)) => s.is_empty(),
@@ -1091,6 +1141,7 @@ mod tests {
             required: true,
             filled_by: boss_core::job::FilledBy::Filer,
             item_keys: vec!["anchor".into(), "title".into()],
+            covers: None,
         };
         let spec_with = |field_type: &str| {
             WorkflowSpec::platform_seed(
@@ -1134,6 +1185,82 @@ mod tests {
         );
     }
 
+    /// `covers` must relate two array fields on the same step; each way
+    /// it can fail to is refused by name, and the intended shape passes.
+    #[test]
+    fn covers_must_name_another_array_field_on_the_same_step() {
+        let reg = StepRegistry::v1();
+        let mk = |name: &str, field_type: &str, covers: Option<&str>| boss_core::job::StepField {
+            name: name.into(),
+            field_type: field_type.into(),
+            required: true,
+            filled_by: boss_core::job::FilledBy::Executor,
+            item_keys: Vec::new(),
+            covers: covers.map(str::to_string),
+        };
+        let spec_with = |fields: Vec<boss_core::job::StepField>| {
+            WorkflowSpec::platform_seed(
+                "doc",
+                "doc",
+                "test",
+                vec!["custom".into()],
+                vec![
+                    StepSpec {
+                        title: "drafted".into(),
+                        kind: "trigger".into(),
+                        ready_when: "true".into(),
+                        metadata_defaults: serde_json::json!({
+                            "trigger_kind": "operator", "trigger_name": "t"
+                        }),
+                        ..Default::default()
+                    },
+                    StepSpec {
+                        title: "review".into(),
+                        kind: "task".into(),
+                        ready_when: "steps.drafted.done".into(),
+                        fields,
+                        terminal: Some(Terminal {
+                            outcome: "published".into(),
+                        }),
+                        ..Default::default()
+                    },
+                ],
+            )
+        };
+        let covers_errs = |fields| {
+            validate_workflow(&spec_with(fields), &reg)
+                .into_iter()
+                .filter(|e| e.reason.contains("covers"))
+                .map(|e| e.reason)
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            covers_errs(vec![
+                mk("questions", "array", None),
+                mk("resolutions", "array", Some("questions"))
+            ])
+            .is_empty(),
+            "the intended shape passes"
+        );
+        let e = covers_errs(vec![mk("resolutions", "array", Some("questions"))]);
+        assert!(
+            e.iter().any(|r| r.contains("no field of that name")),
+            "{e:?}"
+        );
+        let e = covers_errs(vec![
+            mk("questions", "string", None),
+            mk("resolutions", "array", Some("questions")),
+        ]);
+        assert!(e.iter().any(|r| r.contains("not an array")), "{e:?}");
+        let e = covers_errs(vec![
+            mk("questions", "array", None),
+            mk("resolutions", "string", Some("questions")),
+        ]);
+        assert!(e.iter().any(|r| r.contains("not an array")), "{e:?}");
+        let e = covers_errs(vec![mk("resolutions", "array", Some("resolutions"))]);
+        assert!(e.iter().any(|r| r.contains("itself")), "{e:?}");
+    }
+
     /// An empty string can never be a member of an enum, so `""` as a
     /// metadata_default on an enum field is the unset placeholder the
     /// executor overwrites — the reading `""` already gets on date /
@@ -1171,6 +1298,7 @@ mod tests {
                             required: true,
                             filled_by: boss_core::job::FilledBy::Executor,
                             item_keys: Vec::new(),
+                            covers: None,
                         }],
                         metadata_defaults: serde_json::json!({ "route": default }),
                         terminal: Some(Terminal {
@@ -1327,6 +1455,7 @@ mod tests {
                         required: true,
                         filled_by: boss_core::job::FilledBy::Executor,
                         item_keys: Vec::new(),
+                        covers: None,
                     }],
                     ..Default::default()
                 },
@@ -1340,6 +1469,7 @@ mod tests {
                         required: true,
                         filled_by: boss_core::job::FilledBy::Executor,
                         item_keys: Vec::new(),
+                        covers: None,
                     }],
                     // Stamped at materialization, so the step carries the
                     // key from the moment it exists — which is why the
@@ -1411,6 +1541,7 @@ mod tests {
                         required: true,
                         filled_by: boss_core::job::FilledBy::Executor,
                         item_keys: Vec::new(),
+                        covers: None,
                     }],
                     ..Default::default()
                 },
@@ -1424,6 +1555,7 @@ mod tests {
                         required: false,
                         filled_by: boss_core::job::FilledBy::Executor,
                         item_keys: Vec::new(),
+                        covers: None,
                     }],
                     ..Default::default()
                 },
@@ -1481,6 +1613,7 @@ mod tests {
                         required: false,
                         filled_by: boss_core::job::FilledBy::Executor,
                         item_keys: Vec::new(),
+                        covers: None,
                     }],
                     ..Default::default()
                 },
@@ -1533,6 +1666,7 @@ mod tests {
                         required: false,
                         filled_by: boss_core::job::FilledBy::Executor,
                         item_keys: Vec::new(),
+                        covers: None,
                     }],
                     ..Default::default()
                 },
@@ -1647,6 +1781,7 @@ mod tests {
             required: true,
             filled_by: boss_core::job::FilledBy::Executor,
             item_keys: Vec::new(),
+            covers: None,
         }
     }
 
@@ -1697,6 +1832,7 @@ mod tests {
             required: false,
             filled_by: boss_core::job::FilledBy::Executor,
             item_keys: Vec::new(),
+            covers: None,
         });
         assert!(
             validate_workflow(&spec, &reg)

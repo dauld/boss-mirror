@@ -3605,7 +3605,18 @@ pub(crate) fn verdict_strikes_cars(verdict: &str, rollup: Option<&Value>) -> boo
     !any_failing_check_refused(rollup)
 }
 
-/// Does any FAILING check in the rollup carry a `refused` description?
+/// Does any FAILING check in the rollup carry a `refused` description —
+/// or declare a refusal in its own log?
+///
+/// Two channels for one fact, and the second exists because the first
+/// is a network write at the moment the CI host is already in trouble
+/// (c186d63d). locomotive.sh posts the `refused: <why>` status
+/// best-effort; with no token, no GITHUB_SHA, or a rejected POST, it
+/// says "the conductor will read this as a plain red" and every car
+/// aboard is struck for a full disk. But it declares every refusal in
+/// its OWN log first — `LOCOMOTIVE RED: <why>` — and the conductor
+/// already attaches the failing job's log tail to the entry for the
+/// alert. The intent is where another actor can read it; read it there.
 pub(crate) fn any_failing_check_refused(rollup: Option<&Value>) -> bool {
     rollup
         .and_then(Value::as_array)
@@ -3613,10 +3624,32 @@ pub(crate) fn any_failing_check_refused(rollup: Option<&Value>) -> bool {
         .flatten()
         .filter(|c| c.get("conclusion").and_then(Value::as_str) == Some("FAILURE"))
         .any(|c| {
-            c.get("description")
+            let description_refuses = c
+                .get("description")
                 .and_then(Value::as_str)
-                .is_some_and(|d| d.trim_start().to_lowercase().starts_with("refused"))
+                .is_some_and(|d| d.trim_start().to_lowercase().starts_with("refused"));
+            description_refuses
+                || c.get("log_tail")
+                    .and_then(Value::as_str)
+                    .is_some_and(log_declares_refusal)
         })
+}
+
+/// The locomotive's own declaration, as it prints it: a line starting
+/// `LOCOMOTIVE RED:` (locomotive.sh `say`). A LINE, at its start — a
+/// test that happens to print the word, or a log quoting this rule,
+/// is not a refusal. Pure and line-based so a wrapped or indented tail
+/// still matches on the line it is on.
+pub(crate) fn log_declares_refusal(tail: &str) -> bool {
+    tail.lines().map(str::trim_start).any(|l| {
+        l.starts_with("LOCOMOTIVE RED:")
+            // The two lines locomotive.sh prints LAST when the status
+            // could not be posted — the tail keeps the end of a log,
+            // so these survive a truncation that lost the RED line.
+            || (l.starts_with("locomotive:")
+                && (l.contains("refusal not posted")
+                    || l.contains("could not post the refusal status")))
+    })
 }
 
 /// The names of the checks that FAILED, from the rollup — `context`
@@ -10945,6 +10978,48 @@ mod tests {
         assert!(verdict_strikes_cars("failing", Some(&green_mentions)));
         // Only a failing verdict can strike at all.
         assert!(!verdict_strikes_cars("aborted", Some(&refused)));
+    }
+
+    /// THE REFUSAL WITHOUT THE NETWORK (c186d63d part 1). The sparing
+    /// rested on locomotive.sh's best-effort status POST: with no token,
+    /// no GITHUB_SHA, or a rejected POST, its own log said "the conductor
+    /// will read this as a plain red" and the strike happened anyway —
+    /// a network write at the moment the host is already in trouble.
+    /// But the locomotive declares every refusal in its OWN log first
+    /// (`LOCOMOTIVE RED: <why>`), and the conductor already attaches the
+    /// failing job's log tail to the rollup entry for the alert. The
+    /// intent is where another actor can read it; read it there.
+    #[test]
+    fn a_refusal_declared_in_the_log_spares_the_cars_when_the_status_post_failed() {
+        let post_failed = json!([
+            {"context": "CI / locomotive (pull_request)", "conclusion": "FAILURE", "description": "",
+             "log_tail": "locomotive: nproc=16 loadavg=0.4 stamp=ok free=61GB\n\
+                          LOCOMOTIVE RED: 61GB free on the workspace filesystem, need 70GB.\n\
+                          locomotive: no FORGE_TOKEN/GITHUB_SHA/GITHUB_REPOSITORY in the environment — refusal not posted, the conductor will read a plain red\n"},
+        ]);
+        assert!(
+            !verdict_strikes_cars("failing", Some(&post_failed)),
+            "the locomotive's own log declares the refusal; the cars are spared without the status"
+        );
+        // A tail that lost the RED line but kept the locomotive's last
+        // words still reads as a refusal.
+        let tail_only = json!([
+            {"context": "CI / locomotive (pull_request)", "conclusion": "FAILURE", "description": "",
+             "log_tail": "locomotive: could not post the refusal status — the conductor will read this as a plain red\n"},
+        ]);
+        assert!(!verdict_strikes_cars("failing", Some(&tail_only)));
+        // A judged red whose log merely CONTAINS the word is still a red.
+        let real_red = json!([
+            {"context": "CI / test (pull_request)", "conclusion": "FAILURE", "description": "3 checks failed",
+             "log_tail": "test refused_because_x ... FAILED\nthread panicked: assertion failed\n"},
+        ]);
+        assert!(verdict_strikes_cars("failing", Some(&real_red)));
+        // The marker on a PASSING entry's log proves nothing.
+        let green_log = json!([
+            {"context": "CI / fast (pull_request)", "conclusion": "SUCCESS", "description": "", "log_tail": "LOCOMOTIVE RED: nope\n"},
+            {"context": "CI / test (pull_request)", "conclusion": "FAILURE", "description": "2 failed"},
+        ]);
+        assert!(verdict_strikes_cars("failing", Some(&green_log)));
     }
 
     #[test]

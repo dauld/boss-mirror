@@ -74,7 +74,7 @@ kind = "review-design"
 ready_when = "steps.drafted.done"
 title_template = "Answer the open questions"
 authority_role = "platform-admin"
-metadata_defaults = { title = "{metadata.title}", markdown = "{metadata.markdown}", questions = "{metadata.questions}" }
+metadata_defaults = { title = "{metadata.title}", markdown = "{metadata.markdown}", questions = "{metadata.questions}", resolutions = [] }
 
 [[workflow.step.fields]]
 name = "title"
@@ -94,6 +94,22 @@ field_type = "array"
 required = true
 filled_by = "filer"
 item_keys = ["anchor", "title", "proposal"]
+
+# The answers, and the contract that makes the review a review: every
+# question's anchor must be resolved before the step can complete.
+# Executor-filled (the reviewer), required at done, and `covers`
+# relates it to `questions` so a review with an answer missing is
+# refused naming the anchors still open. Until 2026-09-12 this field
+# was not declared at all — the surface wrote it, nothing required it —
+# and four design packets reached `fold` with their review completed
+# and ZERO resolutions against twelve questions (0ef658e6): twelve
+# judgements recorded nowhere, and a fold with nothing to fold from.
+[[workflow.step.fields]]
+name = "resolutions"
+field_type = "array"
+required = true
+item_keys = ["anchor", "decision"]
+covers = "questions"
 
 # The fold is where a settled doc pays into current truth. Published
 # live as design-doc v4 (2026-09-05) before it reached this bundle;

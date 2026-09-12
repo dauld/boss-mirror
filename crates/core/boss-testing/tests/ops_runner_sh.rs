@@ -118,13 +118,14 @@ fn run(
     (text, payload)
 }
 
-/// The real allowlist, its script paths rewritten from the forge
-/// checkout to this tree.
+/// The real allowlist, verbatim: its script paths are repo-relative and
+/// the runner resolves them against its own checkout, so no rewriting
+/// is needed here (66077f9c — this harness used to carry one of the
+/// four copies of the `/home/david/boss/` substitution).
 fn real_verbs(root: &Path) -> PathBuf {
     let src = std::fs::read_to_string(repo_root().join("infra/ops/verbs.json")).unwrap();
-    let rewritten = src.replace("/home/david/boss/", &format!("{}/", repo_root().display()));
     let p = root.join("verbs.json");
-    std::fs::write(&p, rewritten).unwrap();
+    std::fs::write(&p, src).unwrap();
     p
 }
 
@@ -200,6 +201,61 @@ macro_rules! needs_jq {
             return;
         }
     };
+}
+
+/// A verb's script is named RELATIVE to the repo and resolved against
+/// the runner's OWN checkout (backlog 66077f9c). Eleven of sixteen verbs
+/// baked `/home/david/boss/infra/forge/…` — the forge checkout's path —
+/// into argv[0], so none could run on boss-gcp (/opt/boss) and every
+/// consumer (two lints, this harness) carried its own substitution of
+/// that prefix: one path assumption in four places. The runner knows
+/// where it is; a relative argv[0] resolves against that, an absent
+/// script is a REFUSAL naming the resolved path, and a bare command is
+/// left to PATH as before.
+#[test]
+fn a_relative_argv0_resolves_against_the_runners_own_checkout() {
+    needs_jq!();
+    let root = scratch("relative-argv0");
+    stub_sor(&root);
+    let verbs = root.join("verbs.json");
+    std::fs::write(
+        &verbs,
+        r#"{"verbs": {
+            "probe": {"about": "a tree lint, as a probe of resolution", "hosts": ["forge"],
+                      "argv": ["infra/lint/no-manifest-mounts-a-hostpath.sh"], "params": []},
+            "gone":  {"about": "a script this checkout does not carry", "hosts": ["forge"],
+                      "argv": ["infra/ops/does-not-exist.sh"], "params": []}
+        }}"#,
+    )
+    .unwrap();
+    packet(&root, "probe", "[]");
+    let (out, payload) = run(&root, &verbs, &[]);
+    let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
+    assert_eq!(md["disposition"], "answered", "{md} / {out}");
+    assert!(
+        md["output"]
+            .as_str()
+            .unwrap_or("")
+            .contains("no-manifest-mounts-a-hostpath: ok"),
+        "the relative script ran from this checkout: {md} / {out}"
+    );
+
+    packet(&root, "gone", "[]");
+    let (out, payload) = run(&root, &verbs, &[]);
+    let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
+    assert_eq!(md["disposition"], "refused", "{md} / {out}");
+    let reason = md["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("infra/ops/does-not-exist.sh") && reason.contains("not in this checkout"),
+        "the refusal names the resolved path: {md} / {out}"
+    );
+
+    // The shipped allowlist carries NO absolute checkout path any more.
+    let shipped = std::fs::read_to_string(repo_root().join("infra/ops/verbs.json")).unwrap();
+    assert!(
+        !shipped.contains("/home/david/boss/"),
+        "verbs.json names scripts relative to the repo, never one host's checkout"
+    );
 }
 
 /// The allowed literal reaches the verb: `publish-github-pr --check` is
