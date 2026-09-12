@@ -83,6 +83,17 @@
     runnerPacketId,
     type ClusterMachine,
   } from './yard-machines';
+  import {
+    CONVERGE_TIMER_MINUTES,
+    JOURNAL_TAIL,
+    convergeLabel,
+    convergeRun,
+    convergeSilence,
+    durText,
+    fetchConverges,
+    stageRows,
+    withConverge,
+  } from './yard-converge';
   import { yardAlerts, type Alert } from './yard-alerts';
   import { yardSignals } from './yard-signals';
   import { production as productionOf } from './yard-production';
@@ -139,7 +150,22 @@
   // rule filed for each landed car. One fetch, two readers.
   let opsRequests = $state<readonly JobLite[] | null>(null);
   let cluster = $state<ClusterMachine>({ kind: 'unknown' });
-  const feeds = $derived<Feeds>({ runner: runnerMachine(opsRequests, nowMs), cluster, probes: opsRequests });
+  // THE CONVERGE'S OWN PACKETS (yard-converge.ts): the maintenance-
+  // cluster-converge rows cluster-deploy-runner.service opens and
+  // closes around each run, carrying the stage stamps. The shed's
+  // reading is the request's reading COMPOSED with the run's: an open
+  // run makes it busy from the run's own clock, a dead run makes it
+  // red, and the card in the entity panel carries the stages.
+  let converges = $state<readonly JobLite[] | null>(null);
+  const converge = $derived(convergeRun(converges, nowMs));
+  const convergeQuiet = $derived(convergeSilence(converges, nowMs));
+  const convergeStages = $derived(converge.kind === 'ended' ? stageRows(converge.stages) : []);
+  const convergeTotalS = $derived(convergeStages.reduce((n, s) => n + s.seconds, 0));
+  const feeds = $derived<Feeds>({
+    runner: withConverge(runnerMachine(opsRequests, nowMs), converge),
+    cluster,
+    probes: opsRequests,
+  });
 
   // THE FLOOR: the pure scene both the map and the board draw.
   const floor = $derived<Scene | null>(yard ? sceneOf(yard, statusData, nowMs, feeds) : null);
@@ -393,16 +419,18 @@
   onMount(() => {
     let cancelled = false;
     async function tick() {
-      const [y, s, ops, health] = await Promise.all([
+      const [y, s, ops, health, conv] = await Promise.all([
         fetchYard(),
         fetchYardStatus(),
         fetchOpsRequests(),
         fetchHealth(),
+        fetchConverges(),
       ]);
       if (cancelled) return;
       if (y) yard = y;
       status = s;
       opsRequests = ops;
+      converges = conv;
       const now = Date.now();
       cluster = clusterReading(cluster, health, now);
       nowMs = now;
@@ -1044,11 +1072,14 @@
           {@const r = floor.machines.runner}
           {@const rid = runnerPacketId(r)}
           <h2 class="yard-panel-h">Entity · deploy runner</h2>
-          <!-- THE SHED reads the newest converge ops-request: the packet
+          <!-- THE SHED reads the newest converge ops-request — the packet
                the dispatcher files when a train merges and the forge's
-               ops-runner answers by starting cluster-deploy-runner. The
-               packet proves the unit was STARTED; whether the cluster
-               moved is the tower's reading, beside it. -->
+               ops-runner answers by starting cluster-deploy-runner —
+               COMPOSED with the run's own maintenance packet
+               (yard-converge.ts withConverge): the request proves the
+               unit was STARTED, the run's packet says it is running or
+               how it ended. Whether the cluster moved is the tower's
+               reading, beside it. -->
           <div class="yard-entity-title" class:is-silent={r.kind === 'failed'}>{runnerLabel(r, nowMs)}</div>
           <div class="yard-entity-sub">cluster-deploy-runner on the forge — started by the ops-request the dispatcher files when a train merges (rule converge-on-merge); builds the image, pushes it, rolls the cluster, waits for Ready</div>
           <dl class="yard-kv">
@@ -1069,6 +1100,60 @@
             <dd>{clusterLabel(floor.machines.cluster)}</dd>
             <dt>usual</dt>
             <dd class="yard-since-muted">~{CONVERGE_USUAL_MINUTES} min build → push → roll → Ready — a drawing scale, not a reading</dd>
+          </dl>
+          <!-- THE CONVERGE CARD (yard-converge.ts, backlog 84c47438): the
+               run's OWN packet. cluster-deploy-runner.service opens a
+               maintenance-cluster-converge packet when it starts and its
+               ExecStopPost merges the stage stamps onto the run step —
+               build / push / roll / verify in seconds, or the head it
+               found unchanged. Polled with the page (answer 1: poll,
+               not stream). A failed run or a silent timer reads as
+               trouble here; an empty tail never reads as calm. -->
+          <div class="yard-label">Converge · the run's own packet</div>
+          <div
+            class="yard-converge-line"
+            class:is-trouble={(converge.kind === 'ended' && converge.outcome === 'failed') || converge.kind === 'unknown'}>
+            {convergeLabel(converge, nowMs)}
+          </div>
+          {#if convergeQuiet.kind === 'silent'}
+            <div class="yard-converge-silent">
+              <span class="yard-trouble">SILENT</span>
+              the timer fires every {CONVERGE_TIMER_MINUTES} min and the newest converge packet opened {clockOf(convergeQuiet.newest)} — {durText(convergeQuiet.ageS)} ago, past the {durText(convergeQuiet.maxS)} threshold. The forge, its timer, or the path to the record is down; this card cannot tell which.
+            </div>
+          {/if}
+          {#if convergeStages.length > 0}
+            <!-- THE CONSIST: one wagon per stage on the record, width
+                 proportional to its seconds, in the order the runner ran
+                 them. A run that died shows the wagons it coupled and
+                 stops — the missing ones are the finding. -->
+            <div class="yard-consist" aria-label="converge stages">
+              {#each convergeStages as st (st.stage)}
+                <div
+                  class="yard-wagon"
+                  style="flex-grow: {Math.max(st.seconds, 1)}"
+                  title="{st.stage} · {durText(st.seconds)}">
+                  <span class="yard-wagon-stage">{st.stage}</span>
+                  <span class="yard-wagon-s yard-mono">{durText(st.seconds)}</span>
+                </div>
+              {/each}
+            </div>
+            <div class="yard-since-muted yard-consist-total">
+              {convergeStages.length} of 4 stages on the record · {durText(convergeTotalS)} in stages{converge.kind === 'ended' && converge.stages.buildHead ? ` · built ${converge.stages.buildHead}` : ''}
+            </div>
+          {/if}
+          {#if converge.kind === 'ended' && converge.summaryAbsent}
+            <div class="yard-converge-silent"><span class="yard-trouble">NO SUMMARY</span> {converge.summaryAbsent}</div>
+          {/if}
+          <!-- THE LIVE TAIL — answer (2) — is not wired: the gateway has
+               no journal route and no forge credential reaches the
+               browser (answer 3). Said here, in words, so that nobody
+               reads the absence of a tail as a quiet converge. -->
+          <dl class="yard-kv yard-converge-tail">
+            <dt>journal tail</dt>
+            <dd>
+              <span class="yard-converge-unwired">not yet wired</span> — {JOURNAL_TAIL.why}. Until it is, the door that reads {JOURNAL_TAIL.unit} with its freshness assertion is
+              <code class="yard-mono">{JOURNAL_TAIL.command}</code>
+            </dd>
           </dl>
           {#if rid !== null}
             <div class="yard-label">The packet's steps</div>
@@ -1683,6 +1768,38 @@
 
   .yard-deck-lower { grid-template-columns: 1fr 1fr; }
   .yard-since-muted { color: var(--static, #7a838c); }
+  /* The converge card: the run's one line, its consist, and the
+     unwired tail named as such. Trouble is red, not merely dim. */
+  .yard-converge-line { font-size: 13px; margin: var(--s2, 8px) 0; }
+  .yard-converge-line.is-trouble { color: var(--err, #b91c1c); font-weight: 600; }
+  .yard-converge-silent { font-size: 12px; margin: 0 0 var(--s2, 8px); color: var(--err, #b91c1c); }
+  .yard-converge-silent .yard-trouble { margin-right: 6px; }
+  .yard-consist { display: flex; gap: 3px; margin: var(--s2, 8px) 0 4px; min-height: 34px; }
+  .yard-wagon {
+    flex-basis: 0;
+    min-width: 44px;
+    border: 1px solid var(--signal, #5fd4a8);
+    border-radius: 3px;
+    padding: 3px 6px;
+    display: grid;
+    font-size: 11px;
+    line-height: 1.3;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .yard-wagon-stage { color: var(--static, #7a838c); letter-spacing: 0.06em; text-transform: uppercase; font-size: 10px; }
+  .yard-consist-total { font-size: 12px; margin-bottom: var(--s3, 12px); }
+  .yard-converge-tail { margin-top: var(--s2, 8px); }
+  .yard-converge-tail code { font-size: 11px; overflow-wrap: anywhere; }
+  .yard-converge-unwired {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    padding: 1px 6px;
+    border: 1px solid var(--warn, #d9a441);
+    color: var(--warn, #d9a441);
+    border-radius: 2px;
+  }
   @media (max-width: 1000px) { .yard-deck { grid-template-columns: 1fr; } }
   @media (prefers-reduced-motion: reduce) {
     .yard-dot, .yard-lamp-dot { animation: none; }

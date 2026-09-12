@@ -242,8 +242,9 @@
     </g>
 
     <!-- the deploy-runner shed: read off the newest converge ops-request
-         (yard-machines.ts). It smokes while the converge runs; dark and
-         "no reading" until the page has read the packets -->
+         (yard-machines.ts) composed with the run's own maintenance
+         packet (yard-converge.ts). It smokes while the converge runs;
+         dark and "no reading" until the page has read the packets -->
     <g
       class="machine"
       class:selected={selected === 'runner'}
