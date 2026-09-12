@@ -246,7 +246,7 @@ pub async fn run(all: bool) -> Result<()> {
     println!(
         "{}",
         crate::built_from::freshness_line(
-            crate::built_from::BUILT_FROM,
+            crate::built_from::built_from(),
             crate::built_from::origin_main_head().as_deref()
         )
     );

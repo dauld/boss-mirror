@@ -3,13 +3,14 @@
 # `infra/oss-quickstart/docker-compose.yml`.
 #
 # Multi-stage:
-#   1. rust-base   — toolchain + build deps + cargo-chef.
-#   2. planner     — cargo-chef recipe (the dependency build plan).
-#   3. rust-build  — cook the dep tree (a cacheable layer), then
-#                    compile the workspace in release mode.
-#   4. spa-build   — bun install + bun run build for BOTH SPAs
+#   1. rust-base   — toolchain + build deps.
+#   2. rust-build  — compile the workspace in release mode, cargo's
+#                    target and registry kept in BuildKit cache mounts
+#                    between builds.
+#   3. spa-build   — bun install + bun run build for BOTH SPAs
 #                    (apps/web and apps/simulator).
-#   5. runtime     — debian:slim with the binaries + SPAs copied in.
+#   4. runtime     — debian:slim with the binaries + SPAs copied in,
+#                    and BOSS_BUILD_COMMIT set last.
 #
 # Image size: ~250 MB (binaries are stripped via `-C strip=symbols`
 # in the workspace Cargo.toml; SPA dist is gzipped by Caddy).
@@ -18,19 +19,36 @@
 # `build.context: ../..` so the entire workspace is available.
 
 # ---------------------------------------------------------------------------
-# Stages 1–3 — Rust build, split so the dependency tree is a real,
-# cacheable image LAYER.
+# Stages 1–2 — Rust build, with the compiler's own cache kept between
+# builds.
 #
-# cargo-chef separates "compile the ~400-crate dependency tree"
-# (changes only when Cargo.lock / crate manifests change) from
-# "compile our own crates" (changes every commit). CI's remote layer
-# cache (--cache-to type=gha) can persist and restore LAYERS across
-# runs — but never RUN cache mounts, which live in local BuildKit
-# state and die with the runner. The previous cache-mount pattern was
-# therefore warm for local rebuilds and permanently cold in CI (~20
-# min of dep compilation every run). Baking the cook step into a
-# layer serves both: local rebuilds hit the local layer cache, CI
-# restores the same layer from the Actions cache.
+# THE BUILDER IS THE FORGE'S ROOTLESS BUILDKIT DAEMON, every train, and
+# `docker compose` on an operator's machine; nothing else builds this
+# file (CI's kaniko builds boss-ci, a different Dockerfile). Both keep
+# local BuildKit state between builds, so `RUN --mount=type=cache` is
+# warm where it runs — the reason it was once dropped for cargo-chef
+# (a GitHub Actions layer cache that could not carry mounts) no longer
+# applies, and the forge's converge stamps said what chef's layer was
+# costing: 2026-09-12, `build_s=522` for a train that changed no Rust.
+# Two causes, both fixed here:
+#
+#   - `ENV BOSS_BUILD_COMMIT` stood before `cargo build`, and
+#     `option_env!` baked it into boss-core — so a value that changes
+#     on every train recompiled every workspace crate on every train.
+#     It now lives in the runtime stage (the last lines of this file),
+#     read by the binaries from their environment: the image still
+#     names the tree it was built from, and the compiled layer is
+#     invalidated only by what it compiles.
+#   - nothing of one build's `target/` survived into the next, so even
+#     a one-crate change paid the whole workspace. The cache mounts
+#     below keep cargo's incremental state and the registry between
+#     builds; a cold or pruned cache costs one full build and nothing
+#     else (`docker builder prune` is the reset).
+#
+# WHAT THE CACHE DOES NOT CHANGE: the binaries copied to /out are what
+# `cargo build --release` produced for this tree, and the runtime stage
+# is rebuilt for every commit. A train without a Rust change ships the
+# identical binaries under a new commit, which is exactly what it is.
 # ---------------------------------------------------------------------------
 FROM rust:1.96-slim-bookworm@sha256:c8a94a78f67ec8c4d474ec7f71e0720f21eb7e584e158daec0874cafa7c30e4d AS rust-base
 
@@ -42,40 +60,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Version-pinned + --locked, same discipline as the digest-pinned
-# base images. Compiling chef costs ~1 min once; the layer keys only
-# on the base image + apt layer above, so every rebuild — local or
-# CI — reuses it until the toolchain image bumps.
-RUN cargo install cargo-chef --version 0.1.77 --locked
-
 WORKDIR /build
 
-# ---------------------------------------------------------------------------
-# Planner — compute recipe.json, the dependency build plan. Re-runs on
-# ANY source change (cheap: manifest analysis only), but its output is
-# byte-identical unless Cargo.toml / Cargo.lock content actually
-# changed — and the expensive cook layer below keys on recipe.json
-# CONTENT, so source-only commits leave the cooked deps cached.
-# ---------------------------------------------------------------------------
-FROM rust-base AS planner
-COPY Cargo.toml Cargo.lock ./
-COPY crates ./crates
-RUN cargo chef prepare --recipe-path recipe.json
-
-# ---------------------------------------------------------------------------
-# Rust build — cook the dependency tree, then compile the workspace.
-# ---------------------------------------------------------------------------
 FROM rust-base AS rust-build
-
-COPY --from=planner /build/recipe.json recipe.json
-
-# Compile ONLY dependencies, against chef's stub skeleton of the
-# workspace. Flags must mirror the real build below — a mismatch
-# changes cargo's fingerprints and the deps silently recompile. The
-# two umbrella-feature bins built explicitly below (accounts-api /
-# events-api) may pull a few deps this pass misses; those compile in
-# the final step at seconds of cost, not the ~20-min tree.
-RUN cargo chef cook --release --workspace --features postgres --recipe-path recipe.json
 
 # The real source. .dockerignore excludes target/ and node_modules/
 # so only source goes into the build context.
@@ -113,22 +100,19 @@ COPY infra/ops/verbs.json ./infra/ops/verbs.json
 COPY infra/deploy-services.sh ./infra/deploy-services.sh
 COPY infra/forge/run-car-probe.sh ./infra/forge/run-car-probe.sh
 
-# The commit this image is built from, exported to the cargo build so
-# `Capabilities` self-reports it from every service's health endpoint
-# (option_env! in boss-core). Declared AFTER the chef cook layer on
-# purpose: the arg changes every build, and placing it above would
-# invalidate the cached dependency tree each time. The train's
-# `converged` step reads this back from the RUNNING pod — the proof of
-# installation the arrival report now requires (fdff316c / 7e5ee013).
-ARG BOSS_BUILD_COMMIT=
-ENV BOSS_BUILD_COMMIT=$BOSS_BUILD_COMMIT
+# NO `ENV BOSS_BUILD_COMMIT` HERE — see the stage header; it is set in
+# the runtime stage so this layer keys on the sources alone.
 
 # Build every binary the runtime needs. --features postgres pulls in
 # the sqlx-backed adapters; the workspace builds in one cargo
-# invocation so dep compilation is shared across crates. The cooked
-# target/ from the layer above carries the finished dep artifacts, so
-# this step compiles workspace crates only.
-RUN set -eu && \
+# invocation so dep compilation is shared across crates. The three
+# mounts are cargo's state between builds: the target dir (incremental
+# compilation of deps and workspace alike), the registry (downloaded
+# crates) and git checkouts. They are not part of the image; /out is.
+RUN --mount=type=cache,id=boss-cargo-target,target=/build/target \
+    --mount=type=cache,id=boss-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=boss-cargo-git,target=/usr/local/cargo/git \
+    set -eu && \
     # Single cargo invocation across the whole workspace —
     # boss-brewery-sim builds by default (no feature gate), so it
     # rides the same --workspace --bins pass, sharing dep compilation.
@@ -158,7 +142,7 @@ RUN set -eu && \
     test -x /out/boss-brewery-sim || (echo "FATAL: boss-brewery-sim missing in /out" >&2; ls /out >&2; exit 1)
 
 # ---------------------------------------------------------------------------
-# Stage 4 — SPA build.
+# Stage 3 — SPA build.
 # ---------------------------------------------------------------------------
 FROM oven/bun:1.3-debian@sha256:9dba1a1b43ce28c9d7931bfc4eb00feb63b0114720a0277a8f939ae4dfc9db6f AS spa-build
 
@@ -211,7 +195,7 @@ RUN cd apps/simulator && bun run build && \
     (echo "FATAL: apps/simulator built no dist/index.html" >&2; exit 1)
 
 # ---------------------------------------------------------------------------
-# Stage 5 — runtime.
+# Stage 4 — runtime.
 # ---------------------------------------------------------------------------
 FROM debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf87857c4b8188404716 AS runtime
 
@@ -362,6 +346,16 @@ RUN chmod +x /usr/local/bin/boss-init /usr/local/bin/boss-launch \
 # debian permissions on /etc are root:root 0755, which the boss
 # user can't write to. Open it up; the container is ephemeral.
 RUN chmod 0777 /etc
+
+# The commit this image is built from, for every binary to read from
+# its environment: `Capabilities.commit` on each service's /health (the
+# train's `converged` step reads it back from the RUNNING pod — the
+# proof of installation the arrival report requires, fdff316c /
+# 7e5ee013) and `boss --version` / `boss orient` in the conductor.
+# LAST, on purpose: it changes every build, and everything above it is
+# cached by content.
+ARG BOSS_BUILD_COMMIT=
+ENV BOSS_BUILD_COMMIT=$BOSS_BUILD_COMMIT
 
 USER boss
 WORKDIR /home/boss
