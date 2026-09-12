@@ -213,6 +213,26 @@ pub(crate) fn orphan_lines(orphans: &[String], shown: usize, all: bool) -> Vec<S
     out
 }
 
+/// A stranded green that is the second half of a `boss rerail` a killed
+/// waiter never finished: `<branch>-rerail` gated green while the car
+/// still points at `<branch>`. It lists as stranded (a green no car
+/// claims) — correctly — but the lane's generic rescue, "rebase + re-gate",
+/// is the wrong verb for it: everything durable is done and one PATCH is
+/// owed. `Some(advice)` names the car and the verb that finishes it
+/// (464309ee: a `--finish` that existed and nothing pointed at).
+pub(crate) fn half_done_rerail(
+    branch: &str,
+    car_ids: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    let base = branch.strip_suffix("-rerail")?;
+    let car = car_ids.get(base)?;
+    let id8 = &car[..8.min(car.len())];
+    Some(format!(
+        "← half-done rerail of {base} (car {id8}): everything but the repoint is done — \
+         finish it with `boss rerail {id8} --finish`, never re-gate"
+    ))
+}
+
 pub async fn run(all: bool) -> Result<()> {
     let http = reqwest::Client::new();
 
@@ -337,8 +357,19 @@ pub async fn run(all: bool) -> Result<()> {
              onto origin/main + re-gate; never rebuild blind):",
             stranded.len()
         );
+        let car_ids: std::collections::BTreeMap<String, String> = cars
+            .iter()
+            .filter_map(|c| {
+                let b = md_str(c, "branch");
+                let id = c.get("id")?.as_str()?;
+                (!b.is_empty()).then(|| (b.to_string(), id.to_string()))
+            })
+            .collect();
         for b in &stranded {
-            println!("    {b}");
+            match half_done_rerail(b, &car_ids) {
+                Some(line) => println!("    {b}  {line}"),
+                None => println!("    {b}"),
+            }
         }
     }
 
@@ -564,6 +595,35 @@ pub async fn run(all: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_stranded_rerail_head_names_the_car_and_the_finishing_verb() {
+        let cars: std::collections::BTreeMap<String, String> = [(
+            "feat/x".to_string(),
+            "abcdef12-0000-4000-8000-000000000000".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let line = super::half_done_rerail("feat/x-rerail", &cars).expect("a half-done rerail");
+        assert!(
+            line.contains("feat/x") && line.contains("boss rerail abcdef12 --finish"),
+            "{line}"
+        );
+        assert!(line.contains("never re-gate"), "{line}");
+    }
+
+    #[test]
+    fn a_plain_stranded_green_gets_no_rerail_advice() {
+        let cars: std::collections::BTreeMap<String, String> = [(
+            "feat/x".to_string(),
+            "abcdef12-0000-4000-8000-000000000000".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        assert_eq!(super::half_done_rerail("feat/y", &cars), None);
+        // a -rerail head whose base has no car is just stranded
+        assert_eq!(super::half_done_rerail("feat/z-rerail", &cars), None);
+    }
+
     #[test]
     fn a_bounded_orphan_list_names_the_flag_that_shows_the_rest() {
         let orphans: Vec<String> = (0..46).map(|i| format!("feat/b{i}")).collect();

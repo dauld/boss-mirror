@@ -3490,6 +3490,48 @@ pub(crate) fn operator_cancel_refusal(train: &Value) -> Option<String> {
 /// the cars are released with the stall named in their `skip_reason`, so
 /// the record says which question to ask without inventing a strike
 /// nothing reads.
+/// One forge commit status as one rollup entry — the ONLY place the
+/// adapter decides which fields of a check the system of record keeps.
+///
+/// Pure, because this layer has dropped a field before and the drop was
+/// silent: the check's NAME (`context`) was dropped, so every red train
+/// in the SoR read `?:FAILURE` and 2026-09-02 cost two trips to the
+/// forge API to learn that `test` had died on a disk floor, not on code.
+/// The `description` is the other load-bearing field: locomotive.sh
+/// posts a status whose description starts with `refused:` when the CI
+/// host refuses BEFORE any check runs, and [`verdict_strikes_cars`]
+/// spares every car aboard on that word alone (c186d63d). A rollup that
+/// lost descriptions would turn every infrastructure refusal back into a
+/// strike against innocent cars, silently. Pinned by
+/// `a_refusal_survives_the_rollup_and_spares_the_cars`.
+pub(crate) fn rollup_entry(st: &Value) -> Value {
+    let verdict = st
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_lowercase();
+    let conclusion = match verdict.as_str() {
+        "success" => "SUCCESS",
+        "failure" | "error" => "FAILURE",
+        _ => "",
+    };
+    json!({
+        "context": st.get("context").and_then(Value::as_str).unwrap_or_default(),
+        // The forge's own one-line reason, when it gives one — free
+        // provenance, and the refusal channel.
+        "description": st
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        "conclusion": conclusion,
+        "status": if verdict == "pending" { "PENDING" } else { "COMPLETED" },
+        // …/actions/runs/{run}/jobs/{index}: the run and the failing
+        // job's position in it. `attach_failing_logs` resolves it to a
+        // job id and pulls the log tail.
+        "target_url": st.get("target_url").and_then(Value::as_str).unwrap_or_default(),
+    })
+}
+
 pub(crate) fn verdict_strikes_cars(verdict: &str, rollup: Option<&Value>) -> bool {
     if verdict != "failing" {
         return false;
@@ -4020,6 +4062,59 @@ mod red_train_alert_tests {
             "steps": [{"metadata": {"spec_slug": "merged"}, "title": "Merged into main", "status": merged}]
         })
     }
+    /// c186d63d: the sparing of innocent cars on a CI refusal rests on
+    /// the rollup carrying each check's `description` — the same adapter
+    /// layer that once dropped `context`. From the forge's statuses, as
+    /// its API spells them, through the entry mapping, to the verdict.
+    #[test]
+    fn a_refusal_survives_the_rollup_and_spares_the_cars() {
+        let forge_statuses = json!([
+            {"context": "CI / build-image (pull_request)", "status": "success", "description": ""},
+            {"context": "CI / locomotive refusal", "status": "failure",
+             "description": "refused: 65GB free on the workspace filesystem, need 70GB",
+             "target_url": "http://10.20.0.15:3000/david/boss/actions/runs/9/jobs/1"},
+            {"context": "CI / test (pull_request)", "status": "pending", "description": ""},
+        ]);
+        let entries: Vec<Value> = forge_statuses
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(super::rollup_entry)
+            .collect();
+        let refusal = &entries[1];
+        assert_eq!(refusal["context"], "CI / locomotive refusal");
+        assert_eq!(refusal["conclusion"], "FAILURE");
+        assert_eq!(
+            refusal["description"], "refused: 65GB free on the workspace filesystem, need 70GB",
+            "the description is the refusal channel; dropping it turns the refusal into a strike"
+        );
+        assert_eq!(
+            refusal["target_url"],
+            "http://10.20.0.15:3000/david/boss/actions/runs/9/jobs/1"
+        );
+        assert_eq!(entries[2]["status"], "PENDING");
+        let rollup = json!(entries);
+        assert!(super::any_failing_check_refused(Some(&rollup)));
+        assert!(
+            !super::verdict_strikes_cars("failing", Some(&rollup)),
+            "an infrastructure refusal must not strike the cars aboard"
+        );
+        // And the same statuses with the description lost DO strike — so
+        // this test fails the moment the adapter drops the field again.
+        let stripped: Vec<Value> = entries
+            .iter()
+            .map(|e| {
+                let mut e = e.clone();
+                e["description"] = json!("");
+                e
+            })
+            .collect();
+        assert!(super::verdict_strikes_cars(
+            "failing",
+            Some(&json!(stripped))
+        ));
+    }
+
     fn rollup(entries: Value) -> Value {
         entries
     }
@@ -5235,41 +5330,7 @@ impl Forge for ForgejoForge {
                 .cloned()
                 .unwrap_or_default();
             for st in &statuses {
-                let verdict = st
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_lowercase();
-                let conclusion = match verdict.as_str() {
-                    "success" => "SUCCESS",
-                    "failure" | "error" => "FAILURE",
-                    _ => "",
-                };
-                rollup.push(json!({
-                    // The check's NAME. `ci_check_summary` has always
-                    // rendered `context:STATE` and the completing step
-                    // has always been commented "WHICH check, not just
-                    // that one failed" — but this adapter dropped the
-                    // field, so every red train in the SoR read
-                    // `?:FAILURE`. On 2026-09-02 that cost a trip to
-                    // the forge API to learn the answer was `test`, and
-                    // another to learn `test` had died on a disk floor,
-                    // not on any code. A verdict that cannot name what
-                    // failed is a verdict someone has to go re-derive.
-                    "context": st.get("context").and_then(Value::as_str).unwrap_or_default(),
-                    // The forge's own one-line reason, when it gives
-                    // one — free provenance for the same price.
-                    "description": st
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default(),
-                    "conclusion": conclusion,
-                    "status": if verdict == "pending" { "PENDING" } else { "COMPLETED" },
-                    // …/actions/runs/{run}/jobs/{index}: the run and the
-                    // failing job's position in it. `attach_failing_logs`
-                    // resolves it to a job id and pulls the log tail.
-                    "target_url": st.get("target_url").and_then(Value::as_str).unwrap_or_default(),
-                }));
+                rollup.push(rollup_entry(st));
             }
         }
         // A red verdict names its log, not just its check: best-effort,
