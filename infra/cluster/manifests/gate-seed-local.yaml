@@ -1,0 +1,144 @@
+# gate-seed-local — the gate's warm seed lives on the build node's own
+# filesystem, so a gate's copy of it is a REFLINK, not a rewrite.
+#
+# THE MEASUREMENT (backlog 5b3dabb5, 2026-09-11). Every gate copied the
+# warm target (tens of GB) from a Longhorn block volume into its per-run
+# emptyDir with `cp -a` — 184 s per gate, and every byte of the seed
+# WRITTEN to w-1's SSD each time; every green gate near tip copied it
+# back to refresh the seed. w-1's NVMe had ~61 TB written in 16.7 days
+# (~3.6 TB/day, /sys/block/nvme0n1/stat) with ~38 h of all-tasks IO
+# stall: the seed copy was the single largest writer. A reflink copy
+# (`cp --reflink=auto`, FICLONE) shares extents and writes only metadata
+# — but only within ONE filesystem, and a Longhorn volume carries its
+# own ext4. Talos puts every emptyDir on the EPHEMERAL partition's xfs
+# (nvme0n1p4 on w-1, reflink-capable); a `local` PersistentVolume on a
+# directory of that same partition puts the seed there too.
+#
+# WHAT THIS DECLARES, cluster-scoped, so it is converged from here and
+# not applied by `boss gate` (whose credential is namespaced):
+#   - a StorageClass with no provisioner and WaitForFirstConsumer, the
+#     standard shape for a hand-declared local volume;
+#   - the PersistentVolume itself: 200Gi of /var/local/gate-seed on
+#     w-1, Retain (a warm seed is minutes of every gate; never reclaim
+#     it by accident), bound only on w-1 by nodeAffinity;
+#   - a daily prepare CronJob whose hostPath mount (DirectoryOrCreate)
+#     CREATES the directory on w-1 — a local PV refuses a path that does
+#     not exist, and nothing else on a Talos node makes directories. It
+#     runs unprivileged (the mount does the work; the gate's fsGroup does
+#     the ownership); it lives in boss-dev, which carries no pod-security
+#     enforce label, while the gate Job itself stays restricted-profile
+#     clean (it mounts a PVC, not a hostPath).
+#
+# WHAT IT COSTS. The PV's node affinity makes gating REQUIRE w-1: the
+# gate-runner's "preferred, not required" build-node affinity is now
+# effectively required through the claim, so cordoning w-1 stops gating
+# instead of degrading it. That is the honest trade — the seed was
+# always w-1's disk in practice (its Longhorn replica lived there), and
+# the pipeline's other write sinks already assume the build node.
+#
+# THE MIGRATION. The first gate after this lands finds an empty seed —
+# run.sh says "no warm seed — cold build" and pays ~20 min once — and
+# its green refresh writes the seed back BY REFLINK. From the second
+# gate on, the copy is metadata. The old Longhorn claim
+# `gate-runner-disk` stays declared in infra/gate-runner/gate-runner.yaml
+# until the new seed is warm, then a car retires it (delete-orphan-object).
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gate-seed-local
+  labels: {app.kubernetes.io/part-of: boss, boss.dev/purpose: build}
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: gate-seed-w-1
+  labels: {app.kubernetes.io/part-of: boss, boss.dev/purpose: build}
+spec:
+  capacity:
+    storage: 200Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: gate-seed-local
+  local:
+    path: /var/local/gate-seed
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - {key: kubernetes.io/hostname, operator: In, values: ["w-1"]}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gate-seed-prepare
+  namespace: boss-dev
+  labels: {app.kubernetes.io/part-of: boss, boss.dev/purpose: build}
+spec:
+  # Daily and idempotent: the kubelet creates the PV's path when the
+  # hostPath mounts (DirectoryOrCreate), so a rebuilt w-1 has its seed
+  # directory back within a day and the local PV binds again (sooner by
+  # hand: `kubectl -n boss-dev create job --from=cronjob/gate-seed-prepare
+  # gate-seed-prepare-now`). A CronJob rather than a Job so its runs
+  # carry an ownerReference — the orphan derivation excludes controller-
+  # made objects, where a bare Job here would put (Job, boss-dev) in
+  # scope and read every gate Job as undeclared. Nothing here needs
+  # root: ownership at mount is the gate pod's fsGroup (1500), the same
+  # arrangement the Longhorn seed relied on. Leaves a packet like every
+  # scheduled run (timers-leave-a-packet): maintenance-gate-seed.
+  schedule: "41 4 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/hostname: w-1
+          imagePullSecrets:
+            - {name: forgejo-registry}
+          # The boss image runs as uid 1500 (measured, see boss-files-gc.yaml);
+          # the seed directory's group is 1500 too, so what this writes
+          # (nothing today) stays readable to the gate.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1500
+            runAsGroup: 1500
+            seccompProfile: {type: RuntimeDefault}
+          containers:
+            - name: prepare
+              image: 10.20.0.15:3000/david/boss:latest
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: {drop: ["ALL"]}
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  /usr/local/bin/boss-maintenance-wrap.sh maintenance-gate-seed "gate seed directory on the build node"
+                  # The mount itself created the directory; this records
+                  # what the gate will see at its mount, and fails loudly
+                  # if the path is not there after all.
+                  test -d /gate-seed
+                  echo "gate-seed-prepare: /var/local/gate-seed present on w-1 — $(stat -c '%U:%G %a' /gate-seed) $(ls /gate-seed | wc -l) entries"
+                  /usr/local/bin/boss-step.sh maintenance-gate-seed run result=ok
+              env:
+                - name: BOSS_JOBS_URL
+                  value: http://boss-jobs-internal.boss.svc.cluster.local:7900
+                - name: BOSS_MACHINE_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: boss-secrets
+                      key: machine-token
+                      optional: true
+              volumeMounts:
+                - {name: gate-seed-dir, mountPath: /gate-seed}
+          volumes:
+            - name: gate-seed-dir
+              hostPath: {path: /var/local/gate-seed, type: DirectoryOrCreate}

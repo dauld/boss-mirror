@@ -318,7 +318,11 @@ seed_target() {
         return 0
     fi
     local t0=$SECONDS
-    if ( flock -s -w 900 9 && cp -a "$SEED/target/." /gate-target/target/ ) 9>>"$SEED_LOCK"; then
+    # --reflink=auto: on one filesystem (the seed is a local PV on the
+    # build node's xfs since 5b3dabb5) this shares extents and writes
+    # only metadata; anywhere else it falls back to a plain copy. The
+    # timing line below is the measurement either way.
+    if ( flock -s -w 900 9 && cp -a --reflink=auto "$SEED/target/." /gate-target/target/ ) 9>>"$SEED_LOCK"; then
         echo "gate-runner: target seeded from head $(cat "$SEED/.seed-head" 2>/dev/null || echo '<unrecorded>') in $((SECONDS - t0))s"
     else
         echo "gate-runner: seed copy failed or lock timed out after $((SECONDS - t0))s — cold build instead"
@@ -899,7 +903,7 @@ refresh_seed() {
     if ( flock -x -n 9 &&
          rm -f "$SEED/.seed-head" &&
          rm -rf "$SEED/target" "$SEED/target.partial" &&
-         cp -a /gate-target/target "$SEED/target.partial" &&
+         cp -a --reflink=auto /gate-target/target "$SEED/target.partial" &&
          mv "$SEED/target.partial" "$SEED/target" &&
          echo "$HEAD_SHA" > "$SEED/.seed-head"
        ) 9>>"$SEED_LOCK"; then

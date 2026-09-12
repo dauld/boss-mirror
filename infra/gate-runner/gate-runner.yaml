@@ -56,6 +56,25 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
+  name: gate-seed
+  namespace: boss-dev
+  labels: {app.kubernetes.io/part-of: boss, boss.dev/purpose: build}
+spec:
+  # THE WARM SEED, on w-1's own xfs so a gate's copy is a reflink (see
+  # infra/cluster/manifests/gate-seed-local.yaml for the measurement and
+  # the migration). Bound by name to the one local PV; the class has no
+  # provisioner, so a typo here binds nothing and the Job stays Pending
+  # rather than gating on the wrong disk.
+  accessModes: [ReadWriteOnce]
+  storageClassName: gate-seed-local
+  volumeName: gate-seed-w-1
+  resources:
+    requests:
+      storage: 200Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
   name: gate-runner-disk
   namespace: boss-dev
 spec:
@@ -369,8 +388,13 @@ spec:
         # read-write because run.sh's post-verdict refresh writes the
         # next snapshot here; reads and writes coordinate through
         # flock on the volume, never by luck.
+        # …on the build node's OWN filesystem (a `local` PV declared in
+        # infra/cluster/manifests/gate-seed-local.yaml), so run.sh's
+        # `cp --reflink=auto` shares extents instead of rewriting tens of
+        # GB per gate. The Longhorn claim above stays until this seed is
+        # warm, then a car retires it.
         - name: gate-seed
-          persistentVolumeClaim: {claimName: gate-runner-disk}
+          persistentVolumeClaim: {claimName: gate-seed}
         - name: pgdata
           emptyDir: {}
         - name: pg-shm

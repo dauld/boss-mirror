@@ -894,7 +894,12 @@ cat '{jobs}'
             .env("BOSS_MIRROR_URL", self.mirror.display().to_string())
             .env("BOSS_FORK_SLUG", FORK_SLUG)
             .env("BOSS_FORK_URL", self.fork.display().to_string())
-            .env("BOSS_PUBLISH_DATE", PUBLISH_DATE);
+            .env("BOSS_PUBLISH_DATE", PUBLISH_DATE)
+            // The forge push, as the test's own uid into the fixture by
+            // path: in production it is `runuser -l david` over Forgejo's
+            // HTTP, which no test box can stand in for.
+            .env("BOSS_FORGE_PUSH_URL", self.forge.display().to_string())
+            .env("BOSS_FORGE_PUSH_AS", "");
         let out = cmd.output().expect("the verb runs");
         let mut text = String::from_utf8_lossy(&out.stdout).to_string();
         text.push_str(&String::from_utf8_lossy(&out.stderr));
@@ -918,6 +923,28 @@ cat '{jobs}'
             .expect("git runs")
             .status
             .success()
+    }
+
+    /// Did the snapshot ALSO reach the forge under the same branch name?
+    /// The forge's push mirror force-syncs the fork (`git push --mirror`)
+    /// on every commit, pruning any branch the forge lacks — so a PR head
+    /// that lives only on GitHub dies at the next train (ce5339d6, PR
+    /// #238 closed 2 min after opening). On the forge it is carried.
+    fn forge_has_branch(&self) -> Option<String> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&self.forge)
+            .args([
+                "rev-parse",
+                "--verify",
+                "-q",
+                &format!("refs/heads/publish/{PUBLISH_DATE}"),
+            ])
+            .output()
+            .expect("git runs");
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
     fn gh_log(&self) -> String {
@@ -967,6 +994,61 @@ fn a_real_fork_of_the_mirror_is_published_to() {
         !run.gh_log().contains("repo fork"),
         "the verb forked a fork that already existed: {}",
         run.gh_log()
+    );
+}
+
+/// THE BRANCH LIVES ON THE FORGE TOO (ce5339d6). PR #238 opened at
+/// 22:46:59Z on 2026-09-11 and was closed at 22:49:17Z with its head
+/// deleted: the forge's push mirror to dauld/boss-mirror — the same fork
+/// the PR opens from — is `git push --mirror` on every commit, and prunes
+/// what the forge lacks. `publish/2026-09-08` survived exactly because it
+/// also existed on the forge. So a run pushes the snapshot to the forge
+/// under the same name, BEFORE the fork and the PR: if the forge push
+/// fails, nothing has been opened that the next train would close.
+#[test]
+fn the_snapshot_is_pushed_to_the_forge_so_the_mirror_carries_it() {
+    if !have_real_jq() {
+        eprintln!("publish_github_pr_sh: SKIPPED — the run path needs a real jq");
+        return;
+    }
+    let run = Run::new("forge-carries-the-branch");
+    run.gh_repo(
+        FORK_SLUG,
+        &format!(
+            r#"{{"full_name":"{FORK_SLUG}","fork":true,
+                 "parent":{{"full_name":"{MIRROR_SLUG}"}},
+                 "source":{{"full_name":"{MIRROR_SLUG}"}},
+                 "default_branch":"main","private":false}}"#
+        ),
+    );
+    let (ok, out) = run.go();
+    assert!(ok, "{out}");
+    let on_forge = run
+        .forge_has_branch()
+        .expect("publish/<date> must exist on the forge after a run");
+    let on_fork = git_in(
+        &run.fork,
+        &["rev-parse", &format!("refs/heads/publish/{PUBLISH_DATE}")],
+    );
+    assert_eq!(
+        on_forge,
+        on_fork.trim(),
+        "the forge and the fork must hold the SAME snapshot commit"
+    );
+    assert!(
+        out.contains("pushed publish/") && out.contains("to the forge"),
+        "the run must say it pushed to the forge: {out}"
+    );
+    let forge_line = out.find("to the forge").expect("forge push line");
+    let fork_line = out
+        .find(&format!(
+            "pushed {}:publish/",
+            FORK_SLUG.split('/').next().unwrap()
+        ))
+        .expect("fork push line");
+    assert!(
+        forge_line < fork_line,
+        "the forge push comes BEFORE the fork push, so a failed forge push opens nothing"
     );
 }
 

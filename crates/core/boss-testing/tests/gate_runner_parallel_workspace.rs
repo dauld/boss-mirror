@@ -288,3 +288,93 @@ fn the_seed_refreshes_only_on_a_green_near_tip_run() {
          count, not a feeling"
     );
 }
+
+/// THE SEED COPY IS A REFLINK (backlog 5b3dabb5). Every gate copied the
+/// warm target from a Longhorn volume with a plain `cp -a` — 184 s and
+/// tens of GB written per gate, the single largest writer on w-1's SSD
+/// (~3.6 TB/day). Both copies — seeding the workspace and refreshing
+/// the seed — must ask for a reflink, and the seed must live where a
+/// reflink can happen: a `local` PV on the build node's own filesystem,
+/// bound by name so a typo binds nothing rather than the wrong disk.
+/// Three files state one arrangement; this pins them to each other.
+#[test]
+fn the_seed_is_copied_by_reflink_from_a_local_volume_on_the_build_node() {
+    let sh = run_sh();
+    let seeding = sh
+        .lines()
+        .filter(|l| l.contains("cp -a") && l.contains("$SEED/target/."))
+        .count();
+    let refreshing = sh
+        .lines()
+        .filter(|l| l.contains("cp -a") && l.contains("$SEED/target.partial"))
+        .count();
+    assert_eq!(seeding, 1, "one seeding copy in run.sh");
+    assert_eq!(refreshing, 1, "one refresh copy in run.sh");
+    for l in sh
+        .lines()
+        .filter(|l| l.contains("cp -a") && l.contains("$SEED/target"))
+    {
+        assert!(
+            l.contains("--reflink=auto"),
+            "a seed copy without --reflink=auto rewrites the whole target: {l}"
+        );
+    }
+
+    let job = job_doc();
+    assert_eq!(volume_backing(&job, "gate-seed"), "persistentVolumeClaim");
+    assert!(
+        job.contains("persistentVolumeClaim: {claimName: gate-seed}"),
+        "the seed volume must be the local-PV claim `gate-seed`, not the Longhorn one"
+    );
+    assert!(
+        !job.contains("claimName: gate-runner-disk"),
+        "the Job must no longer mount the Longhorn claim"
+    );
+
+    let manifest = manifest();
+    let pvc = manifest
+        .split(
+            "
+---
+",
+        )
+        .find(|d| {
+            d.contains("kind: PersistentVolumeClaim")
+                && d.contains(
+                    "name: gate-seed
+",
+                )
+        })
+        .expect("the gate-seed claim is declared beside the Job");
+    assert!(pvc.contains("storageClassName: gate-seed-local"), "{pvc}");
+    assert!(pvc.contains("volumeName: gate-seed-w-1"), "{pvc}");
+
+    let local = read("infra/cluster/manifests/gate-seed-local.yaml");
+    assert!(
+        local.contains("name: gate-seed-local")
+            && local.contains("provisioner: kubernetes.io/no-provisioner")
+    );
+    assert!(
+        local.contains("name: gate-seed-w-1")
+            && local.contains("storageClassName: gate-seed-local")
+    );
+    assert!(
+        local.contains("path: /var/local/gate-seed"),
+        "the PV's path"
+    );
+    assert!(
+        local.contains("kind: CronJob")
+            && local.contains("hostPath: {path: /var/local/gate-seed, type: DirectoryOrCreate}"),
+        "the prepare CronJob's mount must create exactly the PV's path"
+    );
+    assert!(
+        local.contains("boss-maintenance-wrap.sh maintenance-gate-seed")
+            && local.contains("boss-step.sh maintenance-gate-seed"),
+        "a scheduled run leaves a packet (timers-leave-a-packet)"
+    );
+    assert!(
+        local.contains(r#"operator: In, values: ["w-1"]"#)
+            && local.contains("kubernetes.io/hostname: w-1"),
+        "the PV and the prepare Job must name the same node"
+    );
+}

@@ -78,6 +78,22 @@ MIRROR_URL="${BOSS_MIRROR_URL:-https://github.com/${MIRROR_SLUG}.git}"
 # branch"), none of which names the cause: GitHub opens a pull request
 # only between two repositories in ONE fork network, and dauld/boss is
 # not in it. The slug was the symptom; the check below is the defect.
+# THE FORGE PUSH (ce5339d6). The forge repository carries a push mirror
+# to the SAME fork this verb opens PRs from — `git push --mirror` on
+# every commit, which PRUNES any branch the forge lacks. PR #238 opened
+# at 22:46:59Z on 2026-09-11 and GitHub closed it at 22:49:17Z, head
+# deleted, two minutes and one train later; publish/2026-09-08 survived
+# because it also existed on the forge. So the snapshot goes to the forge
+# FIRST, under the same branch name, and the mirror carries it from
+# there. This verb runs as root under the ops-runner, and a root push
+# into Forgejo's repository would leave root-owned objects the forge's
+# own user cannot collect — so the push runs as the host user whose
+# login shell carries the forge credential helper (the converge's own
+# arrangement, forge-converge.sh), over Forgejo's HTTP, from a clone
+# made readable to it. Empty BOSS_FORGE_PUSH_AS runs the push inline
+# (the test harness, whose fixture repo the test's uid owns).
+FORGE_PUSH_URL="${BOSS_FORGE_PUSH_URL:-http://10.20.0.15:3000/david/boss.git}"
+FORGE_PUSH_AS="${BOSS_FORGE_PUSH_AS-david}"
 FORK_SLUG="${BOSS_FORK_SLUG:-dauld/boss-mirror}"
 FORK_URL="${BOSS_FORK_URL:-https://github.com/${FORK_SLUG}.git}"
 FORK_OWNER="${FORK_SLUG%%/*}"
@@ -495,6 +511,24 @@ elif [ "$fork_rc" -eq 2 ]; then
     say "forked $MIRROR_SLUG as $FORK_SLUG ($(cat "$workdir/fork-says"))"
 else
     refuse "$FORK_SLUG exists on GitHub but is NOT a fork of $MIRROR_SLUG — it says $(cat "$workdir/fork-says"). A pull request can only be opened between two repositories in one fork network, so pushing $BRANCH there would succeed and then fail at gh pr create with errors that name no cause (measured 2026-09-11 against dauld/boss, a namesake outside the network). Point BOSS_FORK_SLUG at a fork of $MIRROR_SLUG, or rename $FORK_SLUG so this verb forks it itself. Nothing was pushed"
+fi
+
+# 4a. The forge first — see FORGE_PUSH_URL. Idempotent per day: --force
+#     re-points the dated branch at today's snapshot, the same way the
+#     fork push below does. A failure here opens nothing on GitHub.
+# Readable to the pushing user: the bare clone only (public source),
+# never the state dir's other contents — traversable, not listable.
+chmod a+x "$STATE_DIR" 2>/dev/null || true
+chmod -R a+rX "$CLONE" 2>/dev/null || true
+forge_push_cmd="git -C '$CLONE' push -q --force '$FORGE_PUSH_URL' '$snapshot:refs/heads/$BRANCH'"
+if [ -n "$FORGE_PUSH_AS" ]; then
+    runuser -l "$FORGE_PUSH_AS" -c "$forge_push_cmd" 2>"$workdir/err" \
+        || fail "pushing $BRANCH to the forge ($FORGE_PUSH_URL) as $FORGE_PUSH_AS: $(head -c 300 "$workdir/err" | tr '\n' ' '). Without it on the forge, the push mirror prunes the PR's head at the next train"
+    say "pushed publish/${BRANCH#publish/} to the forge as $FORGE_PUSH_AS ($FORGE_PUSH_URL) — the mirror carries it"
+else
+    bash -c "$forge_push_cmd" 2>"$workdir/err" \
+        || fail "pushing $BRANCH to the forge ($FORGE_PUSH_URL): $(head -c 300 "$workdir/err" | tr '\n' ' ')"
+    say "pushed publish/${BRANCH#publish/} to the forge ($FORGE_PUSH_URL) — the mirror carries it"
 fi
 
 g -c "credential.helper=$helper" push -q --force fork "$snapshot:refs/heads/$BRANCH" 2>"$workdir/err" \
