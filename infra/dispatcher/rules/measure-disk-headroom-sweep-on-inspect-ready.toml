@@ -1,0 +1,24 @@
+# The disk-headroom sweep arrives with its measurement. When its `Inspect` checklist
+# becomes ready (the step.ready.checklist event whose subject is this
+# sweep's target), spawn an ops-request `disk-report` to the forge and
+# link it back to the sweep as metadata.for_sweep — so the inspector
+# reads the forge's own numbers off a packet instead of fetching them by
+# hand first. Counted 2026-09-12 (8e8311f5): six inspections in one day
+# each began with that fetch.
+[[rule]]
+name = "measure-disk-headroom-sweep-on-inspect-ready"
+why = """
+A CROSS-PROTOCOL REACTOR spanning maintenance-sweep -> ops-request ->
+a read on the forge host, which no single Workflow consequence can
+express: the sweep's protocol cannot name a host verb, and the
+ops-request's cannot know which sweep asked. The measurement is a
+READ (disk-report, forge-scoped, no authority widened); the inspector's
+judgement stays a human or agent step over a number that is now on the
+record before they arrive. Self-filters to this one sweep by the
+subject the daily spawner gives it.
+"""
+on_event = "step.ready.checklist"
+when = 'subject_id = "disk-headroom"'
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"ops-request\"", subject_kind = "\"custom\"", subject = "\"forge\"", title = "\"disk-report on forge — the disk-headroom sweep's measurement\"", "metadata.host" = "\"forge\"", "metadata.verb" = "\"disk-report\"", "metadata.for_sweep" = "job_id" }

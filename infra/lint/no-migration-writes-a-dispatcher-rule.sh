@@ -63,6 +63,25 @@ SCHEMA_DIR="infra/postgres/schema"
 # `-- INSERT INTO dispatcher_rules` trailing a statement is deliberately
 # still read, because failing closed on a comment costs a rewording and
 # failing open costs the property.
+# A prefix compared against CUTOVER at CUTOVER's own width. Three
+# prefix widths coexist in the schema directory (`NNN-`, minute stamps,
+# second stamps), and a numeric compare across widths is not a compare
+# of instants: `202609122000` (2026-09-12, minute width) is 2.0e11 and
+# CUTOVER is 2.0e13, so the first rule car after the collapse — carrying
+# the INSERT this lint exists to refuse — passed it on 2026-09-12 by
+# being stamped to the minute. A minute stamp (twelve digits) is
+# right-padded to fourteen so it reads as its first second; a legacy
+# `NNN-` number is left alone and stays below every stamp, as the apply
+# order has it. 10# forces base-10: a prefix with a leading zero is not
+# octal.
+at_seconds_width() {
+    local p="$1"
+    if [ "${#p}" -ge 12 ]; then
+        while [ "${#p}" -lt 14 ]; do p="${p}0"; done
+    fi
+    printf '%s' "$((10#$p))"
+}
+
 writes_a_rule() {
     LC_ALL=C awk '
         { line = $0 }
@@ -81,8 +100,7 @@ check_dir() {
         prefix="${base%%-*}"
         # Not a numeric-prefixed migration: nothing to order it by.
         case "$prefix" in ''|*[!0-9]*) continue ;; esac
-        # 10# forces base-10: a prefix with a leading zero is not octal.
-        [ "$((10#$prefix))" -ge "$CUTOVER" ] || continue
+        [ "$(at_seconds_width "$prefix")" -ge "$CUTOVER" ] || continue
         case " ${ALLOWLIST[*]} " in *" $base "*) continue ;; esac
         hit="$(writes_a_rule "$path")"
         if [ -n "$hit" ]; then
@@ -113,6 +131,14 @@ printf "UPDATE dispatcher_rules SET status = 'retired' WHERE name = 'x';\n" \
     > "$tmp/20260913000000-a-rule-retirement.sql"
 if check_dir "$tmp" 2>/dev/null; then
     echo "no-migration-writes-a-dispatcher-rule: SELF-TEST FAILED — a post-cutover rule write must be refused" >&2
+    exit 1
+fi
+rm -f "$tmp"/*.sql
+# The 2026-09-12 shape: a post-cutover INSERT stamped to the minute.
+printf "INSERT INTO dispatcher_rules (name, version, status) VALUES ('y', 1, 'active');\n" \
+    > "$tmp/202609122000-a-minute-width-rule-insert.sql"
+if check_dir "$tmp" 2>/dev/null; then
+    echo "no-migration-writes-a-dispatcher-rule: SELF-TEST FAILED — a minute-width post-cutover rule write must be refused, not read as history" >&2
     exit 1
 fi
 rm -f "$tmp"/*.sql

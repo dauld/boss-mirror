@@ -210,6 +210,26 @@ dup=$(printf '%s\n' $role_stems | uniq -d)
 # ML batch (other roles) must be reported, not installed.
 mkdir -p "$tmp/etc-roles"
 : >"$tmp/systemctl-roles.log"
+# THE HOST'S OWN ROLE SET FIRST — including one that maps to NO units
+# (wireguard-bastion: `units = []`). Measured 2026-09-12 18:55Z on
+# boss-gcp, three converges in a row: the roles read worked, the
+# installer printed its header and died with exit 1 and not one more
+# line, because `role_units` piped awk into `grep -oE '"[^"]+"'`, an
+# empty units list gave grep nothing to match, and `set -euo pipefail`
+# ended the script on that exit 1. The lint below had only ever run
+# with BOSS_NODE_ROLES=legacy-stack, a role with units.
+mkdir -p "$tmp/etc-all"
+: >"$tmp/systemctl-all.log"
+sum_all="$tmp/summary-all-roles.json"
+BOSS_NODE_ROLES=legacy-stack,ml-batch-host,off-cluster-observer,wireguard-bastion UNITS_SUMMARY="$sum_all" \
+    units_run "$tmp/systemctl-all.log" "$tmp/etc-all" "$tmp/unitlib" "$tmp/units-all.out" \
+    || { cat "$tmp/units-all.out" >&2; fail "units mode with the host's four roles (one with units = []) exited non-zero — an empty role must install nothing, not kill the converge"; }
+# Those four roles plus [always] name the whole TIMERS roster, so every
+# stem must land — the empty role adds nothing and removes nothing.
+for stem in $timer_stems; do
+    [ -f "$tmp/etc-all/$stem.service" ] || fail "$stem was not installed under boss-gcp's own four roles (one of them empty)"
+done
+
 sum_roles="$tmp/summary-roles.json"
 BOSS_NODE_ROLES=legacy-stack UNITS_SUMMARY="$sum_roles" \
     units_run "$tmp/systemctl-roles.log" "$tmp/etc-roles" "$tmp/unitlib" "$tmp/units-roles.out" \

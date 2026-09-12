@@ -1209,13 +1209,24 @@ ROLES_TOML="${BOSS_ROLES_TOML:-$REPO_ROOT/infra/estate/roles.toml}"
 
 # The stems roles.toml names for one section header ("always" or
 # "roles.<name>"), one per line. The file keeps each `units = [...]` on
-# one line so this needs no TOML parser.
+# one line so this needs no TOML parser. awk does the extraction on its
+# own: a role whose list is empty (`units = []`) yields no lines and
+# exit 0. The earlier shape piped into `grep -oE '"[^"]+"'`, which
+# exits 1 when it matches nothing, and under `set -o pipefail` that
+# killed the converge of every host declaring such a role — boss-gcp,
+# three times running from 2026-09-12 18:55Z, one header line and no
+# more (estate alarm a1b4f3fa).
 role_units() { # <section>
     awk -v want="[$1]" '
         $0 == want { on = 1; next }
         /^\[/ { on = 0 }
-        on && /^units[[:space:]]*=/ { print }
-    ' "$ROLES_TOML" | grep -oE '"[^"]+"' | tr -d '"'
+        on && /^units[[:space:]]*=/ {
+            while (match($0, /"[^"]+"/)) {
+                print substr($0, RSTART + 1, RLENGTH - 2)
+                $0 = substr($0, RSTART + RLENGTH)
+            }
+        }
+    ' "$ROLES_TOML"
 }
 
 # The stems this host installs, or nothing when no roles are declared

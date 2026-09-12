@@ -130,7 +130,13 @@ twenty minutes in. **It is now refused rather than merely unnecessary:**
 migration written after the collapse that writes rule rows, because §9a is
 explicit that asking the next person not to re-open a second home is not a
 mechanism. The thirty-one that predate it are applied history and are left
-alone.
+alone. The first rule added after the collapse (2026-09-12,
+`measure-*-sweep-on-inspect-ready`) still arrived with that INSERT, because
+`an-expectation-names-a-rule-the-tree-declares.sh` had kept demanding one —
+its non-vacuity guard predated the collapse — and the minute-width stamp on
+the file slipped under the refusing lint's date compare. Both lints now
+agree with this paragraph: a rule declared by its file alone is counted, not
+refused, and a stamp is compared at one width.
 
 The fourth place, before that, was `infra/lint/dispatcher-rules-ratchet.sh`,
 whose hand-typed `BASELINE=60` every rule car had to bump. That integer
