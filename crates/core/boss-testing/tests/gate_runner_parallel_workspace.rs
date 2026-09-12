@@ -362,19 +362,40 @@ fn the_seed_is_copied_by_reflink_from_a_local_volume_on_the_build_node() {
         local.contains("path: /var/local/gate-seed"),
         "the PV's path"
     );
+    // The directory is the NODE's declaration (Talos machine.files on
+    // w-1), not a CronJob's hostPath mount: boss-dev enforces the Talos
+    // default `baseline`, which refuses hostPath — measured on
+    // 2026-09-12 (backlog d42d4967) when the prepare Job created no pod
+    // in ten minutes while its emptyDir twin completed in twenty
+    // seconds. A manifest that reintroduces the mount is refused by
+    // infra/lint/no-manifest-mounts-a-hostpath.sh; this pins the
+    // manifest's own account of where the directory comes from.
     assert!(
-        local.contains("kind: CronJob")
-            && local.contains("hostPath: {path: /var/local/gate-seed, type: DirectoryOrCreate}"),
-        "the prepare CronJob's mount must create exactly the PV's path"
+        !local.contains("kind: CronJob") && !local.contains("hostPath:"),
+        "nothing in the cluster may create the seed directory — baseline refuses hostPath"
     );
     assert!(
-        local.contains("boss-maintenance-wrap.sh maintenance-gate-seed")
-            && local.contains("boss-step.sh maintenance-gate-seed"),
-        "a scheduled run leaves a packet (timers-leave-a-packet)"
+        local.contains("machine.files") && local.contains("talosctl"),
+        "the manifest names the Talos declaration that creates the PV's path"
+    );
+    // The directory alone is not enough: the kubelet runs in its own
+    // mount namespace and does not see /var/local unless the machine
+    // config binds it in. With only machine.files applied, a pod
+    // mounting the PVC sat nine hours at ContainerCreating while the
+    // kubelet logged `path "/var/local/gate-seed" does not exist` 296
+    // times, on a node where `talosctl ls` showed it (2026-09-12).
+    assert!(
+        local.contains("machine.kubelet.extraMounts"),
+        "the manifest names the kubelet mount that lets the PV's path be seen"
     );
     assert!(
-        local.contains(r#"operator: In, values: ["w-1"]"#)
-            && local.contains("kubernetes.io/hostname: w-1"),
-        "the PV and the prepare Job must name the same node"
+        !repo_root()
+            .join("infra/platform/workflows/maintenance-gate-seed.toml")
+            .exists(),
+        "the prepare CronJob's workflow went with it"
+    );
+    assert!(
+        local.contains(r#"operator: In, values: ["w-1"]"#),
+        "the PV binds only on the build node"
     );
 }

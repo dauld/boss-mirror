@@ -15,19 +15,64 @@
 # directory of that same partition puts the seed there too.
 #
 # WHAT THIS DECLARES, cluster-scoped, so it is converged from here and
-# not applied by `boss gate` (whose credential is namespaced):
+# not applied by `boss gate` (whose credential is namespaced) — and the
+# one thing it cannot declare:
 #   - a StorageClass with no provisioner and WaitForFirstConsumer, the
 #     standard shape for a hand-declared local volume;
 #   - the PersistentVolume itself: 200Gi of /var/local/gate-seed on
 #     w-1, Retain (a warm seed is minutes of every gate; never reclaim
 #     it by accident), bound only on w-1 by nodeAffinity;
-#   - a daily prepare CronJob whose hostPath mount (DirectoryOrCreate)
-#     CREATES the directory on w-1 — a local PV refuses a path that does
-#     not exist, and nothing else on a Talos node makes directories. It
-#     runs unprivileged (the mount does the work; the gate's fsGroup does
-#     the ownership); it lives in boss-dev, which carries no pod-security
-#     enforce label, while the gate Job itself stays restricted-profile
-#     clean (it mounts a PVC, not a hostPath).
+#   - NOT the directory itself. A local PV refuses a path that does
+#     not exist, and nothing in this cluster may make one: the only
+#     Kubernetes way is a hostPath mount, and boss-dev — no pod-security
+#     labels of its own — enforces the Talos DEFAULT profile, which is
+#     `baseline`, and baseline refuses hostPath. MEASURED 2026-09-12
+#     (backlog d42d4967): the first version of this file carried a
+#     prepare CronJob whose DirectoryOrCreate hostPath was to make the
+#     path; run by hand it created no pod in ten minutes, while the same
+#     Job with an emptyDir completed in twenty seconds, and the gate
+#     could not have told us (it applies nothing). The directory is
+#     therefore the NODE's declaration — TWO entries in w-1's Talos
+#     machine config (~/talos-homelab/v2, outside this repo). The first,
+#     `machine.files`, makes the directory; Talos creates the parents
+#     at boot:
+#
+#         machine:
+#           files:
+#             - path: /var/local/gate-seed/.declared-by-talos
+#               op: create
+#               permissions: 0o644
+#               content: "local PV gate-seed-w-1 mounts this directory\n"
+#
+#     The second, `machine.kubelet.extraMounts`, lets the kubelet SEE
+#     it. On Talos the kubelet runs in
+#     its own mount namespace with a fixed set of host paths, and
+#     /var/local is not one of them — MEASURED 2026-09-12 04:21-13:30Z:
+#     with the directory present on the host (`talosctl ls /var/local/`
+#     listed it) a pod mounting the PVC sat nine hours at
+#     ContainerCreating while the kubelet logged, 296 times,
+#     `MountVolume.NewMounter initialization failed for volume
+#     "gate-seed-w-1": path "/var/local/gate-seed" does not exist`.
+#     The same arrangement local-path-provisioner needs on Talos:
+#
+#         machine:
+#           kubelet:
+#             extraMounts:
+#               - destination: /var/local/gate-seed
+#                 type: bind
+#                 source: /var/local/gate-seed
+#                 options: [bind, rshared, rw]
+#
+#     Both applied with `talosctl -n <w-1> patch machineconfig --patch
+#     @…` (the kubelet restarts; running pods survive, no reboot). The
+#     PROOF is a pod in boss-dev that mounts the PVC and writes a file
+#     — `talosctl ls` is the host's view and passed while the mount
+#     failed, so it proves nothing about the mount. A rebuilt w-1 gets
+#     both back from its config, which is where a node's own filesystem
+#     belongs; ownership is the gate pod's fsGroup (1500) at mount, the
+#     arrangement the Longhorn seed relied on.
+#     infra/lint/no-manifest-mounts-a-hostpath.sh refuses the hostPath
+#     mount coming back.
 #
 # WHAT IT COSTS. The PV's node affinity makes gating REQUIRE w-1: the
 # gate-runner's "preferred, not required" build-node affinity is now
@@ -70,75 +115,3 @@ spec:
       nodeSelectorTerms:
         - matchExpressions:
             - {key: kubernetes.io/hostname, operator: In, values: ["w-1"]}
----
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: gate-seed-prepare
-  namespace: boss-dev
-  labels: {app.kubernetes.io/part-of: boss, boss.dev/purpose: build}
-spec:
-  # Daily and idempotent: the kubelet creates the PV's path when the
-  # hostPath mounts (DirectoryOrCreate), so a rebuilt w-1 has its seed
-  # directory back within a day and the local PV binds again (sooner by
-  # hand: `kubectl -n boss-dev create job --from=cronjob/gate-seed-prepare
-  # gate-seed-prepare-now`). A CronJob rather than a Job so its runs
-  # carry an ownerReference — the orphan derivation excludes controller-
-  # made objects, where a bare Job here would put (Job, boss-dev) in
-  # scope and read every gate Job as undeclared. Nothing here needs
-  # root: ownership at mount is the gate pod's fsGroup (1500), the same
-  # arrangement the Longhorn seed relied on. Leaves a packet like every
-  # scheduled run (timers-leave-a-packet): maintenance-gate-seed.
-  schedule: "41 4 * * *"
-  concurrencyPolicy: Forbid
-  successfulJobsHistoryLimit: 1
-  failedJobsHistoryLimit: 1
-  jobTemplate:
-    spec:
-      backoffLimit: 1
-      template:
-        spec:
-          restartPolicy: Never
-          nodeSelector:
-            kubernetes.io/hostname: w-1
-          imagePullSecrets:
-            - {name: forgejo-registry}
-          # The boss image runs as uid 1500 (measured, see boss-files-gc.yaml);
-          # the seed directory's group is 1500 too, so what this writes
-          # (nothing today) stays readable to the gate.
-          securityContext:
-            runAsNonRoot: true
-            runAsUser: 1500
-            runAsGroup: 1500
-            seccompProfile: {type: RuntimeDefault}
-          containers:
-            - name: prepare
-              image: 10.20.0.15:3000/david/boss:latest
-              securityContext:
-                allowPrivilegeEscalation: false
-                capabilities: {drop: ["ALL"]}
-              command: ["/bin/bash", "-c"]
-              args:
-                - |
-                  set -euo pipefail
-                  /usr/local/bin/boss-maintenance-wrap.sh maintenance-gate-seed "gate seed directory on the build node"
-                  # The mount itself created the directory; this records
-                  # what the gate will see at its mount, and fails loudly
-                  # if the path is not there after all.
-                  test -d /gate-seed
-                  echo "gate-seed-prepare: /var/local/gate-seed present on w-1 — $(stat -c '%U:%G %a' /gate-seed) $(ls /gate-seed | wc -l) entries"
-                  /usr/local/bin/boss-step.sh maintenance-gate-seed run result=ok
-              env:
-                - name: BOSS_JOBS_URL
-                  value: http://boss-jobs-internal.boss.svc.cluster.local:7900
-                - name: BOSS_MACHINE_TOKEN
-                  valueFrom:
-                    secretKeyRef:
-                      name: boss-secrets
-                      key: machine-token
-                      optional: true
-              volumeMounts:
-                - {name: gate-seed-dir, mountPath: /gate-seed}
-          volumes:
-            - name: gate-seed-dir
-              hostPath: {path: /var/local/gate-seed, type: DirectoryOrCreate}

@@ -21,9 +21,11 @@
 #
 # An undeclared uid is not a cosmetic gap, because the cliff is
 # cluster-wide rather than per-namespace: boss.yaml enforces the baseline
-# profile on the boss namespace only, and restricted:latest is the Talos
-# machine-config DEFAULT outside this repo. Tightening that default would
-# hit every namespace at once — so these are not N independent small
+# profile on the boss namespace only, and the Talos machine-config
+# DEFAULT outside this repo — measured 2026-09-12 (d42d4967): enforce
+# baseline, warn restricted:latest — is what every unlabelled namespace
+# takes. Tightening that default to restricted would hit every namespace
+# at once — so these are not N independent small
 # risks, they are one switch away from being one large one. A workload
 # that states runAsNonRoot + runAsUser survives that switch; one that
 # inherits its uid from an image is admitted or refused on a property no

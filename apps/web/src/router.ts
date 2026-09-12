@@ -103,6 +103,9 @@ export type Route =
   /// per-kind dashboard is unique, not a duplicate rendering).
   | { kind: 'systemFleet' }
   | { kind: 'systemMarshallingYard' }
+  /// The Receiving Yard — the INBOUND third: what asked the platform for
+  /// something and is still standing, before the Marshalling Yard sorts it.
+  | { kind: 'systemReceivingYard' }
   /// The Crew Board — who is building what, right now. The MIDDLE third
   /// of the operator surface (backlog 04c5bbc0): the Train Yard shows
   /// landed work, the Marshalling Yard shows work waiting, and the
@@ -162,6 +165,7 @@ export function parseRoute(pathname: string): Route {
     if (p === '/operate/atlas') return { kind: 'systemMonitoringAtlas' };
     if (p === '/operate/bottlenecks') return { kind: 'systemFleet' };
     if (p === '/operate/marshalling') return { kind: 'systemMarshallingYard' };
+    if (p === '/operate/receiving') return { kind: 'systemReceivingYard' };
     if (p === '/operate/yard-status') return { kind: 'systemYardStatus' };
     if (p === '/operate/conductor') return { kind: 'systemMonitoringConductor' };
     // 3. Registry — one surface over the registry family.
