@@ -124,6 +124,19 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "create", "patch", "update"]
+  # The namespace's EVENTS, read-only, in both groups (describe reads
+  # core; `get events` and newer clients read events.k8s.io). Without
+  # this, `kubectl describe pod` from the session printed
+  # `Events: <none>` and the cause of every pod stuck at
+  # ContainerCreating — a mount the kubelet could not see, a hostPath
+  # baseline refused — had to be read by a human from a workstation
+  # and pasted back (backlog 27eacc14; the 9-hour d42d4967 diagnosis).
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

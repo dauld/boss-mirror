@@ -140,6 +140,57 @@ if [ "${INSTALL_KUBECTL:-1}" = "1" ] && [ ! -x /usr/local/bin/kubectl ]; then
     rm -f "$tmp"
 fi
 
+# WHAT THE cluster-operator ROLE BRINGS (design 1bc4b4ed: cluster
+# management runs on this host; the workstation is a terminal). Read
+# off BOSS_NODE_ROLES, which forge-converge exports from the estate
+# registry; a hand run with no roles set installs nothing here and says
+# so. Two things, and a check:
+#
+#   * talosctl, pinned by sha like kubectl above — the Talos client is
+#     the ONLY interface to the nodes (no ssh), and it must stay within
+#     one minor of the cluster. v1.13.8 is the version David's own client
+#     runs, so the forge answers exactly as the workstation did.
+#   * The credentials the role needs — /etc/boss-ops/talosconfig and
+#     /etc/boss-ops/kubeconfig — are CHECKED, never written. They are
+#     placed once by David (token admin is his) and must be root:root
+#     mode 0600; anything else is reported on the converge packet as
+#     absent-or-wrong until fixed. The estate's own converge never
+#     writes a credential.
+. "${HERE}/../estate/node-roles.sh"
+if has_role cluster-operator; then
+    TALOSCTL_VERSION="v1.13.8"
+    TALOSCTL_SHA256="406b56f9e4ff03b1557cc941b1f163aec8a6ebb36e28f0bbbe6d083589529261"
+    if [ "${INSTALL_TALOSCTL:-1}" = "1" ] && [ ! -x /usr/local/bin/talosctl ]; then
+        tmp="$(mktemp)"
+        if curl -sfL -o "$tmp" "https://github.com/siderolabs/talos/releases/download/${TALOSCTL_VERSION}/talosctl-linux-amd64" \
+            && echo "${TALOSCTL_SHA256}  ${tmp}" | sha256sum -c - >/dev/null; then
+            install -m 0755 "$tmp" /usr/local/bin/talosctl
+            echo "install.sh: talosctl ${TALOSCTL_VERSION} installed (cluster-operator)"
+        else
+            echo "install.sh: talosctl download or checksum failed — the cluster-operator role has no Talos client until it is present" >&2
+        fi
+        rm -f "$tmp"
+    fi
+    ops_missing=""
+    for cred in talosconfig kubeconfig; do
+        f="/etc/boss-ops/$cred"
+        if [ ! -f "$f" ]; then
+            ops_missing="$ops_missing $cred:absent"
+        elif [ "$(stat -c '%U:%G %a' "$f" 2>/dev/null)" != "root:root 600" ]; then
+            ops_missing="$ops_missing $cred:$(stat -c '%U:%G %a' "$f")"
+        fi
+    done
+    if [ -n "$ops_missing" ]; then
+        echo "install.sh: cluster-operator credentials not ready —${ops_missing} (want root:root 600 under /etc/boss-ops; placed by hand, never by this script)"
+        if declare -F run_summary_field >/dev/null; then run_summary_field ops_credentials "not ready:${ops_missing}"; fi
+    else
+        echo "install.sh: cluster-operator credentials present (root:root 600)"
+        if declare -F run_summary_field >/dev/null; then run_summary_field ops_credentials "present"; fi
+    fi
+else
+    echo "install.sh: cluster-operator not among this host's roles (${BOSS_NODE_ROLES:-none}) — no Talos client installed"
+fi
+
 # The system of record for the maintenance packets these units open.
 # ONE definition (§9a), written as a per-unit drop-in so
 # boss-maintenance-wrap.sh — which has NO localhost default and REFUSES

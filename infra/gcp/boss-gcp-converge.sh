@@ -255,36 +255,13 @@ run_summary_field converge_sha "$after"
 # the cost is paid by whoever is next in front of the failure. So the
 # installer's every line is kept and every line is printed, with a loud
 # banner when it failed.
-# WHAT THIS HOST IS FOR, read off the system of record. A node declares
-# its roles as registry data (Classes of `node`, migration 202609120300)
-# and infra/estate/roles.toml maps each role to the TIMERS rows it
-# needs; the installer installs only those and REPORTS the rest. The
-# read is BEST-EFFORT with a short ceiling: a system of record that
-# cannot be reached leaves the roles empty, the installer then installs
-# every row exactly as it did before roles existed, and the packet says
-# so. An arm that needs the patient is not an arm — this loop's job is
-# to keep units current, and it does that whether or not the registry
-# answers. BOSS_NODE_ROLES set by the caller wins (a test, a hand run).
+# WHAT THIS HOST IS FOR, read off the system of record — one definition
+# for every managed host, in infra/estate/node-roles.sh (the forge reads
+# its roles the same way). Best-effort: an unreachable registry leaves
+# the roles empty and every row installs, as before roles existed.
 NODE_ID="${BOSS_NODE_ID:-$(hostname -s)}"
-NODES_URL="${BOSS_ESTATE_NODES_URL:-http://10.20.0.34:7900/api/estate/nodes}"
-if [ -z "${BOSS_NODE_ROLES+set}" ]; then
-    roles_json="$(curl -fsS --max-time 10 "$NODES_URL" 2>/dev/null)" || roles_json=""
-    if [ -z "$roles_json" ]; then
-        echo "boss-gcp-converge: $NODES_URL did not answer — roles unknown, installing every row"
-        run_summary_note "roles: $NODES_URL did not answer — every TIMERS row installed"
-        BOSS_NODE_ROLES=""
-    else
-        BOSS_NODE_ROLES="$(printf '%s' "$roles_json" \
-            | jq -r --arg id "$NODE_ID" '[.data[] | select(.id == $id) | .roles[]?] | join(",")' 2>/dev/null)" \
-            || BOSS_NODE_ROLES=""
-        if [ -z "$BOSS_NODE_ROLES" ]; then
-            echo "boss-gcp-converge: $NODE_ID declares no roles in the registry — installing every row"
-        else
-            echo "boss-gcp-converge: $NODE_ID declares roles: $BOSS_NODE_ROLES"
-        fi
-    fi
-fi
-export BOSS_NODE_ROLES
+. "${BOSS_GCP_CONVERGE_INFRA:-$(dirname "$0")}/estate/node-roles.sh"
+BOSS_CONVERGE_NAME="boss-gcp-converge" read_node_roles "$NODE_ID"
 run_summary_field node_id "$NODE_ID"
 
 log="$(mktemp -t boss-gcp-converge-install.XXXXXX)"

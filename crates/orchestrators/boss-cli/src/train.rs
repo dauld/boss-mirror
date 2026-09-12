@@ -3028,6 +3028,63 @@ pub(crate) fn sweep_subject(b: &CarBranch) -> String {
     }
 }
 
+/// What a delete actually did, as OBSERVED — the forge's answer to
+/// DELETE read against a `branch_head` taken afterwards. The answer
+/// alone is a claim: 2xx says "deleted", 404 says "already gone", and
+/// on 2026-09-11 six landed cars' branches were on the forge the next
+/// morning under trains stamped `branches_swept`, with every condition
+/// the sweep requires met — so the forge said one of those two things
+/// and the branch stayed (backlog 1096b1a4). The merge is observed,
+/// never assumed; so is the delete. `StillPresent` is a branch
+/// failure: the train stays pending and the record names what the
+/// forge said, so the next such morning is a one-read diagnosis
+/// instead of a journal nobody outside the cluster can open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SweepDelete {
+    /// DELETE answered success and the branch is gone.
+    Deleted,
+    /// DELETE answered "already gone" and the branch is gone.
+    AlreadyGone,
+    /// The branch is still on the forge after DELETE answered.
+    StillPresent { forge_said: &'static str },
+}
+
+pub(crate) fn sweep_delete_verdict(claimed_deleted: bool, after: Option<&str>) -> SweepDelete {
+    match (claimed_deleted, after.filter(|h| !h.is_empty())) {
+        (true, None) => SweepDelete::Deleted,
+        (false, None) => SweepDelete::AlreadyGone,
+        (true, Some(_)) => SweepDelete::StillPresent {
+            forge_said: "deleted",
+        },
+        (false, Some(_)) => SweepDelete::StillPresent {
+            forge_said: "already gone",
+        },
+    }
+}
+
+/// One row of the train's `sweep_report`: the record of what the sweep
+/// decided and observed for one branch, this pass. Stamped onto the
+/// train beside `branches_swept` so the stamp carries its evidence.
+pub(crate) fn sweep_report_row(b: &CarBranch, outcome: &str) -> Value {
+    json!({
+        "branch": b.branch,
+        "car": id8(&b.car),
+        "rerail_origin": b.rerail_origin,
+        "outcome": outcome,
+    })
+}
+
+/// The journal line for a delete the forge answered but did not
+/// perform — the only kind of sweep line that must be loud.
+pub(crate) fn sweep_still_present_line(b: &CarBranch, forge_said: &str, head: &str) -> String {
+    format!(
+        "sweep: {} STILL ON THE FORGE at {} after DELETE answered \"{forge_said}\" — not swept; train stays pending (car {} landed)",
+        sweep_subject(b),
+        &head[..head.len().min(8)],
+        id8(&b.car)
+    )
+}
+
 /// A step's `completed_at` evidence stamp, raw as stored. The
 /// conductor stamps this on every step IT completes; steps closed by
 /// other hands (the dispatcher's terminals) may not carry one.
@@ -7355,6 +7412,12 @@ impl Conductor {
                 // UNSTAMPED below, so it is revisited next pass rather
                 // than marked swept with the branch leaked.
                 let mut branch_failures = 0usize;
+                // THE RECORD OF THIS PASS, one row per branch decided,
+                // written on the train beside the stamp so the stamp
+                // carries its evidence (1096b1a4: six leaked branches
+                // under stamped trains, and the only trace of what the
+                // forge had answered was a journal outside the cluster).
+                let mut report: Vec<Value> = Vec::new();
                 for b in deletable_branches(&cars, &open_branches) {
                     let branch_outcome: Result<()> = async {
                         // The job record proved the CONTENT landed; the head
@@ -7371,6 +7434,15 @@ impl Conductor {
                         if let Some(note) = sweep_note(&guard, &b) {
                             log(note);
                         }
+                        match &guard {
+                            SweepGuard::Gone => report.push(sweep_report_row(&b, "gone before this pass")),
+                            SweepGuard::NoRecord => report.push(sweep_report_row(&b, "kept: no boarded head on record")),
+                            SweepGuard::Moved { recorded, current } => report.push(sweep_report_row(
+                                &b,
+                                &format!("kept: moved since boarding ({} -> {})", &recorded[..recorded.len().min(8)], &current[..current.len().min(8)]),
+                            )),
+                            SweepGuard::Delete => {}
+                        }
                         if guard == SweepGuard::Delete {
                             let what = sweep_subject(&b);
                             if self.cfg.dry {
@@ -7378,13 +7450,39 @@ impl Conductor {
                                     "DRY: would delete {what} (car {} landed)",
                                     id8(&b.car)
                                 ));
-                            } else if self.forge.delete_branch(&b.branch).await? {
-                                log(format!("deleted {what} (car {} landed)", id8(&b.car)));
-                            } else {
-                                // It existed a moment ago — something else
-                                // swept it between the two calls. Rare, and
-                                // worth saying so it is not read as our doing.
-                                log(format!("{what} already gone (car {} landed)", id8(&b.car)));
+                                return Ok(());
+                            }
+                            // THE DELETE IS OBSERVED, NEVER ASSUMED. The forge's
+                            // answer is a claim; the branch read back afterwards
+                            // is the fact. A branch still present after an
+                            // answered delete is a failure of THIS branch: the
+                            // train stays pending, the row says what the forge
+                            // said, and the line is loud.
+                            let claimed = self.forge.delete_branch(&b.branch).await?;
+                            let after = self.forge.branch_head(&b.branch).await?;
+                            match sweep_delete_verdict(claimed, after.as_deref()) {
+                                SweepDelete::Deleted => {
+                                    log(format!("deleted {what} (car {} landed)", id8(&b.car)));
+                                    report.push(sweep_report_row(&b, "deleted"));
+                                }
+                                SweepDelete::AlreadyGone => {
+                                    // It existed a moment ago — something else
+                                    // swept it between the two calls. Rare, and
+                                    // worth saying so it is not read as our doing.
+                                    log(format!("{what} already gone (car {} landed)", id8(&b.car)));
+                                    report.push(sweep_report_row(&b, "already gone"));
+                                }
+                                SweepDelete::StillPresent { forge_said } => {
+                                    let head = after.unwrap_or_default();
+                                    log(sweep_still_present_line(&b, forge_said, &head));
+                                    report.push(sweep_report_row(
+                                        &b,
+                                        &format!("still present after DELETE answered \"{forge_said}\""),
+                                    ));
+                                    bail!(
+                                        "{what} still on the forge after DELETE answered \"{forge_said}\""
+                                    );
+                                }
                             }
                         }
                         Ok(())
@@ -7403,17 +7501,23 @@ impl Conductor {
                 let deferred = claim_deferred_branches(&cars, &open_branches);
                 for b in &deferred {
                     log(claim_deferred_line(b));
+                    report.push(sweep_report_row(b, "kept: a still-open car claims it"));
                 }
                 // Stamp swept only when EVERY branch was handled: a
                 // branch we could not sweep this pass must be revisited,
                 // and the stamp is what drops the train off the pending
                 // list. Stamping over an un-swept branch leaks it onto
                 // the forge forever — the very debt this isolation
-                // exists to stop.
+                // exists to stop. The report is written EITHER WAY, in
+                // the same PUT as the stamp when there is one: an
+                // unstamped train says on its own record why it is
+                // still pending, and a stamped one says what each
+                // branch's delete was observed to do.
+                let mut kv: Vec<(&str, Value)> = vec![("sweep_report", json!(report))];
                 if sweep_complete(branch_failures, deferred.len(), &cars) {
-                    self.merge_job_metadata(tid, vec![("branches_swept", json!("true"))])
-                        .await?;
+                    kv.push(("branches_swept", json!("true")));
                 }
+                self.merge_job_metadata(tid, kv).await?;
                 Ok(())
             }
             .await;
@@ -13396,6 +13500,10 @@ mod tests {
     struct SweepForge {
         deleted: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
         head: String,
+        /// An honest forge forgets a branch it deleted, so the read-back
+        /// after DELETE answers None. `false` models the 2026-09-11
+        /// forge: answers the delete, keeps the branch (1096b1a4).
+        performs_deletes: bool,
     }
     #[async_trait::async_trait]
     impl Forge for SweepForge {
@@ -13421,7 +13529,10 @@ mod tests {
             self.deleted.lock().unwrap().push(branch.to_string());
             Ok(true)
         }
-        async fn branch_head(&self, _branch: &str) -> Result<Option<String>> {
+        async fn branch_head(&self, branch: &str) -> Result<Option<String>> {
+            if self.performs_deletes && self.deleted.lock().unwrap().iter().any(|b| b == branch) {
+                return Ok(None);
+            }
             Ok(Some(self.head.clone()))
         }
         async fn cancel_ci_runs(&self, _pr_index: &str, _head_sha: &str) -> Result<usize> {
@@ -13546,6 +13657,7 @@ mod tests {
             Box::new(SweepForge {
                 deleted: deleted.clone(),
                 head: HEAD.to_string(),
+                performs_deletes: true,
             }),
         );
         c.cfg.jobs = format!("http://{addr}");
@@ -13564,6 +13676,165 @@ mod tests {
             !deleted.contains(&"fix/a".to_string()),
             "train A aborted before its branch loop, so its branch is untouched \
              this pass and retried next: {deleted:?}"
+        );
+    }
+
+    /// The forge's answer to DELETE is a claim; the read-back is the
+    /// fact. Four combinations, two of which are the 2026-09-11 leak.
+    #[test]
+    fn a_delete_is_judged_by_the_read_back_not_the_answer() {
+        assert_eq!(sweep_delete_verdict(true, None), SweepDelete::Deleted);
+        assert_eq!(sweep_delete_verdict(false, None), SweepDelete::AlreadyGone);
+        assert_eq!(
+            sweep_delete_verdict(true, Some("abc")),
+            SweepDelete::StillPresent {
+                forge_said: "deleted"
+            }
+        );
+        assert_eq!(
+            sweep_delete_verdict(false, Some("abc")),
+            SweepDelete::StillPresent {
+                forge_said: "already gone"
+            }
+        );
+        assert_eq!(
+            sweep_delete_verdict(true, Some("")),
+            SweepDelete::Deleted,
+            "an empty head is no head"
+        );
+    }
+
+    /// A forge that ANSWERS the delete and does not perform it: the
+    /// 2026-09-11 shape (backlog 1096b1a4) — six landed branches on the
+    /// forge the next morning under trains stamped swept. The sweep
+    /// must read the branch back, count it a failure, leave the train
+    /// UNSTAMPED, and write a `sweep_report` on the train that names
+    /// the branch and what the forge said — the evidence that used to
+    /// live only in a journal outside anyone's reach.
+    #[tokio::test]
+    async fn a_delete_the_forge_answered_but_did_not_perform_keeps_the_train_pending() {
+        use axum::extract::{Path, RawQuery};
+        use axum::routing::get;
+        use axum::{Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        const HEAD: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let train = json!({
+            "id": "tP", "kind": "pr-train", "status": "closed",
+            "metadata": { "boarded_jobs": ["car-tP"] },
+            "steps": [
+                {"id":"s-arr","spec_slug":"arrived","title":"Train arrived","status":"completed","metadata":{}}
+            ]
+        });
+        let car = json!({
+            "id": "car-tP", "kind": "ship-a-change", "status": "closed",
+            "metadata": { "train": "tP", "branch": "fix/stays", "outcome": "merged", "boarded_head": HEAD },
+            "steps": []
+        });
+        let closed_list = json!({ "data": [train.clone()], "total": 1 });
+        let by_id: std::collections::HashMap<String, Value> =
+            [("tP".to_string(), train), ("car-tP".to_string(), car)]
+                .into_iter()
+                .collect();
+        let by_id = Arc::new(by_id);
+        let patches: Arc<Mutex<Vec<(String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let list_route = closed_list.clone();
+        let by_id_get = by_id.clone();
+        let patches_w = patches.clone();
+        let puts_w = patches.clone();
+        let app = Router::new()
+            .route(
+                "/api/jobs",
+                get(move |RawQuery(q): RawQuery| {
+                    let list = list_route.clone();
+                    async move {
+                        if q.unwrap_or_default().contains("pr-train") {
+                            Json(list)
+                        } else {
+                            Json(json!({ "data": [], "total": 0 }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/jobs/{id}",
+                get(move |Path(id): Path<String>| {
+                    let by_id = by_id_get.clone();
+                    async move { Json(by_id.get(&id).cloned().unwrap_or(json!({}))) }
+                })
+                // merge_job_metadata writes the WHOLE job back with a PUT;
+                // the stamp and the report both arrive through this door.
+                .put(move |Path(id): Path<String>, Json(b): Json<Value>| {
+                    let puts = puts_w.clone();
+                    async move {
+                        puts.lock().unwrap().push((id, b));
+                        Json(json!({}))
+                    }
+                }),
+            )
+            .route(
+                "/api/jobs/{id}/metadata",
+                axum::routing::patch(move |Path(id): Path<String>, Json(b): Json<Value>| {
+                    let patches = patches_w.clone();
+                    async move {
+                        patches.lock().unwrap().push((id, b));
+                        Json(json!({}))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        // SweepForge answers every DELETE with Ok(true) and every
+        // branch_head with the same head — a forge that says "deleted"
+        // and keeps the branch.
+        let deleted = Arc::new(Mutex::new(Vec::new()));
+        let mut c = cleanup_conductor(
+            "github",
+            Box::new(SweepForge {
+                deleted: deleted.clone(),
+                head: HEAD.to_string(),
+                performs_deletes: false,
+            }),
+        );
+        c.cfg.jobs = format!("http://{addr}");
+        c.sweep_landed_branches().await.unwrap();
+
+        assert!(
+            deleted.lock().unwrap().contains(&"fix/stays".to_string()),
+            "the delete was attempted"
+        );
+        let patches = patches.lock().unwrap().clone();
+        let train_patches: Vec<&Value> = patches
+            .iter()
+            .filter(|(id, _)| id == "tP")
+            .map(|(_, b)| b)
+            .collect();
+        let stamped = train_patches.iter().any(|b| {
+            truthy(
+                b.pointer("/metadata/branches_swept")
+                    .or_else(|| b.get("branches_swept")),
+            )
+        });
+        assert!(
+            !stamped,
+            "the train was stamped swept while its branch is still on the forge: {train_patches:?}"
+        );
+        let report = train_patches
+            .iter()
+            .find_map(|b| {
+                b.pointer("/metadata/sweep_report")
+                    .or_else(|| b.get("sweep_report"))
+            })
+            .expect("the sweep wrote a report on the train even though it did not stamp it");
+        let text = report.to_string();
+        assert!(
+            text.contains("fix/stays")
+                && text.contains("still present")
+                && text.contains("deleted"),
+            "the report names the branch, that it is still present, and what the forge said: {text}"
         );
     }
 
@@ -13651,6 +13922,7 @@ mod tests {
             Box::new(SweepForge {
                 deleted: deleted.clone(),
                 head: HEAD.to_string(),
+                performs_deletes: true,
             }),
         );
         c.cfg.jobs = format!("http://{addr}");

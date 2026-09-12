@@ -47,3 +47,25 @@ async fn boss_gcp_declares_four_roles_and_keeps_its_primary() {
         w1.roles
     );
 }
+
+/// The forge declares `cluster-operator` — the role that makes it the
+/// host cluster management runs on, so the workstation is a terminal
+/// (design 1bc4b4ed, Q1 resolved "forge now" 2026-09-12). The Class
+/// row and the node_roles row are one migration; this pins that the
+/// estate read returns it, which is what forge-converge reads to
+/// decide whether to install talosctl and to look for the credentials.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_forge_declares_cluster_operator() {
+    let db = TestDb::new().await;
+    let repo = PgJobs::new(db.pool.clone());
+    let nodes = repo.list_estate_nodes().await.expect("estate nodes");
+    let forge = nodes
+        .iter()
+        .find(|n| n.id == "forge")
+        .expect("the forge is declared");
+    assert_eq!(
+        forge.role, "forge",
+        "the primary role the estate page keys on is unchanged"
+    );
+    assert_eq!(forge.roles, vec!["cluster-operator".to_string()]);
+}

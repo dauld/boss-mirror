@@ -39,6 +39,16 @@ units = ["boss-estate-observe-host", "boss-codebase-metrics"]
 [roles.ml-batch-host]
 units = ["boss-ml-inference-batch"]
 
+[roles.cluster-operator]
+# Where cluster management commands run (design 1bc4b4ed): the host
+# carries talosctl and kubectl and the cluster credentials under
+# /etc/boss-ops. No TIMERS row yet — what this role brings is tooling,
+# installed by infra/forge/install.sh when the converge reads the role,
+# and a credential-presence check reported on the converge packet. The
+# ops verbs that read the cluster (node-status, pod-events, talos-logs)
+# and the bounded act (node-converge) are the next cars.
+units = []
+
 [roles.legacy-stack]
 # The ten chores that maintain the second, older stack's data, plus the
 # deploy-confirm arm of the retired deploy hop (dead since 2026-09-03).

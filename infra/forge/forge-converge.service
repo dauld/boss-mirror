@@ -17,6 +17,10 @@ User=root
 # pinning it on the unit that INSTALLS the drop-in avoids the bootstrap
 # gap where the first converge runs before its own drop-in exists.
 Environment=BOSS_JOBS_URL=http://10.20.0.34:7900
+# WHICH NODE THIS IS in the estate registry, so the converge can read
+# its own roles off /api/estate/nodes (infra/estate/roles.toml maps them
+# to what the host installs). Declared here, not read from a hostname.
+Environment=BOSS_NODE_ID=forge
 # WHAT THE RUN LEAVES FOR ITS PACKET — one path, declared once, for two
 # processes: ExecStart (this script and install.sh under it) writes
 # structured facts here, ExecStopPost (boss-step.sh) merges them onto the
