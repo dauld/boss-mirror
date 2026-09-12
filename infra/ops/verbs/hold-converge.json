@@ -1,0 +1,17 @@
+{
+  "about": "MUTATING — an operator's hold on the cluster converge: writes the hold file the runner reads before it builds or rolls anything (infra/forge/converge-hold.sh). Same authorization as rollback-to (David, 2026-09-05). The reason is one token (no spaces; use dashes) and rides on the packet.",
+  "hosts": [
+    "forge"
+  ],
+  "argv": [
+    "infra/forge/converge-hold.sh",
+    "hold",
+    "{1}"
+  ],
+  "params": [
+    {
+      "name": "reason",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$"
+    }
+  ]
+}

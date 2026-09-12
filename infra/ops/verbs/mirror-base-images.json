@@ -1,0 +1,10 @@
+{
+  "about": "MUTATING — mirror the CI build's external base images (the kaniko executor from gcr.io, plus the boss-ci Dockerfile's oven/bun and rust bases from docker.io) into the forge registry, so build-image resolves NO public DNS. Runs infra/forge/mirror-base-images.sh, which pulls a FIXED in-tree list and pushes it to 10.20.0.15:3000/david — bounded by construction like reclaim-disk (no packet-supplied image name). The gcr.io/docker.io DNS flake reddened trains #236 and #250; this moves that lookup off the every-train hot path onto an occasional, retryable job. Idempotent (re-mirrors the same tags). Authorized by David 2026-09-07, same explicit per-verb process as reclaim-disk / rollback-to / converge. Backlog 7f408b99.",
+  "hosts": [
+    "forge"
+  ],
+  "argv": [
+    "infra/forge/mirror-base-images.sh"
+  ],
+  "params": []
+}

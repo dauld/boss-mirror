@@ -372,6 +372,14 @@ elif [[ "$rc" -ne 0 && -z "$said" ]]; then
     # wording here — "not holding, or the probe is wrong" — read
     # identically to a real regression.
     why="THE FAILURE CANNOT BE READ: the probe ran on $host and exited $rc, printing NOTHING on either stream. That is a missing record, not a verdict on the claim — nothing here says whether the change is in production. The usual causes are a bare '|| exit <n>', which replaces the status that named the cause and prints nothing, and a swallowed stderr ('2>&1 | grep -q'). Re-park with a probe that echoes what failed, with \$?, before it exits — and check for the shape 4fccc595 measured: under 'jq -e' a success branch of 'empty' exits 4, so the probe fails PRECISELY when the claim holds."
+elif [[ "$rc" -eq 75 ]]; then
+    # NOT YET (75 = EX_TEMPFAIL): the probe ran, found the world not
+    # ready to judge the claim, and said so. Four of the eight probes
+    # recorded on 2026-09-12 were exactly this — "no disk-report request
+    # carrying for_sweep yet, the sweeps fire daily" — and exit 1 made
+    # them read as regressions in the shed and in orient. This is not a
+    # verdict against the change; the daily recheck runs it again.
+    why="NOT YET: the probe ran on $host and said the claim cannot be judged until something happens — $said. Not a verdict against the change; recheck-failing-probes-daily runs it again."
 elif [[ "$rc" -ne 0 ]]; then
     why="the probe RAN on $host and exited $rc. What it said: $said"
 elif [[ -z "$said" ]]; then
@@ -380,12 +388,15 @@ else
     why="the probe RAN on $host and exited 0, but neither stream contained '$expect'. What it printed: $said"
 fi
 # PROBE-VERDICT-END
+not_yet=false
+[[ "$rc" -eq 75 && "$unrunnable" != true ]] && not_yet=true
 attempt=$(jq -cn --arg at "$at" --argjson exit "$rc" --arg host "$host" \
     --arg probe "$probe" --arg expect "$expect" --arg why "$why" \
     --argjson unrunnable "$unrunnable" --argjson missing_tools "$missing_json" \
+    --argjson not_yet "$not_yet" \
     --arg stdout "$stdout" --arg stderr "$stderr" \
     '{at:$at, exit:$exit, stdout:$stdout, stderr:$stderr, host:$host, probe:$probe,
-      expect:$expect, why:$why, unrunnable:$unrunnable, missing_tools:$missing_tools}')
+      expect:$expect, why:$why, unrunnable:$unrunnable, not_yet:$not_yet, missing_tools:$missing_tools}')
 printf '%s' "$attempt" | jq -c '{proof_attempt: .}' > "$workdir/payload"
 if ! curl -fsS -X PATCH -H "content-type: application/json" -H "x-boss-user: $BOSS_USER" \
         ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
@@ -395,12 +406,16 @@ if ! curl -fsS -X PATCH -H "content-type: application/json" -H "x-boss-user: $BO
 fi
 if [[ "$unrunnable" == true ]]; then
     say "NOT RUN ${car:0:8} — $why"
+elif [[ "$not_yet" == true ]]; then
+    say "NOT YET ${car:0:8} — $why"
 else
     say "NOT PROVEN ${car:0:8} — $why"
 fi
 say "proof_attempt recorded, proven stays ready"
 printf '  stdout: %s\n  stderr: %s\n' "${stdout:-(empty)}" "${stderr:-(empty)}"
-# 3 = could not run here; 1 = ran and did not prove. Two different
-# things to do about it, so two exit codes for the ops-request to carry.
+# 3 = could not run here; 75 = ran and said not yet; 1 = ran and did
+# not prove. Three different things to do about it, so three exit codes
+# for the ops-request to carry.
 [[ "$unrunnable" == true ]] && exit 3
+[[ "$not_yet" == true ]] && exit 75
 exit 1

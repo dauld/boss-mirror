@@ -1,0 +1,13 @@
+{
+  "about": "systemd timers and when they fire next",
+  "hosts": [
+    "boss-gcp",
+    "forge"
+  ],
+  "argv": [
+    "systemctl",
+    "list-timers",
+    "--no-pager"
+  ],
+  "params": []
+}

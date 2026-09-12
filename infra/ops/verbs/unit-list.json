@@ -1,0 +1,23 @@
+{
+  "about": "READ-ONLY: `systemctl list-units --all` for one unit-name glob (e.g. boss-*), plain and unpaged: every matching unit with its load/active/sub state and description. Added 2026-09-12 to enumerate the second BOSS stack on boss-gcp before anything is retired (45641c91 / d5941ef3 car 2: 'establish the dependency order BEFORE stopping anything') — the host has 23 cluster chores and a full older stack, and the tree can name only what it installed. The glob is one token of unit-name characters plus `*` and `?`; no spaces, no shell.",
+  "hosts": [
+    "boss-gcp",
+    "forge"
+  ],
+  "argv": [
+    "systemctl",
+    "list-units",
+    "--all",
+    "--no-pager",
+    "--plain",
+    "--no-legend",
+    "--",
+    "{1}"
+  ],
+  "params": [
+    {
+      "name": "glob",
+      "pattern": "^[A-Za-z0-9@._*?-]+$"
+    }
+  ]
+}

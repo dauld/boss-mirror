@@ -75,6 +75,8 @@ export type ProbeRun =
       stderr: string | null;
       why: string | null;
       missingTools: readonly string[];
+      /** Exit 75: ran, said "not yet" — see `ProofAttempt.notYet`. */
+      notYet: boolean;
     }>
   | Readonly<{ kind: 'waiting' }>;
 
@@ -120,6 +122,7 @@ export function probeRun(
       stderr: a.stderr,
       why: a.why,
       missingTools: a.missingTools,
+      notYet: a.notYet,
     };
   }
   return { kind: 'waiting' };
@@ -160,13 +163,20 @@ export function inspectionShed(
   });
 }
 
-/** A probe that ran and did not print what was claimed. */
-const ranRed = (s: ShedCar): boolean => s.run.kind === 'ran' && s.run.exit !== 0;
+/** A probe that ran and said NOT YET (exit 75): the world is not ready
+ *  to judge the claim, and the probe said why. Early, not wrong. */
+const ranNotYet = (s: ShedCar): boolean => s.run.kind === 'ran' && s.run.notYet;
+
+/** A probe that ran and did not print what was claimed — and did not
+ *  say "not yet". This is the one red thing in the shed. */
+const ranRed = (s: ShedCar): boolean => s.run.kind === 'ran' && s.run.exit !== 0 && !s.run.notYet;
 
 export type ShedCounts = Readonly<{
   inspecting: number;
   /** Of those inspecting, how many have a failed run on record. */
   failed: number;
+  /** Of those inspecting, how many said "not yet" on their last run. */
+  notYet: number;
   onEvent: number;
   noProbe: number;
 }>;
@@ -175,6 +185,7 @@ export function shedCounts(cars: readonly ShedCar[]): ShedCounts {
   return {
     inspecting: cars.filter(s => s.place === 'inspection-shed').length,
     failed: cars.filter(s => s.place === 'inspection-shed' && ranRed(s)).length,
+    notYet: cars.filter(s => s.place === 'inspection-shed' && ranNotYet(s)).length,
     onEvent: cars.filter(s => s.place === 'siding-event').length,
     noProbe: cars.filter(s => s.place === 'siding-no-probe').length,
   };
@@ -185,6 +196,7 @@ export function shedLabel(c: ShedCounts): string {
   const parts = [
     ...(c.inspecting > 0 ? [`${c.inspecting} inspecting`] : []),
     ...(c.failed > 0 ? [`${c.failed} probe failed`] : []),
+    ...(c.notYet > 0 ? [`${c.notYet} not yet`] : []),
     ...(c.onEvent > 0 ? [`${c.onEvent} on an event`] : []),
     ...(c.noProbe > 0 ? [`${c.noProbe} with no probe`] : []),
   ];
@@ -207,7 +219,9 @@ export function shedStatus(s: ShedCar): string {
             ? 'inspection shed · probe ran, no exit recorded'
             : s.run.exit === 0
               ? 'inspection shed · probe exit 0, not stamped'
-              : `inspection shed · probe failed, exit ${s.run.exit}`;
+              : s.run.notYet
+                ? 'inspection shed · probe says not yet — rechecked daily'
+                : `inspection shed · probe failed, exit ${s.run.exit}`;
         case 'waiting':
           // Deliberately the weaker claim: the page read a window of
           // ops-requests, and an absence there is not an absence.

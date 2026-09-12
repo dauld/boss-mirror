@@ -1,0 +1,17 @@
+{
+  "about": "RUNS A LANDED CAR'S RECORDED PROBE — as david, never root — and writes the verdict on the car (infra/forge/run-car-probe.sh). The machine half of `boss prove` (backlog 28ac45ab: 43 landed cars waited 2.5 days on hand-authored probes). The dispatcher rule run-car-probes-on-train-arrived files one of these per car aboard an arrived train that recorded `proof_probe`/`proof_expect` at park time (`boss gate --park-probe/--park-expect`). The script re-reads the car from the system of record and refuses unless it is a ship-a-change car with metadata.merged=true, a recorded probe AND expect, and an open `proven` step; then runs the probe with `runuser -u david`, cwd the runner's checkout (the forge's), under a 60s timeout with both streams capped at 4000 bytes; judges by the two rules `boss prove` applies (exit 0 and the expected string printed); completes `proven` with `boss prove`'s proof record on green, or stamps `proof_attempt` on the car, leaves `proven` ready and exits 1 so this packet's exit_code carries the verdict. Nothing on this host is mutated by the script itself. The bound, honestly: the probe is program text the car's builder wrote — the same builder whose branch just merged and was converged onto the cluster by this host as this same user — and what may run is exactly one recorded command, for a merged car only, as david. The verb's own argument is a full uuid, pattern-checked here and again in the script. Authorization: the routed build on backlog 28ac45ab (2026-09-08), the same per-verb process as reclaim-disk / converge / publish-github-pr — flagged for David's review as the first verb that runs builder-authored text.",
+  "hosts": [
+    "forge"
+  ],
+  "argv": [
+    "infra/forge/run-car-probe.sh",
+    "{1}"
+  ],
+  "params": [
+    {
+      "name": "car",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    }
+  ],
+  "timeout": 120
+}

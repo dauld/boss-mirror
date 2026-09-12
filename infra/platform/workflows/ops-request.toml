@@ -12,7 +12,7 @@
 #
 # THE ALLOWLIST IS THE AUTHORITY. The packet carries only a verb NAME
 # and pattern-validated args; the command words live in
-# infra/ops/verbs.json — in-tree, reviewed, versioned. The runner never
+# infra/ops/verbs/<verb>.json — in-tree, reviewed, versioned. The runner never
 # executes a packet-supplied string, only allowlisted argv templates.
 # Phase 1 is read-only; mutating verbs are phase 2, behind per-verb
 # policy, and are deliberately absent.
@@ -22,7 +22,7 @@
 #   host — estate node id (boss-gcp, forge); the runner acts only on
 #          an exact match, so a packet for a host with no runner sits
 #          open and VISIBLY unanswered rather than being guessed at
-#   verb — a key of infra/ops/verbs.json
+#   verb — a file infra/ops/verbs/<verb>.json
 #   args — JSON array of strings, positional; each validated against
 #          its param's pattern before anything runs
 #

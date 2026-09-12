@@ -1425,7 +1425,7 @@ case "$MODE" in
         # answering loop bounces nothing and stages nothing; it adds one
         # oneshot that polls the system of record and runs allowlisted
         # reads. What it may run on this host is the five host-agnostic
-        # reads in infra/ops/verbs.json (df, uptime, unit-status,
+        # reads in infra/ops/verbs/ (df, uptime, unit-status,
         # timer-list, journal-tail) and nothing else: every verb there
         # declares the hosts it serves, and the runner REFUSES one that
         # does not name this host — by name, on the packet.

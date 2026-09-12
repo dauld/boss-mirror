@@ -1,0 +1,16 @@
+{
+  "about": "MUTATING — roll deploy/boss to a NAMED build and verify it Ready (infra/forge/rollback-to.sh). The lever the 2026-09-05 outage needed a human's shell for: the classifier blocks the agent's kubectl, the converge's own rollback had rolled to the wrong image, and David was asleep. Authorized by David, 2026-09-05: 'it is obvious we need a lot more ad hoc controls while we are still learning'. The sha names an image the registry holds — read it from `rollout history` or the converge's stamp, never guess. Leaves the stamp and main untouched: a rollback buys time for a fix.",
+  "hosts": [
+    "forge"
+  ],
+  "argv": [
+    "infra/forge/rollback-to.sh",
+    "{1}"
+  ],
+  "params": [
+    {
+      "name": "sha",
+      "pattern": "^[0-9a-f]{7,40}$"
+    }
+  ]
+}

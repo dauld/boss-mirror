@@ -6,7 +6,7 @@
 //! converge runs `kubectl apply` with no `--prune`, so deleting a
 //! manifest removes the DECLARATION and leaves the OBJECT running. The
 //! only way to clear one was a human typing `kubectl -n boss delete svc
-//! <name>`, and `infra/ops/verbs.json` — the allowlist the ops-runner
+//! <name>`, and `infra/ops/verbs/` — the allowlist the ops-runner
 //! executes — had no verb that could. A gated-green car whose lint
 //! exits 1 on an orphan therefore could not land: the next converge
 //! would fail until a person intervened.
@@ -26,7 +26,7 @@
 //! (declared / out of scope / not live / controller-owned / unreadable),
 //! the verb's own kind floor, and the capture-before-delete. Plus the
 //! allowlist's own validation, exercised THROUGH `ops-runner.sh` with
-//! the real `verbs.json`.
+//! the real verb files.
 //!
 //! Nothing here touches a cluster. `kubectl` is a stub on every path,
 //! and a `delete` it receives is appended to a file.
@@ -980,18 +980,19 @@ fn the_runner_answers_a_dry_run() {
     assert_eq!(c.deletions(), "", "a dry run deleted something:\n{text}");
 }
 
-/// The real `infra/ops/verbs.json`, with the forge's absolute script
-/// paths rewritten to this tree — the allowlist under test is the one
-/// that ships.
+/// The real `infra/ops/verbs/` — one file per verb — copied verbatim:
+/// the allowlist under test is the one that ships. (Its script paths
+/// are repo-relative since 66077f9c and the runner resolves them
+/// against its own checkout, so nothing is rewritten.)
 fn rewritten_verbs(root: &Path) -> PathBuf {
-    let src = std::fs::read_to_string(repo_root().join("infra/ops/verbs.json"))
-        .expect("verbs.json is readable");
-    let dst = root.join("verbs.json");
-    std::fs::write(
-        &dst,
-        src.replace("/home/david/boss/", &format!("{}/", repo_root().display())),
-    )
-    .unwrap();
+    let dst = root.join("verbs");
+    std::fs::create_dir_all(&dst).unwrap();
+    for e in std::fs::read_dir(repo_root().join("infra/ops/verbs")).expect("infra/ops/verbs/") {
+        let p = e.unwrap().path();
+        if p.extension().is_some_and(|x| x == "json") {
+            std::fs::copy(&p, dst.join(p.file_name().unwrap())).unwrap();
+        }
+    }
     dst
 }
 
@@ -1028,7 +1029,7 @@ fn run_runner(c: &Case, verbs: &Path, args: &str) -> (String, Option<serde_json:
         )
         .env("HOST_ID", "forge")
         .env("BOSS_JOBS_URL", "http://sor.invalid")
-        .env("OPS_VERBS_FILE", verbs)
+        .env("OPS_VERBS_DIR", verbs)
         .env("STUB_JOBS", c.root.join("jobs.json"))
         .env("STUB_PUT", &put)
         .env("BOSS_KUBECTL", &c.kubectl)

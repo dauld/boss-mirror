@@ -14,9 +14,12 @@
 # - READ-ONLY. Every verb in the allowlist is a read; mutating verbs
 #   are phase 2, behind per-verb policy, and are NOT in this script's
 #   world at all.
-# - THE ALLOWLIST IS THE AUTHORITY: infra/ops/verbs.json, in-tree,
-#   reviewed, versioned. A packet carries only a verb NAME and args;
-#   the command words come from the file. The runner never executes a
+# - THE ALLOWLIST IS THE AUTHORITY: infra/ops/verbs/<name>.json, one
+#   file per verb, in-tree, reviewed, versioned (the verb's name IS
+#   the file name; infra/ops/verbs-allowlist.sh assembles the
+#   directory — 5086842d, after two verb cars collided on the one file
+#   it used to be). A packet carries only a verb NAME and args; the
+#   command words come from the file. The runner never executes a
 #   packet-supplied string.
 # - NO SHELL INTERPOLATION OF ARGS, EVER. The runner builds an argv
 #   ARRAY (`set -- word word ...`) and execs it directly — no sh -c,
@@ -75,7 +78,7 @@
 #
 #   HOST_ID        (required) estate node id this runner answers for
 #   BOSS_JOBS_URL  (required, no default — see below) the SoR
-#   OPS_VERBS_FILE (default: verbs.json beside this script)
+#   OPS_VERBS_DIR  (default: verbs/ beside this script) — one file per verb
 #   OPS_TIMEOUT    (default 30) seconds before a verb is killed, unless
 #                  the verb's allowlist entry declares its own `timeout`
 #   OPS_OUTPUT_CAP (default 102400) bytes of output kept
@@ -105,9 +108,9 @@ if [ -z "${BOSS_JOBS_URL:-}" ]; then
 fi
 BASE="$BOSS_JOBS_URL"
 
-VERBS_FILE="${OPS_VERBS_FILE:-$(dirname "$0")/verbs.json}"
-# THE CHECKOUT THIS RUNNER IS PART OF. A verb's script is named in
-# verbs.json RELATIVE to the repo (infra/forge/reach.sh) and resolved
+VERBS_DIR="${OPS_VERBS_DIR:-$(dirname "$0")/verbs}"
+# THE CHECKOUT THIS RUNNER IS PART OF. A verb's script is named in its
+# verb file RELATIVE to the repo (infra/forge/reach.sh) and resolved
 # here, against the checkout the runner itself runs from — never an
 # absolute path baked into the allowlist. Until 2026-09-12 eleven of
 # sixteen verbs carried /home/david/boss/…, the FORGE's checkout path,
@@ -119,17 +122,24 @@ OPS_REPO_ROOT="${OPS_REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 OPS_TIMEOUT="${OPS_TIMEOUT:-30}"
 OPS_OUTPUT_CAP="${OPS_OUTPUT_CAP:-102400}"
 
-if [ ! -r "$VERBS_FILE" ]; then
-    echo "ops-runner: allowlist $VERBS_FILE is missing or unreadable — refusing to run" >&2
+workdir=$(mktemp -d) || exit 1
+trap 'rm -rf "$workdir"' EXIT
+
+# THE ALLOWLIST IS ASSEMBLED ONCE PER RUN from the directory, by the one
+# script every sh/python reader shares, into a file the per-packet jq
+# below reads. A directory that cannot be loaded — missing, empty, a
+# file that is not one verb — is a refusal to run at all (EX_CONFIG,
+# the fault named by the assembler on stderr), never a partial
+# allowlist that refuses every packet as "unknown verb".
+VERBS_FILE="$workdir/allowlist.json"
+if ! sh "$(dirname "$0")/verbs-allowlist.sh" "$VERBS_DIR" > "$VERBS_FILE"; then
+    echo "ops-runner: allowlist directory $VERBS_DIR could not be loaded — refusing to run" >&2
     exit 78
 fi
 
 # An automated answer should read as automation in the audit trail.
 ACTOR="${BOSS_OPS_ACTOR:-automation:ops-runner}"
 BOSS_USER="{\"id\":\"$ACTOR\",\"role\":\"platform-admin\",\"access_tier\":\"operator\",\"territory_account_ids\":[],\"direct_report_ids\":[],\"department\":\"platform\"}"
-
-workdir=$(mktemp -d) || exit 1
-trap 'rm -rf "$workdir"' EXIT
 
 if ! jobs_json=$(curl -fsS -H "x-boss-user: $BOSS_USER" \
         "$BASE/api/jobs?kind=ops-request&status=open&limit=100" 2>&1); then
@@ -191,10 +201,10 @@ while [ "$i" -lt "$n" ]; do
         .verbs[$verb] as $spec
         | if $verb == "" then refuse("metadata.verb is missing")
           elif $spec == null then
-            refuse("verb \($verb) is not in the allowlist (infra/ops/verbs.json); phase-1 verbs: "
+            refuse("verb \($verb) is not in the allowlist (infra/ops/verbs/); verbs: "
                    + (.verbs | keys | join(", ")))
           elif (($spec.hosts // []) | index($host)) == null then
-            refuse("verb \($verb) does not serve host \($host) — infra/ops/verbs.json scopes it to "
+            refuse("verb \($verb) does not serve host \($host) — infra/ops/verbs/\($verb).json scopes it to "
                    + (if (($spec.hosts // []) | length) == 0
                       then "no host (a verb that declares no `hosts` is refused everywhere)"
                       else ($spec.hosts | join(", ")) end)

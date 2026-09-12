@@ -1,0 +1,22 @@
+{
+  "about": "READ-ONLY: can this host open a TCP connection to <ip>:<port>? A LAN/tunnel-side vantage the cluster pod lacks (no CAP_NET_RAW, no route into the WireGuard overlay). First use 2026-09-07: is the WireGuard hub 10.99.0.1 reachable over wg0 (the bastion route into the LAN); also the gateway-vs-ISP question for the 1.1.1.0/24 blackhole. Read-only in the phase-1 sense: a TCP connect, nothing sent, nothing mutated. Runs infra/forge/reach.sh: one line, open (<N>ms) / closed (<reason>) / timeout (4s), exit 0 only when open. IPv4 literal only — no hostname, so the host never resolves a name on a packet's behalf.",
+  "hosts": [
+    "forge"
+  ],
+  "argv": [
+    "infra/forge/reach.sh",
+    "{1}",
+    "{2}"
+  ],
+  "params": [
+    {
+      "name": "ip",
+      "pattern": "^[0-9]{1,3}(\\.[0-9]{1,3}){3}$"
+    },
+    {
+      "name": "port",
+      "pattern": "^[0-9]{1,5}$",
+      "max": 65535
+    }
+  ]
+}

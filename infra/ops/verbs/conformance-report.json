@@ -1,0 +1,12 @@
+{
+  "about": "READ-ONLY: the cluster's orphan set — every live object in the managed namespaces that no manifest under infra/cluster/manifests declares — as `infra/cluster/undeclared-objects.sh --list` computes it, the ONE definition the orphan lint and delete-orphan-object share. Empty output with exit 0 is the answer 'none'; exit 4 is 'cannot answer' with the reason named, never a smaller set. Filed by the cluster-conformance sweep for itself the moment its Inspect step becomes ready (rule measure-cluster-conformance-sweep-on-inspect-ready, backlog 8e8311f5): on 2026-09-12 the inspector had to gather this by hand from a credential that could not read half the pairs, and the sweep before it sat uninspected. Nothing mutated; the same kubectl and kubeconfig resolution as the delete verb, without the delete. Its own timeout: the derivation parses every manifest with kubectl, which exceeds the runner's 30s default.",
+  "hosts": [
+    "forge"
+  ],
+  "argv": [
+    "infra/cluster/undeclared-objects.sh",
+    "--list"
+  ],
+  "params": [],
+  "timeout": 300
+}

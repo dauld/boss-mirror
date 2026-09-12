@@ -319,6 +319,34 @@ fn a_zero_exit_without_the_expected_token_says_what_was_printed_instead() {
     );
 }
 
+/// NOT YET (exit 75): the probe ran and said the world is not ready to
+/// judge the claim. Four of the eight probes recorded on 2026-09-12 were
+/// this shape ("no disk-report request carrying for_sweep yet — the
+/// sweeps fire daily") and read as regressions. The verdict names it as
+/// not-yet, carries the probe's own reason, and says the recheck re-runs
+/// it — never "failed".
+#[test]
+fn an_exit_75_is_not_yet_and_carries_the_probes_reason() {
+    let why = verdict(
+        "not-yet",
+        75,
+        "no disk-report ops-request carrying for_sweep yet (0) — the three disk sweeps fire daily\n",
+        "",
+        false,
+        "sweep-measured:ok",
+    );
+    assert!(why.starts_with("NOT YET"), "{why}");
+    assert!(
+        why.contains("carrying for_sweep yet"),
+        "the probe's reason rides: {why}"
+    );
+    assert!(why.contains("recheck-failing-probes-daily"), "{why}");
+    assert!(
+        !why.contains("FAILED") && !why.contains("CANNOT BE READ"),
+        "not a failure: {why}"
+    );
+}
+
 /// AND THE BRANCH THAT ALREADY WORKED STILL WORKS. An unrunnable probe
 /// names the tool and says the claim is untested (f9304366) — it is not
 /// evidence against the change, and the other branches must not have

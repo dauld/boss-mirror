@@ -99,11 +99,15 @@ fn a_different_sweep_does_not_file_a_conformance_report() {
 
 #[test]
 fn the_verb_the_rule_names_is_in_the_ops_allowlist() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../infra/ops/verbs.json");
-    let verbs: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(path).expect("verbs.json read"))
-            .expect("verbs.json parses");
-    let v = &verbs["verbs"]["conformance-report"];
+    // One file per verb (5086842d): the verb IS infra/ops/verbs/<name>.json.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../infra/ops/verbs/conformance-report.json"
+    );
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(path).expect("conformance-report is not an ops verb file"),
+    )
+    .expect("conformance-report.json parses");
     assert!(v.is_object(), "conformance-report is not an ops verb");
     assert_eq!(v["hosts"], json!(["forge"]));
     assert_eq!(

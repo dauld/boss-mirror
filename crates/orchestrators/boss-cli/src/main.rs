@@ -148,7 +148,7 @@ enum Commands {
     },
     /// File an ops-request to a host — the terminal's handle on the door
     /// that replaced ssh (729329c6). The call is validated against
-    /// infra/ops/verbs.json HERE, with the rules the host's runner
+    /// infra/ops/verbs/ HERE, with the rules the host's runner
     /// applies: an unknown verb, a host the verb does not serve, a
     /// missing or out-of-pattern arg is refused before a packet exists.
     /// `--wait` polls the packet to the host's answer and prints its
@@ -157,7 +157,7 @@ enum Commands {
     Ops {
         /// Estate node id the request is for (forge, boss-gcp).
         host: String,
-        /// A key of infra/ops/verbs.json.
+        /// A verb name — a file infra/ops/verbs/<verb>.json.
         verb: String,
         /// Positional args, one per param the verb declares.
         args: Vec<String>,

@@ -9,7 +9,7 @@
 # Trains then pull the base images from 10.20.0.15:3000 (the forge host
 # itself), which needs no external resolver.
 #
-# BOUNDED BY CONSTRUCTION, like disk-floor-sweep.sh (verbs.json _about):
+# BOUNDED BY CONSTRUCTION, like disk-floor-sweep.sh (infra/ops/verbs/README.md):
 # the set of images is a FIXED in-tree list below, never a packet-
 # supplied name. The `mirror-base-images` ops-verb runs THIS script with
 # no arguments; a packet cannot ask it to pull or push anything else.

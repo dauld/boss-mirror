@@ -1,0 +1,11 @@
+{
+  "about": "MUTATING — lifts the converge hold (infra/forge/converge-hold.sh release). Same authorization as rollback-to (David, 2026-09-05).",
+  "hosts": [
+    "forge"
+  ],
+  "argv": [
+    "infra/forge/converge-hold.sh",
+    "release"
+  ],
+  "params": []
+}

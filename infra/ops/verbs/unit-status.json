@@ -1,0 +1,20 @@
+{
+  "about": "systemctl status of one unit",
+  "hosts": [
+    "boss-gcp",
+    "forge"
+  ],
+  "argv": [
+    "systemctl",
+    "status",
+    "--no-pager",
+    "--",
+    "{1}"
+  ],
+  "params": [
+    {
+      "name": "unit",
+      "pattern": "^[A-Za-z0-9@._][A-Za-z0-9@._-]*$"
+    }
+  ]
+}

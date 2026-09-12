@@ -7,9 +7,13 @@
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; repo="$(cd "$here/../.." && pwd)"
 fail() { echo "FAIL: $*" >&2; exit 1; }
-python3 - "$repo" <<'PY' || exit 1
+# The allowlist is the directory infra/ops/verbs/, assembled by the one
+# script the runner itself uses (5086842d) — read here the same way.
+allowlist="$(sh "$repo/infra/ops/verbs-allowlist.sh" "$repo/infra/ops/verbs")" \
+    || fail "infra/ops/verbs-allowlist.sh could not assemble infra/ops/verbs/ (see above)"
+python3 - "$repo" "$allowlist" <<'PY' || exit 1
 import json,re,sys,os
-repo=sys.argv[1]; v=json.load(open(f"{repo}/infra/ops/verbs.json"))["verbs"]
+repo=sys.argv[1]; v=json.loads(sys.argv[2])["verbs"]
 # THE ROSTER IS DERIVED, not listed here. It used to be four names typed
 # into this loop, which meant every mutating verb added after them —
 # reclaim-disk, converge, mirror-base-images, delete-orphan-object — was
@@ -191,15 +195,16 @@ for a in "$@"; do case "$a" in @*) cp "${a#@}" "$STUB_PUT"; exit 0;; esac; done
 cat "$STUB_JOBS"
 EOF
     chmod +x "$tmp/rbin/curl"
-    # The allowlist is used VERBATIM: its scripts are repo-relative and
-    # the runner resolves them against OPS_REPO_ROOT (66077f9c).
-    cp "$repo/infra/ops/verbs.json" "$tmp/verbs.json"
+    # The allowlist is used VERBATIM — the directory of verb files copied
+    # as-is: its scripts are repo-relative and the runner resolves them
+    # against OPS_REPO_ROOT (66077f9c).
+    mkdir -p "$tmp/verbs" && cp "$repo"/infra/ops/verbs/*.json "$tmp/verbs/"
     packet() { # $1 = args JSON array
         printf '{"data":[{"id":"aaaaaaaa-0000-4000-8000-000000000000","status":"open","metadata":{"host":"forge","verb":"publish-github-pr","args":%s},"steps":[{"id":"s-execute","spec_slug":"execute","status":"ready","metadata":{"authority_role":"platform-admin"}}]}]}' "$1" > "$tmp/jobs.json"
     }
     run_runner() {
         env -i PATH="$tmp/rbin:$PATH" HOST_ID=forge BOSS_JOBS_URL=http://sor.invalid \
-            OPS_VERBS_FILE="$tmp/verbs.json" STUB_JOBS="$tmp/jobs.json" STUB_PUT="$tmp/put.json" \
+            OPS_VERBS_DIR="$tmp/verbs" STUB_JOBS="$tmp/jobs.json" STUB_PUT="$tmp/put.json" \
             BOSS_PUBLISH_STATE_DIR="$tmp/rstate" BOSS_FORGE_REPO_PATH="$tmp/forge.git" \
             BOSS_GITHUB_TOKEN_FILE="$tmp/etc/github.token" \
             sh "$repo/infra/ops/ops-runner.sh" 2>&1

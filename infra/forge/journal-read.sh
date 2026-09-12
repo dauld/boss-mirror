@@ -196,7 +196,7 @@ independent_path() {
     echo "    The independent path, which shells local journalctl on the host and so"
     echo "    cannot be affected by this door at all:"
     echo "      boss-api POST /api/jobs with kind=ops-request, host=${HOST_LABEL},"
-    echo "      verb=journal-tail, args='<unit> <lines>'  (infra/ops/verbs.json)"
+    echo "      verb=journal-tail, args='<unit> <lines>'  (infra/ops/verbs/journal-tail.json)"
     if [ "$HOST_LABEL" != "forge" ]; then
         echo "    CAVEAT: only the forge's ops runner is known installed. On ${HOST_LABEL} that"
         echo "    request may sit at ready with nothing behind it — which is not an answer"

@@ -3,7 +3,7 @@
 # hosts it serves, every named host is a real one, and a verb scoped to
 # a host can actually run there.
 #
-# WHY. The ops-request allowlist (infra/ops/verbs.json) had no notion of
+# WHY. The ops-request allowlist (infra/ops/verbs/, one file per verb) had no notion of
 # a host: a runner executed any verb a packet named. That was harmless
 # while exactly one host had a runner, and stopped being harmless on
 # 2026-09-11 when boss-gcp got one (backlog c3d06016). Eleven of the
@@ -31,8 +31,8 @@
 #      not powerful: its set is the read-only, host-agnostic reads, and
 #      widening is a reviewed per-verb change with its own
 #      authorization — the same process reclaim-disk / converge /
-#      publish-github-pr each went through (infra/ops/verbs.json
-#      _about). A mutating verb appearing here silently would be that
+#      publish-github-pr each went through (infra/ops/verbs/README.md
+#      §Authorization). A mutating verb appearing here silently would be that
 #      process skipped.
 #   5. at least one verb serves boss-gcp, or the runner there answers
 #      nothing and this lint is green over a dead door.
@@ -41,16 +41,22 @@
 # The sibling is infra/lint/the-controls-are-bounded-verbs.sh, which
 # asks whether a MUTATING verb is bounded and authorized; this one asks
 # WHERE a verb runs. Both derive their rosters from the allowlist rather
-# than listing verbs (§9a).
+# than listing verbs (§9a) — and the allowlist itself is DERIVED from the
+# directory infra/ops/verbs/ by the one script the runner uses
+# (infra/ops/verbs-allowlist.sh, 5086842d), so this lint reads exactly
+# what the runner reads, assembled the same way.
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 
-python3 - "$repo" <<'PY' || exit 1
+allowlist="$(sh "$repo/infra/ops/verbs-allowlist.sh" "$repo/infra/ops/verbs")" \
+    || { echo "FAIL: infra/ops/verbs-allowlist.sh could not assemble infra/ops/verbs/ (see above)" >&2; exit 1; }
+
+python3 - "$repo" "$allowlist" <<'PY' || exit 1
 import json, os, re, sys, glob
 
 repo = sys.argv[1]
-verbs = json.load(open(f"{repo}/infra/ops/verbs.json"))["verbs"]
+verbs = json.loads(sys.argv[2])["verbs"]
 
 # ---- the hosts that EXIST, derived from the estate registry's seeds.
 # `nodes` is the estate registry's table; its id is what an ops-request

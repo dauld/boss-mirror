@@ -93,6 +93,7 @@ describe('readCarProof', () => {
         stderr: 'jq: error — category=null',
         why: 'the probe RAN on david-asus-minipc and exited 1. What it said: jq: error — category=null',
         missingTools: ['jq'],
+        notYet: false,
       },
       stamped: null,
     });
@@ -223,6 +224,7 @@ describe('the run the forge drains', () => {
         stderr: 'boom',
         why: 'it exited 1',
         missingTools: [],
+        notYet: false,
       },
     });
     expect(probeRun('a', ran, [request('r1', 'a', 'closed')])).toEqual({
@@ -234,6 +236,7 @@ describe('the run the forge drains', () => {
       stderr: 'boom',
       why: 'it exited 1',
       missingTools: [],
+      notYet: false,
     });
   });
 
@@ -248,6 +251,7 @@ describe('the run the forge drains', () => {
         stderr: null,
         why: null,
         missingTools: [],
+        notYet: false,
       },
     });
     expect(probeRun('a', ran, [request('r1', 'a', 'open')]).kind).toBe('queued');
@@ -286,6 +290,27 @@ describe('the shed as a whole', () => {
         stderr: 'boom',
         why: 'it exited 1',
         missingTools: [],
+        notYet: false,
+      },
+    }),
+  );
+  // NOT YET (exit 75): ran, said the world is not ready to judge the
+  // claim — early, not wrong. Four of the eight probes recorded on
+  // 2026-09-12 were this shape and drew red beside real failures.
+  const early = car(
+    'f',
+    proofOf({
+      probe: 'bash f.sh',
+      expect: 'F-OK',
+      attempt: {
+        at: '2026-09-12T22:00:00Z',
+        exit: 75,
+        host: 'forge',
+        stdout: 'no disk-report request carrying for_sweep yet — the sweeps fire daily',
+        stderr: null,
+        why: 'NOT YET: the probe ran on forge and said the claim cannot be judged until something happens — no disk-report request carrying for_sweep yet. Not a verdict against the change; recheck-failing-probes-daily runs it again.',
+        missingTools: [],
+        notYet: true,
       },
     }),
   );
@@ -319,13 +344,13 @@ describe('the shed as a whole', () => {
 
   test('the counts and the label are the three places, nothing invented', () => {
     const shed = inspectionShed([probed, failed, evented, bare], null);
-    expect(shedCounts(shed)).toEqual({ inspecting: 2, failed: 1, onEvent: 1, noProbe: 1 });
+    expect(shedCounts(shed)).toEqual({ inspecting: 2, failed: 1, notYet: 0, onEvent: 1, noProbe: 1 });
     expect(shedLabel(shedCounts(shed))).toBe('2 inspecting · 1 probe failed · 1 on an event · 1 with no probe');
   });
 
   test('an empty shed says clear', () => {
     expect(shedLabel(shedCounts([]))).toBe('clear');
-    expect(shedCounts([])).toEqual({ inspecting: 0, failed: 0, onEvent: 0, noProbe: 0 });
+    expect(shedCounts([])).toEqual({ inspecting: 0, failed: 0, notYet: 0, onEvent: 0, noProbe: 0 });
   });
 
   test('each place states itself in one line', () => {
@@ -351,6 +376,7 @@ describe('the shed as a whole', () => {
           stderr: null,
           why: null,
           missingTools: [],
+          notYet: false,
         },
       }),
     );
@@ -364,5 +390,29 @@ describe('the shed as a whole', () => {
     const shed = inspectionShed([probed, failed, evented, bare], null);
     expect(shed.map(shedTone)).toEqual(['ok', 'red', 'static', 'static']);
     expect(shed.map(shedLamp)).toEqual(['working', 'err', 'off', 'off']);
+  });
+
+  test('a probe that said not yet stands in the shed working, not red, and is counted apart', () => {
+    const shed = inspectionShed([failed, early], null);
+    expect(shed.map(shedTone)).toEqual(['red', 'ok']);
+    expect(shed.map(shedLamp)).toEqual(['err', 'working']);
+    const e = shed[1];
+    expect(e && shedStatus(e)).toBe('inspection shed · probe says not yet — rechecked daily');
+    const counts = shedCounts(shed);
+    expect(counts.failed).toBe(1);
+    expect(counts.notYet).toBe(1);
+    expect(shedLabel(counts)).toBe('2 inspecting · 1 probe failed · 1 not yet');
+  });
+
+  test('an attempt that exited 75 without the not_yet flag still reads as not yet', () => {
+    const j: JobLite = {
+      id: 'g',
+      kind: 'ship-a-change',
+      title: 'g',
+      status: 'open',
+      opened_on: '2026-09-12',
+      metadata: { branch: 'feat/g', proof_probe: 'x', proof_attempt: { exit: 75, why: 'NOT YET: …' } },
+    };
+    expect(readCarProof(j)?.attempt?.notYet).toBe(true);
   });
 });

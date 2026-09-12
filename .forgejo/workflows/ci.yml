@@ -584,7 +584,7 @@ jobs:
   # systemd unit on the host: this file IS the definition the runner
   # reads, so the trigger cannot land uninstalled the way host units on
   # this box have. The script files an ops-request for the allowlisted,
-  # bounded `reclaim-disk` verb (infra/ops/verbs.json) and the forge's
+  # bounded `reclaim-disk` verb (infra/ops/verbs/reclaim-disk.json) and the forge's
   # ops-runner — already installed, ~1-minute poll — runs the same
   # disk-floor-sweep.sh the timer runs. Same posture as the `converge`
   # verb's merge fast path: an ACCELERATOR only. The hourly timer owes

@@ -31,7 +31,7 @@
 #
 # SO ONLY THE TRIGGER WAS MISSING. The forge already runs the ops-runner
 # on a ~1-minute poll, and `reclaim-disk` is an allowlisted bounded verb
-# (infra/ops/verbs.json) whose argv is the SAME disk-floor-sweep.sh the
+# (infra/ops/verbs/reclaim-disk.json) whose argv is the SAME disk-floor-sweep.sh the
 # hourly timer runs — regenerable docker caches only, in a fixed order,
 # stopping at the floor, never volumes or non-docker paths. This script
 # is the trigger, and .forgejo/workflows/ci.yml fires it from a job that

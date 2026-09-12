@@ -88,6 +88,11 @@ export type ProofAttempt = Readonly<{
   why: string | null;
   /** Tools the probe needed and the host did not have. */
   missingTools: readonly string[];
+  /** The probe exited 75 (EX_TEMPFAIL): it ran, found the world not yet
+   *  able to judge the claim, and said so — the daily recheck runs it
+   *  again. Not a verdict against the change, and the shed must not
+   *  draw it red (2026-09-12: four early probes read as regressions). */
+  notYet: boolean;
 }>;
 
 /** The `proven` step completed — the transition a car leaves the
@@ -125,6 +130,7 @@ function proofAttempt(v: unknown): ProofAttempt | null {
     stderr: text(a.stderr),
     why: text(a.why),
     missingTools: tools,
+    notYet: a.not_yet === true || a.exit === 75,
   };
 }
 

@@ -688,6 +688,7 @@ describe('the signals along the track', () => {
           stderr: 'boom',
           why: 'it exited 1',
           missingTools: [],
+          notYet: false,
         },
       }),
     });
@@ -802,6 +803,7 @@ describe('the inspection shed', () => {
       label: '1 inspecting · 1 on an event · 1 with no probe',
       inspecting: 1,
       failed: 0,
+      notYet: 0,
       onEvent: 1,
       noProbe: 1,
     });
@@ -809,6 +811,7 @@ describe('the inspection shed', () => {
       label: 'clear',
       inspecting: 0,
       failed: 0,
+      notYet: 0,
       onEvent: 0,
       noProbe: 0,
     });

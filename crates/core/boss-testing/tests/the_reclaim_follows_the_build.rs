@@ -22,7 +22,7 @@
 //! So the reclaim must follow the EVENT that fills the disk. The
 //! mechanism was already complete and only the trigger was missing: the
 //! forge runs an ops-runner on a ~1-minute poll, and `reclaim-disk` is
-//! an allowlisted bounded verb (`infra/ops/verbs.json`) that runs the
+//! an allowlisted bounded verb (`infra/ops/verbs/reclaim-disk.json`) that runs the
 //! SAME `disk-floor-sweep.sh` the timer runs. `request-reclaim-disk.sh`
 //! is the trigger, and the CI workflow — which already runs on every
 //! train, green or red, and needs no install step on the host — is what

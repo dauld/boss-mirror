@@ -94,9 +94,10 @@ COPY infra/postgres ./infra/postgres
 # Rust build layer every time a shell script moved.
 COPY infra/estate/observe-lib.sh ./infra/estate/observe-lib.sh
 COPY infra/forge/host-absent-tools.txt ./infra/forge/host-absent-tools.txt
-# `boss ops` compiles the ops allowlist in (include_str!), the one file
-# the host runner enforces; the terminal applies the same rules first.
-COPY infra/ops/verbs.json ./infra/ops/verbs.json
+# `boss ops` compiles the ops allowlist in — the DIRECTORY of verb files
+# the host runner enforces (one per verb, 5086842d), listed by boss-cli's
+# build.rs; the terminal applies the same rules first.
+COPY infra/ops/verbs ./infra/ops/verbs
 COPY infra/deploy-services.sh ./infra/deploy-services.sh
 COPY infra/forge/run-car-probe.sh ./infra/forge/run-car-probe.sh
 

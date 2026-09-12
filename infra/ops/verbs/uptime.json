@@ -1,0 +1,11 @@
+{
+  "about": "uptime and load averages",
+  "hosts": [
+    "boss-gcp",
+    "forge"
+  ],
+  "argv": [
+    "uptime"
+  ],
+  "params": []
+}

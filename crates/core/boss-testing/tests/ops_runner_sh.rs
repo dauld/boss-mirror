@@ -79,8 +79,10 @@ fn packet(root: &Path, verb: &str, args: &str) {
     packet_for(root, "forge", verb, args);
 }
 
-/// Run the runner once against the stub. Returns (stdout+stderr, the
-/// PUT payload's step metadata if a step was completed).
+/// Run the runner once against the stub, with `verbs` as its allowlist
+/// DIRECTORY (one file per verb — the shape the shipped
+/// `infra/ops/verbs/` has). Returns (stdout+stderr, the PUT payload's
+/// step metadata if a step was completed).
 fn run(
     root: &Path,
     verbs: &Path,
@@ -99,7 +101,7 @@ fn run(
         .env("PATH", path)
         .env("HOST_ID", "forge")
         .env("BOSS_JOBS_URL", "http://sor.invalid")
-        .env("OPS_VERBS_FILE", verbs)
+        .env("OPS_VERBS_DIR", verbs)
         .env("STUB_JOBS", root.join("jobs.json"))
         .env("STUB_PUT", &put);
     for (k, v) in extra_env {
@@ -118,15 +120,41 @@ fn run(
     (text, payload)
 }
 
-/// The real allowlist, verbatim: its script paths are repo-relative and
-/// the runner resolves them against its own checkout, so no rewriting
-/// is needed here (66077f9c — this harness used to carry one of the
-/// four copies of the `/home/david/boss/` substitution).
+/// The real allowlist, verbatim: `infra/ops/verbs/*.json` copied file
+/// by file. Its script paths are repo-relative and the runner resolves
+/// them against its own checkout, so no rewriting is needed here
+/// (66077f9c — this harness used to carry one of the four copies of
+/// the `/home/david/boss/` substitution).
 fn real_verbs(root: &Path) -> PathBuf {
-    let src = std::fs::read_to_string(repo_root().join("infra/ops/verbs.json")).unwrap();
-    let p = root.join("verbs.json");
-    std::fs::write(&p, src).unwrap();
-    p
+    let dir = root.join("verbs");
+    std::fs::create_dir_all(&dir).unwrap();
+    for f in shipped_verb_files() {
+        std::fs::copy(&f, dir.join(f.file_name().unwrap())).unwrap();
+    }
+    dir
+}
+
+/// A fixture allowlist: one file per (name, spec) under `verbs/`.
+fn verbs_dir(root: &Path, specs: &[(&str, &str)]) -> PathBuf {
+    let dir = root.join("verbs");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, spec) in specs {
+        std::fs::write(dir.join(format!("{name}.json")), spec).unwrap();
+    }
+    dir
+}
+
+/// Every `*.json` under the shipped `infra/ops/verbs/`, sorted — the
+/// directory IS the allowlist, so this is the definition every reader
+/// is measured against.
+fn shipped_verb_files() -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(repo_root().join("infra/ops/verbs"))
+        .expect("infra/ops/verbs/ exists")
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    files.sort();
+    files
 }
 
 /// What `publish-github-pr.sh --check` needs to say ok without a
@@ -217,17 +245,21 @@ fn a_relative_argv0_resolves_against_the_runners_own_checkout() {
     needs_jq!();
     let root = scratch("relative-argv0");
     stub_sor(&root);
-    let verbs = root.join("verbs.json");
-    std::fs::write(
-        &verbs,
-        r#"{"verbs": {
-            "probe": {"about": "a tree lint, as a probe of resolution", "hosts": ["forge"],
-                      "argv": ["infra/lint/no-manifest-mounts-a-hostpath.sh"], "params": []},
-            "gone":  {"about": "a script this checkout does not carry", "hosts": ["forge"],
-                      "argv": ["infra/ops/does-not-exist.sh"], "params": []}
-        }}"#,
-    )
-    .unwrap();
+    let verbs = verbs_dir(
+        &root,
+        &[
+            (
+                "probe",
+                r#"{"about": "a tree lint, as a probe of resolution", "hosts": ["forge"],
+                    "argv": ["infra/lint/no-manifest-mounts-a-hostpath.sh"], "params": []}"#,
+            ),
+            (
+                "gone",
+                r#"{"about": "a script this checkout does not carry", "hosts": ["forge"],
+                    "argv": ["infra/ops/does-not-exist.sh"], "params": []}"#,
+            ),
+        ],
+    );
     packet(&root, "probe", "[]");
     let (out, payload) = run(&root, &verbs, &[]);
     let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
@@ -251,11 +283,14 @@ fn a_relative_argv0_resolves_against_the_runners_own_checkout() {
     );
 
     // The shipped allowlist carries NO absolute checkout path any more.
-    let shipped = std::fs::read_to_string(repo_root().join("infra/ops/verbs.json")).unwrap();
-    assert!(
-        !shipped.contains("/home/david/boss/"),
-        "verbs.json names scripts relative to the repo, never one host's checkout"
-    );
+    for f in shipped_verb_files() {
+        let shipped = std::fs::read_to_string(&f).unwrap();
+        assert!(
+            !shipped.contains("/home/david/boss/"),
+            "{} names a script by one host's checkout, not relative to the repo",
+            f.display()
+        );
+    }
 }
 
 /// The allowed literal reaches the verb: `publish-github-pr --check` is
@@ -354,12 +389,13 @@ fn an_absent_optional_literal_drops_its_placeholder_word() {
     needs_jq!();
     let root = scratch("optional-omitted");
     stub_sor(&root);
-    let verbs = root.join("verbs.json");
-    std::fs::write(
-        &verbs,
-        r#"{"verbs":{"say":{"about":"echo","hosts":["forge"],"argv":["echo","ran","{1}"],"params":[{"name":"mode","one_of":["--check"],"optional":true}]}}}"#,
-    )
-    .unwrap();
+    let verbs = verbs_dir(
+        &root,
+        &[(
+            "say",
+            r#"{"about":"echo","hosts":["forge"],"argv":["echo","ran","{1}"],"params":[{"name":"mode","one_of":["--check"],"optional":true}]}"#,
+        )],
+    );
 
     packet(&root, "say", "[]");
     let (out, payload) = run(&root, &verbs, &[]);
@@ -444,12 +480,13 @@ fn a_verb_declaring_no_hosts_is_refused_everywhere() {
     needs_jq!();
     let root = scratch("hosts-absent");
     stub_sor(&root);
-    let verbs = root.join("verbs.json");
-    std::fs::write(
-        &verbs,
-        r#"{"verbs":{"say":{"about":"echo","argv":["echo","ran"],"params":[]}}}"#,
-    )
-    .unwrap();
+    let verbs = verbs_dir(
+        &root,
+        &[(
+            "say",
+            r#"{"about":"echo","argv":["echo","ran"],"params":[]}"#,
+        )],
+    );
 
     packet(&root, "say", "[]");
     let (out, payload) = run(&root, &verbs, &[]);
@@ -462,5 +499,148 @@ fn a_verb_declaring_no_hosts_is_refused_everywhere() {
     assert!(
         reason.contains("no host") && reason.contains("refused everywhere"),
         "the refusal must say the allowlist entry declares no hosts: {reason}"
+    );
+}
+
+/// THE ALLOWLIST IS A DIRECTORY, one file per verb, and the verb's
+/// name is its file name (backlog 5086842d). `infra/ops/verbs.json`
+/// was one JSON object, and a JSON object has no uncontended insertion
+/// point: on 2026-09-12 three cars each added a verb, two inserted
+/// before the same key, and the conductor left one behind
+/// (`conflict: infra/ops/verbs.json`) — the shape CLAUDE.md §9a records
+/// for rules.toml before rules became one file each. Now adding a verb
+/// is dropping a file in, touching no shared line.
+///
+/// The runner is the reader that matters most: it runs on two hosts
+/// from their converged checkouts, and if it cannot load the directory
+/// every ops verb dies. So this RUNS it over a directory and asks that
+/// a verb be reachable by its file name, and that an unknown verb's
+/// refusal lists every file — which is the runner saying, on the
+/// packet, that it loaded them all.
+#[test]
+fn the_allowlist_is_the_directory_and_a_verb_is_named_by_its_file() {
+    needs_jq!();
+    let root = scratch("directory-allowlist");
+    stub_sor(&root);
+    let verbs = verbs_dir(
+        &root,
+        &[
+            (
+                "say-hello",
+                r#"{"about":"echo","hosts":["forge"],"argv":["echo","hello"],"params":[]}"#,
+            ),
+            (
+                "say-bye",
+                r#"{"about":"echo","hosts":["forge"],"argv":["echo","bye"],"params":[]}"#,
+            ),
+        ],
+    );
+    // A README beside the verbs is prose, not a verb: the loader must
+    // take only `*.json`.
+    std::fs::write(verbs.join("README.md"), "# not a verb\n").unwrap();
+
+    packet(&root, "say-bye", "[]");
+    let (out, payload) = run(&root, &verbs, &[]);
+    let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
+    assert_eq!(md["disposition"], "answered", "{md} / {out}");
+    assert_eq!(md["output"], "bye\n", "{md}");
+
+    packet(&root, "rm-rf", "[]");
+    let (out, payload) = run(&root, &verbs, &[]);
+    let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
+    assert_eq!(md["disposition"], "refused", "{md} / {out}");
+    let reason = md["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("infra/ops/verbs/") && reason.ends_with("verbs: say-bye, say-hello"),
+        "the refusal names the directory and every verb file in it: {reason}"
+    );
+}
+
+/// The SHIPPED directory loads whole: the runner's own listing of what
+/// it knows equals the file names under `infra/ops/verbs/`. This is the
+/// equality that makes the directory the definition — a verb file the
+/// runner silently skipped would show up here as a name missing from
+/// the refusal.
+#[test]
+fn the_runner_loads_every_shipped_verb_file() {
+    needs_jq!();
+    let root = scratch("shipped-directory");
+    stub_sor(&root);
+    let verbs = real_verbs(&root);
+    let expected: Vec<String> = shipped_verb_files()
+        .iter()
+        .map(|f| f.file_stem().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert!(expected.len() >= 16, "{expected:?}");
+    assert!(
+        !repo_root().join("infra/ops/verbs.json").exists(),
+        "infra/ops/verbs.json is back — the directory is the allowlist now (5086842d); \
+         a verb goes in infra/ops/verbs/<name>.json"
+    );
+
+    packet(&root, "rm-rf", "[]");
+    let (out, payload) = run(&root, &verbs, &[]);
+    let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
+    let reason = md["reason"].as_str().unwrap();
+    let listed = reason
+        .rsplit("verbs: ")
+        .next()
+        .unwrap()
+        .split(", ")
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        listed, expected,
+        "the runner's allowlist is not the directory: {reason}"
+    );
+}
+
+/// A directory the runner cannot load is a REFUSAL TO RUN naming the
+/// directory (EX_CONFIG, the same exit an unreadable allowlist got),
+/// never an empty allowlist that refuses every packet as unknown: no
+/// directory, an empty one, and a file that is not a JSON object each
+/// stop the runner before it touches a packet, and each says which.
+#[test]
+fn a_directory_the_runner_cannot_load_stops_it_by_name() {
+    needs_jq!();
+    let root = scratch("directory-broken");
+    stub_sor(&root);
+    packet(&root, "uptime", "[]");
+
+    let missing = root.join("no-such-dir");
+    let (out, payload) = run(&root, &missing, &[]);
+    assert!(
+        payload.is_none(),
+        "a runner with no allowlist touched a packet: {out}"
+    );
+    assert!(
+        out.contains("no-such-dir") && out.contains("refusing to run"),
+        "{out}"
+    );
+
+    let empty = root.join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let (out, payload) = run(&root, &empty, &[]);
+    assert!(payload.is_none(), "{out}");
+    assert!(
+        out.contains("holds no verb") && out.contains("empty"),
+        "an empty directory must be named as the fault, not treated as an allowlist: {out}"
+    );
+
+    let broken = verbs_dir(
+        &root,
+        &[
+            (
+                "ok",
+                r#"{"about":"echo","hosts":["forge"],"argv":["echo","ok"],"params":[]}"#,
+            ),
+            ("bad", "{not json"),
+        ],
+    );
+    let (out, payload) = run(&root, &broken, &[]);
+    assert!(payload.is_none(), "{out}");
+    assert!(
+        out.contains("bad.json"),
+        "the fault must name the file that would not parse: {out}"
     );
 }

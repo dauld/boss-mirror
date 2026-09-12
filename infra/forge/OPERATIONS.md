@@ -57,7 +57,7 @@ closed for everything in the installer's `UNITS` list.
 | `disk-floor-sweep` | hourly (boot +5) | two passes. **Every** run prunes the **system** daemon's per-train `boss-ci:<sha>` images older than `BOSS_CI_IMAGE_AGE_HOURS` (6h), keeping the newest 3 — only sha-shaped tags, so `rust1.96` and `latest` are never candidates. **Below** `BOSS_DISK_FLOOR_GB` (100 in the service) it goes on to the emergency remediations: all unused system-daemon images over 4h, the whole rootless builder cache, dangling images, registry-verified old tags — in that fixed order, stopping at the floor; regenerable caches only, never volumes | exits non-zero with `FLOOR UNMET — a human decides next` rather than deleting harder, and non-zero when the age pass could not reach the system daemon (a prune of the wrong daemon would report success and free nothing) |
 | `reap-dead-ci-jobs` | daily (boot +15) | remove the containers and volumes of crashed CI jobs | journal |
 | `estate-observe-host` | 15 min (boot +3) | record this host's disk, load and units into the estate as observations; the conductor's boarding refuses on a positive "host is short" reading | journal; a stale series reads as unverifiable, and boarding proceeds with one loud line |
-| `boss-ops-runner` | ~1 min | answer `ops-request` packets filed against `forge` with a verb from `infra/ops/verbs.json` | `refused` outcome on the packet; installed by `install.sh` since 2026-09-05 (a drop-in carries this host's identity) |
+| `boss-ops-runner` | ~1 min | answer `ops-request` packets filed against `forge` with a verb from `infra/ops/verbs/` (one file per verb) | `refused` outcome on the packet; installed by `install.sh` since 2026-09-05 (a drop-in carries this host's identity) |
 | `systemd-journal-gatewayd` | socket-activated, no timer | serve this host's journal over HTTP on `:19531` — the read door the pod uses when there is no ssh and the API is dark | **it does not fail loudly, and that is the point of `journal-read.sh`.** The distro's units, enabled (never copied) by `install.sh`; if the package is absent the installer says so and carries on, because a visibility door must not be able to abort the converge. It has **no periodic restart**: bounding the process with `RuntimeMaxSec=` would leave the unit `failed` after every expiry, and `infra/estate/observe-units.sh` reads `ActiveState=failed` as unhealthy — an hourly red nobody reads is the same defect as no check at all (CLAUDE.md §Diagnosis). When it wedges, `journal-read.sh` refuses and prints `systemctl restart systemd-journal-gatewayd.service` |
 | `cluster-watchdog` | 5 min (boot +2) | know the cluster is working from outside it; roll to the last converged build after three dark checks | its own journal line every tick, `hands needed` when it cannot act |
 
@@ -120,7 +120,7 @@ No ssh from the pod. Three doors, all read-only:
   Forgejo's data, the checkout), `reach <ipv4> <port>` (one TCP
   connect from this host's vantage — the WireGuard overlay and the
   LAN the pod cannot route to; nothing sent), and the mutating verbs, each
-  authorized by name in `verbs.json`: `reclaim-disk <floor>` (the
+  authorized by name in `infra/ops/verbs/reclaim-disk.json`: `reclaim-disk <floor>` (the
   sweep, with a floor), `rollback-to <sha>` (roll deploy/boss to a
   named build, verified Ready), `hold-converge <reason>` and
   `release-converge` (the runner builds and rolls nothing while a
@@ -376,6 +376,6 @@ arrived is answered by the next run, usually `converged: <sha>`.
   freshness assertion; `infra/lint/the-journal-door-states-its-freshness.sh`
   proves its three postures and that the installer still enables the socket.
 - `infra/forge/disk-floor-sweep.sh` — the one definition of a bounded
-  reclaim; `infra/ops/verbs.json` — the ops verbs.
+  reclaim; `infra/ops/verbs/` — the ops verbs, one file each.
 - `docs/runbooks/operator.md` — the cluster-side runbook.
 - CLAUDE.md §Diagnosis — what a stopped pipeline owes you.

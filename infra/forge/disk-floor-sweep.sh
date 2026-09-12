@@ -68,7 +68,7 @@
 # sweep's packets are the alarm. Escalating to more aggressive
 # deletion is a human's call, never this script's.
 #
-# AGENT-WORKABLE TOO: once infra/ops/verbs.json lands (branch
+# AGENT-WORKABLE TOO: once the ops allowlist (now infra/ops/verbs/) lands (branch
 # feat/ops-request-the-host-answers), `reclaim-disk` registers THIS
 # script as the first mutating ops verb — authorized by David,
 # 2026-09-03, bounded to regenerable caches by construction of what

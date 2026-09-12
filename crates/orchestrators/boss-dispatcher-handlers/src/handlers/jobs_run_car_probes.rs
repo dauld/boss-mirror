@@ -35,7 +35,7 @@
 //! where that call is argued rather than described (23b2dffa).
 //! The forge already answers
 //! ops-request packets through a reviewed verb allowlist
-//! (`infra/ops/verbs.json`), so the run goes through that door:
+//! (`infra/ops/verbs/run-car-probe.json`), so the run goes through that door:
 //! `infra/forge/run-car-probe.sh` re-reads the car, refuses unless it
 //! has merged and recorded a probe, runs the probe as `david` (never
 //! root) with a timeout, judges it by the two rules `boss prove`
@@ -60,7 +60,7 @@ use boss_jobs::car;
 
 use super::common::{api_client, get_json, post_json, write_json};
 
-/// The allowlisted verb (`infra/ops/verbs.json`) and the host that
+/// The allowlisted verb (a file under `infra/ops/verbs/`) and the host that
 /// answers it. One definition each, read by the request builder and
 /// the twice-guard.
 pub const VERB: &str = "run-car-probe";

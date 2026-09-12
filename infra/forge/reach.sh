@@ -28,7 +28,7 @@
 # answers ops-request packets (infra/ops/ops-runner.sh); this is the
 # script behind its `reach` verb.
 #
-# BOUNDS. The verb's params in infra/ops/verbs.json admit only a
+# BOUNDS. The verb's params in infra/ops/verbs/reach.json admit only a
 # dotted IPv4 quad and a 1-5 digit port (max 65535): no hostname, so
 # this host never resolves a name on a packet's behalf; no path, no
 # scheme, no whitespace, no leading dash. The checks below repeat that

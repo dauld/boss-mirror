@@ -1,0 +1,12 @@
+{
+  "about": "filesystem usage, human units",
+  "hosts": [
+    "boss-gcp",
+    "forge"
+  ],
+  "argv": [
+    "df",
+    "-h"
+  ],
+  "params": []
+}

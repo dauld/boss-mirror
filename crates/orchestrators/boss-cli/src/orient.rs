@@ -207,6 +207,10 @@ pub(crate) enum Shed {
     /// A probe is recorded; `last` is the failed attempt's `why`, if any
     /// (a succeeding attempt completes the step and the car leaves).
     ProbePending { last: Option<String> },
+    /// The probe ran and exited 75: NOT YET — the world cannot judge the
+    /// claim until something happens, and the probe said what. Early,
+    /// not wrong; the daily recheck runs it again.
+    ProbeNotYet { said: String },
     /// Only an event is recorded: prose naming what has to happen.
     WaitingOn(String),
     /// Neither — the forgotten case, and the only troubled one.
@@ -217,11 +221,23 @@ pub(crate) fn shed_place(car: &Value) -> Shed {
     let probe = md_str(car, "proof_probe");
     let event = md_str(car, "proof_event");
     if !probe.is_empty() {
-        let last = car
-            .pointer("/metadata/proof_attempt/why")
+        let attempt = car.pointer("/metadata/proof_attempt");
+        let not_yet = attempt
+            .map(|a| {
+                a.get("not_yet").and_then(Value::as_bool) == Some(true)
+                    || a.get("exit").and_then(Value::as_i64) == Some(75)
+            })
+            .unwrap_or(false);
+        let last = attempt
+            .and_then(|a| a.get("why"))
             .and_then(Value::as_str)
             .filter(|w| !w.is_empty())
             .map(str::to_string);
+        if not_yet {
+            return Shed::ProbeNotYet {
+                said: last.unwrap_or_else(|| "the probe said not yet".to_string()),
+            };
+        }
         Shed::ProbePending { last }
     } else if !event.is_empty() {
         Shed::WaitingOn(event.to_string())
@@ -261,6 +277,9 @@ pub(crate) fn shed_lines(cars: &[Value]) -> Vec<String> {
                 }
                 Shed::ProbePending { last: Some(why) } => {
                     format!("    {branch}: probe FAILING — {}", clipped(&why))
+                }
+                Shed::ProbeNotYet { said } => {
+                    format!("    {branch}: probe says NOT YET — {}", clipped(&said))
                 }
                 Shed::WaitingOn(ev) => format!("    {branch}: waiting on: {}", clipped(&ev)),
                 Shed::Unproven => format!(
@@ -811,6 +830,29 @@ mod tests {
             Shed::WaitingOn("the next red train".into())
         );
         assert_eq!(shed_place(&landed("fix/d", json!({}))), Shed::Unproven);
+    }
+
+    /// Exit 75 is "not yet": early, not wrong — a different word from
+    /// FAILING, and the probe's own reason rides the line.
+    #[test]
+    fn a_probe_that_said_not_yet_is_not_failing() {
+        let early = landed(
+            "fix/early",
+            json!({ "proof_probe": "bash x.sh", "proof_attempt": { "exit": 75, "not_yet": true, "why": "NOT YET: no disk-report request yet — the sweeps fire daily" } }),
+        );
+        assert!(matches!(shed_place(&early), Shed::ProbeNotYet { .. }));
+        let line = &shed_lines(&[early])[0];
+        assert!(
+            line.contains("probe says NOT YET — NOT YET: no disk-report"),
+            "{line}"
+        );
+        assert!(!line.contains("FAILING"), "{line}");
+        // An attempt written before the flag existed, exit 75 alone, reads the same.
+        let bare = landed(
+            "fix/bare",
+            json!({ "proof_probe": "bash x.sh", "proof_attempt": { "exit": 75, "why": "later" } }),
+        );
+        assert!(matches!(shed_place(&bare), Shed::ProbeNotYet { .. }));
     }
 
     #[test]

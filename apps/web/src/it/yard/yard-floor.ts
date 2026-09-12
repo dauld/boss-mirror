@@ -216,12 +216,14 @@ export type Machines = Readonly<{
   garage: Readonly<{ label: string; count: number }>;
   arrivals: Readonly<{ label: string; landed: number }>;
   /** The inspection shed and its two sidings — the counts are the three
-   *  places, and `failed` is how many of the inspected cars have a
-   *  non-zero probe run on record. */
+   *  places; `failed` is how many of the inspected cars have a failing
+   *  probe run on record, and `notYet` how many said "not yet" (exit
+   *  75) — early, not wrong, and not red. */
   inspection: Readonly<{
     label: string;
     inspecting: number;
     failed: number;
+    notYet: number;
     onEvent: number;
     noProbe: number;
   }>;
