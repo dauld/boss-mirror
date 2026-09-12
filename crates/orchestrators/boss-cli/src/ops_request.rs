@@ -448,6 +448,23 @@ mod tests {
         }
     }
 
+    /// `unit-list` takes one glob of unit-name characters and nothing a
+    /// shell could read: `boss-*` is admitted, a space or a `;` is not,
+    /// and the runner receives it as its own argv element.
+    #[test]
+    fn unit_list_admits_a_glob_and_refuses_a_shell() {
+        let v: Value = serde_json::from_str(VERBS_JSON).expect("verbs.json parses");
+        let ok = validate(&v, "boss-gcp", "unit-list", &["boss-*".into()]).unwrap();
+        assert_eq!(ok.args, vec!["boss-*".to_string()]);
+        assert!(!ok.mutating);
+        for bad in ["boss-* ; id", "boss-*;id", "$(id)", "a b"] {
+            let e = validate(&v, "boss-gcp", "unit-list", &[bad.into()])
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("does not match"), "{bad}: {e}");
+        }
+    }
+
     /// The answer is read off the packet's execute step and judged the
     /// way the runner wrote it: answered+0 is success; anything else is
     /// a non-zero exit for the caller.

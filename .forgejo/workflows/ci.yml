@@ -19,9 +19,20 @@
 # the bottleneck is visible rather than averaged away.
 name: CI
 
+# THE PULL REQUEST ALONE. Until 2026-09-12 `push: branches: [main]` was
+# here too, and every train cost two full runs: the PR's, then the same
+# suite again on the squash commit the merge put on main. The jobs run
+# serially on one runner slot (~17 min a run, `test` 11–13 of it), so
+# the second run held the slot while the NEXT train's PR queued — train
+# 18:51Z's CI began at 19:30Z — and it built a second 3.48 GB
+# boss-ci:<sha> image per train into the disk the floor sweep defends
+# (05db904e). Nobody read it: the conductor's verdict is the PR head's
+# combined status, and the cluster's image is built by the forge
+# converge, not here. The squash commit carries the PR head's tree
+# because the track lock keeps main still between assembly and merge.
+# Measured off the forge's task list, backlog 47fc2bc1; pinned by
+# boss-testing's ci_runs_once_per_train.
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
 

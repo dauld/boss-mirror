@@ -77,6 +77,14 @@ const SPAWNS_NOTHING_ON_PURPOSE: &[(&str, &str)] = &[
          as 'never fired' is the claim cf0f5e2d's first pass withdrew.",
     ),
     (
+        "recheck-failing-probes-daily",
+        "runs `jobs.run-car-probes` scoped to cars whose probe already failed; it files \
+         a `run-car-probe` ops-request per such car, so on a day with no failing probe \
+         it produces NOTHING, and that zero is the healthy reading. The packets it does \
+         file are the same kind the arrival rule files, so a sweep keyed by kind could \
+         not tell the two apart either.",
+    ),
+    (
         SWEEP_RULE,
         "IS the sweep. Its own firing leaves no packet of a kind — its findings are \
          backlog-items keyed by cadence, and a silence in the sweep itself is the gap \

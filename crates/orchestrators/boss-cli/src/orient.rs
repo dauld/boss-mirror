@@ -191,6 +191,86 @@ fn bases_behind(checks: &[(String, Option<i32>)]) -> Vec<&str> {
 /// set, and the tail line names the flag that shows the rest.
 pub(crate) const ORPHANS_SHOWN: usize = 12;
 
+/// Where a landed, unproven car stands — the yard's inspection shed
+/// read in words (`apps/web/src/it/yard/yard-shed.ts`, `shedPlace`).
+/// Four landed cars sat at `Proven in prod` on 2026-09-12 with a
+/// recorded proof EVENT rather than a probe, which is correct: each
+/// can only be proven when a real fault or a real timer firing happens.
+/// But `boss orient` did not list them at all, and the yard's counter
+/// once rendered them exactly like a car nobody proved (9e3e07aa). A
+/// reader must be able to tell "waiting on the next red train" from
+/// "nobody ran boss prove"; the difference is the whole question. The
+/// three places are disjoint and total, the probe winning over an event
+/// (a probe can be run; an event has to happen).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Shed {
+    /// A probe is recorded; `last` is the failed attempt's `why`, if any
+    /// (a succeeding attempt completes the step and the car leaves).
+    ProbePending { last: Option<String> },
+    /// Only an event is recorded: prose naming what has to happen.
+    WaitingOn(String),
+    /// Neither — the forgotten case, and the only troubled one.
+    Unproven,
+}
+
+pub(crate) fn shed_place(car: &Value) -> Shed {
+    let probe = md_str(car, "proof_probe");
+    let event = md_str(car, "proof_event");
+    if !probe.is_empty() {
+        let last = car
+            .pointer("/metadata/proof_attempt/why")
+            .and_then(Value::as_str)
+            .filter(|w| !w.is_empty())
+            .map(str::to_string);
+        Shed::ProbePending { last }
+    } else if !event.is_empty() {
+        Shed::WaitingOn(event.to_string())
+    } else {
+        Shed::Unproven
+    }
+}
+
+/// One terminal line's worth of a probe verdict or an event's prose.
+/// The full text rides the packet and the yard shows it; here the
+/// reader wants the first clause, not the paragraph (a 600-character
+/// `why` was the first live line).
+pub(crate) const SHED_TEXT_CHARS: usize = 160;
+
+fn clipped(text: &str) -> String {
+    let t = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if t.chars().count() <= SHED_TEXT_CHARS {
+        t
+    } else {
+        let cut: String = t.chars().take(SHED_TEXT_CHARS - 1).collect();
+        format!("{}…", cut.trim_end())
+    }
+}
+
+/// The SHED listing lines: every open car at `Proven in prod`, one
+/// line each, saying which of the three places it stands in. Pure so
+/// the shape is testable; the caller prints the heading from the count.
+pub(crate) fn shed_lines(cars: &[Value]) -> Vec<String> {
+    cars.iter()
+        .filter(|c| c.get("status").and_then(Value::as_str) == Some("open"))
+        .filter(|c| at_step(c) == "Proven in prod")
+        .map(|c| {
+            let branch = md_str(c, "branch");
+            match shed_place(c) {
+                Shed::ProbePending { last: None } => {
+                    format!("    {branch}: probe pending (the forge runs it on arrival)")
+                }
+                Shed::ProbePending { last: Some(why) } => {
+                    format!("    {branch}: probe FAILING — {}", clipped(&why))
+                }
+                Shed::WaitingOn(ev) => format!("    {branch}: waiting on: {}", clipped(&ev)),
+                Shed::Unproven => format!(
+                    "    {branch}: UNPROVEN — no probe, no event; nothing mechanical can settle it (boss prove --probe)"
+                ),
+            }
+        })
+        .collect()
+}
+
 /// The ORPHANS listing lines for a set of forge heads, bounded to
 /// `shown` entries unless `all` — and when bounded, the tail line
 /// SAYS how to see the rest, because a list truncated with no way to
@@ -563,6 +643,20 @@ pub async fn run(all: bool) -> Result<()> {
         }
     }
 
+    // THE SHED — landed cars not yet proven, and what each waits on.
+    let shed = shed_lines(&cars);
+    if shed.is_empty() {
+        println!("\n  SHED — empty: every landed car is proven");
+    } else {
+        println!(
+            "\n  SHED — {} landed car(s) awaiting proof (probe pending / waiting on an event / UNPROVEN):",
+            shed.len()
+        );
+        for line in &shed {
+            println!("{line}");
+        }
+    }
+
     // The task queue, as a number.
     let tasks = api(
         &http,
@@ -676,6 +770,96 @@ mod tests {
 
     fn heads(bs: &[&str]) -> std::collections::BTreeSet<String> {
         bs.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn landed(branch: &str, md: Value) -> Value {
+        let mut m = md;
+        m["branch"] = json!(branch);
+        json!({
+            "status": "open",
+            "metadata": m,
+            "steps": [
+                { "title": "Boarded", "status": "completed" },
+                { "title": "Proven in prod", "status": "ready" }
+            ]
+        })
+    }
+
+    #[test]
+    fn a_probe_wins_over_an_event_and_a_failed_attempt_is_named() {
+        assert_eq!(
+            shed_place(&landed(
+                "fix/a",
+                json!({ "proof_probe": "bash x.sh", "proof_event": "the next red train" })
+            )),
+            Shed::ProbePending { last: None }
+        );
+        assert_eq!(
+            shed_place(&landed(
+                "fix/b",
+                json!({ "proof_probe": "bash x.sh", "proof_attempt": { "why": "exit 1: grep found nothing" } })
+            )),
+            Shed::ProbePending {
+                last: Some("exit 1: grep found nothing".into())
+            }
+        );
+        assert_eq!(
+            shed_place(&landed(
+                "fix/c",
+                json!({ "proof_event": "the next red train" })
+            )),
+            Shed::WaitingOn("the next red train".into())
+        );
+        assert_eq!(shed_place(&landed("fix/d", json!({}))), Shed::Unproven);
+    }
+
+    #[test]
+    fn the_shed_lists_only_open_cars_at_proven_and_says_what_each_waits_on() {
+        let mut closed = landed("fix/closed", json!({}));
+        closed["status"] = json!("closed");
+        let mut gating = landed("fix/gating", json!({}));
+        gating["steps"] = json!([{ "title": "Gated", "status": "ready" }]);
+        let cars = vec![
+            landed("fix/event", json!({ "proof_event": "the next red train" })),
+            landed("fix/probe", json!({ "proof_probe": "bash x.sh" })),
+            landed(
+                "fix/failing",
+                json!({ "proof_probe": "bash x.sh", "proof_attempt": { "why": "exit 1" } }),
+            ),
+            landed("fix/forgot", json!({})),
+            closed,
+            gating,
+        ];
+        let lines = shed_lines(&cars);
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        assert_eq!(lines[0], "    fix/event: waiting on: the next red train");
+        assert_eq!(
+            lines[1],
+            "    fix/probe: probe pending (the forge runs it on arrival)"
+        );
+        assert_eq!(lines[2], "    fix/failing: probe FAILING — exit 1");
+        assert!(
+            lines[3].starts_with("    fix/forgot: UNPROVEN — no probe, no event"),
+            "{}",
+            lines[3]
+        );
+    }
+
+    #[test]
+    fn a_paragraph_long_verdict_is_clipped_to_one_line_and_says_so() {
+        let long = "x ".repeat(400);
+        let lines = shed_lines(&[landed(
+            "fix/long",
+            json!({ "proof_probe": "bash x.sh", "proof_attempt": { "why": long } }),
+        )]);
+        let line = &lines[0];
+        assert!(line.ends_with('…'), "{line}");
+        assert!(
+            line.chars().count() < SHED_TEXT_CHARS + 40,
+            "{}",
+            line.chars().count()
+        );
+        assert_eq!(clipped("short  and\n spaced"), "short and spaced");
     }
 
     #[test]

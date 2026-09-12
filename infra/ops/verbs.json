@@ -68,6 +68,14 @@
         { "name": "unit", "pattern": "^[A-Za-z0-9@._][A-Za-z0-9@._-]*$" }
       ]
     },
+    "unit-list": {
+      "about": "READ-ONLY: `systemctl list-units --all` for one unit-name glob (e.g. boss-*), plain and unpaged: every matching unit with its load/active/sub state and description. Added 2026-09-12 to enumerate the second BOSS stack on boss-gcp before anything is retired (45641c91 / d5941ef3 car 2: 'establish the dependency order BEFORE stopping anything') — the host has 23 cluster chores and a full older stack, and the tree can name only what it installed. The glob is one token of unit-name characters plus `*` and `?`; no spaces, no shell.",
+      "hosts": ["boss-gcp", "forge"],
+      "argv": ["systemctl", "list-units", "--all", "--no-pager", "--plain", "--no-legend", "--", "{1}"],
+      "params": [
+        { "name": "glob", "pattern": "^[A-Za-z0-9@._*?-]+$" }
+      ]
+    },
     "journal-tail": {
       "about": "last N journal lines of one unit (default 100, max 200)",
       "hosts": ["boss-gcp", "forge"],
@@ -108,6 +116,13 @@
       "hosts": ["forge"],
       "argv": ["infra/forge/disk-report.sh"],
       "params": []
+    },
+    "conformance-report": {
+      "about": "READ-ONLY: the cluster's orphan set — every live object in the managed namespaces that no manifest under infra/cluster/manifests declares — as `infra/cluster/undeclared-objects.sh --list` computes it, the ONE definition the orphan lint and delete-orphan-object share. Empty output with exit 0 is the answer 'none'; exit 4 is 'cannot answer' with the reason named, never a smaller set. Filed by the cluster-conformance sweep for itself the moment its Inspect step becomes ready (rule measure-cluster-conformance-sweep-on-inspect-ready, backlog 8e8311f5): on 2026-09-12 the inspector had to gather this by hand from a credential that could not read half the pairs, and the sweep before it sat uninspected. Nothing mutated; the same kubectl and kubeconfig resolution as the delete verb, without the delete. Its own timeout: the derivation parses every manifest with kubectl, which exceeds the runner's 30s default.",
+      "hosts": ["forge"],
+      "argv": ["infra/cluster/undeclared-objects.sh", "--list"],
+      "params": [],
+      "timeout": 300
     },
     "reach": {
       "about": "READ-ONLY: can this host open a TCP connection to <ip>:<port>? A LAN/tunnel-side vantage the cluster pod lacks (no CAP_NET_RAW, no route into the WireGuard overlay). First use 2026-09-07: is the WireGuard hub 10.99.0.1 reachable over wg0 (the bastion route into the LAN); also the gateway-vs-ISP question for the 1.1.1.0/24 blackhole. Read-only in the phase-1 sense: a TCP connect, nothing sent, nothing mutated. Runs infra/forge/reach.sh: one line, open (<N>ms) / closed (<reason>) / timeout (4s), exit 0 only when open. IPv4 literal only — no hostname, so the host never resolves a name on a packet's behalf.",

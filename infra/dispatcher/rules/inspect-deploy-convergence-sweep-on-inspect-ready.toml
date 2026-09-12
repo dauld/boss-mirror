@@ -1,0 +1,27 @@
+# The deploy-convergence sweep inspects itself. Every pr-train stamps
+# the instant it merged and the instant the cluster was observed running
+# that commit; the sweep's question — did every merge since yesterday
+# reach the cluster, and how long did each take — is a function of those
+# two stamps over the trains in the window. An operator read them by
+# hand on 2026-09-11 and 2026-09-12 (backlog 8e8311f5). Now the handler
+# does, on the sweep's own Inspect step: one checklist item per merged
+# train with its lag, a finding for any train converged past the 30-min
+# arm, still unconverged past it, or closed without converging, and
+# action_needed routed accordingly.
+[[rule]]
+name = "inspect-deploy-convergence-sweep-on-inspect-ready"
+why = """
+A CROSS-PROTOCOL REACTOR: the inspection reads pr-train packets —
+another protocol's steps and their completion stamps — which the
+maintenance-sweep definition cannot declare. Same handler as the
+empty-decisions self-inspection; the `target` arg names which sweep
+this rule reads for, so two rules never inspect one sweep. No host
+verb, no authority widened: the trains are read through the jobs API
+and the one write completes the sweep's own checklist. Self-filters by
+the subject the daily spawner gives the sweep.
+"""
+on_event = "step.ready.checklist"
+when = 'subject_id = "deploy-convergence"'
+[[rule.do]]
+handler = "maintenance.sweep.inspect"
+args = { target = "\"deploy-convergence\"" }

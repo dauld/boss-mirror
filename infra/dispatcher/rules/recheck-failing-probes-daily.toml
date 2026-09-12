@@ -1,0 +1,24 @@
+# A failing probe is rechecked daily. A landed car whose recorded probe
+# RAN and did not settle it carries a `proof_attempt` and stands in the
+# yard's inspection shed as "probe FAILING". Often that is correct and
+# early — on 2026-09-12 two cars waited on the first firing of a daily
+# timer — but until this rule the only way the probe would run again was
+# a human refiling `run-car-probe` by hand. Same handler and same
+# request shape as the arrival rule, scoped to every failing car
+# instead of one train's; a request already open for the car is not
+# filed twice. Backlog 9e3e07aa's neighbour: the shed names the failing
+# case, this is what clears it without a hand.
+[[rule]]
+name = "recheck-failing-probes-daily"
+why = """
+A TIMER, the standing exemption: "a day passed" is no packet's event, so
+no Workflow consequence can fire it. It adds no routing: it files the
+same ops-request the arrival rule files, for cars whose probe already
+ran and failed, so the proof a builder recorded is re-read by machine
+instead of by a human remembering to. One request per car per day at
+most, and none for a car with a request still open.
+"""
+schedule = { cadence = "daily", anchor_date = "2026-09-13" }
+[[rule.do]]
+handler = "jobs.run-car-probes"
+args = { scope = "\"failing\"" }

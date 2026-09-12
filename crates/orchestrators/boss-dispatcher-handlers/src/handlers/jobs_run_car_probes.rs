@@ -223,8 +223,38 @@ fn ship_refusal(probe: &str, expect: Option<&str>) -> Option<Value> {
 /// A car whose recorded probe this door refuses ([`ship_refusal`]) is
 /// not shipped, and comes back in `refusals` so the reason lands on the
 /// car instead of vanishing.
+/// Which cars a firing asks after.
+///
+/// `Train`: the cars aboard the train that just arrived — the first
+/// honest moment for their probes. `Failing`: every landed car whose
+/// probe has RUN and not settled it (a `proof_attempt` is on the car),
+/// whatever train it rode. On 2026-09-12 two such cars sat at `proven`
+/// waiting on tomorrow's timer firing, correct but early, and the only
+/// way their probe would run again was a human refiling
+/// `run-car-probe` by hand (rule `recheck-failing-probes-daily`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scope<'a> {
+    Train(&'a str),
+    Failing,
+}
+
+impl Scope<'_> {
+    fn admits(&self, car: &Value) -> bool {
+        match self {
+            Scope::Train(t) => md(car, "train") == Some(t),
+            Scope::Failing => car.pointer("/metadata/proof_attempt").is_some(),
+        }
+    }
+    fn train_of(&self, car: &Value) -> String {
+        match self {
+            Scope::Train(t) => t.to_string(),
+            Scope::Failing => md(car, "train").unwrap_or("").to_string(),
+        }
+    }
+}
+
 pub(crate) fn probe_requests(
-    train_id: &str,
+    scope: Scope<'_>,
     cars: &[Value],
     open_requests: &[Value],
     rule_name: &str,
@@ -239,7 +269,7 @@ pub(crate) fn probe_requests(
     let mut refusals: Vec<(String, Value)> = Vec::new();
     let requests = cars
         .iter()
-        .filter(|c| md(c, "train") == Some(train_id))
+        .filter(|c| scope.admits(c))
         .filter(|c| md(c, PROOF_PROBE).is_some())
         .filter(|c| proven_is_open(c))
         .filter_map(|c| {
@@ -271,7 +301,8 @@ pub(crate) fn probe_requests(
                     "args": [id],
                     "car": id,
                     "branch": md(c, "branch").unwrap_or(""),
-                    "train": train_id,
+                    "train": scope.train_of(c),
+                    "recheck": matches!(scope, Scope::Failing),
                     "spawned_by_rule": rule_name,
                     "triggered_by_event_id": event_id,
                     "triggered_by_topic": topic,
@@ -290,16 +321,29 @@ impl Handler for JobsRunCarProbes {
 
     async fn invoke(
         &self,
-        _args: &[(String, boss_dispatcher::rules::expr::Value)],
+        args: &[(String, boss_dispatcher::rules::expr::Value)],
         ctx: &InvocationContext,
     ) -> Result<(), HandlerError> {
-        let Some(train_id) = arrived_train(&ctx.event_payload) else {
-            return Ok(());
+        // The rule says which cars: `scope = "failing"` for the daily
+        // recheck; no arg means the arrival rule, which names its train
+        // in the closing event.
+        let scope = match boss_dispatcher::rules::handler::arg_string(args, "scope") {
+            Ok("failing") => Scope::Failing,
+            Ok(other) => {
+                return Err(HandlerError::Permanent(format!(
+                    "jobs.run-car-probes: scope must be \"failing\" (or absent for the arrival rule), not {other:?}"
+                )));
+            }
+            Err(HandlerError::MissingArg(_)) => match arrived_train(&ctx.event_payload) {
+                Some(t) => Scope::Train(t),
+                None => return Ok(()),
+            },
+            Err(e) => return Err(e),
         };
         let cars = self.all_open("ship-a-change", &ctx.rule_name).await?;
         let open_requests = self.all_open("ops-request", &ctx.rule_name).await?;
         let arrival = probe_requests(
-            train_id,
+            scope,
             &cars,
             &open_requests,
             &ctx.rule_name,
@@ -386,7 +430,7 @@ mod tests {
     fn a_probed_car_aboard_the_train_gets_one_bounded_request() {
         let cars = [car("c1", "t1", probed(), "ready")];
         let got = probe_requests(
-            "t1",
+            Scope::Train("t1"),
             &cars,
             &[],
             "run-car-probes-on-train-arrived",
@@ -408,6 +452,69 @@ mod tests {
             "run-car-probes-on-train-arrived"
         );
         assert!(r["title"].as_str().unwrap().contains("Car c1"));
+    }
+
+    /// THE DAILY RECHECK: a landed car whose probe ran and did not settle
+    /// it (a `proof_attempt` on the car) is asked again whatever train it
+    /// rode; a car whose probe never ran, an event-bound car, a proven
+    /// car and an already-asked car are not. The request says it is a
+    /// recheck and names the car's own train.
+    #[test]
+    fn the_failing_scope_asks_again_for_every_landed_car_whose_probe_ran_and_failed() {
+        let failed = json!({"proof_attempt": {"exit": "1", "why": "printed nothing"}});
+        let mut f1 = probed();
+        f1["proof_attempt"] = failed["proof_attempt"].clone();
+        let mut f2 = probed();
+        f2["proof_attempt"] = failed["proof_attempt"].clone();
+        let cars = [
+            car("f1", "t1", f1, "ready"),
+            car("f2", "t7", f2, "ready"),
+            car("never-ran", "t1", probed(), "ready"),
+            car(
+                "event",
+                "t1",
+                json!({"proof_event": "the next red train", "proof_attempt": failed["proof_attempt"].clone()}),
+                "ready",
+            ),
+            car(
+                "done",
+                "t1",
+                {
+                    let mut m = probed();
+                    m["proof_attempt"] = failed["proof_attempt"].clone();
+                    m
+                },
+                "completed",
+            ),
+        ];
+        let open = [json!({"metadata": {"verb": VERB, "car": "f2"}})];
+        let got = probe_requests(
+            Scope::Failing,
+            &cars,
+            &open,
+            "recheck-failing-probes-daily",
+            "clock-day:2026-09-13",
+            "clock.day",
+        );
+        let asked: Vec<&str> = got
+            .requests
+            .iter()
+            .map(|r| r["metadata"]["car"].as_str().unwrap())
+            .collect();
+        assert_eq!(asked, vec!["f1"], "{got:?}");
+        assert_eq!(got.requests[0]["metadata"]["train"], "t1");
+        assert_eq!(got.requests[0]["metadata"]["recheck"], true);
+        assert_eq!(
+            got.requests[0]["metadata"]["spawned_by_rule"],
+            "recheck-failing-probes-daily"
+        );
+    }
+
+    #[test]
+    fn an_arrival_request_is_not_a_recheck() {
+        let cars = [car("c1", "t1", probed(), "ready")];
+        let got = probe_requests(Scope::Train("t1"), &cars, &[], "r", "ev", "jobs.job.closed");
+        assert_eq!(got.requests[0]["metadata"]["recheck"], false);
     }
 
     /// Everything that must NOT be asked: another train's car, an
@@ -433,7 +540,14 @@ mod tests {
             "id": "r1", "kind": "ops-request", "status": "open",
             "metadata": {"host": "forge", "verb": "run-car-probe", "car": "asked"}
         })];
-        let got = probe_requests("t1", &cars, &open, "r", "ev", "jobs.job.closed");
+        let got = probe_requests(
+            Scope::Train("t1"),
+            &cars,
+            &open,
+            "r",
+            "ev",
+            "jobs.job.closed",
+        );
         let ids: Vec<&str> = got
             .requests
             .iter()
@@ -461,7 +575,7 @@ mod tests {
             "proof_expect": "c0ffee",
         });
         let cars = [car("c1", "t1", bad, "ready")];
-        let got = probe_requests("t1", &cars, &[], "r", "ev", "jobs.job.closed");
+        let got = probe_requests(Scope::Train("t1"), &cars, &[], "r", "ev", "jobs.job.closed");
         assert!(
             got.requests.is_empty(),
             "a probe that reads unidentified must not be shipped to the forge: {:?}",
@@ -497,7 +611,7 @@ mod tests {
                    "proof_expect": "boss-jobs"}),
             "ready",
         )];
-        let got = probe_requests("t1", &cars, &[], "r", "ev", "jobs.job.closed");
+        let got = probe_requests(Scope::Train("t1"), &cars, &[], "r", "ev", "jobs.job.closed");
         assert_eq!(got.requests.len(), 1);
         assert!(got.refusals.is_empty());
     }

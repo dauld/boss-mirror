@@ -1,0 +1,28 @@
+# The cluster-conformance sweep arrives with its measurement. When its
+# `Inspect` checklist becomes ready (the step.ready.checklist event whose
+# subject is this sweep's target), spawn an ops-request
+# `conformance-report` to the forge — `undeclared-objects.sh --list`, the
+# orphan set as the ONE definition computes it — and link it back to the
+# sweep as metadata.for_sweep, so the inspector reads the set off a
+# packet instead of deriving it by hand from a credential that cannot
+# read every pair (2026-09-12, sweep e4cfa56d: "UNVERIFIED for the
+# by-label pairs and ConfigMap/boss/step-plugins this credential cannot
+# read"). Backlog 8e8311f5.
+[[rule]]
+name = "measure-cluster-conformance-sweep-on-inspect-ready"
+why = """
+A CROSS-PROTOCOL REACTOR spanning maintenance-sweep -> ops-request ->
+a read on the forge host, which no single Workflow consequence can
+express: the sweep's protocol cannot name a host verb, and the
+ops-request's cannot know which sweep asked. The measurement is a
+READ (conformance-report, forge-scoped, no authority widened; the
+delete stays its own verb with its own bounds); the inspector's
+judgement stays a human or agent step over a set that is now on the
+record before they arrive. Self-filters to this one sweep by the
+subject the daily spawner gives it.
+"""
+on_event = "step.ready.checklist"
+when = 'subject_id = "cluster-conformance"'
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"ops-request\"", subject_kind = "\"custom\"", subject = "\"forge\"", title = "\"conformance-report on forge — the cluster-conformance sweep's measurement\"", "metadata.host" = "\"forge\"", "metadata.verb" = "\"conformance-report\"", "metadata.for_sweep" = "job_id" }
