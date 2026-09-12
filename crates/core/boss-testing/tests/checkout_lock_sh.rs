@@ -459,6 +459,12 @@ fn the_runner_answers_its_request_through_the_exit_trap() {
     ] {
         std::fs::copy(forge.join(f), work.join("infra/forge").join(f)).unwrap();
     }
+    // …and the run-summary lib it stamps its stage timings through.
+    std::fs::copy(
+        repo_root().join("infra/run-summary.sh"),
+        work.join("infra/run-summary.sh"),
+    )
+    .unwrap();
     let git = |args: &[&str]| {
         let out = Command::new("git")
             .args(args)

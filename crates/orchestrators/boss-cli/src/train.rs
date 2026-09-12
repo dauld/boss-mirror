@@ -3074,6 +3074,52 @@ pub(crate) fn sweep_report_row(b: &CarBranch, outcome: &str) -> Value {
     })
 }
 
+/// The rows for boarded cars that are NOT terminal yet — the reason a
+/// train stays pending that `deletable_branches` cannot name, because
+/// an open car decides nothing. Seen live on the first report
+/// (2026-09-12, train 17:48): four rows said "gone before this pass"
+/// and the train sat unstamped with no row for the fifth car, still at
+/// `proven`; a reader had to infer it. Each open car's branch gets a
+/// row saying which step holds it, so an unstamped train explains
+/// itself completely.
+pub(crate) fn unsettled_rows(boarded_cars: &[Value]) -> Vec<Value> {
+    boarded_cars
+        .iter()
+        .filter(|car| {
+            !matches!(
+                car.get("status").and_then(Value::as_str),
+                Some("closed") | Some("cancelled")
+            )
+        })
+        .filter_map(|car| {
+            let branch = car.pointer("/metadata/branch").and_then(Value::as_str)?;
+            let id = car.get("id").and_then(Value::as_str).unwrap_or("?");
+            let at = car
+                .get("steps")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .find(|s| {
+                    matches!(
+                        s.get("status").and_then(Value::as_str),
+                        Some("ready") | Some("active")
+                    )
+                })
+                .and_then(|s| s.get("spec_slug").or_else(|| s.get("title")))
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            Some(json!({
+                "branch": branch,
+                "car": id8(id),
+                "rerail_origin": false,
+                "outcome": format!(
+                    "kept: car still open at `{at}` — the train stays pending until it closes"
+                ),
+            }))
+        })
+        .collect()
+}
+
 /// The journal line for a delete the forge answered but did not
 /// perform — the only kind of sweep line that must be loud.
 pub(crate) fn sweep_still_present_line(b: &CarBranch, forge_said: &str, head: &str) -> String {
@@ -7536,6 +7582,10 @@ impl Conductor {
                     log(claim_deferred_line(b));
                     report.push(sweep_report_row(b, "kept: a still-open car claims it"));
                 }
+                // A boarded car that is not terminal is the other reason a
+                // train stays pending; name its branch and the step that
+                // holds it, so the report is complete, not only correct.
+                report.extend(unsettled_rows(&cars));
                 // Stamp swept only when EVERY branch was handled: a
                 // branch we could not sweep this pass must be revisited,
                 // and the stamp is what drops the train off the pending
@@ -13752,6 +13802,27 @@ mod tests {
             "train A aborted before its branch loop, so its branch is untouched \
              this pass and retried next: {deleted:?}"
         );
+    }
+
+    /// An open boarded car earns a row naming the step that holds it —
+    /// the fifth car of train 17:48 (2026-09-12), which the first live
+    /// report left to inference.
+    #[test]
+    fn an_open_boarded_car_is_named_in_the_report_with_the_step_that_holds_it() {
+        let cars = vec![
+            json!({"id": "car-closed-0000", "status": "closed",
+                   "metadata": {"branch": "fix/a", "outcome": "merged"}, "steps": []}),
+            json!({"id": "car-open-000000", "status": "open",
+                   "metadata": {"branch": "fix/the-metrics-timer"},
+                   "steps": [{"spec_slug": "merged", "status": "completed"},
+                             {"spec_slug": "proven", "status": "ready"}]}),
+        ];
+        let rows = unsettled_rows(&cars);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["branch"], "fix/the-metrics-timer");
+        assert_eq!(rows[0]["car"], "car-open");
+        let o = rows[0]["outcome"].as_str().unwrap();
+        assert!(o.contains("still open") && o.contains("`proven`"), "{o}");
     }
 
     /// The forge's answer to DELETE is a claim; the read-back is the

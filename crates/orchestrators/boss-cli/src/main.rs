@@ -24,6 +24,7 @@ mod inspect;
 mod job;
 mod merged;
 mod ops;
+mod ops_request;
 mod orient;
 mod park;
 mod prove;
@@ -144,6 +145,28 @@ enum Commands {
     Train {
         #[command(subcommand)]
         action: TrainAction,
+    },
+    /// File an ops-request to a host — the terminal's handle on the door
+    /// that replaced ssh (729329c6). The call is validated against
+    /// infra/ops/verbs.json HERE, with the rules the host's runner
+    /// applies: an unknown verb, a host the verb does not serve, a
+    /// missing or out-of-pattern arg is refused before a packet exists.
+    /// `--wait` polls the packet to the host's answer and prints its
+    /// output and exit code, the way `boss gate --wait` does for a gate.
+    /// Five of these were filed by hand on 2026-09-12 (3d6daea9).
+    Ops {
+        /// Estate node id the request is for (forge, boss-gcp).
+        host: String,
+        /// A key of infra/ops/verbs.json.
+        verb: String,
+        /// Positional args, one per param the verb declares.
+        args: Vec<String>,
+        /// Poll the packet until the host answers; print output and exit code.
+        #[arg(long)]
+        wait: bool,
+        /// Validate and show what would be filed, without filing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Launch a gate for a branch — files or reuses the gate-run
     /// packet, renders the runner Job, and creates it.
@@ -296,6 +319,16 @@ enum Commands {
         /// `git rebase origin/main`, which the refusal prints.
         #[arg(long, value_name = "REASON")]
         stale_base_anyway: Option<String>,
+        /// Replay a stale car onto origin/main before gating. When the
+        /// base is BEHIND, the car's commits are cherry-picked onto
+        /// origin/main in a TEMPORARY worktree and the branch is moved on
+        /// the forge with a lease on its old head; the gate then judges
+        /// the replayed head. A conflict is refused naming the files, with
+        /// nothing pushed. Your own worktree is never touched. Measured
+        /// 2026-09-12: seven cars rebased by hand, each the same three
+        /// steps, because trains land every ~45 min.
+        #[arg(long)]
+        rebase: bool,
         /// Gate and deliberately do NOT park: stamp `hold: <reason>` on
         /// the gate-run so its green reads HELD (in the yard, `boss
         /// orient` and the stranded-green alarm) rather than stranded.
@@ -1225,6 +1258,13 @@ async fn main() -> Result<()> {
             } => workflow::publish(&kind, &spec, dry_run).await,
             WorkflowAction::Discard { kind, version } => workflow::discard(&kind, version).await,
         },
+        Commands::Ops {
+            host,
+            verb,
+            args,
+            wait,
+            dry_run,
+        } => ops_request::run(host, verb, args, wait, dry_run, chrono::Utc::now()).await,
         Commands::Job { action } => match action {
             JobAction::Get { job, json } => job::get(&job, json).await,
             JobAction::Station { station, json } => job::station(&station, json).await,
@@ -1341,6 +1381,7 @@ async fn main() -> Result<()> {
             park_proof_event,
             force_regate,
             stale_base_anyway,
+            rebase,
             hold,
         } => {
             let park = gate::ParkIntent {
@@ -1366,6 +1407,7 @@ async fn main() -> Result<()> {
                 park,
                 force_regate,
                 stale_base_anyway,
+                rebase,
                 hold,
                 // Wall-clock at the CLI boundary, minted once: the queue's
                 // ordering key and its heartbeat are real elapsed time on

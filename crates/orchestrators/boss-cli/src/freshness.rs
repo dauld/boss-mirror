@@ -253,6 +253,206 @@ pub(crate) enum BaseGuard {
 /// something that only happens there. It takes a reason for the same
 /// reason `boss prove --probe-anyway` does: the reason is the part that
 /// survives into the record.
+/// What a `--rebase` did: the forge head it found, the head it left,
+/// and how many of the car's commits it replayed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Rebased {
+    pub old_head: String,
+    pub new_head: String,
+    pub replayed: usize,
+}
+
+/// Replay a stale car onto origin/main and move its branch on the forge
+/// — the fix the stale-base refusal always asked for, as a door.
+///
+/// THE CALLER'S CHECKOUT NEVER MOVES. The work happens in a temporary
+/// worktree this function adds and removes (a `git rebase` in the
+/// builder's tree is the destructive act a builder's harness rightly
+/// refuses, and a worktree left behind is the 3d8bb6e6 shape); the
+/// branch is moved on the forge with `--force-with-lease` on the head
+/// this function read, so a push that raced it is refused, not
+/// overwritten. A replay that CONFLICTS is refused naming the files and
+/// nothing is pushed: this verb never guesses a merge.
+///
+/// Measured 2026-09-12 (protocol retro 8043c1f5): seven cars in one
+/// session were built on a main that had moved by gate time — trains
+/// land every ~45 min — and each rebase was the same three hand steps.
+pub(crate) fn rebase_onto_main(repo: &Path, branch: &str) -> anyhow::Result<Rebased> {
+    use anyhow::{Context, bail};
+    let git = |args: &[&str]| -> anyhow::Result<std::process::Output> {
+        let mut cmd = crate::git_auth::command();
+        cmd.arg("-C").arg(repo).args(args);
+        cmd.output()
+            .with_context(|| format!("git {args:?} in {}", repo.display()))
+    };
+    let ok = |o: &std::process::Output, what: &str| -> anyhow::Result<String> {
+        if !o.status.success() {
+            bail!("{what}: {}", String::from_utf8_lossy(&o.stderr).trim());
+        }
+        Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    ok(
+        &git(&[
+            "fetch",
+            "-q",
+            "origin",
+            "main",
+            &format!("refs/heads/{branch}"),
+        ])?,
+        "fetching main and the branch",
+    )?;
+    let old_head = ok(
+        &git(&["rev-parse", &format!("origin/{branch}")])?,
+        "reading the branch's forge head",
+    )?;
+    let main_head = ok(&git(&["rev-parse", "origin/main"])?, "reading origin/main")?;
+    let commits = ok(
+        &git(&[
+            "rev-list",
+            "--reverse",
+            &format!("origin/main..origin/{branch}"),
+        ])?,
+        "listing the car's commits",
+    )?;
+    let commits: Vec<&str> = commits.lines().filter(|l| !l.is_empty()).collect();
+    let behind = ok(
+        &git(&[
+            "rev-list",
+            "--count",
+            &format!("origin/{branch}..origin/main"),
+        ])?,
+        "counting how far behind",
+    )?;
+    if behind.trim() == "0" {
+        return Ok(Rebased {
+            old_head: old_head.clone(),
+            new_head: old_head,
+            replayed: 0,
+        });
+    }
+    let tmp = std::env::temp_dir().join(format!(
+        "boss-gate-rebase-{}-{}",
+        std::process::id(),
+        &old_head[..8.min(old_head.len())]
+    ));
+    let _ = std::fs::remove_dir_all(&tmp);
+    ok(
+        &git(&[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            tmp.to_str().context("temp path is utf8")?,
+            &main_head,
+        ])?,
+        "adding the temporary worktree",
+    )?;
+    let cleanup = |git: &dyn Fn(&[&str]) -> anyhow::Result<std::process::Output>| {
+        let _ = git(&["worktree", "remove", "--force", tmp.to_str().unwrap_or("")]);
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = git(&["worktree", "prune"]);
+    };
+    let tmp_str = tmp.to_str().context("temp path is utf8")?.to_string();
+    for c in &commits {
+        // cherry-pick keeps the car's AUTHOR; the COMMITTER is this
+        // verb, acting for whoever runs it — set explicitly so the replay
+        // does not depend on a git identity in the environment (a gate
+        // runner's or a test's has none).
+        let pick = crate::git_auth::command()
+            .arg("-C")
+            .arg(&tmp_str)
+            .args(["cherry-pick", c])
+            .env("GIT_COMMITTER_NAME", "boss gate --rebase")
+            .env("GIT_COMMITTER_EMAIL", "boss@algedonic.dev")
+            .output()
+            .context("cherry-pick")?;
+        if !pick.status.success() {
+            let files = crate::git_auth::command()
+                .arg("-C")
+                .arg(&tmp_str)
+                .args(["diff", "--name-only", "--diff-filter=U"])
+                .output()
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .trim()
+                        .replace('\n', ", ")
+                })
+                .unwrap_or_default();
+            let said = String::from_utf8_lossy(&pick.stderr).trim().to_string();
+            let _ = crate::git_auth::command()
+                .arg("-C")
+                .arg(&tmp_str)
+                .args(["cherry-pick", "--abort"])
+                .output();
+            cleanup(&git);
+            if files.is_empty() {
+                bail!(
+                    "boss gate --rebase: replaying {} onto origin/main@{} failed before any \
+                     conflict could be read — git said: {said}. Nothing was pushed; {branch} still \
+                     points at {}.",
+                    &c[..8.min(c.len())],
+                    &main_head[..8],
+                    &old_head[..8]
+                );
+            }
+            bail!(
+                "boss gate --rebase: REFUSED — replaying {} onto origin/main@{} hit a conflict in: \
+                 {files}. Nothing was pushed; {branch} still points at {}. Resolve it in your own \
+                 worktree (git rebase origin/main) and gate again.",
+                &c[..8.min(c.len())],
+                &main_head[..8],
+                &old_head[..8]
+            );
+        }
+    }
+    let new_head = match ok(
+        &crate::git_auth::command()
+            .arg("-C")
+            .arg(&tmp_str)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .context("reading the replayed head")?,
+        "reading the replayed head",
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            cleanup(&git);
+            return Err(e);
+        }
+    };
+    // Author preserved by cherry-pick; committer is whoever runs this, as
+    // with any push. The lease is the head this function read, so a push
+    // that raced us is refused rather than overwritten.
+    let push = crate::git_auth::command()
+        .arg("-C")
+        .arg(&tmp_str)
+        .args([
+            "push",
+            "-q",
+            &format!("--force-with-lease=refs/heads/{branch}:{old_head}"),
+            "origin",
+            &format!("HEAD:refs/heads/{branch}"),
+        ])
+        .output()
+        .context("pushing the replayed branch")?;
+    cleanup(&git);
+    if !push.status.success() {
+        bail!(
+            "boss gate --rebase: the replay succeeded but the push was refused: {}. The branch \
+             on the forge is unchanged.",
+            String::from_utf8_lossy(&push.stderr).trim()
+        );
+    }
+    // Keep the caller's remote-tracking ref honest; the local branch,
+    // if checked out somewhere, is theirs to move.
+    let _ = git(&["fetch", "-q", "origin", &format!("refs/heads/{branch}")]);
+    Ok(Rebased {
+        old_head,
+        new_head,
+        replayed: commits.len(),
+    })
+}
+
 pub(crate) fn stale_base_guard(
     branch: &str,
     obs: &BaseObservation,
@@ -475,6 +675,110 @@ mod tests {
             );
             Self { clone }
         }
+    }
+
+    /// `--rebase`: a stale car's commits are replayed onto origin/main in a
+    /// TEMPORARY worktree and the branch is moved on the forge with a
+    /// lease on its old head. Nothing in the caller's checkout moves.
+    /// Measured 2026-09-12: seven cars rebased by hand in one session,
+    /// each a worktree-add + cherry-pick + force-with-lease because the
+    /// refusal was right and the fix was always the same.
+    #[test]
+    fn a_stale_car_is_replayed_onto_main_and_moved_on_the_forge() {
+        let f = Forge::build("boss-cli-freshness-rebase-clean");
+        let before = observe(&f.clone, "car/disjoint");
+        assert_eq!(before.standing, Base::Behind, "{before:?}");
+        let old_head = String::from_utf8_lossy(
+            &Forge::git(&f.clone, &["rev-parse", "origin/car/disjoint"]).stdout,
+        )
+        .trim()
+        .to_string();
+
+        let done =
+            rebase_onto_main(&f.clone, "car/disjoint").expect("a disjoint car replays clean");
+        assert_eq!(done.old_head, old_head);
+        assert_eq!(done.replayed, 1, "one commit replayed");
+        assert_ne!(done.new_head, old_head);
+
+        // The forge's branch moved, the replayed commit sits on main, and
+        // the observation is now CURRENT.
+        Forge::git(&f.clone, &["fetch", "-q", "origin"]);
+        let forge_head = String::from_utf8_lossy(
+            &Forge::git(&f.clone, &["rev-parse", "origin/car/disjoint"]).stdout,
+        )
+        .trim()
+        .to_string();
+        assert_eq!(
+            forge_head, done.new_head,
+            "the forge carries the replayed head"
+        );
+        let after = observe(&f.clone, "car/disjoint");
+        assert_eq!(after.standing, Base::Current, "{after:?}");
+        let body = String::from_utf8_lossy(
+            &Forge::git(
+                &f.clone,
+                &["show", "--stat", "--format=%s", "origin/car/disjoint"],
+            )
+            .stdout,
+        )
+        .to_string();
+        assert!(
+            body.contains("car edits mine.rs only") && body.contains("mine.rs"),
+            "{body}"
+        );
+        // The caller's checkout did not move: no worktree of ours was
+        // left behind under it.
+        let wts = String::from_utf8_lossy(&Forge::git(&f.clone, &["worktree", "list"]).stdout)
+            .to_string();
+        assert_eq!(
+            wts.lines().count(),
+            1,
+            "the temporary worktree is gone: {wts}"
+        );
+    }
+
+    /// A car whose replay conflicts is REFUSED with the files named, the
+    /// forge untouched and the temporary worktree removed — the builder
+    /// resolves it; this verb never guesses a merge.
+    #[test]
+    fn a_conflicting_replay_is_refused_naming_the_files_and_moves_nothing() {
+        let f = Forge::build("boss-cli-freshness-rebase-conflict");
+        let old_head = String::from_utf8_lossy(
+            &Forge::git(&f.clone, &["rev-parse", "origin/car/overlaps"]).stdout,
+        )
+        .trim()
+        .to_string();
+        let err = rebase_onto_main(&f.clone, "car/overlaps")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("landed.rs") && err.contains("conflict"),
+            "{err}"
+        );
+        Forge::git(&f.clone, &["fetch", "-q", "origin"]);
+        let forge_head = String::from_utf8_lossy(
+            &Forge::git(&f.clone, &["rev-parse", "origin/car/overlaps"]).stdout,
+        )
+        .trim()
+        .to_string();
+        assert_eq!(forge_head, old_head, "the forge's branch did not move");
+        let wts = String::from_utf8_lossy(&Forge::git(&f.clone, &["worktree", "list"]).stdout)
+            .to_string();
+        assert_eq!(
+            wts.lines().count(),
+            1,
+            "no temporary worktree left behind: {wts}"
+        );
+    }
+
+    /// A car already on main has nothing to replay; saying so is not an
+    /// error, and nothing is pushed.
+    #[test]
+    fn a_current_car_is_left_alone() {
+        let f = Forge::build("boss-cli-freshness-rebase-current");
+        let done = rebase_onto_main(&f.clone, "car/ahead").expect("nothing to do is ok");
+        assert_eq!(done.replayed, 0);
+        assert_eq!(done.old_head, done.new_head);
     }
 
     /// THE ANCHOR. A branch whose base is behind main, and whose diff

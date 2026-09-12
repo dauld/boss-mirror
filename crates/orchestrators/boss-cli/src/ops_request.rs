@@ -1,0 +1,479 @@
+//! `boss ops <host> <verb> [args…] [--wait]` — file an ops-request from
+//! the terminal, validated against the allowlist the runner itself
+//! enforces, and optionally wait for the host's answer.
+//!
+//! THE DOOR HAD NO HANDLE. The ops-request packet (729329c6) replaced
+//! ssh: a host's runner polls the system of record for packets naming
+//! it, executes one of the allowlisted verbs in infra/ops/verbs.json
+//! with pattern-checked args, and writes stdout/stderr/exit onto the
+//! step — in under two minutes, every time it was tried. But filing one
+//! was five hand steps: write `{host, verb, args}` to a scratch file,
+//! `boss job file --kind ops-request --subject-id <host> --title … --metadata
+//! file.json`, then poll the packet by hand for its `execute` step. Five
+//! were filed that way on 2026-09-12 alone (3d6daea9), two the session
+//! before. This verb is the handle.
+//!
+//! ONE ALLOWLIST, READ TWICE, NEVER COPIED. `verbs.json` is the
+//! authority the runner enforces on the host; this verb compiles the
+//! same file in and applies the same rules at the terminal — unknown
+//! verb, a host the verb does not serve, a missing required arg, an arg
+//! outside its pattern / one_of / max — so a bad call is refused before
+//! a packet exists rather than as a `refused` step a minute later. The
+//! runner's check still runs: this is the early copy of its verdict,
+//! not a replacement for it. A binary that lags main carries an older
+//! allowlist; `boss orient`'s freshness line says so.
+
+use anyhow::{Context, Result, anyhow, bail};
+use serde_json::{Value, json};
+
+/// The allowlist this binary was built with — the same file the runner
+/// reads on the host (`infra/ops/verbs.json`).
+pub(crate) const VERBS_JSON: &str = include_str!("../../../../infra/ops/verbs.json");
+
+/// A call the allowlist admits: the args as the packet will carry them
+/// (positional strings, defaults filled, omitted optionals dropped) and
+/// the title the packet gets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Validated {
+    pub host: String,
+    pub verb: String,
+    pub args: Vec<String>,
+    pub title: String,
+    pub mutating: bool,
+}
+
+/// Apply the allowlist's rules to a call, exactly as `ops-runner.sh`
+/// does (`params[]`: `pattern` | `one_of`, `default`, `optional`, `max`;
+/// `hosts`). Pure, over the parsed allowlist, so a test can hand it a
+/// fixture.
+pub(crate) fn validate(
+    verbs: &Value,
+    host: &str,
+    verb: &str,
+    args: &[String],
+) -> Result<Validated> {
+    let table = verbs
+        .get("verbs")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("the allowlist has no `verbs` table"))?;
+    let spec = table.get(verb).ok_or_else(|| {
+        let mut names: Vec<&str> = table.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        anyhow!(
+            "boss ops: REFUSED — `{verb}` is not an allowlisted verb. The allowlist \
+             (infra/ops/verbs.json) knows: {}",
+            names.join(", ")
+        )
+    })?;
+    let hosts: Vec<&str> = spec
+        .get("hosts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if !hosts.contains(&host) {
+        bail!(
+            "boss ops: REFUSED — `{verb}` does not serve host `{host}`; it serves: {}. A runner \
+             acts only on an exact host match, so this packet would sit open and unanswered.",
+            if hosts.is_empty() {
+                "(no host at all)".to_string()
+            } else {
+                hosts.join(", ")
+            }
+        );
+    }
+    let params: Vec<&Value> = spec
+        .get("params")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .collect();
+    if args.len() > params.len() {
+        bail!(
+            "boss ops: REFUSED — `{verb}` takes {} arg(s) ({}), got {}: {:?}",
+            params.len(),
+            params
+                .iter()
+                .filter_map(|p| p.get("name").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(", "),
+            args.len(),
+            args
+        );
+    }
+    let mut out = Vec::new();
+    for (i, p) in params.iter().enumerate() {
+        let name = p.get("name").and_then(Value::as_str).unwrap_or("?");
+        let given = args.get(i).map(String::as_str);
+        let raw = match given {
+            Some(v) => v.to_string(),
+            None => {
+                if let Some(d) = p.get("default").and_then(Value::as_str) {
+                    d.to_string()
+                } else if p.get("optional").and_then(Value::as_bool).unwrap_or(false) {
+                    continue;
+                } else {
+                    bail!(
+                        "boss ops: REFUSED — `{verb}` needs arg `{name}` (position {})",
+                        i + 1
+                    );
+                }
+            }
+        };
+        if let Some(one_of) = p.get("one_of").and_then(Value::as_array) {
+            let allowed: Vec<&str> = one_of.iter().filter_map(Value::as_str).collect();
+            if !allowed.contains(&raw.as_str()) {
+                bail!(
+                    "boss ops: REFUSED — arg `{name}` value `{raw}` is not one of {}",
+                    allowed.join(", ")
+                );
+            }
+        } else if let Some(pat) = p.get("pattern").and_then(Value::as_str) {
+            let re = regex::Regex::new(pat).with_context(|| {
+                format!("the allowlist's pattern for {verb}.{name} is not a regex")
+            })?;
+            if !re.is_match(&raw) {
+                bail!("boss ops: REFUSED — arg `{name}` value `{raw}` does not match {pat}");
+            }
+        }
+        if let Some(max) = p.get("max").and_then(Value::as_i64)
+            && raw.parse::<i64>().map(|n| n > max).unwrap_or(false)
+        {
+            bail!("boss ops: REFUSED — arg `{name}` value `{raw}` exceeds max {max}");
+        }
+        out.push(raw);
+    }
+    let mutating = spec
+        .get("about")
+        .and_then(Value::as_str)
+        .is_some_and(|a| a.contains("MUTATING"));
+    let title = if out.is_empty() {
+        format!("{verb} on {host}")
+    } else {
+        format!("{verb} {} on {host}", out.join(" "))
+    };
+    Ok(Validated {
+        host: host.to_string(),
+        verb: verb.to_string(),
+        args: out,
+        title,
+        mutating,
+    })
+}
+
+/// The answer a closed ops-request carries on its `execute` step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Answer {
+    pub disposition: String,
+    pub exit_code: Option<String>,
+    pub output: String,
+    pub runner_host: String,
+}
+
+/// Read the `execute` step's record off a packet, or `None` while the
+/// host has not answered.
+pub(crate) fn answer_of(job: &Value) -> Option<Answer> {
+    let step = job
+        .get("steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some("execute"))?;
+    let md = step.get("metadata")?;
+    let disposition = md.get("disposition").and_then(Value::as_str)?.to_string();
+    Some(Answer {
+        disposition,
+        exit_code: md
+            .get("exit_code")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        output: md
+            .get("output")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        runner_host: md
+            .get("runner_host")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+/// The one-line verdict `--wait` ends with, and whether it is a success.
+pub(crate) fn verdict_line(id8: &str, v: &Validated, a: &Answer) -> (String, bool) {
+    match (a.disposition.as_str(), a.exit_code.as_deref()) {
+        ("answered", Some("0")) => (
+            format!(
+                "boss ops: answered — {} on {} (packet {id8}, exit 0)",
+                v.verb, a.runner_host
+            ),
+            true,
+        ),
+        ("answered", code) => (
+            format!(
+                "boss ops: answered — {} on {} (packet {id8}, exit {})",
+                v.verb,
+                a.runner_host,
+                code.unwrap_or("?")
+            ),
+            false,
+        ),
+        (d, _) => (
+            format!("boss ops: {d} — {} on {} (packet {id8})", v.verb, v.host),
+            false,
+        ),
+    }
+}
+
+pub async fn run(
+    host: String,
+    verb: String,
+    args: Vec<String>,
+    wait: bool,
+    dry_run: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let verbs: Value =
+        serde_json::from_str(VERBS_JSON).context("the compiled-in verbs.json is not JSON")?;
+    let v = validate(&verbs, &host, &verb, &args)?;
+    if v.mutating {
+        eprintln!(
+            "boss ops: `{}` is MUTATING on {} — the host's runner applies the verb's own bounds; \
+             this files the request, it does not widen them.",
+            v.verb, v.host
+        );
+    }
+    if dry_run {
+        println!(
+            "boss ops: DRY RUN — would file ops-request \"{}\" (host {}, verb {}, args {:?})",
+            v.title, v.host, v.verb, v.args
+        );
+        return Ok(());
+    }
+    let http = reqwest::Client::new();
+    let owner = crate::identity::sign(&reqwest::Method::POST, "/api/jobs")?;
+    let body = crate::job::envelope(
+        "ops-request",
+        &v.title,
+        None,
+        Some(&v.host),
+        &owner,
+        &now.format("%Y-%m-%d").to_string(),
+        Some(json!({"host": v.host, "verb": v.verb, "args": v.args})),
+    );
+    let created = crate::gate::api(&http, reqwest::Method::POST, "/api/jobs", Some(body))
+        .await?
+        .context("the create returned no body")?;
+    let id = created
+        .get("id")
+        .and_then(Value::as_str)
+        .context("the create returned no id — refusing to call that filed")?
+        .to_string();
+    let id8 = &id[..8.min(id.len())];
+    println!("boss ops: filed {id8} — \"{}\"", v.title);
+    if !wait {
+        println!(
+            "boss ops: the runner on {} polls about once a minute; `boss job get {id8}` reads the answer",
+            v.host
+        );
+        return Ok(());
+    }
+    // The packet is the record; poll it, as `boss gate --wait` does.
+    // A host whose runner is down never answers: say so after a bound
+    // rather than waiting forever on a packet nobody will touch.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        let job = crate::gate::api(
+            &http,
+            reqwest::Method::GET,
+            &format!("/api/jobs/{id}"),
+            None,
+        )
+        .await?
+        .context("the filed packet vanished")?;
+        let job = job.get("data").unwrap_or(&job).clone();
+        if let Some(a) = answer_of(&job) {
+            let (line, ok) = verdict_line(id8, &v, &a);
+            if !a.output.trim().is_empty() {
+                println!("{}", a.output.trim_end());
+            }
+            println!("{line}");
+            if ok {
+                return Ok(());
+            }
+            bail!("{line}");
+        }
+        if std::time::Instant::now() > deadline {
+            bail!(
+                "boss ops: no answer from {} in 15 minutes — its runner polls every minute, so it \
+                 is down or cannot reach the system of record. The packet {id8} stays open and \
+                 visibly unanswered; `boss job get {id8}` when the host is back.",
+                v.host
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture() -> Value {
+        json!({"verbs": {
+            "journal-tail": {"about": "last N journal lines", "hosts": ["boss-gcp", "forge"],
+                "argv": ["journalctl", "-u", "{1}", "-n", "{2}", "--no-pager"],
+                "params": [
+                    {"name": "unit", "pattern": "^[A-Za-z0-9@._][A-Za-z0-9@._-]*$"},
+                    {"name": "lines", "pattern": "^[0-9]{1,3}$", "default": "100", "max": 200}]},
+            "delete-orphan-object": {"about": "MUTATING — delete one undeclared object", "hosts": ["forge"],
+                "argv": ["infra/forge/delete-orphan-object.sh", "{1}", "{2}"],
+                "params": [
+                    {"name": "object", "pattern": "^[A-Z][A-Za-z0-9]{0,62}/[a-z0-9-]+/[a-z0-9.-]+$"},
+                    {"name": "mode", "one_of": ["--dry-run"], "optional": true}]},
+            "uptime": {"about": "uptime", "hosts": ["boss-gcp", "forge"], "argv": ["uptime"], "params": []}
+        }})
+    }
+
+    /// The same rules the runner applies on the host, applied here
+    /// first: each refusal names what the allowlist would have said.
+    #[test]
+    fn the_terminal_refuses_what_the_runner_would_refuse() {
+        let v = fixture();
+        let e = validate(&v, "forge", "rm-rf", &[]).unwrap_err().to_string();
+        assert!(
+            e.contains("not an allowlisted verb") && e.contains("journal-tail"),
+            "{e}"
+        );
+        let e = validate(&v, "w-1", "uptime", &[]).unwrap_err().to_string();
+        assert!(
+            e.contains("does not serve host `w-1`") && e.contains("boss-gcp, forge"),
+            "{e}"
+        );
+        let e = validate(&v, "forge", "journal-tail", &[])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("needs arg `unit`"), "{e}");
+        let e = validate(
+            &v,
+            "forge",
+            "journal-tail",
+            &["boss-x.service".into(), "5000".into()],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("does not match"), "{e}");
+        let e = validate(
+            &v,
+            "forge",
+            "journal-tail",
+            &["boss-x.service".into(), "201".into()],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("exceeds max 200"), "{e}");
+        let e = validate(
+            &v,
+            "forge",
+            "delete-orphan-object",
+            &["CronJob/boss-dev/x".into(), "--force".into()],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("not one of --dry-run"), "{e}");
+        let e = validate(&v, "forge", "uptime", &["extra".into()])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("takes 0 arg(s)"), "{e}");
+    }
+
+    /// What the allowlist admits is carried exactly as the runner will
+    /// read it: defaults filled, omitted optionals dropped, a title a
+    /// reader can scan, and MUTATING said out loud.
+    #[test]
+    fn an_admitted_call_carries_the_args_as_the_runner_reads_them() {
+        let v = fixture();
+        let ok = validate(
+            &v,
+            "boss-gcp",
+            "journal-tail",
+            &["boss-codebase-metrics.service".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            ok.args,
+            vec!["boss-codebase-metrics.service", "100"],
+            "the default is filled"
+        );
+        assert_eq!(
+            ok.title,
+            "journal-tail boss-codebase-metrics.service 100 on boss-gcp"
+        );
+        assert!(!ok.mutating);
+        let ok = validate(
+            &v,
+            "forge",
+            "delete-orphan-object",
+            &["CronJob/boss-dev/gate-seed-prepare".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            ok.args,
+            vec!["CronJob/boss-dev/gate-seed-prepare"],
+            "the optional mode is dropped, not defaulted"
+        );
+        assert!(ok.mutating);
+        let ok = validate(&v, "forge", "uptime", &[]).unwrap();
+        assert_eq!(ok.title, "uptime on forge");
+    }
+
+    /// The shipped allowlist parses and every verb validates its own
+    /// happy path — so a verbs.json edit that breaks the terminal half is
+    /// caught here, not at the first `boss ops`.
+    #[test]
+    fn the_shipped_allowlist_is_one_this_verb_can_read() {
+        let v: Value = serde_json::from_str(VERBS_JSON).expect("verbs.json parses");
+        let table = v["verbs"].as_object().expect("a verbs table");
+        assert!(table.len() >= 16, "{} verbs", table.len());
+        for (name, spec) in table {
+            let host = spec["hosts"][0].as_str().expect("a host");
+            // No args: a verb whose every param has a default or is optional validates;
+            // one with a required param refuses naming it — either way it is readable.
+            match validate(&v, host, name, &[]) {
+                Ok(ok) => assert!(ok.title.ends_with(&format!("on {host}"))),
+                Err(e) => assert!(e.to_string().contains("needs arg"), "{name}: {e}"),
+            }
+        }
+    }
+
+    /// The answer is read off the packet's execute step and judged the
+    /// way the runner wrote it: answered+0 is success; anything else is
+    /// a non-zero exit for the caller.
+    #[test]
+    fn the_answer_is_judged_off_the_execute_step() {
+        let v = validate(&fixture(), "forge", "uptime", &[]).unwrap();
+        let job = json!({"steps": [
+            {"spec_slug": "filed", "status": "completed", "metadata": {}},
+            {"spec_slug": "execute", "status": "completed",
+             "metadata": {"disposition": "answered", "exit_code": "0", "output": " 18:40:01 up 9 days\n", "runner_host": "forge"}}
+        ]});
+        let a = answer_of(&job).unwrap();
+        let (line, ok) = verdict_line("abcd1234", &v, &a);
+        assert!(
+            ok && line.contains("exit 0") && line.contains("on forge"),
+            "{line}"
+        );
+        let refused = json!({"steps": [{"spec_slug": "execute", "status": "completed",
+            "metadata": {"disposition": "refused", "output": "verb x does not serve this host", "runner_host": "forge"}}]});
+        let (line, ok) = verdict_line("abcd1234", &v, &answer_of(&refused).unwrap());
+        assert!(!ok && line.starts_with("boss ops: refused"), "{line}");
+        assert!(
+            answer_of(
+                &json!({"steps": [{"spec_slug": "execute", "status": "ready", "metadata": {}}]})
+            )
+            .is_none()
+        );
+    }
+}

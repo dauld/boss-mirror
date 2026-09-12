@@ -37,6 +37,9 @@ uuid = { workspace = true }
 # (workflow publish-request v1, packet 0b1b32f9).
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# `boss ops` applies the allowlist's arg patterns at the terminal, the
+# same regexes ops-runner.sh applies on the host (3d6daea9).
+regex = "1"
 
 [dev-dependencies]
 # dock_preview's tests prove trial_merge against REAL git in a scratch

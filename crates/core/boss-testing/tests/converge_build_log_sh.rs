@@ -85,9 +85,13 @@ fn run(dir: &PathBuf, docker_rc: i32, docker_out: &str) -> (i32, String, String)
         std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    // The block records its timing through run-summary.sh, the one
+    // definition every unit's summary goes through; the file is where
+    // ExecStopPost reads it from.
     let script = format!(
-        "set -euo pipefail\nHOME={home}\nHEAD=abc1234\nREGISTRY=reg/boss\n{block}",
+        "set -euo pipefail\nHOME={home}\nHEAD=abc1234\nREGISTRY=reg/boss\n. {lib}\n{block}",
         home = dir.display(),
+        lib = repo_root().join("infra/run-summary.sh").display(),
         block = build_block()
     );
     let out = Command::new("bash")
@@ -97,6 +101,7 @@ fn run(dir: &PathBuf, docker_rc: i32, docker_out: &str) -> (i32, String, String)
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
+        .env("BOSS_RUN_SUMMARY_FILE", dir.join("summary.json"))
         .current_dir(dir)
         .output()
         .expect("bash runs");
@@ -212,4 +217,30 @@ fn a_successful_build_says_nothing_and_clears_the_stamp() {
         !s.0.join(".boss-last-build-failed").exists(),
         "a build that succeeds clears the stamp, so the next failure reads as a first attempt"
     );
+}
+
+/// WHERE THE MINUTES WENT is on the packet, not only in the journal.
+/// Every converge closed `result=ok` and nothing else (measured
+/// 2026-09-12 while sizing the converge as the second-longest stage of
+/// a car's life at 10–20 min): answering "how long was the build" meant
+/// 200 journal lines off the host. The build block now stamps
+/// `build_s` and the head it built through run-summary.sh, so the
+/// packet says how long the image took — the measurement a layer cache
+/// would be judged against.
+#[test]
+fn a_successful_build_records_how_long_it_took_on_the_summary() {
+    let s = scratch("converge-build-records-build-s");
+    let (rc, out, err) = run(&s.0, 0, "#12 DONE 1.0s\nnaming to reg/boss:abc1234");
+    assert_eq!(rc, 0, "stdout:\n{out}\nstderr:\n{err}");
+    let summary = std::fs::read_to_string(s.0.join("summary.json"))
+        .expect("the build block wrote the run summary");
+    let v: serde_json::Value = serde_json::from_str(&summary).expect("summary is JSON");
+    assert!(
+        v.get("build_s")
+            .and_then(|b| b.as_str().map(|x| x.parse::<u64>().is_ok()))
+            .unwrap_or(false)
+            || v.get("build_s").and_then(|b| b.as_u64()).is_some(),
+        "build_s is a number of seconds: {summary}"
+    );
+    assert_eq!(v["build_head"], "abc1234", "{summary}");
 }

@@ -1968,6 +1968,7 @@ pub async fn run(
     park: ParkIntent,
     force_regate: Option<String>,
     stale_base_anyway: Option<String>,
+    rebase: bool,
     hold: Option<String>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
@@ -2053,7 +2054,7 @@ pub async fn run(
     // Fetched here, before the packet, so a bad env override refuses
     // without side effects — the policy read never fails, it falls back.
     let max = max_concurrent(&http).await?;
-    let sha = resolve_sha(branch);
+    let mut sha = resolve_sha(branch);
 
     // A LANDED BRANCH IS NOT GATED. Before any packet is filed or
     // reused — a refusal here costs nothing to close. See `landed_guard`.
@@ -2137,7 +2138,37 @@ pub async fn run(
     // "stale", and this is the single door every car passes through, so a
     // guard that failed closed on a forge blip would stop all delivery,
     // which is worse than the defect it guards.
-    let base_obs = crate::freshness::observe(std::path::Path::new("."), branch);
+    let mut base_obs = crate::freshness::observe(std::path::Path::new("."), branch);
+    // `--rebase`: the refusal below was always followed by the same three
+    // hand steps (worktree, cherry-pick, force-with-lease — seven times on
+    // 2026-09-12), so the verb does them, in a temporary worktree, and
+    // gates the replayed head. A conflict refuses with the files named
+    // and pushes nothing. The sha recorded on the gate-run is the NEW
+    // head: it is resolved below, after this.
+    if rebase && dry && base_obs.standing == crate::freshness::Base::Behind {
+        println!(
+            "boss gate: DRY RUN — --rebase would replay {branch} onto origin/main@{} (base {} is \
+             {} commit(s) behind) and push with a lease; nothing is pushed in a dry run",
+            &base_obs.main_head[..7.min(base_obs.main_head.len())],
+            &base_obs.base[..7.min(base_obs.base.len())],
+            base_obs.behind_by
+        );
+    } else if rebase && base_obs.standing == crate::freshness::Base::Behind {
+        let done = crate::freshness::rebase_onto_main(std::path::Path::new("."), branch)?;
+        println!(
+            "boss gate: --rebase replayed {} commit(s) of {branch} onto origin/main — {} → {} \
+             (pushed with a lease on the old head; your own worktree still has the old head: \
+             `git fetch origin && git reset --hard origin/{branch}` there when you are done)",
+            done.replayed,
+            &done.old_head[..8.min(done.old_head.len())],
+            &done.new_head[..8.min(done.new_head.len())]
+        );
+        base_obs = crate::freshness::observe(std::path::Path::new("."), branch);
+        // The packet records the head that is GATED — the replayed one.
+        // First live use (2026-09-12, dfc747c5) recorded the pre-rebase
+        // sha, because it was resolved before the guard ran.
+        sha = done.new_head.clone();
+    }
     match crate::freshness::stale_base_guard(branch, &base_obs, stale_base_anyway.as_deref()) {
         crate::freshness::BaseGuard::Note(note) => println!("{note}"),
         crate::freshness::BaseGuard::Refuse(why) => bail!("{why}"),

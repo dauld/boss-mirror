@@ -482,6 +482,8 @@ pub async fn run(
         // landed between the cut and the gate and re-railing onto the
         // newer main is the right answer, not a forced gate.
         None,
+        // No `--rebase` either: a rerail IS the replay, already done.
+        false,
         None,
         now,
     )

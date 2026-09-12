@@ -64,6 +64,24 @@ REPO="${BOSS_FORGE_REPO_DIR:-$HOME/boss}"
 # the stage that actually exits runs it.
 STAGE="start"
 OUTCOME=""
+# WHERE THE MINUTES WENT, on the packet. Every converge closed its
+# maintenance packet `result=ok` and nothing else; how long the image
+# build took — the second-longest stage of a car's life, 10–20 min
+# measured 2026-09-12 — lived only in this journal, 200 lines at a time
+# through an ops-request. run-summary.sh is the one definition of how a
+# unit leaves facts for its own ExecStopPost (the unit declares
+# BOSS_RUN_SUMMARY_FILE); each stage below stamps its seconds as soon as
+# it knows them, and a run that dies keeps what it had recorded.
+# From $REPO like the other libs: this script runs from a snapshot in
+# /tmp (BOSS_RUNNER_SNAPSHOT), so `dirname "$0"` is not the tree.
+. "$REPO/infra/run-summary.sh"
+run_summary_reset
+_stage_started=$(date +%s)
+_stage_done() { # <field>  — seconds since the previous stage boundary
+    local now; now=$(date +%s)
+    run_summary_field "$1" "$(( now - _stage_started ))"
+    _stage_started=$now
+}
 _finish() {
     local rc=$?
     rm -f "$BOSS_RUNNER_SNAPSHOT" ${BOSS_RUNNER_SNAPSHOT2:+"$BOSS_RUNNER_SNAPSHOT2"}
@@ -104,9 +122,11 @@ LAST=$(cat "$STAMP_FILE" 2>/dev/null || echo none)
 
 if [ "$HEAD" = "$LAST" ]; then
     echo "cluster-deploy-runner: forge main unchanged ($HEAD)"
+    run_summary_field unchanged "$HEAD"
     OUTCOME="converged=$HEAD (unchanged)"
     exit 0
 fi
+_stage_started=$(date +%s)
 
 # A head that bricked its boot stays quarantined until main moves.
 # Without this, the 2026-09-02 shape loops forever: rollout fails,
@@ -189,10 +209,16 @@ if [ "$HEAD" = "$(cat "$BUILD_FAILED_FILE" 2>/dev/null || echo none)" ]; then
 fi
 BUILD_LOG="$(mktemp -t boss-converge-build.XXXXXX)"
 echo "cluster-deploy-runner: building $HEAD ($BUILD_ATTEMPT)"
+_build_started=$(date +%s)
 if docker build -f infra/oss-quickstart/Dockerfile \
     --build-arg BOSS_BUILD_COMMIT="$(git rev-parse HEAD)" \
     -t "$REGISTRY:$HEAD" . > "$BUILD_LOG" 2>&1; then
     rm -f "$BUILD_FAILED_FILE" "$BUILD_LOG"
+    # Stamped here, in the block the build-log test lifts verbatim, with
+    # the lib's own function rather than a helper the block cannot see.
+    run_summary_field build_s "$(( $(date +%s) - _build_started ))"
+    run_summary_field build_head "$HEAD"
+    _stage_started=$(date +%s)
 else
     build_rc=$?
     echo "$HEAD" > "$BUILD_FAILED_FILE"
@@ -224,6 +250,7 @@ else
 fi
 STAGE="push $HEAD"
 docker push "$REGISTRY:$HEAD"
+_stage_done push_s
 
 # The image proves it can boot before it goes anywhere near the cluster
 # (cluster-deploy-lib.sh image_boots): its own launcher checks that
@@ -414,6 +441,7 @@ $K set image -n boss-dev deploy/boss-conductor "conductor=$REGISTRY:$HEAD" || tr
 echo "$HEAD" > "$STAMP_FILE"
 rm -f "$FAILED_FILE"
 echo "cluster-deploy-runner: cluster on $REGISTRY:$HEAD"
+_stage_done roll_s
 # The roll is real from here; a failed verification below is a finding
 # about it, not a failed converge — the request reads converged either
 # way, and the maintenance packet carries the verification verdict.
@@ -447,6 +475,7 @@ if [ "$check_rc" -ne 0 ]; then
     exit 1
 fi
 echo "cluster-deploy-runner: manifests verified — the cluster holds what the tree declares"
+_stage_done verify_s
 
 # AND THE OTHER DIRECTION. check-manifests-applied.sh asks "is every
 # DECLARED object present?" — a question no deleted manifest is in, and

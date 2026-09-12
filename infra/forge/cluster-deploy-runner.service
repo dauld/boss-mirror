@@ -8,6 +8,13 @@ User=david
 TimeoutStartSec=90min
 # Job visibility. The forge host has no /opt/boss — it runs from
 # this checkout, which is where the installed units already point.
+# The facts the run leaves for its own packet (build_s, push_s, roll_s,
+# verify_s, build_head, or unchanged): run-summary.sh writes them here
+# during ExecStart and boss-step.sh (ExecStopPost) merges them onto the
+# run step and deletes the file. Under $HOME because this unit runs as
+# david and /run is root's; one path, declared once, inherited by both
+# Exec lines (CLAUDE.md §9a).
+Environment=BOSS_RUN_SUMMARY_FILE=/home/david/.boss-cluster-converge.summary.json
 ExecStartPre=/home/david/boss/infra/boss-maintenance-wrap.sh maintenance-cluster-converge "Cluster converge on forge main"
 ExecStart=/home/david/boss/infra/forge/cluster-deploy-runner.sh
 ExecStopPost=-/home/david/boss/infra/boss-step.sh maintenance-cluster-converge run
