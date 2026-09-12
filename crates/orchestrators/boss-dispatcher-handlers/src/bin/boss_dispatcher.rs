@@ -538,6 +538,11 @@ async fn main() -> Result<()> {
                         // this pod's log. Best-effort; see
                         // boss_dispatcher::rules::dead_letter.
                         dead_letters: Some(dead_letters.clone()),
+                        // Counted on the liveness surface whether or not
+                        // the annotation could land (8834804a): the six
+                        // packet-less topics and a failed write both
+                        // leave a number at /api/dispatcher/health.
+                        live: Some(live_rules.clone()),
                     });
                     let ev = {
                         let live = live_rules.clone();

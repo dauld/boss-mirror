@@ -556,6 +556,44 @@ def error_lines(body):
     return out
 
 
+RE_UNREACHABLE = re.compile(
+    r"Unable to connect|Could not resolve host|Temporary failure in name resolution|"
+    r"failed to lookup address|Connection timed out|Network is unreachable|"
+    r"ConnectionRefused|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|"
+    r"Couldn't connect to server|Could not connect to|error sending request for url")
+# Two ways to say "I could not judge the tree" that must NOT be
+# mistaken for "the tree is bad". A local backend refused (127.0.0.1,
+# localhost) is the CAR's failure — a mocked suite reaching for a
+# service it was never given — and stays a red (478347ad, corrected
+# 2026-09-11 after exactly that misreading).
+RE_LOCAL = re.compile(r"127\.0\.0\.1|localhost|\[::1\]")
+
+
+def network_refusal(name, body):
+    """`None`, or the reason a failed check is a REFUSAL rather than a
+    verdict: its failure lines are connect/resolve errors against
+    somewhere off this machine, and NOTHING judged the tree — no failing
+    test, no panic, no compile error line that is not itself about the
+    network. Gate-run 7522c115 (2026-09-11): 232 bun "Unable to connect"
+    lines against registry.npmjs.org, verdict=failed against a branch
+    that was never judged; the registry answered two minutes later.
+    The receipt's own `fails` said "no cargo test failure" over the
+    connect errors — the diagnosis was on the record and nothing acted.
+    """
+    hits = [l for l in body if RE_UNREACHABLE.search(l) and not RE_LOCAL.search(l)]
+    if len(hits) < 3:
+        return None
+    if failing_tests(body) or panics(body):
+        return None
+    judged = [e for e in error_lines(body) if not RE_UNREACHABLE.search(e)
+              and not re.search(r"InstallFailed|install failed|network", e)]
+    if judged:
+        return None
+    return ("network unreachable during %s: %d connect/resolve error line(s) and no test, "
+            "panic or compile failure - the run could not judge the tree; re-gate when the "
+            "network answers (first: %s)" % (name, len(hits), hits[0].strip()[:160]))
+
+
 def clip(entry):
     """One entry, one line, bounded - and saying by how much."""
     entry = " ".join(entry.split())
@@ -676,6 +714,23 @@ if not failed:
     raise SystemExit(0)
 
 found = sections(failed)
+# A run whose EVERY failed check could not reach the network judged
+# nothing: the receipt becomes a refusal in the shape gate.sh writes for
+# its own disk floor (`verdict: refused`, `refused_because`), so the
+# strike rule, the yard and `red_verdict_detail` read it as the
+# infrastructure's failure, not the branch's. One judged failure among
+# the failed checks keeps the red: a test that failed is a verdict.
+refusals = []
+for name in failed:
+    got = found.get(name)
+    why = network_refusal(name, got[0]) if got and got[0] else None
+    if why is None:
+        refusals = []
+        break
+    refusals.append(why)
+if refusals:
+    RECEIPT["verdict"] = "refused"
+    RECEIPT["refused_because"] = "; ".join(refusals)
 entries, replay = [], []
 for name in failed:
     got = found.get(name)

@@ -232,6 +232,79 @@ fn it_replays_only_the_checks_that_failed() {
 /// ended — a timeout, an OOM kill, a node reset mid-gate. That is one of
 /// the cases most worth explaining, so it must not be dropped for want
 /// of a closing marker.
+/// A CHECK THAT COULD NOT REACH THE NETWORK JUDGED NOTHING (478347ad).
+/// Gate-run 7522c115: `web-suite` failed with 232 lines of bun's
+/// "error: Unable to connect. Is the computer able to access the url?"
+/// and no test or compile failure; two minutes later the registry
+/// answered in 0.06 s. The receipt recorded verdict=failed against the
+/// branch, and its own `fails` line already said "no cargo test failure
+/// in this check's output" over 232 connect errors — the diagnosis was
+/// on the record and nothing acted on it. A check whose failure is only
+/// connect/resolve errors, with no test, panic or compile failure, is a
+/// REFUSAL: the receipt says `refused` with a `refused_because` naming
+/// the check and the count, in the shape gate.sh writes for its own
+/// disk-floor refusal, so every reader that spares the branch on a
+/// refusal spares this one too.
+#[test]
+fn a_check_that_only_failed_to_reach_the_network_is_a_refusal_not_a_red() {
+    if python3_missing() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let mut connect_errors = String::new();
+    for _ in 0..40 {
+        connect_errors.push_str(
+            "error: Unable to connect. Is the computer able to access the url?\n\
+             \n  https://registry.npmjs.org/svelte\n\n",
+        );
+    }
+    let log = format!(
+        "::group::gate: web install\nbun install v1.2.0\n{connect_errors}error: InstallFailed\n::endgroup::\n"
+    );
+    let receipt = red_receipt(
+        "{\"name\":\"fmt\",\"result\":\"pass\"},\
+         {\"name\":\"web install\",\"result\":\"fail\"}",
+    );
+    let got = run_extractor(&receipt, &log);
+    assert!(got.ok, "{}", got.stdout);
+    let v: Value = serde_json::from_str(&got.receipt).expect("receipt is JSON");
+    assert_eq!(
+        v["verdict"], "refused",
+        "only connect errors and no judged failure: the run was refused, not the branch:\n{}",
+        got.receipt
+    );
+    let why = v["refused_because"].as_str().unwrap_or("");
+    assert!(
+        why.contains("web install") && why.contains("network") && why.contains("40"),
+        "refused_because names the check, the cause and the count: {why}"
+    );
+    assert!(
+        got.fails_joined().contains("no cargo test failure"),
+        "the fails ladder still says what it saw: {}",
+        got.fails_joined()
+    );
+}
+
+/// The same connect errors BESIDE a judged failure are noise around a
+/// red, not a refusal: a test that failed is a verdict on the branch.
+#[test]
+fn connect_errors_beside_a_judged_failure_stay_a_red() {
+    if python3_missing() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let log = format!(
+        "::group::gate: test\nerror: Unable to connect. Is the computer able to access the url?\n\
+         error: Unable to connect. Is the computer able to access the url?\n{}",
+        LOG.split("::group::gate: test\n").nth(1).unwrap_or("")
+    );
+    let receipt = red_receipt("{\"name\":\"test\",\"result\":\"fail\"}");
+    let got = run_extractor(&receipt, &log);
+    let v: Value = serde_json::from_str(&got.receipt).expect("receipt is JSON");
+    assert_eq!(v["verdict"], "failed", "{}", got.receipt);
+    assert!(v.get("refused_because").is_none(), "{}", got.receipt);
+}
+
 #[test]
 fn it_keeps_what_a_killed_check_managed_to_say() {
     if python3_missing() {

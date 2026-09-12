@@ -40,6 +40,19 @@ pub struct DispatcherLiveness {
     schedule_events: AtomicU64,
     /// Wall-clock unix seconds of the most recently handled event (0 = none yet).
     last_event_unix: AtomicI64,
+    /// Dead-letters since start (monotonic): handler failures past their
+    /// budget, or permanent. Counted HERE — a local read — because the
+    /// durable record (an annotation on the packet) needs the jobs API,
+    /// which is exactly what a dead-letter often reports broken
+    /// (8834804a). Six topics carry no packet at all; for those and for
+    /// a failed annotation write, this number is the only record that
+    /// outlives the log line.
+    dead_letters: AtomicU64,
+    /// Of those, how many left NO durable record: no packet to annotate,
+    /// no sink configured, or the annotation write failed.
+    dead_letters_unrecorded: AtomicU64,
+    /// Wall-clock unix seconds of the most recent dead-letter (0 = none).
+    last_dead_letter_unix: AtomicI64,
 }
 
 impl DispatcherLiveness {
@@ -89,6 +102,17 @@ impl DispatcherLiveness {
         self.schedule_running.store(false, Ordering::Relaxed);
     }
     /// Called by the schedule runner per sim-day it fires.
+    /// One dead-letter happened; `recorded` says whether a durable record
+    /// (the packet annotation) landed for it.
+    pub fn record_dead_letter(&self, recorded: bool) {
+        self.dead_letters.fetch_add(1, Ordering::Relaxed);
+        if !recorded {
+            self.dead_letters_unrecorded.fetch_add(1, Ordering::Relaxed);
+        }
+        self.last_dead_letter_unix
+            .store(Self::now_unix(), Ordering::Relaxed);
+    }
+
     pub fn record_schedule(&self) {
         self.schedule_events.fetch_add(1, Ordering::Relaxed);
         self.last_event_unix
@@ -115,6 +139,9 @@ impl DispatcherLiveness {
             "schedule_running": self.schedule_running.load(Ordering::Relaxed),
             "schedule_events": self.schedule_events.load(Ordering::Relaxed),
             "last_event_unix": self.last_event_unix.load(Ordering::Relaxed),
+            "dead_letters": self.dead_letters.load(Ordering::Relaxed),
+            "dead_letters_unrecorded": self.dead_letters_unrecorded.load(Ordering::Relaxed),
+            "last_dead_letter_unix": self.last_dead_letter_unix.load(Ordering::Relaxed),
         })
     }
 }

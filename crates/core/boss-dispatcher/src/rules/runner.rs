@@ -43,6 +43,12 @@ pub struct RulesRunner {
     /// only record — the pre-`a9c498eb` behaviour, kept for the tests
     /// that are about matching and settling rather than about visibility.
     pub dead_letters: Option<Arc<dyn DeadLetterSink>>,
+    /// The liveness surface a dead-letter is COUNTED on regardless of
+    /// whether it could be recorded (8834804a). A local read that owes
+    /// nothing to the jobs API — the arm that still speaks when the
+    /// annotation's own write is what failed. `None` in tests about
+    /// matching and settling.
+    pub live: Option<std::sync::Arc<crate::liveness::DispatcherLiveness>>,
 }
 
 impl RulesRunner {
@@ -374,6 +380,9 @@ impl RulesRunner {
         failures: Vec<HandlerFailure>,
     ) {
         let Some(sink) = &self.dead_letters else {
+            if let Some(live) = &self.live {
+                live.record_dead_letter(false);
+            }
             return;
         };
         let Some(target) = annotation_target(topic, payload) else {
@@ -383,8 +392,11 @@ impl RulesRunner {
                 attempts = attempt,
                 class = class.as_str(),
                 "dead-letter carries no packet to annotate: this topic's subject is not a Job, \
-                 so the log line above is the only record (a dead-letter counter is the follow-up)"
+                 so the log line above and the liveness counter are the record"
             );
+            if let Some(live) = &self.live {
+                live.record_dead_letter(false);
+            }
             return;
         };
         let note = DeadLetterNote {
@@ -400,24 +412,33 @@ impl RulesRunner {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
         };
-        match sink.record(&target, &note).await {
-            Ok(()) => info!(
-                job_id = %target.job_id,
-                step_id = ?target.step_id,
-                topic = %topic,
-                attempts = attempt,
-                class = class.as_str(),
-                "dead-letter recorded on its packet"
-            ),
+        let recorded = match sink.record(&target, &note).await {
+            Ok(()) => {
+                info!(
+                    job_id = %target.job_id,
+                    step_id = ?target.step_id,
+                    topic = %topic,
+                    attempts = attempt,
+                    class = class.as_str(),
+                    "dead-letter recorded on its packet"
+                );
+                true
+            }
             // Not an error! return and not a retry: see (1) above.
-            Err(e) => error!(
-                job_id = %target.job_id,
-                topic = %topic,
-                attempts = attempt,
-                error = %e,
-                "DEAD-LETTER annotation failed; the packet still looks untouched and this \
-                 pod's log is the only record"
-            ),
+            Err(e) => {
+                error!(
+                    job_id = %target.job_id,
+                    topic = %topic,
+                    attempts = attempt,
+                    error = %e,
+                    "DEAD-LETTER annotation failed; the packet still looks untouched and this \
+                     pod's log and the liveness counter are the record"
+                );
+                false
+            }
+        };
+        if let Some(live) = &self.live {
+            live.record_dead_letter(recorded);
         }
     }
 }
@@ -501,6 +522,7 @@ handler = "h3"
             handlers: HandlerRegistry::new(),
             helpers: Arc::new(NoHelpers),
             dead_letters: None,
+            live: None,
         };
         let subs = runner.subscriptions();
         assert_eq!(subs.len(), 2);
@@ -515,6 +537,7 @@ handler = "h3"
             handlers: HandlerRegistry::new(),
             helpers: Arc::new(NoHelpers),
             dead_letters: None,
+            live: None,
         };
         assert!(runner.subscriptions().is_empty());
     }
@@ -541,6 +564,7 @@ handler = "boom"
             handlers,
             helpers: Arc::new(NoHelpers),
             dead_letters: None,
+            live: None,
         };
         let payload = serde_json::json!({
             "job_id": "j1", "step_id": "s1", "kind": "billing"
@@ -567,6 +591,7 @@ handler = "boom"
             handlers: HandlerRegistry::new(),
             helpers: Arc::new(NoHelpers),
             dead_letters: None,
+            live: None,
         };
         let res = runner
             .handle("step.done.unmatched", "evt", &serde_json::json!({}), FIRST)
@@ -611,6 +636,7 @@ handler = "boom"
             handlers: reg,
             helpers: Arc::new(NoHelpers),
             dead_letters: None,
+            live: None,
         }
     }
 
@@ -909,6 +935,91 @@ handler = "h.invoice"
             sink.landed().await.is_empty(),
             "no packet means no annotation, not a fabricated one"
         );
+    }
+
+    /// THE COUNTER THAT OWES NOTHING TO THE JOBS API (8834804a). A
+    /// dead-letter with no packet, or whose annotation write itself
+    /// failed, had a pod's log as its only record. Both now count on
+    /// the liveness surface (/api/dispatcher/health), which is a local
+    /// read: total dead-letters, how many left NO durable record, and
+    /// when the last one happened — so an outage of the very API the
+    /// annotation needs still leaves a number a reader can see.
+    #[tokio::test]
+    async fn a_dead_letter_is_counted_on_the_liveness_surface_even_when_it_cannot_be_recorded() {
+        use crate::rules::handler::HandlerError;
+        let live = std::sync::Arc::new(crate::liveness::DispatcherLiveness::default());
+        // No packet to annotate: counted, and counted as unrecorded.
+        let sink = RecordingDeadLetters::new();
+        let mut runner = runner_with(
+            vec![("h.invoice", || Err(HandlerError::Downstream("503".into())))],
+            r#"
+[[rule]]
+name = "r-invoice"
+on_event = "commerce.invoice.paid"
+[[rule.do]]
+handler = "h.invoice"
+"#,
+        );
+        runner.dead_letters = Some(sink.clone());
+        runner.live = Some(live.clone());
+        runner
+            .handle(
+                "commerce.invoice.paid",
+                "evt-inv",
+                &serde_json::json!({"id": "inv-1"}),
+                FINAL,
+            )
+            .await;
+        let snap = live.snapshot();
+        assert_eq!(snap["dead_letters"], 1, "{snap}");
+        assert_eq!(
+            snap["dead_letters_unrecorded"], 1,
+            "no packet: no durable record: {snap}"
+        );
+        assert!(
+            snap["last_dead_letter_unix"].as_i64().unwrap_or(0) > 0,
+            "{snap}"
+        );
+
+        // A recorded one: counted, not unrecorded.
+        let mut runner = sweep_runner(|| Err(HandlerError::Downstream("503".into())), sink.clone());
+        runner.live = Some(live.clone());
+        runner
+            .handle("step.ready.checklist", "evt-sweep", &sweep_payload(), FINAL)
+            .await;
+        let snap = live.snapshot();
+        assert_eq!(snap["dead_letters"], 2, "{snap}");
+        assert_eq!(
+            snap["dead_letters_unrecorded"], 1,
+            "the landed one is recorded: {snap}"
+        );
+
+        // A sink that fails is the jobs API being what broke: counted as unrecorded.
+        let mut runner = sweep_runner(|| Err(HandlerError::Downstream("503".into())), sink.clone());
+        runner.dead_letters = Some(Arc::new(FailingDeadLetters));
+        runner.live = Some(live.clone());
+        runner
+            .handle(
+                "step.ready.checklist",
+                "evt-sweep-2",
+                &sweep_payload(),
+                FINAL,
+            )
+            .await;
+        let snap = live.snapshot();
+        assert_eq!(snap["dead_letters"], 3, "{snap}");
+        assert_eq!(
+            snap["dead_letters_unrecorded"], 2,
+            "a failed write left no record: {snap}"
+        );
+    }
+
+    struct FailingDeadLetters;
+    #[async_trait::async_trait]
+    impl DeadLetterSink for FailingDeadLetters {
+        async fn record(&self, _t: &Target, _n: &DeadLetterNote) -> Result<(), String> {
+            Err("PATCH returned 503".into())
+        }
     }
 
     /// Sim-ness is inherited from the triggering event, the same read
