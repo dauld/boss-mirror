@@ -40,9 +40,7 @@ async fn main() -> Result<()> {
 
     info!(http_bind = %cfg.http_bind, "boss-subject-kinds-api starting");
 
-    #[cfg(feature = "postgres")]
     let subjects_pool: Option<sqlx::PgPool>;
-    #[cfg(feature = "postgres")]
     let subject_kinds: Arc<dyn SubjectKindRepository> = {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(10)
@@ -53,17 +51,10 @@ async fn main() -> Result<()> {
         Arc::new(boss_subject_kinds::PgSubjectKinds::new(pool))
     };
 
-    #[cfg(not(feature = "postgres"))]
-    let subject_kinds: Arc<dyn SubjectKindRepository> = {
-        boss_core::startup::require_postgres_or_explicit_inmemory("boss-subject-kinds-api")?;
-        Arc::new(boss_subject_kinds::InMemorySubjectKinds::new(vec![]))
-    };
-
     let state = SubjectKindsApiState { subject_kinds };
     let mut app = router(state);
     // The subjects identity surface (R1): mint + existence probe.
     // Postgres-only — the identity table has no in-memory twin.
-    #[cfg(feature = "postgres")]
     if let Some(pool) = subjects_pool {
         app = app.merge(boss_subject_kinds::subjects::subjects_router(pool));
     }

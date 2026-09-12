@@ -36,6 +36,22 @@
 #   * $DIR declares at least one object of that kind in it; and
 #   * the kind is not in $EXCLUDED_KINDS below.
 #
+# AND ONE OBJECT AT A TIME, BY LABEL: an object carrying the tree's own
+# mark, `app.kubernetes.io/part-of=boss`, of a kind the tree declares
+# SOMEWHERE in an owned namespace, is in scope in every owned namespace
+# — whether or not that namespace still declares the kind. This is the
+# case the pair rule alone cannot see: THE LAST MANIFEST OF A KIND IN A
+# NAMESPACE. Measured 2026-09-12: the seed-dir car deleted boss-dev's
+# only CronJob (#341); the object stayed (apply does not prune), failed
+# every minute against PodSecurity, and this derivation REFUSED to name
+# it — "the tree declares no CronJob in boss-dev" — while `--list` did
+# not list it. The pair rule exists so Pods, ReplicaSets and Events —
+# kinds the tree declares nowhere — are never findings, and it keeps
+# doing that: a labelled Pod is still out (Pod is declared nowhere), an
+# UNlabelled CronJob in boss-dev is still out (nothing says it is ours).
+# The label is the tree's own claim on the object, so acting on it is
+# acting on a declaration, not a guess.
+#
 # OUT OF SCOPE, each for a stated reason — never silently skipped:
 #   * CLUSTER-SCOPED KINDS (ClusterRole, ClusterRoleBinding, Namespace,
 #     StorageClass). The cluster holds hundreds that belong to Talos,
@@ -423,6 +439,20 @@ pairs=$(LC_ALL=C awk -F'\t' -v mns="$managed_ns" '
 ' "$declared_converged" | LC_ALL=C sort -u)
 declares_pair() { printf '%s\n' "$pairs" | LC_ALL=C grep -qxF "$(printf '%s\t%s' "$1" "$2")"; }
 
+# The tree's own mark on what it creates; every manifest under $DIR
+# carries it. An object without it in an undeclared pair is not ours to
+# call undeclared.
+BOSS_LABEL="app.kubernetes.io/part-of=boss"
+# Kinds the tree declares in SOME owned namespace — the kinds that can
+# be in scope by label where a namespace no longer declares them.
+declared_kinds=$(printf '%s\n' "$pairs" | LC_ALL=C cut -f1 | LC_ALL=C sort -u)
+declares_kind_somewhere() { printf '%s\n' "$declared_kinds" | LC_ALL=C grep -qxF "$1"; }
+# (kind, namespace) pairs in scope BY LABEL ONLY: a declared-somewhere
+# kind in an owned namespace that does not itself declare the kind.
+label_pairs=$(for k in $declared_kinds; do for ns in $managed_ns; do
+    printf '%s\t%s\n' "$k" "$ns"
+done; done | LC_ALL=C sort -u | LC_ALL=C comm -23 - <(printf '%s\n' "$pairs" | LC_ALL=C sort -u))
+
 # --- the cluster ----------------------------------------------------------
 # Live names of one kind in one namespace, excluding anything a
 # controller owns. Prints nothing and returns 1 when this credential
@@ -435,6 +465,22 @@ live_names() { # kind ns
         return 1
     fi
     printf '%s\n' "$out" | LC_ALL=C awk -F'\t' 'NF && $1 != "" && $2 == "" { print $1 }'
+}
+# The same, restricted to objects carrying the tree's label — the read
+# for a pair in scope by label only.
+live_labelled_names() { # kind ns
+    local out
+    if ! out=$("${KUBECTL[@]}" get "$1" -n "$2" -l "$BOSS_LABEL" \
+            -o 'jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.ownerReferences[0].kind}{"\n"}{end}' \
+            --request-timeout=10s 2>"$TMP/get.err"); then
+        return 1
+    fi
+    printf '%s\n' "$out" | LC_ALL=C awk -F'\t' 'NF && $1 != "" && $2 == "" { print $1 }'
+}
+# One object's part-of label, or empty. Returns 1 when the read failed.
+label_of() { # kind ns name
+    "${KUBECTL[@]}" get "$1" "$3" -n "$2" \
+        -o 'jsonpath={.metadata.labels.app\.kubernetes\.io/part-of}' --request-timeout=10s 2>"$TMP/label.err"
 }
 
 # The text of the last failed read, as one line. $TMP/get.err is ONE
@@ -476,9 +522,28 @@ if [ "$MODE" = "--check" ]; then
         say "  the tree's declaration set for it is incomplete on purpose, so 'undeclared' means nothing here."
         exit 3
     fi
+    in_scope_by_label=""
     if ! declares_pair "$kind" "$ns"; then
-        say "REFUSED $kind/$ns/$name — the tree declares no $kind in \`$ns\`, so there is no declared set to compare against."
-        exit 3
+        if ! declares_kind_somewhere "$kind"; then
+            say "REFUSED $kind/$ns/$name — the tree declares no $kind in \`$ns\`, nor anywhere it owns, so there is no declared set to compare against."
+            exit 3
+        fi
+        # The pair is gone; the object may still be ours by label.
+        if ! label=$(label_of "$kind" "$ns" "$name"); then
+            if LC_ALL=C grep -q 'NotFound' "$TMP/label.err"; then
+                say "$kind/$ns/$name is NOT LIVE — the tree declares no $kind in \`$ns\` and the cluster has no such object."
+                exit 3
+            fi
+            say "CANNOT ANSWER for $kind/$ns/$name — this credential cannot read it to see whether it carries $BOSS_LABEL:"
+            sed 's/^/    /' "$TMP/label.err" >&2
+            exit "$CANNOT_ANSWER"
+        fi
+        if [ "$label" != "${BOSS_LABEL#*=}" ]; then
+            say "REFUSED $kind/$ns/$name — the tree declares no $kind in \`$ns\`, so there is no declared set to compare against,"
+            say "  and the object does not carry $BOSS_LABEL (it has part-of='${label:-<none>}'), so nothing says it is ours."
+            exit 3
+        fi
+        in_scope_by_label="yes"
     fi
     if file=$(declaring_file "$kind" "$ns" "$name"); [ -n "$file" ]; then
         say "REFUSED $kind/$ns/$name — the tree DECLARES it, in $file."
@@ -521,8 +586,14 @@ if [ "$MODE" = "--check" ]; then
         exit 3
     fi
     printf 'undeclared\t%s\t%s\t%s\n' "$kind" "$ns" "$name"
-    say "$kind/$ns/$name is live in a namespace the tree owns, of a kind the tree declares there, carries no"
-    say "  ownerReference, and NO manifest in the tree declares it. Derived from $declared_count declared object(s)."
+    if [ -n "$in_scope_by_label" ]; then
+        say "$kind/$ns/$name is live in a namespace the tree owns, in scope by label ($BOSS_LABEL — the tree"
+        say "  declares $kind elsewhere but no longer in \`$ns\`), carries no ownerReference, and NO manifest in the"
+        say "  tree declares it. Derived from $declared_count declared object(s)."
+    else
+        say "$kind/$ns/$name is live in a namespace the tree owns, of a kind the tree declares there, carries no"
+        say "  ownerReference, and NO manifest in the tree declares it. Derived from $declared_count declared object(s)."
+    fi
     exit 0
 fi
 
@@ -564,9 +635,36 @@ done <<EOF
 $pairs
 EOF
 
+# Pairs in scope BY LABEL ONLY: the tree declares the kind elsewhere,
+# not here, and only objects carrying its own label are its business.
+label_pairs_checked=0
+label_pairs_total=0
+while IFS=$'\t' read -r kind ns; do
+    [ -n "${kind:-}" ] || continue
+    is_excluded_kind "$kind" && continue
+    label_pairs_total=$((label_pairs_total + 1))
+    if ! names=$(live_labelled_names "$kind" "$ns"); then
+        unreadable=$((unreadable + 1))
+        unreadable_names+=("$kind in $ns (by label) — not listable by this credential: $(read_error "$TMP/get.err")")
+        continue
+    fi
+    label_pairs_checked=$((label_pairs_checked + 1))
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        [ -n "$(declaring_file "$kind" "$ns" "$name")" ] && continue
+        is_exempt "$kind" "$ns" "$name" && continue
+        orphans+=("$(printf '%s\t%s\t%s' "$kind" "$ns" "$name")")
+    done <<EOF
+$names
+EOF
+done <<EOF
+$label_pairs
+EOF
+
 [ "${#orphans[@]}" -eq 0 ] || printf '%s\n' "${orphans[@]}"
 
 say "${#orphans[@]} undeclared object(s) in $pairs_checked of $pairs_total in-scope (kind, namespace) pair(s) across $(printf '%s ' $managed_ns)"
+say "  plus $label_pairs_checked of $label_pairs_total pair(s) in scope by label only ($BOSS_LABEL on a kind the tree declares elsewhere)"
 [ "${#excluded_pairs[@]}" -eq 0 ] || say "  excluded by kind: $(printf '%s; ' "${excluded_pairs[@]}")"
 if [ "$unreadable" -gt 0 ]; then
     # Stated on every path. A first draft of the lint this was extracted

@@ -179,7 +179,7 @@ fn fixture_tree(root: &Path) -> PathBuf {
 /// The stubbed `kubectl`, answering the shapes the derivation uses and
 /// reading the "cluster" from files:
 ///
-///   $STUB_LIVE/<Kind>.<ns>  one line per live object: name<TAB>ownerKind
+///   $STUB_LIVE/<Kind>.<ns>  one line per live object: name<TAB>ownerKind[<TAB>part-of]
 ///   $STUB_FORBID            "<Kind> <ns>" per line — not listable
 ///   $STUB_FORBID_GET        "<Kind> <ns> <name>" per line — not readable
 ///   $STUB_BADPARSE          a manifest basename that will not parse
@@ -212,11 +212,12 @@ get)
     kind="$2"; shift 2
     name=""
     case "${1:-}" in -*|"") ;; *) name="$1"; shift ;; esac
-    ns=""
+    ns=""; sel=""; out=""
     while [ $# -gt 0 ]; do
         case "$1" in
             -n) ns="$2"; shift 2 ;;
-            -o) shift 2 ;;
+            -o) out="$2"; shift 2 ;;
+            -l) sel="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
@@ -225,7 +226,13 @@ get)
         exit 1
     fi
     if [ -z "$name" ]; then
-        live "$kind" "$ns"
+        # A label selector keeps the rows whose third column is the value.
+        if [ -n "$sel" ]; then
+            want="${sel#*=}"
+            live "$kind" "$ns" | awk -F'\t' -v w="$want" '$3 == w'
+        else
+            live "$kind" "$ns"
+        fi
         exit 0
     fi
     if listed_in "${STUB_FORBID_GET:-}" "$kind $ns $name"; then
@@ -237,7 +244,12 @@ get)
         echo "Error from server (NotFound): $kind \"$name\" not found" >&2
         exit 1
     fi
-    printf '%s\n' "$row" | cut -f2 ;;
+    # A single get answers the owner, or the part-of label when the
+    # jsonpath asks for labels.
+    case "$out" in
+        *labels*) printf '%s\n' "$row" | awk -F'\t' '{ print $3 }' ;;
+        *) printf '%s\n' "$row" | cut -f2 ;;
+    esac ;;
 *)
     echo "stub kubectl: unexpected invocation: $*" >&2
     exit 64 ;;
@@ -287,6 +299,15 @@ impl Case {
         let f = self.live.join(format!("{kind}.{ns}"));
         let mut body = std::fs::read_to_string(&f).unwrap_or_default();
         body.push_str(&format!("{name}\t{owner}\n"));
+        std::fs::write(&f, body).unwrap();
+    }
+
+    /// One more object carrying `app.kubernetes.io/part-of=<label>` —
+    /// the tree's own mark on what it created.
+    fn add_live_labelled(&self, kind: &str, ns: &str, name: &str, label: &str) {
+        let f = self.live.join(format!("{kind}.{ns}"));
+        let mut body = std::fs::read_to_string(&f).unwrap_or_default();
+        body.push_str(&format!("{name}\t\t{label}\n"));
         std::fs::write(&f, body).unwrap();
     }
 
@@ -530,6 +551,72 @@ fn check_cannot_answer_when_the_object_itself_cannot_be_read() {
 /// An object that really is absent keeps the verdict it had: NotFound is
 /// a fact about the object, not about the credential. Here so the test
 /// above cannot be satisfied by giving up on every failed read.
+/// THE LAST MANIFEST OF A KIND IN A NAMESPACE. Measured 2026-09-12:
+/// the seed-dir car deleted boss-dev's only CronJob manifest (#341);
+/// the live CronJob stayed (apply does not prune) and failed every
+/// minute against PodSecurity; `delete-orphan-object` REFUSED it —
+/// "the tree declares no CronJob in boss-dev, so there is no declared
+/// set to compare against" — and `--list` did not name it either. The
+/// pair rule is right for Pods and ReplicaSets, which the tree never
+/// declares anywhere; it is wrong for a kind the tree declares in
+/// another namespace, on an object the tree itself labelled
+/// `app.kubernetes.io/part-of=boss`. That label is the tree's own
+/// claim, so the object is in scope by label where the pair is gone.
+#[test]
+fn a_labelled_object_of_a_kind_the_tree_declares_elsewhere_is_in_scope_by_label() {
+    let c = Case::new("last-kind-labelled", &[]);
+    // CronJob is declared in `boss` (boss-backup), never in `boss-dev`.
+    c.add_live_labelled("CronJob", "boss-dev", "gate-seed-prepare", "boss");
+    let (rc, stdout, all) = c.run(&["--list"]);
+    assert_eq!(rc, 0, "{all}");
+    assert!(
+        stdout.contains("CronJob\tboss-dev\tgate-seed-prepare"),
+        "the labelled orphan is named on stdout: {stdout}\n{all}"
+    );
+    let (rc, _, all) = c.run(&["--check", "CronJob/boss-dev/gate-seed-prepare"]);
+    assert_eq!(rc, 0, "in scope by label, undeclared, no owner: {all}");
+    assert!(
+        all.contains("by label"),
+        "the answer says WHY it is in scope: {all}"
+    );
+}
+
+/// The same object without the tree's label is still refused — the
+/// pair rule stands for everything the tree never marked as its own —
+/// and the refusal now names the label as the way in.
+#[test]
+fn an_unlabelled_object_of_an_undeclared_pair_is_still_refused() {
+    let c = Case::new("last-kind-unlabelled", &[]);
+    c.add_live("CronJob", "boss-dev", "somebody-elses", "");
+    let (rc, stdout, all) = c.run(&["--list"]);
+    assert_eq!(rc, 0, "{all}");
+    assert!(
+        !stdout.contains("somebody-elses"),
+        "unlabelled stays out of the list: {stdout}"
+    );
+    let (rc, _, all) = c.run(&["--check", "CronJob/boss-dev/somebody-elses"]);
+    assert_eq!(rc, 3, "refused: {all}");
+    assert!(
+        all.contains("declares no CronJob in `boss-dev`") && all.contains("part-of"),
+        "the refusal names both the missing pair and the label that would bring it in: {all}"
+    );
+}
+
+/// A kind the tree declares NOWHERE stays out of scope even when
+/// labelled: Pods and ReplicaSets carry the label too (a Deployment's
+/// template propagates it), and they are the controller's, not the
+/// tree's.
+#[test]
+fn a_labelled_object_of_a_kind_the_tree_never_declares_stays_out_of_scope() {
+    let c = Case::new("last-kind-never-declared", &[]);
+    c.add_live_labelled("Pod", "boss-dev", "boss-dev-abc12", "boss");
+    let (rc, stdout, all) = c.run(&["--list"]);
+    assert_eq!(rc, 0, "{all}");
+    assert!(!stdout.contains("boss-dev-abc12"), "{stdout}");
+    let (rc, _, all) = c.run(&["--check", "Pod/boss-dev/boss-dev-abc12"]);
+    assert_eq!(rc, 3, "refused: a kind the tree declares nowhere: {all}");
+}
+
 #[test]
 fn check_still_says_not_live_for_an_object_that_is_absent() {
     let c = Case::new("absent", &[]);

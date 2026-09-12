@@ -7,6 +7,7 @@ edition.workspace = true
 [[bin]]
 name = "boss-assets-api"
 path = "src/bin/boss_assets_api.rs"
+required-features = ["postgres"]
 
 [features]
 default = []

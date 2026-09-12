@@ -169,9 +169,11 @@ done < "$TMP/bins.tsv"
 # 2026-05-05): the *-api binary has no `required-features`, so the
 # workspace build always produces it. But the crate has a `postgres`
 # feature, optional `dep:sqlx`, and main.rs calls
-# `boss_core::startup::require_postgres_or_explicit_inmemory()`. When
-# the feature isn't active, the binary boots, hits the guard, and
-# exit-1's. systemd marks the unit failed and restart-loops. Pass 4
+# the Postgres repositories under `#[cfg(feature = "postgres")]`. When
+# the feature isn't active the binary does not COMPILE — the in-memory
+# serving arms were deleted 2026-09-12 (be793304) — and before that it
+# booted, hit a startup guard, and exit-1'd, so systemd restart-looped
+# the unit. Either way a mis-declared feature is a broken deploy. Pass 4
 # couldn't see this because the bin never appears in $TMP/bins.tsv
 # (no required-features → no row).
 #
@@ -263,7 +265,7 @@ while IFS=$'\t' read -r pkg_name bin_name req_features; do
         done < "$TMP/deps.tsv"
         if $activated; then continue; fi
 
-        STARTUP_TRAPS+=("$pkg_name::$bin_name has '$hf' feature but neither default, required-features, nor a workspace dep activates it; the bin will boot in-memory and exit-1 on the require_postgres_or_explicit_inmemory guard")
+        STARTUP_TRAPS+=("$pkg_name::$bin_name has '$hf' feature but neither default, required-features, nor a workspace dep activates it; the bin has no in-memory arm to fall back to and will not compile or deploy")
         ok=false
     done
 done < "$TMP/all_bins.tsv"
@@ -293,11 +295,11 @@ if [[ ${#UNSATISFIED[@]} -gt 0 ]]; then
 fi
 
 if [[ ${#STARTUP_TRAPS[@]} -gt 0 ]]; then
-    echo "DRIFT (Pass 5): the following service-shaped binaries will build but" >&2
-    echo "       crashloop at startup because their heavy feature isn't" >&2
-    echo "       activated. The require_postgres_or_explicit_inmemory guard" >&2
-    echo "       in main.rs will exit-1 with 'built without the postgres" >&2
-    echo "       feature' (or s3, etc.). Same shape as the boss-classes/" >&2
+    echo "DRIFT (Pass 5): the following service-shaped binaries declare a heavy" >&2
+    echo "       feature that nothing activates. With no in-memory arm left to" >&2
+    echo "       fall back to (be793304) such a bin does not compile without" >&2
+    echo "       the feature, and a build that skips it deploys nothing." >&2
+    echo "       Same shape as the boss-classes/" >&2
     echo "       locations/subject-kinds bug 2026-05-05." >&2
     for u in "${STARTUP_TRAPS[@]}"; do
         echo "  + $u" >&2

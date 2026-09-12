@@ -41,21 +41,13 @@ async fn main() -> Result<()> {
 
     // One pool per service. PgPool is internally Arc'd, so cloning is
     // cheap and every sub-router/audit-writer shares the same slots.
-    #[cfg(feature = "postgres")]
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)
         .connect(&cfg.postgres_url)
         .await
         .with_context(|| "connecting to Postgres")?;
 
-    #[cfg(feature = "postgres")]
     let messages = Arc::new(boss_messages::PgMessages::new(pool.clone()));
-
-    #[cfg(not(feature = "postgres"))]
-    let messages = {
-        boss_core::startup::require_postgres_or_explicit_inmemory("boss-messages-api")?;
-        Arc::new(boss_messages::InMemoryMessages::new(vec![]))
-    };
 
     // Connect to NATS for domain event publishing (optional).
     let publisher = match &cfg.nats_url {
@@ -65,7 +57,6 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("connecting to NATS at {url}"))?;
             #[allow(unused_mut)]
             let mut pub_ = boss_core::publisher::DomainPublisher::new(Arc::new(bus), "messages");
-            #[cfg(feature = "postgres")]
             {
                 // Messages get their OWN immutable event log
                 // (`messages_events`) instead of riding the

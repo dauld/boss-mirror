@@ -41,21 +41,13 @@ async fn main() -> Result<()> {
 
     // One pool per service. PgPool is internally Arc'd, so cloning is
     // cheap and every sub-router/audit-writer shares the same slots.
-    #[cfg(feature = "postgres")]
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)
         .connect(&cfg.postgres_url)
         .await
         .with_context(|| "connecting to Postgres")?;
 
-    #[cfg(feature = "postgres")]
     let shipping = Arc::new(boss_shipping::PgShipping::new(pool.clone()));
-
-    #[cfg(not(feature = "postgres"))]
-    let shipping = {
-        boss_core::startup::require_postgres_or_explicit_inmemory("boss-shipping-api")?;
-        Arc::new(boss_shipping::InMemoryShipping::new(vec![]))
-    };
 
     // Connect to NATS for domain event publishing (optional).
     let publisher = match &cfg.nats_url {
@@ -65,7 +57,6 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("connecting to NATS at {url}"))?;
             #[allow(unused_mut)]
             let mut pub_ = boss_core::publisher::DomainPublisher::new(Arc::new(bus), "shipping");
-            #[cfg(feature = "postgres")]
             {
                 pub_ = pub_.with_audit(std::sync::Arc::new(boss_events::PgAuditWriter::new(
                     pool.clone(),

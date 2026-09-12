@@ -13,8 +13,10 @@
 # table, that POST and the whole boss-docs service are gone since
 # 2026-09-10 — the crate that named this bug class no longer exists,
 # but the class does; see below.)
-# Option (1) of the fix (boss_core::startup::require_postgres_or_explicit_inmemory)
-# stops the next regression at *boot*. This script is the
+# Option (1) of the fix was a boot-time guard; since 2026-09-12 the
+# in-memory serving arms are DELETED (be793304), so a binary without
+# the postgres feature does not compile and the two runtime choosers
+# refuse to start without a postgres_url. This script is the
 # defense-in-depth check that catches the same class of bug at
 # *runtime* — useful in cron and after deploys.
 #

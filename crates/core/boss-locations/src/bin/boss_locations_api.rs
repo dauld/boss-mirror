@@ -39,7 +39,6 @@ async fn main() -> Result<()> {
 
     info!(http_bind = %cfg.http_bind, "boss-locations-api starting");
 
-    #[cfg(feature = "postgres")]
     let locations: Arc<dyn LocationRepository> = {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(10)
@@ -47,12 +46,6 @@ async fn main() -> Result<()> {
             .await
             .with_context(|| "connecting to Postgres")?;
         Arc::new(boss_locations::PgLocations::new(pool))
-    };
-
-    #[cfg(not(feature = "postgres"))]
-    let locations: Arc<dyn LocationRepository> = {
-        boss_core::startup::require_postgres_or_explicit_inmemory("boss-locations-api")?;
-        Arc::new(boss_locations::InMemoryLocations::new(vec![]))
     };
 
     let state = LocationsApiState { locations };

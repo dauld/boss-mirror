@@ -1147,6 +1147,37 @@ impl ParkIntent {
         Ok(())
     }
 
+    /// Every packet id a park intent names, with the flag that named it:
+    /// the item this car closes or is a piece of, and the car it boards
+    /// behind. Each is a reference the auto-park handler will write as a
+    /// job edge ON GREEN — an hour after this terminal, where a bad id is
+    /// a refused edge on a dispatcher run and not a word to the builder.
+    /// So the launcher resolves them now: `unresolvable` returns the ones
+    /// `exists` cannot find, and the caller refuses before a slot is
+    /// spent. Measured 2026-09-12: a builder passed a `--park-backlog-item`
+    /// id they had typed rather than read; the gate launched, and only a
+    /// read of the packet afterwards caught it (CLAUDE.md memory: never
+    /// write a sha you did not read — an id is a sha).
+    pub fn named_refs(&self) -> Vec<(&'static str, &str)> {
+        [
+            ("--park-backlog-item", self.backlog_item.as_deref()),
+            ("--park-partial-item", self.partial_item.as_deref()),
+            ("--park-after", self.boards_after.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(f, v)| v.map(|v| (f, v)))
+        .filter(|(_, v)| !v.trim().is_empty())
+        .collect()
+    }
+
+    pub fn unresolvable(&self, exists: impl Fn(&str) -> bool) -> Vec<(&'static str, String)> {
+        self.named_refs()
+            .into_iter()
+            .filter(|(_, id)| !exists(id))
+            .map(|(f, id)| (f, id.to_string()))
+            .collect()
+    }
+
     /// The metadata patch to MERGE onto the gate-run — only the fields
     /// set, keyed `park_*` so the auto-park handler reads them on green.
     pub fn metadata_patch(&self) -> Value {
@@ -1974,6 +2005,50 @@ pub async fn run(
     }
     let hold = hold_guard(hold.as_deref(), &park)?;
     let http = reqwest::Client::new();
+    // EVERY PACKET THE PARK INTENT NAMES MUST EXIST, checked here at the
+    // terminal. The auto-park handler writes these as job edges on
+    // green, and the edge guard refuses an unresolvable id — an hour
+    // from now, on a dispatcher run, as a dead letter the builder never
+    // sees. An id typed rather than read is the whole failure mode
+    // (2026-09-12, be793304's car launched with an invented suffix).
+    if !dry {
+        let mut missing = Vec::new();
+        for (flag, id) in park.named_refs() {
+            // `api` raises on every non-2xx; a 404 here is the answer,
+            // not an error — the rest (unreachable, 5xx) still raise.
+            match api(
+                &http,
+                reqwest::Method::GET,
+                &format!("/api/jobs/{id}"),
+                None,
+            )
+            .await
+            {
+                Ok(Some(_)) => {}
+                Ok(None) => missing.push((flag, id.to_string())),
+                Err(e) if format!("{e:#}").contains("404") => {
+                    missing.push((flag, id.to_string()));
+                }
+                Err(e) => {
+                    return Err(e.context(format!(
+                        "resolving {flag} {id} against the system of record"
+                    )));
+                }
+            }
+        }
+        if !missing.is_empty() {
+            let lines: Vec<String> = missing
+                .iter()
+                .map(|(f, id)| format!("  {f} {id} — no such packet"))
+                .collect();
+            bail!(
+                "boss gate: REFUSED — the park intent names a packet the system of record \
+                 does not have:\n{}\n  Read the id off the packet (boss-api GET /api/jobs?…) \
+                 rather than typing it; an id is a sha.",
+                lines.join("\n")
+            );
+        }
+    }
     // The concurrency bound: env override > delivery policy > compiled.
     // Fetched here, before the packet, so a bad env override refuses
     // without side effects — the policy read never fails, it falls back.
@@ -2034,7 +2109,7 @@ pub async fn run(
         println!("boss gate: packet {id} is already being gated by {name}");
         if wait {
             println!("boss gate: attaching to it — a second Job would race it");
-            return wait_for_verdict(&http, id, namespace, &name).await;
+            return wait_for_verdict(&http, id, namespace, &name, now).await;
         }
         println!(
             "boss gate: not starting a second Job. Follow this one with \
@@ -2279,7 +2354,7 @@ pub async fn run(
             wait_for_slot(&http, &packet, branch, namespace, max, now).await?
         {
             println!("boss gate: packet {packet} was launched as {name} while it waited");
-            return wait_for_verdict(&http, &packet, namespace, &name).await;
+            return wait_for_verdict(&http, &packet, namespace, &name, now).await;
         }
         // The place is spent the moment a Job exists, and a run still
         // marked queued would be missing from the yard's gate bays.
@@ -2339,7 +2414,7 @@ pub async fn run(
             .next()
             .unwrap_or_default()
             .to_string();
-        wait_for_verdict(&http, &packet, namespace, &job_name).await?;
+        wait_for_verdict(&http, &packet, namespace, &job_name, now).await?;
     } else {
         println!(
             "boss gate: not waiting — `boss gate {branch} --wait` ATTACHES to this Job, \
@@ -2368,6 +2443,125 @@ pub async fn run(
 /// The Job status is a signal about the RUN and never about the CODE, so
 /// it is not treated as a verdict here — it is only used to decide that
 /// no verdict is coming, and to say where the answer actually lives.
+/// How long a scheduled gate pod may sit without its containers
+/// starting before the wait calls it an infrastructure refusal. A
+/// warm image pull and a volume mount are seconds; a local PV whose
+/// path the kubelet cannot see retries every two minutes forever.
+pub(crate) const START_TOLERANCE: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// What the kubelet has to say about a gate pod that has a node but no
+/// running containers — read off the pod, not the events (the session
+/// could not read events until 27eacc14; conditions it always could).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct PodStart {
+    /// `PodScheduled=True` since this instant (RFC 3339), if at all.
+    pub scheduled_at: Option<String>,
+    /// `PodReadyToStartContainers=True`, i.e. the sandbox and every
+    /// volume are up and the containers can start.
+    pub ready_to_start: bool,
+    /// Each container's `state.waiting.reason` (ContainerCreating,
+    /// ErrImagePull, …) and message, for the record.
+    pub waiting: Vec<String>,
+}
+
+/// Has this pod been scheduled for longer than the tolerance without
+/// getting to start? Pure: the caller supplies "now".
+pub(crate) fn unstarted_too_long(
+    start: &PodStart,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<i64> {
+    if start.ready_to_start {
+        return None;
+    }
+    let since = start
+        .scheduled_at
+        .as_deref()
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())?;
+    let waited = now.signed_duration_since(since.with_timezone(&chrono::Utc));
+    (waited.num_seconds() >= START_TOLERANCE.as_secs() as i64).then(|| waited.num_minutes())
+}
+
+/// The receipt an unstarted gate records: a REFUSAL, the runner's own
+/// shape for "declined before any check ran" (`verdict: refused`,
+/// `refused_because`), so every reader that already spares the cars on a
+/// refusal — train.rs `verdict_strikes_cars`, `red_verdict_detail` —
+/// reads this one the same way. Before this, a pod that never started
+/// sat silent until `activeDeadlineSeconds` (three hours) failed the
+/// Job, and the wait then read that as a red (1661dd1e: the 9-hour
+/// gate-seed mount, d42d4967, was found by a human looking at a pod).
+pub(crate) fn unstarted_receipt(minutes: i64, start: &PodStart) -> Value {
+    let waiting = if start.waiting.is_empty() {
+        "no container state reported".to_string()
+    } else {
+        start.waiting.join("; ")
+    };
+    json!({
+        "verdict": "refused",
+        "head": "",
+        "mode": "",
+        "fails": [],
+        "refused_because": format!(
+            "the gate pod was scheduled {minutes} min ago and its containers never started \
+             (PodReadyToStartContainers=False) — a mount, image or sandbox the node could not \
+             provide, not a verdict on the branch. Container state: {waiting}. \
+             `kubectl -n boss-dev describe pod -l job-name=<job>` carries the kubelet's reason."
+        ),
+    })
+}
+
+/// Parse `kubectl get pods -l job-name=<job> -o json` into the pod's
+/// start state. Absent pods (none created yet) read as default:
+/// unscheduled, so never "too long" — a pod that is not even scheduled
+/// is the queue's business, not this guard's.
+pub(crate) fn pod_start_from_json(pods: &Value) -> PodStart {
+    let Some(pod) = pods
+        .get("items")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+    else {
+        return PodStart::default();
+    };
+    let conds = pod
+        .pointer("/status/conditions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let cond = |ty: &str| {
+        conds
+            .iter()
+            .find(|c| c.get("type").and_then(Value::as_str) == Some(ty))
+    };
+    let scheduled_at = cond("PodScheduled")
+        .filter(|c| c.get("status").and_then(Value::as_str) == Some("True"))
+        .and_then(|c| c.get("lastTransitionTime"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let ready_to_start = cond("PodReadyToStartContainers")
+        .is_some_and(|c| c.get("status").and_then(Value::as_str) == Some("True"));
+    let waiting = pod
+        .pointer("/status/containerStatuses")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            let name = c.get("name").and_then(Value::as_str).unwrap_or("?");
+            let w = c.pointer("/state/waiting")?;
+            let reason = w.get("reason").and_then(Value::as_str).unwrap_or("waiting");
+            let msg = w.get("message").and_then(Value::as_str).unwrap_or("");
+            Some(if msg.is_empty() {
+                format!("{name}: {reason}")
+            } else {
+                format!("{name}: {reason} — {msg}")
+            })
+        })
+        .collect();
+    PodStart {
+        scheduled_at,
+        ready_to_start,
+        waiting,
+    }
+}
+
 pub(crate) fn silent_packet_verdict(job_finished: bool, job_failed: bool) -> Option<String> {
     if !job_finished {
         return None;
@@ -2567,7 +2761,16 @@ async fn wait_for_verdict(
     packet: &str,
     namespace: &str,
     job_name: &str,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
+    // Wall time for the pod-start guard: the clock-routed `now` this
+    // verb was handed, advanced by the monotonic time since — never a
+    // fresh wallclock read (infra/lint/no-wallclock.sh says why).
+    let started = std::time::Instant::now();
+    let wall_now = || {
+        now + chrono::Duration::from_std(started.elapsed())
+            .unwrap_or_else(|_| chrono::Duration::zero())
+    };
     // A MOMENTARY ABSENCE IS NOT A FAILURE.
     //
     // Every train deploy rolls the boss Deployment, and the jobs API
@@ -2648,6 +2851,111 @@ async fn wait_for_verdict(
         if let Some(why) = silent_packet_verdict(finished, failed) {
             bail!("{why}\n  Job: {job_name} (namespace {namespace}), packet: {packet}");
         }
+        // A POD THAT NEVER STARTS IS A REFUSAL, WITHIN MINUTES. The Job
+        // is live and the packet silent for one more reason than "still
+        // running": the pod has a node and its containers never came up
+        // — a volume the kubelet cannot mount, an image it cannot pull.
+        // Left alone that sits until activeDeadlineSeconds (three
+        // hours) fails the Job, which the branch then wears as a red.
+        // On 2026-09-12 the gate seed's local PV was invisible to the
+        // kubelet for nine hours and the only thing that noticed was a
+        // human reading a pod (1661dd1e, d42d4967). Past the tolerance
+        // the wait records the runner's own refusal shape on the packet,
+        // frees the slot, and says what it is.
+        let start = pod_start(namespace, job_name);
+        if let Some(minutes) = unstarted_too_long(&start, wall_now()) {
+            let receipt = unstarted_receipt(minutes, &start);
+            let why = receipt["refused_because"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            record_refusal(http, packet, &receipt).await;
+            let _ = kubectl(namespace)
+                .args(["delete", job_name, "--ignore-not-found", "--wait=false"])
+                .output();
+            println!(
+                "boss gate: REFUSED  (packet {}, infrastructure — not the branch)",
+                &packet[..8.min(packet.len())]
+            );
+            bail!(
+                "gate refused: {why}\n  Job {job_name} deleted so the slot is free; the packet {packet} \
+                 carries the refusal. Fix the node or the manifest and gate again — there is nothing \
+                 here for the author of the change to edit."
+            );
+        }
+    }
+}
+
+/// The start state of the gate Job's pod, read off the cluster. A read
+/// that fails (kubectl absent, RBAC) is the default state — unscheduled
+/// — which never trips the guard: this verb must not refuse a gate
+/// because it could not see the pod.
+fn pod_start(namespace: &str, job_name: &str) -> PodStart {
+    let selector = format!("job-name={}", job_name.trim_start_matches("job.batch/"));
+    let out = kubectl(namespace)
+        .args(["get", "pods", "-l", &selector, "-o", "json"])
+        .output();
+    let Ok(o) = out else {
+        return PodStart::default();
+    };
+    if !o.status.success() {
+        return PodStart::default();
+    }
+    serde_json::from_slice::<Value>(&o.stdout)
+        .map(|v| pod_start_from_json(&v))
+        .unwrap_or_default()
+}
+
+/// Record an infrastructure refusal on the gate-run's receipt step —
+/// the same step and the same shape the runner writes, so the record
+/// reads one way whichever side declined. Best-effort, like
+/// `close_refused`: a failure to write is said, not raised, because the
+/// wait is about to end with the reason either way.
+async fn record_refusal(http: &reqwest::Client, packet: &str, receipt: &Value) {
+    let result = async {
+        let job = api(
+            http,
+            reqwest::Method::GET,
+            &format!("/api/jobs/{packet}"),
+            None,
+        )
+        .await?
+        .ok_or_else(|| anyhow!("gate-run {packet} vanished"))?;
+        let step_id = job
+            .get("steps")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|s| s.get("title").and_then(Value::as_str) == Some("Record the receipt"))
+            .and_then(|s| s.get("id"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("gate-run {packet} has no verdict step"))?
+            .to_string();
+        // The step's `verdict` is the closed enum green|failed|lost
+        // (gate-run.toml); `lost` is "the environment died", the same
+        // word `close_refused` uses for a launch that never made a Job.
+        // The refusal itself rides the receipt — `verdict: refused`,
+        // `refused_because` — exactly as gate.sh writes a headroom
+        // refusal, so `red_verdict_detail` and the train's strike rule
+        // read both the same way.
+        api(
+            http,
+            reqwest::Method::PUT,
+            &format!("/api/jobs/{packet}/steps/{step_id}"),
+            Some(json!({
+                "status": "completed",
+                "metadata": { "verdict": "lost", "receipt": serde_json::to_string(receipt)? },
+            })),
+        )
+        .await?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    if let Err(e) = result {
+        eprintln!(
+            "boss gate: could not record the refusal on packet {packet}: {e:#}\n  \
+             the packet stays open; the overdue alarm will find it."
+        );
     }
 }
 
@@ -2912,6 +3220,113 @@ fn live_gate_for_packet(namespace: &str, packet: &str) -> Result<Option<String>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pod scheduled but never started is an infrastructure refusal
+    /// after the tolerance, never before it, and never once it started
+    /// (1661dd1e; the 9-hour gate-seed mount d42d4967 sat exactly like
+    /// this, found by a human reading a pod).
+    #[test]
+    fn an_unstarted_pod_is_refused_only_past_the_tolerance() {
+        let now = chrono::Utc::now();
+        let at = |secs_ago: i64| {
+            Some(
+                (now - chrono::Duration::seconds(secs_ago))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            )
+        };
+        let stuck = PodStart {
+            scheduled_at: at(600),
+            ready_to_start: false,
+            waiting: vec!["gate: ContainerCreating".into()],
+        };
+        assert_eq!(
+            unstarted_too_long(&stuck, now),
+            Some(10),
+            "ten minutes, not started"
+        );
+        let fresh = PodStart {
+            scheduled_at: at(90),
+            ..stuck.clone()
+        };
+        assert_eq!(
+            unstarted_too_long(&fresh, now),
+            None,
+            "90 s is a normal mount"
+        );
+        let started = PodStart {
+            ready_to_start: true,
+            ..stuck.clone()
+        };
+        assert_eq!(
+            unstarted_too_long(&started, now),
+            None,
+            "started: the run decides"
+        );
+        let unscheduled = PodStart::default();
+        assert_eq!(
+            unstarted_too_long(&unscheduled, now),
+            None,
+            "no pod yet is the queue's business"
+        );
+    }
+
+    /// The receipt is the runner's own refusal shape, so every reader
+    /// that spares the cars on `refused` spares these too.
+    #[test]
+    fn an_unstarted_gate_records_a_refusal_not_a_red() {
+        let start = PodStart {
+            scheduled_at: None,
+            ready_to_start: false,
+            waiting: vec!["gate: ContainerCreating".into()],
+        };
+        let r = unstarted_receipt(12, &start);
+        assert_eq!(r["verdict"], "refused");
+        assert_eq!(r["fails"], json!([]), "a refusal fails no check");
+        let why = r["refused_because"].as_str().unwrap();
+        assert!(
+            why.contains("12 min") && why.contains("never started"),
+            "{why}"
+        );
+        assert!(
+            why.contains("gate: ContainerCreating"),
+            "the container state rides the record: {why}"
+        );
+        assert!(why.contains("not a verdict on the branch"), "{why}");
+    }
+
+    /// The kubelet's account is read off the pod's conditions and
+    /// container states — the fields this session could always read.
+    #[test]
+    fn pod_start_is_read_off_conditions_and_container_states() {
+        let pods = json!({"items": [{
+            "status": {
+                "conditions": [
+                    {"type": "PodReadyToStartContainers", "status": "False", "lastTransitionTime": "2026-09-12T04:21:30Z"},
+                    {"type": "PodScheduled", "status": "True", "lastTransitionTime": "2026-09-12T04:21:30Z"}
+                ],
+                "containerStatuses": [
+                    {"name": "gate", "state": {"waiting": {"reason": "ContainerCreating"}}},
+                    {"name": "pg", "state": {"waiting": {"reason": "ContainerCreating"}}}
+                ]
+            }
+        }]});
+        let s = pod_start_from_json(&pods);
+        assert_eq!(s.scheduled_at.as_deref(), Some("2026-09-12T04:21:30Z"));
+        assert!(!s.ready_to_start);
+        assert_eq!(
+            s.waiting,
+            vec!["gate: ContainerCreating", "pg: ContainerCreating"]
+        );
+        assert_eq!(
+            pod_start_from_json(&json!({"items": []})),
+            PodStart::default()
+        );
+        let running = json!({"items": [{"status": {"conditions": [
+            {"type": "PodReadyToStartContainers", "status": "True"},
+            {"type": "PodScheduled", "status": "True", "lastTransitionTime": "2026-09-12T04:21:30Z"}
+        ]}}]});
+        assert!(pod_start_from_json(&running).ready_to_start);
+    }
 
     fn park_full() -> ParkIntent {
         ParkIntent {
@@ -3561,6 +3976,35 @@ mod tests {
         assert!(
             p.metadata_patch().get(PARK_BOARDS_AFTER).is_none(),
             "absent, not blank: a blank would read as an edge the dock cannot see"
+        );
+    }
+
+    /// An id the system of record cannot resolve is refused at the
+    /// terminal, naming the flag — not an hour later as a refused edge
+    /// on the auto-park handler's dispatcher run.
+    #[test]
+    fn a_park_intent_naming_a_packet_that_does_not_exist_is_refused_by_flag() {
+        let mut p = park_full();
+        p.backlog_item = Some("be793304-9f1e-4c76-a9e6-2a6b47bcf4c0".into());
+        p.boards_after = Some("a1b2c3d4".into());
+        let known = |id: &str| id == "a1b2c3d4";
+        assert_eq!(
+            p.unresolvable(known),
+            vec![(
+                "--park-backlog-item",
+                "be793304-9f1e-4c76-a9e6-2a6b47bcf4c0".to_string()
+            )],
+            "the one the SoR cannot find is named with its flag; the one it can is not"
+        );
+        assert!(
+            p.unresolvable(|_| true).is_empty(),
+            "every ref resolves: nothing to refuse"
+        );
+        let mut none = park_full();
+        none.no_item = Some("asked for in conversation".into());
+        assert!(
+            none.named_refs().is_empty(),
+            "--park-no-item names no packet"
         );
     }
 

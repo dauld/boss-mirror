@@ -1,48 +1,21 @@
-//! Boot-time guards every Boss service binary should use.
+//! Boot-time helpers every BOSS service binary uses: the masked
+//! database URL for logs, and the `/health` capability snapshot.
 //!
-//! The pattern: each service crate has an in-memory repo for tests
-//! and a Postgres repo behind `#[cfg(feature = "postgres")]`. A binary
-//! built **without** the `postgres` feature in error (e.g. the deploy
-//! script forgot the flag) would otherwise silently serve in-memory
-//! data — every write landing in a process-local map and disappearing
-//! on restart, a degradation invisible to operators until something
-//! observable breaks downstream.
-//!
-//! [`require_postgres_or_explicit_inmemory`] is the load-bearing
-//! guard. Call it from each service's `main()` on the
-//! `#[cfg(not(feature = "postgres"))]` branch — it errors out with a
-//! clear remediation message unless the operator explicitly opts in
-//! by setting `BOSS_ALLOW_INMEMORY=1` (test harnesses, dev shells).
-
-/// Refuse to serve in-memory unless the operator explicitly opts in.
-///
-/// Intended call site:
-///
-/// ```ignore
-/// #[cfg(not(feature = "postgres"))]
-/// boss_core::startup::require_postgres_or_explicit_inmemory("boss-docs-api")?;
-/// ```
-///
-/// Returns `Ok(())` if `BOSS_ALLOW_INMEMORY=1` is set in the
-/// environment (the in-memory path is then taken with a `WARN`
-/// announcing the override). Otherwise returns `Err` with the
-/// remediation text — the binary is expected to propagate this and
-/// exit non-zero.
-pub fn require_postgres_or_explicit_inmemory(service_name: &str) -> anyhow::Result<()> {
-    if std::env::var("BOSS_ALLOW_INMEMORY").is_ok() {
-        tracing::warn!(
-            service = service_name,
-            "BOSS_ALLOW_INMEMORY=1 — serving in-memory only; writes will not persist"
-        );
-        return Ok(());
-    }
-    anyhow::bail!(
-        "{service_name} was built without the `postgres` feature.\n\
-         Writes would silently disappear into a process-local map.\n\
-         Fix: rebuild with `cargo build --release -p <crate> --bin {service_name} --features postgres`,\n\
-         or set BOSS_ALLOW_INMEMORY=1 to acknowledge the limitation (intended for tests / dev shells).",
-    )
-}
+//! THERE IS NO IN-MEMORY SERVING BRANCH. Until 2026-09-12 this module
+//! carried `require_postgres_or_explicit_inmemory`, a guard for a
+//! binary built without the `postgres` feature that would refuse to
+//! serve from a process-local map unless `BOSS_ALLOW_INMEMORY=1` was
+//! set. Measured (backlog be793304): nothing in the tree set that
+//! variable, every service binary declares `required-features =
+//! ["postgres"]` so cargo will not build one without the feature, and
+//! infra/check-binary-build-coverage.sh classified REACHING the guard
+//! as a defect. A branch whose sanctioned outcome is "never reached"
+//! is not a safety net; it is code that cannot run. The thirteen
+//! `cfg(not(feature = "postgres"))` arms that called it went with it,
+//! and the two binaries that chose storage at RUNTIME from an optional
+//! `postgres_url` (boss-jobs-api, boss-assets-api) now refuse to start
+//! without one. The in-memory repositories themselves stay: they are
+//! what the unit tests run against.
 
 /// Redact the password in a database URL for safe logging.
 ///

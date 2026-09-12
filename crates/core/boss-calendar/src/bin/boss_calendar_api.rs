@@ -38,7 +38,6 @@ async fn main() -> Result<()> {
 
     info!(http_bind = %cfg.http_bind, "boss-calendar-api starting");
 
-    #[cfg(feature = "postgres")]
     let (calendar, publisher): (
         Arc<dyn CalendarClient>,
         Option<boss_core::publisher::DomainPublisher>,
@@ -66,15 +65,6 @@ async fn main() -> Result<()> {
             }
         };
         (calendar, publisher)
-    };
-
-    #[cfg(not(feature = "postgres"))]
-    let (calendar, publisher): (
-        Arc<dyn CalendarClient>,
-        Option<boss_core::publisher::DomainPublisher>,
-    ) = {
-        boss_core::startup::require_postgres_or_explicit_inmemory("boss-calendar-api")?;
-        (Arc::new(boss_calendar::InMemoryCalendar::new()), None)
     };
 
     let clock_url = std::env::var("BOSS_CLOCK_URL").unwrap_or_else(|_| boss_ports::url("clock"));

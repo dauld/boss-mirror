@@ -46,6 +46,16 @@ TimeoutStartSec=10min
 # the whole measurement to the journal and exits non-zero. The
 # measurement is never lost to a reduction (CLAUDE.md §Diagnosis), and
 # the failed unit is a state somebody notices.
+# AS THE CHECKOUT'S OWNER. The measurement is `git log` over /opt/boss,
+# and git refuses to read a repository owned by somebody else — "dubious ownership"
+# — so with no User= this unit, as root, exited 3 on its
+# first-ever firing (2026-09-12 05:14Z), the cadence stayed silent and
+# two landed cars waited on a packet that could not exist. The siblings
+# that run git here (boss-search-reindex, boss-forge-token-audit) say the
+# same. Not `safe.directory`: that is right where a root process must
+# READ a foreign clone and wrong everywhere else (infra/gate.sh says why),
+# and nothing here needs root.
+User=david
 ExecStartPre=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-maintenance-wrap.sh maintenance-codebase-metrics "Codebase metrics"
 ExecStart=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/codebase-metrics.sh file --repo /opt/boss --ref main
 ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-step.sh maintenance-codebase-metrics run

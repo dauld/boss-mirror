@@ -55,21 +55,13 @@ async fn main() -> Result<()> {
         Arc::new(ReqwestAssetsClient::new(cfg.assets_api_url.clone()));
 
     // Connect to Postgres.
-    #[cfg(feature = "postgres")]
     let pg_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)
         .connect(&cfg.postgres_url)
         .await
         .with_context(|| "connecting to Postgres")?;
 
-    #[cfg(feature = "postgres")]
     let catalog = Arc::new(boss_catalog::PgKb::new(pg_pool.clone()));
-
-    #[cfg(not(feature = "postgres"))]
-    let catalog = {
-        boss_core::startup::require_postgres_or_explicit_inmemory("boss-catalog-api")?;
-        Arc::new(boss_catalog::InMemoryKb::new(vec![]))
-    };
 
     // Connect to NATS for domain event publishing + audit trail (optional).
     let publisher = match &cfg.nats_url {
@@ -79,7 +71,6 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("connecting to NATS at {url}"))?;
             #[allow(unused_mut)]
             let mut pub_ = boss_core::publisher::DomainPublisher::new(Arc::new(bus), "kb");
-            #[cfg(feature = "postgres")]
             {
                 pub_ = pub_.with_audit(Arc::new(boss_events::PgAuditWriter::new(pg_pool.clone())));
             }
@@ -136,7 +127,6 @@ async fn main() -> Result<()> {
     // examples/used-device-shop/design/marketing-needs.md). Postgres-only: marketing_assets
     // is backed by Postgres via PgMarketingAssets, no in-memory
     // fallback since the InMemoryKb is device-catalog specific.
-    #[cfg(feature = "postgres")]
     let app = {
         use boss_catalog::marketing_assets::http::{
             MarketingAssetsApiState, router as marketing_assets_router,
@@ -146,8 +136,6 @@ async fn main() -> Result<()> {
             classes_client: marketing_classes_client,
         }))
     };
-    #[cfg(not(feature = "postgres"))]
-    let app = router(state);
     // Sim-origin middleware: extract x-sim-origin header and set the
     // per-request task-local so the publisher inherits the sim
     // marker. Closes the gap where a sim chain could trigger a

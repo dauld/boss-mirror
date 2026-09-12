@@ -11,7 +11,6 @@ use anyhow::{Context, Result};
 use boss_assets::asset_config::AssetsApiConfig;
 use boss_assets::bridge::core_event_to_system;
 use boss_assets::http::{AssetsApiState, InsightsClients, router};
-use boss_assets::in_memory::InMemoryAssets;
 use boss_assets::port::AssetsRepository;
 use boss_assets::sse::{self, SseHub};
 use boss_catalog_client::ReqwestCatalogClient;
@@ -94,9 +93,7 @@ async fn main() -> Result<()> {
         "assets",
     );
 
-    // Choose storage backend: Postgres when configured, in-memory otherwise.
     // The Postgres pool is shared across PgAssets and PgAuditWriter.
-    #[cfg(feature = "postgres")]
     if let Some(ref pg_url) = cfg.postgres_url {
         info!("using Postgres assets storage");
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -120,28 +117,16 @@ async fn main() -> Result<()> {
             cancel_tx,
             cancel_rx,
             &cfg.http_bind,
-            Some(pool),
+            pool,
         )
         .await;
     }
 
-    boss_core::startup::require_postgres_or_explicit_inmemory("boss-assets-api")?;
-    info!("using in-memory assets storage (no postgres_url configured)");
-    let assets = Arc::new(InMemoryAssets::new());
-    run_server(
-        assets,
-        bus,
-        publisher,
-        people_client,
-        classes_client,
-        insights_clients,
-        hub,
-        cancel_tx,
-        cancel_rx,
-        &cfg.http_bind,
-        None,
+    anyhow::bail!(
+        "boss-assets-api: postgres_url is required. The in-memory serving branch was deleted \
+         (be793304): nothing ever set the opt-in it guarded, every image builds --features postgres, \
+         and a service whose writes vanish on restart is not a degraded mode but a lie."
     )
-    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -156,8 +141,7 @@ async fn run_server<R: AssetsRepository + 'static>(
     cancel_tx: watch::Sender<bool>,
     cancel_rx: watch::Receiver<bool>,
     http_bind: &str,
-    #[cfg(feature = "postgres")] pool: Option<sqlx::PgPool>,
-    #[cfg(not(feature = "postgres"))] _pool: Option<()>,
+    pool: sqlx::PgPool,
 ) -> Result<()> {
     // Spawn NATS ingress: subscribe to asset.>, decode, append.
     let ingress_assets = assets.clone();
@@ -213,20 +197,8 @@ async fn run_server<R: AssetsRepository + 'static>(
         .await
         .with_context(|| format!("binding HTTP listener on {http_addr}"))?;
     info!(addr = %http_addr, "assets HTTP API listening");
-    // Without the `postgres` feature `app` is never reassigned, so the
-    // `mut` binding is cfg-gated to match. Clippy otherwise fires
-    // `unused_mut` on the default-feature build.
-    #[cfg(not(feature = "postgres"))]
-    let app = router(state);
-    #[cfg(feature = "postgres")]
-    let mut app = router(state);
-    // Merge in the per-asset Parts router when Postgres is wired.
-    // In-memory mode skips it (no backing store for parts tables yet);
-    // the main assets endpoints still work.
-    #[cfg(feature = "postgres")]
-    if let Some(ref pool) = pool {
-        app = app.merge(boss_assets::asset_parts::asset_parts_router(pool.clone()));
-    }
+    // The per-asset Parts router rides the same pool.
+    let app = router(state).merge(boss_assets::asset_parts::asset_parts_router(pool.clone()));
     // Sim-origin middleware: extract x-sim-origin header and set the
     // per-request task-local so the publisher inherits the sim
     // marker. Closes the gap where a sim chain could trigger a

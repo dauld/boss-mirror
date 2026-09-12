@@ -1,6 +1,6 @@
 //! `boss-jobs-api` service: jobs domain + NATS event bus + HTTP API.
 //!
-//! Wires the jobs repository (Postgres or in-memory) to NATS for
+//! Wires the jobs repository (Postgres) to NATS for
 //! event distribution and exposes an axum HTTP API.
 
 use std::net::SocketAddr;
@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use boss_jobs::http::{JobsApiState, router};
-use boss_jobs::in_memory::InMemoryJobs;
 use boss_jobs::jobs_config::JobsApiConfig;
 use boss_jobs::port::JobsRepository;
 use boss_nats::NatsEventBus;
@@ -130,8 +129,7 @@ async fn main() -> Result<()> {
     let clock: Arc<dyn boss_clock_client::ClockClient> =
         Arc::new(boss_clock_client::ReqwestClockClient::new(clock_url));
 
-    // Choose storage backend: Postgres when configured, in-memory otherwise.
-    #[cfg(feature = "postgres")]
+    // Postgres, or refuse: the in-memory serving branch is deleted (below).
     if let Some(ref pg_url) = cfg.postgres_url {
         info!("using Postgres jobs storage");
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -231,45 +229,11 @@ async fn main() -> Result<()> {
         .await;
     }
 
-    boss_core::startup::require_postgres_or_explicit_inmemory("boss-jobs-api")?;
-    info!("using in-memory jobs storage (no postgres_url configured)");
-    let jobs = Arc::new(InMemoryJobs::new());
-    let kind_registry: Arc<dyn boss_jobs::WorkflowRegistry> =
-        Arc::new(boss_jobs::InMemoryWorkflows::new());
-    let plugin_registry: Arc<dyn boss_jobs::StepPluginRegistry> =
-        Arc::new(boss_jobs::InMemoryStepPlugins::new());
-    reconcile_platform_workflows(kind_registry.as_ref(), jobs.as_ref(), &clock).await;
-    // No subjects table without Postgres — the in-memory spike path
-    // skips the existence gate, same as before.
-    let subject_existence: Option<Arc<dyn boss_jobs::subject_existence::SubjectExistenceCheck>> =
-        None;
-    run_server(
-        Some(std::sync::Arc::new(boss_jobs::job_edges::InMemoryJobEdges)
-            as std::sync::Arc<dyn boss_jobs::job_edges::JobEdgesRegistry>),
-        Some(Arc::new(boss_jobs::InMemoryStations::new()) as Arc<dyn boss_jobs::StationRegistry>),
-        jobs,
-        bus,
-        publisher,
-        Some(kind_registry),
-        Some(plugin_registry),
-        None,
-        None,
-        None,
-        None,
-        // In-memory spike path: the agent-run record is a projection of
-        // the log and has no in-memory story worth wiring here.
-        None,
-        calendar,
-        subject_kinds,
-        subject_existence,
-        // In-memory spike path: no people stack to resolve against.
-        None,
-        clock,
-        cancel_tx,
-        cancel_rx,
-        &cfg.http_bind,
+    anyhow::bail!(
+        "boss-jobs-api: postgres_url is required. The in-memory serving branch was deleted \
+         (be793304): nothing ever set the opt-in it guarded, every image builds --features postgres, \
+         and a system of record whose writes vanish on restart is not a degraded mode but a lie."
     )
-    .await
 }
 
 #[allow(clippy::too_many_arguments)]

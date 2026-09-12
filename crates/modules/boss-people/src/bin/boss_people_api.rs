@@ -5,9 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-#[cfg(feature = "postgres")]
 use boss_classes_client::{ClassesClient, ReqwestClassesClient};
-#[cfg(feature = "postgres")]
 use boss_locations_client::{LocationsClient, ReqwestLocationsClient};
 use boss_people::http::{PeopleApiState, router};
 use boss_people::people_config::PeopleApiConfig;
@@ -44,7 +42,6 @@ async fn main() -> Result<()> {
     // Mandatory Class registry client. Employee writes validate
     // `role` via `class_exists("employee", code)` before commit —
     // the only gate keeping an unregistered role code out.
-    #[cfg(feature = "postgres")]
     let classes_client: Arc<dyn ClassesClient> = {
         info!(classes_api_url = %cfg.classes_api_url, "Class registry validation enabled");
         Arc::new(ReqwestClassesClient::new(cfg.classes_api_url.clone()))
@@ -54,7 +51,6 @@ async fn main() -> Result<()> {
     // `has_global_read` recognises tenant-defined executives. Skip
     // on transport failure — platform-admin + audit-readonly still
     // grant global read.
-    #[cfg(feature = "postgres")]
     match boss_classes_client::seed_executive_role_cache(classes_client.as_ref()).await {
         Ok(n) => info!(count = n, "executive role cache seeded"),
         Err(e) => {
@@ -64,7 +60,6 @@ async fn main() -> Result<()> {
 
     // Mandatory Locations registry client. Employee writes validate
     // `location` via `location_exists(id)` before commit.
-    #[cfg(feature = "postgres")]
     let locations_client: Arc<dyn LocationsClient> = {
         info!(locations_api_url = %cfg.locations_api_url, "Locations registry validation enabled");
         Arc::new(ReqwestLocationsClient::new(cfg.locations_api_url.clone()))
@@ -73,25 +68,17 @@ async fn main() -> Result<()> {
     // One pool per service. PgPool is internally Arc'd, so cloning is
     // cheap and every sub-router shares the same connection slots
     // instead of fragmenting them across many small pools.
-    #[cfg(feature = "postgres")]
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)
         .connect(&cfg.postgres_url)
         .await
         .with_context(|| "connecting to Postgres")?;
 
-    #[cfg(feature = "postgres")]
     let people = Arc::new(boss_people::PgPeople::with_registries(
         pool.clone(),
         classes_client.clone(),
         locations_client.clone(),
     ));
-
-    #[cfg(not(feature = "postgres"))]
-    let people = {
-        boss_core::startup::require_postgres_or_explicit_inmemory("boss-people-api")?;
-        Arc::new(boss_people::InMemoryPeople::new(vec![]))
-    };
 
     // Connect to NATS for domain event publishing (optional).
     let publisher = match &cfg.nats_url {
@@ -101,7 +88,6 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("connecting to NATS at {url}"))?;
             #[allow(unused_mut)]
             let mut pub_ = boss_core::publisher::DomainPublisher::new(Arc::new(bus), "people");
-            #[cfg(feature = "postgres")]
             {
                 pub_ = pub_.with_audit(std::sync::Arc::new(boss_events::PgAuditWriter::new(
                     pool.clone(),
@@ -136,7 +122,6 @@ async fn main() -> Result<()> {
 
     // Mount workflow and search routers first (more-specific routes),
     // then merge the people CRUD router (has catch-all /{id}).
-    #[cfg(feature = "postgres")]
     let mut app = boss_people::workflows::workflow_router(
         pool.clone(),
         std::sync::Arc::new(boss_people::PgPeople::new(pool.clone())),
@@ -168,9 +153,6 @@ async fn main() -> Result<()> {
     //     crates/modules/boss-accounts/src/bin/boss_accounts_api.rs
     //   - boss-events-api    (port 7150) — see
     //     crates/core/boss-events/src/bin/boss_events_api.rs
-
-    #[cfg(not(feature = "postgres"))]
-    let mut app = axum::Router::new();
 
     // Wire the calendar client if configured. The PTO endpoint
     // returns 503 when calendar isn't set up; everything else

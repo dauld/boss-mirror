@@ -39,7 +39,6 @@ async fn main() -> Result<()> {
 
     info!(http_bind = %cfg.http_bind, "boss-classes-api starting");
 
-    #[cfg(feature = "postgres")]
     let classes: Arc<dyn ClassRepository> = {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(10)
@@ -47,12 +46,6 @@ async fn main() -> Result<()> {
             .await
             .with_context(|| "connecting to Postgres")?;
         Arc::new(boss_classes::PgClasses::new(pool))
-    };
-
-    #[cfg(not(feature = "postgres"))]
-    let classes: Arc<dyn ClassRepository> = {
-        boss_core::startup::require_postgres_or_explicit_inmemory("boss-classes-api")?;
-        Arc::new(boss_classes::InMemoryClasses::new(vec![]))
     };
 
     let state = ClassesApiState { classes };
