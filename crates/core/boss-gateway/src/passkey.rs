@@ -136,6 +136,41 @@ pub async fn credentials_list(
     Json(out).into_response()
 }
 
+/// `DELETE /api/auth/passkey/credentials/{credential_id}` — remove one
+/// of the session's own passkeys. The rule lives in boss-people (the
+/// last one stays, 409 in the user's terms); this proxies for the
+/// session's employee and passes that refusal through verbatim, so the
+/// panel can show the reason rather than "failed".
+pub async fn credentials_remove(
+    State(state): State<Arc<PasskeyState>>,
+    headers: HeaderMap,
+    axum::extract::Path(credential_id): axum::extract::Path<String>,
+) -> Response {
+    let (_sess, employee_id) = match employee_session(&headers, &state.session_key) {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+    let url = format!(
+        "{}/api/people/{}/webauthn-credentials/{}",
+        state.people_base, employee_id, credential_id
+    );
+    let resp = match state.request(reqwest::Method::DELETE, url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return err(StatusCode::BAD_GATEWAY, format!("people unreachable: {e}"))
+                .into_response();
+        }
+    };
+    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    match status {
+        StatusCode::NO_CONTENT => StatusCode::NO_CONTENT.into_response(),
+        StatusCode::CONFLICT | StatusCode::NOT_FOUND => {
+            (status, resp.text().await.unwrap_or_default()).into_response()
+        }
+        _ => err(StatusCode::BAD_GATEWAY, "credential removal failed").into_response(),
+    }
+}
+
 /// The challenge recipe, in one place so the begin and any future
 /// audit tooling cannot drift: sha256 over the utf8 of
 /// `<shape_hash>:<nonce>`, both hex strings.

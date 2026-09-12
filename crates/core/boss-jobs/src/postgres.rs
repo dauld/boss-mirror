@@ -57,6 +57,7 @@ struct EstateNodeRow {
     label: String,
     address: String,
     role: String,
+    roles: Vec<String>,
     cpu: Option<i32>,
     memory_gb: Option<i32>,
     disk_gb: Option<i32>,
@@ -562,10 +563,14 @@ impl JobsRepository for PgJobs {
     async fn list_estate_nodes(&self) -> Result<Vec<crate::port::EstateNode>, JobsError> {
         let rows = sqlx::query_as::<_, EstateNodeRow>(
             r#"
-            SELECT id, label, address, role, cpu, memory_gb, disk_gb, notes,
-                   (retired_at IS NOT NULL) AS retired
-            FROM nodes
-            ORDER BY role, id
+            SELECT n.id, n.label, n.address, n.role, n.cpu, n.memory_gb, n.disk_gb, n.notes,
+                   (n.retired_at IS NOT NULL) AS retired,
+                   COALESCE(
+                       (SELECT array_agg(r.role ORDER BY r.role) FROM node_roles r WHERE r.node_id = n.id),
+                       ARRAY[]::text[]
+                   ) AS roles
+            FROM nodes n
+            ORDER BY n.role, n.id
             "#,
         )
         .fetch_all(&self.pool)
@@ -578,6 +583,7 @@ impl JobsRepository for PgJobs {
                 label: r.label,
                 address: r.address,
                 role: r.role,
+                roles: r.roles,
                 cpu: r.cpu,
                 memory_gb: r.memory_gb,
                 disk_gb: r.disk_gb,

@@ -75,7 +75,9 @@
           {#each estate.nodes.data.filter((n) => !n.retired) as n (n.id)}
             <tr title={n.notes ?? ''}>
               <td class="estate-id">{n.id}</td>
-              <td>{n.role}</td>
+              <td>
+                {n.role}{#if n.roles.length > 0}<span class="estate-roles"> · {n.roles.join(' · ')}</span>{/if}
+              </td>
               <td class="estate-addr">{n.address ?? '—'}</td>
               <td class="estate-num">{n.cpu ?? '—'}</td>
               <td class="estate-num">{n.memory_gb != null ? `${n.memory_gb}G` : '—'}</td>
@@ -195,6 +197,7 @@
   .estate-table td { padding: 6px 12px 6px 0; border-bottom: 1px solid var(--hairline, #2A3138); }
   .estate-id { font-family: var(--font-mono, ui-monospace, monospace); }
   .estate-addr, .estate-num { font-family: var(--font-mono, ui-monospace, monospace); color: var(--static, #7A838C); }
+  .estate-roles { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--static, #7A838C); }
   .estate-obs { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
   .estate-obs-row { display: flex; gap: 16px; align-items: baseline; }
   .estate-scope {

@@ -423,7 +423,15 @@ pub struct EstateNode {
     pub id: String,
     pub label: String,
     pub address: String,
+    /// The PRIMARY role — what the estate page keys on (`bastion` is
+    /// the jump host). One value, from `nodes.role`.
     pub role: String,
+    /// Every role the node DECLARES, sorted — Classes of `node` joined
+    /// through `node_roles` (202609120300). The set a managed host
+    /// derives its unit roster from; empty when the node declares
+    /// nothing, which the converge reads as "install every row".
+    #[serde(default)]
+    pub roles: Vec<String>,
     pub cpu: Option<i32>,
     pub memory_gb: Option<i32>,
     pub disk_gb: Option<i32>,

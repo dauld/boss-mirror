@@ -773,7 +773,19 @@ a door that stops being true is a defect worth a car.
 - **Gating a branch — `boss gate <branch> [--wait]`.** Files or reuses
   the packet, renders the runner, creates the Job. `--wait` polls to a
   verdict; hand-rolled pollers have been written three times and two
-  were broken.
+  were broken. Two ways to spend a gate for nothing, each paid for
+  once (2026-08-28) and neither discoverable from the code: **a gated
+  branch must not move** — the receipt vouches for the sha the gate
+  resolved at launch, so a commit pushed after it leaves a car the dock
+  refuses as "gated, then changed" — a rebase of a parked car is the
+  same event. The repair is to gate the new tip again: a re-gate
+  REFRESHES the parked car (the fresh receipt rides it as
+  `regate_receipt`) rather than filing a twin, and `boss rerail
+  --finish` does the same once a green vouches for the head; and
+  **prose with backticks does not survive argv** — every `--park-*`
+  text goes through the shell, where a backtick is command substitution
+  and the phrase is replaced by nothing, silently. Single quotes, or no
+  backticks in car prose.
 
 - **Publishing a branch to the forge.** A workstation has no forge
   credential. Push to the conductor clone (`gcp` remote) under

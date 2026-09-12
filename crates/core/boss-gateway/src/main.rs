@@ -695,7 +695,12 @@ fn build_router(local_auth_state: Option<Arc<LocalAuthState>>) -> axum::Router<A
                 )
                 .route(
                     "/api/auth/passkey/credentials",
-                    axum::routing::get(boss_gateway::passkey::credentials_list).with_state(pk),
+                    axum::routing::get(boss_gateway::passkey::credentials_list)
+                        .with_state(pk.clone()),
+                )
+                .route(
+                    "/api/auth/passkey/credentials/{credential_id}",
+                    axum::routing::delete(boss_gateway::passkey::credentials_remove).with_state(pk),
                 )
             }
             Err(e) => {

@@ -6,13 +6,51 @@
 # `maintenance-*` protocol that is NOT unit-run: there is no `run` step
 # whose `result` routes the verdict, because the executor is a person or
 # an agent doing an inspection, not a systemd unit reporting an exit
-# status. It forks on what the inspection FINDS — `remediated` when
-# something had to change, `clear` when it did not — and the ratio is the
-# measurement: a sweep that always remediates is a threshold set too
-# tight, one that never does is a sweep nobody needed. That is why
+# status. It forks TWICE. First on what the inspection FINDS — `clear` when
+# nothing had to change, on to `remediate` when something did — and that
+# ratio is the measurement: a sweep that always remediates is a threshold
+# set too tight, one that never does is a sweep nobody needed. That is why
 # `every_unit_run_maintenance_kind_ends_in_its_verdict` is scoped by the
 # trigger's executor rather than by the `maintenance-` prefix, and why
 # `only_the_sweep_is_exempt_from_the_verdict_rule` names this kind.
+#
+# SECOND FORK, AND THE ONE THIS BODY ADDS: what KIND of remediation it
+# was. (The live lineage stood at v2 on 2026-09-11 with the two-terminal
+# shape; publishing this body makes it v3. The file carries no version —
+# the seed gives a fresh database this body as its own v1, and a live
+# lineage keeps the number it has reached.)
+# `remediated` for one the sweep discharged with the hands it has,
+# `change-needed` for one it cannot — the finding needs a change to the
+# tree. Backlog 21edde87, measured 2026-09-11: of the 21 remediated
+# sweeps the registry had closed, NINETEEN were operational (37 GB of
+# dead cargo caches reclaimed, a build cache pruned, an orphan PVC and an
+# undeclared Service deleted, a CI image rebuilt) and two were "nothing
+# deleted, deliberately; filed the real defect instead". Yet
+# `spawn-car-on-sweep-remediated` filed a `ship-a-change` packet on every
+# one of the 21, because it read `remediated` — "something had to change"
+# — as "the tree has to change". Nineteen delivery packets with no branch
+# to cut and nothing to scope, each sitting at `scope` until a human
+# recognised it as residue and abandoned it by hand; three were cleaned
+# up the day this was measured (2e4bd982, fc12c370, 5ce99240).
+#
+# The sweep SAYS which it is, as a required field on the step that did
+# the remediating, because a rule that has to be right about intent will
+# be wrong. The spawn rule (v3) then keys on the `outcome` the closed
+# packet already carries, and the two honest routes the packet proposed —
+# condition the spawn on a field, and give the sweep an operational
+# terminal it can discharge in place — are the same change seen from
+# either end.
+#
+# THE FAIL-SAFE DIRECTION IS DELIBERATE. `remediated` is gated on
+# `!= "code-change"`, so an ABSENT `remediation_kind` routes there: a
+# missing field mints no delivery packet. Pinned by
+# `boss-jobs/tests/platform_bundle_maintenance_sweep.rs`.
+#
+# IN-FLIGHT SWEEPS KEEP THE VERSION THEY WERE ADMITTED UNDER, so nothing
+# open is disturbed — and nothing open gains the new behaviour either: a
+# sweep already running still closes `remediated` and still matches the
+# spawn rule at whatever version that rule is live at. Since a sweep's
+# whole life is one day, that window closes on its own.
 #
 # Authored live through the API and never written back until 2026-09-10,
 # which is the gap `infra/lint/the-live-protocols-are-the-authored-
@@ -27,7 +65,7 @@ label = "Maintenance sweep"
 category = "platform"
 subject_kinds = ["custom"]
 owning_team = "platform"
-description = "A recurring inspection of one piece of infrastructure, admitted on a cadence rather than remembered. Forks on what the inspection finds: remediate when it must change, clear when it need not. Either way the log carries the measurement, so a threshold trend is a query instead of someone's recollection."
+description = "A recurring inspection of one piece of infrastructure, admitted on a cadence rather than remembered. Forks on what the inspection finds: remediate when it must change, clear when it need not — and a remediation says whether it was discharged here (operational) or needs a change to the tree (code-change), which is what decides whether a delivery packet is owed. Either way the log carries the measurement, so a threshold trend is a query instead of someone's recollection."
 
 [[workflow.step]]
 title = "opened"
@@ -54,17 +92,35 @@ ready_when = "steps.inspect.done AND job.metadata.action_needed = \"true\""
 title_template = "Remediate: {metadata.target}"
 authority_role = "platform-admin"
 fields = [
+  { name = "remediation_kind", field_type = "operational|code-change", required = true },
   { name = "what_changed", field_type = "string", required = true },
   { name = "verified", field_type = "string", required = true },
 ]
 
+# Discharged in place. Nothing is owed downstream, so nothing is spawned
+# — which is the common case by a factor of nine. `!= "code-change"`
+# rather than `= "operational"` on purpose: an absent value lands here,
+# and here is the terminal that mints no residue.
 [[workflow.step]]
 title = "remediated"
 kind = "outcome"
-ready_when = "steps.remediate.done"
+ready_when = "steps.remediate.done AND steps.remediate.metadata.remediation_kind != \"code-change\""
 title_template = "Remediated: {metadata.target}"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "remediated" }
+
+# The sweep did its job and the finding outlives it: this one needs the
+# tree changed, which a sweep cannot do. `spawn-car-on-sweep-remediated`
+# (v3) fires HERE and only here, so the delivery packet it files has a
+# branch worth cutting. `outcome_kind = "completed"` is right — the sweep
+# completed; it is the remediation that is owed elsewhere.
+[[workflow.step]]
+title = "change-needed"
+kind = "outcome"
+ready_when = "steps.remediate.done AND steps.remediate.metadata.remediation_kind = \"code-change\""
+title_template = "Change needed: {metadata.target}"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "change-needed" }
 
 [[workflow.step]]
 title = "clear"

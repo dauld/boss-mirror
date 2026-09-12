@@ -19,6 +19,11 @@ export type EstateNode = Readonly<{
   label: string;
   address: string | null;
   role: string;
+  /** Every role the node DECLARES (Classes of `node`, 202609120300) —
+   *  the set a managed host derives its unit roster from. `role` above
+   *  is the primary one the page keys on; this is the full set. Empty
+   *  when the node declares nothing. */
+  roles: readonly string[];
   cpu: number | null;
   memory_gb: number | null;
   disk_gb: number | null;
@@ -149,6 +154,7 @@ export function parseNodes(raw: unknown): readonly EstateNode[] {
       label: typeof o.label === 'string' ? o.label : o.id,
       address: typeof o.address === 'string' ? o.address : null,
       role: o.role,
+      roles: Array.isArray(o.roles) ? o.roles.filter((x): x is string => typeof x === 'string') : [],
       cpu: typeof o.cpu === 'number' ? o.cpu : null,
       memory_gb: typeof o.memory_gb === 'number' ? o.memory_gb : null,
       disk_gb: typeof o.disk_gb === 'number' ? o.disk_gb : null,

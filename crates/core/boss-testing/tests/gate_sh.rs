@@ -199,9 +199,10 @@ fn gate_script_covers_the_checks() {
         ),
         (
             "no-snapshot-arrays.sh",
-            "needs a built workspace (boss-ports-list) — gating it is \
-             proposed separately; it is the check that would have caught \
-             the stale _generated/ports.ts",
+            "needs a built workspace (boss-ports-list); the gate's build \
+             phase runs it once the binary exists, and that is asserted \
+             below — it is the check that would have caught the stale \
+             _generated/ports.ts",
         ),
         (
             "svelte-check.sh",
@@ -255,6 +256,18 @@ fn gate_script_covers_the_checks() {
         gate.contains("infra/lint/svelte-check.sh"),
         "svelte-check.sh is kept out of the pre-flight for cost, not for coverage: \
          the gate's web phase must still run it"
+    );
+    // Not `contains("infra/lint/no-snapshot-arrays.sh")` — the exclusion
+    // list already names the path, so that would pass with the lint
+    // never run. From 2026-08-31 to 2026-09-12 the lint was excluded
+    // here "because CI builds, then runs it", and nothing ran it: it
+    // named a page deleted in #161 and stayed red, unread, for twelve
+    // days (docs/invariants/spa-lists-are-generated.toml recorded the
+    // gap as `unenforced`). A check nobody runs is not running.
+    assert!(
+        gate.contains("check \"no-snapshot-arrays\""),
+        "no-snapshot-arrays.sh is kept out of the pre-flight because it needs the built \
+         boss-ports-list: the gate's build phase must still run it as a check"
     );
 }
 

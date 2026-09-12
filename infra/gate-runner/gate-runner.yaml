@@ -146,6 +146,16 @@ spec:
       # see the claim's comment.)
       affinity:
         nodeAffinity:
+          # A BUILD NEVER SHARES A NODE WITH ETCD (incident a398c4d3,
+          # 2026-09-11): a control-plane node's disk carries etcd's WAL,
+          # and a gate writes tens of GB. Required, not preferred — a
+          # preference is dropped under pressure, and pressure is the
+          # day it matters. Pinned by
+          # infra/lint/a-build-never-shares-a-node-with-etcd.sh.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - {key: node-role.kubernetes.io/control-plane, operator: DoesNotExist}
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
               preference:

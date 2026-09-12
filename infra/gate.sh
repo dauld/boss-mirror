@@ -1054,7 +1054,8 @@ PREFLIGHT_EXCLUDES=(
     # live-DB sweeps on systemd timers, not static checks
     "infra/lint/audit-ordering.sh"
     "infra/lint/conservation-invariants.sh"
-    # needs a built workspace (boss-ports-list); CI builds, then runs it
+    # needs a built workspace (boss-ports-list); the build phase below
+    # runs it once the binary exists
     "infra/lint/no-snapshot-arrays.sh"
     # installs packages — minutes, not seconds; the web phase below runs it
     "infra/lint/svelte-check.sh"
@@ -1499,10 +1500,22 @@ elif [ "${#SCOPE[@]}" -eq 0 ]; then
     # (see #180). One cheap build closes the class.
     check "build (default features)" cargo build --workspace
     check "test"    cargo test --all-features
+    # Kept out of the pre-flight because it reads the built
+    # boss-ports-list; the build above just produced it. This line was
+    # missing from 2026-08-31 to 2026-09-12: the exclusion said "CI
+    # builds, then runs it", CI did not, and the lint sat red on a page
+    # #161 had deleted, read by nobody (spa-lists-are-generated.toml).
+    check "no-snapshot-arrays" infra/lint/no-snapshot-arrays.sh
 else
     check "clippy"  cargo clippy "${SCOPE[@]}" --all-features --tests -- -D warnings
     check "build (default features)" cargo build "${SCOPE[@]}"
     check "test"    cargo test "${SCOPE[@]}" --all-features
+    # A scoped car pays for the binary only when it could have moved
+    # the answer: the registry crate, or a generated copy of it.
+    if changed_paths | grep -qE '^(crates/core/boss-ports/|apps/(web|simulator)/src/_generated/ports\.ts$)'; then
+        check "build boss-ports-list" cargo build -p boss-ports
+        check "no-snapshot-arrays" infra/lint/no-snapshot-arrays.sh
+    fi
 fi
 
 # THE WEB SUITE. CI's web job runs typecheck + unit + build + the

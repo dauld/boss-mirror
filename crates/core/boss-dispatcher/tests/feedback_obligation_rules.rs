@@ -64,7 +64,7 @@ fn close_marker(kind: &str, outcome: serde_json::Value) -> serde_json::Value {
 
 /// The registry is loaded whole, so every helper any `jobs.job.closed`
 /// rule names must RESOLVE here even though these tests only assert the
-/// two feedback rules — `spawn-car-on-sweep-remediated` (v2) calls
+/// two feedback rules — `spawn-car-on-sweep-remediated` (v3) calls
 /// `open_car_exists`, and an unresolvable helper is a `PredicateFailed`
 /// for the whole match, same as an absent identifier. Answering `false`
 /// (no open car) keeps that rule inert without dead-lettering the rest.

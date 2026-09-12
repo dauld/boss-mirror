@@ -1191,14 +1191,65 @@ TIMER_SYSTEMCTL="${INSTALL_SYSTEMCTL:-systemctl}"
 # disagree with the roster is not a count.
 TIMER_UNITS_INSTALLED=0
 TIMER_UNITS_SKIPPED=0
+TIMER_UNITS_NOT_IN_ROLE=0
+
+# WHICH ROWS THIS HOST IS FOR. A host declares its roles in the estate
+# registry (Classes of `node`, migration 202609120300) and
+# infra/estate/roles.toml maps each role to the TIMERS stems it needs;
+# the converge passes the host's roles in BOSS_NODE_ROLES (comma-
+# separated, read off /api/estate/nodes). With roles declared, only
+# their rows and the `always` set are installed and every other row is
+# REPORTED as NOT IN ROLE — reported, never uninstalled here: taking a
+# unit off a host is the retire-second-stack verb's job, with
+# capture-before-delete. With NO roles (undeclared, or the registry
+# unreachable), every row installs exactly as it did before roles
+# existed, and the run says so. An arm that needs the patient is not
+# an arm.
+ROLES_TOML="${BOSS_ROLES_TOML:-$REPO_ROOT/infra/estate/roles.toml}"
+
+# The stems roles.toml names for one section header ("always" or
+# "roles.<name>"), one per line. The file keeps each `units = [...]` on
+# one line so this needs no TOML parser.
+role_units() { # <section>
+    awk -v want="[$1]" '
+        $0 == want { on = 1; next }
+        /^\[/ { on = 0 }
+        on && /^units[[:space:]]*=/ { print }
+    ' "$ROLES_TOML" | grep -oE '"[^"]+"' | tr -d '"'
+}
+
+# The stems this host installs, or nothing when no roles are declared
+# (the caller reads "nothing" as "every row").
+roster_for_roles() { # <comma-separated roles>
+    local roles="$1" role
+    [[ -z "$roles" ]] && return 0
+    role_units always
+    IFS=, read -ra _roles <<<"$roles"
+    for role in "${_roles[@]}"; do
+        role_units "roles.${role}"
+    done
+}
 
 # $1 = "stage" to also stage each timer's binary into the generation.
 install_timer_units() {
-    local stage="${1:-}" entry stem subdir src_dir svc_src tmr_src
+    local stage="${1:-}" entry stem subdir src_dir svc_src tmr_src roster
     TIMER_UNITS_INSTALLED=0
     TIMER_UNITS_SKIPPED=0
+    TIMER_UNITS_NOT_IN_ROLE=0
+    roster="$(roster_for_roles "${BOSS_NODE_ROLES:-}")"
+    if [[ -n "${BOSS_NODE_ROLES:-}" ]]; then
+        echo "  roles: ${BOSS_NODE_ROLES} — installing only the rows they name (infra/estate/roles.toml)"
+    else
+        echo "  roles: none declared — installing every row"
+    fi
     for entry in "${TIMERS[@]}"; do
         IFS=: read -r stem subdir <<<"$entry"
+        if [[ -n "$roster" ]] && ! grep -qxF "$stem" <<<"$roster"; then
+            echo "  NOT IN ROLE $stem — this host's roles do not name it; a later car retires it"
+            TIMER_UNITS_NOT_IN_ROLE=$((TIMER_UNITS_NOT_IN_ROLE + 1))
+            run_summary_note "NOT IN ROLE $stem"
+            continue
+        fi
         src_dir="$REPO_ROOT/infra"
         [[ "$subdir" != "." ]] && src_dir="$src_dir/$subdir"
         svc_src="$src_dir/${stem}.service"
@@ -1263,9 +1314,15 @@ UNIT
 }
 
 enable_timer_units() {
-    local entry stem
+    local entry stem roster
+    roster="$(roster_for_roles "${BOSS_NODE_ROLES:-}")"
     for entry in "${TIMERS[@]}"; do
         IFS=: read -r stem _ <<<"$entry"
+        # A row outside this host's roles is neither installed nor
+        # enabled here, even if an earlier converge left its files.
+        if [[ -n "$roster" ]] && ! grep -qxF "$stem" <<<"$roster"; then
+            continue
+        fi
         if [[ -f "${TIMER_ETC}/${stem}.timer" ]]; then
             "$TIMER_SYSTEMCTL" enable --now "${stem}.timer" >/dev/null 2>&1 || true
             echo "  enabled ${stem}.timer"
@@ -1295,8 +1352,10 @@ case "$MODE" in
         # assembled at the end is a summary a failure takes with it.
         run_summary_field units_installed "$TIMER_UNITS_INSTALLED"
         run_summary_field units_skipped "$TIMER_UNITS_SKIPPED"
+        run_summary_field units_not_in_role "$TIMER_UNITS_NOT_IN_ROLE"
+        run_summary_field node_roles "${BOSS_NODE_ROLES:-}"
         run_summary_field summary \
-            "installed $TIMER_UNITS_INSTALLED of ${#TIMERS[@]} timer unit pair(s), skipped $TIMER_UNITS_SKIPPED"
+            "installed $TIMER_UNITS_INSTALLED of ${#TIMERS[@]} timer unit pair(s), skipped $TIMER_UNITS_SKIPPED, not in role $TIMER_UNITS_NOT_IN_ROLE"
         # THE JOURNAL READ DOOR, converged with the units.
         #
         # Backlog 68757702: boss-gcp had no read path from the pod for

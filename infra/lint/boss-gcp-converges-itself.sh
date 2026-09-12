@@ -75,6 +75,7 @@ done
 
 # 2. The loop installs itself.
 rows=$(sed -n '/^TIMERS=(/,/^)/p' "$deploy" | grep -oE '"[a-z0-9-]+:[^"]+"' | tr -d '"')
+command -v jq >/dev/null || fail "jq is required to check the run summary and the roles read"
 printf '%s\n' "$rows" | grep -qx 'boss-gcp-converge:gcp' \
     || fail "boss-gcp-converge is not a TIMERS row in deploy-services.sh — the converge
     would install every OTHER unit and never itself, so the one hand-install would have
@@ -180,6 +181,60 @@ for word in "stage" "converge schema" "health probes" "activate generation"; do
     grep -qi -- "$word" "$tmp/units.out" \
         && units_fail "the units mode ran '$word' — it must install unit files only"
 done
+
+# ---------------------------------------------------------------------
+# 3b. A HOST INSTALLS THE ROWS ITS ROLES NAME, AND REPORTS THE REST.
+#
+# Design 9e3e093f: a node declares its roles as registry data and
+# infra/estate/roles.toml maps each role to TIMERS stems. Two things are
+# pinned. First, the two rosters are one roster (CLAUDE.md §9a): every
+# TIMERS stem is named by exactly one role (or `always`) in roles.toml,
+# and roles.toml names nothing the array does not have. Second, with
+# BOSS_NODE_ROLES set, the units mode installs ONLY the named rows plus
+# `always`, prints NOT IN ROLE for each of the others by name, enables
+# none of those, and counts them on the packet — while with no roles at
+# all it installs every row (check 3 above ran exactly that).
+# ---------------------------------------------------------------------
+roles_toml="$repo/infra/estate/roles.toml"
+[ -f "$roles_toml" ] || fail "infra/estate/roles.toml is missing — the role -> units map"
+role_stems=$(grep -oE '"boss-[a-z0-9-]+"' "$roles_toml" | tr -d '"' | sort)
+timer_stems=$(printf '%s\n' $rows | cut -d: -f1 | sort)
+[ "$role_stems" = "$timer_stems" ] || fail "roles.toml and the TIMERS array disagree —
+    named by roles.toml but not a TIMERS row: $(comm -23 <(echo "$role_stems") <(echo "$timer_stems") | tr '\n' ' ')
+    a TIMERS row no role names: $(comm -13 <(echo "$role_stems") <(echo "$timer_stems") | tr '\n' ' ')
+    Every unit a host runs is derived from a role; a row outside every role is a row no host is for."
+dup=$(printf '%s\n' $role_stems | uniq -d)
+[ -z "$dup" ] || fail "roles.toml names a unit under two roles: $dup — one role owns each row"
+
+# The installer under roles: legacy-stack only, so the observer and the
+# ML batch (other roles) must be reported, not installed.
+mkdir -p "$tmp/etc-roles"
+: >"$tmp/systemctl-roles.log"
+sum_roles="$tmp/summary-roles.json"
+BOSS_NODE_ROLES=legacy-stack UNITS_SUMMARY="$sum_roles" \
+    units_run "$tmp/systemctl-roles.log" "$tmp/etc-roles" "$tmp/unitlib" "$tmp/units-roles.out" \
+    || { cat "$tmp/units-roles.out" >&2; fail "units mode with BOSS_NODE_ROLES=legacy-stack exited non-zero"; }
+touch "$tmp/systemctl-roles.log"
+in_role=$(awk '$0=="[always]"||$0=="[roles.legacy-stack]"{on=1;next} /^\[/{on=0} on&&/^units/' "$roles_toml" | grep -oE '"[^"]+"' | tr -d '"')
+for stem in $timer_stems; do
+    if grep -qxF "$stem" <<<"$in_role"; then
+        [ -f "$tmp/etc-roles/$stem.service" ] || fail "$stem is in the legacy-stack/always roster and was NOT installed under BOSS_NODE_ROLES=legacy-stack"
+    else
+        [ -f "$tmp/etc-roles/$stem.service" ] && fail "$stem is outside the legacy-stack roster and was installed anyway under BOSS_NODE_ROLES=legacy-stack"
+        grep -q "NOT IN ROLE $stem" "$tmp/units-roles.out" \
+            || fail "$stem is outside the roster and the units mode did not REPORT it by name (NOT IN ROLE $stem)"
+        grep -q "enable --now $stem.timer" "$tmp/systemctl-roles.log" \
+            && fail "$stem is outside the roster and was still ENABLED"
+    fi
+done
+not_in_role=$(grep -c 'NOT IN ROLE ' "$tmp/units-roles.out" || true)
+[ "$not_in_role" -ge 1 ] || fail "BOSS_NODE_ROLES=legacy-stack reported nothing as NOT IN ROLE — the observer and the ML batch are outside it"
+[ "$(jq -r '.units_not_in_role // ""' "$sum_roles")" = "$not_in_role" ] \
+    || fail "the summary says units_not_in_role='$(jq -r '.units_not_in_role // ""' "$sum_roles")'; the run reported $not_in_role — the packet must carry the count a reader with no host access needs"
+[ "$(jq -r '.node_roles // ""' "$sum_roles")" = "legacy-stack" ] \
+    || fail "the summary does not record which roles the roster was derived from"
+grep -q 'NOT IN ROLE boss-estate-observe-host' "$sum_roles" \
+    || fail "the summary's anomalies do not name the observer as NOT IN ROLE — a report that reaches only the journal is a report a reader without host access never sees"
 
 # ---------------------------------------------------------------------
 # 8. THE JOURNAL READ DOOR (:19531), CONVERGED.
@@ -324,7 +379,6 @@ printf '%s\n' "$rows" | grep -q 'boss-ops-runner' \
 # would stop the other thirteen pairs converging. It must be IN THE
 # RECORD, with the name, which is what this asserts.
 # ---------------------------------------------------------------------
-command -v jq >/dev/null || fail "jq is required to check the run summary"
 sum="$tmp/summary.json"
 mkdir -p "$tmp/etc-sum"
 UNITS_SUMMARY="$sum" units_run "$tmp/systemctl-sum.log" "$tmp/etc-sum" "$tmp/unitlib" "$tmp/units-sum.out" \
@@ -457,7 +511,7 @@ fi
 # ---------------------------------------------------------------------
 cat >"$tmp/bin/installer-ok" <<'STUB'
 #!/usr/bin/env bash
-echo "stub installer: args=$*" >>"$STUB_CALLS"
+echo "stub installer: args=$* roles=${BOSS_NODE_ROLES-unset}" >>"$STUB_CALLS"
 echo "units: 14 timer unit pair(s) installed and enabled"
 exit 0
 STUB
@@ -470,8 +524,17 @@ exit 3
 STUB
 chmod +x "$tmp/bin/installer-ok" "$tmp/bin/installer-bad"
 
+# The registry the converge reads its roles from is a FILE here — the
+# harness never touches the network — shaped like /api/estate/nodes.
+nodes_json="$tmp/nodes.json"
+cat >"$nodes_json" <<'JSON'
+{"data":[{"id":"boss-gcp","role":"bastion","roles":["legacy-stack","ml-batch-host","off-cluster-observer","wireguard-bastion"]},
+         {"id":"w-1","role":"talos-worker","roles":[]}]}
+JSON
 run_converge() { # <dir> <installer> -> output; returns the script's status
     BOSS_GCP_REPO_DIR="$1" BOSS_GCP_CONVERGE_INSTALLER="$2" \
+        BOSS_NODE_ID="${CONVERGE_NODE_ID:-boss-gcp}" \
+        BOSS_ESTATE_NODES_URL="${CONVERGE_NODES_URL:-file://$nodes_json}" \
         STUB_CALLS="$tmp/calls.log" bash "$converge" 2>&1
 }
 
@@ -535,6 +598,30 @@ $out"
 grep -q "args=units" "$tmp/calls.log" \
     || fail "the second pass skipped the installer. A unit removed by hand must come back
     on the next tick even when main has not moved: that is what converge means."
+
+# 6b. THE HOST'S ROLES REACH THE INSTALLER, read off the registry — and
+#     a registry that does not answer leaves them empty, installs every
+#     row, and says so, instead of stopping the converge.
+grep -q "roles=legacy-stack,ml-batch-host,off-cluster-observer,wireguard-bastion" "$tmp/calls.log" \
+    || fail "the converge did not hand boss-gcp's declared roles to the installer as BOSS_NODE_ROLES (calls: $(cat "$tmp/calls.log"))"
+printf '%s' "$out" | grep -q "declares roles: legacy-stack" \
+    || fail "the converge does not say which roles it read:
+$out"
+: >"$tmp/calls.log"
+out=$(CONVERGE_NODE_ID=w-1 run_converge "$clean" "$tmp/bin/installer-ok") \
+    || fail "the converge failed for a node that declares no roles:
+$out"
+grep -q "roles=$" "$tmp/calls.log" \
+    || fail "a node with no declared roles must reach the installer with BOSS_NODE_ROLES empty, so every row installs (calls: $(cat "$tmp/calls.log"))"
+: >"$tmp/calls.log"
+out=$(CONVERGE_NODES_URL="file://$tmp/no-such-registry.json" run_converge "$clean" "$tmp/bin/installer-ok") \
+    || fail "an unreachable registry STOPPED the converge — an arm that needs the patient is not an arm:
+$out"
+grep -q "roles=$" "$tmp/calls.log" \
+    || fail "an unreachable registry must still drive the installer, with no roles (calls: $(cat "$tmp/calls.log"))"
+printf '%s' "$out" | grep -q "did not answer" \
+    || fail "the converge does not say the registry did not answer:
+$out"
 
 # 7. A failed install prints EVERY line the installer wrote.
 : >"$tmp/calls.log"

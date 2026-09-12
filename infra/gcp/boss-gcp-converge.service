@@ -40,6 +40,11 @@ TimeoutStartSec=10min
 # on 2026-09-11 that was enough to support a wrong conclusion about what
 # the converge had installed — see infra/run-summary.sh.
 Environment=BOSS_RUN_SUMMARY_FILE=/run/boss-gcp-converge.summary.json
+# WHICH NODE THIS IS in the estate registry, so the converge can read
+# its own roles off /api/estate/nodes (infra/estate/roles.toml maps them
+# to units). This unit file lives under infra/gcp/ and installs on this
+# one host, so the id is declared rather than guessed from a hostname.
+Environment=BOSS_NODE_ID=boss-gcp
 # THE SYSTEM OF RECORD, PINNED INLINE WITH env(1). deploy-services'
 # shared jobs-url.conf drop-in points this host's timer fleet at the
 # legacy 127.0.0.1 instance, drop-in env outranks unit Environment=, and

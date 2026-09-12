@@ -46,13 +46,17 @@ PORTS_TS_FILES=(
     "apps/web/src/_generated/ports.ts"
     "apps/simulator/src/_generated/ports.ts"
 )
-# Release first, then debug, then PATH. The debug fallback is what
-# makes this runnable straight after `infra/gate.sh`, whose build phase
-# is `cargo build --workspace` (debug) — without it the check could only
-# ever say "not found" on a machine that had just built everything,
-# which is a large part of why it never joined the gate roster.
-PORTS_BIN="${PORTS_BIN:-target/release/boss-ports-list}"
-[[ -x "$PORTS_BIN" ]] || PORTS_BIN="target/debug/boss-ports-list"
+# Release first, then debug, then PATH — under CARGO_TARGET_DIR when it
+# is set, because the gate-runner builds into /gate-target/target and
+# the dev pod into /scratch/target, and a lint that only looked in
+# ./target could only ever say "not found" on the two machines that
+# had just built everything. The debug fallback is what makes this
+# runnable straight after `infra/gate.sh`, whose build phase is
+# `cargo build --workspace` (debug); that gate runs this as a check
+# once the build has produced the binary.
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+PORTS_BIN="${PORTS_BIN:-$TARGET_DIR/release/boss-ports-list}"
+[[ -x "$PORTS_BIN" ]] || PORTS_BIN="$TARGET_DIR/debug/boss-ports-list"
 [[ -x "$PORTS_BIN" ]] || PORTS_BIN="$(command -v boss-ports-list 2>/dev/null)"
 
 # --- 1. ports.ts matches the Rust source -------------------------------
@@ -95,13 +99,18 @@ else
     done
 fi
 
-# --- 2. dev-server.ts + MonitoringPage.svelte import from _generated ---
+# --- 2. every consumer of the service list imports from _generated ---
+#
+# dev-server.ts is the one consumer left in the SPA. MonitoringPage.svelte
+# was the other until #161 (2026-08-31) deleted it, and this list kept
+# naming it — so from that day the lint failed on a missing file, and
+# nothing noticed because nothing ran it. A consumer named here must
+# exist; a consumer that stops existing is removed here, in the same car.
 
 printf '\n%s\n' "[2/2] known service-list consumers import from _generated/ports"
 
 for f in \
-    apps/web/src/dev-server.ts \
-    apps/web/src/it/monitoring/MonitoringPage.svelte
+    apps/web/src/dev-server.ts
 do
     if [[ ! -f "$f" ]]; then
         fail "$f missing (expected to exist)"

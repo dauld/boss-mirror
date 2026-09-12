@@ -48,6 +48,14 @@ describe('parseNodes', () => {
     // days) — refuse loudly instead.
     expect(() => parseNodes([{ role: 'talos-worker' }])).toThrow();
   });
+  test('declared roles ride along as a set; a node declaring none reads empty', () => {
+    const [gcp, w1] = parseNodes([
+      { ...node(), id: 'boss-gcp', role: 'bastion', roles: ['legacy-stack', 'wireguard-bastion'] },
+      node(),
+    ]);
+    expect(gcp?.roles).toEqual(['legacy-stack', 'wireguard-bastion']);
+    expect(w1?.roles).toEqual([]);
+  });
 });
 
 describe('observations and comparisons', () => {

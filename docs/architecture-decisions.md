@@ -1061,6 +1061,31 @@ identity and a consumer of intent, never the host of either: moving
 the company is copying its log and its rules, and everything else
 regenerates.
 
+**A workspace declares what it guarantees; that is the half that has
+shipped.** Allocation was decided first (`2d43cbcb`, 2026-08-16): a dev
+node is a **`service-instance` Subject**, the pool a StatefulSet whose
+ordinals give stable identity and a per-replica PVC, **the checkout Job
+the lease** — its terminal releases it — with a read-only credential
+and a sweep for leaks. Review `775f0b35` (2026-08-29) then settled
+what a workspace *guarantees*, separately from who gets one: the
+capability declaration belongs on the Subject, not on the checkout
+packet (Postgres is there whether or not anyone has leased it; on the
+lease it would be copied onto every checkout and drift per-lease);
+**evidence before enforcement** — record which workspace the work
+happened in before refusing work from one that lacked a capability,
+because nothing yet says what a change *needs* and inferring it from
+touched paths would refuse correct work; and **a laptop is a workspace
+like any other, with its capabilities declared false** — a car that
+passed 285 local tests failed the gate on a roster test that cannot run
+without Postgres, 118 database-backed targets unrun on the workstation.
+What the code does today is the last of these: the pre-flight
+**opens** by reporting what the workspace cannot cover
+(`workspace-declares-what-it-runs.sh`, pinned first in `gate.sh`),
+which is that guarantee made legible at the point of work. The pool,
+the lease, the `service-instance` kind and the `build` step's record
+of its workspace are decided and **not built**: the dev session is one
+Deployment on the build node, allocated by hand.
+
 ## Design docs and the decision record
 
 The markdown corpus stopped being the source of truth and kept the

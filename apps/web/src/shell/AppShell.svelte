@@ -12,7 +12,7 @@
   import { canSeeRoute, type RouteName, type Role } from '@boss/web-kit/session/permissions';
   import { workForRole } from '@boss/web-kit/session/work-by-role';
   import { departmentLabel } from '@boss/web-kit/nav';
-  import { navigate } from '../router';
+  import { href, navigate } from '../router';
   import {
     ROUTE_CATALOG,
     type AppId,
@@ -295,10 +295,21 @@
 
     <div class="shell-sidebar-footer">
       {#if user}
-        <div class="shell-user">
+        <!-- The name is the door to the profile — passkeys, assignments,
+             the person's own page (feedback 16414d99: "Let's have the
+             user's name in the bottom right click into the profile"). -->
+        <a
+          class="shell-user"
+          href={href('/ux/me')}
+          title="Your profile and passkeys"
+          onclick={(e) => {
+            e.preventDefault();
+            navigate('/ux/me');
+          }}
+        >
           <div class="shell-user-name">{user.name}</div>
           <div class="shell-user-role">{user.role}</div>
-        </div>
+        </a>
       {/if}
     </div>
   </aside>

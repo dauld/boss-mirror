@@ -1485,7 +1485,11 @@ pub(super) async fn patch_job_metadata<R: JobsRepository + 'static, B: EventBus 
         Err(crate::port::JobsError::NotFound(_)) => {
             return (StatusCode::NOT_FOUND, "job not found").into_response();
         }
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        // The same door as create/update: a declared edge the guard
+        // refuses is the CALLER's error (400 with the guard's sentence),
+        // not a storage failure. As a 500 here it read as an outage to
+        // `boss gate --park-after` and the auto-park handler (b683f1cc).
+        Err(e) => return persist_error_response(e),
     };
 
     // Same wake as the PUT: a metadata write can flip a metadata-gated

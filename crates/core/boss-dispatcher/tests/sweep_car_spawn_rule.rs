@@ -1,11 +1,28 @@
-//! The `spawn-car-on-sweep-remediated` rule at v2 (migration 148) —
-//! a recurring sweep stops minting one car per firing.
+//! The `spawn-car-on-sweep-remediated` rule at v3 — a sweep files a
+//! delivery packet only when it said a code change is owed, and a
+//! recurring finding still mints at most one car.
 //!
-//! Pins the exact `when` the migration ships against the expr engine,
+//! Pins the exact `when` the rule file ships against the expr engine,
 //! and the shape of the spawn it produces. Defect e74b32a1: two cars
 //! sat on the board a day apart, both titled "Stale build cache
 //! sweep", both from the same target, and the only way to tell them
 //! apart was to open each one.
+//!
+//! v3 (backlog 21edde87, measured 2026-09-11) moves the trigger from
+//! `outcome = "remediated"` to `outcome = "change-needed"`. Of the 21
+//! remediated sweeps the registry had closed by then, NINETEEN were
+//! discharged operationally — disk reclaimed, a build cache pruned, an
+//! orphan object deleted, a CI image rebuilt — and each minted a
+//! `ship-a-change` packet that could never progress, because there was
+//! no code to ship: no branch was ever cut and it sat at `scope` until
+//! a human recognised it as residue and abandoned it by hand.
+//! `remediated` answers "did something have to change"; it was being
+//! read as "does the TREE have to change". The sweep protocol now says
+//! which it is, as a field on the `remediate` step, and routes to a
+//! terminal per answer — so this rule keeps reading the one field the
+//! closed-packet payload already carries, and stops having to be right
+//! about intent. The bundle side is pinned by
+//! `boss-jobs/tests/platform_bundle_maintenance_sweep.rs`.
 //!
 //! The interesting assertion is the KEY. Dedup has to key on the
 //! sweep's subject, because the other two candidates cannot separate
@@ -20,7 +37,7 @@ const RULE: &str = r#"
 [[rule]]
 name = "spawn-car-on-sweep-remediated"
 on_event = "jobs.job.closed"
-when = "kind = \"maintenance-sweep\" AND outcome = \"remediated\" AND NOT open_car_exists(subject_id)"
+when = "kind = \"maintenance-sweep\" AND outcome = \"change-needed\" AND NOT open_car_exists(subject_id)"
 [[rule.do]]
 handler = "jobs.spawn"
 args = { kind = "\"ship-a-change\"", subject_kind = "\"custom\"", subject = "id", title = "title", "metadata.backlog_item" = "id", "metadata.sweep_target" = "subject_id" }
@@ -73,16 +90,16 @@ fn closed_sweep(outcome: &str) -> serde_json::Value {
 }
 
 #[test]
-fn a_remediated_sweep_with_no_open_car_spawns_one() {
+fn a_sweep_that_said_a_code_change_is_owed_spawns_a_car() {
     let reg = Registry::from_toml(RULE).expect("rule parses");
     let hits = match_event(
         &reg,
         "jobs.job.closed",
-        &closed_sweep("remediated"),
+        &closed_sweep("change-needed"),
         &StubCars::new(false),
     )
     .matched;
-    assert_eq!(hits.len(), 1, "remediated + no open car → spawn");
+    assert_eq!(hits.len(), 1, "change-needed + no open car → spawn");
 
     let args = &hits[0].invocations[0].args;
     let get = |k: &str| {
@@ -111,7 +128,7 @@ fn a_second_firing_for_the_same_finding_does_not_spawn() {
     let hits = match_event(
         &reg,
         "jobs.job.closed",
-        &closed_sweep("remediated"),
+        &closed_sweep("change-needed"),
         &StubCars::new(true),
     )
     .matched;
@@ -132,13 +149,40 @@ fn a_sweep_that_found_nothing_never_spawns() {
         &StubCars::new(false),
     )
     .matched;
-    assert!(hits.is_empty(), "only `remediated` spawns a car");
+    assert!(hits.is_empty(), "only `change-needed` spawns a car");
+}
+
+/// THE DEFECT v3 EXISTS FOR. An operational remediation — 19 of the 21
+/// the registry had closed by 2026-09-11 — closes `remediated`, and
+/// must spawn NOTHING. The work is already done; a delivery packet for
+/// it has no branch to cut and no scope to fill, and every one of them
+/// had to be recognised and abandoned by hand.
+#[test]
+fn an_operational_remediation_does_not_spawn_a_car() {
+    let reg = Registry::from_toml(RULE).expect("rule parses");
+    let outcome = match_event(
+        &reg,
+        "jobs.job.closed",
+        &closed_sweep("remediated"),
+        &StubCars::new(false),
+    );
+    assert!(
+        outcome.skipped.is_empty(),
+        "the predicate must evaluate, not skip: {:?}",
+        outcome.skipped
+    );
+    assert!(
+        outcome.matched.is_empty(),
+        "a sweep that fixed the thing itself owes no delivery packet — this is the \
+         residue backlog 21edde87 measured: unbranched ship-a-change packets stuck \
+         at `scope`, each abandoned by a human who recognised it"
+    );
 }
 
 #[test]
 fn some_other_packet_closing_is_not_a_sweep() {
     let reg = Registry::from_toml(RULE).expect("rule parses");
-    let mut payload = closed_sweep("remediated");
+    let mut payload = closed_sweep("change-needed");
     payload["kind"] = serde_json::json!("ship-a-change");
     let hits = match_event(&reg, "jobs.job.closed", &payload, &StubCars::new(false)).matched;
     assert!(hits.is_empty(), "the rule is scoped to maintenance-sweep");
@@ -156,7 +200,12 @@ fn the_dedup_asks_about_the_target_not_the_id_or_the_title() {
     // old .expect("eval") gave - that the predicates actually
     // evaluated - which is easy to lose now that a failure is a
     // quiet skip rather than an error.
-    let outcome = match_event(&reg, "jobs.job.closed", &closed_sweep("remediated"), &stub);
+    let outcome = match_event(
+        &reg,
+        "jobs.job.closed",
+        &closed_sweep("change-needed"),
+        &stub,
+    );
     assert!(
         outcome.skipped.is_empty(),
         "predicates must evaluate: {:?}",

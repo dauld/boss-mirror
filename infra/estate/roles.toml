@@ -1,0 +1,46 @@
+# infra/estate/roles.toml — which units a host runs, derived from the
+# roles it DECLARES (design 9e3e093f; migration
+# 202609120300-a-node-declares-its-roles.sql).
+#
+# A managed host's roster used to be "every row of deploy-services.sh's
+# TIMERS array", because nothing recorded what a host was FOR. Now the
+# host reads its roles off /api/estate/nodes (Classes of `node`, joined
+# through node_roles) and `deploy-services.sh units` installs the rows
+# its roles name plus the `always` set; every other row is REPORTED as
+# NOT IN ROLE — reported, not uninstalled: the uninstall is the
+# retire-second-stack verb's job, with capture-before-delete, in the car
+# after this one.
+#
+# ONE PLACE, PINNED. Every TIMERS stem appears in exactly one role (or
+# `always`) here, and every unit named here is a TIMERS stem —
+# infra/lint/boss-gcp-converges-itself.sh refuses either drift (CLAUDE.md
+# §9a). Keep each `units = [...]` on ONE line: the installer reads this
+# file with the shell, not a TOML parser.
+#
+# A host that declares NO roles installs every row, exactly as before
+# this file existed; a host whose system of record cannot be reached at
+# converge time does the same and says so on its packet. An arm that
+# needs the patient is not an arm.
+
+# Every managed host: the loop that adopts its own units, and the
+# observer that reports what those units did.
+[always]
+units = ["boss-gcp-converge", "boss-estate-observe-units"]
+
+[roles.wireguard-bastion]
+# WireGuard itself is a distro service, not a BOSS timer.
+units = []
+
+[roles.off-cluster-observer]
+# Observes the estate from OUTSIDE the cluster it observes, and reads
+# the codebase's own size from the checkout it converges.
+units = ["boss-estate-observe-host", "boss-codebase-metrics"]
+
+[roles.ml-batch-host]
+units = ["boss-ml-inference-batch"]
+
+[roles.legacy-stack]
+# The ten chores that maintain the second, older stack's data, plus the
+# deploy-confirm arm of the retired deploy hop (dead since 2026-09-03).
+# This role exists to be removed.
+units = ["boss-messages-events-purge", "boss-audit-integrity-check", "boss-ledger-recognize", "boss-ledger-replay-check", "boss-conservation-invariants", "boss-files-gc", "boss-views-catchup", "boss-search-reindex", "boss-backup", "boss-deploy-confirm"]

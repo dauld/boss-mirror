@@ -248,3 +248,84 @@ async fn the_trigger_text_classifies_as_a_caller_error() {
         "the classification signature the HTTP mapping keys on must hold: {msg}"
     );
 }
+
+/// THE SAME REFUSAL AT EVERY DOOR. The create and update paths map the
+/// guard's text to a 400 (persist_error_response); the metadata PATCH
+/// — the door `boss gate --park-after` and the auto-park handler write
+/// through — answered a bare 500 "storage failure: … references
+/// unresolvable Job …" (b683f1cc, measured 2026-09-11 21:20Z). A 5xx
+/// reads as an outage-class transient to a caller, who retries or
+/// records `lost`; the refusal is the caller's own bad reference and
+/// must read as one. Exercised through the HTTP handler over a database
+/// with the ref check ON, the way production runs it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_metadata_patch_reports_an_unresolvable_edge_as_the_callers_error() {
+    use axum::http::StatusCode;
+    use boss_jobs::PgJobs;
+    use boss_jobs::http::{JobsApiState, router};
+    use boss_policy_client::{Action, FakePolicyClient, PolicyClient, Resource, Scope};
+    use boss_testing::{RecordingEventBus, TestRequest};
+    use std::sync::Arc;
+
+    let db = TestDb::new().await;
+    // TestDb turns the ref check OFF at the database level for bulk
+    // seeds; turn it back on and open a pool whose connections see it.
+    sqlx::query(&format!(
+        r#"ALTER DATABASE "{}" SET audit_log.ref_check = 'on'"#,
+        db.name()
+    ))
+    .execute(&db.pool)
+    .await
+    .expect("re-enable the ref check");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db.url())
+        .await
+        .expect("guarded pool");
+    let job_id = seed_job(&pool, "ship-a-change").await;
+
+    let bus = RecordingEventBus::new();
+    let publisher = boss_core::publisher::DomainPublisher::new(
+        bus.clone() as Arc<dyn boss_core::port::EventBus>,
+        "jobs",
+    );
+    let policy: Arc<dyn PolicyClient> = Arc::new(
+        FakePolicyClient::builder()
+            .allow("ceo", Action::Read, Resource::job(), Scope::All)
+            .allow("ceo", Action::Update, Resource::job(), Scope::All)
+            .build(),
+    );
+    let app = router(JobsApiState {
+        job_edges: None,
+        stations: None,
+        jobs: Arc::new(PgJobs::new(pool.clone())),
+        bus,
+        publisher,
+        step_registry: Arc::new(boss_jobs::step_registry::StepRegistry::v1()),
+        policy,
+        kind_registry: None,
+        plugin_registry: None,
+        calendar: None,
+        subject_kinds: None,
+        subject_existence: None,
+        roster: None,
+        clock: Arc::new(boss_clock_client::WallClockClient),
+        cadence: None,
+        delivery: None,
+    });
+
+    let resp = TestRequest::new(
+        axum::http::Method::PATCH,
+        format!("/api/jobs/{job_id}/metadata"),
+    )
+    .json(&serde_json::json!({"boards_after": "00000000-0000-4000-8000-000000000000"}))
+    .as_user("emp-ceo", "ceo")
+    .send(&app)
+    .await;
+    resp.assert_status(StatusCode::BAD_REQUEST);
+    let text = resp.body_text();
+    assert!(
+        text.contains("job edge") && text.contains("unresolvable"),
+        "the 4xx carries the guard's own sentence: {text}"
+    );
+}

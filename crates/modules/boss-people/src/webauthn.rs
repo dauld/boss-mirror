@@ -29,7 +29,7 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -75,6 +75,10 @@ pub fn webauthn_router(pool: PgPool, clock: Arc<dyn ClockClient>) -> Router {
         .route(
             "/api/people/{id}/webauthn-credentials",
             get(list_credentials).post(register_credential),
+        )
+        .route(
+            "/api/people/{id}/webauthn-credentials/{credential_id}",
+            delete(remove_credential),
         )
         .route(
             "/api/people/webauthn-credentials/used",
@@ -220,6 +224,66 @@ async fn register_credential(
 struct CredentialUsedBody {
     credential_id: String,
     sign_count: i32,
+}
+
+/// `DELETE /api/people/{id}/webauthn-credentials/{credential_id}` —
+/// a lost or retired authenticator can go; the LAST one stays.
+///
+/// David, feedback 16414d99: "Important so users can add a backup key,
+/// but don't let them delete all their keys." A person with no passkey
+/// cannot pass a presence-gated step, so the surface that let them
+/// remove the last one would be the one that locked them out. The
+/// refusal is a 409 in the user's terms — add a backup, then remove —
+/// and a credential that is not this employee's is a 404, never a
+/// silent 204 that reads as "removed". One statement does the count
+/// and the delete together, so two removals racing cannot both see
+/// "two keys" and leave none.
+async fn remove_credential(
+    State(state): State<WebauthnState>,
+    CurrentUser(user): CurrentUser,
+    Path((employee_id, credential_id)): Path<(String, String)>,
+) -> Response {
+    if let Err(r) = operator_gate(&user) {
+        return r.into_response();
+    }
+    let cred = match unb64("credential_id", &credential_id) {
+        Ok(v) => v,
+        Err(r) => return r.into_response(),
+    };
+    let deleted = sqlx::query(
+        "DELETE FROM webauthn_credentials
+          WHERE employee_id = $1 AND credential_id = $2
+            AND (SELECT count(*) FROM webauthn_credentials WHERE employee_id = $1) > 1",
+    )
+    .bind(&employee_id)
+    .bind(&cred)
+    .execute(state.pool.as_ref())
+    .await;
+    match deleted {
+        Ok(r) if r.rows_affected() == 1 => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => {
+            let exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM webauthn_credentials
+                                WHERE employee_id = $1 AND credential_id = $2)",
+            )
+            .bind(&employee_id)
+            .bind(&cred)
+            .fetch_one(state.pool.as_ref())
+            .await
+            .unwrap_or(false);
+            if exists {
+                (
+                    StatusCode::CONFLICT,
+                    "this is the last passkey on the account and it stays — add a backup \
+                     key first, then remove this one",
+                )
+                    .into_response()
+            } else {
+                (StatusCode::NOT_FOUND, "no such passkey on this account").into_response()
+            }
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 async fn record_credential_use(

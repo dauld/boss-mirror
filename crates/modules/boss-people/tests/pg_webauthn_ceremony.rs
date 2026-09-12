@@ -226,3 +226,66 @@ async fn an_ordinary_session_is_refused_at_the_storage_door() {
         .await
         .assert_status(StatusCode::FORBIDDEN);
 }
+
+// David, feedback 16414d99 (2026-09-10): "Let me manage the passkeys on
+// my account… Important so users can add a backup key, but don't let
+// them delete all their keys." Removal exists so a lost or retired
+// authenticator can go; the LAST one stays, because a person with no
+// passkey cannot pass a presence-gated step and the surface that let
+// them do that would be the one that locked them out.
+#[tokio::test]
+async fn a_passkey_can_be_removed_but_never_the_last_one() {
+    let (db, router) = app().await;
+    seed_employee(&db, "emp-wa-5").await;
+    const BACKUP_ID: &str = "YmFja3VwLWNyZWRlbnRpYWwtaWQ";
+
+    for (id, label) in [(CRED_ID, "yubikey-a"), (BACKUP_ID, "backup")] {
+        TestRequest::post("/api/people/emp-wa-5/webauthn-credentials")
+            .json(&json!({"credential_id": id, "public_key": PUB_KEY, "label": label}))
+            .as_user("automation:gateway", "platform-admin")
+            .send(&router)
+            .await
+            .assert_status(StatusCode::CREATED);
+    }
+
+    // Two keys: one may go.
+    TestRequest::delete(format!(
+        "/api/people/emp-wa-5/webauthn-credentials/{CRED_ID}"
+    ))
+    .as_user("automation:gateway", "platform-admin")
+    .send(&router)
+    .await
+    .assert_status(StatusCode::NO_CONTENT);
+
+    // One key: it stays, and the refusal says why in the user's terms.
+    let resp = TestRequest::delete(format!(
+        "/api/people/emp-wa-5/webauthn-credentials/{BACKUP_ID}"
+    ))
+    .as_user("automation:gateway", "platform-admin")
+    .send(&router)
+    .await;
+    resp.assert_status(StatusCode::CONFLICT);
+    let text = resp.body_text();
+    assert!(
+        text.contains("last passkey") && text.contains("backup"),
+        "the refusal names the rule and the way out: {text}"
+    );
+
+    let resp = TestRequest::get("/api/people/emp-wa-5/webauthn-credentials")
+        .as_user("automation:gateway", "platform-admin")
+        .send(&router)
+        .await;
+    let creds: serde_json::Value = resp.assert_json();
+    assert_eq!(creds.as_array().map(Vec::len), Some(1));
+    assert_eq!(creds[0]["credential_id"], BACKUP_ID);
+
+    // A credential that is not there, or is somebody else's, is 404 —
+    // never a silent 204 that reads as "removed".
+    TestRequest::delete(format!(
+        "/api/people/emp-wa-5/webauthn-credentials/{CRED_ID}"
+    ))
+    .as_user("automation:gateway", "platform-admin")
+    .send(&router)
+    .await
+    .assert_status(StatusCode::NOT_FOUND);
+}
