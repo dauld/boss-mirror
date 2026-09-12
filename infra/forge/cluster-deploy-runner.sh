@@ -171,10 +171,12 @@ if [ -z "${BOSS_RUNNER_SNAPSHOT2:-}" ]; then
     cat infra/forge/cluster-deploy-runner.sh > "$snap2"
     BOSS_RUNNER_SNAPSHOT2="$snap2" exec bash "$snap2" "$@"
 fi
-# The FULL commit rides into the binaries (Capabilities.commit) so the
+# The FULL commit rides into the image's environment (the runtime
+# stage's ENV; Capabilities.commit reads it at process start) so the
 # conductor's `converged` step can verify the running pod serves this
 # exact merge — the short tag stays the image name, the full sha is
-# the attestation (prefix-compared, so either length matches).
+# the attestation (prefix-compared, so either length matches). It is
+# NOT compiled in: that made every train recompile every crate.
 STAGE="build $HEAD"
 # A FAILED CONVERGE SAYS WHY.
 #

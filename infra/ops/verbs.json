@@ -76,6 +76,14 @@
         { "name": "glob", "pattern": "^[A-Za-z0-9@._*?-]+$" }
       ]
     },
+    "unit-cat": {
+      "about": "READ-ONLY: `systemctl cat` of one unit — the unit file and its drop-ins as systemd holds them — with the VALUE of every secret-shaped Environment assignment (TOKEN, SECRET, PASSWORD, API_KEY, PRIVATE_KEY, CREDENTIAL in the name) masked before it leaves the host, name kept (infra/ops/unit-cat.sh, tested in boss-testing unit_cat_sh). Added 2026-09-12 to read the forge's hand-installed forgejo-runner.service — `daemon` with no -c, every default, capacity 1 and no valid_volumes — so its User=, WorkingDirectory= and ExecStart= can be declared in the tree instead of guessed (47fc2bc1; the-cluster-is-the-system.md: the build plane's config converges from the tree where it can). exit 4 = no such unit, never an empty answer.",
+      "hosts": ["boss-gcp", "forge"],
+      "argv": ["infra/ops/unit-cat.sh", "{1}"],
+      "params": [
+        { "name": "unit", "pattern": "^[A-Za-z0-9@._][A-Za-z0-9@._-]*$" }
+      ]
+    },
     "journal-tail": {
       "about": "last N journal lines of one unit (default 100, max 200)",
       "hosts": ["boss-gcp", "forge"],

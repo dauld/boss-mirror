@@ -29,16 +29,18 @@ fn main() {
         .unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=BOSS_CLI_BUILT_FROM={sha}");
     println!("cargo:rerun-if-env-changed=BOSS_BUILD_COMMIT");
-    // HEAD moves on checkout/commit; in a worktree `.git` is a file and
-    // `--git-path HEAD` resolves it either way. No git, no rerun key —
-    // the env fallback above is then the only input and is tracked.
-    if let Some(head) = Command::new("git")
-        .args(["rev-parse", "--git-path", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    {
-        println!("cargo:rerun-if-changed={head}");
-    }
+    // RERUN EVERY BUILD. This script used to name the checkout's HEAD
+    // file as its one rerun key, and that was wrong twice over. On a
+    // branch, HEAD is `ref: refs/heads/x` and a commit moves the ref
+    // file, not HEAD, so the stamp lagged every commit. And worktrees
+    // sharing one target dir share this script's unit: the key the LAST
+    // worktree wrote (`/work/boss/.git/worktrees/gaterebase/HEAD`) is
+    // what cargo checks when the NEXT worktree builds, so on 2026-09-12
+    // the pod's `boss --version` answered 47a31701 for a binary just
+    // built from a7c3bf4f — the freshness door (895c9a3b) saying
+    // "current" about a stale stamp, which is the one thing it exists
+    // not to do. A path that never exists makes cargo run this script
+    // on every build; it costs one `git rev-parse` (milliseconds), and
+    // boss-cli itself recompiles only when the sha it is handed changes.
+    println!("cargo:rerun-if-changed=.boss-built-from-is-recomputed-every-build");
 }

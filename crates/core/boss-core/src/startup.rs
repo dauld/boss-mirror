@@ -60,13 +60,23 @@ pub struct Capabilities {
     pub storage: &'static str,
     /// Crate version (`CARGO_PKG_VERSION`).
     pub version: &'static str,
-    /// The git commit this binary was BUILT from — `BOSS_BUILD_COMMIT`
-    /// at compile time, which the image build passes as a build arg.
-    /// `None` in dev builds. This is what lets the train's `converged`
-    /// step prove the RUNNING cluster binary serves the merge commit:
-    /// an image tag proves a push happened; a self-reported build
-    /// commit proves the pod restarted onto it (fdff316c / 7e5ee013,
-    /// decided 2026-08-19).
+    /// The git commit this IMAGE was built from — `BOSS_BUILD_COMMIT`,
+    /// read from the process environment first (the image's runtime
+    /// stage sets it) and from compile time second (a dev build with
+    /// the variable exported). `None` in a plain dev build. This is
+    /// what lets the train's `converged` step prove the RUNNING cluster
+    /// serves the merge commit: an image tag proves a push happened; a
+    /// self-reported build commit proves the pod restarted onto the
+    /// image built from it (fdff316c / 7e5ee013, decided 2026-08-19).
+    ///
+    /// WHY THE ENVIRONMENT AND NOT THE COMPILE. Until 2026-09-12 the
+    /// Dockerfile set `ENV BOSS_BUILD_COMMIT` before `cargo build`, so
+    /// `option_env!` baked it in — and because it changed on every
+    /// train, every workspace crate recompiled on every train: the
+    /// converge's own stamps read `build_s=522` for a train that
+    /// touched no Rust at all. Set in the runtime stage instead, the
+    /// value still names the tree the image was built from, and the
+    /// compiled layer is invalidated only by what it compiles.
     pub commit: Option<&'static str>,
 }
 
@@ -84,9 +94,37 @@ impl Capabilities {
             service,
             storage,
             version,
-            commit: option_env!("BOSS_BUILD_COMMIT"),
+            commit: build_commit(),
         }
     }
+}
+
+/// The build commit as [`Capabilities::commit`] reports it: the runtime
+/// variable when set and non-empty, else the compile-time one, else
+/// none. Resolved once per process.
+pub fn build_commit() -> Option<&'static str> {
+    static COMMIT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    COMMIT
+        .get_or_init(|| {
+            resolve_build_commit(
+                std::env::var("BOSS_BUILD_COMMIT").ok(),
+                option_env!("BOSS_BUILD_COMMIT"),
+            )
+        })
+        .as_deref()
+}
+
+/// PURE: the precedence [`build_commit`] applies. An empty runtime
+/// value is "unset", not a commit.
+pub fn resolve_build_commit(runtime: Option<String>, compiled: Option<&str>) -> Option<String> {
+    runtime
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .or_else(|| {
+            compiled
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string())
+        })
 }
 
 /// Standard `/health` payload every Boss `*-api` binary returns.
@@ -131,5 +169,36 @@ pub fn health_response(
     HealthResponse {
         status: "ok",
         capabilities: Capabilities::new(service, version, storage),
+    }
+}
+
+#[cfg(test)]
+mod build_commit_tests {
+    use super::resolve_build_commit;
+
+    #[test]
+    fn the_runtime_variable_wins_over_the_compiled_one() {
+        assert_eq!(
+            resolve_build_commit(Some("abc123\n".into()), Some("def456")),
+            Some("abc123".into())
+        );
+    }
+
+    #[test]
+    fn an_empty_runtime_variable_is_unset_and_the_compiled_one_answers() {
+        assert_eq!(
+            resolve_build_commit(Some("  ".into()), Some("def456")),
+            Some("def456".into())
+        );
+        assert_eq!(
+            resolve_build_commit(None, Some("def456")),
+            Some("def456".into())
+        );
+    }
+
+    #[test]
+    fn a_dev_build_with_neither_reports_none() {
+        assert_eq!(resolve_build_commit(None, None), None);
+        assert_eq!(resolve_build_commit(Some(String::new()), Some("")), None);
     }
 }

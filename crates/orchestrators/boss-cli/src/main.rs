@@ -40,7 +40,7 @@ mod upgrade;
 mod workflow;
 
 #[derive(Parser)]
-#[command(name = "boss", about = "Boss operator + developer CLI", version = built_from::VERSION)]
+#[command(name = "boss", about = "Boss operator + developer CLI", version = built_from::version())]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

@@ -8,16 +8,39 @@
 //! `origin/main` and prints the rebuild line when they differ. The
 //! comparison is a pure function so the wording is pinned.
 
-/// The commit this binary was built from (`build.rs`): a full sha, or
-/// `unknown` when neither git nor `BOSS_BUILD_COMMIT` could say.
-pub const BUILT_FROM: &str = env!("BOSS_CLI_BUILT_FROM");
+/// The commit this binary was compiled from (`build.rs`): a full sha
+/// from git, or `unknown`. In the cluster image there is no git in the
+/// build stage and — since 2026-09-12 — no `BOSS_BUILD_COMMIT` at
+/// compile time either (it moved to the runtime stage so a train
+/// without a Rust change ships without a Rust build), so there this is
+/// `unknown` and [`built_from`] reads the runtime variable instead.
+pub const COMPILED_FROM: &str = env!("BOSS_CLI_BUILT_FROM");
+
+/// The commit this binary was built from, as the operator should read
+/// it: the compile-time sha when git could say, else the image's
+/// `BOSS_BUILD_COMMIT` from the environment, else `unknown`. Resolved
+/// once per process.
+pub fn built_from() -> &'static str {
+    static BUILT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| resolve_built_from(COMPILED_FROM, std::env::var("BOSS_BUILD_COMMIT").ok()))
+}
+
+/// PURE: the precedence [`built_from`] applies.
+pub fn resolve_built_from(compiled: &str, runtime: Option<String>) -> String {
+    if compiled != "unknown" && !compiled.trim().is_empty() {
+        return compiled.to_string();
+    }
+    runtime
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
 
 /// What `boss --version` prints: the crate version and the commit.
-pub const VERSION: &str = concat!(
-    env!("CARGO_PKG_VERSION"),
-    " built from ",
-    env!("BOSS_CLI_BUILT_FROM")
-);
+pub fn version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| format!("{} built from {}", env!("CARGO_PKG_VERSION"), built_from()))
+}
 
 /// The rebuild recipe the pod uses — one line, the cargo bound sourced
 /// from its one home (infra/dev/pod-build.env) rather than retyped.
@@ -32,7 +55,7 @@ pub fn freshness_line(built: &str, main: Option<&str>) -> String {
     let short = |s: &str| s.chars().take(7).collect::<String>();
     match main {
         _ if built == "unknown" => "  binary    built from an unknown commit (no git and no \
-                                    BOSS_BUILD_COMMIT at build time) — cannot tell whether it \
+                                    BOSS_BUILD_COMMIT in the environment) — cannot tell whether it \
                                     lags main"
             .to_string(),
         None => format!(
@@ -116,9 +139,30 @@ mod tests {
 
     #[test]
     fn this_binary_is_stamped() {
-        assert!(
-            BUILT_FROM == "unknown" || BUILT_FROM.len() == 40,
-            "{BUILT_FROM}"
+        let b = built_from();
+        assert!(b == "unknown" || b.len() == 40, "{b}");
+        assert!(version().contains(" built from "), "{}", version());
+    }
+
+    /// The image compiles without git and without the variable, so
+    /// `COMPILED_FROM` is `unknown` there; the runtime stage's
+    /// `BOSS_BUILD_COMMIT` is then what the operator reads. A dev build
+    /// that git could stamp keeps the compiled sha whatever the
+    /// environment says.
+    #[test]
+    fn the_image_reads_its_commit_from_the_environment_and_a_dev_build_from_git() {
+        assert_eq!(
+            resolve_built_from("unknown", Some("abc123\n".into())),
+            "abc123"
+        );
+        assert_eq!(resolve_built_from("unknown", Some("  ".into())), "unknown");
+        assert_eq!(resolve_built_from("unknown", None), "unknown");
+        assert_eq!(
+            resolve_built_from(
+                "0123456789abcdef0123456789abcdef01234567",
+                Some("abc123".into())
+            ),
+            "0123456789abcdef0123456789abcdef01234567"
         );
     }
 }
