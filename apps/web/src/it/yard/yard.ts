@@ -204,6 +204,10 @@ export type TrainRow = Readonly<{
   eta: Eta;
   /** Non-null when the train is in trouble the board must show. */
   trouble: TrainTrouble | null;
+  /** THE TRAIN GATE (design 128b5496): the cluster gate-run of the train
+   *  branch the conductor files when it opens the PR, read off the train
+   *  and its ci step. Null on a train that predates it. */
+  gate?: TrainGateReading | null;
   /** An operator's standing request that the conductor cancel this
    *  train (`metadata.cancel_requested`), read back off the Job so a
    *  reload shows the pending state. */
@@ -996,6 +1000,51 @@ function readCancelRefused(j: JobLite): boolean {
   return v !== undefined && v !== null;
 }
 
+/** What the train records about its gate-run: the packet id while it
+ *  runs (train metadata), the conductor's one-line reading and the
+ *  forge's own result once the ci step completes, and the fallback
+ *  stamp when the gate could not be filed and CI alone judged the
+ *  train. Every field is a packet field; nothing is derived. */
+export type TrainGateReading = Readonly<{
+  run: string | null;
+  line: string | null;
+  forge: string | null;
+  fallback: string | null;
+  relaunches: number;
+}>;
+
+export function readTrainGate(j: JobLite): TrainGateReading | null {
+  const md = (j.metadata ?? {}) as {
+    train_gate_run?: unknown;
+    train_gate_fallback?: unknown;
+    train_gate_relaunches?: unknown;
+  };
+  const ci = (step(j, 'ci', 'CI verdict')?.metadata ?? {}) as {
+    train_gate?: unknown;
+    train_gate_run?: unknown;
+    forge_result?: unknown;
+  };
+  const text = (v: unknown): string | null => (typeof v === 'string' && v !== '' ? v : null);
+  const run = text(ci.train_gate_run) ?? text(md.train_gate_run);
+  const line = text(ci.train_gate);
+  const forge = text(ci.forge_result);
+  const fallback = text(md.train_gate_fallback);
+  const relaunches = typeof md.train_gate_relaunches === 'number' ? md.train_gate_relaunches : 0;
+  if (run === null && line === null && forge === null && fallback === null) return null;
+  return { run, line, forge, fallback, relaunches };
+}
+
+/** The verdict row's one line: both halves, in words the conductor
+ *  already used. A train whose gate is still running says so; one that
+ *  fell back to CI alone says that in the trouble style. */
+export function trainGateLabel(g: TrainGateReading): string {
+  const forge = g.forge ? `forge ${g.forge}` : 'forge pending';
+  if (g.fallback) return `${forge} · gate UNAVAILABLE — CI alone judged this train`;
+  if (g.line) return `${forge} · ${g.line.replace(/^train gate: /, 'gate ')}`;
+  if (g.run) return `${forge} · gate running (${g.run.slice(0, 8)})${g.relaunches > 0 ? ` · relaunched ${g.relaunches}×` : ''}`;
+  return forge;
+}
+
 export function ciLamp(j: JobLite): Lamp {
   const ci = step(j, 'ci', 'CI verdict');
   const result = (ci?.metadata as { result?: string } | null)?.result;
@@ -1055,6 +1104,7 @@ export function toTrainRow(
     arrivedAt: arrivalStamp(j),
     eta: trainEta(j, medians, nowMs),
     trouble: trainTrouble(j),
+    gate: readTrainGate(j),
     cancelRequested: readCancelRequest(j),
     cancelRefused: readCancelRefused(j),
   };

@@ -204,6 +204,18 @@ STAGE="build $HEAD"
 # common causes here (a registry fetch losing a DNS race on this LAN,
 # memory contention with a concurrent CI job) are transient and a
 # retry that PASSES is itself the finding.
+# MIRROR WHAT THE TREE LISTS BEFORE BUILDING. The Dockerfile's
+# `COPY --from=10.20.0.15:3000/david/…` and the manifests' images are
+# forge tags the mirror list declares; the registry holding them is a
+# separate fact, and on 2026-09-13 the gap cost two hours of unconverged
+# trains (see mirror-base-images.sh --missing). Best-effort: a mirror
+# that cannot complete is said, and the build runs anyway — a base the
+# registry still lacks names itself in the build log.
+if [ -x infra/forge/mirror-base-images.sh ]; then
+    if ! infra/forge/mirror-base-images.sh --missing 2>&1 | sed 's/^/cluster-deploy-runner: /'; then
+        echo "cluster-deploy-runner: mirror --missing did not complete — building anyway; a base the registry lacks will name itself in the build log"
+    fi
+fi
 BUILD_FAILED_FILE="${BOSS_FORGE_LAST_BUILD_FAILED:-$HOME/.boss-last-build-failed}"
 BUILD_ATTEMPT="first attempt"
 if [ "$HEAD" = "$(cat "$BUILD_FAILED_FILE" 2>/dev/null || echo none)" ]; then

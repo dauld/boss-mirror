@@ -28,6 +28,7 @@ import {
   trainTrouble,
   troubleLabel,
   toTrainRow,
+  trainGateLabel,
   cancelRequestBody,
   canOfferCancel,
   CANCEL_ROLE,
@@ -1477,3 +1478,65 @@ describe('the yard names every open car', () => {
   });
 });
 
+
+// THE TRAIN GATE (design 128b5496): the conductor files a cluster
+// gate-run of the train branch when it opens the PR and reads the train
+// as green only when the forge AND that gate are. The row carries both
+// halves off the packet, and the verdict line says which one spoke.
+describe('TrainRow reads the train gate off the train and its ci step', () => {
+  const none = new Map<string, JobLite>();
+
+  test('a train from before the design carries no gate reading', () => {
+    expect(toTrainRow(train({ metadata: {}, steps: [s('ci', 'ready')] }), none, false).gate).toBeNull();
+  });
+
+  test('while the gate runs, the train metadata names its packet', () => {
+    const g = toTrainRow(
+      train({ metadata: { train_gate_run: '0123456789abcdef', train_gate_relaunches: 1 }, steps: [s('ci', 'ready')] }),
+      none,
+      false,
+    ).gate;
+    expect(g).toEqual({ run: '0123456789abcdef', line: null, forge: null, fallback: null, relaunches: 1 });
+    expect(g && trainGateLabel(g)).toBe('forge pending · gate running (01234567) · relaunched 1×');
+  });
+
+  test('once judged, the ci step carries both halves in the conductor words', () => {
+    const g = toTrainRow(
+      train({
+        metadata: { train_gate_run: '0123456789abcdef' },
+        steps: [
+          s('ci', 'completed', {
+            result: 'green',
+            forge_result: 'green',
+            train_gate: 'train gate: green',
+            train_gate_run: '0123456789abcdef',
+          }),
+        ],
+      }),
+      none,
+      false,
+    ).gate;
+    expect(g && trainGateLabel(g)).toBe('forge green · gate green');
+    const red = toTrainRow(
+      train({
+        steps: [s('ci', 'completed', { result: 'failing', forge_result: 'green', train_gate: 'train gate: RED — strikes the cars aboard' })],
+      }),
+      none,
+      false,
+    ).gate;
+    expect(red && trainGateLabel(red)).toBe('forge green · gate RED — strikes the cars aboard');
+  });
+
+  test('a train CI alone judged says so, and the row marks it as trouble-worthy', () => {
+    const g = toTrainRow(
+      train({
+        metadata: { train_gate_fallback: 'the train gate could not be filed 3 passes running (no kubectl); CI alone judged this train' },
+        steps: [s('ci', 'completed', { result: 'green', forge_result: 'green' })],
+      }),
+      none,
+      false,
+    ).gate;
+    expect(g?.fallback).toContain('CI alone');
+    expect(g && trainGateLabel(g)).toBe('forge green · gate UNAVAILABLE — CI alone judged this train');
+  });
+});

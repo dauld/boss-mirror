@@ -165,6 +165,26 @@ pub(crate) fn contended(phase: &Phase) -> Contended {
     }
 }
 
+/// The train's `<branch>@<short sha>`, as the ASSEMBLE STEP recorded it
+/// (`completed assemble … train_ref`). Read there first; the train's own
+/// metadata second, where older fixtures and an older reader put it.
+/// The first live train gate (71098905, 2026-09-13 03:30Z) was not
+/// filed because the launcher read only the train metadata: "the train
+/// carries no train_ref" — three passes running, then CI alone.
+pub(crate) fn train_ref_of(train: &Value) -> Option<&str> {
+    find_step(train, "assemble", "Assemble the train branch")
+        .and_then(|s| s.get("metadata"))
+        .and_then(|m| m.get("train_ref"))
+        .and_then(Value::as_str)
+        .filter(|r| !r.is_empty())
+        .or_else(|| {
+            train
+                .pointer("/metadata/train_ref")
+                .and_then(Value::as_str)
+                .filter(|r| !r.is_empty())
+        })
+}
+
 pub(crate) fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -6820,10 +6840,8 @@ impl Conductor {
     /// `boss gate` performs, without the operator-facing guards (the
     /// train branch is the conductor's own, freshly assembled on main).
     async fn launch_train_gate(&self, t: &Value, tid: &str) -> Result<String> {
-        let train_ref = t
-            .pointer("/metadata/train_ref")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("the train carries no train_ref"))?;
+        let train_ref = train_ref_of(t)
+            .ok_or_else(|| anyhow!("the train carries no train_ref on its assemble step"))?;
         let (branch, short) = train_ref
             .split_once('@')
             .ok_or_else(|| anyhow!("train_ref {train_ref:?} is not <branch>@<sha>"))?;
@@ -9090,10 +9108,7 @@ impl Conductor {
         // window where the run is still burning the single-concurrency
         // runner for a PR that is already gone, which is the state
         // 89b27e60 measured 27 minutes into.
-        let train_head = train
-            .get("metadata")
-            .and_then(|m| m.get("train_ref"))
-            .and_then(Value::as_str)
+        let train_head = train_ref_of(train)
             .and_then(|r| r.rsplit('@').next())
             .unwrap_or_default()
             .to_string();
@@ -9444,6 +9459,27 @@ pub async fn run(phase: Phase, dry: bool, now: DateTime<Utc>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    use super::train_ref_of;
+
+    /// The ref is on the assemble step, where the assembly writes it;
+    /// the train metadata is the older home and still read.
+    #[test]
+    fn the_train_ref_is_read_off_the_assemble_step_first() {
+        let live = serde_json::json!({
+            "metadata": { "boarded_jobs": ["c1"] },
+            "steps": [
+                { "spec_slug": "assemble", "title": "Assemble the train branch", "status": "completed",
+                  "metadata": { "train_ref": "train/20260913-0327@1a74705f" } }
+            ]
+        });
+        assert_eq!(train_ref_of(&live), Some("train/20260913-0327@1a74705f"));
+        let old =
+            serde_json::json!({ "metadata": { "train_ref": "train/x@abcdef1" }, "steps": [] });
+        assert_eq!(train_ref_of(&old), Some("train/x@abcdef1"));
+        let none = serde_json::json!({ "metadata": {}, "steps": [{ "spec_slug": "assemble", "status": "ready", "metadata": {} }] });
+        assert_eq!(train_ref_of(&none), None);
+    }
     // -- a machine cancellation says why -------------------------------
 
     /// Measured 2026-09-05 across every cancelled train on the record:

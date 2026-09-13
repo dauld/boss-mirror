@@ -70,18 +70,32 @@ fn missing(tool: &str) -> bool {
 /// they are the two the test has to wait on and cannot see from outside:
 /// `started` before the delay, and `bound` once its listener exists.
 const STUB: &str = r#"
-import http.server, json, sys, time
-port, log, mode, delay = int(sys.argv[1]), sys.argv[2], sys.argv[3], float(sys.argv[4])
-JOB, started_at, bound_at = sys.argv[5], sys.argv[6], sys.argv[7]
+import http.server, json, socket, sys, time
+log, mode, delay = sys.argv[1], sys.argv[2], float(sys.argv[3])
+JOB, started_at, bound_at = sys.argv[4], sys.argv[5], sys.argv[6]
 
-def announce(path):
+def announce(path, text="ok"):
     with open(path, "w") as f:
-        f.write("ok")
+        f.write(text)
+
+# THE STUB OWNS ITS PORT FROM THE FIRST INSTANT. It used to be handed a
+# port the test had bound and released — a window in which any of the
+# seven sibling tests, each doing the same, could be handed the same
+# just-freed port by the kernel; python then died on EADDRINUSE and the
+# test read "the stub exited early" (train 71098905, 2026-09-13 03:38Z,
+# a web-only car struck for it). Now the socket is bound here, to port
+# 0, and the port announced in `started`; a bound socket that is not yet
+# listening REFUSES connections, which is exactly the dark window a
+# delayed stub owes its test, and listen() after the delay is the
+# moment the port stops refusing.
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.bind(("127.0.0.1", 0))
+port = sock.getsockname()[1]
 
 # `started` goes out BEFORE the delay, so a test that wants a dark
 # window gets `delay` seconds of one rather than `delay` minus however
 # long python took to boot.
-announce(started_at)
+announce(started_at, str(port))
 time.sleep(delay)
 seen = {"n": 0}
 refuse_first = int(mode.split(":")[1]) if mode.startswith("503:") else 0
@@ -123,10 +137,14 @@ class H(http.server.BaseHTTPRequestHandler):
         else:
             self._reply(200)
 
-# The constructor is where bind() and listen() both happen: past this
-# line a connection to the port can no longer be refused, which is
-# exactly the fact `start_stub` waits for.
-srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), H)
+# listen() is the line past which a connection to the port can no longer
+# be refused — exactly the fact `start_stub` waits for. The server takes
+# the socket bound above instead of binding its own.
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H, bind_and_activate=False)
+srv.socket.close()
+srv.socket = sock
+srv.server_address = sock.getsockname()
+srv.server_activate()
 announce(bound_at)
 srv.serve_forever()
 "#;
@@ -184,22 +202,15 @@ fn scratch(tag: &str) -> PathBuf {
 
 fn start_stub(tag: &str, mode: &str, delay_secs: f32) -> Stub {
     let dir = scratch(tag);
-    // A free port, released before the stub binds it. The window is
-    // microseconds and the tests run one stub each; if something does
-    // take it, python dies on EADDRINUSE and the wait below says so by
-    // name rather than leaving a dark stub behind.
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port();
+    // The stub binds its own port (0) and announces it in `started`;
+    // see the script. No port is chosen here, so none can be taken in
+    // a window between choosing and binding.
     let script = dir.join("stub.py");
     let started = dir.join("started");
     let bound = dir.join("bound");
     std::fs::write(&script, STUB).expect("write stub");
     let child = Command::new("python3")
         .arg(&script)
-        .arg(port.to_string())
         .arg(dir.join("puts.log"))
         .arg(mode)
         .arg(delay_secs.to_string())
@@ -210,7 +221,11 @@ fn start_stub(tag: &str, mode: &str, delay_secs: f32) -> Stub {
         .stderr(Stdio::inherit())
         .spawn()
         .expect("python3 runs");
-    let mut stub = Stub { child, port, dir };
+    let mut stub = Stub {
+        child,
+        port: 0,
+        dir,
+    };
 
     // READINESS IS A FACT THE STUB STATES, NOT A CONNECT THAT SUCCEEDED.
     //
@@ -235,6 +250,13 @@ fn start_stub(tag: &str, mode: &str, delay_secs: f32) -> Stub {
         Duration::from_secs(30),
         "the stub process never started",
     );
+    // `started` carries the port the stub bound — read it, never guess it.
+    stub.port = std::fs::read_to_string(&started)
+        .expect("started marker")
+        .trim()
+        .parse()
+        .expect("the started marker carries the stub's port");
+    assert!(stub.port != 0, "the stub announced port 0");
     if delay_secs == 0.0 {
         stub.await_fact(&bound, Duration::from_secs(10), "the stub never bound");
     }

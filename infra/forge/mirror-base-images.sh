@@ -74,6 +74,18 @@ if [ "${1:-}" = "--check" ]; then
     exit $rc
 fi
 
+# --missing: mirror only what the registry does not hold. The converge
+# runs this before every image build (cluster-deploy-runner.sh), because
+# a tag in the list above is a DECLARATION and the registry holding it is
+# the fact: on 2026-09-13 the cluster image's `COPY --from=…/alpine-k8s:
+# 1.33.3` named a tag listed here since 2026-09-09 that no one had ever
+# mirrored, six converges failed on `not found`, and two merged trains
+# sat unconverged for two hours until a human filed this verb. The
+# presence check is `docker manifest inspect` against the forge tag with
+# the same config the push uses; absent means pull, tag, push.
+ONLY_MISSING=false
+[ "${1:-}" = "--missing" ] && ONLY_MISSING=true
+
 pull_with_retry() {
     # The pull is the only step exposed to public DNS — the very flake
     # this job exists to retire off the hot path. Retry it here so a
@@ -92,8 +104,14 @@ pull_with_retry() {
 }
 
 count=0
+skipped=0
 while IFS='|' read -r ext dst; do
     forge="$REGISTRY_BASE/$dst"
+    if $ONLY_MISSING && docker manifest inspect "$forge" >/dev/null 2>&1; then
+        echo "mirror-base-images: $forge already in the registry — skipped"
+        skipped=$((skipped + 1))
+        continue
+    fi
     echo "mirror-base-images: $ext  ->  $forge"
     pull_with_retry "$ext" || exit 1
     docker tag "$ext" "$forge" || { echo "mirror-base-images: tag FAILED: $ext -> $forge" >&2; exit 1; }
@@ -101,4 +119,8 @@ while IFS='|' read -r ext dst; do
     count=$((count + 1))
 done < <(mappings)
 
-echo "mirror-base-images: done — ${count} image(s) mirrored to ${REGISTRY_BASE}"
+if $ONLY_MISSING; then
+    echo "mirror-base-images: done — ${count} image(s) mirrored to ${REGISTRY_BASE} (${skipped} already in the registry)"
+else
+    echo "mirror-base-images: done — ${count} image(s) mirrored to ${REGISTRY_BASE}"
+fi

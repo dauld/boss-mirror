@@ -36,6 +36,7 @@
     dockUpstream,
     fetchYard,
     splitAtDeparture,
+    trainGateLabel,
     troubleLabel,
     wipAdvisory,
     type CancelRequest,
@@ -674,6 +675,13 @@
               {#if t.prUrl}
                 <dt>PR</dt>
                 <dd><a href={t.prUrl} target="_blank" rel="noreferrer">{t.prUrl}</a></dd>
+              {/if}
+              {#if t.gate}
+                <!-- THE TRAIN GATE (128b5496): the verdict is the forge's
+                     and the cluster gate's read together; both halves
+                     are shown, and a train CI alone judged says so. -->
+                <dt>verdict</dt>
+                <dd class:yard-trouble={t.gate.fallback !== null}>{trainGateLabel(t.gate)}</dd>
               {/if}
             </dl>
             <div class="yard-label">Its steps</div>
