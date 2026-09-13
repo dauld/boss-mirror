@@ -236,6 +236,18 @@ struct Config {
     /// is skipped, with one journal line, so a deployment that has not
     /// configured it behaves exactly as before.
     ci_host: Option<String>,
+    /// THE TRAIN GATE (design 128b5496): the runner manifest `boss gate`
+    /// renders and the namespace its Jobs run in — the conductor files a
+    /// gate-run of the train branch when it opens the PR and reads the
+    /// train as green only when CI AND that gate are (BOSS_GATE_MANIFEST,
+    /// BOSS_GATE_NAMESPACE; see `train_gate`).
+    gate_manifest: String,
+    gate_namespace: String,
+    /// BOSS_TRAIN_GATE_REQUIRED=1: a train waits for its gate however
+    /// long; otherwise a gate that cannot be FILED falls back to CI
+    /// alone, stamped (`train_gate::REQUIRED_ENV` — off until car 3 of
+    /// 128b5496 stops CI running the Rust checks).
+    gate_required: bool,
     dry: bool,
 }
 
@@ -307,6 +319,15 @@ impl Config {
             ci_host: std::env::var("BOSS_TRAIN_CI_HOST")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
+            gate_manifest: env_or(
+                crate::train_gate::MANIFEST_ENV,
+                crate::train_gate::DEFAULT_MANIFEST,
+            ),
+            gate_namespace: env_or(
+                crate::train_gate::NAMESPACE_ENV,
+                crate::train_gate::DEFAULT_NAMESPACE,
+            ),
+            gate_required: std::env::var(crate::train_gate::REQUIRED_ENV).as_deref() == Ok("1"),
             gh_repo,
             home,
             dry,
@@ -6628,6 +6649,271 @@ impl Conductor {
         Ok(())
     }
 
+    /// THE TRAIN GATE, read or filed (design 128b5496). Returns the
+    /// gate's standing (None when no gate-run is on the train yet) and
+    /// the relaunch count, for `train_gate::combined_verdict`. Every
+    /// failure here is logged and read as "pending": a gate the
+    /// conductor could not file or read this pass is filed or read the
+    /// next, and the train waits — it never merges on CI alone.
+    async fn train_gate(
+        &self,
+        t: &mut Value,
+        tid: &str,
+        now: DateTime<Utc>,
+    ) -> (Option<crate::train_gate::Standing>, u32) {
+        use crate::train_gate::{self as tg, Standing};
+        let relaunches = t
+            .pointer(&format!("/metadata/{}", tg::KEY_RELAUNCHES))
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32;
+        let run_id = t
+            .pointer(&format!("/metadata/{}", tg::KEY_RUN))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if let Some(run_id) = run_id {
+            let run = match self.get_job(&run_id).await {
+                Ok(r) => r,
+                Err(e) => {
+                    log(format!(
+                        "train {}: could not read its gate-run {} this pass ({e}) — reading it as running",
+                        id8(tid),
+                        id8(&run_id)
+                    ));
+                    return (Some(Standing::Pending), relaunches);
+                }
+            };
+            let standing = tg::standing(&run);
+            if tg::wants_relaunch(&standing, relaunches) {
+                let why = match &standing {
+                    Standing::Refused(w) => w.clone(),
+                    _ => "the Job ended without a verdict".to_string(),
+                };
+                log(format!(
+                    "train {}: {}",
+                    id8(tid),
+                    tg::describe(Some(&standing), relaunches)
+                ));
+                if !self.cfg.dry {
+                    let mut refusals = t
+                        .pointer(&format!("/metadata/{}", tg::KEY_REFUSALS))
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    refusals.push(json!({
+                        "gate_run": run_id,
+                        "why": why,
+                        "at": now.to_rfc3339(),
+                    }));
+                    if let Err(e) = self
+                        .merge_job_metadata(
+                            tid,
+                            vec![
+                                (tg::KEY_RUN, Value::Null),
+                                (tg::KEY_RELAUNCHES, json!(relaunches + 1)),
+                                (tg::KEY_REFUSALS, json!(refusals)),
+                            ],
+                        )
+                        .await
+                    {
+                        log(format!(
+                            "train {}: could not record the gate refusal ({e}) — retrying next pass",
+                            id8(tid)
+                        ));
+                        return (Some(standing), relaunches);
+                    }
+                    if let Ok(fresh) = self.get_job(tid).await {
+                        *t = fresh;
+                    }
+                }
+                return (Some(standing), relaunches + 1);
+            }
+            return (Some(standing), relaunches);
+        }
+        // No gate-run yet: file one. Not in a dry run, and not past the
+        // cluster's gate bound — the next pass tries again.
+        if self.cfg.dry {
+            log(format!("DRY: would file a train gate for {}", id8(tid)));
+            return (None, relaunches);
+        }
+        match self.launch_train_gate(t, tid).await {
+            Ok(run_id) => {
+                log(format!(
+                    "train {}: train gate filed — gate-run {} on {}",
+                    id8(tid),
+                    id8(&run_id),
+                    self.cfg.gate_namespace
+                ));
+                if let Err(e) = self
+                    .merge_job_metadata(
+                        tid,
+                        vec![
+                            (tg::KEY_RUN, json!(run_id)),
+                            (tg::KEY_LAUNCHED_AT, json!(now.to_rfc3339())),
+                        ],
+                    )
+                    .await
+                {
+                    log(format!(
+                        "train {}: gate-run {} launched but could not be recorded on the train ({e}) — \
+                         the next pass would file a second gate; retried",
+                        id8(tid),
+                        id8(&run_id)
+                    ));
+                }
+                if let Ok(fresh) = self.get_job(tid).await {
+                    *t = fresh;
+                }
+                (Some(Standing::Pending), relaunches)
+            }
+            Err(e) => {
+                let failures = t
+                    .pointer(&format!("/metadata/{}", tg::KEY_LAUNCH_FAILURES))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as u32
+                    + 1;
+                let why = format!("{e:#}");
+                let unavailable = failures >= tg::MAX_LAUNCH_FAILURES;
+                log(format!(
+                    "train {}: train gate not filed this pass ({why}) — attempt {failures} of {}; {}",
+                    id8(tid),
+                    tg::MAX_LAUNCH_FAILURES,
+                    if !unavailable {
+                        "retrying next pass; the train waits"
+                    } else if self.cfg.gate_required {
+                        "the gate is REQUIRED, the train waits"
+                    } else {
+                        "reading the gate as UNAVAILABLE: CI alone judges this train, stamped on it"
+                    }
+                ));
+                let mut kv = vec![(tg::KEY_LAUNCH_FAILURES, json!(failures))];
+                if unavailable && !self.cfg.gate_required {
+                    kv.push((
+                        tg::KEY_FALLBACK,
+                        json!(format!(
+                            "the train gate could not be filed {} passes running ({why}); CI alone judged this train ({}=0)",
+                            tg::MAX_LAUNCH_FAILURES,
+                            tg::REQUIRED_ENV
+                        )),
+                    ));
+                }
+                if !self.cfg.dry {
+                    if let Err(e2) = self.merge_job_metadata(tid, kv).await {
+                        log(format!(
+                            "train {}: could not record the launch failure ({e2})",
+                            id8(tid)
+                        ));
+                    } else if let Ok(fresh) = self.get_job(tid).await {
+                        *t = fresh;
+                    }
+                }
+                if unavailable {
+                    (Some(Standing::Unavailable(why)), relaunches)
+                } else {
+                    (None, relaunches)
+                }
+            }
+        }
+    }
+
+    /// File the gate-run for the train branch and create its Job — the
+    /// same packet body, manifest rendering and `kubectl create` that
+    /// `boss gate` performs, without the operator-facing guards (the
+    /// train branch is the conductor's own, freshly assembled on main).
+    async fn launch_train_gate(&self, t: &Value, tid: &str) -> Result<String> {
+        let train_ref = t
+            .pointer("/metadata/train_ref")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("the train carries no train_ref"))?;
+        let (branch, short) = train_ref
+            .split_once('@')
+            .ok_or_else(|| anyhow!("train_ref {train_ref:?} is not <branch>@<sha>"))?;
+        // The full sha from the conductor's own clone, where the branch
+        // was assembled; the short one from train_ref if the clone
+        // cannot answer.
+        let sha = sh(&[
+            "git",
+            "-C",
+            &self.cfg.clone,
+            "rev-parse",
+            "--verify",
+            branch,
+        ])
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| stdout_str(&o).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| short.to_string());
+        let manifest_text =
+            std::fs::read_to_string(&self.cfg.gate_manifest).with_context(|| {
+                format!(
+                    "reading the gate runner manifest {} ({}=…)",
+                    self.cfg.gate_manifest,
+                    crate::train_gate::MANIFEST_ENV
+                )
+            })?;
+        let ns = self.cfg.gate_namespace.as_str();
+        let max = crate::gate::max_concurrent(&self.http).await?;
+        let live = crate::gate::running_gates(ns)?;
+        if live.len() >= max {
+            bail!(
+                "the cluster is at its gate bound ({} running of {max}: {})",
+                live.len(),
+                live.join(", ")
+            );
+        }
+        let created = self
+            .api(
+                Method::POST,
+                "/api/jobs",
+                Some(crate::gate::gate_run_body(
+                    branch,
+                    &sha,
+                    &self.cfg.gate_manifest,
+                    None,
+                )),
+            )
+            .await?;
+        let run_id = created
+            .as_ref()
+            .and_then(|c| c.get("data").unwrap_or(c).get("id"))
+            .and_then(Value::as_str)
+            .context("the jobs API returned no id for the train's gate-run")?
+            .to_string();
+        let title = t.get("title").and_then(Value::as_str).unwrap_or("PR train");
+        self.api(
+            Method::PATCH,
+            &format!("/api/jobs/{run_id}/metadata"),
+            Some(crate::train_gate::packet_marks(tid, title)),
+        )
+        .await
+        .context("marking the gate-run as the train's")?;
+        let job = crate::gate::render_job(&manifest_text, branch, &run_id, "--auto")?;
+        let mut child = crate::gate::kubectl(ns)
+            .args(["create", "-f", "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("spawning kubectl create — is kubectl in the conductor's image?")?;
+        {
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .context("kubectl stdin")?
+                .write_all(job.as_bytes())?;
+        }
+        let out = child.wait_with_output()?;
+        if !out.status.success() {
+            bail!(
+                "kubectl create failed for the train gate ({}): {}",
+                branch,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(run_id)
+    }
+
     async fn reconcile(&self, now: DateTime<Utc>) -> Result<()> {
         // Keep the clone fetched before the convergence check below asks git
         // "is the cluster's running commit a descendant of this train's
@@ -6721,8 +7007,28 @@ impl Conductor {
             }
             let mut info = self.forge.pr_info(&pr_url).await?;
 
+            // THE TRAIN GATE (design 128b5496): the train's Rust checks
+            // are a gate-run of the train branch on the cluster, filed
+            // here while the PR is open and unjudged, and the verdict is
+            // CI's and the gate's read together (`train_gate`).
+            let ci_judged = step_done(find_step(&t, "ci", "CI verdict"));
+            let (gate, relaunches) = if ci_judged {
+                (None, 0)
+            } else {
+                self.train_gate(&mut t, &tid, now).await
+            };
             let ci_step = find_step(&t, "ci", "CI verdict");
-            let verdict = ci_verdict(info.get("statusCheckRollup"));
+            let forge_verdict = ci_verdict(info.get("statusCheckRollup"));
+            let verdict = if step_done(ci_step) {
+                forge_verdict
+            } else {
+                crate::train_gate::combined_verdict(
+                    forge_verdict,
+                    gate.as_ref(),
+                    relaunches,
+                    self.cfg.gate_required,
+                )
+            };
             if !step_done(ci_step) && verdict != "pending" {
                 let checks = ci_check_summary(info.get("statusCheckRollup"));
                 // WHY, not just WHICH: the tail of each failing job's log,
@@ -6732,11 +7038,21 @@ impl Conductor {
                     &failing_check_logs(info.get("statusCheckRollup")),
                     CI_STEP_LOG_BYTES,
                 );
+                let gate_line = crate::train_gate::describe(gate.as_ref(), relaunches);
+                let gate_run = t
+                    .pointer(&format!("/metadata/{}", crate::train_gate::KEY_RUN))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
                 self.complete_step(
                     &t,
                     ci_step,
                     &[
                         ("result", Some(verdict.to_string())),
+                        // Both halves of the verdict, so a reader sees
+                        // which one spoke.
+                        ("forge_result", Some(forge_verdict.to_string())),
+                        ("train_gate", Some(gate_line)),
+                        ("train_gate_run", gate_run),
                         // WHICH check, not just that one failed.
                         ("checks", (!checks.is_empty()).then_some(checks)),
                         // The failing job's log tail — a verdict names WHY.
@@ -11428,6 +11744,9 @@ mod tests {
                 auto_park_grace_mins: 10,
                 auto_cancel: false,
                 ci_host: None,
+                gate_manifest: "/nonexistent/gate-runner.yaml".to_string(),
+                gate_namespace: "boss-dev".to_string(),
+                gate_required: false,
                 dry: false,
             },
             http: reqwest::Client::new(),

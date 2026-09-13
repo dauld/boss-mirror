@@ -332,7 +332,7 @@ async fn policy_max_concurrent(http: &reqwest::Client) -> usize {
 
 /// The concurrency bound in force: env override > delivery policy >
 /// compiled fallback.
-async fn max_concurrent(http: &reqwest::Client) -> Result<usize> {
+pub(crate) async fn max_concurrent(http: &reqwest::Client) -> Result<usize> {
     let fallback = policy_max_concurrent(http).await;
     max_concurrent_from(
         std::env::var("BOSS_GATE_MAX_CONCURRENT").ok().as_deref(),
@@ -1906,7 +1906,7 @@ pub(crate) fn resolve_sha(branch: &str) -> String {
     format!("origin/{branch}")
 }
 
-fn kubectl(namespace: &str) -> std::process::Command {
+pub(crate) fn kubectl(namespace: &str) -> std::process::Command {
     let mut c = std::process::Command::new("kubectl");
     c.args(["-n", namespace]);
     c
@@ -1953,7 +1953,7 @@ fn gate_jobs_table(namespace: &str, selector: &str) -> Result<String> {
 /// see it — two quick `boss gate` calls would each count zero and
 /// together over-fill the node. A Job with neither `succeeded` nor
 /// `failed` set is live from the moment `kubectl create` returns.
-fn running_gates(namespace: &str) -> Result<Vec<String>> {
+pub(crate) fn running_gates(namespace: &str) -> Result<Vec<String>> {
     Ok(live_gates(&gate_jobs_table(namespace, "app=gate-runner")?))
 }
 

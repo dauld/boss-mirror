@@ -36,6 +36,7 @@ mod rerail;
 mod running;
 mod script;
 mod train;
+mod train_gate;
 mod upgrade;
 mod workflow;
 
