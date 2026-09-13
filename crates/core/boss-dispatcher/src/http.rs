@@ -73,8 +73,13 @@ async fn health() -> Json<boss_core::startup::HealthResponse> {
 /// Real readiness: are both durable consumers bound + draining? Returns
 /// `{ready, assigning, assignment_events, rules_running, rules_events,
 /// last_event_unix, dead_letters, dead_letters_unrecorded,
-/// last_dead_letter_unix}`. `ready=false` while health is 200 is the exact
-/// "process up, but assigning nothing, so Jobs never close" failure.
+/// last_dead_letter_unix, last_unrecorded_dead_letter_unix}`. `ready=false`
+/// while health is 200 is the exact "process up, but assigning nothing, so
+/// Jobs never close" failure. The dead-letter counters are the read the
+/// cluster estate observer (`boss-estate-observe.yaml`) carries into its
+/// observation (8834804a): this surface owes nothing to the jobs API, so a
+/// dead-letter that could not be annotated — or whose annotation write was
+/// the very thing that failed — still has a number a reader can see.
 async fn readyz(State(state): State<HttpState>) -> Json<serde_json::Value> {
     Json(state.live.snapshot())
 }

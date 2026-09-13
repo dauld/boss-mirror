@@ -37,8 +37,10 @@
 //! CALIBRATION, so the alarm is worth trusting:
 //! - HARD findings only — `not_ready` (a declared node that is sick),
 //!   `declared_not_observed` (a declared node that is GONE),
-//!   `disk_tight` (a host below the floor a gate needs), and
-//!   `units_unhealthy` (a watched unit the observer derived sick).
+//!   `disk_tight` (a host below the floor a gate needs),
+//!   `units_unhealthy` (a watched unit the observer derived sick), and
+//!   `dead_letters_unrecorded` (a dispatcher dead-letter with no
+//!   durable record anywhere else, 8834804a).
 //!   `observed_not_declared` is a paperwork gap and `drift` is config
 //!   — real, but not 03:00-urgent, and an alarm that cries over
 //!   paperwork trains operators to ignore it.
@@ -156,6 +158,13 @@ fn hard_findings(comparison: &Value) -> Vec<(String, Value)> {
         // The host scope's disk floor (49a8d842): a machine below the
         // headroom a full gate needs is as hard as a sick node.
         ("disk_tight", "disk_tight"),
+        // A dead-letter that left NO durable record (8834804a): no
+        // packet to annotate, or the annotation write was itself the
+        // failure. The dispatcher counted it on its own surface, the
+        // cluster observer carried the count here, and this is the
+        // reader that owes nothing to the jobs API — the path CLAUDE.md
+        // §Diagnosis asks of an arm. Keyed on the dispatcher's id.
+        ("dead_letters_unrecorded", "dead_letters_unrecorded"),
     ] {
         for v in entries(comparison, field) {
             let id = v
@@ -742,6 +751,30 @@ mod tests {
             vec!["gone:w-9".to_string(), "not_ready:cp-2".to_string()],
             "paperwork (observed_not_declared) and drift must not alarm"
         );
+    }
+
+    #[test]
+    fn an_unrecorded_dead_letter_is_hard_and_an_unread_dispatcher_is_not() {
+        // 8834804a: a dead-letter with no packet, or whose annotation
+        // write failed, has the dispatcher's own counter as its only
+        // record that outlives the log line. estate.compare carries it
+        // into the cluster series as `dead_letters_unrecorded`; it has
+        // to be HARD here or the path ends one hop short of a reader.
+        // `dispatcher_unread` is the best-effort read going dark —
+        // informational, like disk_unmeasured, so it does not wake anyone.
+        let mut c = comparison("kubernetes-nodes", &[], &[]);
+        c["findings"]["dead_letters_unrecorded"] = json!([{
+            "id": "boss-dispatcher", "dead_letters": 5,
+            "dead_letters_unrecorded": 2, "age_s": 600 }]);
+        c["findings"]["dispatcher_unread"] = json!(null);
+        assert_eq!(
+            hard_finding_keys(&c).into_iter().collect::<Vec<_>>(),
+            vec!["dead_letters_unrecorded:boss-dispatcher".to_string()],
+        );
+        let mut c = comparison("kubernetes-nodes", &[], &[]);
+        c["findings"]["dead_letters_unrecorded"] = json!([]);
+        c["findings"]["dispatcher_unread"] = json!("curl: (7) Failed to connect");
+        assert!(hard_finding_keys(&c).is_empty(), "unread is informational");
     }
 
     #[test]

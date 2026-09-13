@@ -305,6 +305,82 @@ pub(crate) fn compare_host(declared: &[Json], observation: &Json) -> Json {
     })
 }
 
+/// How long an UNRECORDED dead-letter stays a finding (8834804a). The
+/// dispatcher's counters are monotonic for the process lifetime, so
+/// "unrecorded > 0" alone would keep the finding present on every
+/// comparison until the next deploy and re-raise the alarm after every
+/// settle. Judged against the observation's own `observed_at`, never
+/// the clock, so a replayed comparison answers as it would have when
+/// the reading was taken. A day: long enough that the 15-minute series
+/// carries it through the alarm's three consecutive readings many times
+/// over, and for the operator to read the dispatcher's WARN (the only
+/// other record) before the pod that holds it rolls.
+pub(crate) const DEAD_LETTER_RECENT_S: i64 = 24 * 3600;
+
+/// The id the dead-letter finding is keyed on. There is one dispatcher
+/// per deployment and it is a service, not a node, so it does not
+/// collide with any observed machine's id.
+const DISPATCHER_ID: &str = "boss-dispatcher";
+
+/// The dispatcher's dead-letter counters, read by the cluster observer
+/// off `/api/dispatcher/readyz` and carried on the kubernetes-nodes
+/// observation as `dispatcher`. Pure. Returns `(hard, unread)`: the
+/// hard finding when an unrecorded dead-letter is recent, or the reason
+/// the counters could not be read when they could not — never both,
+/// never neither-and-zero. A body the counters are missing from (the
+/// wrong surface answered 200) is UNREAD, not zero: the quiet answer is
+/// the one this whole packet exists to refuse.
+fn dead_letter_finding(observation: &Json) -> (Option<Json>, Option<String>) {
+    let Some(dispatcher) = observation.get("dispatcher").filter(|d| !d.is_null()) else {
+        let why = observation
+            .get("dispatcher_unread")
+            .and_then(Json::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| "the observation carries no dispatcher reading".to_string());
+        return (None, Some(why));
+    };
+    let Some(unrecorded) = dispatcher
+        .get("dead_letters_unrecorded")
+        .and_then(Json::as_u64)
+    else {
+        return (
+            None,
+            Some(
+                "the dispatcher reading carries no numeric dead_letters_unrecorded — the wrong \
+                 surface answered, or the dispatcher predates the counter"
+                    .to_string(),
+            ),
+        );
+    };
+    if unrecorded == 0 {
+        return (None, None);
+    }
+    let last_unrecorded = dispatcher
+        .get("last_unrecorded_dead_letter_unix")
+        .and_then(Json::as_i64)
+        .unwrap_or(0);
+    // Age against the observation's stamp. An unparseable stamp cannot
+    // judge recency, so the count stands as the finding — loud, not quiet.
+    let age_s = observation
+        .get("observed_at")
+        .and_then(Json::as_str)
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.timestamp() - last_unrecorded);
+    if age_s.is_some_and(|age| age > DEAD_LETTER_RECENT_S) {
+        return (None, None);
+    }
+    (
+        Some(json!({
+            "id": DISPATCHER_ID,
+            "dead_letters": dispatcher.get("dead_letters"),
+            "dead_letters_unrecorded": unrecorded,
+            "last_unrecorded_dead_letter_unix": last_unrecorded,
+            "age_s": age_s,
+        })),
+        None,
+    )
+}
+
 /// A declared row participates in the kubernetes-nodes comparison iff
 /// its role names a cluster node. conductor/forge roles never
 /// participate — the observer cannot see them, so their absence is a
@@ -426,6 +502,13 @@ pub(crate) fn compare(declared: &[Json], observation: &Json) -> Json {
         }
     }
 
+    // The one non-machine reading on this scope (8834804a): the
+    // dispatcher's dead-letter counters, carried by the same observer
+    // because the cluster CronJob is the one actor that can reach the
+    // dispatcher's in-cluster door AND sign a write to the record.
+    let (dead_letters_unrecorded, dispatcher_unread) = dead_letter_finding(observation);
+    let dead_letters_unrecorded: Vec<Json> = dead_letters_unrecorded.into_iter().collect();
+
     json!({
         "counts": {
             "observed": observed.len(),
@@ -435,6 +518,7 @@ pub(crate) fn compare(declared: &[Json], observation: &Json) -> Json {
             "drift": drift.len(),
             "disk_tight": disk_tight.len(),
             "disk_unmeasured": disk_unmeasured.len(),
+            "dead_letters_unrecorded": dead_letters_unrecorded.len(),
         },
         "findings": {
             "observed_not_declared": observed_not_declared,
@@ -444,6 +528,8 @@ pub(crate) fn compare(declared: &[Json], observation: &Json) -> Json {
             "disk_tight": disk_tight,
             "disk_unmeasured": disk_unmeasured,
             "not_ready": not_ready,
+            "dead_letters_unrecorded": dead_letters_unrecorded,
+            "dispatcher_unread": dispatcher_unread,
         },
     })
 }
@@ -1097,6 +1183,104 @@ mod tests {
         let out = compare(&[], &cluster_obs("w-9", 929, Some(10)));
         assert_eq!(out["counts"]["observed_not_declared"], 1);
         assert_eq!(out["findings"]["disk_tight"][0]["id"], "w-9");
+    }
+
+    // ----- the dispatcher's dead-letter counters (8834804a) -----
+
+    /// `observed_at` of every `observed(..)` fixture, as unix seconds.
+    const OBSERVED_AT_UNIX: i64 = 1_788_085_200; // 2026-08-30T10:20:00Z
+
+    fn with_dispatcher(dispatcher: Json) -> Json {
+        let mut obs = cluster_obs("w-1", 929, Some(390));
+        obs["dispatcher"] = dispatcher;
+        obs
+    }
+
+    fn dispatcher(unrecorded: u64, unrecorded_age_s: i64) -> Json {
+        json!({
+            "ready": true,
+            "dead_letters": unrecorded + 3,
+            "dead_letters_unrecorded": unrecorded,
+            "last_dead_letter_unix": OBSERVED_AT_UNIX - 60,
+            "last_unrecorded_dead_letter_unix":
+                if unrecorded == 0 { 0 } else { OBSERVED_AT_UNIX - unrecorded_age_s },
+        })
+    }
+
+    #[test]
+    fn a_recent_unrecorded_dead_letter_is_a_hard_finding() {
+        // The packet's case: a handler failed past its budget and the
+        // only record was a log line with a pod's lifetime — no packet
+        // to annotate, or the annotation write itself failed. The
+        // counter lives on the dispatcher's own surface and the
+        // observer carried it here; this is where it becomes a finding
+        // the alarm can raise on.
+        let out = compare(&[], &with_dispatcher(dispatcher(2, 600)));
+        assert_eq!(out["counts"]["dead_letters_unrecorded"], 1, "{out}");
+        let f = &out["findings"]["dead_letters_unrecorded"][0];
+        assert_eq!(f["id"], "boss-dispatcher", "{out}");
+        assert_eq!(f["dead_letters_unrecorded"], 2, "{out}");
+        assert_eq!(f["dead_letters"], 5, "{out}");
+        assert_eq!(f["age_s"], 600, "the excerpt says how fresh: {out}");
+        assert!(out["findings"]["dispatcher_unread"].is_null(), "{out}");
+    }
+
+    #[test]
+    fn an_old_unrecorded_dead_letter_does_not_persist_forever() {
+        // The counter is monotonic for the process lifetime, so without
+        // a recency window one dead-letter from last week would keep
+        // the finding present on every comparison and re-raise the
+        // alarm after every settle. Judged against the OBSERVATION's
+        // stamp, not the clock: a replayed comparison must answer the
+        // way it would have when the reading was taken.
+        let out = compare(
+            &[],
+            &with_dispatcher(dispatcher(2, DEAD_LETTER_RECENT_S + 1)),
+        );
+        assert_eq!(out["counts"]["dead_letters_unrecorded"], 0, "{out}");
+        assert_eq!(
+            out["findings"]["dead_letters_unrecorded"],
+            json!([]),
+            "{out}"
+        );
+        // Right at the window's edge is still recent.
+        let edge = compare(&[], &with_dispatcher(dispatcher(2, DEAD_LETTER_RECENT_S)));
+        assert_eq!(edge["counts"]["dead_letters_unrecorded"], 1, "{edge}");
+    }
+
+    #[test]
+    fn a_recorded_dead_letter_is_not_this_finding() {
+        // Dead-letters that landed on their packet are already durable
+        // and already loud there (feat/a-dead-letter-lands-on-its-packet).
+        // Only the UNRECORDED ones have nowhere else to be seen.
+        let out = compare(&[], &with_dispatcher(dispatcher(0, 0)));
+        assert_eq!(out["counts"]["dead_letters_unrecorded"], 0, "{out}");
+        assert!(out["findings"]["dispatcher_unread"].is_null(), "{out}");
+    }
+
+    #[test]
+    fn a_dispatcher_that_could_not_be_read_is_unread_not_clean() {
+        // The same contract as disk_unmeasured: the read is best-effort
+        // so it can never cost the node observation, and losing it must
+        // be visible rather than read like zero dead-letters.
+        // Informational, not hard — `estate.alarm` does not read it.
+        let mut obs = with_dispatcher(Json::Null);
+        obs["dispatcher_unread"] = json!("curl: (7) Failed to connect");
+        let out = compare(&[], &obs);
+        assert_eq!(out["counts"]["dead_letters_unrecorded"], 0, "{out}");
+        assert_eq!(
+            out["findings"]["dispatcher_unread"], "curl: (7) Failed to connect",
+            "{out}"
+        );
+        // An observation with no dispatcher reading at all — an observer
+        // that never looked — is unread too, and says so.
+        let out = compare(&[], &cluster_obs("w-1", 929, Some(390)));
+        assert!(out["findings"]["dispatcher_unread"].is_string(), "{out}");
+        // A body with the counters missing (the wrong surface answered
+        // 200) is unread, never zero.
+        let out = compare(&[], &with_dispatcher(json!({"recorded": true})));
+        assert!(out["findings"]["dispatcher_unread"].is_string(), "{out}");
+        assert_eq!(out["counts"]["dead_letters_unrecorded"], 0, "{out}");
     }
 
     // ----- the self-scoped host comparison (49a8d842) -----
