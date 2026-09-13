@@ -48,11 +48,13 @@
 #   0. per-train CI images in the SYSTEM daemon whose TRAIN IS DONE,
 #      plus anything the record cannot vouch for that is older than
 #      CI_IMAGE_AGE_HOURS, keeping the newest few — NOT floor-gated
-#   a. docker builder prune -af  (ALL build cache, no age filter)
-#      (build cache is regenerable by definition; the converge runner
-#      uses a gentler filter because it runs above the floor — below it,
-#      a slower next build is the cheapest thing on the menu, so take
-#      all of it. A 24h filter here left the floor unmet on 2026-09-04.)
+#   a. docker builder prune -af --filter type!=exec.cachemount
+#      (ALL regenerable build cache, no age filter — but NOT the
+#      compiler's cache mounts, which are what make a converge build
+#      warm; an hourly wipe of those made every build cold, 2026-09-12.
+#      A 24h filter here left the floor unmet on 2026-09-04.)
+#   a'. below the HARD floor (half of FLOOR_GB) the mounts go too,
+#      with the size spent in the log.
 #   b. docker image prune -f            (dangling images only, no -a)
 #   c. registry-verified old-tag removal — the SAME loop as its
 #      sibling cluster-deploy-runner.sh, via the shared
@@ -284,9 +286,33 @@ fi
 if floor_met_after "system-daemon unused-image prune (older than ${CI_IMAGE_FLOOR_AGE_HOURS}h)"; then
     done_at "system-daemon image prune"
 fi
-docker builder prune -af || true
-if floor_met_after "builder cache prune (all)"; then
+# EXCEPT THE COMPILER'S CACHE MOUNTS. Since 2026-09-12 the image build
+# keeps cargo's target and registry in BuildKit cache mounts
+# (`exec.cachemount` records) so a train pays only for what it changed;
+# the forge has sat under this floor for days, and an hourly `-af` here
+# is what made the first "warm" converge build in 331 s against a cold
+# 329 — a cache wiped every hour is not a cache. Below the floor the
+# regenerable layers go (that is most of the build cache) and the mounts
+# stay; only the HARD floor — half the defended one, the disk truly in
+# danger — takes them too, and says so with the size it spent. A
+# docker version whose prune filter refuses the exclusion says so here
+# rather than falling back to -af silently.
+HARD_FLOOR_GB=$((FLOOR_GB / 2))
+cache_size=$(docker system df 2>/dev/null | awk '/^Build Cache/ { print $5 }')
+if docker builder prune -af --filter 'type!=exec.cachemount' 2>&1 | tail -1; then
+    echo "disk-floor-sweep: kept the compiler's cache mounts (build cache was ${cache_size:-unknown}; hard floor ${HARD_FLOOR_GB}GB)"
+else
+    echo "disk-floor-sweep: builder prune with the cache-mount exclusion refused (docker too old for type!=?) — mounts NOT pruned, nothing else pruned either" >&2
+fi
+if floor_met_after "builder cache prune (all but the compiler's cache mounts)"; then
     done_at "builder cache prune"
+fi
+if [ $((last_kb / 1024 / 1024)) -lt "$HARD_FLOOR_GB" ]; then
+    echo "disk-floor-sweep: HARD FLOOR — $((last_kb / 1024 / 1024))GB free < ${HARD_FLOOR_GB}GB: taking the compiler's cache mounts too (build cache was ${cache_size:-unknown}); the next converge builds cold"
+    docker builder prune -af || true
+    if floor_met_after "builder cache prune (everything, cache mounts included)"; then
+        done_at "builder cache prune (hard floor)"
+    fi
 fi
 
 # (b) Dangling images only — deliberately no -a, which would take
