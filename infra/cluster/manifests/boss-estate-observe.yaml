@@ -259,6 +259,61 @@ spec:
                     # glob three lines earlier.
                     echo '{}' > "$WORK/free.json"
                   fi
+                  # THE DISPATCHER'S DEAD-LETTER COUNTERS (8834804a). A
+                  # handler failure past its budget annotates the subject
+                  # packet — except when there is no packet (six topics
+                  # carry none) or when the annotation write is itself
+                  # what failed, which is precisely the case where the
+                  # jobs API is what broke. For those, the dispatcher
+                  # counts on its OWN surface, /api/dispatcher/readyz
+                  # (dead_letters, dead_letters_unrecorded,
+                  # last_unrecorded_dead_letter_unix — a local read that
+                  # owes nothing to the jobs API), and this observer is
+                  # the one actor that can reach the dispatcher's
+                  # in-cluster door AND sign a write to the record. The
+                  # counters ride the same POST as the nodes; the next
+                  # firing the record answers carries whatever was counted
+                  # while it did not (CLAUDE.md §Diagnosis: a monitor
+                  # needs a path to a reader that does not depend on what
+                  # it watches). `estate.compare` turns a recent unrecorded
+                  # count into a hard finding the alarm raises on.
+                  #
+                  # The door is boss-dispatcher-internal.yaml's Service,
+                  # pinned to this default by
+                  # infra/lint/a-dead-letter-is-read-from-outside-the-jobs-api.sh,
+                  # which also RUNS this block under stubs.
+                  #
+                  # BEST-EFFORT, AND LOUD ABOUT IT — the same contract as
+                  # the kubelet read above. A plain curl with a short
+                  # deadline, not api_curl: the dispatcher shares the
+                  # boss pod with the jobs API, so a roll takes both away
+                  # together and the POST below already waits it out; a
+                  # reading taken mid-roll honestly says the dispatcher
+                  # was unread at that moment. A refused or failed read
+                  # costs `dispatcher: null` plus `dispatcher_unread`
+                  # naming why, never the observation. And a 200 whose
+                  # body lacks the counters is UNREAD, never zero: the
+                  # wrong surface answering confidently is the class
+                  # CLAUDE.md §Doors names, refused at the instrument.
+                  DISPATCHER_API="${DISPATCHER_API:-http://boss-dispatcher-internal.boss.svc.cluster.local:7950}"
+                  dispatcher=null
+                  dispatcher_unread=""
+                  if curl -sSf -m 10 "$DISPATCHER_API/api/dispatcher/readyz" >"$WORK/readyz.json" 2>"$WORK/readyz.err"; then
+                    counters=$(jq -c 'select(type == "object")
+                      | select((.dead_letters_unrecorded | type) == "number")
+                      | {ready, dead_letters, dead_letters_unrecorded,
+                         last_dead_letter_unix, last_unrecorded_dead_letter_unix}' \
+                      "$WORK/readyz.json" 2>/dev/null | head -n 1)
+                    if [ -n "$counters" ]; then
+                      dispatcher=$counters
+                      echo "dispatcher: $(printf '%s' "$dispatcher" | jq -r '"dead_letters=\(.dead_letters) dead_letters_unrecorded=\(.dead_letters_unrecorded) last_unrecorded_dead_letter_unix=\(.last_unrecorded_dead_letter_unix)"')"
+                    else
+                      dispatcher_unread="$DISPATCHER_API/api/dispatcher/readyz answered without numeric dead-letter counters: $(head -c 200 "$WORK/readyz.json")"
+                    fi
+                  else
+                    dispatcher_unread="$DISPATCHER_API/api/dispatcher/readyz unreachable: $(cat "$WORK/readyz.err")"
+                  fi
+                  [ -z "$dispatcher_unread" ] || echo "no dispatcher reading: $dispatcher_unread"
                   # jq, not python: directive 26d61c97 retired python
                   # from the estate's shell, and infra/estate/observe-host.sh
                   # (the host-scope sibling) is the shape to match.
@@ -269,17 +324,20 @@ spec:
                   # python this replaces used round-half-even, so an
                   # exact .5-GiB tie now rounds up instead of to the
                   # nearest even integer.
-                  jq --slurpfile free "$WORK/free.json" '
+                  jq --slurpfile free "$WORK/free.json" \
+                     --argjson dispatcher "$dispatcher" --arg dispatcher_unread "$dispatcher_unread" '
                     def gib:
                       if . == null then null
                       elif endswith("Ki") then (((rtrimstr("Ki") | tonumber) + 524288) / 1048576 | floor)
                       elif endswith("Mi") then (((rtrimstr("Mi") | tonumber) + 512) / 1024 | floor)
                       else null end;
                     ($free[0] // {}) as $fs |
+                    (if $dispatcher_unread == "" then {} else { dispatcher_unread: $dispatcher_unread } end) +
                     {
                       observed_at: (now | todate),
                       observer: "boss-estate-observe",
                       scope: "kubernetes-nodes",
+                      dispatcher: $dispatcher,
                       nodes: ([ (.items // [])[]
                         | (.metadata // {}) as $md
                         | (.status // {}) as $st

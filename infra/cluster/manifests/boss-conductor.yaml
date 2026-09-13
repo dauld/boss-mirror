@@ -103,15 +103,20 @@
 #   which :latest is.
 #
 # ----------------------------------------------------------------------------
-# RBAC: NONE. The conductor holds no Kubernetes credential.
+# RBAC: THE GATES ROLE, and nothing else.
 # ----------------------------------------------------------------------------
-#   `boss train cadence` speaks HTTP to the jobs API and git/HTTP to the
-#   forge, and nothing to the Kubernetes API (grep train.rs / cadence.rs:
-#   zero kube/k8s references). So there is no ServiceAccount to grant and
-#   nothing to bind — automountServiceAccountToken is off to make the
-#   absence explicit. This is the opposite of the estate observer, which
-#   needs a ClusterRole to list nodes; the conductor observes nothing in
-#   the cluster.
+#   Until 2026-09-12 the conductor held no Kubernetes credential: `boss
+#   train cadence` spoke HTTP to the jobs API and git/HTTP to the forge,
+#   and the token was not even mounted. Design 128b5496 (David, all three
+#   questions accepted as proposed) has the conductor file a gate-run of
+#   the train branch when it opens the PR — the train's Rust checks move
+#   from CI's 11–13-minute `test` job on the forge's one runner slot to
+#   the cluster gate, which runs the same infra/gate.sh warm in 3–5 min.
+#   Launching a gate is `kubectl create job` in this namespace and
+#   reading the pod, exactly what the dev pod's `dev-session-gates` Role
+#   grants, so the conductor binds to THAT Role (declared once, in
+#   boss-dev.yaml) through its own ServiceAccount below. Still nothing
+#   cluster-wide, and still the opposite of the estate observer.
 ---
 # The conductor's train-assembly clone lives here (BOSS_TRAIN_HOME below).
 # RWO + durable `longhorn` (NOT the disposable dev class): the clone is a
@@ -210,6 +215,28 @@ data:
   # guard must stay armed. Setting it here would be the exact footgun the
   # unit warns against — never on a box whose SoR lives elsewhere.
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: boss-conductor
+  namespace: boss-dev
+  labels: {app.kubernetes.io/part-of: boss, boss.dev/purpose: conductor}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: boss-conductor-gates
+  namespace: boss-dev
+  labels: {app.kubernetes.io/part-of: boss, boss.dev/purpose: conductor}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dev-session-gates
+subjects:
+  - kind: ServiceAccount
+    name: boss-conductor
+    namespace: boss-dev
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -236,10 +263,11 @@ spec:
     metadata:
       labels: {app: boss-conductor}
     spec:
-      # No k8s API access: the conductor speaks HTTP to the jobs API and
-      # git/HTTP to the forge and NOTHING to Kubernetes. No ServiceAccount
-      # is granted anything; the token is not even mounted.
-      automountServiceAccountToken: false
+      # The gates ServiceAccount (RBAC block above) and its token: the
+      # conductor creates gate Jobs in this namespace and reads their
+      # pods, nothing else.
+      serviceAccountName: boss-conductor
+      automountServiceAccountToken: true
       # The forge registry needs a pull secret, same as every boss-image
       # consumer in this namespace (boss-dev.yaml).
       imagePullSecrets:

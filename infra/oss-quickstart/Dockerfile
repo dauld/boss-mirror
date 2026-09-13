@@ -284,6 +284,14 @@ COPY infra/postgres /opt/boss/infra/postgres
 # MUST be available — seed-operator-baseline.sh reads this dir to POST
 # them to /api/people once the stack is up.
 COPY infra/operator-baseline /opt/boss/infra/operator-baseline
+# THE CONDUCTOR LAUNCHES GATES (design 128b5496): `boss gate` renders
+# infra/gate-runner/gate-runner.yaml and runs `kubectl create`, so the
+# image carries both. kubectl is copied from the alpine/k8s image the
+# converge runner already drives kubectl from — the mirrored tag
+# (infra/forge/mirror-base-images.sh), no public download, no sha to
+# hunt — and it is the version the cluster's own tooling runs.
+COPY --from=10.20.0.15:3000/david/alpine-k8s:1.33.3 /usr/bin/kubectl /usr/local/bin/kubectl
+COPY infra/gate-runner /opt/boss/infra/gate-runner
 # The platform Workflow bundle — protocols shipped as DATA
 # (protocols-as-data step 1). bootstrap-db.sh seeds it insert-if-
 # missing at ../platform/workflows/ relative to itself, and until
