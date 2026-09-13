@@ -1086,6 +1086,46 @@ the lease, the `service-instance` kind and the `build` step's record
 of its workspace are decided and **not built**: the dev session is one
 Deployment on the build node, allocated by hand.
 
+**The train is tested where the seed is** (design `128b5496`, David
+2026-09-12, all three questions accepted as proposed; cars landed
+2026-09-13). Measured off the forge's task list on 2026-09-12: CI's jobs
+ran *serially* on the runner's one slot, about seventeen minutes a run,
+of which `test` — `infra/gate.sh`, cold, in a fresh container — was
+eleven to thirteen; and every train ran twice, once on the PR head and
+again on the squash commit, for a result nobody read. The cluster gate
+runs the *same script* warm on the reflink seed in three to five
+minutes, and the forge's disk is ext4 (no reflink) and chronically
+under its floor — so the seed does not move to the check; **the check
+moves to the seed.** (1) **The launcher is the conductor**: when it
+opens a train's PR it files a gate-run for the *train branch* — the
+assembled tree — and creates its Job the way `boss gate` does, under a
+`boss-conductor` ServiceAccount bound to the gates Role the dev pod
+already uses, with kubectl and the runner manifest in the cluster
+image; the gate-run carries `train_gate`/`train` marks and a `hold`, so
+the stranded-green sweep reads it as HELD and auto-park leaves it alone
+(`boss-cli/src/train_gate.rs`). A standing launcher that turns *any*
+requested gate-run into a Job — a gate filed from the forge, a Mac, or
+boss-gcp — is the general door, deferred. (2) **The verdict is both
+halves read together**, off the system of record and never posted back
+to the forge (the forge stays a one-way peer): a green CI does not merge
+a train whose gate has not spoken; a red gate strikes the cars like a
+red CI; a refused or lost gate is filed again up to three times and then
+the train reads *aborted*, cars released unstruck. While CI still ran
+the Rust checks, a gate the conductor could not *file* fell back to CI
+alone after three passes, stamped `train_gate_fallback`; car 3 sets
+`BOSS_TRAIN_GATE_REQUIRED=1` in the same change that drops CI's `fast`
+and `test`, and from then on a train waits. (3) **The per-train image
+stays**, contrary to the proposal as filed: `locomotive.sh` reds when
+the image's baked stamp disagrees with the tree, and a floating tag was
+once served stale from the runner's cache (`6aa603ef`) — so
+`build-image` keeps pushing `boss-ci:<sha>` (about a minute, layers
+cached) and the disk cost it carries is the bigger forge disk's to
+absorb. The double run went first (`fix/a-train-is-tested-once`,
+2026-09-12: `pull_request` alone); the two hours of unconverged trains
+on 2026-09-13 taught that a tag in the mirror *list* is a declaration
+and the registry holding it is the fact, which the converge now closes
+before it builds.
+
 ## Design docs and the decision record
 
 The markdown corpus stopped being the source of truth and kept the
