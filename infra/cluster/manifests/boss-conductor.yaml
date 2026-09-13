@@ -191,6 +191,14 @@ data:
   # The conductor drives merges. Off by default; the boss-gcp unit turns
   # it on via a drop-in, and so must this.
   BOSS_TRAIN_AUTO_MERGE: "1"
+  # THE TRAIN GATE IS REQUIRED (design 128b5496, car 3). CI no longer runs
+  # the Rust checks — .forgejo/workflows/ci.yml dropped `fast` and `test`
+  # in the same change as this line — so a train whose cluster gate-run
+  # cannot be filed WAITS for it rather than merging on CI alone
+  # (boss-cli train_gate.rs: REQUIRED_ENV). Unset, the conductor falls
+  # back to CI after three failed launches, which was safe only while CI
+  # still covered the tree.
+  BOSS_TRAIN_GATE_REQUIRED: "1"
   # Cadence knobs, set to their defaults explicitly so the contract is
   # visible here rather than implied (train.rs / cadence.rs defaults).
   BOSS_TRAIN_CADENCE_TICK_SECONDS: "60"

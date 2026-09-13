@@ -410,156 +410,17 @@ jobs:
         working-directory: apps/web
         run: bun run test:mocked
 
-  fast:
-    runs-on: docker
-    needs: [locomotive]
-    container:
-      image: 10.20.0.15:3000/david/boss-ci:${{ github.sha }}
-    steps:
-      - name: Check out from the forge, not github.com
-        # actions/checkout is a JavaScript action the runner pulls from
-        # github.com before the job starts; the runner's container DNS
-        # has no redundancy (see build-image's retry note), so one
-        # dropped lookup there reds the whole train with no car at fault
-        # — d9a34560. The repo is on the forge at a LAN IP, so a git
-        # clone by IP resolves no name. github.token is the job's own
-        # repo-scoped credential, the same one locomotive passes below.
-        env:
-          FORGE_TOKEN: ${{ github.token }}
-        run: |
-          set -eu
-          git init -q .
-          git remote add origin \
-            "http://x-access-token:${FORGE_TOKEN}@10.20.0.15:3000/${GITHUB_REPOSITORY}.git"
-          git fetch -q --depth=1 origin "${GITHUB_REF}"
-          git checkout -q --force FETCH_HEAD
-
-      - name: Format check
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        # -D warnings per CLAUDE.md: warnings are errors in this workspace.
-        run: cargo clippy --workspace --all-features --tests -- -D warnings
-
-  test:
-    runs-on: docker
-    needs: [locomotive]
-    container:
-      image: 10.20.0.15:3000/david/boss-ci:${{ github.sha }}
-    services:
-      postgres:
-        # FROM THE FORGE, like every image above. This was the last
-        # public pull on a train's hot path: the runner resolved
-        # docker.io for it on every run, through the resolver whose
-        # dropped lookups redded #236 and #250 with every car clean.
-        # The copy is put there by infra/forge/mirror-base-images.sh
-        # (postgres:16 is on its IMAGES list), and the lint that pins
-        # the container: images above covers services: too. No
-        # credentials: block, because none of the container: images
-        # carry one either — the forge's david/* packages pull
-        # anonymously (verified 2026-09-08: an unauthenticated
-        # /v2/token fetches this manifest with 200), and the runner
-        # pulls a service image exactly as it pulls a job's container.
-        image: 10.20.0.15:3000/david/postgres:16
-        env:
-          POSTGRES_USER: boss
-          POSTGRES_PASSWORD: boss
-          POSTGRES_DB: boss
-        # WHAT THESE OPTIONS DO AND DO NOT DO. They are health-check
-        # settings: they make the job wait until Postgres answers
-        # `pg_isready` before any step runs. They do NOT raise
-        # max_connections, which stays at the image default of 100 —
-        # the comment that stood here claimed otherwise ("~24 services
-        # each hold an sqlx pool, so the default max_connections=100
-        # saturates") while sitting above settings that cannot change
-        # it, so it read as a solved problem for as long as it was
-        # here.
-        #
-        # It is not solved, and it is not solvable in this block:
-        # service containers take docker RUN options, not a container
-        # command, and `-c max_connections=N` has to be the command.
-        # The routes that exist are a custom image with a postgresql.conf
-        # baked in, or a step that ALTER SYSTEMs and restarts the
-        # server — neither cheap, both worth it only once this is shown
-        # to be the cause of something.
-        #
-        # It has not been. The one measured failure — train 47,
-        # 2026-08-16, `CREATE DATABASE …: expected to read 5 bytes, got
-        # 0 bytes at EOF` — happened while the test binaries were
-        # running SEQUENTIALLY, 0.8s after the previous one finished,
-        # so connection count was near zero. That is the server closing
-        # a socket, not refusing a 101st client. The change that
-        # actually addresses it is the retry in
-        # boss-testing/src/test_db.rs (70487141).
-        options: >-
-          --health-cmd "pg_isready -U boss"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-    env:
-      DATABASE_URL: postgres://boss:boss@postgres:5432/boss
-      BOSS_POSTGRES_URL: postgres://boss:boss@postgres:5432/boss
-      # boss-testing creates a scratch database per test and defaults its
-      # admin connection to loopback. That holds on GitHub, where the
-      # service binds to the runner itself, but in a container job
-      # Postgres is a separate host on the job network — without this
-      # every DB-backed test dies on "Connection refused".
-      BOSS_TEST_POSTGRES_ADMIN_URL: postgres://boss:boss@postgres:5432/postgres
-      # TestDb refuses to run against a server that hosts a database
-      # named `boss`, because that is what tells a BOSS deployment apart
-      # from a scratch instance (the 2026-08-14 port-forward incident:
-      # 582 scratch databases on the production volume). CI is the one
-      # place that premise is false by construction — the service
-      # container above is created with POSTGRES_DB=boss precisely so
-      # `Apply schema` can migrate it, and it is destroyed with the job.
-      # This is the disposable-server case the guard's own message names.
-      BOSS_TEST_ALLOW_PRODUCTION_SERVER: "1"
-    steps:
-      # THE FORGE IS THE TRUNK, AND IT IS ON THE LAN.
-      #
-      # Replaces actions/checkout@v4 (a github.com fetch — d9a34560, and
-      # the shape of the 2026-08-26 build-image DNS flake) with a git
-      # clone from the forge by IP, which resolves no name. Full history,
-      # not a single-ref shallow clone, because migrations-append-only
-      # asks git whether this branch touched a migration already on the
-      # trunk and resolves that trunk as origin/main: `git fetch origin`
-      # brings it, the second fetch brings the ref under test. checkout@v4
-      # gave this the same depth via fetch-depth: 0; the extra history is
-      # cheap, the repo's .git is ~20M. github.token is the job's own
-      # repo-scoped credential (locomotive below passes the same one).
-      - name: Check out from the forge, not github.com
-        env:
-          FORGE_TOKEN: ${{ github.token }}
-        run: |
-          set -eu
-          git init -q .
-          git remote add origin \
-            "http://x-access-token:${FORGE_TOKEN}@10.20.0.15:3000/${GITHUB_REPOSITORY}.git"
-          git fetch -q origin
-          git fetch -q origin "${GITHUB_REF}"
-          git checkout -q --force FETCH_HEAD
-
-      - name: Apply schema
-        run: infra/postgres/migrate.sh -- psql "$DATABASE_URL"
-
-      - name: Gate
-        # ONE definition of the rust gate — the same script an agent runs
-        # before pushing a car (`infra/gate.sh -p <crate>`) and the same
-        # one .github/workflows/ci.yml's rust job runs, so CI and the
-        # local gate cannot drift (CLAUDE.md §9a). The check roster, each
-        # check's flags, and the provenance comments for both live IN the
-        # script; environment setup (image, services, schema) stays here.
-        # boss-testing/tests/gate_sh.rs pins this step and the roster.
-        #
-        # This replaces the `cargo build --workspace` + `cargo test
-        # --all-features` steps that stood here: gate.sh runs both, plus
-        # clippy, fmt, and the 13-lint roster. Between the forge cutover
-        # (2026-08-12) and this change the forge workflow ran neither the
-        # roster nor a default-feature build, so the lints — including
-        # no-wallclock, tier-import-audit, no-secrets, schema-converge —
-        # were unenforced on the branch that actually gates every train.
-        run: infra/gate.sh
-
+  # THE RUST CHECKS RUN ON THE CLUSTER, NOT HERE (design 128b5496, David
+  # 2026-09-12; cars 1–2 landed 2026-09-13). Until then this file carried
+  # `fast` (fmt + clippy) and `test` (infra/gate.sh against a postgres
+  # service) — 13 of the ~17 minutes every train spent on the forge's one
+  # runner slot, cold, in a fresh container. The conductor now files a
+  # gate-run of the TRAIN BRANCH on the cluster when it opens the PR, and
+  # that gate runs the same infra/gate.sh warm on the reflink seed in 3–5
+  # minutes; the train merges only when the forge's status here AND that
+  # gate-run's verdict are green (boss-cli train_gate.rs). What stays
+  # here is what needs the forge: the image build, the locomotive's
+  # host checks, and the web suite.
   # THE RECLAIM FOLLOWS THE BUILD.
   #
   # The disk this run just filled is reclaimed when this run ENDS, not at
@@ -601,7 +462,7 @@ jobs:
   # strike it exists to prevent.
   reclaim:
     runs-on: docker
-    needs: [build-image, locomotive, fast, test, web]
+    needs: [build-image, locomotive, web]
     if: ${{ always() && needs.build-image.result == 'success' }}
     continue-on-error: true
     container:

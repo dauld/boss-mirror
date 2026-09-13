@@ -196,7 +196,10 @@ fn the_reclaim_waits_for_the_heavy_jobs_and_runs_whatever_their_verdict() {
         .find(|l| l.trim_start().starts_with("needs:"))
         .unwrap_or_else(|| panic!("the `reclaim` job declares no `needs:`"))
         .to_string();
-    for heavy in ["fast", "test", "web"] {
+    // `fast` and `test` left this workflow on 2026-09-13 (design
+    // 128b5496: the Rust checks run as the train's cluster gate); `web`
+    // is the heavy job that remains on the forge.
+    for heavy in ["build-image", "web"] {
         assert!(
             needs.contains(heavy),
             "the `reclaim` job does not wait for `{heavy}` ({needs}) — reclaiming \

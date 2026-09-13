@@ -7,13 +7,14 @@
 //! with full crate suites missed a shell lint only CI ran. CLAUDE.md
 //! §9a: collapse the pair, and pin what cannot collapse.
 //!
-//! The collapse: the CI workflow's test job invokes `infra/gate.sh`
-//! instead of inlining cargo commands and lint scripts, so CI and a
-//! local run are the same definition. What cannot collapse is pinned
-//! here:
-//! - the workflow must actually call the script, and must not grow a
-//!   second inline definition beside it (a new `run: infra/lint/...`
-//!   line in the test job is the pair reopening);
+//! The collapse: the gate runner (`infra/gate-runner/run.sh`) invokes
+//! `infra/gate.sh` for every car and — since 2026-09-13, design 128b5496
+//! — for every train, so a gate and a local run are the same definition.
+//! The CI workflow's `test` job used to be the train's copy of it; that
+//! job is gone. What cannot collapse is pinned here:
+//! - the runner must actually call the script, and the workflow must
+//!   not grow a second inline definition (a `test` job or a
+//!   `run: infra/lint/...` line is the pair reopening);
 //! - the script must keep covering the checks the gate exists to run —
 //!   a trimmed roster is exactly the under-covering gate that let both
 //!   #226 failures through.
@@ -100,57 +101,49 @@ fn gate_cmd(args: &[&str]) -> std::process::Command {
     cmd
 }
 
-/// The `test`-job slice of the Forgejo workflow — the job that carries
-/// the Postgres service, and so the only one that can run the gate's
-/// DB-backed test phase. `test` is the last job in the file, so the
-/// slice runs to the end; a job appended after it would be swept in,
-/// which only ever makes the no-second-definition check stricter.
-fn forge_test_job() -> String {
-    let ci = read(".forgejo/workflows/ci.yml");
-    let start = ci
-        .find("\n  test:")
-        .expect(".forgejo/workflows/ci.yml has a test job");
-    ci[start + 1..].to_string()
+/// Since 2026-09-13 (design 128b5496) the workflow has NO `test` job:
+/// the Rust checks run as the train's cluster gate-run, which is
+/// `infra/gate-runner/run.sh` invoking `infra/gate.sh` — the same one
+/// definition every car's gate runs. What the workflow must not do is
+/// grow the second definition back: no `test` job, no inline cargo or
+/// lint invocation anywhere in it.
+fn forge_workflow() -> String {
+    read(".forgejo/workflows/ci.yml")
 }
 
-/// The forge workflow is the one that actually gates a train — since
-/// the 2026-08-12 cutover every car lands through Forgejo. For a day it
-/// ran locomotive + fmt + clippy + migrate + build + test and NOT the
-/// script, so the whole lint roster was unenforced in production and
-/// thirteen trains landed green over a real `no-wallclock` violation.
-/// The pin at the time only knew about the GitHub file, which is why
-/// nothing caught it.
+/// The gate runner — the thing that now judges a train's Rust — runs
+/// the script, not a copy of its checks.
 #[test]
-fn forge_test_job_invokes_the_gate_script() {
-    let job = forge_test_job();
+fn the_gate_runner_invokes_the_gate_script() {
+    let run = read("infra/gate-runner/run.sh");
     assert!(
-        job.contains("infra/gate.sh"),
-        ".forgejo/workflows/ci.yml's test job does not invoke \
-         infra/gate.sh — the workflow that gates every train has \
-         forked away from the gate's definition"
+        run.contains("./infra/gate.sh"),
+        "infra/gate-runner/run.sh does not invoke infra/gate.sh — the runner that gates \
+         every car and every train has forked away from the gate's definition"
     );
 }
 
 #[test]
-fn forge_test_job_has_no_inline_second_definition() {
-    let job = forge_test_job();
-    // Environment setup (services, schema apply) stays in the
-    // workflow, checks live in the script. The
-    // `fast` job's fmt + clippy are deliberately outside this slice —
-    // they are a duplicated fast-signal loop, not a second definition.
+fn the_forge_workflow_carries_no_second_definition_of_the_gate() {
+    let ci = forge_workflow();
+    assert!(
+        !ci.contains("\n  test:") && !ci.contains("\n  fast:"),
+        ".forgejo/workflows/ci.yml has a test or fast job again — the Rust checks run as \
+         the train's cluster gate (128b5496); a second run of them here is the pair reopening"
+    );
     let inline_checks = [
         "run: cargo clippy",
         "run: cargo test",
         "run: cargo build",
         "run: cargo fmt",
         "run: infra/lint/",
+        "run: infra/gate.sh",
     ];
     for needle in inline_checks {
         assert!(
-            !job.contains(needle),
-            ".forgejo/workflows/ci.yml's test job inlines `{needle}` \
-             beside infra/gate.sh — the gate now has two definitions \
-             again; move the check into the script"
+            !ci.contains(needle),
+            ".forgejo/workflows/ci.yml inlines `{needle}` — the gate has two definitions \
+             again; the checks live in infra/gate.sh, run by the gate runner"
         );
     }
 }
