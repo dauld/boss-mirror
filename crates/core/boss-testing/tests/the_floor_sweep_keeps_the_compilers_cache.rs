@@ -19,14 +19,12 @@
 //! the builder step with nothing else moving the number.
 
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
 
 const SWEEP: &str = "infra/forge/disk-floor-sweep.sh";
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
-}
+use boss_testing::repo_root;
 
 fn write_exec(path: &Path, body: &str) {
     std::fs::write(path, body).expect("write stub");
