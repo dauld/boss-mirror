@@ -25,6 +25,7 @@ pub mod human_only;
 pub mod in_memory;
 pub mod job_edges;
 pub mod jobs_config;
+pub mod metadata_containment;
 pub mod metadata_key;
 pub mod policy_glue;
 pub mod port;

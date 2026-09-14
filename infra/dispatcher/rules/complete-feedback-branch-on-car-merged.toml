@@ -56,15 +56,41 @@ into forge CI.)
 # the measurement. Five items were closed by hand that way in one
 # night — triage `disposition=build` with the car as evidence, then
 # `build` with the proof. `route` is that routing as data: the KIND
-# whose triage vocabulary it speaks (user-feedback keeps the v2 answer
-# — a filer's decision is still theirs), the routing STEP, and the
-# METADATA that step requires at done. The handler completes the route
+# whose triage vocabulary it speaks (user-feedback kept the v2 answer
+# until v4 below — a filer's decision is still theirs), the routing
+# STEP, and the METADATA that step requires at done. The handler completes the route
 # step, re-reads, and the fork's own `ready_when` opens `build`, which
 # `steps` then completes; the item's `closed` outcome does the rest.
 # Absent keys only, as with done_metadata.
-version = 3
+#
+# v4 (backlog 1c704bb8; no migration — a rule change is a version bump
+# in this file, `infra/lint/no-migration-writes-a-dispatcher-rule.sh`):
+# `route` is a LIST, one entry per kind, and gains `user-feedback`. v3
+# kept feedback to its filer ("a filer's decision is still theirs"),
+# and that holds for feedback nobody has acted on — but it inverts the
+# moment a ship-a-change car is PARKED AGAINST the packet with
+# `--park-backlog-item`: the routing decision (build) was made by
+# whoever built and linked the car, the shipped and proven car is the
+# evidence, and David ratified exactly this close ("once the user
+# feedback results in a shipped change it can be closed without the
+# filer approving"). Measured 2026-09-14 22:31Z: David's own feedback
+# 9827c699 (a page for the codebase stats) had its car built, landed
+# and proven within seventy minutes and stayed OPEN at triage — the
+# obligation wrote `obligation_noop` on the car ("this obligation
+# completes one of [investigate, design-review, build], and the
+# packet's open step is [triage]") and the operator closed it by hand,
+# ten minutes after the proof: the manual act this rule exists to
+# remove. user-feedback's triage vocabulary is
+# reproduce|design|build|duplicate|needs-info|decline, so `build` is
+# admitted; its `build` step opens by `ready_when` and `steps`
+# completes it. A feedback packet with NO linked car never reaches
+# this handler, so its triage stays a person's; the needs-info branch
+# is untouched. The single-object form is still accepted (a tenant's
+# own row keeps parsing). Pinned per kind against the live Workflows by
+# feedback_obligation_rules.rs.
+version = 4
 on_event = "jobs.job.closed"
 when = "kind = \"ship-a-change\" AND outcome = \"merged\""
 [[rule.do]]
 handler = "jobs.complete_linked_step"
-args = { link = "\"backlog_item\"", steps = "\"investigate,design-review,build\"", done_metadata = '"{\"verdict\": \"approved\", \"answer\": \"shipped: {branch} — {title}\"}"', route = '"{\"kind\": \"backlog-item\", \"step\": \"triage\", \"metadata\": {\"disposition\": \"build\", \"evidence\": \"shipped and proven: {branch} — {title} (car {car})\"}}"' }
+args = { link = "\"backlog_item\"", steps = "\"investigate,design-review,build\"", done_metadata = '"{\"verdict\": \"approved\", \"answer\": \"shipped: {branch} — {title}\"}"', route = '"[{\"kind\": \"backlog-item\", \"step\": \"triage\", \"metadata\": {\"disposition\": \"build\", \"evidence\": \"shipped and proven: {branch} — {title} (car {car})\"}}, {\"kind\": \"user-feedback\", \"step\": \"triage\", \"metadata\": {\"disposition\": \"build\", \"evidence\": \"shipped and proven: {branch} — {title} (car {car})\"}}]"' }

@@ -2,14 +2,20 @@
 //! rule rows over generic handlers (job 2c4ae549, migration 117).
 //!
 //! Everything here loads the registry the way the service does —
-//! `load_active_rules` against the seeded `dispatcher_rules` table,
-//! then `Registry::from_raw` — and drives `match_event` → `dispatch`
-//! with `RecordingHandler` standing in for the HTTP handlers. So the
-//! assertions are about what the SHIPPED rows do, not about a fixture
-//! copy of them. (`infra/dispatcher/rules/` is the definition those rows
-//! are published from;
-//! `the_registry_equals_the_authored_directory_after_a_seed` proves the
-//! derivation.)
+//! `seed_authored_rules` publishes `infra/dispatcher/rules/` into the
+//! `dispatcher_rules` table (the dispatcher's boot step since the
+//! collapse, 41ba00cd), then `load_active_rules` + `Registry::from_raw`
+//! — and drives `match_event` → `dispatch` with `RecordingHandler`
+//! standing in for the HTTP handlers. So the assertions are about what
+//! the AUTHORED rules do, not about a fixture copy of them, and not
+//! about the rows the migrations happen to leave: a fresh TestDb holds
+//! the last MIGRATED version of this rule (v3, 202609082000), and since
+//! a rule change is a version bump in the file with no migration
+//! (`infra/lint/no-migration-writes-a-dispatcher-rule.sh`), a test that
+//! read the table alone would pin a version the tree no longer ships —
+//! which is how v4's second route would have gone untested here.
+//! (`the_registry_equals_the_authored_directory_after_a_seed` proves the
+//! derivation itself.)
 //!
 //! Three things are worth a test at this layer, and none of them are
 //! visible from a handler unit test:
@@ -32,6 +38,7 @@
 use boss_dispatcher::rules::expr::{EvalError, HelperResolver, Value};
 use boss_dispatcher::rules::handler::{HandlerRegistry, RecordingHandler, dispatch};
 use boss_dispatcher::rules::registry::{MatchedRule, Registry, load_active_rules, match_event};
+use boss_dispatcher::rules::seed::seed_authored_rules;
 use boss_jobs::registry::{feedback_branch_for_disposition, seedable_platform_workflows};
 use boss_testing::TestDb;
 use serde_json::json;
@@ -39,8 +46,19 @@ use serde_json::json;
 const COMPLETE_RULE: &str = "complete-feedback-branch-on-car-merged";
 const NOTIFY_RULE: &str = "notify-filer-on-feedback-terminal";
 
-/// Load the shipped registry through the production path.
+/// The authored registry: the directory the dispatcher seeds at boot.
+const RULES_DIR: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../infra/dispatcher/rules"
+);
+
+/// Load the shipped registry through the production path: seed the
+/// authored directory over whatever the migrations left, then read the
+/// active rows back.
 async fn shipped_registry(db: &TestDb) -> Registry {
+    seed_authored_rules(&db.pool, RULES_DIR)
+        .await
+        .expect("seed the authored rule directory");
     let raw = load_active_rules(&db.pool)
         .await
         .expect("load active rules from dispatcher_rules");
@@ -249,89 +267,119 @@ async fn a_close_marker_with_no_outcome_evaluates_to_a_clean_false() {
     }
 }
 
-/// v3 (dda0713c): the rule's `route` speaks the LIVE `backlog-item`
-/// triage vocabulary, and the disposition it writes opens a branch
-/// the `steps` arg then completes. The route is data, the Workflow is
-/// data, and only this connects them — rename the step, retire the
-/// `build` disposition, or add a required field to triage, and the
-/// route would 400 at the write (or route into nothing) on every
-/// landed car, silently. So each of those fails here instead.
+/// v3 (dda0713c), widened by v4 (1c704bb8): every entry of the rule's
+/// `route` list speaks the LIVE triage vocabulary of the kind it names,
+/// and the disposition it writes opens a branch the `steps` arg then
+/// completes. The route is data, the Workflow is data, and only this
+/// connects them — rename the step, retire the `build` disposition, or
+/// add a required field to triage, and the route would 400 at the
+/// write (or route into nothing) on every landed car, silently. So
+/// each of those fails here instead, per kind.
+///
+/// And the list must name BOTH kinds a car is parked against. v3
+/// routed `backlog-item` only; on 2026-09-14 David's own feedback
+/// 9827c699 had its car landed and proven inside seventy minutes and
+/// stayed open at triage until an operator closed it by hand — the
+/// noop the obligation wrote on the car said exactly which step it
+/// could not make. A route that drops a kind reverts to that.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_route_speaks_the_live_backlog_item_triage_and_opens_a_branch_the_rule_completes() {
+async fn every_route_speaks_its_kinds_live_triage_and_opens_a_branch_the_rule_completes() {
     let db = TestDb::new().await;
     let reg = shipped_registry(&db).await;
     let payload = close_marker("ship-a-change", json!("merged"));
     let matched = match_event(&reg, "jobs.job.closed", &payload, &NoOpenCars).matched;
     let m = matched_named(&matched, COMPLETE_RULE).expect("the completion rule matched");
 
-    let route: serde_json::Value =
-        serde_json::from_str(&arg_of(m, "jobs.complete_linked_step", "route"))
-            .expect("route parses as JSON");
-    let kind = route["kind"].as_str().expect("route.kind");
-    let step_slug = route["step"].as_str().expect("route.step");
-    let written = route["metadata"]
-        .as_object()
-        .expect("route.metadata is an object");
-    let disposition = written["disposition"]
-        .as_str()
-        .expect("the route chooses a disposition");
-
-    let spec = seedable_platform_workflows()
-        .into_iter()
-        .find(|w| w.kind == kind)
-        .unwrap_or_else(|| panic!("route.kind `{kind}` is not a shipped platform Workflow"));
-    let routing = spec
-        .steps
+    let routes: Vec<serde_json::Value> =
+        match serde_json::from_str(&arg_of(m, "jobs.complete_linked_step", "route"))
+            .expect("route parses as JSON")
+        {
+            serde_json::Value::Array(list) => list,
+            one @ serde_json::Value::Object(_) => vec![one],
+            other => panic!("route is neither a list nor an object: {other}"),
+        };
+    let mut kinds: Vec<&str> = routes
         .iter()
-        .find(|s| s.title == step_slug)
-        .unwrap_or_else(|| panic!("`{kind}` has no step `{step_slug}` to route through"));
-
-    // Every field the routing step REQUIRES at done is one the route
-    // writes — a missing one 400s the completion, and the obligation
-    // would fall back to the noop note it was built to replace.
-    for field in routing.fields.iter().filter(|f| f.required) {
-        assert!(
-            written.contains_key(&field.name),
-            "`{kind}.{step_slug}` requires `{}` at done and the route does not write it",
-            field.name
-        );
-    }
-    // …and the disposition it writes is one the step's enum admits.
-    let enum_values = routing
-        .fields
-        .iter()
-        .find(|f| f.name == "disposition")
-        .map(|f| f.field_type.split('|').map(str::trim).collect::<Vec<_>>())
-        .unwrap_or_default();
-    assert!(
-        enum_values.contains(&disposition),
-        "`{disposition}` is not a `{kind}.{step_slug}` disposition: {enum_values:?}"
+        .map(|r| r["kind"].as_str().expect("route.kind"))
+        .collect();
+    kinds.sort_unstable();
+    assert_eq!(
+        kinds,
+        ["backlog-item", "user-feedback"],
+        "the route list names every kind a car is parked against (and each once)"
     );
 
-    // The branch that disposition opens must be one the `steps` arg
-    // completes, and must not be a declared terminal — the whole
-    // point is a second write that closes the item through its own
-    // `closed` outcome.
-    let needle = format!("steps.{step_slug}.metadata.disposition = \"{disposition}\"");
-    let opened = spec
-        .steps
-        .iter()
-        .find(|s| s.ready_when.contains(&needle))
-        .unwrap_or_else(|| panic!("no `{kind}` step opens on `{needle}`"));
-    assert!(
-        opened.terminal.is_none(),
-        "`{}` is a terminal — routing there closes the item with nothing to complete",
-        opened.title
-    );
     let completes: Vec<String> = arg_of(m, "jobs.complete_linked_step", "steps")
         .split(',')
         .map(|s| s.trim().to_string())
         .collect();
-    assert!(
-        completes.contains(&opened.title),
-        "the route opens `{}` but the rule's `steps` arg {completes:?} does not complete it",
-        opened.title
-    );
+    let workflows = seedable_platform_workflows();
+
+    for route in &routes {
+        let kind = route["kind"].as_str().expect("route.kind");
+        let step_slug = route["step"].as_str().expect("route.step");
+        let written = route["metadata"]
+            .as_object()
+            .expect("route.metadata is an object");
+        let disposition = written["disposition"]
+            .as_str()
+            .expect("the route chooses a disposition");
+
+        let spec = workflows
+            .iter()
+            .find(|w| w.kind == kind)
+            .unwrap_or_else(|| panic!("route.kind `{kind}` is not a shipped platform Workflow"));
+        let routing = spec
+            .steps
+            .iter()
+            .find(|s| s.title == step_slug)
+            .unwrap_or_else(|| panic!("`{kind}` has no step `{step_slug}` to route through"));
+
+        // Every field the routing step REQUIRES at done is one the
+        // route writes — a missing one 400s the completion, and the
+        // obligation would fall back to the noop note it was built to
+        // replace.
+        for field in routing.fields.iter().filter(|f| f.required) {
+            assert!(
+                written.contains_key(&field.name),
+                "`{kind}.{step_slug}` requires `{}` at done and the route does not write it",
+                field.name
+            );
+        }
+        // …and the disposition it writes is one the step's enum admits.
+        let enum_values = routing
+            .fields
+            .iter()
+            .find(|f| f.name == "disposition")
+            .map(|f| f.field_type.split('|').map(str::trim).collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert!(
+            enum_values.contains(&disposition),
+            "`{disposition}` is not a `{kind}.{step_slug}` disposition: {enum_values:?}"
+        );
+
+        // The branch that disposition opens must be one the `steps`
+        // arg completes, and must not be a declared terminal — the
+        // whole point is a second write that closes the packet through
+        // its own `closed` outcome.
+        let needle = format!("steps.{step_slug}.metadata.disposition = \"{disposition}\"");
+        let opened = spec
+            .steps
+            .iter()
+            .find(|s| s.ready_when.contains(&needle))
+            .unwrap_or_else(|| panic!("no `{kind}` step opens on `{needle}`"));
+        assert!(
+            opened.terminal.is_none(),
+            "`{}` is a terminal — routing there closes `{kind}` with nothing to complete",
+            opened.title
+        );
+        assert!(
+            completes.contains(&opened.title),
+            "the `{kind}` route opens `{}` but the rule's `steps` arg {completes:?} does not \
+             complete it",
+            opened.title
+        );
+    }
 }
 
 /// The rule row is data and the Workflow is data; only a test

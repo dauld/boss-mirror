@@ -55,9 +55,9 @@ pub(super) struct ListJobsQuery {
     /// metadata must CONTAIN it (`metadata @> $n`, the shape the port
     /// already handles for station predicates). `metadata={"branch":
     /// "feat/x"}` is the car, not a page that may or may not hold it.
-    /// Anything that is not a flat string-valued object is a 400 that
-    /// names the rule — a nested document that silently matched
-    /// nothing would read as "no such packet".
+    /// Anything else is a 400 that names the rule
+    /// (`crate::metadata_containment`) — a nested document that
+    /// silently matched nothing would read as "no such packet".
     metadata: Option<String>,
     /// A top-level key the packet must carry, whatever its value
     /// (`metadata ? $n`). Letters, digits, underscore; a dotted path
@@ -68,30 +68,23 @@ pub(super) struct ListJobsQuery {
 /// Parse `metadata=<json>` into the containment document the port
 /// accepts, or the sentence the 400 carries.
 ///
-/// The port's contract (`JobFilter::metadata_contains`) is flat
-/// string-valued objects only — that is all `metadata_equals`
-/// expresses and all the in-memory adapter mirrors. Widening it here
-/// would make the two adapters answer differently, so the boundary
-/// refuses instead. An empty object narrows nothing and is `None`.
+/// The shape and its sentence are `crate::metadata_containment` — the
+/// ONE copy `boss job list --where` builds by as well (backlog 88a3b072,
+/// 2026-09-14). What is this door's alone is the wire form: the text is
+/// parsed here, the 400 names the param and shows the url-encoded
+/// example, and an empty object narrows nothing and is `None`.
 fn metadata_containment_from_query(raw: Option<&str>) -> Result<Option<serde_json::Value>, String> {
-    const RULE: &str = "metadata must be a flat JSON object of string values, \
-         e.g. metadata={\"branch\":\"feat/x\"} (url-encoded); nested \
-         objects, arrays, numbers, booleans and null are not accepted";
+    use crate::metadata_containment::{RULE, check};
     let Some(raw) = raw else {
         return Ok(None);
     };
-    let value: serde_json::Value =
-        serde_json::from_str(raw).map_err(|e| format!("{RULE}: not JSON ({e})"))?;
-    let serde_json::Value::Object(doc) = value else {
-        return Err(format!("{RULE}: got a non-object"));
+    let door = |why: String| {
+        format!("metadata {why}; e.g. metadata={{\"branch\":\"feat/x\"}} (url-encoded)")
     };
-    if let Some((key, _)) = doc.iter().find(|(_, v)| !v.is_string()) {
-        return Err(format!("{RULE}: value of {key:?} is not a string"));
-    }
-    if doc.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(serde_json::Value::Object(doc)))
+    let value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| door(format!("{RULE}: not JSON ({e})")))?;
+    let doc = check(&value).map_err(door)?;
+    Ok((!doc.is_empty()).then_some(serde_json::Value::Object(doc)))
 }
 
 /// Validate `metadata_has=<key>` as a plain identifier, or say why not.

@@ -52,6 +52,23 @@
 //! and completes the branch the fork opened. Any other kind keeps the
 //! v2 answer (a noop note): a filer's decision is theirs.
 //!
+//! ## One route per kind (v4, 1c704bb8)
+//!
+//! `route` is a LIST — a JSON array of the object above, one entry per
+//! kind — and the single object is still accepted as a list of one. v3
+//! named `backlog-item` alone and left `user-feedback` to its filer;
+//! that held for feedback nobody had acted on, and inverted the moment
+//! a car was PARKED AGAINST the packet: the build decision was made by
+//! whoever linked the car, the landed and proven car is the evidence,
+//! and David ratified exactly this close ("once the user feedback
+//! results in a shipped change it can be closed without the filer
+//! approving"). On 2026-09-14 his own feedback 9827c699 had its car
+//! landed and proven inside seventy minutes and stayed open at triage
+//! while the obligation wrote a noop on the car — closed by hand ten
+//! minutes after the proof, the act this rule exists to remove. The
+//! handler matches the packet's kind against the list; a kind no entry
+//! names still keeps the v2 answer.
+//!
 //! ## Saying so on BOTH ends (ca76d8f9)
 //!
 //! When the obligation can act on neither the branch nor the route, the
@@ -438,7 +455,7 @@ impl Handler for JobsCompleteLinkedStep {
         // in hand. Fills ABSENT keys only — metadata a person already
         // wrote is their record, not this obligation's to overwrite.
         let done_metadata = template_arg(args, "done_metadata", &ctx.rule_name);
-        let route = parse_route(args, &ctx.rule_name);
+        let routes = parse_routes(args, &ctx.rule_name);
 
         // GUARD 2 — the open branch, the route to one, or nothing.
         // Exactly one of the named steps is open on a live packet (the
@@ -455,14 +472,13 @@ impl Handler for JobsCompleteLinkedStep {
                 // measurement triage was waiting for. Complete the
                 // routing step with the row's disposition + evidence,
                 // re-read, and the fork's own `ready_when` has opened
-                // the branch this obligation completes. Scoped to
-                // `route.kind`: every other kind keeps the answer
-                // below — a filer's routing decision stays theirs.
-                let routable = route
-                    .as_ref()
-                    .filter(|r| {
-                        target.get("kind").and_then(|v| v.as_str()) == Some(r.kind.as_str())
-                    })
+                // the branch this obligation completes. Scoped to the
+                // kinds the list names (v4, 1c704bb8: one entry per
+                // kind): every other kind keeps the answer below — a
+                // filer's routing decision stays theirs.
+                let routable = routes
+                    .iter()
+                    .find(|r| target.get("kind").and_then(|v| v.as_str()) == Some(r.kind.as_str()))
                     .and_then(|r| {
                         step_by_slug(&target, &r.step)
                             .filter(|s| is_open(s))
@@ -579,7 +595,8 @@ struct Shipped {
 /// `steps` is open because the packet has not been triaged, complete
 /// `step` on a packet of `kind` with `metadata` — the step kind's
 /// required vocabulary, `{branch}`/`{car}`/`{title}` substituted — and
-/// let the fork open the branch `steps` then completes.
+/// let the fork open the branch `steps` then completes. A rule row
+/// carries one per kind (v4, 1c704bb8).
 struct Route {
     kind: String,
     step: String,
@@ -611,26 +628,42 @@ fn template_arg(
     }
 }
 
-fn parse_route(args: &[(String, Value)], rule: &str) -> Option<Route> {
+/// The `route` arg: a JSON array of `{kind, step, metadata}` objects,
+/// or a single such object read as a list of one (the v3 shape, still
+/// accepted so a tenant's own rule row keeps parsing). Bad rule
+/// authoring is permanent, so a malformed value — or one malformed
+/// entry — is a warning and an EMPTY list, never an error: the
+/// obligation then runs as v2 did.
+fn parse_routes(args: &[(String, Value)], rule: &str) -> Vec<Route> {
     let Some(Value::String(src)) = arg(args, "route") else {
-        return None;
+        return Vec::new();
     };
-    let route = serde_json::from_str::<serde_json::Value>(src)
-        .ok()
-        .and_then(|v| {
+    let entries = match serde_json::from_str::<serde_json::Value>(src) {
+        Ok(serde_json::Value::Array(list)) => list,
+        Ok(one @ serde_json::Value::Object(_)) => vec![one],
+        _ => Vec::new(),
+    };
+    let routes: Option<Vec<Route>> = entries
+        .iter()
+        .map(|v| {
             Some(Route {
                 kind: v.get("kind")?.as_str()?.to_string(),
                 step: v.get("step")?.as_str()?.to_string(),
                 metadata: v.get("metadata")?.as_object()?.clone(),
             })
-        });
-    if route.is_none() {
-        tracing::warn!(
-            rule = %rule,
-            "route is not a JSON object with kind/step/metadata — completing without routing"
-        );
+        })
+        .collect();
+    match routes {
+        Some(routes) if !routes.is_empty() => routes,
+        _ => {
+            tracing::warn!(
+                rule = %rule,
+                "route is not a JSON object (or a non-empty array of objects) with \
+                 kind/step/metadata — completing without routing"
+            );
+            Vec::new()
+        }
     }
-    route
 }
 
 fn is_open(step: &serde_json::Value) -> bool {
@@ -1072,6 +1105,48 @@ mod tests {
         })
     }
 
+    /// v4 rule args (1c704bb8): `route` is a LIST — one entry per kind
+    /// whose triage a shipped, proven car may make. The single-object
+    /// form above is still accepted; this is the shape the rule file
+    /// carries now.
+    fn args_with_routes() -> Vec<(String, Value)> {
+        let mut a = args_with_done_metadata();
+        a.push((
+            "route".to_string(),
+            Value::String(
+                r#"[{"kind": "backlog-item", "step": "triage", "metadata": {"disposition": "build", "evidence": "shipped and proven: {branch} — {title} (car {car})"}}, {"kind": "user-feedback", "step": "triage", "metadata": {"disposition": "build", "evidence": "shipped and proven: {branch} — {title} (car {car})"}}]"#.into(),
+            ),
+        ));
+        a
+    }
+
+    /// A live `user-feedback` packet nobody has triaged, in the shape
+    /// the live Workflow gives it: `submitted` fired, `triage` open,
+    /// every branch (and `needs-info`) still `pending`. The packet a
+    /// car parked with `--park-backlog-item` names when what it was
+    /// parked against is feedback rather than a backlog item.
+    fn untriaged_feedback() -> serde_json::Value {
+        json!({
+            "id": PACKET,
+            "kind": "user-feedback",
+            "title": "A page for the codebase stats",
+            "status": "open",
+            "metadata": { "submitted_by": "emp-david" },
+            "steps": [
+                { "id": "s-submitted", "spec_slug": "submitted", "status": "completed",
+                  "metadata": {} },
+                { "id": "s-triage", "spec_slug": "triage", "status": "ready", "metadata": {} },
+                { "id": "s-investigate", "spec_slug": "investigate", "status": "pending",
+                  "metadata": {} },
+                { "id": "s-design-review", "spec_slug": "design-review", "status": "pending",
+                  "metadata": {} },
+                { "id": BRANCH_STEP, "spec_slug": "build", "status": "pending", "metadata": {} },
+                { "id": "s-needs-info", "spec_slug": "needs-info", "status": "pending",
+                  "metadata": {} },
+            ],
+        })
+    }
+
     /// c65110d6: the note saying "this obligation completed nothing"
     /// must actually LAND on the car. It never did — the first
     /// `note_on_car` PUT `/api/jobs/{id}` with a metadata-only body,
@@ -1186,9 +1261,11 @@ mod tests {
         );
     }
 
-    /// The route is scoped to the kind it names. A user-feedback
-    /// packet at triage keeps the v2 answer: a filer's routing
-    /// decision is not made for them, and the noop note lands.
+    /// A route is scoped to the kind it names. The v3 SINGLE-OBJECT
+    /// form is still accepted (1c704bb8 made `route` a list without
+    /// retiring the object), and under it a user-feedback packet at
+    /// triage keeps the v2 answer: no step completed, the noop note
+    /// lands on both ends. The list form below is what routes it.
     #[tokio::test]
     async fn the_route_applies_only_to_the_kind_it_names() {
         let mut feedback = untriaged_packet();
@@ -1315,6 +1392,108 @@ mod tests {
             patches.lock().unwrap().len(),
             2,
             "the v2 noop note lands on both ends"
+        );
+    }
+
+    /// 1c704bb8 — the route list. David's feedback 9827c699 had its
+    /// car built, landed and PROVEN inside seventy minutes, and the
+    /// packet stayed open at triage: v3's route named `backlog-item`
+    /// only, so the obligation wrote `obligation_noop` on the car and
+    /// the operator closed the packet by hand ten minutes after the
+    /// proof — the manual act this rule exists to remove. The v3
+    /// reasoning ("a filer's decision is still theirs") does not hold
+    /// when a car was PARKED AGAINST the packet: whoever built and
+    /// linked the car made the routing decision, and the proven car is
+    /// the evidence. So the same two writes the backlog-item route
+    /// makes — triage `build` with the car as evidence, then the
+    /// `build` branch the fork opened — land on a user-feedback packet
+    /// when the rule row lists its kind.
+    #[tokio::test]
+    async fn a_proven_car_routes_the_user_feedback_it_was_parked_against() {
+        let (base, puts, patches) = mock_jobs(vec![
+            car(json!({ "backlog_item": PACKET, "train": TRAIN, "branch": "feat/codebase-stats" })),
+            untriaged_feedback(),
+            train(),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        h.invoke(&args_with_routes(), &ctx(close_marker()))
+            .await
+            .expect("runs");
+
+        let calls = puts.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2, "triage, then build: {calls:?}");
+
+        let (step_id, body) = &calls[0];
+        assert_eq!(step_id, "s-triage", "the routing step is completed FIRST");
+        assert_eq!(body["status"], "completed");
+        assert_eq!(
+            body["metadata"]["disposition"], "build",
+            "a disposition the live user-feedback triage admits"
+        );
+        let evidence = body["metadata"]["evidence"].as_str().unwrap_or_default();
+        assert!(
+            evidence.contains("feat/codebase-stats") && evidence.contains(CAR),
+            "the triage evidence names the branch and the car: {evidence}"
+        );
+        assert_eq!(body["metadata"]["arrived_from"]["car"], CAR);
+
+        let (step_id, body) = &calls[1];
+        assert_eq!(step_id, BRANCH_STEP, "the build branch the route opened");
+        assert_eq!(body["status"], "completed");
+        assert_eq!(body["metadata"]["arrived_from"]["car"], CAR);
+
+        assert!(
+            patches.lock().unwrap().is_empty(),
+            "nothing to apologise for — the obligation acted"
+        );
+    }
+
+    /// The list did not narrow what v3 routed: a backlog item at
+    /// triage takes the same two writes under the list form.
+    #[tokio::test]
+    async fn the_route_list_still_routes_the_backlog_item() {
+        let (base, puts, patches) = mock_jobs(vec![
+            car(json!({ "backlog_item": PACKET, "train": TRAIN, "branch": "fix/x" })),
+            untriaged_packet(),
+            train(),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        h.invoke(&args_with_routes(), &ctx(close_marker()))
+            .await
+            .expect("runs");
+
+        let calls = puts.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2, "triage, then build: {calls:?}");
+        assert_eq!(calls[0].0, "s-triage");
+        assert_eq!(calls[0].1["metadata"]["disposition"], "build");
+        assert_eq!(calls[1].0, BRANCH_STEP);
+        assert!(patches.lock().unwrap().is_empty());
+    }
+
+    /// The list is still a scope, not a licence: a kind no entry names
+    /// keeps the v2 answer — nothing completed, the note on both ends.
+    #[tokio::test]
+    async fn the_route_list_leaves_a_kind_it_does_not_name_alone() {
+        let mut other = untriaged_packet();
+        other["kind"] = json!("ops-request");
+        let (base, puts, patches) = mock_jobs(vec![
+            car(json!({ "backlog_item": PACKET, "train": TRAIN, "branch": "fix/x" })),
+            other,
+            train(),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        h.invoke(&args_with_routes(), &ctx(close_marker()))
+            .await
+            .expect("runs");
+
+        assert!(puts.lock().unwrap().is_empty(), "no step completed");
+        assert_eq!(
+            patches.lock().unwrap().len(),
+            2,
+            "the noop note lands on the car and on the packet"
         );
     }
 

@@ -541,9 +541,13 @@ const QUERY_VALUE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUM
 
 /// The flat containment document `--where key=value` pairs compose:
 /// one object, string values, everything after the FIRST `=` is the
-/// value (a branch or a probe text carries `=` of its own). The server
-/// accepts exactly this shape and 400s any other
-/// (`metadata_containment_from_query`), so nothing wider is built here.
+/// value (a branch or a probe text carries `=` of its own). What is
+/// composed then passes the server's own rule for `metadata=`
+/// (`where_containment`), so nothing this door sends is a 400.
+///
+/// The duplicate-key refusal stays here because only the composer can
+/// see one: a JSON object holds a key once, so by the time a document
+/// is a `Value` the second value has already won.
 pub(crate) fn where_object(wheres: &[String]) -> Result<Value> {
     let mut doc = serde_json::Map::new();
     for w in wheres {
@@ -560,7 +564,20 @@ pub(crate) fn where_object(wheres: &[String]) -> Result<Value> {
             bail!("--where names {key:?} twice — a packet's metadata holds one value per key");
         }
     }
-    Ok(Value::Object(doc))
+    where_containment(Value::Object(doc))
+}
+
+/// Judge a composed `--where` document by the server's own rule for
+/// `metadata=` — `boss_jobs::metadata_containment`, the ONE definition,
+/// not a restatement of it (until 2026-09-14 this side decided the
+/// shape alone, related to the server's by a comment; backlog
+/// 88a3b072). Refused HERE, before the round trip, with the sentence
+/// the 400 would carry; the only word this door adds is the name of
+/// its own flag.
+fn where_containment(doc: Value) -> Result<Value> {
+    boss_jobs::metadata_containment::check(&doc)
+        .map(Value::Object)
+        .map_err(|why| anyhow!("--where {why}"))
 }
 
 /// Validate a `--has` key by the server's own rule for `metadata_has`
@@ -1079,6 +1096,37 @@ mod tests {
         assert!(e.to_string().contains("key=value"), "{e}");
         let e = where_object(&["=v".to_string()]).unwrap_err();
         assert!(e.to_string().contains("key=value"), "{e}");
+    }
+
+    #[test]
+    fn a_where_document_is_judged_by_the_servers_containment_rule() {
+        // What `--where` composes passes the server's rule for
+        // `metadata=` — the ONE definition both doors call
+        // (`boss_jobs::metadata_containment`), so a document the terminal
+        // sends is one the server takes. Until 2026-09-14 the two sides
+        // each decided the shape alone, related by a comment (backlog
+        // 88a3b072).
+        let doc = where_object(&["branch=feat/x".to_string(), "merged=true".to_string()]).unwrap();
+        assert_eq!(
+            boss_jobs::metadata_containment::check(&doc).map(Value::Object),
+            Ok(doc)
+        );
+        // Should this door ever build something wider than flat strings,
+        // it is refused HERE, before the round trip, with the terminal's
+        // flag in front of byte for byte what the 400 would carry.
+        for bad in [json!({"a": {"b": "c"}}), json!({"n": 1}), json!(["a"])] {
+            let said = where_containment(bad.clone()).unwrap_err().to_string();
+            assert!(
+                said.starts_with("--where must be"),
+                "the terminal names ITS parameter in front of the rule: {bad}: {said}"
+            );
+            assert!(
+                said.contains(boss_jobs::metadata_containment::RULE),
+                "{bad}: {said}"
+            );
+            let server = boss_jobs::metadata_containment::check(&bad).unwrap_err();
+            assert_eq!(said, format!("--where {server}"), "{bad}");
+        }
     }
 
     #[test]
