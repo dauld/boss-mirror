@@ -24,7 +24,7 @@ use boss_dispatcher_handlers::handlers::{
     bill_payment_batch::BillPaymentBatch, cadence_silence::CadenceSilenceSweep,
     commerce_invoice_issue::CommerceInvoiceIssue, credential_issuer,
     credential_rotate_forgejo::CredentialRotateForgejo, estate_alarm::EstateAlarm,
-    estate_compare::EstateCompare, gate_resolve::GateResolve,
+    estate_compare::EstateCompare, estate_recover::EstateRecover, gate_resolve::GateResolve,
     inventory_bill_approve::InventoryBillApprove,
     inventory_overhead_absorb::InventoryOverheadAbsorb,
     inventory_parts_consume::InventoryPartsConsume, inventory_parts_produce::InventoryPartsProduce,
@@ -271,6 +271,12 @@ async fn main() -> Result<()> {
                 cfg.jobs_api_url.clone(),
                 cfg.clock_api_url.clone(),
             ));
+            // The half that closes (ef421cd3): an alarm whose finding
+            // has been ABSENT from N consecutive comparisons of its
+            // series completes its own triage step as `stale`. Reads
+            // the same series the raiser reads; needs no clock — the
+            // recovery instant is the record's own.
+            handlers.register(EstateRecover::new(cfg.jobs_api_url.clone()));
             // A DECLARED cadence with no packet files an alarm
             // (ecca2f43). The estate alarm hears a host that stopped
             // being observed; this hears a CHORE that stopped running —

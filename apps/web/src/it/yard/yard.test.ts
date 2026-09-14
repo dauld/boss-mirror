@@ -165,7 +165,7 @@ describe('the dock from the station envelope', () => {
       data: [
         dockJob('s1', {
           tags: ['hotfix'],
-          metadata: { branch: 'feat/s1', skip_reason: 'CI red' },
+          metadata: { branch: 'feat/s1', skip_reason: 'CI red', red_trains: 1 },
           simulated: true,
         }),
         dockJob('s2'),
@@ -179,9 +179,13 @@ describe('the dock from the station envelope', () => {
       // This packet records nothing about proving it — null, not a row
       // of nulls (readCarProof).
       proof: null,
+      // The conductor's strike count, read off the record (2bb0d014).
+      redTrains: 1,
     });
     expect(y.dock[1]?.sim).toBe(false);
     expect(y.dock[1]?.skipReason).toBeNull();
+    // Absent on the record is zero strikes, not an unknown.
+    expect(y.dock[1]?.redTrains).toBe(0);
   });
 
   test('the envelope is authoritative: membership does not re-derive from ships', () => {

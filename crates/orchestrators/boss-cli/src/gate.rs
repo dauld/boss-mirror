@@ -2025,7 +2025,10 @@ pub async fn run(
     // sees. An id typed rather than read is the whole failure mode
     // (2026-09-12, be793304's car launched with an invented suffix).
     if !dry {
-        let mut missing = Vec::new();
+        // What the SoR could find, by the id typed; `unresolvable` then
+        // names the rest with their flags — the pure half the test
+        // pins, the loop here only gathering the answers.
+        let mut found: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut resolved: Vec<(&'static str, String)> = Vec::new();
         for (flag, id) in park.named_refs() {
             // `api` raises on every non-2xx; a 404 here is the answer,
@@ -2039,6 +2042,7 @@ pub async fn run(
             .await
             {
                 Ok(Some(packet)) => {
+                    found.insert(id.to_string());
                     // STAMP WHAT WAS RESOLVED, not what was typed. The
                     // jobs API answers a unique prefix, so an 8-char id
                     // passes this check — and rode the gate-run as
@@ -2058,10 +2062,8 @@ pub async fn run(
                         resolved.push((flag, full.to_string()));
                     }
                 }
-                Ok(None) => missing.push((flag, id.to_string())),
-                Err(e) if format!("{e:#}").contains("404") => {
-                    missing.push((flag, id.to_string()));
-                }
+                Ok(None) => {}
+                Err(e) if format!("{e:#}").contains("404") => {}
                 Err(e) => {
                     return Err(e.context(format!(
                         "resolving {flag} {id} against the system of record"
@@ -2069,6 +2071,7 @@ pub async fn run(
                 }
             }
         }
+        let missing = park.unresolvable(|id| found.contains(id));
         for (flag, full) in &resolved {
             println!("boss gate: {flag} resolved to {full}");
             park.set_named_ref(flag, full.clone());

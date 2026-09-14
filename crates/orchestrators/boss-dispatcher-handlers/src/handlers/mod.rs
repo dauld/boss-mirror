@@ -22,6 +22,7 @@ pub mod credential_issuer;
 pub mod credential_rotate_forgejo;
 pub mod estate_alarm;
 pub mod estate_compare;
+pub mod estate_recover;
 pub mod gate_resolve;
 pub mod inventory_bill_approve;
 pub mod inventory_overhead_absorb;

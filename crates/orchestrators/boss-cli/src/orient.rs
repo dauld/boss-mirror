@@ -45,6 +45,35 @@ fn at_step(v: &Value) -> String {
         .to_string()
 }
 
+/// One GATING line for a running gate-run. A car's run is its branch. A
+/// TRAIN's run (`metadata.train_gate`, filed by the conductor for the
+/// train branch — design 128b5496) is the train being tested, not a car
+/// being gated, and the lane has to say so: on 2026-09-14 it listed
+/// `train/20260914-1641` beside a car branch as two indistinguishable
+/// runs, and David asked three times why a PR train was in the gates
+/// (b96a878f). The predicate is `boss_jobs::stranded::is_train_gate` —
+/// the ONE definition, never the branch name (§9a). The title is read
+/// off the trains IN TRANSIT already fetched; a train not among them is
+/// named by id alone rather than by a second read or an invented title.
+fn gating_line(run: &Value, trains: &[Value]) -> String {
+    let branch = md_str(run, "branch");
+    let metadata = run.get("metadata").unwrap_or(&Value::Null);
+    if !boss_jobs::stranded::is_train_gate(metadata) {
+        return branch.to_string();
+    }
+    let train_id = md_str(run, "train");
+    let id8: String = train_id.chars().take(8).collect();
+    let title = trains
+        .iter()
+        .find(|t| t.get("id").and_then(Value::as_str) == Some(train_id))
+        .and_then(|t| t.get("title").and_then(Value::as_str))
+        .filter(|t| !t.is_empty());
+    match title {
+        Some(title) => format!("{branch}  (train gate — testing train {id8}, {title})"),
+        None => format!("{branch}  (train gate — testing train {id8})"),
+    }
+}
+
 /// Branches whose base has fallen behind `origin/main`. Each pair is
 /// (branch, exit code of `git merge-base --is-ancestor origin/main
 /// origin/<branch>`), read through the ONE definition of that code
@@ -388,7 +417,7 @@ pub async fn run(all: bool) -> Result<()> {
         .partition(|g| !md_str(g, boss_jobs::yard::QUEUED_AT).is_empty());
     println!("\n  GATING — {} run(s)", running.len());
     for g in &running {
-        println!("    {}", md_str(g, "branch"));
+        println!("    {}", gating_line(g, &trains));
     }
     // A PLACE NOBODY HOLDS IS NOT A QUEUE. The two readings are the
     // system of record's own: `queue_order` is every place a live
@@ -708,6 +737,64 @@ pub async fn run(all: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A TRAIN's gate-run (128b5496) in the GATING lane is the train being
+    /// tested, not a car being gated. On 2026-09-14 `boss orient` listed
+    /// `train/20260914-1641` and a car branch as two indistinguishable
+    /// runs, the afternoon David asked three times why a PR train was in
+    /// the gates (b96a878f). The yard learned to say so in three lanes
+    /// that day; the terminal says the same thing in the same words — the
+    /// predicate is `boss_jobs::stranded::is_train_gate`, never the
+    /// branch name, and the title comes from the trains IN TRANSIT
+    /// already fetched, so no extra read. A car's line does not change.
+    #[test]
+    fn a_train_gate_in_the_gating_lane_is_named_as_the_trains_test() {
+        use serde_json::json;
+        let trains = vec![json!({
+            "id": "9a3af298-0000-4000-8000-000000000000",
+            "title": "PR train 2026-09-14 16:41",
+        })];
+        let car =
+            json!({"metadata": {"branch": "fix/a-dark-registry-does-not-widen-what-a-host-runs"}});
+        let train_gate = json!({"metadata": {
+            "branch": "train/20260914-1641",
+            "train_gate": true,
+            "train": "9a3af298-0000-4000-8000-000000000000",
+        }});
+        assert_eq!(
+            super::gating_line(&car, &trains),
+            "fix/a-dark-registry-does-not-widen-what-a-host-runs",
+            "a car's line is its branch, as before"
+        );
+        assert_eq!(
+            super::gating_line(&train_gate, &trains),
+            "train/20260914-1641  (train gate — testing train 9a3af298, PR train 2026-09-14 16:41)"
+        );
+    }
+
+    /// The IN TRANSIT fetch is capped at ten trains; a train gate whose
+    /// train is not among them still says WHICH train, by id, and does
+    /// not invent a title. And a `train/…` branch WITHOUT the flag is a
+    /// car (the predicate is the metadata, not the name).
+    #[test]
+    fn a_train_gate_whose_train_was_not_fetched_names_the_id_alone() {
+        use serde_json::json;
+        let train_gate = json!({"metadata": {
+            "branch": "train/20260914-1641",
+            "train_gate": true,
+            "train": "9a3af298-0000-4000-8000-000000000000",
+        }});
+        assert_eq!(
+            super::gating_line(&train_gate, &[]),
+            "train/20260914-1641  (train gate — testing train 9a3af298)"
+        );
+        let named_like_a_train = json!({"metadata": {"branch": "train/20260914-1641"}});
+        assert_eq!(
+            super::gating_line(&named_like_a_train, &[]),
+            "train/20260914-1641",
+            "the branch name is not the predicate"
+        );
+    }
+
     #[test]
     fn a_stranded_rerail_head_names_the_car_and_the_finishing_verb() {
         let cars: std::collections::BTreeMap<String, String> = [(

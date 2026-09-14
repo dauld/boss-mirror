@@ -1,6 +1,8 @@
 //! Where the IT department's work comes from — the INPUT-channel mix.
 //!
-//! Design: docs/design/it-delivery-channels.md (approved 2026-09-06).
+//! Design: "IT delivery channels", approved 2026-09-06 as a design-doc
+//! packet; its file under docs/design/ was folded and deleted with the
+//! 2026-09-10 docs cleanup (f5da586c), so the packet is the record.
 //! A job has two orthogonal channels: `input_channel` (the lane it
 //! entered through) and `delivery_channel` (how it ships). This module
 //! answers the first, and reports the *mix* — the algedonic reading

@@ -1,0 +1,64 @@
+# The CLOSE half of the estate alarm (backlog ef421cd3; the raise half
+# is `estate-alarm-on-comparison`). The raiser files ONE urgent packet
+# when a hard finding persists PERSIST_N consecutive comparisons of a
+# series, and until this rule nothing ever closed it: the same series
+# kept arriving, the finding went absent, the system of record held
+# the recovery — and the packet still read as an open urgent alarm
+# until a person noticed.
+#
+# WHY IT MUST EXIST AT ALL — measured 2026-09-14: three estate alarms
+# closed by hand in two days (a1b4f3fa boss-gcp-converge
+# unit_unhealthy, e3da3202, fdd10ec8 boss-codebase-metrics
+# unit_unhealthy — the last still open after its fix landed at 15:55),
+# each time the operator reading the N clean comparisons off
+# /api/estate/comparisons and typing them into the triage step. "An
+# alarm that only a human can clear trains the operator to leave alarms
+# open (three did), and a stale open alarm suppresses the next real
+# raise of the same finding through the dedup" (the packet). CLAUDE.md
+# §Diagnosis: "Mechanical operations belong to the machine" — this
+# close is a read of the record and a write the record already
+# determines, which is the definition of mechanical.
+#
+# A SIBLING RULE ON THE SAME EVENT, not a second `do` on the raiser's
+# rule: its own `why`, its own retirement, its own redelivery budget (a
+# failed close never NAKs a raise), and the raiser's rule row stays the
+# live row it was copied from. The calibration is the raiser's, mirrored
+# — the same N, the same `(scope, host)` series filter, read back from
+# the same recorded series — with one addition the raiser does not need:
+# the N clean readings must postdate the alarm's `opened_at`, so a
+# series that has gone dark cannot close its own `unobserved` alarm
+# against the readings from before it went quiet
+# (handlers/estate_recover.rs).
+#
+# NO `when`, for the raiser's reason: the decision is not a predicate
+# over one event. Whether an open alarm belongs to the series that just
+# ticked, and whether its finding has been absent N consecutive times,
+# are both read from the system of record inside the handler, and it
+# is a no-op — not an error — on the many firings that find no alarm on
+# their series.
+[[rule]]
+name = "estate-recover-on-comparison"
+why = """
+A THRESHOLD, the same standing exemption as `estate-alarm-on-comparison`
+and its exact mirror image: what closes is a LEVEL integrated over
+time — a finding ABSENT from consecutive same-series comparisons — not
+a transition, and no protocol row can name it. The backlog-item
+Workflow already owns the terminal ("Closed — the claim no longer
+holds", `disposition = stale`); what it cannot express is WHEN the
+claim stopped holding, because the evidence is a series of readings of
+the CLUSTER, external ingress one hop upstream, none of which is a
+packet. The raiser's `why` says "a kubelet is not a packet"; a kubelet
+coming back is not one either.
+
+Reacting to the comparison event rather than running a second clock is
+the choice the whole estate loop makes: the close inherits the
+observer's own cadence, so a five-minute unit series clears in ~15
+minutes and the daily host series in three days, and tightening an
+observer tightens both halves with no rule change. It adds no routing —
+one firing closes at most the alarms of the one series that ticked,
+each through the step the Workflow already names — and it is what lets
+the algedonic channel go quiet by itself when the pain stops.
+"""
+on_event = "jobs.estate.compared"
+[[rule.do]]
+handler = "estate.recover"

@@ -162,6 +162,18 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // terminates at the operator's queue by design (delivery beyond
         // the queue is channel work, not this handler's).
         ("estate.alarm", vec!["jobs.job.created"]),
+        // The raiser's closing half (ef421cd3): when a finding has
+        // been absent N consecutive comparisons, it completes the
+        // alarm packet's triage step (`jobs.step.completed`, which
+        // carries the backlog-item to its `stale` terminal) and
+        // merges `recovered_at` onto the packet (`jobs.job.updated`).
+        // Both are backlog-item writes; neither can make the estate
+        // series it reads look any different, so the loop ends at
+        // the packet the same way the raiser's does.
+        (
+            "estate.recover",
+            vec!["jobs.step.completed", "jobs.job.updated"],
+        ),
         // The cadence silence sweep (ecca2f43): a daily clock rule
         // that reconciles each DECLARED cadence against the newest
         // ACTUAL packet of that kind. Three writes, all through the

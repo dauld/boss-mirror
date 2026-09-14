@@ -82,7 +82,7 @@ use super::estate_compare::{HOST_SCOPE, KNOWN_SCOPE, UNITS_SCOPE};
 /// minutes; the daily host-disk series in three readings, which is
 /// what its cadence affords — tightening that is a timer-file change,
 /// not an alarm change.)
-const PERSIST_N: usize = 3;
+pub(super) const PERSIST_N: usize = 3;
 
 /// A series is stale when its newest observation is older than this
 /// many of its own measured cadences. Three, like PERSIST_N and for
@@ -193,7 +193,7 @@ fn hard_findings(comparison: &Value) -> Vec<(String, Value)> {
 
 /// Just the keys of [`hard_findings`] — the set the persistence
 /// intersection runs over.
-fn hard_finding_keys(comparison: &Value) -> BTreeSet<String> {
+pub(super) fn hard_finding_keys(comparison: &Value) -> BTreeSet<String> {
     hard_findings(comparison)
         .into_iter()
         .map(|(k, _)| k)
@@ -312,10 +312,16 @@ const SETTLED_DAYS: i64 = 7;
 /// stays well under this in steady state; a `total` past it trips the
 /// truncation HOLD in [`dedup_page_complete`] rather than raising blind.
 /// This is the jobs API's own `MAX_LIMIT`, the largest page it serves.
-const DEDUP_PAGE: usize = 1000;
+pub(super) const DEDUP_PAGE: usize = 1000;
 
-/// `estate_finding` keys whose packet a human closed as `stale` or
+/// `estate_finding` keys whose packet a HUMAN closed as `stale` or
 /// `duplicate` within [`SETTLED_DAYS`] — pure over the closed listing.
+///
+/// A close `estate.recover` made is excluded (ef421cd3): it closes a
+/// recovered alarm as `stale` too, stamped `cleared_by`, and the
+/// machine's answer must not suppress the next genuine raise of the
+/// same finding. A unit that recovers and dies again inside the day
+/// is two conditions, not one settled question.
 fn settled_recently(closed_jobs: &[Value], now: DateTime<Utc>) -> BTreeSet<String> {
     closed_jobs
         .iter()
@@ -330,14 +336,18 @@ fn settled_recently(closed_jobs: &[Value], now: DateTime<Utc>) -> BTreeSet<Strin
             if (now.date_naive() - closed).num_days() > SETTLED_DAYS {
                 return None;
             }
-            let settled = j
-                .get("steps")
-                .and_then(Value::as_array)
+            let steps = j.get("steps").and_then(Value::as_array);
+            let settled = steps
                 .into_iter()
                 .flatten()
                 .filter_map(|s| s.get("metadata")?.get("disposition")?.as_str())
                 .any(|d| d == "stale" || d == "duplicate");
-            settled.then_some(key)
+            let machine_cleared = steps
+                .into_iter()
+                .flatten()
+                .filter_map(|s| s.get("metadata")?.get("cleared_by")?.as_str())
+                .any(|c| c == super::estate_recover::CLEARED_BY);
+            (settled && !machine_cleared).then_some(key)
         })
         .collect()
 }
@@ -1137,6 +1147,39 @@ mod tests {
         assert!(
             !settled.contains("not_ready:cp-2"),
             "closed as BUILT — a recurrence after a fix is a new fact"
+        );
+    }
+
+    #[test]
+    fn a_machine_clear_does_not_suppress_but_a_human_stale_does() {
+        // ef421cd3: `estate.recover` closes a recovered alarm as
+        // `stale`, the same disposition a human uses. Read as a human
+        // answer it would silence the next genuine raise of that
+        // finding for a week — a unit that recovers and then dies
+        // again inside the day would never re-raise. The machine's
+        // close is stamped `cleared_by`, and that stamp is what tells
+        // the two apart.
+        let now = Utc.with_ymd_and_hms(2026, 9, 14, 20, 0, 0).unwrap();
+        let mut machine = closed_alarm(
+            "unit_unhealthy:boss-gcp/boss-codebase-metrics.service",
+            "2026-09-14",
+            "stale",
+        );
+        machine["steps"][0]["metadata"]["cleared_by"] =
+            json!(crate::handlers::estate_recover::CLEARED_BY);
+        let human = closed_alarm(
+            "unit_unhealthy:boss-gcp/other.service",
+            "2026-09-14",
+            "stale",
+        );
+        let settled = settled_recently(&[machine, human], now);
+        assert!(
+            !settled.contains("unit_unhealthy:boss-gcp/boss-codebase-metrics.service"),
+            "a recovery the machine recorded must not suppress the next raise"
+        );
+        assert!(
+            settled.contains("unit_unhealthy:boss-gcp/other.service"),
+            "a human's stale still holds for the week"
         );
     }
 }

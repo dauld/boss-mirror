@@ -389,6 +389,16 @@ export function sinceText(since: string | null | undefined, nowMs: number): stri
  *  `stale` flag is the alarm. */
 export const GATE_USUAL_MINUTES = 12;
 
+/** The strike count a dock wagon appends to its status — empty for a
+ *  clean car, so the clean sentence is unchanged (2bb0d014, 2026-09-14).
+ *  Read after train #361: a car one red train had released stood on the
+ *  dock indistinguishable from a clean one, and the first the operator
+ *  heard was the hold at the second. "Behind it" because the reds are
+ *  consists it rode, not verdicts on it — which car turned a consist red
+ *  is exactly what nobody knows yet. */
+const redTrainsSuffix = (n: number | undefined): string =>
+  (n ?? 0) <= 0 ? '' : ` · ${n} red train${n === 1 ? '' : 's'} behind it`;
+
 /** An operator's hold marker often opens with its own "held:" — the
  *  wagon already says held, so the reason is what follows it. */
 const holdReason = (hold: string | null): string =>
@@ -848,15 +858,22 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
     // the client dock still lists it — skipped here so it is ONE wagon,
     // held, never a parked one beside a held twin.
     if (claimedIds.has(c.id) || claimedBranches.has(c.branch) || heldCarIds.has(c.id)) return;
+    // A struck car looks struck: one red behind it is the state in which
+    // the NEXT red holds it out, so it takes the warn stripe the map
+    // already paints and names the count (2bb0d014). Lamp stays ok — it
+    // can still board; the stripe is the invitation to look first.
+    const struck = (c.redTrains ?? 0) >= 1;
     place({
       id: c.id,
       ...base(c),
       station: 'dock',
       slot: dockSlot,
       trainId: null,
-      tone: 'ok',
+      tone: struck ? 'warn' : 'ok',
       lamp: 'ok',
-      status: c.skipReason ? `parked · held: ${c.skipReason}` : 'parked · gated green, waiting to board',
+      status:
+        (c.skipReason ? `parked · held: ${c.skipReason}` : 'parked · gated green, waiting to board') +
+        redTrainsSuffix(c.redTrains),
       since: parkedSince.get(c.id) ?? null,
     });
     dockSlot += 1;
@@ -879,7 +896,12 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
       trainId: null,
       tone: 'static',
       lamp: 'off',
-      status: `held — ${holdReason(h.reason)}`,
+      // The held reason stays first and the tone stays neutral; the
+      // strike count is appended so the siding reads WHY as well as THAT
+      // (2bb0d014). The count comes off the client's car row — the
+      // server's HeldCar does not carry it — so a held car the dock no
+      // longer lists reads its reason alone, as before.
+      status: `held — ${holdReason(h.reason)}${redTrainsSuffix(fromDock?.redTrains)}`,
       since: h.parked_since,
     });
     dockSlot += 1;

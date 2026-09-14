@@ -131,7 +131,7 @@ use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext};
 use boss_dispatcher::rules::registry::RawRule;
 
 use super::cadence_roster::{ClockCadence, Guard, clock_cadences};
-use super::common::{api_client, get_json, post_json, write_json};
+use super::common::{TRIAGE_SLUG, api_client, get_json, post_json, triage_step, write_json};
 
 /// Arg-key prefix for one declared cadence. `interval_minutes.<kind>`
 /// = "a packet of `<kind>` is expected every N minutes".
@@ -199,11 +199,6 @@ const DEDUP_PAGE: usize = 1000;
 /// Stamped on a triage completion this sweep made, so
 /// [`settled_recently`] can tell a machine clear from a human's answer.
 const CLEARED_BY: &str = "cadence.silence.sweep";
-
-/// The step this sweep completes to close its own alarm. `backlog-item`
-/// routes on `triage.disposition`, and `stale` is the terminal whose
-/// title is literally "Closed — the claim no longer holds".
-const TRIAGE_SLUG: &str = "triage";
 
 pub struct CadenceSilenceSweep {
     client: reqwest::Client,
@@ -968,24 +963,6 @@ pub fn clear_step_body(existing: &Map<String, Value>, label: &str, v: &Verdict) 
     );
     metadata.insert("cleared_by".into(), json!(CLEARED_BY));
     json!({"status": "completed", "metadata": metadata})
-}
-
-/// The `triage` step of one alarm packet, as (id, existing metadata).
-pub fn triage_step(job: &Value) -> Option<(String, Map<String, Value>)> {
-    job.get("steps")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some(TRIAGE_SLUG))
-        .and_then(|s| {
-            let id = s.get("id").and_then(Value::as_str)?.to_string();
-            let meta = s
-                .get("metadata")
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            Some((id, meta))
-        })
 }
 
 // ---------------------------------------------------------------------------

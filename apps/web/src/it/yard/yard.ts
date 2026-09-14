@@ -63,6 +63,14 @@ export type CarRow = Readonly<{
    *  reader existed. The inspection shed is a lens over this and
    *  nothing else. */
   proof?: CarProof | null;
+  /** How many red consists this car has ridden — the conductor's
+   *  `red_trains` stamp, incremented once per red train that released
+   *  it (`release_stamps` in boss-cli/src/train.rs). Absent on the
+   *  record is 0. One strike is the state in which the NEXT red holds
+   *  the car out, and until 2bb0d014 (2026-09-14) the floor drew it
+   *  exactly like a clean car; the dock wagon reads this to look struck.
+   *  Optional because rows built outside the yard (`/me`) predate it. */
+  redTrains?: number;
 }>;
 
 /** A probe run the forge wrote back onto the car (`proof_attempt`). Only
@@ -1072,6 +1080,7 @@ export function toTrainRow(
     const cmd = (car?.metadata ?? {}) as {
       branch?: string;
       skip_reason?: string;
+      red_trains?: unknown;
     };
     return {
       id,
@@ -1085,6 +1094,7 @@ export function toTrainRow(
       // A car outside the window says nothing about its own proof, and
       // the arrivals stack must not read that silence as "not proven".
       proof: readCarProof(car),
+      redTrains: redTrainsOf(cmd.red_trains),
     };
   });
   return {
@@ -1134,7 +1144,7 @@ export function headOf(j: JobLite): string | null {
 // set all map through here, so the card grammar cannot fork between
 // lanes.
 function carRow(j: JobLite): CarRow {
-  const md = (j.metadata ?? {}) as { branch?: string; skip_reason?: string };
+  const md = (j.metadata ?? {}) as { branch?: string; skip_reason?: string; red_trains?: unknown };
   return {
     id: j.id,
     kind: j.kind,
@@ -1145,7 +1155,15 @@ function carRow(j: JobLite): CarRow {
     skipReason: md.skip_reason ?? null,
     head: headOf(j),
     proof: readCarProof(j),
+    redTrains: redTrainsOf(md.red_trains),
   };
+}
+
+/** The conductor's `red_trains` stamp as a count: absent — a car no red
+ *  train has released — is 0, and anything that is not a non-negative
+ *  integer is read as 0 rather than painted as a strike (2bb0d014). */
+function redTrainsOf(v: unknown): number {
+  return typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : 0;
 }
 
 /** How many arrivals the board shows, and how many cancellations. */

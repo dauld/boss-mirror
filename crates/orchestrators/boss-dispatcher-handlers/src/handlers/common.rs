@@ -292,6 +292,37 @@ pub(crate) async fn write_json(
     Ok(())
 }
 
+/// The step a machine completes to close a `backlog-item` alarm it
+/// raised. The kind routes on `triage.disposition`, and `stale` is the
+/// terminal whose title is literally "Closed — the claim no longer
+/// holds" (infra/platform/workflows/backlog-item.toml).
+pub(crate) const TRIAGE_SLUG: &str = "triage";
+
+/// The `triage` step of one alarm packet, as (id, existing metadata).
+///
+/// Lived in `cadence_silence` until `estate.recover` closed alarms the
+/// same way (backlog ef421cd3) — one definition of "the step that
+/// closes an alarm", not a second copy (CLAUDE.md §9a). The existing
+/// metadata rides back because PUT on a step REPLACES top-level
+/// metadata, and `authority_role` living there is what keeps the step
+/// gated.
+pub(crate) fn triage_step(job: &Value) -> Option<(String, serde_json::Map<String, Value>)> {
+    job.get("steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some(TRIAGE_SLUG))
+        .and_then(|s| {
+            let id = s.get("id").and_then(Value::as_str)?.to_string();
+            let meta = s
+                .get("metadata")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            Some((id, meta))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -449,6 +449,58 @@ describe('the dock and the garage', () => {
     expect(wagon(s, 'c2').status).toContain('track occupied');
   });
 
+  // A STRUCK CAR LOOKS STRUCK (2bb0d014, 2026-09-14). Read after train
+  // #361: a car a red train released carried `metadata.red_trains: 1`
+  // and stood on the dock drawn exactly like a clean one. One strike is
+  // the state in which the NEXT red holds the car out, so it is the
+  // moment an operator can still look before it costs a second consist
+  // — and the floor said nothing. The count is READ off the record the
+  // conductor stamps, never inferred from a train's outcome.
+  test('a dock car with one red train behind it takes the warn tone and says so', () => {
+    const s = scene(
+      yardOf({ dock: [car('c1', 'fix/a', { redTrains: 1 })] }),
+      statusOf({ dock: [{ id: 'c1', title: 'Car c1', branch: 'fix/a', parked_since: '2026-09-07T22:00:00Z' }] }),
+      NOW,
+    );
+    expect(wagon(s, 'c1').tone).toBe('warn');
+    expect(wagon(s, 'c1').status).toBe('parked · gated green, waiting to board · 1 red train behind it');
+  });
+
+  test('two red trains pluralise; a skip reason keeps its place ahead of the count', () => {
+    const s = scene(
+      yardOf({ dock: [car('c1', 'fix/a', { redTrains: 2, skipReason: 'track occupied' })] }),
+      statusOf(),
+      NOW,
+    );
+    expect(wagon(s, 'c1').tone).toBe('warn');
+    expect(wagon(s, 'c1').status).toBe('parked · held: track occupied · 2 red trains behind it');
+  });
+
+  test('a clean car — red_trains absent or zero — reads exactly as before', () => {
+    const s = scene(
+      yardOf({ dock: [car('c1', 'fix/a'), car('c2', 'fix/b', { redTrains: 0 })] }),
+      statusOf(),
+      NOW,
+    );
+    for (const id of ['c1', 'c2']) {
+      expect(wagon(s, id).tone).toBe('ok');
+      expect(wagon(s, id).status).toBe('parked · gated green, waiting to board');
+    }
+  });
+
+  // A held car keeps its held reason and its neutral tone — a brake
+  // deliberately on is still not an alarm — and gains the count, so the
+  // operator reading the siding sees WHY it is held as well as THAT.
+  test('a held car keeps its reason and tone and gains the red-train count', () => {
+    const s = scene(
+      yardOf({ dock: [car('c9', 'fix/held', { redTrains: 2 })] }),
+      statusOf({ held_cars: [heldCar('c9', 'fix/held', 'held: 2 red trains')] }),
+      NOW,
+    );
+    expect(wagon(s, 'c9')).toMatchObject({ tone: 'static', lamp: 'off' });
+    expect(wagon(s, 'c9').status).toBe('held — 2 red trains · 2 red trains behind it');
+  });
+
   // THE HELD SIDING. A car an operator held cannot board, so the
   // loading-dock station row stops listing it (36c3d4ca) and the client
   // dock goes quiet about it — while the floor's `held` lane counts held
