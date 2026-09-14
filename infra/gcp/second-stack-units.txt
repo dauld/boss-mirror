@@ -1,0 +1,124 @@
+# infra/gcp/second-stack-units.txt — THE units the retire-second-stack
+# verb stops and disables on boss-gcp, one per line, in STOP ORDER, and
+# nothing else (backlog d5941ef3 car 2; design 9e3e093f, decided by
+# David 2026-09-11: "retire it quickly ... part of our tech debt payoff").
+#
+# infra/gcp/retire-second-stack.sh reads this file and refuses to touch
+# a unit it does not name. Every line is `boss-<name>.timer` or
+# `boss-<name>.service`; a comment starts with `#`; the script refuses a
+# line of any other shape BY NAME, so the WireGuard tunnel, the journal
+# gateway, caddy and postgres itself are unreachable from here by
+# construction. Editing this file is a reviewed change to what the verb
+# may do — the same review an allowlist entry gets.
+#
+# WHAT THIS IS. Read live off the host on 2026-09-12 22Z through the
+# unit-list verb (ops-request 9d33d799): 32 RUNNING services forming the
+# second, older, complete BOSS stack (boss-gcp-local, 127.0.0.1:7900 — a
+# different database from the system of record at 10.20.0.34:7900),
+# including boss-docs-api, whose crate was deleted from the tree on
+# 2026-09-10, so that stack serves deleted code; the ten chores of the
+# `legacy-stack` role in infra/estate/roles.toml (each a .timer + a
+# .service), six of them in active=failed for three weeks because they
+# maintain that stack's data or belong to the retired deploy hop; and
+# the old conductor pair boss-pr-train-reconcile, replaced by the
+# cadence loop in the cluster on 2026-09-04 and failed here since.
+#
+# KEEP — the host's own loops, NEVER in this list; the script carries the
+# same set and refuses a list that names one:
+#   boss-ops-runner.{timer,service}          the door this verb arrives through
+#   boss-gcp-converge.{timer,service}        the loop that installs the host's units
+#   boss-estate-observe-units.{timer,service}  [always] in roles.toml
+#   boss-estate-observe-host.{timer,service}   role off-cluster-observer
+#   boss-codebase-metrics.{timer,service}      role off-cluster-observer (the metrics
+#                                              timer — it was failed in the inventory,
+#                                              but failing is not the same as redundant)
+#   boss-ml-inference-batch.{timer,service}    role ml-batch-host — DELIBERATE here:
+#                                              fires 02:30, files its packet into the SoR
+#   wg-quick@*, systemd-journal-gatewayd, caddy, postgresql — not boss-*,
+#                                              out of this verb's shape entirely
+#
+# boss-backup — RETIRED, with the stack. Decided against the declared
+# roles: infra/backup.sh dumps the 127.0.0.1 `boss` database (the one
+# being retired) and copies that stack's /etc/boss-*.toml, gateway key
+# and unit files — it backs up nothing the host keeps. Its kanidm leg
+# copies /var/lib/kanidm/backups, which is empty here: the estate
+# registry (infra/postgres/schema/144-estate-subjects.sql) places kanidm
+# on cp-1. The cluster's offsite dumps arrive under
+# /var/backups/boss-cluster-pg through an SSH forced command, not this
+# unit, and are untouched. roles.toml already classifies it legacy-stack.
+# The verb's own capture — a pg_dump of that database to
+# /var/backups/boss/second-stack/ before the first stop — is its last
+# backup; the tarballs it left stay on disk.
+#
+# ORDER. Timers first: a service disabled while its timer still waits is
+# started again at the next elapse. Then the chore services (mostly
+# failed or dead — cheap), then the daemons that WRITE to the stack's
+# database (sim, dispatcher, relay, witness, observability), then the
+# ingress (gateway, simulator), then the domain APIs, and the three the
+# rest depend on — policy, events, jobs — last.
+
+# --- timers ------------------------------------------------------------
+boss-messages-events-purge.timer
+boss-audit-integrity-check.timer
+boss-ledger-recognize.timer
+boss-ledger-replay-check.timer
+boss-conservation-invariants.timer
+boss-files-gc.timer
+boss-views-catchup.timer
+boss-search-reindex.timer
+boss-backup.timer
+boss-deploy-confirm.timer
+boss-pr-train-reconcile.timer
+
+# --- the chores' oneshot services (failed / inactive in the inventory) --
+boss-messages-events-purge.service
+boss-audit-integrity-check.service
+boss-ledger-recognize.service
+boss-ledger-replay-check.service
+boss-conservation-invariants.service
+boss-files-gc.service
+boss-views-catchup.service
+boss-search-reindex.service
+boss-backup.service
+boss-deploy-confirm.service
+boss-pr-train-reconcile.service
+
+# --- the stack's writers -----------------------------------------------
+boss-brewery-sim.service
+boss-dispatcher.service
+boss-event-relay.service
+boss-witness.service
+boss-observability.service
+
+# --- ingress -----------------------------------------------------------
+boss-gateway.service
+boss-simulator.service
+
+# --- domain APIs -------------------------------------------------------
+boss-accounts-api.service
+boss-assets-api.service
+boss-calendar-api.service
+boss-campaigns-api.service
+boss-catalog-api.service
+boss-classes-api.service
+boss-clock-api.service
+boss-commerce-api.service
+boss-content-api.service
+boss-customers-api.service
+boss-docs-api.service
+boss-inventory-api.service
+boss-ledger-api.service
+boss-locations-api.service
+boss-messages-api.service
+boss-ml-api.service
+boss-people-api.service
+boss-products-api.service
+boss-search-api.service
+boss-shipping-api.service
+boss-subject-kinds-api.service
+boss-views-api.service
+
+# --- the three everything else depends on ------------------------------
+boss-policy-api.service
+boss-events-api.service
+boss-jobs-api.service

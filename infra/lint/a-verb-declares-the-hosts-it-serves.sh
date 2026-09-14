@@ -27,13 +27,15 @@
 #      filesystem, and may be scoped only to that host. This is the
 #      check that would have caught the whole class: the forge scripts
 #      are reachable by path only on the forge.
-#   4. NO MUTATING VERB SERVES boss-gcp. The host was made answerable,
+#   4. NO MUTATING VERB SERVES boss-gcp unless it is ADMITTED BY NAME
+#      below, with its authorization. The host was made answerable,
 #      not powerful: its set is the read-only, host-agnostic reads, and
 #      widening is a reviewed per-verb change with its own
 #      authorization — the same process reclaim-disk / converge /
 #      publish-github-pr each went through (infra/ops/verbs/README.md
 #      §Authorization). A mutating verb appearing here silently would be that
-#      process skipped.
+#      process skipped; one appearing in GCP_MUTATING_ADMITTED is that
+#      process having happened, and this file is where it is noticed.
 #   5. at least one verb serves boss-gcp, or the runner there answers
 #      nothing and this lint is green over a dead door.
 #   6. the runner actually READS `hosts`, or the field is decoration.
@@ -87,6 +89,19 @@ if len(node_ids) < 5:
              f"infra/postgres/schema — the derivation broke, so every host check below "
              f"would be vacuous: {sorted(node_ids)}")
 
+# MUTATING verbs boss-gcp may serve, each with the authorization that
+# admitted it. Empty until 2026-09-14. An entry here is the review
+# check 4 exists to force: the verb's own `about` must carry the same
+# authorization (the-controls-are-bounded-verbs.sh checks for "David"),
+# and this table says which verbs went through it.
+GCP_MUTATING_ADMITTED = {
+    # design 9e3e093f, decided by David 2026-09-11 ("Go ahead and retire
+    # it quickly ... part of our tech debt payoff"); backlog d5941ef3
+    # car 2. Bounded to infra/gcp/second-stack-units.txt, capture before
+    # stop, --dry-run exercisable without acting.
+    "retire-second-stack": "David 2026-09-11, design 9e3e093f",
+}
+
 problems = []
 serving_gcp = []
 for name in sorted(verbs):
@@ -127,7 +142,7 @@ for name in sorted(verbs):
             problems.append(f"{name}'s argv[0] {argv0} is in the tree but not executable.")
     if "boss-gcp" in hosts:
         serving_gcp.append(name)
-        if "MUTATING" in spec.get("about", ""):
+        if "MUTATING" in spec.get("about", "") and name not in GCP_MUTATING_ADMITTED:
             problems.append(
                 f"{name} is MUTATING and scoped to boss-gcp. boss-gcp was made ANSWERABLE, not "
                 f"powerful (c3d06016): its verbs are the read-only, host-agnostic reads. A "
@@ -154,8 +169,18 @@ if "$spec.hosts" not in runner or "does not serve host" not in runner:
              "(expected `$spec.hosts` in the decision jq and a refusal naming the host)")
 
 mutating = sorted(n for n, s in verbs.items() if "MUTATING" in s.get("about", ""))
+gcp_mutating = sorted(n for n in serving_gcp if n in mutating)
+# An admitted name that no longer exists, or that exists but no longer
+# serves boss-gcp as a MUTATING verb, is a stale admission — say so
+# rather than carry it.
+for n in GCP_MUTATING_ADMITTED:
+    if n not in verbs:
+        sys.exit(f"FAIL: GCP_MUTATING_ADMITTED names {n}, which is not a verb — drop the stale admission")
+    if n not in gcp_mutating:
+        sys.exit(f"FAIL: GCP_MUTATING_ADMITTED names {n}, which is not a MUTATING verb serving boss-gcp — drop the stale admission")
 print(f"a-verb-declares-the-hosts-it-serves: ok — {len(verbs)} verbs each name the hosts they "
       f"serve, from the {len(node_ids)} estate node ids in the tree; boss-gcp serves "
-      f"{', '.join(sorted(serving_gcp))} and none of the {len(mutating)} MUTATING verbs; every "
+      f"{', '.join(sorted(serving_gcp))}, and of the {len(mutating)} MUTATING verbs only the admitted "
+      f"{', '.join(gcp_mutating) or 'none'}; every "
       f"script is repo-relative and in the tree; the runner refuses on the field")
 PY
