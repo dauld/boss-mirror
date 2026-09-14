@@ -6669,6 +6669,41 @@ impl Conductor {
         Ok(())
     }
 
+    /// The train gate as RECORDED, for a train whose ci step is already
+    /// judged: the standing of the gate-run the train names, read and
+    /// never filed or relaunched — the judgement is made; this keeps it
+    /// in force (`train_gate::judged_verdict`). `None` when the train
+    /// never had a gate-run; an unreadable run reads as pending, so a
+    /// blip holds the train rather than merging it on CI alone.
+    async fn recorded_train_gate(
+        &self,
+        t: &Value,
+        tid: &str,
+    ) -> (Option<crate::train_gate::Standing>, u32) {
+        use crate::train_gate::{self as tg, Standing};
+        let relaunches = t
+            .pointer(&format!("/metadata/{}", tg::KEY_RELAUNCHES))
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32;
+        let Some(run_id) = t
+            .pointer(&format!("/metadata/{}", tg::KEY_RUN))
+            .and_then(Value::as_str)
+        else {
+            return (None, relaunches);
+        };
+        match self.get_job(run_id).await {
+            Ok(run) => (Some(tg::standing(&run)), relaunches),
+            Err(e) => {
+                log(format!(
+                    "train {}: could not re-read its judged gate-run {} this pass ({e}) — holding",
+                    id8(tid),
+                    id8(run_id)
+                ));
+                (Some(Standing::Pending), relaunches)
+            }
+        }
+    }
+
     /// THE TRAIN GATE, read or filed (design 128b5496). Returns the
     /// gate's standing (None when no gate-run is on the train yet) and
     /// the relaunch count, for `train_gate::combined_verdict`. Every
@@ -7029,16 +7064,26 @@ impl Conductor {
             // are a gate-run of the train branch on the cluster, filed
             // here while the PR is open and unjudged, and the verdict is
             // CI's and the gate's read together (`train_gate`).
+            // Once judged, the gate-run is RE-READ (never relaunched)
+            // and still combined: the judged arm used to recompute
+            // `forge_verdict` alone, and train #361 merged with its gate
+            // RED on the tick after its ci step recorded `failing`
+            // (2026-09-14, 6f18390b).
             let ci_judged = step_done(find_step(&t, "ci", "CI verdict"));
             let (gate, relaunches) = if ci_judged {
-                (None, 0)
+                self.recorded_train_gate(&t, &tid).await
             } else {
                 self.train_gate(&mut t, &tid, now).await
             };
             let ci_step = find_step(&t, "ci", "CI verdict");
             let forge_verdict = ci_verdict(info.get("statusCheckRollup"));
             let verdict = if step_done(ci_step) {
-                forge_verdict
+                crate::train_gate::judged_verdict(
+                    forge_verdict,
+                    gate.as_ref(),
+                    relaunches,
+                    self.cfg.gate_required,
+                )
             } else {
                 crate::train_gate::combined_verdict(
                     forge_verdict,
@@ -7196,7 +7241,23 @@ impl Conductor {
             }
 
             let pr_state = info.get("state").and_then(Value::as_str);
-            if self.cfg.auto_merge && verdict == "green" && pr_state == Some("OPEN") {
+            // Second lock on the same door: the ci step's RECORDED
+            // verdict. The live reading above is what merges; this is
+            // the frozen judgement, and a train judged failing or
+            // aborted never merges whatever the live reading says —
+            // the merge observed against the record, never assumed.
+            let judged_red = find_step(&t, "ci", "CI verdict")
+                .and_then(|s| s.get("metadata"))
+                .and_then(|m| m.get("result"))
+                .and_then(Value::as_str)
+                .is_some_and(|r| matches!(r, "failing" | "aborted"));
+            if judged_red && verdict == "green" && pr_state == Some("OPEN") {
+                log(format!(
+                    "train {}: live verdict green but the ci step is judged red — NOT merging (6f18390b)",
+                    id8(&tid)
+                ));
+            }
+            if self.cfg.auto_merge && verdict == "green" && !judged_red && pr_state == Some("OPEN") {
                 log(format!(
                     "CI green — merging {pr_url} (train protocol 27ab7680)"
                 ));

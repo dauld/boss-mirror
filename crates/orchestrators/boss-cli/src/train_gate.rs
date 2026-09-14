@@ -173,6 +173,27 @@ pub(crate) fn combined_verdict(
 
 /// PURE: does this standing call for filing the gate again? A refusal
 /// or a lost Job, while relaunches remain.
+/// PURE: the live verdict on a tick AFTER the ci step has been judged.
+/// The judged step is frozen; this is what the merge, the drift note,
+/// the red-train alert and auto-cancel read from then on. It is the
+/// same reading as the first one — the recorded gate-run and the forge
+/// together — never CI alone, because that is how train #361 merged
+/// with its gate RED (2026-09-14 17:10Z, backlog 6f18390b): the judged
+/// arm recomputed `forge_verdict` by itself and read green. Only a
+/// train with no gate-run recorded at all (before 128b5496, or a gate
+/// that was not required and never filed) keeps CI's word alone.
+pub(crate) fn judged_verdict(
+    ci: &'static str,
+    gate: Option<&Standing>,
+    relaunches: u32,
+    required: bool,
+) -> &'static str {
+    match gate {
+        None => ci,
+        Some(_) => combined_verdict(ci, gate, relaunches, required),
+    }
+}
+
 pub(crate) fn wants_relaunch(gate: &Standing, relaunches: u32) -> bool {
     matches!(gate, Standing::Refused(_) | Standing::Lost) && relaunches < MAX_RELAUNCHES
 }
@@ -234,6 +255,53 @@ pub(crate) fn describe(gate: Option<&Standing>, relaunches: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TRAIN #361, 2026-09-14 17:10Z (backlog 6f18390b). The ci step was
+    /// judged `failing` at 17:00 — CI green, gate RED — and ten minutes
+    /// later the conductor recomputed the live verdict for the judged
+    /// step from CI ALONE, read green, and merged. A judged verdict is
+    /// re-read the same way it was first read: the recorded gate-run
+    /// and the forge together. Only a train that never had a gate-run
+    /// at all keeps CI alone.
+    #[test]
+    fn a_judged_red_gate_holds_the_train_while_ci_is_green() {
+        assert_eq!(
+            judged_verdict("green", Some(&Standing::Failed), 0, true),
+            "failing",
+            "the gate's red is terminal; CI turning green does not merge the train"
+        );
+        assert_eq!(
+            judged_verdict("green", Some(&Standing::Green), 0, true),
+            "green"
+        );
+        // CI drift after the judgement is still seen (verdict_drift reads
+        // this): a green train whose CI later reds reads failing.
+        assert_eq!(
+            judged_verdict("failing", Some(&Standing::Green), 0, true),
+            "failing"
+        );
+        // A refusal past its relaunches stays aborted rather than
+        // becoming CI's green on the next pass.
+        assert_eq!(
+            judged_verdict(
+                "green",
+                Some(&Standing::Refused("disk floor".into())),
+                MAX_RELAUNCHES,
+                true
+            ),
+            "aborted"
+        );
+        // A gate-run the conductor cannot read this pass holds.
+        assert_eq!(
+            judged_verdict("green", Some(&Standing::Pending), 0, true),
+            "pending"
+        );
+        // No gate-run was ever recorded on the train (a train from before
+        // 128b5496, or a gate that was not required and never filed): CI
+        // alone, as before.
+        assert_eq!(judged_verdict("green", None, 0, true), "green");
+        assert_eq!(judged_verdict("failing", None, 0, false), "failing");
+    }
 
     fn run(verdict: Option<&str>, receipt: Option<Value>) -> Value {
         let mut md = json!({});
