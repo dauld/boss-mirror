@@ -4115,6 +4115,7 @@ pub(crate) fn red_train_alert(
     train: &Value,
     live_verdict: &str,
     rollup: Option<&Value>,
+    gate_fails: &[String],
 ) -> Option<RedTrainAlert> {
     if live_verdict != "failing" {
         return None;
@@ -4123,8 +4124,17 @@ pub(crate) fn red_train_alert(
     if step_done(find_step(train, "merged", "Merged into main")) {
         return None;
     }
-    let failing = failing_checks(rollup);
+    let mut failing = failing_checks(rollup);
     let refused = any_failing_check_refused(rollup);
+    // The OTHER half of the verdict (128b5496): a red train gate names
+    // its failing checks on its receipt. Train #361's alert said "check
+    // names unavailable" while the gate-run a1d0d144 held the name —
+    // CI was green, the gate was red, and only the rollup was read
+    // (071d8b23). A verdict must name what failed.
+    let gate_red = failing.is_empty() && !gate_fails.is_empty();
+    if gate_red {
+        failing.extend(gate_fails.iter().cloned());
+    }
     let id = train.get("id").and_then(Value::as_str).unwrap_or("");
     let named = if failing.is_empty() {
         "check names unavailable".to_string()
@@ -4136,6 +4146,8 @@ pub(crate) fn red_train_alert(
             "Red train {} — CI REFUSED (infrastructure, not the consist): {named}",
             id8(id)
         )
+    } else if gate_red {
+        format!("Red train {} — train gate failed: {named}", id8(id))
     } else {
         format!("Red train {} — CI failed: {named}", id8(id))
     };
@@ -4305,6 +4317,7 @@ mod red_train_alert_tests {
                 {"context": "CI / build-image", "conclusion": "SUCCESS"},
                 {"context": "CI / test", "conclusion": "FAILURE"}
             ]))),
+            &[],
         )
         .expect("a red train alerts");
         assert_eq!(r.failing, vec!["CI / test".to_string()]);
@@ -4316,15 +4329,53 @@ mod red_train_alert_tests {
         );
     }
 
+    /// Train #361, 2026-09-14 17:00Z: CI green, train gate RED, and the
+    /// alert (071d8b23) read "check names unavailable" because only the
+    /// forge rollup was consulted. The gate's receipt named the check.
+    #[test]
+    fn a_red_train_gate_announces_its_failing_check_when_ci_is_green() {
+        let green_ci = rollup(json!([
+            {"context": "CI / build-image", "conclusion": "SUCCESS"},
+            {"context": "CI / web", "conclusion": "SUCCESS"}
+        ]));
+        let fails = vec![
+            "test: the_real_run_refuses_while_the_host_declares_legacy_stack - FAILED".to_string(),
+        ];
+        let r = red_train_alert(&train(false), "failing", Some(&green_ci), &fails)
+            .expect("a red gate is a red train");
+        assert_eq!(r.failing, fails);
+        assert!(!r.refused);
+        assert!(
+            r.title.contains("train gate failed")
+                && r.title
+                    .contains("the_real_run_refuses_while_the_host_declares_legacy_stack"),
+            "the title names the gate and the check: {}",
+            r.title
+        );
+        // When the forge itself names a failing check, that name leads
+        // and the title stays CI's.
+        let both = red_train_alert(
+            &train(false),
+            "failing",
+            Some(&rollup(
+                json!([{"context": "CI / web", "conclusion": "FAILURE"}]),
+            )),
+            &fails,
+        )
+        .unwrap();
+        assert_eq!(both.failing, vec!["CI / web".to_string()]);
+        assert!(both.title.contains("CI failed"), "{}", both.title);
+    }
+
     #[test]
     fn a_green_or_pending_verdict_is_no_alert() {
-        assert!(red_train_alert(&train(false), "green", None).is_none());
-        assert!(red_train_alert(&train(false), "pending", None).is_none());
+        assert!(red_train_alert(&train(false), "green", None, &[]).is_none());
+        assert!(red_train_alert(&train(false), "pending", None, &[]).is_none());
     }
 
     #[test]
     fn a_merged_train_is_no_alert_whatever_the_verdict() {
-        assert!(red_train_alert(&train(true), "failing", None).is_none());
+        assert!(red_train_alert(&train(true), "failing", None, &[]).is_none());
     }
 
     #[test]
@@ -4349,6 +4400,7 @@ mod red_train_alert_tests {
             Some(&rollup(json!([
                 {"context": "CI / locomotive", "conclusion": "FAILURE", "description": "refused: disk floor"}
             ]))),
+            &[],
         )
         .expect("a refusal still alerts");
         assert!(r.refused);
@@ -4695,7 +4747,7 @@ mod red_verdict_log_tests {
             "steps": [{"metadata": {"spec_slug": "merged"}, "title": "Merged into main", "status": "pending"}]
         });
         let rollup = json!([{"context": "CI / test", "conclusion": "FAILURE"}]);
-        let alert = red_train_alert(&train, "failing", Some(&rollup))
+        let alert = red_train_alert(&train, "failing", Some(&rollup), &[])
             .expect("still an alert without a log");
         assert_eq!(alert.failing, vec!["CI / test".to_string()]);
         assert!(alert.logs.is_empty(), "no attachment, not an error");
@@ -4716,7 +4768,7 @@ mod red_verdict_log_tests {
         let rollup = json!([
             {"context": "CI / test", "conclusion": "FAILURE", "log_tail": "assertion failed at line 9"}
         ]);
-        let alert = red_train_alert(&train, "failing", Some(&rollup)).unwrap();
+        let alert = red_train_alert(&train, "failing", Some(&rollup), &[]).unwrap();
         assert_eq!(alert.logs.len(), 1);
         let body = red_train_alert_body("abcd1234-0000-0000-0000-000000000000", &alert);
         assert_eq!(body["metadata"]["failing_logs"][0]["check"], "CI / test");
@@ -6839,6 +6891,23 @@ impl Conductor {
     /// same packet body, manifest rendering and `kubectl create` that
     /// `boss gate` performs, without the operator-facing guards (the
     /// train branch is the conductor's own, freshly assembled on main).
+    /// What the train's gate-run says failed (`train_gate::fails`), for
+    /// the red-train alert. Empty when the train has no gate-run or it
+    /// cannot be read this pass — the alert then names what the forge
+    /// names, as before; a missing name is never an error here.
+    async fn train_gate_fails(&self, t: &Value) -> Vec<String> {
+        let Some(run_id) = t
+            .pointer(&format!("/metadata/{}", crate::train_gate::KEY_RUN))
+            .and_then(Value::as_str)
+        else {
+            return Vec::new();
+        };
+        match self.get_job(run_id).await {
+            Ok(run) => crate::train_gate::fails(&run),
+            Err(_) => Vec::new(),
+        }
+    }
+
     async fn launch_train_gate(&self, t: &Value, tid: &str) -> Result<String> {
         let train_ref = train_ref_of(t)
             .ok_or_else(|| anyhow!("the train carries no train_ref on its assemble step"))?;
@@ -7147,8 +7216,16 @@ impl Conductor {
             // rc=1 every pass — one red train froze all landings for ~8h
             // (2026-09-06). Any error here now logs and the pass continues,
             // so a broken alert is at worst a missing alert, never a wedge.
+            // The gate's failing checks are read only on a red pass —
+            // one extra GET when there is something to name.
+            let gate_fails = if verdict == "failing" {
+                self.train_gate_fails(&t).await
+            } else {
+                Vec::new()
+            };
             if info.get("state").and_then(Value::as_str) == Some("OPEN")
-                && let Some(alert) = red_train_alert(&t, verdict, info.get("statusCheckRollup"))
+                && let Some(alert) =
+                    red_train_alert(&t, verdict, info.get("statusCheckRollup"), &gate_fails)
             {
                 if self.cfg.dry {
                     log(format!(
