@@ -190,7 +190,9 @@ export function parseRoute(pathname: string): Route {
     if (p === '/design/experiments') return { kind: 'experiments' };
     if (p === '/design/feedback') return { kind: 'systemFeedback' };
     if (p === '/design/backlog') return { kind: 'systemBacklog' };
-    if (p === '/design/codebase') return { kind: 'systemCodebase' };
+    // /it/codebase is the row (9827c699); the old Design-tab path still
+    // answers so a bookmark or a packet link keeps working.
+    if (p === '/codebase' || p === '/design/codebase') return { kind: 'systemCodebase' };
     // 5. Estate. 6. KB. Plus the unlisted auth door.
     // 5a. The Crew Board — a sidebar row of its own, not an Operate tab.
     // David's decision on 04c5bbc0 (2026-09-11) overrode the proposal to

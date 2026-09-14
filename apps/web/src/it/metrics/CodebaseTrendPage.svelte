@@ -1,5 +1,5 @@
 <script lang="ts">
-  // /it/design/codebase — the codebase trend, read off the daily
+  // /it/codebase (and the older /it/design/codebase) — the codebase, read off the daily
   // `maintenance-codebase-metrics` packets (backlog 06048ade).
   //
   // David, 2026-09-11: "once we have code base analysis statistics we
@@ -30,6 +30,7 @@
     loadMetricsPackets,
     mergeLandings,
     newestMeasured,
+    statsStrip,
     perDay,
     reading,
     type MetricsPage,
@@ -56,6 +57,7 @@
 
   const ready = $derived(page.kind === 'ready' ? page.data : null);
   const newest = $derived(ready ? newestMeasured(ready.packets) : null);
+  const stats = $derived(newest ? statsStrip(newest.measured) : []);
   const landings = $derived(ready ? mergeLandings(ready.packets) : []);
   const days = $derived(perDay(landings));
   const read = $derived(newest && ready ? reading(newest, landings, READ_DAYS, ready.packets) : null);
@@ -108,9 +110,9 @@
 
 <div class="ct-root">
   <PageHeader
-    eyebrow="IT · Design · The codebase states its own trend"
-    title="Codebase trend"
-    subtitle="Are we getting simpler or more complex as we go? Read off the daily codebase-metrics packets — every landing on main with its adds and deletes, and the registry against the code branches it was meant to retire. Two ratios are the headline; everything else is context."
+    eyebrow="IT · Codebase · what the tree is, and which way it is going"
+    title="Codebase"
+    subtitle="The plain numbers first — crates, files, lines, lints, registry rows — off the newest daily codebase-metrics packet, then the trend: every landing on main with its adds and deletes, and the registry against the code branches it was meant to retire. Nothing here is typed; every figure names the head it was measured at."
   />
 
   {#if page.kind === 'failed'}
@@ -127,7 +129,18 @@
       The cadence has not measured yet; this page has nothing it can honestly draw.
     </p>
   {:else}
-    <div class="ct-section">00 — THE READING · computed from the numbers below</div>
+    <div class="ct-section">00 — THE CODEBASE NOW · at head {short(newest.measured.head)}, measured {newest.measured.at.slice(0, 16).replace('T', ' ')}Z</div>
+    <div class="ct-stats">
+      {#each stats as c (c.k)}
+        <div class="ct-stat">
+          <div class="k">{c.k}</div>
+          <div class="v">{c.v}</div>
+          <div class="s">{c.sub}</div>
+        </div>
+      {/each}
+    </div>
+
+    <div class="ct-section">01 — THE READING · computed from the numbers below</div>
     <div class="ct-findings">
       <div class="ct-finding {tone(read.volume.verdict)}">
         <div class="k">By volume · last {READ_DAYS} days of landings</div>
@@ -192,7 +205,7 @@
       </div>
     </div>
 
-    <div class="ct-section">01 — NET LINES PER DAY · adds minus deletes, every landing on main</div>
+    <div class="ct-section">02 — NET LINES PER DAY · adds minus deletes, every landing on main</div>
     <div class="ct-panel">
       <div class="ct-controls">
         {#each [14, 30, 90, null] as d (d ?? 'all')}
@@ -229,7 +242,7 @@
       </div>
     </div>
 
-    <div class="ct-section">02 — PER LANDING · newest {trains.length} of {n(landings.length)}</div>
+    <div class="ct-section">03 — PER LANDING · newest {trains.length} of {n(landings.length)}</div>
     <div class="ct-tbl">
       <table class="ct-table">
         <thead>
@@ -262,7 +275,7 @@
       </table>
     </div>
 
-    <div class="ct-section">03 — CONTEXT · the rest of the row, at head {short(newest.measured.head)}</div>
+    <div class="ct-section">04 — CONTEXT · the rest of the row, at head {short(newest.measured.head)}</div>
     <div class="ct-context">
       {#if newest.measured.totals}
         {@const t = newest.measured.totals}
@@ -353,6 +366,13 @@
     display: flex; align-items: center; gap: 12px;
   }
   .ct-section::after { content: ''; flex: 1; border-top: 1px solid var(--hairline, #2a3138); }
+  /* THE CODEBASE NOW — six plain cards, the number large, the breakdown
+     small; the reading's verdicts keep their tones below. */
+  .ct-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 0.6rem; margin-bottom: 1rem; }
+  .ct-stat { border: 1px solid var(--hairline, #2a3138); border-radius: 6px; padding: 0.6rem 0.75rem; background: var(--ink-raised, #171c24); }
+  .ct-stat .k { font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted, #8a939c); }
+  .ct-stat .v { font-size: 1.5rem; font-variant-numeric: tabular-nums; margin: 0.1rem 0; }
+  .ct-stat .s { font-size: 0.78rem; color: var(--text-muted, #8a939c); }
   .ct-quiet { color: var(--static, #7a838c); font-size: 13px; }
   .ct-fail {
     color: var(--warn, #d9a441); border: 1px solid var(--warn, #d9a441);

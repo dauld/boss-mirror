@@ -96,26 +96,17 @@ fn metadata_containment_from_query(raw: Option<&str>) -> Result<Option<serde_jso
 
 /// Validate `metadata_has=<key>` as a plain identifier, or say why not.
 ///
-/// `metadata ? $n` reads TOP-LEVEL keys only. A dotted path would be
-/// bound as one literal key, match nothing, and answer `total: 0`
-/// with a straight face — the wrong-target shape the doors section
-/// names. So the key is letters, digits and underscore, not starting
-/// with a digit, and everything else is a 400 that names the param.
+/// The rule and its sentence are `crate::metadata_key` — the ONE copy
+/// `boss job list --has` refuses by as well (backlog b46e9d8e,
+/// 2026-09-14). This door adds only the name of its param, so the 400
+/// names what to fix.
 fn metadata_key_from_query(raw: Option<&str>) -> Result<Option<String>, String> {
     let Some(key) = raw else {
         return Ok(None);
     };
-    let mut chars = key.chars();
-    let plain = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
-    if !plain {
-        return Err(format!(
-            "metadata_has must be a top-level metadata key — letters, digits and \
-             underscore, not starting with a digit — got {key:?}; dotted paths \
-             are not walked"
-        ));
-    }
-    Ok(Some(key.to_string()))
+    crate::metadata_key::check(key)
+        .map(|k| Some(k.to_string()))
+        .map_err(|why| format!("metadata_has {why}"))
 }
 
 pub(super) async fn list_jobs<R: JobsRepository + 'static, B: EventBus + 'static>(

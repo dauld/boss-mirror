@@ -12,6 +12,7 @@ import {
   reading,
   recentWindow,
   registryRatio,
+  statsStrip,
   type Landing,
   type MetricsPacket,
 } from './trend';
@@ -137,6 +138,36 @@ describe('newestMeasured / mergeLandings', () => {
     const dup = parseMetricsPackets([packet('dup', {}, [L[1]!, L[2]!])]).packets[0]!;
     const all = mergeLandings([older, newer, dup]);
     expect(all.map((l) => l.sha)).toEqual(['c3', 'c2', 'c1']);
+  });
+});
+
+// Feedback 9827c699: the stats a person came for, first, off the newest
+// row — and never a number the row does not carry.
+describe('statsStrip', () => {
+  test('the strip is the plain numbers, tiers and registries broken down', () => {
+    const page = parseMetricsPackets({
+      data: [{ id: 'm1', title: 't', metadata: { measured: measured({ counts: { crates: 54, crates_by_tier: { core: 28, modules: 18, orchestrators: 6, tenants: 2 }, lints: 77, migrations: 136, rust_files: 887, web_files: 429 } }), landings: [] } }],
+      total: 1,
+    });
+    const cards = statsStrip(page.packets[0]!.measured);
+    const byKey = new Map(cards.map((c) => [c.k, c]));
+    expect(byKey.get('crates')).toEqual({ k: 'crates', v: '54', sub: '28 core · 18 modules · 6 orchestrators · 2 tenants' });
+    expect(byKey.get('source files')).toEqual({ k: 'source files', v: '1,316', sub: '887 rust · 429 web' });
+    expect(byKey.get('lines')?.v).toBe('546,281');
+    expect(byKey.get('lines')?.sub).toBe('252,783 prod · 172,719 test (68% of prod)');
+    expect(byKey.get('gate lints · migrations')?.v).toBe('77 · 136');
+    expect(byKey.get('registry rows')?.v).toBe('246');
+    expect(byKey.get('registry rows')?.sub).toContain('73 tenant workflows');
+    expect(byKey.get('code branches on kind')?.v).toBe('3');
+  });
+  test('a row without totals or registry yields no card for them, never a zero', () => {
+    const page = parseMetricsPackets({
+      data: [{ id: 'm1', title: 't', metadata: { measured: measured({ totals: null, registry: null, counts: { crates: 1 } }), landings: [] } }],
+      total: 1,
+    });
+    const cards = statsStrip(page.packets[0]!.measured);
+    expect(cards.map((c) => c.k)).toEqual(['crates']);
+    expect(cards[0]?.sub).toBe('by tier: not in this row');
   });
 });
 

@@ -252,7 +252,8 @@
       <ItTabs group="design" active="/it/design/backlog" />
       <BacklogBoardPage />
     {:else if route.kind === 'systemCodebase'}
-      <ItTabs group="design" active="/it/design/codebase" />
+      <!-- No ItTabs: the Codebase is its own sidebar row since feedback
+           9827c699 (David, 2026-09-14), not a tab on Design. -->
       <CodebaseTrendPage />
     {:else if route.kind === 'authAdmin'}
       <AuthAdminPage />

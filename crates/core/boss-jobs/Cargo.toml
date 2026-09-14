@@ -183,3 +183,23 @@ required-features = ["postgres"]
 [[test]]
 name = "workflow_registry_events_pg"
 required-features = ["postgres"]
+
+[[test]]
+name = "a_completion_names_its_actor_pg"
+required-features = ["postgres"]
+
+[[test]]
+name = "a_day_of_jobs_lists_newest_first_pg"
+required-features = ["postgres"]
+
+[[test]]
+name = "a_node_declares_its_roles_pg"
+required-features = ["postgres"]
+
+[[test]]
+name = "job_edges_pg"
+required-features = ["postgres"]
+
+[[test]]
+name = "station_flow_pg"
+required-features = ["postgres"]

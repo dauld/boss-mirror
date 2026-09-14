@@ -28,7 +28,15 @@ const SCRIPT: &str = "infra/dev/boss";
 /// The system of record; the shim's default when the caller sets none.
 /// The same literal the conductor's unit and the maintenance units
 /// carry — the packet excludes changing it.
-const SOR: &str = "http://10.20.0.34:7900";
+/// The one spelling, read from infra/dev/sor-url — the file boss-api
+/// reads too. Read here rather than typed so the test cannot drift
+/// from it.
+fn sor() -> String {
+    std::fs::read_to_string(repo_root().join("infra/dev/sor-url"))
+        .expect("infra/dev/sor-url")
+        .trim()
+        .to_string()
+}
 
 struct Fixture {
     /// Stands in for /scratch: the shim looks under `<root>/target`.
@@ -97,25 +105,72 @@ fn the_shim_is_in_the_tree_and_executable() {
     );
 }
 
-/// The pod copy's order: release first, then debug. Both built, release
-/// answers; only debug built, debug answers.
+/// THE NEWER BUILD ANSWERS. The pod copy took release over debug in a
+/// fixed order, so a stale release binary would beat a fresh debug one
+/// forever — the mechanism behind the wrong `boss --version` the
+/// built_from car chased (2026-09-14). Only debug built: debug answers.
+/// Both built, release older: debug answers. Release rebuilt newer:
+/// release answers.
 #[test]
-fn release_answers_over_debug_and_debug_answers_alone() {
-    let f = Fixture::new("order");
+fn the_newer_build_answers_whatever_its_profile() {
+    let f = Fixture::new("newest");
+    f.build("release");
+    let old = f.root.join("target/release/boss");
+    // Age the release build by an hour so mtime order is unambiguous.
+    let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(&old)
+        .unwrap()
+        .set_modified(hour_ago)
+        .unwrap();
     f.build("debug");
     let (rc, out) = f.run(&["--version"], &[]);
     assert_eq!(rc, 0, "the shim failed: {out}");
     assert!(
         out.contains("profile=debug"),
-        "with only a debug build, debug answers: {out}"
+        "a fresh debug build beats a stale release one: {out}"
     );
 
+    // Rebuild release now: it is the newer of the two and answers.
     f.build("release");
+    let now_plus = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+    std::fs::File::options()
+        .write(true)
+        .open(&old)
+        .unwrap()
+        .set_modified(now_plus)
+        .unwrap();
     let (rc, out) = f.run(&["--version"], &[]);
     assert_eq!(rc, 0, "the shim failed: {out}");
     assert!(
         out.contains("profile=release"),
-        "with both built, release answers: {out}"
+        "rebuilt newer, release answers: {out}"
+    );
+}
+
+/// A shim copied away from its `sor-url` has no default to invent.
+#[test]
+fn without_sor_url_beside_it_the_shim_refuses_rather_than_guess() {
+    let f = Fixture::new("no-sor-url");
+    f.build("debug");
+    let copy_dir = scratch_dir("boss-shim-copy");
+    let copy = copy_dir.join("boss");
+    write_exec(
+        &copy,
+        &std::fs::read_to_string(repo_root().join(SCRIPT)).unwrap(),
+    );
+    let out = Command::new(&copy)
+        .arg("--version")
+        .env("BOSS_SHIM_TARGET_ROOT", &f.root)
+        .env_remove("BOSS_JOBS_URL")
+        .output()
+        .expect("run the copied shim");
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("sor-url") && err.contains("BOSS_JOBS_URL"),
+        "the refusal names the file and the override: {err}"
     );
 }
 
@@ -145,7 +200,7 @@ fn the_jobs_url_defaults_to_the_sor_only_when_unset() {
     let (rc, out) = f.run(&["orient"], &[]);
     assert_eq!(rc, 0, "the shim failed: {out}");
     assert!(
-        out.contains(&format!("jobs_url={SOR}")),
+        out.contains(&format!("jobs_url={}", sor())),
         "unset, the jobs URL defaults to the system of record: {out}"
     );
 

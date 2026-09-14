@@ -85,6 +85,9 @@ export type Measured = Readonly<{
   backfill: boolean;
   since: string | null;
   counts: Readonly<Record<string, number>>;
+  /** `counts.crates_by_tier` — the four tiers of CLAUDE.md §Structure,
+   *  nested inside `counts` in the row; empty when the row predates it. */
+  crates_by_tier: Readonly<Record<string, number>>;
   window: Window;
   totals: Totals | null;
   registry: Registry | null;
@@ -210,6 +213,7 @@ function parseMeasured(v: unknown): Measured | null {
     backfill: r.backfill === true,
     since: str(r.since),
     counts: numMap(r.counts),
+    crates_by_tier: numMap(rec(r.counts)?.crates_by_tier),
     window: parseWindow(r.window),
     totals: parseTotals(r.totals),
     registry: parseRegistry(r.registry),
@@ -243,6 +247,70 @@ export function loadMetricsPackets(limit: number): Promise<Exclude<Remote<Metric
 // ---------------------------------------------------------------------
 // Derivations — pure functions of the fields above
 // ---------------------------------------------------------------------
+
+/** One card on the "codebase now" strip: a label, the number as text,
+ *  and the one-line breakdown under it. */
+export type StatCard = Readonly<{ k: string; v: string; sub: string }>;
+
+/** THE CODEBASE NOW — the plain numbers off the newest row, before any
+ *  reading of them. Feedback 9827c699 (David, 2026-09-14): "add a page
+ *  to the IT department showing the Code base stats" — the trend page
+ *  existed as a Design tab and opened on the delete:add verdict, so the
+ *  stats a person wanted were three sections down and one tab in. This
+ *  strip is those stats; the reading follows it. Pure over the row so
+ *  the page cannot invent a number the row does not carry: a missing
+ *  totals/registry block yields no card rather than a zero. */
+export function statsStrip(m: Measured): ReadonlyArray<StatCard> {
+  const n = (v: number): string => v.toLocaleString('en-US');
+  const cards: StatCard[] = [];
+  const c = m.counts;
+  if (typeof c.crates === 'number') {
+    const tiers = Object.entries(m.crates_by_tier)
+      .sort(([, a], [, b]) => b - a)
+      .map(([k, v]) => `${v} ${k}`)
+      .join(' · ');
+    cards.push({ k: 'crates', v: n(c.crates), sub: tiers || 'by tier: not in this row' });
+  }
+  if (typeof c.rust_files === 'number' || typeof c.web_files === 'number') {
+    cards.push({
+      k: 'source files',
+      v: n((c.rust_files ?? 0) + (c.web_files ?? 0)),
+      sub: `${n(c.rust_files ?? 0)} rust · ${n(c.web_files ?? 0)} web`,
+    });
+  }
+  if (m.totals) {
+    const t = m.totals;
+    cards.push({
+      k: 'lines',
+      v: n(t.lines),
+      sub: `${n(t.prod_lines)} prod · ${n(t.test_lines)} test${t.test_prod_pct === null ? '' : ` (${t.test_prod_pct}% of prod)`}`,
+    });
+  }
+  if (typeof c.lints === 'number' || typeof c.migrations === 'number') {
+    cards.push({
+      k: 'gate lints · migrations',
+      v: `${n(c.lints ?? 0)} · ${n(c.migrations ?? 0)}`,
+      sub: 'checks every car passes · schema files, append-only',
+    });
+  }
+  if (m.registry) {
+    const r = m.registry;
+    const kinds = Object.entries(r.by_registry)
+      .sort(([, a], [, b]) => b - a)
+      .map(([k, v]) => `${v} ${k.replace(/_/g, ' ')}`)
+      .join(' · ');
+    cards.push({ k: 'registry rows', v: n(r.rows), sub: kinds || 'by registry: not in this row' });
+    cards.push({
+      k: 'code branches on kind',
+      v: r.code_branches_on_kind === null ? 'not counted' : n(r.code_branches_on_kind),
+      sub:
+        r.code_branches_on_kind === null
+          ? r.code_branches_not_counted_why ?? 'the machine had no counter'
+          : 'match arms a registry row should have replaced (CLAUDE.md §9)',
+    });
+  }
+  return cards;
+}
 
 /** The packet measured last — by `measured.at`, not by API order. */
 export function newestMeasured(packets: ReadonlyArray<MetricsPacket>): MetricsPacket | null {

@@ -115,9 +115,8 @@ export const SECTION_FOR_ROUTE: Readonly<Record<Route['kind'], string>> = {
   incidents: 'system-incidents',
   systemKb: 'system-kb',
   systemDesign: 'system-design',
-  // The codebase trend is a tab on Design, the way the yards are tabs
-  // on Operate: it highlights the family's row, not one of its own.
-  systemCodebase: 'system-design',
+  // The codebase has its own row since 2026-09-14 (feedback 9827c699).
+  systemCodebase: 'system-codebase',
   experiments: 'system-experiments',
   policy: 'policy',
   authAdmin: 'auth-admin',

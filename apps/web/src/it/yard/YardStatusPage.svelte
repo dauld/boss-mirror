@@ -148,6 +148,37 @@
       </table>
     {/if}
 
+    <!-- 01b — HELD CARS: standing on the dock, unable to board, with the
+         reason written on the review step. The server has stated this
+         lane since #367 and the parser has read it; the page drew only
+         the held GREENS below, so a car held out for two reds — the one
+         state an operator must act on — showed on the yard map alone
+         (b6522ff9). Always drawn, empty state included: this lane going
+         quiet is exactly how it went unread. -->
+    <div class="ys-section">01b — HELD CARS</div>
+    {#if s.held_cars.length === 0}
+      <p class="ys-quiet">none held</p>
+    {:else}
+      <p class="ys-quiet">
+        Parked, gated green, and held out — released by clearing the hold, not by another gate.
+      </p>
+      <table class="ys-table">
+        <thead>
+          <tr><th>branch</th><th>reason</th><th>reds</th><th>since</th></tr>
+        </thead>
+        <tbody>
+          {#each s.held_cars as h (h.id)}
+            <tr>
+              <td class="ys-mono">{h.branch ?? '—'}</td>
+              <td>{h.reason}</td>
+              <td class="ys-mono ys-reds">{redsCell(h.red_trains)}</td>
+              <td class="ys-mono ys-dim">{h.parked_since}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
+
     <!-- 02 — RECENT: the last few trains and how they ended -->
     <div class="ys-section">02 — RECENT TRAINS</div>
     {#if s.recent.length === 0}

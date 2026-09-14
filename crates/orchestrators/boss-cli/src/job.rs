@@ -28,7 +28,7 @@
 //! that has corrupted the system of record before. Not wrapped;
 //! wrapping it would make it convenient.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 
 /// A full job id as the API expects it: 36 chars, dashed. Anything
@@ -563,24 +563,13 @@ pub(crate) fn where_object(wheres: &[String]) -> Result<Value> {
     Ok(Value::Object(doc))
 }
 
-/// Validate a `--has` key the way the server validates `metadata_has`
-/// (boss-jobs `http/jobs.rs`, `metadata_key_from_query`): a plain
-/// identifier, because `metadata ? $n` reads top-level keys only and
-/// a dotted path would match nothing and answer `total: 0` with a
-/// straight face. Refused HERE, before the round trip, with the same
-/// rule sentence the 400 would carry.
+/// Validate a `--has` key by the server's own rule for `metadata_has`
+/// — `boss_jobs::metadata_key`, the ONE definition, not a copy of it
+/// (a copy is what lived here until 2026-09-14; backlog b46e9d8e).
+/// Refused HERE, before the round trip, with the sentence the 400 would
+/// carry; the only word this door adds is the name of its own flag.
 fn has_key(key: &str) -> Result<&str> {
-    let mut chars = key.chars();
-    let plain = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
-    if !plain {
-        bail!(
-            "--has must be a top-level metadata key — letters, digits and \
-             underscore, not starting with a digit — got {key:?}; dotted paths \
-             are not walked"
-        );
-    }
-    Ok(key)
+    boss_jobs::metadata_key::check(key).map_err(|why| anyhow!("--has {why}"))
 }
 
 /// The query `boss job list` sends. Pure, so what reaches the wire is
@@ -1096,22 +1085,30 @@ mod tests {
     fn has_is_one_identifier_validated_like_the_server() {
         let path = list_query(None, "open", 50, &[], &["proof_probe".to_string()]).unwrap();
         assert!(path.ends_with("&metadata_has=proof_probe"), "{path}");
-        // The server's own rule sentence (boss-jobs http/jobs.rs
-        // `metadata_key_from_query`), so the terminal refuses BEFORE the
-        // round trip and says the same thing the 400 would.
+        // The server's own rule sentence — read from the ONE definition
+        // both doors call (`boss_jobs::metadata_key`), not retyped here,
+        // so the terminal refuses BEFORE the round trip and says the
+        // same thing the 400 would. Until 2026-09-14 this string and the
+        // check behind it were a second copy (backlog b46e9d8e).
         for bad in ["steps.0", "9lives", "a-b", ""] {
             let e = list_query(None, "open", 50, &[], &[bad.to_string()]).unwrap_err();
+            let said = e.to_string();
             assert!(
-                e.to_string().contains(
-                    "must be a top-level metadata key — letters, digits and \
-                     underscore, not starting with a digit"
-                ),
-                "{bad:?}: {e}"
+                said.starts_with("--has must be"),
+                "the terminal names ITS parameter in front of the rule: {bad:?}: {said}"
             );
             assert!(
-                e.to_string().contains("dotted paths are not walked"),
-                "{bad:?}: {e}"
+                said.contains(boss_jobs::metadata_key::RULE),
+                "{bad:?}: {said}"
             );
+            assert!(
+                said.contains("dotted paths are not walked"),
+                "{bad:?}: {said}"
+            );
+            // The whole tail after the parameter's name is the shared
+            // check's own word — byte for byte what the 400 carries.
+            let server = boss_jobs::metadata_key::check(bad).unwrap_err();
+            assert_eq!(said, format!("--has {server}"), "{bad:?}");
         }
         // The API takes ONE `metadata_has`; two is refused with a sentence
         // rather than one of them silently dropped.

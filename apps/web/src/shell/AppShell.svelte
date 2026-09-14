@@ -164,6 +164,7 @@
         ROUTE_CATALOG.workflows,
         ROUTE_CATALOG['system-design'],
         ROUTE_CATALOG['system-crew'],
+        ROUTE_CATALOG['system-codebase'],
         ROUTE_CATALOG['system-estate'],
         ROUTE_CATALOG['system-kb'],
       ],

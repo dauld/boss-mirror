@@ -61,3 +61,7 @@ required-features = ["postgres"]
 [[test]]
 name = "subject_linkage_pg"
 required-features = ["postgres"]
+
+[[test]]
+name = "stages_pg"
+required-features = ["postgres"]

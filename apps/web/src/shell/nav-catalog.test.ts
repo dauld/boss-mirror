@@ -105,6 +105,9 @@ describe('nav catalog — app assignment', () => {
     // The hardware registry page — declared beside observed, plus the
     // dev-workspace ssh door (59ef456a).
     'system-estate',
+    // The codebase — the tree's own numbers and trend; a row since
+    // David's feedback 9827c699 (2026-09-14), formerly a Design tab.
+    'system-codebase',
   ];
 
   it('the IT app contains the System Model set plus what we added deliberately', () => {
@@ -147,6 +150,7 @@ describe('nav catalog — app assignment', () => {
       'workflows',        // Registry
       'system-design',    // Design
       'system-crew',      // Crew Board — see below
+      'system-codebase',  // Codebase — see below
       'system-estate',    // Estate
       'system-kb',        // Knowledge Base
     ];
@@ -166,8 +170,13 @@ describe('nav catalog — app assignment', () => {
     // count still exists and still bites — the consolidation's point was
     // that a family belongs behind one row — so a new row needs the same
     // kind of answer, not an edit to this line.
+    //
+    // The eighth is the Codebase, and it has one: David's feedback
+    // 9827c699 (2026-09-14), "Let's add a page to the IT department
+    // showing the Code base stats", filed while the trend was a tab on
+    // Design. The tab is gone; the row is the page.
     const rowRefs = (groups.match(/ROUTE_CATALOG(\.\w[\w-]*|\['[^']+'\])/g) ?? []).length;
-    expect(rowRefs, 'the IT sidebar must hold exactly seven rows').toBe(7);
+    expect(rowRefs, 'the IT sidebar must hold exactly eight rows').toBe(8);
 
     const tabs = readFileSync(
       new URL('../it/ItTabs.svelte', import.meta.url),

@@ -19,14 +19,35 @@
 # operator's checkout. The pod copy is the spec; behaviour is
 # unchanged.
 #
-# Which binary wins: target/release/boss, then target/debug/boss —
-# the pod copy's fixed order, not the newer of the two. The root
-# (/scratch on the pod) is overridable so the test never touches it:
+# Which binary wins: THE NEWER of target/release/boss and
+# target/debug/boss, by mtime. The pod copy took release first in a
+# fixed order, which is exactly the mechanism by which a stale binary
+# answered `boss --version` wrong (the built_from car, 2026-09-14): a
+# release build from days ago would beat this morning's debug build
+# forever. The pod builds debug; a release build is the exception and
+# wins only while it is the fresher one. The root (/scratch on the pod)
+# is overridable so the test never touches it:
 #   BOSS_SHIM_TARGET_ROOT=/some/dir boss --version
-export BOSS_JOBS_URL="${BOSS_JOBS_URL:-http://10.20.0.34:7900}"
+#
+# The system of record has ONE spelling, in `sor-url` beside this
+# script (boss-api reads the same file); readlink -f because the pod
+# reaches this through a symlink. A caller's BOSS_JOBS_URL is kept.
+here="$(dirname "$(readlink -f "$0")")"
+if [ -z "${BOSS_JOBS_URL:-}" ]; then
+  if [ -s "$here/sor-url" ]; then
+    BOSS_JOBS_URL="$(tr -d '[:space:]' < "$here/sor-url")"
+  else
+    echo "boss: BOSS_JOBS_URL is unset and $here/sor-url names no system of record — a copy of this shim without its sor-url has no default" >&2
+    exit 2
+  fi
+fi
+export BOSS_JOBS_URL
 target="${BOSS_SHIM_TARGET_ROOT:-/scratch}/target"
+newest=""
 for b in "$target/release/boss" "$target/debug/boss"; do
-  [ -x "$b" ] && exec "$b" "$@"
+  [ -x "$b" ] || continue
+  if [ -z "$newest" ] || [ "$b" -nt "$newest" ]; then newest="$b"; fi
 done
+[ -n "$newest" ] && exec "$newest" "$@"
 echo "boss: no built binary under $target — run: cargo build -p boss-cli" >&2
 exit 127

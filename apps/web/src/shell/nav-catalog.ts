@@ -80,6 +80,10 @@ export type UngatedSurfaceId =
   // adding a permKey would mean widening the RouteName vocabulary in
   // libs/web-kit and hand-editing four role entries in ROUTE_ACCESS.
   | 'system-crew'
+  // 'system-codebase' (the Codebase row): the department's own numbers,
+  // readable by any operator — same shape as the Crew Board, and for
+  // the same reason (feedback 9827c699, 2026-09-14).
+  | 'system-codebase'
   | 'system-fleet'
   | 'system-backlog'
   | 'hr'
@@ -145,6 +149,12 @@ export const ROUTE_CATALOG: Readonly<Record<RouteName | UngatedSurfaceId, NavIte
   // ROW, not a tab: David's decision on backlog 04c5bbc0 (2026-09-11)
   // reversed the proposal to fold it into an existing IT family.
   'system-crew':             { id: 'system-crew',             label: 'Crew Board',          path: '/it/crew',         app: 'it' },
+  // The Codebase — a SIDEBAR ROW, not the Design tab it was: David's
+  // feedback 9827c699 (2026-09-14) asked for "a page to the IT department
+  // showing the Code base stats" while the trend sat one tab in. permKey-
+  // less like the Crew Board: the department's own numbers, readable by
+  // any operator.
+  'system-codebase':         { id: 'system-codebase',         label: 'Codebase',            path: '/it/codebase',     app: 'it' },
   'system-estate':           { id: 'system-estate',           label: 'Estate',              path: '/it/estate',       permKey: 'system-estate',           app: 'it' },
   'system-kb':               { id: 'system-kb',               label: 'Knowledge Base',      path: '/it/kb',           permKey: 'system-kb',               app: 'it' },
   // Unlisted door: reachable, never a sidebar row.

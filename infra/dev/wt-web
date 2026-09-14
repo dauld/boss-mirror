@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# wt-web — prepare a WORKTREE for web checks by linking the operator
+# checkout's node_modules into it, then run the given command there
+# (backlog ef4394e1, 2026-09-14). The web half of wt-cargo.
+#
+# Why: a worktree has no node_modules, so every web check a builder
+# ran there (svelte-check, the playwright mocked specs, anything that
+# imports zod) failed on the environment before it could fail on the
+# change. On 2026-09-14 three builders each re-derived a different
+# workaround — one symlinked the operator's three dirs, one ran
+# bun install --ignore-scripts, one gave up on svelte-check. wt-cargo
+# closed the same gap for cargo with one command; this is that door
+# for the web. Nothing is installed: the links point at packages the
+# operator's checkout already has, at the three places bun resolves
+# them (./node_modules, apps/web/node_modules, libs/web-kit/node_modules).
+#
+# Usage: wt-web <command…>          (run from inside the worktree)
+#        wt-web bun test src/it/yard/
+#        wt-web svelte-check --tsconfig apps/web/tsconfig.json
+#        wt-web                     (prepare only; print what it linked)
+# The source checkout is /work/boss (the pod's); WT_WEB_SOURCE overrides
+# it so the pin (crates/core/boss-testing/tests/wt_web_sh.rs) never
+# reads the operator's tree. A source dir that does not exist is
+# skipped, by name. A destination that is already the right link is
+# left as it is; a link pointing elsewhere is re-pointed; a real
+# directory (a bun install someone ran) is left alone, by name.
+set -euo pipefail
+root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "wt-web: not in a git worktree" >&2; exit 2; }
+source=${WT_WEB_SOURCE:-/work/boss}
+
+# With a command to run, the report stays out of its stdout (so
+# `wt-web bun test … | grep` sees only bun); with none, the report IS
+# the output.
+if [ $# -eq 0 ]; then report_fd=1; else report_fd=2; fi
+say() { echo "wt-web: $*" >&"$report_fd"; }
+
+for rel in node_modules apps/web/node_modules libs/web-kit/node_modules; do
+    src=$source/$rel
+    dst=$root/$rel
+    if [ ! -d "$src" ]; then
+        say "no $src — skipping $rel"
+        continue
+    fi
+    if [ -L "$dst" ]; then
+        if [ "$(readlink "$dst")" = "$src" ]; then
+            say "$rel already -> $src"
+        else
+            say "$rel pointed at $(readlink "$dst"); re-pointed -> $src"
+            ln -sfn "$src" "$dst"
+        fi
+        continue
+    fi
+    if [ -e "$dst" ]; then
+        say "$dst exists and is not a symlink — left alone"
+        continue
+    fi
+    mkdir -p "$(dirname "$dst")"
+    ln -s "$src" "$dst"
+    say "linked $rel -> $src"
+done
+
+[ $# -eq 0 ] || exec "$@"

@@ -9,7 +9,12 @@ target
 # context).
 
 # Node
-node_modules/
+# No trailing slash: with one the pattern matches directories only, and
+# infra/dev/wt-web links a worktree's node_modules to the operator's as
+# SYMLINKS, which are not directories to the ignore rules — so the
+# pattern that hid a bun install left three untracked paths in every
+# builder worktree (backlog ef4394e1, 2026-09-14). Pinned in wt_web_sh.rs.
+node_modules
 dist/
 .next/
 *.tsbuildinfo
