@@ -28,7 +28,7 @@
 import { formatDate } from '@boss/web-kit/ui/date';
 import type { ClusterMachine, RunnerMachine } from './yard-machines';
 export type { ClusterMachine, RunnerMachine } from './yard-machines';
-import { approach, failedChecks, stampAt, troubleLabel, type CarRow, type JobLite, type TrainRow, type WithSteps, type YardState } from './yard';
+import { approach, failedChecks, redTrainsPhrase, stampAt, troubleLabel, type CarRow, type JobLite, type TrainRow, type WithSteps, type YardState } from './yard';
 import {
   inspectionShed,
   runAt,
@@ -393,11 +393,13 @@ export const GATE_USUAL_MINUTES = 12;
  *  clean car, so the clean sentence is unchanged (2bb0d014, 2026-09-14).
  *  Read after train #361: a car one red train had released stood on the
  *  dock indistinguishable from a clean one, and the first the operator
- *  heard was the hold at the second. "Behind it" because the reds are
- *  consists it rode, not verdicts on it — which car turned a consist red
- *  is exactly what nobody knows yet. */
-const redTrainsSuffix = (n: number | undefined): string =>
-  (n ?? 0) <= 0 ? '' : ` · ${n} red train${n === 1 ? '' : 's'} behind it`;
+ *  heard was the hold at the second. The words are the card's
+ *  (`redTrainsPhrase`, d6e53a35), so My Day and the floor cannot name
+ *  one count two ways; only the ` · ` join is the wagon's own. */
+const redTrainsSuffix = (n: number | undefined): string => {
+  const phrase = redTrainsPhrase(n);
+  return phrase ? ` · ${phrase}` : '';
+};
 
 /** An operator's hold marker often opens with its own "held:" — the
  *  wagon already says held, so the reason is what follows it. */

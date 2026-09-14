@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# boss — the BOSS CLI on the dev pod's PATH.
+#
+# The pod image ships no `boss`; the binary is a build artifact in
+# CARGO_TARGET_DIR (/scratch/target), so a bare shell — and David's
+# `!` prompt in a session — could not find it (2026-09-07 23:05 UTC,
+# a train cancel that mattered). This shim execs the built binary and
+# defaults BOSS_JOBS_URL to the system of record, the way the
+# conductor's unit does.
+#
+# Why it lives HERE and not only on the pod (backlog f199c188,
+# 2026-09-14): it was pod-local text under /work/tools/bin —
+# unversioned, untested, absent from any fresh pod or builder pod —
+# and it decides WHICH binary answers every `boss` verb; a stale one
+# answered `boss --version` wrong through it once already. Same shape
+# as wt-cargo (34b29b52) and boss-api (0d8d7a90): the file is
+# versioned and pinned (crates/core/boss-testing/tests/boss_shim_sh.rs),
+# and the pod's /work/tools/bin/boss is a symlink to this file in the
+# operator's checkout. The pod copy is the spec; behaviour is
+# unchanged.
+#
+# Which binary wins: target/release/boss, then target/debug/boss —
+# the pod copy's fixed order, not the newer of the two. The root
+# (/scratch on the pod) is overridable so the test never touches it:
+#   BOSS_SHIM_TARGET_ROOT=/some/dir boss --version
+export BOSS_JOBS_URL="${BOSS_JOBS_URL:-http://10.20.0.34:7900}"
+target="${BOSS_SHIM_TARGET_ROOT:-/scratch}/target"
+for b in "$target/release/boss" "$target/debug/boss"; do
+  [ -x "$b" ] && exec "$b" "$@"
+done
+echo "boss: no built binary under $target — run: cargo build -p boss-cli" >&2
+exit 127

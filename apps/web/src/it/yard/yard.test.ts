@@ -224,6 +224,17 @@ describe('the dock from the station envelope', () => {
     expect(carRow(dockJob('c8', { metadata: {} })).branch).toBe('');
   });
 
+  // d6e53a35 (2026-09-14): a projection that is not a Job — the My Day
+  // assignment row — carries the conductor's count as a FIELD, the job
+  // carries it in metadata; the constructor reads either, through the
+  // same guard, so the two lenses cannot disagree on one packet.
+  test('a projection\'s red_trains field reads like the job\'s metadata stamp', () => {
+    expect(carRow({ id: 'p1', kind: 'ship-a-change', title: 'p', red_trains: 2 }).redTrains).toBe(2);
+    expect(carRow({ id: 'p1', kind: 'ship-a-change', title: 'p', red_trains: 0 }).redTrains).toBe(0);
+    expect(carRow({ id: 'p1', kind: 'ship-a-change', title: 'p', red_trains: -1 }).redTrains).toBe(0);
+    expect(carRow(dockJob('c9', { metadata: { red_trains: 1 } })).redTrains).toBe(1);
+  });
+
   test('the envelope is authoritative: membership does not re-derive from ships', () => {
     // A ship the old client predicate would have parked, which the
     // station did not serve.

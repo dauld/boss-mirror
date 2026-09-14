@@ -688,6 +688,18 @@ export function journeyText(seconds: number | null): string {
   return `${Math.round((seconds / 3600) * 10) / 10}h`;
 }
 
+/** The dock table's `reds` cell — the conductor's `red_trains` stamp on
+ *  a parked car, as words. Blank for a clean car (and for an older server
+ *  that states no count), so a clean row reads exactly as it did; `1 red`
+ *  / `N reds` otherwise. The status table is the reading an operator uses
+ *  to decide what to look at before the next board, and until 2026-09-14
+ *  a car one red away from being held read identical to a clean one
+ *  there, though the row already carried the count (cb6714de). */
+export function redsCell(n: number | undefined): string {
+  if (n === undefined || n <= 0) return '';
+  return `${n} red${n === 1 ? '' : 's'}`;
+}
+
 /** One gate slot: either the car being assessed in it, or empty. */
 export type GateSlot =
   | { readonly kind: 'occupied'; readonly gate: ActiveGate }

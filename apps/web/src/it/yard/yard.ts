@@ -54,6 +54,11 @@ export type CarFacts = Readonly<{
   metadata?: Record<string, unknown> | null;
   steps?: readonly StepLite[] | null;
   simulated?: boolean;
+  /** The conductor's strike count as a FIELD — what a projection that
+   *  is not a Job carries (the My Day assignment row, d6e53a35). A Job
+   *  carries the same stamp in `metadata.red_trains`; the constructor
+   *  reads whichever the caller has, through one guard. */
+  red_trains?: number;
 }>;
 
 // A car in the yard is a job packet, and it renders as a card (David's
@@ -204,7 +209,7 @@ import { isSim } from '@boss/web-kit/ui/packet-card';
 // The server-computed read model. The approach lane's verdict rows are
 // ITS lanes, not this lens's derivation — see [`approach`].
 import type { YardStatus } from './yard-status';
-export { isSim, PROTOCOL_PALETTE, protocolHue } from '@boss/web-kit/ui/packet-card';
+export { isSim, PROTOCOL_PALETTE, protocolHue, redTrainsPhrase } from '@boss/web-kit/ui/packet-card';
 
 export type TrainStatus = 'BOARDING' | 'BOARDED' | 'DEPARTED' | 'CONVERGING' | 'ARRIVED';
 export type Lamp = 'green' | 'failing' | 'pending';
@@ -1169,7 +1174,7 @@ export function carRow(j: CarFacts): CarRow {
     skipReason: md.skip_reason ?? null,
     head: headOf(j),
     proof: readCarProof(j),
-    redTrains: redTrainsOf(md.red_trains),
+    redTrains: redTrainsOf(j.red_trains ?? md.red_trains),
   };
 }
 

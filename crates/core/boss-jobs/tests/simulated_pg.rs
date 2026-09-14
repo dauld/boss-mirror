@@ -101,3 +101,45 @@ async fn assignment_rows_carry_the_sim_facts() {
         "bulk backlog rows carry the flag too"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn assignment_rows_carry_the_cars_red_train_count() {
+    // A builder's own struck car was invisible on their My Day
+    // (d6e53a35, 2026-09-14): the lens builds its card through the
+    // yard's one constructor, but the row carried no job metadata, so
+    // `red_trains` read 0 there while the yard drew the car struck.
+    // The indexed JOIN is its own SELECT list — pin the JSON read.
+    let db = TestDb::new().await;
+    let repo = boss_jobs::PgJobs::new(db.pool.clone());
+
+    let mut struck = job("00000000-0000-0000-0000-00000000c001", false);
+    struck.metadata = serde_json::json!({ "branch": "fix/x", "red_trains": 2 });
+    let clean = job("00000000-0000-0000-0000-00000000c002", false);
+    repo.create_job(&struck).await.unwrap();
+    repo.create_job(&clean).await.unwrap();
+    for j in [&struck, &clean] {
+        let mut s = Step::new(j.id, "review", "Review", 0).with_assignee("emp-1");
+        s.status = StepStatus::Ready;
+        repo.add_step(&s).await.unwrap();
+    }
+
+    let rows = repo
+        .list_assignments(Some("emp-1"), &[], 100)
+        .await
+        .unwrap();
+    let struck_row = rows.iter().find(|r| r.job_id == struck.id).unwrap();
+    assert_eq!(struck_row.red_trains, 2, "a twice-struck car's row says so");
+    let clean_row = rows.iter().find(|r| r.job_id == clean.id).unwrap();
+    assert_eq!(clean_row.red_trains, 0, "no stamp reads as no strikes");
+
+    // Same row shape on the sim workforce's bulk pull.
+    let bulk = repo.list_assigned_workable(100).await.unwrap();
+    assert_eq!(
+        bulk.iter()
+            .find(|r| r.job_id == struck.id)
+            .unwrap()
+            .red_trains,
+        2,
+        "bulk backlog rows carry the count too"
+    );
+}

@@ -19,6 +19,7 @@
     fetchYardStatus,
     journeyText,
     phaseLabel,
+    redsCell,
     trainTone,
     type YardStatus,
   } from './yard-status';
@@ -129,7 +130,7 @@
     {:else}
       <table class="ys-table">
         <thead>
-          <tr><th>car</th><th>branch</th><th>parked</th></tr>
+          <tr><th>car</th><th>branch</th><th>parked</th><th>reds</th></tr>
         </thead>
         <tbody>
           {#each s.dock as c (c.id)}
@@ -137,6 +138,10 @@
               <td>{c.title}</td>
               <td class="ys-mono">{c.branch ?? '—'}</td>
               <td class="ys-mono ys-dim">{c.parked_since}</td>
+              <!-- Strikes: one red behind a car is the state in which the
+                   NEXT red holds it out, so it takes the warn token the
+                   page already uses; a clean car's cell is blank (cb6714de). -->
+              <td class="ys-mono ys-reds">{redsCell(c.red_trains)}</td>
             </tr>
           {/each}
         </tbody>
@@ -265,6 +270,7 @@
   .ys-table td { padding: 6px 12px 6px 0; border-bottom: 1px solid var(--hairline, #2a3138); }
   .ys-mono { font-family: var(--font-mono, ui-monospace, monospace); }
   .ys-dim { color: var(--static, #7a838c); }
+  .ys-reds { color: var(--warn, #d9a441); }
   .ys-stranded { list-style: none; padding: 0; margin: 6px 0; display: flex; flex-direction: column; gap: 4px; }
   .ys-stranded li { color: var(--warn, #d9a441); font-size: 13px; }
   .ys-held { list-style: none; padding: 0; margin: 6px 0; display: flex; flex-direction: column; gap: 4px; }

@@ -125,6 +125,11 @@ struct AssignmentRowSql {
     priority: String,
     simulated: bool,
     tags: Vec<String>,
+    /// `j.metadata -> 'red_trains'` — the one metadata key the row
+    /// carries (d6e53a35), read as JSON so a malformed stamp goes
+    /// through the same reader the yard uses rather than failing the
+    /// row on a cast.
+    red_trains: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1322,7 +1327,7 @@ impl JobsRepository for PgJobs {
                     s.step_plugin_version, s.embedded_job, \
                     j.title AS job_title, j.due_on, j.kind AS workflow, j.workflow_version, \
                     j.subject_kind, j.subject_id, j.priority, \
-                    j.simulated, j.tags \
+                    j.simulated, j.tags, j.metadata -> 'red_trains' AS red_trains \
              FROM steps s \
              JOIN jobs j ON s.job_id = j.id \
              WHERE j.status = 'open' \
@@ -1354,6 +1359,7 @@ impl JobsRepository for PgJobs {
                     priority: parse_priority(&r.priority),
                     simulated: r.simulated,
                     tags: r.tags,
+                    red_trains: crate::yard::red_trains_count(r.red_trains.as_ref()),
                     step: row_to_step(r.step)?,
                 })
             })
@@ -1372,7 +1378,7 @@ impl JobsRepository for PgJobs {
                     s.step_plugin_version, s.embedded_job, \
                     j.title AS job_title, j.due_on, j.kind AS workflow, j.workflow_version, \
                     j.subject_kind, j.subject_id, j.priority, \
-                    j.simulated, j.tags \
+                    j.simulated, j.tags, j.metadata -> 'red_trains' AS red_trains \
              FROM steps s \
              JOIN jobs j ON s.job_id = j.id \
              WHERE j.status = 'open' \
@@ -1398,6 +1404,7 @@ impl JobsRepository for PgJobs {
                     priority: parse_priority(&r.priority),
                     simulated: r.simulated,
                     tags: r.tags,
+                    red_trains: crate::yard::red_trains_count(r.red_trains.as_ref()),
                     step: row_to_step(r.step)?,
                 })
             })

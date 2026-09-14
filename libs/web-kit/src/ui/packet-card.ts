@@ -15,7 +15,25 @@ export type PacketCardData = Readonly<{
   tags: readonly string[];
   sim: boolean;
   skipReason?: string | null;
+  /** How many red trains have released this car — the conductor's
+   *  `red_trains` stamp. Absent or 0 is a clean car and the card says
+   *  nothing; above 0 it wears {@link redTrainsPhrase} as a warn badge.
+   *  Optional so a lens that has no notion of a strike (a watchlist row,
+   *  a station queue) passes nothing and draws the card it always did. */
+  redTrains?: number;
 }>;
+
+/** The strike sentence — `1 red train behind it`, `2 red trains behind
+ *  it` — and `''` for a clean car, so a caller can append it blindly.
+ *  Lives with the card so the yard floor's dock wagon and the My Day
+ *  card say the same words for the same count (d6e53a35, 2026-09-14:
+ *  a builder's own struck car read clean in their personal queue while
+ *  the yard drew it struck). "Behind it" because the reds are consists
+ *  the car rode, not verdicts on it — which car turned a consist red is
+ *  exactly what nobody knows yet (2bb0d014). */
+export function redTrainsPhrase(n: number | undefined): string {
+  return (n ?? 0) <= 0 ? '' : `${n} red train${n === 1 ? '' : 's'} behind it`;
+}
 
 // The facts a packet carries about being simulated. Every field is
 // optional: a lens passes whatever its rows hold (My Day's assignment

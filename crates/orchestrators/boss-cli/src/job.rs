@@ -529,18 +529,137 @@ pub async fn station(name: &str, raw: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn list(kind: Option<String>, status: String, limit: u32) -> Result<()> {
-    let http = reqwest::Client::new();
+/// RFC 3986 unreserved set — everything but `A-Z a-z 0-9 - . _ ~` is
+/// percent-encoded. A `--where` document goes into ONE query value, so
+/// the `{ " : , /` of its JSON, and any `&` or `+` inside a value, must
+/// not be read as query syntax on the far side.
+const QUERY_VALUE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+/// The flat containment document `--where key=value` pairs compose:
+/// one object, string values, everything after the FIRST `=` is the
+/// value (a branch or a probe text carries `=` of its own). The server
+/// accepts exactly this shape and 400s any other
+/// (`metadata_containment_from_query`), so nothing wider is built here.
+pub(crate) fn where_object(wheres: &[String]) -> Result<Value> {
+    let mut doc = serde_json::Map::new();
+    for w in wheres {
+        let (key, value) = match w.split_once('=') {
+            Some((k, v)) if !k.is_empty() => (k, v),
+            _ => bail!("--where takes key=value, e.g. --where branch=feat/x — got {w:?}"),
+        };
+        if doc
+            .insert(key.to_string(), Value::String(value.to_string()))
+            .is_some()
+        {
+            // A flat object holds one value per key; keeping the last
+            // would drop the first without a word. Say so instead.
+            bail!("--where names {key:?} twice — a packet's metadata holds one value per key");
+        }
+    }
+    Ok(Value::Object(doc))
+}
+
+/// Validate a `--has` key the way the server validates `metadata_has`
+/// (boss-jobs `http/jobs.rs`, `metadata_key_from_query`): a plain
+/// identifier, because `metadata ? $n` reads top-level keys only and
+/// a dotted path would match nothing and answer `total: 0` with a
+/// straight face. Refused HERE, before the round trip, with the same
+/// rule sentence the 400 would carry.
+fn has_key(key: &str) -> Result<&str> {
+    let mut chars = key.chars();
+    let plain = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !plain {
+        bail!(
+            "--has must be a top-level metadata key — letters, digits and \
+             underscore, not starting with a digit — got {key:?}; dotted paths \
+             are not walked"
+        );
+    }
+    Ok(key)
+}
+
+/// The query `boss job list` sends. Pure, so what reaches the wire is
+/// pinned: `--where` pairs become one url-encoded `metadata=` document,
+/// `--has` becomes `metadata_has=`, and asking for neither sends the
+/// query this verb has always sent.
+///
+/// WHY. `GET /api/jobs` learned `metadata=` (containment) and
+/// `metadata_has=` on #366, and one day later every operator and every
+/// builder brief was still `boss-api GET ... | jq` over a PAGE — the
+/// shape `a-limit-is-not-a-filter` names — because the terminal door
+/// could only say kind/status/limit (backlog 58eef0f5).
+pub(crate) fn list_query(
+    kind: Option<&str>,
+    status: &str,
+    limit: u32,
+    wheres: &[String],
+    has: &[String],
+) -> Result<String> {
     let mut path = format!("/api/jobs?status={status}&limit={limit}");
-    if let Some(k) = &kind {
+    if let Some(k) = kind {
         path.push_str(&format!("&kind={k}"));
     }
-    let rows = crate::gate::rows(crate::gate::api(&http, reqwest::Method::GET, &path, None).await?);
+    if !wheres.is_empty() {
+        let doc = where_object(wheres)?.to_string();
+        path.push_str(&format!(
+            "&metadata={}",
+            percent_encoding::utf8_percent_encode(&doc, QUERY_VALUE)
+        ));
+    }
+    match has {
+        [] => {}
+        [one] => path.push_str(&format!("&metadata_has={}", has_key(one)?)),
+        // The API takes ONE key. Sending two would keep whichever the
+        // query parser saw last and drop the other without a word.
+        many => bail!(
+            "--has takes one key per run (the API's metadata_has filters on a \
+             single top-level key) — got {}: {}",
+            many.len(),
+            many.iter()
+                .map(|k| format!("{k:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+    Ok(path)
+}
+
+/// The list's closing line. When the page is smaller than the answer
+/// it says so — `showing N of TOTAL` — because a truncated page that
+/// looks complete answers a smaller question without telling the
+/// reader (memory: `a-limit-is-not-a-filter`).
+pub(crate) fn list_footer(shown: usize, total: Option<u64>) -> String {
+    match total {
+        Some(t) if t > shown as u64 => format!("boss job: showing {shown} of {t}"),
+        _ => format!("boss job: {shown} row(s)"),
+    }
+}
+
+pub async fn list(
+    kind: Option<String>,
+    status: String,
+    limit: u32,
+    wheres: Vec<String>,
+    has: Vec<String>,
+) -> Result<()> {
+    let path = list_query(kind.as_deref(), &status, limit, &wheres, &has)?;
+    let http = reqwest::Client::new();
+    let body = crate::gate::api(&http, reqwest::Method::GET, &path, None).await?;
+    let total = body
+        .as_ref()
+        .and_then(|b| b.get("total"))
+        .and_then(Value::as_u64);
+    let rows = crate::gate::rows(body);
     let w = width();
     for r in &rows {
         println!("{}", list_line(r, w));
     }
-    println!("boss job: {} row(s)", rows.len());
+    println!("{}", list_footer(rows.len(), total));
     Ok(())
 }
 
@@ -926,5 +1045,89 @@ mod tests {
         assert!(line.ends_with("..."));
         // Wide enough: untouched.
         assert!(!list_line(&row, 200).ends_with("..."));
+    }
+
+    #[test]
+    fn two_where_values_compose_one_containment_object() {
+        // `--where branch=feat/x --where merged=true` is ONE `metadata=`
+        // document, url-encoded, so the server's `@>` reads both at once.
+        let path = list_query(
+            Some("ship-a-change"),
+            "open",
+            50,
+            &["branch=feat/x".to_string(), "merged=true".to_string()],
+            &[],
+        )
+        .unwrap();
+        assert!(path.starts_with("/api/jobs?status=open&limit=50"), "{path}");
+        assert!(path.contains("&kind=ship-a-change"), "{path}");
+        // RFC 3986: `{` `"` `:` `/` `,` `}` are all percent-encoded, so a
+        // value carrying `&` or `+` can never split the query.
+        assert!(
+            path.contains(
+                "&metadata=%7B%22branch%22%3A%22feat%2Fx%22%2C%22merged%22%3A%22true%22%7D"
+            ),
+            "{path}"
+        );
+        assert!(!path.contains("metadata_has"), "{path}");
+        // Nothing asked: nothing sent. The old query, byte for byte.
+        assert_eq!(
+            list_query(None, "open", 50, &[], &[]).unwrap(),
+            "/api/jobs?status=open&limit=50"
+        );
+    }
+
+    #[test]
+    fn a_where_value_keeps_everything_after_the_first_equals() {
+        let doc = where_object(&["note=a=b".to_string()]).unwrap();
+        assert_eq!(doc, json!({"note": "a=b"}));
+        // The same key twice cannot both hold in one flat object; one
+        // would win silently. Refused instead.
+        let e = where_object(&["k=1".to_string(), "k=2".to_string()]).unwrap_err();
+        assert!(e.to_string().contains("twice"), "{e}");
+        // No `=` at all is not a filter; it is refused with the shape.
+        let e = where_object(&["branch".to_string()]).unwrap_err();
+        assert!(e.to_string().contains("key=value"), "{e}");
+        let e = where_object(&["=v".to_string()]).unwrap_err();
+        assert!(e.to_string().contains("key=value"), "{e}");
+    }
+
+    #[test]
+    fn has_is_one_identifier_validated_like_the_server() {
+        let path = list_query(None, "open", 50, &[], &["proof_probe".to_string()]).unwrap();
+        assert!(path.ends_with("&metadata_has=proof_probe"), "{path}");
+        // The server's own rule sentence (boss-jobs http/jobs.rs
+        // `metadata_key_from_query`), so the terminal refuses BEFORE the
+        // round trip and says the same thing the 400 would.
+        for bad in ["steps.0", "9lives", "a-b", ""] {
+            let e = list_query(None, "open", 50, &[], &[bad.to_string()]).unwrap_err();
+            assert!(
+                e.to_string().contains(
+                    "must be a top-level metadata key — letters, digits and \
+                     underscore, not starting with a digit"
+                ),
+                "{bad:?}: {e}"
+            );
+            assert!(
+                e.to_string().contains("dotted paths are not walked"),
+                "{bad:?}: {e}"
+            );
+        }
+        // The API takes ONE `metadata_has`; two is refused with a sentence
+        // rather than one of them silently dropped.
+        let e = list_query(None, "open", 50, &[], &["a".to_string(), "b".to_string()]).unwrap_err();
+        assert!(e.to_string().contains("one"), "{e}");
+        assert!(e.to_string().contains("\"a\""), "{e}");
+        assert!(e.to_string().contains("\"b\""), "{e}");
+    }
+
+    #[test]
+    fn the_list_footer_says_when_the_page_is_smaller_than_the_answer() {
+        // A LIMIT IS NOT A FILTER: 50 rows of 184 must say so.
+        assert_eq!(list_footer(50, Some(184)), "boss job: showing 50 of 184");
+        // The whole answer fits: the old line, unchanged.
+        assert_eq!(list_footer(3, Some(3)), "boss job: 3 row(s)");
+        // A body with no `total` cannot claim more than it shows.
+        assert_eq!(list_footer(3, None), "boss job: 3 row(s)");
     }
 }

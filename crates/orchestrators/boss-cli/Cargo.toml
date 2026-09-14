@@ -37,6 +37,11 @@ uuid = { workspace = true }
 # (workflow publish-request v1, packet 0b1b32f9).
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# `boss job list --where` sends a JSON document as ONE query value
+# (`metadata=`); percent-encoding it is what keeps a `&` or `+` in a
+# value from splitting the query (backlog 58eef0f5). Same crate
+# boss-classes-client already uses for path segments.
+percent-encoding = "2"
 # `boss ops` applies the allowlist's arg patterns at the terminal, the
 # same regexes ops-runner.sh applies on the host (3d6daea9).
 regex = "1"

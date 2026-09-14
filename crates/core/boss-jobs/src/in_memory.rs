@@ -1490,6 +1490,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn assignment_rows_carry_the_cars_red_train_count() {
+        // A builder's own struck car was invisible on their My Day
+        // (d6e53a35, 2026-09-14): the assignments lens builds its card
+        // through the yard's one constructor, but the row it feeds in
+        // carried no job metadata, so `red_trains` read 0 there while
+        // the yard drew the same car struck. The count rides the row.
+        let repo = InMemoryJobs::new();
+        let mut struck = make_job_with("ship-a-change", serde_json::json!({ "red_trains": 2 }));
+        struck.status = JobStatus::Open;
+        repo.create_job(&struck).await.unwrap();
+        let mut s = Step::new(struck.id, "review", "Review", 0).with_assignee("emp-1");
+        s.status = StepStatus::Ready;
+        repo.add_step(&s).await.unwrap();
+
+        let mut clean = make_job("ship-a-change");
+        clean.status = JobStatus::Open;
+        repo.create_job(&clean).await.unwrap();
+        let mut c = Step::new(clean.id, "review", "Review", 0).with_assignee("emp-1");
+        c.status = StepStatus::Ready;
+        repo.add_step(&c).await.unwrap();
+
+        let rows = repo
+            .list_assignments(Some("emp-1"), &[], 100)
+            .await
+            .unwrap();
+        let struck_row = rows.iter().find(|row| row.job_id == struck.id).unwrap();
+        assert_eq!(struck_row.red_trains, 2, "a twice-struck car's row says so");
+        let clean_row = rows.iter().find(|row| row.job_id == clean.id).unwrap();
+        assert_eq!(clean_row.red_trains, 0, "no stamp reads as no strikes");
+
+        // The sim workforce's bulk pull reads the same row shape.
+        let bulk = repo.list_assigned_workable(100).await.unwrap();
+        assert_eq!(
+            bulk.iter()
+                .find(|row| row.job_id == struck.id)
+                .unwrap()
+                .red_trains,
+            2,
+            "bulk backlog rows carry the count too"
+        );
+    }
+
+    #[tokio::test]
     async fn count_in_flight_steps_by_kind_only_counts_non_terminal() {
         let repo = InMemoryJobs::new();
         let job = make_job("refurb");

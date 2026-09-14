@@ -449,10 +449,18 @@ pub fn dock_car(job: &Job) -> DockCar {
 /// The `red_trains` stamp as a count. Only a non-negative integer is a
 /// strike count — a negative, a string, or a fraction reads as 0, the
 /// same reading the client's `redTrainsOf` gives (2bb0d014), so a
-/// malformed stamp cannot paint a car struck.
-fn red_trains_of(metadata: &Value) -> u32 {
-    metadata
-        .get("red_trains")
+/// malformed stamp cannot paint a car struck. Shared with the
+/// assignments rows ([`crate::port::AssignmentRow::red_trains`]) so My
+/// Day and the yard read one stamp one way (d6e53a35).
+pub(crate) fn red_trains_of(metadata: &Value) -> u32 {
+    red_trains_count(metadata.get("red_trains"))
+}
+
+/// The stamp's VALUE as a count — the half of [`red_trains_of`] the
+/// Postgres assignments JOIN needs, since it selects
+/// `metadata -> 'red_trains'` rather than the whole document.
+pub(crate) fn red_trains_count(stamp: Option<&Value>) -> u32 {
+    stamp
         .and_then(Value::as_u64)
         .and_then(|n| u32::try_from(n).ok())
         .unwrap_or(0)

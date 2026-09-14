@@ -44,6 +44,11 @@ export type AssignmentRow = Readonly<{
    *  same default the Job's own `serde(default)` takes). */
   simulated?: boolean;
   tags?: readonly string[];
+  /** How many red trains have released this car — the conductor's
+   *  `red_trains` stamp, read off the job's metadata by the server
+   *  (boss-jobs port.rs AssignmentRow, d6e53a35). Optional so a row from
+   *  a server that predates it still parses, and reads as a clean car. */
+  red_trains?: number;
   step: AssignmentStep;
 }>;
 
@@ -193,11 +198,15 @@ export async function fetchMyDay(
 // by the yard's one constructor (fb3b5ce1, 2026-09-14: this lens had
 // its own literal and missed `redTrains` the day the yard read it).
 // The row is a projection, not the Job — it names the packet and
-// carries its sim flag and tags but no metadata and no steps — so the
-// constructor gets exactly what the row holds and the packet-record
-// facts (head, proof, strikes) read as absent, the way a car outside
-// the yard's window does. When the server puts more of the packet on
-// the row, this call passes it and nothing else changes. Two fields are
+// carries its sim flag, tags and strike count but no metadata and no
+// steps — so the constructor gets exactly what the row holds and the
+// packet-record facts it lacks (head, proof) read as absent, the way a
+// car outside the yard's window does. The strike count is the first
+// fact the server put on the row for this lens (d6e53a35, 2026-09-14:
+// a builder's own struck car read clean here while the yard drew it
+// struck, and the builder is who can act before the next red holds it);
+// when the server puts more of the packet on the row, this call passes
+// it and nothing else changes. Two fields are
 // the lens's own and override: the actionable step rides the mono
 // provenance line, and the chips are queue state (blocked / priority /
 // due), not packet labels — the job's tags feed the sim predicate and
@@ -211,6 +220,7 @@ export function assignmentPacket(row: AssignmentRow): CarRow {
       title: row.job_title,
       tags: row.tags,
       simulated: row.simulated,
+      red_trains: row.red_trains,
     }),
     branch: row.step.title,
     tags: [

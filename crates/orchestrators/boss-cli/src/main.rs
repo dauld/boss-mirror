@@ -1020,6 +1020,15 @@ enum JobAction {
         /// Max rows (default 50).
         #[arg(long, default_value_t = 50)]
         limit: u32,
+        /// Only packets whose metadata CONTAINS this key=value (string
+        /// values; repeat to require several at once). `--where
+        /// branch=feat/x` is the car, not a page that may hold it.
+        #[arg(long = "where", value_name = "KEY=VALUE")]
+        wheres: Vec<String>,
+        /// Only packets carrying this top-level metadata key, whatever
+        /// its value (e.g. `--has estate_finding`). One key per run.
+        #[arg(long, value_name = "KEY")]
+        has: Vec<String>,
     },
     /// Create a packet with the whole envelope defaulted — no more
     /// one-422-per-missing-field guessing. Confirms by reading the
@@ -1273,7 +1282,9 @@ async fn main() -> Result<()> {
                 kind,
                 status,
                 limit,
-            } => job::list(kind, status, limit).await,
+                wheres,
+                has,
+            } => job::list(kind, status, limit, wheres, has).await,
             JobAction::File {
                 kind,
                 title,

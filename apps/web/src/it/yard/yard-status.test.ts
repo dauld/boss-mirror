@@ -14,6 +14,7 @@ import {
   parseYardStatus,
   phaseLabel,
   queueLabel,
+  redsCell,
   etaDetail,
   etaReading,
   trainTone,
@@ -768,6 +769,20 @@ describe('trainTone', () => {
   });
   test('an arrived train is muted', () => {
     expect(trainTone({ ...base, phase: 'arrived' })).toBe('muted');
+  });
+});
+
+describe('redsCell', () => {
+  test('blank for a clean car — the clean row is unchanged', () => {
+    expect(redsCell(0)).toBe('');
+  });
+  test('an older server that states no count reads blank, not zero', () => {
+    expect(redsCell(undefined)).toBe('');
+  });
+  test('one red is singular, more are plural', () => {
+    expect(redsCell(1)).toBe('1 red');
+    expect(redsCell(2)).toBe('2 reds');
+    expect(redsCell(5)).toBe('5 reds');
   });
 });
 

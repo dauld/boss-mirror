@@ -13,7 +13,7 @@
   // job page.
   import { navigate } from '../nav';
   import { entityHref } from './entity-href';
-  import { protocolHue, type PacketCardData } from './packet-card';
+  import { protocolHue, redTrainsPhrase, type PacketCardData } from './packet-card';
 
   type Props = Readonly<{
     card: PacketCardData;
@@ -34,6 +34,7 @@
   let { card, size = 'dock', onOpen, onDismiss }: Props = $props();
 
   const hue = $derived(protocolHue(card.kind));
+  const strikes = $derived(redTrainsPhrase(card.redTrains));
   const shownTags = $derived(
     card.tags.filter(t => !['sim', 'simulated', 'synthetic'].includes(t.toLowerCase())).slice(0, 3),
   );
@@ -102,6 +103,9 @@
   </div>
   {#if card.skipReason}
     <div class="pk-skip">LEFT BEHIND — {card.skipReason}</div>
+  {/if}
+  {#if strikes}
+    <div class="pk-struck">{strikes}</div>
   {/if}
 </div>
 
@@ -204,7 +208,8 @@
     padding: 0 5px;
     flex: none;
   }
-  .pk-skip {
+  .pk-skip,
+  .pk-struck {
     font-family: var(--font-mono, ui-monospace, monospace);
     font-size: 10.5px;
     color: var(--warn, #d9a441);

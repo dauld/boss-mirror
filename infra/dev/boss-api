@@ -13,18 +13,33 @@
 # that no gate read and no car shipped — a fresh pod, a second builder
 # host, or a builder pod (design 90a14acc) would not have had it, and
 # CLAUDE.md documented a door the tree could not reproduce. Same shape
-# as wt-cargo (34b29b52, #364): the pod file was the spec, behaviour is
-# unchanged, and the pod's /work/tools/bin/boss-api becomes a symlink
-# to this file in the operator's checkout. Pinned by
+# as wt-cargo (34b29b52, #364): the pod file was the spec, and the
+# pod's /work/tools/bin/boss-api becomes a symlink to this file in the
+# operator's checkout. Pinned by
 # crates/core/boss-testing/tests/boss_api_sh.rs against a stub curl.
 #
-# The pod-specific constants are env-overridable, defaults = the pod's:
-#   BOSS_JOBS_URL            the base URL (in-cluster service address)
+# Who a call signs as follows the boss CLI's rule
+# (crates/orchestrators/boss-cli/src/identity.rs, backlog 5083d6f5):
+# BOSS_ACTOR, else the actor file, else NOBODY — and nobody is loud. A
+# WRITE with no actor is refused, naming both fixes; a READ, which
+# attributes nothing, goes out marked operator:unidentified and says so
+# once on stderr. Until 2026-09-14 (backlog 416d503c) the pod copy fell
+# back to a fixed id instead, so a builder pod or a fresh session with
+# no actor file wrote history as the operator's agent identity — two
+# doors to one system of record with two provenance rules.
+#
+# The base URL, when BOSS_JOBS_URL does not name one, is the one line
+# in `sor-url` beside this script — the ONE spelling of the
+# system-of-record address in infra/dev (CLAUDE.md §9a). The boss shim
+# (feat/the-boss-shim-lives-in-the-tree, parked as of 2026-09-14) is
+# to read the same file when it lands; until then the pod's
+# /work/tools/bin/boss still carries its own spelling.
+#
+# The pod-specific constants are env-overridable:
+#   BOSS_JOBS_URL            the base URL; else the line in ./sor-url
 #   BOSS_ACTOR               who the call signs as — the id; else the one
 #   BOSS_ACTOR_FILE            line in this file ($HOME/.config/boss/actor,
-#                              as the boss CLI reads it); else the id the
-#                              pod copy hard-coded, so an unconfigured pod
-#                              answers exactly as before
+#                              as the boss CLI reads it)
 #   BOSS_MACHINE_TOKEN_FILE  the machine token, sent only when it exists
 set -euo pipefail
 
@@ -35,10 +50,35 @@ case "$METHOD" in
 esac
 [ -n "$API_PATH" ] || { echo "usage: boss-api GET|POST|PUT|PATCH|DELETE /api/path [body.json]" >&2; exit 2; }
 
-BASE=${BOSS_JOBS_URL:-http://boss-jobs-internal.boss.svc.cluster.local:7900}
+# readlink -f: the pod invokes this through a symlink, and sor-url sits
+# beside the FILE, not the link.
+SOR_URL_FILE="$(dirname "$(readlink -f "$0")")/sor-url"
+BASE=${BOSS_JOBS_URL:-$(head -n1 "$SOR_URL_FILE" 2>/dev/null || true)}
+[ -n "$BASE" ] || {
+  echo "boss-api: BOSS_JOBS_URL is unset and $SOR_URL_FILE names no system of record — a copy of this script without its sor-url has no default" >&2
+  exit 2
+}
+
+# Blank and whitespace-only values are NOT answers (identity.rs): an
+# `export BOSS_ACTOR=` or an empty file falls through, never signs as "".
 ACTOR_FILE=${BOSS_ACTOR_FILE:-$HOME/.config/boss/actor}
-ACTOR_ID=${BOSS_ACTOR:-$(head -n1 "$ACTOR_FILE" 2>/dev/null || true)}
-ACTOR_ID=${ACTOR_ID:-claude@algedonic.dev}
+ACTOR_ID=$(printf '%s' "${BOSS_ACTOR:-}" | tr -d '[:space:]')
+[ -n "$ACTOR_ID" ] || ACTOR_ID=$(head -n1 "$ACTOR_FILE" 2>/dev/null | tr -d '[:space:]' || true)
+if [ -z "$ACTOR_ID" ]; then
+  case "$METHOD" in
+    GET)
+      ACTOR_ID=operator:unidentified
+      echo "boss-api: nothing names the actor running this command — reading as \`$ACTOR_ID\`. Writes will be refused until \`BOSS_ACTOR\` (or the actor file) names you." >&2
+      ;;
+    *)
+      # The CLI's refusal, with the identity THIS door used to fall back
+      # to in place of the conductor, so a reader tells it apart from a
+      # policy denial.
+      echo "boss-api: refusing to sign $METHOD $API_PATH: nothing names the actor running this command, and signing it as \`claude@algedonic.dev\` would credit the operator's agent identity with your act (backlog 416d503c). Name yourself with \`export BOSS_ACTOR=<your id>\` or by writing that id into $ACTOR_FILE." >&2
+      exit 2
+      ;;
+  esac
+fi
 ACTOR='{"id":"'"$ACTOR_ID"'","role":"platform-admin","access_tier":"operator","territory_account_ids":[],"direct_report_ids":[],"department":null}'
 
 args=( -sS -X "$METHOD" -H 'Content-Type: application/json' -H "X-Boss-User: $ACTOR" -w '\n%{http_code}' )

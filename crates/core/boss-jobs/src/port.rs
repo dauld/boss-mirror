@@ -383,6 +383,17 @@ pub struct AssignmentRow {
     /// without it the two lenses would disagree on the same packet.
     pub simulated: bool,
     pub tags: Vec<String>,
+    /// How many red trains have released this car — the conductor's
+    /// `red_trains` stamp on the job's metadata, absent = 0. The row
+    /// carries the packet's identity and no metadata, so until
+    /// d6e53a35 (2026-09-14) a builder's own struck car read clean on
+    /// their My Day while the yard drew the same car struck — and the
+    /// builder is the one who can act on a strike before the next red
+    /// holds the car out. `default` so a row from an older server reads
+    /// back as 0 rather than failing to parse, as [`crate::yard::DockCar`]
+    /// does.
+    #[serde(default)]
+    pub red_trains: u32,
     pub step: Step,
 }
 
@@ -805,6 +816,7 @@ pub trait JobsRepository: Send + Sync {
                         priority: job.priority,
                         simulated: job.simulated,
                         tags: job.tags.clone(),
+                        red_trains: crate::yard::red_trains_of(&job.metadata),
                         step,
                     });
                     if out.len() >= limit as usize {
@@ -859,6 +871,7 @@ pub trait JobsRepository: Send + Sync {
                     priority: job.priority,
                     simulated: job.simulated,
                     tags: job.tags.clone(),
+                    red_trains: crate::yard::red_trains_of(&job.metadata),
                     step,
                 });
                 if out.len() >= limit as usize {

@@ -698,6 +698,29 @@ new surface against.
   destructive-by-policy actions are not, and keeping that line sharp is
   what makes handing over the first kind safe.
 
+- **A verdict once judged is re-read the way it was first read.** On
+  2026-09-14 train #361's ci step recorded `failing` — forge CI green,
+  the train gate RED — and ten minutes later the conductor merged it.
+  The judged-step arm recomputed the live verdict from CI ALONE; the
+  gate half was consulted only while the step was still open. Every
+  later reader of that step (the merge, the drift note, the alert,
+  auto-cancel) must see the same two halves the judgement saw, and the
+  merge holds a second lock on the frozen result (`6f18390b`). The
+  red-train alert filed for it read "check names unavailable" for the
+  same reason — it consulted only the forge rollup while the gate's
+  receipt held the name. When a verdict has two sources, every
+  consumer takes both.
+
+- **A combined-tree failure is repaired as ONE car.** The same red was
+  real: two cars each green on their own gate — a roles reader that
+  answers a dark registry with a non-empty sentinel, and a retire verb
+  whose bound checked only for emptiness — stopped the second stack
+  under a dark registry only when assembled. Neither half of the repair
+  is green alone on main (the reader's `BOSS_NODE_ROLES_SOURCE` without
+  the verb's check, or the verb's check without the source, still fails
+  the same test), so the repair rode as one car. The train gate exists
+  for exactly this class; a per-car gate cannot see it.
+
 **What held, and is worth protecting:** the seed's baseline guard
 refused to stamp over a failed prepare and saved the tenant model; the
 trains refused to claim convergence they could not evidence and filed
@@ -786,6 +809,20 @@ a door that stops being true is a defect worth a car.
   text goes through the shell, where a backtick is command substitution
   and the phrase is replaced by nothing, silently. Single quotes, or no
   backticks in car prose.
+
+- **The train's gate is the assembled tree's test — it belongs in the
+  gate lane.** Since design 128b5496 (2026-09-13) the conductor files
+  one gate-run for every train's `train/…` branch when the PR opens;
+  the cluster gate runs the Rust checks on the ASSEMBLED consist (warm
+  target, ~2–10 min) and forge CI builds only the image, the locomotive
+  and the web. So a `train/…` run in a gate bay is not a PR car in the
+  wrong place; it is the train being tested, and it caught the
+  interaction above. What was wrong, and is fixed, was every OTHER lane
+  drawing that run as a car — stranded green, garage, limbo — and the
+  bay drawing it in a car's wagon (`is_train_gate` is the one
+  predicate; the yard, orient and the stranded sweep all use it). The
+  question "why is a PR train in the gates" was asked three times in
+  one afternoon; this paragraph is the answer.
 
 - **Publishing a branch to the forge.** A workstation has no forge
   credential. Push to the conductor clone (`gcp` remote) under
