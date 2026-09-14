@@ -917,17 +917,18 @@ impl ParkIntent {
     /// `boss prove` refuses that shape too), and a car is EITHER probed
     /// or event-bound — a probe next to a `--park-proof-event` says the
     /// builder did not decide which.
-    /// THE TWO SHAPE WARNINGS ON A `--park-probe` (backlog 4fccc595).
+    /// THE SHAPE WARNINGS ON A `--park-probe` (backlog 4fccc595, and
+    /// 0df3af1c for the third).
     ///
     /// This door is where the probe that cost 18 hours was ADMITTED, and
     /// the moment a builder is still typing it is the only moment the
     /// shape is cheap to fix — by the time the arrival rule runs the
     /// text, unattended on the forge, nothing there reads a warning. So
-    /// the same two findings `boss prove`'s `admit` says are said here,
+    /// the same findings `boss prove`'s `admit` says are said here,
     /// from the one definition in `boss_jobs::probe`. They WARN rather
-    /// than refuse, for the reason argued at that door: both shapes fail
-    /// closed, so the worst they do is strand a car, and both detectors
-    /// are coarse text scans a false refusal would be too expensive for.
+    /// than refuse, for the reason argued at that door: every shape fails
+    /// closed, so the worst it does is strand a car, and every detector
+    /// is a coarse text scan a false refusal would be too expensive for.
     pub fn probe_warnings(&self) -> Vec<String> {
         match &self.probe {
             None => Vec::new(),
@@ -2009,9 +2010,9 @@ pub async fn run(
     {
         eprintln!("{w}");
     }
-    // And the two SHAPE warnings on the probe itself, said here for the
+    // And the SHAPE warnings on the probe itself, said here for the
     // same reason: this text is judged by a machine at arrival, hours
-    // later, where no warning has a reader (4fccc595).
+    // later, where no warning has a reader (4fccc595, 0df3af1c).
     for w in park.probe_warnings() {
         eprintln!("{w}");
     }
@@ -3870,6 +3871,58 @@ mod tests {
         assert!(
             park_full().probe_warnings().is_empty(),
             "no probe, no warning"
+        );
+    }
+
+    /// THE NUMBER THAT WAS `null`, named at the door that admitted it
+    /// (backlog 0df3af1c). Three probes parked through this flag compared
+    /// a `jq -r` number with `-lt` and nothing between the JSON and `[`;
+    /// each read `null`, each wrote `integer expression expected` to a
+    /// stderr nobody reads, and each car sat unproven until an operator
+    /// rewrote it. Warned, not refused, like the two shapes before it:
+    /// `[` exits 2 on the string, so the shape fails closed.
+    #[test]
+    fn a_park_probe_that_compares_an_unguarded_number_is_warned_about_not_refused() {
+        let mut p = park_full();
+        p.probe = Some(
+            "b=$(boss-sor-read /api/jobs?kind=x | jq -r '[.data[] | .m] | first | .build_s'); \
+             if [ \"${b:-9999}\" -lt 200 ]; then echo warm:ok; else exit 75; fi"
+                .into(),
+        );
+        p.expect = Some("warm:ok".into());
+        assert!(
+            p.require_complete().is_ok(),
+            "a warning must not become a refusal: {:?}",
+            p.require_complete()
+        );
+        let said = p.probe_warnings().join("\n");
+        assert!(said.contains("$b"), "names the variable to guard: {said}");
+        assert!(
+            said.contains("integer expression expected"),
+            "says what happens: {said}"
+        );
+        assert!(said.contains("// empty"), "shows the jq-side guard: {said}");
+        assert!(
+            said.contains("*[!0-9]*"),
+            "shows the shell-side guard: {said}"
+        );
+        assert!(
+            said.contains("${b:-"),
+            "says why the default is not a guard: {said}"
+        );
+        // The same probe with either idiomatic guard says nothing.
+        let mut guarded = park_full();
+        guarded.probe = Some(
+            "b=$(boss-sor-read /api/jobs?kind=x | jq -r '[.data[] | .m] | first | .build_s // empty'); \
+             case \"$b\" in ''|*[!0-9]*) echo 'not yet: no build recorded'; exit 75;; esac; \
+             if [ \"$b\" -lt 200 ]; then echo warm:ok; else exit 75; fi"
+                .into(),
+        );
+        guarded.expect = Some("warm:ok".into());
+        assert!(
+            guarded.probe_warnings().is_empty(),
+            "{:?}",
+            guarded.probe_warnings()
         );
     }
 

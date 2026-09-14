@@ -261,6 +261,26 @@ const FILLER = new Set([
  *  plus each following word that still fits in eleven characters, at
  *  most three words. A first word longer than eleven is cut. Pure and
  *  deterministic: the same branch always paints the same nameplate. */
+/** The wagon a TRAIN's gate-run is drawn as in a bay or the queue:
+ *  the train's id, the `train gate` tag and its own kind — read off the
+ *  server's `train` on the row (128b5496), never off the branch name.
+ *  Null for a car's gate, which is drawn as before. */
+export function trainGateOf(g: Readonly<{ branch: string; train?: string | null }>): Readonly<{
+  trainId: string;
+  tag: string;
+  title: string;
+  kind: 'train-gate';
+}> | null {
+  const t = g.train;
+  if (typeof t !== 'string' || t === '') return null;
+  return {
+    trainId: t,
+    tag: 'train gate',
+    title: `train gate — testing train ${t.slice(0, 8)} (${g.branch})`,
+    kind: 'train-gate',
+  };
+}
+
 export function wagonTag(branch: string): string {
   const words = tagWords(branch);
   const first = words[0];
@@ -738,23 +758,28 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
     const progress = Number.isNaN(startedMs)
       ? 0
       : Math.min(Math.max(nowMs - startedMs, 0) / (GATE_USUAL_MINUTES * 60_000), 1);
+    // A TRAIN's gate (128b5496) is the train being tested, not a car
+    // being gated: it takes the train's id, the `train gate` tag and
+    // its own kind, so the bay never reads as a PR car in the gates
+    // (asked twice on 2026-09-14). The car branch below is unchanged.
+    const tg = trainGateOf(g);
     if (!claimedBranches.has(g.branch)) {
       place({
         id,
-        tag: tagOf(g.branch),
-        title: car?.title ?? g.branch,
+        tag: tg?.tag ?? tagOf(g.branch),
+        title: tg?.title ?? car?.title ?? g.branch,
         branch: g.branch,
         head: car?.head ?? null,
-        kind: car?.kind ?? 'gate-run',
+        kind: tg?.kind ?? car?.kind ?? 'gate-run',
         sim: car?.sim ?? false,
         station: 'gate',
         slot: i,
-        trainId: null,
+        trainId: tg?.trainId ?? null,
         tone: g.stale ? 'warn' : 'ok',
         lamp: g.stale ? 'warn' : 'working',
         status: g.stale
-          ? `gating · ${elapsed} · STALE — past the runner's usual; the verdict may never reach the packet, re-gate`
-          : `gating · ${elapsed}`,
+          ? `${tg ? 'testing the train' : 'gating'} · ${elapsed} · STALE — past the runner's usual; the verdict may never reach the packet, re-gate`
+          : `${tg ? 'testing the train' : 'gating'} · ${elapsed}`,
         since: g.since,
       });
     }
@@ -764,7 +789,7 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
       branch: g.branch,
       packetId: g.packet_id,
       wagonId: id,
-      tag: tagOf(g.branch),
+      tag: tg?.tag ?? tagOf(g.branch),
       since: g.since,
       elapsed,
       stale: g.stale,
@@ -782,17 +807,18 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
     if (claimedBranches.has(q.branch)) return;
     const car = carByBranch.get(q.branch);
     const id = car && !claimedIds.has(car.id) ? car.id : q.packet_id;
+    const tg = trainGateOf(q);
     place({
       id,
-      tag: tagOf(q.branch),
-      title: car?.title ?? q.branch,
+      tag: tg?.tag ?? tagOf(q.branch),
+      title: tg?.title ?? car?.title ?? q.branch,
       branch: q.branch,
       head: car?.head ?? null,
-      kind: car?.kind ?? 'gate-run',
+      kind: tg?.kind ?? car?.kind ?? 'gate-run',
       sim: car?.sim ?? false,
       station: 'gate-queue',
       slot: q.position > 0 ? q.position - 1 : 0,
-      trainId: null,
+      trainId: tg?.trainId ?? null,
       tone: 'static',
       lamp: 'off',
       status: `queued · ${queueLabel(q)}`,

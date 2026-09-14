@@ -416,10 +416,13 @@ pub(crate) fn admit(probe: &str, from_car: bool) -> Admission {
     Admission { refusal, warnings }
 }
 
-/// THE TWO SHAPE WARNINGS, in the wording every door can use (the
-/// prefix is the door's). Both read the probe TEXT, like the two rules
-/// above them, and both are host-independent — so they are said at every
-/// door a human is standing at, `--from-car` or not.
+/// THE THREE SHAPE WARNINGS, in the wording every door can use (the
+/// prefix is the door's). All read the probe TEXT, like the two rules
+/// above them, and all are host-independent — so they are said at every
+/// door a human is standing at, `--from-car` or not. The third
+/// (0df3af1c) joined the first two for the same reason they exist: `[`
+/// exits 2 on a non-integer, so the shape fails CLOSED, and the one
+/// place its stderr has a reader is the terminal it is typed at.
 pub(crate) fn shape_warnings(probe: &str) -> impl Iterator<Item = String> {
     let inverted = boss_jobs::probe::asserts_its_own_negation(probe).then(|| {
         format!(
@@ -445,7 +448,23 @@ pub(crate) fn shape_warnings(probe: &str) -> impl Iterator<Item = String> {
              Keep the evidence first: `|| {{ echo \"<what failed> (exit $?)\"; exit 1; }}`."
         )
     });
-    inverted.into_iter().chain(rewritten)
+    let unguarded = boss_jobs::probe::compares_an_unguarded_number(probe).map(|var| {
+        format!(
+            "THIS PROBE COMPARES `${var}` AS A NUMBER WITHOUT CHECKING THAT IT IS ONE. When \
+             the query matches nothing, `jq -r` prints the literal `null` — four characters, \
+             not an empty string, so a `${{{var}:-9999}}` default does not fill it — and `[` \
+             answers `integer expression expected` on stderr, exits 2, and takes the else \
+             branch. Measured 2026-09-14 (0df3af1c): three cars sat UNPROVEN on exactly that, \
+             each behind a stderr nobody reads, until an operator rewrote the probe by hand.\
+             \n  \
+             Guard on either side of the pipe, so a missing number says NOT YET instead:\n    \
+             in jq:        `… | first | .field // empty`   (or `first | select(. != null)`)\n    \
+             in the shell: `case \"${var}\" in ''|*[!0-9]*) echo 'not yet: <what has not happened>'; exit 75;; esac`\n  \
+             This is a warning, not a refusal: `[` fails closed on the string, so the shape \
+             strands a car but never records a proof of nothing."
+        )
+    });
+    inverted.into_iter().chain(rewritten).chain(unguarded)
 }
 
 /// The override, resolved once: `None` when the flag was not given,

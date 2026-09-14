@@ -285,6 +285,42 @@ describe('the gate bays', () => {
     expect(wagon(s, 'g9').tag).toBe('y');
   });
 
+  // A TRAIN's gate-run in a bay (128b5496) is the train being tested. It
+  // used to stand there as a `train/…` wagon indistinguishable from a
+  // PR car, and the question "why is a PR car in the gates" came twice in
+  // one afternoon (2026-09-14). The server names the train on the row;
+  // the floor draws the bay as the train under test.
+  test('a train gate in a bay reads as the train under test, not a car', () => {
+    const s = scene(
+      yardOf({ inFlight: [trainRow('t1', 'DEPARTED')] }),
+      statusOf({
+        gates: {
+          capacity: 3,
+          active: [{ ...gate('train/20260914-1727', 'g7'), train: 't1' }],
+          queued: [{ branch: 'train/20260914-1800', packet_id: 'g8', queued_at: '2026-09-07T23:10:00Z', position: 1, waiting_seconds: 600, estimated_wait_seconds: null, train: 't2' }],
+          typical_seconds: null,
+        },
+      }),
+      NOW,
+    );
+    const w = wagon(s, 'g7');
+    expect(w.station).toBe('gate');
+    expect(w.kind).toBe('train-gate');
+    expect(w.tag).toBe('train gate');
+    expect(w.trainId).toBe('t1');
+    expect(w.title).toContain('train t1');
+    expect(w.status).toContain('testing the train');
+    expect(s.bays[0]?.tag).toBe('train gate');
+    const q = wagon(s, 'g8');
+    expect(q.kind).toBe('train-gate');
+    expect(q.trainId).toBe('t2');
+    expect(q.tag).toBe('train gate');
+    // A car's gate is untouched by this.
+    const c = scene(yardOf(), statusOf({ gates: { capacity: 3, active: [gate('feat/y', 'g9')], queued: [], typical_seconds: null } }), NOW);
+    expect(wagon(c, 'g9').kind).toBe('gate-run');
+    expect(wagon(c, 'g9').trainId).toBeNull();
+  });
+
   test("a gate's since as a bare date draws no elapsed and no progress; as an instant it draws both", () => {
     const dated = scene(yardOf(), statusOf({ gates: { capacity: 3, active: [{ ...gate('feat/y', 'g9'), since: '2026-09-07' }], queued: [], typical_seconds: null } }), NOW);
     expect(dated.bays[0]).toMatchObject({ elapsed: 'Sep 7, 2026', progress: 0 });

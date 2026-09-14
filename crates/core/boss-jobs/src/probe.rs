@@ -20,7 +20,9 @@
 //! says what its author meant — a `jq -e` whose success branch is
 //! `empty` ([`asserts_its_own_negation`]), a bare `|| exit n` that
 //! throws away the status naming the cause
-//! ([`rewrites_its_exit_status`]) — which is also true everywhere.
+//! ([`rewrites_its_exit_status`]), a `-lt` on a variable nothing checked
+//! was a number ([`compares_an_unguarded_number`]) — which is also true
+//! everywhere.
 //!
 //! Each door applies the first only about the host it is actually
 //! sending the probe to, and the other two always. The second REFUSES,
@@ -29,7 +31,7 @@
 //! on a proof of nothing. The third only WARNS, because it fails
 //! closed — `boss prove` records nothing on a nonzero exit, so the worst
 //! it does is strand a car and misdescribe why (18 hours of that,
-//! 4fccc595) — and because both its detectors are coarse text scans a
+//! 4fccc595) — and because its detectors are coarse text scans a
 //! false refusal would be too expensive for.
 //!
 //! The predicates below are shared; the wording of a refusal or a
@@ -458,6 +460,105 @@ pub fn rewrites_its_exit_status(probe: &str) -> Option<i32> {
     })
 }
 
+/// WHEN A PROBE COMPARES A NUMBER IT NEVER CHECKED WAS ONE — the fourth
+/// shape, and like the two before it one that fails closed.
+///
+/// THE DEFECT (backlog 0df3af1c, measured 2026-09-14T00:00:25Z on
+/// david-asus-minipc). Two landed cars (dd1d872d, 2e4d3bce) and the
+/// daily recheck ran probes of the form
+/// `b=$(… | jq -r '… | first | .build_s'); if [ "${b:-9999}" -lt 200 ]`.
+/// The query matched nothing, so `first` was `null` and `jq -r` printed
+/// the four-character string `null` — which is not empty, so the `:-`
+/// default did nothing — and `[` wrote `[: null: integer expression
+/// expected` to stderr, exited 2, and fell into the else branch. The
+/// cars sat UNPROVEN behind a stderr nobody reads until an operator
+/// rewrote both probes by hand at 16:36Z.
+///
+/// Returns the NAME of the variable under the first unguarded numeric
+/// test, so the warning can say which one to guard, or `None` when
+/// there is no such test or the text guards against a non-number
+/// somewhere. A guard is one of the two things that actually stop the
+/// string reaching `[`:
+///
+/// - a jq-side `// empty` or `select(. != null)` on the VALUE, so that
+///   a missing number prints nothing at all; or
+/// - a shell-side non-digit check — `case "$b" in ''|*[!0-9]*) …` or
+///   `[[ "$b" =~ ^[0-9]+$ ]]` — before the test.
+///
+/// THREE THINGS DELIBERATELY NOT COUNTED, because both measured probes
+/// carried all three and failed anyway: a `${b:-9999}` default (guards
+/// EMPTY, not `null`); a `select(.field != null)` inside the array (the
+/// array is then empty and `first` of it is still `null`); and an
+/// `exit 75` in the else branch (reached only after the test has
+/// already errored). Any one of them counting would have exempted the
+/// probes this exists to catch.
+///
+/// DELIBERATELY COARSE, like its two siblings, and a warning because of
+/// it: a `case` anywhere in the text counts for every test in it, and a
+/// `[ "$n" -lt 3 ]` on a variable the probe set from `wc -l` is
+/// reported though it cannot be `null`. The cost when it is wrong is one
+/// line a builder reads and ignores; the cost of the alternative is a
+/// shell parser, or a car unproven for a day.
+pub fn compares_an_unguarded_number(probe: &str) -> Option<&str> {
+    if guards_against_a_non_number(probe) {
+        return None;
+    }
+    NUMERIC_TEST_OPERATORS.iter().find_map(|op| {
+        probe
+            .match_indices(op)
+            .filter(|(i, _)| {
+                // The operator as a whole word: `-lt` and not `-lte`,
+                // and not the tail of `--lt`.
+                let before = probe[..*i].chars().next_back();
+                let after = probe[i + op.len()..].chars().next();
+                before.is_some_and(char::is_whitespace) && after.is_none_or(char::is_whitespace)
+            })
+            .find_map(|(i, _)| tested_variable(&probe[..i]))
+    })
+}
+
+/// The shell's six integer comparisons — the operators `[` and `[[`
+/// refuse a non-integer operand for.
+const NUMERIC_TEST_OPERATORS: [&str; 6] = ["-lt", "-gt", "-le", "-ge", "-eq", "-ne"];
+
+/// The variable a test's left operand expands, if the operand IS a
+/// variable and the word in front of it is a test command. `head` is
+/// the text up to the operator.
+///
+/// `"${b:-9999}"`, `"$b"`, `${s}` and `$s` all name their variable; a
+/// literal (`[ 1 -lt 2 ]`) or a substitution (`$(wc -l)`) names none. A
+/// `!` in front of the operand is stepped over, and `test` counts
+/// alongside the two brackets because it is the same builtin.
+fn tested_variable(head: &str) -> Option<&str> {
+    let mut words = head.split_whitespace().rev();
+    let operand = words.next()?;
+    let command = words.find(|w| *w != "!")?;
+    if !matches!(command, "[" | "[[" | "test") {
+        return None;
+    }
+    let name = operand
+        .trim_matches('"')
+        .strip_prefix('$')?
+        .trim_start_matches('{');
+    let end = name
+        .find(|c: char| !c.is_alphanumeric() && c != '_')
+        .unwrap_or(name.len());
+    (end > 0).then(|| &name[..end])
+}
+
+/// Does the text, anywhere, stop a non-number before it reaches a
+/// test? Whitespace is dropped first so `select(. != null)` and
+/// `select(.!=null)` read the same; `select(.field != null)` does not,
+/// and must not (see [`compares_an_unguarded_number`]).
+fn guards_against_a_non_number(probe: &str) -> bool {
+    let packed: String = probe.split_whitespace().collect();
+    packed.contains("//empty")
+        || packed.contains("select(.!=null)")
+        || packed.contains("[!0-9]")
+        || packed.contains("[^0-9]")
+        || (packed.contains("=~") && packed.contains("[0-9]"))
+}
+
 /// The rule id a door records when an operator overrides a refusal on
 /// it. Short, stable, and greppable across recorded proofs — an
 /// override nobody can find later is the defect it was meant to avoid.
@@ -831,6 +932,118 @@ echo "ONE-HOME-FOR-A-DISPATCHER-RULE""#;
             rewrites_its_exit_status("boss-sor-read /api/x | grep -q y"),
             None
         );
+    }
+
+    /// THE TWO PROBES THAT SAT UNPROVEN ON `null`, verbatim off the
+    /// cars' `proof_attempt.probe` (0df3af1c, run 2026-09-14T00:00:25Z on
+    /// david-asus-minipc). Both read a number out of JSON with `jq -r`,
+    /// both test it with `-lt`, and both carried every shape of guard
+    /// that does NOT work: a `select(.build_s != null)` INSIDE the array
+    /// (so `first` of an empty array is still `null`), a `${b:-9999}`
+    /// default (which fills EMPTY, and `null` is four characters), and an
+    /// `exit 75` in the else branch the test never reached. stderr, both:
+    /// `bash: line 10: [: null: integer expression expected`.
+    const THE_FLOOR_SWEEP_PROBE_THAT_FAILED_ON_NULL: &str = "b=$(boss-sor-read \"/api/jobs?kind=maintenance-cluster-converge&limit=6\" | jq -r \"[.data[] | .steps[] | select(.spec_slug==\\\"run\\\") | .metadata | select(.build_s != null)] | first | .build_s\"); echo \"build_s=$b\"; if [ \"${b:-9999}\" -lt 200 ]; then echo warm-build-kept:ok; else echo \"newest converge built in ${b}s — warm needs a sweep hour to pass without wiping the mounts, then a converge\"; exit 75; fi";
+
+    const THE_IMAGE_BUILD_PROBE_THAT_FAILED_ON_NULL: &str = "b=$(boss-sor-read '/api/jobs?kind=maintenance-cluster-converge&limit=6' | jq -r '[.data[] | .steps[] | select(.spec_slug==\"run\") | .metadata | select(.build_s != null)] | first | \"build_s=\\(.build_s) head=\\(.build_head)\"'); echo \"$b\"; s=${b#build_s=}; s=${s%% *}; if [ \"${s:-9999}\" -lt 300 ]; then echo warm-image-build:ok; else echo \"the newest converge built in ${s}s — a cold cache fill after landing is expected once; the converge after it is the measurement (was 522s before)\"; exit 75; fi";
+
+    /// And the two that REPLACED them by hand at 16:36Z, also verbatim
+    /// off the cars' `proof_probe`: the first guards on both sides
+    /// (`// empty` in jq AND `case … *[!0-9]*` in the shell), the second
+    /// with `first | select(. != null)` in jq and the same `case`. A
+    /// check that flags the correct shape teaches the next builder to
+    /// ignore it.
+    const THE_FLOOR_SWEEP_PROBE_REWRITTEN: &str = "b=$(boss-sor-read \"/api/jobs?kind=maintenance-cluster-converge&limit=60\" | jq -r \"[.data[] | .steps[] | select(.spec_slug==\\\"run\\\") | .metadata | select(.build_s != null)] | first | .build_s // empty\"); echo \"build_s=${b:-none}\"; case \"$b\" in ''|*[!0-9]*) echo \"not yet: no converge in the newest 60 packets recorded a build (every tick was unchanged)\"; exit 75;; esac; if [ \"$b\" -lt 200 ]; then echo warm-build-kept:ok; else echo \"newest converge built in ${b}s — warm needs a sweep hour to pass without wiping the mounts, then a converge\"; exit 75; fi";
+
+    const THE_IMAGE_BUILD_PROBE_REWRITTEN: &str = "b=$(boss-sor-read '/api/jobs?kind=maintenance-cluster-converge&limit=60' | jq -r '[.data[] | .steps[] | select(.spec_slug==\"run\") | .metadata | select(.build_s != null)] | first | select(. != null) | \"build_s=\\(.build_s) head=\\(.build_head)\"'); echo \"${b:-build_s=none}\"; s=${b#build_s=}; s=${s%% *}; case \"$s\" in ''|*[!0-9]*) echo 'not yet: no converge in the newest 60 packets recorded a build (every tick was unchanged)'; exit 75;; esac; if [ \"$s\" -lt 300 ]; then echo warm-image-build:ok; else echo \"the newest converge built in ${s}s — a cold cache fill after landing is expected once; the converge after it is the measurement (was 522s before)\"; exit 75; fi";
+
+    /// The measured instances are seen, and the variable each compares
+    /// is NAMED, because the warning has to say which one to guard. The
+    /// third text is the packet's own schematic of the pattern, which
+    /// is what the daily recheck ran into again.
+    #[test]
+    fn the_probes_that_failed_on_null_are_seen_with_their_variable_named() {
+        assert_eq!(
+            compares_an_unguarded_number(THE_FLOOR_SWEEP_PROBE_THAT_FAILED_ON_NULL),
+            Some("b"),
+            "{THE_FLOOR_SWEEP_PROBE_THAT_FAILED_ON_NULL}"
+        );
+        assert_eq!(
+            compares_an_unguarded_number(THE_IMAGE_BUILD_PROBE_THAT_FAILED_ON_NULL),
+            Some("s"),
+            "{THE_IMAGE_BUILD_PROBE_THAT_FAILED_ON_NULL}"
+        );
+        assert_eq!(
+            compares_an_unguarded_number(
+                "b=$(boss-sor-read /api/jobs | jq -r '.data | first | .build_s'); \
+                 if [ \"$b\" -lt 200 ]; then echo claim:ok; fi"
+            ),
+            Some("b")
+        );
+    }
+
+    /// The hand rewrites are clean — on either side of the pipe.
+    #[test]
+    fn the_probes_rewritten_with_a_guard_are_not_reported() {
+        for probe in [
+            THE_FLOOR_SWEEP_PROBE_REWRITTEN,
+            THE_IMAGE_BUILD_PROBE_REWRITTEN,
+            // Each guard alone is enough: the jq side …
+            "b=$(boss-sor-read /api/x | jq -r '.n // empty'); [ \"$b\" -lt 200 ] && echo claim:ok",
+            "b=$(boss-sor-read /api/x | jq -r 'first | select(. != null) | .n'); [ \"$b\" -lt 200 ] && echo claim:ok",
+            // … or the shell side, as a glob or as a regex.
+            "b=$(boss-sor-read /api/x | jq -r '.n'); case \"$b\" in ''|*[!0-9]*) echo 'not yet: no n'; exit 75;; esac; [ \"$b\" -lt 200 ] && echo claim:ok",
+            "b=$(boss-sor-read /api/x | jq -r '.n'); [[ \"$b\" =~ ^[0-9]+$ ]] || { echo 'not yet: no n'; exit 75; }; [[ \"$b\" -lt 200 ]] && echo claim:ok",
+        ] {
+            assert_eq!(
+                compares_an_unguarded_number(probe),
+                None,
+                "guarded: {probe}"
+            );
+        }
+    }
+
+    /// WHAT DOES NOT COUNT AS A GUARD, each because the failing probes
+    /// HAD it. A `${b:-9999}` default fills the empty string and `jq -r`
+    /// prints `null`, not nothing. A `select(.field != null)` inside the
+    /// array leaves `first` of an empty array as `null`. An `exit 75` in
+    /// the else branch is reached only after `[` has already errored on
+    /// the string. Counting any of these would have exempted both
+    /// measured probes.
+    #[test]
+    fn a_default_a_field_select_and_a_late_exit_75_are_not_guards() {
+        for probe in [
+            "b=$(boss-sor-read /api/x | jq -r '.n'); [ \"${b:-9999}\" -lt 200 ] && echo claim:ok",
+            "b=$(boss-sor-read /api/x | jq -r '[.[] | select(.n != null)] | first | .n'); [ \"$b\" -lt 200 ] && echo claim:ok",
+            "b=$(boss-sor-read /api/x | jq -r '.n'); if [ \"$b\" -lt 200 ]; then echo claim:ok; else echo 'not yet'; exit 75; fi",
+        ] {
+            assert_eq!(
+                compares_an_unguarded_number(probe),
+                Some("b"),
+                "not a guard: {probe}"
+            );
+        }
+    }
+
+    /// No numeric test on a VARIABLE, no finding — whatever else the
+    /// text does. A string test, a `grep -c` piped to nothing numeric, an
+    /// operator mentioned in prose or in a jq filter, and a literal on
+    /// both sides are all not the shape.
+    #[test]
+    fn a_probe_without_a_numeric_test_on_a_variable_is_not_reported() {
+        for probe in [
+            "boss-sor-read /api/workflows/x | grep -q claim:ok",
+            "b=$(boss-sor-read /api/x | jq -r '.name'); [ \"$b\" = ready ] && echo claim:ok",
+            "git show HEAD:infra/gate.sh | grep -c \"integer expression\" && echo claim:ok",
+            "echo 'the -lt test is the shape'; [ 1 -lt 2 ] && echo claim:ok",
+            "boss-sor-read /api/x | jq -e '.n < 200' >/dev/null && echo claim:ok",
+        ] {
+            assert_eq!(
+                compares_an_unguarded_number(probe),
+                None,
+                "not the shape: {probe}"
+            );
+        }
     }
 
     /// The override record is the same shape wherever a door writes it,

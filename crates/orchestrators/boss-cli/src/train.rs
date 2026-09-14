@@ -185,6 +185,28 @@ pub(crate) fn train_ref_of(train: &Value) -> Option<&str> {
         })
 }
 
+/// PURE: whether the boarding pass owes this train its gate before the
+/// pass ends (backlog 95c349a5). Measured 2026-09-14 on four trains, PR
+/// open -> gate filed was 2.5–8.5 minutes of pure waiting, because the
+/// gate was filed from the ci-step block on the NEXT reconcile pass.
+/// Yes once the train carries what `launch_train_gate` reads — a
+/// `train_ref` on its assemble step and the PR recorded on its pr step
+/// — and no gate-run yet. A train that already carries one is the ci
+/// block's to read; a train missing the ref would fail the launch on
+/// "carries no train_ref" and spend one of `MAX_LAUNCH_FAILURES` on it.
+pub(crate) fn gate_due_at_boarding(train: &Value) -> bool {
+    let pr_recorded = find_step(train, "pr", "Open the batched PR")
+        .and_then(|s| s.get("metadata"))
+        .and_then(|m| m.get("pr_url"))
+        .and_then(Value::as_str)
+        .is_some_and(|u| !u.is_empty());
+    let unfiled = train
+        .pointer(&format!("/metadata/{}", crate::train_gate::KEY_RUN))
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty);
+    pr_recorded && train_ref_of(train).is_some() && unfiled
+}
+
 pub(crate) fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -6669,12 +6691,51 @@ impl Conductor {
         Ok(())
     }
 
+    /// The train gate as RECORDED, for a train whose ci step is already
+    /// judged: the standing of the gate-run the train names, read and
+    /// never filed or relaunched — the judgement is made; this keeps it
+    /// in force (`train_gate::judged_verdict`). `None` when the train
+    /// never had a gate-run; an unreadable run reads as pending, so a
+    /// blip holds the train rather than merging it on CI alone.
+    async fn recorded_train_gate(
+        &self,
+        t: &Value,
+        tid: &str,
+    ) -> (Option<crate::train_gate::Standing>, u32) {
+        use crate::train_gate::{self as tg, Standing};
+        let relaunches = t
+            .pointer(&format!("/metadata/{}", tg::KEY_RELAUNCHES))
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32;
+        let Some(run_id) = t
+            .pointer(&format!("/metadata/{}", tg::KEY_RUN))
+            .and_then(Value::as_str)
+        else {
+            return (None, relaunches);
+        };
+        match self.get_job(run_id).await {
+            Ok(run) => (Some(tg::standing(&run)), relaunches),
+            Err(e) => {
+                log(format!(
+                    "train {}: could not re-read its judged gate-run {} this pass ({e}) — holding",
+                    id8(tid),
+                    id8(run_id)
+                ));
+                (Some(Standing::Pending), relaunches)
+            }
+        }
+    }
+
     /// THE TRAIN GATE, read or filed (design 128b5496). Returns the
     /// gate's standing (None when no gate-run is on the train yet) and
     /// the relaunch count, for `train_gate::combined_verdict`. Every
     /// failure here is logged and read as "pending": a gate the
     /// conductor could not file or read this pass is filed or read the
-    /// next, and the train waits — it never merges on CI alone.
+    /// next, and the train waits — it never merges on CI alone. Two
+    /// callers: `board`, once, right after the PR is recorded (so the
+    /// gate starts in the pass that opens the PR, backlog 95c349a5),
+    /// and the ci-step block of every `reconcile` pass, which is the
+    /// retry when that first launch failed.
     async fn train_gate(
         &self,
         t: &mut Value,
@@ -7029,16 +7090,26 @@ impl Conductor {
             // are a gate-run of the train branch on the cluster, filed
             // here while the PR is open and unjudged, and the verdict is
             // CI's and the gate's read together (`train_gate`).
+            // Once judged, the gate-run is RE-READ (never relaunched)
+            // and still combined: the judged arm used to recompute
+            // `forge_verdict` alone, and train #361 merged with its gate
+            // RED on the tick after its ci step recorded `failing`
+            // (2026-09-14, 6f18390b).
             let ci_judged = step_done(find_step(&t, "ci", "CI verdict"));
             let (gate, relaunches) = if ci_judged {
-                (None, 0)
+                self.recorded_train_gate(&t, &tid).await
             } else {
                 self.train_gate(&mut t, &tid, now).await
             };
             let ci_step = find_step(&t, "ci", "CI verdict");
             let forge_verdict = ci_verdict(info.get("statusCheckRollup"));
             let verdict = if step_done(ci_step) {
-                forge_verdict
+                crate::train_gate::judged_verdict(
+                    forge_verdict,
+                    gate.as_ref(),
+                    relaunches,
+                    self.cfg.gate_required,
+                )
             } else {
                 crate::train_gate::combined_verdict(
                     forge_verdict,
@@ -7196,7 +7267,23 @@ impl Conductor {
             }
 
             let pr_state = info.get("state").and_then(Value::as_str);
-            if self.cfg.auto_merge && verdict == "green" && pr_state == Some("OPEN") {
+            // Second lock on the same door: the ci step's RECORDED
+            // verdict. The live reading above is what merges; this is
+            // the frozen judgement, and a train judged failing or
+            // aborted never merges whatever the live reading says —
+            // the merge observed against the record, never assumed.
+            let judged_red = find_step(&t, "ci", "CI verdict")
+                .and_then(|s| s.get("metadata"))
+                .and_then(|m| m.get("result"))
+                .and_then(Value::as_str)
+                .is_some_and(|r| matches!(r, "failing" | "aborted"));
+            if judged_red && verdict == "green" && pr_state == Some("OPEN") {
+                log(format!(
+                    "train {}: live verdict green but the ci step is judged red — NOT merging (6f18390b)",
+                    id8(&tid)
+                ));
+            }
+            if self.cfg.auto_merge && verdict == "green" && !judged_red && pr_state == Some("OPEN") {
                 log(format!(
                     "CI green — merging {pr_url} (train protocol 27ab7680)"
                 ));
@@ -8951,6 +9038,33 @@ impl Conductor {
             id8(&train_id),
             boarded.len()
         ));
+
+        // THE TRAIN GATE, FILED IN THIS PASS (backlog 95c349a5). Until
+        // 2026-09-14 the gate was filed only from the ci-step block in
+        // `reconcile`, so every train waited for the next tick before its
+        // Rust checks started — 8m30s, 4m29s, 6m30s, 2m30s on the last
+        // four, on the critical path of every landing. `train_gate` is
+        // the same launch path the ci block uses and is idempotent on
+        // KEY_RUN, so that block stays the retry for a launch that fails
+        // here (the gate bound, kubectl, the API). BEST-EFFORT, after
+        // the cars are stamped: nothing in boarding may abort on it — a
+        // train that boarded is a train, gate or no gate. The instant is
+        // `Utc::now()`, not the pass's `now`: the boarding pass can run
+        // minutes, and `train_gate_launched_at` before the pr step's own
+        // `completed_at` would be a record nobody could read.
+        match self.get_job(&train_id).await {
+            Ok(mut fresh) if gate_due_at_boarding(&fresh) => {
+                self.train_gate(&mut fresh, &train_id, Utc::now()).await;
+            }
+            Ok(_) => log(format!(
+                "train {}: not filing its gate at boarding — it already carries one, or its record is incomplete; the reconcile pass files it",
+                id8(&train_id)
+            )),
+            Err(e) => log(format!(
+                "train {}: could not re-read the train to file its gate at boarding ({e}) — the reconcile pass files it",
+                id8(&train_id)
+            )),
+        }
         Ok(())
     }
 
@@ -9460,7 +9574,7 @@ pub async fn run(phase: Phase, dry: bool, now: DateTime<Utc>) -> Result<()> {
 #[cfg(test)]
 mod tests {
 
-    use super::train_ref_of;
+    use super::{gate_due_at_boarding, train_ref_of};
 
     /// The ref is on the assemble step, where the assembly writes it;
     /// the train metadata is the older home and still read.
@@ -9479,6 +9593,51 @@ mod tests {
         assert_eq!(train_ref_of(&old), Some("train/x@abcdef1"));
         let none = serde_json::json!({ "metadata": {}, "steps": [{ "spec_slug": "assemble", "status": "ready", "metadata": {} }] });
         assert_eq!(train_ref_of(&none), None);
+    }
+
+    // -- the train gate is filed in the pass that opens the PR ---------
+    //
+    // Measured 2026-09-14 on four trains (backlog 95c349a5): PR open ->
+    // gate filed took 8m30s, 4m29s, 6m30s, 2m30s — pure waiting, because
+    // the gate was filed from the ci-step block on the NEXT reconcile
+    // pass. The boarding pass owes the gate itself, and this predicate
+    // is what it asks before filing: it must say yes to exactly the
+    // train boarding leaves behind, and no to a train that already
+    // carries a gate-run (the ci block reads that one) or one whose
+    // record is not yet complete enough to launch from.
+    #[test]
+    fn a_freshly_boarded_train_is_owed_its_gate_in_the_same_pass() {
+        let boarded = json!({
+            "id": "t-1",
+            "metadata": { "boarded_jobs": ["c1"] },
+            "steps": [
+                { "spec_slug": "assemble", "title": "Assemble the train branch", "status": "completed",
+                  "metadata": { "train_ref": "train/20260914-1726@1a74705f" } },
+                { "spec_slug": "pr", "title": "Open the batched PR", "status": "completed",
+                  "metadata": { "pr_url": "https://forge.example/david/boss/pulls/361" } }
+            ]
+        });
+        assert!(
+            gate_due_at_boarding(&boarded),
+            "a train with its PR open, a train_ref and no gate-run is owed a gate before the boarding pass ends"
+        );
+
+        // Already filed — this pass or a previous one: the ci block reads it.
+        let mut filed = boarded.clone();
+        filed["metadata"][crate::train_gate::KEY_RUN] = json!("g-1");
+        assert!(!gate_due_at_boarding(&filed));
+
+        // The PR was never recorded: nothing to gate against yet.
+        let mut no_pr = boarded.clone();
+        no_pr["steps"][1]["status"] = json!("ready");
+        no_pr["steps"][1]["metadata"] = json!({});
+        assert!(!gate_due_at_boarding(&no_pr));
+
+        // No train_ref: the launch would fail on "carries no train_ref"
+        // and burn one of the three launch attempts for nothing.
+        let mut no_ref = boarded.clone();
+        no_ref["steps"][0]["metadata"] = json!({});
+        assert!(!gate_due_at_boarding(&no_ref));
     }
     // -- a machine cancellation says why -------------------------------
 

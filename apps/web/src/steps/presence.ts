@@ -23,6 +23,8 @@ const bytesToB64url = (buf: ArrayBuffer): string =>
     .replace(/\//g, '_')
     .replace(/=+$/, '');
 
+import { CEREMONY_DECLINED } from '../me/passkeyHints';
+
 export type PresenceRefusal = Readonly<{
   required?: string;
   detail?: string;
@@ -161,7 +163,7 @@ export async function enrollPasskey(label: string): Promise<void> {
       },
     })) as PublicKeyCredential | null;
   } catch {
-    throw new Error('Passkey creation was declined or timed out.');
+    throw new Error(CEREMONY_DECLINED);
   }
   if (!credential) throw new Error('Passkey creation returned no credential.');
   const attestation = credential.response as AuthenticatorAttestationResponse;

@@ -216,6 +216,10 @@ export type ActiveGate = Readonly<{
    *  like a slow one from here, and the bay must say so. Absent on an
    *  older server → false: no fabricated alarm. */
   stale: boolean;
+  /** The pr-train this run tests when it is a TRAIN gate (128b5496) —
+   *  absent or null for a car's gate. The floor draws such a bay as the
+   *  train under test, not as a PR car (2026-09-14). */
+  train?: string | null;
 }>;
 
 /** One gate-run WAITING for a slot — filed and ordered, but not running.
@@ -237,6 +241,8 @@ export type QueuedGate = Readonly<{
   /** How much longer it expects to wait, seconds — derived server-side
    *  from the MEASURED gate duration. Null when nothing was measured. */
   estimated_wait_seconds: number | null;
+  /** As on ActiveGate: the train this run tests, when it is a train gate. */
+  train?: string | null;
 }>;
 
 /** The gate slots the Approach renders: `capacity` (from the delivery

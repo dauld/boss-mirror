@@ -6,6 +6,7 @@
   // credential lands in BOSS's own table. Presence-gated steps then
   // verify fresh assertions against these credentials, bound to each
   // step's shape hash.
+  import { PHONE_QR_HINT } from './passkeyHints';
   import { enrollPasskey } from '../steps/presence';
   import { formatDate } from '@boss/web-kit/ui/date';
 
@@ -133,6 +134,9 @@
         {busy ? 'Waiting for authenticator…' : 'Add passkey'}
       </button>
     </div>
+    <!-- The browser draws the enrolment dialog and its phone QR; this
+         page owes the sentence the dialog does not say (a55d9a01). -->
+    <p class="passkeys-hint">{PHONE_QR_HINT}</p>
     {#if error}
       <p class="passkeys-error">{error}</p>
     {/if}
@@ -142,6 +146,12 @@
 <style>
   .passkeys-panel {
     margin-top: 1rem;
+  }
+  .passkeys-hint {
+    margin: 0.5rem 0 0;
+    font-size: 0.85rem;
+    color: var(--text-muted, #8a939c);
+    max-width: 60ch;
   }
   .passkeys-panel h3 {
     margin: 0 0 0.25rem;

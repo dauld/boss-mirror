@@ -440,6 +440,7 @@
           class="token wagon {w.tone}"
           class:landed={w.station === 'arrivals'}
           class:sim={w.sim}
+          class:train-gate={w.kind === 'train-gate'}
           class:selected={selected === `car:${w.id}`}
           style="transform: translate({x}px, {y}px)"
           role="button"
@@ -569,6 +570,11 @@
   .wagon.static rect.stripe { fill: var(--border-strong, #3a434d); }
   .wagon.landed rect.body { opacity: 0.55; }
   .wagon.sim rect.body { stroke-dasharray: 3 2; }
+  /* A TRAIN's gate in a bay is drawn in the locomotive's livery — the
+     train under test, not a PR car (128b5496; asked twice 2026-09-14). */
+  .wagon.train-gate rect.body { stroke: var(--fog, #e8ecef); }
+  .wagon.train-gate rect.stripe { fill: var(--fog, #e8ecef); }
+  .wagon.train-gate text { font-weight: 600; }
   .wagon text { fill: var(--fog, #e8ecef); font-size: 9px; letter-spacing: 0; text-transform: none; }
   .wagon.selected rect.body, .wagon:hover rect.body, .wagon:focus-visible rect.body {
     stroke: var(--signal, #5fd4a8); stroke-width: 1.5;

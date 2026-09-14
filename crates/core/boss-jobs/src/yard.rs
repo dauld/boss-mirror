@@ -1784,6 +1784,12 @@ pub struct ActiveGate {
     /// and a third silently ate a car that was never gated at all.
     #[serde(default)]
     pub stale: bool,
+    /// The train this run tests, when it is a TRAIN gate (128b5496:
+    /// `metadata.train_gate` true, `metadata.train` the pr-train id) —
+    /// `None` for a car's gate. The floor reads it to draw the bay as
+    /// the train under test rather than as a PR car (2026-09-14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub train: Option<String>,
 }
 
 /// The metadata key a gate-run carries while it is WAITING for a
@@ -1843,6 +1849,10 @@ pub struct QueuedGate {
     /// [`estimated_waits`]. `None` when nothing has been measured: a
     /// wait nobody can derive is reported unknown, never invented.
     pub estimated_wait_seconds: Option<i64>,
+    /// The train this run tests when it is a train gate; see
+    /// [`ActiveGate::train`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub train: Option<String>,
 }
 
 /// The gate slots the Approach renders: how many gates run at once
@@ -1997,10 +2007,21 @@ fn queued_gates(
                     .zip(parse_instant(stamp))
                     .map(|(n, t)| (n - t).num_seconds()),
                 estimated_wait_seconds: waits.get(i).copied(),
+                train: train_of_gate(g),
             }
         })
         .collect();
     (queued, typical)
+}
+
+/// The pr-train a gate-run tests, when it is a TRAIN gate (128b5496):
+/// `metadata.train`, read only when `metadata.train_gate` is true, so a
+/// car's run — whatever else its metadata says — names no train.
+fn train_of_gate(g: &Job) -> Option<String> {
+    crate::stranded::is_train_gate(&g.metadata)
+        .then(|| meta_str(&g.metadata, "train").filter(|t| !t.is_empty()))
+        .flatten()
+        .map(str::to_string)
 }
 
 /// A car that gated RED and is waiting for rework — the garage. Named
@@ -2091,6 +2112,7 @@ pub fn gates(
                     (Some(cutoff), Some(at)) => at < cutoff,
                     _ => false,
                 },
+                train: train_of_gate(g),
             })
         })
         .collect();
@@ -2207,6 +2229,13 @@ fn unsettled_latest<'a>(
             continue;
         };
         if settled_branches.iter().any(|b| b == branch) {
+            continue;
+        }
+        // A train's own gate-run (128b5496) is the TRAIN's verdict: it
+        // renders on the train card and strikes the cars aboard. It is
+        // no car awaiting rework (garage) and no car nobody judged
+        // (limbo) — the held lane makes the same exclusion for a green.
+        if crate::stranded::is_train_gate(&g.metadata) {
             continue;
         }
         match latest.get(branch) {
@@ -4675,6 +4704,45 @@ mod tests {
         );
     }
 
+    /// A TRAIN's gate-run in a bay (128b5496) is the train being tested,
+    /// not a car being gated; the bay has to be able to say so, or the
+    /// floor draws a `train/…` wagon that reads as a PR car and every
+    /// viewer asks why a PR is in the gates (David, 2026-09-14, twice).
+    /// The row carries the train's id when the run is a train gate, and
+    /// nothing otherwise — a car's row does not change.
+    #[test]
+    fn a_train_gate_in_a_bay_names_its_train() {
+        let mut tg = gate_run_on("train/20260914-1727", 2);
+        tg.metadata["train_gate"] = json!(true);
+        tg.metadata["train"] = json!("9a3af298-0000-4000-8000-000000000000");
+        let mut queued_tg = gate_run_on("train/20260914-1800", 2);
+        queued_tg.metadata["train_gate"] = json!(true);
+        queued_tg.metadata["train"] = json!("b1b1b1b1-0000-4000-8000-000000000000");
+        queued_tg.metadata[QUEUED_AT] = json!("2026-09-02T01:00:00Z");
+        let runs = vec![
+            (gate_run_on("feat/car", 2), vec![in_flight_step()]),
+            (tg, vec![in_flight_step()]),
+            (queued_tg, vec![in_flight_step()]),
+        ];
+        let g = gates(&runs, 2, None);
+        let by_branch: std::collections::HashMap<&str, Option<&str>> = g
+            .active
+            .iter()
+            .map(|a| (a.branch.as_str(), a.train.as_deref()))
+            .collect();
+        assert_eq!(by_branch["feat/car"], None, "a car's row carries no train");
+        assert_eq!(
+            by_branch["train/20260914-1727"],
+            Some("9a3af298-0000-4000-8000-000000000000"),
+            "a train gate names the train it tests"
+        );
+        assert_eq!(
+            g.queued[0].train.as_deref(),
+            Some("b1b1b1b1-0000-4000-8000-000000000000"),
+            "and so does one waiting in line"
+        );
+    }
+
     /// An EMPTY marker is not a queued run. A `queued_at: ""` is the
     /// shape a cleared key leaves behind on a metadata merge that wrote
     /// a blank instead of deleting, and reading it as "queued" would
@@ -4889,6 +4957,50 @@ mod tests {
         assert_eq!(g[0].branch, "feat/x");
         assert_eq!(g[0].failed_check.as_deref(), Some("test"));
         assert_eq!(g[0].since, "2026-09-03");
+    }
+
+    /// Train #361, 2026-09-14: its own gate-run (`train/20260914-1641`,
+    /// filed by the conductor under design 128b5496) went red and the
+    /// garage drew it as a car awaiting rework. A train gate is the
+    /// TRAIN's verdict — it renders on the train card, it strikes the
+    /// cars aboard, and no builder reworks a `train/…` branch — so it is
+    /// no car in the garage, and no car in limbo when it is lost, the
+    /// way the held lane already refuses to call it a stranded green.
+    #[test]
+    fn a_train_gate_is_no_car_in_the_garage_or_limbo() {
+        let mut red = gate_run_on("train/20260914-1641", 3);
+        red.metadata["train_gate"] = json!(true);
+        red.metadata["train"] = json!("7cf3e5fe-b8c7-4cc5-af4c-8f47f6a94b1f");
+        let mut lost = gate_run_on("train/20260914-1555", 3);
+        lost.metadata["train_gate"] = json!(true);
+        let runs = vec![
+            (
+                red,
+                vec![verdict_step(
+                    "failed",
+                    json!([{"name": "test", "result": "fail"}]),
+                )],
+            ),
+            (lost, vec![verdict_step("lost", json!([]))]),
+            // A car's red beside them still garages.
+            (
+                gate_run_on("feat/x", 3),
+                vec![verdict_step(
+                    "failed",
+                    json!([{"name": "test", "result": "fail"}]),
+                )],
+            ),
+        ];
+        let g = garage(&runs, &[]);
+        assert_eq!(
+            g.iter().map(|c| c.branch.as_str()).collect::<Vec<_>>(),
+            vec!["feat/x"],
+            "the train's red is the train's, not a car's"
+        );
+        assert!(
+            limbo(&runs, &[]).is_empty(),
+            "a lost train gate is relaunched by the conductor, not reworked by a builder"
+        );
     }
 
     /// 2026-09-04: every one of the garage's three entries was landed
