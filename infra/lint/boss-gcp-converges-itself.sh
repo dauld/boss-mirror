@@ -210,8 +210,11 @@ dup=$(printf '%s\n' $role_stems | uniq -d)
 # ML batch (other roles) must be reported, not installed.
 mkdir -p "$tmp/etc-roles"
 : >"$tmp/systemctl-roles.log"
-# THE HOST'S OWN ROLE SET FIRST — including one that maps to NO units
-# (wireguard-bastion: `units = []`). Measured 2026-09-12 18:55Z on
+# THE FOUR ROLES THE HOST DECLARED ON 2026-09-12 FIRST — including one
+# that maps to NO units (wireguard-bastion: `units = []`). A fixture, not
+# the live set: legacy-stack left boss-gcp's node_roles on 2026-09-14
+# (d5941ef3 car 3) and stays in roles.toml as vocabulary, so this still
+# exercises a role with units beside an empty one. Measured 2026-09-12 18:55Z on
 # boss-gcp, three converges in a row: the roles read worked, the
 # installer printed its header and died with exit 1 and not one more
 # line, because `role_units` piped awk into `grep -oE '"[^"]+"'`, an

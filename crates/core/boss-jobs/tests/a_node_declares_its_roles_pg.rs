@@ -15,8 +15,13 @@ use boss_jobs::PgJobs;
 use boss_jobs::port::JobsRepository;
 use boss_testing::TestDb;
 
+/// Three roles since 2026-09-14 (d5941ef3 car 3): `legacy-stack` was
+/// deleted from node_roles — the second stack is being retired, and the
+/// bounded verb that stops it refuses while the declaration stands,
+/// because the converge would re-enable the chores on its next tick.
+/// The Class row for the role stays; no node declares it.
 #[tokio::test(flavor = "multi_thread")]
-async fn boss_gcp_declares_four_roles_and_keeps_its_primary() {
+async fn boss_gcp_declares_three_roles_and_keeps_its_primary() {
     let db = TestDb::new().await;
     let repo = PgJobs::new(db.pool.clone());
 
@@ -29,12 +34,17 @@ async fn boss_gcp_declares_four_roles_and_keeps_its_primary() {
     assert_eq!(
         gcp.roles,
         vec![
-            "legacy-stack".to_string(),
             "ml-batch-host".to_string(),
             "off-cluster-observer".to_string(),
             "wireguard-bastion".to_string(),
         ],
-        "sorted, so two reads of the same registry compare equal"
+        "sorted, so two reads of the same registry compare equal — and no legacy-stack"
+    );
+    assert!(
+        !nodes
+            .iter()
+            .any(|n| n.roles.iter().any(|r| r == "legacy-stack")),
+        "no node declares legacy-stack any more; the role row is vocabulary only"
     );
 
     let w1 = nodes

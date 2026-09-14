@@ -50,7 +50,7 @@ fn has_role_matches_a_whole_role_and_never_a_substring() {
 #[test]
 fn a_preset_roles_list_wins_and_an_unreachable_registry_leaves_it_empty() {
     let (rc, out) = sh(
-        "read_node_roles forge; echo \"roles=<$BOSS_NODE_ROLES>\"",
+        "read_node_roles forge; echo \"roles=<$BOSS_NODE_ROLES> source=$BOSS_NODE_ROLES_SOURCE\"",
         &[
             ("BOSS_NODE_ROLES", "cluster-operator"),
             ("BOSS_ESTATE_NODES_URL", "http://127.0.0.1:9/never"),
@@ -58,7 +58,7 @@ fn a_preset_roles_list_wins_and_an_unreachable_registry_leaves_it_empty() {
     );
     assert_eq!(rc, 0);
     assert!(
-        out.contains("roles=<cluster-operator>"),
+        out.contains("roles=<cluster-operator> source=preset"),
         "a caller's preset list is not overwritten by a read: {out}"
     );
 
@@ -70,7 +70,7 @@ fn a_preset_roles_list_wins_and_an_unreachable_registry_leaves_it_empty() {
     let cache = boss_testing::scratch_dir("node-roles-nocache").join("roles.cache");
     let _ = std::fs::remove_file(&cache);
     let (rc, out) = sh(
-        "read_node_roles forge; echo \"roles=<$BOSS_NODE_ROLES>\"",
+        "read_node_roles forge; echo \"roles=<$BOSS_NODE_ROLES> source=$BOSS_NODE_ROLES_SOURCE\"",
         &[
             ("BOSS_ESTATE_NODES_URL", "http://127.0.0.1:9/never"),
             ("BOSS_NODE_ROLES_CACHE", cache.to_str().unwrap()),
@@ -82,8 +82,10 @@ fn a_preset_roles_list_wins_and_an_unreachable_registry_leaves_it_empty() {
         "the read says why and what it did: {out}"
     );
     assert!(
-        out.contains("roles=<registry-unread>"),
-        "a sentinel no role section matches, so only [always] installs: {out}"
+        out.contains("roles=<registry-unread> source=none"),
+        "a sentinel no role section matches, so only [always] installs — and the source says no read happened, \
+         so a verb with a stricter policy (the retire verb refuses unless the registry answered) is not fooled \
+         by a non-empty list: {out}"
     );
 }
 
@@ -104,7 +106,7 @@ fn a_dark_registry_installs_the_last_declaration_it_read() {
     .unwrap();
     let url = format!("file://{}", nodes.display());
     let (rc, out) = sh(
-        "read_node_roles boss-gcp; echo \"roles=<$BOSS_NODE_ROLES>\"",
+        "read_node_roles boss-gcp; echo \"roles=<$BOSS_NODE_ROLES> source=$BOSS_NODE_ROLES_SOURCE\"",
         &[
             ("BOSS_ESTATE_NODES_URL", &url),
             ("BOSS_NODE_ROLES_CACHE", cache.to_str().unwrap()),
@@ -112,7 +114,7 @@ fn a_dark_registry_installs_the_last_declaration_it_read() {
     );
     assert_eq!(rc, 0);
     assert!(
-        out.contains("roles=<ml-batch-host,off-cluster-observer>"),
+        out.contains("roles=<ml-batch-host,off-cluster-observer> source=registry"),
         "{out}"
     );
     assert_eq!(
@@ -122,7 +124,7 @@ fn a_dark_registry_installs_the_last_declaration_it_read() {
     );
     // Now the registry is dark: the cache answers, and the log says so.
     let (rc, out) = sh(
-        "read_node_roles boss-gcp; echo \"roles=<$BOSS_NODE_ROLES>\"",
+        "read_node_roles boss-gcp; echo \"roles=<$BOSS_NODE_ROLES> source=$BOSS_NODE_ROLES_SOURCE\"",
         &[
             ("BOSS_ESTATE_NODES_URL", "http://127.0.0.1:9/never"),
             ("BOSS_NODE_ROLES_CACHE", cache.to_str().unwrap()),
@@ -130,8 +132,8 @@ fn a_dark_registry_installs_the_last_declaration_it_read() {
     );
     assert_eq!(rc, 0);
     assert!(
-        out.contains("roles=<ml-batch-host,off-cluster-observer>"),
-        "{out}"
+        out.contains("roles=<ml-batch-host,off-cluster-observer> source=cache"),
+        "a caller with its own policy can see the roles did NOT come from a live read: {out}"
     );
     assert!(
         out.contains("did not answer") && out.contains("cached declaration"),

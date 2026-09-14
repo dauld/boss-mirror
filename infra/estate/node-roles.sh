@@ -25,6 +25,17 @@
 #   run-summary.sh). A BOSS_NODE_ROLES already set by the caller wins
 #   (a test, a hand run).
 #
+#   Also exports BOSS_NODE_ROLES_SOURCE — `preset`, `registry`, `cache`
+#   or `none` — so a caller with a DIFFERENT fallback policy can have
+#   one. The converge's policy (last declaration, else [always]) is the
+#   right one for keeping a host converging; it is the WRONG one for a
+#   verb that stops units, which must refuse unless the registry
+#   answered now (infra/gcp/retire-second-stack.sh). The sentinel alone
+#   could not tell them apart: `registry-unread` is non-empty, so an
+#   emptiness check read it as a declaration — the train gate of
+#   2026-09-14 16:41 caught exactly that, the retire verb stopping the
+#   stack under a dark registry.
+#
 # has_role <role>
 #   True when BOSS_NODE_ROLES names the role. Exact match on the
 #   comma-separated list, so `operator` never matches `cluster-operator`.
@@ -33,18 +44,21 @@ read_node_roles() { # <node-id>
     local nodes_url="${BOSS_ESTATE_NODES_URL:-http://10.20.0.34:7900/api/estate/nodes}"
     local prefix="${BOSS_CONVERGE_NAME:-converge}"
     local cache="${BOSS_NODE_ROLES_CACHE:-/var/lib/boss/node-roles.${node_id}}"
+    BOSS_NODE_ROLES_SOURCE="preset"
     if [ -z "${BOSS_NODE_ROLES+set}" ]; then
         local roles_json
         roles_json="$(curl -fsS --max-time 10 "$nodes_url" 2>/dev/null)" || roles_json=""
         if [ -z "$roles_json" ]; then
             if [ -s "$cache" ]; then
                 BOSS_NODE_ROLES="$(tr -d '[:space:]' < "$cache")"
+                BOSS_NODE_ROLES_SOURCE="cache"
                 echo "$prefix: $nodes_url did not answer — installing the cached declaration read $(date -u -r "$cache" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo earlier): $BOSS_NODE_ROLES"
                 if declare -F run_summary_note >/dev/null; then
                     run_summary_note "roles: $nodes_url did not answer — cached declaration installed ($BOSS_NODE_ROLES)"
                 fi
             else
                 BOSS_NODE_ROLES="registry-unread"
+                BOSS_NODE_ROLES_SOURCE="none"
                 echo "$prefix: $nodes_url did not answer and there is no cached declaration at $cache — installing [always] only, never every row"
                 if declare -F run_summary_note >/dev/null; then
                     run_summary_note "roles: $nodes_url did not answer, no cache — [always] only installed"
@@ -54,6 +68,7 @@ read_node_roles() { # <node-id>
             BOSS_NODE_ROLES="$(printf '%s' "$roles_json" \
                 | jq -r --arg id "$node_id" '[.data[] | select(.id == $id) | .roles[]?] | join(",")' 2>/dev/null)" \
                 || BOSS_NODE_ROLES=""
+            BOSS_NODE_ROLES_SOURCE="registry"
             if [ -z "$BOSS_NODE_ROLES" ]; then
                 echo "$prefix: $node_id declares no roles in the registry — installing every row"
             else
@@ -67,7 +82,7 @@ read_node_roles() { # <node-id>
             fi
         fi
     fi
-    export BOSS_NODE_ROLES
+    export BOSS_NODE_ROLES BOSS_NODE_ROLES_SOURCE
 }
 
 has_role() { # <role>

@@ -232,7 +232,11 @@ exit 0
             .env(
                 "BOSS_ESTATE_NODES_URL",
                 "http://sor.invalid/api/estate/nodes",
-            );
+            )
+            // The roles reader remembers a live read beside the host's
+            // state (/var/lib/boss by default); a test's read stays in
+            // its own scratch.
+            .env("BOSS_NODE_ROLES_CACHE", self.root.join("roles.cache"));
         for (k, v) in extra {
             cmd.env(k, v);
         }
@@ -527,12 +531,33 @@ fn the_real_run_refuses_while_the_host_declares_legacy_stack() {
     );
 
     // And when the registry cannot be read at all, the bound cannot be
-    // evaluated, which is a refusal — never a pass.
+    // evaluated, which is a refusal — never a pass. The reader's own
+    // fallback (a cached declaration, else the sentinel `registry-unread`
+    // — non-empty, so an emptiness check alone would pass it) is for a
+    // converge; this verb asks where the roles CAME FROM and acts only
+    // on a live answer.
     write_file(&c.nodes, "");
     let (rc, text) = c.run(&["--for-real"]);
     assert_eq!(rc, 2, "an unreadable registry was not a refusal:\n{text}");
     contains_all(&text, &["REFUSED", "roles"], "the refusal");
     assert!(c.stopped().is_empty());
+
+    // The same dark registry with a cached declaration that would pass
+    // the bound: still a refusal, because the cache is not a live read.
+    std::fs::write(
+        c.root.join("roles.cache"),
+        "wireguard-bastion,ml-batch-host\n",
+    )
+    .unwrap();
+    let (rc, text) = c.run(&["--for-real"]);
+    assert_eq!(rc, 2, "a cached declaration passed the bound:\n{text}");
+    contains_all(&text, &["REFUSED", "roles"], "the refusal");
+    assert!(c.stopped().is_empty());
+    assert_eq!(
+        c.dump_calls(),
+        "",
+        "the database was dumped on a cached reading"
+    );
 }
 
 /// The real run captures first, then disables exactly the listed units
@@ -710,6 +735,7 @@ fn run_runner(c: &Case, verbs: &Path, args: &str) -> (String, Option<serde_json:
             ),
         )
         .env("HOST_ID", "boss-gcp")
+        .env("BOSS_NODE_ROLES_CACHE", c.root.join("roles.cache"))
         .env("BOSS_JOBS_URL", "http://sor.invalid")
         .env("OPS_VERBS_DIR", verbs)
         .env("STUB_JOBS", c.root.join("jobs.json"))

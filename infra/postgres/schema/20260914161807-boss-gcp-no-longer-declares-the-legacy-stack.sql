@@ -1,0 +1,16 @@
+-- boss-gcp no longer declares the legacy-stack role (design 9e3e093f,
+-- David 2026-09-11: "retire it quickly"; d5941ef3 car 3).
+--
+-- Car 1 made the host's role estate-registry data and derived the unit
+-- roster from it; car 2 (feat/a-bounded-verb-retires-the-second-stack)
+-- built the bounded verb that stops the stack — and REFUSES its real run
+-- while this row exists, because boss-gcp-converge would re-enable the
+-- ten legacy chores on its next tick and the record would lie. This
+-- deletes the declaration; the converge then installs the other three
+-- roles' units and reports the ten as NOT IN ROLE (units mode never
+-- uninstalls on its own); the verb, run by David, is what stops them.
+--
+-- The Class row `legacy-stack` stays: it is vocabulary, and its `about`
+-- already says it exists to be removed. A row for a role no node
+-- declares is the honest end state of the taxonomy, not a leak.
+DELETE FROM node_roles WHERE node_id = 'boss-gcp' AND role = 'legacy-stack';
