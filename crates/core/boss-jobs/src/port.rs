@@ -80,6 +80,19 @@ pub struct JobFilter {
     /// Flat string-valued objects only — that is the whole of what
     /// `metadata_equals` expresses.
     pub metadata_contains: Option<serde_json::Value>,
+    /// Jobs whose `metadata` carries this top-level key, whatever its
+    /// value — the JSONB existence shape (`metadata ? $n`). The
+    /// question a probe asks most: "the alerts carrying
+    /// `estate_finding`", "the cars with a `proof_probe`". Before this
+    /// existed (4d9aa761, 2026-09-14) every such reader paged 60-200
+    /// rows and filtered in jq, exact only while the page was bigger
+    /// than the world; one measured 356 closed rows in 14 days against
+    /// a 200-row page.
+    ///
+    /// Top-level keys only: `?` does not walk paths, and the HTTP layer
+    /// refuses anything that is not a plain identifier so a dotted key
+    /// cannot silently match nothing.
+    pub metadata_has: Option<String>,
     /// Row-level policy scope — translated from `boss_policy_client::Predicate`
     /// by the HTTP handler before calling the adapter. Pushing it down
     /// into SQL here means scoped roles get accurate `total` counts

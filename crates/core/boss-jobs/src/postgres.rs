@@ -785,6 +785,12 @@ impl JobsRepository for PgJobs {
               -- predicate's bound `metadata_equals`): every key/value
               -- in it must be present on the packet.
               AND ($12::jsonb IS NULL OR metadata @> $12::jsonb)
+              -- $15 is a top-level key the packet must carry, whatever
+              -- its value (JSONB existence). A probe's usual question
+              -- — "the alerts carrying estate_finding" — answered in
+              -- the query instead of over a page that may be smaller
+              -- than the world (4d9aa761).
+              AND ($15::text IS NULL OR metadata ? $15::text)
               -- $14 partitions real work from the demo tenant's.
               -- Pushed into SQL, not applied to the page: 87% of
               -- packets are simulated, so a post-fetch filter returns
@@ -816,6 +822,7 @@ impl JobsRepository for PgJobs {
             .bind(filter.metadata_contains.as_ref())
             .bind(filter.closed_since)
             .bind(filter.simulated)
+            .bind(filter.metadata_has.as_deref())
             .fetch_all(&self.pool)
             .await
             .map_err(|e| JobsError::Storage(e.to_string()))?;
@@ -851,6 +858,9 @@ impl JobsRepository for PgJobs {
               -- Same partition as the list query, so `total` agrees
               -- with the rows actually returned.
               AND ($12::bool IS NULL OR simulated = $12)
+              -- Same key-existence clause as the list query, for the
+              -- same reason.
+              AND ($13::text IS NULL OR metadata ? $13::text)
             "#,
         )
         .bind(filter.kind.as_deref())
@@ -865,6 +875,7 @@ impl JobsRepository for PgJobs {
         .bind(filter.metadata_contains.as_ref())
         .bind(filter.closed_since)
         .bind(filter.simulated)
+        .bind(filter.metadata_has.as_deref())
         .fetch_one(&self.pool)
         .await
         .map_err(|e| JobsError::Storage(e.to_string()))?;

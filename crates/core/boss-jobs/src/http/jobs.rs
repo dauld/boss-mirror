@@ -51,6 +51,71 @@ pub(super) struct ListJobsQuery {
     /// 87% of packets are simulated, so a surface that wants real work
     /// has to say so in the query rather than filter the page it got.
     simulated: Option<bool>,
+    /// A URL-encoded flat JSON object of string values; the packet's
+    /// metadata must CONTAIN it (`metadata @> $n`, the shape the port
+    /// already handles for station predicates). `metadata={"branch":
+    /// "feat/x"}` is the car, not a page that may or may not hold it.
+    /// Anything that is not a flat string-valued object is a 400 that
+    /// names the rule — a nested document that silently matched
+    /// nothing would read as "no such packet".
+    metadata: Option<String>,
+    /// A top-level key the packet must carry, whatever its value
+    /// (`metadata ? $n`). Letters, digits, underscore; a dotted path
+    /// is refused because `?` does not walk one.
+    metadata_has: Option<String>,
+}
+
+/// Parse `metadata=<json>` into the containment document the port
+/// accepts, or the sentence the 400 carries.
+///
+/// The port's contract (`JobFilter::metadata_contains`) is flat
+/// string-valued objects only — that is all `metadata_equals`
+/// expresses and all the in-memory adapter mirrors. Widening it here
+/// would make the two adapters answer differently, so the boundary
+/// refuses instead. An empty object narrows nothing and is `None`.
+fn metadata_containment_from_query(raw: Option<&str>) -> Result<Option<serde_json::Value>, String> {
+    const RULE: &str = "metadata must be a flat JSON object of string values, \
+         e.g. metadata={\"branch\":\"feat/x\"} (url-encoded); nested \
+         objects, arrays, numbers, booleans and null are not accepted";
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("{RULE}: not JSON ({e})"))?;
+    let serde_json::Value::Object(doc) = value else {
+        return Err(format!("{RULE}: got a non-object"));
+    };
+    if let Some((key, _)) = doc.iter().find(|(_, v)| !v.is_string()) {
+        return Err(format!("{RULE}: value of {key:?} is not a string"));
+    }
+    if doc.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::Value::Object(doc)))
+}
+
+/// Validate `metadata_has=<key>` as a plain identifier, or say why not.
+///
+/// `metadata ? $n` reads TOP-LEVEL keys only. A dotted path would be
+/// bound as one literal key, match nothing, and answer `total: 0`
+/// with a straight face — the wrong-target shape the doors section
+/// names. So the key is letters, digits and underscore, not starting
+/// with a digit, and everything else is a 400 that names the param.
+fn metadata_key_from_query(raw: Option<&str>) -> Result<Option<String>, String> {
+    let Some(key) = raw else {
+        return Ok(None);
+    };
+    let mut chars = key.chars();
+    let plain = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !plain {
+        return Err(format!(
+            "metadata_has must be a top-level metadata key — letters, digits and \
+             underscore, not starting with a digit — got {key:?}; dotted paths \
+             are not walked"
+        ));
+    }
+    Ok(Some(key.to_string()))
 }
 
 pub(super) async fn list_jobs<R: JobsRepository + 'static, B: EventBus + 'static>(
@@ -79,6 +144,18 @@ pub(super) async fn list_jobs<R: JobsRepository + 'static, B: EventBus + 'static
     // passes through one policy path.
     let scope = job_scope_from_predicate(&user, &predicate);
 
+    // The two metadata filters are refused at the boundary rather than
+    // bound as-is: a document or key the SQL would accept and match
+    // nothing with is a confident wrong answer, not an empty one.
+    let metadata_contains = match metadata_containment_from_query(q.metadata.as_deref()) {
+        Ok(doc) => doc,
+        Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
+    };
+    let metadata_has = match metadata_key_from_query(q.metadata_has.as_deref()) {
+        Ok(key) => key,
+        Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
+    };
+
     let filter = JobFilter {
         kind: q.kind,
         kind_prefix: q.kind_prefix,
@@ -87,6 +164,8 @@ pub(super) async fn list_jobs<R: JobsRepository + 'static, B: EventBus + 'static
         subject_id: q.subject_id,
         waiting_on: q.waiting_on,
         closed_since: closed_since_from(q.closed_within, &state).await,
+        metadata_contains,
+        metadata_has,
         scope,
         simulated: q.simulated,
         ..Default::default()
@@ -318,6 +397,7 @@ pub(super) async fn jobs_live<R: JobsRepository + 'static, B: EventBus + 'static
         subject_id: None,
         waiting_on: None,
         metadata_contains: None,
+        metadata_has: None,
         scope: JobScope::All,
         // Unchanged on purpose. This feed currently shows every
         // packet, 87% of which are the demo tenant's; narrowing it is

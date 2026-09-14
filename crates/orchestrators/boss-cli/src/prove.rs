@@ -2644,36 +2644,17 @@ mod tests {
     /// by name, with both verdicts in the message.
     #[test]
     fn the_forge_runner_names_the_same_crashes() {
-        const SH: &str = include_str!("../../../../infra/forge/run-car-probe.sh");
-        let block = SH
-            .split_once("# PROBE-VERDICT-BEGIN")
-            .expect("run-car-probe.sh has its verdict markers")
-            .1
-            .split_once("# PROBE-VERDICT-END")
-            .expect("…both of them")
-            .0;
-        let dir = boss_testing::scratch::scratch_dir("prove-forge-crash-verdict");
         for marker in NUMERIC_CRASH_MARKERS {
             let stderr = format!("bash: line 10: [: null: {marker}\n");
-            std::fs::write(dir.join("out"), "not yet: none\n").unwrap();
-            std::fs::write(dir.join("errs"), &stderr).unwrap();
-            let script = format!(
-                "set -uo pipefail\nworkdir={dir}\nrc=75\nunrunnable=false\n\
-                 missing_list=''\nhost='david-asus-minipc'\nPROBE_USER=david\n\
-                 PROBE_DIR=/home/david/boss\nexpect='x:ok'\n{block}\nprintf '%s' \"$why\"\n",
-                dir = dir.display(),
-            );
-            let out = std::process::Command::new("bash")
-                .arg("-c")
-                .arg(&script)
-                .output()
-                .expect("bash runs the lifted verdict");
-            assert!(
-                out.status.success(),
-                "the lifted block must run: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            let why = String::from_utf8_lossy(&out.stdout).to_string();
+            let run = ForgeRun {
+                rc: 75,
+                stdout: "not yet: none\n",
+                stderr: &stderr,
+                missing_tools: "",
+                expect: "x:ok",
+            };
+            let (ok, why) = forge_verdict("prove-forge-crash-verdict", &run);
+            assert!(!ok, "a crash is not proof: {why}");
             let ours = failure_diagnosis(NULL_COUNT_PROBE, &crashed(75, &stderr)).unwrap();
             for phrase in ["THE PROBE CRASHED", marker, "// empty", "*[!0-9]*"] {
                 assert!(
@@ -2687,6 +2668,349 @@ mod tests {
                 "a crash must not read as not-yet on the forge either: {why}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // ONE VERDICT, TWO AUTHORS, PINNED EQUAL (backlog a44e16aa)
+    // -----------------------------------------------------------------
+
+    /// What the forge runner has in scope when it composes `why`: the
+    /// probe's exit and two streams, the tools fd 9 caught it failing
+    /// to find (the runner's `missing_list`, empty when it ran), and the
+    /// expectation. The same run, read as `boss prove` reads it, is
+    /// [`ForgeRun::outcome`] — so both authors judge ONE record.
+    struct ForgeRun<'a> {
+        rc: i32,
+        stdout: &'a str,
+        stderr: &'a str,
+        missing_tools: &'a str,
+        expect: &'a str,
+    }
+
+    impl ForgeRun<'_> {
+        fn outcome(&self) -> Outcome {
+            Outcome {
+                exit: self.rc,
+                stdout: self.stdout.into(),
+                stderr: self.stderr.into(),
+            }
+        }
+    }
+
+    /// The text of run-car-probe.sh from one marker up to the next, so
+    /// a test RUNS the script's shell rather than restating it. The
+    /// opening marker rides along: every marker is a whole comment
+    /// line, or the head of one.
+    fn forge_block(begin: &str, end: &str) -> &'static str {
+        const SH: &str = include_str!("../../../../infra/forge/run-car-probe.sh");
+        let a = SH
+            .find(begin)
+            .unwrap_or_else(|| panic!("run-car-probe.sh lost its {begin} marker"));
+        let b = SH[a..]
+            .find(end)
+            .unwrap_or_else(|| panic!("run-car-probe.sh lost its {end} marker"));
+        &SH[a..a + b]
+    }
+
+    /// The forge runner's judgement of one run: `ok` from its judge
+    /// block (the two rules, over its own matcher) and `why` from its
+    /// verdict block — the sentence `proof_attempt.why` would carry.
+    /// Supplies exactly the variables the script has in scope there.
+    fn forge_verdict(case: &str, run: &ForgeRun<'_>) -> (bool, String) {
+        let dir = boss_testing::scratch::scratch_dir(case);
+        std::fs::write(dir.join("out"), run.stdout).unwrap();
+        std::fs::write(dir.join("errs"), run.stderr).unwrap();
+        let unrunnable = if run.missing_tools.is_empty() {
+            "false"
+        } else {
+            "true"
+        };
+        let script = format!(
+            "set -uo pipefail\nworkdir={dir}\nrc={rc}\nunrunnable={unrunnable}\n\
+             missing_list={missing:?}\nhost='david-asus-minipc'\nPROBE_USER=david\n\
+             PROBE_DIR=/home/david/boss\nexpect={expect:?}\n{matcher}\n{judge}\n{verdict}\n\
+             printf '%s\\n%s' \"$ok\" \"$why\"\n",
+            dir = dir.display(),
+            rc = run.rc,
+            missing = run.missing_tools,
+            expect = run.expect,
+            matcher = forge_block("# --- expectation-match", "# --- end expectation-match"),
+            judge = forge_block("# PROBE-JUDGE-BEGIN", "# PROBE-JUDGE-END"),
+            verdict = forge_block("# PROBE-VERDICT-BEGIN", "# PROBE-VERDICT-END"),
+        );
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("bash runs the lifted blocks");
+        assert!(
+            out.status.success(),
+            "the lifted blocks must run: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let printed = String::from_utf8_lossy(&out.stdout).to_string();
+        let (ok, why) = printed.split_once('\n').expect("ok, then why");
+        (ok == "1", why.to_string())
+    }
+
+    /// A probe as the forge's shell runs it: the runner's PROBE-PRELUDE
+    /// ahead of the text, fd 9 pointed at a not-found channel. Returns
+    /// the outcome and the channel's contents joined the way the runner
+    /// joins `missing_list` — the one input `boss prove` never has.
+    fn run_as_the_forge_would(case: &str, probe: &str) -> (Outcome, String) {
+        let dir = boss_testing::scratch::scratch_dir(case);
+        let notfound = dir.join("notfound");
+        std::fs::write(&notfound, "").unwrap();
+        let prelude = forge_block("# PROBE-PRELUDE-BEGIN", "# PROBE-PRELUDE-END");
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!("{prelude}\n{probe}"))
+            .env("BOSS_PROBE_NOTFOUND", &notfound)
+            .output()
+            .expect("bash runs the probe");
+        let caught = std::fs::read_to_string(&notfound).unwrap();
+        let mut missing: Vec<&str> = caught.lines().filter(|l| !l.is_empty()).collect();
+        missing.sort_unstable();
+        missing.dedup();
+        (
+            Outcome {
+                exit: out.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            },
+            missing.join(", "),
+        )
+    }
+
+    /// The ALL-CAPS verdict words `failure_diagnosis` can lead with. A
+    /// run it declines to diagnose must not be diagnosed by the shell
+    /// either — a verdict one door invents and the other does not is
+    /// the two-sentence defect in a new coat.
+    const DIAGNOSIS_WORDS: [&str; 3] = [
+        "THE PROBE CRASHED",
+        "THE FAILURE CANNOT BE READ",
+        "THE PROBE IS SELF-CONTRADICTORY",
+    ];
+
+    /// One outcome, judged by both authors, and the phrases the two
+    /// verdicts must share: the ALL-CAPS word when there is one, and the
+    /// reason clause a reader acts on.
+    struct SameVerdict<'a> {
+        case: &'a str,
+        probe: &'a str,
+        run: ForgeRun<'a>,
+        /// The verdict word `failure_diagnosis` leads with, or `None`
+        /// when it (rightly) adds nothing — then the shell adds nothing
+        /// of the kind either.
+        diagnosis: Option<&'a str>,
+        /// Load-bearing text both verdicts carry, verbatim.
+        agree: &'a [&'a str],
+    }
+
+    /// A PROBE VERDICT HAS TWO AUTHORS (backlog a44e16aa): the forge
+    /// runner's PROBE-VERDICT shell, on a host with no `boss` binary,
+    /// and `judge_probe` here. `the_forge_runner_names_the_same_crashes`
+    /// pinned the newest branch equal and left the older ones living
+    /// twice — CANNOT BE READ, not-yet, plain red, the wrong string —
+    /// where a wording change on one side silently diverged the other,
+    /// and the reader of a car saw different sentences for one verdict
+    /// depending on which door ran the probe.
+    ///
+    /// So every branch is run through both, on ONE record each, and the
+    /// load-bearing phrases are asserted shared. The Rust wording is the
+    /// reference (it has the unit tests); where the shell disagreed it
+    /// was changed to match. Two branches are deliberately NOT equalised
+    /// and are pinned as such instead: unrunnable, because its input (fd
+    /// 9's not-found channel) exists only on the forge — this door sees
+    /// bash's `command not found` on stderr and nothing more, so both
+    /// name the tool and neither diagnoses; and not-yet, which this door
+    /// has no branch for at all (`a_clean_exit_75_gets_no_crash_diagnosis`:
+    /// the forge's sentence is the verdict there, and stays) — so both
+    /// quote the probe's own line and neither diagnoses.
+    #[test]
+    fn the_forge_runner_gives_the_same_verdict_for_every_outcome() {
+        let (missing_tool, missing_list) = run_as_the_forge_would(
+            "prove-forge-verdict-missing-tool",
+            "kubectl-no-such-tool get pods -A && echo pods:ok",
+        );
+        assert_eq!(missing_list, "kubectl-no-such-tool", "fd 9 caught the tool");
+        let cases = [
+            SameVerdict {
+                case: "not-yet",
+                probe: "n=$(boss-sor-read /api/x | jq -r '.total // empty'); case \"$n\" in \
+                        ''|*[!0-9]*) echo 'not yet: no disk-report request carrying for_sweep \
+                        yet'; exit 75;; esac; echo sweep-measured:ok",
+                run: ForgeRun {
+                    rc: 75,
+                    stdout: "not yet: no disk-report request carrying for_sweep yet\n",
+                    stderr: "",
+                    missing_tools: "",
+                    expect: "sweep-measured:ok",
+                },
+                diagnosis: None,
+                agree: &["not yet: no disk-report request carrying for_sweep yet"],
+            },
+            SameVerdict {
+                case: "unrunnable",
+                probe: "kubectl-no-such-tool get pods -A && echo pods:ok",
+                run: ForgeRun {
+                    rc: missing_tool.exit,
+                    stdout: &missing_tool.stdout,
+                    stderr: &missing_tool.stderr,
+                    missing_tools: &missing_list,
+                    expect: "pods:ok",
+                },
+                diagnosis: None,
+                agree: &["kubectl-no-such-tool", "not found"],
+            },
+            SameVerdict {
+                case: "cannot-be-read",
+                probe: "boss-sor-read /api/x | jq -e '.total == 0' >/dev/null || exit 1",
+                run: ForgeRun {
+                    rc: 1,
+                    stdout: "",
+                    stderr: "",
+                    missing_tools: "",
+                    expect: "x:ok",
+                },
+                diagnosis: Some("THE FAILURE CANNOT BE READ"),
+                agree: &[
+                    "THE FAILURE CANNOT BE READ",
+                    "exited 1",
+                    "printed NOTHING on either stream",
+                    "not a verdict on the claim",
+                    "missing record",
+                    "bare",
+                    "|| exit",
+                ],
+            },
+            SameVerdict {
+                case: "plain-red",
+                probe: "boss-sor-read /api/x | jq -e '.total == 0' >/dev/null || { echo \
+                        \"CLAIM FAILS for maintenance-backup (jq exit $?)\"; exit 1; }",
+                run: ForgeRun {
+                    rc: 1,
+                    stdout: "CLAIM FAILS for maintenance-backup (jq exit 5)\n",
+                    stderr: "",
+                    missing_tools: "",
+                    expect: "x:ok",
+                },
+                diagnosis: None,
+                agree: &[
+                    "exited 1",
+                    "not proof of anything",
+                    "CLAIM FAILS for maintenance-backup (jq exit 5)",
+                ],
+            },
+            SameVerdict {
+                case: "wrong-string",
+                probe: "echo dock_depth=$(boss-sor-read /api/yard/status | jq .dock_depth)",
+                run: ForgeRun {
+                    rc: 0,
+                    stdout: "dock_depth=0\n",
+                    stderr: "",
+                    missing_tools: "",
+                    expect: "dock_depth=1",
+                },
+                diagnosis: None,
+                agree: &[
+                    "exited 0",
+                    "never printed",
+                    "dock_depth=1",
+                    "dock_depth=0",
+                    "weak assertion",
+                    "echo hi",
+                    "exits 0 too",
+                ],
+            },
+            SameVerdict {
+                case: "zero-and-silent",
+                probe: "boss-sor-read /api/yard/status | jq -e '.dock_depth == 1' >/dev/null",
+                run: ForgeRun {
+                    rc: 0,
+                    stdout: "",
+                    stderr: "",
+                    missing_tools: "",
+                    expect: "dock:ok",
+                },
+                diagnosis: None,
+                agree: &[
+                    "exited 0",
+                    "never printed",
+                    "dock:ok",
+                    "weak assertion",
+                    "echo hi",
+                    "exits 0 too",
+                ],
+            },
+        ];
+        for c in &cases {
+            let o = c.run.outcome();
+            let (ok, why) = forge_verdict(&format!("prove-forge-verdict-{}", c.case), &c.run);
+            let rs = judge_probe(c.probe, &o, Some(c.run.expect))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                !ok,
+                "{}: the forge must refuse what this door refuses",
+                c.case
+            );
+            let d = failure_diagnosis(c.probe, &o);
+            match c.diagnosis {
+                Some(word) => {
+                    let d = d.unwrap_or_else(|| panic!("{}: prove.rs diagnoses this", c.case));
+                    assert!(
+                        d.starts_with(word),
+                        "{}: rs leads with {word:?}: {d}",
+                        c.case
+                    );
+                    assert!(
+                        why.starts_with(word),
+                        "{}: run-car-probe.sh does not lead with {word:?} the way prove.rs \
+                         does:\n  sh: {why}\n  rs: {d}",
+                        c.case
+                    );
+                }
+                None => {
+                    assert!(d.is_none(), "{}: prove.rs adds no diagnosis: {d:?}", c.case);
+                    for word in DIAGNOSIS_WORDS {
+                        assert!(
+                            !why.contains(word),
+                            "{}: run-car-probe.sh diagnoses {word:?} where prove.rs declines \
+                             to:\n  sh: {why}\n  rs: {rs}",
+                            c.case
+                        );
+                    }
+                }
+            }
+            for phrase in c.agree {
+                assert!(
+                    rs.contains(phrase),
+                    "{}: prove.rs lost {phrase:?}:\n  rs: {rs}",
+                    c.case
+                );
+                assert!(
+                    why.contains(phrase),
+                    "{}: run-car-probe.sh does not say {phrase:?} the way prove.rs does:\n  \
+                     sh: {why}\n  rs: {rs}",
+                    c.case
+                );
+            }
+        }
+
+        // AND GREEN: exit 0 with the token printed is proof at both
+        // doors, so the verdict block is never composed — which is the
+        // one outcome where "the same sentence" means no sentence.
+        let green = ForgeRun {
+            rc: 0,
+            stdout: "measured 3 sweeps\nsweep-measured:ok\n",
+            stderr: "",
+            missing_tools: "",
+            expect: "sweep-measured:ok",
+        };
+        let (ok, why) = forge_verdict("prove-forge-verdict-green", &green);
+        assert!(ok, "the forge proves what this door proves: {why}");
+        assert!(judge_probe("true", &green.outcome(), Some(green.expect)).is_ok());
     }
 
     // -----------------------------------------------------------------

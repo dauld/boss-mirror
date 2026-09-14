@@ -394,3 +394,88 @@ async fn simulated_partitions_the_rows_and_the_total() {
     assert_eq!(rows.len(), 3);
     assert_eq!(total, 3);
 }
+
+/// `metadata_has` and `metadata_contains` at the Postgres layer.
+///
+/// The claim behind 4d9aa761 (2026-09-14): three probes written in one
+/// day each paged 60-200 rows of a kind and filtered by a metadata key
+/// in jq, and one measured the closed listing at 356 rows within 14
+/// days against a 200-row page. A limit is not a filter. Both clauses
+/// here (`metadata ? $n`, `metadata @> $n`) are asserted on the count
+/// query as well as the list query — the two queries are written
+/// separately in the adapter, so this is where they drift.
+#[tokio::test(flavor = "multi_thread")]
+async fn metadata_has_and_contains_narrow_the_rows_and_the_total() {
+    let db = TestDb::new().await;
+    let repo = boss_jobs::PgJobs::new(db.pool.clone());
+    let net = Subject::new("asset", "BOSSNET");
+
+    let mut car = job(
+        "00000000-0000-0000-0000-0000000000c1",
+        "ship-a-change",
+        net.clone(),
+    );
+    car.title = "the car".into();
+    car.metadata = serde_json::json!({ "branch": "feat/x", "proof_probe": "true" });
+    let mut twin = job(
+        "00000000-0000-0000-0000-0000000000c2",
+        "ship-a-change",
+        net.clone(),
+    );
+    twin.title = "another car".into();
+    twin.metadata = serde_json::json!({ "branch": "feat/y" });
+    // Null metadata — the seeded default — carries no key at all.
+    let mut bare = job(
+        "00000000-0000-0000-0000-0000000000c3",
+        "ship-a-change",
+        net.clone(),
+    );
+    bare.title = "bare".into();
+
+    for j in [&car, &twin, &bare] {
+        repo.create_job(j).await.unwrap();
+    }
+
+    let has_probe = JobFilter {
+        kind: Some("ship-a-change".into()),
+        metadata_has: Some("proof_probe".into()),
+        ..Default::default()
+    };
+    let (rows, total) = repo.list_jobs(&has_probe, 100, 0).await.unwrap();
+    assert_eq!(rows.len(), 1, "one packet carries proof_probe");
+    assert_eq!(
+        total, 1,
+        "the count query must carry the same `?` clause as the list query"
+    );
+    assert_eq!(rows[0].title, "the car");
+
+    let has_branch = JobFilter {
+        kind: Some("ship-a-change".into()),
+        metadata_has: Some("branch".into()),
+        ..Default::default()
+    };
+    let (rows, total) = repo.list_jobs(&has_branch, 100, 0).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(total, 2, "null metadata does not carry the key");
+
+    let one_branch = JobFilter {
+        kind: Some("ship-a-change".into()),
+        metadata_contains: Some(serde_json::json!({ "branch": "feat/y" })),
+        ..Default::default()
+    };
+    let (rows, total) = repo.list_jobs(&one_branch, 100, 0).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(total, 1);
+    assert_eq!(rows[0].title, "another car");
+
+    // Both at once intersect: the key filter and the containment
+    // document are separate binds and must both hold.
+    let both = JobFilter {
+        kind: Some("ship-a-change".into()),
+        metadata_has: Some("proof_probe".into()),
+        metadata_contains: Some(serde_json::json!({ "branch": "feat/y" })),
+        ..Default::default()
+    };
+    let (rows, total) = repo.list_jobs(&both, 100, 0).await.unwrap();
+    assert_eq!((rows.len(), total), (0, 0));
+}

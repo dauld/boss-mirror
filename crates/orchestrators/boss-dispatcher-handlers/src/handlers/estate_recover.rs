@@ -28,7 +28,7 @@
 //!   the packet (stamped by the jobs API at admission) is the floor;
 //!   a row observed before it is not evidence the condition recovered
 //!   AFTER it was raised. This is also what makes the silence sweep's
-//!   `unobserved:<host>` alarms safe to judge by the same rule: a
+//!   `unobserved:<series>` alarms safe to judge by the same rule: a
 //!   series that has gone dark has no new rows, so its newest N are
 //!   the pre-silence ones and "the finding is absent there" would
 //!   close the alarm the moment it was raised. N rows observed after
@@ -669,6 +669,56 @@ mod tests {
             1
         );
         assert!(recovered(&open, &rows, "host-units", Some("boss-gcp"), 3).is_empty());
+    }
+
+    #[test]
+    fn a_cluster_silence_alarm_closes_when_its_host_less_series_returns() {
+        // 3908d555: `unobserved:kubernetes-nodes` is raised by the
+        // silence sweep on the cluster scope, whose rows carry no host.
+        // Filed host-less (as the raiser now does), the cluster
+        // observer coming back — N host-less rows after the raise — is
+        // its recovery, judged by the same rule as every other alarm.
+        let open = [alarm(
+            "quiet-cluster",
+            "unobserved:kubernetes-nodes",
+            "kubernetes-nodes",
+            None,
+            "open",
+        )];
+        let rows = [
+            cluster_row(&[], at(45)),
+            units_row("boss-gcp", &[], at(44)),
+            cluster_row(&[], at(30)),
+            cluster_row(&[], at(15)),
+            cluster_row(&[], at(-60)),
+        ];
+        let out = recovered(&open, &rows, "kubernetes-nodes", None, 3);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].job_id, "quiet-cluster");
+        assert_eq!(out[0].host, None);
+        assert_eq!(out[0].clean_at, vec![at(45), at(30), at(15)]);
+        // And the shape the sweep used to file — host stamped with the
+        // series NAME — matches no series at all, which is the defect:
+        // the key the raise stamps must be the key the record carries.
+        let mislabelled = [alarm(
+            "quiet-cluster",
+            "unobserved:kubernetes-nodes",
+            "kubernetes-nodes",
+            Some("kubernetes-nodes"),
+            "open",
+        )];
+        assert!(recovered(&mislabelled, &rows, "kubernetes-nodes", None, 3).is_empty());
+        assert!(
+            recovered(
+                &mislabelled,
+                &rows,
+                "kubernetes-nodes",
+                Some("kubernetes-nodes"),
+                3
+            )
+            .is_empty(),
+            "no comparison row carries that host either"
+        );
     }
 
     #[test]

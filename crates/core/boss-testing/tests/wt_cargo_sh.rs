@@ -16,7 +16,10 @@
 //!     `nice -n 10`, so the interactive shell wins the scheduler;
 //!   * `WT_JOBS` wins over either;
 //!   * the reflink seed is attempted only when the seed exists —
-//!     otherwise the per-worktree dir starts cold, and says so.
+//!     otherwise the per-worktree dir starts cold, and says so;
+//!   * the seed lands in a sibling `.seeding` dir and is renamed into
+//!     place only once whole (backlog 08782b71): a copy that dies
+//!     part-way leaves no half target for the next run to believe warm.
 
 use boss_testing::{repo_root, scratch_dir, write_exec};
 use std::path::{Path, PathBuf};
@@ -72,12 +75,19 @@ impl Fixture {
         );
         // cp: a reflink copy needs XFS and the test runs on whatever
         // scratch is (tmpfs, overlay). Record the call and make the
-        // destination exist, which is all the script reads back.
+        // destination exist, which is all the script reads back. With
+        // STUB_CP_FAIL set it dies PART-WAY the way a real cp does —
+        // destination created, one file inside, nonzero exit — so a
+        // test can see what the script leaves behind.
         write_exec(
             &bin.join("cp"),
             "#!/usr/bin/env bash\n\
              echo \"$*\" >> \"$STUB_COPIED\"\n\
-             mkdir -p \"${!#}\"\n",
+             mkdir -p \"${!#}\"\n\
+             if [ -n \"${STUB_CP_FAIL:-}\" ]; then\n\
+                 touch \"${!#}/half-copied\"\n\
+                 exit \"$STUB_CP_FAIL\"\n\
+             fi\n",
         );
         Self {
             root,
@@ -127,6 +137,7 @@ impl Fixture {
             .env("WT_SEED", seed)
             .env("WT_TARGET_ROOT", self.targets())
             .env_remove("WT_JOBS")
+            .env_remove("STUB_CP_FAIL")
             .env_remove("CARGO_TARGET_DIR")
             .env_remove("CARGO_BUILD_JOBS");
         for (k, v) in env {
@@ -274,6 +285,87 @@ fn wt_jobs_wins_in_both_branches() {
         f.nice_calls().starts_with("-n 10 cargo"),
         "a builder is still niced under WT_JOBS: {:?}",
         f.nice_calls()
+    );
+}
+
+/// A seed copy that dies part-way (backlog 08782b71): the half copy
+/// must not become `$dir`, or the next run sees the directory, skips
+/// the seed, and builds against it believing it warm. The script must
+/// clear the temp dir, start `$dir` cold, say WHY (cp's exit code),
+/// and still run cargo.
+#[test]
+fn a_failed_seed_leaves_no_half_target_and_starts_cold_saying_why() {
+    let f = Fixture::new("failed-seed");
+    let wt = f.worktree("agent-halfcopy");
+    let seed = f.root.join("seed");
+    boss_testing::create_dir(&seed);
+
+    let (rc, out) = f.run(&wt, &seed, &[("STUB_CP_FAIL", "1")]);
+    assert_eq!(rc, 0, "a failed seed is not a failed build: {out}");
+
+    let target = f.targets().join("target-agent-halfcopy");
+    let seeding = f.targets().join("target-agent-halfcopy.seeding");
+    assert!(
+        !seeding.exists(),
+        "the temp dir must be removed after a failed copy: {out}"
+    );
+    assert!(target.is_dir(), "the dir must still exist, cold: {out}");
+    assert!(
+        !target.join("half-copied").exists(),
+        "the half copy must not be renamed into place: {out}"
+    );
+    assert!(
+        out.contains("starts cold"),
+        "the existing cold message must be kept: {out}"
+    );
+    assert!(
+        out.contains("cp exit 1"),
+        "the message must name why the seed failed: {out}"
+    );
+    assert!(
+        out.contains(&format!("target={}", target.display()))
+            && out.contains("argv=test -p boss-cli"),
+        "cargo must still run against the cold dir: {out}"
+    );
+}
+
+/// A seed copy that succeeds lands in `$dir.seeding` and is renamed to
+/// `$dir`; a stale `.seeding` left by a killed run is cleared before
+/// the attempt, so nothing from it rides into the new target.
+#[test]
+fn a_successful_seed_is_renamed_into_place_over_a_stale_temp_dir() {
+    let f = Fixture::new("renamed-seed");
+    let wt = f.worktree("agent-rename");
+    let seed = f.root.join("seed");
+    boss_testing::create_dir(&seed);
+    let target = f.targets().join("target-agent-rename");
+    let seeding = f.targets().join("target-agent-rename.seeding");
+    boss_testing::create_dir(&seeding);
+    std::fs::write(seeding.join("stale-from-killed-run"), "").expect("stale marker");
+
+    let (rc, out) = f.run(&wt, &seed, &[]);
+    assert_eq!(rc, 0, "wt-cargo failed: {out}");
+
+    let cp = f.cp_calls();
+    assert!(
+        cp.trim_end().ends_with(seeding.to_str().expect("utf8")),
+        "cp's destination must be the sibling temp dir, not $dir: {cp:?}"
+    );
+    assert!(
+        target.is_dir(),
+        "the seeded dir must be renamed into place: {out}"
+    );
+    assert!(
+        !seeding.exists(),
+        "no temp dir remains after a successful seed: {out}"
+    );
+    assert!(
+        !target.join("stale-from-killed-run").exists(),
+        "a stale .seeding is cleared before the attempt, not renamed in: {out}"
+    );
+    assert!(
+        out.contains("seeded") && out.contains("by reflink"),
+        "the seed step must be reported: {out}"
     );
 }
 

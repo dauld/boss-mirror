@@ -31,9 +31,27 @@ seed=${WT_SEED:-/scratch/target}
 dir=${WT_TARGET_ROOT:-/scratch}/target-$name
 if [ ! -d "$dir" ]; then
     if [ -d "$seed" ]; then
+        # The copy lands in a sibling temp name and is renamed into
+        # place only once it is whole (backlog 08782b71, 2026-09-14).
+        # Under set -e a cp that died part-way — a non-reflink
+        # filesystem, a full disk, a kill — used to leave a PARTIAL
+        # $dir; the next run saw the directory, skipped the seed, and
+        # built against a half-copied target it believed warm, with
+        # no message naming it. A stale temp dir from a killed run is
+        # cleared first; a failed copy is cleared, named (cp's exit
+        # code), and $dir starts cold exactly as if there were no seed.
+        tmp=$dir.seeding
+        rm -rf "$tmp"
         start=$(date +%s)
-        cp -a --reflink=always "$seed" "$dir"
-        echo "wt-cargo: seeded $dir from $seed by reflink in $(( $(date +%s) - start ))s" >&2
+        if cp -a --reflink=always "$seed" "$tmp"; then
+            mv "$tmp" "$dir"
+            echo "wt-cargo: seeded $dir from $seed by reflink in $(( $(date +%s) - start ))s" >&2
+        else
+            rc=$?
+            rm -rf "$tmp"
+            mkdir -p "$dir"
+            echo "wt-cargo: seed from $seed failed (cp exit $rc) — $dir starts cold" >&2
+        fi
     else
         mkdir -p "$dir"
         echo "wt-cargo: no seed at $seed — $dir starts cold" >&2

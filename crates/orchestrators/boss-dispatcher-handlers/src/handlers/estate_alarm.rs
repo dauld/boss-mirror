@@ -53,6 +53,22 @@
 //! - DEDUP against open packets carrying the same `estate_finding`
 //!   key: a persisting condition is ONE packet, not one per firing.
 //!
+//! THE PACKET'S `(scope, host)` IS THE SERIES KEY THE ROWS CARRY, not
+//! the series' name. `estate.recover` closes an alarm by finding N
+//! clean rows of the SAME series after the raise, matching on the
+//! packet's `(scope, host)` exactly as persistence filters rows — so a
+//! raise that stamps a key the rows do not carry files an alarm nothing
+//! can ever close. The silence sweep did exactly that for the cluster
+//! observer (3908d555): `unobserved:kubernetes-nodes` was stamped
+//! `host = "kubernetes-nodes"` because the series' NAME is its scope,
+//! while every kubernetes-nodes comparison row is host-less — and the
+//! alarm class that recovers most often (an observer restart) was the
+//! one still closed by hand. A stale entry therefore carries `series`
+//! (what it is called — the host for a self-scoped series, the scope
+//! for the cluster's) for the key and the title, and `host` only when
+//! the rows are stamped with one. The packet describes the series
+//! truthfully: the cluster has no host, so its alarm has none.
+//!
 //! The raise is an URGENT packet on the operator's queue naming host +
 //! condition + the latest evidence excerpt. Delivery beyond the queue
 //! (push, phone) is deliberately NOT built here — that is channel
@@ -243,8 +259,12 @@ fn persistent_keys(
 /// envelope `timestamp`); the cadence is the median gap between
 /// consecutive observations, so the test needs no copy of any timer
 /// file's schedule and survives the schedule changing. Returns one
-/// entry per stale series: host, scope, last_observed_at, cadence_s,
-/// age_s — the evidence the raise will carry.
+/// entry per stale series: series, scope, last_observed_at, cadence_s,
+/// age_s — the evidence the raise will carry — plus `host` on a
+/// per-host series only. `series` is what the series is CALLED (the
+/// host for a self-scoped series, the scope for the cluster's); `host`
+/// is what its comparison rows are STAMPED with, and the cluster's
+/// rows carry none (3908d555).
 fn stale_series(rows: &[Value], per_host: bool, scope: &str, now: DateTime<Utc>) -> Vec<Value> {
     let mut series: BTreeMap<String, Vec<DateTime<Utc>>> = BTreeMap::new();
     for row in rows {
@@ -284,13 +304,17 @@ fn stale_series(rows: &[Value], per_host: bool, scope: &str, now: DateTime<Utc>)
         let cadence = gaps[gaps.len() / 2].max(STALE_MIN_CADENCE_S);
         let age = (now - times[0]).num_seconds();
         if age > STALE_MULTIPLIER * cadence {
-            out.push(json!({
-                "host": id,
+            let mut entry = json!({
+                "series": id,
                 "scope": scope,
                 "last_observed_at": times[0].to_rfc3339(),
                 "cadence_s": cadence,
                 "age_s": age,
-            }));
+            });
+            if per_host {
+                entry["host"] = json!(id);
+            }
+            out.push(entry);
         }
     }
     out
@@ -426,13 +450,14 @@ fn alarm_body(key: &str, scope: &str, host: Option<&str>, evidence: &str, excerp
     })
 }
 
-/// The dedup key of one stale series: `unobserved:<host>` — one
-/// condition per quiet host, even when both of its series go dark.
+/// The dedup key of one stale series: `unobserved:<series>` — one
+/// condition per quiet host, even when both of its series go dark;
+/// `unobserved:kubernetes-nodes` for the cluster observer.
 fn unobserved_key(stale: &Value) -> String {
     format!(
         "unobserved:{}",
         stale
-            .get("host")
+            .get("series")
             .and_then(Value::as_str)
             .unwrap_or("unknown")
     )
@@ -440,16 +465,45 @@ fn unobserved_key(stale: &Value) -> String {
 
 /// The urgent packet one quiet series becomes. No persistence count in
 /// the title — the staleness window IS the persistence.
+///
+/// `host` is stamped only when the series has one. The packet's
+/// `(scope, host)` is the key `estate.recover` matches it to its
+/// comparison rows by, so it must be the key the ROWS carry: the
+/// cluster scope's rows are host-less, and a cluster alarm stamped with
+/// the series name as its host matched no series and never auto-closed
+/// (3908d555). The title and detail still name the series.
 fn staleness_body(stale: &Value, evidence: &str) -> Value {
-    let host = stale
-        .get("host")
+    let series = stale
+        .get("series")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     let scope = stale.get("scope").and_then(Value::as_str).unwrap_or("?");
+    let mut metadata = json!({
+        "area": "estate",
+        "estate_finding": unobserved_key(stale),
+        "scope": scope,
+        "detail": format!(
+            "Raised by estate.alarm's silence sweep (a7a19a1a: an alarm that only \
+             hears what its sources say dies with its patient — an expected series \
+             that stops arriving IS a finding). The `{scope}` observation series \
+             for `{series}` went quiet: {evidence_json}. Either the observer died \
+             (the quiet-observer class) or the host itself is down; either way \
+             nothing downstream of this series can see that host any more. \
+             Evidence: {evidence}. The series rides \
+             /api/estate/observations?scope={scope}.",
+            evidence_json = excerpt(stale),
+        ),
+    });
+    if let (Some(h), Some(obj)) = (
+        stale.get("host").and_then(Value::as_str),
+        metadata.as_object_mut(),
+    ) {
+        obj.insert("host".into(), json!(h));
+    }
     json!({
         "kind": "backlog-item",
         "title": format!(
-            "ESTATE ALARM: {host} unobserved — {scope} series quiet past \
+            "ESTATE ALARM: {series} unobserved — {scope} series quiet past \
              {STALE_MULTIPLIER}x cadence"
         ),
         "subject": {"subject_kind": "custom", "id": "bosspipeline"},
@@ -457,23 +511,7 @@ fn staleness_body(stale: &Value, evidence: &str) -> Value {
         "priority": "urgent",
         "status": "open",
         "tags": [],
-        "metadata": {
-            "area": "estate",
-            "estate_finding": unobserved_key(stale),
-            "scope": scope,
-            "host": host,
-            "detail": format!(
-                "Raised by estate.alarm's silence sweep (a7a19a1a: an alarm that only \
-                 hears what its sources say dies with its patient — an expected series \
-                 that stops arriving IS a finding). The `{scope}` observation series \
-                 for `{host}` went quiet: {evidence_json}. Either the observer died \
-                 (the quiet-observer class) or the host itself is down; either way \
-                 nothing downstream of this series can see that host any more. \
-                 Evidence: {evidence}. The series rides \
-                 /api/estate/observations?scope={scope}.",
-                evidence_json = excerpt(stale),
-            ),
-        },
+        "metadata": metadata,
     })
 }
 
@@ -1076,13 +1114,60 @@ mod tests {
         ];
         let stale = stale_series(&rows, false, "kubernetes-nodes", n);
         assert_eq!(stale.len(), 1);
-        assert_eq!(stale[0]["host"], "kubernetes-nodes");
+        assert_eq!(stale[0]["series"], "kubernetes-nodes");
+        assert!(
+            stale[0].get("host").is_none(),
+            "the cluster series has no host, so its stale entry carries none (3908d555)"
+        );
+    }
+
+    #[test]
+    fn a_per_host_stale_entry_names_its_host_as_the_series() {
+        let n = now();
+        let rows = [
+            obs_row("host-units", "boss-gcp", &at(n, 60)),
+            obs_row("host-units", "boss-gcp", &at(n, 65)),
+            obs_row("host-units", "boss-gcp", &at(n, 70)),
+        ];
+        let stale = stale_series(&rows, true, "host-units", n);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0]["series"], "boss-gcp");
+        assert_eq!(stale[0]["host"], "boss-gcp");
+    }
+
+    #[test]
+    fn the_cluster_silence_alarm_carries_no_host_because_its_series_has_none() {
+        // 3908d555: the raise stamped host = "kubernetes-nodes" (the
+        // series name) while every kubernetes-nodes comparison row is
+        // host-less, so estate.recover — which matches an alarm to its
+        // series on (scope, host) exactly as persistence does — matched
+        // it to nothing and the one alarm that recovers most often (an
+        // observer restart) was the one still closed by hand. The
+        // packet describes the series truthfully: no host. The key and
+        // the title still name the series.
+        let stale = json!({
+            "series": "kubernetes-nodes", "scope": "kubernetes-nodes",
+            "last_observed_at": "2026-09-03T11:20:00+00:00",
+            "cadence_s": 900, "age_s": 3600,
+        });
+        let b = staleness_body(&stale, "evt");
+        assert_eq!(
+            b["metadata"]["estate_finding"],
+            "unobserved:kubernetes-nodes"
+        );
+        assert_eq!(b["metadata"]["scope"], "kubernetes-nodes");
+        assert!(
+            b["metadata"].get("host").is_none(),
+            "a host-less series raises a host-less alarm, the shape recovery matches"
+        );
+        let title = b["title"].as_str().unwrap();
+        assert!(title.contains("kubernetes-nodes") && title.contains("unobserved"));
     }
 
     #[test]
     fn the_staleness_packet_is_urgent_and_names_host_and_condition() {
         let stale = json!({
-            "host": "boss-gcp", "scope": "host-units",
+            "series": "boss-gcp", "host": "boss-gcp", "scope": "host-units",
             "last_observed_at": "2026-09-03T11:20:00+00:00",
             "cadence_s": 300, "age_s": 2400,
         });
@@ -1101,9 +1186,10 @@ mod tests {
     fn two_quiet_series_on_one_host_share_one_dedup_key() {
         // Both the host and host-units series going dark is ONE sick
         // host, not two packets.
-        let a = json!({"host": "boss-gcp", "scope": "host"});
-        let b = json!({"host": "boss-gcp", "scope": "host-units"});
+        let a = json!({"series": "boss-gcp", "host": "boss-gcp", "scope": "host"});
+        let b = json!({"series": "boss-gcp", "host": "boss-gcp", "scope": "host-units"});
         assert_eq!(unobserved_key(&a), unobserved_key(&b));
+        assert_eq!(unobserved_key(&a), "unobserved:boss-gcp");
     }
 
     fn closed_alarm(key: &str, closed_on: &str, disposition: &str) -> Value {

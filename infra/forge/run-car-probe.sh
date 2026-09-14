@@ -308,12 +308,18 @@ else
     unrunnable=true
 fi
 
-# 3. Judge — the two rules `boss prove` applies, and no third.
+# 3. Judge — the two rules `boss prove` applies, and no third. The
+#    markers are an extraction point: prove.rs's
+#    the_forge_runner_gives_the_same_verdict_for_every_outcome lifts
+#    these lines with the matcher above and the verdict block below and
+#    runs one record through both authors (a44e16aa).
+# PROBE-JUDGE-BEGIN
 ok=1
 [[ "$rc" -eq 0 ]] || ok=0
 if [[ "$ok" -eq 1 ]] && ! printed_expectation "$expect" "$workdir/out" "$workdir/errs"; then
     ok=0
 fi
+# PROBE-JUDGE-END
 
 # The proof record, in `boss prove`'s shape (prove.rs proof_json) —
 # field names are a contract `--recheck` reads.
@@ -354,7 +360,13 @@ fi
 # (CLAUDE.md §Diagnosis, and backlog 4fccc595 for what the old wording
 # cost). The markers are the extraction point: boss-testing's
 # run_car_probe_sh.rs lifts what lies between them and RUNS it over the
-# four outcomes, so the verdict cannot rot into a comment.
+# four outcomes, so the verdict cannot rot into a comment; and prove.rs's
+# the_forge_runner_gives_the_same_verdict_for_every_outcome runs the
+# same block beside `boss prove`'s judge_probe on one record per branch,
+# so the load-bearing phrases below — the ALL-CAPS word and the reason
+# clause — cannot drift from the Rust that has the unit tests (a44e16aa:
+# "printing NOTHING" here vs "printed NOTHING" there, "neither stream
+# contained" vs "never printed", found the day the pin was written).
 #
 # WHAT THE PROBE SAID, in one line: the first non-empty line of stderr,
 # else of stdout. stderr first because that is where a tool puts its
@@ -388,7 +400,7 @@ elif [[ "$rc" -ne 0 && -z "$said" ]]; then
     # output), a trailing `|| exit 1` rewrote the 4 to a 1, and the old
     # wording here — "not holding, or the probe is wrong" — read
     # identically to a real regression.
-    why="THE FAILURE CANNOT BE READ: the probe ran on $host and exited $rc, printing NOTHING on either stream. That is a missing record, not a verdict on the claim — nothing here says whether the change is in production. The usual causes are a bare '|| exit <n>', which replaces the status that named the cause and prints nothing, and a swallowed stderr ('2>&1 | grep -q'). Re-park with a probe that echoes what failed, with \$?, before it exits — and check for the shape 4fccc595 measured: under 'jq -e' a success branch of 'empty' exits 4, so the probe fails PRECISELY when the claim holds."
+    why="THE FAILURE CANNOT BE READ: the probe ran on $host, exited $rc and printed NOTHING on either stream, so this is not a verdict on the claim — it is a missing record. Nothing here says whether the change is in production. The usual causes are a bare '|| exit <n>', which replaces the status that named the cause and prints nothing, and a swallowed stderr ('2>&1 | grep -q'). Re-park with a probe that echoes what failed, with \$?, before it exits — and check for the shape 4fccc595 measured: under 'jq -e' a success branch of 'empty' exits 4, so the probe fails PRECISELY when the claim holds."
 elif [[ "$rc" -eq 75 ]]; then
     # NOT YET (75 = EX_TEMPFAIL): the probe ran, found the world not
     # ready to judge the claim, and said so. Four of the eight probes
@@ -398,11 +410,11 @@ elif [[ "$rc" -eq 75 ]]; then
     # verdict against the change; the daily recheck runs it again.
     why="NOT YET: the probe ran on $host and said the claim cannot be judged until something happens — $said. Not a verdict against the change; recheck-failing-probes-daily runs it again."
 elif [[ "$rc" -ne 0 ]]; then
-    why="the probe RAN on $host and exited $rc. What it said: $said"
+    why="the probe RAN on $host and exited $rc, so it is not proof of anything. What it said: $said"
 elif [[ -z "$said" ]]; then
-    why="the probe RAN on $host and exited 0 and printed NOTHING, so it cannot have printed '$expect'. An exit code alone is a weak assertion — 'echo hi' exits 0 too. Re-park with a probe that prints a named token on success."
+    why="the probe RAN on $host and exited 0 but never printed '$expect' — it printed NOTHING on either stream, so it did not observe what was claimed. An exit code alone is a weak assertion — 'echo hi' exits 0 too. Re-park with a probe that prints a named token on success."
 else
-    why="the probe RAN on $host and exited 0, but neither stream contained '$expect'. What it printed: $said"
+    why="the probe RAN on $host and exited 0 but never printed '$expect', so it did not observe what was claimed. What it printed instead: $said. An exit code alone is a weak assertion — 'echo hi' exits 0 too. Either the change is not in prod, or the probe is looking in the wrong place."
 fi
 # PROBE-VERDICT-END
 # A crash that exited 75 is NOT not-yet: not-yet re-runs daily and

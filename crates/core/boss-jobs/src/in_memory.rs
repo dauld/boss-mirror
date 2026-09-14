@@ -139,6 +139,15 @@ fn matches_filter(job: &Job, filter: &JobFilter) -> bool {
             }
         }
     }
+    if let Some(key) = &filter.metadata_has
+        && job.metadata.get(key).is_none()
+    {
+        // The stand-in for Postgres `metadata ? $n`: a top-level key,
+        // whatever its value. `Value::get` on null metadata is None, so
+        // the seeded default carries nothing — same as `?` on a JSONB
+        // null.
+        return false;
+    }
     match &filter.scope {
         JobScope::All => {}
         JobScope::None => return false,
@@ -1064,6 +1073,93 @@ mod tests {
             Priority::Standard,
             test_date(),
         )
+    }
+
+    /// A packet's metadata is the only place most of what a reader
+    /// wants to know lives — the car's branch, the alert's finding,
+    /// the train's outcome — and until 2026-09-14 (4d9aa761) the list
+    /// could not narrow on any of it, so every probe paged and
+    /// filtered afterwards, exact only while the page was bigger than
+    /// the world. These two filters are the in-memory half of the
+    /// `metadata @> $n` / `metadata ? $n` clauses; the Pg half is
+    /// tests/postgres_filter.rs. Both assert the total, because a
+    /// total that disagrees with the rows is the failure this exists
+    /// to remove.
+    fn make_job_with(kind: &str, metadata: serde_json::Value) -> Job {
+        let mut j = make_job(kind);
+        j.metadata = metadata;
+        j
+    }
+
+    #[tokio::test]
+    async fn metadata_has_keeps_only_packets_carrying_the_key() {
+        let repo = InMemoryJobs::new();
+        let mut with_key = make_job_with(
+            "estate-alert",
+            serde_json::json!({ "estate_finding": "disk-floor" }),
+        );
+        with_key.title = "carries it".into();
+        let mut other_key = make_job_with("estate-alert", serde_json::json!({ "branch": "x" }));
+        other_key.title = "other key".into();
+        // Null metadata is the seeded default and must not match —
+        // `Value::get` on a non-object is None, but say so in a test.
+        let mut bare = make_job("estate-alert");
+        bare.title = "no metadata".into();
+        for j in [&with_key, &other_key, &bare] {
+            repo.create_job(j).await.unwrap();
+        }
+
+        let filter = JobFilter {
+            metadata_has: Some("estate_finding".into()),
+            ..Default::default()
+        };
+        let (rows, total) = repo.list_jobs(&filter, 100, 0).await.unwrap();
+        assert_eq!(total, 1, "the total must reflect the key filter");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "carries it");
+
+        // A key nothing carries is an empty answer, not everything.
+        let filter = JobFilter {
+            metadata_has: Some("outcome".into()),
+            ..Default::default()
+        };
+        let (rows, total) = repo.list_jobs(&filter, 100, 0).await.unwrap();
+        assert_eq!((rows.len(), total), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn metadata_contains_narrows_to_the_matching_document() {
+        let repo = InMemoryJobs::new();
+        let mut car = make_job_with(
+            "ship-a-change",
+            serde_json::json!({ "branch": "feat/x", "outcome": "arrived" }),
+        );
+        car.title = "the car".into();
+        let mut twin = make_job_with(
+            "ship-a-change",
+            serde_json::json!({ "branch": "feat/y", "outcome": "arrived" }),
+        );
+        twin.title = "another car".into();
+        for j in [&car, &twin] {
+            repo.create_job(j).await.unwrap();
+        }
+
+        let filter = JobFilter {
+            metadata_contains: Some(serde_json::json!({ "branch": "feat/x" })),
+            ..Default::default()
+        };
+        let (rows, total) = repo.list_jobs(&filter, 100, 0).await.unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "the car");
+
+        // Containment is AND across keys: both must hold on one packet.
+        let filter = JobFilter {
+            metadata_contains: Some(serde_json::json!({ "branch": "feat/y", "outcome": "lost" })),
+            ..Default::default()
+        };
+        let (rows, total) = repo.list_jobs(&filter, 100, 0).await.unwrap();
+        assert_eq!((rows.len(), total), (0, 0));
     }
 
     #[tokio::test]
