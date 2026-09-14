@@ -555,6 +555,7 @@ run_converge() { # <dir> <installer> -> output; returns the script's status
     BOSS_GCP_REPO_DIR="$1" BOSS_GCP_CONVERGE_INSTALLER="$2" \
         BOSS_NODE_ID="${CONVERGE_NODE_ID:-boss-gcp}" \
         BOSS_ESTATE_NODES_URL="${CONVERGE_NODES_URL:-file://$nodes_json}" \
+        BOSS_NODE_ROLES_CACHE="${CONVERGE_ROLES_CACHE:-$tmp/roles.cache}" \
         STUB_CALLS="$tmp/calls.log" bash "$converge" 2>&1
 }
 
@@ -633,12 +634,41 @@ out=$(CONVERGE_NODE_ID=w-1 run_converge "$clean" "$tmp/bin/installer-ok") \
 $out"
 grep -q "roles=$" "$tmp/calls.log" \
     || fail "a node with no declared roles must reach the installer with BOSS_NODE_ROLES empty, so every row installs (calls: $(cat "$tmp/calls.log"))"
+# A DARK REGISTRY NEVER WIDENS WHAT THE HOST RUNS (6cd124c4). The read
+# above was remembered in the scratch cache; with the registry dark the
+# converge installs THAT declaration and says it is cached. With no cache
+# at all it installs [always] only — the sentinel `registry-unread`
+# matches no roles.toml section — never every row, which until
+# 2026-09-14 is what a dark tick did.
 : >"$tmp/calls.log"
 out=$(CONVERGE_NODES_URL="file://$tmp/no-such-registry.json" run_converge "$clean" "$tmp/bin/installer-ok") \
     || fail "an unreachable registry STOPPED the converge — an arm that needs the patient is not an arm:
 $out"
 grep -q "roles=$" "$tmp/calls.log" \
-    || fail "an unreachable registry must still drive the installer, with no roles (calls: $(cat "$tmp/calls.log"))"
+    || fail "w-1's cached declaration is EMPTY (it declares no roles), so a dark tick installs every row as its last read did (calls: $(cat "$tmp/calls.log"))"
+printf '%s' "$out" | grep -q "cached declaration" \
+    || fail "the converge does not say w-1's empty roles came from the cache:
+$out"
+: >"$tmp/calls.log"
+out=$(CONVERGE_NODE_ID=boss-gcp CONVERGE_ROLES_CACHE="$tmp/roles.cache.gcp" run_converge "$clean" "$tmp/bin/installer-ok") \
+    || fail "the boss-gcp read that seeds the cache failed:
+$out"
+[ -s "$tmp/roles.cache.gcp" ] || fail "a successful roles read was not remembered in the cache"
+: >"$tmp/calls.log"
+out=$(CONVERGE_NODE_ID=boss-gcp CONVERGE_ROLES_CACHE="$tmp/roles.cache.gcp" CONVERGE_NODES_URL="file://$tmp/no-such-registry.json" run_converge "$clean" "$tmp/bin/installer-ok") \
+    || fail "an unreachable registry STOPPED the converge that had a cache:
+$out"
+grep -q "roles=legacy-stack,ml-batch-host,off-cluster-observer,wireguard-bastion" "$tmp/calls.log" \
+    || fail "a dark registry must drive the installer with the CACHED declaration (calls: $(cat "$tmp/calls.log"))"
+printf '%s' "$out" | grep -q "cached declaration" \
+    || fail "the converge does not say the roles came from the cache:
+$out"
+: >"$tmp/calls.log"
+out=$(CONVERGE_NODE_ID=boss-gcp CONVERGE_ROLES_CACHE="$tmp/roles.cache.none" CONVERGE_NODES_URL="file://$tmp/no-such-registry.json" run_converge "$clean" "$tmp/bin/installer-ok") \
+    || fail "an unreachable registry with no cache STOPPED the converge:
+$out"
+grep -q "roles=registry-unread" "$tmp/calls.log" \
+    || fail "a dark registry with no cache must install [always] only (roles=registry-unread), never every row (calls: $(cat "$tmp/calls.log"))"
 printf '%s' "$out" | grep -q "did not answer" \
     || fail "the converge does not say the registry did not answer:
 $out"
@@ -672,6 +702,8 @@ sum_conv="$tmp/summary-converge.json"
 run_converge_sum() { # <dir> <installer>
     BOSS_GCP_REPO_DIR="$1" BOSS_GCP_CONVERGE_INSTALLER="$2" \
         BOSS_RUN_SUMMARY_FILE="$sum_conv" \
+        BOSS_NODE_ID=boss-gcp BOSS_ESTATE_NODES_URL="file://$nodes_json" \
+        BOSS_NODE_ROLES_CACHE="$tmp/roles.cache.sum" \
         STUB_CALLS="$tmp/calls.log" bash "$converge" 2>&1
 }
 conv_fail() { echo "FAIL: $*" >&2; echo "--- summary ($sum_conv):" >&2
