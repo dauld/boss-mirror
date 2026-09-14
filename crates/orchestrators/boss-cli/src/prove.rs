@@ -244,7 +244,10 @@ pub(crate) fn judge(o: &Outcome, expect: Option<&str>) -> Result<()> {
 /// nothing when it does not. Order matters: the self-contradictory shape
 /// is checked FIRST because a probe carrying it never had a verdict to
 /// give — its nonzero exit says nothing about production either way, and
-/// the measured probe carried both findings at once.
+/// the measured probe carried both findings at once. A crashed numeric
+/// test comes next, for the same reason and one more: its exit code is
+/// whatever the `||` branch behind it chose — 75 on both measured cars
+/// — so the code is not just uninformative, it points the wrong way.
 pub(crate) fn failure_diagnosis(probe: &str, o: &Outcome) -> Option<String> {
     if o.exit == 0 {
         return None;
@@ -269,6 +272,18 @@ pub(crate) fn failure_diagnosis(probe: &str, o: &Outcome) -> Option<String> {
             evidence = boss_jobs::probe::SELF_CONTRADICTORY_EVIDENCE,
         ));
     }
+    if let Some(line) = crashed_comparing_a_non_number(&o.stderr) {
+        return Some(format!(
+            "THE PROBE CRASHED comparing a non-number (jq printed null?), so exit {exit} is \
+             not a verdict on the claim — it is whichever `||` branch caught the crash. \
+             bash's `[` said:\n  {line}\n  \
+             Guard the value before the numeric test — `// empty` in the jq filter, or \
+             `case \"$n\" in ''|*[!0-9]*) echo \"not yet: no number\"; exit 75;; esac` — so a \
+             missing value says not-yet BY NAME instead of crashing into the not-yet branch. \
+             Fix the probe and re-park; a recheck re-runs a crash forever (68081368).",
+            exit = o.exit,
+        ));
+    }
     if o.stdout.trim().is_empty() && o.stderr.trim().is_empty() {
         let rewritten = match boss_jobs::probe::rewrites_its_exit_status(probe) {
             Some(n) => format!(
@@ -290,6 +305,34 @@ pub(crate) fn failure_diagnosis(probe: &str, o: &Outcome) -> Option<String> {
         ));
     }
     None
+}
+
+/// WHAT BASH SAYS WHEN `[` OR `((` IS HANDED A NON-NUMBER (backlog
+/// 68081368). Cars dd1d872d and 2e4d3bce each recorded the not-yet
+/// sentence over a stderr of `bash: line 10: [: null: integer expression
+/// expected`: jq printed null, `[ "$n" -ge 1 ]` exited 2, and the `||`
+/// branch meant for "no such packet yet" exited 75. Nothing was judged.
+///
+/// The forge runner (infra/forge/run-car-probe.sh) composes its own
+/// verdict in shell, on a host with no `boss` binary, so it carries this
+/// list as a grep pattern rather than reading it here. Two copies, one
+/// equality test: `the_forge_runner_names_the_same_crashes` runs the
+/// script's verdict block over every entry, so an entry added on one
+/// side and not the other fails by name (CLAUDE.md §9a).
+pub(crate) const NUMERIC_CRASH_MARKERS: [&str; 3] = [
+    "integer expression expected",
+    "unary operator expected",
+    "syntax error: invalid arithmetic operator",
+];
+
+/// The first stderr line that carries one of [`NUMERIC_CRASH_MARKERS`],
+/// trimmed — the line the verdict quotes. `None` when the probe crashed
+/// on nothing of the kind, so the other diagnoses get their turn.
+pub(crate) fn crashed_comparing_a_non_number(stderr: &str) -> Option<&str> {
+    stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| NUMERIC_CRASH_MARKERS.iter().any(|m| line.contains(m)))
 }
 
 /// [`judge`], with the diagnosis attached when the record supports one.
@@ -2498,6 +2541,152 @@ mod tests {
         // Nor on a pass: `judge_probe` adds nothing when there is
         // nothing to explain.
         assert!(judge_probe("true", &ok("claim:ok"), Some("claim:ok")).is_ok());
+    }
+
+    // -----------------------------------------------------------------
+    // A PROBE THAT CRASHED IS NOT A PROBE THAT SAID NOT-YET (68081368)
+    // -----------------------------------------------------------------
+
+    /// THE MEASURED RECORD, twice (cars dd1d872d and 2e4d3bce,
+    /// 2026-09-14): a probe read a count with jq, jq printed `null`,
+    /// bash's `[` refused to compare it and exited 2, and the `||`
+    /// branch behind it said "not yet" and exited 75. The verdict
+    /// recorded "said the claim cannot be judged until something
+    /// happens" — the not-yet sentence, over stderr that held the crash.
+    /// The reader had to open stderr to learn the probe had never
+    /// judged anything.
+    const CRASHED_STDERR: &str = "bash: line 10: [: null: integer expression expected\n";
+    const NULL_COUNT_PROBE: &str = "n=$(boss-sor-read /api/jobs?kind=x | jq -r .total); \
+         if [ \"$n\" -ge 1 ]; then echo x:ok; else echo 'not yet: none'; exit 75; fi";
+
+    fn crashed(exit: i32, stderr: &str) -> Outcome {
+        Outcome {
+            exit,
+            stdout: "not yet: none\n".into(),
+            stderr: stderr.into(),
+        }
+    }
+
+    #[test]
+    fn a_probe_that_crashed_comparing_a_non_number_has_the_crash_named() {
+        let o = crashed(75, CRASHED_STDERR);
+        let d = failure_diagnosis(NULL_COUNT_PROBE, &o).expect("a crash is diagnosable");
+        assert!(
+            d.contains("THE PROBE CRASHED"),
+            "the crash comes first: {d}"
+        );
+        assert!(
+            d.contains("[: null: integer expression expected"),
+            "the stderr line is quoted, not pointed at: {d}"
+        );
+        assert!(
+            d.contains("// empty") && d.contains("*[!0-9]*"),
+            "and the guard to add is named: {d}"
+        );
+        assert!(
+            !d.contains("cannot be judged"),
+            "a crash is not the not-yet sentence: {d}"
+        );
+        // The door's refusal carries it too — `judge_probe` is the one
+        // path every probe run goes through.
+        let e = judge_probe(NULL_COUNT_PROBE, &o, Some("x:ok"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("THE PROBE CRASHED"), "{e}");
+    }
+
+    /// Every message bash's `[` and `((` print for a non-number is a
+    /// crash, not only the one measured. A fourth one is a line in
+    /// `NUMERIC_CRASH_MARKERS`, and this test walks the list so the
+    /// list is what gets tested — at every exit code a `||` branch
+    /// could turn the crash into.
+    #[test]
+    fn every_numeric_crash_marker_is_named_whatever_the_exit_code() {
+        for marker in NUMERIC_CRASH_MARKERS {
+            let stderr = format!("bash: line 3: [: : {marker}\n");
+            for exit in [1, 2, 75] {
+                let d = failure_diagnosis(NULL_COUNT_PROBE, &crashed(exit, &stderr))
+                    .unwrap_or_else(|| panic!("{marker:?} at exit {exit} is a crash"));
+                assert!(d.contains("THE PROBE CRASHED"), "{marker}: {d}");
+                assert!(d.contains(marker), "the line is quoted: {d}");
+            }
+        }
+    }
+
+    /// A CLEAN NOT-YET IS LEFT ALONE. Exit 75, a "not yet:" line, an
+    /// empty stderr — the probe said what it meant, and this door
+    /// invents no diagnosis for it (the forge runner's not-yet sentence
+    /// is the right verdict there, and stays). Nor does an ordinary
+    /// failure — a curl refusal on stderr — read as a crash.
+    #[test]
+    fn a_clean_exit_75_gets_no_crash_diagnosis() {
+        let o = Outcome {
+            exit: 75,
+            stdout: "not yet: no disk-report request carrying for_sweep yet\n".into(),
+            stderr: String::new(),
+        };
+        assert!(failure_diagnosis(NULL_COUNT_PROBE, &o).is_none());
+        let o = Outcome {
+            exit: 1,
+            stdout: String::new(),
+            stderr: "curl: (7) Failed to connect\n".into(),
+        };
+        assert!(failure_diagnosis(NULL_COUNT_PROBE, &o).is_none());
+    }
+
+    /// A FACT THAT LIVES TWICE GETS AN EQUALITY TEST (CLAUDE.md 9a).
+    /// The forge runner composes its verdict in shell, on a host with
+    /// no `boss` binary, so the marker list cannot be ONE definition —
+    /// the shell's copy is a grep pattern. This lifts the runner's
+    /// verdict block (between the same markers boss-testing's
+    /// run_car_probe_sh.rs lifts) and runs it over every entry in
+    /// `NUMERIC_CRASH_MARKERS`: a marker added here and not there fails
+    /// by name, with both verdicts in the message.
+    #[test]
+    fn the_forge_runner_names_the_same_crashes() {
+        const SH: &str = include_str!("../../../../infra/forge/run-car-probe.sh");
+        let block = SH
+            .split_once("# PROBE-VERDICT-BEGIN")
+            .expect("run-car-probe.sh has its verdict markers")
+            .1
+            .split_once("# PROBE-VERDICT-END")
+            .expect("…both of them")
+            .0;
+        let dir = boss_testing::scratch::scratch_dir("prove-forge-crash-verdict");
+        for marker in NUMERIC_CRASH_MARKERS {
+            let stderr = format!("bash: line 10: [: null: {marker}\n");
+            std::fs::write(dir.join("out"), "not yet: none\n").unwrap();
+            std::fs::write(dir.join("errs"), &stderr).unwrap();
+            let script = format!(
+                "set -uo pipefail\nworkdir={dir}\nrc=75\nunrunnable=false\n\
+                 missing_list=''\nhost='david-asus-minipc'\nPROBE_USER=david\n\
+                 PROBE_DIR=/home/david/boss\nexpect='x:ok'\n{block}\nprintf '%s' \"$why\"\n",
+                dir = dir.display(),
+            );
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(&script)
+                .output()
+                .expect("bash runs the lifted verdict");
+            assert!(
+                out.status.success(),
+                "the lifted block must run: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let why = String::from_utf8_lossy(&out.stdout).to_string();
+            let ours = failure_diagnosis(NULL_COUNT_PROBE, &crashed(75, &stderr)).unwrap();
+            for phrase in ["THE PROBE CRASHED", marker, "// empty", "*[!0-9]*"] {
+                assert!(
+                    why.contains(phrase),
+                    "run-car-probe.sh does not name {marker:?} as a crash the way \
+                     prove.rs does (missing {phrase:?}):\n  sh: {why}\n  rs: {ours}"
+                );
+            }
+            assert!(
+                !why.starts_with("NOT YET"),
+                "a crash must not read as not-yet on the forge either: {why}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------

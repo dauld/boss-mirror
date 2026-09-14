@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# wt-cargo — run cargo in a WORKTREE with its own target dir, seeded by
+# reflink from the warm shared one (bottleneck #6, 2026-09-12).
+#
+# Why: one shared /scratch/target across worktrees meant every switch
+# recompiled the touched crates and boss-testing's tree-match guard
+# (3d8bb6e6) refused binaries built from a neighbour; and one 16 GiB
+# cgroup meant one build at a time. /scratch is XFS with reflink: a
+# 30 GB target copies in ~7 s for zero bytes, so each worktree can have
+# its own, and builds can run two at a time with -j capped.
+#
+# Why it lives HERE and not only on the pod (backlog 34b29b52,
+# 2026-09-14): it was pod-local text under /work/tools/bin with its own
+# copy of the cargo bound, and the copy drifted (8, against
+# infra/dev/pod-build.env's 6) — CLAUDE.md §9a, one layer down from the
+# file that says so. Now the bound is SOURCED from pod-build.env, the
+# script is versioned and pinned (crates/core/boss-testing/tests/
+# wt_cargo_sh.rs), and the pod's /work/tools/bin/wt-cargo is a symlink
+# to this file in the operator's checkout.
+#
+# Usage: wt-cargo <cargo args…>        (run from inside the worktree)
+#        WT_JOBS=8 wt-cargo test -p boss-cli
+# The seed is /scratch/target (kept warm by the shim's boss-cli build);
+# the per-worktree dir is /scratch/target-<worktree-basename>. Both roots
+# are overridable (WT_SEED, WT_TARGET_ROOT) so the test never touches
+# /scratch; the defaults are the pod's.
+set -euo pipefail
+root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "wt-cargo: not in a git worktree" >&2; exit 2; }
+name=$(basename "$root")
+seed=${WT_SEED:-/scratch/target}
+dir=${WT_TARGET_ROOT:-/scratch}/target-$name
+if [ ! -d "$dir" ]; then
+    if [ -d "$seed" ]; then
+        start=$(date +%s)
+        cp -a --reflink=always "$seed" "$dir"
+        echo "wt-cargo: seeded $dir from $seed by reflink in $(( $(date +%s) - start ))s" >&2
+    else
+        mkdir -p "$dir"
+        echo "wt-cargo: no seed at $seed — $dir starts cold" >&2
+    fi
+fi
+export CARGO_TARGET_DIR="$dir"
+
+# THE BOUND IS READ, NOT TYPED. pod-build.env is the one home of the
+# pod's cargo job count; it sits beside this script, and the symlink
+# under /work/tools/bin is resolved so the checkout it points at is the
+# one consulted. A missing file is refused rather than defaulted: an
+# unbounded cargo here is 32 jobs against a 16 GiB cgroup, which is the
+# failure pod-build.env exists to prevent.
+here=$(dirname "$(readlink -f "$0")")
+env_file=$here/pod-build.env
+[ -f "$env_file" ] || { echo "wt-cargo: $env_file is missing — the cargo bound has no home to read; refusing to build unbounded" >&2; exit 2; }
+set -a; . "$env_file"; set +a
+[ -n "${CARGO_BUILD_JOBS:-}" ] || { echo "wt-cargo: $env_file sets no CARGO_BUILD_JOBS; refusing to build unbounded" >&2; exit 2; }
+
+# The pod is one 8-CPU / 16 GiB cgroup shared with David's interactive
+# session. Measured 2026-09-14: two builders + the operator compiling
+# at once throttled the cgroup 2,177 periods (~10 min) and he felt it
+# as lag. A BUILDER worktree (.claude/worktrees/agent-*) therefore
+# builds 4-wide and nice'd, so the interactive shell wins the scheduler
+# when they collide; the operator's own worktrees keep the pod bound
+# (infra/dev/pod-build.env, sourced above). WT_JOBS overrides either.
+case "$name" in
+    agent-*) export CARGO_BUILD_JOBS="${WT_JOBS:-4}"; exec nice -n 10 cargo "$@" ;;
+    *)       export CARGO_BUILD_JOBS="${WT_JOBS:-$CARGO_BUILD_JOBS}"; exec cargo "$@" ;;
+esac

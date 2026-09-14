@@ -361,8 +361,25 @@ fi
 # diagnosis — jq's `error(…)`, curl's message, bash's command-not-found.
 # PROBE-VERDICT-BEGIN
 said=$(sed -n '/[^[:space:]]/{s/^[[:space:]]*//;p;q;}' "$workdir/errs" "$workdir/out" 2>/dev/null | cut -c1-300)
+# WHAT BASH SAYS WHEN `[` OR `((` IS HANDED A NON-NUMBER (68081368).
+# The first stderr line carrying one of these is a CRASH, whatever
+# exit code the `||` branch behind it chose. The same three phrases
+# are prove.rs's NUMERIC_CRASH_MARKERS; its test
+# the_forge_runner_names_the_same_crashes runs this block over each
+# of them, so adding one here and not there (or the reverse) fails by
+# name (CLAUDE.md §9a).
+crash=$(grep -m1 -E 'integer expression expected|unary operator expected|syntax error: invalid arithmetic operator' "$workdir/errs" 2>/dev/null | sed 's/^[[:space:]]*//' | cut -c1-300)
 if [[ "$unrunnable" == true ]]; then
     why="THE PROBE DID NOT RUN on $host: $missing_list not found. A recorded probe runs on the forge host as $PROBE_USER in $PROBE_DIR, with this host's tools — not on the dev pod where it was written, which is where cluster tools like kubectl live. This says nothing about whether the change works; re-probe from a vantage this host has, or record the car as event-bound."
+elif [[ -n "$crash" ]]; then
+    # A CRASHED NUMERIC TEST IS NOT NOT-YET. Cars dd1d872d and 2e4d3bce
+    # (2026-09-14) recorded the not-yet sentence below while stderr held
+    # `bash: line 10: [: null: integer expression expected`: jq printed
+    # null, `[ "$n" -ge 1 ]` exited 2, and the `||` branch meant for "no
+    # such packet yet" exited 75. Nothing was judged, and the daily
+    # recheck would re-run the crash forever. Checked before the exit
+    # code is read, because the code is the branch's, not the crash's.
+    why="THE PROBE CRASHED comparing a non-number (jq printed null?) on $host, so exit $rc is not a verdict on the claim — it is whichever '||' branch caught the crash. bash's [ said: $crash. Guard the value before the numeric test — '// empty' in the jq filter, or a case \"\$n\" in ''|*[!0-9]*) echo \"not yet: no number\"; exit 75;; esac check — so a missing value says not-yet BY NAME instead of crashing into the not-yet branch. Fix the probe and re-park; a recheck re-runs a crash forever (68081368)."
 elif [[ "$rc" -ne 0 && -z "$said" ]]; then
     # A NONZERO EXIT WITH BOTH STREAMS EMPTY IS NOT A VERDICT — it is a
     # missing record, and saying so is the whole of 4fccc595. Car
@@ -388,8 +405,10 @@ else
     why="the probe RAN on $host and exited 0, but neither stream contained '$expect'. What it printed: $said"
 fi
 # PROBE-VERDICT-END
+# A crash that exited 75 is NOT not-yet: not-yet re-runs daily and
+# waits; a crash needs a re-park, and must read as NOT PROVEN.
 not_yet=false
-[[ "$rc" -eq 75 && "$unrunnable" != true ]] && not_yet=true
+[[ "$rc" -eq 75 && "$unrunnable" != true && -z "$crash" ]] && not_yet=true
 attempt=$(jq -cn --arg at "$at" --argjson exit "$rc" --arg host "$host" \
     --arg probe "$probe" --arg expect "$expect" --arg why "$why" \
     --argjson unrunnable "$unrunnable" --argjson missing_tools "$missing_json" \

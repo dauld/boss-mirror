@@ -347,6 +347,38 @@ fn an_exit_75_is_not_yet_and_carries_the_probes_reason() {
     );
 }
 
+/// BUT AN EXIT 75 OVER A CRASH IS NOT NOT-YET (backlog 68081368). Cars
+/// dd1d872d and 2e4d3bce recorded exactly the sentence above while
+/// stderr held `bash: line 10: [: null: integer expression expected`:
+/// jq printed null, `[` refused to compare it, and the `||` branch
+/// meant for "no such packet yet" exited 75 on a crash. A recheck
+/// re-runs a crash forever; the verdict must name it, quote the line,
+/// and say which guard to add — before any not-yet wording.
+#[test]
+fn an_exit_75_whose_stderr_shows_a_crashed_numeric_test_names_the_crash() {
+    let why = verdict(
+        "crashed-not-yet",
+        75,
+        "not yet: no such packet\n",
+        "bash: line 10: [: null: integer expression expected\n",
+        false,
+        "seen:ok",
+    );
+    assert!(why.starts_with("THE PROBE CRASHED"), "{why}");
+    assert!(
+        why.contains("[: null: integer expression expected"),
+        "the stderr line is quoted, not pointed at: {why}"
+    );
+    assert!(
+        why.contains("// empty") && why.contains("*[!0-9]*"),
+        "the guard to add is named: {why}"
+    );
+    assert!(
+        !why.contains("cannot be judged"),
+        "the not-yet sentence is what sent two readers to stderr: {why}"
+    );
+}
+
 /// AND THE BRANCH THAT ALREADY WORKED STILL WORKS. An unrunnable probe
 /// names the tool and says the claim is untested (f9304366) — it is not
 /// evidence against the change, and the other branches must not have
