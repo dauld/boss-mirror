@@ -216,6 +216,23 @@ fn verdict(
     unrunnable: bool,
     expect: &str,
 ) -> String {
+    verdict_and_flag(case, rc, stdout, stderr, unrunnable, expect).0
+}
+
+/// The verdict AND the `not_yet` flag the block sets beside it
+/// (5461b899). The flag is what orient, the yard and the daily recheck
+/// read; the sentence is what the operator reads. They are one record,
+/// so they are derived in one block — and this lifts both, so a flag
+/// that disagrees with its sentence fails here by name. Prints "unset"
+/// for the flag when the block did not derive it.
+fn verdict_and_flag(
+    case: &str,
+    rc: i32,
+    stdout: &str,
+    stderr: &str,
+    unrunnable: bool,
+    expect: &str,
+) -> (String, String) {
     let sh = std::fs::read_to_string(repo_root().join("infra/forge/run-car-probe.sh"))
         .expect("run-car-probe.sh is readable");
     let block = sh
@@ -239,7 +256,7 @@ fn verdict(
          PROBE_DIR=/home/david/boss\n\
          expect={expect:?}\n\
          {block}\n\
-         printf '%s' \"$why\"\n",
+         printf '%s\\n%s' \"$why\" \"${{not_yet-unset}}\"\n",
         dir = dir.display(),
     );
     let out = Command::new("bash")
@@ -252,7 +269,11 @@ fn verdict(
         "the lifted verdict block must run: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    String::from_utf8_lossy(&out.stdout).to_string()
+    let printed = String::from_utf8_lossy(&out.stdout).to_string();
+    let (why, flag) = printed
+        .rsplit_once('\n')
+        .expect("why, then the not_yet flag");
+    (why.to_string(), flag.to_string())
 }
 
 /// THE MEASURED RECORD, and the one branch that did not exist: a nonzero
@@ -344,6 +365,70 @@ fn an_exit_75_is_not_yet_and_carries_the_probes_reason() {
     assert!(
         !why.contains("FAILED") && !why.contains("CANNOT BE READ"),
         "not a failure: {why}"
+    );
+    let (_, flag) = verdict_and_flag(
+        "not-yet-flag",
+        75,
+        "not yet: no disk-report ops-request carrying for_sweep yet (0)\n",
+        "",
+        false,
+        "sweep-measured:ok",
+    );
+    assert_eq!(flag, "true", "the NOT YET sentence carries not_yet=true");
+}
+
+/// AN EXIT 75 THAT SAID NOTHING IS NOT NOT-YET EITHER (backlog
+/// 5461b899). The flag used to be computed after the block, from rc
+/// alone — `rc -eq 75`, runnable, no crash — so an exit 75 with both
+/// streams empty recorded THE FAILURE CANNOT BE READ beside
+/// not_yet=true: orient and the yard read "not yet" while the sentence
+/// said "missing record", and the daily recheck (scope failing /
+/// not_yet) re-ran a missing record forever. `boss prove` derives the
+/// flag from the sentence and cannot produce the disagreement; the
+/// forge must not either. The flag is the sentence's: true in the one
+/// branch that writes NOT YET, false everywhere else, derived nowhere
+/// but in the block that writes the sentence.
+#[test]
+fn an_exit_75_with_nothing_printed_is_an_unreadable_failure_not_not_yet() {
+    let (why, flag) = verdict_and_flag("silent-75", 75, "", "", false, "SOME-TOKEN");
+    assert!(
+        why.contains("CANNOT BE READ") && why.contains("exited 75"),
+        "the verdict names the empty record: {why}"
+    );
+    assert!(
+        !why.contains("cannot be judged"),
+        "an empty record is not the not-yet sentence: {why}"
+    );
+    assert_eq!(
+        flag, "false",
+        "CANNOT BE READ must not ride with not_yet=true — that pair is what the recheck re-ran forever"
+    );
+
+    // The crash branch already refused the not-yet sentence (68081368);
+    // its flag must refuse with it.
+    let (why, flag) = verdict_and_flag(
+        "crashed-75-flag",
+        75,
+        "not yet: no such packet\n",
+        "bash: line 10: [: null: integer expression expected\n",
+        false,
+        "seen:ok",
+    );
+    assert!(why.starts_with("THE PROBE CRASHED"), "{why}");
+    assert_eq!(flag, "false", "a crash that exited 75 is not not-yet");
+
+    // Derived ONCE, where the sentence is: nothing after the block may
+    // set the flag again from rc, or the two can disagree as they did.
+    let sh = std::fs::read_to_string(repo_root().join("infra/forge/run-car-probe.sh"))
+        .expect("run-car-probe.sh is readable");
+    let after = sh.split_once(VERDICT_END).expect("the block ends").1;
+    assert!(
+        !after.contains("not_yet=true"),
+        "not_yet is set only in the branch that writes the NOT YET sentence, not after the block from rc"
+    );
+    assert!(
+        after.contains("[[ \"$not_yet\" == true ]] && exit 75"),
+        "and the exit code follows the flag, so this record exits 1 (NOT PROVEN)"
     );
 }
 

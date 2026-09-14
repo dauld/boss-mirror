@@ -425,6 +425,15 @@ pub struct DockCar {
     /// step-level "parked since review became ready" is the queue-age
     /// lens; the dock row carries the packet's own stamp.
     pub parked_since: String,
+    /// How many red trains have released this car — the conductor's
+    /// `red_trains` stamp, absent = 0. On the ROW, not derived by a
+    /// surface: the dock station stops listing a held car (36c3d4ca), so
+    /// the yard's held lane is drawn from [`HeldCar`] alone, and a row
+    /// without the count showed a twice-struck car as its reason sentence
+    /// with the strike itself invisible (ac80357b). `default` so a row
+    /// from an older server reads back as 0 rather than failing to parse.
+    #[serde(default)]
+    pub red_trains: u32,
 }
 
 pub fn dock_car(job: &Job) -> DockCar {
@@ -433,7 +442,20 @@ pub fn dock_car(job: &Job) -> DockCar {
         title: job.title.clone(),
         branch: meta_str(&job.metadata, "branch").map(str::to_string),
         parked_since: job.opened_on.to_string(),
+        red_trains: red_trains_of(&job.metadata),
     }
+}
+
+/// The `red_trains` stamp as a count. Only a non-negative integer is a
+/// strike count — a negative, a string, or a fraction reads as 0, the
+/// same reading the client's `redTrainsOf` gives (2bb0d014), so a
+/// malformed stamp cannot paint a car struck.
+fn red_trains_of(metadata: &Value) -> u32 {
+    metadata
+        .get("red_trains")
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0)
 }
 
 /// A car ON the dock that CANNOT board: parked, gated green, and held by
@@ -4546,6 +4568,61 @@ mod tests {
         assert_eq!(v["parked_since"], "2026-09-03");
         assert!(v["id"].is_string());
         assert!(v["title"].is_string());
+    }
+
+    /// A held car's STRIKES ride the row. The dock station stops listing
+    /// a held car (36c3d4ca), so the yard's HELD lane is drawn from this
+    /// row alone — and a row that carried the reason sentence without the
+    /// count showed "held after 2 red trains" as prose while the strike
+    /// itself stayed invisible (ac80357b). The conductor's `red_trains`
+    /// stamp is the count, absent is 0, and a parked (unheld) car carries
+    /// it the same way since the field lives on the dock row both lanes
+    /// share.
+    #[test]
+    fn a_held_car_carries_its_red_train_count_and_a_clean_one_carries_zero() {
+        let mut struck = car(
+            "fix/struck",
+            review(json!({ "hold": "held after 2 red trains" })),
+        );
+        struck.0.metadata["red_trains"] = json!(2);
+        let clean = car("fix/clean", review(json!({ "hold": "waiting on a node" })));
+        let mut parked = car("fix/parked", review(json!({})));
+        parked.0.metadata["red_trains"] = json!(1);
+        let (dock, held) = dock_lanes(&[struck, clean, parked]);
+        assert_eq!(
+            held.iter()
+                .map(|h| (h.car.branch.as_deref(), h.car.red_trains))
+                .collect::<Vec<_>>(),
+            vec![(Some("fix/struck"), 2), (Some("fix/clean"), 0)],
+            "a twice-struck held car carries 2; a clean held car carries 0"
+        );
+        assert_eq!(
+            dock[0].red_trains, 1,
+            "the parked lane carries the same field"
+        );
+        // On the wire it is a plain integer beside the reason, and a row
+        // from an older server that lacks it reads back as 0.
+        let v = serde_json::to_value(&held[0]).unwrap();
+        assert_eq!(v["red_trains"], 2);
+        let older: HeldCar = serde_json::from_value(json!({
+            "id": "x", "title": "t", "branch": "fix/old",
+            "parked_since": "2026-09-03", "reason": "why"
+        }))
+        .unwrap();
+        assert_eq!(older.car.red_trains, 0);
+    }
+
+    /// The stamp is read as a count and nothing else: a negative, a
+    /// string, or a fraction is NOT a strike (the client's `redTrainsOf`
+    /// reads the same way, 2bb0d014), so a malformed stamp cannot paint
+    /// a car struck.
+    #[test]
+    fn a_malformed_red_trains_stamp_reads_as_zero() {
+        for bad in [json!(-1), json!("2"), json!(1.5), json!(null)] {
+            let mut c = car("fix/bad", review(json!({})));
+            c.0.metadata["red_trains"] = bad.clone();
+            assert_eq!(dock_car(&c.0).red_trains, 0, "{bad} is not a strike count");
+        }
     }
 
     /// The relaxed membership question takes the marker off and nothing

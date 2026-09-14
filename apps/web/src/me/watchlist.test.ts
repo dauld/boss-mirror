@@ -103,6 +103,20 @@ describe('watchlistPacket', () => {
     expect(watchlistPacket(job({ simulated: true })).sim).toBe(true);
     expect(watchlistPacket(job({ tags: ['sim'] })).sim).toBe(true);
   });
+
+  // fb3b5ce1 (2026-09-14): the yard's reader learned `red_trains` and
+  // this lens, building its own literal, silently did not. The card is
+  // now built through the yard's one constructor, so a fact on the
+  // packet reaches this card the day the yard learns to read it.
+  test('a packet a red train released reaches the card with its strike count', () => {
+    const card = watchlistPacket(job({ metadata: { route: '/ux/jobs', red_trains: 2 } }));
+    expect(card.redTrains).toBe(2);
+    // The lens still decides its own provenance line and chips.
+    expect(card.branch).toBe('/ux/jobs');
+    expect(card.tags).toEqual(['bug']);
+    // Absent on the record is zero strikes, as on the dock.
+    expect(watchlistPacket(job()).redTrains).toBe(0);
+  });
 });
 
 describe('watchlistStateFromResponse', () => {
@@ -116,6 +130,15 @@ describe('watchlistStateFromResponse', () => {
     total: 1,
     data: [job()],
     ...over,
+  });
+
+  test('the strike count rides the envelope through to the entry', () => {
+    const state = watchlistStateFromResponse(200, envelope({
+      data: [job({ metadata: { route: '/ux/jobs', red_trains: 1 } })],
+    }));
+    expect(state.kind).toBe('ready');
+    if (state.kind !== 'ready') return;
+    expect(state.entries[0]?.card.redTrains).toBe(1);
   });
 
   test('a served envelope becomes cards in the server’s order', () => {

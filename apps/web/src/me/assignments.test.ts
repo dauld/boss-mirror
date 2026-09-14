@@ -156,6 +156,19 @@ describe('assignmentPacket', () => {
     expect(assignmentPacket(row({ step: { status: 'active' } })).tags).toEqual([]);
   });
 
+  // fb3b5ce1 (2026-09-14): built through the yard's one constructor
+  // now, not a literal with a fixed field list. The assignment row is a
+  // projection without the packet's metadata (boss-jobs port.rs
+  // AssignmentRow), so the packet-record facts read as ABSENT here —
+  // zero strikes, no head, no proof — the same answer the constructor
+  // gives a car outside the yard's window, never `undefined`.
+  test('the card carries every field the yard\'s constructor sets', () => {
+    const p = assignmentPacket(row({}));
+    expect(p.redTrains).toBe(0);
+    expect(p.head).toBeNull();
+    expect(p.proof).toBeNull();
+  });
+
   test('a simulated packet is marked SIM in the personal queue too', () => {
     expect(assignmentPacket(row({ simulated: true })).sim).toBe(true);
     // Pre-column packets carry the tag instead — the same fallback the

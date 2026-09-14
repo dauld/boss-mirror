@@ -40,11 +40,29 @@ export type JobLite = Readonly<{
   simulated?: boolean;
 }>;
 
+/** What [`carRow`] reads off a packet: a JobLite minus the envelope
+ *  fields no card field derives from (`status`, `opened_on`). Narrower
+ *  than JobLite on purpose — the /me lenses hold projections that are
+ *  not Jobs (an assignment row names the job but carries no metadata),
+ *  and they still map through the one constructor, passing what they
+ *  have. Everything optional reads as absent, never as an error. */
+export type CarFacts = Readonly<{
+  id: string;
+  kind: string;
+  title: string;
+  tags?: readonly string[];
+  metadata?: Record<string, unknown> | null;
+  steps?: readonly StepLite[] | null;
+  simulated?: boolean;
+}>;
+
 // A car in the yard is a job packet, and it renders as a card (David's
 // call, 2026-08-12): protocol names the color, tags ride along, and a
 // simulated packet is visibly not a real one. The same card grammar is
 // meant to travel to every queue lens, so everything here derives from
-// packet data — no per-kind code paths.
+// packet data — no per-kind code paths. Built ONLY by [`carRow`]: it was
+// built in three places until fb3b5ce1 (2026-09-14), and `redTrains`
+// reached one of them.
 export type CarRow = Readonly<{
   id: string;
   kind: string;
@@ -69,7 +87,8 @@ export type CarRow = Readonly<{
    *  record is 0. One strike is the state in which the NEXT red holds
    *  the car out, and until 2bb0d014 (2026-09-14) the floor drew it
    *  exactly like a clean car; the dock wagon reads this to look struck.
-   *  Optional because rows built outside the yard (`/me`) predate it. */
+   *  Optional so a test fixture built as a literal still typechecks;
+   *  every row the constructor builds carries it. */
   redTrains?: number;
 }>;
 
@@ -148,7 +167,7 @@ function proofAttempt(v: unknown): ProofAttempt | null {
  *  about proving it" and "this packet records an empty probe" are
  *  different facts, and the second one is a defect an operator should
  *  see rather than a shape the floor smooths over. */
-export function readCarProof(j: JobLite | null | undefined): CarProof | null {
+export function readCarProof(j: CarFacts | null | undefined): CarProof | null {
   if (!j) return null;
   const md = (j.metadata ?? {}) as Record<string, unknown>;
   const proven = step(j, 'proven', 'Proven in production');
@@ -1077,25 +1096,13 @@ export function toTrainRow(
   const status = trainStatus(j);
   const cars: CarRow[] = (md.boarded_jobs ?? []).map(id => {
     const car = shipById.get(id);
-    const cmd = (car?.metadata ?? {}) as {
-      branch?: string;
-      skip_reason?: string;
-      red_trains?: unknown;
-    };
-    return {
-      id,
-      kind: car?.kind ?? 'ship-a-change',
-      branch: cmd.branch ?? id.slice(0, 8),
-      title: car?.title ?? '(car not in window)',
-      tags: car?.tags ?? [],
-      sim: car ? isSim(car) : false,
-      skipReason: cmd.skip_reason ?? null,
-      head: car ? headOf(car) : null,
-      // A car outside the window says nothing about its own proof, and
-      // the arrivals stack must not read that silence as "not proven".
-      proof: readCarProof(car),
-      redTrains: redTrainsOf(cmd.red_trains),
-    };
+    // A car outside the fetch window is a packet with nothing on it:
+    // every fact reads absent — including its proof, which the arrivals
+    // stack must not read as "not proven" — and its short id stands in
+    // for the branch it cannot name.
+    return car
+      ? carRow(car)
+      : { ...carRow({ id, kind: 'ship-a-change', title: '(car not in window)' }), branch: id.slice(0, 8) };
   });
   return {
     id: j.id,
@@ -1127,7 +1134,7 @@ const shortSha = (v: unknown): string | null =>
 /** The head a car names: `boarded_head` once the conductor boarded it,
  *  else the `head` inside the gate step's receipt (a JSON string the
  *  runner wrote). No record, no sha — the floor paints a dash. */
-export function headOf(j: JobLite): string | null {
+export function headOf(j: CarFacts): string | null {
   const boarded = shortSha((j.metadata as { boarded_head?: unknown } | null)?.boarded_head);
   if (boarded) return boarded;
   const receipt = (step(j, 'gate', 'Gate')?.metadata as { receipt?: unknown } | null)?.receipt;
@@ -1140,10 +1147,17 @@ export function headOf(j: JobLite): string | null {
 }
 
 // One packet → one card, whoever chose the packet: the station
-// envelope, the publish queue, the awaiting-proof set and the open-car
-// set all map through here, so the card grammar cannot fork between
-// lanes.
-function carRow(j: JobLite): CarRow {
+// envelope, the publish queue, the awaiting-proof set, the open-car
+// set, a train's consist, and the two /me lenses all map through here,
+// so the card grammar cannot fork between lanes — a field this reader
+// learns, every lens carries (fb3b5ce1). A lens that owns its own
+// provenance line or chips spreads the result and overrides those two;
+// nothing overrides a packet fact.
+//
+// A packet naming no branch reads `''`, and that is a fact two readers
+// test for (the open-car set drops it; the floor does not claim it) —
+// not a gap to paper over with the id.
+export function carRow(j: CarFacts): CarRow {
   const md = (j.metadata ?? {}) as { branch?: string; skip_reason?: string; red_trains?: unknown };
   return {
     id: j.id,

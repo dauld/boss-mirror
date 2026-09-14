@@ -346,6 +346,127 @@ pub(crate) fn judge_probe(probe: &str, o: &Outcome, expect: Option<&str>) -> Res
     })
 }
 
+/// THE EXIT CODE THAT MEANS "NOT YET" — the probe's, and now this
+/// verb's. 75 is EX_TEMPFAIL, the code a recorded probe exits with
+/// when the world is not ready to judge the claim ("not yet: no
+/// disk-report request carrying for_sweep yet"). The forge runner
+/// (infra/forge/run-car-probe.sh) exits 75 itself in that case so the
+/// ops-request carries the verdict; this verb exits the same number
+/// for the same reason, so a script wrapping either door tells the
+/// three answers apart the same way.
+pub(crate) const NOT_YET_EXIT: i32 = 75;
+
+/// THE THREE-WAY READING (backlog 726562de). Two doors run a car's
+/// probe, and until 2026-09-14 they read exit 75 in opposite
+/// directions. The forge runner learned the not-yet protocol on
+/// 2026-09-13 (feat/a-probe-can-say-not-yet): a clean exit 75 is NOT
+/// YET — the probe ran, found nothing to judge yet, and said so — so it
+/// stamps `proof_attempt{not_yet:true}`, leaves `proven` ready and lets
+/// the daily recheck run it again. This door was not taught: `judge`
+/// has two rules, and exit 75 broke the first, so `boss prove <car>
+/// --from-car` on the SAME run printed "A probe that fails is evidence
+/// AGAINST the claim". One record, two verdicts, depending on which
+/// door happened to run it — found by the pin that could not make the
+/// wording equal because one side had no wording at all.
+///
+/// So the verdict is an enum with three arms rather than a `Result`
+/// with two, and every path that runs a probe reads it here. Not-yet
+/// is what a probe SAYS, not merely a number it exits with: it takes
+/// exit 75 AND no [`failure_diagnosis`] — the same order the forge's
+/// verdict block uses, where a crashed numeric test (68081368) and a
+/// silent exit (4fccc595) are checked before the code is read, because
+/// in both the 75 is whichever `||` branch caught a probe that never
+/// judged anything.
+#[derive(Debug)]
+pub(crate) enum Verdict {
+    /// Exit 0 and the expectation printed — [`judge`]'s two rules.
+    Proven,
+    /// Exit 75 with something to say and nothing to diagnose. `said` is
+    /// the probe's own not-yet line ([`what_it_said`]).
+    NotYet { said: String },
+    /// Everything else: [`judge_probe`]'s refusal, diagnosis attached.
+    NotProven(anyhow::Error),
+}
+
+/// Read one run three ways. See [`Verdict`].
+pub(crate) fn verdict(probe: &str, o: &Outcome, expect: Option<&str>) -> Verdict {
+    if o.exit == NOT_YET_EXIT
+        && failure_diagnosis(probe, o).is_none()
+        && let Some(said) = what_it_said(o)
+    {
+        return Verdict::NotYet { said };
+    }
+    match judge_probe(probe, o, expect) {
+        Ok(()) => Verdict::Proven,
+        Err(e) => Verdict::NotProven(e),
+    }
+}
+
+/// WHAT THE PROBE SAID, in one line: the first non-empty line of
+/// stderr, else of stdout, trimmed and cut as the forge cuts it (300
+/// characters). stderr first because that is where a tool puts its
+/// diagnosis — jq's `error(…)`, curl's message, bash's command-not-
+/// found. Mirrors run-car-probe.sh's `said`, so the reason clause both
+/// doors quote is the same line.
+pub(crate) fn what_it_said(o: &Outcome) -> Option<String> {
+    o.stderr
+        .lines()
+        .chain(o.stdout.lines())
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|l| l.chars().take(300).collect())
+}
+
+/// THE NOT-YET SENTENCE — `proof_attempt.why` when the probe said not
+/// yet, and what the operator reads. Pinned word-for-word against the
+/// forge's verdict block by
+/// `the_forge_runner_gives_the_same_verdict_for_every_outcome`: the
+/// lead word, the reason clause, and the disclaimer that this is not a
+/// verdict against the change are load-bearing text a reader of the
+/// car acts on, and must not depend on which door ran the probe.
+pub(crate) fn not_yet_why(host: &str, said: &str) -> String {
+    format!(
+        "NOT YET: the probe ran on {host} and said the claim cannot be judged until \
+         something happens — {said}. Not a verdict against the change; \
+         recheck-failing-probes-daily runs it again."
+    )
+}
+
+/// THE ATTEMPT RECORD — a run that settled nothing, written on the CAR
+/// (`metadata.proof_attempt`, via the merge-PATCH), never on the step,
+/// which stays open. The shape is the forge runner's, key for key:
+/// `the_hand_door_records_the_forges_attempt_shape` pins the two
+/// records equal, because `--recheck`, `boss orient` and the yard's
+/// shed read one shape and must not learn which door wrote it.
+/// `unrunnable` and `missing_tools` are the forge's fd-9 finding; this
+/// door has no such channel, so it records what the forge records when
+/// the channel is empty — a probe that RAN. `expect` is `null` under
+/// `--exit-only`, as `proof_json` records it.
+pub(crate) fn attempt_json(
+    probe: &str,
+    expect: Option<&str>,
+    o: &Outcome,
+    host: &str,
+    at: &str,
+    why: &str,
+) -> Value {
+    json!({
+        "at": at,
+        "exit": o.exit,
+        "stdout": clip(&o.stdout),
+        "stderr": clip(&o.stderr),
+        "host": host,
+        "probe": probe,
+        "expect": expect,
+        "why": why,
+        "unrunnable": false,
+        // The flag is the sentence's: a record whose `not_yet` and `why`
+        // disagree cannot be written from here.
+        "not_yet": why.starts_with("NOT YET"),
+        "missing_tools": [],
+    })
+}
+
 /// WHICH PROBES THIS DOOR WILL RUN (backlog 23b2dffa).
 ///
 /// TWO DOORS RUN A CAR'S RECORDED PROBE AND ONLY ONE CHECKED IT. `boss
@@ -873,6 +994,20 @@ pub(crate) fn recorded_proof_on(step: &Value) -> Option<&str> {
         .filter(|p| !p.is_empty())
 }
 
+/// Which record a re-runnable probe was read from. `--recheck` reports
+/// differently on each: a PROOF that fails now has decayed ("NO LONGER
+/// HOLDS"), while an ATTEMPT was never a proof, so the same failure is
+/// "still not proven" and the same success is "now provable" — never
+/// "still HOLDS" about a claim nobody ever proved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Source {
+    /// The step's `proof`, or the newest `reproof` entry.
+    Proof,
+    /// The car's `proof_attempt`: a run that settled nothing, with
+    /// `not_yet` as the writer stamped it.
+    Attempt { not_yet: bool },
+}
+
 /// A recorded proof, as much of it as the writer stored.
 #[derive(Debug)]
 pub(crate) struct Recorded {
@@ -886,6 +1021,7 @@ pub(crate) struct Recorded {
     /// unattended re-run — says so instead of reporting a clean HOLDS
     /// on a probe somebody had to argue past.
     pub overridden: Option<Value>,
+    pub source: Source,
 }
 
 /// Read back a recorded proof so `--recheck` can re-run it.
@@ -902,6 +1038,24 @@ pub(crate) fn recorded_probe_for(car: &Value, step: &Value) -> Result<Recorded> 
         && let Some(p) = last.get("proof")
     {
         return read_proof(p);
+    }
+    if recorded_proof_on(step).is_some() {
+        return recorded_probe(step);
+    }
+    // A NOT-YET CAR HAS NO PROOF TO RE-RUN, AND ONE PROBE THAT RAN
+    // (726562de). Its `proven` step is still ready, so the step reader
+    // below would refuse with "nothing to re-run" — but "not yet" is a
+    // request to run it again, and the car holds exactly what ran in
+    // `proof_attempt` (the forge's record or this door's, one shape).
+    // Read in preference to nothing, never in preference to a proof.
+    if let Some(attempt) = car.get("metadata").and_then(|m| m.get("proof_attempt"))
+        && attempt.get("probe").and_then(Value::as_str).is_some()
+    {
+        let mut rec = read_proof(attempt)?;
+        rec.source = Source::Attempt {
+            not_yet: attempt.get("not_yet").and_then(Value::as_bool) == Some(true),
+        };
+        return Ok(rec);
     }
     recorded_probe(step)
 }
@@ -981,6 +1135,7 @@ fn read_proof(raw: &Value) -> Result<Recorded> {
         host: text("host"),
         cwd: text("cwd"),
         overridden: v.get("overridden").cloned(),
+        source: Source::Proof,
     })
 }
 
@@ -1202,21 +1357,50 @@ pub(crate) async fn run(
                 serde_json::to_string(o).unwrap_or_else(|_| "(unreadable)".into())
             );
         }
+        if let Source::Attempt { not_yet } = rec.source {
+            println!(
+                "boss prove: {short} is not proven — re-running the probe of its last \
+                 attempt, which said {}",
+                if not_yet { "NOT YET" } else { "NOT PROVEN" }
+            );
+        }
         println!("boss prove: re-running the recorded probe for {short}\n  $ {probe}");
         let o = match rec.cwd.as_deref() {
             Some(dir) if !dir.is_empty() => execute_in(&probe, Some(Path::new(dir)))?,
             _ => execute(&probe)?,
         };
-        return match judge_probe(&probe, &o, expect.as_deref()) {
-            Ok(()) => {
+        // THREE READINGS, and which record they are read against
+        // decides the sentence: a PROOF that fails now has decayed; an
+        // ATTEMPT was never a proof. --recheck writes nothing on any of
+        // them — `proven` stays exactly as it was (ready, for a not-yet
+        // car), and a not-yet exits 75 so a script can tell.
+        return match (verdict(&probe, &o, expect.as_deref()), rec.source) {
+            (Verdict::Proven, Source::Proof) => {
                 println!("boss prove: HOLDS — {short} is still true in production");
                 Ok(())
             }
-            Err(e) => bail!(
+            (Verdict::Proven, Source::Attempt { .. }) => {
+                println!(
+                    "boss prove: NOW PROVABLE — {short}'s last attempt did not settle the \
+                     claim and the same probe passes now. Nothing is recorded by --recheck; \
+                     run boss prove {short} --from-car (or --probe/--expect) to record it \
+                     and complete `{PROVEN}`."
+                );
+                Ok(())
+            }
+            (Verdict::NotYet { said }, _) => {
+                println!("boss prove: {}", not_yet_why(&here, &said));
+                println!("boss prove: --recheck records nothing; `{PROVEN}` stays as it is");
+                std::process::exit(NOT_YET_EXIT)
+            }
+            (Verdict::NotProven(e), Source::Proof) => bail!(
                 "NO LONGER HOLDS — {short} was proven once and is not true now.\n\n{e}\n\n\
                  A proof can decay honestly: a step-plugin ConfigMap preview survives \
                  exactly until the next converge, and a car that never landed leaves \
                  prod looking fixed until it isn't."
+            ),
+            (Verdict::NotProven(e), Source::Attempt { .. }) => bail!(
+                "STILL NOT PROVEN — {short}'s recorded probe does not pass now either.\n\n{e}"
             ),
         };
     }
@@ -1297,9 +1481,45 @@ pub(crate) async fn run(
 
     println!("boss prove: {short}  $ {probe}");
     let o = execute(&probe)?;
-    judge_probe(&probe, &o, expect.as_deref())?;
-
     let at = now.to_rfc3339();
+    match verdict(&probe, &o, expect.as_deref()) {
+        Verdict::Proven => {}
+        Verdict::NotProven(e) => return Err(e),
+        // NOT YET (726562de): the probe ran and said the claim cannot be
+        // judged until something happens. Not a verdict against the
+        // change, so nothing is refused — and not a proof, so nothing
+        // completes. What lands is the forge's record, from this door:
+        // `proof_attempt{not_yet:true}` on the car, `proven` untouched,
+        // and the daily recheck (recheck-failing-probes-daily picks up
+        // any car carrying an attempt) runs it again. Exit 75, as the
+        // probe did and as the forge does.
+        Verdict::NotYet { said } => {
+            let here = host();
+            let why = not_yet_why(&here, &said);
+            println!("boss prove: {why}");
+            let step_status = target.get("status").and_then(Value::as_str).unwrap_or("?");
+            if dry {
+                println!(
+                    "boss prove: DRY — would record this as proof_attempt on {short}; \
+                     `{PROVEN}` stays {step_status}"
+                );
+                std::process::exit(NOT_YET_EXIT);
+            }
+            let attempt = attempt_json(&probe, expect.as_deref(), &o, &here, &at, &why);
+            crate::gate::api(
+                &http,
+                reqwest::Method::PATCH,
+                &format!("/api/jobs/{car_id}/metadata"),
+                Some(json!({"proof_attempt": attempt})),
+            )
+            .await?;
+            println!(
+                "boss prove: proof_attempt recorded on {short}; `{PROVEN}` stays {step_status}"
+            );
+            std::process::exit(NOT_YET_EXIT);
+        }
+    }
+
     let proof = proof_json(
         &probe,
         expect.as_deref(),
@@ -2613,10 +2833,11 @@ mod tests {
         }
     }
 
-    /// A CLEAN NOT-YET IS LEFT ALONE. Exit 75, a "not yet:" line, an
-    /// empty stderr — the probe said what it meant, and this door
-    /// invents no diagnosis for it (the forge runner's not-yet sentence
-    /// is the right verdict there, and stays). Nor does an ordinary
+    /// A CLEAN NOT-YET IS LEFT ALONE BY THE DIAGNOSER. Exit 75, a "not
+    /// yet:" line, an empty stderr — the probe said what it meant, and
+    /// `failure_diagnosis` invents nothing for it; `verdict` reads it as
+    /// NOT YET precisely BECAUSE there is no diagnosis (726562de), the
+    /// same order the forge's verdict block uses. Nor does an ordinary
     /// failure — a curl refusal on stderr — read as a crash.
     #[test]
     fn a_clean_exit_75_gets_no_crash_diagnosis() {
@@ -2782,14 +3003,17 @@ mod tests {
         )
     }
 
-    /// The ALL-CAPS verdict words `failure_diagnosis` can lead with. A
-    /// run it declines to diagnose must not be diagnosed by the shell
-    /// either — a verdict one door invents and the other does not is
-    /// the two-sentence defect in a new coat.
-    const DIAGNOSIS_WORDS: [&str; 3] = [
+    /// The ALL-CAPS verdict words this door can lead with — the three
+    /// `failure_diagnosis` names, and NOT YET, which `verdict` gives a
+    /// clean exit 75 (726562de). A run this door reads one way must not
+    /// be led with another of these by the shell — a verdict one door
+    /// invents and the other does not is the two-sentence defect in a
+    /// new coat, and NOT YET against NOT PROVEN was the measured one.
+    const VERDICT_WORDS: [&str; 4] = [
         "THE PROBE CRASHED",
         "THE FAILURE CANNOT BE READ",
         "THE PROBE IS SELF-CONTRADICTORY",
+        "NOT YET",
     ];
 
     /// One outcome, judged by both authors, and the phrases the two
@@ -2799,9 +3023,10 @@ mod tests {
         case: &'a str,
         probe: &'a str,
         run: ForgeRun<'a>,
-        /// The verdict word `failure_diagnosis` leads with, or `None`
-        /// when it (rightly) adds nothing — then the shell adds nothing
-        /// of the kind either.
+        /// The verdict word this door leads with — `failure_diagnosis`'s
+        /// when it diagnoses, NOT YET when `verdict` says so — or `None`
+        /// when it (rightly) adds nothing to `judge`'s refusal; then the
+        /// shell adds nothing of the kind either.
         diagnosis: Option<&'a str>,
         /// Load-bearing text both verdicts carry, verbatim.
         agree: &'a [&'a str],
@@ -2819,14 +3044,19 @@ mod tests {
     /// So every branch is run through both, on ONE record each, and the
     /// load-bearing phrases are asserted shared. The Rust wording is the
     /// reference (it has the unit tests); where the shell disagreed it
-    /// was changed to match. Two branches are deliberately NOT equalised
-    /// and are pinned as such instead: unrunnable, because its input (fd
+    /// was changed to match. One branch is deliberately NOT equalised
+    /// and is pinned as such instead: unrunnable, because its input (fd
     /// 9's not-found channel) exists only on the forge — this door sees
     /// bash's `command not found` on stderr and nothing more, so both
-    /// name the tool and neither diagnoses; and not-yet, which this door
-    /// has no branch for at all (`a_clean_exit_75_gets_no_crash_diagnosis`:
-    /// the forge's sentence is the verdict there, and stays) — so both
-    /// quote the probe's own line and neither diagnoses.
+    /// name the tool and neither diagnoses.
+    ///
+    /// NOT-YET WAS THE OTHER EXCEPTION, and the pin documented it as an
+    /// asymmetry it could not resolve as wording: this door had no
+    /// branch for exit 75 at all, so the forge said NOT YET and the hand
+    /// door said "evidence AGAINST" about one run (726562de). Now both
+    /// have the branch, and it is pinned like the rest — `verdict` reads
+    /// the run as NOT YET, and `not_yet_why` is the sentence the forge's
+    /// verdict block composes, lead word and reason clause alike.
     #[test]
     fn the_forge_runner_gives_the_same_verdict_for_every_outcome() {
         let (missing_tool, missing_list) = run_as_the_forge_would(
@@ -2847,8 +3077,14 @@ mod tests {
                     missing_tools: "",
                     expect: "sweep-measured:ok",
                 },
-                diagnosis: None,
-                agree: &["not yet: no disk-report request carrying for_sweep yet"],
+                diagnosis: Some("NOT YET"),
+                agree: &[
+                    "NOT YET",
+                    "cannot be judged until something happens",
+                    "not yet: no disk-report request carrying for_sweep yet",
+                    "Not a verdict against the change",
+                    "recheck-failing-probes-daily runs it again",
+                ],
             },
             SameVerdict {
                 case: "unrunnable",
@@ -2947,15 +3183,31 @@ mod tests {
         for c in &cases {
             let o = c.run.outcome();
             let (ok, why) = forge_verdict(&format!("prove-forge-verdict-{}", c.case), &c.run);
-            let rs = judge_probe(c.probe, &o, Some(c.run.expect))
-                .unwrap_err()
-                .to_string();
             assert!(
                 !ok,
                 "{}: the forge must refuse what this door refuses",
                 c.case
             );
-            let d = failure_diagnosis(c.probe, &o);
+            // ONE record, read by this door's three-way `verdict`: what
+            // the operator reads (`rs`) and the word it leads with (`d`),
+            // the same two things the shell's `why` carries.
+            let (rs, d) = match verdict(c.probe, &o, Some(c.run.expect)) {
+                Verdict::Proven => panic!("{}: this door must not prove this", c.case),
+                Verdict::NotYet { said } => {
+                    assert_eq!(c.diagnosis, Some("NOT YET"), "{}: read as not-yet", c.case);
+                    let w = not_yet_why("david-asus-minipc", &said);
+                    (w.clone(), Some(w))
+                }
+                Verdict::NotProven(e) => {
+                    assert_ne!(
+                        c.diagnosis,
+                        Some("NOT YET"),
+                        "{}: read as NOT PROVEN",
+                        c.case
+                    );
+                    (e.to_string(), failure_diagnosis(c.probe, &o))
+                }
+            };
             match c.diagnosis {
                 Some(word) => {
                     let d = d.unwrap_or_else(|| panic!("{}: prove.rs diagnoses this", c.case));
@@ -2973,7 +3225,7 @@ mod tests {
                 }
                 None => {
                     assert!(d.is_none(), "{}: prove.rs adds no diagnosis: {d:?}", c.case);
-                    for word in DIAGNOSIS_WORDS {
+                    for word in VERDICT_WORDS {
                         assert!(
                             !why.contains(word),
                             "{}: run-car-probe.sh diagnoses {word:?} where prove.rs declines \
@@ -3011,6 +3263,10 @@ mod tests {
         let (ok, why) = forge_verdict("prove-forge-verdict-green", &green);
         assert!(ok, "the forge proves what this door proves: {why}");
         assert!(judge_probe("true", &green.outcome(), Some(green.expect)).is_ok());
+        assert!(matches!(
+            verdict("true", &green.outcome(), Some(green.expect)),
+            Verdict::Proven
+        ));
     }
 
     // -----------------------------------------------------------------
@@ -3105,5 +3361,216 @@ mod tests {
             plain.get("overridden").is_none(),
             "no override, no key — a reader must not read one to learn nothing"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // THE HAND DOOR CAN SAY NOT YET (backlog 726562de)
+    // -----------------------------------------------------------------
+
+    /// THE MEASURED ASYMMETRY. The forge runner records a clean exit 75
+    /// as NOT YET — the probe said the claim cannot be judged until
+    /// something happens — leaves `proven` ready and re-runs it daily.
+    /// `boss prove <car> --from-car` on the SAME run read "A probe that
+    /// fails is evidence AGAINST the claim": the opposite verdict for
+    /// one record, depending on which door ran it. Exit 75 is a third
+    /// answer, and this door now gives it.
+    #[test]
+    fn an_exit_75_with_a_not_yet_line_is_not_yet_not_evidence_against() {
+        let o = Outcome {
+            exit: NOT_YET_EXIT,
+            stdout: "not yet: no disk-report request carrying for_sweep yet\n".into(),
+            stderr: String::new(),
+        };
+        let Verdict::NotYet { said } = verdict(NULL_COUNT_PROBE, &o, Some("sweep-measured:ok"))
+        else {
+            panic!("a clean exit 75 is NOT YET, not a refusal");
+        };
+        assert_eq!(
+            said,
+            "not yet: no disk-report request carrying for_sweep yet"
+        );
+        let why = not_yet_why("pod", &said);
+        assert!(why.starts_with("NOT YET"), "{why}");
+        assert!(
+            why.contains(&said),
+            "the probe's own line is the reason: {why}"
+        );
+        assert!(
+            !why.contains("evidence AGAINST") && !why.contains("not proof of anything"),
+            "not-yet is not a verdict against the change: {why}"
+        );
+        assert_eq!(
+            NOT_YET_EXIT, 75,
+            "the verb exits as the probe did, so scripts can tell"
+        );
+    }
+
+    /// A CRASH THAT EXITED 75 IS THE CRASH (68081368), at this door as
+    /// at the forge: the code is whichever `||` branch caught it, and
+    /// re-running a crash daily judges nothing forever.
+    #[test]
+    fn an_exit_75_whose_stderr_shows_a_crash_is_the_crash_not_not_yet() {
+        let o = crashed(75, CRASHED_STDERR);
+        let Verdict::NotProven(e) = verdict(NULL_COUNT_PROBE, &o, Some("x:ok")) else {
+            panic!("a crashed numeric test is not not-yet");
+        };
+        let e = e.to_string();
+        assert!(e.contains("THE PROBE CRASHED"), "{e}");
+        assert!(!e.contains("cannot be judged"), "{e}");
+    }
+
+    /// AND AN EXIT 75 THAT SAID NOTHING CANNOT BE READ — the forge's
+    /// `why` checks the silent nonzero exit before it reads the code,
+    /// and this door keeps the same order: not-yet is what a probe SAYS,
+    /// not a number it exits with.
+    #[test]
+    fn an_exit_75_that_said_nothing_cannot_be_read() {
+        let o = Outcome {
+            exit: 75,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        let Verdict::NotProven(e) = verdict("some-command --quiet", &o, Some("x:ok")) else {
+            panic!("silence is a missing record, not a not-yet");
+        };
+        assert!(e.to_string().contains("THE FAILURE CANNOT BE READ"), "{e}");
+    }
+
+    /// The other two readings are unchanged by the third.
+    #[test]
+    fn the_other_two_readings_are_unchanged() {
+        assert!(matches!(
+            verdict("true", &ok("x:ok"), Some("x:ok")),
+            Verdict::Proven
+        ));
+        let red = Outcome {
+            exit: 1,
+            stdout: "CLAIM FAILS (jq exit 5)\n".into(),
+            stderr: String::new(),
+        };
+        let Verdict::NotProven(e) = verdict("true", &red, Some("x:ok")) else {
+            panic!("exit 1 is still a refusal");
+        };
+        assert!(e.to_string().contains("evidence AGAINST"), "{e}");
+    }
+
+    /// WHAT THE PROBE SAID, read as the forge reads it: the first
+    /// non-empty line of stderr, else of stdout — stderr first because
+    /// that is where a tool puts its diagnosis.
+    #[test]
+    fn what_it_said_reads_stderr_first_then_stdout() {
+        let o = Outcome {
+            exit: 75,
+            stdout: "\n  not yet: from stdout\nmore\n".into(),
+            stderr: String::new(),
+        };
+        assert_eq!(what_it_said(&o).as_deref(), Some("not yet: from stdout"));
+        let o = Outcome {
+            exit: 75,
+            stdout: "not yet: from stdout\n".into(),
+            stderr: "\ncurl: (7) refused\n".into(),
+        };
+        assert_eq!(what_it_said(&o).as_deref(), Some("curl: (7) refused"));
+        let o = Outcome {
+            exit: 75,
+            stdout: "  \n".into(),
+            stderr: String::new(),
+        };
+        assert_eq!(what_it_said(&o), None);
+    }
+
+    /// THE ATTEMPT RECORD LIVES TWICE — the forge's jq record and this
+    /// door's `attempt_json` — and `--recheck`, orient and the yard read
+    /// one shape. Pinned both ways (CLAUDE.md 9a): every key this door
+    /// writes is in the script's record, and every key the script
+    /// records is written here. Values the forge alone can know (fd 9's
+    /// missing tools) are recorded as the forge records "none".
+    #[test]
+    fn the_hand_door_records_the_forges_attempt_shape() {
+        const SH: &str = include_str!("../../../../infra/forge/run-car-probe.sh");
+        let sh_attempt = SH
+            .split_once("attempt=$(jq -cn")
+            .expect("run-car-probe.sh builds a proof_attempt record")
+            .1
+            .split_once("proof_attempt")
+            .expect("…and PATCHes it onto the car")
+            .0;
+        let sh_keys: std::collections::BTreeSet<&str> = sh_attempt
+            .split(['{', ',', '}'])
+            .filter_map(|kv| kv.trim().split_once(":$"))
+            .map(|(k, _)| k)
+            .collect();
+        assert!(
+            sh_keys.contains("not_yet"),
+            "the forge stamps not_yet: {sh_keys:?}"
+        );
+        let o = Outcome {
+            exit: 75,
+            stdout: "not yet: none\n".into(),
+            stderr: String::new(),
+        };
+        let a = attempt_json("true", Some("x:ok"), &o, "h", "now", "NOT YET: none");
+        let rs_keys: std::collections::BTreeSet<&str> =
+            a.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            rs_keys, sh_keys,
+            "the two proof_attempt records differ in shape:\n  rs: {rs_keys:?}\n  sh: {sh_keys:?}"
+        );
+        assert_eq!(a["not_yet"], true);
+        assert_eq!(a["unrunnable"], false);
+        assert_eq!(a["missing_tools"], json!([]));
+        assert_eq!(a["exit"], 75);
+        assert_eq!(a["why"], "NOT YET: none");
+        // A NOT PROVEN attempt from this door carries the same shape
+        // with not_yet false — one record, one reader.
+        let red = Outcome {
+            exit: 1,
+            stdout: "CLAIM FAILS\n".into(),
+            stderr: String::new(),
+        };
+        assert_eq!(
+            attempt_json("true", Some("x:ok"), &red, "h", "now", "why")["not_yet"],
+            false
+        );
+    }
+
+    /// `--recheck` ON A NOT-YET CAR RE-RUNS THE ATTEMPT'S PROBE. The
+    /// step is still `ready` and carries no `proof`, so the old reader
+    /// refused with "nothing to re-run" — but the car holds exactly what
+    /// ran, in `proof_attempt`, and re-running it is what "not yet"
+    /// asks for. The record's provenance rides along so the report says
+    /// "now provable", never "still HOLDS", about a claim never proven.
+    #[test]
+    fn a_recheck_of_a_not_yet_car_re_runs_the_attempts_probe() {
+        let car = json!({"metadata": {"proof_attempt": {
+            "at": "2026-09-14T00:00:25Z", "exit": 75, "not_yet": true, "unrunnable": false,
+            "probe": "n=$(boss-sor-read /api/x | jq -r '.total // empty'); echo x:ok",
+            "expect": "x:ok", "host": "david-asus-minipc",
+            "why": "NOT YET: the probe ran on david-asus-minipc and said …",
+            "stdout": "not yet: none", "stderr": "", "missing_tools": []
+        }}});
+        let step = json!({"title": PROVEN, "status": "ready", "metadata": {}});
+        let rec = recorded_probe_for(&car, &step).expect("the attempt is what re-runs");
+        assert!(rec.probe.starts_with("n=$(boss-sor-read"), "{}", rec.probe);
+        assert_eq!(rec.expect.as_deref(), Some("x:ok"));
+        assert_eq!(rec.host.as_deref(), Some("david-asus-minipc"));
+        assert!(
+            rec.cwd.is_none(),
+            "the forge's attempt records no cwd; absent is not a mismatch"
+        );
+        assert_eq!(rec.source, Source::Attempt { not_yet: true });
+
+        // A step that DOES carry a proof still wins — an attempt is the
+        // record of a run that settled nothing, not a replacement.
+        let proven = json!({"metadata": {"proof": proof_json(
+            "real-probe", Some("x"), &ok("x"), "h", "now", None).to_string()}});
+        let rec = recorded_probe_for(&car, &proven).unwrap();
+        assert_eq!(rec.probe, "real-probe");
+        assert_eq!(rec.source, Source::Proof);
+
+        // And a car with neither still says so.
+        let bare = json!({"metadata": {}});
+        let e = recorded_probe_for(&bare, &step).unwrap_err().to_string();
+        assert!(e.contains("nothing to re-run"), "{e}");
     }
 }

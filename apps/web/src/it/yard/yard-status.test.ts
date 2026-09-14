@@ -151,6 +151,29 @@ describe('parseYardStatus', () => {
     expect(parseYardStatus({}).held_cars).toEqual([]);
   });
 
+  // The strike count rides the dock row (the Rust `DockCar`, which the
+  // held row flattens), so both lanes carry it: a stated integer is kept
+  // as stated — 0 included, since a stated 0 is "clean" and not "unknown"
+  // — and a row without it (an older server) leaves it undefined so the
+  // floor can fall back to the client's own reading rather than fabricate
+  // a count (ac80357b). Anything that is not a non-negative integer is
+  // not a count.
+  test('a dock or held row carries its red_trains as stated, or not at all', () => {
+    const row = { id: 'c', title: 'T', branch: 'fix/x', parked_since: '2026-09-08' };
+    const s = parseYardStatus({
+      dock: [{ ...row, red_trains: 1 }, row],
+      held_cars: [
+        { ...row, reason: 'why', red_trains: 2 },
+        { ...row, reason: 'why', red_trains: 0 },
+        { ...row, reason: 'why' },
+        { ...row, reason: 'why', red_trains: '2' },
+        { ...row, reason: 'why', red_trains: -1 },
+      ],
+    });
+    expect(s.dock.map(d => d.red_trains)).toEqual([1, undefined]);
+    expect(s.held_cars.map(h => h.red_trains)).toEqual([2, 0, undefined, undefined, undefined]);
+  });
+
   // Every lane row names the gate-run packet behind it and the head it
   // gated, because the approach lane DRAWS these rows — a wagon with a
   // packet to open and a head to label. Recovering them client-side from

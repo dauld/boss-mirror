@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# boss-api METHOD /api/path [body.json] — the door to the system of record.
+#
+# The curl wrapper every session, probe and builder uses to read and
+# write the jobs API (CLAUDE.md §Doors): pinned base URL, the session's
+# actor in X-Boss-User, the machine token when one is mounted, invoked
+# BARE so it stays inside a permission allowlist. Body -> stdout, HTTP
+# code -> stderr as one `HTTP:<code>` line, non-2xx exits 1 so drivers
+# fail loudly (boss-driving-the-jobs-api item 1).
+#
+# Why it lives HERE and not only on the pod (backlog 0d8d7a90,
+# 2026-09-14): until then it was pod-local text under /work/tools/bin
+# that no gate read and no car shipped — a fresh pod, a second builder
+# host, or a builder pod (design 90a14acc) would not have had it, and
+# CLAUDE.md documented a door the tree could not reproduce. Same shape
+# as wt-cargo (34b29b52, #364): the pod file was the spec, behaviour is
+# unchanged, and the pod's /work/tools/bin/boss-api becomes a symlink
+# to this file in the operator's checkout. Pinned by
+# crates/core/boss-testing/tests/boss_api_sh.rs against a stub curl.
+#
+# The pod-specific constants are env-overridable, defaults = the pod's:
+#   BOSS_JOBS_URL            the base URL (in-cluster service address)
+#   BOSS_ACTOR               who the call signs as — the id; else the one
+#   BOSS_ACTOR_FILE            line in this file ($HOME/.config/boss/actor,
+#                              as the boss CLI reads it); else the id the
+#                              pod copy hard-coded, so an unconfigured pod
+#                              answers exactly as before
+#   BOSS_MACHINE_TOKEN_FILE  the machine token, sent only when it exists
+set -euo pipefail
+
+METHOD=${1:-}; API_PATH=${2:-}; BODY=${3:-}
+case "$METHOD" in
+  GET|POST|PUT|PATCH|DELETE) ;;
+  *) echo "usage: boss-api GET|POST|PUT|PATCH|DELETE /api/path [body.json]" >&2; exit 2 ;;
+esac
+[ -n "$API_PATH" ] || { echo "usage: boss-api GET|POST|PUT|PATCH|DELETE /api/path [body.json]" >&2; exit 2; }
+
+BASE=${BOSS_JOBS_URL:-http://boss-jobs-internal.boss.svc.cluster.local:7900}
+ACTOR_FILE=${BOSS_ACTOR_FILE:-$HOME/.config/boss/actor}
+ACTOR_ID=${BOSS_ACTOR:-$(head -n1 "$ACTOR_FILE" 2>/dev/null || true)}
+ACTOR_ID=${ACTOR_ID:-claude@algedonic.dev}
+ACTOR='{"id":"'"$ACTOR_ID"'","role":"platform-admin","access_tier":"operator","territory_account_ids":[],"direct_report_ids":[],"department":null}'
+
+args=( -sS -X "$METHOD" -H 'Content-Type: application/json' -H "X-Boss-User: $ACTOR" -w '\n%{http_code}' )
+TOK=$(cat "${BOSS_MACHINE_TOKEN_FILE:-/etc/boss/machine-token}" 2>/dev/null || true)
+[ -n "$TOK" ] && args+=( -H "X-Boss-Machine-Token: $TOK" )
+[ -n "$BODY" ] && args+=( --data-binary "@$BODY" )
+
+out=$(curl "${args[@]}" "$BASE$API_PATH")
+code=${out##*$'\n'}
+body=${out%"$code"}
+printf '%s' "$body"
+printf 'HTTP:%s\n' "$code" >&2
+case "$code" in 2*) exit 0 ;; *) exit 1 ;; esac

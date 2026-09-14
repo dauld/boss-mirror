@@ -86,6 +86,11 @@ export type DockCar = Readonly<{
   title: string;
   branch: string | null;
   parked_since: string;
+  /** How many red trains have released this car — the conductor's
+   *  stamp, as the server states it. Absent on an older server, and
+   *  ONLY then: a stated 0 is "clean", not "unknown", so a reader falls
+   *  back to its own count only when the field is missing (ac80357b). */
+  red_trains?: number;
 }>;
 
 /** A car standing ON the dock that cannot board: an operator wrote a
@@ -106,6 +111,10 @@ export type HeldCar = Readonly<{
   title: string;
   branch: string | null;
   parked_since: string;
+  /** The dock row's strike count — see `DockCar.red_trains`. This is
+   *  the row the held lane is drawn from once the dock station stops
+   *  listing a held car, so the count must ride HERE or nowhere. */
+  red_trains?: number;
   /** Why it cannot board. A bare `hold: true` reads "no reason
    *  recorded" — the same words the held-green lane uses. */
   reason: string;
@@ -417,12 +426,24 @@ function parseTrain(raw: unknown): TrainStatus {
 
 function parseDockCar(raw: unknown): DockCar {
   const o = asObject(raw, 'dock car');
+  const red_trains = parseRedTrains(o.red_trains);
   return {
     id: String(o.id ?? ''),
     title: String(o.title ?? ''),
     branch: typeof o.branch === 'string' ? o.branch : null,
     parked_since: String(o.parked_since ?? ''),
+    // Set only when stated, so `'red_trains' in row` and `?? fallback`
+    // both read "the server said nothing" on an older server.
+    ...(red_trains === undefined ? {} : { red_trains }),
   };
+}
+
+/** A strike count as the server states it: a non-negative integer, 0
+ *  included. Anything else — absent, a string, a negative, a fraction —
+ *  is NOT a count and reads as "not stated", never as 0 (a stated 0 is a
+ *  clean car; an unstated one lets the reader fall back). */
+function parseRedTrains(raw: unknown): number | undefined {
+  return typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 ? raw : undefined;
 }
 
 /** A held car is a dock row plus its reason — parsed through the same

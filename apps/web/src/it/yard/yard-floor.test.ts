@@ -501,6 +501,50 @@ describe('the dock and the garage', () => {
     expect(wagon(s, 'c9').status).toBe('held — 2 red trains · 2 red trains behind it');
   });
 
+  // THE CASE THAT MATTERS. The dock station stops listing a held car
+  // (36c3d4ca), so the client dock has NO row for it and the count above
+  // had nowhere to come from — a car held out for two reds read its
+  // reason sentence alone (ac80357b). The server's HeldCar now carries
+  // `red_trains`, and the held wagon reads the count off that row.
+  test('a held car the client dock no longer lists shows its strikes from the server row', () => {
+    const s = scene(
+      yardOf({ dock: [] }),
+      statusOf({
+        held_cars: [{ ...heldCar('c9', 'fix/held', 'needs a look before it boards again'), red_trains: 2 }],
+      }),
+      NOW,
+    );
+    expect(wagon(s, 'c9')).toMatchObject({ tone: 'static', lamp: 'off' });
+    expect(wagon(s, 'c9').status).toBe(
+      'held — needs a look before it boards again · 2 red trains behind it',
+    );
+  });
+
+  // The server row's count is the authority when it states one — a
+  // stated 0 is "clean", not "unknown", and does not fall back to the
+  // client's row. Only a row WITHOUT the field (an older server) falls
+  // back to the client's CarRow, and a clean car reads as before.
+  test('a stated server count wins; an older server row falls back to the client row', () => {
+    const stated = scene(
+      yardOf({ dock: [car('c9', 'fix/held', { redTrains: 2 })] }),
+      statusOf({ held_cars: [{ ...heldCar('c9', 'fix/held', 'why'), red_trains: 0 }] }),
+      NOW,
+    );
+    expect(wagon(stated, 'c9').status).toBe('held — why');
+    const older = scene(
+      yardOf({ dock: [car('c9', 'fix/held', { redTrains: 1 })] }),
+      statusOf({ held_cars: [heldCar('c9', 'fix/held', 'why')] }),
+      NOW,
+    );
+    expect(wagon(older, 'c9').status).toBe('held — why · 1 red train behind it');
+    const clean = scene(
+      yardOf({ dock: [] }),
+      statusOf({ held_cars: [heldCar('c9', 'fix/held', 'why')] }),
+      NOW,
+    );
+    expect(wagon(clean, 'c9').status).toBe('held — why');
+  });
+
   // THE HELD SIDING. A car an operator held cannot board, so the
   // loading-dock station row stops listing it (36c3d4ca) and the client
   // dock goes quiet about it — while the floor's `held` lane counts held

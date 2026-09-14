@@ -74,6 +74,20 @@ fn gating_line(run: &Value, trains: &[Value]) -> String {
     }
 }
 
+/// One QUEUED FOR A SLOT line for a gate-run holding a place in line:
+/// the same words as [`gating_line`] — the ONE definition of how a
+/// train's gate is named (§9a) — with the run's `queued_at` stamp kept
+/// as it was. Until 90ee6fcd (2026-09-14) this lane printed the bare
+/// branch, so a train gate waiting for a bay was indistinguishable from
+/// a queued car the same afternoon GATING learned to name it (#365).
+fn queued_lane_line(run: &Value, trains: &[Value]) -> String {
+    format!(
+        "{}  since {}",
+        gating_line(run, trains),
+        md_str(run, boss_jobs::yard::QUEUED_AT)
+    )
+}
+
 /// Branches whose base has fallen behind `origin/main`. Each pair is
 /// (branch, exit code of `git merge-base --is-ancestor origin/main
 /// origin/<branch>`), read through the ONE definition of that code
@@ -439,11 +453,7 @@ pub async fn run(all: bool) -> Result<()> {
             let id = g.get("id").and_then(Value::as_str).unwrap_or_default();
             in_line.iter().any(|held| held == id)
         }) {
-            println!(
-                "    {}  since {}",
-                md_str(g, "branch"),
-                md_str(g, boss_jobs::yard::QUEUED_AT)
-            );
+            println!("    {}", queued_lane_line(g, &trains));
         }
     }
     for line in abandoned_report(&abandoned) {
@@ -768,6 +778,29 @@ mod tests {
         assert_eq!(
             super::gating_line(&train_gate, &trains),
             "train/20260914-1641  (train gate — testing train 9a3af298, PR train 2026-09-14 16:41)"
+        );
+        // The QUEUED FOR A SLOT lane says the same thing in the same
+        // words, with its place-in-line stamp kept: until 90ee6fcd a
+        // train gate waiting for a bay printed as a bare branch there,
+        // indistinguishable from a queued car, while GATING named it.
+        let queued_train_gate = json!({"metadata": {
+            "branch": "train/20260914-1641",
+            "train_gate": true,
+            "train": "9a3af298-0000-4000-8000-000000000000",
+            boss_jobs::yard::QUEUED_AT: "2026-09-14T20:01:00Z",
+        }});
+        assert_eq!(
+            super::queued_lane_line(&queued_train_gate, &trains),
+            "train/20260914-1641  (train gate — testing train 9a3af298, PR train 2026-09-14 16:41)  since 2026-09-14T20:01:00Z"
+        );
+        let queued_car = json!({"metadata": {
+            "branch": "fix/a-dark-registry-does-not-widen-what-a-host-runs",
+            boss_jobs::yard::QUEUED_AT: "2026-09-14T20:02:00Z",
+        }});
+        assert_eq!(
+            super::queued_lane_line(&queued_car, &trains),
+            "fix/a-dark-registry-does-not-widen-what-a-host-runs  since 2026-09-14T20:02:00Z",
+            "a queued car's line is its branch and its stamp, as before"
         );
     }
 

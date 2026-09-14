@@ -381,6 +381,16 @@ said=$(sed -n '/[^[:space:]]/{s/^[[:space:]]*//;p;q;}' "$workdir/errs" "$workdir
 # of them, so adding one here and not there (or the reverse) fails by
 # name (CLAUDE.md §9a).
 crash=$(grep -m1 -E 'integer expression expected|unary operator expected|syntax error: invalid arithmetic operator' "$workdir/errs" 2>/dev/null | sed 's/^[[:space:]]*//' | cut -c1-300)
+# THE FLAG IS THE SENTENCE'S (5461b899). not_yet is what orient, the
+# yard and recheck-failing-probes-daily read; $why is what the operator
+# reads; they ride one record. Until 2026-09-14 the flag was computed
+# AFTER this block from rc alone — 75, runnable, no crash — so an exit
+# 75 with both streams empty recorded THE FAILURE CANNOT BE READ beside
+# not_yet=true, the yard said "not yet" over a missing record, and the
+# recheck re-ran it forever. `boss prove` derives the flag from the
+# sentence and cannot disagree with itself; so, now, does this. True in
+# the one branch that writes the NOT YET sentence, and nowhere else.
+not_yet=false
 if [[ "$unrunnable" == true ]]; then
     why="THE PROBE DID NOT RUN on $host: $missing_list not found. A recorded probe runs on the forge host as $PROBE_USER in $PROBE_DIR, with this host's tools — not on the dev pod where it was written, which is where cluster tools like kubectl live. This says nothing about whether the change works; re-probe from a vantage this host has, or record the car as event-bound."
 elif [[ -n "$crash" ]]; then
@@ -408,6 +418,7 @@ elif [[ "$rc" -eq 75 ]]; then
     # carrying for_sweep yet, the sweeps fire daily" — and exit 1 made
     # them read as regressions in the shed and in orient. This is not a
     # verdict against the change; the daily recheck runs it again.
+    not_yet=true
     why="NOT YET: the probe ran on $host and said the claim cannot be judged until something happens — $said. Not a verdict against the change; recheck-failing-probes-daily runs it again."
 elif [[ "$rc" -ne 0 ]]; then
     why="the probe RAN on $host and exited $rc, so it is not proof of anything. What it said: $said"
@@ -417,10 +428,6 @@ else
     why="the probe RAN on $host and exited 0 but never printed '$expect', so it did not observe what was claimed. What it printed instead: $said. An exit code alone is a weak assertion — 'echo hi' exits 0 too. Either the change is not in prod, or the probe is looking in the wrong place."
 fi
 # PROBE-VERDICT-END
-# A crash that exited 75 is NOT not-yet: not-yet re-runs daily and
-# waits; a crash needs a re-park, and must read as NOT PROVEN.
-not_yet=false
-[[ "$rc" -eq 75 && "$unrunnable" != true && -z "$crash" ]] && not_yet=true
 attempt=$(jq -cn --arg at "$at" --argjson exit "$rc" --arg host "$host" \
     --arg probe "$probe" --arg expect "$expect" --arg why "$why" \
     --argjson unrunnable "$unrunnable" --argjson missing_tools "$missing_json" \

@@ -7,7 +7,7 @@
 // unassigned). Rows where someone else is mid-flight on a
 // role-matched step are visible context, not claimable work.
 
-import { isSim, type PacketCardData } from '@boss/web-kit/ui/packet-card';
+import { carRow, type CarRow } from '../it/yard/yard';
 
 export type AssignmentStep = Readonly<{
   id: string;
@@ -189,29 +189,35 @@ export async function fetchMyDay(
 }
 
 // My Day rows render as packet cards — the same card the train yard
-// uses (feedback d69033dd: one card grammar across the network). The
-// lens maps its rows into the card's shape: the workflow is the
-// protocol, the job title leads, and the actionable step rides the
-// mono provenance line. Priority, due date, and a blocked marker
-// travel as tag chips. Sim comes off the row's own packet facts
-// through the shared predicate, so a simulated packet is as visibly
-// simulated in a personal queue as it is in the yard. The job's tags
-// feed that predicate but stay off the chips: in this lens the chips
-// are queue state (blocked / priority / due), not packet labels.
-export function assignmentPacket(row: AssignmentRow): PacketCardData {
+// uses (feedback d69033dd: one card grammar across the network), built
+// by the yard's one constructor (fb3b5ce1, 2026-09-14: this lens had
+// its own literal and missed `redTrains` the day the yard read it).
+// The row is a projection, not the Job — it names the packet and
+// carries its sim flag and tags but no metadata and no steps — so the
+// constructor gets exactly what the row holds and the packet-record
+// facts (head, proof, strikes) read as absent, the way a car outside
+// the yard's window does. When the server puts more of the packet on
+// the row, this call passes it and nothing else changes. Two fields are
+// the lens's own and override: the actionable step rides the mono
+// provenance line, and the chips are queue state (blocked / priority /
+// due), not packet labels — the job's tags feed the sim predicate and
+// stay off them.
+export function assignmentPacket(row: AssignmentRow): CarRow {
   const actionable = row.step.status === 'ready' || row.step.status === 'active';
   return {
-    id: row.job_id,
-    kind: row.workflow,
+    ...carRow({
+      id: row.job_id,
+      kind: row.workflow,
+      title: row.job_title,
+      tags: row.tags,
+      simulated: row.simulated,
+    }),
     branch: row.step.title,
-    title: row.job_title,
     tags: [
       ...(actionable ? [] : ['blocked']),
       ...(row.priority !== 'standard' ? [row.priority] : []),
       ...(row.due_on ? [`due ${row.due_on}`] : []),
     ],
-    sim: isSim({ simulated: row.simulated, tags: row.tags }),
-    skipReason: null,
   };
 }
 

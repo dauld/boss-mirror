@@ -140,12 +140,13 @@ describe('readCarProof', () => {
 
   test('a packet recording nothing about proof reads null, not a row of nulls', () => {
     expect(
+      // The reader takes CarFacts — the packet facts a card derives
+      // from, not the envelope — so the fixture carries no status or
+      // opened_on (fb3b5ce1).
       readCarProof({
         id: 'c4',
         kind: 'ship-a-change',
         title: 'x',
-        status: 'open',
-        opened_on: '2026-09-11',
         metadata: { branch: 'feat/x' },
       }),
     ).toBeNull();

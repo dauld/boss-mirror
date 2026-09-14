@@ -32,6 +32,7 @@ import {
   cancelRequestBody,
   canOfferCancel,
   CANCEL_ROLE,
+  carRow,
   type TrainRow,
 } from './yard';
 
@@ -186,6 +187,41 @@ describe('the dock from the station envelope', () => {
     expect(y.dock[1]?.skipReason).toBeNull();
     // Absent on the record is zero strikes, not an unknown.
     expect(y.dock[1]?.redTrains).toBe(0);
+  });
+
+  // fb3b5ce1 (2026-09-14): a CarRow was built in three places and the
+  // yard's reader learned `red_trains` while the others did not. One
+  // constructor now, exported, and every lens — the dock, the consist,
+  // the /me pages — maps through it.
+  test('a boarded car is the same row the dock would build for it', () => {
+    const car = dockJob('c7', {
+      metadata: { branch: 'fix/c7', red_trains: 1, proof_probe: 'true', proof_expect: 'ok' },
+    });
+    const t = toTrainRow(
+      train({ metadata: { boarded_jobs: ['c7'] }, steps: [s('pr', 'completed')] }),
+      new Map([['c7', car]]),
+      true,
+    );
+    expect(t.cars[0]).toEqual(carRow(car));
+    expect(t.cars[0]?.redTrains).toBe(1);
+    expect(t.cars[0]?.proof?.probe).toBe('true');
+  });
+
+  test('a car outside the window is a packet with nothing on it, named by its id', () => {
+    const t = toTrainRow(
+      train({ metadata: { boarded_jobs: ['0123456789abcdef'] }, steps: [s('pr', 'completed')] }),
+      new Map(),
+      true,
+    );
+    expect(t.cars[0]).toEqual({
+      id: '0123456789abcdef', kind: 'ship-a-change', branch: '01234567',
+      title: '(car not in window)', tags: [], sim: false, skipReason: null,
+      head: null, proof: null, redTrains: 0,
+    });
+  });
+
+  test('a packet naming no branch reads an empty line — the open-car set filters on it', () => {
+    expect(carRow(dockJob('c8', { metadata: {} })).branch).toBe('');
   });
 
   test('the envelope is authoritative: membership does not re-derive from ships', () => {

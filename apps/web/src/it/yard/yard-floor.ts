@@ -898,10 +898,13 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
       lamp: 'off',
       // The held reason stays first and the tone stays neutral; the
       // strike count is appended so the siding reads WHY as well as THAT
-      // (2bb0d014). The count comes off the client's car row — the
-      // server's HeldCar does not carry it — so a held car the dock no
-      // longer lists reads its reason alone, as before.
-      status: `held — ${holdReason(h.reason)}${redTrainsSuffix(fromDock?.redTrains)}`,
+      // (2bb0d014). The count comes off the SERVER's row: the dock
+      // station stops listing a held car (36c3d4ca), so the client's
+      // CarRow is usually absent here, and reading it alone left a
+      // twice-struck held car showing its reason sentence with the
+      // strike invisible (ac80357b). The client row is the fallback for
+      // an older server that states no count — never a fabricated one.
+      status: `held — ${holdReason(h.reason)}${redTrainsSuffix(h.red_trains ?? fromDock?.redTrains)}`,
       since: h.parked_since,
     });
     dockSlot += 1;

@@ -30,7 +30,7 @@
 //     closed packet with nothing recorded says "closed", because that
 //     is the whole of what is known.
 
-import { isSim, type PacketCardData } from '@boss/web-kit/ui/packet-card';
+import { carRow, type CarRow } from '../it/yard/yard';
 import { PACKET_STOPS, stopOf, type StopKey } from './packetTrack';
 
 /// A packet as the station-queue envelope serializes it (bare Jobs,
@@ -78,31 +78,33 @@ export function outcomeOf(job: WatchlistJob): Outcome | null {
   return { label, tone: OUTCOME_TONES[label] ?? 'static' };
 }
 
-/// A packet in the shared card grammar. The mono provenance line is
-/// where the feedback was filed (its route), falling back to when —
-/// and once the packet closes, when it closed rides along, so a card
-/// lifted out of this list still says what happened and when.
+/// A packet in the shared card grammar, built by the yard's one
+/// constructor so every packet fact it reads (sim, head, proof, the
+/// strike count) reaches this card without this file learning it —
+/// this lens built its own literal until fb3b5ce1 (2026-09-14) and
+/// missed `redTrains` the day the yard read it. Two fields are the
+/// lens's own and override: the mono provenance line is where the
+/// feedback was filed (its route), falling back to when — and once the
+/// packet closes, when it closed rides along, so a card lifted out of
+/// this list still says what happened and when; and the chips drop the
+/// `feedback` tag every packet here carries.
 ///
 /// The outcome is NOT among the tags: tag chips are uniformly
 /// `--static`, and the outcome's whole job is to carry a tone. It
 /// renders beside the card instead.
-export function watchlistPacket(job: WatchlistJob): PacketCardData {
+export function watchlistPacket(job: WatchlistJob): CarRow {
   const md = (job.metadata ?? {}) as { route?: string };
   const where = md.route ?? `filed ${job.opened_on}`;
   return {
-    id: job.id,
-    kind: job.kind,
+    ...carRow(job),
     branch: job.closed_on ? `${where} · closed ${job.closed_on}` : where,
-    title: job.title,
     tags: (job.tags ?? []).filter(t => t !== 'feedback'),
-    sim: isSim(job),
-    skipReason: null,
   };
 }
 
 /// One rendered row: the card plus its terminal state, if it has one.
 export type WatchlistEntry = Readonly<{
-  card: PacketCardData;
+  card: CarRow;
   outcome: Outcome | null;
   /// Which stop this packet is standing at, or `null` when it left the
   /// track (a duplicate, or one we turned down). Requires the queue
