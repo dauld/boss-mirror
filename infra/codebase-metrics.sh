@@ -627,9 +627,16 @@ row_json() {
     # flat trend that produces is indistinguishable from a quiet week.
     head_at=$(git_answer "$NAME" 0 log -1 \
         --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%ad "$HEAD_SHA") || return $?
-    jq -n --argjson s "$s" --argjson w "$w" --argjson m "$m" \
+    # THE SERIES GOES IN ON STDIN, NOT AS AN ARGUMENT. `--argjson w "$w"`
+    # handed jq the whole per-landing series as one argv string, and a
+    # backfill over the entire first-parent history (no measured packet
+    # yet to start the window from) is past Linux's 128 KiB cap on a
+    # single argument — `jq: Argument list too long`. Same cap that took
+    # the PATCH below on 2026-09-13/14; see file_row.
+    printf '%s' "$w" | jq --argjson s "$s" --argjson m "$m" \
         --arg head_at "$head_at" \
         --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        . as $w |
         {measured: {at: $at, ref: $w.ref, head: $w.head, head_at: $head_at,
                     since: $w.since,
                     backfill: $w.backfill,
@@ -653,10 +660,21 @@ BOSS_USER='{"id":"automation:codebase-metrics","role":"platform-admin","access_t
 api() { # <method> <path> [body]
     local method="$1" path="$2" body="${3:-}"
     if [ -n "$body" ]; then
+        # THE BODY TRAVELS AS A FILE. `-d "$body"` put the whole row in
+        # one argv string, and on 2026-09-13 and 2026-09-14 the daily
+        # run — its first, backfilling every landing since June — died
+        # here with `Argument list too long`, the measurement dumped to
+        # a journal nobody read, for two days (fdd10ec8, 436a2e91).
+        local bodyfile
+        bodyfile=$(mktemp -t codebase-metrics-body.XXXXXX) || return 1
+        printf '%s' "$body" > "$bodyfile"
         "$API_CURL" -fsS -X "$method" -H "x-boss-user: $BOSS_USER" \
             -H "content-type: application/json" \
             ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
-            -d "$body" "$BOSS_JOBS_URL$path"
+            --data-binary "@$bodyfile" "$BOSS_JOBS_URL$path"
+        local rc=$?
+        rm -f "$bodyfile"
+        return $rc
     else
         "$API_CURL" -fsS -H "x-boss-user: $BOSS_USER" "$BOSS_JOBS_URL$path"
     fi
