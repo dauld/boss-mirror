@@ -204,28 +204,40 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
     };
     let heartbeat_rule = rules.iter().find(|r| r.name == HEARTBEAT_RULE);
     let heartbeat_minutes = heartbeat_rule.and_then(|r| r.every_minutes).map(i64::from);
-    // The board rule's last firing — the fact the cooldown hold is read
-    // from. The rule is found by SHAPE (the row declaring
-    // `min_dock_depth`), the same way the predicate finds its threshold,
-    // so a renamed row moves both together.
+    // The board rules' last firings — the depth rule's, which the
+    // cooldown hold is read from, and the clock rule's, so the last board
+    // is the newest of ANY rule that departs a train. Read the way the
+    // conductor reads them, one `last_firing(&rule.name)` per row; each
+    // rule is found by SHAPE (`min_dock_depth`, `at_times` + a departing
+    // verb), the same way the predicate finds its threshold and its
+    // windows, so a renamed row moves both together. Until 43fb424f only
+    // the depth rule was read, and a clock-window board never appeared
+    // in `last_board_at` — two trains 16 min apart under a stated 45.
     //
     // Three outcomes, not two: a firing, no firing (the rule has never
-    // boarded — an ANSWER), and a read that did not answer. `.ok()`
-    // collapsed the third into the second, and the three nulls that
-    // follow from it — `last_board_at`, `cooldown_remaining_minutes`,
-    // `held_because` — read together as "no cooldown in force, boards on
-    // the next tick", which is the permissive answer (31783deb).
-    let (last_board, last_board_reading) = match (state.cadence.as_ref(), yard::depth_rule(&rules))
-    {
-        (Some(repo), Some(rule)) => match repo.last_firing(&rule.name).await {
-            Ok(firing) => (firing, yard::Reading::Read),
-            Err(_) => (None, yard::Reading::Unread),
-        },
-        // No depth rule among rows we COULD read: there is no board rule,
-        // so there is no firing, and `None` is the answer. With the rows
-        // unread we cannot say that — and the cadence reading is exactly
-        // the fact that decides which of the two this is.
-        _ => (None, cadence_reading),
+    // boarded, or there is no such rule — an ANSWER), and a read that did
+    // not answer. `.ok()` collapsed the third into the second, and the
+    // three nulls that follow from it — `last_board_at`,
+    // `cooldown_remaining_minutes`, `held_because` — read together as "no
+    // cooldown in force, boards on the next tick", which is the
+    // permissive answer (31783deb). One reading covers both rows: they
+    // are one table on one connection, and a cooldown stated beside an
+    // unknown last board would be half an answer wearing a whole one's
+    // shape.
+    let (depth_firing, clock_firing, last_board_reading) = match state.cadence.as_ref() {
+        Some(repo) if cadence_reading == yard::Reading::Read => {
+            let (depth, clock) = tokio::join!(
+                firing_of(repo.as_ref(), yard::depth_rule(&rules)),
+                firing_of(repo.as_ref(), yard::clock_rule(&rules)),
+            );
+            match (depth, clock) {
+                (Ok(depth), Ok(clock)) => (depth, clock, yard::Reading::Read),
+                _ => (None, None, yard::Reading::Unread),
+            }
+        }
+        // With the rows unread there is nothing to read a firing under,
+        // and the cadence reading is exactly the fact that says so.
+        _ => (None, None, cadence_reading),
     };
     let policy = match state.delivery.as_ref() {
         Some(repo) => repo.active_policy("train-conductor").await.ok().flatten(),
@@ -294,7 +306,10 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
             closed_trains: &closed_trains,
             dock_cars: dock_read.as_deref().unwrap_or(&[]),
             rules: &rules,
-            last_board: last_board.as_ref(),
+            board_firings: yard::BoardFirings {
+                depth: depth_firing.as_ref(),
+                clock: clock_firing.as_ref(),
+            },
             policy: policy.as_ref(),
             gate_runs: &gate_runs,
             car_branches: &car_branches,
@@ -323,6 +338,20 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
         dock_reading,
     ))
     .into_response()
+}
+
+/// One board rule's newest firing, by the read the conductor makes
+/// (`last_firing(&rule.name)`). `Ok(None)` both for no such rule and for
+/// a rule that has never fired — each an ANSWER; `Err` only when the read
+/// did not answer, which the caller turns into [`yard::Reading::Unread`].
+async fn firing_of(
+    repo: &dyn crate::cadence::CadenceRepository,
+    rule: Option<&crate::cadence::CadenceRuleRow>,
+) -> Result<Option<crate::cadence::LastFiring>, crate::cadence::CadenceError> {
+    match rule {
+        Some(rule) => repo.last_firing(&rule.name).await,
+        None => Ok(None),
+    }
 }
 
 /// The cars standing ON the dock, with their steps, read from the

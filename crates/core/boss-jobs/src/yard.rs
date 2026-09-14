@@ -650,10 +650,51 @@ pub struct BoardingReadings {
     /// Whether `active_rules()` answered. `Unread` → the threshold, the
     /// cooldown and the clock times are unknown, not absent.
     pub cadence: Reading,
-    /// Whether the board rule's `last_firing()` answered. `Unread` → no
-    /// cooldown can be computed, and "no cooldown in force" must not be
-    /// implied by the nulls that stand in its place.
+    /// Whether the board rules' `last_firing()` reads answered — one per
+    /// rule that departs a train, see [`BoardFirings`]. `Unread` → no
+    /// cooldown can be computed and no last board stated, and "no
+    /// cooldown in force" must not be implied by the nulls that stand in
+    /// their place.
     pub last_board: Reading,
+}
+
+/// The board rules' newest firings, one per rule that departs a train
+/// — the facts the boarding block reads from `cadence_firings`.
+///
+/// Two firings rather than one because the two numbers derived from
+/// them belong to DIFFERENT rules, and the block stated them as if they
+/// were one (43fb424f). The conductor paces each cadence row on its own
+/// firing history (`cadence::last_firing(&rule.name)`), and
+/// `cooldown_minutes` lives in the depth row alone — so a clock window
+/// boards regardless of the depth rule's cooldown and does not reset it.
+/// Measured 2026-09-14: train 33eaad45 boarded at 18:06:11 on the 18:05
+/// window and train d078acd2 at 18:22:09 on the depth rule, 16 min apart
+/// under a stated "min 45 min between boards", while `last_board_at`
+/// (read from the depth rule only) still showed 17:26:57. Both boards
+/// were legal; the reading was the defect. Now the last board is the
+/// newest of the two, and the cooldown is measured on `depth` alone.
+///
+/// A struct rather than two adjacent `Option<&LastFiring>` parameters,
+/// for the reason [`BoardingReadings`] and [`YardInputs`] give: adjacent
+/// parameters of one type compile transposed.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BoardFirings<'a> {
+    /// The depth rule's newest firing. The cooldown is measured on THIS
+    /// and only this.
+    pub depth: Option<&'a LastFiring>,
+    /// The clock rule's newest firing — a scheduled window's board.
+    pub clock: Option<&'a LastFiring>,
+}
+
+impl<'a> BoardFirings<'a> {
+    /// The newest firing across the board rules — what `last_board_at`
+    /// states: when a train last boarded, whichever rule boarded it.
+    pub fn newest(self) -> Option<&'a LastFiring> {
+        [self.depth, self.clock]
+            .into_iter()
+            .flatten()
+            .max_by_key(|f| f.fired_at)
+    }
 }
 
 /// The boarding predicate, rendered from the live cadence rows — the
@@ -739,13 +780,24 @@ pub struct BoardHold {
     /// N-car threshold cannot be evaluated"`), because `None` here is
     /// read as a go-ahead and the read-model has no grounds for one.
     pub held_because: Option<String>,
-    /// Minutes until the board cooldown clears; `None` when none is
-    /// running — never fired, elapsed, or released by a firing that
-    /// boarded nothing.
+    /// Minutes until the DEPTH rule's board cooldown clears; `None` when
+    /// none is running — never fired, elapsed, or released by a firing
+    /// that boarded nothing. Measured on the depth rule's own last
+    /// firing, never on `last_board_at`: a clock-window board neither
+    /// resets it nor waits for it (43fb424f).
     pub cooldown_remaining_minutes: Option<u32>,
-    /// When the board rule last fired, released or not.
+    /// The rule whose pacing `cooldown_remaining_minutes` measures — the
+    /// depth rule's name, when one with a `cooldown_minutes` is
+    /// configured. Stated beside the minutes so the pair above cannot be
+    /// read as a property of the track: the last board may be another
+    /// rule's.
+    #[serde(default)]
+    pub cooldown_rule: Option<String>,
+    /// When a board rule last fired, released or not — the newest firing
+    /// across the rules that depart a train (depth AND clock window), see
+    /// [`BoardFirings::newest`]. The track's last board, not one rule's.
     pub last_board_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Whether that firing could be READ. `unread` says `last_board_at`
+    /// Whether those firings could be READ. `unread` says `last_board_at`
     /// and `cooldown_remaining_minutes` are nulls nobody read — not "it
     /// has never boarded" and not "no cooldown is running", which is how
     /// the pair reads on its own and is the permissive answer.
@@ -797,7 +849,9 @@ pub fn depth_rule(rules: &[CadenceRuleRow]) -> Option<&CadenceRuleRow> {
 
 /// A cadence rule fires by CLOCK when it declares `at_times` (and is not
 /// the calendar basis, which also uses `at_times` but for whole days).
-fn clock_rule(rules: &[CadenceRuleRow]) -> Option<&CadenceRuleRow> {
+/// Public for the same reason [`depth_rule`] is: the handler reads this
+/// rule's last firing under the row the predicate reads `at_times` from.
+pub fn clock_rule(rules: &[CadenceRuleRow]) -> Option<&CadenceRuleRow> {
     // A clock row is a BOARDING trigger only if its verb departs a train
     // — the conductor's own rule, read from its one home (634a475b).
     rules.iter().find(|r| {
@@ -828,13 +882,13 @@ fn at_times_of(rule: Option<&CadenceRuleRow>) -> Vec<String> {
 /// ("no clock, no claim").
 ///
 /// `readings` says which of the two registry reads behind `rules` and
-/// `last_board` ANSWERED — see [`BoardingReadings`]. It rides last, the
+/// `firings` ANSWERED — see [`BoardingReadings`]. It rides last, the
 /// qualifier on everything before it, the same position it takes on
 /// [`build_status_for`].
 pub fn boarding_predicate(
     rules: &[CadenceRuleRow],
     dock_depth: Option<usize>,
-    last_board: Option<&LastFiring>,
+    firings: BoardFirings<'_>,
     on_track: usize,
     now: Option<chrono::DateTime<chrono::Utc>>,
     readings: BoardingReadings,
@@ -852,8 +906,12 @@ pub fn boarding_predicate(
     let mut clauses: Vec<String> = Vec::new();
     if let Some(t) = dock_threshold {
         let mut c = format!("{t} parked cars");
+        // WHOSE minimum: the depth rule's, not the track's. "between
+        // boards" read as a spacing every train keeps, and a clock window
+        // boards through it (43fb424f: two trains 16 min apart under a
+        // stated 45). `cooldown_rule` carries the row's name.
         if let Some(cd) = cooldown_minutes {
-            c.push_str(&format!(" (min {cd} min between boards)"));
+            c.push_str(&format!(" (min {cd} min between depth-rule boards)"));
         }
         clauses.push(c);
     }
@@ -902,7 +960,7 @@ pub fn boarding_predicate(
         threshold_met,
         cadence_reading: readings.cadence,
         summary,
-        hold: boarding_hold(rules, last_board, dock_depth, on_track, now, readings),
+        hold: boarding_hold(rules, firings, dock_depth, on_track, now, readings),
     }
 }
 
@@ -918,26 +976,30 @@ fn cooldown_released(last: &LastFiring) -> bool {
 /// The boarding decision for the queue-depth rule, as the conductor
 /// would make it on its next tick — see [`BoardHold`].
 ///
-/// Pure: (rules, the board rule's last firing, dock depth, trains on the
-/// track — open and still before their merge, see `holds_the_track` —
-/// now) in, the hold out. The cooldown needs a clock: no clock, no
+/// Pure: (rules, the board rules' last firings, dock depth, trains on
+/// the track — open and still before their merge, see `holds_the_track`
+/// — now) in, the hold out. The cooldown needs a clock: no clock, no
 /// cooldown reading — the rule `build_status` keeps for stalls. Only the
 /// clockless empty status takes that path, and it carries no firing.
 ///
 /// `held_because` and `cooldown_remaining_minutes` are the queue-depth
-/// rule's answer and only its. `next_board` is not: it answers "when
-/// does the next train board?", and a CLOCK rule boards too. The
-/// conductor evaluates each cadence row against its own last firing
+/// rule's answer and only its. `next_board` and `last_board_at` are not:
+/// the first answers "when does the next train board?", the second "when
+/// did one last board?", and a CLOCK rule boards too. The conductor
+/// evaluates each cadence row against its own last firing
 /// (`cadence::last_firing(&rule.name)`), and `cooldown_minutes` /
 /// `min_dock_depth` live inside `Basis::QueueDepth` — `due_window` reads
 /// them in that arm alone. So the cooldown and the depth threshold hold
 /// the depth rule and nothing else, while the open-train count holds
 /// every departing verb. `next_board` says which of its holds the clock
 /// rule is exempt from, because a reader who acts on the sentence is
-/// otherwise told to wait for a board that already happened.
+/// otherwise told to wait for a board that already happened; the
+/// cooldown is computed from `firings.depth` alone and `last_board_at`
+/// from the newest of both, because the pair used to be read from the
+/// depth rule together and a clock board never appeared (43fb424f).
 pub fn boarding_hold(
     rules: &[CadenceRuleRow],
-    last_board: Option<&LastFiring>,
+    firings: BoardFirings<'_>,
     dock_depth: Option<usize>,
     on_track: usize,
     now: Option<chrono::DateTime<chrono::Utc>>,
@@ -945,7 +1007,17 @@ pub fn boarding_hold(
 ) -> BoardHold {
     let depth = depth_rule(rules);
     let threshold = depth.and_then(|r| r.min_dock_depth);
-    let cooldown_remaining = last_board
+    // The rule the cooldown paces, named whenever one declares a
+    // cooldown — in force or not, so the field reads the same across
+    // the arms below.
+    let cooldown_rule = depth
+        .filter(|r| r.cooldown_minutes.is_some())
+        .map(|r| r.name.clone());
+    // The newest board of ANY rule: the track's last board.
+    let last_board_at = firings.newest().map(|l| l.fired_at);
+    // The DEPTH rule's own firing paces the depth rule's cooldown.
+    let cooldown_remaining = firings
+        .depth
         .filter(|l| !cooldown_released(l))
         .zip(now)
         .zip(depth.and_then(|r| r.cooldown_minutes).filter(|cd| *cd > 0))
@@ -1010,7 +1082,8 @@ pub fn boarding_hold(
                     .map_or_else(|| admission.clone(), |(why, _, _)| why.clone()),
             ),
             cooldown_remaining_minutes: None,
-            last_board_at: last_board.map(|l| l.fired_at),
+            cooldown_rule: cooldown_rule.clone(),
+            last_board_at,
             last_board_reading: readings.last_board,
             next_board: format!("cannot say — {}{admission}", held_by(&holds)),
         };
@@ -1035,7 +1108,8 @@ pub fn boarding_hold(
         return BoardHold {
             held_because: holds.first().map(|(why, _, _)| why.clone()),
             cooldown_remaining_minutes: None,
-            last_board_at: last_board.map(|l| l.fired_at),
+            cooldown_rule: cooldown_rule.clone(),
+            last_board_at,
             last_board_reading: readings.last_board,
             next_board: format!(
                 "no depth rule is configured — nothing boards on dock depth{clock}{}",
@@ -1180,7 +1254,8 @@ pub fn boarding_hold(
             .map(|(why, _, _)| why)
             .or_else(|| admissions.first().map(|(_, line, _)| line.clone())),
         cooldown_remaining_minutes: cooldown_remaining,
-        last_board_at: last_board.map(|l| l.fired_at),
+        cooldown_rule,
+        last_board_at,
         last_board_reading: readings.last_board,
         next_board,
     }
@@ -2450,8 +2525,10 @@ pub struct YardInputs<'a> {
     pub dock_cars: &'a [(Job, Vec<Step>)],
     /// The active cadence rows.
     pub rules: &'a [CadenceRuleRow],
-    /// The board rule's last firing, which the cooldown hold is read from.
-    pub last_board: Option<&'a LastFiring>,
+    /// The board rules' last firings — the depth rule's, which the
+    /// cooldown hold is read from, and the clock rule's; the newest of
+    /// the two is the last board.
+    pub board_firings: BoardFirings<'a>,
     /// The active delivery policy, if any.
     pub policy: Option<&'a DeliveryPolicyRow>,
     /// Recent gate-runs with their steps — the stranded/held/garage/limbo
@@ -2509,7 +2586,7 @@ pub fn build_status_for(
         closed_trains,
         dock_cars,
         rules,
-        last_board,
+        board_firings,
         policy,
         gate_runs,
         car_branches,
@@ -2559,7 +2636,7 @@ pub fn build_status_for(
     let boarding = boarding_predicate(
         rules,
         dock_depth,
-        last_board,
+        board_firings,
         on_track,
         now,
         boarding_readings,
@@ -3066,13 +3143,31 @@ mod tests {
         clock.at_times = Some(json!(["06:00", "18:00"]));
         let rules = vec![depth, clock];
 
-        let p = boarding_predicate(&rules, Some(2), None, 0, None, BoardingReadings::default());
+        let p = boarding_predicate(
+            &rules,
+            Some(2),
+            BoardFirings::default(),
+            0,
+            None,
+            BoardingReadings::default(),
+        );
         assert_eq!(p.dock_threshold, Some(4));
         assert_eq!(p.cooldown_minutes, Some(120));
         assert_eq!(p.at_times, vec!["06:00", "18:00"]);
         assert_eq!(p.dock_depth, Some(2));
         assert_eq!(p.threshold_met, Some(false));
         assert!(p.summary.contains("4 parked cars"));
+        // The cooldown is the DEPTH rule's own pacing, and the sentence
+        // says whose it is: "between boards" read as a property of the
+        // track, and two trains boarded 16 min apart under a stated 45
+        // (43fb424f — one on the 18:05 clock window, one on the depth
+        // rule, each paced by its own firing history).
+        assert!(
+            p.summary
+                .contains("4 parked cars (min 120 min between depth-rule boards)"),
+            "{}",
+            p.summary
+        );
         assert!(p.summary.contains("06:00 / 18:00 UTC"));
         assert!(p.summary.contains("2 car(s) parked now"));
         assert!(p.summary.contains("below the dock threshold"));
@@ -3085,7 +3180,7 @@ mod tests {
         let p = boarding_predicate(
             &[depth],
             Some(5),
-            None,
+            BoardFirings::default(),
             0,
             None,
             BoardingReadings::default(),
@@ -3104,7 +3199,14 @@ mod tests {
     fn an_unread_dock_says_the_depth_is_unknown_rather_than_zero() {
         let mut depth = rule("queue-depth");
         depth.min_dock_depth = Some(4);
-        let p = boarding_predicate(&[depth], None, None, 0, None, BoardingReadings::default());
+        let p = boarding_predicate(
+            &[depth],
+            None,
+            BoardFirings::default(),
+            0,
+            None,
+            BoardingReadings::default(),
+        );
         assert_eq!(p.dock_depth, None, "a depth nobody read is not a depth");
         assert_eq!(
             p.threshold_met, None,
@@ -3127,7 +3229,14 @@ mod tests {
     /// must not imply a dock reading it never took.
     #[test]
     fn an_unread_dock_with_no_cadence_still_says_so_rather_than_zero() {
-        let p = boarding_predicate(&[], None, None, 0, None, BoardingReadings::default());
+        let p = boarding_predicate(
+            &[],
+            None,
+            BoardFirings::default(),
+            0,
+            None,
+            BoardingReadings::default(),
+        );
         assert_eq!(p.dock_depth, None);
         assert!(
             p.summary.contains("No boarding cadence is configured"),
@@ -3148,7 +3257,7 @@ mod tests {
         let v = serde_json::to_value(boarding_predicate(
             &[depth],
             None,
-            None,
+            BoardFirings::default(),
             0,
             None,
             BoardingReadings::default(),
@@ -3169,7 +3278,7 @@ mod tests {
         let p = boarding_predicate(
             &[depth],
             Some(0),
-            None,
+            BoardFirings::default(),
             0,
             None,
             BoardingReadings::default(),
@@ -3186,7 +3295,14 @@ mod tests {
 
     #[test]
     fn no_cadence_rules_reads_as_no_configured_cadence_not_a_fake_schedule() {
-        let p = boarding_predicate(&[], Some(3), None, 0, None, BoardingReadings::default());
+        let p = boarding_predicate(
+            &[],
+            Some(3),
+            BoardFirings::default(),
+            0,
+            None,
+            BoardingReadings::default(),
+        );
         assert_eq!(p.dock_threshold, None);
         assert_eq!(p.threshold_met, None);
         assert!(p.at_times.is_empty());
@@ -3201,7 +3317,7 @@ mod tests {
         let p = boarding_predicate(
             &[clock],
             Some(0),
-            None,
+            BoardFirings::default(),
             0,
             None,
             BoardingReadings::default(),
@@ -3235,7 +3351,10 @@ mod tests {
         let last = fired("2026-09-07T20:00:00Z", Some(0));
         let h = boarding_hold(
             &[board_rule(4, 45)],
-            Some(&last),
+            BoardFirings {
+                depth: Some(&last),
+                clock: None,
+            },
             Some(5),
             0,
             Some(at("2026-09-07T20:33:30Z")),
@@ -3250,6 +3369,64 @@ mod tests {
         );
     }
 
+    /// 43fb424f, measured 2026-09-14: train 33eaad45 boarded at 18:06:11
+    /// on the 18:05 clock window and train d078acd2 at 18:22:09 on the
+    /// depth rule, 16 min apart under a stated 45-min minimum — because
+    /// the conductor paces each rule on ITS OWN last firing, and the yard
+    /// read `last_board_at` from the depth rule alone, so the clock board
+    /// never appeared (at 18:06 it still showed 17:26:57). The reading
+    /// now keeps the two apart: the last board is the newest firing of
+    /// ANY board rule, the cooldown is measured on the depth rule's, and
+    /// the block names whose cooldown it is.
+    #[test]
+    fn a_clock_window_board_is_the_last_board_but_never_the_cooldown() {
+        let depth = fired("2026-09-14T17:26:57Z", Some(0));
+        let clock = fired("2026-09-14T18:06:11Z", Some(0));
+        let h = boarding_hold(
+            &[board_rule(3, 45)],
+            BoardFirings {
+                depth: Some(&depth),
+                clock: Some(&clock),
+            },
+            Some(5),
+            0,
+            Some(at("2026-09-14T18:10:00Z")),
+            BoardingReadings::default(),
+        );
+        // The track's last board is the clock window's, 4 min ago …
+        assert_eq!(h.last_board_at, Some(at("2026-09-14T18:06:11Z")));
+        // … and the cooldown is the depth rule's: 45 − 43 = 2 min left of
+        // ITS window, not 41 min of the clock board's.
+        assert_eq!(h.cooldown_remaining_minutes, Some(2));
+        assert_eq!(h.held_because.as_deref(), Some("cooldown — 2 min left"));
+        assert_eq!(
+            h.cooldown_rule.as_deref(),
+            Some("train-board-on-dock-depth")
+        );
+    }
+
+    /// The other order: a depth board newer than the clock board is both
+    /// the last board and the cooldown's basis.
+    #[test]
+    fn a_depth_board_newer_than_the_clock_board_is_the_last_board() {
+        let depth = fired("2026-09-14T18:22:09Z", Some(0));
+        let clock = fired("2026-09-14T18:06:11Z", Some(0));
+        let h = boarding_hold(
+            &[board_rule(3, 45)],
+            BoardFirings {
+                depth: Some(&depth),
+                clock: Some(&clock),
+            },
+            Some(5),
+            0,
+            Some(at("2026-09-14T18:30:00Z")),
+            BoardingReadings::default(),
+        );
+        assert_eq!(h.last_board_at, Some(at("2026-09-14T18:22:09Z")));
+        // 7 min 51 s elapsed reads as 7 whole minutes: 45 − 7.
+        assert_eq!(h.cooldown_remaining_minutes, Some(38));
+    }
+
     #[test]
     fn a_board_that_boarded_nothing_releases_the_cooldown() {
         // The conductor's own release rule (`due_window`): a failed board
@@ -3260,7 +3437,10 @@ mod tests {
             let last = fired("2026-09-07T20:00:00Z", Some(rc));
             let h = boarding_hold(
                 &[board_rule(4, 45)],
-                Some(&last),
+                BoardFirings {
+                    depth: Some(&last),
+                    clock: None,
+                },
                 Some(5),
                 0,
                 now,
@@ -3280,7 +3460,10 @@ mod tests {
         let last = fired("2026-09-07T20:00:00Z", None);
         let h = boarding_hold(
             &[board_rule(4, 45)],
-            Some(&last),
+            BoardFirings {
+                depth: Some(&last),
+                clock: None,
+            },
             Some(5),
             0,
             Some(at("2026-09-07T20:05:00Z")),
@@ -3295,7 +3478,10 @@ mod tests {
         let last = fired("2026-09-07T19:00:00Z", Some(0));
         let h = boarding_hold(
             &[board_rule(4, 45)],
-            Some(&last),
+            BoardFirings {
+                depth: Some(&last),
+                clock: None,
+            },
             Some(5),
             0,
             Some(at("2026-09-07T20:00:00Z")),
@@ -3311,7 +3497,7 @@ mod tests {
     fn a_shallow_dock_is_held_below_threshold() {
         let h = boarding_hold(
             &[board_rule(4, 45)],
-            None,
+            BoardFirings::default(),
             Some(2),
             0,
             Some(at("2026-09-07T20:00:00Z")),
@@ -3338,7 +3524,10 @@ mod tests {
         let now = Some(at("2026-09-07T20:10:00Z"));
         let h = boarding_hold(
             &[board_rule(4, 45)],
-            Some(&last),
+            BoardFirings {
+                depth: Some(&last),
+                clock: None,
+            },
             Some(2),
             2,
             now,
@@ -3356,7 +3545,7 @@ mod tests {
         );
         let one = boarding_hold(
             &[board_rule(4, 45)],
-            None,
+            BoardFirings::default(),
             Some(5),
             1,
             now,
@@ -3515,7 +3704,10 @@ mod tests {
         let last = fired("2026-09-07T20:00:00Z", Some(0));
         let h = boarding_hold(
             &[board_rule(4, 45), clock_rule_row()],
-            Some(&last),
+            BoardFirings {
+                depth: Some(&last),
+                clock: None,
+            },
             Some(5),
             0,
             Some(at("2026-09-07T20:10:00Z")),
@@ -3543,7 +3735,10 @@ mod tests {
         let last = fired("2026-09-07T20:00:00Z", Some(0));
         let h = boarding_hold(
             &[board_rule(4, 45), clock_rule_row()],
-            Some(&last),
+            BoardFirings {
+                depth: Some(&last),
+                clock: None,
+            },
             Some(2),
             1,
             Some(at("2026-09-07T20:10:00Z")),
@@ -3566,7 +3761,7 @@ mod tests {
         // and saying otherwise would be this same defect mirrored.
         let h = boarding_hold(
             &[board_rule(4, 45), clock_rule_row()],
-            None,
+            BoardFirings::default(),
             Some(5),
             1,
             Some(at("2026-09-07T20:10:00Z")),
@@ -3583,7 +3778,10 @@ mod tests {
         let last = fired("2026-09-07T20:00:00Z", Some(0));
         let h = boarding_hold(
             &[board_rule(4, 45)],
-            Some(&last),
+            BoardFirings {
+                depth: Some(&last),
+                clock: None,
+            },
             Some(2),
             0,
             Some(at("2026-09-07T20:10:00Z")),
@@ -3600,7 +3798,7 @@ mod tests {
     fn a_clear_dock_boards_on_the_next_tick_never_at_a_time() {
         let h = boarding_hold(
             &[board_rule(4, 45)],
-            None,
+            BoardFirings::default(),
             Some(4),
             0,
             Some(at("2026-09-07T20:10:00Z")),
@@ -3621,7 +3819,7 @@ mod tests {
     fn an_unread_dock_will_not_promise_a_board_nor_a_threshold_it_cannot_check() {
         let h = boarding_hold(
             &[board_rule(4, 45)],
-            None,
+            BoardFirings::default(),
             None,
             0,
             Some(at("2026-09-07T20:10:00Z")),
@@ -3662,7 +3860,10 @@ mod tests {
         let last = fired("2026-09-07T20:00:00Z", Some(0));
         let h = boarding_hold(
             &[board_rule(4, 45)],
-            Some(&last),
+            BoardFirings {
+                depth: Some(&last),
+                clock: None,
+            },
             None,
             1,
             Some(at("2026-09-07T20:10:00Z")),
@@ -3692,7 +3893,7 @@ mod tests {
         clock.at_times = Some(json!(["06:00", "18:00"]));
         let h = boarding_hold(
             &[board_rule(4, 45), clock],
-            None,
+            BoardFirings::default(),
             None,
             0,
             Some(at("2026-09-07T20:10:00Z")),
@@ -3715,7 +3916,7 @@ mod tests {
         clock.at_times = Some(json!(["06:00"]));
         let h = boarding_hold(
             &[clock],
-            None,
+            BoardFirings::default(),
             Some(3),
             0,
             Some(at("2026-09-07T20:10:00Z")),
@@ -3743,7 +3944,7 @@ mod tests {
         clock.at_times = Some(json!(["06:00"]));
         let h = boarding_hold(
             &[clock],
-            None,
+            BoardFirings::default(),
             Some(3),
             1,
             Some(at("2026-09-07T20:10:00Z")),
@@ -3771,7 +3972,7 @@ mod tests {
         clock.at_times = Some(json!(["06:00"]));
         let h = boarding_hold(
             &[clock],
-            None,
+            BoardFirings::default(),
             Some(3),
             0,
             Some(at("2026-09-07T20:10:00Z")),
@@ -3792,7 +3993,10 @@ mod tests {
         let p = boarding_predicate(
             &[board_rule(4, 45)],
             Some(5),
-            Some(&last),
+            BoardFirings {
+                depth: Some(&last),
+                clock: None,
+            },
             0,
             Some(at("2026-09-07T20:33:00Z")),
             BoardingReadings::default(),
@@ -3828,7 +4032,7 @@ mod tests {
     /// to "unknown cadence"; the sentences said "is not configured".
     #[test]
     fn an_unread_cadence_says_so_rather_than_no_cadence_is_configured() {
-        let p = boarding_predicate(&[], Some(2), None, 0, None, unread());
+        let p = boarding_predicate(&[], Some(2), BoardFirings::default(), 0, None, unread());
         assert!(
             !p.summary.contains("No boarding cadence is configured"),
             "{}",
@@ -3868,7 +4072,7 @@ mod tests {
     /// swallow it, the same way an unread dock does not.
     #[test]
     fn an_unread_cadence_still_names_the_track_hold_it_can_read() {
-        let p = boarding_predicate(&[], Some(2), None, 1, None, unread());
+        let p = boarding_predicate(&[], Some(2), BoardFirings::default(), 1, None, unread());
         assert_eq!(
             p.hold.held_because.as_deref(),
             Some("track occupied (1 open train)")
@@ -3894,7 +4098,7 @@ mod tests {
     fn an_unread_firing_does_not_read_as_no_cooldown_in_force() {
         let h = boarding_hold(
             &[board_rule(4, 45)],
-            None,
+            BoardFirings::default(),
             Some(5),
             0,
             Some(at("2026-09-07T20:10:00Z")),
@@ -3925,7 +4129,7 @@ mod tests {
     fn a_board_rule_that_has_never_fired_still_boards_on_the_next_tick() {
         let h = boarding_hold(
             &[board_rule(4, 45)],
-            None,
+            BoardFirings::default(),
             Some(5),
             0,
             Some(at("2026-09-07T20:10:00Z")),
@@ -3944,7 +4148,7 @@ mod tests {
         clock.at_times = Some(json!(["06:00"]));
         let h = boarding_hold(
             &[board_rule(4, 45), clock],
-            None,
+            BoardFirings::default(),
             None,
             0,
             Some(at("2026-09-07T20:10:00Z")),
@@ -3968,8 +4172,15 @@ mod tests {
     /// dock settled the same question as `dock_source`.
     #[test]
     fn the_readings_ride_the_wire_beside_the_nulls_they_qualify() {
-        let v = serde_json::to_value(boarding_predicate(&[], Some(0), None, 0, None, unread()))
-            .unwrap();
+        let v = serde_json::to_value(boarding_predicate(
+            &[],
+            Some(0),
+            BoardFirings::default(),
+            0,
+            None,
+            unread(),
+        ))
+        .unwrap();
         assert!(v["dock_threshold"].is_null(), "{v}");
         assert!(v["cooldown_minutes"].is_null(), "{v}");
         assert_eq!(v["at_times"], json!([]), "{v}");
@@ -3980,7 +4191,7 @@ mod tests {
         let read = serde_json::to_value(boarding_predicate(
             &[],
             Some(0),
-            None,
+            BoardFirings::default(),
             0,
             None,
             Default::default(),

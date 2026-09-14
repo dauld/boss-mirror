@@ -70,20 +70,20 @@ pub(super) struct ListJobsQuery {
 ///
 /// The shape and its sentence are `crate::metadata_containment` — the
 /// ONE copy `boss job list --where` builds by as well (backlog 88a3b072,
-/// 2026-09-14). What is this door's alone is the wire form: the text is
-/// parsed here, the 400 names the param and shows the url-encoded
-/// example, and an empty object narrows nothing and is `None`.
+/// 2026-09-14). The TEXT goes to the rule, not a parsed value: a key
+/// that appears twice is only visible before the parse keeps its last
+/// value, and until 2026-09-14 this door kept it — `{"k":"1","k":"2"}`
+/// narrowed on `"2"` with a 200 while the terminal refused the same
+/// request (backlog 03852b47). What is this door's alone is the 400
+/// naming the param and showing the url-encoded example, and an empty
+/// object narrowing nothing as `None`.
 fn metadata_containment_from_query(raw: Option<&str>) -> Result<Option<serde_json::Value>, String> {
-    use crate::metadata_containment::{RULE, check};
     let Some(raw) = raw else {
         return Ok(None);
     };
-    let door = |why: String| {
+    let doc = crate::metadata_containment::parse(raw).map_err(|why| {
         format!("metadata {why}; e.g. metadata={{\"branch\":\"feat/x\"}} (url-encoded)")
-    };
-    let value: serde_json::Value =
-        serde_json::from_str(raw).map_err(|e| door(format!("{RULE}: not JSON ({e})")))?;
-    let doc = check(&value).map_err(door)?;
+    })?;
     Ok((!doc.is_empty()).then_some(serde_json::Value::Object(doc)))
 }
 

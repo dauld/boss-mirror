@@ -159,8 +159,16 @@ export type BoardingPredicate = Readonly<{
    *  trains, the dock). Null on an older server, with `next_board` null
    *  beside it; the page then states the rule and never a hold. */
   held_because: string | null;
+  /** Minutes left of the DEPTH rule's cooldown — measured on that rule's
+   *  own last firing, never on `last_board_at`. The server names the
+   *  rule beside it (`cooldown_rule`, not parsed here: nothing renders
+   *  it) and its `summary` says "between depth-rule boards", because a
+   *  clock-window board neither waits for this nor resets it (43fb424f:
+   *  two trains 16 min apart under a stated 45). */
   cooldown_remaining_minutes: number | null;
-  /** When the board rule last fired (RFC3339), released or not. */
+  /** When a board rule last fired (RFC3339), released or not — the
+   *  newest across the depth rule AND the clock window, so it is the
+   *  track's last board and not one rule's. */
   last_board_at: string | null;
   /** Whether the server read that firing. `unread` says `last_board_at`
    *  and `cooldown_remaining_minutes` are unknowns — not "it has never

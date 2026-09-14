@@ -692,11 +692,25 @@ fn is_set(v: Option<&Value>) -> bool {
     }
 }
 
-/// The kind of linked packet a park may ROUTE. A `user-feedback`
-/// packet's triage is the filer's own routing decision and stays
-/// theirs — the same scoping the arrival rule's `route` arg carries
-/// (`jobs.complete_linked_step`, dda0713c).
-pub const TRIAGEABLE_KIND: &str = "backlog-item";
+/// The kinds of linked packet a park may ROUTE — the same two the
+/// merge-time route lists (`complete-feedback-branch-on-car-merged`
+/// v4, `route = [...]`), so the park and the merge agree about whose
+/// triage a car may complete.
+///
+/// `user-feedback` joined on 2026-09-14 (backlog a29c3687). Until then
+/// a feedback packet's triage was "the filer's own routing decision"
+/// and the park left it alone — but a car PARKED AGAINST the packet is
+/// that decision already made, by whoever built and linked the car,
+/// and the v4 merge route closes it on the same reasoning. Leaving the
+/// hours between park and merge un-routed put David's 9827c699 on the
+/// feedback board as nobody's decision for seventy minutes while its
+/// car sat on the dock and then rode a train. Its triage vocabulary
+/// (`reproduce|design|build|duplicate|needs-info|decline`,
+/// infra/platform/workflows/user-feedback.toml) admits `build`; the
+/// `build` step then opens by `ready_when` and the merge route
+/// completes it. A feedback packet with no car parked against it never
+/// reaches this function, so its triage stays a person's.
+pub const TRIAGEABLE_KINDS: &[&str] = &["backlog-item", "user-feedback"];
 
 /// The routing step on that kind. Its `spec_slug` is the lookup;
 /// `find_step`'s title fallback is given the same string because this
@@ -743,12 +757,14 @@ pub struct TriageWrite {
 /// routing step is still OPEN (`ready`/`active` — the same "open" the
 /// arrival rule's route reads) AND carries no disposition. A triage a
 /// person already completed, an item a person routed to `verify` /
-/// `design` / `stale` / `decline`, a closed or cancelled item, an item
-/// with no routing step, and a kind whose triage is not a park's to
-/// make all answer `None` — so a re-gate, a refresh or a redelivery
-/// writes nothing, and no human's disposition is ever overwritten.
+/// `design` / `stale` / `decline` (or feedback its filer sent to
+/// `reproduce` / `needs-info`), a closed or cancelled packet, a packet
+/// with no routing step, and a kind outside `TRIAGEABLE_KINDS` all
+/// answer `None` — so a re-gate, a refresh or a redelivery writes
+/// nothing, and no human's disposition is ever overwritten.
 pub fn triage_on_park(item: &Value, car_id: &str, branch: &str) -> Option<TriageWrite> {
-    if item.get("kind").and_then(Value::as_str) != Some(TRIAGEABLE_KIND) {
+    let kind = item.get("kind").and_then(Value::as_str)?;
+    if !TRIAGEABLE_KINDS.contains(&kind) {
         return None;
     }
     if matches!(
@@ -787,16 +803,21 @@ pub fn triage_on_park(item: &Value, car_id: &str, branch: &str) -> Option<Triage
     })
 }
 
-/// The `evidence` the routing step requires at done, naming WHAT made
-/// the decision — a reader of the item should not have to go find out
-/// why its route says `build`.
+/// The `evidence` the routing step records at done, naming WHAT made
+/// the decision — a reader of the packet should not have to go find
+/// out why its route says `build`. Shaped as the merge route's own
+/// sentence is (`shipped and proven: {branch} — {title} (car {car})`,
+/// complete-feedback-branch-on-car-merged v4): the moment differs, the
+/// form does not, so the two reads on one packet's history read as
+/// one story. `backlog-item`'s triage REQUIRES this key at done;
+/// `user-feedback`'s declares only `finding`, and an extra key is
+/// carried, not refused — the same key the merge route writes there.
 fn park_triage_evidence(car_id: &str, branch: &str) -> String {
     format!(
-        "routed at park: car {} on {branch} is this item's build. \
-         `--park-backlog-item` names the car as the build, so the route is stated when \
-         the car is filed rather than left un-triaged for the arrival rule to find \
-         nothing to advance (backlog ca76d8f9).",
-        &car_id[..8.min(car_id.len())]
+        "routed at park: {branch} is this packet's build (car {car_id}). \
+         --park-backlog-item names the car as the build, so the route is stated when \
+         the car is filed rather than left un-triaged until the car merges \
+         (backlog ca76d8f9, a29c3687)."
     )
 }
 
@@ -1307,14 +1328,82 @@ mod park_triage_tests {
         assert!(triage_on_park(&active, CAR_ID, BRANCH).is_some());
     }
 
-    /// A `user-feedback` packet's triage is the FILER's routing
-    /// decision. A car answering one says so in its own evidence; it
-    /// does not choose the filer's route for them.
+    /// A `user-feedback` packet as the chrome bar files it: submitted,
+    /// un-triaged, every branch still pending. Its triage vocabulary is
+    /// `reproduce|design|build|duplicate|needs-info|decline`
+    /// (infra/platform/workflows/user-feedback.toml), so `build` is a
+    /// route it admits.
+    fn untriaged_feedback() -> Value {
+        json!({
+            "id": "9827c699-3e49-4494-a812-d3ab5fa4bd69",
+            "kind": "user-feedback",
+            "status": "open",
+            "steps": [
+                { "id": "s-submitted", "spec_slug": "submitted", "status": "completed", "metadata": {} },
+                { "id": "s-triage", "spec_slug": "triage", "status": "ready",
+                  "metadata": { "finding": "a page for the codebase stats" } },
+                { "id": "s-build", "spec_slug": "build", "status": "pending", "metadata": {} },
+            ],
+        })
+    }
+
+    /// A car parked against a user-feedback packet states its route at
+    /// PARK time, not at merge (backlog a29c3687). Until this test the
+    /// park covered `backlog-item` only and the packet sat un-triaged
+    /// until the v4 merge route closed it — David's 9827c699 read as
+    /// nobody's decision for seventy minutes with its car on the dock.
     #[test]
-    fn a_filers_own_packet_keeps_its_routing_decision() {
-        let mut feedback = untriaged_item();
-        feedback["kind"] = json!("user-feedback");
-        assert!(triage_on_park(&feedback, CAR_ID, BRANCH).is_none());
+    fn parking_a_car_against_untriaged_feedback_routes_it_to_build() {
+        let w = triage_on_park(&untriaged_feedback(), CAR_ID, BRANCH)
+            .expect("un-triaged feedback gets the route its car states");
+        assert_eq!(w.step_id, "s-triage");
+        assert_eq!(w.body["status"], "completed");
+        assert_eq!(w.body["metadata"]["disposition"], DISPOSITION_BUILD);
+        let evidence = w.body["metadata"]["evidence"].as_str().unwrap_or_default();
+        assert!(
+            evidence.contains(CAR_ID) && evidence.contains(BRANCH),
+            "the evidence names the car and its branch: {evidence}"
+        );
+        // The filer's own words ride along with the route.
+        assert_eq!(
+            w.body["metadata"]["finding"],
+            "a page for the codebase stats"
+        );
+    }
+
+    /// Feedback a person already routed — to `reproduce`, `design`, or
+    /// anything else — is a decision, and a park never overwrites it;
+    /// nor does it touch a packet whose triage is done and whose open
+    /// step is further along.
+    #[test]
+    fn feedback_already_past_triage_is_left_exactly_alone() {
+        let mut investigating = untriaged_feedback();
+        investigating["steps"][1]["status"] = json!("completed");
+        investigating["steps"][1]["metadata"] = json!({ "disposition": "reproduce" });
+        investigating["steps"][2] = json!({ "id": "s-investigate", "spec_slug": "investigate",
+            "status": "ready", "metadata": {} });
+        assert!(triage_on_park(&investigating, CAR_ID, BRANCH).is_none());
+
+        let mut decided = untriaged_feedback();
+        decided["steps"][1]["metadata"] = json!({ "disposition": "needs-info" });
+        assert!(triage_on_park(&decided, CAR_ID, BRANCH).is_none());
+    }
+
+    /// The park routes the two kinds a car may be parked against and no
+    /// other: a `design-doc`, an `ops-request`, a `ship-a-change` with a
+    /// step that happens to be called `triage` is not a park's to decide.
+    #[test]
+    fn a_packet_of_any_other_kind_is_untouched() {
+        for kind in ["design-doc", "ops-request", "ship-a-change", "gate-run"] {
+            let mut other = untriaged_item();
+            other["kind"] = json!(kind);
+            assert!(triage_on_park(&other, CAR_ID, BRANCH).is_none(), "{kind}");
+        }
+        let mut kindless = untriaged_item();
+        if let Some(m) = kindless.as_object_mut() {
+            m.remove("kind");
+        }
+        assert!(triage_on_park(&kindless, CAR_ID, BRANCH).is_none());
     }
 
     #[test]

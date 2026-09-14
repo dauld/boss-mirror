@@ -1,10 +1,15 @@
 //! Every seeded rule must only reference fields its event declares.
 //!
 //! This is the gate cf7ae3b5 asked for: "turn today's dead-letter into a
-//! 422 at authoring time". It runs against the SEEDED registry — the same
-//! `dispatcher_rules` and `event_kinds` rows a deployment gets — so a
-//! migration that adds a rule binding a field its topic does not carry
-//! fails here rather than eight NAKs into production.
+//! 422 at authoring time". It runs against the SEEDED registry —
+//! `infra/dispatcher/rules/` published into `dispatcher_rules` the way
+//! the dispatcher's boot step does it, over the `event_kinds` rows a
+//! deployment gets — so a rule file binding a field its topic does not
+//! carry fails here rather than eight NAKs into production. Until
+//! 2026-09-14 this read the table alone, which since the one-file-per-
+//! rule collapse (41ba00cd) holds the last MIGRATED version of every
+//! rule, not the file the tree ships (backlog 488cadca): a v4 binding a
+//! new field would have passed here unread.
 //!
 //! It is a ratchet. A topic whose `payload_fields` roster is empty is not
 //! checked, so this starts covering `jobs.job.closed` (migration 137, the
@@ -16,8 +21,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use boss_dispatcher::rules::payload_contract::unresolved_identifiers;
-use boss_dispatcher::rules::registry::{Rule, load_active_rules};
+use boss_dispatcher::rules::registry::Rule;
 use boss_testing::TestDb;
+
+mod common;
 
 /// kind_pattern → declared field names, for kinds that declare any.
 async fn rosters(pool: &sqlx::PgPool) -> BTreeMap<String, BTreeSet<String>> {
@@ -45,7 +52,7 @@ async fn rosters(pool: &sqlx::PgPool) -> BTreeMap<String, BTreeSet<String>> {
 async fn seeded_rules_only_reference_fields_their_event_declares() {
     let db = TestDb::new().await;
     let rosters = rosters(&db.pool).await;
-    let raw = load_active_rules(&db.pool).await.expect("load rules");
+    let raw = common::shipped_raw_rules(&db).await;
 
     let mut failures: Vec<String> = Vec::new();
     for raw_rule in raw.rules {

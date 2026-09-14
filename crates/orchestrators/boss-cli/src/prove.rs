@@ -84,6 +84,12 @@ pub(crate) struct Outcome {
     pub exit: i32,
     pub stdout: String,
     pub stderr: String,
+    /// The commands bash could not resolve while the probe ran — the
+    /// forge's fd-9 finding, now this door's too (46f67333). Empty means
+    /// the probe RAN; anything here means it did not, whatever the exit
+    /// and the streams say. Sorted and deduplicated, as the runner's
+    /// `sort -u` leaves it.
+    pub missing_tools: Vec<String>,
 }
 
 /// Run `probe` through a shell and capture everything it did.
@@ -91,24 +97,110 @@ pub(crate) fn execute(probe: &str) -> Result<Outcome> {
     execute_in(probe, None)
 }
 
+/// THE FORGE RUNNER'S OWN TEXT, compiled in so this door can run the
+/// same prelude the arrival rule runs — one definition, lifted between
+/// the markers boss-testing's run_car_probe_sh.rs lifts, never restated
+/// (CLAUDE.md §9a). The tests read the same constant for the judge and
+/// verdict blocks.
+const FORGE_RUNNER: &str = include_str!("../../../../infra/forge/run-car-probe.sh");
+
+/// The text of run-car-probe.sh from one marker up to the next. The
+/// opening marker rides along: every marker is a whole comment line, or
+/// the head of one. Refuses by name when the script lost a marker, so a
+/// refactor there fails here in the same commit.
+pub(crate) fn forge_block(begin: &str, end: &str) -> Result<&'static str> {
+    let a = FORGE_RUNNER
+        .find(begin)
+        .ok_or_else(|| anyhow::anyhow!("run-car-probe.sh lost its {begin} marker"))?;
+    let b = FORGE_RUNNER[a..]
+        .find(end)
+        .ok_or_else(|| anyhow::anyhow!("run-car-probe.sh lost its {end} marker"))?;
+    Ok(&FORGE_RUNNER[a..a + b])
+}
+
+/// THE UNRUNNABLE PRELUDE (backlog 46f67333). The forge runner puts this
+/// ahead of every probe's text: fd 9 opened on a not-found channel
+/// before the probe can redirect anything, and a
+/// `command_not_found_handle` that writes every unresolved command to
+/// it — so a probe that pipes its own stderr into a `grep -q` still
+/// cannot hide which tool was missing (f9304366). Until this door ran
+/// the same prelude, a tool absent on the operator's machine read as
+/// CANNOT BE READ or NOT PROVEN here and DID NOT RUN on the forge: a
+/// verdict about the machine recorded as a verdict about the claim, and
+/// the two doors disagreeing about one probe.
+pub(crate) fn forge_prelude() -> Result<&'static str> {
+    forge_block("# PROBE-PRELUDE-BEGIN", "# PROBE-PRELUDE-END")
+}
+
+/// The channel, read as the runner reads it: `sort -u`, blank lines
+/// dropped. Pure, so the record's `missing_tools` is testable without a
+/// shell.
+pub(crate) fn missing_tools(channel: &str) -> Vec<String> {
+    let mut tools: Vec<String> = channel
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    tools.sort_unstable();
+    tools.dedup();
+    tools
+}
+
 /// As [`execute`], but in a stated directory — what `--recheck` uses to
 /// put the probe back where it was recorded.
+///
+/// `bash`, not `sh`, because the prelude's handler is a bash facility
+/// and because the forge runs the same text under `bash -c` — a probe
+/// should mean one thing at both doors. On a bash too old for the
+/// handler (macOS's 3.2) the channel stays empty and the verdict falls
+/// back to what it was: `command not found` on stderr, read as a red.
 pub(crate) fn execute_in(probe: &str, cwd: Option<&Path>) -> Result<Outcome> {
-    let mut cmd = std::process::Command::new("sh");
+    let prelude = forge_prelude()?;
+    // The channel: a file of this process's own, named so two operators
+    // (or two rechecks) on one box never share it. It is created empty
+    // and removed after the read; the prelude opens it for append. As
+    // on the forge, the channel must not be able to take the probe down
+    // with it: a temp dir that refuses the file leaves the env unset,
+    // the prelude falls back to /dev/null, and the probe still runs —
+    // with an empty channel, which reads as today's verdict.
+    let channel = std::env::temp_dir().join(format!(
+        "boss-prove-notfound-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let channel = std::fs::write(&channel, "").is_ok().then_some(channel);
+    let mut cmd = std::process::Command::new("bash");
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
+    if let Some(c) = &channel {
+        cmd.env("BOSS_PROBE_NOTFOUND", c);
+    }
     let out = cmd
         .arg("-c")
-        .arg(probe)
+        .arg(format!("{prelude}\n{probe}"))
         .output()
-        .map_err(|e| anyhow::anyhow!("could not run the probe: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("could not run the probe: {e}"));
+    let caught = channel
+        .as_deref()
+        .map(|c| {
+            let caught = std::fs::read_to_string(c).unwrap_or_default();
+            let _ = std::fs::remove_file(c);
+            caught
+        })
+        .unwrap_or_default();
+    let out = out?;
     Ok(Outcome {
         // A signalled probe reports no code; -1 is recorded rather than
         // silently becoming 0, because "killed" must not read as "passed".
         exit: out.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        missing_tools: missing_tools(&caught),
     })
 }
 
@@ -356,6 +448,15 @@ pub(crate) fn judge_probe(probe: &str, o: &Outcome, expect: Option<&str>) -> Res
 /// three answers apart the same way.
 pub(crate) const NOT_YET_EXIT: i32 = 75;
 
+/// THE EXIT CODE THAT MEANS "COULD NOT RUN HERE" — the forge runner's
+/// third code (46f67333). run-car-probe.sh exits 3 when fd 9 caught a
+/// tool, 75 when the probe ran and said not yet, 1 when it ran and did
+/// not prove: three different things to do about it, so three numbers
+/// for the ops-request to carry. This verb exits the same 3 for the same
+/// finding; `the_hand_door_exits_the_forges_unrunnable_code` reads the
+/// shell line so the two cannot drift.
+pub(crate) const UNRUNNABLE_EXIT: i32 = 3;
+
 /// THE THREE-WAY READING (backlog 726562de). Two doors run a car's
 /// probe, and until 2026-09-14 they read exit 75 in opposite
 /// directions. The forge runner learned the not-yet protocol on
@@ -377,6 +478,14 @@ pub(crate) const NOT_YET_EXIT: i32 = 75;
 /// silent exit (4fccc595) are checked before the code is read, because
 /// in both the 75 is whichever `||` branch caught a probe that never
 /// judged anything.
+///
+/// UNRUNNABLE IS THE FOURTH ARM, and the first one read after the two
+/// rules (46f67333). The forge's verdict block checks fd 9's channel
+/// before anything else — a probe that never resolved its tool has no
+/// exit code worth reading and no streams worth diagnosing — and, like
+/// the forge, this door checks it only on a run the two rules refused:
+/// a probe that lost a tool on a `||` branch and still printed its token
+/// proved the claim at both doors.
 #[derive(Debug)]
 pub(crate) enum Verdict {
     /// Exit 0 and the expectation printed — [`judge`]'s two rules.
@@ -384,22 +493,31 @@ pub(crate) enum Verdict {
     /// Exit 75 with something to say and nothing to diagnose. `said` is
     /// the probe's own not-yet line ([`what_it_said`]).
     NotYet { said: String },
+    /// The not-found channel named a tool: the probe DID NOT RUN, so
+    /// nothing was judged. `missing` is [`Outcome::missing_tools`].
+    Unrunnable { missing: Vec<String> },
     /// Everything else: [`judge_probe`]'s refusal, diagnosis attached.
     NotProven(anyhow::Error),
 }
 
-/// Read one run three ways. See [`Verdict`].
+/// Read one run four ways. See [`Verdict`].
 pub(crate) fn verdict(probe: &str, o: &Outcome, expect: Option<&str>) -> Verdict {
+    let refused = match judge_probe(probe, o, expect) {
+        Ok(()) => return Verdict::Proven,
+        Err(e) => e,
+    };
+    if !o.missing_tools.is_empty() {
+        return Verdict::Unrunnable {
+            missing: o.missing_tools.clone(),
+        };
+    }
     if o.exit == NOT_YET_EXIT
         && failure_diagnosis(probe, o).is_none()
         && let Some(said) = what_it_said(o)
     {
         return Verdict::NotYet { said };
     }
-    match judge_probe(probe, o, expect) {
-        Ok(()) => Verdict::Proven,
-        Err(e) => Verdict::NotProven(e),
-    }
+    Verdict::NotProven(refused)
 }
 
 /// WHAT THE PROBE SAID, in one line: the first non-empty line of
@@ -432,16 +550,35 @@ pub(crate) fn not_yet_why(host: &str, said: &str) -> String {
     )
 }
 
+/// THE DID-NOT-RUN SENTENCE — `proof_attempt.why` when the channel
+/// named a tool, and what the operator reads. Pinned against the forge's
+/// verdict block by `the_forge_runner_gives_the_same_verdict_for_every_outcome`
+/// on the load-bearing text: the lead word, the `on <host>: <tools> not
+/// found` clause a reader acts on, and the disclaimer that this says
+/// nothing about the change. The middle sentence is the door's own —
+/// the forge's names the forge host and its vantage, this one names the
+/// machine the operator is standing at — because what to do instead
+/// differs by door (`boss_jobs::probe`).
+pub(crate) fn unrunnable_why(host: &str, missing: &[String]) -> String {
+    format!(
+        "THE PROBE DID NOT RUN on {host}: {list} not found. It ran HERE, as you, with this \
+         machine's PATH, and bash could not resolve the tool, so nothing about the claim was \
+         judged — the same finding the forge runner records from its fd-9 channel. This says \
+         nothing about whether the change works; re-probe from a vantage this host has, or \
+         record the car as event-bound.",
+        list = missing.join(", ")
+    )
+}
+
 /// THE ATTEMPT RECORD — a run that settled nothing, written on the CAR
 /// (`metadata.proof_attempt`, via the merge-PATCH), never on the step,
 /// which stays open. The shape is the forge runner's, key for key:
 /// `the_hand_door_records_the_forges_attempt_shape` pins the two
 /// records equal, because `--recheck`, `boss orient` and the yard's
 /// shed read one shape and must not learn which door wrote it.
-/// `unrunnable` and `missing_tools` are the forge's fd-9 finding; this
-/// door has no such channel, so it records what the forge records when
-/// the channel is empty — a probe that RAN. `expect` is `null` under
-/// `--exit-only`, as `proof_json` records it.
+/// `unrunnable` and `missing_tools` are the not-found channel's
+/// finding, from whichever door ran the prelude (46f67333). `expect` is
+/// `null` under `--exit-only`, as `proof_json` records it.
 pub(crate) fn attempt_json(
     probe: &str,
     expect: Option<&str>,
@@ -459,11 +596,11 @@ pub(crate) fn attempt_json(
         "probe": probe,
         "expect": expect,
         "why": why,
-        "unrunnable": false,
+        "unrunnable": !o.missing_tools.is_empty(),
         // The flag is the sentence's: a record whose `not_yet` and `why`
         // disagree cannot be written from here.
         "not_yet": why.starts_with("NOT YET"),
-        "missing_tools": [],
+        "missing_tools": o.missing_tools,
     })
 }
 
@@ -1393,6 +1530,15 @@ pub(crate) async fn run(
                 println!("boss prove: --recheck records nothing; `{PROVEN}` stays as it is");
                 std::process::exit(NOT_YET_EXIT)
             }
+            // DID NOT RUN (46f67333): not decay, not "still not proven" —
+            // the claim was not tested either way, which is the fact
+            // 66fd64c6 taught this path to keep separate. Exit 3, as the
+            // forge does.
+            (Verdict::Unrunnable { missing }, _) => {
+                println!("boss prove: {}", unrunnable_why(&here, &missing));
+                println!("boss prove: --recheck records nothing; `{PROVEN}` stays as it is");
+                std::process::exit(UNRUNNABLE_EXIT)
+            }
             (Verdict::NotProven(e), Source::Proof) => bail!(
                 "NO LONGER HOLDS — {short} was proven once and is not true now.\n\n{e}\n\n\
                  A proof can decay honestly: a step-plugin ConfigMap preview survives \
@@ -1485,6 +1631,36 @@ pub(crate) async fn run(
     match verdict(&probe, &o, expect.as_deref()) {
         Verdict::Proven => {}
         Verdict::NotProven(e) => return Err(e),
+        // DID NOT RUN (46f67333): the channel named a tool this machine
+        // lacks, so nothing about the claim was judged — not a verdict
+        // against it, and not a proof. What lands is the forge's record
+        // from this door: `proof_attempt{unrunnable:true, missing_tools}`
+        // on the car, `proven` untouched, exit 3 as the forge exits.
+        Verdict::Unrunnable { missing } => {
+            let here = host();
+            let why = unrunnable_why(&here, &missing);
+            println!("boss prove: {why}");
+            let step_status = target.get("status").and_then(Value::as_str).unwrap_or("?");
+            if dry {
+                println!(
+                    "boss prove: DRY — would record this as proof_attempt on {short}; \
+                     `{PROVEN}` stays {step_status}"
+                );
+                std::process::exit(UNRUNNABLE_EXIT);
+            }
+            let attempt = attempt_json(&probe, expect.as_deref(), &o, &here, &at, &why);
+            crate::gate::api(
+                &http,
+                reqwest::Method::PATCH,
+                &format!("/api/jobs/{car_id}/metadata"),
+                Some(json!({"proof_attempt": attempt})),
+            )
+            .await?;
+            println!(
+                "boss prove: proof_attempt recorded on {short}; `{PROVEN}` stays {step_status}"
+            );
+            std::process::exit(UNRUNNABLE_EXIT);
+        }
         // NOT YET (726562de): the probe ran and said the claim cannot be
         // judged until something happens. Not a verdict against the
         // change, so nothing is refused — and not a proof, so nothing
@@ -1617,6 +1793,7 @@ mod tests {
             exit: 0,
             stdout: stdout.into(),
             stderr: String::new(),
+            missing_tools: Vec::new(),
         }
     }
 
@@ -1627,6 +1804,7 @@ mod tests {
             exit: 1,
             stdout: "nope".into(),
             stderr: "boom".into(),
+            missing_tools: Vec::new(),
         };
         let e = judge(&o, None).unwrap_err().to_string();
         assert!(e.contains("exited 1"), "{e}");
@@ -1643,6 +1821,7 @@ mod tests {
             exit: -1,
             stdout: String::new(),
             stderr: String::new(),
+            missing_tools: Vec::new(),
         };
         assert!(
             judge(&o, None).is_err(),
@@ -1667,6 +1846,7 @@ mod tests {
             exit: 0,
             stdout: String::new(),
             stderr: "MARKER present".into(),
+            missing_tools: Vec::new(),
         };
         assert!(
             judge(&o, Some("MARKER")).is_ok(),
@@ -1804,7 +1984,7 @@ mod tests {
     /// own matcher out and runs both sides against one table.
     #[test]
     fn the_forge_runner_judges_an_expectation_the_same_way() {
-        const SH: &str = include_str!("../../../../infra/forge/run-car-probe.sh");
+        const SH: &str = FORGE_RUNNER;
         const START: &str = "# --- expectation-match";
         const END: &str = "# --- end expectation-match";
         let a = SH
@@ -1866,7 +2046,7 @@ mod tests {
     /// a machine-written proof it cannot re-run.
     #[test]
     fn the_forge_runner_records_the_same_proof_shape() {
-        const SH: &str = include_str!("../../../../infra/forge/run-car-probe.sh");
+        const SH: &str = FORGE_RUNNER;
         let p = proof_json("true", Some("x"), &ok("x"), "h", "now", None);
         for k in p.as_object().unwrap().keys() {
             assert!(
@@ -2035,6 +2215,7 @@ mod tests {
             exit: 0,
             stdout: "ok".into(),
             stderr: String::new(),
+            missing_tools: Vec::new(),
         };
         let proof = proof_json(
             "echo ok",
@@ -2369,6 +2550,7 @@ mod tests {
             exit: 0,
             stdout: String::new(),
             stderr: String::new(),
+            missing_tools: Vec::new(),
         };
         let first = proof_json("old-probe", None, &o, "h", "2026-08-29T00:00:00Z", None);
         let better = proof_json("better-probe", None, &o, "h", "2026-08-30T00:00:00Z", None);
@@ -2728,6 +2910,7 @@ mod tests {
             exit: 1,
             stdout: String::new(),
             stderr: String::new(),
+            missing_tools: Vec::new(),
         };
         let d = failure_diagnosis("some-command --quiet", &o).expect("silence is diagnosable");
         assert!(
@@ -2749,6 +2932,7 @@ mod tests {
             exit: 1,
             stdout: "CLAIM FAILS for maintenance-backup (jq exit 5)".into(),
             stderr: String::new(),
+            missing_tools: Vec::new(),
         };
         assert!(
             failure_diagnosis(
@@ -2784,6 +2968,7 @@ mod tests {
             exit,
             stdout: "not yet: none\n".into(),
             stderr: stderr.into(),
+            missing_tools: Vec::new(),
         }
     }
 
@@ -2845,12 +3030,14 @@ mod tests {
             exit: 75,
             stdout: "not yet: no disk-report request carrying for_sweep yet\n".into(),
             stderr: String::new(),
+            missing_tools: Vec::new(),
         };
         assert!(failure_diagnosis(NULL_COUNT_PROBE, &o).is_none());
         let o = Outcome {
             exit: 1,
             stdout: String::new(),
             stderr: "curl: (7) Failed to connect\n".into(),
+            missing_tools: Vec::new(),
         };
         assert!(failure_diagnosis(NULL_COUNT_PROBE, &o).is_none());
     }
@@ -2914,6 +3101,9 @@ mod tests {
                 exit: self.rc,
                 stdout: self.stdout.into(),
                 stderr: self.stderr.into(),
+                // The runner's `missing_list` is the channel joined with
+                // ", "; this door carries the channel itself.
+                missing_tools: missing_tools(&self.missing_tools.replace(", ", "\n")),
             }
         }
     }
@@ -2923,14 +3113,7 @@ mod tests {
     /// opening marker rides along: every marker is a whole comment
     /// line, or the head of one.
     fn forge_block(begin: &str, end: &str) -> &'static str {
-        const SH: &str = include_str!("../../../../infra/forge/run-car-probe.sh");
-        let a = SH
-            .find(begin)
-            .unwrap_or_else(|| panic!("run-car-probe.sh lost its {begin} marker"));
-        let b = SH[a..]
-            .find(end)
-            .unwrap_or_else(|| panic!("run-car-probe.sh lost its {end} marker"));
-        &SH[a..a + b]
+        super::forge_block(begin, end).unwrap_or_else(|e| panic!("{e}"))
     }
 
     /// The forge runner's judgement of one run: `ok` from its judge
@@ -2975,32 +3158,14 @@ mod tests {
     }
 
     /// A probe as the forge's shell runs it: the runner's PROBE-PRELUDE
-    /// ahead of the text, fd 9 pointed at a not-found channel. Returns
-    /// the outcome and the channel's contents joined the way the runner
-    /// joins `missing_list` — the one input `boss prove` never has.
-    fn run_as_the_forge_would(case: &str, probe: &str) -> (Outcome, String) {
-        let dir = boss_testing::scratch::scratch_dir(case);
-        let notfound = dir.join("notfound");
-        std::fs::write(&notfound, "").unwrap();
-        let prelude = forge_block("# PROBE-PRELUDE-BEGIN", "# PROBE-PRELUDE-END");
-        let out = std::process::Command::new("bash")
-            .arg("-c")
-            .arg(format!("{prelude}\n{probe}"))
-            .env("BOSS_PROBE_NOTFOUND", &notfound)
-            .output()
-            .expect("bash runs the probe");
-        let caught = std::fs::read_to_string(&notfound).unwrap();
-        let mut missing: Vec<&str> = caught.lines().filter(|l| !l.is_empty()).collect();
-        missing.sort_unstable();
-        missing.dedup();
-        (
-            Outcome {
-                exit: out.status.code().unwrap_or(-1),
-                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-            },
-            missing.join(", "),
-        )
+    /// ahead of the text, fd 9 pointed at a not-found channel. Since
+    /// 46f67333 that is what `execute` IS, so this runs the door itself
+    /// and returns the channel joined the way the runner joins
+    /// `missing_list` — the input the shell side of the pin is fed.
+    fn run_as_the_forge_would(probe: &str) -> (Outcome, String) {
+        let o = execute(probe).expect("bash runs the probe");
+        let list = o.missing_tools.join(", ");
+        (o, list)
     }
 
     /// The ALL-CAPS verdict words this door can lead with — the three
@@ -3009,11 +3174,12 @@ mod tests {
     /// be led with another of these by the shell — a verdict one door
     /// invents and the other does not is the two-sentence defect in a
     /// new coat, and NOT YET against NOT PROVEN was the measured one.
-    const VERDICT_WORDS: [&str; 4] = [
+    const VERDICT_WORDS: [&str; 5] = [
         "THE PROBE CRASHED",
         "THE FAILURE CANNOT BE READ",
         "THE PROBE IS SELF-CONTRADICTORY",
         "NOT YET",
+        "THE PROBE DID NOT RUN",
     ];
 
     /// One outcome, judged by both authors, and the phrases the two
@@ -3044,11 +3210,13 @@ mod tests {
     /// So every branch is run through both, on ONE record each, and the
     /// load-bearing phrases are asserted shared. The Rust wording is the
     /// reference (it has the unit tests); where the shell disagreed it
-    /// was changed to match. One branch is deliberately NOT equalised
-    /// and is pinned as such instead: unrunnable, because its input (fd
-    /// 9's not-found channel) exists only on the forge — this door sees
-    /// bash's `command not found` on stderr and nothing more, so both
-    /// name the tool and neither diagnoses.
+    /// was changed to match. One branch was deliberately NOT equalised
+    /// at first and pinned as an asymmetry instead: unrunnable, because
+    /// its input (fd 9's not-found channel) existed only on the forge.
+    /// Since 46f67333 this door runs the same prelude, `execute` carries
+    /// the channel on the outcome, and the branch is pinned like the
+    /// rest — lead word, the `on <host>: <tool> not found` clause, and
+    /// the disclaimer.
     ///
     /// NOT-YET WAS THE OTHER EXCEPTION, and the pin documented it as an
     /// asymmetry it could not resolve as wording: this door had no
@@ -3059,10 +3227,8 @@ mod tests {
     /// verdict block composes, lead word and reason clause alike.
     #[test]
     fn the_forge_runner_gives_the_same_verdict_for_every_outcome() {
-        let (missing_tool, missing_list) = run_as_the_forge_would(
-            "prove-forge-verdict-missing-tool",
-            "kubectl-no-such-tool get pods -A && echo pods:ok",
-        );
+        let (missing_tool, missing_list) =
+            run_as_the_forge_would("kubectl-no-such-tool get pods -A && echo pods:ok");
         assert_eq!(missing_list, "kubectl-no-such-tool", "fd 9 caught the tool");
         let cases = [
             SameVerdict {
@@ -3096,8 +3262,12 @@ mod tests {
                     missing_tools: &missing_list,
                     expect: "pods:ok",
                 },
-                diagnosis: None,
-                agree: &["kubectl-no-such-tool", "not found"],
+                diagnosis: Some("THE PROBE DID NOT RUN"),
+                agree: &[
+                    "THE PROBE DID NOT RUN",
+                    "on david-asus-minipc: kubectl-no-such-tool not found",
+                    "This says nothing about whether the change works",
+                ],
             },
             SameVerdict {
                 case: "cannot-be-read",
@@ -3198,10 +3368,19 @@ mod tests {
                     let w = not_yet_why("david-asus-minipc", &said);
                     (w.clone(), Some(w))
                 }
-                Verdict::NotProven(e) => {
-                    assert_ne!(
+                Verdict::Unrunnable { missing } => {
+                    assert_eq!(
                         c.diagnosis,
-                        Some("NOT YET"),
+                        Some("THE PROBE DID NOT RUN"),
+                        "{}: read as unrunnable",
+                        c.case
+                    );
+                    let w = unrunnable_why("david-asus-minipc", &missing);
+                    (w.clone(), Some(w))
+                }
+                Verdict::NotProven(e) => {
+                    assert!(
+                        !matches!(c.diagnosis, Some("NOT YET" | "THE PROBE DID NOT RUN")),
                         "{}: read as NOT PROVEN",
                         c.case
                     );
@@ -3380,6 +3559,7 @@ mod tests {
             exit: NOT_YET_EXIT,
             stdout: "not yet: no disk-report request carrying for_sweep yet\n".into(),
             stderr: String::new(),
+            missing_tools: Vec::new(),
         };
         let Verdict::NotYet { said } = verdict(NULL_COUNT_PROBE, &o, Some("sweep-measured:ok"))
         else {
@@ -3429,6 +3609,7 @@ mod tests {
             exit: 75,
             stdout: String::new(),
             stderr: String::new(),
+            missing_tools: Vec::new(),
         };
         let Verdict::NotProven(e) = verdict("some-command --quiet", &o, Some("x:ok")) else {
             panic!("silence is a missing record, not a not-yet");
@@ -3447,6 +3628,7 @@ mod tests {
             exit: 1,
             stdout: "CLAIM FAILS (jq exit 5)\n".into(),
             stderr: String::new(),
+            missing_tools: Vec::new(),
         };
         let Verdict::NotProven(e) = verdict("true", &red, Some("x:ok")) else {
             panic!("exit 1 is still a refusal");
@@ -3463,18 +3645,21 @@ mod tests {
             exit: 75,
             stdout: "\n  not yet: from stdout\nmore\n".into(),
             stderr: String::new(),
+            missing_tools: Vec::new(),
         };
         assert_eq!(what_it_said(&o).as_deref(), Some("not yet: from stdout"));
         let o = Outcome {
             exit: 75,
             stdout: "not yet: from stdout\n".into(),
             stderr: "\ncurl: (7) refused\n".into(),
+            missing_tools: Vec::new(),
         };
         assert_eq!(what_it_said(&o).as_deref(), Some("curl: (7) refused"));
         let o = Outcome {
             exit: 75,
             stdout: "  \n".into(),
             stderr: String::new(),
+            missing_tools: Vec::new(),
         };
         assert_eq!(what_it_said(&o), None);
     }
@@ -3487,7 +3672,7 @@ mod tests {
     /// missing tools) are recorded as the forge records "none".
     #[test]
     fn the_hand_door_records_the_forges_attempt_shape() {
-        const SH: &str = include_str!("../../../../infra/forge/run-car-probe.sh");
+        const SH: &str = FORGE_RUNNER;
         let sh_attempt = SH
             .split_once("attempt=$(jq -cn")
             .expect("run-car-probe.sh builds a proof_attempt record")
@@ -3508,6 +3693,7 @@ mod tests {
             exit: 75,
             stdout: "not yet: none\n".into(),
             stderr: String::new(),
+            missing_tools: Vec::new(),
         };
         let a = attempt_json("true", Some("x:ok"), &o, "h", "now", "NOT YET: none");
         let rs_keys: std::collections::BTreeSet<&str> =
@@ -3527,10 +3713,146 @@ mod tests {
             exit: 1,
             stdout: "CLAIM FAILS\n".into(),
             stderr: String::new(),
+            missing_tools: Vec::new(),
         };
         assert_eq!(
             attempt_json("true", Some("x:ok"), &red, "h", "now", "why")["not_yet"],
             false
+        );
+        // AND THE UNRUNNABLE ONE (46f67333): the channel's finding rides
+        // the record under the forge's two keys, so the yard, orient and
+        // the daily recheck read "did not run" from either door.
+        let unrun = Outcome {
+            exit: 127,
+            stdout: String::new(),
+            stderr: "bash: line 9: kubectl: command not found\n".into(),
+            missing_tools: vec!["kubectl".into()],
+        };
+        let a = attempt_json("kubectl get pods", Some("x:ok"), &unrun, "h", "now", "why");
+        assert_eq!(a["unrunnable"], true);
+        assert_eq!(a["missing_tools"], json!(["kubectl"]));
+        assert_eq!(a["not_yet"], false);
+    }
+
+    // -----------------------------------------------------------------
+    // THE UNRUNNABLE PRELUDE, AT THIS DOOR (backlog 46f67333)
+    // -----------------------------------------------------------------
+
+    /// THE MEASURED ASYMMETRY. The forge runner runs every probe behind
+    /// a `command_not_found_handle` writing to fd 9 and records DID NOT
+    /// RUN with the tool named; this door ran `sh -c` and read the same
+    /// run as CANNOT BE READ or NOT PROVEN — a verdict about the
+    /// operator's machine recorded as a verdict about the claim. Now the
+    /// probe runs behind the forge's own prelude here too, so a tool the
+    /// PATH lacks is a finding on the record, not a red.
+    #[test]
+    fn a_probe_naming_a_tool_the_path_lacks_did_not_run() {
+        let stub = boss_testing::scratch::scratch_dir("prove-stub-path");
+        let probe = format!(
+            "export PATH={}; kubectl get pods -A && echo pods:ok",
+            stub.display()
+        );
+        let o = execute(&probe).unwrap();
+        assert_eq!(
+            o.missing_tools,
+            vec!["kubectl".to_string()],
+            "the channel names the tool bash could not resolve: {o:?}"
+        );
+        assert!(
+            o.stderr.contains("kubectl: command not found"),
+            "bash's own message still reaches stderr: {}",
+            o.stderr
+        );
+        let Verdict::Unrunnable { missing } = verdict(&probe, &o, Some("pods:ok")) else {
+            panic!("a missing tool is DID NOT RUN, not a verdict on the claim: {o:?}")
+        };
+        assert_eq!(missing, vec!["kubectl".to_string()]);
+        let why = unrunnable_why("pod-7", &missing);
+        assert!(
+            why.starts_with("THE PROBE DID NOT RUN on pod-7: kubectl not found."),
+            "{why}"
+        );
+        assert!(
+            !why.contains("CANNOT BE READ") && !why.contains("NOT PROVEN"),
+            "the two verdicts about the claim must not appear: {why}"
+        );
+        let a = attempt_json(&probe, Some("pods:ok"), &o, "pod-7", "now", &why);
+        assert_eq!(a["unrunnable"], true);
+        assert_eq!(a["missing_tools"], json!(["kubectl"]));
+        assert_eq!(a["not_yet"], false);
+    }
+
+    /// A probe whose tools are present is judged exactly as before: the
+    /// channel is empty, and the two rules decide.
+    #[test]
+    fn a_probe_whose_tools_are_present_is_judged_as_today() {
+        let green = execute("echo pods:ok").unwrap();
+        assert!(green.missing_tools.is_empty(), "{green:?}");
+        assert!(matches!(
+            verdict("echo pods:ok", &green, Some("pods:ok")),
+            Verdict::Proven
+        ));
+        let red = execute("echo CLAIM FAILS; exit 1").unwrap();
+        assert!(red.missing_tools.is_empty(), "{red:?}");
+        let Verdict::NotProven(e) = verdict("echo CLAIM FAILS; exit 1", &red, Some("pods:ok"))
+        else {
+            panic!("a false claim is still NOT PROVEN")
+        };
+        assert!(
+            !e.to_string().contains("DID NOT RUN"),
+            "a false claim must not look unrunnable: {e}"
+        );
+        // A NOT-YET probe is still read as not-yet, prelude and all.
+        let ny = execute("echo 'not yet: nothing filed'; exit 75").unwrap();
+        assert!(matches!(
+            verdict("true", &ny, Some("x:ok")),
+            Verdict::NotYet { .. }
+        ));
+    }
+
+    /// The channel is read the way the runner reads it — `sort -u` —
+    /// so a tool a probe fails to find three times is named once, and
+    /// the empty lines a `>>` append can leave are not tools.
+    #[test]
+    fn missing_tools_is_the_channel_sorted_and_deduplicated() {
+        assert_eq!(
+            missing_tools("kubectl\nboss\nkubectl\n\nboss\n"),
+            vec!["boss".to_string(), "kubectl".to_string()]
+        );
+        assert!(missing_tools("").is_empty());
+        assert!(missing_tools("\n\n").is_empty());
+    }
+
+    /// THE EXIT CODE IS THE FORGE'S. run-car-probe.sh exits 3 for "could
+    /// not run here" — told apart from 75 (ran, not yet) and 1 (ran, did
+    /// not prove) so the ops-request carries three different things to
+    /// do. This verb exits the same number for the same reason, and the
+    /// two live twice, so the shell line is read here (CLAUDE.md §9a).
+    #[test]
+    fn the_hand_door_exits_the_forges_unrunnable_code() {
+        const SH: &str = FORGE_RUNNER;
+        assert!(
+            SH.contains(&format!(
+                "[[ \"$unrunnable\" == true ]] && exit {UNRUNNABLE_EXIT}"
+            )),
+            "run-car-probe.sh no longer exits {UNRUNNABLE_EXIT} for an unrunnable probe"
+        );
+        assert_ne!(UNRUNNABLE_EXIT, NOT_YET_EXIT);
+        assert_ne!(UNRUNNABLE_EXIT, 1);
+    }
+
+    /// The prelude this door runs IS the runner's — lifted between the
+    /// same markers boss-testing's run_car_probe_sh.rs lifts, never
+    /// restated — so a change to the handler on the forge is a change
+    /// here in the same commit.
+    #[test]
+    fn the_hand_door_runs_the_forges_own_prelude() {
+        let prelude = forge_prelude().unwrap();
+        assert!(prelude.contains("command_not_found_handle()"), "{prelude}");
+        assert!(prelude.contains("BOSS_PROBE_NOTFOUND"), "{prelude}");
+        assert_eq!(
+            prelude,
+            forge_block("# PROBE-PRELUDE-BEGIN", "# PROBE-PRELUDE-END")
         );
     }
 

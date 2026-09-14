@@ -1017,6 +1017,61 @@ async fn a_recent_board_firing_reads_as_a_cooldown_hold_with_the_minutes_left() 
     );
 }
 
+/// 43fb424f, measured 2026-09-14 off the live yard: train 33eaad45
+/// boarded at 18:06:11 on the 18:05 clock window, train d078acd2 at
+/// 18:22:09 on the depth rule — 16 min apart under the "min 45 min
+/// between boards" the summary stated. The conductor paces each rule on
+/// its OWN last firing, so the two boards were both legal; the yard
+/// read `last_board_at` from the depth rule alone, so the clock board
+/// never appeared (at 18:06 the block still showed 17:26:57), and the
+/// sentence claimed a spacing the track does not keep. Now the handler
+/// reads BOTH board rules' firings: the last board is the newest of the
+/// two, the cooldown stays measured on the depth rule's, and the block
+/// says whose cooldown it is.
+#[tokio::test]
+async fn a_clock_window_board_is_the_last_board_while_the_cooldown_stays_the_depth_rules() {
+    let mut d = depth_rule();
+    d.min_dock_depth = Some(2);
+    let cadence = InMemoryCadence::new(vec![d, clock_rule()]);
+    // The depth rule boarded 33 min before NOW; the clock window boarded
+    // 5 min before NOW, newer.
+    fire(
+        &cadence,
+        "train-board-on-dock-depth",
+        "board",
+        "2026-09-03T11:27:00Z",
+        Some(0),
+    )
+    .await;
+    fire(
+        &cadence,
+        "train-window",
+        "run",
+        "2026-09-03T11:55:00Z",
+        Some(0),
+    )
+    .await;
+    let (app, jobs) = app_with_cadence(cadence, vec![policy_row()]);
+    seed_dock_only(&jobs).await;
+    let (status, body) = get(&app, "operator").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let b = &body["boarding"];
+    // The last board is the clock window's …
+    assert_eq!(b["last_board_at"], "2026-09-03T11:55:00Z", "{b}");
+    // … the cooldown is the depth rule's (120 − 33 = 87), not the clock
+    // board's 115 …
+    assert_eq!(b["cooldown_remaining_minutes"], 87, "{b}");
+    assert_eq!(b["cooldown_rule"], "train-board-on-dock-depth", "{b}");
+    // … and the sentence names the rule the minimum belongs to.
+    let summary = b["summary"].as_str().unwrap();
+    assert!(
+        summary.contains("(min 120 min between depth-rule boards)"),
+        "{summary}"
+    );
+    assert!(!summary.contains("between boards)"), "{summary}");
+}
+
 /// The single track is the hold the conductor checks first: a train
 /// still before its merge holds the dock before its depth does, and the
 /// sentence still names the depth that has to follow. The seed's own

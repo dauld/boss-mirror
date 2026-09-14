@@ -2,10 +2,10 @@
 //! rule rows over generic handlers (job 2c4ae549, migration 117).
 //!
 //! Everything here loads the registry the way the service does —
-//! `seed_authored_rules` publishes `infra/dispatcher/rules/` into the
-//! `dispatcher_rules` table (the dispatcher's boot step since the
-//! collapse, 41ba00cd), then `load_active_rules` + `Registry::from_raw`
-//! — and drives `match_event` → `dispatch` with `RecordingHandler`
+//! `common::shipped_registry`: `seed_authored_rules` publishes
+//! `infra/dispatcher/rules/` into the `dispatcher_rules` table (the
+//! dispatcher's boot step since the collapse, 41ba00cd), then
+//! `load_active_rules` + `Registry::from_raw` — and drives `match_event` → `dispatch` with `RecordingHandler`
 //! standing in for the HTTP handlers. So the assertions are about what
 //! the AUTHORED rules do, not about a fixture copy of them, and not
 //! about the rows the migrations happen to leave: a fresh TestDb holds
@@ -37,33 +37,16 @@
 
 use boss_dispatcher::rules::expr::{EvalError, HelperResolver, Value};
 use boss_dispatcher::rules::handler::{HandlerRegistry, RecordingHandler, dispatch};
-use boss_dispatcher::rules::registry::{MatchedRule, Registry, load_active_rules, match_event};
-use boss_dispatcher::rules::seed::seed_authored_rules;
+use boss_dispatcher::rules::registry::{MatchedRule, match_event};
 use boss_jobs::registry::{feedback_branch_for_disposition, seedable_platform_workflows};
 use boss_testing::TestDb;
 use serde_json::json;
 
+mod common;
+use common::shipped_registry;
+
 const COMPLETE_RULE: &str = "complete-feedback-branch-on-car-merged";
 const NOTIFY_RULE: &str = "notify-filer-on-feedback-terminal";
-
-/// The authored registry: the directory the dispatcher seeds at boot.
-const RULES_DIR: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../../infra/dispatcher/rules"
-);
-
-/// Load the shipped registry through the production path: seed the
-/// authored directory over whatever the migrations left, then read the
-/// active rows back.
-async fn shipped_registry(db: &TestDb) -> Registry {
-    seed_authored_rules(&db.pool, RULES_DIR)
-        .await
-        .expect("seed the authored rule directory");
-    let raw = load_active_rules(&db.pool)
-        .await
-        .expect("load active rules from dispatcher_rules");
-    Registry::from_raw(raw).expect("the shipped rows parse")
-}
 
 /// A `jobs.job.closed` marker in the shape all three emit sites
 /// produce: every key present, null where there is no answer.

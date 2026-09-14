@@ -282,6 +282,47 @@ async fn a_metadata_document_that_is_not_flat_strings_is_refused_naming_the_rule
     assert_eq!(body["total"], 2);
 }
 
+/// A JSON object holds a key once, so `{"branch":"feat/x","branch":
+/// "feat/y"}` parsed the ordinary way is `{"branch":"feat/y"}` — the
+/// first value gone without a word, and a caller who meant an AND of
+/// two values answered with one. Until 2026-09-14 this door did exactly
+/// that while `boss job list --where` refused the same request, so the
+/// two doors disagreed on the one input the containment rule cannot
+/// see once the text is a `Value` (backlog 03852b47). The wire text is
+/// where a repeat is visible, so it is refused there, with the rule and
+/// the key named.
+#[tokio::test]
+async fn a_metadata_document_with_a_repeated_key_is_refused_naming_the_key() {
+    let (app, jobs) = app();
+    seed(&jobs).await;
+
+    // {"branch":"feat/x","branch":"feat/y"} — kept-last would answer
+    // "another car" with a 200, which is what this test is against.
+    let doc = "%7B%22branch%22%3A%22feat%2Fx%22%2C%22branch%22%3A%22feat%2Fy%22%7D";
+    let (status, body) = get(&app, &format!("kind=ship-a-change&metadata={doc}")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.contains("flat") && body.contains("string"),
+        "the 400 must name the containment rule, got: {body}"
+    );
+    assert!(
+        body.contains("\"branch\"") && body.contains("repeated"),
+        "the 400 must name the repeated key, got: {body}"
+    );
+
+    // The same key spelled two ways in JSON is still one key once
+    // decoded: {"branch":"feat/x","branch":"feat/y"}.
+    let doc = "%7B%22branch%22%3A%22feat%2Fx%22%2C%22%5Cu0062ranch%22%3A%22feat%2Fy%22%7D";
+    let (status, body) = get(&app, &format!("kind=ship-a-change&metadata={doc}")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("repeated"), "{body}");
+
+    // A document with distinct keys is unchanged by the refusal.
+    let doc = "%7B%22branch%22%3A%22feat%2Fy%22%2C%22outcome%22%3A%22arrived%22%7D";
+    let body = list(&app, &format!("kind=ship-a-change&metadata={doc}")).await;
+    assert_eq!(titles(&body), vec!["another car".to_string()]);
+}
+
 /// `metadata_has` is a top-level key — letters, digits, underscore. The
 /// SQL behind it is `metadata ? $n`, which only reads top-level keys,
 /// so a dotted path would silently match nothing; refuse it instead.

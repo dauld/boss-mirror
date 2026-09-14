@@ -1,4 +1,4 @@
-//! `complete-feedback-branch-on-car-merged` v3 (migration
+//! `complete-feedback-branch-on-car-merged` from v3 (migration
 //! 202609082000) — a landed car advances the backlog item it was
 //! parked against (dda0713c).
 //!
@@ -11,26 +11,31 @@
 //! adds a `route` arg: the routing the obligation may make, as data,
 //! scoped to the kind whose triage vocabulary it speaks.
 //!
-//! Pins the row as authored — expression + args verbatim from the
-//! migration — the way converge_on_merge_rule.rs pins its own: a
-//! merged close selects it and the route resolves; an abandoned close
-//! does not select it at all.
+//! Pins the row AS THE FILE AUTHORS IT — `infra/dispatcher/rules/`, the
+//! directory the dispatcher boots from — not a copy of it: a merged
+//! close selects it and the backlog-item route resolves; an abandoned
+//! close does not select it at all. Until 2026-09-14 the TOML was
+//! inlined here "verbatim from the migration", and when v4 turned
+//! `route` into a list the copy kept saying object and kept passing
+//! (backlog 488cadca). The per-kind vocabulary check against the live
+//! Workflows is feedback_obligation_rules.rs's job; this file is about
+//! selection and the shape of the one route it was written for.
 
 use boss_dispatcher::rules::expr::{NoHelpers, Value};
 use boss_dispatcher::rules::registry::{Registry, match_event};
 
-/// The migration row, expressed as the same TOML the registry loader
-/// accepts — expression + args verbatim from 202609082000.
-const RULE: &str = r#"
-[[rule]]
-name = "complete-feedback-branch-on-car-merged"
-version = 3
-on_event = "jobs.job.closed"
-when = "kind = \"ship-a-change\" AND outcome = \"merged\""
-[[rule.do]]
-handler = "jobs.complete_linked_step"
-args = { link = "\"backlog_item\"", steps = "\"investigate,design-review,build\"", done_metadata = '"{\"verdict\": \"approved\", \"answer\": \"shipped: {branch} — {title}\"}"', route = '"{\"kind\": \"backlog-item\", \"step\": \"triage\", \"metadata\": {\"disposition\": \"build\", \"evidence\": \"shipped and proven: {branch} — {title} (car {car})\"}}"' }
-"#;
+mod common;
+
+/// The rule as the dispatcher boots it: its file under
+/// `infra/dispatcher/rules/`, not a copy. Until 2026-09-14 this was an
+/// inline TOML literal of the v3 row (backlog 488cadca) — a second copy
+/// of rule text (CLAUDE.md §9a) that still said `route` was one object
+/// after v4 made it a list, and passed.
+const RULE: &str = "complete-feedback-branch-on-car-merged";
+
+fn rule() -> Registry {
+    common::authored_rule(RULE)
+}
 
 fn close_marker(kind: &str, outcome: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
@@ -52,7 +57,7 @@ fn arg_of(args: &[(String, Value)], k: &str) -> String {
 
 #[test]
 fn a_proven_car_fires_the_obligation_with_a_route_for_backlog_items() {
-    let reg = Registry::from_toml(RULE).expect("rule parses");
+    let reg = rule();
     let payload = close_marker("ship-a-change", serde_json::json!("merged"));
     let hits = match_event(&reg, "jobs.job.closed", &payload, &NoHelpers).matched;
     assert_eq!(hits.len(), 1, "a merged car fires exactly one obligation");
@@ -62,15 +67,22 @@ fn a_proven_car_fires_the_obligation_with_a_route_for_backlog_items() {
     assert_eq!(arg_of(args, "link"), "backlog_item");
     assert_eq!(arg_of(args, "steps"), "investigate,design-review,build");
 
-    // The route is a JSON object naming the kind it may route, the
-    // routing step, and the completion vocabulary that step requires
-    // at done — `disposition` (the fork) and `evidence` (the record).
-    let route: serde_json::Value =
-        serde_json::from_str(&arg_of(args, "route")).expect("route parses as JSON");
-    assert_eq!(
-        route["kind"], "backlog-item",
-        "scoped to the backlog item protocol"
-    );
+    // The route names the kind it may route, the routing step, and the
+    // completion vocabulary that step requires at done — `disposition`
+    // (the fork) and `evidence` (the record). v3 shipped it as one
+    // object; v4 (1c704bb8) made it a LIST, one entry per kind, and the
+    // handler accepts both — so this reads both, and asks for the
+    // backlog-item entry by name rather than assuming it is the only one.
+    let routes: Vec<serde_json::Value> =
+        match serde_json::from_str(&arg_of(args, "route")).expect("route parses as JSON") {
+            serde_json::Value::Array(list) => list,
+            one @ serde_json::Value::Object(_) => vec![one],
+            other => panic!("route is neither a list nor an object: {other}"),
+        };
+    let route = routes
+        .iter()
+        .find(|r| r["kind"] == "backlog-item")
+        .unwrap_or_else(|| panic!("no route is scoped to the backlog item protocol: {routes:?}"));
     assert_eq!(route["step"], "triage");
     assert_eq!(route["metadata"]["disposition"], "build");
     let evidence = route["metadata"]["evidence"].as_str().unwrap_or_default();
@@ -87,7 +99,7 @@ fn a_proven_car_fires_the_obligation_with_a_route_for_backlog_items() {
 
 #[test]
 fn an_abandoned_car_does_not_fire_the_obligation() {
-    let reg = Registry::from_toml(RULE).expect("rule parses");
+    let reg = rule();
     for outcome in [serde_json::json!("abandoned"), serde_json::json!(null)] {
         let payload = close_marker("ship-a-change", outcome.clone());
         let hits = match_event(&reg, "jobs.job.closed", &payload, &NoHelpers).matched;
