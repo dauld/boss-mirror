@@ -221,6 +221,16 @@ fi
 # script's own, because the converge's fallback is not this verb's.
 BOSS_CONVERGE_NAME="$ME" read_node_roles "$NODE_ID" > "$TMP/roles.note" 2>&1
 sed 's/^/  /' "$TMP/roles.note"
+# The reader's fallback for a dark registry (its last cached read, else
+# the sentinel `registry-unread`) keeps a CONVERGE converging; it is not
+# a reading this verb may act on. Only a live answer evaluates the
+# bound — anything else is a refusal, never a pass. The source is asked
+# explicitly because the sentinel is a non-empty string: an emptiness
+# check alone read it as a declaration and stopped the stack under a
+# dark registry, on the train gate of 2026-09-14 16:41.
+if [ "${BOSS_NODE_ROLES_SOURCE:-registry}" != "registry" ]; then
+    refuse "$NODE_ID's roles did not come from a live read of the estate registry (source: ${BOSS_NODE_ROLES_SOURCE}, roles: ${BOSS_NODE_ROLES:-}), so the legacy-stack bound cannot be evaluated. A bound that cannot be evaluated is not passed. Nothing was stopped."
+fi
 if [ -z "${BOSS_NODE_ROLES:-}" ]; then
     refuse "$NODE_ID's roles could not be read from the estate registry (or it declares none), so the legacy-stack bound cannot be evaluated. A bound that cannot be evaluated is not passed. Nothing was stopped."
 fi
