@@ -62,18 +62,80 @@ fn a_preset_roles_list_wins_and_an_unreachable_registry_leaves_it_empty() {
         "a caller's preset list is not overwritten by a read: {out}"
     );
 
+    // A dark registry with NO cache to fall back on: the read installs
+    // [always] only — a sentinel no roles.toml section matches — never
+    // every row. Widening what a host runs on a failed read was the
+    // hazard 6cd124c4 filed the day boss-gcp stopped declaring the
+    // legacy stack.
+    let cache = boss_testing::scratch_dir("node-roles-nocache").join("roles.cache");
+    let _ = std::fs::remove_file(&cache);
     let (rc, out) = sh(
         "read_node_roles forge; echo \"roles=<$BOSS_NODE_ROLES>\"",
-        &[("BOSS_ESTATE_NODES_URL", "http://127.0.0.1:9/never")],
+        &[
+            ("BOSS_ESTATE_NODES_URL", "http://127.0.0.1:9/never"),
+            ("BOSS_NODE_ROLES_CACHE", cache.to_str().unwrap()),
+        ],
     );
     assert_eq!(rc, 0, "an unreachable registry is not a failed converge");
     assert!(
-        out.contains("did not answer"),
-        "the read says why the roles are empty: {out}"
+        out.contains("did not answer") && out.contains("no cached declaration"),
+        "the read says why and what it did: {out}"
     );
     assert!(
-        out.contains("roles=<>"),
-        "empty, so every row installs as before roles existed: {out}"
+        out.contains("roles=<registry-unread>"),
+        "a sentinel no role section matches, so only [always] installs: {out}"
+    );
+}
+
+/// A successful read is REMEMBERED beside the checkout, and a dark
+/// registry then installs the last declaration it has evidence for —
+/// stamped as cached — rather than every row or nothing.
+#[test]
+fn a_dark_registry_installs_the_last_declaration_it_read() {
+    let dir = boss_testing::scratch_dir("node-roles-cache");
+    let cache = dir.join("roles.cache");
+    let _ = std::fs::remove_file(&cache);
+    // A stub registry: one node with two roles.
+    let nodes = dir.join("nodes.json");
+    std::fs::write(
+        &nodes,
+        r#"{"data":[{"id":"boss-gcp","roles":["ml-batch-host","off-cluster-observer"]}]}"#,
+    )
+    .unwrap();
+    let url = format!("file://{}", nodes.display());
+    let (rc, out) = sh(
+        "read_node_roles boss-gcp; echo \"roles=<$BOSS_NODE_ROLES>\"",
+        &[
+            ("BOSS_ESTATE_NODES_URL", &url),
+            ("BOSS_NODE_ROLES_CACHE", cache.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(rc, 0);
+    assert!(
+        out.contains("roles=<ml-batch-host,off-cluster-observer>"),
+        "{out}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&cache).unwrap().trim(),
+        "ml-batch-host,off-cluster-observer",
+        "the read is remembered"
+    );
+    // Now the registry is dark: the cache answers, and the log says so.
+    let (rc, out) = sh(
+        "read_node_roles boss-gcp; echo \"roles=<$BOSS_NODE_ROLES>\"",
+        &[
+            ("BOSS_ESTATE_NODES_URL", "http://127.0.0.1:9/never"),
+            ("BOSS_NODE_ROLES_CACHE", cache.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(rc, 0);
+    assert!(
+        out.contains("roles=<ml-batch-host,off-cluster-observer>"),
+        "{out}"
+    );
+    assert!(
+        out.contains("did not answer") && out.contains("cached declaration"),
+        "the fallback is named as a fallback: {out}"
     );
 }
 

@@ -40,6 +40,8 @@ export type Route =
   /// IT feedback triage board.
   | { kind: 'systemFeedback' }
   | { kind: 'systemBacklog' }
+  /// The codebase trend — the daily metrics packets, rendered.
+  | { kind: 'systemCodebase' }
   /// Full-page step surface. A step whose UX is a plugin gets the
   /// whole viewport instead of a panel inside the job page — review
   /// and authoring steps are reading tasks, and reading competes
@@ -188,6 +190,7 @@ export function parseRoute(pathname: string): Route {
     if (p === '/design/experiments') return { kind: 'experiments' };
     if (p === '/design/feedback') return { kind: 'systemFeedback' };
     if (p === '/design/backlog') return { kind: 'systemBacklog' };
+    if (p === '/design/codebase') return { kind: 'systemCodebase' };
     // 5. Estate. 6. KB. Plus the unlisted auth door.
     // 5a. The Crew Board — a sidebar row of its own, not an Operate tab.
     // David's decision on 04c5bbc0 (2026-09-11) overrode the proposal to

@@ -97,7 +97,12 @@ exist there, so standing the runner up advertised a vocabulary of which
 (CLAUDE.md §Diagnosis); a refusal that names the verb, this host and the
 hosts that verb does serve is. Widening a verb to another host is a
 reviewed change to that verb's file — boss-gcp's set is deliberately the
-read-only host-agnostic reads and nothing mutating.
+read-only host-agnostic reads, plus exactly the MUTATING verbs
+`infra/lint/a-verb-declares-the-hosts-it-serves.sh` admits BY NAME with
+their authorization. The first is `retire-second-stack` (David
+2026-09-11, design 9e3e093f): bounded to the unit list the tree carries
+at `infra/gcp/second-stack-units.txt`, capture-before-stop, `--dry-run`
+exercisable without acting, `--for-real` a human's decision to file.
 
 ## Defense
 

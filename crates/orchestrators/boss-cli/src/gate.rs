@@ -1158,6 +1158,17 @@ impl ParkIntent {
     /// id they had typed rather than read; the gate launched, and only a
     /// read of the packet afterwards caught it (CLAUDE.md memory: never
     /// write a sha you did not read — an id is a sha).
+    /// Replace a named ref with the id the system of record resolved it
+    /// to — the full id the auto-park handler's routing requires.
+    pub fn set_named_ref(&mut self, flag: &str, full: String) {
+        match flag {
+            "--park-backlog-item" => self.backlog_item = Some(full),
+            "--park-partial-item" => self.partial_item = Some(full),
+            "--park-after" => self.boards_after = Some(full),
+            _ => {}
+        }
+    }
+
     pub fn named_refs(&self) -> Vec<(&'static str, &str)> {
         [
             ("--park-backlog-item", self.backlog_item.as_deref()),
@@ -1965,7 +1976,7 @@ pub async fn run(
     namespace: &str,
     wait: bool,
     dry: bool,
-    park: ParkIntent,
+    mut park: ParkIntent,
     force_regate: Option<String>,
     stale_base_anyway: Option<String>,
     rebase: bool,
@@ -2014,6 +2025,7 @@ pub async fn run(
     // (2026-09-12, be793304's car launched with an invented suffix).
     if !dry {
         let mut missing = Vec::new();
+        let mut resolved: Vec<(&'static str, String)> = Vec::new();
         for (flag, id) in park.named_refs() {
             // `api` raises on every non-2xx; a 404 here is the answer,
             // not an error — the rest (unreachable, 5xx) still raise.
@@ -2025,7 +2037,26 @@ pub async fn run(
             )
             .await
             {
-                Ok(Some(_)) => {}
+                Ok(Some(packet)) => {
+                    // STAMP WHAT WAS RESOLVED, not what was typed. The
+                    // jobs API answers a unique prefix, so an 8-char id
+                    // passes this check — and rode the gate-run as
+                    // `park_backlog_item: "436a2e91"`, which the auto-park
+                    // handler's routing refused ("not a full Job id") and
+                    // left the item un-routed (2026-09-14). The car got
+                    // its full link because the handler resolves the car
+                    // side; the routing reads the stamp raw. Read the id
+                    // off the packet the API returned.
+                    if let Some(full) = packet
+                        .get("data")
+                        .unwrap_or(&packet)
+                        .get("id")
+                        .and_then(Value::as_str)
+                        && full != id
+                    {
+                        resolved.push((flag, full.to_string()));
+                    }
+                }
                 Ok(None) => missing.push((flag, id.to_string())),
                 Err(e) if format!("{e:#}").contains("404") => {
                     missing.push((flag, id.to_string()));
@@ -2036,6 +2067,10 @@ pub async fn run(
                     )));
                 }
             }
+        }
+        for (flag, full) in &resolved {
+            println!("boss gate: {flag} resolved to {full}");
+            park.set_named_ref(flag, full.clone());
         }
         if !missing.is_empty() {
             let lines: Vec<String> = missing
@@ -4156,6 +4191,31 @@ mod tests {
     }
 
     /// ANSWER (1) — this car IS the item's build. Unchanged: the edge
+    /// A short id typed at the terminal is replaced by the id the system
+    /// of record answered with, so the stamp the auto-park routing reads
+    /// is the full one (2026-09-14: an 8-char stamp left 436a2e91
+    /// un-routed while its car carried the full link).
+    #[test]
+    fn a_named_ref_is_stamped_as_the_id_the_record_resolved() {
+        let mut p = ParkIntent {
+            backlog_item: Some("436a2e91".into()),
+            ..ParkIntent::default()
+        };
+        p.set_named_ref(
+            "--park-backlog-item",
+            "436a2e91-06e3-4d98-953d-d813745dbf9f".into(),
+        );
+        assert_eq!(
+            p.metadata_patch()["park_backlog_item"],
+            "436a2e91-06e3-4d98-953d-d813745dbf9f"
+        );
+        p.set_named_ref("--park-after", "0123456789abcdef0123456789abcdef".into());
+        assert_eq!(
+            p.boards_after.as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+    }
+
     /// rides the gate-run as `park_backlog_item`, becomes
     /// `metadata.backlog_item` on the car, and the arrival rule closes
     /// the item when the car lands.

@@ -61,6 +61,13 @@ export const ROUTES: ReadonlyArray<string> = [
   // entry because it is a tab, not a sidebar row (same as yard-status
   // above): pages live in their department.
   '/it/operate/marshalling',
+  // The codebase trend — a Design tab (backlog 06048ade). Its one read
+  // is `/api/jobs?kind=maintenance-codebase-metrics`; under the mock's
+  // `[]` catch-all it renders "no packet carries a measurement" as a
+  // bordered notice, and under the outage it renders `load-failed`.
+  // Crawled here rather than via a catalog entry because it is a tab,
+  // not a sidebar row: pages live in their department.
+  '/it/design/codebase',
   // The risk watchlist. Since CAR-6 it HAS a catalog entry, so the
   // drift test in route-smoke.mocked.spec.ts now enforces its presence
   // here instead of this line being the whole of its coverage.

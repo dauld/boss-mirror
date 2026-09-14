@@ -1,0 +1,20 @@
+{
+  "about": "MUTATING — stop and disable the second, older BOSS stack on boss-gcp: EXACTLY the units infra/gcp/second-stack-units.txt names, after capturing their database, and nothing else (infra/gcp/retire-second-stack.sh). boss-gcp still runs a complete older stack — 32 services against a database at 127.0.0.1 that is not the system of record, one of them (boss-docs-api) serving a crate deleted from the tree on 2026-09-10 — plus the ten `legacy-stack` chores that maintain that stack's data, six of them active=failed for three weeks, training the operator to discount the alarm (backlog d5941ef3; the inventory was read live through unit-list, ops-request 9d33d799). Retiring it by hand is 54 systemctl invocations on a console with nothing recording which, in what order, or what the database held; through this door the packet holds all three. THE BOUND IS THE LIST THE TREE CARRIES: every line is boss-<name>.service or boss-<name>.timer and any other shape is refused by name, so WireGuard, the journal gateway, caddy and postgres are unreachable by construction; the host's own loops (boss-ops-runner, boss-gcp-converge, boss-estate-observe-units, boss-estate-observe-host, boss-codebase-metrics, boss-ml-inference-batch — the roles boss-gcp DECLARES) form a KEEP set the script refuses a list for; the real run refuses while the estate registry still says boss-gcp declares legacy-stack, because boss-gcp-converge would re-enable that role's timers within the half hour and the record would lie; and CAPTURE BEFORE STOP — pg_dump of the stack's database (found off its own units' BOSS_POSTGRES_URL, credential redacted in every line printed) to a dated file under /var/backups/boss/second-stack/, with nothing stopped if that fails. The stop is then one `systemctl disable --now` per unit, in the list's order, each printed as it lands, so a run killed at the timeout still leaves an exact record; the after-state is listed again and success is refused while any planned unit is still active. It deletes no unit file, binary, config or database — the uninstall is the converge's business once the role is dropped (car 3). `--dry-run` runs every bound, prints the plan and rehearses the capture schema-only to /dev/null; `--for-real` is the retirement, and is a human's decision to file. Own timeout: 54 stops, each bounded by its unit's TimeoutStopSec. Authorized by David 2026-09-11 on design 9e3e093f ('Go ahead and retire it quickly. We are not yet supporting external users, and this is really part of our tech debt payoff') — the first MUTATING verb scoped to boss-gcp, admitted by name in infra/lint/a-verb-declares-the-hosts-it-serves.sh; same explicit per-verb process as reclaim-disk / delete-orphan-object, a precedent for the PROCESS, not a loosened default.",
+  "hosts": [
+    "boss-gcp"
+  ],
+  "argv": [
+    "infra/gcp/retire-second-stack.sh",
+    "{1}"
+  ],
+  "params": [
+    {
+      "name": "mode",
+      "one_of": [
+        "--dry-run",
+        "--for-real"
+      ]
+    }
+  ],
+  "timeout": 1800
+}

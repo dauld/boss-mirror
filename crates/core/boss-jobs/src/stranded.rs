@@ -137,11 +137,25 @@ pub fn any_green<'a>(step_metadata: impl IntoIterator<Item = &'a Value>) -> bool
 /// callers hold that set in different containers and read it off
 /// `metadata.branch`, never the car's subject (a re-railed car's
 /// subject is the branch it was FILED under, not the one it carries).
+/// A gate-run the conductor filed for a TRAIN BRANCH (design 128b5496):
+/// `metadata.train_gate` is true and `metadata.train` names the train.
+/// Its verdict is the train's to read; no car was ever going to park
+/// from it, so it is not an unparked green in any sense — not stranded,
+/// not held. Until 2026-09-14 it carried only a `hold`, which kept it
+/// out of the stranded list and put it INTO the yard's held lane, where
+/// four `train/…` branches then stood as if they were parked cars.
+pub fn is_train_gate(gate_run_metadata: &Value) -> bool {
+    gate_run_metadata.get("train_gate").and_then(Value::as_bool) == Some(true)
+}
+
 pub fn unparked_green<'a>(
     gate_run_metadata: &Value,
     step_metadata: impl IntoIterator<Item = &'a Value>,
     claimed: impl Fn(&str) -> bool,
 ) -> Option<UnparkedGreen> {
+    if is_train_gate(gate_run_metadata) {
+        return None;
+    }
     if spent_reason(gate_run_metadata).is_some() {
         return None;
     }
@@ -178,6 +192,20 @@ mod tests {
 
     /// The base case: a green gate-run whose branch no car carries is
     /// an unparked green, and with no hold it is STRANDED.
+    /// A train's own gate-run (128b5496) is neither stranded nor held —
+    /// with or without the hold the conductor stamps on it. Four
+    /// `train/…` branches stood in the yard's HELD lane on 2026-09-14
+    /// for want of this.
+    #[test]
+    fn a_train_gate_is_no_cars_green_at_all() {
+        let held = json!({"branch": "train/20260913-0457", "train_gate": true, "train": "f8ffeaf6",
+                          "hold": "train gate for PR train 2026-09-13 04:57"});
+        assert!(call(&held, &green(), &[]).is_none());
+        let bare = json!({"branch": "train/20260913-0457", "train_gate": true});
+        assert!(call(&bare, &green(), &[]).is_none());
+        assert!(is_train_gate(&bare) && !is_train_gate(&json!({"branch": "feat/x"})));
+    }
+
     #[test]
     fn a_green_with_no_car_is_stranded() {
         let got = call(&json!({"branch": "fix/a"}), &green(), &[]).expect("unparked");

@@ -194,6 +194,36 @@ impl MaintenanceSweepInspect {
     }
 }
 
+/// THE ONE BODY the Inspect completion sends, for either target — so a
+/// test can hold it against the fields maintenance-sweep.toml declares
+/// for the step (`inspection_bodies_validate_against_the_step_they_complete`).
+pub(crate) fn inspection_put_body(findings: String, measured: String, items: Vec<Value>) -> Value {
+    json!({
+        "status": "completed",
+        "metadata": {
+            "findings": findings,
+            "measured": measured,
+            "items": items,
+        },
+    })
+}
+
+/// The Inspect step's `findings` field is a STRING (maintenance-sweep.toml:
+/// `field_type = "string", required = true`), one finding per line, or
+/// the word `none`. The handler used to send an array — and from
+/// 2026-09-13 the step API refused it: `400 invalid step metadata:
+/// findings: expected type 'string', got array`, eight attempts, a
+/// dead letter on each sweep, both self-inspections silent for a day
+/// and the daily spawner's dedup guard then filing no new sweeps at all.
+/// The dead letter on the packet is what named it.
+pub(crate) fn findings_text(lines: &[String]) -> String {
+    if lines.is_empty() {
+        "none".to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
 /// The sweep target a rule asks this handler to inspect. The first
 /// rule (`inspect-empty-decisions-sweep-on-step-ready`) predates the
 /// arg and names none, so absent means `empty-decisions`; a wrong
@@ -289,7 +319,7 @@ impl Handler for MaintenanceSweepInspect {
                     ctx,
                     &ev,
                     insp.action_needed,
-                    json!(insp.findings),
+                    findings_text(&insp.findings),
                     insp.measured,
                     insp.items,
                 )
@@ -343,9 +373,9 @@ impl Handler for MaintenanceSweepInspect {
                 })
                 .collect()
         };
-        let findings_list: Vec<Value> = findings
+        let finding_lines: Vec<String> = findings
             .iter()
-            .map(|f| json!(format!("{}/{}: {}", f.job_id, f.step_id, f.title)))
+            .map(|f| format!("{}/{}: {}", f.job_id, f.step_id, f.title))
             .collect();
         let measured = format!(
             "{} empty approval decision(s) among open packets since {since}",
@@ -355,7 +385,7 @@ impl Handler for MaintenanceSweepInspect {
             ctx,
             &ev,
             !findings.is_empty(),
-            json!(findings_list),
+            findings_text(&finding_lines),
             measured,
             items,
         )
@@ -374,7 +404,7 @@ impl MaintenanceSweepInspect {
         ctx: &InvocationContext,
         ev: &StepEvent<'_>,
         action_needed: bool,
-        findings: Value,
+        findings: String,
         measured: String,
         items: Vec<Value>,
     ) -> Result<(), HandlerError> {
@@ -406,14 +436,7 @@ impl MaintenanceSweepInspect {
             .header("content-type", "application/json")
             .header("x-boss-user", dispatcher_actor_header(&ctx.rule_name))
             .header("x-sim-origin", sim_origin_value())
-            .json(&json!({
-                "status": "completed",
-                "metadata": {
-                    "findings": findings,
-                    "measured": measured,
-                    "items": items,
-                },
-            }))
+            .json(&inspection_put_body(findings, measured, items))
             .send()
             .await
             .map_err(|e| HandlerError::Downstream(format!("PUT {put_url}: {e}")))?;
@@ -503,6 +526,79 @@ mod tests {
     fn a_decision_before_the_window_is_ignored() {
         let jobs = vec![job(json!([step(json!({ "completed_on": "2026-08-20" }))]))];
         assert!(empty_approval_decisions(&jobs, &kinds(), "2026-09-01").is_empty());
+    }
+
+    /// The step declares `findings` a string; an array is a 400 at the
+    /// step API (2026-09-13, both self-inspections dead-lettered).
+    #[test]
+    fn findings_are_one_string_the_step_accepts() {
+        assert_eq!(findings_text(&[]), "none");
+        assert_eq!(
+            findings_text(&["a/b: x".to_string(), "c/d: y".to_string()]),
+            "a/b: x\nc/d: y"
+        );
+    }
+
+    /// THE PIN (CLAUDE.md §9a): the body this handler PUTs and the
+    /// fields the workflow declares for the step are two homes for one
+    /// shape. Read the step off infra/platform/workflows/maintenance-
+    /// sweep.toml and validate both targets' bodies against it with the
+    /// core's own validator — the check the step API ran when it
+    /// refused the array (2026-09-13: eight attempts, two dead letters,
+    /// a day of uninspected sweeps).
+    #[test]
+    fn inspection_bodies_validate_against_the_step_they_complete() {
+        let dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../infra/platform/workflows"
+        );
+        let specs = boss_jobs::seed_loader::load_workflows(dir).expect("the platform bundle loads");
+        let sweep = specs
+            .iter()
+            .find(|w| w.kind == "maintenance-sweep")
+            .expect("maintenance-sweep is a platform protocol");
+        let inspect = sweep
+            .steps
+            .iter()
+            .find(|st| st.title == "inspect")
+            .expect("the sweep has an inspect step");
+        assert!(
+            !inspect.fields.is_empty(),
+            "the inspect step declares fields"
+        );
+        let stamp = "2026-09-13T00:00:00Z";
+        let item = |label: &str| json!({"label": label, "checked": true, "checked_by": "automation:t", "checked_at": stamp});
+        // empty-decisions, both with and without findings
+        for lines in [vec![], vec!["j1/s1: Approve".to_string()]] {
+            let body = inspection_put_body(
+                findings_text(&lines),
+                "1 empty approval decision(s) among open packets since 2026-09-12".into(),
+                vec![item("x")],
+            );
+            boss_jobs::step_registry::StepRegistry::validate_authored_fields(
+                &inspect.fields,
+                &body["metadata"],
+            )
+            .unwrap_or_else(|e| panic!("the step API would refuse this body: {e:?}"));
+        }
+        // deploy-convergence, from its own inspection
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-13T20:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let insp = super::super::sweep_deploy_convergence::inspect(&[], now, "automation:t");
+        let body = inspection_put_body(findings_text(&insp.findings), insp.measured, insp.items);
+        boss_jobs::step_registry::StepRegistry::validate_authored_fields(
+            &inspect.fields,
+            &body["metadata"],
+        )
+        .unwrap_or_else(|e| panic!("the step API would refuse the convergence body: {e:?}"));
+        // And the shape that failed live is refused here too.
+        let bad = json!({"findings": ["a"], "measured": "m", "items": [item("x")]});
+        assert!(
+            boss_jobs::step_registry::StepRegistry::validate_authored_fields(&inspect.fields, &bad)
+                .is_err(),
+            "an array for findings must be refused, as the step API refused it"
+        );
     }
 
     #[test]
