@@ -562,9 +562,12 @@ enum Commands {
     /// branch as a bundle on a packet; this verb — run where the forge
     /// credential lives — verifies the bundle against the declared
     /// shas and pushes, or refuses with the reason on the packet.
-    /// Never force-pushes. Also runs inside every `boss train run`,
-    /// before reconcile/board, so a fresh branch can be gated the same
-    /// cycle.
+    /// Never force-pushes. Also runs at the head of every `boss train
+    /// reconcile` (the ten-minute tick) and `boss train run` (the
+    /// twice-daily window), before reconcile/board, so a fresh branch
+    /// can be gated the same cycle — it rode `run` alone until
+    /// 2026-09-15, which after the cadence split left a filed branch
+    /// waiting up to 12 h (backlog 03e81aa9).
     PublishRequests {
         /// Clone to fetch and push in. Defaults to the working
         /// directory.
