@@ -26,6 +26,7 @@
       { label: 'Step plugins', path: '/it/registry/step-plugins' },
       { label: 'Policy', path: '/it/registry/policy' },
       { label: 'Subjects', path: '/it/registry/subjects' },
+      { label: 'Drift', path: '/it/registry/drift' },
     ],
     design: [
       { label: 'Reviews', path: '/it/design' },

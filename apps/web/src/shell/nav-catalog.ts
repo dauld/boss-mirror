@@ -84,6 +84,11 @@ export type UngatedSurfaceId =
   // readable by any operator — same shape as the Crew Board, and for
   // the same reason (feedback 9827c699, 2026-09-14).
   | 'system-codebase'
+  // 'system-registry-drift' (the Drift tab on Registry): a view of the
+  // workflow registry against its authored bundle, so it borrows the
+  // `workflows` gate of the family it sits in rather than widening the
+  // RouteName vocabulary (4ae9969e, 2026-09-15).
+  | 'system-registry-drift'
   | 'system-fleet'
   | 'system-backlog'
   | 'hr'
@@ -137,6 +142,7 @@ export const ROUTE_CATALOG: Readonly<Record<RouteName | UngatedSurfaceId, NavIte
   'system-step-plugins':     { id: 'system-step-plugins',     label: 'Step plugins',        path: '/it/registry/step-plugins', permKey: 'system-step-plugins', app: 'it' },
   'system-dispatcher':       { id: 'system-dispatcher',       label: 'Dispatcher rules',    path: '/it/registry/dispatcher', permKey: 'system-dispatcher', app: 'it' },
   'system-subjects':         { id: 'system-subjects',         label: 'Subjects & Classes',  path: '/it/registry/subjects', permKey: 'system-subjects',    app: 'it' },
+  'system-registry-drift':   { id: 'system-registry-drift',   label: 'Protocol drift',      path: '/it/registry/drift', permKey: 'workflows',             app: 'it' },
   'system-dispatcher-rules': { id: 'system-dispatcher-rules', label: 'Dispatcher rules — authoring', path: '/it/registry/rules', permKey: 'system-dispatcher-rules', app: 'it' },
   'system-dispatcher-rule':  { id: 'system-dispatcher-rule',  label: 'Dispatcher rule — editor',     path: '/it/registry/rules', permKey: 'system-dispatcher-rule',  app: 'it' },
   'system-design':           { id: 'system-design',           label: 'Design',              path: '/it/design',       permKey: 'system-design',           app: 'it' },

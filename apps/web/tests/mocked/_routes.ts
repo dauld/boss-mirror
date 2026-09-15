@@ -70,6 +70,11 @@ export const ROUTES: ReadonlyArray<string> = [
   // and is crawled so a bookmark cannot rot unnoticed.
   '/it/codebase',
   '/it/design/codebase',
+  // Protocol drift — a Registry tab (4ae9969e). Its one read is
+  // `/api/jobs?kind=maintenance-protocol-drift`; under the mock's `[]`
+  // catch-all it renders "the 05:20 measurement has not filed" as a
+  // bordered notice, and under the outage it renders `load-failed`.
+  '/it/registry/drift',
   // The risk watchlist. Since CAR-6 it HAS a catalog entry, so the
   // drift test in route-smoke.mocked.spec.ts now enforces its presence
   // here instead of this line being the whole of its coverage.

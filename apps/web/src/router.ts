@@ -119,6 +119,9 @@ export type Route =
   /// the closed ones rendered as a durable archive.
   | { kind: 'incidents' }
   | { kind: 'systemSubjects' }
+  /// The Drift tab on Registry — the newest maintenance-protocol-drift
+  /// packet rendered (4ae9969e, car 2 of 8f4e9cc0).
+  | { kind: 'systemRegistryDrift' }
   | { kind: 'experiments' }
   | { kind: 'dispatcherRules' }
   | { kind: 'dispatcherRulesList' }
@@ -185,6 +188,7 @@ export function parseRoute(pathname: string): Route {
     if (p === '/registry/dispatcher') return { kind: 'dispatcherRules' };
     if (p === '/registry/policy') return { kind: 'policy' };
     if (p === '/registry/subjects') return { kind: 'systemSubjects' };
+    if (p === '/registry/drift') return { kind: 'systemRegistryDrift' };
     // 4. Design — reviews lead; experiments and feedback tabs.
     if (p === '/design') return { kind: 'systemDesign' };
     if (p === '/design/experiments') return { kind: 'experiments' };

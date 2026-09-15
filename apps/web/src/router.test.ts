@@ -69,6 +69,9 @@ describe('parseRoute — every specific path matches its specific case', () => {
     ['/it/operate/conductor', { kind: 'systemMonitoringConductor' }],
     ['/it/kb', { kind: 'systemKb' }],
     ['/it/registry/subjects', { kind: 'systemSubjects' }],
+    // The Drift tab (4ae9969e): declared before the workflow-detail
+    // wildcard, which would otherwise read 'drift' as a kind slug.
+    ['/it/registry/drift', { kind: 'systemRegistryDrift' }],
     // /it/* is the canonical spelling for IT surfaces (0fc8b216); the
     // /system/* rows above stay because bookmarks, the station
     // registry's upstream hrefs and the docs all still use them.

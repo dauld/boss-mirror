@@ -108,6 +108,10 @@ describe('nav catalog — app assignment', () => {
     // The codebase — the tree's own numbers and trend; a row since
     // David's feedback 9827c699 (2026-09-14), formerly a Design tab.
     'system-codebase',
+    // The Drift tab on Registry — the newest maintenance-protocol-drift
+    // packet rendered (4ae9969e, car 2 of 8f4e9cc0). A TAB, not a row:
+    // it gates under `workflows` like the registry it is a view of.
+    'system-registry-drift',
   ];
 
   it('the IT app contains the System Model set plus what we added deliberately', () => {
