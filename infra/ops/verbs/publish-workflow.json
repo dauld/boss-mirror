@@ -1,0 +1,26 @@
+{
+  "about": "MUTATING — publish the TREE's row for one existing platform workflow kind into the live registry, from the converged checkout on boss-gcp (infra/gcp/publish-workflow.sh). The publish is the one act that lands a data car for an existing kind — the seed is insert-if-missing by decision, so `boss workflow publish <kind> infra/platform/workflows/<kind>.toml` on a host with the checkout is the only way a changed description or step reaches the row — and until this verb it had no door but an operator's terminal: the daily drift measurement (19dec171) and the Drift tab (#378) show the drift and offer nothing, because the server has no tree. Measured 2026-09-15: sixteen maintenance-* kinds carry a `failed` step in the tree the live row lacks, landed 2026-09-08 and never published. The script runs the CLI's own checked sequence (`boss workflow publish`, which reads the TOML with the seed's loader — one definition — lints, refuses a dirty registry, creates the draft, reads it back, publishes, confirms) and puts FOUR REFUSALS in front of it: the tree has no file for the kind (exit 3); the row does not lint (4); the live row already equals the tree on label, description, category, subject_kinds and every step, so there is nothing to publish (5); and — the load-bearing one — the live row carries what the tree NEVER SAID (6): no revision of infra/platform/ in the checkout's history renders to it, so it is an operator's edit made live (ship-a-change v31's `procedure` texts and required `proof` field are the measured case) and publishing the tree would erase it. That last refusal names the drift field by field and is overridden only by the literal `--force-tree`, which the Drift tab's approve is what says (car 3b). `--check` runs every refusal and the lint and stops before writing, so the verb is exercisable through the runner without acting. After the publish the row is read back and compared to the tree again; a version that did not move or a row that does not equal the file is NOT CONFIRMED (exit 7), never a success reported off the CLI's word. Bounded by construction: the only file it can publish is infra/platform/workflows/<kind>.toml in the checkout the runner itself runs from, with the kind pattern-checked by the runner and again by the script; nothing packet-supplied reaches the argv but the kind and one of two reviewed words. Signs the publish as the account running it (BOSS_ACTOR, default automation:ops-runner); the approving human is this packet's filer, and the packet id rides in the output. Own timeout: a history walk plus two `boss` runs against the registry exceed the runner's 30s. Authorization: David, 2026-09-11, on 8f4e9cc0 ('We might need some sort of doc diff view for me to approve in the future') — this verb is the publish that approve fires; routed build on backlog 3ce95b85, admitted by name in infra/lint/a-verb-declares-the-hosts-it-serves.sh and flagged for David's review as the first verb that writes the workflow registry from a host, the same explicit per-verb process as reclaim-disk / converge / run-car-probe / retire-second-stack — a precedent for the PROCESS, not a loosened default.",
+  "hosts": [
+    "boss-gcp"
+  ],
+  "argv": [
+    "infra/gcp/publish-workflow.sh",
+    "{1}",
+    "{2}"
+  ],
+  "params": [
+    {
+      "name": "kind",
+      "pattern": "^[a-z][a-z0-9-]{1,60}$"
+    },
+    {
+      "name": "mode",
+      "one_of": [
+        "--check",
+        "--force-tree"
+      ],
+      "optional": true
+    }
+  ],
+  "timeout": 300
+}

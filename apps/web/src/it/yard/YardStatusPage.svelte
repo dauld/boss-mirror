@@ -200,6 +200,16 @@
       </table>
     {/if}
 
+    <!-- The recency lanes read a window; the server says when the record
+         held more. Held greens are read by their hold, not by this window
+         (2fa96d34), so the notice names the lanes it is about. -->
+    {#if s.gate_runs?.truncated}
+      <p class="ys-quiet">
+        Slots, garage, limbo and stranded read the newest {s.gate_runs.window} gate-runs;
+        held greens are listed from the whole record.
+      </p>
+    {/if}
+
     <!-- 03 — STRANDED: green gates no car claims (cheap signal) -->
     {#if s.stranded.length > 0}
       <div class="ys-section">03 — STRANDED GREENS</div>

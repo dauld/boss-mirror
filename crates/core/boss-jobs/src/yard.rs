@@ -2584,6 +2584,32 @@ pub struct YardStatus {
 /// this number (CLAUDE.md §9a).
 pub const TRAIN_WINDOW: i64 = 60;
 
+/// How many gate-runs the handler's RECENCY read fetches — the slots,
+/// the garage, limbo and the stranded lane read the newest this many.
+/// Named here, beside `TRAIN_WINDOW`, for the same reason: the test
+/// that pins what the window must NOT hide
+/// (`a_held_green_older_than_the_window_is_still_named_by_the_held_lane`)
+/// seeds exactly one window plus one rather than a second copy of this
+/// number. Measured 2026-09-15: 891 gate-runs on record, 112 in the
+/// last two days, so this window is about half a busy day — which is
+/// why a held green is read by its HOLD, never by its place in here.
+pub const GATE_RUN_WINDOW: i64 = 60;
+
+/// The HELD read's page and how many pages it will turn. Not a recency
+/// window — the filter is the hold itself (`metadata_has = "hold"`) —
+/// and the read follows `total` across pages rather than trusting one,
+/// because the newest page is exactly where a long-held green is NOT.
+/// Measured 2026-09-15: 44 gate-runs carry a `hold`, 43 of them train
+/// gates (128b5496 stamps one on every train's own run), accruing at
+/// the train cadence (~20/day) — so one page holds today's record ten
+/// times over and the cap is ~100 days of train gates away. Past it the
+/// read warns rather than pretends; the durable fix is a hold marker
+/// the train gate does not share, or a filter that can say "not a train
+/// gate". Public for the same reason `GATE_RUN_WINDOW` is: the test
+/// that pins the page turn seeds one page plus one.
+pub const HELD_RUN_PAGE: i64 = 400;
+pub const HELD_RUN_PAGES: i64 = 5;
+
 /// How many recent trains the status carries. Enough to read a trend in
 /// arrivals/cancellations without turning the surface into a history log
 /// — the terminal report owns the long view.

@@ -48,6 +48,7 @@ const statusOf = (over: Partial<YardStatus> = {}): YardStatus => ({
   limbo: [],
   policy: { stall_hours: 2, max_red_trains: 2 },
   conductor: null,
+  gate_runs: null,
   now: '2026-09-08T02:35:20Z',
   ...over,
 });

@@ -157,6 +157,55 @@ fn held_dock_cars(cars: &[Value]) -> Vec<(String, String)> {
     out
 }
 
+/// The two gate-run reads behind the STRANDED and HELD GREENS lanes,
+/// composed here so the test that pins their shape reads the strings
+/// the server will.
+///
+/// A held green is read BY THE HOLD (`metadata_has=hold`, the
+/// `metadata ? $n` door), never by its place in a recency page: it is
+/// the one state that exists to be seen until a person releases it, and
+/// it stays exactly as long as the hold does. On 2026-09-15 the dev-pod
+/// car (gate-run 3164b0d5, green on `--hold` since 17:56Z the day
+/// before) had 80 gate-runs open behind it and this verb read the newest
+/// 60 — the held green was on the record and on no surface (backlog
+/// 2fa96d34). The stranded read is windowed in DAYS (`closed_within`,
+/// the boards' retention field) for the same reason a count is not a
+/// filter; measured 2026-09-15, a week is 415 gate-runs and 4.3 MB, read
+/// in 0.2 s. Both pages are bounded by the server's ceiling and judged
+/// against `total` — see [`cut_note`].
+pub(crate) const GATE_RUN_PAGE: i64 = 1000;
+pub(crate) fn held_gate_runs_query() -> String {
+    format!("/api/jobs?kind=gate-run&metadata_has=hold&limit={GATE_RUN_PAGE}")
+}
+pub(crate) fn stranded_gate_runs_query() -> String {
+    format!("/api/jobs?kind=gate-run&closed_within=7&limit={GATE_RUN_PAGE}")
+}
+
+/// `Some("<read> of <total>")` when the record held more rows than the
+/// page — the note a lane prints so an empty lane never reads as a fact
+/// about the whole record. `None` with no `total`: absence is not a
+/// claim either way.
+pub(crate) fn cut_note(total: Option<i64>, read: usize) -> Option<String> {
+    let total = total?;
+    (total > read as i64).then(|| format!("{read} of {total}"))
+}
+
+/// Green gate-runs no car claims WITH a hold — `(branch, reason)`,
+/// branch-sorted and de-duped. The other half of the stranded predicate
+/// (one definition, `boss_jobs::stranded::unparked_green`, through the
+/// census's JSON adapter): a stranded green was forgotten, a held green
+/// is deliberately waiting, and a lane that shows only the first makes
+/// the second invisible.
+fn held_greens(gate_runs: &[Value], car_branches: &BTreeSet<String>) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = crate::census::unparked_greens(gate_runs, car_branches)
+        .into_iter()
+        .filter_map(|u| Some((u.branch, u.hold?)))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// The lines naming every queued gate-run NO PROCESS HOLDS — empty when
 /// there are none.
 ///
@@ -462,16 +511,31 @@ pub async fn run(all: bool) -> Result<()> {
 
     // Stranded greens: gated, never parked — the census cross-ref, not a
     // second definition (§9a). A gate-run CLOSES on its verdict, so this
-    // reads closed ones; a status=open query cannot see them.
-    let gate_runs = rows(
-        api(
-            &http,
-            reqwest::Method::GET,
-            "/api/jobs?kind=gate-run&limit=60",
-            None,
-        )
-        .await?,
-    );
+    // reads closed ones; a status=open query cannot see them. Windowed
+    // in DAYS, not by count, and the page judged against `total` — see
+    // [`stranded_gate_runs_query`] for the held green a count hid.
+    let stranded_body = api(
+        &http,
+        reqwest::Method::GET,
+        &stranded_gate_runs_query(),
+        None,
+    )
+    .await?;
+    let stranded_total = stranded_body
+        .as_ref()
+        .and_then(|b| b.get("total"))
+        .and_then(Value::as_i64);
+    let gate_runs = rows(stranded_body);
+    let stranded_cut = cut_note(stranded_total, gate_runs.len());
+    // Held greens: read BY THE HOLD, so a hold is seen for as long as it
+    // stands, whatever gated after it.
+    let held_body = api(&http, reqwest::Method::GET, &held_gate_runs_query(), None).await?;
+    let held_total = held_body
+        .as_ref()
+        .and_then(|b| b.get("total"))
+        .and_then(Value::as_i64);
+    let held_runs = rows(held_body);
+    let held_cut = cut_note(held_total, held_runs.len());
     let cars = rows(
         api(
             &http,
@@ -510,6 +574,29 @@ pub async fn run(all: bool) -> Result<()> {
             }
         }
     }
+    if let Some(cut) = &stranded_cut {
+        println!("    (read {cut} gate-runs in the week — the rest were not cross-referenced)");
+    }
+
+    // Held greens: gated green, no car, and an operator's hold — the
+    // deliberate half of the stranded predicate. A brake on is not an
+    // alarm; an invisible brake is (2fa96d34).
+    let held_greens = held_greens(&held_runs, &car_branches);
+    if held_greens.is_empty() {
+        println!("\n  HELD GREENS — none: no green gate is held before parking");
+    } else {
+        println!(
+            "\n  HELD GREENS — {} green gate(s) held off the dock on purpose (release = \
+             re-gate with the --park-* intent; never rebuild one blind):",
+            held_greens.len()
+        );
+        for (branch, reason) in &held_greens {
+            println!("    {branch}  —  {reason}");
+        }
+    }
+    if let Some(cut) = &held_cut {
+        println!("    (read {cut} held gate-runs — the rest were not cross-referenced)");
+    }
 
     // Orphans: forge heads no packet claims (281f9842 — 60 of 80 the
     // day this was measured). The claimed set is every branch any
@@ -521,6 +608,7 @@ pub async fn run(all: bool) -> Result<()> {
     claimed.extend(
         gate_runs
             .iter()
+            .chain(held_runs.iter())
             .chain(gating.iter())
             .map(|g| md_str(g, "branch").to_string())
             .filter(|b| !b.is_empty()),
@@ -650,6 +738,9 @@ pub async fn run(all: bool) -> Result<()> {
     // train ([[parked-cars-go-stale]]). It has to be re-gated before it is
     // released, so it belongs in the freshness check beside the parked.
     fresh_targets.extend(held.iter().map(|(b, _)| b.clone()));
+    // A held GREEN too: it has no car yet, but the same hold keeps its
+    // base falling behind, and releasing it is a re-gate.
+    fresh_targets.extend(held_greens.iter().map(|(b, _)| b.clone()));
     fresh_targets.sort();
     fresh_targets.dedup();
     if !fresh_targets.is_empty() {
@@ -1089,6 +1180,111 @@ mod tests {
             vec![(
                 "fix/held".to_string(),
                 "waiting on an operator action".to_string()
+            )]
+        );
+    }
+
+    /// The query string as `(key, value)` pairs — what the server reads,
+    /// not what the string looks like.
+    fn params(query: &str) -> Vec<(&str, &str)> {
+        query
+            .split_once('?')
+            .map(|(_, q)| q)
+            .unwrap_or_default()
+            .split('&')
+            .filter_map(|kv| kv.split_once('='))
+            .collect()
+    }
+
+    /// A held green is read by its HOLD, a stranded one by a window in
+    /// DAYS — neither by a recency COUNT. David, 2026-09-15: the dev-pod
+    /// car (gate-run 3164b0d5, green on `--hold` since 17:56Z 09-14)
+    /// vanished from every surface after 80 newer gate-runs, because the
+    /// approach read the newest N and cross-referenced those. A limit is
+    /// not a filter (backlog 2fa96d34): the held read narrows on
+    /// `metadata_has=hold` (the `metadata ? $n` door, 4d9aa761) and the
+    /// stranded read keeps every run closed inside the retention window
+    /// (`closed_within`, the same field the boards use), so a count only
+    /// bounds the page and is checked against `total`.
+    #[test]
+    fn the_held_read_narrows_on_the_hold_and_the_stranded_read_on_days() {
+        let held_q = held_gate_runs_query();
+        let held = params(&held_q);
+        assert!(held.contains(&("kind", "gate-run")), "{held_q}");
+        assert!(
+            held.contains(&("metadata_has", "hold")),
+            "the held lane reads BY THE HOLD: {held_q}"
+        );
+
+        let stranded_q = stranded_gate_runs_query();
+        let stranded = params(&stranded_q);
+        assert!(stranded.contains(&("kind", "gate-run")), "{stranded_q}");
+        assert!(
+            stranded
+                .iter()
+                .any(|(k, v)| *k == "closed_within" && v.parse::<u32>().is_ok_and(|d| d >= 7)),
+            "the stranded lane is windowed in DAYS, a week or more: {stranded_q}"
+        );
+        // The page bound is the server's ceiling, not a recency window:
+        // the read is judged against `total`, and a count below the
+        // ceiling would silently be one.
+        for q in [&held_q, &stranded_q] {
+            let limit = params(q)
+                .iter()
+                .find(|(k, _)| *k == "limit")
+                .and_then(|(_, v)| v.parse::<i64>().ok());
+            assert_eq!(limit, Some(GATE_RUN_PAGE), "{q}");
+        }
+    }
+
+    /// The truncation note is a reading of `total` against the page, and
+    /// silent when the page held everything.
+    #[test]
+    fn a_cut_read_says_how_much_it_read() {
+        assert_eq!(cut_note(Some(1200), 1000), Some("1000 of 1200".to_string()));
+        assert_eq!(cut_note(Some(415), 415), None);
+        assert_eq!(cut_note(None, 415), None, "no total is no claim");
+    }
+
+    fn gate_run(branch: &str, md: Value, verdict: &str) -> Value {
+        let mut m = md;
+        m["branch"] = json!(branch);
+        json!({
+            "id": branch,
+            "kind": "gate-run",
+            "status": "closed",
+            "metadata": m,
+            "steps": [{ "spec_slug": "gate", "metadata": { "verdict": verdict } }],
+        })
+    }
+
+    /// The held-green lane: a green no car claims WITH a hold, named with
+    /// the operator's reason. A stranded green (no hold) is the other
+    /// lane's; a train's own gate-run carries a hold too (128b5496) and
+    /// is neither — the shared predicate (`stranded::unparked_green`)
+    /// decides, not this lane.
+    #[test]
+    fn a_held_green_is_named_with_its_reason_and_a_train_gate_is_not() {
+        let runs = vec![
+            gate_run(
+                "feat/held",
+                json!({ "hold": "lands at the next restart" }),
+                "green",
+            ),
+            gate_run("feat/stranded", json!({}), "green"),
+            gate_run(
+                "train/20260915-1427",
+                json!({ "hold": "train gate", "train_gate": true }),
+                "green",
+            ),
+            gate_run("feat/red-held", json!({ "hold": "x" }), "failed"),
+            gate_run("feat/parked", json!({ "hold": "x" }), "green"),
+        ];
+        assert_eq!(
+            held_greens(&runs, &heads(&["feat/parked"])),
+            vec![(
+                "feat/held".to_string(),
+                "lands at the next restart".to_string()
             )]
         );
     }

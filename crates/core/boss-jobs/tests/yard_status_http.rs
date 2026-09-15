@@ -1866,3 +1866,151 @@ async fn a_held_car_does_not_count_toward_the_dock_depth() {
     assert_eq!(b["dock_depth"], 2, "free + released, not the held one");
     assert_eq!(b["threshold_met"], true);
 }
+
+/// A held green is read by its HOLD, not by its place in the recency
+/// window. David, 2026-09-15: the dev-pod car (gate-run 3164b0d5,
+/// green on `--hold` since 17:56Z 09-14) stopped showing as held after
+/// 80 gate-runs opened behind it — the cross-ref read the newest
+/// `GATE_RUN_WINDOW` runs and the one state that exists to be SEEN until
+/// a person releases it fell off the end. A limit is not a filter
+/// (backlog 2fa96d34). One window of newer runs plus one is the exact
+/// flood that hid it.
+#[tokio::test]
+async fn a_held_green_older_than_the_window_is_still_named_by_the_held_lane() {
+    use boss_jobs::yard::GATE_RUN_WINDOW;
+
+    let (app, jobs) = app_with(vec![depth_rule(), clock_rule()], vec![policy_row()]);
+    let now = t(NOW);
+
+    // The held green: gated green, no car, an operator's hold reason,
+    // opened the day BEFORE the flood so `opened_on desc` puts it last.
+    let mut held = job(
+        "gate-run",
+        "77777777-7777-7777-7777-777777777777",
+        "gate feat/held-old",
+        JobStatus::Closed,
+        json!({ "branch": "feat/held-old", "hold": "lands at the next restart" }),
+    );
+    held.opened_on = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+    jobs.create_job_at(&held, now, &[]).await.unwrap();
+    jobs.add_step_at(
+        &step(
+            &held.id,
+            "gate",
+            "Gate",
+            StepStatus::Completed,
+            json!({ "verdict": "green" }),
+        ),
+        now,
+        &[],
+    )
+    .await
+    .unwrap();
+
+    // One window of newer runs, plus one — every one opened after the
+    // held green, none of them held.
+    for i in 0..=GATE_RUN_WINDOW {
+        let newer = job(
+            "gate-run",
+            &format!("88888888-8888-8888-8888-{i:012}"),
+            &format!("gate feat/newer-{i}"),
+            JobStatus::Closed,
+            json!({ "branch": format!("feat/newer-{i}") }),
+        );
+        jobs.create_job_at(&newer, now, &[]).await.unwrap();
+    }
+
+    let (status, body) = get(&app, "operator").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let held_lane = body["held"].as_array().unwrap();
+    assert_eq!(
+        held_lane.len(),
+        1,
+        "the held green is named whatever gated after it: {body}"
+    );
+    assert_eq!(held_lane[0]["branch"], "feat/held-old");
+    assert_eq!(held_lane[0]["reason"], "lands at the next restart");
+    assert_eq!(held_lane[0]["packet_id"], held.id.to_string());
+
+    // The payload SAYS the recency lanes were cut: the page can tell an
+    // operator "lanes read the newest N runs" rather than let an empty
+    // stranded lane read as a fact about the whole record.
+    assert_eq!(body["gate_runs_truncated"], true, "{body}");
+    assert_eq!(body["gate_run_window"], GATE_RUN_WINDOW, "{body}");
+}
+
+/// The other leg: a record that fits inside the window is not reported
+/// as cut, so the notice is a reading, not a fixture.
+#[tokio::test]
+async fn a_record_inside_the_window_is_not_reported_truncated() {
+    let (app, jobs) = app_with(vec![depth_rule(), clock_rule()], vec![policy_row()]);
+    seed_full(&jobs).await;
+    let (_, body) = get(&app, "operator").await;
+    assert_eq!(body["gate_runs_truncated"], false, "{body}");
+}
+
+/// The held read turns pages: a hold older than one page of newer holds
+/// is still read. The newer holds on the live record are the trains'
+/// own gate-runs (128b5496 stamps a `hold` on each), 43 of 44 on
+/// 2026-09-15 and accruing ~20 a day — so a one-page held read is the
+/// same defect on a longer fuse.
+#[tokio::test]
+async fn a_held_green_behind_a_page_of_train_holds_is_still_read() {
+    use boss_jobs::yard::HELD_RUN_PAGE;
+
+    let (app, jobs) = app_with(vec![depth_rule(), clock_rule()], vec![policy_row()]);
+    let now = t(NOW);
+
+    let mut held = job(
+        "gate-run",
+        "77777777-7777-7777-7777-777777777777",
+        "gate feat/held-old",
+        JobStatus::Closed,
+        json!({ "branch": "feat/held-old", "hold": "lands at the next restart" }),
+    );
+    held.opened_on = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
+    jobs.create_job_at(&held, now, &[]).await.unwrap();
+    jobs.add_step_at(
+        &step(
+            &held.id,
+            "gate",
+            "Gate",
+            StepStatus::Completed,
+            json!({ "verdict": "green" }),
+        ),
+        now,
+        &[],
+    )
+    .await
+    .unwrap();
+
+    // One page of newer TRAIN gates plus one, each carrying the
+    // conductor's hold.
+    for i in 0..=HELD_RUN_PAGE {
+        let train_gate = job(
+            "gate-run",
+            &format!("99999999-9999-9999-9999-{i:012}"),
+            &format!("gate train/{i}"),
+            JobStatus::Closed,
+            json!({
+                "branch": format!("train/{i}"),
+                "hold": "train gate — no car parks from it",
+                "train_gate": true,
+                "train": format!("train #{i}"),
+            }),
+        );
+        jobs.create_job_at(&train_gate, now, &[]).await.unwrap();
+    }
+
+    let (_, body) = get(&app, "operator").await;
+    let held_lane = body["held"].as_array().unwrap();
+    assert_eq!(
+        held_lane
+            .iter()
+            .map(|h| h["branch"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["feat/held-old"],
+        "the held green behind a page of train holds, and no train in the lane: {body}"
+    );
+}

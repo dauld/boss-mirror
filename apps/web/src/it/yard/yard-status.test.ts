@@ -122,6 +122,20 @@ describe('parseYardStatus', () => {
     ]);
   });
 
+  // The recency lanes (slots, garage, limbo, stranded) read the newest N
+  // gate-runs and the server says when the record held more (2fa96d34:
+  // a held green fell off that window and the lane said none held). The
+  // held lane is read from the record by its hold, so the notice is
+  // about the OTHER lanes — and an older server that says nothing is no
+  // reading, never "not truncated".
+  test('the gate-run window and whether it was cut are read as stated, or as no reading', () => {
+    const cut = parseYardStatus({ gate_runs_truncated: true, gate_run_window: 60 });
+    expect(cut.gate_runs).toEqual({ truncated: true, window: 60 });
+    const whole = parseYardStatus({ gate_runs_truncated: false, gate_run_window: 60 });
+    expect(whole.gate_runs).toEqual({ truncated: false, window: 60 });
+    expect(parseYardStatus({}).gate_runs).toBeNull();
+  });
+
   // A held CAR is a different answer from a held GREEN: the green has no
   // car yet (release = file one), the car is standing on the dock
   // (release = clear the marker). Two lanes, so a surface never has to

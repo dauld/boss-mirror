@@ -100,6 +100,15 @@ GCP_MUTATING_ADMITTED = {
     # car 2. Bounded to infra/gcp/second-stack-units.txt, capture before
     # stop, --dry-run exercisable without acting.
     "retire-second-stack": "David 2026-09-11, design 9e3e093f",
+    # backlog 3ce95b85, car 3a of 8f4e9cc0: David 2026-09-11 asked for
+    # "some sort of doc diff view for me to approve"; this verb is the
+    # publish that approve fires. Bounded to the checkout's own
+    # infra/platform/workflows/<kind>.toml, refuses a live row the tree
+    # never said unless --force-tree, --check exercisable without
+    # acting, the read-back is the verdict. Flagged for David's review
+    # as the first verb that writes the workflow registry from a host,
+    # the way run-car-probe was flagged as the first to run builder text.
+    "publish-workflow": "David 2026-09-11, 8f4e9cc0 / backlog 3ce95b85 — flagged for review",
 }
 
 problems = []

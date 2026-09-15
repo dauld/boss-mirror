@@ -366,8 +366,17 @@ export type YardStatus = Readonly<{
   /** `null` on a server that predates the reading — rendered as "no
    *  reading", never as a healthy conductor. */
   conductor: ConductorHealth | null;
+  /** How the recency lanes (slots, garage, limbo, stranded) were read:
+   *  the newest `window` gate-runs, and whether the record held more
+   *  (`truncated`). The held lane is NOT bounded by this — it is read
+   *  from the record by its hold (2fa96d34: a held green fell off the
+   *  window and the lane said none held). `null` on a server that
+   *  predates the reading. */
+  gate_runs: GateRunWindow | null;
   now: string;
 }>;
+
+export type GateRunWindow = Readonly<{ truncated: boolean; window: number }>;
 
 // ---------------------------------------------------------------------
 // Parse — once, at the fetch site (house style). Throws on a bad shape
@@ -627,6 +636,12 @@ function parseStrandedGreen(raw: unknown): StrandedGreen {
   };
 }
 
+/** The gate-run window marker — both keys stated, or no reading. */
+function parseGateRunWindow(truncated: unknown, window: unknown): GateRunWindow | null {
+  if (typeof truncated !== 'boolean' || typeof window !== 'number') return null;
+  return { truncated, window };
+}
+
 /** The conductor block. Absent on an older server → `null` (the page
  *  says "no reading"); present with unknowns → nulls, never defaults. */
 function parseConductor(raw: unknown): ConductorHealth | null {
@@ -668,6 +683,7 @@ export function parseYardStatus(raw: unknown): YardStatus {
     limbo: Array.isArray(o.limbo) ? o.limbo.map(parseLimboCar) : [],
     policy: parsePolicy(o.policy),
     conductor: parseConductor(o.conductor),
+    gate_runs: parseGateRunWindow(o.gate_runs_truncated, o.gate_run_window),
     now: String(o.now ?? ''),
   };
 }
