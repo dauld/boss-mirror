@@ -135,10 +135,14 @@ impl Handler for InventoryReceive {
                 // a redelivered receive double-incremented on_hand while the
                 // once-posted DR-1300 stayed put. Exact mirror of
                 // inventory_parts_consume.rs.
+                // No `po_id` here: the receive endpoint has no field for it
+                // (ReceiveRequest.po_id was dead and deleted, e758f5bf) and
+                // the PO reaches the record through the goods-receipt JE memo
+                // and the PO status PUT below. A sender carrying a key nobody
+                // reads is the same dead code one level up.
                 let mut body = json!({
                     "part_sku": it.part_sku,
                     "qty": qty,
-                    "po_id": po_id,
                     "idempotency_key": format!("{}:{}", step.step_id, it.part_sku),
                 });
                 if let Some(unit_cost) = cost {

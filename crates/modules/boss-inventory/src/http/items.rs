@@ -75,9 +75,6 @@ pub(super) async fn primary_vendor_for_sku<R: InventoryRepository + 'static>(
 pub(super) struct ConsumeRequest {
     qty: u32,
     #[serde(default)]
-    #[expect(dead_code)]
-    job_id: Option<String>,
-    #[serde(default)]
     reason: Option<String>,
     /// Deterministic idempotency key from the triggering step
     /// (`{step_id}:{part_sku}`). Becomes the consume's `source_id` so a
@@ -343,12 +340,6 @@ pub(super) struct ReceiveRequest {
     /// and only on_hand moves.
     #[serde(default)]
     unit_cost_cents: Option<i64>,
-    #[serde(default)]
-    #[expect(dead_code)]
-    po_id: Option<String>,
-    #[serde(default)]
-    #[expect(dead_code)]
-    reason: Option<String>,
     /// Deterministic idempotency key from the triggering step
     /// (`{step_id}:{part_sku}`). Becomes the receive's `source_id` so a
     /// redelivered step-effect event (at-least-once JetStream delivery)
