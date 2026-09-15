@@ -53,6 +53,8 @@
 # THE SEQUENCE, each step checked rather than assumed
 # ---------------------------------------------------------------------
 #   1. the kind's file exists in the tree               else exit 3
+#   1b. the host's CLI can read a bundle: `boss --version` names a
+#      commit at or after the loader's arrival (the floor) else exit 78
 #   2. the live active row is read                       else exit 75 / 8
 #   3. tree vs live: equal is nothing to publish         else exit 5
 #      differing: the history walk decides; a live row the tree never
@@ -73,6 +75,22 @@
 # missing one is a configuration refusal naming that, never an ENOENT
 # dressed as a verdict.
 #
+# AND A STALE ONE IS REFUSED BY NAME (backlog fec2851f). The first live
+# run (ops-request 25cb2f71, 2026-09-15 16:36Z) reached step 4 with a
+# host CLI older than the loader: it rejected the kind file as "is not
+# JSON" — the branch an older `load_spec` falls into for any path —
+# and this script reported exit 4, "the tree's file does not lint
+# clean", about a file that lints clean. Nothing refreshes that binary
+# (boss-gcp-converge installs units only; `prod` is a deliberate human
+# run), so the misnamed refusal would have sent an operator to the
+# tree every time. Now `boss --version` is read first: the commit it
+# names must sit in this checkout's history at or after CLI_FLOOR —
+# the train that taught the CLI to read a bundle — else the refusal
+# names the binary, its commit, the floor and the refresh path, as a
+# host-configuration fault (78, where "no boss CLI" lives). A binary
+# that cannot say (`unknown`) or names a commit this checkout does not
+# hold is refused the same way: unplaceable is not assumed current.
+#
 # USAGE
 #   publish-workflow.sh <kind> [--check | --force-tree]
 #
@@ -83,6 +101,10 @@
 #                                is in — /opt/boss on boss-gcp)
 #   BOSS_BIN                     the CLI (default: `boss` on PATH, else
 #                                /usr/local/bin/boss)
+#   BOSS_PUBLISH_CLI_FLOOR       the oldest commit a usable CLI may be
+#                                built from (default CLI_FLOOR_DEFAULT
+#                                below; the test fixture's history has
+#                                its own)
 #   BOSS_ACTOR                   who the publish signs as (default
 #                                automation:ops-runner — the account
 #                                RUNNING it, the identity rule every
@@ -101,7 +123,8 @@
 #   7  the publish ran and was NOT confirmed by the read-back
 #   8  the kind has no live active row (the seed admits new kinds)
 #  75  cannot answer: the registry could not be read
-#  78  configuration: no BOSS_JOBS_URL, no `boss`, no python3/tomllib
+#  78  configuration: no BOSS_JOBS_URL, no `boss`, a `boss` older than
+#      the bundle loader (or of unknown provenance), no python3/tomllib
 #
 # Runs as root under the ops-runner with NO HOME; every git read drops
 # to the checkout's owner (root cannot even READ a checkout it does not
@@ -153,6 +176,15 @@ for tool in jq curl python3; do
 done
 python3 -c 'import tomllib' 2>/dev/null || { echo "$NAME: python3 has no tomllib (3.11+) — the bundle cannot be read, so nothing compared" >&2; exit 78; }
 
+# The floor: train #268 (2026-09-08), where `load_spec` in
+# crates/orchestrators/boss-cli/src/workflow.rs began reading a `.toml`
+# path through boss_jobs::seed_loader. A CLI built from any commit
+# before it cannot read what this verb publishes. One constant, pinned
+# by crates/core/boss-testing/tests/publish_workflow_sh.rs to the
+# commit whose workflow.rs first calls the loader.
+CLI_FLOOR_DEFAULT="c17827f37b3a464c7e2377281ff3dd8206f6ee8a"
+CLI_FLOOR="${BOSS_PUBLISH_CLI_FLOOR:-$CLI_FLOOR_DEFAULT}"
+
 BOSS_BIN="${BOSS_BIN:-}"
 if [ -z "$BOSS_BIN" ]; then
     if command -v boss >/dev/null 2>&1; then BOSS_BIN="$(command -v boss)"; else BOSS_BIN=/usr/local/bin/boss; fi
@@ -196,6 +228,31 @@ as_owner() { # <command string>
         runuser -u "$OWNER" -- env HOME="${OWNER_HOME:-/}" PATH="$PATH" bash -c "$1"
     fi
 }
+
+# --- 1b. the host's CLI can read what it will publish ---------------------------
+# `boss --version` prints `boss <crate> built from <sha>` (built_from.rs).
+# Read before the registry: a host that cannot act is a host fault, and
+# an operator should not be sent to the SoR or the tree for it.
+# Captured whole, first line taken in the shell: an external producer
+# piped into an early-exiting reader is the SIGPIPE coin-flip the lint
+# no-lint-flips-a-coin-on-an-external-producer refuses (2026-09-15).
+BOSS_VERSION_LINE="$("$BOSS_BIN" --version 2>&1)"
+BOSS_VERSION_LINE="${BOSS_VERSION_LINE%%$'\n'*}"
+BUILT_FROM="$(printf '%s\n' "$BOSS_VERSION_LINE" | sed -n 's/.*built from \([0-9a-f]\{7,40\}\|unknown\).*/\1/p')"
+REFRESH="the binary is refreshed by deploy-services.sh prod on this host (boss-gcp-converge installs units only)"
+case "${BUILT_FROM:-}" in
+    "")
+        refuse 78 "$BOSS_BIN cannot say what it was built from ('$BOSS_VERSION_LINE' names no commit), so whether it reads a bundle is unknown and is not assumed; $REFRESH" ;;
+    unknown)
+        refuse 78 "$BOSS_BIN cannot say what it was built from (built from unknown — compiled without git and no BOSS_BUILD_COMMIT), so whether it reads a bundle is unknown and is not assumed; $REFRESH" ;;
+esac
+if ! as_owner "git -C '$REPO' cat-file -e '$BUILT_FROM^{commit}'" 2>/dev/null; then
+    refuse 78 "$BOSS_BIN is built from $BUILT_FROM, a commit not in the history of $REPO, so it cannot be placed before or after the bundle loader ($CLI_FLOOR); an unplaceable binary is not assumed current. $REFRESH"
+fi
+if ! as_owner "git -C '$REPO' merge-base --is-ancestor '$CLI_FLOOR' '$BUILT_FROM'" 2>/dev/null; then
+    refuse 78 "$BOSS_BIN is built from ${BUILT_FROM:0:8}, older than the bundle loader (floor ${CLI_FLOOR:0:8}, train #268 2026-09-08): it would reject $KIND_FILE_REL as not JSON, a fault of the host and not of the tree. $REFRESH"
+fi
+say "boss: $BOSS_BIN built from ${BUILT_FROM:0:8} (floor ${CLI_FLOOR:0:8} reached)"
 
 # --- the comparator -----------------------------------------------------------
 # `python3 compare.py <toml> <live.json> <kind>`: exit 0 and print EQUAL

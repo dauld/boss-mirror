@@ -169,6 +169,12 @@ struct Case {
     live: PathBuf,
     live_after: PathBuf,
     boss_log: PathBuf,
+    /// The fixture's two commits: rev1 (the one-file bundle) and rev2
+    /// (HEAD). The stub `boss` reports itself built from rev2 and the
+    /// script's CLI floor is rev1 unless a case says otherwise, so the
+    /// version check passes by default and a case can turn it around.
+    rev1: String,
+    rev2: String,
 }
 
 impl Case {
@@ -217,6 +223,16 @@ impl Case {
             "-m",
             "rev2: one file per kind, a failed step",
         ]);
+        let rev = |spec: &str| {
+            let out = Command::new("git")
+                .args(["rev-parse", spec])
+                .current_dir(&repo)
+                .output()
+                .expect("git rev-parse runs");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let rev1 = rev("HEAD~1");
+        let rev2 = rev("HEAD");
 
         write_exec(
             &bin.join("boss"),
@@ -224,6 +240,11 @@ impl Case {
 # stub boss: records argv and the actor it was handed. `--dry-run`
 # lints (fails when STUB_LINT_FAIL is set); a real publish flips the
 # live row to STUB_LIVE_AFTER unless STUB_PUBLISH_FAIL / STUB_NO_EFFECT.
+# `--version` is a read of the binary, not an act: answered from
+# STUB_BUILT_FROM and never logged, so the counts below stay the acts.
+case "$*" in
+  --version) echo "boss 0.1.0 built from ${STUB_BUILT_FROM:-unknown}"; exit 0 ;;
+esac
 echo "$* actor=${BOSS_ACTOR:-unset}" >> "$STUB_BOSS_LOG"
 case "$*" in
   *--dry-run*)
@@ -271,6 +292,8 @@ exit 0
             live,
             live_after,
             boss_log,
+            rev1,
+            rev2,
         }
     }
 
@@ -298,7 +321,11 @@ exit 0
             .env("BOSS_PUBLISH_WORKFLOW_REPO", &self.repo)
             .env("STUB_LIVE", &self.live)
             .env("STUB_LIVE_AFTER", &self.live_after)
-            .env("STUB_BOSS_LOG", &self.boss_log);
+            .env("STUB_BOSS_LOG", &self.boss_log)
+            // The stub CLI is built from HEAD and the floor is the older
+            // commit: a current binary. A case overrides either.
+            .env("STUB_BUILT_FROM", &self.rev2)
+            .env("BOSS_PUBLISH_CLI_FLOOR", &self.rev1);
         for (k, v) in extra {
             cmd.env(k, v);
         }
@@ -621,6 +648,118 @@ fn a_malformed_kind_or_a_foreign_mode_is_refused_before_anything_runs() {
 }
 
 // ---------------------------------------------------------------------------
+// The host's CLI must be able to read what it is asked to publish.
+// ---------------------------------------------------------------------------
+
+/// The first live run (ops-request 25cb2f71, 2026-09-15 16:36Z; backlog
+/// fec2851f): boss-gcp's `/usr/local/bin/boss` predated the bundle
+/// loader (c17827f3, 2026-09-08), rejected the kind file as "is not
+/// JSON", and the script reported exit 4 — "the tree's file does not
+/// lint clean" — about a file that lints clean. The binary is read
+/// BEFORE the registry: a CLI built from a commit older than the floor
+/// is a host-configuration refusal (78, where "no boss CLI" already
+/// lives) that names the binary, its commit, the floor and the refresh
+/// path, and nothing is compared or published.
+#[test]
+fn a_host_cli_older_than_the_bundle_loader_is_refused_by_name_before_the_registry_is_read() {
+    if !ready() {
+        return;
+    }
+    let c = Case::new("stale-cli");
+    let (rc, out) = c.run_env(
+        &[KIND, "--check"],
+        &[
+            ("STUB_BUILT_FROM", c.rev1.clone()),
+            ("BOSS_PUBLISH_CLI_FLOOR", c.rev2.clone()),
+            // The registry is dark too: the CLI refusal must come first,
+            // or this would read 75 and send an operator to the SoR.
+            ("STUB_REGISTRY_DOWN", "1".into()),
+        ],
+    );
+    assert_eq!(rc, 78, "{out}");
+    contains_all(
+        &out,
+        &[
+            "REFUSED",
+            &c.bin.join("boss").display().to_string(),
+            "built from",
+            &c.rev1[..8],
+            &c.rev2[..8],
+            "deploy-services.sh prod",
+        ],
+        "the stale-CLI refusal names the binary, its commit, the floor and the refresh path",
+    );
+    assert!(
+        !out.contains("does not lint"),
+        "a stale binary was blamed on the tree: {out}"
+    );
+    assert!(c.boss_calls().is_empty(), "boss acted: {out}");
+}
+
+/// A binary that cannot say what it was built from, or names a commit
+/// this checkout does not hold, is refused the same way — the verb
+/// does not guess that an unplaceable binary reads a bundle.
+#[test]
+fn a_host_cli_of_unknown_or_unplaceable_provenance_is_refused_not_guessed() {
+    if !ready() {
+        return;
+    }
+    let c = Case::new("unknown-cli");
+    for (built, needle) in [
+        ("unknown".to_string(), "cannot say"),
+        ("deadbeef".repeat(5), "not in the history"),
+    ] {
+        let (rc, out) = c.run_env(&[KIND, "--check"], &[("STUB_BUILT_FROM", built.clone())]);
+        assert_eq!(rc, 78, "{built}: {out}");
+        contains_all(&out, &["REFUSED", needle], "the provenance refusal");
+        assert!(c.boss_calls().is_empty(), "{built}: boss acted: {out}");
+    }
+}
+
+/// The floor the script ships is the commit that taught the CLI to read
+/// a bundle: at it `workflow.rs` calls the seed loader, and at its
+/// parent it does not. Skips honestly where the checkout has no history
+/// to read (a shallow gate clone); the fixture cases above cover the
+/// mechanism either way.
+#[test]
+fn the_shipped_floor_is_the_commit_that_taught_the_cli_to_read_a_bundle() {
+    let script = std::fs::read_to_string(repo_root().join(SCRIPT)).unwrap();
+    let floor = script
+        .lines()
+        .find_map(|l| l.strip_prefix("CLI_FLOOR_DEFAULT="))
+        .expect("the script names CLI_FLOOR_DEFAULT")
+        .trim_matches('"')
+        .to_string();
+    assert_eq!(floor.len(), 40, "the floor is a full sha: {floor}");
+    let show = |rev: &str| {
+        Command::new("git")
+            .args([
+                "show",
+                &format!("{rev}:crates/orchestrators/boss-cli/src/workflow.rs"),
+            ])
+            .current_dir(repo_root())
+            .output()
+            .expect("git runs")
+    };
+    let at = show(&floor);
+    if !at.status.success() {
+        eprintln!("skipping: this checkout does not hold {floor} (shallow?)");
+        return;
+    }
+    assert!(
+        String::from_utf8_lossy(&at.stdout).contains("seed_loader::load_workflows"),
+        "at the floor the CLI reads a bundle"
+    );
+    let before = show(&format!("{floor}~1"));
+    if before.status.success() {
+        assert!(
+            !String::from_utf8_lossy(&before.stdout).contains("seed_loader::load_workflows"),
+            "the floor's parent already read a bundle — the floor is later than it needs to be"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // THROUGH THE RUNNER, with the real allowlist, as boss-gcp.
 // ---------------------------------------------------------------------------
 
@@ -684,6 +823,8 @@ cat "$STUB_JOBS"
         .env("STUB_LIVE", &c.live)
         .env("STUB_LIVE_AFTER", &c.live_after)
         .env("STUB_BOSS_LOG", &c.boss_log)
+        .env("STUB_BUILT_FROM", &c.rev2)
+        .env("BOSS_PUBLISH_CLI_FLOOR", &c.rev1)
         .output()
         .expect("ops-runner.sh runs");
     let text = format!(
