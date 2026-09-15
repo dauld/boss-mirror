@@ -1381,6 +1381,15 @@ pub(super) async fn update_job<R: JobsRepository + 'static, B: EventBus + 'stati
         return resp;
     }
 
+    // The third close site (the two step-driven hooks are in steps.rs):
+    // the same `closed_at` stamp beside the caller's `closed_on`, so a
+    // Job the operator closes by hand measures a cycle time like every
+    // other. The caller's own `closed_at`, if it sent one, wins.
+    if action == Action::Close {
+        let now = boss_clock_client::now_from(&state.clock).await;
+        stamp_close_instant(&mut job, &now);
+    }
+
     // OUTBOX (phase 2): the state event (full row state, what the
     // rebuild consumes) + the status-transition markers (topic-only
     // duplicates for downstream consumers; rebuild ignores them)

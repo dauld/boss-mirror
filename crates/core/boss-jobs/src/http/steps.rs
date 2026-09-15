@@ -1061,15 +1061,7 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
                 // clock's date only if the step somehow lacks one.
                 let job_now = boss_clock_client::now_from(&state.clock).await;
                 job.closed_on = step.completed_on.or(Some(job_now.date_naive()));
-                // The precise instant beside the date — `closed_on` has
-                // one-day resolution by construction, and the terminal
-                // report prefers the `opened_at` / `closed_at` metadata
-                // stamps (`cycle_days_sample`, port.rs). First close
-                // wins; a Job closes once.
-                if let serde_json::Value::Object(map) = &mut job.metadata {
-                    map.entry("closed_at")
-                        .or_insert_with(|| serde_json::json!(job_now.to_rfc3339()));
-                }
+                stamp_close_instant(&mut job, &job_now);
             }
             // OUTBOX (phase 2): the state event (full row state for
             // the rebuild) + status markers record in the SAME
@@ -1782,22 +1774,17 @@ async fn close_job_on_terminal<R: JobsRepository + 'static, B: EventBus + 'stati
     job.closed_on = Some(now.date_naive());
     // Stamp the terminal outcome onto the Job metadata so projections
     // / the SPA can render *why* the Job closed — and the precise
-    // close instant beside the one-day-resolution `closed_on`, which
-    // the terminal report prefers (`cycle_days_sample`, port.rs).
-    // First close wins on `closed_at`; a Job closes once.
+    // close instant beside the one-day-resolution `closed_on`
+    // (`stamp_close_instant`, the one write shared by every close).
     if let serde_json::Value::Object(map) = &mut job.metadata {
         map.insert(
             "outcome".to_string(),
             serde_json::Value::String(outcome.to_string()),
         );
-        map.entry("closed_at")
-            .or_insert_with(|| serde_json::json!(now.to_rfc3339()));
     } else {
-        job.metadata = serde_json::json!({
-            "outcome": outcome,
-            "closed_at": now.to_rfc3339(),
-        });
+        job.metadata = serde_json::json!({ "outcome": outcome });
     }
+    stamp_close_instant(&mut job, &now);
 
     // OUTBOX (phase 2): the close's state event + markers record in
     // the SAME transaction as the row.

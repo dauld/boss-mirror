@@ -343,6 +343,39 @@ legend both cite (resolved 2026-08-12; the redraw itself is not yet
 executed). The envelope model and the target shape of the parts not
 yet built are carried by `docs/design/job-packet-network.md`.
 
+**A step declares its audience once, and every surface derives its
+selector from that** (design `f5ebd2e1`, David 2026-09-11; three
+questions accepted as proposed, the fourth a constraint). The
+measurement: a backlog item routed to `design` produced a decision step
+at slug `design-review` that no station predicate claimed — invisible
+on `/it/design` by construction — while My Day's endpoint listed it
+among eleven rows for `assignee_id=emp-david&roles=platform-admin`, and
+the operator found neither. Read from the code, placement is three
+mechanisms keyed on three different things: an individual on
+`step.assignee_id`, a role on `metadata.authority_role` (with the
+unclaimed-or-active rider), a queue on a `StationPredicate` over
+`job.kind` + `step.slug`/`step.kind`; My Day unions the first two, a
+station page reads only the third, and nothing asserts that a ready
+step is claimed by any of them. Decided: (1) **one required audience
+field** on a step's declaration — a closed set of shapes: an
+individual, a role, a department, a named station — from which all
+three selectors derive, because a closed set makes an audience nobody
+reads *impossible* rather than unlikely; (2) **department is Class
+registry data** on workflows and/or stations, never a match in core
+code (CLAUDE.md §9), which also answers "every human-only step in the
+department regardless of assignee" without a bespoke query; (3) **no
+orphan steps**: a check, computable from registry data alone, that
+every ready step in an open packet is selected by at least one station
+predicate or carries an assignee — the mechanism that would have caught
+this the day it was introduced; whether it warns or refuses at publish
+is open until the station set is complete. The fourth answer is a
+constraint on any build, not a choice between them: **surfaces never
+show inconsistent representations of the same step.** Not yet built;
+until it lands, a decision that must reach a person is assigned to
+them by id, which is the one selector every surface honours today
+(2026-09-15: six operator decisions assigned that way, each with the
+ask written on the step as `context_md`).
+
 ## Step types are property bundles; the alphabet is the mechanisms
 
 A step *type* enforces rules, and each rule is an orthogonal,
@@ -758,6 +791,33 @@ refuse), `auth.login.succeeded` (carrying `method`), and
 exchange, userinfo — stay warn lines: plumbing facts, not
 who-tried-the-door facts. **No per-request events**, ratified as a
 standing constraint rather than a deferral.
+
+**One actor, one identity: an agent's login resolves to a registered
+id the way a human's does** (design `6fda05ae`, David 2026-09-12; all
+three questions accepted as proposed; folds backlog `adf025df` and
+`7dd9f28c` into one decision). Measured: the same CPU was
+`claude@algedonic.dev` on `steps.assignee_id`/`completed_by` and
+`claude:opus-5[1m]` on `agent_runs.actor_id`, so the question the
+agent-runs module exists to answer — what did this actor build, at what
+cost — could not be asked, and `ActorId` carried no address arm at all:
+the address was live data the vocabulary did not describe. The human
+side already had the answer — `boss-gateway/src/oidc.rs` resolves a
+login to an `emp-*` id before any write is signed and fails closed on
+no match — so an address surviving to a step meant that resolution
+never happened for agents. Decided: (1) **the canonical id is an
+emp-style opaque id in an agents registry** (`agent-<slug>`), never the
+login address and never the model-qualified colon form — addresses are
+logins (aliases), models are facts about a run; (2) **the model lives
+on the run** (`agent_runs.model`), the agent row carrying its default
+model and its caps, because one registered agent runs different models
+over time and cost is priced per run; (3) **an unregistered agent login
+is refused, failing closed**, exactly as a human login matching no
+employee is — after a one-release migration window in which an alias
+table maps the one live address to its agent and a lint counts writes
+still arriving under an alias. Budgets (`AgentSpec` caps, a decision
+recorded before a run starts) sequence after the run is a recorded
+fact. Car 1 (registry + alias + resolution, window open) building
+2026-09-15.
 
 ## Calendar
 
@@ -1192,6 +1252,93 @@ volume by reflink. **Until the broker mints** (the maiden rotation,
 held for a David-timed restart) and 4-wide niced cargo for `agent-*`
 worktrees (`infra/dev/wt-cargo`), which took the throttling from
 2,177 periods to ~350 over the next ten hours.
+
+**Cluster management runs on an internal host; the workstation is a
+terminal** (design `1bc4b4ed`, David 2026-09-12: "I would rather one of
+the internalized systems be where commands run"). Measured: every
+`talosctl` and admin `kubectl` ran from `~/talos-homelab/v2` on a
+laptop — the cluster's root credential and machine configs on a host
+that is not managed, converged, observed or reachable — and the gate
+seed's kubelet mount took nine hours to diagnose because three of the
+reads that settled it had to be typed by a human and pasted back.
+Decided: (1) **the forge declares a `cluster-operator` role** (a Class
+row on the node, `infra/estate/roles.toml` saying what the role
+installs) — "start with forge; a GCP VM may make more sense later", so
+w-2 off Talos and a GCP VM are recorded as future options for
+separating the credential from git+registry; the role brings the
+interactive door first (`talosctl`/`kubectl` on the forge, credentials
+root-only under `/etc/boss-ops`, installed once by David — the
+estate's converge never writes a credential — and the Talos configs
+move there as the canonical copy), then (2) **mechanical reads as ops
+verbs** — `node-status`, `pod-describe`, `pod-events`, `talos-ls`,
+`talos-logs`, `talos-get`, literal argv, reads only — and (3) **one
+bounded act**, `node-converge <node>`: `apply-config --dry-run` against
+the per-node file declared in the repo (non-secret entries only; PKI
+stays in `/etc/boss-ops`), the diff recorded on the packet, then apply.
+**Reboot, upgrade, reset and etcd membership never become verbs.** The
+question of *how the operator's own terminal should carry the
+credentials* is not decided: David's answer asked what professionals
+do and whether a small standalone management tool should ship for
+terminals like the Mac, and that stays open on the packet.
+
+**The knobs outside the tree become declared settings** (design
+`16115a17`, David 2026-09-12; all four questions accepted as proposed).
+Measured 2026-09-11: three of the five levers behind a 22-minute outage
+of the system of record and a publish PR closing itself two minutes
+after it opened were settings that live in no file here — a Forgejo
+push mirror found only through its API, the Talos kubelet image-GC
+thresholds, Longhorn's node-down pod-deletion policy — each an
+imperative act with no packet, no declared value to converge from, and
+no observer comparing it to anything; and retention had the same
+absence, three reclaim scripts each carrying its own constant for the
+lifetime of an image, a target dir, a `publish/<date>` branch. Decided:
+(1) **scope** is the four that bit — Talos kubelet extraConfig, Longhorn
+settings, Forgejo repository settings, and the retention rules — with
+GitHub token/repo facts recorded but not compared (no read without the
+token); (2) **one table, `declared_settings`, with a `kind` column**
+(`setting` | `retention`) — retention *is* a declared setting of an
+artifact kind, and one observer and one alarm path is the point (two
+tables would drift the way the three scripts did); (3) **apply is an
+ops verb per system where a runner can reach it** (Longhorn via the
+conductor's kubectl, Forgejo's API from the forge) and **a named human
+step for Talos** (`talosctl` is David's door), and **verify is always
+the observer's next comparison, never the applier's exit code**; (4)
+**drift raises through `estate.alarm`** as a hard finding carrying live
+and declared values, never auto-applied, and a setting nobody declared
+but the observer can see is reported **UNDECLARED** — the third state
+beside declared-and-matching and drift. Not yet built; the Talos
+entries the gate depends on are being declared first (`08430090`).
+
+**A maintenance chore states its coverage, its numbers, and its
+suppression** (design `14c135f5`, David 2026-09-11; all three
+questions accepted as proposed). Nine maintenance mechanisms were found
+failing in one session on 2026-09-10 and they were one shape, not nine
+bugs: a chore is not obliged to report honestly about itself. Seven
+daily sweeps dead nine days each behind its own undrained packet; the
+mirror check dead nineteen days while the mirror drifted 238 commits;
+a branch sweep reading the newest fifty trains and calling it total;
+139 disk-floor packets recording `result: ok` and no number while
+computing the very number that decided it; a `disk_tight` alarm that
+could never fire for a cluster node because the observer records
+capacity, never headroom. **Coverage** — what population was examined
+and whether that was all of it; **numbers** — what was measured, not a
+word for how it went (CLAUDE.md's rule about reducing a record before
+storing it, applied to successes); **suppression** — "did not run
+because a packet is open" distinguishable from "ran and found nothing".
+Decided: (1) **the contract lives in the Workflow registry**: the
+`measured`/`coverage` fields are REQUIRED on maintenance chore kinds via
+`metadata_schema`, so the protocol refuses a chore packet that cannot
+say what it examined — the packet is the durable record, and a lint
+over scripts would catch the author but not the packet; (2) **a
+suppressed firing refreshes one open record, never twins** — the estate
+alarm's existing idiom (bounded dedup read, refresh not twin, a human
+close suppresses for a week, self-clear stamped) — because a packet per
+suppressed tick would file hundreds and no packet is the invisible
+state that cost nineteen days; (3) **a chore that cannot state its
+coverage FAILS**, not warns: the audit-integrity alarm's history is the
+proof that permanently-red and green-with-warnings decay the same way.
+First instance landed 2026-09-15: the protocol-drift chore records
+`measured` (kinds compared, fields, head) on every run.
 
 ## Design docs and the decision record
 

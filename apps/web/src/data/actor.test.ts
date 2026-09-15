@@ -83,6 +83,22 @@ describe('isHumanActor', () => {
     expect(isHumanActor('someone@example.com')).toBe(false);
   });
 
+  it('is false for a registered agent id — the resolved form', () => {
+    // Design 6fda05ae (decided 2026-09-15): the address above is a LOGIN,
+    // and the jobs API now resolves it at its door to the registered
+    // agent's id, `agent-claude`, before a step or an event records the
+    // actor — the same resolution a human's login gets at the gateway.
+    // The resolved id is bare and colon-free, so without this branch the
+    // mirror would have called the agent staff the day the resolution
+    // landed. Same prefix `ActorId::from_str` reads (REGISTERED_AGENT_PREFIX).
+    expect(isHumanActor('agent-claude')).toBe(false);
+    expect(isHumanActor('agent-inventory-reorder-advisor')).toBe(false);
+    // The prefix is `agent-` with the hyphen and a slug after it; an id
+    // that merely starts with the word, or the bare prefix, is not one.
+    expect(isHumanActor('agentsmith')).toBe(true);
+    expect(isHumanActor('agent-')).toBe(true);
+  });
+
   it('is false for an absent actor — Platform is not a person', () => {
     expect(isHumanActor(null)).toBe(false);
     expect(isHumanActor(undefined)).toBe(false);
@@ -141,6 +157,17 @@ describe('formatActor', () => {
     expect(formatActor('claude@algedonic.dev')).toBe('claude@algedonic.dev');
     expect(formatActor('claude@algedonic.dev', new Map([['emp-032', 'Dana Ng']]))).toBe(
       'claude@algedonic.dev',
+    );
+  });
+
+  it('renders a registered agent by its id, never as a missing employee', () => {
+    // The registry form carries no model (the model is a fact about a
+    // run, design 6fda05ae), so there is no `mode · model` to render:
+    // the id is the label, as an address was, and `empNames` — which
+    // holds only employee ids — is not consulted for it.
+    expect(formatActor('agent-claude')).toBe('agent-claude');
+    expect(formatActor('agent-claude', new Map([['agent-claude', 'not an employee']]))).toBe(
+      'agent-claude',
     );
   });
 

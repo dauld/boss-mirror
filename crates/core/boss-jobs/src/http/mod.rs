@@ -459,6 +459,27 @@ pub(super) fn self_id(user: &boss_policy_client::User) -> Option<&str> {
     user.ambient_actor().is_some().then_some(user.id.as_str())
 }
 
+/// The precise close instant beside the one-day-resolution
+/// `closed_on`: `metadata.closed_at`, which the terminal report prefers
+/// over date arithmetic (`cycle_days_sample`, port.rs). First close
+/// wins — a Job closes once — and a non-object metadata is replaced by
+/// the one-key object rather than skipped.
+///
+/// ONE write for the three close sites (the declared-terminal hook and
+/// the all-steps-terminal catch-all in steps.rs, the status PUT in
+/// jobs.rs). Until 2026-09-15 each hook carried its own copy of this
+/// and the PUT had none, so a packet the operator closed by hand read
+/// as "no cycle time" beside its stamped neighbours (backlog
+/// a7a07ffb). A fact that lives three times gets one definition.
+pub(super) fn stamp_close_instant(job: &mut Job, now: &chrono::DateTime<chrono::Utc>) {
+    if let serde_json::Value::Object(map) = &mut job.metadata {
+        map.entry("closed_at")
+            .or_insert_with(|| serde_json::json!(now.to_rfc3339()));
+    } else {
+        job.metadata = serde_json::json!({ "closed_at": now.to_rfc3339() });
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared id parsers
 // ---------------------------------------------------------------------------

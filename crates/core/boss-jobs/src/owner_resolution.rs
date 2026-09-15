@@ -42,13 +42,20 @@ pub trait RosterLookup: Send + Sync {
 /// person: the `ActorId` union's non-human arms plus the historical
 /// pseudo-owners the audit catalogued.
 ///
-/// Every colon-bearing id is a machine: a named automation
-/// (`automation:<slug>`, `rule:<name>`) or an agent session
-/// (`<mode>:<model>`, e.g. `claude:opus-5`). No employee id carries a
-/// colon — that is the same invariant `ActorId::from_str` parses on.
+/// The union's own parse decides the first half: every colon-bearing
+/// id is a machine — a named automation (`automation:<slug>`,
+/// `rule:<name>`) or an agent session (`<mode>:<model>`, e.g.
+/// `claude:opus-5`) — and so is a registered agent's bare id
+/// (`agent-claude`, design 6fda05ae). Reading it off `ActorId` rather
+/// than off a copy of its prefixes is what keeps this predicate and
+/// `ActorId::is_human` one definition (§9a): the `agent-` spelling
+/// would otherwise have needed adding here by hand, and until it was,
+/// a registered agent would have owned a Job as if it were staff.
 pub fn is_automation_shaped(owner: &str) -> bool {
     owner.is_empty()
-        || owner.contains(':')
+        || owner
+            .parse::<boss_core::actor::ActorId>()
+            .is_ok_and(|a| !a.is_human())
         || owner.starts_with("system")
         || owner == "direct-shop"
         || owner == "bootstrap"
@@ -304,13 +311,19 @@ mod tests {
     async fn an_agent_owner_is_machine_shaped_and_resolves_to_a_human() {
         assert!(is_automation_shaped("claude:opus-5"));
         assert!(is_automation_shaped("claude:fable"));
+        // The registry spelling (design 6fda05ae) is the same class in
+        // a colon-free id; the shape test reads it off the ActorId
+        // parse rather than off a second copy of the prefix.
+        assert!(is_automation_shaped("agent-claude"));
         assert!(!is_automation_shaped("emp-brew-1"));
 
         let roster = InMemoryRoster::new().with_holder("brewer", "emp-brew-1");
-        let owner = resolve_owner(&roster, "claude:fable", "j", Some("brewer"), None)
-            .await
-            .unwrap();
-        assert_eq!(owner, "emp-brew-1");
+        for agent in ["claude:fable", "agent-claude"] {
+            let owner = resolve_owner(&roster, agent, "j", Some("brewer"), None)
+                .await
+                .unwrap();
+            assert_eq!(owner, "emp-brew-1", "{agent}");
+        }
     }
 
     #[tokio::test]

@@ -1285,7 +1285,7 @@ async fn main() -> Result<()> {
             args,
             wait,
             dry_run,
-        } => ops_request::run(host, verb, args, wait, dry_run, chrono::Utc::now()).await,
+        } => ops_request::run(host, verb, args, wait, dry_run).await,
         Commands::Job { action } => match action {
             JobAction::Get { job, json } => job::get(&job, json).await,
             JobAction::Station { station, json } => job::station(&station, json).await,
@@ -1302,17 +1302,7 @@ async fn main() -> Result<()> {
                 priority,
                 metadata,
                 subject_id,
-            } => {
-                job::file(
-                    &kind,
-                    &title,
-                    priority,
-                    metadata,
-                    subject_id,
-                    chrono::Utc::now(),
-                )
-                .await
-            }
+            } => job::file(&kind, &title, priority, metadata, subject_id).await,
             JobAction::Patch { job, patch } => job::patch(&job, &patch).await,
         },
         Commands::Orient { all } => orient::run(all).await,

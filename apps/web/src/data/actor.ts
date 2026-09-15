@@ -9,12 +9,14 @@
  *   - a **named automation**, carrying the `automation:` prefix with an
  *     explicit authority — a dispatch rule (`automation:rule:<name>`), the
  *     dispatcher, the simulator, or the emitting service.
- *   - an **agent session**, in either of two spellings — `<mode>:<model>`
- *     (`claude:opus-5[1m]`, what `agent_runs.actor_id` carries) or the
- *     ADDRESS the session signs its jobs-API calls with
- *     (`claude@algedonic.dev`, what `steps.assignee_id` carries). Both
- *     name an LLM CPU; `claude` is the mode for an interactive Claude
- *     session.
+ *   - an **agent**, in three spellings — `<mode>:<model>`
+ *     (`claude:opus-5[1m]`, what `agent_runs.actor_id` carries), the
+ *     REGISTERED id `agent-<slug>` (`agent-claude`, what a step or an
+ *     event carries since the jobs API began resolving agent logins at
+ *     its door — design 6fda05ae), and the ADDRESS a session signs its
+ *     jobs-API calls with (`claude@algedonic.dev`, what rows written
+ *     before that resolution carry). All three name an LLM CPU; `claude`
+ *     is the mode for an interactive Claude session.
  *
  * The branch order in `formatActor` mirrors `ActorId::from_str` and is
  * load-bearing: `automation:` is claimed first because its slug may itself
@@ -60,6 +62,15 @@ export function isHumanActor(actorId: string | null | undefined): boolean {
   //     whose other reads answer nonzero), so this pins the mirror rather
   //     than changing any rendering today.
   //
+  //  4. The `agent-` prefix — a REGISTERED agent's id (`agent-claude`),
+  //     `ActorId::RegisteredAgent` since design 6fda05ae (2026-09-15).
+  //     Shape 2 is a login; this is what the login resolves TO at the
+  //     jobs API's door, the way an email resolves to an `emp-*` id at
+  //     the gateway, and it is what steps and events carry from then on.
+  //     Bare and colon-free like an employee id — the SPA treats such
+  //     ids as opaque lookups — so the prefix is the whole tell, spelled
+  //     once in Rust (`REGISTERED_AGENT_PREFIX`) and once here.
+  //
   // WHY THIS IS HERE (backlog a6b10413). The colon alone was the whole
   // test, which was true while `automation:` and `emp-` were the only
   // prefixes and stopped being true when an agent began being assigned
@@ -69,13 +80,27 @@ export function isHumanActor(actorId: string | null | undefined): boolean {
   // department's work read as staff on every surface asking this question,
   // and any census of the human/machine boundary counted it as a person.
   //
-  // THE HONEST LIMIT: this is a fix to the PREDICATE, not to the
-  // vocabulary. One actor still has two spellings — the address here and
-  // `claude:opus-5[1m]` in `agent_runs` — so "what did this actor build,
-  // and what did it cost" is still a join nothing can make. That is one
-  // spelling per actor (§9a), it touches live data and the `ActorId`
-  // union, and it is filed separately rather than half-done here.
-  return !!actorId && !actorId.includes(':') && !actorId.includes('@') && actorId !== 'system';
+  // THE HONEST LIMIT, as it stands after shape 4. Rows written before
+  // the door landed still carry the address, and `agent_runs` still
+  // carries `claude:opus-5[1m]`; the `actor_aliases` table is how the
+  // first are read under `agent-claude`, and moving the model onto the
+  // run (so agent_runs can carry the registered id too) is the next car
+  // of design 6fda05ae. Until it lands, "what did this actor build, and
+  // what did it cost" joins through the alias table, not by equality.
+  return (
+    !!actorId &&
+    !actorId.includes(':') &&
+    !actorId.includes('@') &&
+    actorId !== 'system' &&
+    !isRegisteredAgent(actorId)
+  );
+}
+
+/** `agent-<slug>` — the id of an `agents` registry row. The Rust parse
+ *  (`ActorId::from_str`, branch 4) reads the same prefix and, like it,
+ *  wants a non-empty slug after the hyphen. */
+function isRegisteredAgent(actorId: string): boolean {
+  return actorId.startsWith('agent-') && actorId.length > 'agent-'.length;
 }
 
 /** @see the module docstring — this is the label side of {@link isHumanActor}. */
@@ -107,6 +132,11 @@ export function formatActor(
     // `opus-5` into `Opus 5` would name a model that does not exist.
     return `${titleCase(actorId.slice(0, split))} · ${actorId.slice(split + 1)}`;
   }
+
+  // A registered agent — its id is the label. There is no model half to
+  // render (the model is a fact about a run, not the actor), and
+  // `empNames` holds employees, so it is not consulted.
+  if (isRegisteredAgent(actorId)) return actorId;
 
   // Human — an employee id. Use a friendly name when we have one.
   return empNames?.get(actorId) ?? actorId;

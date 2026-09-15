@@ -56,6 +56,11 @@
 #       older stack boss-gcp still carries — and unit FILES are the
 #       part that rotted: every timer authored or fixed after the
 #       2026-09-04 conductor cutover sat inert on main (408c81f6).
+#   ./infra/deploy-services.sh roster
+#       one line per TIMERS row, `in-role <stem>` or `not-in-role
+#       <stem>` under BOSS_NODE_ROLES, by the same derivation the
+#       `units` mode installs by. Reads only; the uninstall verb
+#       (infra/gcp/uninstall-not-in-role.sh) takes its set from here.
 #   sudo ./infra/deploy-services.sh revert
 #       flip current <-> previous and restart the prod fleet — the
 #       make-before-break rollback (seconds, no build)
@@ -69,6 +74,7 @@ usage() {
     echo "       $0 check <prod|scratch|both>" >&2
     echo "       $0 probe [prod|scratch|both]" >&2
     echo "       $0 units" >&2
+    echo "       $0 roster" >&2
     echo "       $0 revert" >&2
     echo "       $0 prune" >&2
     exit 2
@@ -83,13 +89,14 @@ case "${1:-}" in
     check)  MODE="check";  shift; [[ $# -ge 1 ]] || usage ;;
     probe)  MODE="probe";  shift ;;
     units)  MODE="units";  shift ;;
+    roster) MODE="roster"; shift ;;
     revert) MODE="revert"; shift ;;
     prune)  MODE="prune";  shift ;;
 esac
 
-if [[ "$MODE" == "revert" || "$MODE" == "prune" || "$MODE" == "units" ]]; then
+if [[ "$MODE" == "revert" || "$MODE" == "prune" || "$MODE" == "units" || "$MODE" == "roster" ]]; then
     # No env argument: revert and prune operate on the generation store
-    # itself, and `units` on timer unit files, which are
+    # itself, and `units` / `roster` on timer unit files, which are
     # environment-agnostic (they always land in prod).
     # TARGET drives the restart roster on revert — prod, because the
     # confirm (the caller that matters) is prod-scoped; scratch units
@@ -1207,8 +1214,10 @@ TIMER_UNITS_NOT_IN_ROLE=0
 # separated, read off /api/estate/nodes). With roles declared, only
 # their rows and the `always` set are installed and every other row is
 # REPORTED as NOT IN ROLE — reported, never uninstalled here: taking a
-# unit off a host is the retire-second-stack verb's job, with
-# capture-before-delete. With NO roles (undeclared, or the registry
+# unit off a host is the uninstall-not-in-role verb's job
+# (infra/gcp/uninstall-not-in-role.sh), which reads the SAME set off
+# the `roster` mode below rather than deriving a second one (CLAUDE.md
+# §9a). With NO roles (undeclared, or the registry
 # unreachable), every row installs exactly as it did before roles
 # existed, and the run says so. An arm that needs the patient is not
 # an arm.
@@ -1248,6 +1257,16 @@ roster_for_roles() { # <comma-separated roles>
     done
 }
 
+# Is one TIMERS stem in the roster? ONE predicate for the three readers
+# — install, enable, and the `roster` mode the uninstall verb reads —
+# so what a host installs and what it may remove cannot be two
+# different questions. An empty roster (no roles declared) is "every
+# row", as before roles existed.
+stem_in_role() { # <stem> <roster>
+    [[ -z "$2" ]] && return 0
+    grep -qxF "$1" <<<"$2"
+}
+
 # $1 = "stage" to also stage each timer's binary into the generation.
 install_timer_units() {
     local stage="${1:-}" entry stem subdir src_dir svc_src tmr_src roster
@@ -1262,8 +1281,8 @@ install_timer_units() {
     fi
     for entry in "${TIMERS[@]}"; do
         IFS=: read -r stem subdir <<<"$entry"
-        if [[ -n "$roster" ]] && ! grep -qxF "$stem" <<<"$roster"; then
-            echo "  NOT IN ROLE $stem — this host's roles do not name it; a later car retires it"
+        if ! stem_in_role "$stem" "$roster"; then
+            echo "  NOT IN ROLE $stem — this host's roles do not name it; the uninstall-not-in-role verb removes it"
             TIMER_UNITS_NOT_IN_ROLE=$((TIMER_UNITS_NOT_IN_ROLE + 1))
             run_summary_note "NOT IN ROLE $stem"
             continue
@@ -1338,7 +1357,7 @@ enable_timer_units() {
         IFS=: read -r stem _ <<<"$entry"
         # A row outside this host's roles is neither installed nor
         # enabled here, even if an earlier converge left its files.
-        if [[ -n "$roster" ]] && ! grep -qxF "$stem" <<<"$roster"; then
+        if ! stem_in_role "$stem" "$roster"; then
             continue
         fi
         if [[ -f "${TIMER_ETC}/${stem}.timer" ]]; then
@@ -1349,6 +1368,27 @@ enable_timer_units() {
 }
 
 case "$MODE" in
+    roster)
+        # THE ROSTER AS A LIST, ONE LINE PER TIMERS ROW: `in-role <stem>`
+        # or `not-in-role <stem>` under BOSS_NODE_ROLES — the same
+        # roster_for_roles / stem_in_role the `units` mode installs and
+        # enables by. This is the ONE derivation of "what this host is
+        # for"; infra/gcp/uninstall-not-in-role.sh (d5941ef3 car 4)
+        # takes the set it may remove from these lines and never
+        # computes its own, so the installed set and the removable set
+        # are complements by construction (CLAUDE.md §9a). Reads only:
+        # no root, no systemctl, nothing written.
+        roster="$(roster_for_roles "${BOSS_NODE_ROLES:-}")"
+        for entry in "${TIMERS[@]}"; do
+            IFS=: read -r stem _ <<<"$entry"
+            if stem_in_role "$stem" "$roster"; then
+                echo "in-role $stem"
+            else
+                echo "not-in-role $stem"
+            fi
+        done
+        exit 0
+        ;;
     units)
         # UNIT FILES ONLY. No build, no staging, no schema, no restart —
         # which is what makes this mode safe to run unattended every half

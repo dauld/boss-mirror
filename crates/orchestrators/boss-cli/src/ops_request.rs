@@ -251,7 +251,6 @@ pub async fn run(
     args: Vec<String>,
     wait: bool,
     dry_run: bool,
-    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
     let verbs = shipped_allowlist()?;
     let v = validate(&verbs, &host, &verb, &args)?;
@@ -277,7 +276,6 @@ pub async fn run(
         None,
         Some(&v.host),
         &owner,
-        &now.format("%Y-%m-%d").to_string(),
         Some(json!({"host": v.host, "verb": v.verb, "args": v.args})),
     );
     let created = crate::gate::api(&http, reqwest::Method::POST, "/api/jobs", Some(body))

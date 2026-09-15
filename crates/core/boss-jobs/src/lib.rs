@@ -10,6 +10,7 @@
 //! Postgres, in-memory, and other adapters implement the same trait.
 
 pub mod agent_runs;
+pub mod agents;
 pub mod bootstrap;
 pub mod cadence;
 pub mod calendar_hook;

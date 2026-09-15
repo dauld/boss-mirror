@@ -368,3 +368,55 @@ async fn the_declared_terminal_close_stamps_the_precise_close_instant() {
         "the close instant precedes the open instant: {closed:#}"
     );
 }
+
+/// The third close site. A full-body `PUT /api/jobs/{id}` carrying
+/// `status: closed` is the designed operator close (the mass-close
+/// mechanic, `boss job` hand closes); it emitted the same
+/// `jobs.job.closed` marker as the two step-driven hooks but wrote no
+/// `closed_at`, so a packet closed this way read as "no cycle time"
+/// beside its date-stamped neighbours (backlog a7a07ffb — the two
+/// pre-stamp publish-requests it cites closed through a step hook
+/// before train #167 landed the stamp; this path was the one still
+/// live without it). One stamp helper now serves all three.
+#[tokio::test]
+async fn a_status_put_close_stamps_the_precise_close_instant() {
+    let app = app();
+    let job = open_job(
+        &app,
+        job_body("closes-by-catch-all", serde_json::json!({ "note": "kept" })),
+    )
+    .await;
+    let job_id = job["id"].as_str().expect("job id").to_string();
+
+    let mut closing = job.clone();
+    closing["status"] = serde_json::json!("closed");
+    closing["closed_on"] = serde_json::json!("2026-09-15");
+    let (status, body) = send(
+        &app,
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/api/jobs/{job_id}"))
+            .header("content-type", "application/json")
+            .header("x-boss-user", admin_header())
+            .body(Body::from(closing.to_string()))
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        status.is_success(),
+        "status PUT close failed: {status} {body}"
+    );
+
+    let closed = get_job(&app, &job_id).await;
+    assert_eq!(closed["status"], "closed", "expected a PUT close");
+    assert_eq!(
+        closed["metadata"]["note"], "kept",
+        "the stamp merges into the body's metadata, never replaces it: {closed:#}"
+    );
+    let opened_at = parsed_stamp(&closed, "opened_at");
+    let closed_at = parsed_stamp(&closed, "closed_at");
+    assert!(
+        closed_at >= opened_at,
+        "the close instant precedes the open instant: {closed:#}"
+    );
+}

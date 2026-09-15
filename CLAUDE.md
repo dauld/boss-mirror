@@ -777,10 +777,17 @@ a door that stops being true is a defect worth a car.
   agent's work.
 
 - **Which deployment.** The system of record is
-  **`http://10.20.0.34:7900`**. boss-gcp's `127.0.0.1:7900` is a
-  *second, older, complete stack* with different data. The conductor's
-  systemd unit sets `BOSS_JOBS_URL` explicitly for this reason; a verb
-  run by hand inherits no unit.
+  **`http://10.20.0.34:7900`**, and since 2026-09-15 it is the ONLY
+  jobs API in the estate. boss-gcp's `127.0.0.1:7900` was a *second,
+  older, complete stack* with different data; David retired it through
+  the bounded `retire-second-stack` verb (ops-request 7912c9ae: 52
+  units stopped and disabled, the database captured first to
+  `/var/backups/boss/second-stack/second-stack-20260915T211123Z.sql`,
+  unit files and binaries untouched). The rule it taught outlives it:
+  a query against a wrong or dark instance answers `total: 0` instead
+  of erroring, so every verb pins `BOSS_JOBS_URL` explicitly (the
+  conductor's unit, the pod shim's `sor-url`) and a verb run by hand
+  inherits no unit.
 
 - **Who a verb signs as — `BOSS_ACTOR`.** Every `boss` verb signs its
   jobs-API calls as the actor RUNNING it, read from `BOSS_ACTOR` or,

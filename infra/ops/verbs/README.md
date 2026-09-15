@@ -103,6 +103,10 @@ their authorization. The first is `retire-second-stack` (David
 2026-09-11, design 9e3e093f): bounded to the unit list the tree carries
 at `infra/gcp/second-stack-units.txt`, capture-before-stop, `--dry-run`
 exercisable without acting, `--for-real` a human's decision to file.
+The second, `uninstall-not-in-role` (same authorization, car 4 of
+d5941ef3), carries no list at all: its set is what
+`deploy-services.sh roster` says the host's LIVE roles do not name —
+the installer's own derivation — and an empty set is a refusal.
 
 ## Defense
 

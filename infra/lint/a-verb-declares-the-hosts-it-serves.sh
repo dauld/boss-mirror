@@ -109,6 +109,14 @@ GCP_MUTATING_ADMITTED = {
     # as the first verb that writes the workflow registry from a host,
     # the way run-car-probe was flagged as the first to run builder text.
     "publish-workflow": "David 2026-09-11, 8f4e9cc0 / backlog 3ce95b85 — flagged for review",
+    # design 9e3e093f, decided by David 2026-09-11 — its accepted
+    # proposal names this path: "an uninstall path for units the role
+    # does not name ... through the ops-runner door as a bounded verb";
+    # backlog d5941ef3 car 4. Bounded to the installer's own roster
+    # derivation (deploy-services.sh roster: TIMERS minus what the
+    # host's LIVE roles name), refuses an empty set, --dry-run
+    # exercisable without acting.
+    "uninstall-not-in-role": "David 2026-09-11, design 9e3e093f",
 }
 
 problems = []

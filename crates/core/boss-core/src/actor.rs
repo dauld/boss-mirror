@@ -21,6 +21,18 @@
 //!     `claude` is the mode for an interactive Claude session (Claude
 //!     Code); the model half is the vendor's model string, kept whole.
 //!
+//!     The same class has a second, REGISTRY spelling since design
+//!     6fda05ae (decided 2026-09-15): `agent-<slug>` (`agent-claude`),
+//!     the id of a row in the `agents` registry, bare on the wire the
+//!     way an employee id is. That decision moved the model off the
+//!     actor and onto the run (`agent_runs.model`) — one registered
+//!     agent runs different models over time, and cost is priced per
+//!     run — so the registry form carries no model half. The
+//!     `<mode>:<model>` form survives on `agent_runs.actor_id` until
+//!     the run carries its model in a column of its own; the
+//!     [`ActorId::RegisteredAgent`] arm is where the class is heading
+//!     and the [`ActorId::Agent`] arm is the one to retire.
+//!
 //! Agents are CPUs in the same machine, not a separate system — but
 //! they are not *people*. Before this variant existed, an agent
 //! stamping `claude:fable` parsed as `Human("claude:fable")`: the SPA
@@ -88,6 +100,18 @@ pub enum ActorId {
     /// actor id itself. Neither half is validated against a registry —
     /// same free-form stance as automation slugs.
     Agent { mode: String, model: String },
+    /// A registered agent, by the id of its `agents` registry row —
+    /// `agent-<slug>`, e.g. `agent-claude`. The address it logs in
+    /// with (`claude@algedonic.dev`) is an ALIAS resolved at the jobs
+    /// API's door before any write is signed, the way a human's login
+    /// resolves to an `emp-*` id in boss-gateway's oidc.rs — which is
+    /// why there is deliberately no address arm here: an address
+    /// surviving to a step means resolution did not happen, not that a
+    /// fourth kind of actor exists. Wire form is the bare id, because
+    /// the SPA treats colon-free ids as opaque lookups and the `agent-`
+    /// prefix is what tells it (and [`ActorId::is_human`]) this one is
+    /// not staff.
+    RegisteredAgent(String),
 }
 
 impl ActorId {
@@ -115,20 +139,24 @@ impl ActorId {
         matches!(self, Self::Human(_))
     }
 
-    /// True if an LLM session was the CPU on this transition.
+    /// True if an LLM session was the CPU on this transition — in
+    /// either spelling of the class.
     pub fn is_agent(&self) -> bool {
-        matches!(self, Self::Agent { .. })
+        matches!(self, Self::Agent { .. } | Self::RegisteredAgent(_))
     }
 
-    /// The underlying id / slug for display. Human and Automation
-    /// return their inner string (`emp-032`, `rule:bill-approve` —
-    /// note the automation slug *without* its `automation:` prefix);
-    /// Agent returns the full `<mode>:<model>`, because neither half
-    /// alone identifies the CPU. Use [`Display`](fmt::Display) when
-    /// you want the wire form for every variant.
+    /// The underlying id / slug for display. Human, Automation and
+    /// RegisteredAgent return their inner string (`emp-032`,
+    /// `rule:bill-approve` — note the automation slug *without* its
+    /// `automation:` prefix — `agent-claude`); Agent returns the full
+    /// `<mode>:<model>`, because neither half alone identifies the CPU.
+    /// Use [`Display`](fmt::Display) when you want the wire form for
+    /// every variant.
     pub fn as_slug(&self) -> Cow<'_, str> {
         match self {
-            Self::Human(id) | Self::Automation(id) => Cow::Borrowed(id.as_str()),
+            Self::Human(id) | Self::Automation(id) | Self::RegisteredAgent(id) => {
+                Cow::Borrowed(id.as_str())
+            }
             Self::Agent { mode, model } => Cow::Owned(format!("{mode}:{model}")),
         }
     }
@@ -136,10 +164,11 @@ impl ActorId {
 
 impl fmt::Display for ActorId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Mirrors the Serialize impl: Human is bare; Automation uses
-        // the `automation:` prefix; Agent is `<mode>:<model>`.
+        // Mirrors the Serialize impl: Human and RegisteredAgent are
+        // bare; Automation uses the `automation:` prefix; Agent is
+        // `<mode>:<model>`.
         match self {
-            Self::Human(id) => f.write_str(id),
+            Self::Human(id) | Self::RegisteredAgent(id) => f.write_str(id),
             Self::Automation(name) => write!(f, "automation:{name}"),
             Self::Agent { mode, model } => write!(f, "{mode}:{model}"),
         }
@@ -161,7 +190,12 @@ impl FromStr for ActorId {
     ///    Safe as a catch-all because no employee id carries a colon —
     ///    verified across the seeds and fixtures (`emp-aa-001`,
     ///    `emp-bootstrap-admin`).
-    /// 4. Otherwise → [`Self::Human`].
+    /// 4. `agent-` prefix with a non-empty slug →
+    ///    [`Self::RegisteredAgent`]. Safe because no employee id
+    ///    carries it (`emp-*`) and the prefix was already the
+    ///    convention for agent ids (boss-observability's demo agents,
+    ///    `agent-inventory-reorder-advisor`).
+    /// 5. Otherwise → [`Self::Human`].
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(if let Some(rest) = s.strip_prefix("automation:") {
             Self::Automation(rest.to_string())
@@ -178,16 +212,26 @@ impl FromStr for ActorId {
                 mode: mode.to_string(),
                 model: model.to_string(),
             }
+        } else if s
+            .strip_prefix(REGISTERED_AGENT_PREFIX)
+            .is_some_and(|slug| !slug.is_empty())
+        {
+            Self::RegisteredAgent(s.to_string())
         } else {
             Self::Human(s.to_string())
         })
     }
 }
 
+/// The prefix a registered agent's id carries (`agent-claude`). One
+/// definition: the parse above reads it, and the `agents` registry's
+/// CHECK constraint spells the same thing in SQL.
+pub const REGISTERED_AGENT_PREFIX: &str = "agent-";
+
 impl Serialize for ActorId {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         match self {
-            Self::Human(id) => s.serialize_str(id),
+            Self::Human(id) | Self::RegisteredAgent(id) => s.serialize_str(id),
             Self::Automation(name) => s.serialize_str(&format!("automation:{name}")),
             Self::Agent { mode, model } => s.serialize_str(&format!("{mode}:{model}")),
         }
@@ -331,6 +375,46 @@ mod tests {
             "rule:bill-approve"
         );
         assert_eq!(ActorId::agent("claude", "fable").as_slug(), "claude:fable");
+    }
+
+    // -- RegisteredAgent (the registry form of the same class) -------
+
+    /// `agent-<slug>` is a registered agent's canonical id (design
+    /// 6fda05ae): bare on the wire like an employee id, colon-free, and
+    /// NOT a person. Before this branch existed it parsed as `Human`,
+    /// which is exactly the census defect the `Agent` arm was added to
+    /// stop, wearing a new spelling.
+    #[test]
+    fn a_registered_agent_id_parses_bare_and_is_not_a_person() {
+        let a: ActorId = "agent-claude".parse().unwrap();
+        assert_eq!(a, ActorId::RegisteredAgent("agent-claude".into()));
+        assert!(a.is_agent() && !a.is_human());
+        assert_eq!(a.as_slug(), "agent-claude");
+        assert_eq!(a.to_string(), "agent-claude");
+        let j = serde_json::to_string(&a).unwrap();
+        assert_eq!(j, "\"agent-claude\"");
+        assert_eq!(serde_json::from_str::<ActorId>(&j).unwrap(), a);
+    }
+
+    /// The prefix is the whole test, and it is `agent-` with the hyphen
+    /// and something after it: an automation slug that merely contains
+    /// the word (`shipping-agent`), an id that starts with `agent` and
+    /// no hyphen, or the bare prefix stay what they were.
+    #[test]
+    fn only_the_agent_hyphen_prefix_is_a_registered_agent() {
+        assert_eq!(
+            "agentsmith".parse::<ActorId>().unwrap(),
+            ActorId::Human("agentsmith".into())
+        );
+        assert_eq!(
+            "automation:shipping-agent".parse::<ActorId>().unwrap(),
+            ActorId::Automation("shipping-agent".into())
+        );
+        assert_eq!(
+            "agent-".parse::<ActorId>().unwrap(),
+            ActorId::Human("agent-".into()),
+            "a bare prefix names no agent"
+        );
     }
 
     /// Model is a groupable dimension off `actor_id` alone — the retro

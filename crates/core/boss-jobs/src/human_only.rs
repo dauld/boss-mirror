@@ -27,6 +27,10 @@
 //! the roster — `claude@algedonic.dev` parses as `ActorId::Human` by
 //! shape alone — is refused by the roster, which is the point: the
 //! actor model cannot tell a login from a person, and the roster can.
+//! Since design 6fda05ae that login is resolved at the jobs API's door
+//! to `agent-claude`, which IS machine-shaped (`ActorId::RegisteredAgent`),
+//! so the shape test refuses it before the roster is asked; the roster
+//! arm remains for an address that reaches here unresolved.
 //! A roster that cannot answer keeps the human-shaped id (the same
 //! grace owner resolution extends) so a people-api blip never locks a
 //! person out of the one step that needs them.
@@ -203,6 +207,12 @@ mod tests {
         );
         // No roster wired: shape alone, so the login passes.
         assert_eq!(person_check(None, "claude@algedonic.dev").await, Ok(()));
+        // The login RESOLVED (design 6fda05ae) is machine-shaped by
+        // its own id, so the roster is not needed to refuse it.
+        assert_eq!(
+            person_check(None, "agent-claude").await,
+            Err(NotAPerson::MachineShaped)
+        );
     }
 
     #[tokio::test]

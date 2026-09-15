@@ -124,6 +124,15 @@ deploy hop and the stack retire together and the migration is smaller
 than it looks. If something depends on it, name the dependency before
 cutover.
 
+**Answered 2026-09-15: vestigial, and retired.** The inventory
+(d5941ef3, 2026-09-12) found 32 running services of the old stack and
+nine failed chores, one of them serving a crate deleted from the tree;
+the roles car gave the host its declared role and the retire verb its
+bound. David ran it for real on 2026-09-15 (ops-request 7912c9ae): 52
+units stopped and disabled, the database captured first. boss-gcp now
+runs only what its role names — ops-runner, converge, the two estate
+observers, codebase-metrics, protocol-drift, ml-inference-batch.
+
 ### Q2: Where does the conductor read cadence/train data today — cluster SoR or a boss-gcp-local Postgres?
 The review's reviewers disagreed. The systemd unit documents
 `BOSS_JOBS_URL` as required and pointed at the cluster, and preflight

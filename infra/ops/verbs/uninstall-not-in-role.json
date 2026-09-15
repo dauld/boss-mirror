@@ -1,0 +1,20 @@
+{
+  "about": "MUTATING — remove from boss-gcp the systemd unit pairs its declared roles do not name: EXACTLY the set the installer itself reports as NOT IN ROLE, derived at call time, and nothing else (infra/gcp/uninstall-not-in-role.sh). A host declares its roles in the estate registry and `deploy-services.sh units` installs only the rows they name, reporting every other row and leaving it on disk — reported, never removed, because removing is destructive and belongs behind this door. Car 2 stopped the second stack (ops-request 7912c9ae, 2026-09-15 21:11Z: 52 units stopped+disabled, unit FILES untouched) and car 3 dropped legacy-stack from the host's roles; since then boss-gcp-converge has reported 'installed 6 of 16 timer unit pair(s), not in role 10' every half hour with the same ten names under anomalies (backlog d5941ef3). A unit installed and never serving is worse than absent. THE BOUND IS THE INSTALLER'S OWN DERIVATION, never a list: the script reads the host's roles LIVE off the estate registry (infra/estate/node-roles.sh, the converge's reader) and refuses a cached or sentinel reading and a host declaring no roles; it then runs `deploy-services.sh roster` from its own checkout, which prints in-role/not-in-role per TIMERS row by the same roster_for_roles the units mode installs and enables by — so what this verb may remove is the complement of what the converge keeps, by construction, and a role changed in the registry moves both at once. Every in-role stem is printed as keep and is never touched whatever the file system says; boss-ops-runner (not a TIMERS row), retired daemons, WireGuard, caddy and postgres are unreachable because nothing derives them; an EMPTY set is a refusal, not an OK. The plan is each not-in-role stem's timer then service, present when its file is under /etc/systemd/system (the retire's after-snapshot showed the disabled units gone from list-units --all with their files still on disk, so the file is the fact); a unit on neither is reported not on this host and skipped, which is what the second run of this verb is for every unit. `--dry-run` runs every bound, prints both snapshots and the plan, and calls nothing that acts. `--for-real` is, per unit in order, `systemctl disable --now` then the file removed and `disabled+removed <unit>` printed as it lands, so a run killed at the timeout still leaves an exact record; the installer's jobs-url drop-in goes with its service; then ONE daemon-reload, and success is refused while any planned unit still has a file or is still loaded. It captures nothing: these are unit files the tree still carries, reinstalled by one converge should a role come back; the database the retire verb captured is untouched. Own timeout: at most 32 disables, each bounded by its unit's TimeoutStopSec. Authorized by David 2026-09-11 on design 9e3e093f, whose accepted proposal names this path ('an uninstall path for units the role does not name ... through the ops-runner door as a bounded verb'); admitted by name in infra/lint/a-verb-declares-the-hosts-it-serves.sh, the same explicit per-verb process as reclaim-disk / retire-second-stack — a precedent for the PROCESS, not a loosened default.",
+  "hosts": [
+    "boss-gcp"
+  ],
+  "argv": [
+    "infra/gcp/uninstall-not-in-role.sh",
+    "{1}"
+  ],
+  "params": [
+    {
+      "name": "mode",
+      "one_of": [
+        "--dry-run",
+        "--for-real"
+      ]
+    }
+  ],
+  "timeout": 900
+}

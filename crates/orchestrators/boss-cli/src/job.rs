@@ -78,13 +78,20 @@ pub(crate) fn resolve<'a>(rows: &'a [Value], given: &str) -> Result<&'a Value> {
 
 /// The envelope `POST /api/jobs` actually requires, learned one 422 at
 /// a time (f5dd5167). Explicit values win; everything else lands.
+///
+/// No `opened_on`: the create handler injects it off the authoritative
+/// (sim-aware) clock AND stamps the precise filing instant beside it as
+/// `metadata.opened_at` — but only when the clock owns the date. This
+/// envelope used to send the caller's `today`, which read as a
+/// deliberate (backdated) date and silenced the stamp on every packet
+/// `boss job file` / `boss ops` filed, so timing one meant reading its
+/// event stream (backlog a7a07ffb, 2026-09-15).
 pub(crate) fn envelope(
     kind: &str,
     title: &str,
     priority: Option<&str>,
     subject_id: Option<&str>,
     owner_id: &str,
-    today: &str,
     metadata: Option<Value>,
 ) -> Value {
     json!({
@@ -96,7 +103,6 @@ pub(crate) fn envelope(
             "subject_kind": "custom",
         },
         "owner_id": owner_id,
-        "opened_on": today,
         "status": "open",
         "priority": priority.unwrap_or("standard"),
         "metadata": metadata.unwrap_or_else(|| json!({})),
@@ -674,7 +680,6 @@ pub async fn file(
     priority: Option<String>,
     metadata: Option<std::path::PathBuf>,
     subject_id: Option<String>,
-    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
     let http = reqwest::Client::new();
     let md = match &metadata {
@@ -699,7 +704,6 @@ pub async fn file(
         priority.as_deref(),
         subject_id.as_deref(),
         &owner,
-        &now.format("%Y-%m-%d").to_string(),
         md,
     );
     let created = crate::gate::api(&http, reqwest::Method::POST, "/api/jobs", Some(body))
@@ -780,22 +784,13 @@ mod tests {
 
     #[test]
     fn the_envelope_defaults_land_and_explicit_values_win() {
-        let e = envelope(
-            "backlog-item",
-            "t",
-            None,
-            None,
-            "actor:x",
-            "2026-08-30",
-            None,
-        );
+        let e = envelope("backlog-item", "t", None, None, "actor:x", None);
         assert_eq!(e["tags"], json!([]));
         assert_eq!(e["subject"]["id"], "bosspipeline");
         assert_eq!(e["subject"]["subject_kind"], "custom");
         assert_eq!(e["owner_id"], "actor:x");
         assert_eq!(e["status"], "open");
         assert_eq!(e["priority"], "standard");
-        assert_eq!(e["opened_on"], "2026-08-30");
         assert_eq!(e["metadata"], json!({}));
 
         let e = envelope(
@@ -804,12 +799,30 @@ mod tests {
             Some("urgent"),
             Some("boss-dev-0"),
             "a",
-            "2026-08-30",
             Some(json!({"x": 1})),
         );
         assert_eq!(e["priority"], "urgent");
         assert_eq!(e["subject"]["id"], "boss-dev-0");
         assert_eq!(e["metadata"]["x"], 1);
+    }
+
+    /// The create handler stamps `metadata.opened_at` — the precise
+    /// filing instant behind the one-day `opened_on` — ONLY when its
+    /// clock owns the date, i.e. when the body carries no `opened_on`
+    /// (boss-jobs http/jobs.rs). This envelope sent `today`, so every
+    /// packet filed by `boss job file` / `boss ops` defeated the stamp
+    /// (backlog a7a07ffb: 9f9fa486, a7a07ffb and ops-request 25cb2f71
+    /// all lacked it, and timing one meant reading its event stream).
+    /// `boss gate` already leaves the date to the clock (gate.rs). A
+    /// caller that MEANS a backdated packet passes `opened_on` itself.
+    #[test]
+    fn the_envelope_leaves_the_open_date_to_the_api_clock() {
+        let e = envelope("backlog-item", "t", None, None, "actor:x", None);
+        assert!(
+            e.get("opened_on").is_none(),
+            "`opened_on` must be left to the create handler's clock, \
+             or the packet gets no `opened_at`: {e}"
+        );
     }
 
     #[test]

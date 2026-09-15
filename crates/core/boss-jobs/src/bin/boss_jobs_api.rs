@@ -190,6 +190,11 @@ async fn main() -> Result<()> {
         // cost, on the one door `boss-api` already reaches.
         let agent_runs: Arc<dyn boss_jobs::agent_runs::AgentRunLog> =
             Arc::new(boss_jobs::agent_runs::PgAgentRuns::new(pool.clone()));
+        // The agents registry (design 6fda05ae): what an agent's login
+        // resolves to at this service's door, the way a human's
+        // resolves at the gateway's.
+        let agents: Arc<dyn boss_jobs::agents::AgentsRegistry> =
+            Arc::new(boss_jobs::agents::PgAgents::new(pool.clone()));
         // Q7: human job-owner resolution over the people roster.
         let people_url =
             std::env::var("BOSS_PEOPLE_URL").unwrap_or_else(|_| boss_ports::url("people"));
@@ -216,6 +221,7 @@ async fn main() -> Result<()> {
             Some(delivery),
             Some(credentials),
             Some(agent_runs),
+            agents,
             calendar,
             subject_kinds,
             subject_existence,
@@ -249,6 +255,7 @@ async fn run_server<R: JobsRepository + 'static>(
     delivery: Option<Arc<dyn boss_jobs::delivery::DeliveryPolicyRepository>>,
     credentials: Option<Arc<dyn boss_jobs::credentials::CredentialsRegistry>>,
     agent_runs: Option<Arc<dyn boss_jobs::agent_runs::AgentRunLog>>,
+    agents: Arc<dyn boss_jobs::agents::AgentsRegistry>,
     calendar: Option<Arc<dyn boss_calendar_client::CalendarClient>>,
     subject_kinds: Option<Arc<dyn boss_subject_kinds_client::SubjectKindsClient>>,
     subject_existence: Option<Arc<dyn boss_jobs::subject_existence::SubjectExistenceCheck>>,
@@ -293,6 +300,7 @@ async fn run_server<R: JobsRepository + 'static>(
         clock.clone(),
     )));
     let scheduling_publisher = publisher.clone();
+    let door_publisher = publisher.clone();
 
     let state = JobsApiState {
         job_edges,
@@ -360,6 +368,18 @@ async fn run_server<R: JobsRepository + 'static>(
     let app = app.layer(axum::middleware::from_fn(
         boss_policy_client::request_context_middleware,
     ));
+    // The login door (design 6fda05ae): an X-Boss-User id the
+    // actor_aliases table maps is rewritten to the registered agent's
+    // id BEFORE the request-context middleware above reads it — so
+    // this layer must stay OUTSIDE that one. An address no alias maps
+    // is admitted and counted (`actor.login.unresolved`) while the
+    // migration window is open; the refusal is the next car.
+    let door = Arc::new(boss_jobs::agents::LoginDoor::new(agents, door_publisher));
+    let app = app.layer(axum::middleware::from_fn_with_state(
+        door,
+        boss_jobs::agents::resolve_login,
+    ));
+    info!("login door mounted: agent logins resolve through actor_aliases (window open)");
     // The machine door's write gate (7fcd78fa phase 1): when
     // BOSS_MACHINE_TOKEN is set, state-changing requests must carry
     // it. Layered in the binary — this process is the one that knows

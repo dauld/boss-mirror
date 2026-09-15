@@ -8,8 +8,9 @@
 # through node_roles) and `deploy-services.sh units` installs the rows
 # its roles name plus the `always` set; every other row is REPORTED as
 # NOT IN ROLE — reported, not uninstalled: the uninstall is the
-# retire-second-stack verb's job, with capture-before-delete, in the car
-# after this one.
+# uninstall-not-in-role ops verb's job (infra/gcp/uninstall-not-in-
+# role.sh), which takes its set from `deploy-services.sh roster` — the
+# same derivation — and never from a list of its own.
 #
 # ONE PLACE, PINNED. Every TIMERS stem appears in exactly one role (or
 # `always`) here, and every unit named here is a TIMERS stem —
