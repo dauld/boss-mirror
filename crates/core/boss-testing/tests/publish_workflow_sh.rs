@@ -685,7 +685,7 @@ fn a_host_cli_older_than_the_bundle_loader_is_refused_by_name_before_the_registr
             "built from",
             &c.rev1[..8],
             &c.rev2[..8],
-            "deploy-services.sh prod",
+            "boss-gcp-converge",
         ],
         "the stale-CLI refusal names the binary, its commit, the floor and the refresh path",
     );

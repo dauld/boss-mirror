@@ -71,19 +71,23 @@
 # the same loader the seed uses, so the row this publishes and the row
 # a fresh database seeds are one definition (§9a); a shell re-derivation
 # of that loader would be a second copy of it. The binary on boss-gcp is
-# the one `deploy-services.sh prod` installs at /usr/local/bin/boss; a
-# missing one is a configuration refusal naming that, never an ENOENT
-# dressed as a verdict.
+# the one boss-gcp-converge installs at /usr/local/bin/boss out of the
+# cluster image (infra/gcp/install-cli-from-image.sh); a missing one is
+# a configuration refusal naming that, never an ENOENT dressed as a
+# verdict.
 #
 # AND A STALE ONE IS REFUSED BY NAME (backlog fec2851f). The first live
 # run (ops-request 25cb2f71, 2026-09-15 16:36Z) reached step 4 with a
 # host CLI older than the loader: it rejected the kind file as "is not
 # JSON" — the branch an older `load_spec` falls into for any path —
 # and this script reported exit 4, "the tree's file does not lint
-# clean", about a file that lints clean. Nothing refreshes that binary
-# (boss-gcp-converge installs units only; `prod` is a deliberate human
-# run), so the misnamed refusal would have sent an operator to the
-# tree every time. Now `boss --version` is read first: the commit it
+# clean", about a file that lints clean. Nothing refreshed that binary
+# then (boss-gcp-converge installed units only; `prod` is a deliberate
+# human run), so the misnamed refusal would have sent an operator to
+# the tree every time. Since 6f58e9a1 the converge installs the CLI
+# from the cluster image at the sha it converged to and records
+# `cli_sha` / `cli_result` on its packet, so the refresh path the
+# refusal names is a packet read. `boss --version` is read first: the commit it
 # names must sit in this checkout's history at or after CLI_FLOOR —
 # the train that taught the CLI to read a bundle — else the refusal
 # names the binary, its commit, the floor and the refresh path, as a
@@ -190,7 +194,7 @@ if [ -z "$BOSS_BIN" ]; then
     if command -v boss >/dev/null 2>&1; then BOSS_BIN="$(command -v boss)"; else BOSS_BIN=/usr/local/bin/boss; fi
 fi
 if [ ! -x "$BOSS_BIN" ]; then
-    echo "$NAME: no boss CLI at $BOSS_BIN — the publish IS the CLI's checked sequence (boss workflow publish), and this host has none installed. deploy-services.sh prod installs it as /usr/local/bin/boss; until then this verb cannot act." >&2
+    echo "$NAME: no boss CLI at $BOSS_BIN — the publish IS the CLI's checked sequence (boss workflow publish), and this host has none installed. boss-gcp-converge installs it as /usr/local/bin/boss from the cluster image on each tick (cli_result on its packet says why it has not); until then this verb cannot act." >&2
     exit 78
 fi
 
@@ -239,7 +243,7 @@ as_owner() { # <command string>
 BOSS_VERSION_LINE="$("$BOSS_BIN" --version 2>&1)"
 BOSS_VERSION_LINE="${BOSS_VERSION_LINE%%$'\n'*}"
 BUILT_FROM="$(printf '%s\n' "$BOSS_VERSION_LINE" | sed -n 's/.*built from \([0-9a-f]\{7,40\}\|unknown\).*/\1/p')"
-REFRESH="the binary is refreshed by deploy-services.sh prod on this host (boss-gcp-converge installs units only)"
+REFRESH="the binary is refreshed by boss-gcp-converge from the cluster image at the sha it converges to (every 30 min; cli_sha and cli_result on the maintenance-boss-gcp-converge packet say what it installed and why not)"
 case "${BUILT_FROM:-}" in
     "")
         refuse 78 "$BOSS_BIN cannot say what it was built from ('$BOSS_VERSION_LINE' names no commit), so whether it reads a bundle is unknown and is not assumed; $REFRESH" ;;

@@ -26,8 +26,11 @@ Type=oneshot
 # to the checkout's owner for every git operation, so /opt/boss never
 # accumulates root-owned objects.
 User=root
-# The whole run is one shallow fetch of main, file copies and a
-# daemon-reload. A generous ceiling in case the forge is briefly
+# The whole run is one shallow fetch of main, file copies, a
+# daemon-reload — and, when main moved, one pull of the cluster image
+# for the CLI (install-cli-from-image.sh bounds that pull to 6 min
+# itself, so a hung pull is a named failure on the packet rather than
+# this ceiling). A generous ceiling in case the forge is briefly
 # unreachable.
 TimeoutStartSec=10min
 # WHAT THE RUN LEAVES FOR ITS PACKET — one path, declared once, for two

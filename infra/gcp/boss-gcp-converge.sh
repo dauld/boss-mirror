@@ -37,6 +37,18 @@
 # schema on this host stay a deliberate, human-run `deploy-services.sh
 # prod`; unit files converge.
 #
+# ONE BINARY IS THE EXCEPTION, since 2026-09-15: the `boss` CLI. After
+# the units, the converge runs infra/gcp/install-cli-from-image.sh with
+# the sha it just converged to, which takes /usr/local/bin/boss out of
+# the cluster image built for that commit (backlog 6f58e9a1, David's
+# option (b)). Nothing else refreshed that binary — `prod` is a deploy of
+# the stack 45641c91 retires — so it printed `boss 0.1.0` with no commit
+# and every host verb that shells to it (publish-workflow, and the Drift
+# tab's Approve through the same door) refused 78 by name (ops-request
+# 20ba7cdf). Now the CLI on this host is the tree's CLI by construction,
+# and the packet says so: `cli_sha` beside `converge_sha`, `cli_result`
+# the verdict. Nothing is restarted by it; no service execs the CLI.
+#
 # ONE-TIME BOOTSTRAP — the hand action that ends the hand actions.
 # Nothing on boss-gcp installs the loop that does the installing, so
 # somebody runs this once, from boss-gcp, as root. It is idempotent:
@@ -170,6 +182,9 @@ fi
 trap 'rm -f "$BOSS_GCP_CONVERGE_SNAPSHOT"' EXIT
 
 INSTALLER="${BOSS_GCP_CONVERGE_INSTALLER:-$REPO/infra/deploy-services.sh}"
+# Read from $REPO AFTER the fast-forward below, like the installer: the
+# step that runs is the one the converged tree carries.
+CLI_INSTALLER="${BOSS_GCP_CONVERGE_CLI_INSTALLER:-$REPO/infra/gcp/install-cli-from-image.sh}"
 
 # WHAT THIS RUN LEAVES FOR ITS OWN PACKET.
 #
@@ -279,4 +294,30 @@ if [ "$rc" -ne 0 ]; then
     run_summary_note "deploy-services.sh units exited $rc — see this host's journal for every line"
     exit "$rc"
 fi
-echo "boss-gcp-converge: converged on ${after:0:8} ($REMOTE/main)"
+echo "boss-gcp-converge: units converged on ${after:0:8} ($REMOTE/main)"
+
+# THE CLI, FROM THE IMAGE AT THE SHA JUST CONVERGED TO. After the units
+# and never instead of them: a CLI step that cannot pull (no credential
+# yet, a tag the deploy runner has not built yet, no docker) must leave
+# the units converged and REPORTED, which they are by now — its own
+# facts (cli_sha, cli_result, cli_action, cli_image) it records itself
+# through the same summary file. Its output is captured and printed
+# whole under its own prefix, like the installer's. A failure here is
+# still a failed converge: the host has not converged on the tree until
+# its CLI is the tree's, and a packet that read `ok` over a stale CLI
+# would be the 2026-09-15 defect with a green light on it.
+log="$(mktemp -t boss-gcp-converge-cli.XXXXXX)"
+cli_rc=0
+"$CLI_INSTALLER" "$after" >"$log" 2>&1 || cli_rc=$?
+sed 's/^/  cli: /' "$log"
+rm -f "$log"
+if [ "$cli_rc" -ne 0 ]; then
+    echo "boss-gcp-converge: the CLI step FAILED (exit $cli_rc) at ${after:0:8} — its complete" >&2
+    echo "    output is above. Units on this host are converged; /usr/local/bin/boss is" >&2
+    echo "    whatever the previous converge confirmed (cli_result on the packet says why)." >&2
+    # The step records cli_result itself when it can; a step that died
+    # before it could still leaves the exit on the packet.
+    run_summary_field cli_exit "$cli_rc"
+    exit "$cli_rc"
+fi
+echo "boss-gcp-converge: converged on ${after:0:8} ($REMOTE/main) — units and CLI"

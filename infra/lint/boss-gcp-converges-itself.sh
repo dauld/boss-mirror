@@ -546,6 +546,18 @@ echo "DISTINCTIVE-FAILURE-DETAIL: migration 202609 refused"
 exit 3
 STUB
 chmod +x "$tmp/bin/installer-ok" "$tmp/bin/installer-bad"
+# The CLI step (infra/gcp/install-cli-from-image.sh, 6f58e9a1) runs
+# after the units with the converged sha; here it is a stub that records
+# the sha it was handed, so this lint stays about the loop. The step's
+# own behaviour — docker, generations, confirmation, the packet fields —
+# is crates/core/boss-testing/tests/boss_gcp_cli_from_image_sh.rs.
+cat >"$tmp/bin/cli-installer-ok" <<'STUB'
+#!/usr/bin/env bash
+echo "stub cli installer: sha=$*" >>"$STUB_CALLS"
+echo "install-cli-from-image: CONFIRMED (stub)"
+exit 0
+STUB
+chmod +x "$tmp/bin/cli-installer-ok"
 
 # The registry the converge reads its roles from is a FILE here — the
 # harness never touches the network — shaped like /api/estate/nodes.
@@ -556,6 +568,7 @@ cat >"$nodes_json" <<'JSON'
 JSON
 run_converge() { # <dir> <installer> -> output; returns the script's status
     BOSS_GCP_REPO_DIR="$1" BOSS_GCP_CONVERGE_INSTALLER="$2" \
+        BOSS_GCP_CONVERGE_CLI_INSTALLER="$tmp/bin/cli-installer-ok" \
         BOSS_NODE_ID="${CONVERGE_NODE_ID:-boss-gcp}" \
         BOSS_ESTATE_NODES_URL="${CONVERGE_NODES_URL:-file://$nodes_json}" \
         BOSS_NODE_ROLES_CACHE="${CONVERGE_ROLES_CACHE:-$tmp/roles.cache}" \
@@ -607,6 +620,11 @@ $out"
     detached HEAD on a hand-operated host is a surprise nobody asked for."
 grep -q "args=units" "$tmp/calls.log" \
     || fail "the converge did not drive the installer's units mode (calls: $(cat "$tmp/calls.log"))"
+# The CLI step runs AFTER the units, with the sha the tree now sits at.
+grep -q "sha=$want" "$tmp/calls.log" \
+    || fail "the converge did not hand the CLI step the converged sha $want (calls: $(cat "$tmp/calls.log"))"
+[ "$(head -n 1 "$tmp/calls.log")" = "stub installer: args=units roles=legacy-stack,ml-batch-host,off-cluster-observer,wireguard-bastion" ] \
+    || fail "the CLI step must run after the units, never instead of them (calls: $(cat "$tmp/calls.log"))"
 printf '%s' "$out" | grep -q "${want:0:8}" \
     || fail "the converge does not say which commit it converged on:
 $out"
@@ -704,6 +722,7 @@ $out"
 sum_conv="$tmp/summary-converge.json"
 run_converge_sum() { # <dir> <installer>
     BOSS_GCP_REPO_DIR="$1" BOSS_GCP_CONVERGE_INSTALLER="$2" \
+        BOSS_GCP_CONVERGE_CLI_INSTALLER="$tmp/bin/cli-installer-ok" \
         BOSS_RUN_SUMMARY_FILE="$sum_conv" \
         BOSS_NODE_ID=boss-gcp BOSS_ESTATE_NODES_URL="file://$nodes_json" \
         BOSS_NODE_ROLES_CACHE="$tmp/roles.cache.sum" \
