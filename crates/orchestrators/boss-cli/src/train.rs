@@ -2164,7 +2164,10 @@ pub(crate) fn stranded_alarm_body(
         "subject": {"subject_kind": "custom", "id": "bosspipeline"},
         "owner_id": "emp-david",
         "priority": "standard",
-        "opened_on": now.date_naive().to_string(),
+        // No `opened_on`: the create handler injects it off its clock
+        // and stamps the filing instant as `metadata.opened_at` only
+        // when it does — a body-sent date silenced the stamp on every
+        // conductor alarm (dd3624a0, 2026-09-15; envelope: a7a07ffb).
         "tags": ["pipeline", "gate"],
         "metadata": {
             "area": "pipeline",
@@ -2189,6 +2192,81 @@ pub(crate) fn stranded_alarm_body(
                 a.age_mins,
                 cause_detail,
             ),
+        },
+    })
+}
+
+/// The alarm a deploy tree that stays busy becomes: the conductor
+/// refuses to deploy from an unknown working state (correct) but used
+/// to wait SILENTLY (2026-09-02: six hours, two merged trains, a retry
+/// logging to nobody). Pure so the shape is pinned by tests.
+pub(crate) fn deploy_blocked_alarm_body(
+    tid: &str,
+    mins: i64,
+    reason: &str,
+    blocked_since: &str,
+    threshold_mins: i64,
+) -> Value {
+    json!({
+        "kind": "user-feedback",
+        "status": "open",
+        "title": format!("Deploy blocked {mins} min: the playground tree is not clean"),
+        "subject": {"subject_kind": "custom", "id": "cluster-convergence"},
+        "tags": ["deploy", "pipeline"],
+        "owner_id": "emp-david",
+        "priority": "urgent",
+        // No `opened_on`: see stranded_alarm_body (dd3624a0).
+        "metadata": {
+            "message": format!(
+                "The conductor has refused to deploy for {mins} minutes: \
+                 {reason}. Refusing is correct — building from an unknown \
+                 working state is worse than waiting — but waiting SILENTLY \
+                 is the defect this packet exists to end (2026-09-02: a \
+                 regenerated Cargo.lock left the tree dirty and two merged \
+                 trains waited six hours while the retry logged to nobody). \
+                 Inspect with `git -C <deploy tree> status --short`; a \
+                 regenerable artifact is `git checkout --` and the next tick \
+                 deploys. Threshold is BOSS_TRAIN_CONVERGE_ALARM_MINS ({threshold_mins})."
+            ),
+            "train": tid,
+            "blocked_since": blocked_since,
+        },
+    })
+}
+
+/// The alarm a merged train whose commit never reaches the cluster
+/// becomes (fdff316c / 7e5ee013). Pure so the shape is pinned by tests.
+pub(crate) fn convergence_overdue_alarm_body(
+    tid: &str,
+    merge_ref: &str,
+    mins_since_merge: i64,
+    reported: &str,
+    threshold_mins: i64,
+) -> Value {
+    json!({
+        "kind": "user-feedback",
+        "status": "open",
+        "title": format!(
+            "Cluster convergence overdue: train {} merged {mins_since_merge} min ago",
+            id8(tid)
+        ),
+        "subject": {"subject_kind": "custom", "id": "cluster-convergence"},
+        "tags": ["deploy", "pipeline"],
+        "owner_id": "emp-david",
+        "priority": "urgent",
+        // No `opened_on`: see stranded_alarm_body (dd3624a0).
+        "metadata": {
+            "message": format!(
+                "The train merged {merge_ref} {mins_since_merge} minutes ago and \
+                 the cluster's running binary still reports {reported} — past the \
+                 {threshold_mins}-minute threshold (BOSS_TRAIN_CONVERGE_ALARM_MINS). Filed by \
+                 the conductor's converged step (fdff316c / 7e5ee013): the likely \
+                 suspects are the deploy-runner timer on the forge host, the image \
+                 build failing, or the rollout wedged — check \
+                 cluster-deploy-runner's journal first. The train's arrival report \
+                 will not fire until convergence verifies."
+            ),
+            "train": tid,
         },
     })
 }
@@ -6451,34 +6529,13 @@ impl Conductor {
                     self.api(
                         Method::POST,
                         "/api/jobs",
-                        Some(json!({
-                            "kind": "user-feedback",
-                            "status": "open",
-                            "title": format!(
-                                "Deploy blocked {mins} min: the playground tree is not clean"
-                            ),
-                            "subject": {"subject_kind": "custom", "id": "cluster-convergence"},
-                            "tags": ["deploy", "pipeline"],
-                            "owner_id": "emp-david",
-                            "priority": "urgent",
-                            "opened_on": now.date_naive().to_string(),
-                            "metadata": {
-                                "message": format!(
-                                    "The conductor has refused to deploy for {mins} minutes: \
-                                     {reason}. Refusing is correct — building from an unknown \
-                                     working state is worse than waiting — but waiting SILENTLY \
-                                     is the defect this packet exists to end (2026-09-02: a \
-                                     regenerated Cargo.lock left the tree dirty and two merged \
-                                     trains waited six hours while the retry logged to nobody). \
-                                     Inspect with `git -C <deploy tree> status --short`; a \
-                                     regenerable artifact is `git checkout --` and the next tick \
-                                     deploys. Threshold is BOSS_TRAIN_CONVERGE_ALARM_MINS ({}).",
-                                    self.cfg.converge_alarm_mins
-                                ),
-                                "train": tid,
-                                "blocked_since": blocked_since,
-                            },
-                        })),
+                        Some(deploy_blocked_alarm_body(
+                            tid,
+                            mins,
+                            &reason,
+                            &blocked_since,
+                            self.cfg.converge_alarm_mins,
+                        )),
                     )
                     .await?;
                     self.api(
@@ -6652,33 +6709,13 @@ impl Conductor {
                 self.api(
                     Method::POST,
                     "/api/jobs",
-                    Some(json!({
-                        "kind": "user-feedback",
-                        "status": "open",
-                        "title": format!(
-                            "Cluster convergence overdue: train {} merged {} min ago",
-                            id8(&tid), mins_since_merge
-                        ),
-                        "subject": {"subject_kind": "custom", "id": "cluster-convergence"},
-                        "tags": ["deploy", "pipeline"],
-                        "owner_id": "emp-david",
-                        "priority": "urgent",
-                        "opened_on": now.date_naive().to_string(),
-                        "metadata": {
-                            "message": format!(
-                                "The train merged {merge_ref} {mins_since_merge} minutes ago and \
-                                 the cluster's running binary still reports {reported} — past the \
-                                 {}-minute threshold (BOSS_TRAIN_CONVERGE_ALARM_MINS). Filed by \
-                                 the conductor's converged step (fdff316c / 7e5ee013): the likely \
-                                 suspects are the deploy-runner timer on the forge host, the image \
-                                 build failing, or the rollout wedged — check \
-                                 cluster-deploy-runner's journal first. The train's arrival report \
-                                 will not fire until convergence verifies.",
-                                self.cfg.converge_alarm_mins
-                            ),
-                            "train": tid,
-                        },
-                    })),
+                    Some(convergence_overdue_alarm_body(
+                        &tid,
+                        &merge_ref,
+                        mins_since_merge,
+                        reported,
+                        self.cfg.converge_alarm_mins,
+                    )),
                 )
                 .await?;
                 self.merge_job_metadata(&tid, vec![("converge_alarm_filed", json!(true))])
@@ -15055,7 +15092,8 @@ mod burial_tests {
 #[cfg(test)]
 mod stranded_green_tests {
     use super::{
-        StrandCause, StrandWindows, StrandedGreen, stranded_alarm_body, stranded_alarms_to_clear,
+        StrandCause, StrandWindows, StrandedGreen, convergence_overdue_alarm_body,
+        deploy_blocked_alarm_body, stranded_alarm_body, stranded_alarms_to_clear,
         stranded_clear_reason, stranded_clear_step_body, stranded_greens_to_alarm,
         stranded_refresh_patch,
     };
@@ -15548,6 +15586,85 @@ mod stranded_green_tests {
         assert!(
             detail.contains("rebase") && detail.contains("re-gate"),
             "detail carries the orient rescue guidance: {detail}"
+        );
+    }
+
+    /// The create handler stamps `metadata.opened_at` — the precise
+    /// filing instant behind the one-day `opened_on` — ONLY when its
+    /// clock owns the date, i.e. when the body carries no `opened_on`
+    /// (boss-jobs http/jobs.rs). Every conductor alarm sent
+    /// `now.date_naive()`, so a stranded green, a blocked deploy and an
+    /// overdue convergence all filed packets with no filing instant
+    /// (backlog dd3624a0, 2026-09-15; the shared envelope was fixed the
+    /// same way under a7a07ffb). `now` is the conductor's wall clock,
+    /// never a backdated date, so the clock owns it.
+    #[test]
+    fn the_stranded_alarm_leaves_the_open_date_to_the_api_clock() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 7, 12, 0, 0).unwrap();
+        let a = StrandedGreen {
+            branch: "fix/stranded".into(),
+            gate_run_id: "gr-1".into(),
+            age_mins: 90,
+            cause: StrandCause::NeverParked,
+        };
+        let b = stranded_alarm_body(&a, windows(), now);
+        assert!(
+            b.get("opened_on").is_none(),
+            "`opened_on` must be left to the create handler's clock, \
+             or the packet gets no `opened_at`: {b}"
+        );
+        assert_eq!(b["metadata"]["last_measured_at"], now.to_rfc3339());
+    }
+
+    /// Same rule, the deploy-blocked alarm (dd3624a0).
+    #[test]
+    fn the_deploy_blocked_alarm_leaves_the_open_date_to_the_api_clock() {
+        let b = deploy_blocked_alarm_body(
+            "t-1",
+            45,
+            "deploy tree busy (branch=main, dirty=True) — will retry",
+            "2026-09-07T11:15:00+00:00",
+            30,
+        );
+        assert!(
+            b.get("opened_on").is_none(),
+            "`opened_on` must be left to the create handler's clock: {b}"
+        );
+        assert_eq!(b["kind"], "user-feedback");
+        assert_eq!(b["priority"], "urgent");
+        assert_eq!(b["metadata"]["train"], "t-1");
+        assert_eq!(b["metadata"]["blocked_since"], "2026-09-07T11:15:00+00:00");
+        let msg = b["metadata"]["message"].as_str().unwrap();
+        assert!(msg.contains("45 minutes") && msg.contains("(30)"), "{msg}");
+    }
+
+    /// Same rule, the convergence-overdue alarm (dd3624a0).
+    #[test]
+    fn the_convergence_overdue_alarm_leaves_the_open_date_to_the_api_clock() {
+        let b = convergence_overdue_alarm_body(
+            "abcdef12-0000-0000-0000-000000000000",
+            "5c6ca038",
+            50,
+            "nothing",
+            30,
+        );
+        assert!(
+            b.get("opened_on").is_none(),
+            "`opened_on` must be left to the create handler's clock: {b}"
+        );
+        assert_eq!(b["kind"], "user-feedback");
+        assert_eq!(
+            b["title"],
+            "Cluster convergence overdue: train abcdef12 merged 50 min ago"
+        );
+        assert_eq!(
+            b["metadata"]["train"],
+            "abcdef12-0000-0000-0000-000000000000"
+        );
+        let msg = b["metadata"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("5c6ca038") && msg.contains("nothing") && msg.contains("30-minute"),
+            "{msg}"
         );
     }
 

@@ -1315,18 +1315,7 @@ async fn main() -> Result<()> {
             no_questions,
             doc_path,
             answers,
-        } => {
-            design::run(
-                title,
-                markdown,
-                questions,
-                no_questions,
-                doc_path,
-                answers,
-                chrono::Utc::now(),
-            )
-            .await
-        }
+        } => design::run(title, markdown, questions, no_questions, doc_path, answers).await,
 
         Commands::Rerail {
             car,
