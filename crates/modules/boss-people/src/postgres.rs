@@ -504,10 +504,8 @@ struct EmployeeRow {
     employment_type: Option<String>,
     status: Option<String>,
     annual_salary_cents: Option<i64>,
-    #[allow(dead_code)]
-    created_at: chrono::DateTime<chrono::Utc>,
-    #[allow(dead_code)]
-    updated_at: chrono::DateTime<chrono::Utc>,
+    // No `created_at` / `updated_at`: `Employee` carries neither, and
+    // `FromRow` ignores columns it has no field for.
 }
 
 impl EmployeeRow {

@@ -137,8 +137,8 @@ const publishRow = (id: string, branch: string, over: Partial<ApproachRow> = {})
 });
 
 const SINCE = '2026-09-07';
-const garaged = (branch: string, packet_id: string, failed_check: string | null = null) => ({
-  branch, failed_check, since: SINCE, packet_id, sha: null,
+const garaged = (branch: string, packet_id: string, failed_check: string | null = null, failed_line: string | null = null) => ({
+  branch, failed_check, failed_line, since: SINCE, packet_id, sha: null,
 });
 const unjudged = (branch: string, packet_id: string, verdict = 'lost') => ({
   branch, verdict, since: SINCE, packet_id, sha: null,
@@ -620,6 +620,26 @@ describe('the dock and the garage', () => {
     expect(w.tone).toBe('red');
     expect(w.lamp).toBe('err');
     expect(w.status).toContain('clippy, test');
+    // No excerpt on the receipt: the status ends at the check, and the
+    // wagon makes no `why` claim — an older receipt reads as before.
+    expect(w.status).toBe('garaged · red gate (clippy, test) — rework');
+    expect(w.why ?? null).toBeNull();
+  });
+
+  test('a red gate with an excerpt says what the assertion said, on the wagon and in its tooltip', () => {
+    // 6730dccb: "a troubled packet must look troubled, and the reason
+    // is one field away" — the server's `failed_line` rides the status
+    // line after the check, and the tooltip carries it whole.
+    const line = "thread 'refuses_while_legacy' panicked at crates/core/boss-jobs/src/yard.rs:9:5:";
+    const s = scene(
+      yardOf({ cars: [car('c1', 'fix/red')] }),
+      statusOf({ garage: [garaged('fix/red', 'g1', 'test', line)] }),
+      NOW,
+    );
+    const w = wagon(s, 'c1');
+    expect(w.station).toBe('garage');
+    expect(w.status).toBe(`garaged · red gate (test) — ${line} — rework`);
+    expect(w.why).toBe(line);
   });
 
   test('a garaged branch with no car stands in the garage under its gate-run packet', () => {

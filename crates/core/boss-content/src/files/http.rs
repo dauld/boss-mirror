@@ -401,8 +401,14 @@ struct UploadUrlRequest {
     /// Carried for symmetry with the finalize body — the server does
     /// not key off of it during URL generation, but accepting it now
     /// means the SPA can send one canonical metadata object in both
-    /// requests rather than a slim/full split.
-    #[allow(dead_code)]
+    /// requests rather than a slim/full split. Deleting the field would
+    /// silently relax the request contract (a body without `filename`
+    /// is refused today); `expect` fails the build the day a handler
+    /// starts reading it, which is the cue to drop this marker.
+    #[expect(
+        dead_code,
+        reason = "required by the upload request contract, not read during URL generation"
+    )]
     filename: String,
 }
 

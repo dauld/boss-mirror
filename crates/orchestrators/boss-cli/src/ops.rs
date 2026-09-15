@@ -283,11 +283,11 @@ impl StatusReport {
     }
 
     /// Names of services whose systemd or health state is degraded.
-    /// Empty when `all_healthy()` is true. Public helper retained
-    /// for future CLI output tweaks (e.g. colorizing a summary line);
-    /// tests are the only caller today.
-    #[allow(dead_code)]
-    pub fn degraded_services(&self) -> Vec<&str> {
+    /// Empty when `all_healthy()` is true. Tests are the only caller,
+    /// so it is test code; a CLI output tweak that wants it lifts the
+    /// `cfg` rather than adding a dead-code marker.
+    #[cfg(test)]
+    fn degraded_services(&self) -> Vec<&str> {
         self.services
             .iter()
             .filter(|s| s.health != "ok" || s.systemd != "active")

@@ -248,7 +248,7 @@ impl ShippingRepository for PgShipping {
         // joined once as a subquery aggregate.
         let preview_rows: Vec<RecentRow> = sqlx::query_as(
             "SELECT s.id, s.status, s.carrier, s.destination, s.account_id, \
-                    s.shipped_on, s.estimated_delivery, s.delivered_on, s.created_on, \
+                    s.shipped_on, s.estimated_delivery, \
                     COALESCE(sys.n, 0)::bigint AS asset_id_count \
              FROM shipments s \
              LEFT JOIN ( \
@@ -625,10 +625,8 @@ struct RecentRow {
     account_id: Option<String>,
     shipped_on: Option<chrono::NaiveDate>,
     estimated_delivery: Option<chrono::NaiveDate>,
-    #[allow(dead_code)]
-    delivered_on: Option<chrono::NaiveDate>,
-    #[allow(dead_code)]
-    created_on: chrono::NaiveDate,
+    // `delivered_on` / `created_on` order the preview query but are
+    // not part of the preview DTO, so the SELECT list omits them.
     asset_id_count: i64,
 }
 

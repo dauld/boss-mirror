@@ -29,7 +29,6 @@
 /// `u64`, not `u32`: a `YYYYMMDDHHMMSS-` prefix is ~2.0e13 and a u32
 /// would overflow into the no-prefix arm — which is exactly the bug
 /// this file exists to make unrepeatable.
-#[allow(dead_code)]
 fn schema_sort_key(name: &str) -> (u64, String) {
     let num: u64 = name
         .split('-')
@@ -40,7 +39,6 @@ fn schema_sort_key(name: &str) -> (u64, String) {
 }
 
 /// FNV-1a's offset basis — the seed for every fingerprint below.
-#[allow(dead_code)]
 const FNV1A_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 
 /// FNV-1a, continued from `seed`.
@@ -52,7 +50,6 @@ const FNV1A_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 /// One implementation, because a hash that lives twice can drift
 /// (CLAUDE.md §9a) — `schema_fingerprint` in `test_db.rs` held the
 /// second copy.
-#[allow(dead_code)]
 fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
     let mut hash = seed;
     for byte in bytes {
@@ -75,7 +72,6 @@ fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
 /// Length-prefixed per field, so no two different lists can hash alike
 /// by moving a byte across an entry boundary (`("ab","c")` and
 /// `("a","bc")` must differ).
-#[allow(dead_code)]
 fn schema_set_fingerprint<'a>(entries: impl IntoIterator<Item = (&'a str, &'a str)>) -> u64 {
     let mut hash = FNV1A_OFFSET;
     for (name, sql) in entries {

@@ -214,7 +214,6 @@ pub(super) struct FromPaidInvoiceBody {
     /// Static counterparty fields — payment method + bank.
     /// Field names match the brewery's tenant.toml block.
     channel: String,
-    #[allow(dead_code)]
     bank: String,
     /// Counterparty drain date. When absent (test path), fall
     /// back to today.

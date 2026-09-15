@@ -207,6 +207,21 @@ describe('parseYardStatus', () => {
     expect(s.garage[0]!.failed_check).toBeNull();
   });
 
+  test('a garaged car carries the line its check failed on; a server without one reads null', () => {
+    // 6730dccb: the receipt has carried WHY since #372 and the garage
+    // said only WHICH. The server now picks the failure's first line;
+    // an older server (or an older receipt) omits the key, and the
+    // absence must not read as a line.
+    const s = parseYardStatus({
+      garage: [
+        { branch: 'fix/why', failed_check: 'test', failed_line: "thread 'x' panicked at yard.rs:9:5:", since: '2026-09-15' },
+        { branch: 'fix/old', failed_check: 'test', since: '2026-09-03' },
+        { branch: 'fix/odd', failed_check: 'test', failed_line: 7, since: '2026-09-03' },
+      ],
+    });
+    expect(s.garage.map(g => g.failed_line)).toEqual(["thread 'x' panicked at yard.rs:9:5:", null, null]);
+  });
+
   test('a missing block is null, not an error', () => {
     const s = parseYardStatus({
       trains: [{ id: 't', title: 'x', phase: 'boarding', car_count: 0 }],

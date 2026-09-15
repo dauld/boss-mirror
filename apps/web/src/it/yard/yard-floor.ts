@@ -122,6 +122,12 @@ export type Wagon = Readonly<{
   /** The event prose on a wagon standing on the event siding; absent
    *  elsewhere. */
   event?: string | null;
+  /** WHY a wagon IN THE GARAGE is there: the line its failed check
+   *  failed on, as the server reads it off the receipt (6730dccb). The
+   *  status line carries it too; this is the whole line for the
+   *  tooltip. Absent everywhere else, and on a garaged wagon whose
+   *  receipt carries no excerpt. */
+  why?: string | null;
   /** When it reached this station — an RFC3339 instant or a bare date,
    *  whichever the record carries; null when it carries none. */
   since: string | null;
@@ -963,13 +969,18 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
         return;
       case 'gated-red': {
         const g = garageByBranch.get(row.branch);
+        // WHICH check, then WHY (6730dccb): the receipt has carried the
+        // assertion since #372, and a troubled packet must look
+        // troubled without being opened. No excerpt, no claim.
+        const why = g?.failed_line ?? null;
         place({
           ...shared,
           station: 'garage',
           slot: garageSlot++,
           tone: 'red',
           lamp: 'err',
-          status: `garaged · red gate (${g?.failed_check ?? 'run died outside a check'}) — rework`,
+          status: `garaged · red gate (${g?.failed_check ?? 'run died outside a check'})${why ? ` — ${why}` : ''} — rework`,
+          why,
           since: g?.since ?? row.opened_on,
         });
         return;

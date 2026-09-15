@@ -1434,8 +1434,8 @@ struct PurchaseOrderRow {
 
 #[derive(sqlx::FromRow)]
 struct PoLineRow {
-    #[allow(dead_code)]
-    po_id: String,
+    // No `po_id`: every SELECT filters on it, so the caller already
+    // holds it, and `FromRow` ignores columns it has no field for.
     part_sku: String,
     qty: i32,
     unit_cost_cents: i64,

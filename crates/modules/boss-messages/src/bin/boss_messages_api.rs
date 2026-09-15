@@ -55,18 +55,15 @@ async fn main() -> Result<()> {
             let bus = boss_nats::NatsEventBus::connect(url)
                 .await
                 .with_context(|| format!("connecting to NATS at {url}"))?;
-            #[allow(unused_mut)]
-            let mut pub_ = boss_core::publisher::DomainPublisher::new(Arc::new(bus), "messages");
-            {
-                // Messages get their OWN immutable event log
-                // (`messages_events`) instead of riding the
-                // compliance-grade audit_log. That lets operators
-                // expire old messages without breaking the rest of
-                // the audit chain. See PgMessagesEventWriter docs.
-                pub_ = pub_.with_audit(std::sync::Arc::new(
+            // Messages get their OWN immutable event log
+            // (`messages_events`) instead of riding the
+            // compliance-grade audit_log. That lets operators
+            // expire old messages without breaking the rest of
+            // the audit chain. See PgMessagesEventWriter docs.
+            let pub_ = boss_core::publisher::DomainPublisher::new(Arc::new(bus), "messages")
+                .with_audit(std::sync::Arc::new(
                     boss_events::PgMessagesEventWriter::new(pool.clone()),
                 ));
-            }
             info!(nats_url = %url, "domain event publishing + messages_events trail enabled");
             Some(pub_)
         }

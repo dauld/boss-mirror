@@ -12,7 +12,7 @@
 //! Q2 of the step-ux-plugin-model design: files on disk, not DB
 //! BYTEA — matches every other static asset in the repo.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
@@ -93,10 +93,4 @@ fn has_valid_session(headers: &HeaderMap, key: &[u8]) -> bool {
         return false;
     };
     session::Session::decode(raw, key).is_ok()
-}
-
-/// Touch — guard against unused-import warnings on `Path`.
-#[allow(dead_code)]
-fn _touch_path_import() -> Option<&'static Path> {
-    None
 }

@@ -451,11 +451,12 @@
           transition:fade={{ duration: 500 }}>
           <!-- A wagon standing in the inspection shed shows the probe
                command and the string it must print; the entity panel
-               carries them unwrapped. -->
+               carries them unwrapped. A wagon in the garage shows the
+               line its check failed on (6730dccb). -->
           <title
             >{w.title} — {w.branch}@{w.head ?? '—'}{w.probe
               ? `\nprobe: ${w.probe.command}\nmust print: ${w.probe.expect ?? '(nothing recorded)'}`
-              : ''}{w.event ? `\nwaiting on: ${w.event}` : ''}</title>
+              : ''}{w.event ? `\nwaiting on: ${w.event}` : ''}{w.why ? `\nfailed on: ${w.why}` : ''}</title>
           <rect x="0" y="-10" width={WAGON_W} height="20" class="body" />
           <rect x="0" y="-10" width="5" height="20" class="stripe" />
           <circle cx="12" cy="12" r="3" class="wheel" />

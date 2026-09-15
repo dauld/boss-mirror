@@ -1847,11 +1847,27 @@ fn gate_run_verdict(steps: &[Step]) -> Option<&str> {
 /// read for the receipts already sitting on landed cars, which nothing
 /// will rewrite.
 fn failing_check(steps: &[Step]) -> Option<String> {
+    let failed = failing_checks(&gate_run_receipt(steps)?)?;
+    (!failed.is_empty()).then(|| failed.join(", "))
+}
+
+/// The receipt on a gate-run's `record-verdict` step, parsed — `None`
+/// when no step carries one or it is not JSON (a runner that died before
+/// a receipt leaves prose there). The one parse [`failing_check`] and
+/// [`failed_line`] both read, so the check a car names and the line it
+/// quotes come from the same record.
+fn gate_run_receipt(steps: &[Step]) -> Option<Value> {
     let raw = steps
         .iter()
         .find_map(|s| meta_str(&s.metadata, "receipt"))?;
-    let receipt: Value = serde_json::from_str(raw).ok()?;
-    let failed: Vec<String> = match receipt.get("checks").and_then(Value::as_array) {
+    serde_json::from_str(raw).ok()
+}
+
+/// The failed checks a receipt names, in its order (see
+/// [`failing_check`] for the two shapes). `None` when neither shape is
+/// present.
+fn failing_checks(receipt: &Value) -> Option<Vec<String>> {
+    Some(match receipt.get("checks").and_then(Value::as_array) {
         Some(checks) => checks
             .iter()
             .filter(|c| c.get("result").and_then(Value::as_str) != Some("pass"))
@@ -1863,8 +1879,54 @@ fn failing_check(steps: &[Step]) -> Option<String> {
             .iter()
             .filter_map(|f| f.as_str().map(str::to_string))
             .collect(),
-    };
-    (!failed.is_empty()).then(|| failed.join(", "))
+    })
+}
+
+/// Longest `failed_line` the garage will carry, in chars. It is a
+/// status line beside the check's name, not the excerpt — the packet
+/// has the whole excerpt.
+const FAILED_LINE_CHARS: usize = 200;
+
+/// WHY the red gate-run failed, in one line: the first line of the
+/// failed check's `fails_excerpt` that reads as the failure. Since #372
+/// (backlog 5708cbd5) the receipt carries `fails_excerpt: {check: text}`
+/// — the same lines the runner replays to its pod log — and the garage
+/// still said only WHICH check, so an operator opened the packet to read
+/// an assertion that was one field away (backlog 6730dccb).
+///
+/// The excerpt read is the first failed check (in the receipt's own
+/// order, as [`failing_check`] lists them) that has one, so the line
+/// matches the head of the car's `failed_check`; a receipt naming no
+/// checks reads the first excerpt in key order. Within it, the line is
+/// the first that MARKS the failure, the markers tried in the order
+/// `panicked at`, `assertion`, `error:`, `FAILED` — the runner's own
+/// extractor's, ranked — so a test excerpt yields its panic line, not
+/// its `---- stdout ----` header and not the `test … FAILED` roll-call
+/// the runner's 40 lines of context can carry above it, and a clippy
+/// excerpt its `error:`, not its `Checking` preamble. With no marker,
+/// the first non-empty line that is not the
+/// runner's own "... (N … omitted" note. Bounded to
+/// [`FAILED_LINE_CHARS`] with a trailing ellipsis, so the bound shows.
+/// `None` for a receipt from before the field existed, an empty
+/// excerpt, or no receipt at all — an absence, never a fabricated why.
+fn failed_line(steps: &[Step]) -> Option<String> {
+    let receipt = gate_run_receipt(steps)?;
+    let excerpts = receipt.get("fails_excerpt").and_then(Value::as_object)?;
+    let named = failing_checks(&receipt).unwrap_or_default();
+    let text = named
+        .iter()
+        .find_map(|check| excerpts.get(check).and_then(Value::as_str))
+        .or_else(|| excerpts.values().find_map(Value::as_str))?;
+    let lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+    let marked = ["panicked at", "assertion", "error:", "FAILED"]
+        .iter()
+        .find_map(|m| lines.clone().find(|l| l.contains(m)));
+    let line = marked.or_else(|| lines.clone().find(|l| !l.starts_with("... (")))?;
+    let mut bounded: String = line.chars().take(FAILED_LINE_CHARS).collect();
+    if line.chars().count() > FAILED_LINE_CHARS {
+        bounded.push('…');
+    }
+    Some(bounded)
 }
 
 /// One gate currently being assessed — an open gate-run that has not
@@ -2130,8 +2192,9 @@ fn train_of_gate(g: &Job) -> Option<String> {
 }
 
 /// A car that gated RED and is waiting for rework — the garage. Named
-/// with its failing check (when the verdict recorded one) so an operator
-/// reads WHAT to fix without opening the packet.
+/// with its failing check (when the verdict recorded one) and the line
+/// that check failed on (when the receipt carries the excerpt) so an
+/// operator reads WHAT to fix, and WHY, without opening the packet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GaragedCar {
     pub branch: String,
@@ -2140,6 +2203,13 @@ pub struct GaragedCar {
     /// check).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_check: Option<String>,
+    /// WHY: the first line of the failed check's excerpt that reads as
+    /// the failure (the panic, the `error:`), bounded — as
+    /// [`failed_line`] picks it. `None` when the receipt carries no
+    /// `fails_excerpt` (every receipt before #372) or no excerpt for the
+    /// check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_line: Option<String>,
     /// When the failing gate-run opened — the instant when stamped, else
     /// the date, as [`opened_since`] reads it.
     pub since: String,
@@ -2260,6 +2330,7 @@ pub fn garage(gate_runs: &[(Job, Vec<Step>)], settled_branches: &[String]) -> Ve
             (verdict == "failed").then(|| GaragedCar {
                 branch: branch.to_string(),
                 failed_check: failing_check(steps),
+                failed_line: failed_line(steps),
                 since: opened_since(g),
                 packet_id: g.id.to_string(),
                 sha: sha_of(g),
@@ -5253,6 +5324,151 @@ mod tests {
         assert_eq!(g[0].branch, "feat/x");
         assert_eq!(g[0].failed_check.as_deref(), Some("test"));
         assert_eq!(g[0].since, "2026-09-03");
+    }
+
+    /// The garage said WHICH check failed and not WHY, though the
+    /// receipt has carried the why since #372 (`fails_excerpt`, backlog
+    /// 5708cbd5): an operator opened the packet to read an assertion
+    /// that was one field away (backlog 6730dccb). The car now carries
+    /// the first line of the failed check's excerpt that reads as the
+    /// failure — the panic line here, past the `---- stdout ----` header.
+    #[test]
+    fn the_garage_says_what_the_assertion_said() {
+        let raw = serde_json::to_string(&json!({
+            "verdict": "failed",
+            "head": "e16708f69bc5b0a0a3f4bd1572f9db6dec76e7c8",
+            "checks": [
+                {"name": "clippy", "result": "pass"},
+                {"name": "test", "result": "fail"},
+            ],
+            "fails": ["test: refuses_while_legacy - panicked at yard.rs:9: assertion failed: refused"],
+            "fails_excerpt": {
+                "test": "---- refuses_while_legacy stdout ----\nthread 'refuses_while_legacy' panicked at crates/core/boss-jobs/src/yard.rs:9:5:\nassertion failed: refused\n\nfailures:\n    refuses_while_legacy"
+            },
+        }))
+        .unwrap();
+        let steps = vec![step(
+            "record-verdict",
+            "Record the receipt",
+            StepStatus::Completed,
+            json!({ "verdict": "failed", "receipt": raw }),
+        )];
+        let g = garage(&[(gate_run_on("feat/x", 3), steps)], &[]);
+        assert_eq!(g[0].failed_check.as_deref(), Some("test"));
+        assert_eq!(
+            g[0].failed_line.as_deref(),
+            Some(
+                "thread 'refuses_while_legacy' panicked at crates/core/boss-jobs/src/yard.rs:9:5:"
+            )
+        );
+    }
+
+    /// A receipt written before `fails_excerpt` existed (every landed
+    /// car's) names its check and carries no line — `None`, never a
+    /// fabricated why; and the `checks`-shaped garage test above, whose
+    /// receipt has no excerpt either, keeps reading as it did.
+    #[test]
+    fn a_receipt_without_an_excerpt_names_no_failed_line() {
+        let runs = vec![(
+            gate_run_on("feat/x", 3),
+            vec![verdict_step(
+                "failed",
+                json!([{"name": "test", "result": "fail"}]),
+            )],
+        )];
+        let g = garage(&runs, &[]);
+        assert_eq!(g[0].failed_check.as_deref(), Some("test"));
+        assert_eq!(g[0].failed_line, None);
+        // Present-and-empty — a green receipt's `{}` — is the same absence.
+        let steps = vec![step(
+            "record-verdict",
+            "Record the receipt",
+            StepStatus::Completed,
+            json!({ "verdict": "failed", "receipt": serde_json::to_string(&json!({
+                "verdict": "failed", "fails": ["test"], "fails_excerpt": {}
+            })).unwrap() }),
+        )];
+        assert_eq!(failed_line(&steps), None);
+    }
+
+    /// The line the garage picks: the first that MARKS the failure
+    /// (`panicked at`, `assertion`, `error:`, `FAILED`), so a clippy
+    /// excerpt reads its `error:` and not its `Checking …` preamble;
+    /// with no marker, the first non-empty line that is not the runner's
+    /// own omission note; and never longer than 200 chars — a status
+    /// line, not the excerpt.
+    #[test]
+    fn the_failed_line_is_the_first_marker_line_bounded() {
+        let with = |excerpt: &str| {
+            vec![step(
+                "record-verdict",
+                "Record the receipt",
+                StepStatus::Completed,
+                json!({ "verdict": "failed", "receipt": serde_json::to_string(&json!({
+                    "verdict": "failed",
+                    "checks": [{"name": "clippy", "result": "fail"}],
+                    "fails_excerpt": {"clippy": excerpt},
+                })).unwrap() }),
+            )]
+        };
+        assert_eq!(
+            failed_line(&with(
+                "    Checking boss-jobs v0.1.0\nerror: unused variable `x`\n  --> src/yard.rs:1:1"
+            ))
+            .as_deref(),
+            Some("error: unused variable `x`")
+        );
+        // The runner keeps up to 40 lines of context above the first
+        // header, and cargo's roll-call sits there: the panic outranks
+        // the `test … FAILED` line that names the same test.
+        assert_eq!(
+            failed_line(&with("test refuses ... FAILED\ntest other ... ok\n\n---- refuses stdout ----\nthread 'refuses' panicked at src/yard.rs:9:5:\nassertion failed: refused")).as_deref(),
+            Some("thread 'refuses' panicked at src/yard.rs:9:5:")
+        );
+        // No marker: the first line that says something, past the
+        // runner's "... (N line(s) ... omitted" note and blank lines.
+        assert_eq!(
+            failed_line(&with("... (12 line(s) before the first failure marker omitted; the Job log replay has them)\n\n  disk floor: 3 GB free")).as_deref(),
+            Some("disk floor: 3 GB free")
+        );
+        // Bounded, and saying so.
+        let long = format!("error: {}", "x".repeat(300));
+        let got = failed_line(&with(&long)).unwrap();
+        assert_eq!(got.chars().count(), 201);
+        assert!(got.ends_with('…'), "{got}");
+        // Nothing but whitespace is no line.
+        assert_eq!(failed_line(&with("  \n\n")), None);
+    }
+
+    /// Two failed checks: the line comes from the FIRST failed check the
+    /// receipt names that has an excerpt, so the garage's line matches
+    /// the head of its `failed_check` list.
+    #[test]
+    fn the_failed_line_follows_the_first_named_check_with_an_excerpt() {
+        let raw = serde_json::to_string(&json!({
+            "verdict": "failed",
+            "checks": [
+                {"name": "fmt", "result": "fail"},
+                {"name": "clippy", "result": "fail"},
+                {"name": "test", "result": "fail"},
+            ],
+            "fails_excerpt": {
+                "test": "assertion failed: later",
+                "clippy": "error: first with an excerpt",
+            },
+        }))
+        .unwrap();
+        let steps = vec![step(
+            "record-verdict",
+            "Record the receipt",
+            StepStatus::Completed,
+            json!({ "verdict": "failed", "receipt": raw }),
+        )];
+        assert_eq!(failing_check(&steps).as_deref(), Some("fmt, clippy, test"));
+        assert_eq!(
+            failed_line(&steps).as_deref(),
+            Some("error: first with an excerpt")
+        );
     }
 
     /// Train #361, 2026-09-14: its own gate-run (`train/20260914-1641`,

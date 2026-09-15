@@ -33,10 +33,6 @@ use boss_calendar_client::{CalendarClient, CalendarClientError};
 use boss_core::calendar::{ReservationRequest, ReservationStrength, TimeWindow, reason};
 use boss_core::job::{Step, StepStatus, Subject};
 
-#[cfg(test)]
-#[allow(unused_imports)]
-use boss_core::primitives::Subject as _;
-
 /// What the hook decided to do given (old, new) statuses + step
 /// metadata. The HTTP handler maps this onto status codes; sim /
 /// background paths can use it for tracing.

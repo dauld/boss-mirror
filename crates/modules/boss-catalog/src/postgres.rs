@@ -658,11 +658,8 @@ struct ModelRow {
     current_firmware: Option<String>,
     // Tenant-defined kind-specific specs (D2 + D5).
     extras: serde_json::Value,
-    // Timestamps (ignored in domain mapping)
-    #[allow(dead_code)]
-    created_at: chrono::DateTime<chrono::Utc>,
-    #[allow(dead_code)]
-    updated_at: chrono::DateTime<chrono::Utc>,
+    // No `created_at` / `updated_at`: the domain type carries neither,
+    // and `FromRow` ignores columns it has no field for.
 }
 
 impl ModelRow {

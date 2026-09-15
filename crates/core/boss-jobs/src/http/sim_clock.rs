@@ -82,7 +82,6 @@ pub(super) async fn sim_clock_resume<R: JobsRepository + 'static, B: EventBus + 
 /// and pushes a JSON frame when the observed state changes.
 /// Clients (SimClockBadge) connect once and stay subscribed for
 /// the session lifetime (see docs/design/sse-policy.md).
-#[allow(unused_assignments)] // `last` init is overwritten by the first snapshot before any read
 pub(super) async fn sim_clock_stream<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
 ) -> impl axum::response::IntoResponse {
@@ -95,14 +94,13 @@ pub(super) async fn sim_clock_stream<R: JobsRepository + 'static, B: EventBus + 
         // projection: reading the clock directly keeps the date the
         // SPA shows in lock-step with the timestamp events stamp,
         // with no within-tick lag.
-        let mut last: Option<crate::port::SimClockState> = None;
         let initial = sim_clock_state_from_clock(state.clock.as_ref()).await;
         if let Some(snap) = initial.as_ref()
             && let Ok(json) = serde_json::to_string(snap)
         {
             yield Ok::<_, Infallible>(SseEvent::default().data(json));
         }
-        last = initial;
+        let mut last: Option<crate::port::SimClockState> = initial;
 
         // Server-side poll loop. The dedupe filter only pushes
         // frames when something actually changed — most ticks

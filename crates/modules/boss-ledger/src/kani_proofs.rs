@@ -117,7 +117,10 @@ fn build_payroll(gross: i64, withheld: i64, employer_tax: i64) -> JournalEntryDr
 // attributes when that rewrite lands.
 // #[kani::proof]
 // #[kani::unwind(5)]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "parked proof: no #[kani::proof] until the fixed-size-array rewrite; restoring it makes this live and fails this expect, which is the cue to delete it"
+)]
 fn proof_payroll_entry_is_balanced() {
     let gross: i64 = kani::any();
     let withheld: i64 = kani::any();
@@ -200,7 +203,10 @@ fn build_invoice_issued(cats: [i64; MAX_CATS], taxes: [i64; MAX_TAXES]) -> Journ
 // to revive. See comment above that proof for the plan.
 // #[kani::proof]
 // #[kani::unwind(10)]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "parked proof: same heap-allocation blowup as proof_payroll_entry_is_balanced; restoring #[kani::proof] fails this expect, which is the cue to delete it"
+)]
 fn proof_invoice_issued_entry_is_balanced() {
     let mut cats = [0i64; MAX_CATS];
     let mut taxes = [0i64; MAX_TAXES];

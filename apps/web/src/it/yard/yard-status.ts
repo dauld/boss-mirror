@@ -286,10 +286,17 @@ export type Gates = Readonly<{
   typical_seconds: number | null;
 }>;
 
-/** A car whose most-recent gate-run is red — waiting for rework. */
+/** A car whose most-recent gate-run is red — waiting for rework.
+ *  Mirrors the Rust `GaragedCar`. */
 export type GaragedCar = Readonly<{
   branch: string;
   failed_check: string | null;
+  /** WHY, in one line: the first line of the failed check's excerpt
+   *  that reads as the failure, as the server picks it off the
+   *  receipt's `fails_excerpt` (#372). Absent on a server from before
+   *  the reading; null when the receipt carries no excerpt (every one
+   *  before #372) — an absence, never a fabricated why (6730dccb). */
+  failed_line?: string | null;
   since: string;
   packet_id: string;
   sha: string | null;
@@ -578,6 +585,7 @@ function parseGaragedCar(raw: unknown): GaragedCar {
   return {
     branch: String(o.branch ?? ''),
     failed_check: typeof o.failed_check === 'string' ? o.failed_check : null,
+    failed_line: typeof o.failed_line === 'string' && o.failed_line !== '' ? o.failed_line : null,
     since: String(o.since ?? ''),
     ...parsePacket(o),
   };

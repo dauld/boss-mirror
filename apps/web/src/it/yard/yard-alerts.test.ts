@@ -100,8 +100,8 @@ const trainRow = (id: string, over: Partial<TrainRow> = {}): TrainRow => ({
 const strandedGreen = (branch: string, packet_id: string, since = '2026-09-08') => ({
   branch, packet_id, sha: null, since,
 });
-const garaged = (branch: string, failed_check: string | null, since: string, packet_id = `g-${branch}`) => ({
-  branch, failed_check, since, packet_id, sha: null,
+const garaged = (branch: string, failed_check: string | null, since: string, packet_id = `g-${branch}`, failed_line: string | null = null) => ({
+  branch, failed_check, failed_line, since, packet_id, sha: null,
 });
 
 const quiet: Feeds = {
@@ -201,14 +201,18 @@ describe('yardAlerts — what is wrong right now, each a button to its subject',
         garage: [
           garaged('fix/red', 'clippy, test', '2026-09-08T01:00:00Z'),
           garaged('fix/old', null, '2026-09-01'),
+          // 6730dccb: with the receipt's excerpt, the alert says WHY.
+          garaged('fix/why', 'test', '2026-09-15T01:00:00Z', 'g-why', 'assertion failed: refused'),
         ],
       }),
     );
+    // Newest first, as the floor orders the garage.
     expect(a.map(x => [x.subject, x.sev, x.text, x.since])).toEqual([
+      ['garage', 'warn', 'gate red: fix/why (test) — assertion failed: refused — car garaged, rework', '2026-09-15T01:00:00Z'],
       ['garage', 'warn', 'gate red: fix/red (clippy, test) — car garaged, rework', '2026-09-08T01:00:00Z'],
       ['garage', 'warn', 'gate red: fix/old (run died outside a check) — car garaged, rework', '2026-09-01'],
     ]);
-    expect(new Set(a.map(x => x.id)).size).toBe(2);
+    expect(new Set(a.map(x => x.id)).size).toBe(3);
   });
 
   test('every stranded green the server names warns, selecting the approach', () => {

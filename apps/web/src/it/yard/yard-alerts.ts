@@ -66,17 +66,23 @@ export function yardAlerts(s: Scene, status: YardStatus | null, nowMs: number): 
       : [],
   );
 
-  // The garage, one alert per car, in the server's words for the check.
+  // The garage, one alert per car, in the server's words for the check
+  // — and, when the receipt carries the excerpt (#372), for WHY
+  // (6730dccb): the alert is read where the packet is not open.
   const garageByBranch = new Map((status?.garage ?? []).map(g => [g.branch, g]));
   const garage: Alert[] = s.wagons
     .filter(w => w.station === 'garage')
-    .map(w => ({
-      id: `garage:${w.id}`,
-      subject: 'garage',
-      sev: 'warn',
-      text: `gate red: ${w.branch} (${garageByBranch.get(w.branch)?.failed_check ?? 'run died outside a check'}) — car garaged, rework`,
-      since: w.since,
-    }));
+    .map(w => {
+      const g = garageByBranch.get(w.branch);
+      const why = g?.failed_line ? ` — ${g.failed_line}` : '';
+      return {
+        id: `garage:${w.id}`,
+        subject: 'garage',
+        sev: 'warn',
+        text: `gate red: ${w.branch} (${g?.failed_check ?? 'run died outside a check'})${why} — car garaged, rework`,
+        since: w.since,
+      };
+    });
 
   // Stranded greens: the wagons on the approach that say so, plus any
   // branch the server strands that the approach window no longer lists.

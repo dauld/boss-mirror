@@ -87,7 +87,6 @@ async fn main() -> Result<()> {
     let (cancel_tx, cancel_rx) = watch::channel(false);
 
     // Build the publisher: bus + (optional) Postgres audit writer.
-    #[allow(unused_mut)]
     let mut publisher = boss_core::publisher::DomainPublisher::new(
         bus.clone() as std::sync::Arc<dyn boss_core::port::EventBus>,
         "assets",

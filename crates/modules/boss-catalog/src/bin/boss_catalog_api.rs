@@ -69,11 +69,8 @@ async fn main() -> Result<()> {
             let bus = boss_nats::NatsEventBus::connect(url)
                 .await
                 .with_context(|| format!("connecting to NATS at {url}"))?;
-            #[allow(unused_mut)]
-            let mut pub_ = boss_core::publisher::DomainPublisher::new(Arc::new(bus), "kb");
-            {
-                pub_ = pub_.with_audit(Arc::new(boss_events::PgAuditWriter::new(pg_pool.clone())));
-            }
+            let pub_ = boss_core::publisher::DomainPublisher::new(Arc::new(bus), "kb")
+                .with_audit(Arc::new(boss_events::PgAuditWriter::new(pg_pool.clone())));
             info!(nats_url = %url, "domain event publishing + audit trail enabled");
             Some(pub_)
         }

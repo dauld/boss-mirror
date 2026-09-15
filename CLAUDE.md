@@ -743,8 +743,23 @@ constraint."* An agent is trusted with a step because the protocol makes
 that step hard to get wrong — not because it promised to be careful. So
 a door that stops being true is a defect worth a car.
 
+- **The pod's doors are versioned: `infra/dev/`.** `boss-api`, the
+  `boss` shim, `wt-cargo` and `wt-web` were pod-local text under
+  `/work/tools/bin` until 2026-09-14 — unversioned, untested, and one
+  restart from disagreeing with this document. Each now lives in
+  `infra/dev/`, pinned by a shell test in `crates/core/boss-testing/tests/`
+  (`boss_api_sh`, `boss_shim_sh`, `wt_cargo_sh`, `wt_web_sh`), and
+  `/work/tools/bin/<name>` is a SYMLINK to the main checkout's copy —
+  which is why the main checkout stays on `origin/main`. One system-of-
+  record spelling lives in `infra/dev/sor-url` and both `boss-api` and
+  the shim read it. A builder in a worktree builds through `wt-cargo`
+  (its own reflink-seeded target; 4-wide and niced for `agent-*`
+  worktrees so the operator's shell wins the scheduler) and links
+  `node_modules` through `wt-web` before any web check.
+
 - **The jobs API — `boss-api METHOD /api/path [body.json]`**
-  (`/Users/david/bin/boss-api`). Pinned to the system of record, signs
+  (`infra/dev/boss-api`; `/Users/david/bin/boss-api` on the
+  workstation). Pinned to the system of record, signs
   as the session's own actor, allowlisted so it never prompts. Invoke it
   **bare**: `boss-api GET … > file` stays inside the allowlist, `boss-api
   GET … | python3` falls out of it and gets adjudicated. Speaks

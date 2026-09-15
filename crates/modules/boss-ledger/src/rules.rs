@@ -1060,7 +1060,6 @@ fn manual_entry(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
 /// rule stays chart-agnostic, same contract as
 /// `retained_earnings_account`; a non-zero variance without an
 /// account is a malformed fact and is refused.
-#[allow(unused_assignments)] // running sort_order counter; final increment intentionally unread
 fn period_closed(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
     let retained_earnings = fact
         .payload
@@ -1072,7 +1071,6 @@ fn period_closed(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
     let mut lines: Vec<JournalLineDraft> = Vec::new();
     let mut revenue_total: i64 = 0;
     let mut expense_total: i64 = 0;
-    let mut sort: i16 = 0;
 
     let revenue_lines = fact
         .payload
@@ -1101,9 +1099,8 @@ fn period_closed(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
             debit_cents: balance,
             credit_cents: 0,
             memo: Some(format!("Year-end close: zero out {account}")),
-            sort_order: sort,
+            sort_order: lines.len() as i16,
         });
-        sort += 1;
     }
 
     let expense_lines = fact
@@ -1134,7 +1131,7 @@ fn period_closed(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
                 debit_cents: 0,
                 credit_cents: balance,
                 memo: Some(format!("Year-end close: zero out {account}")),
-                sort_order: sort,
+                sort_order: lines.len() as i16,
             });
         } else {
             // balance < 0 → DR side zeros it out
@@ -1145,10 +1142,9 @@ fn period_closed(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
                 memo: Some(format!(
                     "Year-end close: zero out {account} (was credit-balance)"
                 )),
-                sort_order: sort,
+                sort_order: lines.len() as i16,
             });
         }
-        sort += 1;
     }
 
     // Net income → Retained Earnings. Positive NI (revenue > expense)
@@ -1161,18 +1157,16 @@ fn period_closed(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
             debit_cents: 0,
             credit_cents: net_income,
             memo: Some("Year-end close: net income to retained earnings".to_string()),
-            sort_order: sort,
+            sort_order: lines.len() as i16,
         });
-        sort += 1;
     } else if net_income < 0 {
         lines.push(JournalLineDraft {
             account_code: retained_earnings.to_string().into(),
             debit_cents: -net_income,
             credit_cents: 0,
             memo: Some("Year-end close: net loss absorbed by retained earnings".to_string()),
-            sort_order: sort,
+            sort_order: lines.len() as i16,
         });
-        sort += 1;
     }
 
     // WIP-variance close-out (see the doc comment): absent field →
@@ -1197,17 +1191,15 @@ fn period_closed(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
                 memo: Some(format!(
                     "Year-end close: WIP variance write-off ({wip_account})"
                 )),
-                sort_order: sort,
+                sort_order: lines.len() as i16,
             });
-            sort += 1;
             lines.push(JournalLineDraft {
                 account_code: wip_account.to_string().into(),
                 debit_cents: 0,
                 credit_cents: wip_variance,
                 memo: Some(format!("Year-end close: zero out {wip_account} residual")),
-                sort_order: sort,
+                sort_order: lines.len() as i16,
             });
-            sort += 1;
         } else {
             // Credit residual (over-absorbed WIP) → mirror image.
             lines.push(JournalLineDraft {
@@ -1217,9 +1209,8 @@ fn period_closed(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
                 memo: Some(format!(
                     "Year-end close: zero out {wip_account} residual (was credit-balance)"
                 )),
-                sort_order: sort,
+                sort_order: lines.len() as i16,
             });
-            sort += 1;
             lines.push(JournalLineDraft {
                 account_code: retained_earnings.to_string().into(),
                 debit_cents: 0,
@@ -1227,9 +1218,8 @@ fn period_closed(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
                 memo: Some(format!(
                     "Year-end close: WIP over-absorption to retained earnings ({wip_account})"
                 )),
-                sort_order: sort,
+                sort_order: lines.len() as i16,
             });
-            sort += 1;
         }
     }
 
@@ -1897,6 +1887,54 @@ mod v2_tests {
             "5100 should have one close line (the expense zero), not a WIP variance line"
         );
         assert_eq!(cogs_lines[0].credit_cents, 60_000);
+    }
+
+    #[test]
+    fn period_closed_sort_order_is_the_push_index() {
+        // Pins the invariant the rule relies on: every line's
+        // `sort_order` is its position in the entry, 0..n contiguous,
+        // in emission order — revenue zeros, expense zeros, the RE
+        // roll, then the WIP variance pair. The rule used to carry a
+        // running counter for this whose final increment nothing
+        // read (an `allow(unused_assignments)` hid it, backlog
+        // bfcf3fc9); `lines.len()` at push time is the same number
+        // with nothing left over.
+        let id = uuid::Uuid::new_v4();
+        let payload = serde_json::json!({
+            "period_id": "c0000000-0000-0000-0000-000000000011",
+            "period_end": "2026-12-31",
+            "retained_earnings_account": "3000",
+            "revenue_lines": [
+                { "account_code": "4100", "balance_cents": 100_000 },
+                { "account_code": "4200", "balance_cents": 0 },
+            ],
+            "expense_lines": [
+                { "account_code": "5100", "balance_cents": 60_000 },
+                { "account_code": "6100", "balance_cents": -5_000 },
+            ],
+            "wip_variance_cents": -25_000,
+            "wip_account": "1310",
+        });
+        let fact_ref = FactRef {
+            id,
+            kind: "finance.period.closed",
+            happened_on: chrono::NaiveDate::from_ymd_opt(2026, 12, 31).unwrap(),
+            payload: &payload,
+        };
+        let draft = evaluate(&BossRuleSet, &fact_ref).unwrap();
+        // 4100, 5100, 6100 (4200 skipped as zero), RE roll, 1310 DR, RE CR.
+        assert_eq!(draft.lines.len(), 6);
+        let orders: Vec<i16> = draft.lines.iter().map(|l| l.sort_order).collect();
+        assert_eq!(orders, vec![0, 1, 2, 3, 4, 5]);
+        let accounts: Vec<&str> = draft
+            .lines
+            .iter()
+            .map(|l| l.account_code.as_ref())
+            .collect();
+        assert_eq!(
+            accounts,
+            vec!["4100", "5100", "6100", "3000", "1310", "3000"]
+        );
     }
 
     #[test]
