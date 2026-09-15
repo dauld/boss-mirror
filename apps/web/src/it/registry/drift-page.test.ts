@@ -61,3 +61,57 @@ describe('the registry drift page tells its three empty states apart', () => {
     expect(markup).toContain('drift.pending');
   });
 });
+
+// Car 3b: the approve. One control per adrift kind, reading the verb's
+// own answers; the force path two clicks from the plain one.
+describe('the drift page approves a publish through the ops-request packet', () => {
+  const page = readFileSync(join(import.meta.dir, 'ProtocolDriftPage.svelte'), 'utf8');
+  const control = readFileSync(join(import.meta.dir, 'ApprovePublish.svelte'), 'utf8');
+  const markup = control.slice(control.indexOf('</script>'));
+
+  it('the page groups the drift rows by kind and hands each its latest request and the execute role', () => {
+    expect(page).toContain("from './approve'");
+    for (const call of ['adriftKinds(', 'latestFor(', 'loadPublishRequests(', 'loadExecuteAuthorityRole(', '<ApprovePublish']) {
+      expect(page, `the page uses ${call}`).toContain(call);
+    }
+    // The viewer is the actor: id and role come from the session, never typed.
+    expect(page).toContain('session.value.user.id');
+    expect(page).toContain('session.value.user.role');
+  });
+
+  it('a failed requests read withholds the controls with the failure marker, never offers them blind', () => {
+    const failed = page.indexOf("requests.kind === 'failed'");
+    expect(failed).toBeGreaterThan(-1);
+    const arm = page.slice(failed, page.indexOf('{:else', failed));
+    expect(arm).toContain('load-failed');
+    expect(arm).not.toContain('<ApprovePublish');
+  });
+
+  it('the control files through approveBody + fileApprove, inside the write gate, gated by the execute role', () => {
+    expect(control).toContain('approveBody(');
+    expect(control).toContain('fileApprove(');
+    expect(control).toContain('approveAuthority(');
+    expect(markup).toContain('<WriteGate>');
+    // The refusal names the role in the disabled control's title, as the Abort control does.
+    expect(markup).toContain('disabled={refusal !== null');
+  });
+
+  it('the force path exists only in the force mode and enables only on the typed field name', () => {
+    const force = markup.indexOf("mode.kind === 'force'");
+    expect(force).toBeGreaterThan(-1);
+    const arm = markup.slice(force, markup.indexOf('{:else}', force));
+    expect(arm).toContain("file('force')");
+    expect(arm).toContain('forceConfirmed(typed, fieldNames)');
+    expect(arm).toContain('erase');
+    // Nowhere else files with force.
+    expect(markup.slice(0, force)).not.toContain("file('force')");
+    expect(markup.slice(markup.indexOf('{:else}', force))).not.toContain("file('force')");
+  });
+
+  it('the answer is the packet link plus exit code and the FULL output, never a tail', () => {
+    expect(markup).toContain('href={`/jobs/${latest.id}`}');
+    expect(markup).toContain('latest.exit_code');
+    expect(markup).toContain('<pre class="ap-output">{latest.output}</pre>');
+    expect(control).not.toMatch(/output\.slice\(|output\.split\(/);
+  });
+});
