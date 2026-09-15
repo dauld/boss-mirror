@@ -2,8 +2,9 @@
 //! delivery packet only when it said a code change is owed, and a
 //! recurring finding still mints at most one car.
 //!
-//! Pins the exact `when` the rule file ships against the expr engine,
-//! and the shape of the spawn it produces. Defect e74b32a1: two cars
+//! Pins the exact `when` the rule file ships against the expr engine —
+//! read FROM that file, not copied into this one — and the shape of the
+//! spawn it produces. Defect e74b32a1: two cars
 //! sat on the board a day apart, both titled "Stale build cache
 //! sweep", both from the same target, and the only way to tell them
 //! apart was to open each one.
@@ -33,15 +34,19 @@
 use boss_dispatcher::rules::expr::{EvalError, HelperResolver, Value};
 use boss_dispatcher::rules::registry::{Registry, match_event};
 
-const RULE: &str = r#"
-[[rule]]
-name = "spawn-car-on-sweep-remediated"
-on_event = "jobs.job.closed"
-when = "kind = \"maintenance-sweep\" AND outcome = \"change-needed\" AND NOT open_car_exists(subject_id)"
-[[rule.do]]
-handler = "jobs.spawn"
-args = { kind = "\"ship-a-change\"", subject_kind = "\"custom\"", subject = "id", title = "title", "metadata.backlog_item" = "id", "metadata.sweep_target" = "subject_id" }
-"#;
+mod common;
+
+/// The rule as the dispatcher boots it: its file under
+/// `infra/dispatcher/rules/`, not a copy. Until 2026-09-14 this was an
+/// inline TOML literal of the rule (backlog 94f150f9) — one that declared
+/// no `version` while the file said `version = 3`, so a test whose header
+/// says "at v3" was passing against v1 text; the `when` and the spawn
+/// args happened to match.
+const RULE: &str = "spawn-car-on-sweep-remediated";
+
+fn rule() -> Registry {
+    common::authored_rule(RULE)
+}
 
 /// `open_car_exists` answering a fixed value, recording what it was
 /// asked about so a test can assert the dedup KEY, not just the
@@ -91,7 +96,7 @@ fn closed_sweep(outcome: &str) -> serde_json::Value {
 
 #[test]
 fn a_sweep_that_said_a_code_change_is_owed_spawns_a_car() {
-    let reg = Registry::from_toml(RULE).expect("rule parses");
+    let reg = rule();
     let hits = match_event(
         &reg,
         "jobs.job.closed",
@@ -124,7 +129,7 @@ fn a_sweep_that_said_a_code_change_is_owed_spawns_a_car() {
 
 #[test]
 fn a_second_firing_for_the_same_finding_does_not_spawn() {
-    let reg = Registry::from_toml(RULE).expect("rule parses");
+    let reg = rule();
     let hits = match_event(
         &reg,
         "jobs.job.closed",
@@ -141,7 +146,7 @@ fn a_second_firing_for_the_same_finding_does_not_spawn() {
 
 #[test]
 fn a_sweep_that_found_nothing_never_spawns() {
-    let reg = Registry::from_toml(RULE).expect("rule parses");
+    let reg = rule();
     let hits = match_event(
         &reg,
         "jobs.job.closed",
@@ -159,7 +164,7 @@ fn a_sweep_that_found_nothing_never_spawns() {
 /// had to be recognised and abandoned by hand.
 #[test]
 fn an_operational_remediation_does_not_spawn_a_car() {
-    let reg = Registry::from_toml(RULE).expect("rule parses");
+    let reg = rule();
     let outcome = match_event(
         &reg,
         "jobs.job.closed",
@@ -181,7 +186,7 @@ fn an_operational_remediation_does_not_spawn_a_car() {
 
 #[test]
 fn some_other_packet_closing_is_not_a_sweep() {
-    let reg = Registry::from_toml(RULE).expect("rule parses");
+    let reg = rule();
     let mut payload = closed_sweep("change-needed");
     payload["kind"] = serde_json::json!("ship-a-change");
     let hits = match_event(&reg, "jobs.job.closed", &payload, &StubCars::new(false)).matched;
@@ -193,7 +198,7 @@ fn the_dedup_asks_about_the_target_not_the_id_or_the_title() {
     // The assertion that would have caught e74b32a1. Keying on `id`
     // dedupes nothing (fresh uuid every firing) and keying on `title`
     // cannot tell one finding from another (templated per target).
-    let reg = Registry::from_toml(RULE).expect("rule parses");
+    let reg = rule();
     let stub = StubCars::new(false);
     // Called for its effect on the stub; the assertion below reads
     // what it asked about. The skipped check keeps the guarantee the

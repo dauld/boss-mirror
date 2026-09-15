@@ -14,20 +14,11 @@
 use boss_dispatcher::rules::expr::{NoHelpers, Value};
 use boss_dispatcher::rules::registry::{Registry, match_event};
 
+mod common;
+
+/// The whole authored directory, read the way the seed reads it.
 fn shipped_rules() -> Registry {
-    let dir = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../infra/dispatcher/rules"
-    );
-    let mut toml = String::new();
-    for entry in std::fs::read_dir(dir).expect("rules dir") {
-        let p = entry.unwrap().path();
-        if p.extension().is_some_and(|e| e == "toml") {
-            toml.push_str(&std::fs::read_to_string(&p).unwrap());
-            toml.push('\n');
-        }
-    }
-    Registry::from_toml(&toml).expect("the shipped rules parse together")
+    common::authored_registry()
 }
 
 /// The `step.ready.checklist` event the jobs API publishes when a

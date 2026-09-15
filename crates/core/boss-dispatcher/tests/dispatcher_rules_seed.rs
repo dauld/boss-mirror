@@ -31,15 +31,11 @@ use std::path::{Path, PathBuf};
 
 use boss_dispatcher::rules::registry::{load_active_rules, parse_raw_path};
 use boss_dispatcher::rules::seed::seed_authored_rules;
-use boss_testing::TestDb;
-
-/// The authored registry: the directory, not a file. Adding a rule is
-/// dropping a file in (CLAUDE.md §9a — the collapse `infra/postgres/schema/`
-/// and `infra/platform/workflows/` already had).
-const RULES_DIR: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../../infra/dispatcher/rules"
-);
+// The authored registry is a directory, not a file: adding a rule is
+// dropping a file in (CLAUDE.md §9a — the collapse `infra/postgres/schema/`
+// and `infra/platform/workflows/` already had). Where it is has ONE
+// definition, `boss_testing::dispatcher_rules_dir` (94f150f9).
+use boss_testing::{TestDb, dispatcher_rules_dir};
 
 /// The migration directory, read to make "no second edit" a CHECKED
 /// claim rather than a narrated one.
@@ -64,7 +60,7 @@ fn by_name(
 fn authored_copy(tmp: &tempfile::TempDir) -> PathBuf {
     let dir = tmp.path().join("rules");
     std::fs::create_dir_all(&dir).expect("create the fixture registry");
-    for entry in std::fs::read_dir(RULES_DIR).expect("read the authored registry") {
+    for entry in std::fs::read_dir(dispatcher_rules_dir()).expect("read the authored registry") {
         let src = entry.expect("dir entry").path();
         if src.extension().and_then(|e| e.to_str()) != Some("toml") {
             continue;
@@ -170,7 +166,7 @@ async fn the_registry_equals_the_authored_directory_after_a_seed() {
         );
     }
 
-    let report = seed_authored_rules(&db.pool, Path::new(RULES_DIR))
+    let report = seed_authored_rules(&db.pool, dispatcher_rules_dir())
         .await
         .expect("seed the authored registry");
 
@@ -181,7 +177,7 @@ async fn the_registry_equals_the_authored_directory_after_a_seed() {
             report.inserted
         );
     }
-    let from_toml = parse_raw_path(RULES_DIR).expect("parse the rule directory");
+    let from_toml = parse_raw_path(dispatcher_rules_dir()).expect("parse the rule directory");
     let authored_version = from_toml
         .rules
         .iter()
@@ -341,7 +337,7 @@ async fn the_seed_never_walks_back_a_version_the_registry_already_has() {
     .await
     .expect("author a newer version live");
 
-    let report = seed_authored_rules(&db.pool, Path::new(RULES_DIR))
+    let report = seed_authored_rules(&db.pool, dispatcher_rules_dir())
         .await
         .expect("seed the authored registry");
 
@@ -423,10 +419,10 @@ async fn an_unreadable_authored_registry_writes_nothing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn seeding_is_idempotent() {
     let db = TestDb::new().await;
-    let first = seed_authored_rules(&db.pool, Path::new(RULES_DIR))
+    let first = seed_authored_rules(&db.pool, dispatcher_rules_dir())
         .await
         .expect("first seed");
-    let second = seed_authored_rules(&db.pool, Path::new(RULES_DIR))
+    let second = seed_authored_rules(&db.pool, dispatcher_rules_dir())
         .await
         .expect("second seed");
     assert!(
@@ -446,7 +442,7 @@ async fn seeding_is_idempotent() {
 /// it.
 #[test]
 fn stream_covers_every_rule_topic() {
-    let raw = parse_raw_path(RULES_DIR).expect("parse the rule directory");
+    let raw = parse_raw_path(dispatcher_rules_dir()).expect("parse the rule directory");
     let subjects = boss_nats::durable::stream_subjects();
     for rule in &raw.rules {
         // Scheduled rules have no topic — nothing to cover.

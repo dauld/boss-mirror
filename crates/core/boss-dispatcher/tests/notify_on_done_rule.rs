@@ -1,4 +1,5 @@
-//! The `notify-on-step-done-marked` rule (migration 106) — BOSS
+//! The `notify-on-step-done-marked` rule (first seeded by migration 106,
+//! now `infra/dispatcher/rules/notify-on-step-done-marked.toml`) — BOSS
 //! alerting its operators that a wait is over.
 //!
 //! Pins the exact `when` expression the migration ships against the
@@ -13,21 +14,21 @@
 use boss_dispatcher::rules::expr::NoHelpers;
 use boss_dispatcher::rules::registry::{Registry, match_event};
 
-/// The migration row, expressed as the same TOML the registry loader
-/// accepts — expression + args verbatim from 106.
-const RULE: &str = r#"
-[[rule]]
-name = "notify-on-step-done-marked"
-on_event = "step.done.*"
-when = "notify_on_done = true"
-[[rule.do]]
-handler = "messages.notify"
-args = { id_prefix = "\"done\"" }
-"#;
+mod common;
+
+/// The rule as the dispatcher boots it: its file under
+/// `infra/dispatcher/rules/`, not a copy. Until 2026-09-14 this was an
+/// inline TOML literal "verbatim from 106" (backlog 94f150f9) —
+/// measured equal to the file that day, and a copy all the same.
+const RULE: &str = "notify-on-step-done-marked";
+
+fn rule() -> Registry {
+    common::authored_rule(RULE)
+}
 
 #[test]
 fn marked_step_done_matches_and_unmarked_does_not() {
-    let reg = Registry::from_toml(RULE).expect("rule parses");
+    let reg = rule();
 
     let marked = serde_json::json!({
         "job_id": "j1", "step_id": "s1", "kind": "task", "notify_on_done": true,

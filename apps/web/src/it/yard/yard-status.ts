@@ -151,6 +151,16 @@ export type BoardingPredicate = Readonly<{
   /** Whether the threshold is met — null when the question has NO
    *  ANSWER: no depth rule configured, or the depth unread. Not false. */
   threshold_met: boolean | null;
+  /** The boarding rule as a sentence — "Boards at 4 parked cars (min 45
+   *  min between depth-rule boards) or 06:00 / 18:00 UTC; 2 car(s) parked
+   *  now — below the dock threshold." Rendered VERBATIM on the yard
+   *  board's rule line and the status page's dock line: the lens
+   *  composes no boarding sentence of its own. Until dec9c9df it did —
+   *  `boardsWhen()` rebuilt one here from the numeric fields — and when
+   *  the server's wording moved (#371: the cooldown is the depth rule's,
+   *  not the track's) the page kept saying the old sentence. Two
+   *  derivations of one sentence diverge on every rule change; one
+   *  cannot. */
   summary: string;
   /** Why the dock is not boarding RIGHT NOW — `track occupied (…)`,
    *  `cooldown — M min left`, `below threshold (…)` — or null when it
@@ -787,35 +797,6 @@ export function lastVerbReading(c: ConductorHealth | null): Reading {
   if (c.last_rc === null) return { tone: 'muted', text: `${c.last_verb} · rc unknown` };
   if (c.last_rc === 0) return { tone: 'ok', text: `${c.last_verb} · rc 0` };
   return { tone: 'err', text: `${c.last_verb} · rc ${c.last_rc} — the last pass failed` };
-}
-
-/** When the next train boards, as the RULE — depth reached, cooldown
- *  cleared — and never as a time. The board rule is queue-depth
- *  triggered; it has no next-fire clock, and inventing one is exactly
- *  the "the board said fine and it was not" the page exists to stop.
- *  A clock rule beside it is quoted verbatim from the registry row. */
-export function boardsWhen(b: BoardingPredicate): string {
-  const t = b.dock_threshold;
-  // No threshold has two causes — a registry with no depth rule, and a
-  // cadence read that failed — and only the SERVER can tell them apart,
-  // so the server's sentence is what renders. `cadence_reading` says
-  // which one it is for anything that needs to branch.
-  if (t === null) return b.summary !== '' ? b.summary : 'no boarding rule configured';
-  const cooldown =
-    b.cooldown_minutes !== null ? `the cooldown (${b.cooldown_minutes}m) clears` : null;
-  const clockOf = (): string =>
-    b.at_times.length > 0 ? ` · or by the clock at ${b.at_times.join(' / ')} UTC` : '';
-  // NO READING comes first. Without a depth the threshold question has no
-  // answer, and "0/4 parked — boards when the dock reaches 4" is the
-  // sentence an operator acts on. The clock rule still boards, and it
-  // never reads the depth, so it is still quoted.
-  if (b.dock_depth === null)
-    return `dock depth unread — the ${t}-car threshold cannot be evaluated${clockOf()}`;
-  const depth = `${b.dock_depth}/${t} parked`;
-  const rule = b.threshold_met
-    ? `threshold met — ${depth}; boards ${cooldown ? `when ${cooldown}` : "on the conductor's next pass"}`
-    : `${depth} — boards when the dock reaches ${t}${cooldown ? ` and ${cooldown}` : ''}`;
-  return rule + clockOf();
 }
 
 /** An RFC3339 stamp as the clock time it names, `HH:MM UTC` — the

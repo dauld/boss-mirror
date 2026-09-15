@@ -1,5 +1,6 @@
-//! The `publish-github-pr-on-open-pr-ready` rule (migration
-//! 202609081200) — the machine half of `publish-to-github` v6.
+//! The `publish-github-pr-on-open-pr-ready` rule (first seeded by
+//! migration 202609081200, now its file under `infra/dispatcher/rules/`)
+//! — the machine half of `publish-to-github` v6.
 //!
 //! When the protocol's `open-pr` step becomes READY (David approved
 //! the publish), the dispatcher spawns an ops-request for host=forge
@@ -20,17 +21,17 @@
 use boss_dispatcher::rules::expr::{NoHelpers, Value};
 use boss_dispatcher::rules::registry::{Registry, match_event};
 
-/// The migration row, expressed as the same TOML the registry loader
-/// accepts — expression + args verbatim from 202609081200.
-const RULE: &str = r#"
-[[rule]]
-name = "publish-github-pr-on-open-pr-ready"
-on_event = "step.ready.task"
-when = "metadata.ops_verb = \"publish-github-pr\""
-[[rule.do]]
-handler = "jobs.spawn"
-args = { kind = "\"ops-request\"", subject_kind = "\"custom\"", subject = "\"forge\"", title = "\"publish the mirror PR from the forge — a publish was approved\"", "metadata.host" = "\"forge\"", "metadata.verb" = "\"publish-github-pr\"" }
-"#;
+mod common;
+
+/// The rule as the dispatcher boots it: its file under
+/// `infra/dispatcher/rules/`, not a copy. Until 2026-09-14 this was an
+/// inline TOML literal "verbatim from 202609081200" (backlog 94f150f9) —
+/// measured equal to the file that day, and a copy all the same.
+const RULE: &str = "publish-github-pr-on-open-pr-ready";
+
+fn rule() -> Registry {
+    common::authored_rule(RULE)
+}
 
 /// A `step.ready.task` payload as boss-jobs builds it: job/step ids,
 /// kind, subject, assignee, and the step's own metadata.
@@ -45,7 +46,7 @@ fn step_ready(metadata: serde_json::Value) -> serde_json::Value {
 
 #[test]
 fn the_open_pr_step_spawns_a_forge_publish_ops_request() {
-    let reg = Registry::from_toml(RULE).expect("rule parses");
+    let reg = rule();
     let payload = step_ready(serde_json::json!({ "ops_verb": "publish-github-pr" }));
     let outcome = match_event(&reg, "step.ready.task", &payload, &NoHelpers);
     assert!(
@@ -86,7 +87,7 @@ fn the_open_pr_step_spawns_a_forge_publish_ops_request() {
 /// every ordinary task becoming ready.
 #[test]
 fn other_task_steps_do_not_fire_and_do_not_fail() {
-    let reg = Registry::from_toml(RULE).expect("rule parses");
+    let reg = rule();
     for metadata in [
         serde_json::json!({}),
         serde_json::json!({ "authority_role": "platform-admin" }),
@@ -116,7 +117,7 @@ fn other_task_steps_do_not_fire_and_do_not_fail() {
 /// step ready — not again when the machine completes it.
 #[test]
 fn the_done_topic_is_not_subscribed() {
-    let reg = Registry::from_toml(RULE).expect("rule parses");
+    let reg = rule();
     let payload = step_ready(serde_json::json!({ "ops_verb": "publish-github-pr" }));
     let outcome = match_event(&reg, "step.done.task", &payload, &NoHelpers);
     assert!(

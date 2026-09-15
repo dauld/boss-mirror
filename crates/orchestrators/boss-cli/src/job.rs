@@ -545,37 +545,36 @@ const QUERY_VALUE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUM
 /// composed then passes the server's own rule for `metadata=`
 /// (`where_containment`), so nothing this door sends is a 400.
 ///
-/// The duplicate-key refusal stays here because only the composer can
-/// see one: a JSON object holds a key once, so by the time a document
-/// is a `Value` the second value has already won.
+/// Composed as WIRE TEXT, not as a `Value`, because of the one thing
+/// only the text can show: a repeated key. A JSON object holds a key
+/// once, so `--where k=1 --where k=2` read into a map is `{"k":"2"}`
+/// with the first value gone without a word. Writing the pairs out as
+/// the JSON this door would send — repeats and all — and handing that
+/// to the server's own parser is what lets the server refuse it here,
+/// in its own sentence. Until 2026-09-14 the composer caught the repeat
+/// itself and said "names k twice" while the server said "key k
+/// repeated" for the same document: one rule, two wordings, no pin
+/// (backlog a452b11a).
 pub(crate) fn where_object(wheres: &[String]) -> Result<Value> {
-    let mut doc = serde_json::Map::new();
-    for w in wheres {
-        let (key, value) = match w.split_once('=') {
-            Some((k, v)) if !k.is_empty() => (k, v),
+    let pairs = wheres
+        .iter()
+        .map(|w| match w.split_once('=') {
+            Some((k, v)) if !k.is_empty() => Ok(format!("{}:{}", json!(k), json!(v))),
             _ => bail!("--where takes key=value, e.g. --where branch=feat/x — got {w:?}"),
-        };
-        if doc
-            .insert(key.to_string(), Value::String(value.to_string()))
-            .is_some()
-        {
-            // A flat object holds one value per key; keeping the last
-            // would drop the first without a word. Say so instead.
-            bail!("--where names {key:?} twice — a packet's metadata holds one value per key");
-        }
-    }
-    where_containment(Value::Object(doc))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    where_containment(&format!("{{{}}}", pairs.join(",")))
 }
 
-/// Judge a composed `--where` document by the server's own rule for
-/// `metadata=` — `boss_jobs::metadata_containment`, the ONE definition,
-/// not a restatement of it (until 2026-09-14 this side decided the
-/// shape alone, related to the server's by a comment; backlog
-/// 88a3b072). Refused HERE, before the round trip, with the sentence
-/// the 400 would carry; the only word this door adds is the name of
-/// its own flag.
-fn where_containment(doc: Value) -> Result<Value> {
-    boss_jobs::metadata_containment::check(&doc)
+/// Judge the `--where` wire text by the server's own rule for
+/// `metadata=` — `boss_jobs::metadata_containment::parse`, the ONE
+/// definition and the very function the 400 comes out of, not a
+/// restatement of it (until 2026-09-14 this side decided the shape
+/// alone, related to the server's by a comment; backlog 88a3b072).
+/// Refused HERE, before the round trip, with the sentence the 400 would
+/// carry; the only word this door adds is the name of its own flag.
+fn where_containment(text: &str) -> Result<Value> {
+    boss_jobs::metadata_containment::parse(text)
         .map(Value::Object)
         .map_err(|why| anyhow!("--where {why}"))
 }
@@ -1087,10 +1086,21 @@ mod tests {
     fn a_where_value_keeps_everything_after_the_first_equals() {
         let doc = where_object(&["note=a=b".to_string()]).unwrap();
         assert_eq!(doc, json!({"note": "a=b"}));
+        // A key or value the JSON must escape composes valid wire text,
+        // so the server's parser reads back exactly what was typed.
+        let doc = where_object(&[r#"say "hi"=back\slash"#.to_string()]).unwrap();
+        assert_eq!(doc, json!({"say \"hi\"": "back\\slash"}));
         // The same key twice cannot both hold in one flat object; one
-        // would win silently. Refused instead.
+        // would win silently. Refused instead — in the SERVER's words:
+        // the wire text this door would send, repeats and all, is judged
+        // by `boss_jobs::metadata_containment::parse`, so the sentence is
+        // the 400's byte for byte behind the flag's name. Until
+        // 2026-09-14 this side had its own "names k twice" sentence for
+        // the same fact (backlog a452b11a).
         let e = where_object(&["k=1".to_string(), "k=2".to_string()]).unwrap_err();
-        assert!(e.to_string().contains("twice"), "{e}");
+        let server = boss_jobs::metadata_containment::parse(r#"{"k":"1","k":"2"}"#).unwrap_err();
+        assert_eq!(e.to_string(), format!("--where {server}"));
+        assert!(e.to_string().ends_with("key \"k\" repeated"), "{e}");
         // No `=` at all is not a filter; it is refused with the shape.
         let e = where_object(&["branch".to_string()]).unwrap_err();
         assert!(e.to_string().contains("key=value"), "{e}");
@@ -1115,7 +1125,7 @@ mod tests {
         // it is refused HERE, before the round trip, with the terminal's
         // flag in front of byte for byte what the 400 would carry.
         for bad in [json!({"a": {"b": "c"}}), json!({"n": 1}), json!(["a"])] {
-            let said = where_containment(bad.clone()).unwrap_err().to_string();
+            let said = where_containment(&bad.to_string()).unwrap_err().to_string();
             assert!(
                 said.starts_with("--where must be"),
                 "the terminal names ITS parameter in front of the rule: {bad}: {said}"

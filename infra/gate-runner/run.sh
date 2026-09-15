@@ -407,10 +407,26 @@ trap - ERR
 # packets carried `[]`. "Nothing failed" and "nobody wrote the field"
 # must not look the same.
 #
+# `fails_excerpt` IS THE REPLAY, ON THE RECORD (backlog 5708cbd5). Train
+# #361's red gate (2026-09-14) took this one level further down: `fails`
+# named the test and said "no panic line for it in this check's output",
+# and the assertion text was in the replay below - which only `kubectl
+# logs` serves, and the forge, the yard and `boss orient` cannot run it.
+# So the SAME lines the replay prints for each failed check are written
+# to the receipt as `fails_excerpt: {"<check>": "..."}`, bounded, so the
+# gate-run packet's record-verdict step carries WHY and the red-train
+# alert can attach it the way it attaches a forge check's log. It is
+# `{}` when nothing failed, for the reason `fails` is `[]`.
+#
 # EVERY CAP BELOW IS DELIBERATE AND STATES ITSELF. A suite failing 200
 # tests must not write a receipt nobody can read; a cap that silently
 # drops the remainder is the 778 KB-log-tailed-to-16 KB defect wearing a
-# different hat, so each one carries the count of what it left out.
+# different hat, so each one carries the count of what it left out. The
+# excerpt's own caps are sized to the transport: the receipt rides the
+# step's metadata as one JSON string, and `report_once` hands it to
+# python as ONE argv string - 128 KB per argument on Linux - so ~24 KB of
+# excerpt in all keeps the whole receipt well inside that with the rest
+# of gate.sh's account beside it.
 python3 - "$RECEIPT" /gate-target/gate.log /gate-target/failed-checks.txt <<'PY' || echo "gate-runner: failure-detail extractor crashed - the receipt keeps whatever gate.sh wrote"
 import json, os, re, sys
 from collections import deque
@@ -424,6 +440,10 @@ PER_CHECK = 5          # named failures per check on the receipt
 TOTAL_ENTRIES = 40     # entries on the whole receipt
 ENTRY_CHARS = 400      # characters per entry
 QUOTE_LINES = 3        # raw lines quoted for a check this cannot parse
+EXCERPT_CHARS = 6000   # characters of `fails_excerpt` per failed check
+EXCERPT_TOTAL = 24000  # characters of `fails_excerpt` on the whole receipt
+EXCERPT_FLOOR = 400    # below this much budget left, a check's excerpt is omitted, stated
+EXCERPT_CONTEXT = 40   # lines kept above the first failure marker
 
 try:
     with open(log_path, errors="replace") as fh:
@@ -603,6 +623,48 @@ def clip(entry):
         len(entry) - ENTRY_CHARS)
 
 
+RE_MARK = (RE_STDOUT, RE_PANIC_OLD, RE_PANIC_NEW, RE_ERROR)
+
+
+def excerpt(lines, budget):
+    """One failed check's `fails_excerpt`: the replay's own lines,
+    bounded to the smaller of EXCERPT_CHARS and what is left of
+    EXCERPT_TOTAL - and saying what the bound removed.
+
+    The selection is the replay's (`lines` IS what it prints), not a
+    new one. The bound spends its budget where a reader acts: from
+    EXCERPT_CONTEXT lines above the first line that MARKS the failure -
+    a `---- <test> stdout ----` header, a panic, an error line - keeping
+    the head from there, because cargo prints the panic first and the
+    `failures:` roll-call last. With no marker the tail is kept: a check
+    that said nothing this parser recognises is best explained by its
+    last words.
+    """
+    cap = min(EXCERPT_CHARS, budget)
+    text = "\n".join(lines)
+    if len(text) <= cap:
+        return text
+    start = next((i for i, l in enumerate(lines) if any(r.match(l) for r in RE_MARK)), None)
+    if start is not None:
+        start = max(start - EXCERPT_CONTEXT, 0)
+    budget_note = "this check's excerpt budget was %d char(s): %d per check, %d in all" % (
+        cap, EXCERPT_CHARS, EXCERPT_TOTAL)
+    if start is None:
+        kept = text[-cap:]
+        return "... (%d char(s) before this omitted - %s; the Job log replay has them)\n%s" % (
+            len(text) - cap, budget_note, kept)
+    note = ""
+    if start:
+        note = "... (%d line(s) before the first failure marker omitted; the Job log replay " \
+               "has them)\n" % start
+    text = "\n".join(lines[start:])
+    if len(note) + len(text) <= cap:
+        return note + text
+    room = max(cap - len(note), 0)
+    return note + text[:room] + "\n... (+%d char(s) omitted - %s; the Job log replay has the " \
+           "full text)" % (len(text) - room, budget_note)
+
+
 def detail(name, got):
     """What `fails` says about one failed check.
 
@@ -662,11 +724,12 @@ def detail(name, got):
     return out
 
 
-def write(entries, replay):
+def write(entries, replay, excerpts=None):
     with open(replay_path, "w") as fh:
         fh.write("\n".join(replay) + ("\n" if replay else ""))
     if entries is None:
         return
+    RECEIPT["fails_excerpt"] = excerpts or {}
     if len(entries) > TOTAL_ENTRIES:
         dropped = len(entries) - TOTAL_ENTRIES + 1
         entries = entries[:TOTAL_ENTRIES - 1] + [
@@ -731,7 +794,7 @@ for name in failed:
 if refusals:
     RECEIPT["verdict"] = "refused"
     RECEIPT["refused_because"] = "; ".join(refusals)
-entries, replay = [], []
+entries, replay, excerpts = [], [], {}
 for name in failed:
     got = found.get(name)
     entries += detail(name, got)
@@ -740,15 +803,27 @@ for name in failed:
     if got is None:
         replay.append("  (no ::group:: block for this check in gate.log - it failed before it")
         replay.append("   ran, or gate.sh changed its grouping and this extractor needs updating)")
+        excerpts[name] = "(no ::group:: block for this check in gate.log)"
         continue
     body, total = got
     if not body:
         replay.append("  (the check produced no output at all)")
+        excerpts[name] = "(the check produced no output at all)"
         continue
     tail = body[-REPLAY_TAIL:]
     replay.append("  last %d of %d line(s):" % (len(tail), total))
     replay += ["  " + line for line in tail]
-write(entries, replay)
+    # The receipt's copy of the same lines, within what the total cap
+    # has left. A check the total cannot fit still gets an entry that
+    # says so: an absent key would read as "nothing to say".
+    left = EXCERPT_TOTAL - sum(len(e) for e in excerpts.values())
+    if left < EXCERPT_FLOOR:
+        excerpts[name] = "(excerpt omitted - this receipt caps `fails_excerpt` at %d char(s) " \
+                         "in all and %d check(s) before this one used it; the Job log replay " \
+                         "has it)" % (EXCERPT_TOTAL, len(excerpts))
+    else:
+        excerpts[name] = excerpt(tail, left)
+write(entries, replay, excerpts)
 PY
 # --- failure detail (end) ---
 

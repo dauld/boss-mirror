@@ -24,11 +24,7 @@ use boss_dispatcher::rules::helpers_inventory::InventoryHelpers;
 use boss_dispatcher::rules::registry::{RawRegistry, parse_raw_path};
 
 fn rules() -> RawRegistry {
-    parse_raw_path(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../infra/dispatcher/rules"
-    ))
-    .expect("parse the rule directory")
+    parse_raw_path(boss_testing::dispatcher_rules_dir()).expect("parse the rule directory")
 }
 
 /// The subject a spawn rule passes, unquoted. Spawn args are expr

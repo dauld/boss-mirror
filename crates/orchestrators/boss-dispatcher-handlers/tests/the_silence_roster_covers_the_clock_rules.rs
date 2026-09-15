@@ -36,18 +36,20 @@
 
 use std::collections::BTreeSet;
 
-use boss_dispatcher::rules::registry::parse_raw_path;
+use boss_dispatcher::rules::registry::{RawRegistry, parse_raw_path};
 use boss_dispatcher_handlers::handlers::cadence_roster::{
     ClockCadence, Guard, NotACadence, clock_cadences,
 };
 use boss_dispatcher_handlers::handlers::cadence_silence::declarations;
+use boss_testing::dispatcher_rules_dir;
 
 /// The authored registry — the directory, not a file. Adding a rule is
-/// dropping a file in.
-const RULES_DIR: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../../infra/dispatcher/rules"
-);
+/// dropping a file in. Where it is has ONE definition, shared with the
+/// boss-dispatcher tests: `boss_testing::dispatcher_rules_dir` (94f150f9;
+/// until 2026-09-14 this file spelled the path itself).
+fn shipped_raw() -> RawRegistry {
+    parse_raw_path(dispatcher_rules_dir()).expect("parse the shipped rule registry directory")
+}
 
 /// The sweep whose roster this is.
 const SWEEP_RULE: &str = "cadence-silence-sweep-daily";
@@ -94,7 +96,7 @@ const SPAWNS_NOTHING_ON_PURPOSE: &[(&str, &str)] = &[
 ];
 
 fn shipped() -> (Vec<ClockCadence>, Vec<NotACadence>) {
-    let raw = parse_raw_path(RULES_DIR).expect("parse the shipped rule registry directory");
+    let raw = shipped_raw();
     clock_cadences(&raw.rules)
 }
 
@@ -106,7 +108,7 @@ fn every_scheduled_rule_declares_a_cadence_or_says_why_not() {
     let (cadences, skipped) = shipped();
     assert!(
         !cadences.is_empty(),
-        "no clock-rule cadences derived from {RULES_DIR} — the scrape broke, so a green \
+        "no clock-rule cadences derived from infra/dispatcher/rules — the scrape broke, so a green \
          result here would mean nothing"
     );
     for s in &skipped {
@@ -189,13 +191,13 @@ fn the_measured_clock_cadences_are_on_the_roster() {
 /// Where it does, prefer it; `assert_roster_floor!` is for the rest.
 #[test]
 fn every_scheduled_rule_lands_in_exactly_one_bucket() {
-    let raw = parse_raw_path(RULES_DIR).expect("parse the shipped rule registry directory");
+    let raw = shipped_raw();
     let scheduled = raw.rules.iter().filter(|r| r.schedule.is_some()).count();
     let (cadences, skipped) = clock_cadences(&raw.rules);
     assert_eq!(
         cadences.len() + skipped.len(),
         scheduled,
-        "{scheduled} rules in {RULES_DIR} carry a schedule, but the derivation accounted for \
+        "{scheduled} rules in infra/dispatcher/rules carry a schedule, but the derivation accounted for \
          {} of them ({} cadences + {} named non-cadences). A scheduled rule in neither bucket \
          is a cadence nobody watches and nobody can name — and unlike a thinned roster, no \
          floor would notice, because the count it left behind is still plausible.",
@@ -207,7 +209,7 @@ fn every_scheduled_rule_lands_in_exactly_one_bucket() {
     boss_testing::assert_roster_floor!(
         raw.rules,
         40,
-        "the authored dispatcher rule registry at {RULES_DIR} (61 files on 2026-09-11)"
+        "the authored dispatcher rule registry infra/dispatcher/rules (61 files on 2026-09-11)"
     );
 }
 
@@ -221,7 +223,7 @@ fn every_derived_cadence_has_a_readable_guard_or_none_at_all() {
     boss_testing::assert_roster_floor!(
         cadences,
         6,
-        "the clock cadences derived from {RULES_DIR} (7 on 2026-09-11)"
+        "the clock cadences derived from infra/dispatcher/rules (7 on 2026-09-11)"
     );
     for c in &cadences {
         if let Some(Guard::Unreadable(src)) = &c.guard {
@@ -243,7 +245,7 @@ fn every_derived_cadence_has_a_readable_guard_or_none_at_all() {
 /// alarm twice and disagree about what is silent.
 #[test]
 fn no_clock_rule_kind_is_also_declared_on_the_sweeps_args() {
-    let raw = parse_raw_path(RULES_DIR).expect("parse the shipped rule registry directory");
+    let raw = shipped_raw();
     let sweep = raw
         .rules
         .iter()

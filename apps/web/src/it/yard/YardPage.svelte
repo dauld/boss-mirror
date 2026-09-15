@@ -51,7 +51,6 @@
   import {
     blockLabel,
     boardHold,
-    boardsWhen,
     conductorReading,
     elapsedText,
     etaDetail,
@@ -185,8 +184,10 @@
   // own firing record (the-board-does-not-lie) — never inferred from
   // the dock looking full or the trains looking healthy. The boards
   // line is the server's HOLD — why the dock is not boarding right now
-  // and what clears it — with the live cadence rule beneath it; never
-  // a next-board time (the rule is depth-triggered; it has no clock).
+  // and what clears it — with the live cadence rule beneath it, in the
+  // server's own words (`summary`; dec9c9df: this page used to compose
+  // that sentence itself and it drifted from the server's); never a
+  // next-board time (the rule is depth-triggered; it has no clock).
   // `moving` is the server's own phase / step / block per train in
   // transit, so a wedged train shows WHERE and WHY beside the actor
   // that should be moving it.
@@ -194,7 +195,7 @@
   const liveness = $derived(conductorReading(conductor));
   const lastVerb = $derived(lastVerbReading(conductor));
   const hold = $derived(status.kind === 'ready' ? boardHold(status.data.boarding) : null);
-  const boardingRule = $derived(status.kind === 'ready' ? boardsWhen(status.data.boarding) : '');
+  const boardingRule = $derived(status.kind === 'ready' ? status.data.boarding.summary : '');
   const moving = $derived(statusData ? statusData.trains.filter(t => t.phase !== 'arrived') : []);
   const serverTrainById = $derived(new Map((statusData?.trains ?? []).map(t => [t.id, t])));
 

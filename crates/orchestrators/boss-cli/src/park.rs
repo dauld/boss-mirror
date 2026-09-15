@@ -246,7 +246,6 @@ pub(crate) async fn route_linked_item(
     // and shares this write rather than copying it (CLAUDE.md §9a).
     verb: &str,
 ) {
-    let id8 = &item_id[..8.min(item_id.len())];
     let item = match crate::gate::api(
         http,
         reqwest::Method::GET,
@@ -258,9 +257,11 @@ pub(crate) async fn route_linked_item(
         Ok(Some(item)) => item,
         Ok(None) => return,
         Err(e) => {
+            // No packet in hand yet, so no kind to name it by.
+            let id8 = &item_id[..8.min(item_id.len())];
             println!(
-                "boss {verb}: could not read backlog-item {id8} to route it ({e}) — \
-                 the car is filed; triage the item to `build` by hand or its build step \
+                "boss {verb}: could not read packet {id8} to route it ({e}) — \
+                 the car is filed; triage the packet to `build` by hand or its build step \
                  never opens"
             );
             return;
@@ -277,15 +278,37 @@ pub(crate) async fn route_linked_item(
     )
     .await
     {
-        Ok(_) => println!(
-            "boss {verb}: backlog-item {id8} routed to `build` — this car IS its build, \
-             so the arrival rule has a step to complete"
-        ),
+        Ok(_) => println!("{}", routed_line(verb, &item)),
         Err(e) => println!(
-            "boss {verb}: could not route backlog-item {id8} to `build` ({e}) — \
-             the car is filed; triage it by hand or its build step never opens"
+            "boss {verb}: could not route {} to `build` ({e}) — \
+             the car is filed; triage it by hand or its build step never opens",
+            packet_name(&item)
         ),
     }
+}
+
+/// How a park NAMES the packet its car links: the kind READ OFF THE
+/// PACKET and the first eight of its id — `user-feedback 9827c699`,
+/// `backlog-item a452b11a`. Until 2026-09-14 the word `backlog-item`
+/// was a literal in every line this verb printed about the linked
+/// packet, and the same day `user-feedback` joined
+/// `boss_jobs::car::TRIAGEABLE_KINDS`, so a routed feedback packet was
+/// announced as a backlog-item (backlog a452b11a). A packet carrying
+/// no kind is still named — `packet <id8>` — rather than guessed at.
+fn packet_name(item: &Value) -> String {
+    let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+    let kind = item.get("kind").and_then(Value::as_str).unwrap_or("packet");
+    format!("{kind} {}", &id[..8.min(id.len())])
+}
+
+/// The line a park prints once the route it owes the linked packet has
+/// landed — pure, so the kind it names is the packet's own.
+fn routed_line(verb: &str, item: &Value) -> String {
+    format!(
+        "boss {verb}: {} routed to `build` — this car IS its build, \
+         so the arrival rule has a step to complete",
+        packet_name(item)
+    )
 }
 
 /// File a car for `branch` and fill it up to `review`.
@@ -358,7 +381,15 @@ pub(crate) async fn run(
             }
             let full = resolve_job_id(&all, &given)?;
             if full != given {
-                println!("boss park: backlog-item {given} -> {full}");
+                // Named by the kind of the row the prefix resolved to,
+                // not by the flag's name (backlog a452b11a).
+                let kind = all
+                    .iter()
+                    .find(|row| row.get("id").and_then(Value::as_str) == Some(full.as_str()))
+                    .and_then(|row| row.get("kind"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("packet");
+                println!("boss park: {kind} {given} -> {full}");
             }
             Some(full)
         }
@@ -717,6 +748,40 @@ mod tests {
         assert!(
             err.to_string().contains("matches 2 Jobs"),
             "the error must say how many it matched: {err}"
+        );
+    }
+
+    /// The line a park prints when it routes the packet its car links
+    /// names that packet by the KIND read off it. Until 2026-09-14 the
+    /// word `backlog-item` was a literal in the format string, and the
+    /// same day `user-feedback` joined `TRIAGEABLE_KINDS`, so a routed
+    /// feedback packet was announced as a backlog-item (a452b11a).
+    #[test]
+    fn a_routed_feedback_packet_is_named_by_its_own_kind() {
+        let feedback = json!({
+            "id": "9827c699-3e49-4494-a812-d3ab5fa4bd69",
+            "kind": "user-feedback",
+        });
+        let line = routed_line("park", &feedback);
+        assert!(
+            line.starts_with("boss park: user-feedback 9827c699 routed to `build`"),
+            "{line}"
+        );
+        assert!(!line.contains("backlog-item"), "{line}");
+        // A backlog item still reads as one, under the verb that ran.
+        let item = json!({
+            "id": "a452b11a-d634-478a-bbe1-9984210e1325",
+            "kind": "backlog-item",
+        });
+        let line = routed_line("car", &item);
+        assert!(
+            line.starts_with("boss car: backlog-item a452b11a routed to `build`"),
+            "{line}"
+        );
+        // A packet with no kind on it is still named, not guessed at.
+        assert_eq!(
+            packet_name(&json!({"id": "abc12345-1616-4b8d-8a7a-d1e34ff96486"})),
+            "packet abc12345"
         );
     }
 

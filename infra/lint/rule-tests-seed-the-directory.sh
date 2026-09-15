@@ -27,13 +27,26 @@
 # helper (crates/core/boss-dispatcher/tests/common/mod.rs, which carries
 # both names), and a test that goes through the helper mentions neither.
 #
+# THE SECOND CHECKED PROPERTY (backlog 94f150f9, 2026-09-14). No Rust
+# file under a crate's `tests/` directory carries an INLINE COPY of an
+# authored rule: a code line `name = "<x>"` (the TOML key, as it sits
+# inside a raw-string fixture) where `infra/dispatcher/rules/<x>.toml`
+# exists. A copy tests the copy: five selection tests carried one, and
+# the day this was measured `spawn-car-on-sweep-remediated`'s copy
+# declared no version while its file said 3 — the same shape
+# backlog_item_advance_rule.rs had, whose v3 copy passed against a v4
+# file until replaced. A test about one authored rule reads its file
+# (`common::authored_rule`); a SYNTHETIC rule — a name with no file,
+# which rules_reload_pg / rules_wait_pg / the authoring e2e write on
+# purpose — is not a copy of anything and passes. Named by file:line.
+#
 # WHAT THIS DOES NOT SEE, stated rather than discovered: a
 # `#[cfg(test)]` module under `src/` (none reads the table today — the
 # runtime callers in http.rs and registry.rs are the boot path itself),
 # and a file that seeds in one test function and loads unseeded in
 # another. Either would be a new shape; widen the check when one appears.
 #
-# EXIT STATUS: 0 clean, 1 a test file is named. Reads the working tree
+# EXIT STATUS: 0 clean, 1 a test file is named (by either property). Reads the working tree
 # with `find`, never git, so there is nothing here that can refuse
 # (lib/git-answer.sh's exit 3 is for lints that ask git a question).
 #
@@ -77,6 +90,37 @@ EOF
     [ "$named" -eq 0 ]
 }
 
+RULES_DIR="infra/dispatcher/rules"
+
+# Every inline copy of an authored rule under $1, as `file:line:name`,
+# one per line. A copy is a CODE line `name = "<x>"` (double or single
+# TOML quotes) whose `<x>` is a file in $RULES_DIR. Whole-line comments
+# are skipped, as above; `const RULE: &str = "<x>";` — the fixed shape —
+# is not a TOML key and does not match.
+inline_copies() { # root
+    local root="$1" candidates f line name
+    candidates="$(find "$root" -path '*/tests/*' -name '*.rs' -type f -not -path '*/target/*' \
+        | LC_ALL=C sort | while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        LC_ALL=C awk '
+            $0 ~ /^[ \t]*\/\// { next }
+            match($0, /^[ \t]*name[ \t]*=[ \t]*["\x27][^"\x27]+["\x27]/) {
+                s = substr($0, RSTART, RLENGTH)
+                sub(/^[^"\x27]*["\x27]/, "", s); sub(/["\x27]$/, "", s)
+                print FILENAME ":" FNR ":" s
+            }
+        ' "$f"
+    done)"
+    [ -n "$candidates" ] || return 0
+    while IFS=: read -r f line name; do
+        [ -n "$name" ] || continue
+        [ -f "$RULES_DIR/$name.toml" ] && printf '%s:%s:%s\n' "$f" "$line" "$name"
+    done <<EOF
+$candidates
+EOF
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # Self-test — fixtures in a temp directory this run owns, never in
 # infra/lint/ or under crates/, where a file is discovered as real.
@@ -108,6 +152,29 @@ case "$hits" in
 esac
 rm -rf "$tmp/crate"
 
+# The second property. An authored name is read from the directory, not
+# typed here, so the fixture stays true as rules come and go.
+authored="$(find "$RULES_DIR" -maxdepth 1 -name '*.toml' -printf '%f\n' | LC_ALL=C sort | head -1 | sed 's/\.toml$//')"
+[ -n "$authored" ] || { echo "$NAME: SELF-TEST FAILED — no rule files under $RULES_DIR" >&2; exit 1; }
+mkdir -p "$tmp/crate/tests"
+# The fixed shape, a synthetic rule, a template, and a comment: all pass.
+printf 'mod common;\nconst RULE: &str = "%s";\n// name = "%s" is what this used to inline\nconst SYNTHETIC: &str = r#"\n[[rule]]\nname = "a-rule-no-file-declares"\non_event = "x"\n"#;\nconst TEMPLATE: &str = r#"\n[[rule]]\nname = "{name}"\n"#;\n' \
+    "$authored" "$authored" > "$tmp/crate/tests/reads_the_file.rs"
+hits="$(inline_copies "$tmp")"
+if [ -n "$hits" ]; then
+    echo "$NAME: SELF-TEST FAILED — the fixed shape, a synthetic rule, a template and a comment must all pass; got: [$hits]" >&2
+    exit 1
+fi
+# The refused shape: the authored rule's TOML copied into a fixture.
+printf 'const RULE: &str = r#"\n[[rule]]\nname = "%s"\non_event = "x"\n[[rule.do]]\nhandler = "y"\n"#;\n' \
+    "$authored" > "$tmp/crate/tests/carries_a_copy.rs"
+hits="$(inline_copies "$tmp")"
+case "$hits" in
+    "$tmp/crate/tests/carries_a_copy.rs:3:$authored") ;;
+    *) echo "$NAME: SELF-TEST FAILED — an inline copy of $authored must be refused by file:line; got: [$hits]" >&2; exit 1 ;;
+esac
+rm -rf "$tmp/crate"
+
 # ---------------------------------------------------------------------------
 # The tree.
 # ---------------------------------------------------------------------------
@@ -127,7 +194,7 @@ EOF
   ships (backlog 488cadca; feedback_obligation_rules.rs pinned v3 while
   the file said v4). Load the registry the way the dispatcher boots:
 
-    seed_authored_rules(&db.pool, RULES_DIR) then load_active_rules
+    seed_authored_rules(&db.pool, boss_testing::dispatcher_rules_dir()) then load_active_rules
 
   or go through crates/core/boss-dispatcher/tests/common/mod.rs, which
   does exactly that (`shipped_registry` / `shipped_raw_rules`).
@@ -135,6 +202,32 @@ MSG
     exit 1
 fi
 
-echo "$NAME: self-test ok — a seeded helper, a prose mention and a src/ caller pass; an unseeded test load is refused by file"
-echo "$NAME: ok — every test file that calls $LOAD seeds the authored directory in the same file"
+copies="$(inline_copies crates)"
+if [ -n "$copies" ]; then
+    while IFS= read -r hit; do
+        [ -n "$hit" ] || continue
+        echo "$NAME: $hit is an inline copy of an authored rule" >&2
+    done <<EOF
+$copies
+EOF
+    cat >&2 <<'MSG'
+
+  A selection test that carries its own copy of a rule tests the copy:
+  when the file changes (a when-clause, an arg, a version) the copy keeps
+  passing against text the dispatcher no longer boots from (backlog
+  94f150f9; spawn-car-on-sweep-remediated's copy was two versions
+  behind). Read the file instead:
+
+    mod common;
+    let reg = common::authored_rule("<name>");
+
+  (crates/core/boss-dispatcher/tests/common/mod.rs). A synthetic rule —
+  a name with no file under infra/dispatcher/rules/ — is not a copy and
+  is not what this refuses.
+MSG
+    exit 1
+fi
+
+echo "$NAME: self-test ok — a seeded helper, a prose mention and a src/ caller pass; an unseeded test load is refused by file; an inline copy of an authored rule is refused by file:line"
+echo "$NAME: ok — every test file that calls $LOAD seeds the authored directory in the same file, and none carries an inline copy of an authored rule"
 exit 0

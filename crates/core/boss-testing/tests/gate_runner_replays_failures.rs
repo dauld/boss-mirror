@@ -104,6 +104,21 @@ impl Extracted {
     fn fails_joined(&self) -> String {
         self.fails().map(|f| f.join("\n")).unwrap_or_default()
     }
+
+    /// `fails_excerpt` as the receipt carries it — check name to the
+    /// bounded text of what that check said (5708cbd5). `None` when the
+    /// receipt is unparseable or the key is absent, for the same reason
+    /// `fails` tells those apart from empty.
+    fn fails_excerpt(&self) -> Option<serde_json::Map<String, Value>> {
+        let v: Value = serde_json::from_str(&self.receipt).ok()?;
+        v.get("fails_excerpt")?.as_object().cloned()
+    }
+
+    fn excerpt_of(&self, check: &str) -> String {
+        self.fails_excerpt()
+            .and_then(|m| m.get(check).and_then(Value::as_str).map(str::to_string))
+            .unwrap_or_default()
+    }
 }
 
 /// Run the extractor over a crafted receipt + log.
@@ -478,7 +493,7 @@ fn it_leaves_every_other_receipt_field_alone() {
     }
     assert!(
         after.get("fails").is_some(),
-        "…and `fails` is the only addition:\n{}",
+        "…and `fails` (with `fails_excerpt`) is the only addition:\n{}",
         got.receipt
     );
 }
@@ -556,5 +571,182 @@ Error: src/it/yard/yard.svelte:12:3 Type 'string' is not assignable to 'number'
     assert!(
         !fails.contains("panicked"),
         "and nothing may be claimed about a shape that was never there:\n{fails}"
+    );
+}
+
+/// THE THIRD FAILURE, one level deeper again (backlog 5708cbd5). Train
+/// #361's red gate (2026-09-14) recorded `test: the_real_run_refuses…
+/// - FAILED, with no panic line for it in this check's output` — the
+/// test named, the reason absent, because the assertion text lived only
+/// in the pod log's replay and the pod log is reaped. So the SAME lines
+/// the replay prints for a failed check ride the receipt as
+/// `fails_excerpt: {check: text}`, beside `fails`: the record then says
+/// WHY, and the red-train alert can carry it without kubectl.
+#[test]
+fn a_red_receipt_carries_each_failed_checks_excerpt_and_only_theirs() {
+    if python3_missing() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let receipt = red_receipt(
+        "{\"name\":\"fmt\",\"result\":\"pass\"},\
+         {\"name\":\"clippy\",\"result\":\"fail\"},\
+         {\"name\":\"test\",\"result\":\"fail\"}",
+    );
+    let got = run_extractor(&receipt, LOG);
+    assert!(got.ok, "extractor failed: {}", got.stdout);
+
+    let excerpt = got
+        .fails_excerpt()
+        .expect("fails_excerpt is present on a red receipt");
+    let mut keys: Vec<&String> = excerpt.keys().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec!["clippy", "test"],
+        "one excerpt per FAILED check — the passing one has nothing to explain:\n{}",
+        got.receipt
+    );
+    assert!(
+        got.excerpt_of("clippy")
+            .contains("error: aborting due to 1 previous error"),
+        "the failing check's own words are the excerpt:\n{}",
+        got.receipt
+    );
+    assert!(
+        got.excerpt_of("test")
+            .contains("test boss::thing ... FAILED"),
+        "every failed check gets its excerpt, not just the first:\n{}",
+        got.receipt
+    );
+    assert!(
+        !got.receipt.contains("formatting is fine"),
+        "a passing check's output never reaches the receipt:\n{}",
+        got.receipt
+    );
+}
+
+/// The excerpt is the replay's selection, not a new one: the panic
+/// block with its `file:line` and message is in it verbatim, so the
+/// alert that attaches it says what the operator otherwise reads by
+/// `kubectl logs` — which the forge, the yard and orient cannot run.
+#[test]
+fn the_excerpt_carries_the_panic_block_the_replay_prints() {
+    if python3_missing() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let got = run_extractor(
+        &red_receipt("{\"name\":\"test\",\"result\":\"fail\"}"),
+        CARGO_LOG,
+    );
+    assert!(got.ok, "extractor failed: {}", got.stdout);
+    let excerpt = got.excerpt_of("test");
+    for needle in [
+        "---- every_sweep_spawner_guards_on_its_own_subject stdout ----",
+        "panicked at crates/core/boss-dispatcher/tests/sweep_spawn_guards.rs:79:5:",
+        "expected the seven daily sweep spawners, found 6",
+    ] {
+        assert!(
+            excerpt.contains(needle),
+            "the excerpt must carry `{needle}` — the same lines the replay prints:\n{excerpt}"
+        );
+        assert!(
+            got.replay.contains(needle),
+            "…and the replay still prints it (one selection, two outputs):\n{}",
+            got.replay
+        );
+    }
+}
+
+/// A green receipt carries `fails_excerpt: {}` — present and empty, for
+/// the reason `fails` is `[]` and never `null`: "nothing failed" and
+/// "nobody wrote the field" must not look the same to a reader.
+#[test]
+fn a_green_receipt_carries_an_empty_excerpt_not_a_missing_one() {
+    if python3_missing() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let green = "{\"verdict\":\"green\",\"head\":\"abc\",\"mode\":\"full\",\
+                 \"checks\":[{\"name\":\"fmt\",\"result\":\"pass\"}]}";
+    let got = run_extractor(green, "::group::gate: fmt\nfine\n::endgroup::\n");
+    assert!(got.ok, "green must not be an error path: {}", got.stdout);
+    assert_eq!(
+        got.fails_excerpt().map(|m| m.len()),
+        Some(0),
+        "a green receipt must carry `fails_excerpt: {{}}`:\n{}",
+        got.receipt
+    );
+}
+
+/// THE BOUND. The receipt rides the record-verdict step's metadata and
+/// the runner passes it as ONE argv string to the report-back (a 128 KB
+/// ceiling per argument on Linux), so an excerpt is capped per check
+/// (~6 KB) and in all (~24 KB) — and each cap says what it left out,
+/// because a silent reduction is the 778 KB-log-tailed-to-16 KB defect
+/// wearing a different hat (CLAUDE.md §Diagnosis).
+#[test]
+fn the_excerpt_is_bounded_per_check_and_in_all_and_says_so() {
+    if python3_missing() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    // Eight failed checks, each 300 lines of 100 characters: 30 KB per
+    // check, 240 KB in all — a receipt nobody could pass along.
+    let names: Vec<String> = (0..8).map(|i| format!("check-{i}")).collect();
+    let mut log = String::new();
+    for n in &names {
+        log.push_str(&format!("::group::gate: {n}\n"));
+        for i in 0..300 {
+            log.push_str(&format!(
+                "{n} line {i:03} {}\n",
+                "x".repeat(100 - 16 - n.len())
+            ));
+        }
+        log.push_str(&format!("error: {n} failed at the end\n::endgroup::\n"));
+    }
+    let checks = names
+        .iter()
+        .map(|n| format!("{{\"name\":\"{n}\",\"result\":\"fail\"}}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let got = run_extractor(&red_receipt(&checks), &log);
+    assert!(got.ok, "extractor failed: {}", got.stdout);
+
+    let excerpt = got.fails_excerpt().expect("fails_excerpt is present");
+    assert_eq!(
+        excerpt.len(),
+        8,
+        "every failed check has an entry, even one that only says it was omitted:\n{}",
+        got.receipt
+    );
+    let total: usize = excerpt
+        .values()
+        .map(|v| v.as_str().map_or(0, str::len))
+        .sum();
+    assert!(
+        total <= 26_000,
+        "the whole excerpt must stay far under the transport's ceiling — {total} chars is not \
+         a receipt:\n{}",
+        got.receipt
+    );
+    for (name, text) in &excerpt {
+        let text = text.as_str().expect("excerpt is a string");
+        assert!(
+            text.len() <= 6_600,
+            "no single check's excerpt may be unbounded — {name} is {} chars",
+            text.len()
+        );
+        assert!(
+            text.contains("omitted"),
+            "every reduction states itself — {name}'s excerpt was cut and does not say so:\n{text}"
+        );
+    }
+    let first = got.excerpt_of("check-0");
+    assert!(
+        first.contains("error: check-0 failed at the end"),
+        "a bounded excerpt still spends its budget on the failure line, not the chatter \
+         above it:\n{first}"
     );
 }

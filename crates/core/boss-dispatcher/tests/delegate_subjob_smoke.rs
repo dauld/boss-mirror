@@ -7,34 +7,29 @@
 //! handlers so the test asserts *what fired with which resolved args*
 //! without a live jobs-api.
 //!
-//! The rule bodies here mirror `infra/dispatcher/rules/` exactly —
-//! if the production arg expressions drift, this test drifts with them.
+//! The rules are READ from `infra/dispatcher/rules/`, so a change to a
+//! production arg expression reaches this test. Until 2026-09-14 they
+//! were inlined here under a note that they "mirror the directory
+//! exactly" — a sync comment, not a mechanism (CLAUDE.md §9a; backlog
+//! 94f150f9). Both copies measured equal to their files that day.
 
 use boss_dispatcher::rules::expr::{NoHelpers, Value};
 use boss_dispatcher::rules::handler::{HandlerRegistry, RecordingHandler, dispatch};
-use boss_dispatcher::rules::registry::{Registry, match_event};
+use boss_dispatcher::rules::registry::match_event;
 use serde_json::json;
 
-/// The two D7 rules, copied verbatim from infra/dispatcher/rules/.
-const D7_RULES: &str = r#"
-[[rule]]
-name = "spawn-subjob-on-delegate-subjob-step-ready"
-on_event = "step.ready.delegate-subjob"
-[[rule.do]]
-handler = "jobs.spawn"
-args = { kind = "metadata.subworkflow", subject_kind = "subject_kind", subject = "subject_id", parent_step_id = "step_id" }
+mod common;
 
-[[rule]]
-name = "resolve-subjob-on-child-job-closed"
-on_event = "jobs.job.closed"
-when = "parent_step_id != null"
-[[rule.do]]
-handler = "jobs.subjob_resolve"
-"#;
+/// The two D7 rules, each read from its own file under
+/// `infra/dispatcher/rules/` — the spawn half for the `step.ready`
+/// tests, the resolve half for the `jobs.job.closed` ones; the two
+/// listen on different topics, so no test needs both in one registry.
+const SPAWN_RULE: &str = "spawn-subjob-on-delegate-subjob-step-ready";
+const RESOLVE_RULE: &str = "resolve-subjob-on-child-job-closed";
 
 #[tokio::test]
 async fn step_ready_delegate_subjob_fires_spawn_with_resolved_args() {
-    let reg = Registry::from_toml(D7_RULES).unwrap();
+    let reg = common::authored_rule(SPAWN_RULE);
 
     // The `step.ready.delegate-subjob` marker payload, mirroring what
     // boss-jobs `emit_step_ready` publishes: job/step ids, subject
@@ -93,7 +88,7 @@ async fn step_ready_delegate_subjob_fires_spawn_with_resolved_args() {
 
 #[tokio::test]
 async fn job_closed_for_delegated_child_fires_subjob_resolve() {
-    let reg = Registry::from_toml(D7_RULES).unwrap();
+    let reg = common::authored_rule(RESOLVE_RULE);
 
     // A child Job's close marker that carries the delegate back-link.
     let payload = json!({
@@ -128,7 +123,7 @@ async fn job_closed_for_delegated_child_fires_subjob_resolve() {
 
 #[tokio::test]
 async fn job_closed_for_ordinary_job_does_not_fire_resolve() {
-    let reg = Registry::from_toml(D7_RULES).unwrap();
+    let reg = common::authored_rule(RESOLVE_RULE);
 
     // An ordinary (non-delegated) Job close: the marker still carries
     // the `parent_step_id` key but its value is null, so the

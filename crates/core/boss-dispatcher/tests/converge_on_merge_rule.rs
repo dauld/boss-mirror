@@ -1,4 +1,5 @@
-//! The `converge-on-merge` rule (migration 202609071700) — a merged
+//! The `converge-on-merge` rule (first seeded by migration 202609071700,
+//! now `infra/dispatcher/rules/converge-on-merge.toml`) — a merged
 //! pr-train fires the cluster converge event-driven, instead of waiting
 //! for the cluster-deploy-runner timer to poll forge main.
 //!
@@ -15,17 +16,17 @@
 use boss_dispatcher::rules::expr::{NoHelpers, Value};
 use boss_dispatcher::rules::registry::{Registry, match_event};
 
-/// The migration row, expressed as the same TOML the registry loader
-/// accepts — expression + args verbatim from 202609071700.
-const RULE: &str = r#"
-[[rule]]
-name = "converge-on-merge"
-on_event = "step.done.task"
-when = "spec_slug = \"merged\""
-[[rule.do]]
-handler = "jobs.spawn"
-args = { kind = "\"ops-request\"", subject_kind = "\"custom\"", subject = "\"forge\"", title = "\"converge on forge — a train merged to main\"", "metadata.host" = "\"forge\"", "metadata.verb" = "\"converge\"" }
-"#;
+mod common;
+
+/// The rule as the dispatcher boots it: its file under
+/// `infra/dispatcher/rules/`, not a copy. Until 2026-09-14 this was an
+/// inline TOML literal "verbatim from 202609071700" (backlog 94f150f9)
+/// — measured equal to the file that day, and a copy all the same.
+const RULE: &str = "converge-on-merge";
+
+fn rule() -> Registry {
+    common::authored_rule(RULE)
+}
 
 fn step_done(spec_slug: &str) -> serde_json::Value {
     serde_json::json!({
@@ -38,7 +39,7 @@ fn step_done(spec_slug: &str) -> serde_json::Value {
 
 #[test]
 fn the_merged_step_spawns_a_forge_converge_ops_request() {
-    let reg = Registry::from_toml(RULE).expect("rule parses");
+    let reg = rule();
     let hits = match_event(&reg, "step.done.task", &step_done("merged"), &NoHelpers).matched;
     assert_eq!(hits.len(), 1, "the merged step fires exactly one converge");
 
@@ -65,7 +66,7 @@ fn the_merged_step_spawns_a_forge_converge_ops_request() {
 
 #[test]
 fn the_other_task_steps_do_not_fire_a_converge() {
-    let reg = Registry::from_toml(RULE).expect("rule parses");
+    let reg = rule();
     for slug in ["ci", "deployed", "pr", "assemble", "collect"] {
         let hits = match_event(&reg, "step.done.task", &step_done(slug), &NoHelpers).matched;
         assert!(

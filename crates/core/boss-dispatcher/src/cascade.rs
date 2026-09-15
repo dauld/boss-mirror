@@ -291,15 +291,13 @@ mod tests {
 
     /// Drift guard: every handler the shipped registry references must
     /// have a `handler_emits` entry, so the cascade graph never silently
-    /// drops a handler. Reads the real rule directory via CARGO_MANIFEST_DIR
-    /// so it tracks the deployed registry, not a fixture.
+    /// drops a handler. Reads the real rule directory (its one
+    /// definition, `boss_testing::dispatcher_rules_dir`) so it tracks
+    /// the deployed registry, not a fixture.
     #[test]
     fn cascade_handlers_match_rules() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../infra/dispatcher/rules"
-        );
-        let raw = parse_raw_path(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let path = boss_testing::dispatcher_rules_dir();
+        let raw = parse_raw_path(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         let emits = handler_emits();
         for rule in &raw.rules {
             for step in &rule.do_steps {

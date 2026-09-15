@@ -92,18 +92,8 @@ pub(crate) enum Standing {
 /// step (`verdict` green|failed|lost) and the receipt it carries (a
 /// JSON string; `verdict: refused` + `refused_because` for a refusal).
 pub(crate) fn standing(gate_run: &Value) -> Standing {
-    let step = gate_run
-        .get("steps")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some("record-verdict"));
-    let md = step.and_then(|s| s.get("metadata"));
-    let receipt: Option<Value> = md.and_then(|m| m.get("receipt")).and_then(|r| match r {
-        Value::String(s) => serde_json::from_str(s).ok(),
-        Value::Object(_) => Some(r.clone()),
-        _ => None,
-    });
+    let md = verdict_metadata(gate_run);
+    let receipt = receipt(gate_run);
     if let Some(r) = &receipt
         && r.get("verdict").and_then(Value::as_str) == Some("refused")
     {
@@ -122,6 +112,31 @@ pub(crate) fn standing(gate_run: &Value) -> Standing {
     }
 }
 
+/// The `record-verdict` step's metadata — where the runner writes
+/// `verdict` and `receipt`. One reader for the three functions above and
+/// below, so they cannot disagree about which step holds the verdict.
+fn verdict_metadata(gate_run: &Value) -> Option<&Value> {
+    gate_run
+        .get("steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some("record-verdict"))
+        .and_then(|s| s.get("metadata"))
+}
+
+/// The receipt as an object. It rides the step as a JSON STRING (the
+/// runner's encoding); one already parsed to an object reads the same.
+fn receipt(gate_run: &Value) -> Option<Value> {
+    verdict_metadata(gate_run)
+        .and_then(|m| m.get("receipt"))
+        .and_then(|r| match r {
+            Value::String(s) => serde_json::from_str::<Value>(s).ok(),
+            Value::Object(_) => Some(r.clone()),
+            _ => None,
+        })
+}
+
 /// PURE: what a red gate-run says failed — the receipt's `fails` lines
 /// (`test: <name> - FAILED, …`), each naming a check. Empty for any run
 /// that is not red, or whose receipt carries none. Train #361's alert
@@ -129,19 +144,7 @@ pub(crate) fn standing(gate_run: &Value) -> Standing {
 /// rollup while the red was the gate's; this is the other half of the
 /// verdict, so the alert can name it (071d8b23).
 pub(crate) fn fails(gate_run: &Value) -> Vec<String> {
-    let md = gate_run
-        .get("steps")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some("record-verdict"))
-        .and_then(|s| s.get("metadata"));
-    let receipt = md.and_then(|m| m.get("receipt")).and_then(|r| match r {
-        Value::String(s) => serde_json::from_str::<Value>(s).ok(),
-        Value::Object(_) => Some(r.clone()),
-        _ => None,
-    });
-    receipt
+    receipt(gate_run)
         .as_ref()
         .and_then(|r| r.get("fails"))
         .and_then(Value::as_array)
@@ -149,6 +152,25 @@ pub(crate) fn fails(gate_run: &Value) -> Vec<String> {
         .flatten()
         .filter_map(Value::as_str)
         .map(str::to_string)
+        .collect()
+}
+
+/// PURE: WHY a red gate-run failed — the receipt's `fails_excerpt`
+/// (`{check: text}`, the same lines the runner replays to its pod log,
+/// bounded by the runner) as `(check, text)` pairs in the receipt's key
+/// order. `fails` names the failing test; this carries its assertion.
+/// Train #361's alert (2026-09-14) had the name and nothing of the why,
+/// because the why lived only in the reaped gate pod's log (5708cbd5).
+/// Empty for a receipt from before the field existed, a green run, or
+/// no verdict at all — a missing attachment, never an error.
+pub(crate) fn fails_excerpt(gate_run: &Value) -> Vec<(String, String)> {
+    receipt(gate_run)
+        .as_ref()
+        .and_then(|r| r.get("fails_excerpt"))
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(check, text)| text.as_str().map(|t| (check.clone(), t.to_string())))
         .collect()
 }
 
@@ -381,6 +403,58 @@ mod tests {
         );
         assert!(fails(&run(Some("green"), None)).is_empty());
         assert!(fails(&run(None, None)).is_empty());
+    }
+
+    /// The other half of `fails` (5708cbd5): train #361's alert named
+    /// the failing test and nothing of WHY, because the assertion text
+    /// lived only in the reaped gate pod's log. The receipt now carries
+    /// `fails_excerpt: {check: text}` and this reads it, check-ordered,
+    /// so the alert can attach it as it attaches a forge check's log.
+    #[test]
+    fn a_red_gate_run_says_why_when_its_receipt_carries_the_excerpt() {
+        let red = run(
+            Some("failed"),
+            Some(json!({"verdict": "failed",
+            "fails": ["test: the_real_run_refuses_while_the_host_declares_legacy_stack - FAILED, with no panic line for it in this check's output"],
+            "fails_excerpt": {
+                "test": "---- the_real_run_refuses_while_the_host_declares_legacy_stack stdout ----\nassertion failed: refused",
+                "clippy": "error: unused variable `x`"
+            }})),
+        );
+        assert_eq!(
+            fails_excerpt(&red),
+            vec![
+                ("clippy".to_string(), "error: unused variable `x`".to_string()),
+                (
+                    "test".to_string(),
+                    "---- the_real_run_refuses_while_the_host_declares_legacy_stack stdout ----\nassertion failed: refused".to_string()
+                ),
+            ]
+        );
+        // A receipt from before the field existed, a green one, and no
+        // verdict at all each read as "nothing to attach" — never an error.
+        let old = run(
+            Some("failed"),
+            Some(json!({"verdict": "failed", "fails": ["test: x - FAILED"]})),
+        );
+        assert!(fails_excerpt(&old).is_empty());
+        assert!(
+            fails_excerpt(&run(
+                Some("green"),
+                Some(json!({"verdict": "green", "fails": [], "fails_excerpt": {}}))
+            ))
+            .is_empty()
+        );
+        assert!(fails_excerpt(&run(None, None)).is_empty());
+        // A non-string value under a check is skipped, not stringified.
+        let odd = run(
+            Some("failed"),
+            Some(json!({"verdict": "failed", "fails_excerpt": {"test": 7, "fmt": "diff"}})),
+        );
+        assert_eq!(
+            fails_excerpt(&odd),
+            vec![("fmt".to_string(), "diff".to_string())]
+        );
     }
 
     #[test]

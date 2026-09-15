@@ -1,5 +1,6 @@
-//! The `run-car-probes-on-train-arrived` rule (migration
-//! 202609082130) — a pr-train closing `arrived` runs each boarded
+//! The `run-car-probes-on-train-arrived` rule (first seeded by migration
+//! 202609082130, now its file under `infra/dispatcher/rules/`) — a
+//! pr-train closing `arrived` runs each boarded
 //! car's recorded probe, by filing the ops-request the forge answers
 //! (backlog 28ac45ab).
 //!
@@ -14,16 +15,17 @@
 use boss_dispatcher::rules::expr::NoHelpers;
 use boss_dispatcher::rules::registry::{Registry, match_event};
 
-/// The migration row, expressed as the same TOML the registry loader
-/// accepts — expression verbatim from 202609082130.
-const RULE: &str = r#"
-[[rule]]
-name = "run-car-probes-on-train-arrived"
-on_event = "jobs.job.closed"
-when = "kind = \"pr-train\" AND outcome = \"arrived\""
-[[rule.do]]
-handler = "jobs.run-car-probes"
-"#;
+mod common;
+
+/// The rule as the dispatcher boots it: its file under
+/// `infra/dispatcher/rules/`, not a copy. Until 2026-09-14 this was an
+/// inline TOML literal "verbatim from 202609082130" (backlog 94f150f9) —
+/// measured equal to the file that day, and a copy all the same.
+const RULE: &str = "run-car-probes-on-train-arrived";
+
+fn rule() -> Registry {
+    common::authored_rule(RULE)
+}
 
 fn closed(kind: &str, outcome: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
@@ -34,7 +36,7 @@ fn closed(kind: &str, outcome: serde_json::Value) -> serde_json::Value {
 
 #[test]
 fn an_arrived_train_fires_the_probe_runner_once() {
-    let reg = Registry::from_toml(RULE).expect("rule parses");
+    let reg = rule();
     let hits = match_event(
         &reg,
         "jobs.job.closed",
@@ -48,7 +50,7 @@ fn an_arrived_train_fires_the_probe_runner_once() {
 
 #[test]
 fn every_other_close_on_the_topic_is_quietly_false() {
-    let reg = Registry::from_toml(RULE).expect("rule parses");
+    let reg = rule();
     for (kind, outcome) in [
         ("pr-train", serde_json::json!("cancelled")),
         ("pr-train", serde_json::Value::Null),

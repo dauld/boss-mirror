@@ -4,7 +4,6 @@ import { join } from 'node:path';
 import {
   blockLabel,
   boardHold,
-  boardsWhen,
   clockText,
   conductorReading,
   elapsedText,
@@ -462,75 +461,49 @@ describe('lastVerbReading', () => {
   });
 });
 
-describe('boardsWhen', () => {
-  const predicate = (over: Partial<BoardingPredicate> = {}): BoardingPredicate => ({
-    dock_threshold: 4,
-    cooldown_minutes: 120,
-    at_times: [],
-    cadence_reading: 'read',
-    dock_depth: 2,
-    threshold_met: false,
-    summary: 'Boards at 4 parked cars (then a 120m cooldown); 2 car(s) parked now.',
-    held_because: null,
-    cooldown_remaining_minutes: null,
-    last_board_at: null,
-    last_board_reading: 'read',
-    next_board: null,
-    ...over,
+// The boarding RULE line is the server's sentence, verbatim. Until
+// dec9c9df the page composed its own — `boardsWhen()` rebuilt "boards
+// when the cooldown (45m) clears · or by the clock…" in the browser
+// from cooldown_minutes / at_times — while the server already published
+// the sentence (`summary`, `next_board`) from the same rule rows. Two
+// derivations of one sentence: the server's cooldown wording changed on
+// 2026-09-14 (#371, the cooldown is the depth rule's) and the client's
+// text did not move, and the next rule change would have split them
+// again (a-surface-may-answer-differently-than-its-server). Pinned on
+// the source, in the yard-page-order idiom.
+describe('the boarding rule line is the server sentence', () => {
+  const here = (f: string): string => readFileSync(join(import.meta.dir, f), 'utf8');
+  const lens = here('yard-status.ts');
+  const yard = here('YardPage.svelte');
+  const statusPage = here('YardStatusPage.svelte');
+
+  test('the lens composes no boarding sentence of its own', () => {
+    expect(lens).not.toContain('function boardsWhen');
+    expect(lens).not.toContain('boards when the dock reaches');
+    expect(lens).not.toContain('or by the clock at');
+    expect(lens).toContain('composes no boarding sentence of its own');
   });
 
-  test('below threshold: states the RULE — depth and cooldown — never a time', () => {
-    const text = boardsWhen(predicate());
-    expect(text).toBe('2/4 parked — boards when the dock reaches 4 and the cooldown (120m) clears');
-    // The board rule is depth-triggered; there is no next-fire clock to
-    // show, and inventing one is the defect this page exists to avoid.
-    expect(text).not.toMatch(/\d\d:\d\d|next at|in \d+m/);
+  test("the yard board's rule line renders boarding.summary, and calls nothing to build it", () => {
+    expect(yard).not.toContain('boardsWhen');
+    expect(yard).toContain('status.data.boarding.summary');
+    const rule = yard.indexOf('<dt>rule</dt>');
+    expect(rule).toBeGreaterThan(-1);
+    expect(yard.slice(rule, rule + 200)).toContain('{boardingRule}');
   });
 
-  test('threshold met: says so, and that the cooldown is what it waits on', () => {
-    expect(boardsWhen(predicate({ dock_depth: 5, threshold_met: true }))).toBe(
-      'threshold met — 5/4 parked; boards when the cooldown (120m) clears',
-    );
+  test("the yard status page renders boarding.summary as the dock's sentence", () => {
+    expect(statusPage).toContain('{s.boarding.summary}');
+    expect(statusPage).not.toContain('boardsWhen');
   });
 
-  test('no cooldown configured: no cooldown clause', () => {
-    expect(boardsWhen(predicate({ cooldown_minutes: null }))).toBe(
-      '2/4 parked — boards when the dock reaches 4',
-    );
-    expect(boardsWhen(predicate({ cooldown_minutes: null, dock_depth: 4, threshold_met: true }))).toBe(
-      "threshold met — 4/4 parked; boards on the conductor's next pass",
-    );
-  });
-
-  test('a clock rule beside the depth rule is quoted verbatim from the registry', () => {
-    expect(boardsWhen(predicate({ at_times: ['06:00', '18:00'] }))).toBe(
-      '2/4 parked — boards when the dock reaches 4 and the cooldown (120m) clears · or by the clock at 06:00 / 18:00 UTC',
-    );
-  });
-
-  test('no depth rule: the server summary stands, or says nothing is configured', () => {
-    expect(boardsWhen(predicate({ dock_threshold: null, threshold_met: null, summary: 'Boards at 06:00 UTC.' })))
-      .toBe('Boards at 06:00 UTC.');
-    expect(boardsWhen(predicate({ dock_threshold: null, threshold_met: null, summary: '' })))
-      .toBe('no boarding rule configured');
-  });
-
-  // efe6ef10: the server says the dock could not be read (dock_depth
-  // null, threshold_met null). A lens that falls through to the
-  // below-threshold branch has reproduced the defect one layer out — and
-  // `0/4 parked — boards when the dock reaches 4` is the sentence an
-  // operator acts on.
-  test('an unread depth states the absence, never a 0/N parked reading', () => {
-    const text = boardsWhen(predicate({ dock_depth: null, threshold_met: null }));
-    expect(text).toBe('dock depth unread — the 4-car threshold cannot be evaluated');
-    expect(text).not.toContain('parked');
-    expect(text).not.toContain('boards when the dock reaches');
-  });
-
-  test('an unread depth still quotes a clock rule, which never reads the depth', () => {
-    expect(boardsWhen(predicate({ dock_depth: null, threshold_met: null, at_times: ['06:00'] }))).toBe(
-      'dock depth unread — the 4-car threshold cannot be evaluated · or by the clock at 06:00 UTC',
-    );
+  test('the parser passes the server sentence through untouched', () => {
+    const sentence =
+      'Boards at 4 parked cars (min 45 min between depth-rule boards) or 06:00 / 18:00 UTC; 2 car(s) parked now — below the dock threshold.';
+    const b = parseYardStatus({
+      boarding: { dock_threshold: 4, cooldown_minutes: 45, dock_depth: 2, at_times: ['06:00', '18:00'], summary: sentence },
+    }).boarding;
+    expect(b.summary).toBe(sentence);
   });
 });
 
@@ -654,20 +627,19 @@ describe('the readings on the wire', () => {
     expect(junk.cadence_reading).toBeNull();
   });
 
-  test("an unread cadence renders the server's sentence, not a rule it invented", () => {
-    const text = boardsWhen(
-      parseYardStatus({
-        boarding: {
-          dock_threshold: null,
-          dock_depth: 2,
-          at_times: [],
-          cadence_reading: 'unread',
-          summary: 'Cannot say when a train boards — the boarding cadence could not be read; 2 car(s) parked now.',
-        },
-      }).boarding,
-    );
-    expect(text).toContain('the boarding cadence could not be read');
-    expect(text).not.toContain('no boarding rule configured');
+  test("an unread cadence keeps the server's sentence, not a rule the lens invented", () => {
+    const b = parseYardStatus({
+      boarding: {
+        dock_threshold: null,
+        dock_depth: 2,
+        at_times: [],
+        cadence_reading: 'unread',
+        summary: 'Cannot say when a train boards — the boarding cadence could not be read; 2 car(s) parked now.',
+      },
+    }).boarding;
+    expect(b.cadence_reading).toBe('unread');
+    expect(b.summary).toContain('the boarding cadence could not be read');
+    expect(b.summary).not.toContain('no boarding rule configured');
   });
 });
 

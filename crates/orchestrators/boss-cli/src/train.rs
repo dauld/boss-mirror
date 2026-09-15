@@ -4120,7 +4120,10 @@ pub(crate) struct RedTrainAlert {
     pub(crate) refused: bool,
     /// `(check, log_tail)` for each failing check whose log the forge
     /// resolved — empty when none could be fetched, which is a missing
-    /// attachment, never an error (observability is best-effort).
+    /// attachment, never an error (observability is best-effort). When
+    /// the red is the train GATE's, the gate-run receipt's
+    /// `fails_excerpt` rides here instead, one entry per failed check
+    /// labelled `gate: <check>` (5708cbd5).
     pub(crate) logs: Vec<(String, String)>,
 }
 
@@ -4138,6 +4141,7 @@ pub(crate) fn red_train_alert(
     live_verdict: &str,
     rollup: Option<&Value>,
     gate_fails: &[String],
+    gate_excerpt: &[(String, String)],
 ) -> Option<RedTrainAlert> {
     if live_verdict != "failing" {
         return None;
@@ -4154,8 +4158,18 @@ pub(crate) fn red_train_alert(
     // CI was green, the gate was red, and only the rollup was read
     // (071d8b23). A verdict must name what failed.
     let gate_red = failing.is_empty() && !gate_fails.is_empty();
+    let mut logs = failing_check_logs(rollup);
     if gate_red {
         failing.extend(gate_fails.iter().cloned());
+        // And WHY (5708cbd5): the receipt's excerpt of each failed
+        // check — the lines the gate pod replayed and then took with
+        // it — attached as a forge check's log is, labelled as the
+        // gate's. Train #361's alert had the name and nothing else.
+        logs.extend(
+            gate_excerpt
+                .iter()
+                .map(|(check, text)| (format!("gate: {check}"), text.clone())),
+        );
     }
     let id = train.get("id").and_then(Value::as_str).unwrap_or("");
     let named = if failing.is_empty() {
@@ -4177,7 +4191,7 @@ pub(crate) fn red_train_alert(
         title,
         failing,
         refused,
-        logs: failing_check_logs(rollup),
+        logs,
     })
 }
 
@@ -4204,9 +4218,12 @@ pub(crate) fn red_train_alert_body(tid: &str, alert: &RedTrainAlert) -> Value {
             "train_alert": tid,
             "failing_checks": alert.failing,
             "refused": alert.refused,
-            // The failing job's log tail, so the alert names not just
-            // WHICH check failed but WHY — no hand-archaeology through
-            // the forge. Empty when no log could be resolved.
+            // The failing job's log tail — or, for a red train gate,
+            // the gate receipt's excerpt of each failed check — so the
+            // alert names not just WHICH check failed but WHY: no
+            // hand-archaeology through the forge, no kubectl into a
+            // pod log that has already been reaped. Empty when no log
+            // could be resolved.
             "failing_logs": alert.logs.iter()
                 .map(|(check, tail)| json!({"check": check, "log_tail": tail}))
                 .collect::<Vec<_>>(),
@@ -4340,6 +4357,7 @@ mod red_train_alert_tests {
                 {"context": "CI / test", "conclusion": "FAILURE"}
             ]))),
             &[],
+            &[],
         )
         .expect("a red train alerts");
         assert_eq!(r.failing, vec!["CI / test".to_string()]);
@@ -4363,10 +4381,34 @@ mod red_train_alert_tests {
         let fails = vec![
             "test: the_real_run_refuses_while_the_host_declares_legacy_stack - FAILED".to_string(),
         ];
-        let r = red_train_alert(&train(false), "failing", Some(&green_ci), &fails)
+        // WHY, from the receipt's `fails_excerpt` (5708cbd5): the same
+        // lines the gate pod replayed and then took with it.
+        let excerpt = vec![(
+            "test".to_string(),
+            "---- the_real_run_refuses_while_the_host_declares_legacy_stack stdout ----\n\
+             assertion `left == right` failed: the host declares legacy-stack"
+                .to_string(),
+        )];
+        let r = red_train_alert(&train(false), "failing", Some(&green_ci), &fails, &excerpt)
             .expect("a red gate is a red train");
         assert_eq!(r.failing, fails);
         assert!(!r.refused);
+        assert_eq!(
+            r.logs,
+            vec![("gate: test".to_string(), excerpt[0].1.clone())],
+            "the gate's excerpt rides the alert the way a forge check's log does, labelled as \
+             the gate's so the two are never confused"
+        );
+        let body = red_train_alert_body("abcd1234-0000-0000-0000-000000000000", &r);
+        assert_eq!(body["metadata"]["failing_logs"][0]["check"], "gate: test");
+        assert!(
+            body["metadata"]["failing_logs"][0]["log_tail"]
+                .as_str()
+                .unwrap_or("")
+                .contains("the host declares legacy-stack"),
+            "the alert body carries the assertion text, not just the test's name: {}",
+            body["metadata"]["failing_logs"]
+        );
         assert!(
             r.title.contains("train gate failed")
                 && r.title
@@ -4383,21 +4425,28 @@ mod red_train_alert_tests {
                 json!([{"context": "CI / web", "conclusion": "FAILURE"}]),
             )),
             &fails,
+            &excerpt,
         )
         .unwrap();
         assert_eq!(both.failing, vec!["CI / web".to_string()]);
         assert!(both.title.contains("CI failed"), "{}", both.title);
+        assert!(
+            both.logs.is_empty(),
+            "when the forge names the failure, the gate's excerpt is not attached beside it \
+             (the forge's own log is, by attach_failing_logs): {:?}",
+            both.logs
+        );
     }
 
     #[test]
     fn a_green_or_pending_verdict_is_no_alert() {
-        assert!(red_train_alert(&train(false), "green", None, &[]).is_none());
-        assert!(red_train_alert(&train(false), "pending", None, &[]).is_none());
+        assert!(red_train_alert(&train(false), "green", None, &[], &[]).is_none());
+        assert!(red_train_alert(&train(false), "pending", None, &[], &[]).is_none());
     }
 
     #[test]
     fn a_merged_train_is_no_alert_whatever_the_verdict() {
-        assert!(red_train_alert(&train(true), "failing", None, &[]).is_none());
+        assert!(red_train_alert(&train(true), "failing", None, &[], &[]).is_none());
     }
 
     #[test]
@@ -4422,6 +4471,7 @@ mod red_train_alert_tests {
             Some(&rollup(json!([
                 {"context": "CI / locomotive", "conclusion": "FAILURE", "description": "refused: disk floor"}
             ]))),
+            &[],
             &[],
         )
         .expect("a refusal still alerts");
@@ -4769,7 +4819,7 @@ mod red_verdict_log_tests {
             "steps": [{"metadata": {"spec_slug": "merged"}, "title": "Merged into main", "status": "pending"}]
         });
         let rollup = json!([{"context": "CI / test", "conclusion": "FAILURE"}]);
-        let alert = red_train_alert(&train, "failing", Some(&rollup), &[])
+        let alert = red_train_alert(&train, "failing", Some(&rollup), &[], &[])
             .expect("still an alert without a log");
         assert_eq!(alert.failing, vec!["CI / test".to_string()]);
         assert!(alert.logs.is_empty(), "no attachment, not an error");
@@ -4790,7 +4840,7 @@ mod red_verdict_log_tests {
         let rollup = json!([
             {"context": "CI / test", "conclusion": "FAILURE", "log_tail": "assertion failed at line 9"}
         ]);
-        let alert = red_train_alert(&train, "failing", Some(&rollup), &[]).unwrap();
+        let alert = red_train_alert(&train, "failing", Some(&rollup), &[], &[]).unwrap();
         assert_eq!(alert.logs.len(), 1);
         let body = red_train_alert_body("abcd1234-0000-0000-0000-000000000000", &alert);
         assert_eq!(body["metadata"]["failing_logs"][0]["check"], "CI / test");
@@ -6952,20 +7002,24 @@ impl Conductor {
     /// same packet body, manifest rendering and `kubectl create` that
     /// `boss gate` performs, without the operator-facing guards (the
     /// train branch is the conductor's own, freshly assembled on main).
-    /// What the train's gate-run says failed (`train_gate::fails`), for
-    /// the red-train alert. Empty when the train has no gate-run or it
+    /// What the train's gate-run says failed (`train_gate::fails`) and
+    /// why (`train_gate::fails_excerpt`), for the red-train alert — both
+    /// off the one GET. Empty when the train has no gate-run or it
     /// cannot be read this pass — the alert then names what the forge
     /// names, as before; a missing name is never an error here.
-    async fn train_gate_fails(&self, t: &Value) -> Vec<String> {
+    async fn train_gate_fails(&self, t: &Value) -> (Vec<String>, Vec<(String, String)>) {
         let Some(run_id) = t
             .pointer(&format!("/metadata/{}", crate::train_gate::KEY_RUN))
             .and_then(Value::as_str)
         else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
         match self.get_job(run_id).await {
-            Ok(run) => crate::train_gate::fails(&run),
-            Err(_) => Vec::new(),
+            Ok(run) => (
+                crate::train_gate::fails(&run),
+                crate::train_gate::fails_excerpt(&run),
+            ),
+            Err(_) => (Vec::new(), Vec::new()),
         }
     }
 
@@ -7289,14 +7343,19 @@ impl Conductor {
             // so a broken alert is at worst a missing alert, never a wedge.
             // The gate's failing checks are read only on a red pass —
             // one extra GET when there is something to name.
-            let gate_fails = if verdict == "failing" {
+            let (gate_fails, gate_excerpt) = if verdict == "failing" {
                 self.train_gate_fails(&t).await
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new())
             };
             if info.get("state").and_then(Value::as_str) == Some("OPEN")
-                && let Some(alert) =
-                    red_train_alert(&t, verdict, info.get("statusCheckRollup"), &gate_fails)
+                && let Some(alert) = red_train_alert(
+                    &t,
+                    verdict,
+                    info.get("statusCheckRollup"),
+                    &gate_fails,
+                    &gate_excerpt,
+                )
             {
                 if self.cfg.dry {
                     log(format!(
