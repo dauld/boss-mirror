@@ -279,6 +279,47 @@ describe('parseYardStatus', () => {
     expect(odd.trains[0]!.channel).toBeNull();
   });
 
+  // EACH SIDING LANDS ON ITS OWN EVIDENCE (design c6bd173e, car 3 —
+  // edae6e8b). The server judges every car of a merged train on its
+  // channel's live evidence and sends the rows as `sidings`, each
+  // landing tagged by `kind`. A server that predates the lane sends
+  // none, and the floor then reads "landed" the way it did before.
+  test('the sidings lane parses each landing by its kind, and an old server sends none', () => {
+    const boarding = { dock_depth: 0, at_times: [], summary: 'x' };
+    const s = parseYardStatus({
+      boarding,
+      sidings: [
+        {
+          id: 'c1',
+          branch: 'fix/manifest',
+          train: 't1',
+          channel: 'config',
+          landing: { kind: 'landed', evidence: 'manifests applied and verified at 34db709', at: '2026-09-15T16:14:46Z' },
+        },
+        { id: 'c2', train: 't1', channel: 'infra', landing: { kind: 'converging', awaiting: 'host converge on 34db709: boss-gcp' } },
+        { id: 'c3', train: 't1', channel: 'software', landing: { kind: 'unread', why: 'the window begins after this merge' } },
+        // A landing kind this reader does not know is no reading at all.
+        { id: 'c4', train: 't1', channel: 'data', landing: { kind: 'teleported' } },
+        // A channel the sidings do not know stands on software, as a car does.
+        { id: 'c5', train: 't1', channel: 'firmware', landing: { kind: 'landed', evidence: 'x' } },
+      ],
+    });
+    expect(s.sidings).toEqual([
+      {
+        id: 'c1',
+        branch: 'fix/manifest',
+        train: 't1',
+        channel: 'config',
+        landing: { kind: 'landed', evidence: 'manifests applied and verified at 34db709', at: '2026-09-15T16:14:46Z' },
+      },
+      { id: 'c2', branch: null, train: 't1', channel: 'infra', landing: { kind: 'converging', awaiting: 'host converge on 34db709: boss-gcp' } },
+      { id: 'c3', branch: null, train: 't1', channel: 'software', landing: { kind: 'unread', why: 'the window begins after this merge' } },
+      { id: 'c4', branch: null, train: 't1', channel: 'data', landing: null },
+      { id: 'c5', branch: null, train: 't1', channel: 'software', landing: { kind: 'landed', evidence: 'x', at: null } },
+    ]);
+    expect(parseYardStatus({ boarding }).sidings).toEqual([]);
+  });
+
   test('a null boarding block still parses to a well-formed predicate', () => {
     const s = parseYardStatus({ boarding: null });
     expect(s.boarding.dock_threshold).toBeNull();

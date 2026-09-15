@@ -124,6 +124,41 @@ pub enum Phase {
     Cancel { handle: String, reason: String },
 }
 
+/// One thing the standing loop does. [`run`] walks [`loop_work`]'s
+/// list for the phase it was given, so the table IS the dispatch — a
+/// test that reads it reads what a tick does, not a copy of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Work {
+    /// Push the branches credential-less workspaces filed as
+    /// publish-request packets (`crate::publish_requests`), so they
+    /// are on the forge before this pass looks for cars.
+    DrainPublishRequests,
+    Reconcile,
+    Board,
+}
+
+/// What each phase of the standing loop does, in order.
+///
+/// The drain rides EVERY phase that reconciles, not only `Run`. Until
+/// 2026-09-15 it rode `Run` alone — correct when `run` was the
+/// ten-minute tick, wrong once the cadence registry split it: rule
+/// train-window fires `run` at 06:05 and 18:05 and rule train-reconcile
+/// fires `reconcile` every ten minutes. Measured (backlog 03e81aa9):
+/// publish-request 9f9fa486 filed 16:47Z, train-reconcile fired
+/// 17:00:45Z rc 0 and left it at its publish step, next `run` 18:05Z —
+/// a 78-minute wait for a one-commit bundle, up to 12 h at worst.
+///
+/// `Preflight` returns before the table is read; `Cancel` is an
+/// operator's verb on one named train and is dispatched by name.
+pub(crate) fn loop_work(phase: &Phase) -> &'static [Work] {
+    match phase {
+        Phase::Reconcile => &[Work::DrainPublishRequests, Work::Reconcile],
+        Phase::Board => &[Work::Board],
+        Phase::Run => &[Work::DrainPublishRequests, Work::Reconcile, Work::Board],
+        Phase::Preflight | Phase::Cancel { .. } => &[],
+    }
+}
+
 /// What a contended lock MEANS for the phase that gave up on it.
 ///
 /// Whether to WAIT first is [`lock_wait_budget`]'s question. This one
@@ -9687,33 +9722,35 @@ pub async fn run(phase: Phase, dry: bool, now: DateTime<Utc>) -> Result<()> {
     let conductor = Conductor::new(cfg, forge)?;
     let policy = conductor.resolve_policy().await;
     let conductor = conductor.with_policy(policy);
-    match phase {
-        Phase::Preflight => {} // returned above; the arm keeps the match total
-        Phase::Reconcile => conductor.reconcile(now).await?,
-        Phase::Board => conductor.board(now).await?,
-        Phase::Run => {
-            // Drain publish-request packets FIRST, so a branch a
-            // credential-less workspace filed this cycle is on the
-            // forge before reconcile/board look — gateable in the same
-            // window instead of the next one. Same clone the conductor
-            // assembles in; same `fork` remote `publish_car_branch`
-            // pushes car branches to.
-            //
-            // Same failure posture as the branch sweep above: the
-            // drain is a feeder, not the train. A packet that will not
-            // drain (or a jobs API that is away) is journaled and
-            // retried next cycle; reconcile and board still run.
-            if let Err(e) =
-                crate::publish_requests::run(&conductor.cfg.clone, "fork", dry, now).await
-            {
-                log(format!("publish-request drain failed (run stands): {e:#}"));
-            }
-            conductor.reconcile(now).await?;
-            conductor.board(now).await?;
+    if let Phase::Cancel { handle, reason } = &phase {
+        return conductor.cancel(handle, reason).await;
+    }
+    for work in loop_work(&phase) {
+        match work {
+            Work::DrainPublishRequests => drain_publish_requests(&conductor, dry, now).await,
+            Work::Reconcile => conductor.reconcile(now).await?,
+            Work::Board => conductor.board(now).await?,
         }
-        Phase::Cancel { handle, reason } => conductor.cancel(&handle, &reason).await?,
     }
     Ok(())
+}
+
+/// Drain publish-request packets before the pass looks for cars, so a
+/// branch a credential-less workspace filed since the last tick is on
+/// the forge before reconcile/board see the dock — gateable in this
+/// cycle instead of the next one. Same clone the conductor assembles
+/// in; same `fork` remote `publish_car_branch` pushes car branches to.
+///
+/// Same failure posture as the branch sweep: the drain is a feeder,
+/// not the train. A packet that will not drain (or a jobs API that is
+/// away) is journaled and retried next tick; the conductor run that
+/// called it stands — which is why this returns `()` and not a
+/// `Result`. (A fallible write that could fail the loop froze every
+/// landing once; see the sweep's own note.)
+async fn drain_publish_requests(conductor: &Conductor, dry: bool, now: DateTime<Utc>) {
+    if let Err(e) = crate::publish_requests::run(&conductor.cfg.clone, "fork", dry, now).await {
+        log(format!("publish-request drain failed (run stands): {e:#}"));
+    }
 }
 
 #[cfg(test)]
@@ -9928,6 +9965,43 @@ mod tests {
         for phase in [Phase::Preflight, Phase::Reconcile, Phase::Board, Phase::Run] {
             assert_eq!(contended(&phase), Contended::Covered);
         }
+    }
+
+    // ---------------------------------------------------------------
+    // The publish-request drain rides every reconcile (03e81aa9).
+    // ---------------------------------------------------------------
+
+    /// THE DEFECT, measured 2026-09-15: publish-request 9f9fa486 was
+    /// filed 16:47Z from a credential-less dev pod; train-reconcile
+    /// fired at 17:00:45Z (rc 0) and the packet stayed at its publish
+    /// step, because only `Phase::Run` drained — and the cadence
+    /// registry fires `run` at 06:05 and 18:05 (rule train-window)
+    /// while `reconcile` fires every ten minutes (rule
+    /// train-reconcile). A 78-minute wait for a one-commit bundle; up
+    /// to 12 h in the worst case. This is the table `run` walks, so
+    /// what it asserts is the dispatch, not a description of it.
+    #[test]
+    fn a_reconcile_tick_drains_publish_requests_before_it_looks_for_cars() {
+        assert_eq!(
+            loop_work(&Phase::Reconcile),
+            &[Work::DrainPublishRequests, Work::Reconcile],
+            "the 10-minute tick must push a filed branch before it reconciles"
+        );
+        assert_eq!(
+            loop_work(&Phase::Run),
+            &[Work::DrainPublishRequests, Work::Reconcile, Work::Board],
+            "the window still drains first, then reconciles, then boards"
+        );
+        // A board has its own 60-second retry and must not queue
+        // behind a forge push; preflight returns before the table is
+        // read; cancel is an operator's verb on one named train.
+        assert_eq!(loop_work(&Phase::Board), &[Work::Board]);
+        assert!(loop_work(&Phase::Preflight).is_empty());
+        let cancel = Phase::Cancel {
+            handle: "t".into(),
+            reason: "r".into(),
+        };
+        assert!(loop_work(&cancel).is_empty());
     }
 
     // ---------------------------------------------------------------

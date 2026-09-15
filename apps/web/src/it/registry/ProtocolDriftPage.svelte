@@ -5,8 +5,10 @@
   //
   // David, 2026-09-11: "we might need some sort of doc diff view for me
   // to approve." Car 1 measures and files (infra/protocol-drift.sh, on
-  // boss-gcp at 05:20 UTC, train #376); this tab is the view; the
-  // approve — the publish behind an approve — is car 3, not here. The
+  // boss-gcp at 05:20 UTC, train #376); this tab is the view; car 3b
+  // (approve.ts, ApprovePublish.svelte) is the approve: one control per
+  // adrift kind that files the publish-workflow ops-request and shows
+  // the host's answer beside the drift it was approved against. The
   // packet is the record and this page reads it: what a compared field
   // is, why structural fields are deliberately not compared, what the
   // 90-character windows are, is documented at the top of that script
@@ -25,26 +27,70 @@
   // — what renders before the first 05:20 run); packets that exist and
   // carry no measurement (the script refused, exit 3, and PATCHed
   // nothing). Each is a different fact; "0 adrift" is none of them.
-  import { onMount } from 'svelte';
+  //
+  // THE APPROVE SECTION reads two more things, each its own Remote so a
+  // failure there is said there and does not blank the measurement:
+  // this verb's ops-requests (the answer each kind's control shows —
+  // re-read every 10 s while one is in flight, so the answer arrives
+  // without a reload) and the ops-request row's `execute` role, which
+  // is who the control admits.
+  import { onDestroy, onMount } from 'svelte';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
+  import { session } from '@boss/web-kit/session/session.svelte';
   import type { Remote } from '../../data/remote';
   import { loadDriftPackets, newestMeasured, type DriftPage } from './drift';
+  import {
+    adriftKinds,
+    latestFor,
+    loadExecuteAuthorityRole,
+    loadPublishRequests,
+    PUBLISH_HOST,
+    type PublishRequest,
+  } from './approve';
+  import ApprovePublish from './ApprovePublish.svelte';
 
   /** Packets read per load: one a day, so a fortnight; the page says
    *  when `total` is past this. */
   const PAGE = 14;
 
   let page = $state<Remote<DriftPage>>({ kind: 'loading' });
+  let requests = $state<Remote<ReadonlyArray<PublishRequest>>>({ kind: 'loading' });
+  let authorityRole = $state<Remote<string | null>>({ kind: 'loading' });
 
   async function refresh(): Promise<void> {
     page = await loadDriftPackets(PAGE);
   }
+  async function refreshRequests(): Promise<void> {
+    requests = await loadPublishRequests();
+  }
+  /** While a request is open the runner's answer is a minute away;
+   *  re-read until it lands, then stop. */
+  const POLL_MS = 10_000;
+  let poll: ReturnType<typeof setInterval> | null = null;
+  $effect(() => {
+    const inFlight = requests.kind === 'ready' && requests.data.some((r) => r.status === 'open');
+    if (inFlight && poll === null) poll = setInterval(() => void refreshRequests(), POLL_MS);
+    if (!inFlight && poll !== null) {
+      clearInterval(poll);
+      poll = null;
+    }
+  });
   onMount(() => {
     void refresh();
+    void refreshRequests();
+    void loadExecuteAuthorityRole().then((r) => {
+      authorityRole = r;
+    });
+  });
+  onDestroy(() => {
+    if (poll !== null) clearInterval(poll);
   });
 
   const ready = $derived(page.kind === 'ready' ? page.data : null);
   const newest = $derived(ready ? newestMeasured(ready.packets) : null);
+  const kinds = $derived(newest ? adriftKinds(newest.drift.fields) : []);
+  const viewerId = $derived(session.value.kind === 'ready' ? session.value.user.id : null);
+  const viewerRole = $derived(session.value.kind === 'ready' ? session.value.user.role : null);
 
   const short = (sha: string | null): string => (sha ? sha.slice(0, 8) : '—');
   const when = (iso: string | null): string => (iso ? `${iso.slice(0, 10)} ${iso.slice(11, 16)}Z` : '—');
@@ -168,7 +214,42 @@
       </div>
     {/if}
 
-    <div class="pd-section">02 — THE OTHER TWO DIRECTIONS</div>
+    <div class="pd-section">02 — APPROVE · publish the tree's row, one control per adrift kind</div>
+    {#if kinds.length === 0}
+      <p class="pd-quiet">Nothing to approve: no compared field is adrift.</p>
+    {:else if requests.kind === 'failed'}
+      <p class="pd-fail load-failed">
+        The publish requests did not answer: {requests.error}. Without them a kind's control cannot know whether
+        a request is already in flight or what the host last said, so none is offered.
+      </p>
+    {:else if authorityRole.kind === 'failed'}
+      <p class="pd-fail load-failed">
+        The ops-request protocol did not answer: {authorityRole.error}. The control admits the role that row's
+        execute step names, so without it none is offered.
+      </p>
+    {:else if requests.kind === 'loading' || authorityRole.kind === 'loading'}
+      <p class="pd-quiet">Reading the publish requests…</p>
+    {:else}
+      <p class="pd-approve-note">
+        Each approve files an ops-request for {PUBLISH_HOST} — the same packet a terminal's boss ops files — and the
+        runner there publishes the tree's row at head {short(newest.measured.head)} behind the verb's own refusals;
+        the packet's answer, exit code and full output, is shown here when it closes. A refusal that the live row
+        carries what the tree never said opens the second, named confirmation.
+      </p>
+      {#each kinds as k (k.kind)}
+        <ApprovePublish
+          kind={k}
+          against={{ packet: newest.id, head: newest.measured.head }}
+          latest={latestFor(requests.data, k.kind)}
+          authorityRole={authorityRole.data}
+          {viewerId}
+          {viewerRole}
+          onFiled={() => void refreshRequests()}
+        />
+      {/each}
+    {/if}
+
+    <div class="pd-section">03 — THE OTHER TWO DIRECTIONS</div>
     <div class="pd-context">
       <div>
         <div class="h">
@@ -283,4 +364,5 @@
   .pd-context .h small { display: block; font-weight: 400; font-size: 11px; color: var(--static, #7a838c); }
   .pd-list { margin: 0; padding-left: 16px; font-size: 12px; }
   .pd-footnote { color: var(--text-faint, #5c656e); font-size: 12px; max-width: 90ch; margin-top: 20px; }
+  .pd-approve-note { color: var(--static, #7a838c); font-size: 12px; max-width: 90ch; margin: 0 0 10px; }
 </style>

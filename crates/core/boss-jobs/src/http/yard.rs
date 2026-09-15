@@ -351,6 +351,40 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
             .unwrap_or_default()
     };
 
+    // The converge packets each siding's landing is read from (design
+    // c6bd173e, car 3; `crate::landing`): the newest CONVERGE_WINDOW of
+    // the cluster converge and of each host converge, WITH their steps
+    // — the evidence (`build_head`, `unchanged`, `converge_sha`) is on
+    // the `run` step, which is why the web's converge card fetches these
+    // packets with steps too. A read that fails leaves the kind absent,
+    // and every row it would have decided says `unread` rather than
+    // "converging" (a limit is not a filter, and an empty read is not a
+    // reading of "not yet").
+    let converges = {
+        let mut out: Vec<(boss_core::job::Job, Vec<boss_core::job::Step>)> = Vec::new();
+        for kind in
+            std::iter::once(crate::landing::CLUSTER_CONVERGE).chain(crate::landing::HOST_CONVERGES)
+        {
+            let filter = JobFilter {
+                kind: Some(kind.to_string()),
+                scope: scope.clone(),
+                ..Default::default()
+            };
+            let Ok((rows, _)) = state
+                .jobs
+                .list_jobs(&filter, crate::landing::CONVERGE_WINDOW, 0)
+                .await
+            else {
+                continue;
+            };
+            for job in rows {
+                let steps = state.jobs.list_steps(&job.id).await.unwrap_or_default();
+                out.push((job, steps));
+            }
+        }
+        out
+    };
+
     // Every read that can fail QUIETLY states whether it answered: the
     // dock from the `Option` `dock_cars` already returns, the cadence
     // rows from theirs, the firing from its own `Result`. The trains and
@@ -373,6 +407,8 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
             settled_car_branches: &settled_car_branches,
             arrived_trains: &arrived_trains,
             now: Some(now),
+            cars: &cars,
+            converges: &converges,
         },
         dock_reading,
         yard::BoardingReadings {

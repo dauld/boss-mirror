@@ -78,6 +78,7 @@ const statusOf = (over: Partial<YardStatus> = {}): YardStatus => ({
   policy: { stall_hours: 2, max_red_trains: 2 },
   conductor: null,
   gate_runs: null,
+  sidings: [],
   now: NOW_ISO,
   ...over,
 });
@@ -1155,6 +1156,111 @@ describe('the arrivals yard', () => {
     expect(drawn.some(w => w.id === 'd-c')).toBe(true);
     expect(drawn.filter(w => w.siding === 'software')).toHaveLength(ARRIVALS_DRAWN);
     expect(hidden).toBe(2);
+  });
+
+  // EACH SIDING LANDS ON ITS OWN EVIDENCE (design c6bd173e, car 3 —
+  // edae6e8b). The server judges a car on ITS channel's evidence and
+  // the floor draws that judgement: a config car whose manifests have
+  // not applied stands on its siding CONVERGING — its train arrived,
+  // but its change is not live — with the evidence it waits for named;
+  // a landed one carries its evidence on the status line. Measured
+  // 2026-09-15: boss-gcp converged 14 minutes after the image roll, so
+  // an infra car really does stand converging after its train arrives.
+  test('a landed car is judged on its siding row — converging until its own evidence exists', () => {
+    const at = '2026-09-07T23:00:00Z';
+    const arrivals = [
+      trainRow('t1', 'ARRIVED', {
+        live: false,
+        outcome: 'arrived',
+        mergeRef: 'b641f3a',
+        arrivedAt: { ms: Date.parse(at), at, basis: 'completed_at' },
+        cars: [
+          car('cfg', 'fix/manifest', { deliveryChannel: 'config' }),
+          car('inf', 'fix/talos', { deliveryChannel: 'infra' }),
+          car('sw', 'fix/crate', { deliveryChannel: 'software', proof: proofOf({ stamped: { at: at, by: 'x' } }) }),
+          car('old', 'fix/old', { deliveryChannel: 'data' }),
+        ],
+      }),
+    ];
+    const status = statusOf({
+      sidings: [
+        {
+          id: 'cfg',
+          branch: 'fix/manifest',
+          train: 't1',
+          channel: 'config',
+          landing: { kind: 'landed', evidence: 'manifests applied and verified at b641f3a', at: '2026-09-07T22:55:00Z' },
+        },
+        {
+          id: 'inf',
+          branch: 'fix/talos',
+          train: 't1',
+          channel: 'infra',
+          landing: { kind: 'converging', awaiting: 'host converge on b641f3a: boss-gcp — last reported 1111111' },
+        },
+        {
+          id: 'sw',
+          branch: 'fix/crate',
+          train: 't1',
+          channel: 'software',
+          landing: { kind: 'landed', evidence: 'the cluster jobs API self-reports b641f3a', at },
+        },
+        { id: 'old', branch: 'fix/old', train: 't1', channel: 'data', landing: { kind: 'unread', why: 'the window begins after this merge' } },
+      ],
+    });
+    const s = scene(yardOf({ arrivals }), status, NOW);
+    // Landed on its own evidence: the evidence rides the status line,
+    // the wagon reads settled.
+    expect(wagon(s, 'cfg')).toMatchObject({ station: 'arrivals', siding: 'config', tone: 'ok', lamp: 'ok' });
+    expect(wagon(s, 'cfg').status).toBe('landed in b641f3a · manifests applied and verified at b641f3a · arrived');
+    expect(wagon(s, 'cfg').since).toBe('2026-09-07T22:55:00Z');
+    // Not yet: on its siding, converging, the awaited evidence named.
+    expect(wagon(s, 'inf')).toMatchObject({ station: 'arrivals', siding: 'infra', tone: 'warn', lamp: 'working' });
+    expect(wagon(s, 'inf').status).toBe('converging · awaiting host converge on b641f3a: boss-gcp — last reported 1111111');
+    // The proof stamp still reads after the evidence.
+    expect(wagon(s, 'sw').status).toBe('landed in b641f3a · the cluster jobs API self-reports b641f3a · proven');
+    // Unread is not converging: the wagon reads landed by its train, as
+    // before the lane, and says the evidence was not read.
+    expect(wagon(s, 'old')).toMatchObject({ station: 'arrivals', siding: 'data', tone: 'ok', lamp: 'ok' });
+    expect(wagon(s, 'old').status).toBe('landed in b641f3a · arrived · data evidence unread');
+    // Converging wagons are still on the board's landed rows: the
+    // siding is where they stand — but the day's LANDED count excludes
+    // them (three of the four cars landed).
+    expect(s.boardRows.find(r => r.id === 'inf')).toMatchObject({ landed: true, where: 'Arrivals · infra' });
+    expect(s.machines.arrivals.landed).toBe(3);
+  });
+
+  test('without a siding row — an older server — a landed car reads as it did before the lane', () => {
+    const s = scene(
+      yardOf({ arrivals: [arrivedWith('t1', '2026-09-07T23:00:00Z', car('c', 'fix/c', { deliveryChannel: 'config' }))] }),
+      statusOf(),
+      NOW,
+    );
+    expect(wagon(s, 'c').status).toBe('landed in b641f3a · arrived');
+    expect(wagon(s, 'c')).toMatchObject({ tone: 'ok', lamp: 'ok', siding: 'config' });
+  });
+
+  // The EARLIER half of the claim: a config car's manifests apply in the
+  // converge run that closes minutes before the conductor stamps the
+  // image roll, so a car ABOARD a converging train can already be live.
+  // It stays coupled (the consist is the train's) and its status line
+  // says so, with the evidence.
+  test('a car aboard a converging train that has landed on its own evidence says so', () => {
+    const c = car('cfg', 'fix/manifest', { deliveryChannel: 'config' });
+    const status = statusOf({
+      sidings: [
+        {
+          id: 'cfg',
+          branch: 'fix/manifest',
+          train: 't1',
+          channel: 'config',
+          landing: { kind: 'landed', evidence: 'manifests applied and verified at b641f3a', at: '2026-09-07T22:55:00Z' },
+        },
+      ],
+    });
+    const s = scene(yardOf({ inFlight: [trainRow('t1', 'CONVERGING', { cars: [c] })] }), status, NOW);
+    expect(wagon(s, 'cfg')).toMatchObject({ station: 'train', lamp: 'ok', tone: 'ok' });
+    expect(wagon(s, 'cfg').status).toBe('aboard #259 · converge · landed on config: manifests applied and verified at b641f3a');
   });
 
   test("a cancelled train's cars are not placed — they are back on the dock if anywhere", () => {

@@ -34,6 +34,7 @@ use serde_json::Value;
 
 use crate::cadence::{CadenceRuleRow, LastFiring};
 use crate::delivery::DeliveryPolicyRow;
+use crate::landing;
 use crate::stranded;
 
 /// A pr-train's step vocabulary, addressed by spec slug with a title
@@ -2574,6 +2575,15 @@ pub struct YardStatus {
     pub limbo: Vec<LimboCar>,
     /// The alarm thresholds the yard enforces, from the delivery policy.
     pub policy: PolicyThresholds,
+    /// The arrivals sidings: one row per boarded car of every merged
+    /// train on the board (open ones first, then the recent arrivals),
+    /// each judged on ITS channel's live evidence — a config car on the
+    /// cluster converge packet, an infra car on the host converges, a
+    /// software car on the train's converged step (design c6bd173e,
+    /// car 3; [`crate::landing`]). Absent on an older payload → empty,
+    /// and the floor then reads "landed" the way it did before the lane.
+    #[serde(default)]
+    pub sidings: Vec<landing::SidingCar>,
 }
 
 /// How many trains each of the handler's two train reads fetches: every
@@ -2670,6 +2680,17 @@ pub struct YardInputs<'a> {
     /// The clock instant. `None` asserts no trouble rather than inventing
     /// a reading, and keeps wall-clock out of the read-model.
     pub now: Option<chrono::DateTime<chrono::Utc>>,
+    /// The ship-a-change window the handler already reads for
+    /// `car_branches` — the sidings lane looks a train's `boarded_jobs`
+    /// up in it for each car's `delivery_channel`. A boarded car outside
+    /// it gets no row rather than a guessed siding.
+    pub cars: &'a [Job],
+    /// The converge packets each channel's landing is read from — the
+    /// newest [`landing::CONVERGE_WINDOW`] of the cluster converge and of
+    /// each host converge, with their steps (the evidence is on the `run`
+    /// step). Empty when unread: every row then says `unread`, never
+    /// "converging".
+    pub converges: &'a [(Job, Vec<Step>)],
 }
 
 /// Assemble the full status from the rows the handler fetched, asserting
@@ -2713,6 +2734,8 @@ pub fn build_status_for(
         settled_car_branches,
         arrived_trains,
         now,
+        cars,
+        converges,
     } = inputs;
     // The instant a train must have completed SOMETHING after, or it is
     // standing still. Computed once so train_status stays a pure
@@ -2771,6 +2794,20 @@ pub fn build_status_for(
     // No policy → the CLI's own compiled fallback, so the page shows the
     // same bound a gate would obey with an unreachable registry.
     let capacity = policy.map_or(COMPILED_GATE_MAX_CONCURRENT, |p| p.gate_max_concurrent);
+    // The sidings: the open trains (a merged one past its image roll
+    // may already have a config car landed), then the recent arrivals
+    // the board draws — the same `RECENT_LIMIT` tail `recent` lists, so
+    // a wagon on the arrivals board has a row to be judged by.
+    let sidings = landing::sidings(
+        open_trains.iter().chain(
+            closed_trains
+                .iter()
+                .filter(|(j, s)| outcome_of(j, s) == "arrived")
+                .take(RECENT_LIMIT),
+        ),
+        cars,
+        converges,
+    );
     YardStatus {
         trains,
         dock,
@@ -2783,6 +2820,7 @@ pub fn build_status_for(
         garage: garage(gate_runs, settled_car_branches),
         limbo: limbo(gate_runs, settled_car_branches),
         policy: policy_thresholds(policy),
+        sidings,
     }
 }
 
@@ -4507,6 +4545,106 @@ mod tests {
         // And absent from the wire, like the other unknowns on the row.
         let v = serde_json::to_value(&t).unwrap();
         assert!(v.get("boarded_at").is_none());
+    }
+
+    // ---- the sidings lane (design c6bd173e, car 3 — edae6e8b) ----
+
+    /// The status carries one row per boarded car of a MERGED train,
+    /// judged on the car's own channel: an open train past its merge
+    /// whose config car's manifests applied lands that car before the
+    /// train arrives, while its software car waits on the converged
+    /// step. Closed arrived trains contribute too, newest first behind
+    /// the open ones. The reading itself is `landing::sidings`; this
+    /// pins that the status wires it from the same rows the trains are
+    /// built from.
+    #[test]
+    fn the_sidings_lane_judges_each_car_on_its_channel() {
+        let mut config_car = train(
+            vec![],
+            json!({ "branch": "fix/manifest", "delivery_channel": "config" }),
+        );
+        config_car.kind = "ship-a-change".into();
+        let mut software_car = train(
+            vec![],
+            json!({ "branch": "fix/crate", "delivery_channel": "software" }),
+        );
+        software_car.kind = "ship-a-change".into();
+        let mut merged = done("merged", "Merged into main", "2026-09-04T11:00:00Z");
+        merged.metadata["merge_ref"] = json!("34db7093e3b7");
+        let open = vec![(
+            train(
+                vec![],
+                json!({ "boarded_jobs": [config_car.id.to_string(), software_car.id.to_string()] }),
+            ),
+            vec![
+                merged,
+                done(
+                    "deployed",
+                    "Deployed to the playground",
+                    "2026-09-04T11:00:00Z",
+                ),
+                step(
+                    "converged",
+                    "Cluster converged",
+                    StepStatus::Ready,
+                    json!({}),
+                ),
+            ],
+        )];
+        let mut converge = train(
+            vec![],
+            json!({ "opened_at": "2026-09-04T11:01:00Z", "closed_at": "2026-09-04T11:05:00Z" }),
+        );
+        converge.kind = crate::landing::CLUSTER_CONVERGE.into();
+        converge.status = JobStatus::Closed;
+        let converges = vec![(
+            converge,
+            vec![step(
+                "run",
+                "run",
+                StepStatus::Completed,
+                json!({ "result": "ok", "build_head": "34db709", "verify_s": "6" }),
+            )],
+        )];
+        let cars = vec![config_car.clone(), software_car.clone()];
+        let status = build_status(YardInputs {
+            open_trains: &open,
+            cars: &cars,
+            converges: &converges,
+            now: fixed_now(),
+            ..Default::default()
+        });
+        assert_eq!(status.trains[0].phase, TrainPhase::Converging);
+        let by_id = |id: &str| {
+            status
+                .sidings
+                .iter()
+                .find(|r| r.id == id)
+                .unwrap_or_else(|| panic!("no siding row for {id}"))
+        };
+        let config = by_id(&config_car.id.to_string());
+        assert_eq!(config.channel, "config");
+        assert!(
+            matches!(&config.landing, crate::landing::Landing::Landed { evidence, .. } if evidence.contains("34db709")),
+            "{config:?}"
+        );
+        let software = by_id(&software_car.id.to_string());
+        assert!(
+            matches!(
+                &software.landing,
+                crate::landing::Landing::Converging { .. }
+            ),
+            "{software:?}"
+        );
+        // On the wire, tagged — the shape the floor reads.
+        let v = serde_json::to_value(&status).unwrap();
+        assert_eq!(v["sidings"][0]["landing"]["kind"], "landed");
+        assert_eq!(v["sidings"][1]["landing"]["kind"], "converging");
+        // An older payload without the lane still deserializes.
+        let mut old = v.clone();
+        old.as_object_mut().unwrap().remove("sidings");
+        let back: YardStatus = serde_json::from_value(old).unwrap();
+        assert!(back.sidings.is_empty());
     }
 
     // ---- the train's channel (cffef553) ----

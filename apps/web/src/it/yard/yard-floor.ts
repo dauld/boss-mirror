@@ -684,6 +684,14 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
     sim: c.sim,
   });
 
+  // EACH SIDING LANDS ON ITS OWN EVIDENCE (design c6bd173e, car 3 —
+  // edae6e8b). The server judges every car of a merged train on ITS
+  // channel's live evidence and sends the rows as `sidings`; the floor
+  // joins them by car id and draws the judgement rather than "the train
+  // arrived, so every car landed". No row — an older server, or a car
+  // outside the server's window — reads as it did before the lane.
+  const sidingOf = new Map((status?.sidings ?? []).map(r => [r.id, r]));
+
   // THE TRACK — open trains as locomotives, their cars coupled behind.
   const serverTrain = new Map((status?.trains ?? []).map(t => [t.id, t]));
   const locos: Loco[] = yard.inFlight.map(t => {
@@ -711,6 +719,13 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
     const boardedAt = serverTrain.get(t.id)?.boarded_at ?? boardedAtFromTitle(t.title);
     t.cars.forEach((c, i) => {
       if (claimedIds.has(c.id)) return;
+      // The EARLIER half of the claim: a car aboard a merged train whose
+      // own evidence already exists (a config car's manifests apply in
+      // the converge run that closes minutes before the image roll is
+      // stamped) is live while its train is still converging. It stays
+      // coupled — the consist is the train's — and its line says so.
+      const landing = sidingOf.get(c.id)?.landing ?? null;
+      const landed = !l.blocked && landing?.kind === 'landed' ? landing : null;
       place({
         id: c.id,
         ...base(c),
@@ -718,10 +733,12 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
         slot: i,
         trainId: t.id,
         tone: l.blocked ? 'red' : 'ok',
-        lamp: l.blocked ? 'err' : 'working',
+        lamp: l.blocked ? 'err' : landed ? 'ok' : 'working',
         status: l.blocked
           ? `aboard ${locoName(l)} · blocked at ${STAGES[l.stage]}`
-          : `aboard ${locoName(l)} · ${STAGES[l.stage]}`,
+          : landed
+            ? `aboard ${locoName(l)} · ${STAGES[l.stage]} · landed on ${c.deliveryChannel}: ${landed.evidence}`
+            : `aboard ${locoName(l)} · ${STAGES[l.stage]}`,
         since: boardedAt,
       });
     });
@@ -769,8 +786,10 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
   // cars newest first along each. A car lands on the siding of its channel (design c6bd173e, car 1):
   // the wagon's `siding` is the car's `deliveryChannel`, stamped by the
   // gate, and its slot counts along that siding alone, so the map can
-  // lay the four as rows. Landing is still the train's converge for
-  // every channel — car 3 gives each its own live evidence.
+  // lay the four as rows. WHETHER it has landed is the server's siding
+  // row (car 3): a car whose channel evidence has not arrived stands on
+  // its siding CONVERGING — its train arrived, its change is not live —
+  // with what it waits for named; a landed one carries its evidence.
   const landed = [...yard.arrivals].sort((a, b) => b.arrivedAt.ms - a.arrivedAt.ms);
   const sidingSlot = Object.fromEntries(DELIVERY_CHANNELS.map(ch => [ch, 0])) as Record<DeliveryChannel, number>;
   let landedRecently = 0;
@@ -778,24 +797,40 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
     const recent = t.arrivedAt.ms > 0 && nowMs - t.arrivedAt.ms <= DAY_MS;
     t.cars.forEach(c => {
       if (claimedIds.has(c.id)) return;
-      if (recent) landedRecently += 1;
-      place({
+      const landing = sidingOf.get(c.id)?.landing ?? null;
+      // LEAVING THE SHED STAMPED. The `proven` step completing is the
+      // one transition: the car drops out of `awaitingProof`, its
+      // wagon leaves the shed, and it stands here reading `proven`
+      // instead of `arrived`. Silence is `arrived` — a car outside the
+      // window says nothing about its own proof.
+      const proof = c.proof?.stamped ? 'proven' : 'arrived';
+      const landedIn = t.mergeRef ? `landed in ${t.mergeRef}` : 'landed';
+      const arrived = t.arrivedAt.at !== '' ? t.arrivedAt.at : null;
+      const common = {
         id: c.id,
         ...base(c),
-        station: 'arrivals',
+        station: 'arrivals' as const,
         siding: c.deliveryChannel,
         slot: sidingSlot[c.deliveryChannel]++,
         trainId: t.id,
-        tone: 'ok',
-        lamp: 'ok',
-        // LEAVING THE SHED STAMPED. The `proven` step completing is the
-        // one transition: the car drops out of `awaitingProof`, its
-        // wagon leaves the shed, and it stands here reading `proven`
-        // instead of `arrived`. Silence is `arrived` — a car outside the
-        // window says nothing about its own proof.
-        status: `${t.mergeRef ? `landed in ${t.mergeRef}` : 'landed'} · ${c.proof?.stamped ? 'proven' : 'arrived'}`,
-        since: t.arrivedAt.at !== '' ? t.arrivedAt.at : null,
-      });
+      };
+      if (landing?.kind === 'converging') {
+        place({ ...common, tone: 'warn', lamp: 'working', status: `converging · awaiting ${landing.awaiting}`, since: arrived });
+        return;
+      }
+      // Counted as landed only past this line: a converging wagon is on
+      // its siding, not landed, and the arrivals label says how many
+      // LANDED in the day.
+      if (recent) landedRecently += 1;
+      if (landing?.kind === 'landed') {
+        place({ ...common, tone: 'ok', lamp: 'ok', status: `${landedIn} · ${landing.evidence} · ${proof}`, since: landing.at ?? arrived });
+        return;
+      }
+      // Unread is not converging: the train arrived, and the row says
+      // the channel's own evidence was not read — never that it is
+      // missing.
+      const unread = landing?.kind === 'unread' ? ` · ${c.deliveryChannel} evidence unread` : '';
+      place({ ...common, tone: 'ok', lamp: 'ok', status: `${landedIn} · ${proof}${unread}`, since: arrived });
     });
   });
 

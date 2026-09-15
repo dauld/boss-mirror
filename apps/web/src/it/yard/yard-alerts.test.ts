@@ -63,6 +63,7 @@ const statusOf = (over: Partial<YardStatus> = {}): YardStatus => ({
   policy: { stall_hours: 2, max_red_trains: 2 },
   conductor: null,
   gate_runs: null,
+  sidings: [],
   now: NOW_ISO,
   ...over,
 });

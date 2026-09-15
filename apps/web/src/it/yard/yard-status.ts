@@ -346,6 +346,35 @@ export type ConductorHealth = Readonly<{
   last_rc: number | null;
 }>;
 
+/** Whether a car's channel evidence exists — the server's judgement of
+ *  one car on its arrivals siding (the Rust `landing::Landing`, tagged
+ *  on `kind`). EACH SIDING LANDS ON ITS OWN EVIDENCE (design c6bd173e,
+ *  car 3 — edae6e8b): a config car on the cluster converge packet that
+ *  applied its manifests, an infra car on the host converge packets, a
+ *  software car on the train's converged step. `landed` names the
+ *  evidence; `converging` names what is awaited; `unread` says the
+ *  server's window of converge packets began after the merge, so it
+ *  could not judge — which is not "converging", and the floor must not
+ *  draw it as such. */
+export type Landing =
+  | Readonly<{ kind: 'landed'; evidence: string; at: string | null }>
+  | Readonly<{ kind: 'converging'; awaiting: string }>
+  | Readonly<{ kind: 'unread'; why: string }>;
+
+/** One car of a merged train on its siding, as the server judged it. */
+export type SidingCar = Readonly<{
+  /** The car's packet id — the floor joins on it. */
+  id: string;
+  branch: string | null;
+  /** The train that carried it. */
+  train: string;
+  /** The siding: the car's channel, software when the server names one
+   *  this reader has no siding for (the same default a car reads). */
+  channel: DeliveryChannel;
+  /** Null for a landing kind this reader does not know: no reading. */
+  landing: Landing | null;
+}>;
+
 export type YardStatus = Readonly<{
   trains: readonly TrainStatus[];
   dock: readonly DockCar[];
@@ -373,6 +402,10 @@ export type YardStatus = Readonly<{
    *  window and the lane said none held). `null` on a server that
    *  predates the reading. */
   gate_runs: GateRunWindow | null;
+  /** The arrivals sidings, one row per car of every merged train the
+   *  server judged. Empty on a server that predates the lane — the
+   *  floor then reads "landed" off the train, as before. */
+  sidings: readonly SidingCar[];
   now: string;
 }>;
 
@@ -658,6 +691,31 @@ function parseConductor(raw: unknown): ConductorHealth | null {
   };
 }
 
+function parseLanding(raw: unknown): Landing | null {
+  const o = asObjectOrEmpty(raw);
+  switch (o.kind) {
+    case 'landed':
+      return { kind: 'landed', evidence: String(o.evidence ?? ''), at: typeof o.at === 'string' ? o.at : null };
+    case 'converging':
+      return { kind: 'converging', awaiting: String(o.awaiting ?? '') };
+    case 'unread':
+      return { kind: 'unread', why: String(o.why ?? '') };
+    default:
+      return null;
+  }
+}
+
+function parseSidingCar(raw: unknown): SidingCar {
+  const o = asObject(raw, 'siding car');
+  return {
+    id: String(o.id ?? ''),
+    branch: typeof o.branch === 'string' ? o.branch : null,
+    train: String(o.train ?? ''),
+    channel: parseChannel(o.channel) ?? 'software',
+    landing: parseLanding(o.landing),
+  };
+}
+
 function parseHeldGreen(raw: unknown): HeldGreen {
   const o = asObjectOrEmpty(raw);
   return {
@@ -684,6 +742,7 @@ export function parseYardStatus(raw: unknown): YardStatus {
     policy: parsePolicy(o.policy),
     conductor: parseConductor(o.conductor),
     gate_runs: parseGateRunWindow(o.gate_runs_truncated, o.gate_run_window),
+    sidings: Array.isArray(o.sidings) ? o.sidings.map(parseSidingCar) : [],
     now: String(o.now ?? ''),
   };
 }
