@@ -1,0 +1,22 @@
+[Unit]
+Description=Daily protocol drift measurement
+
+[Timer]
+# 05:20, ten minutes after boss-codebase-metrics (05:10) at the quiet tail
+# of the maintenance night: the same host, the same checkout, and no
+# reason to contend with it for the box. The exact minute does not
+# matter — the row is a point-in-time comparison, so a late or missed
+# firing moves `measured.at`, never what the registry and the tree say.
+OnCalendar=*-*-* 05:20:00
+# Cover a host-down window. A missed night is a missing point in the
+# series, and the next firing measures the present, which is the only
+# thing a drift measurement can measure.
+Persistent=true
+RandomizedDelaySec=300
+# The interval lives twice by design and is pinned:
+# infra/lint/timers-leave-a-packet.sh check 9 fails CI if this schedule
+# disagrees with the cadence-silence sweep's declaration for
+# maintenance-protocol-drift (CLAUDE.md §9a).
+
+[Install]
+WantedBy=timers.target

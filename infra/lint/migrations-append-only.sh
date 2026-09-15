@@ -66,7 +66,11 @@ manifest.txt 2026-08-14 removed; the schema directory is now the ordered list (m
 ALLOWLIST
 
 is_allowed() {
-    printf '%s\n' "$ALLOW" | grep -q "^$1 "
+    # A here-string, not `printf | grep -q`: under pipefail a `grep -q`
+    # that exits at its match SIGPIPEs a multi-line writer and the
+    # pipeline reports 141 for an entry that IS listed (measured in
+    # a-kind-bundle-does-not-tighten, backlog 28af807c).
+    grep -q "^$1 " <<< "$ALLOW"
 }
 
 # The trunk to compare against is resolved by lib/trunk-ref.sh — the

@@ -1,0 +1,88 @@
+# ---------------------------------------------------------------------------
+# maintenance-protocol-drift — what is live that the tree does not say, and
+# what does the tree say that is not live: measured daily, onto a packet.
+#
+# Backlog 19dec171, car 1 of 8f4e9cc0 (David, 2026-09-11: "we might need
+# some sort of doc diff view for me to approve"). The comparison already
+# ran on every gate — `infra/lint/the-live-protocols-are-the-authored-
+# protocols.sh` reports field-level drift between `infra/platform/workflows/`
+# and `GET /api/workflows` — and was thrown away with the gate log. The
+# server cannot compute it (no tree), the tree cannot serve it (no page),
+# and the one host with both, boss-gcp's converged checkout, filed nothing.
+# Measured 2026-09-15: 85 admitted kinds, 47 compared, two descriptions
+# adrift (`maintenance-sweep` v2, `ship-a-change` v31), no record of either.
+#
+# WHY A PACKET. The drift is a point-in-time fact about two registries, and
+# "is the operating model the tree describes the one that is running" is a
+# question an operator asks AFTER the fact — the morning a protocol behaves
+# unlike its file, or before approving a publish. A packet per day is a
+# series of those answers in the system of record, queryable by kind, each
+# carrying the exact kind, field, live version and excerpt the lint named,
+# rather than a terminal somebody would have to have been watching. Car 2
+# renders the newest packet on /it/registry; car 3 is the approve.
+#
+# THE SHAPE IS maintenance-codebase-metrics.toml's: a UNIT-RUN CHORE whose
+# `run` step's `result` routes the verdict — the timer's ExecStopPost reads
+# systemd's $SERVICE_RESULT, and a run that died closes this packet
+# "failed" instead of leaving it open looking like a run still in
+# progress. The measurement rides in job metadata under `measured`
+# (head, target, counts, the lint's own exit code, method) and `drift` (the
+# named findings: unauthored, fields, absent, pending, tenants), written by
+# infra/protocol-drift.sh through PATCH /api/jobs/{id}/metadata.
+#
+# WHAT THE ROW DELIBERATELY DOES NOT CARRY: structural fields (steps,
+# subject_kinds, metadata_schema, entitlements). A live row legitimately
+# leads its file between a publish and the car that writes it down, so a
+# structural comparison would report the normal case as drift; the lint
+# compares the three operator-facing scalars (label, description, category)
+# and says why in its own comment. A run that could not READ the registry
+# files nothing and fails: a row saying "0 adrift" from no comparison is
+# the confident wrong answer, not a quiet day.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "maintenance-protocol-drift"
+label = "Protocol drift"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "The daily drift between the authored protocol bundle (infra/platform/workflows) and the live workflow registry: live kinds the tree does not author, bundle kinds not yet admitted, and operator-facing fields (label, description, category) where the live row disagrees with its file — each named by kind, field, live version and excerpt, filed from the converged checkout on boss-gcp."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "systemd-timer" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Compare the bundle to the registry and file the row"
+# Gated so the simulated workforce cannot role-match and "complete" a
+# measurement nobody took; the timer's boss-step call presents the
+# automation actor with this role.
+authority_role = "platform-admin"
+fields = [{ name = "result", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
+title_template = "Drift measured and filed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the service
+# result and exit status) and lands here. This chore's own refusal is one
+# such death: exit 3 when the registry could not be read, so the day is
+# recorded as UNMEASURED rather than as agreeing.
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Drift not measured"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }

@@ -330,6 +330,13 @@ TIMERS=(
     # backfills 467 landings out of git, which is the whole reason the
     # cadence is cheap.
     "boss-codebase-metrics:."
+    # The daily protocol drift (19dec171, car 1 of 8f4e9cc0): the authored
+    # bundle in this checkout against the live workflow registry. Same
+    # host for the same reason as the metrics unit above — the lint that
+    # computes it needs a tree AND a route to the system of record, and
+    # this is the one box with both. On every gate the same comparison
+    # ran and was thrown away with the log; this row is what keeps it.
+    "boss-protocol-drift:."
 )
 
 # Long-running daemons that aren't `boss-*-api` services. Each

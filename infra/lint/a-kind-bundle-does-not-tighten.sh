@@ -165,8 +165,20 @@ fi
 violations=0
 while IFS=$'\t' read -r kind field; do
     [ -z "${kind:-}" ] && continue
-    printf '%s\n' "$BEFORE" | grep -qxF "$kind	$field" && continue
-    printf '%s\n' "$KINDS_BEFORE" | grep -qxF "$kind" || continue
+    # Here-strings, not `printf | grep -q`. bash line-buffers stdout, so a
+    # 48-line list leaves as 48 write() calls; `grep -q` exits at the
+    # first match; the writes printf still owes are SIGPIPE, and under
+    # `set -o pipefail` the pipeline reports 141 for a pair that IS in the
+    # list. Measured 2026-09-15 (gate-run b28b9998, backlog 28af807c): a
+    # bundle compared to ITSELF was refused with
+    # `credential-rotation.credential is now required` — line 11 of the
+    # list — and reproduced at 1 in 3000 with the pipeline pinned to one
+    # contended cpu. The second line's `|| continue` is the mirror image:
+    # a 141 there would wave a REAL tightening through as a new kind. A
+    # here-string is written whole before grep starts and is not a
+    # pipeline, so grep -q cannot SIGPIPE the writer.
+    grep -qxF "$kind	$field" <<< "$BEFORE" && continue
+    grep -qxF "$kind" <<< "$KINDS_BEFORE" || continue
     if [ "$violations" -eq 0 ]; then
         echo "a-kind-bundle-does-not-tighten: a required field was added to an existing step kind." >&2
         echo "  A StepType bundle is GLOBAL and UNPINNED — no step_type_version exists — so this" >&2

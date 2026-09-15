@@ -32,6 +32,8 @@
 #   boss-codebase-metrics.{timer,service}      role off-cluster-observer (the metrics
 #                                              timer — it was failed in the inventory,
 #                                              but failing is not the same as redundant)
+#   boss-protocol-drift.{timer,service}        role off-cluster-observer (the daily
+#                                              protocol-drift measurement, 19dec171)
 #   boss-ml-inference-batch.{timer,service}    role ml-batch-host — DELIBERATE here:
 #                                              fires 02:30, files its packet into the SoR
 #   wg-quick@*, systemd-journal-gatewayd, caddy, postgresql — not boss-*,

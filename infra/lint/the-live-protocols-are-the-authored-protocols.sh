@@ -121,7 +121,7 @@
 # can act on a verdict.
 #
 # Usage:  infra/lint/the-live-protocols-are-the-authored-protocols.sh
-#           [--require-live] [--self-test]
+#           [--require-live] [--report-json <file>] [--self-test]
 #
 #   --require-live  For a caller with somewhere to put the answer (a
 #                   sweep, a cadence, an operator asking the question
@@ -130,6 +130,15 @@
 #                   0, and a field drift is a verdict (2) rather than a
 #                   report. A check that passes when it could not read
 #                   is worse than no check.
+#   --report-json   Write the SAME facts the text report prints, as one
+#                   JSON object, to <file> — for a caller that files
+#                   them rather than reads them (infra/protocol-drift.sh,
+#                   the daily measurement on boss-gcp; backlog 19dec171).
+#                   The verdict is unchanged by this flag. The file is
+#                   written only when the live comparison RAN: a skip
+#                   writes nothing and says so, because a report of no
+#                   comparison would read as "no drift". Its shape is
+#                   `write_report`'s comment below.
 #   --self-test     Run the fixture cases and say what they proved.
 #                   They run on every invocation regardless; the flag
 #                   only makes them speak.
@@ -179,9 +188,13 @@ FIELD_FLOOR=20
 
 REQUIRE_LIVE=0
 SELF_TEST=0
+REPORT_JSON=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --require-live) REQUIRE_LIVE=1 ;;
+        --report-json)
+            [ -n "${2:-}" ] || { echo "$NAME: --report-json needs a file path" >&2; exit 64; }
+            REPORT_JSON="$2"; shift ;;
         --self-test)    SELF_TEST=1 ;;
         *) echo "$NAME: unknown argument: $1" >&2; exit 64 ;;
     esac
@@ -369,6 +382,111 @@ if compared < floor:
 PY
 }
 
+# ---------------------------------------------------------------------------
+# The JSON report — the text report's facts, in a shape a caller can FILE.
+# ---------------------------------------------------------------------------
+# `write_report <file> <verdict>` reads the same variables the text
+# report below prints from — `live_kinds`, `authored`, `unauthored`,
+# `EXEMPT`, `fields_out` (the comparator's TSV lines), `pending`,
+# `tenant_lines`, `problems` — so the two cannot say different things:
+# one source, two renderings (CLAUDE.md §9a). Nothing is re-derived and
+# nothing is reduced that the text does not also reduce: the DRIFT
+# windows are the same 90-character excerpts, with both full copies at
+# their named homes (the file in the tree, the row at GET /api/workflows).
+#
+# Written only when the live comparison RAN. Under a skip there is no
+# report, and the skip says so — a report carrying "0 drifted" from a
+# comparison that never happened is exactly the confident wrong answer
+# the floor in fields_report refuses (§Doors). The shape:
+#
+#   { at, target, verdict, problems,
+#     live:     { admitted },                 what the registry admits
+#     authored: { count },                    what this tree writes down
+#     exempt:   [kind…], unauthored: [kind…], live kinds no file authors
+#     fields:   { parsed, compared, drifted,
+#                 drift:  [{kind, field, live_version, at, tree_len,
+#                           live_len, tree_window, live_window}…],
+#                 absent: [{kind, field}…] }, the file makes no claim
+#     pending:  [kind…],                      authored, not yet admitted
+#     tenants:  [{file, not_admitted, total}…] }
+#
+# `verdict` is the exit code THIS invocation goes on to exit with, so a
+# caller filing the report can record it without parsing stderr — and
+# so a report from a bare run (drift exits 0) and one from --require-live
+# (drift exits 2) are distinguishable on the record.
+write_report() { # <file> <verdict>
+    local out="$1" verdict="$2" t
+    t=$(mktemp -d) || { echo "$NAME: no writable temp dir, so the JSON report could not be assembled" >&2; return 1; }
+    printf '%s\n' "$live_kinds"   > "$t/live"
+    printf '%s\n' "$authored"     > "$t/authored"
+    printf '%s\n' "$unauthored"   > "$t/unauthored"
+    printf '%s\n' "$fields_out"   > "$t/fields"
+    printf '%s\n' "$pending"      > "$t/pending"
+    printf '%s\n' "$tenant_lines" > "$t/tenants"
+    printf '%s\n' ${EXEMPT[@]+"${EXEMPT[@]}"} > "$t/exempt"
+    python3 - "$t" "$out" "$URL" "$verdict" "$problems" <<'PY' || { rm -rf "$t"; return 1; }
+import json, pathlib, sys, datetime
+
+t, out, url, verdict, problems = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5])
+
+def lines(name):
+    return [l for l in (t / name).read_text().split("\n") if l != ""]
+
+def num(s, prefix):
+    v = s[len(prefix):] if s.startswith(prefix) else s
+    try:
+        return int(v)
+    except ValueError:
+        return None
+
+counts = {"parsed": None, "compared": None, "drifted": None}
+drift, absent = [], []
+for line in lines("fields"):
+    cells = line.split("\t")
+    tag = cells[0]
+    if tag == "COUNTS":
+        for cell in cells[1:]:
+            k, _, v = cell.partition("=")
+            if k in counts:
+                counts[k] = num(v, "")
+    elif tag == "DRIFT" and len(cells) >= 9:
+        drift.append({
+            "kind": cells[1], "field": cells[2],
+            "live_version": num(cells[3], "v"),
+            "at": num(cells[4], "at="),
+            "tree_len": num(cells[5], "tree="), "live_len": num(cells[6], "live="),
+            "tree_window": cells[7], "live_window": cells[8],
+        })
+    elif tag == "ABSENT" and len(cells) >= 3:
+        absent.append({"kind": cells[1], "field": cells[2]})
+
+tenants = []
+for line in lines("tenants"):
+    cells = line.split("\t")
+    if len(cells) >= 3:
+        tenants.append({"file": cells[0], "not_admitted": num(cells[1], ""), "total": num(cells[2], "")})
+
+report = {
+    "at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "target": url,
+    "verdict": verdict,
+    "problems": problems,
+    "live": {"admitted": len(lines("live"))},
+    "authored": {"count": len(lines("authored"))},
+    "exempt": lines("exempt"),
+    "unauthored": lines("unauthored"),
+    "fields": {**counts, "drift": drift, "absent": absent},
+    "pending": lines("pending"),
+    "tenants": tenants,
+}
+if len(drift) != (counts["drifted"] or 0):
+    print(f"the report would carry {len(drift)} DRIFT line(s) against a drifted={counts['drifted']} count — the comparator's lines and its count disagree, so nothing was written", file=sys.stderr)
+    sys.exit(1)
+pathlib.Path(out).write_text(json.dumps(report, indent=2) + "\n")
+PY
+    rm -rf "$t"
+}
+
 # Fixtures, then the six refusals the comparator owes. Run on EVERY
 # invocation, not behind a flag: on the forge host the live half below
 # SKIPS, and without this the gate would exercise none of this code at
@@ -470,6 +588,41 @@ FX
 
     FIELD_FLOOR="$FIELD_FLOOR_SAVED"
 
+    # 9. THE JSON REPORT carries the comparator's facts, not a retelling
+    #    of them: driven from the SAME drift fixture as case 2, in a
+    #    subshell that stands in for the live half's variables, it must
+    #    name the same kind, field, live version and excerpt, count the
+    #    same drift, and carry the verdict it was handed.
+    out=$(fields_report "$t/bundle" "$t/drift.json" 2>/dev/null)
+    (
+        live_kinds=$'alpha\nbeta\ngamma'; authored=$'alpha\nbeta\ndelta'; unauthored="gamma"
+        fields_out="$out"; pending="delta"; tenant_lines=$'examples/x/seeds/workflows.toml\t3\t25'
+        problems=1; EXEMPT=()
+        write_report "$t/report.json" 2
+    ) || { echo "self-test FAILED: write_report refused the drift fixture" >&2; rm -rf "$t"; return 1; }
+    out=$(python3 - "$t/report.json" <<'PY' 2>&1
+import json, sys
+r = json.load(open(sys.argv[1]))
+want = {
+    "live.admitted": (r["live"]["admitted"], 3), "authored.count": (r["authored"]["count"], 3),
+    "unauthored": (r["unauthored"], ["gamma"]), "pending": (r["pending"], ["delta"]),
+    "exempt": (r["exempt"], []), "verdict": (r["verdict"], 2), "problems": (r["problems"], 1),
+    "fields.parsed": (r["fields"]["parsed"], 2), "fields.compared": (r["fields"]["compared"], 2),
+    "fields.drifted": (r["fields"]["drifted"], 1), "len(fields.drift)": (len(r["fields"]["drift"]), 1),
+    "drift.kind": (r["fields"]["drift"][0]["kind"], "beta"),
+    "drift.field": (r["fields"]["drift"][0]["field"], "description"),
+    "drift.live_version": (r["fields"]["drift"][0]["live_version"], 3),
+    "tenants": (r["tenants"], [{"file": "examples/x/seeds/workflows.toml", "not_admitted": 3, "total": 25}]),
+}
+bad = [f"{k}: got {g!r}, want {w!r}" for k, (g, w) in want.items() if g != w]
+if "deleted last week" not in r["fields"]["drift"][0]["live_window"]:
+    bad.append("drift.live_window carries no excerpt of the live text")
+if not r["at"].endswith("Z") or r["target"] == "":
+    bad.append("at/target missing")
+print("\n".join(bad)); sys.exit(1 if bad else 0)
+PY
+    ) || { echo "self-test FAILED: the JSON report does not carry the text report's facts: $out" >&2; rm -rf "$t"; return 1; }
+
     # 8. THE UNREACHABLE CASE, end to end, because it is the one that
     #    must never read as success. `--require-live` is the mode for a
     #    caller with somewhere to put the answer, and it must exit 75
@@ -488,7 +641,7 @@ FX
     fi
 
     rm -rf "$t"
-    [ "$SELF_TEST" -eq 1 ] && echo "$NAME: self-test ok — agreement is silent and counted, a drifting description is named by kind/field/version with an excerpt, a field the file does not claim is named and not counted as drift, a comparison below the floor and a retired-only row are refused, an unparseable answer and an unreadable bundle file each refuse distinctly, and --require-live exits 75 naming the target it could not reach"
+    [ "$SELF_TEST" -eq 1 ] && echo "$NAME: self-test ok — agreement is silent and counted, a drifting description is named by kind/field/version with an excerpt, a field the file does not claim is named and not counted as drift, a comparison below the floor and a retired-only row are refused, an unparseable answer and an unreadable bundle file each refuse distinctly, and --require-live exits 75 naming the target it could not reach, and the JSON report carries the same kind/field/version/excerpt, counts and verdict as the text"
     return 0
 }
 
@@ -671,6 +824,11 @@ skip() {
     echo "  NOTHING IS CLAIMED about what the running registry admits, or about" >&2
     echo "  whether any live row still says what its file says — the field" >&2
     echo "  comparison did not run, so ZERO kinds were compared." >&2
+    # A report is the comparison, rendered; with no comparison there is
+    # nothing to render, and a file saying "0 drifted" would be read as
+    # a clean bill by the caller that asked for it (infra/protocol-drift.sh
+    # refuses on exactly this line).
+    [ -z "$REPORT_JSON" ] || echo "  no report was written to $REPORT_JSON — a report of no comparison would read as no drift." >&2
     [ "$problems" -eq 0 ] || exit 1
     # A caller with somewhere to put the answer runs `--require-live`,
     # and for it "I could not read the registry" must not be the same
@@ -887,6 +1045,30 @@ if [ -n "$absent_lines" ]; then
     done
 fi
 
+# Two derived lists the tail prints, computed here so the JSON report
+# can carry them too. Neither is a failure (their comment is below,
+# where they are printed).
+pending=$(LC_ALL=C comm -13 <(printf '%s\n' "$live_kinds") <(printf '%s\n' "$bundle_kinds") | LC_ALL=C sed '/^$/d')
+tenant_lines=$(for f in "${tenant_files[@]}"; do
+    all=$(tenant_kinds_of "$f" | LC_ALL=C sort -u | LC_ALL=C sed '/^$/d')
+    [ -n "$all" ] || continue
+    absent=$(LC_ALL=C comm -13 <(printf '%s\n' "$live_kinds") <(printf '%s\n' "$all") | LC_ALL=C sed '/^$/d' | wc -l | tr -d ' ')
+    total=$(printf '%s\n' "$all" | wc -l | tr -d ' ')
+    printf '%s\t%s\t%s\n' "$f" "$absent" "$total"
+done)
+
+# The verdict, decided once so the report and the exit cannot disagree.
+verdict=0
+if [ "$problems" -gt 0 ]; then verdict=1
+elif [ "$drift_n" -gt 0 ] && [ "$REQUIRE_LIVE" -eq 1 ]; then verdict=2
+fi
+if [ -n "$REPORT_JSON" ]; then
+    write_report "$REPORT_JSON" "$verdict" || {
+        echo "$NAME: the JSON report could not be written to $REPORT_JSON — the caller asked for the record and did not get it" >&2
+        exit 1
+    }
+fi
+
 [ "$problems" -eq 0 ] || exit 1
 
 # A drift is a verdict only for a caller that can act on it.
@@ -912,13 +1094,8 @@ echo "$msg"
 # permanent and correct state for one of the two tenants this tree
 # ships — counted rather than named, so a standing fact cannot train
 # anyone to skim past the line above it.
-pending=$(LC_ALL=C comm -13 <(printf '%s\n' "$live_kinds") <(printf '%s\n' "$bundle_kinds") | LC_ALL=C sed '/^$/d')
 [ -z "$pending" ] || printf '  authored in the bundle, not yet admitted (awaiting converge + seed): %s\n' "$(printf '%s\n' $pending | tr '\n' ' ')"
-for f in "${tenant_files[@]}"; do
-    all=$(tenant_kinds_of "$f" | LC_ALL=C sort -u | LC_ALL=C sed '/^$/d')
-    [ -n "$all" ] || continue
-    absent=$(LC_ALL=C comm -13 <(printf '%s\n' "$live_kinds") <(printf '%s\n' "$all") | LC_ALL=C sed '/^$/d' | wc -l | tr -d ' ')
-    total=$(printf '%s\n' "$all" | wc -l | tr -d ' ')
+[ -z "$tenant_lines" ] || printf '%s\n' "$tenant_lines" | while IFS=$'\t' read -r f absent total; do
     [ "$absent" -eq 0 ] || printf '  %s: %s of %s kinds not admitted here (a tenant this deployment does not run)\n' "$f" "$absent" "$total"
 done
 exit 0

@@ -152,7 +152,12 @@ while IFS=$'\t' read -r kind field ftype freq; do
         # A kind existing on trunk must still exist: removal changes
         # the contract of every in-flight step of that kind (unknown
         # kinds validate permissively) through the unversioned door.
-        if ! printf '%s\n' "$head_rows" | grep -qxF "$(printf '%s\t-\tKIND\t-' "$kind")"; then
+        # Here-strings, not `printf | grep -q`: under pipefail a `grep -q`
+        # that exits at its match SIGPIPEs the multi-line writer and the
+        # pipeline reports 141 for a row that IS present — here a false
+        # "kind removed"; below, a real tightening waved through as a
+        # new kind (measured in a-kind-bundle-does-not-tighten, 28af807c).
+        if ! grep -qxF "$(printf '%s\t-\tKIND\t-' "$kind")" <<< "$head_rows"; then
             say "steptype-bundle-ratchet: kind \`$kind\` exists on the trunk and is removed here." \
                 " In-flight steps of that kind lose their contract at the next restart;" \
                 " retire behaviour through the versioned workflow path instead (cdc23602)."
@@ -179,7 +184,7 @@ EOF
 # New fields on kinds that already existed on the trunk must be optional.
 while IFS=$'\t' read -r kind field ftype freq; do
     [ -n "$kind" ] && [ "$ftype" != "KIND" ] || continue
-    printf '%s\n' "$base_rows" | grep -qxF "$(printf '%s\t-\tKIND\t-' "$kind")" || continue  # new kind: free
+    grep -qxF "$(printf '%s\t-\tKIND\t-' "$kind")" <<< "$base_rows" || continue  # new kind: free
     [ -n "$(printf '%s\n' "$base_rows" | awk -F'\t' -v k="$kind" -v f="$field" '$1==k && $2==f')" ] && continue  # existed: handled above
     if [ "$freq" = "true" ]; then
         say "steptype-bundle-ratchet: NEW required field \`$field\` on existing kind \`$kind\` — this retightens every in-flight \`$kind\` step at the next restart. Declare it required = false, or carry the contract on a new workflow version instead."

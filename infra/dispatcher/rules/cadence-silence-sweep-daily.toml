@@ -63,6 +63,14 @@
 # suppressed by one undrained packet for nineteen days while the public
 # mirror drifted 238 commits behind.
 #
+# v4, 2026-09-15: `maintenance-protocol-drift` at 1440, the daily
+# measurement of what is live that the tree does not say and what the
+# tree says that is not live (19dec171). The same argument as v3, one
+# registry over: a drift series whose cadence stops does not look broken,
+# it looks like a tree and a registry that agree — and "no packet today"
+# would be read as exactly the clean bill the measurement exists to
+# refuse to give from no comparison.
+#
 # v3, 2026-09-11: `maintenance-codebase-metrics` at 1440, the daily
 # codebase-trend measurement (06048ade). It belongs here for a reason
 # specific to what it is: the chore's whole output is a SERIES, and a
@@ -94,12 +102,13 @@ declared kind and files, refreshes, or closes ONE alarm packet per
 silent kind. (Ratchet history: 59 -> 60, 2026-09-08, migration
 202609082300.)
 """
-# v3 carries one more declaration (maintenance-codebase-metrics, 1440) and
-# nothing else. CHANGING A RULE IS BUMPING THIS INTEGER: the seed writes
-# the row at the version this file declares, retiring the incumbent, so
-# a bump is the whole act and no migration follows it.
-version = 3
+# v4 carries one more declaration (maintenance-protocol-drift, 1440) and
+# nothing else; v3 did the same for maintenance-codebase-metrics.
+# CHANGING A RULE IS BUMPING THIS INTEGER: the seed writes the row at the
+# version this file declares, retiring the incumbent, so a bump is the
+# whole act and no migration follows it.
+version = 4
 schedule = { cadence = "daily", anchor_date = "2026-09-09" }
 [[rule.do]]
 handler = "cadence.silence.sweep"
-args = { "interval_minutes.maintenance-audit-integrity" = "1440", "interval_minutes.maintenance-backup" = "1440", "interval_minutes.maintenance-boss-gcp-converge" = "30", "interval_minutes.maintenance-cluster-converge" = "10", "interval_minutes.maintenance-cluster-watchdog" = "5", "interval_minutes.maintenance-codebase-metrics" = "1440", "interval_minutes.maintenance-conservation-invariants" = "60", "interval_minutes.maintenance-disk-floor-sweep" = "60", "interval_minutes.maintenance-estate-observe-host" = "1440", "interval_minutes.maintenance-estate-observe-units" = "5", "interval_minutes.maintenance-files-gc" = "1440", "interval_minutes.maintenance-forge-converge" = "10", "interval_minutes.maintenance-ledger-recognize" = "1440", "interval_minutes.maintenance-ledger-replay" = "1440", "interval_minutes.maintenance-messages-purge" = "1440", "interval_minutes.maintenance-ml-inference-batch" = "1440", "interval_minutes.maintenance-reap-ci-jobs" = "1440", "interval_minutes.maintenance-search-reindex" = "10", "interval_minutes.maintenance-views-catchup" = "5" }
+args = { "interval_minutes.maintenance-audit-integrity" = "1440", "interval_minutes.maintenance-backup" = "1440", "interval_minutes.maintenance-boss-gcp-converge" = "30", "interval_minutes.maintenance-cluster-converge" = "10", "interval_minutes.maintenance-cluster-watchdog" = "5", "interval_minutes.maintenance-codebase-metrics" = "1440", "interval_minutes.maintenance-conservation-invariants" = "60", "interval_minutes.maintenance-disk-floor-sweep" = "60", "interval_minutes.maintenance-estate-observe-host" = "1440", "interval_minutes.maintenance-estate-observe-units" = "5", "interval_minutes.maintenance-files-gc" = "1440", "interval_minutes.maintenance-forge-converge" = "10", "interval_minutes.maintenance-ledger-recognize" = "1440", "interval_minutes.maintenance-ledger-replay" = "1440", "interval_minutes.maintenance-messages-purge" = "1440", "interval_minutes.maintenance-ml-inference-batch" = "1440", "interval_minutes.maintenance-protocol-drift" = "1440", "interval_minutes.maintenance-reap-ci-jobs" = "1440", "interval_minutes.maintenance-search-reindex" = "10", "interval_minutes.maintenance-views-catchup" = "5" }

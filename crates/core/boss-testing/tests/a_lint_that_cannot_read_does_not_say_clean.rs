@@ -43,6 +43,21 @@
 //! unreadable-index failures ownership cannot reproduce, and it is the only
 //! way to break ONE git call while leaving a lint's own git-using
 //! self-test working.
+//!
+//! A SECOND WAY TO ANSWER WRONGLY, measured 2026-09-15 (gate-run b28b9998,
+//! backlog 28af807c). The clean fixture below — a bundle compared to
+//! itself — was refused with `credential-rotation.credential is now
+//! required`, once, on a loaded gate, and passed on re-gate. Not an
+//! anchoring fault: the lint `cd`s to its own copy's root, which is the
+//! fixture, and the test names the trunk (`BOSS_TRUNK_REF=main`), so HEAD
+//! and trunk were both the fixture's and identical. The membership test
+//! was `printf '%s\n' "$BEFORE" | grep -qxF "$pair"` under `set -o
+//! pipefail`: bash line-buffers stdout, so the 48-line list leaves as 48
+//! writes; `grep -q` exits at its match; the writes still owed are SIGPIPE
+//! and the pipeline reports 141 for a pair that IS present. Reproduced at
+//! 1 in 3000 with the pipeline pinned to one contended cpu. The roster
+//! test refuses that shape; the lints use here-strings, which are written
+//! whole before grep starts and are not pipelines.
 
 use boss_testing::repo_root;
 use std::path::{Path, PathBuf};
@@ -725,6 +740,64 @@ fn a_converted_lint_stays_converted() {
                  became \"no trunk ref found — fetch the trunk\".\n  {l}",
                 i + 1
             );
+            assert!(
+                !is_a_list_piped_into_grep_q(l),
+                "{lint}.sh:{} tests membership with `printf '%s\\n' \
+                 \"$LIST\" | grep -q` under `set -o pipefail`. bash \
+                 line-buffers stdout, so the list leaves in one write() \
+                 per line; `grep -q` exits at the first match; every \
+                 write printf still owes is SIGPIPE, and pipefail reports \
+                 141 for a needle that IS in the list. On a loaded gate \
+                 this reported `credential-rotation.credential is now \
+                 required` against a bundle compared to ITSELF (gate-run \
+                 b28b9998, backlog 28af807c) — and the mirror-image line \
+                 (`|| continue`) would wave a real tightening through. A \
+                 here-string (`grep -q … <<< \"$LIST\"`) is written whole \
+                 before grep starts and is not a pipeline.\n  {l}",
+                i + 1
+            );
         }
+    }
+}
+
+/// The exact shape that fired, and no wider: a multi-line list written
+/// by `printf '%s\n'` on the LEFT of a pipe whose right side is a
+/// `grep -q`. `printf '%s'` of a single line is one write and cannot be
+/// interrupted; a `grep` without `-q` drains its input and cannot
+/// SIGPIPE its writer; a here-string is not a pipeline. Scoped this
+/// tightly so it cannot red on the lints' own self-tests, which pipe a
+/// captured `$out` into `grep -q` legitimately (one write, one line).
+fn is_a_list_piped_into_grep_q(line: &str) -> bool {
+    let Some((left, right)) = line.split_once('|') else {
+        return false;
+    };
+    left.trim_start().starts_with("printf '%s\\n' \"$") && right.trim_start().starts_with("grep -q")
+}
+
+#[test]
+fn the_shape_check_reads_the_line_that_fired_and_not_its_repair() {
+    let fired = r#"    printf '%s\n' "$BEFORE" | grep -qxF "$kind	$field" && continue"#;
+    assert!(
+        is_a_list_piped_into_grep_q(fired),
+        "the line that reported a present field as newly required must be caught"
+    );
+    let mirror = r#"    printf '%s\n' "$KINDS_BEFORE" | grep -qxF "$kind" || continue"#;
+    assert!(
+        is_a_list_piped_into_grep_q(mirror),
+        "the mirror-image line, which would wave a real tightening through, must be caught"
+    );
+    for repaired in [
+        r#"    grep -qxF "$kind	$field" <<< "$BEFORE" && continue"#,
+        // One line, one write: a self-test reading its own captured output.
+        r#"    if printf '%s' "$out" | grep -q "VIOLATION"; then"#,
+        // Drains its input; the writer is never SIGPIPEd.
+        r#"    printf '%s\n' "$BEFORE" | grep -c . >/dev/null"#,
+        // A comment quoting the idiom is not the idiom.
+        r#"# was: printf '%s\n' "$BEFORE" | grep -qxF"#,
+    ] {
+        assert!(
+            !is_a_list_piped_into_grep_q(repaired),
+            "a shape that cannot SIGPIPE its writer must not be refused: {repaired}"
+        );
     }
 }

@@ -116,6 +116,7 @@ NODE_ID="boss-gcp"
 #   boss-estate-observe-host   role off-cluster-observer
 #   boss-codebase-metrics      role off-cluster-observer (failing in the
 #                              inventory; failing is not redundant)
+#   boss-protocol-drift        role off-cluster-observer (19dec171)
 #   boss-ml-inference-batch    role ml-batch-host — deliberate here
 KEEP_STEMS=(
     boss-ops-runner
@@ -123,6 +124,7 @@ KEEP_STEMS=(
     boss-estate-observe-units
     boss-estate-observe-host
     boss-codebase-metrics
+    boss-protocol-drift
     boss-ml-inference-batch
 )
 is_kept() { # <unit>

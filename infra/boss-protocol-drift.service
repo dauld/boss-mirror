@@ -1,0 +1,60 @@
+# The daily protocol drift, filed onto a packet (backlog 19dec171, car 1
+# of 8f4e9cc0).
+#
+# What is live that the tree does not say, and what does the tree say
+# that is not live. The comparison already ran on every gate —
+# infra/lint/the-live-protocols-are-the-authored-protocols.sh — and was
+# thrown away with the gate log; this unit runs the same lint in its
+# report mode and files what it found.
+#
+# WHY THIS HOST. The lint compares the authored bundle in a CHECKOUT
+# against the live registry, so it needs both a tree and a route to the
+# system of record, and this is the box that has both: boss-gcp-converge
+# fetches forge main into /opt/boss every thirty minutes, and the SoR is
+# one hop away. The cluster has no checkout (the server cannot compute
+# the drift), the tree has no page (it cannot serve it) — which is why
+# this is a host timer beside boss-codebase-metrics and not a CronJob.
+#
+# WHICH TREE. The lint reads the working tree it lives in, so `--repo
+# /opt/boss` names the checkout the converge keeps on `main`,
+# fast-forwarded to forge main (the converge refuses to run at all unless
+# the checkout is clean and on main). The row carries `head` and
+# `head_at`, so a measurement taken against a stale checkout says how
+# stale it was instead of looking current.
+[Unit]
+Description=BOSS daily protocol drift (authored bundle vs live workflow registry)
+Documentation=file:/opt/boss/infra/protocol-drift.sh
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# One registry read, 47 file parses and a python comparison: about two
+# seconds measured. The ceiling is for a contended box, not the work.
+TimeoutStartSec=10min
+# THE SYSTEM OF RECORD, PINNED INLINE WITH env(1) on every line that
+# speaks to it. deploy-services' shared jobs-url.conf drop-in points this
+# host's timer fleet at the legacy 127.0.0.1 instance, drop-in env
+# outranks unit Environment=, and that instance has never heard of a
+# bundle-only kind: the packet would die 400 in ExecStartPre and the row
+# would be PATCHed onto an instance nobody reads. Same fix the estate
+# observers needed (91ddebfb), and timers-leave-a-packet check 7 makes
+# it the rule. Here the pin does double duty: the SAME URL is the
+# registry the lint reads, so the drift is filed where it was measured.
+#
+# ExecStartPre=- because the packet is VISIBILITY, NEVER A PRECONDITION —
+# and here the packet is also where the work LANDS, so: if the API is
+# unreachable the wrap exits 0 and lets the run proceed, the run then
+# cannot read the registry either, refuses with exit 3 and the lint's
+# stderr whole, and the failed unit is a state somebody notices. Nothing
+# is filed from no comparison.
+# AS THE CHECKOUT'S OWNER. The row's `head` is `git rev-parse` over
+# /opt/boss, and git refuses a repository owned by somebody else
+# ("dubious ownership") — the exit 3 boss-codebase-metrics took on its
+# first-ever firing (2026-09-12 05:14Z) with no User=. The siblings that
+# read git here say the same. Not `safe.directory` (infra/gate.sh says
+# why), and nothing here needs root.
+User=david
+ExecStartPre=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-maintenance-wrap.sh maintenance-protocol-drift "Protocol drift"
+ExecStart=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/protocol-drift.sh file --repo /opt/boss
+ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-step.sh maintenance-protocol-drift run

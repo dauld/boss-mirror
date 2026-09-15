@@ -165,7 +165,7 @@ scan_paths() {
             line=${rest%%:*}
             content=${rest#*:}
             if [ "$id" = "token-assignment" ] &&
-                printf '%s\n' "$content" | grep -qiE "$PLACEHOLDER_RE"; then
+                grep -qiE "$PLACEHOLDER_RE" <<< "$content"; then
                 continue
             fi
             if allowed "$file" "$id" "$allow"; then
