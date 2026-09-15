@@ -82,7 +82,6 @@ pub(crate) fn design_job_body(
     markdown: &str,
     questions: &[Value],
     no_open_questions: bool,
-    opened_on: &str,
     answers: Option<&str>,
 ) -> Value {
     let mut body = json!({
@@ -100,7 +99,10 @@ pub(crate) fn design_job_body(
         "owner_id": "emp-david",
         "priority": "standard",
         "tags": ["design"],
-        "opened_on": opened_on,
+        // No `opened_on`: the create handler injects it off its clock
+        // and stamps the filing instant as `metadata.opened_at` only
+        // when it does — this body's `today` silenced the stamp on
+        // every design doc (dd3624a0, 2026-09-15; envelope: a7a07ffb).
         "subject": {"subject_kind": "custom", "id": "boss-platform"},
         "metadata": {
             "title": title,
@@ -181,7 +183,6 @@ pub async fn run(
     no_questions: bool,
     doc_path: Option<String>,
     answers: Option<String>,
-    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
     // Refuse before filing, not after: a doc with neither questions nor
     // the flag is the exact packet this verb exists to stop reaching a
@@ -253,7 +254,6 @@ pub async fn run(
         &markdown,
         &parsed,
         no_questions,
-        &now.date_naive().to_string(),
         answered.as_ref().map(|(id, _)| id.as_str()),
     );
     let created = api(
@@ -354,8 +354,8 @@ mod tests {
     /// own review step — the trap the module header records.
     #[test]
     fn the_flag_is_always_present() {
-        let with = design_job_body("t", "m", &[], true, "2026-09-02", None);
-        let without = design_job_body("t", "m", &[], false, "2026-09-02", None);
+        let with = design_job_body("t", "m", &[], true, None);
+        let without = design_job_body("t", "m", &[], false, None);
         assert_eq!(with["metadata"]["no_open_questions"], json!("true"));
         assert_eq!(without["metadata"]["no_open_questions"], json!("false"));
     }
@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn the_review_step_carries_the_questions_too() {
         let q = vec![question("Q1", "which brick first?", "the cheap one")];
-        let body = design_job_body("t", "# doc", &q, false, "2026-09-02", None);
+        let body = design_job_body("t", "# doc", &q, false, None);
         let step = review_step_metadata(&body, "docs/design/x.md");
         assert_eq!(step["questions"].as_array().map(Vec::len), Some(1));
         assert_eq!(step["questions"][0]["anchor"], json!("Q1"));
@@ -395,9 +395,13 @@ mod tests {
     /// demands rather than asking my memory. `gate.rs` carries the same
     /// pin for the same reason (its verb shipped unable to file too,
     /// for want of `tags`); this crate now has it on both bodies.
+    ///
+    /// `opened_on` is injected by the handler before it deserializes
+    /// (the body leaves it to the clock, dd3624a0), so injecting it
+    /// here reproduces what the type actually sees — as gate.rs does.
     #[test]
     fn the_body_deserializes_into_the_job_type_the_api_parses_it_as() {
-        let body = design_job_body("the doc", "# body", &[], true, "2026-09-04", None);
+        let body = as_the_handler_sees_it(design_job_body("the doc", "# body", &[], true, None));
         let job: boss_core::job::Job = serde_json::from_value(body).expect(
             "design body must deserialize into Job — this is verbatim what the API does before \
              it admits the packet",
@@ -405,6 +409,34 @@ mod tests {
         assert_eq!(job.kind, "design-doc");
         assert_eq!(job.title, "the doc");
         assert_eq!(job.owner_id, "emp-david");
+    }
+
+    /// The create handler injects `opened_on` off its clock before it
+    /// deserializes the body (boss-jobs http/jobs.rs); a test that asks
+    /// `Job` what it admits has to do the same.
+    fn as_the_handler_sees_it(mut body: Value) -> Value {
+        body.as_object_mut()
+            .expect("body is an object")
+            .insert("opened_on".into(), json!("2026-09-15"));
+        body
+    }
+
+    /// The create handler stamps `metadata.opened_at` — the precise
+    /// filing instant behind the one-day `opened_on` — ONLY when its
+    /// clock owns the date, i.e. when the body carries no `opened_on`
+    /// (boss-jobs http/jobs.rs). This body sent `now.date_naive()`, so
+    /// no design doc had a filing instant (measured 2026-09-15: the
+    /// three newest design-docs all lacked `opened_at` while every
+    /// pr-train beside them carried one; backlog dd3624a0). `boss
+    /// design` files today's doc, never a backdated one.
+    #[test]
+    fn the_design_body_leaves_the_open_date_to_the_api_clock() {
+        let body = design_job_body("t", "m", &[], true, None);
+        assert!(
+            body.get("opened_on").is_none(),
+            "`opened_on` must be left to the create handler's clock, \
+             or the packet gets no `opened_at`: {body}"
+        );
     }
 
     /// The title is written TWICE by design — once on the envelope
@@ -415,14 +447,7 @@ mod tests {
     /// another is the drift this costs nothing to prevent.
     #[test]
     fn the_envelope_title_and_the_tracker_title_are_the_same_string() {
-        let body = design_job_body(
-            "stations hold, they do not drop",
-            "# doc",
-            &[],
-            true,
-            "2026-09-04",
-            None,
-        );
+        let body = design_job_body("stations hold, they do not drop", "# doc", &[], true, None);
         assert_eq!(body["title"], json!("stations hold, they do not drop"));
         assert_eq!(body["title"], body["metadata"]["title"]);
         assert_eq!(
@@ -460,15 +485,16 @@ mod tests {
     #[test]
     fn answers_rides_as_the_declared_edge_and_is_absent_otherwise() {
         const FEEDBACK: &str = "61366e5a-d15f-472c-a667-f4cc007ef8f8";
-        let with = design_job_body("t", "m", &[], false, "2026-09-15", Some(FEEDBACK));
+        let with = design_job_body("t", "m", &[], false, Some(FEEDBACK));
         assert_eq!(with["metadata"]["answers"], json!(FEEDBACK));
-        let without = design_job_body("t", "m", &[], false, "2026-09-15", None);
+        let without = design_job_body("t", "m", &[], false, None);
         assert!(
             without["metadata"].get("answers").is_none(),
             "a design that answers nothing carries no edge key at all"
         );
         // Still the body the API admits.
-        let job: boss_core::job::Job = serde_json::from_value(with).expect("deserializes");
+        let job: boss_core::job::Job =
+            serde_json::from_value(as_the_handler_sees_it(with)).expect("deserializes");
         assert_eq!(job.metadata["answers"], json!(FEEDBACK));
     }
 
