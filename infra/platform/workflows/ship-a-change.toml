@@ -3,17 +3,50 @@
 # high-traffic trio protocols-as-data.md sequences by blast radius:
 # "get those wrong and nothing else can ship, including the fix."
 #
-# 255 packets ride this kind. It moves LAST for that reason and it moves
-# GENERATED rather than transcribed for the same one: the spec is eight
-# steps of predicates and terminals, and hand-copying it is precisely
-# where a wrong `ready_when` comes from. The row below was rendered from
-# `ship_a_change_spec()` and is verified field-for-field, steps included,
-# by `the_platform_bundle_matches_the_specs_it_replaced` — a check that
-# until 2026-08-26 compared only label and category and would not have
-# caught a rewritten flow.
+# WHY `scope` COMES FIRST, AND IS GATED ON A PERSON. A PR's boundary
+# gets decided at the END, when whoever is working is tired and
+# everything is already entangled — the branch that first added this
+# protocol carried a guest sign-in, a dispatcher fix, a ledger
+# determinism fix and two new surfaces, because nothing ever asked
+# where it should have been cut. So the first step is a human declaring
+# what the change contains and what it deliberately leaves out, BEFORE
+# the work. `excludes` is required for exactly that reason: naming what
+# you are not doing is the act that keeps a change small, and a field
+# nobody has to fill in would be filled in never.
+#
+# Hundreds of packets ride this kind. It moved to the bundle LAST for
+# that reason and it moves GENERATED rather than transcribed for the
+# same one: the spec is nine steps of predicates, terminals and
+# per-step procedures, and hand-copying it is precisely where a wrong
+# `ready_when` comes from.
+#
+# THIS FILE IS THE LIVE ROW, FOLDED. Rendered from GET
+# /api/workflows/ship-a-change at v31 on 2026-09-15 (backlog 0ccf23ec)
+# — not from a Rust literal: `ship_a_change_spec()` described the v14
+# shape and left `registry.rs` the same day, so this file is the one
+# authored copy. Between v14 and v31 the row gained, through operator
+# publishes that were never written back: the `settled` outcome (done,
+# with nothing to merge), `proof` REQUIRED on `proven` — the machine-
+# probe rule from v22, which is what makes "proven in prod" a fact a
+# machine saw rather than a sentence somebody wrote — an optional
+# `completed_at` stamp on every task step (cycle time from the packet,
+# not from Job dates), `base` on `build`, and a `procedure` on every
+# task step so how the work is done travels with the packet. Publishing
+# the file over the row — the obvious act for the one description
+# drift the daily measurement DID report — would have deleted all of
+# that, which is why the drift lint now compares steps as well as prose
+# (infra/lint/the-live-protocols-are-the-authored-protocols.sh).
+#
+# The description below carries an "OPERATOR EDIT 2026-08-27" sentence
+# verbatim. It is in the live row, it was put there deliberately as the
+# arbiter for b10b3b52 ("does an operator edit survive a boot"), and it
+# says it is safe to delete once the observation is recorded. Deleting
+# it is a PUBLISH — edit here, then `boss workflow publish` — never a
+# quiet edit that leaves the file disagreeing with the row again.
 #
 # In-flight packets are untouched: the seed binary inserts only what is
-# missing, so the live v14 keeps its pinned spec (protocols-as-data Q4).
+# missing, so every open Job keeps its pinned version (protocols-as-data
+# Q4).
 # ---------------------------------------------------------------------------
 
 [[workflow]]
@@ -22,7 +55,7 @@ label = "Ship a change"
 category = "platform"
 subject_kinds = ["custom"]
 owning_team = "platform"
-description = "One change, from declaring its boundary to merging it. The Subject is a `custom` Subject whose id is the branch, so \"what shipped here\" is a Subject-history question. The `scope` step is the point of the kind: it asks a person what the change contains and what it deliberately excludes BEFORE the work, which is the only moment that decision keeps a PR small. Counted on /system/flow, so a cadence target needs no second mechanism. Name the feedback packet this change answers in `metadata.backlog_item` \u2014 a declared job edge, ref-checked at the write, and the link the dispatcher follows on merge to complete that packet's open branch and tell its filer. Use `metadata.backlog_text` only when the referent is not a Job on this instance (legacy, or a request that arrived as prose); it is free text and nothing follows it."
+description = "One change, from declaring its boundary to merging it. The Subject is a `custom` Subject whose id is the branch, so \"what shipped here\" is a Subject-history question. The `scope` step is the point of the kind: it asks a person what the change contains and what it deliberately excludes BEFORE the work, which is the only moment that decision keeps a PR small. Counted on /system/flow, so a cadence target needs no second mechanism. OPERATOR EDIT 2026-08-27, deliberate and load-bearing: this sentence exists only to make this registry row DIFFER from infra/platform/workflows.toml. The bundle was authored FROM the live specs, so every row matched and nothing could distinguish \"the seeder left my edit alone\" from \"the seeder rewrote it with identical bytes\". If this sentence is still here after the boss pod has restarted, the seeder is insert-if-absent in production and an operator edit survives a boot - the arbiter for the ship-a-change car \"ship-a-change is registry data\" (b10b3b52). If it has vanished, that claim is false and the car must not be stamped proven. Safe to delete once the observation is recorded. EVERY STEP CARRIES ITS OWN PROCEDURE in metadata_defaults, so how the work is actually done travels with the packet rather than living in a document someone has to know about. That also makes the procedure versioned and measurable: /api/workflows/ship-a-change/terminal-report reports cycle time and outcomes per version, so a change to the procedure can be compared against the versions before it instead of argued about."
 metadata = { owner_role = "platform-admin" }
 
 [[workflow.step]]
@@ -38,6 +71,20 @@ kind = "task"
 ready_when = "steps.opened.done"
 title_template = "Declare the boundary"
 authority_role = "platform-admin"
+metadata_defaults = { procedure = """Say what the change contains and what it deliberately EXCLUDES, before writing it. The exclusion is the load-bearing half: it is what keeps a car small enough to review and what stops scope drifting mid-build. Name the feedback or backlog packet this answers in metadata.backlog_item — a ref-checked job edge, so a mistyped id is refused rather than silently pointing at nothing, and the dispatcher follows it on merge to close that packet and tell its filer.
+
+A DEFECT IN A CAR THAT ALREADY MERGED GETS ITS OWN PACKET, BEFORE THE FIX. Not an inline correction in whatever car you happen to be writing. File it, then name it in this car's `backlog_item` so the repair points at what it repairs.
+
+David, 2026-08-28: *"Are we creating jobs for fixes? Or handling them ad hoc? Because that could be causing problems."* Measured that day: ELEVEN defect packets were filed and every one was about something other than the author's own cars, while at least three defects in cars shipped the same day were fixed ad hoc with no packet — a query that silently dropped a scheduled rule, a CHECK constraint that made a just-shipped capability unstorable, and a clippy failure that cost two gates.
+
+THREE THINGS BREAK WHEN THE FIX IS AD HOC:
+  1. THE COUNT IS BIASED. A defect rate that excludes the author's own defects is flattering by construction, and it is the number we judge whether any of this is working by.
+  2. THE TRAIL IS GONE. A reader sees the original car merged and pending proof, with nothing recording that it shipped broken or what repaired it.
+  3. THE CONTEXT DIES WITH THE SESSION. The packet is where the reasoning lives — what the seam was, how it was found, what class it belongs to. An inline fix carries a commit message and nothing a future search will surface.
+
+IT IS ALSO HOW A CLASS GETS SPOTTED. Two of that day's three were the same shape — a capability added in code that no layer beneath it could persist — and that only becomes visible when both are packets sitting next to each other. One inline fix plus one memory is not a pattern anyone can find.
+
+THE BAR IS 'DID IT MERGE', not 'was it embarrassing'. A defect caught before the gate is a correction and belongs in the retro's corrections array. A defect that reached main is work, and work is a packet.""" }
 [[workflow.step.fields]]
 name = "summary"
 field_type = "string"
@@ -46,6 +93,10 @@ required = true
 name = "excludes"
 field_type = "string"
 required = true
+[[workflow.step.fields]]
+name = "completed_at"
+field_type = "date-time"
+required = false
 
 [[workflow.step]]
 title = "build"
@@ -53,10 +104,37 @@ kind = "task"
 ready_when = "steps.scope.done"
 title_template = "Build it"
 authority_role = "platform-admin"
+metadata_defaults = { procedure = """Make the change, then run the tests for the crates you touched. BEFORE branching, check what the parked cars already touch: two cars editing one file merge cleanly and conflict at assembly, or resolve by taking one side and silently reverting the other. A bare `git merge-tree` CONFLICT check is not sufficient — it under-reports, because a stale branch reverts without conflicting. Read the merged CONTENT instead, which needs no working tree: `TREE=$(git merge-tree --write-tree forge/main <branch>)` then `git cat-file -p $TREE:<a file that landed after the base> | wc -l` compared against main's. A large deletion count in `git diff main..branch` is a SCREEN, NOT A VERDICT: that diff compares two endpoints and ignores history, so everything that landed on main after the branch's base reads as a deletion and healthy cars false-positive. On 2026-08-29 a parked car showed 17 files / 34 insertions / 590 deletions and merged with nothing reverted — 809 lines on main, 809 in the merge result. Acting on the screen alone would have meant rebasing and force-pushing a HEALTHY parked car, which is exactly how a boardable car becomes an unboardable one.
+
+CUT THE BRANCH FROM THE FORGE'S MAIN — AND KNOW WHICH REMOTE THAT IS. On the workstation `origin` is the GITHUB MIRROR, not the forge, and it lags: on 2026-08-29 it reported main as b178a534 while the forge was at e124ba61, which made a healthy tree look like it reverted 5,825 lines and sent a session hunting a defect that did not exist. The forge (http://10.20.0.15:3000) has no credential on the workstation and is reachable only through the conductor clone. Get its view, branch from it, and prove the base:
+  git fetch gcp '+refs/remotes/origin/*:refs/remotes/forge/*'
+  git checkout -b <branch> forge/main
+  git merge-base --is-ancestor forge/main HEAD    # must pass before gating
+Record the sha you branched from in `base`. A receipt taken on a stale base vouches for a tree that will never exist, which is why this check belongs here, before the gate, and not at review.
+
+IF THE CHANGE NEEDS A HUMAN TO APPLY IT, WRITE THE INSTRUCTION AS CAREFULLY AS THE CODE. Some changes cannot take effect on their own: a cluster manifest (applying stays a human action with the admin config, by the design recorded in boss-dev-access.yaml itself), a minted credential, a DNS record. Record the exact command in the car's metadata under `human_action`, and follow the shape rotate-a-credential already uses - agent prepares, human executes, agent verifies by effect.
+
+ASSUME NOTHING ABOUT THE READER'S ACCESS, and check rather than guess. THE FORGE IS AGENT-SIDE INFRASTRUCTURE: car branches exist ONLY on the forge, and David's clone is GitHub-backed, so `git fetch && git checkout <branch>` FAILS for him. That instruction was handed over on 2026-08-28 and was simply wrong. Reference the LOCAL git object store instead, which needs no remote at all:
+  git -C <repo> show <branch>:<path> | KUBECONFIG=<path> kubectl apply -f -
+Name the credential and the host explicitly - do not write 'with an admin credential' and leave the reader to find it. On 2026-08-28 the admin kubeconfig was at /Users/david/talos-homelab/v2/kubeconfig (v2; v1 is stale) while ~/.talos/talosconfig had no contexts and the default kubectl config had none either, so 'use kubectl' would have failed three different ways.
+
+DRY-RUN THE INSTRUCTION YOURSELF BEFORE HANDING IT OVER, and say what it will change. `kubectl apply --dry-run=server` reports per-object what would happen; quoting that back ('role/dev-session configured, everything else unchanged') tells the reader the blast radius instead of asking them to trust it. An instruction that has never been run is a guess, and handing a guess to the one person who can execute it wastes the scarcest thing in the loop.
+
+GIVE A VERIFY COMMAND WITH AN UNAMBIGUOUS ANSWER, so the human can confirm without asking - e.g. `kubectl -n boss-dev auth can-i create jobs.batch --as=system:serviceaccount:boss-dev:dev-session` prints exactly `yes` or `no`.
+
+AND PREFER NOT NEEDING THE HUMAN AT ALL. Finding a credential is not the same as being authorised to use it: the admin kubeconfig was reachable on 2026-08-28 and applying was still David's call, because boss-dev-access.yaml records that decision in writing. Read the target before deciding you are allowed to act on it.""" }
 [[workflow.step.fields]]
 name = "test"
 field_type = "string"
 required = true
+[[workflow.step.fields]]
+name = "completed_at"
+field_type = "date-time"
+required = false
+[[workflow.step.fields]]
+name = "base"
+field_type = "string"
+required = false
 
 [[workflow.step]]
 title = "gate"
@@ -64,6 +142,24 @@ kind = "task"
 ready_when = "steps.build.done"
 title_template = "Green, and observed working"
 authority_role = "platform-admin"
+metadata_defaults = { procedure = """Pre-flight first: `infra/gate.sh --quick`, about 11 seconds, and the pre-push hook runs it anyway if core.hooksPath is set. Then `boss gate <branch> --wait`. DO NOT push to the branch while its gate is running — the gate tests the head it resolved at launch, and a later commit leaves a receipt vouching for a commit that is no longer the tip. Park with `boss park`, which COPIES the receipt from the gate-run packet: the head is transcribed by a machine, never retyped. It refuses a gate that is red, lost, still running, or green for a commit that is no longer the branch head.
+
+PUBLISH THE BRANCH TO THE FORGE FIRST — the gate resolves its head from the forge, so an unpublished branch gates the wrong thing or not at all. A workstation has no forge credential, so push to the conductor clone under a temp ref and push THAT to origin from there:
+  git push gcp "HEAD:refs/tmp/${BRANCH}"
+  ssh boss-gcp "cd /var/lib/boss-train/repo && git push origin 'refs/tmp/${BRANCH}:refs/heads/${BRANCH}'; git update-ref -d 'refs/tmp/${BRANCH}'"
+Note `${BRANCH}` in BRACES: in zsh, `$B:refs/...` applies `:r` as a parameter modifier and silently mangles the refspec into garbage. That cost a push on 2026-08-28. Verify with `git ls-remote origin <branch>` from boss-gcp and compare to your local `git rev-parse HEAD` — equal, or the gate is testing something else.
+
+RUN gate AND park FROM boss-gcp. It is the only host where `origin` IS the forge, so it is the only one where the head resolves without config gymnastics. From a workstation both verbs fail in confusing ways: `boss gate` records a SYMBOLIC ref and warns the receipt will not name a head (leaving an orphaned packet with no Job), and `boss park` then refuses with `vouches for its current head origin/feat/...` because it never resolved one. Both happened on 2026-08-28. boss-gcp also needs KUBECONFIG=/etc/boss-dev/kubeconfig set explicitly — a non-interactive ssh inherits no profile, and kubectl otherwise tries localhost:8080.
+
+CHECK THE BASE BEFORE GATING. Cut from the CURRENT forge main, not a local alias: `gcp/realmain` is stale and was two trains behind on 2026-08-28. A branch on an old base merges cleanly and REVERTS whatever landed in between; confirm with `git merge-base --is-ancestor <forge-main-sha> HEAD` and watch the deletion count in `git diff --stat <forge-main> HEAD`.
+
+STAMP `completed_at` WHEN YOU COMPLETE THIS STEP (RFC3339). `boss park` fills it; if you complete a step by hand, fill it too.
+
+WHY THE PACKET CARRIES ITS OWN TIMING. Job.opened_on and closed_on are DATES, not timestamps, so cycle time computed from them can only ever be 0 or 1 day — for a pipeline whose measured machine time is ~11 minutes of gate plus ~15 of train CI, that reports whether the work crossed midnight (feedback 79a5fc64). David, 2026-08-29: put the fields in the protocol and fill them going forward rather than backfilling from the audit log. The conductor already stamps its own train steps this way and reads them for arrival timings, so this is an established pattern, not a new one.
+
+WHAT THE STAMPS BUY: with one per transition, WORK time (scope → build → gate) separates from QUEUE time (parked at review waiting for a train; merged and sitting at `proven` awaiting a natural event). Dates cannot tell those apart — parking and gating happen on the same calendar day — and four cars sitting at `proven` blocked on events currently read as slow delivery.
+
+OPTIONAL FOR NOW, deliberately: three separate verbs complete these steps, and making the field required before all of them fill it would block completion rather than improve measurement. It becomes required once every writer stamps.""" }
 [[workflow.step.fields]]
 name = "gates"
 field_type = "string"
@@ -73,12 +169,8 @@ name = "verified"
 field_type = "string"
 required = true
 [[workflow.step.fields]]
-name = "receipt"
-field_type = "string"
-required = true
-[[workflow.step.fields]]
-name = "rendered"
-field_type = "string"
+name = "completed_at"
+field_type = "date-time"
 required = false
 
 [[workflow.step]]
@@ -87,10 +179,15 @@ kind = "task"
 ready_when = "steps.gate.done"
 title_template = "Open for review"
 authority_role = "platform-admin"
+metadata_defaults = { procedure = "Left ready for the conductor. It completes this when the car boards, recording the train's PR — cars do not open their own PRs, a train opens one for the batch. A car left behind gets a skip_reason on its metadata; if the branch legitimately moved, re-gate and put the fresh receipt in metadata.regate_receipt rather than abandoning the packet, which loses its history." }
 [[workflow.step.fields]]
 name = "pr_url"
 field_type = "string"
 required = true
+[[workflow.step.fields]]
+name = "completed_at"
+field_type = "date-time"
+required = false
 
 [[workflow.step]]
 title = "proven"
@@ -98,6 +195,46 @@ kind = "task"
 ready_when = "steps.review.done AND job.metadata.merged = \"true\""
 title_template = "Proven in prod"
 authority_role = "platform-admin"
+metadata_defaults = { procedure = """Observe the change working in PRODUCTION, on the deployed artifact — not on a local build, and not by restating that the gate was green.
+
+RUN `boss prove <car> --probe '<command>' --expect '<string>' --verified '<prose>'`. The verb executes the probe itself, captures exit status and output verbatim into the required `proof` field, and REFUSES to record anything unless the probe exits zero and prints what was claimed. Do not fill `proof` by hand: a pasted result is a claim again, and the point is that a machine saw it.
+
+WHY IT IS REQUIRED. `verified` alone is prose, so 'proven in prod' used to mean only that somebody wrote a sentence. On 2026-08-28 a change was reported done on the strength of an HTTP 204 — the API accepted a write, so the write was called proof — and the behaviour it claimed had never been observed. Twice.
+
+A PROBE IS ALSO THE ONLY HONEST MERGE CHECK, and git will lie to you about this three different ways. On 2026-08-28, hunting whether four cars had really landed: (1) `git merge-base --is-ancestor gcp/<branch> …` reported NOT MERGED for all 89 cars, because arrived trains delete their branches and a missing ref makes merge-base error; (2) testing the car's receipt sha reported NOT MERGED for all 89, because trains SQUASH-merge, so a car's commit sha is never an ancestor of main; (3) content-checking against `gcp/realmain` reported absent, because that ref is a stale local alias and is NOT the branch trains merge into — the authority is the FORGE's main (`git ls-remote origin main`). All three answers were confident, well-formed and wrong, and all three failed in the direction of 'not there'. A probe against the running system cannot fail that way: an unmerged change simply is not observable.
+
+CHOOSE A PROBE THAT CAN FAIL. `--exit-only` is allowed where the command IS the test (`grep -q`, `test -f`) and is recorded so a reader sees what was asserted. The mirror-image trap fails OPEN: `grep -c … || echo 0` prints '0' from grep AND '0' from the fallback, and a loop comparing that to '0' reported success for a file that had not changed.
+
+NAME THE ARTIFACT YOU PROBED. `boss prove` runs the probe on the host you run it from, so it proves what THAT host can see. On 2026-08-28 `boss park --help` failed outright because the workstation's installed binary was four months old — merged code is not automatically the code a user runs.
+
+For a deletion, the proof is absence plus survival: the symbol is gone from main AND the services still run. For a guard, it is the guard refusing something real. If the proof needs an event that has not happened, say so and wait — a car whose proof requires the failure it prevents may never be provable by waiting, and that is worth naming rather than sitting on.
+
+PROOF CAN DECAY. `boss prove <car> --recheck` re-runs the recorded probe and says whether it still holds — a step-plugin ConfigMap preview survives exactly until the next converge.
+
+PREFER A PROBE THAT STAYS TRUE. Some probes observe a transient condition and stop holding for reasons that have nothing to do with the change. Worked example from the first real use, proving the `boss park` head-selection fix (932aa956): the probe ran the DEPLOYED binary against a branch that was gated green at one head and then rebased, and observed the refusal `no gate ... vouches for its current head 6d34a6da3b8a`. Excellent evidence — and it stopped holding the moment that branch was re-gated, because a matching receipt then existed. `--recheck` will report NO LONGER HOLDS there and be WRONG about the cause. When a durable probe exists (a flag the binary always rejects, a symbol always absent, an endpoint that always answers), prefer it; when only a transient one is available, say so in `verified` so a later reader knows a failed recheck is expected rather than a regression.
+
+BIND THE PROOF TO THE RELEASE. `boss prove` runs the probe on the host that invokes it, and records that host — but a host is not a build. Deployed releases are keyed by COMMIT SHA (`/usr/local/bin/boss` -> `/usr/local/boss/releases/<sha>/bin/boss`, with `current` and `previous` symlinks), so the probe can tie the behaviour it observes to the artifact that produced it. Make TWO exit-gated assertions in one probe:
+  REL=$(basename "$(readlink -f /usr/local/boss/current)")
+  git show "$REL:<path/to/changed/file>" > /dev/null   # the release CARRIES the change
+  <behaviour command> | grep -q '<expected>'            # and it BEHAVES
+  echo "RELEASE=$REL ...=yes"
+Without the first assertion, 'it worked' may describe a build that predates the change; with it, the claim is 'it worked on the build that carries this change'. Worked example: car 25da5be3 merged as ab43e1fd5a12, `current` resolved to releases/ab43e1fd, and the probe asserted both that the release's tree contains prove.rs and that the deployed verb refuses weak evidence. The release sha in the recorded stdout is also what makes a later --recheck interpretable: a failure after the sha has moved is a different question from a failure on the same build.
+
+RUN THE PROBE WHERE THE ARTIFACT IS. Proving a CLI change from a workstation asks the wrong binary: on 2026-08-28 the workstation's installed `boss` was four months old and had no `gate`, `park` or `train` at all. Run `boss prove` ON boss-gcp for CLI cars — it also removes an ssh quoting layer, so the recorded probe stays self-contained and re-runnable.
+
+WRITING THE PROBE IS ITSELF ERROR-PRONE, which is the argument for reusing these shapes rather than inventing one per car. Under `set -o pipefail` a command that refuses BY DESIGN (a guard exiting non-zero is the thing you are proving) kills the script before it reports; capture into a variable with `|| true` and test after.
+
+NEVER PROBE THE PACKET YOU ARE PROVING — a self-referential probe invalidates itself by SUCCEEDING. Worked example, caught by a --recheck sweep on 2026-08-28 hours after it was recorded: car 25da5be3 proved that the deployed `boss prove` refuses weak evidence, and used ITSELF as the target (`boss prove 25da5be3 --probe "echo hi" --expect "MARKER-DELIBERATELY-ABSENT" --dry-run`, grepping for "never printed"). True while the car sat at `proven`. The moment the proof was recorded the car closed, and the verb began refusing EARLIER and for a different reason - "this car is already proven" - so `proven_step()` bails before `judge()` ever runs and the inner assertion can never appear again.
+
+This is distinct from the transient-probe trap above: a transient probe decays because the WORLD moved, a self-referential one decays because RECORDING IT moved the world. Point the probe at a different packet, or at something with no packet dependency at all - the deployed release's tree containing the changed file was already half of that probe and is durable on its own.
+
+MERGED, DEPLOYED AND RUNNING ARE THREE STATES. For a long-running service the deployed artifact is NOT the running one: a systemd unit does not change because a symlink under it did. Probe the RUNNING PROCESS — `ls -l /proc/$(systemctl show <unit> -p MainPID --value)/exe` names the release actually executing. A probe that reads the release TREE passes the moment the deploy lands and says nothing about behaviour.
+
+Worked example, 2026-08-28, car 7a07fe36: the conductor's arrival report had 409'd on every reconcile for weeks. The fix merged on train #138 and its release went live — and the failure kept firing, because boss-train.service was still executing the previous release. It bounced ~25 minutes later via a deferred transient unit, and only then did behaviour change. A tree-reading probe would have recorded a pass twenty minutes early: true, and useless.
+
+COUNT SINCE THE PROCESS STARTED, AND OVER ENOUGH SAMPLES. That same probe took three attempts, and the two failures are the lesson. A 25-line journal window showed zero failures and would have recorded a pass — too small to mean anything. A 120-line window then showed three failures and `boss prove` REFUSED, correctly: that window straddled the restart, so those failures belonged to the old binary. Only `journalctl --since $(systemctl show <unit> -p ActiveEnterTimestamp --value)` answers the question being asked. And require a MINIMUM number of events in the window — '0 failures in 0 reconciles' passes trivially, which is the failed-open shape this whole step exists to stop.
+
+A NARROW WINDOW IS THE COMMONEST WAY TO BE CONFIDENTLY WRONG. Five errors on 2026-08-28 shared it, the most expensive being an URGENT defect filed against working infrastructure — 'a train deploy never restarts the conductor' — measured entirely inside the deferred-restart window. One query against the restart unit's own journal would have shown it firing three times earlier that day. Before generalising from a window, ask what the window excludes.""" }
 [[workflow.step.fields]]
 name = "verified"
 field_type = "string"
@@ -105,6 +242,14 @@ required = true
 [[workflow.step.fields]]
 name = "method"
 field_type = "browser|api|log"
+required = false
+[[workflow.step.fields]]
+name = "proof"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "completed_at"
+field_type = "date-time"
 required = false
 
 [[workflow.step]]
@@ -122,3 +267,11 @@ ready_when = "steps.scope.done AND job.metadata.abandoned = \"true\""
 title_template = "Abandoned"
 terminal = { outcome = "abandoned" }
 metadata_defaults = { outcome_kind = "aborted" }
+
+[[workflow.step]]
+title = "settled"
+kind = "outcome"
+ready_when = "steps.build.done AND job.metadata.settled = \"true\""
+title_template = "Settled — done, with nothing to merge"
+terminal = { outcome = "settled" }
+metadata_defaults = { outcome_kind = "completed" }

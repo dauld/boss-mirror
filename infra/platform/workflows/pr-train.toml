@@ -1,3 +1,20 @@
+# ---------------------------------------------------------------------------
+# pr-train — the twice-daily release train the conductor drives.
+#
+# THIS FILE IS THE LIVE ROW, FOLDED: rendered from GET
+# /api/workflows/pr-train at v17 on 2026-09-15 (backlog 0ccf23ec). The
+# row had moved past the file through operator publishes — the yard
+# grammar on the step labels ("Yard inspection", "DEPARTED", "In
+# transit", "Disassembled — cars back to the dock"; David 2026-09-08,
+# the yard is a floor you can follow) — and nothing the drift lint
+# compared could see it, because step labels were not on its list.
+# They are now, as `steps.<title>.title_template`, and this file is
+# what that comparison reads equal against.
+#
+# In-flight trains are untouched: the seed binary inserts only what is
+# missing, so an open train keeps its pinned version.
+# ---------------------------------------------------------------------------
+
 [[workflow]]
 kind = "pr-train"
 label = "PR train"
@@ -51,7 +68,7 @@ required = true
 title = "ci"
 kind = "task"
 ready_when = "steps.pr.done"
-title_template = "CI verdict"
+title_template = "Yard inspection — CI verdict"
 authority_role = "platform-admin"
 metadata_defaults = { notify_on_done = true }
 [[workflow.step.fields]]
@@ -63,7 +80,7 @@ required = true
 title = "merged"
 kind = "task"
 ready_when = "steps.pr.done"
-title_template = "Merged into main"
+title_template = "DEPARTED — merged into main"
 authority_role = "platform-admin"
 metadata_defaults = { notify_on_done = true }
 [[workflow.step.fields]]
@@ -75,7 +92,7 @@ required = true
 title = "deployed"
 kind = "task"
 ready_when = "steps.merged.done"
-title_template = "Deployed to the playground"
+title_template = "In transit — deployed to the playground"
 authority_role = "platform-admin"
 metadata_defaults = { notify_on_done = true }
 [[workflow.step.fields]]
@@ -87,7 +104,7 @@ required = true
 title = "converged"
 kind = "task"
 ready_when = "steps.deployed.done"
-title_template = "Cluster converged"
+title_template = "In transit — cluster converged"
 authority_role = "platform-admin"
 [[workflow.step.fields]]
 name = "cluster_commit"
@@ -110,6 +127,6 @@ metadata_defaults = { outcome_kind = "completed" }
 title = "cancelled"
 kind = "outcome"
 ready_when = "steps.collect.done AND job.metadata.empty = \"true\""
-title_template = "Cancelled"
+title_template = "Disassembled — cars back to the dock"
 terminal = { outcome = "cancelled" }
 metadata_defaults = { outcome_kind = "aborted" }

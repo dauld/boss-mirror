@@ -30,7 +30,21 @@ cd "$(dirname "$0")/../.."
 # workspace where every git command was refusing (backlog 6b2f4a1a).
 # A scan that did not happen is not a clean tree.
 . "$(dirname "$0")/lib/pattern-scan.sh"
-hits=$(pattern_scan '/Users/[a-z]+/|\.claude/jobs/' -- 'apps/' 'crates/' 'infra/') || exit $?
+#
+# ONE PROTOCOL FILE IS EXEMPT, by name, for the docs/ reason. A step's
+# `procedure` is the runbook riding in the packet, and ship-a-change's
+# live `build` procedure tells the story of a machine-local path ("on
+# 2026-08-28 the admin kubeconfig was at /Users/david/..."), the way a
+# runbook under docs/ may. The file is the live row FOLDED (v31,
+# 2026-09-15, backlog 0ccf23ec): the drift lint reads it equal against
+# the registry, so rewording the sentence here alone would put the tree
+# back out of step with the record. The sentence leaves through a
+# PUBLISH — edit the file, `boss workflow publish`, then drop this
+# entry; a second file wanting the same exemption is a decision that
+# belongs in a diff, not a widening of the pattern.
+hits=$(pattern_scan '/Users/[a-z]+/|\.claude/jobs/' \
+    --exclude ':!infra/platform/workflows/ship-a-change.toml' \
+    -- 'apps/' 'crates/' 'infra/') || exit $?
 if [ -n "$hits" ]; then
     echo "no-session-paths: tracked source names a machine-local or session path:" >&2
     echo "$hits" >&2

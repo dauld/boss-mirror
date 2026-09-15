@@ -98,10 +98,24 @@
 #
 # THREE FIELDS, all scalar strings an operator reads and none of which
 # changes what the protocol does: `description`, `label`, `category`.
-# Structural fields are deliberately out, and so is `owning_team` — the
-# loader overrides the file's key, so a disagreement there could never
-# be cleared by a publish. The comparator's own comment carries the
-# reason for each inclusion and each exclusion.
+# `owning_team` is deliberately out — the loader overrides the file's
+# key, so a disagreement there could never be cleared by a publish. The
+# comparator's own comment carries the reason for each inclusion and
+# each exclusion.
+#
+# AND, SINCE 2026-09-15, FOUR STEP FACETS: the step count, the ordered
+# title list, and each step's required-field set and label
+# (`title_template`). Structural fields were out on the argument that a
+# live row legitimately leads its file between a publish and the car
+# that writes it down — true, and the reason drift is REPORTED rather
+# than failed on, not a reason to leave it unmeasured. The measured
+# cost of not looking (backlog 0ccf23ec): ship-a-change's live v31 had
+# a `settled` step and a required `proof` field its file lacked, the
+# daily measurement said "one description adrift", and publishing the
+# file over the row — the obvious fix for the drift it DID report —
+# would have deleted both. Predicates, kinds, field types and
+# metadata_defaults stay out; they need the publish path's
+# normalisation before an equality means anything.
 #
 # NOT A CASE FOR WIDENING `kind_body_matches`. That function governs
 # every bootstrap-created row, so widening it would change reconcile's
@@ -258,18 +272,75 @@ bundle_dir, live_path, floor = pathlib.Path(sys.argv[1]), sys.argv[2], int(sys.a
 # it. A finding no action can close trains a reader to skip the whole
 # report (§Diagnosis, "a check nobody reads").
 #
-# DELIBERATELY NOT COMPARED: `steps`, `subject_kinds`, `metadata_schema`,
-# `entitlements`, `metadata`, `on_complete_create`. Those are
-# STRUCTURAL — they decide what the protocol does — and a live row
-# legitimately leads its file between a published version and the car
-# that writes it down, so comparing them here would report the normal
-# case as drift. They also need the same normalisation the publish path
-# applies (defaults filled, predicates parsed) before an equality means
-# anything, which is a check of its own, not a line in this one. Also
-# out: `version`, `status`, `created_at`, `authoring_job_id` — four
-# columns with no TOML key at all, so the file cannot disagree with
-# them.
+# DELIBERATELY NOT COMPARED: `subject_kinds`, `metadata_schema`,
+# `entitlements`, `metadata`, `on_complete_create`, and the parts of
+# `steps` that STEP_FACETS below does not render (predicates, kinds,
+# field types, metadata_defaults). Those are STRUCTURAL — they decide
+# what the protocol does — and they need the same normalisation the
+# publish path applies (defaults filled, predicates parsed) before an
+# equality means anything, which is a check of its own, not a line in
+# this one. Also out: `version`, `status`, `created_at`,
+# `authoring_job_id` — four columns with no TOML key at all, so the file
+# cannot disagree with them.
 FIELDS = ("label", "description", "category")
+
+# THE STEP FACETS, compared since 2026-09-15 (backlog 0ccf23ec). Steps
+# were on the not-compared list above, for the reason it still gives
+# about normalisation — and the reason was true of `ready_when` and
+# false of everything the live row and the file both state VERBATIM.
+# The measured cost of leaving them out: ship-a-change's live v31
+# carried a `settled` outcome step, a required `proof` field on
+# `proven` (the machine-probe rule, v22) and a procedure on every step,
+# while its file had eight steps and no `proof`; the daily measurement
+# read "one description adrift" and said nothing about the step, so
+# "fix the drift" — publishing the file over the row — would have
+# DELETED the step and the requirement that makes proven a fact. Each
+# facet is rendered on both sides as one scalar string, so it rides the
+# same DRIFT line, the same windows and the same JSON report as a
+# description, and a reader learns WHICH step and WHAT differs:
+#
+#   steps.count                 how many steps — the headline number
+#   steps.titles                the ordered title list; a step on one
+#                               side only shows up here, once, rather
+#                               than as a per-step line against nothing
+#   steps.<title>.required      the sorted names of that step's
+#                               required fields — the completion
+#                               contract; `proof` is the worked case
+#   steps.<title>.title_template  the step's label as rendered; the
+#                               same class as `label` one level up,
+#                               and where pr-train's live v17 (yard
+#                               grammar) differed from its file with
+#                               nothing else to show for it
+#
+# Per-step facets are compared only for titles BOTH sides hold, so a
+# missing step is one finding (in `steps.titles`), not one per facet.
+# Same tolerance as every other field here: reported, never failed on
+# under a bare invocation, a verdict under --require-live.
+def step_facets(steps):
+    steps = steps if isinstance(steps, list) else []
+    titles = [str(s.get("title", "")) for s in steps if isinstance(s, dict)]
+    out = {"steps.count": str(len(titles)), "steps.titles": ",".join(titles)}
+    for s in steps:
+        if not isinstance(s, dict):
+            continue
+        t = str(s.get("title", ""))
+        fields = s.get("fields") if isinstance(s.get("fields"), list) else []
+        required = sorted(
+            str(f.get("name", "")) for f in fields
+            if isinstance(f, dict) and f.get("required") is True
+        )
+        out[f"steps.{t}.required"] = ",".join(required)
+        out[f"steps.{t}.title_template"] = str(s.get("title_template", ""))
+    return out, titles
+
+def facets_to_compare(tree_titles, live_titles):
+    both = set(tree_titles) & set(live_titles)
+    yield "steps.count"
+    yield "steps.titles"
+    for t in tree_titles:
+        if t in both:
+            yield f"steps.{t}.required"
+            yield f"steps.{t}.title_template"
 
 try:
     doc = json.load(open(live_path))
@@ -308,6 +379,17 @@ def first_diff(a, b):
             return i
     return min(len(a), len(b))
 
+def drift_line(kind, field, row, tree, live):
+    """One DRIFT finding — the same shape for a field and a step facet."""
+    at = first_diff(tree, live)
+    return "DRIFT\t{}\t{}\tv{}\tat={}\ttree={}\tlive={}\t{}\t{}".format(
+        kind, field, row.get("version", "?"), at,
+        len(tree) if isinstance(tree, str) else "-",
+        len(live) if isinstance(live, str) else "-",
+        window(tree if isinstance(tree, str) else str(tree), at),
+        window(live if isinstance(live, str) else str(live), at),
+    )
+
 files = sorted(bundle_dir.glob("*.toml"))
 parsed = compared = drifted = 0
 lines = []
@@ -343,16 +425,16 @@ for f in files:
             if tree == live:
                 continue
             drifted += 1
-            at = first_diff(tree, live)
-            lines.append(
-                "DRIFT\t{}\t{}\tv{}\tat={}\ttree={}\tlive={}\t{}\t{}".format(
-                    kind, field, row.get("version", "?"), at,
-                    len(tree) if isinstance(tree, str) else "-",
-                    len(live) if isinstance(live, str) else "-",
-                    window(tree if isinstance(tree, str) else str(tree), at),
-                    window(live if isinstance(live, str) else str(live), at),
-                )
-            )
+            lines.append(drift_line(kind, field, row, tree, live))
+        # The TOML key is `step` ([[workflow.step]]); the row's is `steps`.
+        tree_facets, tree_titles = step_facets(wf.get("step"))
+        live_facets, live_titles = step_facets(row.get("steps"))
+        for facet in facets_to_compare(tree_titles, live_titles):
+            tree, live = tree_facets[facet], live_facets[facet]
+            if tree == live:
+                continue
+            drifted += 1
+            lines.append(drift_line(kind, facet, row, tree, live))
 
 print(f"COUNTS\tparsed={parsed}\tcompared={compared}\tdrifted={drifted}")
 print("\n".join(lines)) if lines else None
@@ -406,6 +488,10 @@ PY
 #     fields:   { parsed, compared, drifted,
 #                 drift:  [{kind, field, live_version, at, tree_len,
 #                           live_len, tree_window, live_window}…],
+#                         `field` is a compared field (`description`)
+#                         or a step facet (`steps.count`, `steps.titles`,
+#                         `steps.<title>.required`,
+#                         `steps.<title>.title_template`)
 #                 absent: [{kind, field}…] }, the file makes no claim
 #     pending:  [kind…],                      authored, not yet admitted
 #     tenants:  [{file, not_admitted, total}…] }
@@ -563,6 +649,77 @@ owning_team = "platform"
 description = "The second protocol."
 FX
 
+    # 3b. THE STRUCTURAL RED (2026-09-15, backlog 0ccf23ec). The live row
+    #    carries a step and a required field the file lacks, and one
+    #    step's label differs. The finding must name the step COUNT, the
+    #    title LIST, and the one step whose required set and label
+    #    differ — while a step that agrees stays silent and a step
+    #    present on ONE side only is named by the title list, not by a
+    #    per-step line against `<absent>`. This is the measurement that
+    #    was missing when ship-a-change's live v31 read as "one
+    #    description adrift" beside a file with eight steps to live's
+    #    nine and no `proof` field: publishing the file over the row
+    #    would have deleted both.
+    cat > "$t/bundle/beta.toml" <<'FX'
+[[workflow]]
+kind = "beta"
+label = "Beta"
+category = "platform"
+owning_team = "platform"
+description = "The second protocol."
+
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+title_template = "Opened"
+
+[[workflow.step]]
+title = "proven"
+kind = "task"
+ready_when = "steps.opened.done"
+title_template = "Proven"
+[[workflow.step.fields]]
+name = "verified"
+field_type = "string"
+required = true
+FX
+    printf '%s' '[{"kind":"alpha","version":1,"status":"active","label":"Alpha","category":"platform","owning_team":"platform","description":"The first protocol."},
+                  {"kind":"beta","version":3,"status":"active","label":"Beta","category":"platform","owning_team":"platform","description":"The second protocol.",
+                   "steps":[{"title":"opened","kind":"trigger","ready_when":"true","title_template":"Opened","fields":[]},
+                            {"title":"proven","kind":"task","ready_when":"steps.opened.done","title_template":"Proven in prod","fields":[{"name":"verified","field_type":"string","required":true},{"name":"method","field_type":"string","required":false},{"name":"proof","field_type":"string","required":true}]},
+                            {"title":"settled","kind":"outcome","ready_when":"steps.proven.done","title_template":"Settled","fields":[]}]}]' > "$t/steps.json"
+    out=$(fields_report "$t/bundle" "$t/steps.json" 2>&1); rc=$?
+    [ "$rc" -eq 0 ] || { echo "self-test FAILED: a live row with an extra step exited $rc: $out" >&2; rm -rf "$t"; return 1; }
+    grep -qF "DRIFT	beta	steps.count	v3" <<< "$out" \
+        || { echo "self-test FAILED: a step the file lacks did not drift the step count: $out" >&2; rm -rf "$t"; return 1; }
+    grep -qF "DRIFT	beta	steps.titles	v3" <<< "$out" \
+        || { echo "self-test FAILED: a step the file lacks was not named in the title list: $out" >&2; rm -rf "$t"; return 1; }
+    grep -qF "opened,proven,settled" <<< "$out" \
+        || { echo "self-test FAILED: the title-list finding carries no excerpt of the live titles: $out" >&2; rm -rf "$t"; return 1; }
+    grep -qF "DRIFT	beta	steps.proven.required	v3" <<< "$out" \
+        || { echo "self-test FAILED: a required field the file lacks was not named by its step: $out" >&2; rm -rf "$t"; return 1; }
+    grep -qF "proof,verified" <<< "$out" \
+        || { echo "self-test FAILED: the required-set finding carries no excerpt of the live set: $out" >&2; rm -rf "$t"; return 1; }
+    grep -qF "DRIFT	beta	steps.proven.title_template	v3" <<< "$out" \
+        || { echo "self-test FAILED: a step label that differs was not named by its step: $out" >&2; rm -rf "$t"; return 1; }
+    grep -qF "drifted=4" <<< "$out" \
+        || { echo "self-test FAILED: four step facets adrift were not counted as four: $out" >&2; rm -rf "$t"; return 1; }
+    grep -q "steps\.opened\." <<< "$out" \
+        && { echo "self-test FAILED: a step that agrees was named: $out" >&2; rm -rf "$t"; return 1; }
+    grep -q "steps\.settled\." <<< "$out" \
+        && { echo "self-test FAILED: a step on one side only got a per-step line: $out" >&2; rm -rf "$t"; return 1; }
+    grep -q "DRIFT	beta	description" <<< "$out" \
+        && { echo "self-test FAILED: an agreeing description was named beside the step drift: $out" >&2; rm -rf "$t"; return 1; }
+    cat > "$t/bundle/beta.toml" <<'FX'
+[[workflow]]
+kind = "beta"
+label = "Beta"
+category = "platform"
+owning_team = "platform"
+description = "The second protocol."
+FX
+
     # 4. THE FLOOR. A registry answering about kinds this bundle does
     #    not hold finds no drift, which must never read as clean.
     out=$(fields_report "$t/bundle" "$t/elsewhere.json" 2>&1); rc=$?
@@ -641,7 +798,7 @@ PY
     fi
 
     rm -rf "$t"
-    [ "$SELF_TEST" -eq 1 ] && echo "$NAME: self-test ok — agreement is silent and counted, a drifting description is named by kind/field/version with an excerpt, a field the file does not claim is named and not counted as drift, a comparison below the floor and a retired-only row are refused, an unparseable answer and an unreadable bundle file each refuse distinctly, and --require-live exits 75 naming the target it could not reach, and the JSON report carries the same kind/field/version/excerpt, counts and verdict as the text"
+    [ "$SELF_TEST" -eq 1 ] && echo "$NAME: self-test ok — agreement is silent and counted, a drifting description is named by kind/field/version with an excerpt, a field the file does not claim is named and not counted as drift, a step the file lacks is named by count and title list and a required field or step label that differs is named by its step, a comparison below the floor and a retired-only row are refused, an unparseable answer and an unreadable bundle file each refuse distinctly, and --require-live exits 75 naming the target it could not reach, and the JSON report carries the same kind/field/version/excerpt, counts and verdict as the text"
     return 0
 }
 
@@ -1007,7 +1164,7 @@ fields_compared=${fields_compared:-0}
 drift_n=0
 if [ -n "$drift_lines" ]; then
     drift_n=$(printf '%s\n' "$drift_lines" | wc -l | tr -d ' ')
-    echo "$NAME: $drift_n operator-facing field(s) where the live row disagrees with its file:" >&2
+    echo "$NAME: $drift_n field(s) or step facet(s) where the live row disagrees with its file:" >&2
     printf '%s\n' "$drift_lines" | while IFS=$'\t' read -r kind field ver at tlen llen twin lwin; do
         echo "    $kind.$field — live $ver, first differs $at ($tlen vs $llen chars)" >&2
         echo "      file: $twin" >&2
@@ -1030,6 +1187,16 @@ if [ -n "$drift_lines" ]; then
     echo "  the corrected text while the row lags is the safe direction, and it" >&2
     echo "  is the state this check exists to make visible rather than to" >&2
     echo "  forbid." >&2
+    echo "" >&2
+    echo "  A steps.* facet adrift says the two copies disagree about what the" >&2
+    echo "  protocol REQUIRES — a step one side lacks, a required field, a step" >&2
+    echo "  label. Decide which copy is the record BEFORE publishing: when the" >&2
+    echo "  live row is ahead (a version published live and never written" >&2
+    echo "  back), publishing the file over it deletes what the row gained — on" >&2
+    echo "  2026-09-15 that would have been ship-a-change's settled step and" >&2
+    echo "  the proof field that makes proven a machine-run fact (0ccf23ec)." >&2
+    echo "  FOLD the row into the file first: GET $URL/<kind>, write its steps" >&2
+    echo "  and fields into $BUNDLE/<kind>.toml until this reads equal." >&2
 fi
 
 # A file that makes NO claim about a field is not drift — the row can
@@ -1082,7 +1249,7 @@ authored_n=$(printf '%s\n' "$authored" | wc -l | tr -d ' ')
 if [ "$drift_n" -eq 0 ]; then
     msg="$NAME: OK — $live_n admitted kinds, $authored_n authored, $fields_compared live rows agree with their file"
 else
-    msg="$NAME: $live_n admitted kinds, $authored_n authored — $drift_n operator-facing field(s) adrift across $fields_compared compared (named above; REPORTED, not failed)"
+    msg="$NAME: $live_n admitted kinds, $authored_n authored — $drift_n field(s) or step facet(s) adrift across $fields_compared compared (named above; REPORTED, not failed)"
 fi
 [ ${#EXEMPT[@]} -eq 0 ] || msg="$msg, ${#EXEMPT[@]} exempt (${EXEMPT[*]})"
 echo "$msg"

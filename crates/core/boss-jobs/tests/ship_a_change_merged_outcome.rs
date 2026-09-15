@@ -302,6 +302,15 @@ async fn merged_outcome_survives_review_and_closes_on_the_marker() {
     proven_md["verified"] =
         serde_json::Value::String("uxprobe: surface renders on prod, controls present".into());
     proven_md["method"] = serde_json::Value::String("browser".into());
+    // `proof` is REQUIRED on `proven` — the machine-probe rule
+    // (ship-a-change v22, "proven requires a machine-run probe"), in
+    // the tree since the live row was folded into the bundle on
+    // 2026-09-15 (backlog 0ccf23ec). Prose alone is a claim; this is
+    // the record `boss prove` writes: the probe, its exit, its output.
+    proven_md["proof"] = serde_json::Value::String(
+        "probe: curl -sf https://boss.example/it/flow | grep -c 'a-change'; exit 0; stdout: 1"
+            .into(),
+    );
     let (status, body) = send(
         &app,
         Request::builder()

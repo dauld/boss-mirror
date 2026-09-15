@@ -192,6 +192,18 @@ spec:
       # control plane instead of no build at all.
       affinity:
         nodeAffinity:
+          # REQUIRED: never a control-plane node. This pod builds (two
+          # builders and the operator compile in it), and a build that
+          # shares a node with etcd is the 2026-08-22 outage; the
+          # preference below is a hint the scheduler drops under
+          # pressure. Same term as gate-runner.yaml, pinned by
+          # infra/lint/a-build-never-shares-a-node-with-etcd.sh — the
+          # exemption this file carried is paid here, on the same
+          # David-timed restart as the sizing.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - {key: node-role.kubernetes.io/control-plane, operator: DoesNotExist}
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
               preference:
@@ -381,6 +393,41 @@ spec:
                       [ -x /work/home/.local/bin/claude ] || sleep 6
                     done
                     [ -x /work/home/.local/bin/claude ] || echo "claude install: gave up after 10 attempts; install by hand: curl -fsSL https://claude.ai/install.sh | HOME=/work/home bash"
+                    # THE SESSION STARTS ITSELF. David, 2026-09-15: "restart
+                    # the dev pod into the Claude Code session, so we can at
+                    # least use remote connect without needing to SSH into
+                    # the pod." Until now a fresh pod came up with claude
+                    # installed and NOTHING running it — the lost day of
+                    # 2026-09-10 (the pod installs the tool, nothing starts a
+                    # session) — so every restart cost an ssh hop to type
+                    # `claude`. The durable tmux session `dev` (the one
+                    # dev-session.sh attaches ssh logins to) now starts at
+                    # boot running `claude --remote-control boss-dev`, so the
+                    # session appears in claude.ai Remote Control on its own
+                    # and an ssh login lands INSIDE it rather than beside it.
+                    # Needs the binary AND the login on the PVC
+                    # (/work/home/.claude/.credentials.json — placed once by
+                    # David; the boot never writes a credential); with either
+                    # missing it says so and leaves the pod to ssh, as before.
+                    cat > /work/dev-claude.sh <<'DC'
+                    #!/usr/bin/env bash
+                    export HOME=/work/home
+                    export PATH=/work/tools/bin:/work/home/.local/bin:/usr/local/cargo/bin:$PATH
+                    export RUSTUP_HOME=/usr/local/rustup
+                    export CARGO_TARGET_DIR=/scratch/target
+                    cd /work/boss
+                    exec claude --remote-control boss-dev
+                    DC
+                    chmod +x /work/dev-claude.sh
+                    if [ -x /work/home/.local/bin/claude ] && [ -s /work/home/.claude/.credentials.json ]; then
+                      if HOME=/work/home tmux new-session -d -s dev -c /work/boss /work/dev-claude.sh; then
+                        echo "dev session: started claude --remote-control boss-dev in tmux session dev"
+                      else
+                        echo "dev session: tmux could not start the session (exit $?) — ssh in and run /work/dev-session.sh"
+                      fi
+                    else
+                      echo "dev session: not started — claude binary or /work/home/.claude/.credentials.json missing; ssh in, run claude once to log in, and the next boot starts it"
+                    fi
                     } > /work/ssh/postStart.log 2>&1 || true
           workingDir: /work
           env:
@@ -432,9 +479,19 @@ spec:
           # one train each added their own on 2026-08-22, and the
           # duplicate YAML key meant the applied limits depended on
           # parser order. This is the collapse (CLAUDE.md 9a).
+          #
+          # SIZED FOR TWO BUILDERS AND AN OPERATOR (5ee0ff2a). At 8 CPU /
+          # 16Gi the pod was one cgroup shared by two builder agents and
+          # David's interactive session: measured 2026-09-14, memory
+          # 15.85/16 GiB and cpu.stat throttled 2,177 periods (~10 min)
+          # in one afternoon, felt as lag in his shell. w-1 is 32 CPU /
+          # 64 GiB and the three gate slots request 12 / 24Gi; with this
+          # pod at 4 / 8Gi requested the node holds 16 / 32Gi of
+          # requests, and the limits overcommit the way each gate's
+          # (20 CPU / 32Gi) already does.
           resources:
-            requests: {cpu: "2", memory: 4Gi}
-            limits: {cpu: "8", memory: 16Gi}
+            requests: {cpu: "4", memory: 8Gi}
+            limits: {cpu: "16", memory: 32Gi}
           volumeMounts:
             - {name: work, mountPath: /work}
             - {name: scratch, mountPath: /scratch}

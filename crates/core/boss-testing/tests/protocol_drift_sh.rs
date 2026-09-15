@@ -99,6 +99,45 @@ fn registry_fixture() -> (String, usize) {
         let doc: toml::Value = toml::from_str(&text).expect("a bundle file parses");
         let wf = &doc["workflow"][0];
         let kind = wf["kind"].as_str().expect("kind").to_string();
+        // The steps ride too, in the row's shape (`steps`, each with
+        // its `fields`), because the lint compares them since
+        // 2026-09-15 (count, titles, required set, label — backlog
+        // 0ccf23ec): a fixture without them would plant a step drift
+        // on every kind and the two DELIBERATE disagreements below
+        // would drown in it.
+        let steps: Vec<serde_json::Value> = wf
+            .get("step")
+            .and_then(|s| s.as_array())
+            .map(|steps| {
+                steps
+                    .iter()
+                    .map(|s| {
+                        let fields: Vec<serde_json::Value> = s
+                            .get("fields")
+                            .and_then(|f| f.as_array())
+                            .map(|fs| {
+                                fs.iter()
+                                    .map(|f| {
+                                        serde_json::json!({
+                                            "name": f.get("name").and_then(|v| v.as_str()),
+                                            "field_type": f.get("field_type").and_then(|v| v.as_str()),
+                                            "required": f.get("required").and_then(|v| v.as_bool()).unwrap_or(false),
+                                        })
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        serde_json::json!({
+                            "title": s.get("title").and_then(|v| v.as_str()),
+                            "kind": s.get("kind").and_then(|v| v.as_str()),
+                            "ready_when": s.get("ready_when").and_then(|v| v.as_str()),
+                            "title_template": s.get("title_template").and_then(|v| v.as_str()).unwrap_or(""),
+                            "fields": fields,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut row = serde_json::json!({
             "kind": kind,
             "version": 7,
@@ -107,6 +146,7 @@ fn registry_fixture() -> (String, usize) {
             "category": wf.get("category").and_then(|v| v.as_str()),
             "owning_team": "platform",
             "description": wf.get("description").and_then(|v| v.as_str()),
+            "steps": steps,
         });
         if kind == DRIFTED_KIND {
             saw_drifted = true;

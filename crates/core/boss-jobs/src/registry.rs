@@ -425,349 +425,6 @@ fn workflow_design_spec() -> WorkflowSpec {
     spec
 }
 
-/// Build the canonical `ship-a-change` WorkflowSpec.
-///
-/// Shipping is work, so it is a Job — the same argument feedback got.
-/// What it buys here is different, though: a Job gives a change an
-/// owner, a recorded decision about its boundary, and a place in the
-/// same throughput view as everything else the team does. `/system/flow`
-/// counts these against a cadence target without a second mechanism.
-///
-/// The Subject is a `custom` Subject whose id is the branch name, the
-/// shape feedback uses for a route and design-doc-review uses for a
-/// path. "What shipped on this branch" then answers from Subject
-/// history rather than from a report someone writes.
-///
-/// ## Why `scope` comes first, and is gated on a person
-///
-/// The problem this kind exists to solve is that a PR's boundary gets
-/// decided at the END, when whoever is working is tired and everything
-/// is already entangled. The branch that added this spec is the
-/// evidence: one PR carrying a guest sign-in, a dispatcher fix, a
-/// ledger determinism fix and two new surfaces, because nothing ever
-/// asked where it should have been cut.
-///
-/// So the first step is a human declaring what this change contains
-/// and what it deliberately leaves out, BEFORE the work. `excludes` is
-/// required for exactly that reason: naming what you are not doing is
-/// the act that keeps a change small, and a field nobody has to fill
-/// in would be filled in never. It is the split point, made a state
-/// transition instead of a judgement call.
-///
-/// Step graph:
-///  -1. `opened`  — someone started a change
-///   0. `scope`   — declare the boundary (human-gated)
-///   1. `build`   — the change, with the test that fails without it
-///   2. `gate`    — everything green, and observed working
-///   3. `review`  — opened for review, url recorded
-///   999. `merged`/`abandoned` — outcomes
-// Kept only as the fidelity test's expected value — see
-// `the_platform_bundle_matches_the_specs_it_replaced`. Out of
-// `platform_workflows()`, so the lib build has no caller: the kind
-// now lives in infra/platform/workflows/ and an operator edit
-// to it survives a boot, which is the whole point of the move.
-#[cfg(test)]
-fn ship_a_change_spec() -> WorkflowSpec {
-    let steps = vec![
-        StepSpec {
-            title: "opened".into(),
-            kind: "trigger".into(),
-            ready_when: "true".into(),
-            title_template: "Change started".into(),
-            metadata_defaults: serde_json::json!({
-                "trigger_kind": "operator",
-                "trigger_name": "operator-starts-a-change",
-            }),
-            ..Default::default()
-        },
-        StepSpec {
-            title: "scope".into(),
-            kind: "task".into(),
-            ready_when: "steps.opened.done".into(),
-            title_template: "Declare the boundary".into(),
-            // Human-gated for the same reason triage is: `task` carries
-            // no required role, and an ungated ready step gets
-            // role-matched and completed by the simulated workforce. A
-            // scope nobody chose is worse than no scope step, because
-            // the audit trail then says someone decided.
-            authority_role: Some("platform-admin".into()),
-            fields: vec![
-                boss_core::job::StepField {
-                    name: "summary".into(),
-                    field_type: "string".into(),
-                    required: true,
-                    filled_by: boss_core::job::FilledBy::Executor,
-                    item_keys: Vec::new(),
-                    covers: None,
-                },
-                // Required, deliberately. See the doc comment: the
-                // sentence that keeps a change small is the one about
-                // what it is not doing, and an optional field for it
-                // would be skipped every time under exactly the
-                // conditions that need it.
-                boss_core::job::StepField {
-                    name: "excludes".into(),
-                    field_type: "string".into(),
-                    required: true,
-                    filled_by: boss_core::job::FilledBy::Executor,
-                    item_keys: Vec::new(),
-                    covers: None,
-                },
-            ],
-            ..Default::default()
-        },
-        StepSpec {
-            title: "build".into(),
-            kind: "task".into(),
-            ready_when: "steps.scope.done".into(),
-            title_template: "Build it".into(),
-            authority_role: Some("platform-admin".into()),
-            fields: vec![
-                // The test that fails without the change. Named rather
-                // than checkboxed: "tests pass" is true of a change
-                // with no test, and a name is something a reviewer can
-                // go read.
-                boss_core::job::StepField {
-                    name: "test".into(),
-                    field_type: "string".into(),
-                    required: true,
-                    filled_by: boss_core::job::FilledBy::Executor,
-                    item_keys: Vec::new(),
-                    covers: None,
-                },
-            ],
-            ..Default::default()
-        },
-        StepSpec {
-            title: "gate".into(),
-            kind: "task".into(),
-            ready_when: "steps.build.done".into(),
-            title_template: "Green, and observed working".into(),
-            authority_role: Some("platform-admin".into()),
-            fields: vec![
-                boss_core::job::StepField {
-                    name: "gates".into(),
-                    field_type: "string".into(),
-                    required: true,
-                    filled_by: boss_core::job::FilledBy::Executor,
-                    item_keys: Vec::new(),
-                    covers: None,
-                },
-                // How the change was seen working on a running system
-                // — or why there is nothing to observe. Required
-                // because "the tests passed" and "the operator can use
-                // it" came apart repeatedly: a deploy that copied a
-                // stale binary, a fix reported from a green suite while
-                // the running service still had the bug.
-                boss_core::job::StepField {
-                    name: "verified".into(),
-                    field_type: "string".into(),
-                    required: true,
-                    filled_by: boss_core::job::FilledBy::Executor,
-                    item_keys: Vec::new(),
-                    covers: None,
-                },
-                // The gate's OWN account of the run, not the author's.
-                //
-                // `gates` and `verified` are prose, so "the gate was
-                // green" has always been something the protocol takes
-                // on trust. On 2026-08-17 a car asserted
-                // `infra/gate.sh --auto green` while its crate did not
-                // compile, and the train it boarded reddened twice
-                // (742d1faa). Two more reds the same day were the
-                // subtler version: the gate really did pass, on a
-                // laptop, in a shape CI does not run — one suite that
-                // had never seen `FORGEJO_ACTIONS`, one that had never
-                // run against a clean tree whose HEAD is its own trunk.
-                // Neither prose field would have shown that, because
-                // the author did not know it either.
-                //
-                // `infra/gate.sh` now writes a receipt (see
-                // `write_receipt`) recording the mode, the commit,
-                // whether the tree was dirty, the host, whether any CI
-                // marker was set, the free space, and every check with
-                // its result. Paste it here.
-                //
-                // This is EVIDENCE, NOT ENFORCEMENT — nothing stops
-                // someone typing a fiction into a string field, and
-                // pretending otherwise would be the same trust the
-                // prose fields already misplace. What it changes is
-                // that the honest answer is now the easy one, and that
-                // the fact which keeps catching us — WHERE the gate ran
-                // — is written down by something other than the person
-                // making the claim.
-                boss_core::job::StepField {
-                    name: "receipt".into(),
-                    field_type: "string".into(),
-                    required: true,
-                    filled_by: boss_core::job::FilledBy::Executor,
-                    item_keys: Vec::new(),
-                    covers: None,
-                },
-                // What the change LOOKS like, for a car that changes a
-                // rendered surface — a screenshot path, or what was
-                // rendered and looked at.
-                //
-                // Optional, because most cars change no surface and a
-                // required field would be answered "n/a" into
-                // meaninglessness. It exists because the protocol is a
-                // better place to carry this than any one actor's
-                // notes: on 2026-08-15 a UI change was "fixed" twice in
-                // the wrong file and both diffs compiled, typechecked
-                // and read plausibly. The tooling to render it was
-                // already in the repo — `apps/web/playwright.mocked
-                // .config.ts`, chromium installed — and one screenshot
-                // named the mistake in a minute. Asking the question on
-                // the step is what makes that habit belong to whoever
-                // holds the car rather than to whoever happened to
-                // learn it.
-                boss_core::job::StepField {
-                    name: "rendered".into(),
-                    field_type: "string".into(),
-                    required: false,
-                    filled_by: boss_core::job::FilledBy::Executor,
-                    item_keys: Vec::new(),
-                    covers: None,
-                },
-            ],
-            ..Default::default()
-        },
-        StepSpec {
-            title: "review".into(),
-            kind: "task".into(),
-            ready_when: "steps.gate.done".into(),
-            title_template: "Open for review".into(),
-            authority_role: Some("platform-admin".into()),
-            fields: vec![boss_core::job::StepField {
-                name: "pr_url".into(),
-                field_type: "string".into(),
-                required: true,
-                filled_by: boss_core::job::FilledBy::Executor,
-                item_keys: Vec::new(),
-                covers: None,
-            }],
-            ..Default::default()
-        },
-        // Merged is not done. David, 2026-08-19, after a day of
-        // "changes are done that are not visible in my UI experience":
-        // *"Since I am using 'prod', I should have the definitive view
-        // and proof that the change is fully deployed, which should be
-        // the happy path terminal outcome."* The step's contract is
-        // proof AT THE CONSUMING LAYER of the deployed system — a
-        // browser check (infra/uxprobe) for anything with a surface,
-        // endpoint/log evidence for anything without one. `verified`
-        // is required at done so the proof is on the record, and
-        // `method` names which kind of proof it was.
-        //
-        // Same trigger the terminal used to fire on: the conductor (or
-        // a person) observed the merge. The terminal below now waits
-        // for the proof instead.
-        StepSpec {
-            title: "proven".into(),
-            kind: "task".into(),
-            ready_when: "steps.review.done AND job.metadata.merged = \"true\"".into(),
-            title_template: "Proven in prod".into(),
-            authority_role: Some("platform-admin".into()),
-            fields: vec![
-                boss_core::job::StepField {
-                    name: "verified".into(),
-                    field_type: "string".into(),
-                    required: true,
-                    filled_by: boss_core::job::FilledBy::Executor,
-                    item_keys: Vec::new(),
-                    covers: None,
-                },
-                boss_core::job::StepField {
-                    name: "method".into(),
-                    field_type: "browser|api|log".into(),
-                    required: false,
-                    filled_by: boss_core::job::FilledBy::Executor,
-                    item_keys: Vec::new(),
-                    covers: None,
-                },
-            ],
-            ..Default::default()
-        },
-        StepSpec {
-            title: "merged".into(),
-            kind: "outcome".into(),
-            // The happy terminal fires on the PROOF, not the merge —
-            // the outcome value stays "merged" so every consumer of
-            // the close marker (the feedback obligation above all)
-            // keeps matching, and now fires only once the change is
-            // verified where the operator actually lives. The
-            // conductor's own bookkeeping is untouched: it still
-            // completes `review` and sets the merge marker, and the
-            // packet then waits at `proven` instead of closing.
-            ready_when: "steps.proven.done".into(),
-            title_template: "Merged".into(),
-            metadata_defaults: serde_json::json!({ "outcome_kind": "completed" }),
-            terminal: Some(Terminal {
-                outcome: "merged".into(),
-            }),
-            ..Default::default()
-        },
-        // A change that gets abandoned is a real outcome, and the
-        // cadence view should tell it apart from one still in flight.
-        //
-        // Gated on an explicit `job.metadata.abandoned` marker, NOT on
-        // "scope is done". The first version used the latter and it
-        // closed the very first Job filed against this Workflow: an
-        // ungated terminal that is ready is a terminal the dispatcher
-        // completes, so `complete-marker-on-step-ready` fired the
-        // instant scope finished, skipped build/gate/review, and shut
-        // the Job as abandoned seconds after it opened.
-        //
-        // An always-ready escape hatch is indistinguishable from "this
-        // Job is finished". Abandoning has to be an act someone
-        // performs, which is what the marker makes it.
-        StepSpec {
-            title: "abandoned".into(),
-            kind: "outcome".into(),
-            // BOTH halves are load-bearing. `steps.scope.done` is the
-            // DAG edge — the viability lint rejects a step no trigger
-            // can reach, and gating on metadata alone left this one
-            // orphaned. The marker is what stops it being ready by
-            // default, which is what let the dispatcher close a Job
-            // the moment its scope was declared.
-            ready_when: "steps.scope.done AND job.metadata.abandoned = \"true\"".into(),
-            title_template: "Abandoned".into(),
-            metadata_defaults: serde_json::json!({ "outcome_kind": "aborted" }),
-            terminal: Some(Terminal {
-                outcome: "abandoned".into(),
-            }),
-            ..Default::default()
-        },
-    ];
-
-    let mut spec = WorkflowSpec::platform_seed(
-        "ship-a-change",
-        "Ship a change",
-        "platform",
-        vec!["custom".into()],
-        steps,
-    );
-    // Same owner as the other platform meta-kinds — and what puts
-    // these Jobs on `/system/flow`, which selects by owner_role rather
-    // than by a list of kinds.
-    spec.metadata = serde_json::json!({ "owner_role": "platform-admin" });
-    spec.description = Some(
-        "One change, from declaring its boundary to merging it. The Subject is a `custom` \
-         Subject whose id is the branch, so \"what shipped here\" is a Subject-history \
-         question. The `scope` step is the point of the kind: it asks a person what the \
-         change contains and what it deliberately excludes BEFORE the work, which is the \
-         only moment that decision keeps a PR small. Counted on /system/flow, so a cadence \
-         target needs no second mechanism. Name the feedback packet this change answers in \
-         `metadata.backlog_item` — a declared job edge, ref-checked at the write, and the \
-         link the dispatcher follows on merge to complete that packet's open branch and \
-         tell its filer. Use `metadata.backlog_text` only when the referent is not a Job \
-         on this instance (legacy, or a request that arrived as prose); it is free text \
-         and nothing follows it."
-            .to_string(),
-    );
-    spec
-}
-
 /// Build the canonical `regenerate-deployment` WorkflowSpec.
 ///
 /// A regen drops the database and rebuilds it: schema, seed, six
@@ -3675,10 +3332,20 @@ mod tests {
         //
         // The presence half is kept for it by `CONVERTED` above, which
         // is the assertion that actually caught something.
+        //
+        // `ship-a-change` LEFT THE SAME WAY on 2026-09-15 (backlog
+        // 0ccf23ec), for the same reason one version later. Its live row
+        // had moved to v31 through operator publishes — a `settled`
+        // outcome, a required `proof` field on `proven` (the machine-
+        // probe rule, v22), a procedure on every step — while the pin
+        // here still described the v14 shape, so the bundle file it
+        // vouched for was the one copy that could NOT be brought level
+        // with the deployment without editing Rust. The file now
+        // carries the live row, the drift lint compares steps as well
+        // as prose, and this literal held nothing the file does not.
         let expected = [
             workflow_design_spec(),
             regenerate_deployment_spec(),
-            ship_a_change_spec(),
             design_doc_review_spec(),
             maintenance_spec(
                 "maintenance-backup",
@@ -6715,7 +6382,13 @@ mod frozen_job_tests {
     /// reviewer's queue.
     #[test]
     fn an_added_step_freezes_the_job_and_is_detectable() {
-        let spec = ship_a_change_spec();
+        // The real ship-a-change protocol, read from the bundle file
+        // that is its home since the Rust literal left on 2026-09-15.
+        let spec = crate::seed_loader::load_workflows(platform_bundle_path())
+            .expect("the platform bundle parses")
+            .into_iter()
+            .find(|w| w.kind == "ship-a-change")
+            .expect("ship-a-change is in the platform bundle");
         let subject = Subject::new("custom", "x");
         let mut n = 0u32;
         let mut steps = materialize_steps(

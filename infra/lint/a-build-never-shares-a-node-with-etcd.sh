@@ -35,10 +35,10 @@ BUILD_WORKLOADS=(
     "infra/gate-runner/gate-runner.yaml"
     "infra/cluster/manifests/boss-dev.yaml"
 )
-# file<TAB>reason. Every entry is a car somebody owes.
-EXEMPT=(
-    "infra/cluster/manifests/boss-dev.yaml	a car editing this file rolls the dev pod on converge and ends the live operator session, so it lands only at a David-timed restart (boss-dev-manifest-cars-restart-the-session). The term to add is the same one gate-runner.yaml carries; until then the dev pod only PREFERS the build node."
-)
+# file<TAB>reason. Every entry is a car somebody owes. Empty since
+# 2026-09-14: the dev pod paid its exemption on the same restart that
+# resized it (feat/the-dev-pod-has-room-for-two-builders-and-an-operator).
+EXEMPT=()
 TERM='{key: node-role.kubernetes.io/control-plane, operator: DoesNotExist}'
 
 fail=0
