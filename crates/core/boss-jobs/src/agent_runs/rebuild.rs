@@ -80,6 +80,14 @@ async fn insert_run(
     sqlx::query(&insert_run_sql())
         .bind(&run.run.run_id)
         .bind(run.run.actor_id.to_string())
+        // The resolved model, NOT the raw key: an event written before
+        // the column existed (2026-09-10 to 2026-09-15) has no `model`
+        // key and carries the model inside its colon-form actor id.
+        // `NewAgentRun::model` reads that back by the rule the
+        // migration's backfill used, so a rebuilt table and a migrated
+        // one hold the same column (determinism). A newer event carries
+        // the key and the same call returns it unchanged.
+        .bind(run.run.model())
         .bind(run.run.started_at)
         .bind(run.run.finished_at)
         .bind(run.run.outcome.as_str())
@@ -122,7 +130,10 @@ mod tests {
     fn the_insert_has_one_placeholder_per_column() {
         let sql = insert_run_sql();
         let columns = super::super::postgres::RUN_COLUMNS.split(',').count();
-        assert_eq!(columns, 16, "agent_runs has sixteen columns");
+        assert_eq!(
+            columns, 17,
+            "agent_runs has seventeen columns (model joined on 2026-09-15)"
+        );
         for n in 1..=columns {
             assert!(
                 sql.contains(&format!("${n}")),

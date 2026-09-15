@@ -3,13 +3,22 @@
 //! Three deliberate shapes here, each the answer to a way this could
 //! have been got wrong:
 //!
-//! 1. **THE MODEL IS NOT A FIELD.** It is read out of `actor_id`.
-//!    `boss_core::actor::ActorId::Agent { mode, model }` already makes
-//!    the model a groupable dimension of the actor id — that module's
-//!    own doc comment says so and says no separate `_model` key should
-//!    be added. A `model` column beside `actor_id` would be the same
-//!    fact in two places (§9a), so [`AgentRun::model`] parses it and
-//!    the roll-ups below group on the parse. One definition.
+//! 1. **THE MODEL IS A FACT ABOUT THE RUN.** It is a column,
+//!    `agent_runs.model`, resolved ONCE when the run is recorded and
+//!    written down — design 6fda05ae, resolution model-on-run (decided
+//!    2026-09-15): one registered agent (`agent-claude`, an `agents`
+//!    row) runs different models over time, and cost is priced per
+//!    run, so the run names the model and the agent row carries only
+//!    the DEFAULT for a run that does not say. This rule used to read
+//!    the other way — "the model is not a field, it is read out of
+//!    `actor_id`" — and it was right while the actor id carried the
+//!    model (`claude:opus-5`); a registered agent's id is model-free
+//!    by decision, so the column is now the only place the fact lives.
+//!    [`NewAgentRun::model`] is the one resolution: the column first,
+//!    and the colon-form actor id ONLY as the fallback for rows and
+//!    events written before the column existed. The `ActorId::Agent`
+//!    arm survives for exactly those rows; a new run by a registered
+//!    agent carries the registry id and the model beside it.
 //!
 //! 2. **THE PRICE IS NOT SUPPLIED BY THE CALLER.** A run reports
 //!    tokens; the rate card turns tokens into micro-USD. A caller that
@@ -233,8 +242,18 @@ pub struct NewAgentRun {
     /// records the run once (idempotence — the same contract the
     /// cadence claim rests on).
     pub run_id: String,
-    /// The CPU that ran. Must be the agent form `<mode>:<model>`.
+    /// The CPU that ran. An agent in either spelling: the registered
+    /// id (`agent-claude`), which names no model and so relies on
+    /// [`NewAgentRun::model`] or the agent row's default; or the legacy
+    /// colon form (`claude:opus-5`), which carries its model.
     pub actor_id: ActorId,
+    /// The model this run ran on, as `agent_rate_card.model` spells it.
+    /// Optional on the WIRE only: a report may leave it out, and the
+    /// recorder fills it — from the agent row's default when the actor
+    /// is a registered agent, from the actor id when it is the colon
+    /// form — or refuses. On the record it is always resolved.
+    #[serde(default)]
+    pub model: Option<String>,
     /// Both bound by the caller, never the database's `NOW()`: the run
     /// happened on the caller's clock, and a write-time reading would
     /// describe when the report arrived instead.
@@ -284,14 +303,27 @@ pub struct AgentRun {
     pub recorded_at: DateTime<Utc>,
 }
 
-impl AgentRun {
-    /// The model half of the actor id, or `None` if the actor is not
-    /// an agent. The ONLY place a model is derived.
+impl NewAgentRun {
+    /// The model this run names — the ONE place it is derived, and the
+    /// same rule the migration's backfill applied to the rows written
+    /// before the column existed: the column when it is set; else the
+    /// model half of a colon-form actor id; else `None`. A registered
+    /// agent's id carries no model, so a run by one that has not been
+    /// resolved through the registry (`port::resolve_model`) reads as
+    /// naming none — which is why the recorder resolves before it
+    /// prices or writes.
     pub fn model(&self) -> Option<&str> {
-        match &self.run.actor_id {
+        self.model.as_deref().or(match &self.actor_id {
             ActorId::Agent { model, .. } => Some(model.as_str()),
             _ => None,
-        }
+        })
+    }
+}
+
+impl AgentRun {
+    /// The model this run ran on — see [`NewAgentRun::model`].
+    pub fn model(&self) -> Option<&str> {
+        self.run.model()
     }
 
     /// Wall seconds the run took. Derived, never stored: `finished_at -
@@ -326,7 +358,8 @@ impl AgentRun {
 /// three cases, and they are all the same case: nothing on the card
 /// could turn these tokens into a number.
 ///
-/// 1. The actor is not an agent, so it names no model.
+/// 1. The run names no model — a non-agent actor, or a registered
+///    agent's run that was never resolved through the registry.
 /// 2. No card row covers the model.
 /// 3. **The run reported only a total.** The card charges input and
 ///    output at different rates, so there is no arithmetic from one
@@ -338,10 +371,7 @@ impl AgentRun {
 /// the multiply before the divide, rounded to the nearest micro-USD
 /// (half up) and saturated into `u64`.
 pub fn price_run(card: &[RateCardRow], run: &NewAgentRun) -> Option<(u64, String)> {
-    let model = match &run.actor_id {
-        ActorId::Agent { model, .. } => model.as_str(),
-        _ => return None,
-    };
+    let model = run.model()?;
     let TokenUsage::Split { input, output } = run.tokens else {
         return None;
     };
@@ -442,7 +472,7 @@ pub struct RunSummary {
 
 /// Roll up a set of runs. A pure function of the rows — the projection
 /// discipline applied one level up: group in Rust off the one model
-/// parse rather than re-deriving the model split in SQL.
+/// resolution rather than re-deriving it in SQL.
 pub fn summarize(runs: &[AgentRun]) -> RunSummary {
     let mut by_model: BTreeMap<String, GroupSpend> = BTreeMap::new();
     let mut by_branch: BTreeMap<String, GroupSpend> = BTreeMap::new();
@@ -576,6 +606,9 @@ mod tests {
             finished_at: "2026-09-10T01:10:00Z".parse().unwrap(),
             outcome: RunOutcome::Success,
             error: None,
+            // Unset: these fixtures exercise the legacy fallback. The
+            // column-first tests below set it.
+            model: None,
             tokens,
             tool_calls: 7,
             job_id: None,
@@ -595,9 +628,44 @@ mod tests {
     }
 
     #[test]
-    fn model_is_read_from_the_actor_id_not_a_field() {
+    fn a_legacy_colon_form_run_reads_its_model_out_of_the_actor_id() {
+        // The fallback, for rows and events written before the column.
         let run = recorded(a_run("claude:opus-5", 100, 10), &card());
         assert_eq!(run.model(), Some("opus-5"));
+    }
+
+    #[test]
+    fn the_model_column_is_the_definition_when_it_is_set() {
+        // A registered agent's id names no model; the column does, and
+        // it is what the run is priced against.
+        let mut new = a_run("agent-claude", 1_000_000, 0);
+        new.model = Some("haiku-4-5".into());
+        let run = recorded(new, &card());
+        assert_eq!(run.model(), Some("haiku-4-5"));
+        assert_eq!(run.priced_by.as_deref(), Some("haiku-4-5"));
+        assert_eq!(run.usd_micros, Some(1_000_000));
+    }
+
+    #[test]
+    fn the_column_wins_over_a_colon_form_actor_that_disagrees() {
+        // A report that names its model outright is believed over the
+        // spelling of its actor id: the column is the fact, the actor
+        // id a legacy carrier of it.
+        let mut new = a_run("claude:opus-5", 1_000_000, 0);
+        new.model = Some("haiku-4-5".into());
+        let run = recorded(new, &card());
+        assert_eq!(run.model(), Some("haiku-4-5"));
+        assert_eq!(run.usd_micros, Some(1_000_000));
+    }
+
+    #[test]
+    fn an_unresolved_registered_agent_run_names_no_model_and_prices_to_nothing() {
+        // `agent-claude` alone says nothing about the model; the
+        // recorder resolves it through the registry before pricing, and
+        // a run that skipped that step reads as unpriced, never as $0.
+        let run = recorded(a_run("agent-claude", 100, 10), &card());
+        assert_eq!(run.model(), None);
+        assert_eq!(run.usd_micros, None);
     }
 
     #[test]
@@ -754,6 +822,32 @@ mod tests {
         assert_eq!(back, run);
         // The flattened wire form carries the actor in its bare form.
         assert!(json.contains("\"actor_id\":\"claude:opus-5\""));
+        // And the model as its own key — an explicit null here, because
+        // this fixture is the unresolved legacy shape; a recorded run
+        // always carries it resolved (see the port tests).
+        assert!(json.contains("\"model\":null"), "{json}");
+    }
+
+    #[test]
+    fn a_payload_without_the_model_key_still_deserializes() {
+        // Every `agents.run.recorded` event written before the column
+        // existed has no `model` key; the rebuild reads them.
+        let json = r#"{
+            "run_id": "run-old",
+            "actor_id": "claude:opus-5[1m]",
+            "started_at": "2026-09-10T01:00:00Z",
+            "finished_at": "2026-09-10T01:10:00Z",
+            "outcome": "success",
+            "total_tokens": 142982,
+            "recorded_at": "2026-09-10T01:10:01Z"
+        }"#;
+        let run: AgentRun = serde_json::from_str(json).expect("an old payload parses");
+        assert_eq!(run.run.model, None, "the key was absent");
+        assert_eq!(
+            run.model(),
+            Some("opus-5[1m]"),
+            "the fallback still answers"
+        );
     }
 
     // ----------------------------------------------------------------

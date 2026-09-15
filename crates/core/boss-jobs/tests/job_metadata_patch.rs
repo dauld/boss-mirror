@@ -56,7 +56,7 @@ fn job_with_metadata(id: &str, owner: &str, metadata: serde_json::Value) -> Job 
         closed_on: None,
         metadata,
         tags: vec![],
-        simulated: false,
+        partition: boss_core::partition::Partition::Real,
     }
 }
 

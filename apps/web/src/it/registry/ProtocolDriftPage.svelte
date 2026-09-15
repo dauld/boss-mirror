@@ -34,6 +34,15 @@
   // re-read every 10 s while one is in flight, so the answer arrives
   // without a reload) and the ops-request row's `execute` role, which
   // is who the control admits.
+  //
+  // A ROW THE VERB HAS PUBLISHED SINCE the measurement reads superseded
+  // (car 3c): greyed in the table, its control labelled with the
+  // versions and the instant, and its fields out of the header's
+  // adrift count — until the next 05:20 run re-measures it. That is
+  // rowState (approve.ts, tested) over the requests already read here,
+  // never a new fetch; a later refusal is the newer answer and un-greys
+  // the row. While the requests are loading or failed nothing is
+  // superseded: the count is then what the packet said.
   import { onDestroy, onMount } from 'svelte';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import { session } from '@boss/web-kit/session/session.svelte';
@@ -45,7 +54,10 @@
     loadExecuteAuthorityRole,
     loadPublishRequests,
     PUBLISH_HOST,
+    rowState,
+    supersededFieldCount,
     type PublishRequest,
+    type RowState,
   } from './approve';
   import ApprovePublish from './ApprovePublish.svelte';
 
@@ -89,6 +101,16 @@
   const ready = $derived(page.kind === 'ready' ? page.data : null);
   const newest = $derived(ready ? newestMeasured(ready.packets) : null);
   const kinds = $derived(newest ? adriftKinds(newest.drift.fields) : []);
+  const states = $derived<ReadonlyMap<string, RowState>>(
+    new Map(
+      kinds.map((k) => [
+        k.kind,
+        newest && requests.kind === 'ready' ? rowState(k, latestFor(requests.data, k.kind), newest.measured.at) : { kind: 'adrift' },
+      ]),
+    ),
+  );
+  const supersededFields = $derived(supersededFieldCount(kinds, states));
+  const isSuperseded = (kind: string): boolean => states.get(kind)?.kind === 'superseded';
   const viewerId = $derived(session.value.kind === 'ready' ? session.value.user.id : null);
   const viewerRole = $derived(session.value.kind === 'ready' ? session.value.user.role : null);
 
@@ -166,9 +188,14 @@
           <small>of {n(newest.measured.fields_parsed)} parsed</small>
         </div>
       </div>
-      <div title="compared fields where the file and the live row disagree">
+      <div title="compared fields where the file and the live row disagree, less those a publish has answered since the measurement">
         <div class="k">adrift</div>
-        <div class="v {newest.drift.counts.fields > 0 ? 'warn' : 'ok'}">{n(newest.drift.counts.fields)}</div>
+        <div class="v {newest.drift.counts.fields - supersededFields > 0 ? 'warn' : 'ok'}">
+          {n(newest.drift.counts.fields - supersededFields)}
+          {#if supersededFields > 0}
+            <small>of {n(newest.drift.counts.fields)} measured; {n(supersededFields)} published since</small>
+          {/if}
+        </div>
       </div>
       <div title="the lint's own exit on this run — the verdict the gate would have given">
         <div class="k">verdict</div>
@@ -197,7 +224,7 @@
           </thead>
           <tbody>
             {#each newest.drift.fields as f (`${f.kind}.${f.field}`)}
-              <tr>
+              <tr class:superseded={isSuperseded(f.kind)} title={isSuperseded(f.kind) ? 'published since this measurement — see the approve below' : undefined}>
                 <td class="mono">{f.kind}</td>
                 <td class="mono">{f.field}</td>
                 <td class="num mono">{f.live_version === null ? '—' : `v${f.live_version}`}</td>
@@ -241,6 +268,7 @@
           kind={k}
           against={{ packet: newest.id, head: newest.measured.head }}
           latest={latestFor(requests.data, k.kind)}
+          standing={states.get(k.kind) ?? { kind: 'adrift' }}
           authorityRole={authorityRole.data}
           {viewerId}
           {viewerRole}
@@ -354,6 +382,10 @@
   .pd-table td { padding: 6px 8px; border-bottom: 1px solid var(--hairline, #2a3138); vertical-align: top; white-space: nowrap; }
   .pd-table td small { display: block; color: var(--static, #7a838c); font-size: 11px; }
   .pd-table .num { text-align: right; }
+  /* Published since the measurement: still the packet's row, drawn as
+     history rather than as work. */
+  .pd-table tr.superseded td { color: var(--text-faint, #5c656e); }
+  .pd-table tr.superseded .excerpt { color: var(--text-faint, #5c656e); }
   .pd-table .excerpt {
     white-space: pre-wrap; overflow-wrap: anywhere; max-width: 40ch;
     font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--fog, #e8ecef);

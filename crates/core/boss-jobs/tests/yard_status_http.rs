@@ -256,7 +256,7 @@ fn job(kind: &str, id: &str, title: &str, status: JobStatus, metadata: Value) ->
         },
         metadata,
         tags: vec![],
-        simulated: false,
+        partition: boss_core::partition::Partition::Real,
     }
 }
 

@@ -102,8 +102,8 @@ fn matches_filter(job: &Job, filter: &JobFilter) -> bool {
     {
         return false;
     }
-    if let Some(simulated) = filter.simulated
-        && job.simulated != simulated
+    if let Some(partition) = filter.partition
+        && job.partition != partition
     {
         return false;
     }
@@ -238,12 +238,12 @@ impl JobsRepository for InMemoryJobs {
             let Some(existing) = state.jobs.get(&key) else {
                 return Err(JobsError::NotFound(job.id));
             };
-            // Mirror the Pg adapter: `simulated` is decided at
+            // Mirror the Pg adapter: the partition is decided at
             // admission and immutable — an update carries no
             // authority over it. The storage enforces this rather
             // than trusting every caller to.
             let mut next = job.clone();
-            next.simulated = existing.simulated;
+            next.partition = existing.partition;
             state.jobs.insert(key, next);
         }
         self.record_all(events);
@@ -732,7 +732,7 @@ impl JobsRepository for InMemoryJobs {
                     step_title: s.title.clone(),
                     status: s.status,
                     assignee_id: s.assignee_id.clone(),
-                    simulated: job.simulated,
+                    partition: job.partition,
                     since,
                     exact,
                 })
@@ -1004,6 +1004,7 @@ pub fn compute_job_status(steps: &[Step]) -> JobStatus {
 #[cfg(test)]
 mod tests {
     use boss_core::job::{Priority, Subject};
+    use boss_core::partition::Partition;
     use chrono::{NaiveDate, TimeZone};
 
     use super::*;
@@ -1021,20 +1022,28 @@ mod tests {
     /// window exists to prevent, an order of magnitude worse. So the
     /// filter is asserted through `list_jobs`, including its total.
     #[tokio::test]
-    async fn simulated_partitions_both_the_rows_and_the_total() {
+    async fn partition_filters_both_the_rows_and_the_total() {
         let repo = InMemoryJobs::default();
         for i in 0..3 {
             let mut j = make_job("wholesale-keg-order");
-            j.simulated = true;
+            j.partition = Partition::Simulated;
             j.title = format!("sim {i}");
             repo.create_job(&j).await.expect("create sim");
         }
         let mut real = make_job("ship-a-change");
         real.title = "real one".into();
         repo.create_job(&real).await.expect("create real");
+        // A shadow packet (packet 508cc38c): excluded from the real
+        // lane exactly as a simulated one is, AND from the simulated
+        // lane — the sim never sees it (Q5). Only its own filter
+        // returns it.
+        let mut shadow = make_job("wholesale-keg-order");
+        shadow.partition = Partition::Shadow;
+        shadow.title = "shadow one".into();
+        repo.create_job(&shadow).await.expect("create shadow");
 
         let only_real = JobFilter {
-            simulated: Some(false),
+            partition: Some(Partition::Real),
             ..Default::default()
         };
         let (rows, total) = repo.list_jobs(&only_real, 50, 0).await.expect("list");
@@ -1046,12 +1055,21 @@ mod tests {
         assert_eq!(rows[0].title, "real one");
 
         let only_sim = JobFilter {
-            simulated: Some(true),
+            partition: Some(Partition::Simulated),
             ..Default::default()
         };
         let (rows, total) = repo.list_jobs(&only_sim, 50, 0).await.expect("list");
         assert_eq!(rows.len(), 3);
         assert_eq!(total, 3);
+
+        let only_shadow = JobFilter {
+            partition: Some(Partition::Shadow),
+            ..Default::default()
+        };
+        let (rows, total) = repo.list_jobs(&only_shadow, 50, 0).await.expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(total, 1);
+        assert_eq!(rows[0].title, "shadow one");
 
         // Absent means everything — every existing caller keeps its
         // answer, which is what makes this safe to land before any
@@ -1060,8 +1078,8 @@ mod tests {
             .list_jobs(&JobFilter::default(), 50, 0)
             .await
             .expect("list");
-        assert_eq!(rows.len(), 4);
-        assert_eq!(total, 4);
+        assert_eq!(rows.len(), 5);
+        assert_eq!(total, 5);
     }
 
     fn make_job(kind: &str) -> Job {
@@ -1453,7 +1471,7 @@ mod tests {
         let repo = InMemoryJobs::new();
         let mut sim = make_job("ingredient-restock");
         sim.status = JobStatus::Open;
-        sim.simulated = true;
+        sim.partition = Partition::Simulated;
         sim.tags = vec!["nightly".to_string()];
         repo.create_job(&sim).await.unwrap();
         let mut s = Step::new(sim.id, "procurement", "Place PO", 0).with_assignee("emp-1");
@@ -1472,20 +1490,35 @@ mod tests {
             .await
             .unwrap();
         let sim_row = rows.iter().find(|row| row.job_id == sim.id).unwrap();
-        assert!(sim_row.simulated, "simulated job's row reports it");
+        assert_eq!(
+            sim_row.partition,
+            Partition::Simulated,
+            "simulated job's row reports it"
+        );
         assert_eq!(sim_row.tags, vec!["nightly".to_string()]);
         let real_row = rows.iter().find(|row| row.job_id == real.id).unwrap();
-        assert!(!real_row.simulated, "a real job's row stays real");
+        assert_eq!(
+            real_row.partition,
+            Partition::Real,
+            "a real job's row stays real"
+        );
         assert!(real_row.tags.is_empty());
+        // The row's wire shape carries both keys: the sim workforce
+        // reads `partition` (Q5: it works the simulated company and
+        // nothing else), and an N-1 reader of the bool fails closed.
+        let wire = serde_json::to_value(sim_row).unwrap();
+        assert_eq!(wire["partition"], "simulated");
+        assert_eq!(wire["simulated"], true);
 
         // The sim workforce's bulk pull reads the same row shape.
         let bulk = repo.list_assigned_workable(100).await.unwrap();
-        assert!(
+        assert_eq!(
             bulk.iter()
                 .find(|row| row.job_id == sim.id)
                 .unwrap()
-                .simulated,
-            "bulk backlog rows carry the flag too"
+                .partition,
+            Partition::Simulated,
+            "bulk backlog rows carry the partition too"
         );
     }
 

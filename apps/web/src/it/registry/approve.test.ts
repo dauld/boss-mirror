@@ -27,6 +27,8 @@ import {
   PUBLISH_REQUESTS_QUERY,
   PUBLISH_VERB,
   REQUESTED_FROM,
+  rowState,
+  supersededFieldCount,
   type PublishRequest,
 } from './approve';
 import type { FieldDrift } from './drift';
@@ -55,6 +57,8 @@ function request(over: {
   verb?: string;
   requested_from?: string | null;
   output?: string;
+  /** The execute step's `completed_at`; null = the step carries none. */
+  answered_at?: string | null;
 }): Record<string, unknown> {
   const disposition = over.disposition === undefined ? 'answered' : over.disposition;
   const execute: Record<string, unknown> = { authority_role: 'platform-admin' };
@@ -64,6 +68,7 @@ function request(over: {
     execute.runner_host = 'boss-gcp';
     if (over.exit_code !== null) execute.exit_code = over.exit_code ?? '0';
   }
+  const answered_at = over.answered_at === undefined ? '2026-09-15T21:03:12.123456Z' : over.answered_at;
   const metadata: Record<string, unknown> = {
     host: 'boss-gcp',
     verb: over.verb ?? PUBLISH_VERB,
@@ -79,7 +84,12 @@ function request(over: {
     metadata,
     steps: [
       { spec_slug: 'filed', status: 'completed', metadata: {} },
-      { spec_slug: 'execute', status: disposition === null ? 'ready' : 'completed', metadata: execute },
+      {
+        spec_slug: 'execute',
+        status: disposition === null ? 'ready' : 'completed',
+        metadata: execute,
+        ...(disposition !== null && answered_at !== null ? { completed_at: answered_at } : {}),
+      },
     ],
   };
 }
@@ -171,6 +181,73 @@ describe('latestFor and modeFor', () => {
     // A refusal by the RUNNER (outside the allowlist) is not exit 6.
     const [refused] = parsePublishRequests([request({ id: 'rf', disposition: 'refused', exit_code: null })]);
     expect(modeFor(refused ?? null)).toEqual({ kind: 'plain' });
+  });
+});
+
+// Car 3c (8f4e9cc0 `follow_up_3c`): the drift rows come from the 05:20
+// measurement and stay "adrift" until the next one, even after a
+// publish answered exit 0 in between. The row is superseded when the
+// kind's LATEST request wrote the tree's row after the measurement was
+// read — and only then: a --check answers 0 without writing, a later
+// refusal is the newer answer, an in-flight request is not an answer.
+describe('rowState', () => {
+  const measuredAt = '2026-09-15T05:20:00Z';
+  const kind = adriftKinds([row({}), row({ field: 'label' })])[0]!;
+  const published = 'publish-workflow: publishing infra/platform/workflows/ship-a-change.toml as automation:ops-runner for packet req-1 (boss: /usr/local/bin/boss)\n  published ship-a-change v32\npublish-workflow: ship-a-change v31 -> v32 live at http://10.20.0.34:7900 — confirmed by reading the active row back and comparing it to infra/platform/workflows/ship-a-change.toml (equal); packet req-1';
+  const latest = (over: Parameters<typeof request>[0]): PublishRequest | null => parsePublishRequests([request(over)])[0] ?? null;
+
+  test('no request, or one still open, leaves the row as the packet measured it', () => {
+    expect(rowState(kind, null, measuredAt)).toEqual({ kind: 'adrift' });
+    expect(rowState(kind, latest({ status: 'open', disposition: null }), measuredAt)).toEqual({ kind: 'adrift' });
+  });
+
+  test('exit 0 answered after the measurement supersedes the row, naming the versions and the instant', () => {
+    expect(rowState(kind, latest({ output: published }), measuredAt)).toEqual({
+      kind: 'superseded',
+      request_id: 'req-1',
+      at: '2026-09-15T21:03:12.123456Z',
+      from: 31,
+      to: 32,
+    });
+  });
+
+  test('exit 0 answered BEFORE the measurement does not: the measurement already saw its effect', () => {
+    expect(rowState(kind, latest({ output: published, opened_at: '2026-09-14T20:00:00+00:00', answered_at: '2026-09-14T20:01:00Z' }), measuredAt)).toEqual({ kind: 'adrift' });
+  });
+
+  test('a refusal or a non-zero exit after the measurement is the newer answer: not superseded', () => {
+    expect(rowState(kind, latest({ exit_code: '78' }), measuredAt)).toEqual({ kind: 'adrift' });
+    expect(rowState(kind, latest({ exit_code: '6' }), measuredAt)).toEqual({ kind: 'adrift' });
+    expect(rowState(kind, latest({ disposition: 'refused', exit_code: null }), measuredAt)).toEqual({ kind: 'adrift' });
+  });
+
+  test('a --check that answers 0 wrote nothing, so it supersedes nothing', () => {
+    expect(rowState(kind, latest({ args: ['ship-a-change', '--check'], output: 'publish-workflow: --check ok: would publish' }), measuredAt)).toEqual({ kind: 'adrift' });
+  });
+
+  test('versions come off the verb\'s confirmation line; unnamed, the measured live version is the from and the to is null', () => {
+    const got = rowState(kind, latest({ output: 'published, somehow, without the line' }), measuredAt);
+    expect(got).toMatchObject({ kind: 'superseded', from: 31, to: null });
+  });
+
+  test('an answer with no completed_at falls back to opened_at; unstamped both ways it cannot be judged and stays adrift', () => {
+    expect(rowState(kind, latest({ answered_at: null, opened_at: '2026-09-15T21:00:00+00:00', output: published }), measuredAt)).toMatchObject({
+      kind: 'superseded',
+      at: '2026-09-15T21:00:00+00:00',
+    });
+    const unstamped = parsePublishRequests([{ ...request({ answered_at: null, output: published }), metadata: { host: 'boss-gcp', verb: PUBLISH_VERB, args: ['ship-a-change'] } }])[0] ?? null;
+    expect(unstamped?.opened_at).toBeNull();
+    expect(rowState(kind, unstamped, measuredAt)).toEqual({ kind: 'adrift' });
+  });
+
+  test('the header subtracts the fields of every superseded kind, never a kind that is still adrift', () => {
+    const kinds = adriftKinds([row({}), row({ field: 'label' }), row({ kind: 'maintenance-sweep', live_version: 2 })]);
+    const states = new Map([
+      ['ship-a-change', rowState(kinds[0]!, latest({ output: published }), measuredAt)],
+      ['maintenance-sweep', rowState(kinds[1]!, latest({ args: ['maintenance-sweep'], exit_code: '78' }), measuredAt)],
+    ]);
+    expect(supersededFieldCount(kinds, states)).toBe(2);
+    expect(supersededFieldCount(kinds, new Map())).toBe(0);
   });
 });
 

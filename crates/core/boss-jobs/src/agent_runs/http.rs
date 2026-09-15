@@ -6,7 +6,8 @@
 //! deploys is a record nobody can file.
 //!
 //! **Every route, the POST included, admits the same two categories as
-//! the cadence surface: operator tier, or a trusted internal caller.**
+//! the cadence surface: operator tier, or a trusted internal caller** —
+//! and the three reads admit the auditor tier besides ([`can_read`]).
 //! An internal caller is one that arrived with no `x-boss-user` header
 //! at all, which the extractor reports as `role=guest` — a loopback
 //! sibling or a test harness, never a browser, because the gateway
@@ -49,6 +50,18 @@ pub struct AgentRunsApiState {
 /// external requests).
 fn is_trusted(user: &User) -> bool {
     user.role == "guest" || user.access_tier == AccessTier::Operator
+}
+
+/// The reads admit one more caller than the POST: the auditor tier —
+/// the door `/api/events/*` already opens to it, and the tier the
+/// recorded-probe reader carries (`infra/forge/run-car-probe.sh`,
+/// `audit-readonly` at `auditor`). Without it no car can prove a
+/// claim about a run through `boss-sor-read`, which is the one reader
+/// a probe may use — found 2026-09-15 rehearsing this surface's own
+/// probe: 403. The gateway's guest session is NOT this: it is
+/// `audit-readonly` at USER tier, and stays refused.
+fn can_read(user: &User) -> bool {
+    is_trusted(user) || user.access_tier == AccessTier::Auditor
 }
 
 pub fn router(state: AgentRunsApiState) -> Router {
@@ -120,7 +133,7 @@ async fn list_runs(
     CurrentUser(user): CurrentUser,
     Query(q): Query<RunQuery>,
 ) -> Response {
-    if !is_trusted(&user) {
+    if !can_read(&user) {
         return StatusCode::FORBIDDEN.into_response();
     }
     match state.log.list_runs(&q.into()).await {
@@ -162,7 +175,7 @@ async fn cost(
     CurrentUser(user): CurrentUser,
     Query(q): Query<RunQuery>,
 ) -> Response {
-    if !is_trusted(&user) {
+    if !can_read(&user) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let job_id = q.job_id;
@@ -185,7 +198,7 @@ async fn rate_card(
     State(state): State<Arc<AgentRunsApiState>>,
     CurrentUser(user): CurrentUser,
 ) -> Response {
-    if !is_trusted(&user) {
+    if !can_read(&user) {
         return StatusCode::FORBIDDEN.into_response();
     }
     match state.log.rate_card().await {
@@ -258,6 +271,7 @@ mod tests {
             finished_at: finished,
             outcome: RunOutcome::Success,
             error: None,
+            model: None,
             tokens: TokenUsage::TotalOnly { total: 134_392 },
             tool_calls: 70,
             job_id: None,
@@ -267,11 +281,39 @@ mod tests {
     }
 
     async fn app() -> Router {
-        let log = InMemoryAgentRuns::new(card());
+        // The registry's one live row, as 20260915212644 seeds it.
+        let log =
+            InMemoryAgentRuns::new(card()).with_registered_agent("agent-claude", "opus-5[1m]");
         log.record_run(&a_run(), &ActorId::Automation("platform".into()))
             .await
             .expect("the fixture run records");
         router(AgentRunsApiState { log: Arc::new(log) })
+    }
+
+    async fn post(
+        path: &str,
+        body: serde_json::Value,
+        user: Option<String>,
+    ) -> (StatusCode, String) {
+        let mut req = Request::post(path).header("content-type", "application/json");
+        if let Some(u) = user {
+            req = req.header("x-boss-user", u);
+        }
+        let resp = (app().await)
+            .oneshot(
+                req.body(Body::from(body.to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("the router answers");
+        let status = resp.status();
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("body collects")
+            .to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
     fn header(role: &str, tier: AccessTier) -> String {
@@ -338,6 +380,40 @@ mod tests {
         }
     }
 
+    /// The recorded-probe reader (`infra/forge/run-car-probe.sh`:
+    /// role `audit-readonly`, tier `auditor`) reads every surface and
+    /// writes none — the same door `/api/events/*` already opens to
+    /// that tier. Found 2026-09-15 by rehearsing this car's probe:
+    /// `boss-sor-read /api/agent-runs` answered 403, so no car could
+    /// ever prove a claim about a run through the one reader a probe
+    /// is allowed to use.
+    #[tokio::test]
+    async fn the_probe_reader_reads_every_surface_and_cannot_write() {
+        let auditor = header("audit-readonly", AccessTier::Auditor);
+        for path in READS {
+            let (status, body) = get(path, Some(auditor.clone())).await;
+            assert_eq!(status, StatusCode::OK, "`{path}`: {body}");
+        }
+        let (status, body) = post(
+            "/api/agent-runs",
+            serde_json::json!({
+                "run_id": "run-auditor",
+                "actor_id": "agent-claude",
+                "started_at": "2026-09-15T22:00:00Z",
+                "finished_at": "2026-09-15T22:10:00Z",
+                "outcome": "success",
+                "total_tokens": 1
+            }),
+            Some(auditor),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "an auditor is a reader; the record is written by operators: {body}"
+        );
+    }
+
     #[tokio::test]
     async fn a_user_tier_employee_is_refused() {
         for path in READS {
@@ -377,17 +453,86 @@ mod tests {
             "fix/the-branch-sweep-inspects-every-landed-car"
         );
         assert_eq!(row["total_tokens"], 134_392);
+        // The model is its own key on every row the list serves — this
+        // one resolved out of the legacy colon form at record time.
+        assert_eq!(row["model"], "opus-5[1m]", "body: {body}");
         // A bare total cannot be priced, and the row says so rather
         // than reporting a dollar figure it does not have.
         assert!(row["usd_micros"].is_null(), "body: {body}");
     }
 
+    /// The shape the design decided (6fda05ae): a registered agent's
+    /// id, model-free, with the model a fact about the run — from the
+    /// body when it says, from the agent row's default when it does
+    /// not. Posted through the door, read back off the answer.
+    #[tokio::test]
+    async fn a_registered_agents_report_carries_its_model_or_takes_the_default() {
+        let user = Some(header("platform-admin", AccessTier::Operator));
+        let report = |run_id: &str, model: Option<&str>| {
+            serde_json::json!({
+                "run_id": run_id,
+                "actor_id": "agent-claude",
+                "model": model,
+                "started_at": "2026-09-15T22:00:00Z",
+                "finished_at": "2026-09-15T22:10:00Z",
+                "outcome": "success",
+                "total_tokens": 1000,
+                "tool_calls": 1
+            })
+        };
+
+        let (status, body) = post(
+            "/api/agent-runs",
+            report("run-says", Some("haiku-4-5")),
+            user.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let out: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        assert_eq!(out["run"]["actor_id"], "agent-claude");
+        assert_eq!(
+            out["run"]["model"], "haiku-4-5",
+            "the report's own word: {body}"
+        );
+
+        let (status, body) = post("/api/agent-runs", report("run-silent", None), user).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let out: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        assert_eq!(
+            out["run"]["model"], "opus-5[1m]",
+            "the agent row's default: {body}"
+        );
+    }
+
+    /// A registered id no `agents` row backs, reporting no model, is a
+    /// 400 that names both fixes — not a row with a NULL model.
+    #[tokio::test]
+    async fn an_unregistered_agents_silent_report_is_refused_naming_the_fixes() {
+        let (status, body) = post(
+            "/api/agent-runs",
+            serde_json::json!({
+                "run_id": "run-nobody",
+                "actor_id": "agent-nobody",
+                "started_at": "2026-09-15T22:00:00Z",
+                "finished_at": "2026-09-15T22:10:00Z",
+                "outcome": "success",
+                "total_tokens": 1000
+            }),
+            Some(header("platform-admin", AccessTier::Operator)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert!(body.contains("agent-nobody"), "{body}");
+        assert!(body.contains("register the agent"), "{body}");
+    }
+
     /// The roll-up a cost surface would read. It already groups by
-    /// model and by branch; `by_actor` is absent on purpose — the model
-    /// key IS parsed out of `actor_id`, so under today's
-    /// `<mode>:<model>` vocabulary the two groupings have the same
-    /// buckets, and `actor_id` is a filter parameter on the list for
-    /// the narrower question.
+    /// model and by branch; `by_actor` is absent on purpose — every
+    /// live row is one actor (`agent-claude`, or its colon-form
+    /// spelling on older rows), so an actor grouping would be one
+    /// bucket, and `actor_id` is a filter parameter on the list for
+    /// the narrower question. The model bucket reads the run's own
+    /// `model` column since design 6fda05ae.
     #[tokio::test]
     async fn the_cost_read_names_the_filter_it_summed() {
         let (status, body) = get(

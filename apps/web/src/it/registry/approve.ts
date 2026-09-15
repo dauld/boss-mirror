@@ -93,6 +93,9 @@ export type PublishRequest = Readonly<{
   output: string;
   runner_host: string | null;
   requested_from: string | null;
+  /** The instant the answer landed: the `execute` step's server-stamped
+   *  `completed_at`; null while open or on a step that predates it. */
+  answered_at: string | null;
 }>;
 
 const rec = (v: unknown): Record<string, unknown> | null =>
@@ -126,6 +129,7 @@ function parseRequest(v: unknown): PublishRequest | null {
     output: typeof em.output === 'string' ? em.output : '',
     runner_host: str(em.runner_host),
     requested_from: str(meta.requested_from),
+    answered_at: execute ? str(execute.completed_at) : null,
   };
 }
 
@@ -187,6 +191,68 @@ export function modeFor(latest: PublishRequest | null): ApproveMode {
  *  — so what the approver wrote is what the record says was erased. */
 export function forceConfirmed(typed: string, fields: ReadonlyArray<string>): boolean {
   return fields.length > 0 && typed.trim() === fields.join(', ');
+}
+
+// ---------------------------------------------------------------------
+// Superseded — a row the verb has already answered since it was measured
+// ---------------------------------------------------------------------
+//
+// Car 3c (8f4e9cc0 `follow_up_3c`). The rows are the 05:20 packet's and
+// stay "adrift" until the next run even after a publish answered exit 0
+// beside them; the block showed the answer but nothing marked the row.
+// A row reads superseded when the kind's LATEST request WROTE the
+// tree's row after the measurement was read: exit 0, answered, closed,
+// not a --check (which answers 0 having written nothing, step 5 of
+// publish-workflow.sh), and answered after `measured.at`. Anything
+// newer than a success — a refusal, exit 78, a request still in flight
+// — is the newer answer and un-greys the row. The instant is the
+// execute step's `completed_at` (opened_at when a row predates the
+// stamp); unstamped both ways the row cannot be judged and stays what
+// the packet said. The versions are read off the verb's own
+// confirmation line (`<kind> vN -> vM live at`), never computed here.
+
+export type RowState =
+  /** As the packet measured it. */
+  | { kind: 'adrift' }
+  | {
+      kind: 'superseded';
+      request_id: string;
+      /** When the publish answered. */
+      at: string;
+      /** The live version the verb published over; the measured one
+       *  when the output does not name it. */
+      from: number | null;
+      /** The version the verb confirmed live, or null when unnamed. */
+      to: number | null;
+    };
+
+const CONFIRMED_LINE = /\bv(\d+) -> v(\d+) live at\b/;
+const instant = (iso: string | null): number | null => {
+  const t = iso === null ? NaN : Date.parse(iso);
+  return Number.isNaN(t) ? null : t;
+};
+
+export function rowState(row: AdriftKind, latest: PublishRequest | null, measuredAt: string): RowState {
+  if (latest === null || latest.status !== 'closed' || latest.disposition !== 'answered') return { kind: 'adrift' };
+  if (latest.exit_code !== '0' || latest.mode === 'check') return { kind: 'adrift' };
+  const at = latest.answered_at ?? latest.opened_at;
+  const answered = instant(at);
+  const measured = instant(measuredAt);
+  if (at === null || answered === null || measured === null || answered <= measured) return { kind: 'adrift' };
+  const m = CONFIRMED_LINE.exec(latest.output);
+  return {
+    kind: 'superseded',
+    request_id: latest.id,
+    at,
+    from: m ? Number(m[1]) : row.live_version,
+    to: m ? Number(m[2]) : null,
+  };
+}
+
+/** What the header's adrift count subtracts: the packet counts FIELDS,
+ *  so a superseded kind takes all of its fields with it. */
+export function supersededFieldCount(kinds: ReadonlyArray<AdriftKind>, states: ReadonlyMap<string, RowState>): number {
+  return kinds.reduce((n, k) => (states.get(k.kind)?.kind === 'superseded' ? n + k.fields.length : n), 0);
 }
 
 // ---------------------------------------------------------------------

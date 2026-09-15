@@ -539,7 +539,7 @@ mod tests {
             closed_on: None,
             metadata,
             tags: vec![],
-            simulated: false,
+            partition: boss_core::partition::Partition::Real,
         }
     }
 

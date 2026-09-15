@@ -161,7 +161,7 @@ async fn seed() -> (Router, Arc<InMemoryJobs>) {
         closed_on: None,
         metadata: serde_json::json!({}),
         tags: vec![],
-        simulated: false,
+        partition: boss_core::partition::Partition::Real,
     };
     jobs.create_job(&job).await.unwrap();
     jobs.add_step(&step(

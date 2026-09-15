@@ -12,7 +12,7 @@ use boss_core::actor::ActorId;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
-use super::port::{AgentRunError, AgentRunLog, RecordedRun, validate};
+use super::port::{AgentRunError, AgentRunLog, RecordedRun, resolve_model, validate};
 use super::types::{
     AgentRun, NewAgentRun, RateCardRow, RunFilter, RunOutcome, TokenUsage, price_run,
 };
@@ -33,9 +33,9 @@ fn storage(e: sqlx::Error) -> AgentRunError {
 
 /// Every column `agent_runs` holds, in one place, so the SELECTs here
 /// and the rebuilder's INSERT cannot disagree about the row's shape.
-pub(super) const RUN_COLUMNS: &str = "run_id, actor_id, started_at, finished_at, outcome, error, \
-     total_tokens, input_tokens, output_tokens, tool_calls, usd_micros, priced_by, job_id, branch, \
-     detail, recorded_at";
+pub(super) const RUN_COLUMNS: &str = "run_id, actor_id, model, started_at, finished_at, outcome, \
+     error, total_tokens, input_tokens, output_tokens, tool_calls, usd_micros, priced_by, job_id, \
+     branch, detail, recorded_at";
 
 /// `INSERT INTO agent_runs (<cols>) VALUES ($1,…,$n)`, with the
 /// placeholder list DERIVED from [`RUN_COLUMNS`] rather than typed out
@@ -95,6 +95,11 @@ pub(super) fn row_to_run(row: &sqlx::postgres::PgRow) -> Result<AgentRun, AgentR
             actor_id: actor
                 .parse()
                 .unwrap_or_else(|_| ActorId::Automation("platform".into())),
+            // The column as stored. NULL only on a row older than the
+            // column whose actor id the backfill could not read; the
+            // colon-form fallback in `NewAgentRun::model` still answers
+            // for those.
+            model: row.try_get("model").map_err(storage)?,
             started_at: row.try_get("started_at").map_err(storage)?,
             finished_at: row.try_get("finished_at").map_err(storage)?,
             outcome,
@@ -146,6 +151,27 @@ impl AgentRunLog for PgAgentRuns {
             .iter()
             .map(card_row)
             .collect::<Result<Vec<_>, _>>()?;
+
+        // The agent row's default, read in the same transaction as the
+        // price so the row names the registry it was resolved against.
+        // Only a registered id has a row to read; the colon form says
+        // its own model and the lookup is skipped.
+        let registry_default: Option<String> = match &run.actor_id {
+            ActorId::RegisteredAgent(id) => {
+                sqlx::query_scalar("SELECT default_model FROM agents WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(storage)?
+            }
+            _ => None,
+        };
+        // Resolved ONCE, and the run is recorded with it set: the row,
+        // the event and the price all read the same word.
+        let run = &NewAgentRun {
+            model: Some(resolve_model(run, registry_default.as_deref())?),
+            ..run.clone()
+        };
         let priced = price_run(&card, run);
 
         let event = super::events::run_recorded_event(recorded_by, run, &priced);
@@ -153,6 +179,7 @@ impl AgentRunLog for PgAgentRuns {
         let inserted = sqlx::query(&insert_run_sql())
             .bind(&run.run_id)
             .bind(run.actor_id.to_string())
+            .bind(run.model.as_deref())
             .bind(run.started_at)
             .bind(run.finished_at)
             .bind(run.outcome.as_str())

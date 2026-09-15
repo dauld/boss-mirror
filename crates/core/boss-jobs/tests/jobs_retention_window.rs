@@ -124,7 +124,7 @@ fn feedback(n: u8, status: JobStatus, closed_on: Option<NaiveDate>) -> Job {
         closed_on,
         metadata: serde_json::Value::Null,
         tags: vec![],
-        simulated: false,
+        partition: boss_core::partition::Partition::Real,
     }
 }
 

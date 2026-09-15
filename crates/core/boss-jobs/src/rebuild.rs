@@ -22,6 +22,7 @@
 //! follow.
 
 use boss_core::job::{Job, Step};
+use boss_core::partition::Partition;
 use boss_events::replay::{Applied, replay_projection};
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -81,17 +82,15 @@ pub async fn rebuild_jobs_and_steps(pool: &PgPool) -> Result<RebuildReport, Rebu
                             return Ok(Applied::Skipped);
                         }
                     };
-                    // `_simulated` on the create event is where a
-                    // Job's origin lives in the log. Read it here so a
-                    // replay reproduces the same flag the live write
+                    // `_partition` on the create event is where a
+                    // Job's origin lives in the log — with the older
+                    // `_simulated` bool as the fallback for events that
+                    // predate it (packet 508cc38c). Read it here so a
+                    // replay reproduces the same value the live write
                     // set — otherwise a rebuild would quietly turn the
-                    // whole simulated company real.
-                    let simulated = ev
-                        .payload
-                        .get("_simulated")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    let inserted_now = upsert_job(&mut *conn, &job, ev.ts, simulated)
+                    // whole simulated company (or the shadow lane) real.
+                    let partition = Partition::from_event_payload(&ev.payload);
+                    let inserted_now = upsert_job(&mut *conn, &job, ev.ts, partition)
                         .await
                         .map_err(|e| e.to_string())?;
                     if inserted_now {
@@ -148,24 +147,25 @@ pub async fn rebuild_jobs_and_steps(pool: &PgPool) -> Result<RebuildReport, Rebu
 /// Upsert a Job row, stamping `created_at` (only on insert) and
 /// `updated_at` from the audit_log event timestamp. Returns
 /// `true` if the row was inserted (new), `false` if updated.
-/// `simulated` is written on INSERT and deliberately absent from the
-/// DO UPDATE list: a Job's origin is decided when it is created and
-/// never revisited, so a later `jobs.job.updated` must not be able to
-/// move it. The storage enforces the immutability rather than trusting
-/// every caller to.
+/// `partition` (and its derived `simulated` bool — both columns are
+/// written, expand/contract per 20260915221611) is written on INSERT
+/// and deliberately absent from the DO UPDATE list: a Job's origin is
+/// decided when it is created and never revisited, so a later
+/// `jobs.job.updated` must not be able to move it. The storage
+/// enforces the immutability rather than trusting every caller to.
 async fn upsert_job(
     conn: &mut sqlx::PgConnection,
     job: &Job,
     ts: DateTime<Utc>,
-    simulated: bool,
+    partition: Partition,
 ) -> Result<bool, RebuildError> {
     let (subj_kind, subj_ref) = subject_parts(&job.subject);
     let result = sqlx::query(
         r#"
         INSERT INTO jobs (id, kind, subject_kind, subject_id, title, owner_id,
                           status, priority, opened_on, due_on, closed_on, metadata, tags,
-                          workflow_version, created_at, updated_at, simulated)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $15, $16)
+                          workflow_version, created_at, updated_at, partition, simulated)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $15, $16, $17)
         ON CONFLICT (id) DO UPDATE SET
             kind = EXCLUDED.kind,
             workflow_version = EXCLUDED.workflow_version,
@@ -199,7 +199,8 @@ async fn upsert_job(
     .bind(&job.tags)
     .bind(job.workflow_version)
     .bind(ts)
-    .bind(simulated)
+    .bind(partition.as_str())
+    .bind(partition.fails_closed())
     .fetch_one(&mut *conn)
     .await
     .map_err(|e| RebuildError::Storage(e.to_string()))?;

@@ -12,6 +12,7 @@ pub mod job;
 pub mod knowledge;
 pub mod machine_token;
 pub mod money;
+pub mod partition;
 pub mod port;
 pub mod primitives;
 pub mod publisher;

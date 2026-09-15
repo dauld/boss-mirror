@@ -122,7 +122,7 @@ fn packet(n: u8, kind: &str, title: &str, metadata: serde_json::Value) -> Job {
         closed_on: None,
         metadata,
         tags: vec![],
-        simulated: false,
+        partition: boss_core::partition::Partition::Real,
     }
 }
 

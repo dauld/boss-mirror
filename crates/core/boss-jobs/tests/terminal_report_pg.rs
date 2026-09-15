@@ -11,6 +11,7 @@
 //! numbers the in-memory HTTP tests assert.
 
 use boss_core::job::{Job, JobId, JobStatus, Priority, Subject};
+use boss_core::partition::Partition;
 use boss_jobs::port::JobsRepository;
 use boss_testing::TestDb;
 use chrono::NaiveDate;
@@ -28,7 +29,7 @@ fn packet(
     opened: NaiveDate,
     closed: Option<NaiveDate>,
     outcome: Option<&str>,
-    simulated: bool,
+    partition: Partition,
 ) -> Job {
     Job {
         id: JobId::from_uuid(Uuid::new_v4()),
@@ -47,7 +48,7 @@ fn packet(
             None => serde_json::json!({}),
         },
         tags: vec![],
-        simulated,
+        partition,
     }
 }
 
@@ -81,7 +82,7 @@ async fn stamped_instants_override_the_date_arithmetic() {
                 d(2026, 8, 20),
                 Some(d(2026, 8, 20)),
                 None,
-                false,
+                Partition::Real,
             ),
             serde_json::json!({
                 "outcome": "done",
@@ -97,7 +98,7 @@ async fn stamped_instants_override_the_date_arithmetic() {
             d(2026, 8, 20),
             Some(d(2026, 8, 22)),
             Some("done"),
-            false,
+            Partition::Real,
         ),
         // v1, half a stamp: no `opened_at`, so the dates answer = 1.
         with_metadata(
@@ -108,7 +109,7 @@ async fn stamped_instants_override_the_date_arithmetic() {
                 d(2026, 8, 20),
                 Some(d(2026, 8, 21)),
                 None,
-                false,
+                Partition::Real,
             ),
             serde_json::json!({
                 "outcome": "done",
@@ -125,7 +126,7 @@ async fn stamped_instants_override_the_date_arithmetic() {
                 d(2026, 8, 20),
                 None,
                 None,
-                false,
+                Partition::Real,
             ),
             serde_json::json!({
                 "outcome": "done",
@@ -190,7 +191,7 @@ async fn the_sql_report_matches_the_port_contract() {
             d(2026, 8, 10),
             Some(d(2026, 8, 11)),
             Some("approved"),
-            false,
+            Partition::Real,
         ),
         packet(
             "tasting-panel",
@@ -199,7 +200,7 @@ async fn the_sql_report_matches_the_port_contract() {
             d(2026, 8, 10),
             Some(d(2026, 8, 13)),
             Some("approved"),
-            false,
+            Partition::Real,
         ),
         packet(
             "tasting-panel",
@@ -208,7 +209,7 @@ async fn the_sql_report_matches_the_port_contract() {
             d(2026, 8, 12),
             Some(d(2026, 8, 17)),
             Some("rejected"),
-            false,
+            Partition::Real,
         ),
         packet(
             "tasting-panel",
@@ -217,7 +218,7 @@ async fn the_sql_report_matches_the_port_contract() {
             d(2026, 8, 15),
             None,
             None,
-            false,
+            Partition::Real,
         ),
         packet(
             "tasting-panel",
@@ -226,7 +227,7 @@ async fn the_sql_report_matches_the_port_contract() {
             d(2026, 8, 14),
             None,
             Some("approved"),
-            false,
+            Partition::Real,
         ),
         // v1: cycle days 2 and 8; one catch-all close without an
         // outcome; one cancellation (terminal but not closed).
@@ -237,7 +238,7 @@ async fn the_sql_report_matches_the_port_contract() {
             d(2026, 8, 1),
             Some(d(2026, 8, 3)),
             Some("rejected"),
-            false,
+            Partition::Real,
         ),
         packet(
             "tasting-panel",
@@ -246,7 +247,7 @@ async fn the_sql_report_matches_the_port_contract() {
             d(2026, 8, 1),
             Some(d(2026, 8, 9)),
             None,
-            false,
+            Partition::Real,
         ),
         packet(
             "tasting-panel",
@@ -255,7 +256,7 @@ async fn the_sql_report_matches_the_port_contract() {
             d(2026, 8, 2),
             None,
             None,
-            false,
+            Partition::Real,
         ),
         // Another kind — proves the WHERE clause scopes to one kind.
         packet(
@@ -265,7 +266,7 @@ async fn the_sql_report_matches_the_port_contract() {
             d(2026, 8, 1),
             Some(d(2026, 8, 2)),
             Some("returned"),
-            false,
+            Partition::Real,
         ),
     ];
     for p in &fixture {
@@ -329,7 +330,7 @@ async fn the_sql_report_matches_the_port_contract() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn since_and_simulated_push_into_the_sql() {
+async fn since_and_partition_push_into_the_sql() {
     let db = TestDb::new().await;
     let repo = boss_jobs::PgJobs::new(db.pool.clone());
 
@@ -342,7 +343,7 @@ async fn since_and_simulated_push_into_the_sql() {
             d(2026, 8, 1),
             Some(d(2026, 8, 2)),
             Some("returned"),
-            false,
+            Partition::Real,
         ),
         // Simulated, opened late — the brewery's experiment traffic.
         packet(
@@ -352,7 +353,7 @@ async fn since_and_simulated_push_into_the_sql() {
             d(2026, 8, 10),
             Some(d(2026, 8, 12)),
             Some("returned"),
-            true,
+            Partition::Simulated,
         ),
         packet(
             "keg-return",
@@ -361,7 +362,19 @@ async fn since_and_simulated_push_into_the_sql() {
             d(2026, 8, 11),
             Some(d(2026, 8, 16)),
             Some("lost"),
-            true,
+            Partition::Simulated,
+        ),
+        // Shadow (packet 508cc38c): in neither the real nor the
+        // simulated report — a candidate's dry run is not the sim's
+        // traffic and not the company's work — and in its own.
+        packet(
+            "keg-return",
+            4,
+            JobStatus::Closed,
+            d(2026, 8, 11),
+            Some(d(2026, 8, 12)),
+            Some("returned"),
+            Partition::Shadow,
         ),
     ];
     for p in &fixture {
@@ -374,11 +387,11 @@ async fn since_and_simulated_push_into_the_sql() {
         .await
         .unwrap();
     assert_eq!(all.len(), 1);
-    assert_eq!(all[0].total, 3);
+    assert_eq!(all[0].total, 4);
 
-    // simulated=true keeps only the experiment traffic.
+    // partition=simulated keeps only the sim's traffic.
     let sim = repo
-        .workflow_terminal_report("keg-return", None, Some(true))
+        .workflow_terminal_report("keg-return", None, Some(Partition::Simulated))
         .await
         .unwrap();
     assert_eq!(sim[0].total, 2);
@@ -394,19 +407,27 @@ async fn since_and_simulated_push_into_the_sql() {
         "[2,5] interpolates"
     );
 
-    // simulated=false keeps only real work.
+    // partition=real keeps only real work — the shadow packet is
+    // excluded here exactly as the simulated ones are.
     let real = repo
-        .workflow_terminal_report("keg-return", None, Some(false))
+        .workflow_terminal_report("keg-return", None, Some(Partition::Real))
         .await
         .unwrap();
     assert_eq!(real[0].total, 1);
+
+    // partition=shadow is the only report that holds it.
+    let shadow = repo
+        .workflow_terminal_report("keg-return", None, Some(Partition::Shadow))
+        .await
+        .unwrap();
+    assert_eq!(shadow[0].total, 1);
 
     // since= filters on the opened date.
     let recent = repo
         .workflow_terminal_report("keg-return", Some(d(2026, 8, 5)), None)
         .await
         .unwrap();
-    assert_eq!(recent[0].total, 2);
+    assert_eq!(recent[0].total, 3);
 
     // A window past every packet: the kind reports no versions at all
     // — an empty report, not an error.
@@ -438,7 +459,7 @@ async fn arm_cohorts_group_apart_and_match_the_port_contract() {
                 d(2026, 8, 20),
                 Some(d(2026, 8, 21)),
                 None,
-                false,
+                Partition::Real,
             ),
             arm("candidate", "returned"),
         ),
@@ -450,7 +471,7 @@ async fn arm_cohorts_group_apart_and_match_the_port_contract() {
                 d(2026, 8, 20),
                 Some(d(2026, 8, 22)),
                 None,
-                false,
+                Partition::Real,
             ),
             arm("candidate", "lost"),
         ),
@@ -463,7 +484,7 @@ async fn arm_cohorts_group_apart_and_match_the_port_contract() {
                 d(2026, 8, 20),
                 Some(d(2026, 8, 25)),
                 None,
-                false,
+                Partition::Real,
             ),
             arm("control", "returned"),
         ),
@@ -475,7 +496,7 @@ async fn arm_cohorts_group_apart_and_match_the_port_contract() {
             d(2026, 8, 1),
             None,
             None,
-            false,
+            Partition::Real,
         ),
     ];
     for p in &fixture {

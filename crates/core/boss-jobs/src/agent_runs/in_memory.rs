@@ -2,9 +2,11 @@
 //!
 //! Mirrors the Postgres semantics that matter: the insert collapses on
 //! a duplicate `run_id` and returns the run already held, pricing runs
-//! off the same [`price_run`] the Pg adapter calls, and listing newest
-//! finish first. Events are collected rather than delivered, so a test
-//! can assert that recording a run put a fact on the log.
+//! off the same [`price_run`] the Pg adapter calls, resolving the model
+//! through the same [`resolve_model`] (with the `agents` table's one
+//! relevant column, `default_model`, mirrored as a map), and listing
+//! newest finish first. Events are collected rather than delivered, so
+//! a test can assert that recording a run put a fact on the log.
 
 use std::collections::HashMap;
 
@@ -13,11 +15,14 @@ use boss_core::actor::ActorId;
 use boss_core::event::Event;
 use tokio::sync::RwLock;
 
-use super::port::{AgentRunError, AgentRunLog, RecordedRun, validate};
+use super::port::{AgentRunError, AgentRunLog, RecordedRun, resolve_model, validate};
 use super::types::{AgentRun, NewAgentRun, RateCardRow, RunFilter, price_run};
 
 pub struct InMemoryAgentRuns {
     card: Vec<RateCardRow>,
+    /// registered agent id -> default_model, the one column of the
+    /// `agents` table this log reads.
+    defaults: HashMap<String, String>,
     runs: RwLock<HashMap<String, AgentRun>>,
     events: RwLock<Vec<Event>>,
 }
@@ -26,9 +31,18 @@ impl InMemoryAgentRuns {
     pub fn new(card: Vec<RateCardRow>) -> Self {
         Self {
             card,
+            defaults: HashMap::new(),
             runs: RwLock::new(HashMap::new()),
             events: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Register `agent_id` with the model its runs take when a report
+    /// does not say — `agents.default_model`, as the Pg adapter reads it.
+    pub fn with_registered_agent(mut self, agent_id: &str, default_model: &str) -> Self {
+        self.defaults
+            .insert(agent_id.to_string(), default_model.to_string());
+        self
     }
 
     /// Every event this log recorded, in order.
@@ -52,8 +66,18 @@ impl AgentRunLog for InMemoryAgentRuns {
                 run: held.clone(),
             });
         }
-        let priced = price_run(&self.card, run);
-        let event = super::events::run_recorded_event(recorded_by, run, &priced);
+        // Resolve the model ONCE and record the run with it set, so the
+        // row, the event and the price all read the same word.
+        let registry_default = match &run.actor_id {
+            ActorId::RegisteredAgent(id) => self.defaults.get(id).map(String::as_str),
+            _ => None,
+        };
+        let run = NewAgentRun {
+            model: Some(resolve_model(run, registry_default)?),
+            ..run.clone()
+        };
+        let priced = price_run(&self.card, &run);
+        let event = super::events::run_recorded_event(recorded_by, &run, &priced);
         let recorded = AgentRun {
             run: run.clone(),
             usd_micros: priced.as_ref().map(|(m, _)| *m),
@@ -68,7 +92,6 @@ impl AgentRunLog for InMemoryAgentRuns {
             run: recorded,
         })
     }
-
     async fn list_runs(&self, filter: &RunFilter) -> Result<Vec<AgentRun>, AgentRunError> {
         let guard = self.runs.read().await;
         let mut out: Vec<AgentRun> = guard

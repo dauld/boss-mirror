@@ -19,15 +19,20 @@
 use super::*;
 
 use axum::extract::{Path, Query};
+use boss_core::partition::Partition;
 
 #[derive(Deserialize)]
 pub(super) struct TerminalReportQuery {
     /// Keep packets opened on/after this date.
     since: Option<chrono::NaiveDate>,
-    /// `true` | `false` | `all` (default). The brewery experiments
-    /// are simulated traffic and must be visible, which is why the
-    /// default is `all` — and why the response labels which
-    /// partition it reports rather than leaving the reader to guess.
+    /// `real` | `simulated` | `shadow`; absent is every partition.
+    /// The brewery experiments are simulated traffic and must be
+    /// visible, which is why the default is everything — and why the
+    /// response labels which partition it reports rather than
+    /// leaving the reader to guess.
+    partition: Option<String>,
+    /// The N-1 spelling: `true` | `false` | `all` (default), read as
+    /// `partition=simulated` / `real` / absent. `partition` wins.
     simulated: Option<String>,
 }
 
@@ -46,7 +51,7 @@ pub(super) async fn workflow_terminal_report<R: JobsRepository + 'static, B: Eve
     if let Err(r) = policy_check(&state, &user, Action::Read).await {
         return r;
     }
-    let simulated = match q.simulated.as_deref() {
+    let legacy = match q.simulated.as_deref() {
         None | Some("all") => None,
         Some("true") => Some(true),
         Some("false") => Some(false),
@@ -58,18 +63,30 @@ pub(super) async fn workflow_terminal_report<R: JobsRepository + 'static, B: Eve
                 .into_response();
         }
     };
+    let partition = match super::jobs::partition_from_query(q.partition.as_deref(), legacy) {
+        Ok(p) => p,
+        Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
+    };
     match state
         .jobs
-        .workflow_terminal_report(&kind, q.since, simulated)
+        .workflow_terminal_report(&kind, q.since, partition)
         .await
     {
         Ok(versions) => Json(serde_json::json!({
             "kind": kind,
             "since": q.since,
-            "simulated": match simulated {
+            "partition": match partition {
                 None => "all",
-                Some(true) => "true",
-                Some(false) => "false",
+                Some(p) => p.as_str(),
+            },
+            // The N-1 label, derived: `true` for the simulated company,
+            // `false` for real, `all` otherwise — a shadow report reads
+            // `all` here because the bool has no word for it.
+            "simulated": match partition {
+                None => "all",
+                Some(Partition::Simulated) => "true",
+                Some(Partition::Real) => "false",
+                Some(Partition::Shadow) => "all",
             },
             "versions": versions,
         }))

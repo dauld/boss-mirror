@@ -145,7 +145,7 @@ fn job_with_subject(subject: Subject) -> Job {
         closed_on: None,
         metadata: serde_json::Value::Null,
         tags: vec![],
-        simulated: false,
+        partition: boss_core::partition::Partition::Real,
     }
 }
 

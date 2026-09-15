@@ -33,7 +33,13 @@
 //!     consulted BEFORE a run; this module records runs AFTER. Its
 //!     `spent(agent, window)` question is this module's
 //!     `list_runs(actor_id, since)` + `summarize`, which is the join
-//!     point: a budget can be spent against these rows.
+//!     point: a budget can be spent against these rows. Design
+//!     6fda05ae (decided 2026-09-15) made that join possible: the
+//!     `agents` registry gives the actor one id (`agent-claude`) and
+//!     this module's `model` column (see `types`, rule 1) prices the
+//!     run against the model it actually ran, so an agent's cap can be
+//!     read off its row and spent against these rows. The budget
+//!     check itself is still the next car.
 //!   - `be025b44` — a car's packet is filed only at gate-green, so the
 //!     build is invisible while it happens. When a builder opens its
 //!     car at build START, that packet's id is what

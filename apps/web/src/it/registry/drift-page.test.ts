@@ -115,3 +115,46 @@ describe('the drift page approves a publish through the ops-request packet', () 
     expect(control).not.toMatch(/output\.slice\(|output\.split\(/);
   });
 });
+
+// Car 3c: a row the verb published since the measurement reads
+// superseded — greyed, labelled with the versions and the instant, and
+// out of the header's adrift count — until the next 05:20 run
+// re-measures it. The decision is rowState's (approve.test.ts); this
+// pins that the page draws it in all three places, from the requests
+// it already reads, with no new fetch.
+describe('a published drift row reads superseded until the next measurement', () => {
+  const page = readFileSync(join(import.meta.dir, 'ProtocolDriftPage.svelte'), 'utf8');
+  const control = readFileSync(join(import.meta.dir, 'ApprovePublish.svelte'), 'utf8');
+  const markup = page.slice(page.indexOf('</script>'));
+
+  it('the page decides each kind through rowState off latestFor and the packet measured.at, no new fetch', () => {
+    expect(page).toContain('rowState(');
+    expect(page).toContain('supersededFieldCount(');
+    expect(page).toContain('newest.measured.at');
+    expect((page.match(/fetchRemote\(|loadPublishRequests\(/g) ?? []).length).toBe(1);
+  });
+
+  it('the header subtracts the superseded fields and says how many were published since', () => {
+    const adrift = markup.indexOf('title="compared fields where the file and the live row disagree');
+    expect(adrift).toBeGreaterThan(-1);
+    const cell = markup.slice(adrift, markup.indexOf('</div>\n      </div>', adrift));
+    expect(cell).toContain('supersededFields');
+    expect(cell).toContain('published since');
+  });
+
+  it('a drift row of a superseded kind is greyed in the table', () => {
+    const rows = markup.indexOf('{#each newest.drift.fields as');
+    const row = markup.slice(rows, markup.indexOf('{/each}', rows));
+    expect(row).toContain('class:superseded=');
+  });
+
+  it('the control is greyed and labelled published vN→vM at <time>, re-measured at the next drift run', () => {
+    expect(page).toContain('standing={');
+    expect(control).toContain("standing.kind === 'superseded'");
+    expect(control).toContain('re-measured at the next drift run');
+    expect(control).toContain('class:ap-superseded=');
+    // The label names both versions from the verb's own line, or says they were not named.
+    expect(control).toContain('standing.from');
+    expect(control).toContain('standing.to');
+  });
+});

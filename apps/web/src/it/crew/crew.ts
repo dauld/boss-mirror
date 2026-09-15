@@ -28,6 +28,7 @@
 // it is absent. `crew.test.ts` pins its absence.
 
 import { fetchRemote, type Remote } from '../../data/remote';
+import { partitionOf, type Partition } from '@boss/web-kit/ui/packet-card';
 import { isHumanActor } from '../../data/actor';
 
 // ---------------------------------------------------------------------
@@ -108,6 +109,10 @@ export type Car = Readonly<{
   /// see `isBuilding`.
   branch: string | null;
   open: boolean;
+  /// The packet's partition (508cc38c), parsed at this boundary;
+  /// `simulated` is derived from it — not-real — so a shadow car sits
+  /// in the sim lane until car 4 draws it as its own.
+  partition: Partition;
   simulated: boolean;
   abandoned: boolean;
   /// The train this car boarded, when it has boarded one.
@@ -125,12 +130,14 @@ function parseJobLike(r: Record<string, unknown>): Car {
   const steps = Array.isArray(r.steps)
     ? (r.steps as ReadonlyArray<Record<string, unknown>>)
     : [];
-  const simulated = r.simulated === true;
+  const partition = partitionOf(r);
+  const simulated = partition !== 'real';
   return {
     id: str(r.id) ?? '',
     title: str(r.title) ?? '',
     branch: str(m.branch),
     open: str(r.status) === 'open',
+    partition,
     simulated,
     abandoned: m.abandoned === true,
     train: str(m.train),
@@ -302,6 +309,7 @@ export type Wait = Readonly<{
   assigneeId: string | null;
   waitingDays: number;
   exact: boolean;
+  partition: Partition;
   simulated: boolean;
   since: string | null;
 }>;
@@ -318,7 +326,8 @@ export function parseWaits(raw: unknown): ReadonlyArray<Wait> {
       assigneeId: str(r.assignee_id),
       waitingDays: num(r.waiting_days) ?? 0,
       exact: r.exact === true,
-      simulated: r.simulated === true,
+      partition: partitionOf(r),
+      simulated: partitionOf(r) !== 'real',
       since: str(r.since),
     }))
     .filter((w) => w.jobId !== '');

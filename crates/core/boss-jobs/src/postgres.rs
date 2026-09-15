@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use boss_core::job::{Job, JobId, JobStatus, Priority, Step, StepId, StepStatus, Subject};
+use boss_core::partition::Partition;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
@@ -81,7 +82,7 @@ struct JobRow {
     closed_on: Option<chrono::NaiveDate>,
     metadata: serde_json::Value,
     tags: Vec<String>,
-    simulated: bool,
+    partition: String,
 }
 
 #[derive(sqlx::FromRow)]
@@ -123,7 +124,7 @@ struct AssignmentRowSql {
     subject_kind: String,
     subject_id: String,
     priority: String,
-    simulated: bool,
+    partition: String,
     tags: Vec<String>,
     /// `j.metadata -> 'red_trains'` — the one metadata key the row
     /// carries (d6e53a35), read as JSON so a malformed stamp goes
@@ -151,8 +152,16 @@ fn row_to_job(r: JobRow) -> Job {
         closed_on: r.closed_on,
         metadata: r.metadata,
         tags: r.tags,
-        simulated: r.simulated,
+        partition: parse_partition(&r.partition),
     }
+}
+
+/// The `jobs.partition` column read back. The CHECK constraint
+/// (20260915221611) makes an unknown word unreachable; if one ever
+/// arrives it reads as the SIMULATED company, never real — the one
+/// direction a partition read is allowed to be wrong in.
+fn parse_partition(s: &str) -> Partition {
+    s.parse().unwrap_or(Partition::Simulated)
 }
 
 fn row_to_step(r: StepRow) -> Result<Step, JobsError> {
@@ -361,8 +370,8 @@ impl JobsRepository for PgJobs {
             r#"
             INSERT INTO jobs (id, kind, subject_kind, subject_id, title, owner_id,
                               status, priority, opened_on, due_on, closed_on, metadata, tags,
-                              workflow_version, created_at, updated_at, simulated)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $15, $16)
+                              workflow_version, created_at, updated_at, partition, simulated)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $15, $16, $17)
             ON CONFLICT (id) DO NOTHING
             "#,
         )
@@ -382,13 +391,16 @@ impl JobsRepository for PgJobs {
         .bind(job.workflow_version)
         .bind(now)
         // Decided once, at ADMISSION (create_job in http/jobs.rs:
-        // explicit body flag OR sim-chain origin) — and never
+        // explicit body value OR sim-chain origin) — and never
         // revisited. The adapter persists the Job it was handed so
         // the row can never disagree with the JOB_CREATED payload
         // recorded beside it; everything downstream (steps, side
-        // effects, an operator poking at it later) is simulated iff
-        // the Job is.
-        .bind(job.simulated)
+        // effects, an operator poking at it later) is in the Job's
+        // partition. Both columns are written (expand/contract,
+        // 20260915221611): `simulated` is the derived not-real bool an
+        // N-1 reader still tests; reads come from `partition`.
+        .bind(job.partition.as_str())
+        .bind(job.partition.fails_closed())
         .execute(&mut *tx)
         .await
         .map_err(|e| JobsError::Storage(e.to_string()))?;
@@ -411,7 +423,7 @@ impl JobsRepository for PgJobs {
 
     async fn get_job(&self, id: &JobId) -> Result<Option<Job>, JobsError> {
         let row = sqlx::query_as::<_, JobRow>(
-            "SELECT id, kind, workflow_version, subject_kind, subject_id, title, owner_id, status, priority, opened_on, due_on, closed_on, metadata, tags, simulated FROM jobs WHERE id = $1",
+            "SELECT id, kind, workflow_version, subject_kind, subject_id, title, owner_id, status, priority, opened_on, due_on, closed_on, metadata, tags, partition FROM jobs WHERE id = $1",
         )
         .bind(*id.inner().as_uuid())
         .fetch_optional(&self.pool)
@@ -448,8 +460,9 @@ impl JobsRepository for PgJobs {
             .begin()
             .await
             .map_err(|e| JobsError::Storage(e.to_string()))?;
-        // `simulated` is deliberately absent from the SET list: a
-        // Job's origin is decided at admission and never revisited.
+        // `partition` (and its derived `simulated`) is deliberately
+        // absent from the SET list: a Job's origin is decided at
+        // admission and never revisited.
         // The storage enforces the immutability rather than trusting
         // every caller to (same rule as rebuild.rs's upsert).
         let result = sqlx::query(
@@ -534,7 +547,7 @@ impl JobsRepository for PgJobs {
                 updated_at = $4
             WHERE id = $1
             RETURNING id, kind, workflow_version, subject_kind, subject_id, title, owner_id,
-                      status, priority, opened_on, due_on, closed_on, metadata, tags, simulated
+                      status, priority, opened_on, due_on, closed_on, metadata, tags, partition
             "#,
         )
         .bind(*id.inner().as_uuid())
@@ -684,7 +697,7 @@ impl JobsRepository for PgJobs {
             UPDATE jobs SET workflow_version = $2, updated_at = $3
             WHERE id = $1
             RETURNING id, kind, workflow_version, subject_kind, subject_id, title, owner_id,
-                      status, priority, opened_on, due_on, closed_on, metadata, tags, simulated
+                      status, priority, opened_on, due_on, closed_on, metadata, tags, partition
             "#,
         )
         .bind(*id.inner().as_uuid())
@@ -752,7 +765,7 @@ impl JobsRepository for PgJobs {
         // /api/jobs?account_id=foo looked empty on every detail page.
         let list_sql = r#"
             SELECT id, kind, workflow_version, subject_kind, subject_id, title, owner_id, status,
-                   priority, opened_on, due_on, closed_on, metadata, tags, simulated
+                   priority, opened_on, due_on, closed_on, metadata, tags, partition
             FROM jobs
             WHERE ($1::text IS NULL OR kind = $1)
               -- $13 is the terminal retention window. With it, $2 is
@@ -796,11 +809,11 @@ impl JobsRepository for PgJobs {
               -- the query instead of over a page that may be smaller
               -- than the world (4d9aa761).
               AND ($15::text IS NULL OR metadata ? $15::text)
-              -- $14 partitions real work from the demo tenant's.
+              -- $14 keeps one partition (real / simulated / shadow).
               -- Pushed into SQL, not applied to the page: 87% of
               -- packets are simulated, so a post-fetch filter returns
               -- a nearly empty page and a wrong total.
-              AND ($14::bool IS NULL OR simulated = $14)
+              AND ($14::text IS NULL OR partition = $14)
               -- opened_on is a DATE: a busy day is one big tie, and a
               -- LIMIT over an arbitrary order returns an arbitrary
               -- subset (2026-09-07 held 398 closed pr-trains; the
@@ -826,7 +839,7 @@ impl JobsRepository for PgJobs {
             .bind(filter.waiting_on.as_deref())
             .bind(filter.metadata_contains.as_ref())
             .bind(filter.closed_since)
-            .bind(filter.simulated)
+            .bind(filter.partition.map(Partition::as_str))
             .bind(filter.metadata_has.as_deref())
             .fetch_all(&self.pool)
             .await
@@ -862,7 +875,7 @@ impl JobsRepository for PgJobs {
               AND ($10::jsonb IS NULL OR metadata @> $10::jsonb)
               -- Same partition as the list query, so `total` agrees
               -- with the rows actually returned.
-              AND ($12::bool IS NULL OR simulated = $12)
+              AND ($12::text IS NULL OR partition = $12)
               -- Same key-existence clause as the list query, for the
               -- same reason.
               AND ($13::text IS NULL OR metadata ? $13::text)
@@ -879,7 +892,7 @@ impl JobsRepository for PgJobs {
         .bind(filter.waiting_on.as_deref())
         .bind(filter.metadata_contains.as_ref())
         .bind(filter.closed_since)
-        .bind(filter.simulated)
+        .bind(filter.partition.map(Partition::as_str))
         .bind(filter.metadata_has.as_deref())
         .fetch_one(&self.pool)
         .await
@@ -1327,7 +1340,7 @@ impl JobsRepository for PgJobs {
                     s.step_plugin_version, s.embedded_job, \
                     j.title AS job_title, j.due_on, j.kind AS workflow, j.workflow_version, \
                     j.subject_kind, j.subject_id, j.priority, \
-                    j.simulated, j.tags, j.metadata -> 'red_trains' AS red_trains \
+                    j.partition, j.tags, j.metadata -> 'red_trains' AS red_trains \
              FROM steps s \
              JOIN jobs j ON s.job_id = j.id \
              WHERE j.status = 'open' \
@@ -1357,7 +1370,7 @@ impl JobsRepository for PgJobs {
                     subject_kind: r.subject_kind,
                     subject_id: r.subject_id,
                     priority: parse_priority(&r.priority),
-                    simulated: r.simulated,
+                    partition: parse_partition(&r.partition),
                     tags: r.tags,
                     red_trains: crate::yard::red_trains_count(r.red_trains.as_ref()),
                     step: row_to_step(r.step)?,
@@ -1378,7 +1391,7 @@ impl JobsRepository for PgJobs {
                     s.step_plugin_version, s.embedded_job, \
                     j.title AS job_title, j.due_on, j.kind AS workflow, j.workflow_version, \
                     j.subject_kind, j.subject_id, j.priority, \
-                    j.simulated, j.tags, j.metadata -> 'red_trains' AS red_trains \
+                    j.partition, j.tags, j.metadata -> 'red_trains' AS red_trains \
              FROM steps s \
              JOIN jobs j ON s.job_id = j.id \
              WHERE j.status = 'open' \
@@ -1402,7 +1415,7 @@ impl JobsRepository for PgJobs {
                     subject_kind: r.subject_kind,
                     subject_id: r.subject_id,
                     priority: parse_priority(&r.priority),
-                    simulated: r.simulated,
+                    partition: parse_partition(&r.partition),
                     tags: r.tags,
                     red_trains: crate::yard::red_trains_count(r.red_trains.as_ref()),
                     step: row_to_step(r.step)?,
@@ -1446,7 +1459,7 @@ impl JobsRepository for PgJobs {
         &self,
         kind: &str,
         since: Option<chrono::NaiveDate>,
-        simulated: Option<bool>,
+        partition: Option<Partition>,
     ) -> Result<Vec<crate::port::VersionTerminalReport>, JobsError> {
         // One statement for the whole report — the version dimension
         // is the PINNED `workflow_version`, served by the
@@ -1492,7 +1505,7 @@ impl JobsRepository for PgJobs {
               FROM jobs
               WHERE kind = $1
                 AND ($2::date IS NULL OR opened_on >= $2)
-                AND ($3::bool IS NULL OR simulated = $3)
+                AND ($3::text IS NULL OR partition = $3)
             ),
             statuses AS (
               SELECT workflow_version, arm,
@@ -1547,7 +1560,7 @@ impl JobsRepository for PgJobs {
         )
         .bind(kind)
         .bind(since)
-        .bind(simulated)
+        .bind(partition.map(Partition::as_str))
         .fetch_all(&self.pool)
         .await
         .map_err(|e| JobsError::Storage(e.to_string()))?;
@@ -1631,7 +1644,7 @@ impl JobsRepository for PgJobs {
             uuid::Uuid,
             String,
             String,
-            bool,
+            String,
             uuid::Uuid,
             Option<String>,
             String,
@@ -1642,7 +1655,7 @@ impl JobsRepository for PgJobs {
         );
         let rows: Vec<Row> = sqlx::query_as(
             r#"
-            SELECT j.id, j.kind, j.title, j.simulated,
+            SELECT j.id, j.kind, j.title, j.partition,
                    s.id, s.spec_slug, s.title, s.status, s.assignee_id,
                    COALESCE(s.became_ready_at, s.updated_at) AS since,
                    (s.became_ready_at IS NOT NULL) AS exact
@@ -1673,7 +1686,7 @@ impl JobsRepository for PgJobs {
                     job_id,
                     job_kind,
                     job_title,
-                    simulated,
+                    partition,
                     step_id,
                     spec_slug,
                     step_title,
@@ -1692,7 +1705,7 @@ impl JobsRepository for PgJobs {
                         status: parse_step_status(&status)
                             .ok_or_else(|| step_status_err(&status))?,
                         assignee_id,
-                        simulated,
+                        partition: parse_partition(&partition),
                         since,
                         exact,
                     })
@@ -2183,7 +2196,11 @@ pub async fn trim_epoch_audit_log(pool: &PgPool, baseline: i64) -> Result<u64, J
         .execute(&mut *tx)
         .await
         .map_err(|e| JobsError::Storage(format!("disable trigger: {e}")))?;
-    // Delete the simulated company; keep the real one.
+    // Delete the simulated company; keep the real one — AND the shadow
+    // lane (packet 508cc38c, Q5: the sim never participates in an
+    // experiment, so its epoch restart is not allowed to touch one).
+    // This is why the predicate is `partition = 'simulated'` and not
+    // the derived `simulated` bool, which is true for shadow too.
     //
     // Sim-ness is a property of the JOB, decided from the origin of the
     // request that opened it and immutable thereafter. Everything
@@ -2201,7 +2218,9 @@ pub async fn trim_epoch_audit_log(pool: &PgPool, baseline: i64) -> Result<u64, J
     // Events with no Job fall back to their own marker — ledger
     // postings, asset receipts and the like are not Job-scoped, and
     // absence still means keep, because the conservative direction for
-    // a DELETE is to keep.
+    // a DELETE is to keep. `_partition` is read first; an event that
+    // predates it carries only `_simulated`, which before shadow
+    // existed could only mean the simulated company.
     let trimmed = sqlx::query(
         "DELETE FROM audit_log a
           WHERE a.id > $1
@@ -2211,8 +2230,10 @@ pub async fn trim_epoch_audit_log(pool: &PgPool, baseline: i64) -> Result<u64, J
                   THEN EXISTS (
                        SELECT 1 FROM jobs j
                         WHERE j.id::text = COALESCE(a.payload->>'job_id', a.payload->>'id')
-                          AND j.simulated)
-                  ELSE a.payload->>'_simulated' = 'true'
+                          AND j.partition = 'simulated')
+                  ELSE COALESCE(a.payload->>'_partition',
+                                CASE WHEN a.payload->>'_simulated' = 'true'
+                                     THEN 'simulated' ELSE 'real' END) = 'simulated'
                 END",
     )
     .bind(baseline)

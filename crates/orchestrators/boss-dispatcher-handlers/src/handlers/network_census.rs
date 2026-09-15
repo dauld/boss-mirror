@@ -82,6 +82,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
 
+use boss_core::partition::Partition;
 use boss_dispatcher::rules::expr::Value;
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext};
 
@@ -137,32 +138,37 @@ impl NetworkCensus {
         })
     }
 
-    /// The status totals for one partition (`simulated=true|false`),
+    /// The status totals for one partition — real or simulated; the
+    /// shadow lane (508cc38c) is in neither tally, since a candidate's
+    /// dry run is not the company's work and not the sim's traffic —
     /// in `NON_TERMINAL ++ TERMINAL` order, plus the closed-today
     /// derivation input (`closed_within=0`).
+    ///
+    /// Spelled as the N-1 `simulated=<bool>` on the wire, deliberately:
+    /// on a server that knows the word it means exactly `partition=real`
+    /// / `partition=simulated` (http/jobs.rs `partition_from_query`), and
+    /// on one that does not it means the same two lanes — whereas an
+    /// unknown `partition=` param would be IGNORED there and both
+    /// tallies would silently read the unfiltered count. This binary
+    /// and the jobs API roll separately, so that window exists.
     async fn partition_totals(
         &self,
-        simulated: bool,
+        partition: Partition,
         rule: &str,
     ) -> Result<PartitionTotals, HandlerError> {
+        let lane = format!("simulated={}", partition == Partition::Simulated);
         let mut by_status = serde_json::Map::new();
         let mut non_terminal_sum = 0i64;
         for status in NON_TERMINAL {
-            let n = self
-                .total(&format!("status={status}&simulated={simulated}"), rule)
-                .await?;
+            let n = self.total(&format!("status={status}&{lane}"), rule).await?;
             non_terminal_sum += n;
             by_status.insert(status.to_string(), json!(n));
         }
         for status in TERMINAL {
-            let n = self
-                .total(&format!("status={status}&simulated={simulated}"), rule)
-                .await?;
+            let n = self.total(&format!("status={status}&{lane}"), rule).await?;
             by_status.insert(status.to_string(), json!(n));
         }
-        let with_today_window = self
-            .total(&format!("closed_within=0&simulated={simulated}"), rule)
-            .await?;
+        let with_today_window = self.total(&format!("closed_within=0&{lane}"), rule).await?;
         Ok(PartitionTotals {
             by_status: serde_json::Value::Object(by_status),
             open_total: non_terminal_sum,
@@ -214,7 +220,10 @@ struct PartitionTotals {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct PacketView {
     pub id: String,
-    pub simulated: bool,
+    /// Read through the shared wire reader (`partition`, else the
+    /// legacy `simulated` bool, else real), so a shadow packet is
+    /// neither a real one nor the sim's here (508cc38c).
+    pub partition: Partition,
     /// >= 1 step in ready/active — the packet wants an actor.
     pub workable: bool,
     /// A workable step carries an assignee — the packet is at least
@@ -235,10 +244,15 @@ pub(crate) fn packet_views(page: &serde_json::Value) -> Vec<PacketView> {
             rows.iter()
                 .filter_map(|job| {
                     let id = job.get("id")?.as_str()?.to_string();
-                    let simulated = job
-                        .get("simulated")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
+                    let partition = job
+                        .get("partition")
+                        .and_then(|v| v.as_str())
+                        .and_then(|w| w.parse::<Partition>().ok())
+                        .unwrap_or_else(|| {
+                            Partition::from_legacy_simulated(
+                                job.get("simulated").and_then(|v| v.as_bool()) == Some(true),
+                            )
+                        });
                     let empty = Vec::new();
                     let steps = job
                         .get("steps")
@@ -258,7 +272,7 @@ pub(crate) fn packet_views(page: &serde_json::Value) -> Vec<PacketView> {
                     });
                     Some(PacketView {
                         id,
-                        simulated,
+                        partition,
                         workable,
                         assigned,
                     })
@@ -285,9 +299,12 @@ pub(crate) fn queue_member_ids(queue: &serde_json::Value) -> Vec<String> {
 }
 
 /// Q1's space half, computed: workable packets vs the union of every
-/// station queue. Real and simulated are tallied separately; the
-/// orphan id sample carries REAL packets only (a demo orphan is a
-/// count, not a work item for a person).
+/// station queue. Real and simulated are tallied separately, and a
+/// shadow packet (508cc38c) is in NEITHER tally — it fails closed out
+/// of the real headline exactly as a simulated one does, and the sim's
+/// tally is the sim's alone (Q5); the orphan id sample carries REAL
+/// packets only (a demo orphan is a count, not a work item for a
+/// person).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct SpaceHalf {
     pub workable_total: i64,
@@ -312,14 +329,18 @@ pub(crate) fn space_half(
             continue;
         }
         let is_stationed = stationed.contains(&p.id);
-        if p.simulated {
-            out.sim_workable_total += 1;
-            if is_stationed {
-                out.sim_stationed_count += 1;
-            } else {
-                out.sim_orphaned_count += 1;
+        match p.partition {
+            Partition::Simulated => {
+                out.sim_workable_total += 1;
+                if is_stationed {
+                    out.sim_stationed_count += 1;
+                } else {
+                    out.sim_orphaned_count += 1;
+                }
+                continue;
             }
-            continue;
+            Partition::Shadow => continue,
+            Partition::Real => {}
         }
         out.workable_total += 1;
         if is_stationed {
@@ -376,8 +397,8 @@ impl Handler for NetworkCensus {
         let census_day = ctx.event_payload.get("_day").and_then(|v| v.as_str());
 
         // 1. Status totals, per partition.
-        let real = self.partition_totals(false, rule).await?;
-        let sim = self.partition_totals(true, rule).await?;
+        let real = self.partition_totals(Partition::Real, rule).await?;
+        let sim = self.partition_totals(Partition::Simulated, rule).await?;
 
         // 2. The workable set: every open packet with its steps.
         let packets = self.open_packets(rule).await?;
@@ -503,9 +524,23 @@ mod tests {
     }
 
     #[test]
-    fn simulated_defaults_false_for_pre_flag_rows() {
-        let views = packet_views(&page(json!([{"id": "j1", "steps": []}])));
-        assert!(!views[0].simulated);
+    fn partition_defaults_real_for_pre_flag_rows_and_reads_the_word_first() {
+        let views = packet_views(&page(json!([
+            {"id": "j1", "steps": []},
+            {"id": "j2", "simulated": true, "steps": []},
+            {"id": "j3", "partition": "shadow", "simulated": true, "steps": []},
+        ])));
+        assert_eq!(views[0].partition, Partition::Real);
+        assert_eq!(
+            views[1].partition,
+            Partition::Simulated,
+            "an N-1 row: the bool"
+        );
+        assert_eq!(
+            views[2].partition,
+            Partition::Shadow,
+            "the word wins over the derived bool"
+        );
     }
 
     #[test]
@@ -518,10 +553,10 @@ mod tests {
         assert!(queue_member_ids(&json!({"error": "nope"})).is_empty());
     }
 
-    fn pv(id: &str, simulated: bool, workable: bool, assigned: bool) -> PacketView {
+    fn pv(id: &str, partition: Partition, workable: bool, assigned: bool) -> PacketView {
         PacketView {
             id: id.into(),
-            simulated,
+            partition,
             workable,
             assigned,
         }
@@ -530,10 +565,10 @@ mod tests {
     #[test]
     fn stationed_and_orphaned_partition_the_workable_set() {
         let packets = vec![
-            pv("j1", false, true, false),  // stationed
-            pv("j2", false, true, true),   // orphaned, assigned
-            pv("j3", false, true, false),  // orphaned
-            pv("j4", false, false, false), // not workable: not counted
+            pv("j1", Partition::Real, true, false),  // stationed
+            pv("j2", Partition::Real, true, true),   // orphaned, assigned
+            pv("j3", Partition::Real, true, false),  // orphaned
+            pv("j4", Partition::Real, false, false), // not workable: not counted
         ];
         let stationed: HashSet<String> = ["j1".to_string()].into();
         let s = space_half(&packets, &stationed, ORPHAN_ID_CAP);
@@ -548,9 +583,13 @@ mod tests {
     #[test]
     fn simulated_packets_never_touch_the_headline_numbers() {
         let packets = vec![
-            pv("j1", false, true, false),
-            pv("s1", true, true, false), // sim, stationed
-            pv("s2", true, true, false), // sim, orphaned
+            pv("j1", Partition::Real, true, false),
+            pv("s1", Partition::Simulated, true, false), // sim, stationed
+            pv("s2", Partition::Simulated, true, false), // sim, orphaned
+            // A shadow packet (508cc38c): in neither tally — excluded
+            // from the headline as a simulated one is, and not the
+            // sim's either.
+            pv("x1", Partition::Shadow, true, false),
         ];
         let stationed: HashSet<String> = ["s1".to_string()].into();
         let s = space_half(&packets, &stationed, ORPHAN_ID_CAP);
@@ -569,7 +608,7 @@ mod tests {
     #[test]
     fn the_orphan_id_sample_caps_and_says_so_while_the_count_stays_exact() {
         let packets: Vec<PacketView> = (0..25)
-            .map(|i| pv(&format!("j{i}"), false, true, false))
+            .map(|i| pv(&format!("j{i}"), Partition::Real, true, false))
             .collect();
         let s = space_half(&packets, &HashSet::new(), ORPHAN_ID_CAP);
         assert_eq!(s.orphaned_count, 25);

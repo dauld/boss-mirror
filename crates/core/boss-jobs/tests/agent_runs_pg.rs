@@ -21,7 +21,7 @@
 
 use boss_core::actor::ActorId;
 use boss_jobs::agent_runs::{
-    AgentRunLog, NewAgentRun, PgAgentRuns, RunFilter, RunOutcome, TokenUsage,
+    AgentRunLog, NewAgentRun, PgAgentRuns, RunFilter, RunOutcome, TokenUsage, rebuild_agent_runs,
 };
 use boss_testing::TestDb;
 use chrono::{TimeZone, Utc};
@@ -34,6 +34,8 @@ fn a_run(run_id: &str, tokens: TokenUsage) -> NewAgentRun {
         finished_at: Utc.with_ymd_and_hms(2026, 9, 10, 2, 47, 58).unwrap(),
         outcome: RunOutcome::Success,
         error: None,
+        // The 2026-09-10 shape: the model rode inside the actor id.
+        model: None,
         tokens,
         tool_calls: 52,
         job_id: None,
@@ -206,4 +208,203 @@ async fn insert_raw(
     .await
     .map(|_| ())
     .map_err(|e| e.to_string())
+}
+
+// --------------------------------------------------------------------
+// THE MODEL IS A COLUMN (design 6fda05ae, resolution model-on-run).
+// The port test proves the rule; these prove the schema holds it, the
+// live write reads the agent's default from the `agents` table inside
+// the recording transaction, and a rebuild reproduces the column for
+// an event written before the column existed.
+// --------------------------------------------------------------------
+
+/// `agent-claude` is the one row 20260915212644 seeds, with
+/// `default_model = 'opus-5[1m]'`; a run by it that names no model is
+/// priced against that default, read from the table, not from a copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_registered_agents_run_is_stored_with_the_registry_default_model() {
+    let db = TestDb::new().await;
+    let log = PgAgentRuns::new(db.pool.clone());
+
+    let run = NewAgentRun {
+        run_id: "run-registered".into(),
+        actor_id: ActorId::RegisteredAgent("agent-claude".into()),
+        ..a_run(
+            "run-registered",
+            TokenUsage::Split {
+                input: 128_684,
+                output: 14_298,
+            },
+        )
+    };
+    let out = log.record_run(&run, &filer()).await.expect("records");
+    assert_eq!(out.run.model(), Some("opus-5[1m]"));
+
+    let row: (String, Option<String>, Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT actor_id, model, usd_micros, priced_by FROM agent_runs WHERE run_id = $1",
+    )
+    .bind("run-registered")
+    .fetch_one(&db.pool)
+    .await
+    .expect("the row is there");
+    assert_eq!(
+        row.0, "agent-claude",
+        "the actor is the registered id, model-free"
+    );
+    assert_eq!(
+        row.1.as_deref(),
+        Some("opus-5[1m]"),
+        "the model is its own column"
+    );
+    // opus-5[1m] is priced at the opus-5 rate: 1,000,870 micro-USD.
+    assert_eq!(row.2, Some(1_000_870));
+    assert_eq!(row.3.as_deref(), Some("opus-5[1m]"));
+
+    // The event carries the resolved model, so the rebuild below never
+    // has to ask the registry.
+    let model: serde_json::Value =
+        sqlx::query_scalar("SELECT payload -> 'model' FROM event_outbox WHERE kind = $1")
+            .bind("agents.run.recorded")
+            .fetch_one(&db.pool)
+            .await
+            .expect("the event is on the outbox");
+    assert_eq!(model, serde_json::json!("opus-5[1m]"));
+}
+
+/// A run by a registered id that names its own model keeps it: the
+/// agent's default is a fallback, not an override.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_registered_agents_run_that_names_its_model_keeps_it() {
+    let db = TestDb::new().await;
+    let log = PgAgentRuns::new(db.pool.clone());
+
+    let run = NewAgentRun {
+        run_id: "run-named".into(),
+        actor_id: ActorId::RegisteredAgent("agent-claude".into()),
+        model: Some("haiku-4-5".into()),
+        ..a_run(
+            "run-named",
+            TokenUsage::Split {
+                input: 900,
+                output: 100,
+            },
+        )
+    };
+    let out = log.record_run(&run, &filer()).await.expect("records");
+    assert_eq!(out.run.model(), Some("haiku-4-5"));
+    assert_eq!(out.run.priced_by.as_deref(), Some("haiku-4-5"));
+    assert_eq!(out.run.usd_micros, Some(1_400));
+}
+
+/// A legacy colon-form report is stored with the model it implies, so
+/// the column answers for every row and no reader parses an actor id.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_colon_form_run_is_stored_with_the_model_its_actor_id_carries() {
+    let db = TestDb::new().await;
+    let log = PgAgentRuns::new(db.pool.clone());
+    log.record_run(
+        &a_run("run-colon", TokenUsage::TotalOnly { total: 142_982 }),
+        &filer(),
+    )
+    .await
+    .expect("records");
+    let model: Option<String> =
+        sqlx::query_scalar("SELECT model FROM agent_runs WHERE run_id = $1")
+            .bind("run-colon")
+            .fetch_one(&db.pool)
+            .await
+            .expect("the row is there");
+    assert_eq!(model.as_deref(), Some("opus-5"));
+}
+
+/// The rebuild reproduces the column from an event written BEFORE the
+/// column existed — the same rule the migration's backfill applies,
+/// so a rebuilt table and a migrated one agree (determinism).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rebuild_derives_the_model_for_an_event_written_before_the_column() {
+    let db = TestDb::new().await;
+    // A 2026-09-10-shaped payload: no `model` key at all.
+    let payload = serde_json::json!({
+        "run_id": "run-old",
+        "actor_id": "claude:opus-5[1m]",
+        "started_at": "2026-09-10T02:37:27Z",
+        "finished_at": "2026-09-10T02:47:58Z",
+        "outcome": "success",
+        "error": null,
+        "input_tokens": null,
+        "output_tokens": null,
+        "total_tokens": 142982,
+        "tool_calls": 52,
+        "job_id": null,
+        "branch": "fix/x",
+        "detail": {},
+        "usd_micros": null,
+        "priced_by": null,
+        "_actor": "claude:opus-5[1m]"
+    });
+    sqlx::query(
+        "INSERT INTO audit_log (event_id, kind, source, timestamp, payload) \
+         VALUES (gen_random_uuid(), 'agents.run.recorded', 'jobs', NOW(), $1)",
+    )
+    .bind(&payload)
+    .execute(&db.pool)
+    .await
+    .expect("seed the legacy event");
+
+    let report = rebuild_agent_runs(&db.pool).await.expect("rebuilds");
+    assert_eq!(report.runs_inserted, 1);
+
+    let row: (String, Option<String>) =
+        sqlx::query_as("SELECT actor_id, model FROM agent_runs WHERE run_id = 'run-old'")
+            .fetch_one(&db.pool)
+            .await
+            .expect("the rebuilt row is there");
+    assert_eq!(row.0, "claude:opus-5[1m]", "the log is not rewritten");
+    assert_eq!(
+        row.1.as_deref(),
+        Some("opus-5[1m]"),
+        "the model is derived from the colon form, as the backfill derives it"
+    );
+}
+
+/// The migration's backfill and the rebuild's derivation are the SAME
+/// rule written twice — once in SQL for the rows that exist, once in
+/// Rust for the events they came from — and §9a says a fact that lives
+/// twice gets an equality test. This runs the actual migration file
+/// (idempotent by construction) over a row shaped as every row was
+/// before the column, and asks the two answers to agree.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_backfill_and_the_rebuild_derive_the_same_model() {
+    let db = TestDb::new().await;
+    // A pre-column row, written around the Rust writer with model NULL.
+    sqlx::query(
+        "INSERT INTO agent_runs \
+         (run_id, actor_id, started_at, finished_at, outcome, total_tokens, recorded_at) \
+         VALUES ('run-pre', 'claude:opus-5[1m]', NOW(), NOW(), 'success', 1, NOW())",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("a pre-column row");
+
+    let migration = boss_testing::repo_root()
+        .join("infra/postgres/schema/20260915223855-the-model-is-a-fact-about-the-run.sql");
+    let sql = std::fs::read_to_string(&migration).expect("the migration file is in the tree");
+    sqlx::raw_sql(&sql)
+        .execute(&db.pool)
+        .await
+        .expect("the migration re-applies cleanly");
+
+    let backfilled: Option<String> =
+        sqlx::query_scalar("SELECT model FROM agent_runs WHERE run_id = 'run-pre'")
+            .fetch_one(&db.pool)
+            .await
+            .expect("the row is there");
+    assert_eq!(backfilled.as_deref(), Some("opus-5[1m]"));
+
+    // The Rust half of the same rule, on the same actor id.
+    let run = NewAgentRun {
+        actor_id: ActorId::agent("claude", "opus-5[1m]"),
+        ..a_run("run-pre", TokenUsage::TotalOnly { total: 1 })
+    };
+    assert_eq!(run.model(), backfilled.as_deref());
 }

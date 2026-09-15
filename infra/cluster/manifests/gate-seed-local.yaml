@@ -33,44 +33,29 @@
 #     Job with an emptyDir completed in twenty seconds, and the gate
 #     could not have told us (it applies nothing). The directory is
 #     therefore the NODE's declaration — TWO entries in w-1's Talos
-#     machine config (~/talos-homelab/v2, outside this repo). The first,
-#     `machine.files`, makes the directory; Talos creates the parents
-#     at boot:
-#
-#         machine:
-#           files:
-#             - path: /var/local/gate-seed/.declared-by-talos
-#               op: create
-#               permissions: 0o644
-#               content: "local PV gate-seed-w-1 mounts this directory\n"
-#
-#     The second, `machine.kubelet.extraMounts`, lets the kubelet SEE
-#     it. On Talos the kubelet runs in
-#     its own mount namespace with a fixed set of host paths, and
-#     /var/local is not one of them — MEASURED 2026-09-12 04:21-13:30Z:
-#     with the directory present on the host (`talosctl ls /var/local/`
-#     listed it) a pod mounting the PVC sat nine hours at
-#     ContainerCreating while the kubelet logged, 296 times,
-#     `MountVolume.NewMounter initialization failed for volume
-#     "gate-seed-w-1": path "/var/local/gate-seed" does not exist`.
-#     The same arrangement local-path-provisioner needs on Talos:
-#
-#         machine:
-#           kubelet:
-#             extraMounts:
-#               - destination: /var/local/gate-seed
-#                 type: bind
-#                 source: /var/local/gate-seed
-#                 options: [bind, rshared, rw]
-#
-#     Both applied with `talosctl -n <w-1> patch machineconfig --patch
-#     @…` (the kubelet restarts; running pods survive, no reboot). The
-#     PROOF is a pod in boss-dev that mounts the PVC and writes a file
-#     — `talosctl ls` is the host's view and passed while the mount
-#     failed, so it proves nothing about the mount. A rebuilt w-1 gets
-#     both back from its config, which is where a node's own filesystem
-#     belongs; ownership is the gate pod's fsGroup (1500) at mount, the
-#     arrangement the Longhorn seed relied on.
+#     machine config, DECLARED at infra/cluster/talos/patches/w-1.yaml
+#     (backlog 08430090; until 2026-09-15 they lived only on a laptop,
+#     and this comment restated them — a fact that lived twice). The
+#     first, `machine.files`, makes the directory; Talos creates the
+#     parents at boot. The second, `machine.kubelet.extraMounts`, lets
+#     the kubelet SEE it: on Talos the kubelet runs in its own mount
+#     namespace with a fixed set of host paths, and /var/local is not
+#     one of them — MEASURED 2026-09-12 04:21-13:30Z: with the directory
+#     present on the host (`talosctl ls /var/local/` listed it) a pod
+#     mounting the PVC sat nine hours at ContainerCreating while the
+#     kubelet logged, 296 times, `MountVolume.NewMounter initialization
+#     failed for volume "gate-seed-w-1": path "/var/local/gate-seed"
+#     does not exist`. The same arrangement local-path-provisioner needs
+#     on Talos. How to apply, and how to read the live node against the
+#     declaration (infra/cluster/talos/check-declared.sh), is in
+#     infra/cluster/talos/README.md; the kubelet restarts, running pods
+#     survive, no reboot. The PROOF is a pod in boss-dev that mounts
+#     the PVC and writes a file — `talosctl ls` is the host's view and
+#     passed while the mount failed, so it proves nothing about the
+#     mount. A rebuilt w-1 gets both back from its config, which is
+#     where a node's own filesystem belongs; ownership is the gate pod's
+#     fsGroup (1500) at mount, the arrangement the Longhorn seed relied
+#     on.
 #     infra/lint/no-manifest-mounts-a-hostpath.sh refuses the hostPath
 #     mount coming back.
 #

@@ -4,6 +4,7 @@
 
 use async_trait::async_trait;
 use boss_core::job::{Job, JobId, JobStatus, Priority, Step, StepId, StepStatus};
+use boss_core::partition::Partition;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
@@ -99,9 +100,13 @@ pub struct JobFilter {
     /// and pages that only contain jobs they can see (no wasted page
     /// space on rows the post-fetch filter would discard).
     pub scope: JobScope,
-    /// Keep only real packets (`Some(false)`) or only simulated ones
-    /// (`Some(true)`). `None` — the default — is every packet, which
-    /// is what every existing caller already gets.
+    /// Keep only the packets of ONE partition — `Some(Real)`,
+    /// `Some(Simulated)` or `Some(Shadow)`. `None` — the default — is
+    /// every packet, which is what every existing caller already gets.
+    /// There is deliberately no "not real" filter: a real-lane surface
+    /// asks for `Real` and so excludes shadow packets without knowing
+    /// the word, and the sim asks for `Simulated` and never sees them
+    /// (packet 508cc38c, Q5).
     ///
     /// WHY IT IS A QUERY FILTER AND NOT A CLIENT-SIDE `.filter()`, for
     /// exactly the reason `closed_since` above is: measured
@@ -112,13 +117,13 @@ pub struct JobFilter {
     /// silently truncates — the same failure the retention window was
     /// added to fix, one order of magnitude worse.
     ///
-    /// `simulated` is set at admission and immutable afterwards
+    /// The partition is set at admission and immutable afterwards
     /// (`update_job` restores it from the existing row), so this is a
     /// stable partition rather than a mutable label. Measured on the
     /// same population: of 39 kinds, **zero are mixed** — a kind is
     /// either entirely simulated or entirely real — so filtering here
     /// never splits a kind's packets across two answers.
-    pub simulated: Option<bool>,
+    pub partition: Option<Partition>,
 }
 
 /// The policy-scope slice applied to a listing. Mirrors the shapes
@@ -373,15 +378,20 @@ pub struct AssignmentRow {
     pub subject_kind: String,
     pub subject_id: String,
     pub priority: Priority,
-    /// The Job's admission-fixed sim-vs-real flag, and its tags. A
+    /// The Job's admission-fixed partition, and its tags. A
     /// projection, not the Job — but a queue lens renders a packet
     /// card from the row alone, and a simulated packet has to look
     /// simulated in a personal queue exactly as it does in the yard.
+    /// On the wire this is `partition` plus the legacy `simulated`
+    /// bool (derived as not-real — `boss_core::partition::wire`), so
+    /// the sim workforce's fail-closed read of the row keeps working
+    /// and a shadow packet reads as not-real to it.
     /// `tags` rides along for the same reason: the shared card
     /// predicate falls back to a `sim` / `simulated` / `synthetic` tag
     /// for packets that predate the column (there was no backfill), so
     /// without it the two lenses would disagree on the same packet.
-    pub simulated: bool,
+    #[serde(flatten, with = "boss_core::partition::wire")]
+    pub partition: Partition,
     pub tags: Vec<String>,
     /// How many red trains have released this car — the conductor's
     /// `red_trains` stamp on the job's metadata, absent = 0. The row
@@ -433,7 +443,8 @@ pub struct QueueAgeRow {
     pub assignee_id: Option<String>,
     /// Rides along for the same reason it rides on [`AssignmentRow`]:
     /// a simulated packet has to look simulated in every lens.
-    pub simulated: bool,
+    #[serde(flatten, with = "boss_core::partition::wire")]
+    pub partition: Partition,
     /// The instant this obligation has been waiting since.
     pub since: DateTime<Utc>,
     /// `true` when `since` is the recorded ready-flip instant;
@@ -814,7 +825,7 @@ pub trait JobsRepository: Send + Sync {
                             .to_string(),
                         subject_id: boss_core::primitives::Subject::id(&job.subject).to_string(),
                         priority: job.priority,
-                        simulated: job.simulated,
+                        partition: job.partition,
                         tags: job.tags.clone(),
                         red_trains: crate::yard::red_trains_of(&job.metadata),
                         step,
@@ -869,7 +880,7 @@ pub trait JobsRepository: Send + Sync {
                     subject_kind: boss_core::primitives::Subject::kind(&job.subject).to_string(),
                     subject_id: boss_core::primitives::Subject::id(&job.subject).to_string(),
                     priority: job.priority,
-                    simulated: job.simulated,
+                    partition: job.partition,
                     tags: job.tags.clone(),
                     red_trains: crate::yard::red_trains_of(&job.metadata),
                     step,
@@ -889,8 +900,8 @@ pub trait JobsRepository: Send + Sync {
     /// `kind` by its PINNED `workflow_version` and reports counts,
     /// closed-outcome distribution, and open→close cycle-time stats.
     ///
-    /// `since` keeps packets opened on/after that date; `simulated`
-    /// partitions like [`JobFilter::simulated`] (`None` is every
+    /// `since` keeps packets opened on/after that date; `partition`
+    /// partitions like [`JobFilter::partition`] (`None` is every
     /// packet). A kind with no packets reports an empty Vec — absence
     /// is a fact, not an error.
     ///
@@ -901,11 +912,11 @@ pub trait JobsRepository: Send + Sync {
         &self,
         kind: &str,
         since: Option<chrono::NaiveDate>,
-        simulated: Option<bool>,
+        partition: Option<Partition>,
     ) -> Result<Vec<VersionTerminalReport>, JobsError> {
         let filter = JobFilter {
             kind: Some(kind.to_string()),
-            simulated,
+            partition,
             ..Default::default()
         };
         let (jobs, _total) = self.list_jobs(&filter, i64::MAX, 0).await?;

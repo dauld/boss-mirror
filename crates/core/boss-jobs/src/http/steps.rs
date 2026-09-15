@@ -181,12 +181,12 @@ pub(super) async fn add_step<R: JobsRepository + 'static, B: EventBus + 'static>
     };
     let mut stamp = state.publisher.stamp_with_actor(actor.clone()).await;
     // Step events inherit the parent packet's admission-fixed
-    // `simulated` flag (the packet, not the request's transport
+    // partition (the packet, not the request's transport
     // context, is the source of truth). A step posted against a
     // missing Job keeps the chain default — Pg rejects it on the FK
     // anyway.
     if let Ok(Some(job)) = state.jobs.get_job(&job_id).await {
-        stamp = stamp.with_simulated(job.simulated);
+        stamp = stamp.with_partition(job.partition);
     }
     // The completion stamps are server-owned here as on the PUT
     // (c17871fe): a body cannot name who completed a step or when. A
@@ -322,7 +322,7 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     };
 
     // The parent packet, fetched ONCE: the event stamp inherits its
-    // `simulated` flag, the step.done / step.assigned markers read
+    // partition, the step.done / step.assigned markers read
     // its Subject identity, and the re-evaluator runs against it.
     // The step write below never touches the jobs row, so this read
     // stays current through all of those. (The auto-close pass at
@@ -834,7 +834,7 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // simulated event, and a sim-chain write to a real Job stays
     // real.
     if let Some(j) = &parent_job {
-        stamp = stamp.with_simulated(j.simulated);
+        stamp = stamp.with_partition(j.partition);
     }
     let stamp = stamp;
     let mut step_events =
@@ -1074,7 +1074,7 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
                 .publisher
                 .stamp_with_actor(actor.clone())
                 .await
-                .with_simulated(job.simulated);
+                .with_partition(job.partition);
             let mut close_events = vec![
                 close_stamp.event(
                     events::JOB_UPDATED,
@@ -1231,7 +1231,7 @@ pub(super) async fn patch_step_metadata<R: JobsRepository + 'static, B: EventBus
     patch.remove("authority_role");
 
     // The parent packet: the event stamp inherits its admission-fixed
-    // `simulated` flag, and the re-evaluator runs against it.
+    // partition, and the re-evaluator runs against it.
     let parent_job = state.jobs.get_job(&job_id).await.ok().flatten();
 
     let actor = user
@@ -1239,7 +1239,7 @@ pub(super) async fn patch_step_metadata<R: JobsRepository + 'static, B: EventBus
         .unwrap_or_else(|| boss_core::actor::ActorId::Automation("platform".into()));
     let mut stamp = state.publisher.stamp_with_actor(actor.clone()).await;
     if let Some(j) = &parent_job {
-        stamp = stamp.with_simulated(j.simulated);
+        stamp = stamp.with_partition(j.partition);
     }
     let stamp = stamp;
 
@@ -1406,7 +1406,7 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
         .ambient_actor()
         .unwrap_or_else(|| boss_core::actor::ActorId::Automation("platform".into()));
     // The parent packet: the claim's events inherit its
-    // admission-fixed `simulated` flag, and the assignment marker
+    // admission-fixed partition, and the assignment marker
     // reads its Subject identity.
     let parent_job = state.jobs.get_job(&job_id).await.ok().flatten();
 
@@ -1478,7 +1478,7 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
 
     let mut stamp = state.publisher.stamp_with_actor(actor).await;
     if let Some(j) = &parent_job {
-        stamp = stamp.with_simulated(j.simulated);
+        stamp = stamp.with_partition(j.partition);
     }
     let stamp = stamp;
 
@@ -1682,7 +1682,7 @@ pub(super) async fn post_step_sign_off<R: JobsRepository + 'static, B: EventBus 
     // The signed-off marker inherits the packet's admission-fixed
     // flag, like every other event about the Job.
     if let Ok(Some(job)) = state.jobs.get_job(&job_id).await {
-        event_stamp = event_stamp.with_simulated(job.simulated);
+        event_stamp = event_stamp.with_partition(job.partition);
     }
     let signed_off_event = event_stamp.event(
         events::STEP_SIGNED_OFF,
@@ -1737,7 +1737,7 @@ async fn close_job_on_terminal<R: JobsRepository + 'static, B: EventBus + 'stati
         .publisher
         .stamp_with_actor(actor.clone())
         .await
-        .with_simulated(job.simulated);
+        .with_partition(job.partition);
 
     // Skip every still-non-terminal step. The Job is closing on its
     // terminal outcome; any Pending/Ready/Active step is now moot.
@@ -1907,7 +1907,7 @@ pub(super) async fn reevaluate_and_persist<R: JobsRepository + 'static, B: Event
                 .publisher
                 .stamp_with_actor(actor.clone())
                 .await
-                .with_simulated(job.simulated);
+                .with_partition(job.partition);
             for idx in changed {
                 let changed_step = &steps[idx];
                 // OUTBOX (phase 2): the promoted step's state event +
@@ -1961,7 +1961,7 @@ pub(super) async fn build_step_ready_event<R: JobsRepository + 'static, B: Event
         .publisher
         .stamp_with_actor(actor.clone())
         .await
-        .with_simulated(job.simulated);
+        .with_partition(job.partition);
     stamp.event(
         &format!("step.ready.{}", step.kind),
         serde_json::json!({

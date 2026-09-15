@@ -153,16 +153,16 @@ pub fn spawn_router(
                                     return;
                                 }
                             };
-                            // Inherit the triggering event's sim-ness so a
+                            // Inherit the triggering event's partition so a
                             // simulated Job's escalation writes simulated
                             // messages (same task-local the dispatcher sets).
-                            let simulated = event
-                                .payload
-                                .get("_simulated")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
+                            // A shadow packet's escalation rides the same
+                            // not-real chain: it fails closed exactly as a
+                            // simulated one does (packet 508cc38c).
+                            let partition =
+                                boss_core::partition::Partition::from_event_payload(&event.payload);
                             let outcome = boss_core::sim_origin::with_sim_chain(
-                                simulated,
+                                partition.fails_closed(),
                                 handle_event(&client, &config, &event),
                             )
                             .await;

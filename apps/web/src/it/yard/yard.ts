@@ -36,7 +36,11 @@ export type JobLite = Readonly<{
   tags?: readonly string[];
   metadata?: Record<string, unknown> | null;
   steps?: readonly StepLite[];
-  /** Admission-fixed sim-vs-real flag on the Job row itself. */
+  /** Admission-fixed partition on the Job row itself (508cc38c) —
+   *  parsed at the fetch boundary through `partitionOf`; `simulated`
+   *  is the wire's derived not-real bool, kept for rows a lens builds
+   *  from a server that predates the word. */
+  partition?: Partition;
   simulated?: boolean;
 }>;
 
@@ -53,6 +57,7 @@ export type CarFacts = Readonly<{
   tags?: readonly string[];
   metadata?: Record<string, unknown> | null;
   steps?: readonly StepLite[] | null;
+  partition?: Partition;
   simulated?: boolean;
   /** The conductor's strike count as a FIELD — what a projection that
    *  is not a Job carries (the My Day assignment row, d6e53a35). A Job
@@ -225,10 +230,12 @@ export function readCarProof(j: CarFacts | null | undefined): CarProof | null {
 // the definitions live exactly once (CLAUDE.md §9a) and yard consumers
 // need no change.
 import { isSim } from '@boss/web-kit/ui/packet-card';
+import type { Partition } from '@boss/web-kit/ui/packet-card';
 // The server-computed read model. The approach lane's verdict rows are
 // ITS lanes, not this lens's derivation — see [`approach`].
 import type { YardStatus } from './yard-status';
-export { isSim, PROTOCOL_PALETTE, protocolHue, redTrainsPhrase } from '@boss/web-kit/ui/packet-card';
+export { isSim, partitionOf, PROTOCOL_PALETTE, protocolHue, redTrainsPhrase } from '@boss/web-kit/ui/packet-card';
+export type { Partition } from '@boss/web-kit/ui/packet-card';
 
 export type TrainStatus = 'BOARDING' | 'BOARDED' | 'DEPARTED' | 'CONVERGING' | 'ARRIVED';
 export type Lamp = 'green' | 'failing' | 'pending';

@@ -87,6 +87,11 @@ fn with_tokens(branch: &str, tokens: TokenUsage, tool_calls: u32, minutes: i64) 
         finished_at: started + Duration::minutes(minutes),
         outcome: RunOutcome::Success,
         error: None,
+        // Not stated: these fixtures are the 2026-09-10 rows, written
+        // when the model rode inside the colon-form actor id. The
+        // record resolves it from there (see the tests at the bottom
+        // for the registered-agent shape that names it outright).
+        model: None,
         tokens,
         tool_calls,
         job_id: None,
@@ -501,4 +506,126 @@ async fn a_mixed_night_keeps_every_token_and_refuses_a_partial_bill() {
     );
     assert_eq!(one.usd_micros, Some(7_000_000));
     assert_eq!(one.total_only_runs, 0);
+}
+
+// --------------------------------------------------------------------
+// THE MODEL IS A FACT ABOUT THE RUN (design 6fda05ae, resolution
+// model-on-run, decided 2026-09-15). A registered agent — one `agents`
+// row, id `agent-claude` — runs different models over time, and cost is
+// priced per run, so the run names its model in a column of its own.
+// The agent row carries the DEFAULT for a run that does not say.
+// --------------------------------------------------------------------
+
+/// The registry's one live row, as the migration seeds it.
+fn log_with_the_registry() -> InMemoryAgentRuns {
+    InMemoryAgentRuns::new(card()).with_registered_agent("agent-claude", "opus-5")
+}
+
+fn registered_run(model: Option<&str>) -> NewAgentRun {
+    NewAgentRun {
+        actor_id: ActorId::RegisteredAgent("agent-claude".into()),
+        model: model.map(str::to_string),
+        ..measured("feat/registered", 1_000, 1, 1)
+    }
+}
+
+#[tokio::test]
+async fn a_registered_agents_run_names_the_model_it_ran_on() {
+    let log = log_with_the_registry();
+    let out = log
+        .record_run(&registered_run(Some("haiku-4-5")), &filer())
+        .await
+        .expect("a run that names its model records");
+    assert_eq!(
+        out.run.model(),
+        Some("haiku-4-5"),
+        "the run's word, not the agent's default"
+    );
+    assert_eq!(
+        out.run.priced_by.as_deref(),
+        Some("haiku-4-5"),
+        "priced against the run's model"
+    );
+    // 900 input * $1 + 100 output * $5 per MTok.
+    assert_eq!(out.run.usd_micros, Some(1_400));
+    // The record carries the column, so a reader never parses an actor.
+    let events = log.recorded_events().await;
+    assert_eq!(events[0].payload["model"], "haiku-4-5");
+    assert_eq!(events[0].payload["actor_id"], "agent-claude");
+}
+
+#[tokio::test]
+async fn a_registered_agents_run_that_does_not_say_takes_the_agents_default() {
+    let log = log_with_the_registry();
+    let out = log
+        .record_run(&registered_run(None), &filer())
+        .await
+        .expect("the registry supplies the default");
+    assert_eq!(out.run.model(), Some("opus-5"));
+    assert_eq!(out.run.priced_by.as_deref(), Some("opus-5"));
+    // Resolved ONCE, at record time, and written down: the event says
+    // the model outright rather than leaving a rebuild to re-ask a
+    // registry whose default may since have changed.
+    let events = log.recorded_events().await;
+    assert_eq!(events[0].payload["model"], "opus-5");
+}
+
+#[tokio::test]
+async fn an_unregistered_agent_with_no_model_is_refused_and_named_both_fixes() {
+    let log = InMemoryAgentRuns::new(card());
+    let err = log
+        .record_run(
+            &NewAgentRun {
+                actor_id: ActorId::RegisteredAgent("agent-nobody".into()),
+                ..registered_run(None)
+            },
+            &filer(),
+        )
+        .await
+        .expect_err("no model on the run and no row to default from is not a record");
+    let msg = err.to_string();
+    assert!(msg.contains("agent-nobody"), "{msg}");
+    assert!(msg.contains("model"), "{msg}");
+    assert!(
+        msg.contains("agents"),
+        "names the registry as the other fix: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn a_legacy_colon_form_run_still_resolves_its_model_from_the_actor_id() {
+    // Every row written before the column existed spelled the model
+    // inside `claude:opus-5`; the record keeps reading that form so
+    // those reporters (infra/record-agent-runs.sh) are not refused.
+    let log = InMemoryAgentRuns::new(card());
+    let out = log
+        .record_run(&measured("feat/legacy", 1_000, 1, 1), &filer())
+        .await
+        .expect("records");
+    assert_eq!(out.run.model(), Some("opus-5"));
+    // And the resolved model is written down, so the row and the event
+    // carry it as a column even for the legacy shape.
+    assert_eq!(log.recorded_events().await[0].payload["model"], "opus-5");
+}
+
+#[tokio::test]
+async fn the_summary_groups_a_registered_run_and_a_legacy_run_under_one_model() {
+    let log = log_with_the_registry();
+    log.record_run(&registered_run(None), &filer())
+        .await
+        .expect("records");
+    log.record_run(&measured("feat/legacy", 1_000, 1, 1), &filer())
+        .await
+        .expect("records");
+    let runs = log.list_runs(&RunFilter::default()).await.expect("lists");
+    let s = summarize(&runs);
+    assert_eq!(s.runs, 2);
+    assert_eq!(
+        s.by_model
+            .iter()
+            .map(|g| (g.key.as_str(), g.runs))
+            .collect::<Vec<_>>(),
+        vec![("opus-5", 2)],
+        "one model, two spellings of the actor — one bucket"
+    );
 }

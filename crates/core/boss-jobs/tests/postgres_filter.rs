@@ -15,6 +15,7 @@
 //! the same shape against `PgJobs`.
 
 use boss_core::job::{Job, JobId, JobStatus, Priority, Subject};
+use boss_core::partition::Partition;
 use boss_jobs::port::{JobFilter, JobScope, JobsRepository};
 use boss_testing::TestDb;
 use chrono::NaiveDate;
@@ -35,7 +36,7 @@ fn job(id: &str, kind: &str, subject: Subject) -> Job {
         closed_on: None,
         metadata: serde_json::Value::Null,
         tags: vec![],
-        simulated: false,
+        partition: boss_core::partition::Partition::Real,
     }
 }
 
@@ -334,7 +335,7 @@ async fn closed_since_overrides_status_rather_than_intersecting_it() {
 /// way this breaks is that one of them gets the clause and the other
 /// does not — which no in-memory test can see.
 #[tokio::test(flavor = "multi_thread")]
-async fn simulated_partitions_the_rows_and_the_total() {
+async fn partition_filters_the_rows_and_the_total() {
     let db = TestDb::new().await;
     let repo = boss_jobs::PgJobs::new(db.pool.clone());
     let board = Subject::new("account", "board");
@@ -350,21 +351,32 @@ async fn simulated_partitions_the_rows_and_the_total() {
         "ship-a-change",
         board.clone(),
     );
-    sim_a.simulated = true;
+    sim_a.partition = Partition::Simulated;
     let mut sim_b = job(
         "00000000-0000-0000-0000-0000000000b3",
         "ship-a-change",
         board.clone(),
     );
-    sim_b.simulated = true;
+    sim_b.partition = Partition::Simulated;
+    // A shadow packet (packet 508cc38c; migration 20260915221611):
+    // created through the port like any other, excluded by the real-
+    // only filter exactly as a simulated one is, AND by the simulated-
+    // only filter (the sim never sees it, Q5).
+    let mut shadow = job(
+        "00000000-0000-0000-0000-0000000000b4",
+        "ship-a-change",
+        board.clone(),
+    );
+    shadow.title = "shadow run".into();
+    shadow.partition = Partition::Shadow;
 
-    for j in [&real, &sim_a, &sim_b] {
+    for j in [&real, &sim_a, &sim_b, &shadow] {
         repo.create_job(j).await.unwrap();
     }
 
     let only_real = JobFilter {
         kind: Some("ship-a-change".into()),
-        simulated: Some(false),
+        partition: Some(Partition::Real),
         ..Default::default()
     };
     let (rows, total) = repo.list_jobs(&only_real, 100, 0).await.unwrap();
@@ -378,12 +390,37 @@ async fn simulated_partitions_the_rows_and_the_total() {
 
     let only_sim = JobFilter {
         kind: Some("ship-a-change".into()),
-        simulated: Some(true),
+        partition: Some(Partition::Simulated),
         ..Default::default()
     };
     let (rows, total) = repo.list_jobs(&only_sim, 100, 0).await.unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(total, 2);
+
+    let only_shadow = JobFilter {
+        kind: Some("ship-a-change".into()),
+        partition: Some(Partition::Shadow),
+        ..Default::default()
+    };
+    let (rows, total) = repo.list_jobs(&only_shadow, 100, 0).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(total, 1);
+    assert_eq!(rows[0].title, "shadow run");
+    assert_eq!(
+        rows[0].partition,
+        Partition::Shadow,
+        "the column round-trips the third value"
+    );
+
+    // Both columns are written (expand/contract): the derived legacy
+    // bool is TRUE for shadow, so an N-1 reader of `jobs.simulated`
+    // fails closed on it without knowing the word.
+    let (legacy,): (bool,) = sqlx::query_as("SELECT simulated FROM jobs WHERE id = $1")
+        .bind(*shadow.id.inner().as_uuid())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert!(legacy, "jobs.simulated is derived as not-real");
 
     // Absent means everything, so nothing that exists today moves.
     let all = JobFilter {
@@ -391,8 +428,8 @@ async fn simulated_partitions_the_rows_and_the_total() {
         ..Default::default()
     };
     let (rows, total) = repo.list_jobs(&all, 100, 0).await.unwrap();
-    assert_eq!(rows.len(), 3);
-    assert_eq!(total, 3);
+    assert_eq!(rows.len(), 4);
+    assert_eq!(total, 4);
 }
 
 /// `metadata_has` and `metadata_contains` at the Postgres layer.

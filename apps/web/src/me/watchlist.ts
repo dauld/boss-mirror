@@ -30,7 +30,7 @@
 //     closed packet with nothing recorded says "closed", because that
 //     is the whole of what is known.
 
-import { carRow, type CarRow } from '../it/yard/yard';
+import { carRow, type CarRow, type Partition } from '../it/yard/yard';
 import { PACKET_STOPS, stopOf, type StopKey } from './packetTrack';
 
 /// A packet as the station-queue envelope serializes it (bare Jobs,
@@ -44,6 +44,7 @@ export type WatchlistJob = Readonly<{
   closed_on?: string | null;
   tags?: readonly string[];
   metadata?: Record<string, unknown> | null;
+  partition?: Partition;
   simulated?: boolean;
 }>;
 

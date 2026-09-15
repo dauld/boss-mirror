@@ -539,9 +539,12 @@ impl Workforce {
         // (verified='Verified'), and left the sweeps fork-unfireable
         // (defect 88798c96). A simulated worker works simulated
         // packets, full stop. FAIL CLOSED: a row that does not say
-        // simulated=true is not the sim's to touch - absent means real
-        // (rows predating the column carry sim tags the envelope
-        // already folds into `simulated`).
+        // partition=simulated is not the sim's to touch - absent means
+        // real (rows predating the column carry sim tags the envelope
+        // already folds into `simulated`), and a SHADOW row is not the
+        // sim's either (packet 508cc38c, Q5: the sim never participates
+        // in an experiment) — which is why this reads the word and not
+        // the derived `simulated` bool, which is true for shadow too.
         let mut real_skipped = 0u64;
         let rows: Vec<Value> = all_rows
             .into_iter()
@@ -1201,11 +1204,21 @@ fn humanize(name: &str) -> String {
 }
 
 /// The sim boundary as one checkable question. `true` only when the
-/// assignment row SAYS simulated=true; absent, null, or false all read
-/// as REAL and are not the sim's to touch (fail closed - defect
-/// 88798c96 is what the open version of this predicate did).
+/// assignment row SAYS partition="simulated" — or, from a server that
+/// predates the word (no `partition` key at all), simulated=true;
+/// absent, null, false, a mis-typed value, or any OTHER partition
+/// (shadow: 508cc38c Q5) all read as not the sim's to touch (fail
+/// closed - defect 88798c96 is what the open version of this predicate
+/// did). The `simulated` bool is only consulted when `partition` is
+/// absent: a server that writes the word also derives the bool as
+/// not-real, so reading the bool first would hand the sim every shadow
+/// packet.
 fn row_is_simulated(row: &Value) -> bool {
-    row.get("simulated").and_then(Value::as_bool) == Some(true)
+    match row.get("partition") {
+        Some(Value::String(word)) => word == "simulated",
+        Some(_) => false,
+        None => row.get("simulated").and_then(Value::as_bool) == Some(true),
+    }
 }
 
 #[cfg(test)]
@@ -1311,6 +1324,7 @@ mod tests {
     #[test]
     fn the_boundary_fails_closed() {
         use serde_json::json;
+        // An N-1 server: only the bool.
         assert!(super::row_is_simulated(&json!({"simulated": true})));
         assert!(!super::row_is_simulated(&json!({"simulated": false})));
         assert!(!super::row_is_simulated(&json!({})), "absent means real");
@@ -1318,6 +1332,23 @@ mod tests {
         assert!(
             !super::row_is_simulated(&json!({"simulated": "true"})),
             "a string is not a claim - fail closed on shape too"
+        );
+        // A server that writes the word: the word decides.
+        assert!(super::row_is_simulated(
+            &json!({"partition": "simulated", "simulated": true})
+        ));
+        assert!(!super::row_is_simulated(
+            &json!({"partition": "real", "simulated": false})
+        ));
+        // The shadow lane (508cc38c, Q5): the derived bool says
+        // not-real, and the sim must still leave it alone.
+        assert!(
+            !super::row_is_simulated(&json!({"partition": "shadow", "simulated": true})),
+            "a shadow packet is not the sim's to work"
+        );
+        assert!(
+            !super::row_is_simulated(&json!({"partition": 7, "simulated": true})),
+            "an unreadable partition is not a claim either"
         );
     }
 

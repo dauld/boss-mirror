@@ -23,6 +23,8 @@
 // if it is TRUE, so nothing below invents a stop, rounds a count, or
 // quietly drops the feedback that was turned down.
 
+import { partitionOf, type Partition } from '@boss/web-kit/ui/packet-card';
+
 /** A feedback packet as the jobs API serves it. Steps arrive with the
  *  job on the list endpoint, so the current stop needs no second
  *  call. */
@@ -31,6 +33,7 @@ export type FeedbackPacket = Readonly<{
   status: string;
   opened_on: string;
   subject?: Readonly<{ id?: string }> | null;
+  partition?: Partition;
   simulated?: boolean;
   steps?: ReadonlyArray<
     Readonly<{ spec_slug?: string | null; title?: string | null; status: string }>
@@ -150,7 +153,7 @@ export function placeOnTrack(
   packets: readonly FeedbackPacket[],
   perStop = 4,
 ): PacketTrack {
-  const real = packets.filter((p) => p.simulated !== true);
+  const real = packets.filter((p) => partitionOf(p) === 'real');
   const byStop = new Map<StopKey, PacketCard[]>(
     PACKET_STOPS.map((s) => [s.key, [] as PacketCard[]]),
   );

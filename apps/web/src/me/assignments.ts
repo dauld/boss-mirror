@@ -7,7 +7,7 @@
 // unassigned). Rows where someone else is mid-flight on a
 // role-matched step are visible context, not claimable work.
 
-import { carRow, type CarRow } from '../it/yard/yard';
+import { carRow, partitionOf, type CarRow, type Partition } from '../it/yard/yard';
 
 export type AssignmentStep = Readonly<{
   id: string;
@@ -37,11 +37,13 @@ export type AssignmentRow = Readonly<{
   subject_kind: string;
   subject_id: string;
   priority: string;
-  /** The Job's admission-fixed sim-vs-real flag, and its tags — the
-   *  packet facts the card needs, carried on the row so this lens
-   *  needs no second fetch. Optional so a response from a server that
-   *  predates them still parses (they then read as a real packet, the
-   *  same default the Job's own `serde(default)` takes). */
+  /** The Job's admission-fixed partition (the word, 508cc38c) and its
+   *  derived `simulated` bool, and its tags — the packet facts the card
+   *  needs, carried on the row so this lens needs no second fetch.
+   *  Optional so a response from a server that predates them still
+   *  parses (they then read as a real packet, the same default the
+   *  Job's own `serde(default)` takes). */
+  partition?: Partition;
   simulated?: boolean;
   tags?: readonly string[];
   /** How many red trains have released this car — the conductor's
@@ -219,7 +221,7 @@ export function assignmentPacket(row: AssignmentRow): CarRow {
       kind: row.workflow,
       title: row.job_title,
       tags: row.tags,
-      simulated: row.simulated,
+      partition: partitionOf(row),
       red_trains: row.red_trains,
     }),
     branch: row.step.title,

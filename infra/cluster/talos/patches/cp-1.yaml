@@ -1,0 +1,22 @@
+# cp-1 (control plane) — the non-secret Talos machine-config entries the
+# pipeline depends on, declared here so the tree can read them
+# (backlog 08430090; README.md beside this file says how to apply).
+# Values are cp-1's LIVE config as read on 2026-09-15 (talosctl get
+# machineconfig -o yaml). The image-GC pair is 50/40 here and on cp-3;
+# cp-2 carries 40/30 (design 16115a17 named the thresholds as one of
+# the levers behind the 2026-09-11 outage). Which pair is intended is an
+# open question on 08430090 — each node is declared as found, so the
+# check reads MATCH today and the decision, when made, is one edit here
+# per node.
+machine:
+  kubelet:
+    extraConfig:
+      imageGCHighThresholdPercent: 50
+      imageGCLowThresholdPercent: 40
+  # Every image the cluster runs is pulled through the forge's registry
+  # (infra/forge; plain http on the LAN).
+  registries:
+    mirrors:
+      10.20.0.15:3000:
+        endpoints:
+          - http://10.20.0.15:3000

@@ -364,7 +364,7 @@ fn create_job_with_steps(
     // the `x-sim-origin` header the LiveApiOutput stamps, but the
     // engine says it explicitly so the wire body carries the truth
     // even through a path that drops the header.
-    .with_simulated(true);
+    .with_partition(boss_core::partition::Partition::Simulated);
     job.status = JobStatus::Open;
 
     // Post the Job and let the SERVER materialize its steps from the

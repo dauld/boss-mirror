@@ -27,11 +27,14 @@
 //!     way an employee id is. That decision moved the model off the
 //!     actor and onto the run (`agent_runs.model`) — one registered
 //!     agent runs different models over time, and cost is priced per
-//!     run — so the registry form carries no model half. The
-//!     `<mode>:<model>` form survives on `agent_runs.actor_id` until
-//!     the run carries its model in a column of its own; the
+//!     run — so the registry form carries no model half. The run
+//!     carries its model in a column of its own since 2026-09-15
+//!     (`agent_runs.model`, backlog 7dd9f28c); the `<mode>:<model>`
+//!     form survives on the rows and events written before that, and
+//!     the [`ActorId::Agent`] arm survives to read them. The
 //!     [`ActorId::RegisteredAgent`] arm is where the class is heading
-//!     and the [`ActorId::Agent`] arm is the one to retire.
+//!     and the [`ActorId::Agent`] arm is the one to retire once no
+//!     reporter sends it.
 //!
 //! Agents are CPUs in the same machine, not a separate system — but
 //! they are not *people*. Before this variant existed, an agent

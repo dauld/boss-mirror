@@ -169,7 +169,7 @@ fn fixture_job(id: &str, title: &str) -> Job {
         closed_on: None,
         metadata: serde_json::json!({"site": "main"}),
         tags: vec!["urgent".into(), "vip".into()],
-        simulated: false,
+        partition: boss_core::partition::Partition::Real,
     }
 }
 

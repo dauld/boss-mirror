@@ -79,6 +79,9 @@ mod tests {
             finished_at: "2026-09-10T01:10:00Z".parse().unwrap(),
             outcome: RunOutcome::Success,
             error: None,
+            // As the adapters hand it in: resolved before the event is
+            // built, so the payload always states it.
+            model: Some("opus-5".into()),
             tokens: crate::agent_runs::types::TokenUsage::Split {
                 input: 10,
                 output: 2,
@@ -101,6 +104,9 @@ mod tests {
         assert_eq!(ev.source, "jobs");
         assert_eq!(ev.payload["run_id"], "run-1");
         assert_eq!(ev.payload["actor_id"], "claude:opus-5");
+        // The model rides as its own key (design 6fda05ae): a rebuild
+        // reads it here and never parses the actor id for a new event.
+        assert_eq!(ev.payload["model"], "opus-5");
         assert_eq!(ev.payload["tool_calls"], 3);
         // The token shape rides the payload the way the wire states it:
         // the total always present, the split present because it was

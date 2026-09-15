@@ -3,6 +3,8 @@
 
 use super::*;
 
+use boss_core::partition::Partition;
+
 use axum::extract::{Path, Query};
 
 // ---------------------------------------------------------------------------
@@ -46,10 +48,20 @@ pub(super) struct ListJobsQuery {
     /// user-feedback packets to show 14 live ones and was 27 short of
     /// silently truncating at its own limit.
     closed_within: Option<i64>,
-    /// `simulated=false` drops the demo tenant's packets; `true` keeps
-    /// only those; absent is everything, so no existing caller moves.
-    /// 87% of packets are simulated, so a surface that wants real work
-    /// has to say so in the query rather than filter the page it got.
+    /// `partition=real|simulated|shadow` keeps ONE partition; absent
+    /// is everything, so no existing caller moves. 87% of packets are
+    /// simulated, so a surface that wants real work has to say so in
+    /// the query rather than filter the page it got. Any other word is
+    /// a 400 that names the vocabulary — an unknown partition that
+    /// silently answered the unfiltered count would read as "every
+    /// packet is in it".
+    partition: Option<String>,
+    /// The N-1 spelling, kept so old callers do not move:
+    /// `simulated=false` is `partition=real` — so a caller that wants
+    /// real work keeps excluding shadow packets without knowing the
+    /// word — and `simulated=true` is `partition=simulated`, exactly
+    /// the simulated company (the sim never sees the shadow lane, Q5
+    /// of packet 508cc38c). `partition` wins when both are sent.
     simulated: Option<bool>,
     /// A URL-encoded flat JSON object of string values; the packet's
     /// metadata must CONTAIN it (`metadata @> $n`, the shape the port
@@ -102,6 +114,26 @@ fn metadata_key_from_query(raw: Option<&str>) -> Result<Option<String>, String> 
         .map_err(|why| format!("metadata_has {why}"))
 }
 
+/// Resolve the two partition spellings to one filter, or say why not.
+/// `partition=` wins; `simulated=false` is `real` and `simulated=true`
+/// is `simulated` (the N-1 spelling — see `ListJobsQuery`). An unknown
+/// word is refused: a server that ignored it would answer the
+/// unfiltered count, and "0 shadow packets" and "every packet" must not
+/// share a body.
+pub(crate) fn partition_from_query(
+    partition: Option<&str>,
+    simulated: Option<bool>,
+) -> Result<Option<Partition>, String> {
+    match (partition, simulated) {
+        (Some(word), _) => word
+            .parse::<Partition>()
+            .map(Some)
+            .map_err(|e| format!("partition: {e}")),
+        (None, Some(flag)) => Ok(Some(Partition::from_legacy_simulated(flag))),
+        (None, None) => Ok(None),
+    }
+}
+
 pub(super) async fn list_jobs<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
     CurrentUser(user): CurrentUser,
@@ -139,6 +171,10 @@ pub(super) async fn list_jobs<R: JobsRepository + 'static, B: EventBus + 'static
         Ok(key) => key,
         Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
     };
+    let partition = match partition_from_query(q.partition.as_deref(), q.simulated) {
+        Ok(p) => p,
+        Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
+    };
 
     let filter = JobFilter {
         kind: q.kind,
@@ -151,7 +187,7 @@ pub(super) async fn list_jobs<R: JobsRepository + 'static, B: EventBus + 'static
         metadata_contains,
         metadata_has,
         scope,
-        simulated: q.simulated,
+        partition,
         ..Default::default()
     };
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
@@ -388,7 +424,7 @@ pub(super) async fn jobs_live<R: JobsRepository + 'static, B: EventBus + 'static
         // a decision about what this surface is FOR, not part of
         // adding the capability, so it is left to the caller that
         // owns the surface.
-        simulated: None,
+        partition: None,
     };
     let jobs = match state.jobs.list_jobs(&filter, 12, 0).await {
         Ok((jobs, _total)) => jobs,
@@ -696,14 +732,33 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
         }
     }
 
-    // Admission decides sim-vs-real ONCE, here, and the flag never
-    // moves again (03-jobs.sql: the epoch trim leans on a Job's rows
-    // all sharing one fate). Two admissible sources, OR-ed: an
-    // explicit `simulated: true` on the body (demo seeding, tests),
-    // or the request arriving on a sim chain (`x-sim-origin` — how
-    // every sim-engine create presents). The OR means a sim chain can
-    // never mint real work, even with a body that claims otherwise.
-    job.simulated = job.simulated || boss_core::sim_origin::is_in_sim_chain();
+    // Admission decides the partition ONCE, here, and it never moves
+    // again (03-jobs.sql: the epoch trim leans on a Job's rows all
+    // sharing one fate). Two admissible sources, OR-ed: an explicit
+    // `partition` / `simulated: true` on the body (demo seeding,
+    // tests), or the request arriving on a sim chain (`x-sim-origin`
+    // — how every sim-engine create presents). The OR means a sim
+    // chain can never mint real work, even with a body that claims
+    // otherwise.
+    //
+    // NOTHING ADMITS A SHADOW PACKET YET. Shadow admission mirrors a
+    // real packet's trigger into a candidate protocol (design
+    // network-experiments.md Tier 3, car 3 of packet 508cc38c); it is
+    // not a body flag, and a body that claims it is refused so the
+    // shadow lane cannot be populated before its side-effect skip
+    // (car 2) exists. The sim never participates (Q5), so a sim chain
+    // carrying the claim is refused the same way.
+    if job.partition == Partition::Shadow {
+        return (
+            StatusCode::BAD_REQUEST,
+            "partition=shadow is not admitted here: shadow packets are minted by the \
+             experiment lane (docs/design/network-experiments.md, Tier 3), not by a body value",
+        )
+            .into_response();
+    }
+    if boss_core::sim_origin::is_in_sim_chain() {
+        job.partition = Partition::Simulated;
+    }
 
     // Validate the kind against the Workflow registry. When no registry
     // is plumbed (older tests) we accept any kind string. We capture
@@ -969,14 +1024,14 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
     let actor = user
         .ambient_actor()
         .unwrap_or_else(|| boss_core::actor::ActorId::Automation("platform".into()));
-    // Every event about the Job inherits its admission-fixed flag as
-    // the `_simulated` marker — the packet, not the transport context
-    // of the write, is the source of truth for sim-vs-real.
+    // Every event about the Job inherits its admission-fixed partition
+    // as the `_partition` / `_simulated` markers — the packet, not the
+    // transport context of the write, is the source of truth.
     let job_stamp = state
         .publisher
         .stamp_with_actor(actor)
         .await
-        .with_simulated(job.simulated);
+        .with_partition(job.partition);
     let job_event = job_stamp.event(
         events::JOB_CREATED,
         serde_json::to_value(&job).unwrap_or_default(),
@@ -1014,7 +1069,7 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
                 .publisher
                 .stamp_with_actor(step_actor)
                 .await
-                .with_simulated(job.simulated);
+                .with_partition(job.partition);
             let step_event =
                 step_stamp.event(events::STEP_CREATED, events::step_state_payload(step));
             if let Err(e) = state
@@ -1332,7 +1387,7 @@ pub(super) async fn update_job<R: JobsRepository + 'static, B: EventBus + 'stati
     };
     let old_status = existing.status;
 
-    // `simulated` is IMMUTABLE after admission. Ignore-not-reject,
+    // The partition is IMMUTABLE after admission. Ignore-not-reject,
     // matching how the other server-owned field on this route is
     // treated (the path-authoritative `id` above): the stored value
     // wins over anything on the wire, so a client round-tripping a
@@ -1341,7 +1396,7 @@ pub(super) async fn update_job<R: JobsRepository + 'static, B: EventBus + 'stati
     // touches the column; carrying the stored value forward here
     // keeps the JOB_UPDATED event payload (and the in-memory
     // adapter) agreeing with the row.
-    job.simulated = existing.simulated;
+    job.partition = existing.partition;
 
     // Pick the right policy action: transitioning to Closed is a Close
     // action (more restricted than Update); everything else is Update.
@@ -1401,7 +1456,7 @@ pub(super) async fn update_job<R: JobsRepository + 'static, B: EventBus + 'stati
         .publisher
         .stamp_with_actor(actor)
         .await
-        .with_simulated(job.simulated);
+        .with_partition(job.partition);
     let mut job_events = vec![stamp.event(
         events::JOB_UPDATED,
         serde_json::to_value(&job).unwrap_or_default(),
@@ -1548,7 +1603,7 @@ pub(super) async fn patch_job_metadata<R: JobsRepository + 'static, B: EventBus 
         .publisher
         .stamp_with_actor(actor.clone())
         .await
-        .with_simulated(existing.simulated);
+        .with_partition(existing.partition);
     let merged = match state
         .jobs
         .merge_job_metadata_at(&job_id, &patch, &stamp)
@@ -1703,7 +1758,7 @@ pub(super) async fn convert_job<R: JobsRepository + 'static, B: EventBus + 'stat
         .publisher
         .stamp_with_actor(actor)
         .await
-        .with_simulated(existing.simulated);
+        .with_partition(existing.partition);
     match state
         .jobs
         .repin_workflow_version_at(&job_id, to.version, &stamp)

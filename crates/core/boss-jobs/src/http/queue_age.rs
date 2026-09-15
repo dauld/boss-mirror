@@ -58,7 +58,11 @@ pub(super) async fn list_queue_age<R: JobsRepository + 'static, B: EventBus + 's
                         "step_title": r.step_title,
                         "status": r.status,
                         "assignee_id": r.assignee_id,
-                        "simulated": r.simulated,
+                        // Both spellings, like every partitioned row:
+                        // a reader that only knows the bool fails
+                        // closed on a shadow packet.
+                        "partition": r.partition,
+                        "simulated": r.partition.fails_closed(),
                         "since": r.since,
                         "exact": r.exact,
                         "waiting_seconds": waiting_seconds,

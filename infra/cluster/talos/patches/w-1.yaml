@@ -1,0 +1,41 @@
+# w-1 (build node) — the non-secret Talos machine-config entries the
+# pipeline depends on, declared here so the tree can read them
+# (backlog 08430090; README.md beside this file says how to apply).
+# Values are w-1's LIVE config as read on 2026-09-15 (talosctl get
+# machineconfig -o yaml), with one correction: the gate-seed file entry
+# was applied by hand TWICE on 2026-09-12 (the second after the nine-hour
+# mount diagnosis, d42d4967) and the live config carries it two times.
+# It is declared once — the declaration is the intent; the double is a
+# DOUBLED finding for check-declared.sh until it is removed live.
+machine:
+  # The gate seed's directory: a local PersistentVolume
+  # (infra/cluster/manifests/gate-seed-local.yaml) refuses a path that
+  # does not exist and nothing in the cluster may create one (baseline
+  # pod security refuses hostPath), so the node's own config makes it.
+  # Talos creates the parents at boot.
+  files:
+    - content: |
+        local PV gate-seed-w-1 (infra/cluster/manifests/gate-seed-local.yaml) mounts this directory
+      permissions: 0o644
+      path: /var/local/gate-seed/.declared-by-talos
+      op: create
+  kubelet:
+    # The kubelet runs in its own mount namespace with a fixed set of
+    # host paths and /var/local is not one of them: without this bind a
+    # pod mounting the PV sat nine hours at ContainerCreating with
+    # `path "/var/local/gate-seed" does not exist` (2026-09-12).
+    extraMounts:
+      - destination: /var/local/gate-seed
+        type: bind
+        source: /var/local/gate-seed
+        options:
+          - bind
+          - rshared
+          - rw
+  # Every image the cluster runs is pulled through the forge's registry
+  # (infra/forge; plain http on the LAN).
+  registries:
+    mirrors:
+      10.20.0.15:3000:
+        endpoints:
+          - http://10.20.0.15:3000

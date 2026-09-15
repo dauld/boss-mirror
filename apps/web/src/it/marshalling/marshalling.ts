@@ -24,6 +24,7 @@
 // the constraint: naming it would be asserting a rate nobody counted.
 
 import { fetchRemote, type Remote } from '../../data/remote';
+import { partitionOf, type Partition } from '@boss/web-kit/ui/packet-card';
 
 // ---------------------------------------------------------------------
 // Wire shapes — GET /api/stations/load and GET /api/stations/flow,
@@ -317,6 +318,9 @@ export type Wait = Readonly<{
   /** False when the stamp is the `updated_at` fallback — a LOWER
    *  BOUND, and it has to render as one. */
   exact: boolean;
+  /** The packet's partition (508cc38c), parsed at this boundary;
+   *  `simulated` is derived from it — not-real. */
+  partition: Partition;
   simulated: boolean;
 }>;
 
@@ -336,7 +340,8 @@ export function parseQueueAge(raw: unknown): Readonly<{
         assigneeId: str(r.assignee_id),
         waitingDays: num(r.waiting_days) ?? 0,
         exact: r.exact === true,
-        simulated: r.simulated === true,
+        partition: partitionOf(r),
+        simulated: partitionOf(r) !== 'real',
       }))
       .filter((w) => w.jobId !== ''),
     now: str((raw as { now?: unknown } | null)?.now),

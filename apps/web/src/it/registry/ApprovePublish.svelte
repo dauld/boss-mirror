@@ -12,6 +12,12 @@
   // (the live row carries what the tree never said), and its button
   // enables only when the approver has typed the name of the field
   // that will be erased. What they typed is what the record says.
+  //
+  // A SUPERSEDED kind (car 3c) is one whose latest request published
+  // after the measurement: the whole block greys, the head says
+  // "published vN→vM at <time>, re-measured at the next drift run",
+  // and the one control left asks the verb again — which answers
+  // exit 5 (equal) if nothing moved, or the newer answer if it did.
   import WriteGate from '@boss/web-kit/ui/WriteGate.svelte';
   import {
     approveAuthority,
@@ -23,6 +29,7 @@
     type AdriftKind,
     type ApproveAgainst,
     type PublishRequest,
+    type RowState,
   } from './approve';
 
   type Props = Readonly<{
@@ -30,6 +37,10 @@
     against: ApproveAgainst;
     /** This kind's latest publish-workflow request, or null. */
     latest: PublishRequest | null;
+    /** rowState(kind, latest, measured.at) — the page's, so the table
+     *  row, the header count and this control cannot disagree. Not
+     *  named `state`: a prop of that name shadows the `$state` rune. */
+    standing: RowState;
     /** The role the ops-request `execute` step names; null = none. */
     authorityRole: string | null;
     viewerId: string | null;
@@ -37,7 +48,7 @@
     /** Called with the new packet id once the POST returns one. */
     onFiled: (id: string) => void;
   }>;
-  let { kind, against, latest, authorityRole, viewerId, viewerRole, onFiled }: Props = $props();
+  let { kind, against, latest, standing, authorityRole, viewerId, viewerRole, onFiled }: Props = $props();
 
   const mode = $derived(modeFor(latest));
   const authority = $derived(approveAuthority(authorityRole, viewerRole));
@@ -64,15 +75,22 @@
   }
 
   const when = (iso: string | null): string => (iso ? `${iso.slice(0, 10)} ${iso.slice(11, 16)}Z` : 'unstamped');
+  const version = (n: number | null): string => (n === null ? 'v?' : `v${n}`);
 </script>
 
-<div class="ap-kind">
+<div class="ap-kind" class:ap-superseded={standing.kind === 'superseded'}>
   <div class="ap-head">
     <span class="mono">{kind.kind}</span>
     <small>
       {kind.live_version === null ? 'live version unrecorded' : `live v${kind.live_version}`} ·
       adrift: {fieldNames.join(', ')}
     </small>
+    {#if standing.kind === 'superseded'}
+      <span class="ap-superseded-label">
+        published {version(standing.from)}→{standing.to === null ? 'v? (the answer names no version)' : version(standing.to)}
+        at {when(standing.at)}, re-measured at the next drift run
+      </span>
+    {/if}
   </div>
 
   {#if latest}
@@ -139,6 +157,16 @@
             Ask the verb again
           </button>
         </div>
+      {:else if standing.kind === 'superseded'}
+        <button
+          type="button"
+          class="btn"
+          disabled={refusal !== null || filing}
+          title={refusal ?? `files publish-workflow ${kind.kind} on ${PUBLISH_HOST} again; equal answers exit 5, nothing written`}
+          onclick={() => void file('plain')}
+        >
+          Ask the verb again — the tree may have moved since the publish
+        </button>
       {:else}
         <button
           type="button"
@@ -164,6 +192,9 @@
   .ap-kind { border: 1px solid var(--hairline, #2a3138); padding: 10px 12px; margin-bottom: 10px; }
   .ap-head { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; font-size: 13px; }
   .ap-head small { color: var(--static, #7a838c); font-size: 12px; }
+  /* History, not work: the answer stays readable, the block recedes. */
+  .ap-superseded { opacity: 0.55; border-style: dashed; }
+  .ap-superseded-label { color: var(--ok, #4fb98a); font-size: 12px; }
   .mono { font-family: var(--font-mono, ui-monospace, monospace); font-variant-numeric: tabular-nums; }
   .ok { color: var(--ok, #4fb98a); }
   .warn { color: var(--warn, #d9a441); }
