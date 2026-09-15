@@ -122,7 +122,7 @@ validate_entry() {
         elif ! printf '%s' "$f_id" | grep -qE '^[a-z0-9][a-z0-9-]*$'; then
             finding "$file" "$line" "$f_id" "id" \
                 "must be a lowercase slug (a-z, 0-9, dashes) so findings can cite it"
-        elif printf '%s\n' "$SEEN_IDS" | grep -qx -- "$f_id"; then
+        elif grep -qx -- "$f_id" <<< "$SEEN_IDS"; then
             finding "$file" "$line" "$f_id" "id" \
                 "duplicate id — an id is cited by conformance findings and must be unique"
         fi

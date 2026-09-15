@@ -134,7 +134,7 @@ if [[ "${1:-}" == "get" && "${2:-}" == "jobs" ]]; then
     fi
     # The read must be scoped to gate runners: an unlabelled read would
     # settle every failed Job in the namespace as a lost gate.
-    printf '%s\n' "$*" | grep -q -- '-l app=gate-runner' || { echo "kubectl stub: jobs read is not scoped to app=gate-runner: $*" >&2; exit 98; }
+    grep -q -- '-l app=gate-runner' <<< "$*" || { echo "kubectl stub: jobs read is not scoped to app=gate-runner: $*" >&2; exit 98; }
     cat "$FIXTURES/gate-jobs.json"; exit 0
 fi
 echo "kubectl stub: unexpected args: $*" >&2

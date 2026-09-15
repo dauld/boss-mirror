@@ -40,7 +40,7 @@ run_invariant() {
     }
     if [[ -n "$rows" ]]; then
         echo "[VIOLATION] $label"
-        echo "$rows" | head -10 | sed 's/^/    /'
+        head -10 <<< "$rows" | sed 's/^/    /'
         local n
         n=$(echo "$rows" | wc -l)
         if (( n > 10 )); then

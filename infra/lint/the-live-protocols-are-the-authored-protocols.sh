@@ -526,18 +526,18 @@ FX
     # 1. Agreement is silence — and it still says how much it compared.
     out=$(fields_report "$t/bundle" "$t/match.json" 2>&1); rc=$?
     [ "$rc" -eq 0 ] || { echo "self-test FAILED: matching fixtures exited $rc: $out" >&2; rm -rf "$t"; return 1; }
-    printf '%s\n' "$out" | grep -qF "COUNTS	parsed=2	compared=2	drifted=0" \
+    grep -qF "COUNTS	parsed=2	compared=2	drifted=0" <<< "$out" \
         || { echo "self-test FAILED: matching fixtures did not report 2 compared / 0 drifted: $out" >&2; rm -rf "$t"; return 1; }
 
     # 2. THE RED THIS CHECK EXISTS FOR: one description differs, and the
     #    finding must NAME the kind and the field.
     out=$(fields_report "$t/bundle" "$t/drift.json" 2>&1); rc=$?
     [ "$rc" -eq 0 ] || { echo "self-test FAILED: a drifting description exited $rc: $out" >&2; rm -rf "$t"; return 1; }
-    printf '%s\n' "$out" | grep -qF "DRIFT	beta	description	v3" \
+    grep -qF "DRIFT	beta	description	v3" <<< "$out" \
         || { echo "self-test FAILED: the drift was not named by kind, field and live version: $out" >&2; rm -rf "$t"; return 1; }
-    printf '%s\n' "$out" | grep -qF "drifted=1" \
+    grep -qF "drifted=1" <<< "$out" \
         || { echo "self-test FAILED: the drift was not counted: $out" >&2; rm -rf "$t"; return 1; }
-    printf '%s\n' "$out" | grep -qF "deleted last week" \
+    grep -qF "deleted last week" <<< "$out" \
         || { echo "self-test FAILED: the finding carries no excerpt of the live text: $out" >&2; rm -rf "$t"; return 1; }
 
     # 3. A FIELD THE FILE DOES NOT CLAIM is named rather than quietly
@@ -550,9 +550,9 @@ category = "platform"
 FX
     out=$(fields_report "$t/bundle" "$t/drift.json" 2>&1); rc=$?
     [ "$rc" -eq 0 ] || { echo "self-test FAILED: an absent claim exited $rc: $out" >&2; rm -rf "$t"; return 1; }
-    printf '%s\n' "$out" | grep -qF "ABSENT	beta	description" \
+    grep -qF "ABSENT	beta	description" <<< "$out" \
         || { echo "self-test FAILED: a file claiming no description was not named: $out" >&2; rm -rf "$t"; return 1; }
-    printf '%s\n' "$out" | grep -qF "drifted=0" \
+    grep -qF "drifted=0" <<< "$out" \
         || { echo "self-test FAILED: an absent claim was counted as drift: $out" >&2; rm -rf "$t"; return 1; }
     cat > "$t/bundle/beta.toml" <<'FX'
 [[workflow]]
@@ -567,7 +567,7 @@ FX
     #    not hold finds no drift, which must never read as clean.
     out=$(fields_report "$t/bundle" "$t/elsewhere.json" 2>&1); rc=$?
     [ "$rc" -eq 7 ] || { echo "self-test FAILED: a zero-kind comparison exited $rc, expected 7: $out" >&2; rm -rf "$t"; return 1; }
-    printf '%s\n' "$out" | grep -qF "REFUSED" \
+    grep -qF "REFUSED" <<< "$out" \
         || { echo "self-test FAILED: the floor refusal does not say so: $out" >&2; rm -rf "$t"; return 1; }
 
     # 5. A retired row is not an active one — it must not stand in for
@@ -632,11 +632,11 @@ PY
     if [ -z "${BOSS_LINT_SELFTEST_CHILD:-}" ]; then
         out=$(BOSS_LINT_SELFTEST_CHILD=1 BOSS_JOBS_URL="http://[::1]:9" bash "$0" --require-live 2>&1); rc=$?
         [ "$rc" -eq 75 ] || { echo "self-test FAILED: --require-live against an unreachable registry exited $rc, expected 75: $out" >&2; rm -rf "$t"; return 1; }
-        printf '%s\n' "$out" | grep -qF "SKIPPED the live comparison" \
+        grep -qF "SKIPPED the live comparison" <<< "$out" \
             || { echo "self-test FAILED: the skip is not loud: $out" >&2; rm -rf "$t"; return 1; }
-        printf '%s\n' "$out" | grep -qF "[::1]:9" \
+        grep -qF "[::1]:9" <<< "$out" \
             || { echo "self-test FAILED: the skip does not name what it could not reach: $out" >&2; rm -rf "$t"; return 1; }
-        printf '%s\n' "$out" | grep -qi "OK —" \
+        grep -qi "OK —" <<< "$out" \
             && { echo "self-test FAILED: a skip printed an OK line: $out" >&2; rm -rf "$t"; return 1; }
     fi
 

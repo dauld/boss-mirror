@@ -89,6 +89,12 @@ impl JobEdgesRegistry for InMemoryJobEdges {
                 "job_id",
                 "The design-doc packet this one revises — the previous link in the chain",
             ),
+            mk(
+                "design-doc",
+                "answers",
+                "job_id",
+                "The user-feedback or backlog-item this design decides — publishing the design completes the design-review step of that packet",
+            ),
         ])
     }
 }
@@ -271,6 +277,48 @@ mod tests {
             edge.field_path, "waiting_on",
             "boards_after must not be folded into waiting_on: the dispatcher CLEARS \
              waiting_on on any close, including an abandonment"
+        );
+    }
+
+    /// THE SAME PIN FOR THE ANSWERS EDGE (backlog 5f0b2661). A design
+    /// filed for a feedback names it, so the design's close can complete
+    /// the feedback's own design-review — one decision instead of two
+    /// for the same person. Until this edge the link was
+    /// `metadata.design_packet`, a string an operator typed onto the
+    /// feedback, which nothing read; ref-checked at the write like
+    /// `backlog_item`, and the link `complete-feedback-design-review-on-
+    /// design-doc-published` follows.
+    #[tokio::test]
+    async fn the_answers_edge_matches_the_migration_that_seeds_it() {
+        const MIGRATION: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../infra/postgres/schema/",
+            "20260915023329-a-design-doc-names-the-feedback-it-answers.sql"
+        ));
+        let edges = InMemoryJobEdges.list().await.expect("list");
+        let edge = edges
+            .iter()
+            .find(|e| e.source_kind == "design-doc" && e.field_path == "answers")
+            .expect("design-doc.answers must be in the in-memory defaults");
+
+        assert_eq!(
+            edge.field_kind, "job_id",
+            "a design decides exactly one packet; two is a different relation"
+        );
+        assert_eq!(
+            edge.on_missing, "abort",
+            "an edge pointing at nothing would have the close rule complete nothing, \
+             silently — refuse it at the write"
+        );
+        assert!(
+            MIGRATION.contains("'design-doc', 'answers', 'job_id'"),
+            "the migration must seed the same triple the in-memory list serves"
+        );
+        assert!(
+            MIGRATION.contains(&edge.description),
+            "the migration's description must match the in-memory one, or the two \
+             registries disagree about what the edge means: {}",
+            edge.description
         );
     }
 

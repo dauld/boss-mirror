@@ -76,7 +76,7 @@ done
 # 2. The loop installs itself.
 rows=$(sed -n '/^TIMERS=(/,/^)/p' "$deploy" | grep -oE '"[a-z0-9-]+:[^"]+"' | tr -d '"')
 command -v jq >/dev/null || fail "jq is required to check the run summary and the roles read"
-printf '%s\n' "$rows" | grep -qx 'boss-gcp-converge:gcp' \
+grep -qx 'boss-gcp-converge:gcp' <<< "$rows" \
     || fail "boss-gcp-converge is not a TIMERS row in deploy-services.sh — the converge
     would install every OTHER unit and never itself, so the one hand-install would have
     to be repeated after every rebuild. That is the bootstrap treadmill this ends."
@@ -369,7 +369,7 @@ fi
 # maintenance-wrap packet pair — which this unit must not have: it
 # fires every minute, its product IS packets, and a packet per firing
 # would drown the board (infra/ops/ops-runner.sh's header).
-printf '%s\n' "$rows" | grep -q 'boss-ops-runner' \
+grep -q 'boss-ops-runner' <<< "$rows" \
     && units_fail "boss-ops-runner is a TIMERS row. It must be installed from its own block:
     as a row it would get the legacy 127.0.0.1 jobs-url drop-in and would owe a
     maintenance-wrap packet pair it deliberately does not have."

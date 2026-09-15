@@ -21,6 +21,10 @@
   // landing report. Every other Job renders exactly as before.
   import ArrivalReport from '../it/yard/ArrivalReport.svelte';
   import { fetchRemote, type Remote } from '../data/remote';
+  import WriteGate from '@boss/web-kit/ui/WriteGate.svelte';
+  import { session } from '@boss/web-kit/session/session.svelte';
+  import AbortModal from './AbortModal.svelte';
+  import { abortAuthority, abortTerminals } from './abort';
 
   let { jobId } = $props<{ jobId: string }>();
 
@@ -200,6 +204,27 @@
     // the page updates without waiting for the next 2s SSE tick.
     void load();
   }
+
+  // The Abort control (design c6f9fb3e, backlog 7a98040e). Offered
+  // whenever the job is open and its workflow declares a step with
+  // `outcome_kind = aborted` — read off the job's own materialised
+  // steps, so the row decides, not the page. The viewer's role is the
+  // affordance gate, as on the yard's cancel: a terminal whose
+  // `authority_role` the viewer lacks is not offered, and when none is
+  // left the control stays visible but disabled with the role named.
+  // The gate itself is the step API's.
+  const viewerRole = $derived(session.value.kind === 'ready' ? session.value.user.role : null);
+  const abortable = $derived(job?.status === 'open' ? abortTerminals(job.steps) : []);
+  const abortAdmitted = $derived(
+    abortable.filter((t) => abortAuthority(t.authority_role, viewerRole).kind === 'admitted'),
+  );
+  const abortRefusal = $derived.by(() => {
+    if (abortable.length === 0 || abortAdmitted.length > 0) return null;
+    const first = abortable[0];
+    const a = first ? abortAuthority(first.authority_role, viewerRole) : null;
+    return a?.kind === 'refused' ? a.why : null;
+  });
+  let abortOpen = $state(false);
 </script>
 
 {#if loading && !job}
@@ -224,6 +249,35 @@
       title={j.title}
       subtitle={`Opened ${j.opened_on}${j.due_on ? ` · due ${j.due_on}` : ''} · owner ${j.owner_id}`}
     />
+
+    {#if abortable.length > 0}
+      <WriteGate>
+        <div class="jd-actions">
+          <button
+            type="button"
+            class="btn btn-danger-outline"
+            disabled={abortRefusal !== null}
+            title={abortRefusal ?? `Complete ${abortAdmitted.map((t) => t.title).join(' or ')} with a reason`}
+            onclick={() => (abortOpen = true)}
+          >Abort…</button>
+          {#if abortRefusal !== null}
+            <!-- The disabled button says why in its title; the same
+                 sentence in the row for anyone not hovering. -->
+            <span class="jd-abort-why">{abortRefusal}</span>
+          {/if}
+        </div>
+      </WriteGate>
+    {/if}
+
+    {#if abortOpen && abortAdmitted.length > 0}
+      <AbortModal
+        jobId={j.id}
+        jobTitle={j.title}
+        terminals={abortAdmitted}
+        onClose={() => (abortOpen = false)}
+        onAborted={onStepUpdate}
+      />
+    {/if}
 
     <div class="tab-grid">
       <ArrivalReport job={j} />
@@ -300,3 +354,13 @@
     </div>
   </div>
 {/if}
+
+<style>
+  .jd-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: -8px 0 20px;
+  }
+  .jd-abort-why { font-size: 12px; color: var(--text-dim); }
+</style>

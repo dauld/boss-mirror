@@ -13,7 +13,7 @@ import {
   uniqueTags,
   wagonTag,
 } from './yard-floor';
-import type { ApproachRow, CarProof, CarRow, TrainRow, YardState } from './yard';
+import { carRow, type ApproachRow, type CarProof, type CarRow, type TrainRow, type YardState } from './yard';
 import type { YardStatus } from './yard-status';
 
 // The floor is the testable half of the map: where every wagon stands,
@@ -39,6 +39,7 @@ const yardOf = (over: Partial<YardState> = {}): YardState => ({
   },
   arrivals: [],
   cancelled: [],
+  withdrawn: [],
   delivery: [],
   awaitingProof: [],
   publishing: [],
@@ -87,6 +88,7 @@ const car = (id: string, branch: string, over: Partial<CarRow> = {}): CarRow => 
   sim: false,
   skipReason: null,
   head: 'abc1234',
+  deliveryChannel: 'software',
   ...over,
 });
 
@@ -120,6 +122,16 @@ const trainRow = (id: string, status: TrainRow['status'], over: Partial<TrainRow
   cancelRefused: false,
   ...over,
 });
+
+/** A train that arrived at `at`, carrying one car. */
+const arrivedWith = (trainId: string, at: string, c: CarRow): TrainRow =>
+  trainRow(trainId, 'ARRIVED', {
+    live: false,
+    outcome: 'arrived',
+    mergeRef: 'b641f3a',
+    arrivedAt: { ms: Date.parse(at), at, basis: 'completed_at' },
+    cars: [c],
+  });
 
 /** A publish-dock row — the one approach lane the client still supplies
  *  (the station's queue, mapped 1:1). The verdict lanes come from the
@@ -859,15 +871,6 @@ describe('the inspection shed', () => {
   const probe = (over: Partial<CarProof> = {}) =>
     proofOf({ probe: 'bash infra/lint/x.sh --self-test', expect: 'X-OK', ...over });
 
-  const arrivedWith = (trainId: string, at: string, c: CarRow): TrainRow =>
-    trainRow(trainId, 'ARRIVED', {
-      live: false,
-      outcome: 'arrived',
-      mergeRef: 'b641f3a',
-      arrivedAt: { ms: Date.parse(at), at, basis: 'completed_at' },
-      cars: [c],
-    });
-
   test('an arrived car with a probe stands in the shed, showing the command and the string', () => {
     const c = car('c1', 'feat/probed', { proof: probe() });
     const s = scene(yardOf({ awaitingProof: [c] }), statusOf(), NOW);
@@ -1027,7 +1030,7 @@ describe('the arrivals yard', () => {
     expect(wagon(s, 't8-c').slot).toBe(1);
     const rows = s.boardRows.filter(r => r.landed);
     expect(rows.map(r => r.id)).toEqual(['t9-c', 't8-c']);
-    expect(rows[0]?.where).toBe('Arrivals');
+    expect(rows[0]?.where).toBe('Arrivals · software');
   });
 
   test('landed-in-the-last-24h is the arrivals machine\'s count', () => {
@@ -1057,6 +1060,73 @@ describe('the arrivals yard', () => {
     expect(drawnWagons(busy.wagons).drawn.some(w => w.id === 'd1')).toBe(true);
   });
 
+  // FOUR SIDINGS BY DELIVERY CHANNEL (design c6bd173e, car 1 — backlog
+  // 953aaf30). A landed wagon stands on the siding of its car's
+  // `delivery_channel`, in the order data · config · software · infra,
+  // and its slot counts along THAT siding. Landing itself is still the
+  // converge for every channel (car 3 gives each its own evidence).
+  test('a landed car stands on the siding of its channel, slotted along that siding', () => {
+    const on = (id: string, at: string, ch: CarRow['deliveryChannel']) =>
+      trainRow(id, 'ARRIVED', {
+        live: false,
+        outcome: 'arrived',
+        mergeRef: 'b641f3a',
+        arrivedAt: { ms: Date.parse(at), at, basis: 'completed_at' },
+        cars: [car(`${id}-c`, `fix/${id}`, { deliveryChannel: ch })],
+      });
+    const s = scene(
+      yardOf({
+        arrivals: [
+          on('t9', '2026-09-07T23:00:00Z', 'software'),
+          on('t8', '2026-09-07T22:00:00Z', 'data'),
+          on('t7', '2026-09-07T21:00:00Z', 'infra'),
+          on('t6', '2026-09-07T20:00:00Z', 'config'),
+          on('t5', '2026-09-07T19:00:00Z', 'software'),
+        ],
+      }),
+      statusOf(),
+      NOW,
+    );
+    expect(wagon(s, 't8-c')).toMatchObject({ station: 'arrivals', siding: 'data', slot: 0 });
+    expect(wagon(s, 't6-c')).toMatchObject({ station: 'arrivals', siding: 'config', slot: 0 });
+    expect(wagon(s, 't9-c')).toMatchObject({ station: 'arrivals', siding: 'software', slot: 0 });
+    expect(wagon(s, 't5-c')).toMatchObject({ station: 'arrivals', siding: 'software', slot: 1 });
+    expect(wagon(s, 't7-c')).toMatchObject({ station: 'arrivals', siding: 'infra', slot: 0 });
+    // The board names the siding, newest first across all four.
+    expect(s.boardRows.filter(r => r.landed).map(r => [r.id, r.where])).toEqual([
+      ['t9-c', 'Arrivals · software'],
+      ['t8-c', 'Arrivals · data'],
+      ['t7-c', 'Arrivals · infra'],
+      ['t6-c', 'Arrivals · config'],
+      ['t5-c', 'Arrivals · software'],
+    ]);
+  });
+
+  test('an old car — parked before the stamp existed — lands on the software siding', () => {
+    // Built through the one constructor from a packet carrying no
+    // `delivery_channel`, the way every car before the stamp reads.
+    const old = carRow({ id: 'old', kind: 'ship-a-change', title: 'Old car', metadata: { branch: 'fix/old' } });
+    const s = scene(yardOf({ arrivals: [arrivedWith('t1', '2026-09-07T23:00:00Z', old)] }), statusOf(), NOW);
+    expect(wagon(s, 'old')).toMatchObject({ station: 'arrivals', siding: 'software', slot: 0 });
+  });
+
+  test('the drawn cap is per siding — a full software siding hides no data wagon', () => {
+    const at = (i: number) => new Date(Date.parse('2026-09-07T23:00:00Z') - i * 60_000).toISOString();
+    const arrivals = [
+      ...Array.from({ length: ARRIVALS_DRAWN + 2 }, (_, i) => landed(`s${i}`, at(i))),
+      trainRow('d', 'ARRIVED', {
+        live: false,
+        outcome: 'arrived',
+        arrivedAt: { ms: Date.parse(at(20)), at: at(20), basis: 'completed_at' },
+        cars: [car('d-c', 'fix/d', { deliveryChannel: 'data' })],
+      }),
+    ];
+    const { drawn, hidden } = drawnWagons(scene(yardOf({ arrivals }), statusOf(), NOW).wagons);
+    expect(drawn.some(w => w.id === 'd-c')).toBe(true);
+    expect(drawn.filter(w => w.siding === 'software')).toHaveLength(ARRIVALS_DRAWN);
+    expect(hidden).toBe(2);
+  });
+
   test("a cancelled train's cars are not placed — they are back on the dock if anywhere", () => {
     const s = scene(
       yardOf({ cancelled: [trainRow('tx', 'ARRIVED', { outcome: 'cancelled', cars: [car('cx', 'fix/x')] })] }),
@@ -1064,6 +1134,56 @@ describe('the arrivals yard', () => {
       NOW,
     );
     expect(s.wagons).toHaveLength(0);
+  });
+});
+
+// THE CANCELLED SIDING (design c6bd173e, outcomes): a withdrawn car —
+// its `abandoned` terminal completed — is one of the three terminal
+// tracks, beside arrivals and the inspection shed. It is drawn, not
+// listed on the departure board: a withdrawn car is neither in flight
+// nor landed, and the board's two counts are exactly those. Struck and
+// left-behind are dock badges, not a track.
+describe('the cancelled siding', () => {
+  const withdrawn = (id: string, at: string | null, over: Partial<CarRow> = {}) => ({
+    car: car(id, `fix/${id}`, over),
+    at,
+  });
+
+  test('a withdrawn car stands on the cancelled siding, since the instant it was abandoned', () => {
+    const s = scene(
+      yardOf({ withdrawn: [withdrawn('w1', '2026-09-07T22:00:00Z'), withdrawn('w2', '2026-09-07T21:00:00Z')] }),
+      statusOf(),
+      NOW,
+    );
+    expect(wagon(s, 'w1')).toMatchObject({ station: 'cancelled', slot: 0, tone: 'static', lamp: 'off', since: '2026-09-07T22:00:00Z' });
+    expect(wagon(s, 'w1').status).toBe('withdrawn · abandoned');
+    expect(wagon(s, 'w2').slot).toBe(1);
+    expect(wagon(s, 'w1').siding).toBeUndefined();
+    expect(s.boardRows.map(r => r.id)).toEqual([]);
+    expect(s.machines.cancelled).toEqual({ label: '2 withdrawn', count: 2 });
+  });
+
+  test('a withdrawn car whose packet names no branch is still a wagon, named by its id', () => {
+    // The six abandoned cars in the record on 2026-09-15 all read
+    // `branch: null` — filed as cars, withdrawn before they had one.
+    const s = scene(yardOf({ withdrawn: [withdrawn('0123456789abcdef', null, { branch: '' })] }), statusOf(), NOW);
+    expect(wagon(s, '0123456789abcdef')).toMatchObject({ station: 'cancelled', tag: '01234567', since: null });
+  });
+
+  test('an empty siding says so, and the selection is one the map and the panel share', () => {
+    expect(scene(yardOf(), statusOf(), NOW).machines.cancelled).toEqual({ label: 'empty', count: 0 });
+    expect(parseSelection('cancelled')).toEqual({ kind: 'cancelled' });
+  });
+
+  test('a car both landed and withdrawn keeps its arrival — one branch, one wagon', () => {
+    const c = car('c1', 'fix/c1');
+    const s = scene(
+      yardOf({ arrivals: [arrivedWith('t1', '2026-09-07T23:00:00Z', c)], withdrawn: [withdrawn('c1', '2026-09-07T23:30:00Z')] }),
+      statusOf(),
+      NOW,
+    );
+    expect(s.wagons.filter(w => w.id === 'c1')).toHaveLength(1);
+    expect(wagon(s, 'c1').station).toBe('arrivals');
   });
 });
 
@@ -1099,7 +1219,7 @@ describe('the departure board', () => {
       ['d1', 'Dock · slot 1'],
       ['r1', 'Garage'],
       ['a1', 'Track · #259 at CI'],
-      ['z1', 'Arrivals'],
+      ['z1', 'Arrivals · software'],
     ]);
     expect(s.boardRows.map(r => r.landed)).toEqual([false, false, false, false, false, false, true]);
   });

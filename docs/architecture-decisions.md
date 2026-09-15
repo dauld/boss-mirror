@@ -931,6 +931,26 @@ experiments need no IT-vs-model line. Department Apps are the decided
 workflows (registry-governed, the same for everyone in the role);
 Home is where an individual explores what has not been decided yet.
 
+**Aborting a job asks for the reason** (design `c6f9fb3e`, David
+2026-09-15, all three questions accepted as proposed; from his feedback
+`33324fe9`: "I need to be able to Abort a job in the UI, but make me
+provide a reason"). Every workflow already declares its abort as a
+terminal step with `outcome_kind: aborted` and a `reason` field, so an
+abort is a step completion, evented, on the record; what did not exist
+was one control that finds it. Decided: (1) the job page shows
+**Abort…** whenever the job is open and its workflow declares a step
+with `outcome_kind = aborted` — two such steps and the control lists
+them and asks which; none and there is no control, because the
+protocol says the job cannot be aborted and the *row* is what changes,
+never the page; (2) the reason is **required, free text, at least a
+sentence** — not a code from a list, because the list is what we would
+maintain and the sentence is what the next reader needs — recorded on
+the step as `reason` with the session's actor as `completed_by`, and
+nothing else is asked; (3) **whoever the step's `authority_role`
+admits may abort**, the ordinary claim rule and no separate permission;
+a viewer without it sees the control disabled with the role named.
+Built as `7a98040e`.
+
 ## OSS posture & tier boundaries
 
 Two install paths: single-VM bare metal (`infra/oss-quickstart/`)
@@ -1125,6 +1145,53 @@ absorb. The double run went first (`fix/a-train-is-tested-once`,
 on 2026-09-13 taught that a tag in the mirror *list* is a declaration
 and the registry holding it is the fact, which the converge now closes
 before it builds.
+
+**A car lands where its change goes live** (design `c6bd173e`, David
+2026-09-15, all three questions accepted as proposed; from his feedback
+`61366e5a` on the yard). Every car already carries a
+`delivery_channel` — data | config | software | infra — stamped at gate
+time from the paths it changed, the heaviest winning
+(`boss-cli/src/channels.rs`); the yard read none of it, and "landed"
+meant one thing, the image converged, whatever the car changed. Now:
+(1) **the arrivals yard is four sidings**, one per channel, and a car's
+wagon lands on its siding when *its channel's* live evidence exists —
+data when the live-protocols / live-rules equality holds for its files
+(read off the system of record), config when the converge packet
+reports the manifest applied or the unit installed, software when the
+train's `converged` step completes, infra when the host converge
+packet reports — with the car's probe the only *proof* in all four.
+(2) **Three terminal tracks and only three**: arrivals by channel, the
+inspection shed, and a cancelled siding for a withdrawn car; struck and
+left-behind are states of a car ON THE DOCK, drawn there with a badge,
+never a track. (3) **The train has a channel too**, the max of its
+cars: a data- or config-only train's `converged` is satisfied by the
+registry read / manifest apply, not the image roll, so those trains
+arrive in minutes. Built in three cars: the sidings by the stamped
+channel first (`953aaf30`), the train's channel second, per-channel
+landing evidence third.
+
+**A builder is a pod, not a process in the operator's shell** (design
+`90a14acc`, David 2026-09-15, all three questions accepted as
+proposed). Measured 2026-09-14: two builder agents and the operator's
+session in one 8-CPU / 16 GiB cgroup put memory at the ceiling and
+throttled the pod 2,177 periods in an afternoon; builder throughput
+was bought with operator latency, and a builder was invisible to the
+record while it worked. Decided: `boss builder <packet>` renders a Job
+the way `boss gate` does — the brief handed in, a cargo target
+reflink-seeded from the gate seed volume on w-1 (the pin to w-1 is
+accepted for now; a registry image of the target is the alternative),
+the branch gated with the same park intent a human builder types —
+and (1) **its forge credential is a short-lived, branch-scoped token
+minted per run by the credential broker**, placed as a Secret the
+launcher creates and deletes with the Job; never the operator's
+identity, never one shared long-lived token; (2) **the pod ends when
+its gate is launched**, with a 90-minute ceiling after which the
+observer settles it as a dead runner; (3) the seed is the gate seed
+volume by reflink. **Until the broker mints** (the maiden rotation,
+`25dc5358`) builders stay in the dev pod: a bigger pod (`5ee0ff2a`,
+held for a David-timed restart) and 4-wide niced cargo for `agent-*`
+worktrees (`infra/dev/wt-cargo`), which took the throttling from
+2,177 periods to ~350 over the next ten hours.
 
 ## Design docs and the decision record
 

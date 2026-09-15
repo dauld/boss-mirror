@@ -131,7 +131,7 @@ for row in $rows; do
         echo "timers-leave-a-packet: $name opens '$open_kind' but completes '$done_kind'." >&2
         problems=$((problems + 1)); continue
     fi
-    if ! printf '%s\n' "$kinds" | grep -qxF -- "$open_kind"; then
+    if ! grep -qxF -- "$open_kind" <<< "$kinds"; then
         echo "timers-leave-a-packet: $name uses kind '$open_kind', which no Workflow defines." >&2
         echo "    The wrapper's spawn would fail at run time, in the middle of the night." >&2
         problems=$((problems + 1))
@@ -319,8 +319,8 @@ for row in $gcp_rows; do
     [ -f "$unit" ] || continue   # check 1 already named it
     kind=$(grep -oE 'boss-maintenance-wrap\.sh [a-z-]+' "$unit" | awk '{print $2}' | head -1)
     [ -n "$kind" ] || continue   # check 2 already named it
-    printf '%s\n' "$baked" | grep -qxF -- "$kind" && continue          # local instance knows it
-    printf '%s\n' "$cluster_kinds" | grep -qxF -- "$kind" && continue  # the cluster runs it; this copy is a vestige
+    grep -qxF -- "$kind" <<< "$baked" && continue          # local instance knows it
+    grep -qxF -- "$kind" <<< "$cluster_kinds" && continue  # the cluster runs it; this copy is a vestige
     pre=$(grep -E '^ExecStartPre=' "$unit" | grep 'boss-maintenance-wrap' | head -1)
     post=$(grep -E '^ExecStopPost=' "$unit" | grep 'boss-step\.sh' | head -1)
     if ! printf '%s' "$pre" | grep -qF -- "BOSS_JOBS_URL=$sor " \
@@ -341,7 +341,7 @@ for row in $gcp_rows; do
         echo "      ExecStartPre=-/usr/bin/env BOSS_JOBS_URL=$sor ..." >&2
         problems=$((problems + 1)); continue
     fi
-    if printf '%s\n%s' "$pre" "$post" | grep -qE '127\.0\.0\.1|localhost'; then
+    if grep -qE '127\.0\.0\.1|localhost' <<< "$pre"$'\n'"$post"; then
         echo "timers-leave-a-packet: $name names a localhost jobs API on an Exec line — that is" >&2
         echo "    boss-gcp's non-authoritative instance, never the system of record." >&2
         problems=$((problems + 1))
@@ -436,7 +436,7 @@ if [ -d "$CLUSTER_MANIFESTS" ]; then
             echo "    '$done_kind' — one packet is left open and another is closed blind." >&2
             problems=$((problems + 1)); continue
         fi
-        if ! printf '%s\n' "$kinds" | grep -qxF -- "$open_kind"; then
+        if ! grep -qxF -- "$open_kind" <<< "$kinds"; then
             echo "timers-leave-a-packet: CronJob $cname uses kind '$open_kind', which no" >&2
             echo "    Workflow defines. The wrapper's spawn would fail at run time, on a" >&2
             echo "    schedule nobody is watching." >&2

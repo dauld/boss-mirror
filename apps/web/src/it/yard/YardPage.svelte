@@ -177,6 +177,9 @@
       w => w.station === 'inspection-shed' || w.station === 'siding-event' || w.station === 'siding-no-probe',
     ),
   );
+  // The cancelled siding's rows: withdrawn cars, newest first. Not on
+  // the board (neither in flight nor landed), so read off the wagons.
+  const withdrawnRows = $derived((floor?.wagons ?? []).filter(w => w.station === 'cancelled'));
   const whereById = $derived(new Map((floor?.boardRows ?? []).map(r => [r.id, r.where])));
   const locoById = $derived(new Map((floor?.locos ?? []).map(l => [l.id, l])));
 
@@ -971,6 +974,26 @@
             {/each}
             {#if floor.boardRows.every(r => !r.landed)}
               <span class="yard-empty">none yet</span>
+            {/if}
+          </div>
+        {:else if sel.kind === 'cancelled'}
+          <h2 class="yard-panel-h">Entity · cancelled siding</h2>
+          <!-- THE THIRD TERMINAL TRACK (design c6bd173e, outcomes): a car
+               withdrawn — its `abandoned` step completed — beside the
+               arrivals and the inspection shed. Struck and left-behind are
+               not here: those are states of a car still on the dock. -->
+          <div class="yard-entity-title">{floor.machines.cancelled.label}</div>
+          <div class="yard-entity-sub">withdrawn — closed on the abandoned terminal, never landed; each row is a car</div>
+          <div class="yard-steps">
+            {#each withdrawnRows as w (w.id)}
+              <button type="button" class="yard-step yard-step-btn" onclick={() => select(`car:${w.id}`)}>
+                <span class="yard-lamp-dot {w.lamp}"></span>
+                <span>{w.title}</span>
+                <span class="yard-when yard-mono">{sinceText(w.since, nowMs)} · {w.status}</span>
+              </button>
+            {/each}
+            {#if withdrawnRows.length === 0}
+              <span class="yard-empty">none in the window</span>
             {/if}
           </div>
         {:else if sel.kind === 'inspection-shed'}

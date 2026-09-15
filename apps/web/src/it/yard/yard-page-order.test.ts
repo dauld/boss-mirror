@@ -44,7 +44,7 @@ describe('the yard page flows in protocol order', () => {
   it('the entity panel has a home for every selectable thing on the map', () => {
     // One branch per selection kind the floor can produce — a machine
     // the map draws with nowhere to show its facts is a dead button.
-    for (const kind of ['car', 'train', 'track', 'bay', 'dock', 'garage', 'approach', 'arrivals', 'conductor', 'runner', 'cluster']) {
+    for (const kind of ['car', 'train', 'track', 'bay', 'dock', 'garage', 'approach', 'arrivals', 'cancelled', 'inspection-shed', 'conductor', 'runner', 'cluster']) {
       expect(markup, `entity panel renders sel.kind === '${kind}'`).toContain(`sel.kind === '${kind}'`);
     }
   });

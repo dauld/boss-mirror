@@ -34,6 +34,7 @@ const car = (id: string, proof: CarProof | null): CarRow => ({
   sim: false,
   skipReason: null,
   head: 'abc1234',
+  deliveryChannel: 'software',
   proof,
 });
 

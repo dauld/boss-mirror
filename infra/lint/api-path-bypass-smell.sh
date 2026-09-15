@@ -307,13 +307,13 @@ self_test() {
     for base in $(cd "$tmp" && ls ./*.sh | sed 's|^\./||'); do
         case "$base" in
             read-*)
-                if printf '%s\n' "$out" | grep -q "/$base:"; then
+                if grep -q "/$base:" <<< "$out"; then
                     echo "api-path-bypass-smell self-test FAIL: $base is a READ but was reported as a write" >&2
                     printf '%s\n' "$out" | grep "/$base:" >&2
                     fails=1
                 fi ;;
             run-*)
-                if ! printf '%s\n' "$out" | grep -q "/$base:"; then
+                if ! grep -q "/$base:" <<< "$out"; then
                     echo "api-path-bypass-smell self-test FAIL: $base RUNS DML but was not reported" >&2
                     fails=1
                 fi ;;
@@ -322,7 +322,7 @@ self_test() {
 
     # The seed-sql loader must be reported under its own category, and the grep
     # that merely quotes that shape must not be.
-    if ! printf '%s\n' "$out" | grep -q "^shell-seed-sql.*/run-psql-loads-seed-sql.sh:"; then
+    if ! grep -q "^shell-seed-sql.*/run-psql-loads-seed-sql.sh:" <<< "$out"; then
         echo "api-path-bypass-smell self-test FAIL: a psql -f seed load lost its shell-seed-sql category" >&2
         fails=1
     fi

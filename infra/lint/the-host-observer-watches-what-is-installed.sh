@@ -73,7 +73,7 @@ for row in $rows; do
     [ -f "$src/$stem.service" ] && [ -f "$src/$stem.timer" ] || continue
     for ext in timer service; do
         case " $excludes " in *" $stem.$ext "*) continue ;; esac
-        printf '%s\n' "$roster" | grep -qx "$stem.$ext" \
+        grep -qx "$stem.$ext" <<< "$roster" \
             || fail "$stem.$ext installs on this host and the observer does not watch it.
     The roster must be DERIVED from deploy-services.sh's TIMERS (CLAUDE.md §9a), so a
     timer that lands cannot be outside what the observer watches. Roster was:
@@ -93,7 +93,7 @@ got=$(printf '%s\n' "$roster" | sed '/^$/d' | wc -l | tr -d ' ')
 $roster"
 
 # 3. The unit the measured failure was about.
-printf '%s\n' "$roster" | grep -qx 'boss-ml-inference-batch.timer' \
+grep -qx 'boss-ml-inference-batch.timer' <<< "$roster" \
     || fail "boss-ml-inference-batch.timer is not in the roster. That is the exact unit whose
     installed-ness could not be established on 2026-09-10, and the wrong answer reasoned
     from the tree instead cost a correction on a live alarm (backlog 68757702)."

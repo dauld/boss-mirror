@@ -66,7 +66,7 @@ STEP_TITLE="$1"; shift
 # service result: `ok` for success (the word the outcome predicates
 # route on), otherwise systemd's word for how it died, with the exit
 # status beside it. An explicit result= pair still wins.
-if [ -n "${SERVICE_RESULT:-}" ] && ! printf '%s\n' "$@" | grep -q '^result='; then
+if [ -n "${SERVICE_RESULT:-}" ] && ! grep -q '^result=' <<< "$(printf '%s\n' "$@")"; then
     if [ "$SERVICE_RESULT" = "success" ]; then
         set -- "$@" "result=ok"
     else

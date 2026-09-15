@@ -25,6 +25,7 @@ const yardOf = (over: Partial<YardState> = {}): YardState => ({
   },
   arrivals: [],
   cancelled: [],
+  withdrawn: [],
   delivery: [],
   awaitingProof: [],
   publishing: [],
@@ -51,7 +52,7 @@ const statusOf = (over: Partial<YardStatus> = {}): YardStatus => ({
   ...over,
 });
 
-const car = (id: string): CarRow => ({ id, kind: 'ship-a-change', branch: `fix/${id}`, title: id, tags: [], sim: false, skipReason: null, head: null });
+const car = (id: string): CarRow => ({ id, kind: 'ship-a-change', branch: `fix/${id}`, title: id, tags: [], sim: false, skipReason: null, head: null, deliveryChannel: 'software' });
 
 const landed = (id: string, at: string, nCars: number, outcome: TrainRow['outcome'] = 'arrived'): TrainRow => ({
   id,

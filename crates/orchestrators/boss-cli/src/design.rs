@@ -83,8 +83,9 @@ pub(crate) fn design_job_body(
     questions: &[Value],
     no_open_questions: bool,
     opened_on: &str,
+    answers: Option<&str>,
 ) -> Value {
-    json!({
+    let mut body = json!({
         "kind": "design-doc",
         // THE ENVELOPE'S OWN TITLE, not merely metadata's. The filer
         // requires it at admission ("one line; every lens leads with
@@ -108,7 +109,55 @@ pub(crate) fn design_job_body(
             // Always present, never omitted — see the module header.
             "no_open_questions": if no_open_questions { "true" } else { "false" },
         },
-    })
+    });
+    // The feedback (or backlog item) this design answers, as the
+    // DECLARED `design-doc.answers` job edge — ref-checked and
+    // prefix-normalised at the write like ship-a-change's
+    // `backlog_item`, and the link the dispatcher follows when the
+    // design closes to complete that packet's design-review
+    // (complete-feedback-design-review-on-design-doc-published).
+    // Absent, not null, when there is none: the edge guard resolves a
+    // present key.
+    if let Some(feedback) = answers {
+        body["metadata"]["answers"] = json!(feedback);
+    }
+    body
+}
+
+/// The question the feedback's `design-review` step is given at the
+/// moment a design is filed for it. Until backlog 5f0b2661 that step
+/// carried `verdict: ""` and nothing else — the design IS the question,
+/// and it lived on the other packet — so it rendered as a statement,
+/// and if the operator decided it first the design went unread (David,
+/// bug 4f6019d7: "There is no question, just a statement"). Prose a
+/// person reads, so the short id.
+pub(crate) fn feedback_question(design_title: &str, design_id: &str) -> String {
+    let short = &design_id[..8.min(design_id.len())];
+    format!(
+        "Decide design '{design_title}' ({short}) at /it/design — deciding it completes this \
+         step: approved when its questions are all decided, and the build goes ahead as the \
+         design proposes."
+    )
+}
+
+/// The feedback's design-review step metadata with the question laid
+/// over what is already there. PATCH-on-PUT replaces `metadata`
+/// wholesale, and `authority_role` living there is what keeps the step
+/// gated — so the existing keys are kept, and only `question` is added.
+pub(crate) fn design_review_step_metadata(
+    existing: &Value,
+    design_title: &str,
+    design_id: &str,
+) -> Value {
+    let mut md = match existing {
+        Value::Object(m) => m.clone(),
+        _ => serde_json::Map::new(),
+    };
+    md.insert(
+        "question".to_string(),
+        json!(feedback_question(design_title, design_id)),
+    );
+    Value::Object(md)
 }
 
 /// The review step's own copy. The tracker reads the STEP, so a doc
@@ -131,6 +180,7 @@ pub async fn run(
     questions: Vec<String>,
     no_questions: bool,
     doc_path: Option<String>,
+    answers: Option<String>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
     // Refuse before filing, not after: a doc with neither questions nor
@@ -149,6 +199,54 @@ pub async fn run(
         .iter()
         .map(|q| parse_question(q))
         .collect::<Result<Vec<_>>>()?;
+    let http = reqwest::Client::new();
+
+    // `--answers`: the feedback (or backlog item) this design decides.
+    // Read BEFORE filing — the edge needs the full id, and the packet
+    // must have an open design-review to give a question to; a design
+    // filed for a packet nobody routed to design would carry an edge
+    // the close rule can act on nothing with. Refusing here keeps the
+    // filer on the line, where the fix is one triage away.
+    let answered = match answers.as_deref() {
+        Some(given) => {
+            let id = crate::job::fetch_and_resolve(&http, given).await?;
+            let packet = api(
+                &http,
+                reqwest::Method::GET,
+                &format!("/api/jobs/{id}"),
+                None,
+            )
+            .await?
+            .with_context(|| format!("--answers: reading packet {id}"))?;
+            let review = packet
+                .get("steps")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some("design-review"))
+                .cloned()
+                .with_context(|| {
+                    format!(
+                        "--answers: packet {} ({}) has no design-review step — only a \
+                         user-feedback or backlog-item routed to design can be answered by a \
+                         design",
+                        &id[..8],
+                        packet.get("kind").and_then(Value::as_str).unwrap_or("?")
+                    )
+                })?;
+            let status = review.get("status").and_then(Value::as_str).unwrap_or("");
+            if !matches!(status, "ready" | "active") {
+                bail!(
+                    "--answers: packet {}'s design-review is {status}, not open — triage it to \
+                     `design` first (or it was already decided); a design filed against it \
+                     would complete nothing when it closes",
+                    &id[..8]
+                );
+            }
+            Some((id, review))
+        }
+        None => None,
+    };
 
     let body = design_job_body(
         &title,
@@ -156,8 +254,8 @@ pub async fn run(
         &parsed,
         no_questions,
         &now.date_naive().to_string(),
+        answered.as_ref().map(|(id, _)| id.as_str()),
     );
-    let http = reqwest::Client::new();
     let created = api(
         &http,
         reqwest::Method::POST,
@@ -173,6 +271,38 @@ pub async fn run(
         .context("jobs api returned no id for the new design doc")?
         .to_string();
     let short = &id[..8.min(id.len())];
+
+    // The other half of the link: the answered packet's design-review
+    // step gets a real question, naming this design. The edge on the
+    // design is what the close rule follows; this is what the person
+    // assigned that step reads. Merged over the step's own metadata —
+    // PATCH-on-PUT replaces it wholesale.
+    if let Some((feedback, review)) = &answered {
+        let sid = review
+            .get("id")
+            .and_then(Value::as_str)
+            .context("the answered packet's design-review step has no id")?;
+        let existing = review.get("metadata").cloned().unwrap_or_else(|| json!({}));
+        api(
+            &http,
+            reqwest::Method::PUT,
+            &format!("/api/jobs/{feedback}/steps/{sid}"),
+            Some(json!({ "metadata": design_review_step_metadata(&existing, &title, &id) })),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "writing the question onto {}'s design-review (the design {short} is filed \
+                 and carries the edge; only the question is missing)",
+                &feedback[..8]
+            )
+        })?;
+        println!(
+            "boss design: {short} answers {} — its design-review now asks for this design, \
+             and deciding the design completes it",
+            &feedback[..8]
+        );
+    }
 
     if no_questions {
         println!("boss design: {short} filed — no open questions, no review queued");
@@ -224,8 +354,8 @@ mod tests {
     /// own review step — the trap the module header records.
     #[test]
     fn the_flag_is_always_present() {
-        let with = design_job_body("t", "m", &[], true, "2026-09-02");
-        let without = design_job_body("t", "m", &[], false, "2026-09-02");
+        let with = design_job_body("t", "m", &[], true, "2026-09-02", None);
+        let without = design_job_body("t", "m", &[], false, "2026-09-02", None);
         assert_eq!(with["metadata"]["no_open_questions"], json!("true"));
         assert_eq!(without["metadata"]["no_open_questions"], json!("false"));
     }
@@ -236,7 +366,7 @@ mod tests {
     #[test]
     fn the_review_step_carries_the_questions_too() {
         let q = vec![question("Q1", "which brick first?", "the cheap one")];
-        let body = design_job_body("t", "# doc", &q, false, "2026-09-02");
+        let body = design_job_body("t", "# doc", &q, false, "2026-09-02", None);
         let step = review_step_metadata(&body, "docs/design/x.md");
         assert_eq!(step["questions"].as_array().map(Vec::len), Some(1));
         assert_eq!(step["questions"][0]["anchor"], json!("Q1"));
@@ -267,7 +397,7 @@ mod tests {
     /// for want of `tags`); this crate now has it on both bodies.
     #[test]
     fn the_body_deserializes_into_the_job_type_the_api_parses_it_as() {
-        let body = design_job_body("the doc", "# body", &[], true, "2026-09-04");
+        let body = design_job_body("the doc", "# body", &[], true, "2026-09-04", None);
         let job: boss_core::job::Job = serde_json::from_value(body).expect(
             "design body must deserialize into Job — this is verbatim what the API does before \
              it admits the packet",
@@ -291,6 +421,7 @@ mod tests {
             &[],
             true,
             "2026-09-04",
+            None,
         );
         assert_eq!(body["title"], json!("stations hold, they do not drop"));
         assert_eq!(body["title"], body["metadata"]["title"]);
@@ -314,5 +445,61 @@ mod tests {
         for bad in ["Q1|only-two", "|title|proposal", "Q1||proposal"] {
             assert!(parse_question(bad).is_err(), "should refuse {bad:?}");
         }
+    }
+
+    /// `--answers <feedback>` (backlog 5f0b2661). The design names the
+    /// feedback it answers as `metadata.answers` — a DECLARED job edge
+    /// on `design-doc`, ref-checked at the write like ship-a-change's
+    /// `backlog_item` — never as prose. Until now the only link was
+    /// `metadata.design_packet`, a string an operator typed onto the
+    /// feedback, which nothing read: the design was decided at
+    /// /it/design and the feedback's own design-review step stayed
+    /// open, an empty second decision for the same person (David's bug
+    /// 4f6019d7, 2026-09-15). ABSENT when not given, not null: the edge
+    /// guard treats a present key as a reference to resolve.
+    #[test]
+    fn answers_rides_as_the_declared_edge_and_is_absent_otherwise() {
+        const FEEDBACK: &str = "61366e5a-d15f-472c-a667-f4cc007ef8f8";
+        let with = design_job_body("t", "m", &[], false, "2026-09-15", Some(FEEDBACK));
+        assert_eq!(with["metadata"]["answers"], json!(FEEDBACK));
+        let without = design_job_body("t", "m", &[], false, "2026-09-15", None);
+        assert!(
+            without["metadata"].get("answers").is_none(),
+            "a design that answers nothing carries no edge key at all"
+        );
+        // Still the body the API admits.
+        let job: boss_core::job::Job = serde_json::from_value(with).expect("deserializes");
+        assert_eq!(job.metadata["answers"], json!(FEEDBACK));
+    }
+
+    /// The feedback's design-review step is an `answer-question` with
+    /// no question — the design IS the question, and it lives on the
+    /// other packet. So the verb writes a real one, naming the design
+    /// and saying what deciding it does. The step's own keys survive:
+    /// PATCH-on-PUT replaces `metadata` wholesale, and `authority_role`
+    /// living there is what keeps the step gated.
+    #[test]
+    fn the_feedbacks_design_review_gets_a_real_question_and_keeps_its_own_keys() {
+        let existing = json!({ "authority_role": "platform-admin", "verdict": "" });
+        let md = design_review_step_metadata(
+            &existing,
+            "A car lands where its change goes live",
+            "c6bd173e-3dc9-426f-8fff-866a3b2a6117",
+        );
+        assert_eq!(md["authority_role"], json!("platform-admin"));
+        assert_eq!(md["verdict"], json!(""));
+        let q = md["question"].as_str().expect("a question is written");
+        assert!(
+            q.contains("A car lands where its change goes live") && q.contains("c6bd173e"),
+            "the question names the design by title and short id: {q}"
+        );
+        assert!(
+            q.contains("completes this step"),
+            "and says that deciding the design is what completes it: {q}"
+        );
+        assert!(
+            !q.contains("c6bd173e-3dc9"),
+            "the short id, not the full one — this is prose a person reads"
+        );
     }
 }

@@ -28,7 +28,20 @@
 import { formatDate } from '@boss/web-kit/ui/date';
 import type { ClusterMachine, RunnerMachine } from './yard-machines';
 export type { ClusterMachine, RunnerMachine } from './yard-machines';
-import { approach, failedChecks, redTrainsPhrase, stampAt, troubleLabel, type CarRow, type JobLite, type TrainRow, type WithSteps, type YardState } from './yard';
+import {
+  DELIVERY_CHANNELS,
+  approach,
+  failedChecks,
+  redTrainsPhrase,
+  stampAt,
+  troubleLabel,
+  type CarRow,
+  type DeliveryChannel,
+  type JobLite,
+  type TrainRow,
+  type WithSteps,
+  type YardState,
+} from './yard';
 import {
   inspectionShed,
   runAt,
@@ -77,7 +90,12 @@ export type Station =
   | 'dock'
   | 'garage'
   | 'train'
+  /** Landed — on one of the four sidings, named by the wagon's `siding`. */
   | 'arrivals'
+  /** Withdrawn: the car's `abandoned` terminal completed. The third
+   *  terminal track (design c6bd173e); struck and left-behind are dock
+   *  badges, not a station. */
+  | 'cancelled'
   /** Landed, carrying a probe, not yet stamped `proven`. */
   | 'inspection-shed'
   /** Landed, settled only by an event no probe can run. */
@@ -107,8 +125,11 @@ export type Wagon = Readonly<{
   sim: boolean;
   station: Station;
   /** Position within the station: the bay index, the dock slot, the
-   *  place in the consist, the stack position in the arrivals yard. */
+   *  place in the consist, the place along its arrivals siding. */
   slot: number;
+  /** Which arrivals siding — the car's delivery channel. Present only on
+   *  a wagon in `arrivals`; `slot` counts along this siding. */
+  siding?: DeliveryChannel;
   trainId: string | null;
   tone: Tone;
   lamp: Lamp;
@@ -221,6 +242,8 @@ export type Machines = Readonly<{
   }>;
   garage: Readonly<{ label: string; count: number }>;
   arrivals: Readonly<{ label: string; landed: number }>;
+  /** The cancelled siding: how many withdrawn cars stand on it. */
+  cancelled: Readonly<{ label: string; count: number }>;
   /** The inspection shed and its two sidings — the counts are the three
    *  places; `failed` is how many of the inspected cars have a failing
    *  probe run on record, and `notYet` how many said "not yet" (exit
@@ -415,13 +438,15 @@ const holdReason = (hold: string | null): string =>
 const shortSha = (v: unknown): string | null =>
   typeof v === 'string' && /^[0-9a-f]{7,40}$/i.test(v) ? v.slice(0, 7) : null;
 
-/** How many landed wagons the map stacks before a "+N more" plate. On
- *  2026-09-08 eleven landed cars in two columns outgrew the map. */
+/** How many landed wagons the map draws PER SIDING before a "+N more"
+ *  plate. On 2026-09-08 eleven landed cars in two columns outgrew the
+ *  map; since the sidings (c6bd173e) a siding is one row, this many
+ *  wagons long, and a full software siding hides no data wagon. */
 export const ARRIVALS_DRAWN = 6;
 
 /** The wagons the map draws: everything in flight, and the newest
- *  `ARRIVALS_DRAWN` landed; `hidden` is how many landed wagons the
- *  plate stands for. The departure board lists them all. */
+ *  `ARRIVALS_DRAWN` landed on each siding; `hidden` is how many landed
+ *  wagons the plates stand for. The departure board lists them all. */
 export function drawnWagons(wagons: readonly Wagon[]): Readonly<{ drawn: readonly Wagon[]; hidden: number }> {
   const drawn = wagons.filter(w => w.station !== 'arrivals' || w.slot < ARRIVALS_DRAWN);
   return { drawn, hidden: wagons.length - drawn.length };
@@ -441,6 +466,7 @@ export type Selection =
   | Readonly<{ kind: 'approach' }>
   | Readonly<{ kind: 'gate-queue' }>
   | Readonly<{ kind: 'arrivals' }>
+  | Readonly<{ kind: 'cancelled' }>
   /** The inspection shed and its two sidings, selected as one area. */
   | Readonly<{ kind: 'inspection-shed' }>
   | Readonly<{ kind: 'conductor' }>
@@ -448,7 +474,7 @@ export type Selection =
   | Readonly<{ kind: 'cluster' }>;
 
 const PLAIN_SELECTIONS = [
-  'track', 'dock', 'garage', 'approach', 'gate-queue', 'arrivals', 'inspection-shed', 'conductor', 'runner', 'cluster',
+  'track', 'dock', 'garage', 'approach', 'gate-queue', 'arrivals', 'cancelled', 'inspection-shed', 'conductor', 'runner', 'cluster',
 ] as const;
 type PlainSelection = (typeof PLAIN_SELECTIONS)[number];
 
@@ -536,6 +562,8 @@ const STATION_RANK: Readonly<Record<Station, number>> = {
   'inspection-shed': 8,
   'siding-event': 9,
   'siding-no-probe': 10,
+  // Never on the board (see `boardRows`); ranked so the record is total.
+  cancelled: 11,
 };
 
 function stageOf(t: TrainRow): number {
@@ -731,9 +759,14 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
   });
   const shedTally = shedCounts(shed);
 
-  // THE ARRIVALS YARD — landed cars stack newest first.
+  // THE ARRIVALS YARD — four sidings, one per delivery channel, landed
+  // cars newest first along each. A car lands on the siding of its channel (design c6bd173e, car 1):
+  // the wagon's `siding` is the car's `deliveryChannel`, stamped by the
+  // gate, and its slot counts along that siding alone, so the map can
+  // lay the four as rows. Landing is still the train's converge for
+  // every channel — car 3 gives each its own live evidence.
   const landed = [...yard.arrivals].sort((a, b) => b.arrivedAt.ms - a.arrivedAt.ms);
-  let landedSlot = 0;
+  const sidingSlot = Object.fromEntries(DELIVERY_CHANNELS.map(ch => [ch, 0])) as Record<DeliveryChannel, number>;
   let landedRecently = 0;
   landed.forEach(t => {
     const recent = t.arrivedAt.ms > 0 && nowMs - t.arrivedAt.ms <= DAY_MS;
@@ -744,7 +777,8 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
         id: c.id,
         ...base(c),
         station: 'arrivals',
-        slot: landedSlot,
+        siding: c.deliveryChannel,
+        slot: sidingSlot[c.deliveryChannel]++,
         trainId: t.id,
         tone: 'ok',
         lamp: 'ok',
@@ -756,7 +790,29 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
         status: `${t.mergeRef ? `landed in ${t.mergeRef}` : 'landed'} · ${c.proof?.stamped ? 'proven' : 'arrived'}`,
         since: t.arrivedAt.at !== '' ? t.arrivedAt.at : null,
       });
-      landedSlot += 1;
+    });
+  });
+
+  // THE CANCELLED SIDING — withdrawn cars, newest first (yard.ts
+  // `withdrawnCars`). A car already standing somewhere keeps that place:
+  // one branch, one wagon, and a withdrawal is read off a closed packet
+  // that nothing upstream should still be placing. Static, lamp off — a
+  // withdrawal is settled, not wrong. A packet that names no branch
+  // (the six on record were withdrawn before they had one) is named by
+  // its short id, the way a car outside the window is.
+  yard.withdrawn.forEach((w, i) => {
+    if (claimedIds.has(w.car.id)) return;
+    place({
+      id: w.car.id,
+      ...base(w.car),
+      tag: w.car.branch !== '' ? tagOf(w.car.branch) : w.car.id.slice(0, 8),
+      station: 'cancelled',
+      slot: i,
+      trainId: null,
+      tone: 'static',
+      lamp: 'off',
+      status: 'withdrawn · abandoned',
+      since: w.at,
     });
   });
 
@@ -1047,7 +1103,9 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
         return l ? `Track · ${locoName(l)} at ${STAGES[l.stage]}` : 'Track';
       }
       case 'arrivals':
-        return 'Arrivals';
+        return `Arrivals · ${w.siding ?? 'software'}`;
+      case 'cancelled':
+        return 'Cancelled siding';
       case 'inspection-shed':
         return 'Inspection shed';
       case 'siding-event':
@@ -1060,13 +1118,17 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
     const ms = w.since ? Date.parse(w.since) : Number.NaN;
     return Number.isNaN(ms) ? Number.POSITIVE_INFINITY : ms;
   };
+  // A withdrawn car is on neither half of the board: it is not in flight
+  // and it did not land, and the board's two counts are exactly those.
+  // The cancelled siding's own panel lists it.
   const inFlight = wagons
-    .filter(w => w.station !== 'arrivals')
+    .filter(w => w.station !== 'arrivals' && w.station !== 'cancelled')
     .sort(
       (a, b) =>
         STATION_RANK[a.station] - STATION_RANK[b.station] || a.slot - b.slot || sinceMs(a) - sinceMs(b),
     );
-  const landedRows = wagons.filter(w => w.station === 'arrivals').sort((a, b) => a.slot - b.slot);
+  // Newest first across all four sidings — the order they were placed.
+  const landedRows = wagons.filter(w => w.station === 'arrivals');
   const boardRows: BoardRow[] = [
     ...inFlight.map(w => ({ id: w.id, where: whereOf(w), landed: false })),
     ...landedRows.map(w => ({ id: w.id, where: whereOf(w), landed: true })),
@@ -1125,6 +1187,7 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
   const heldCarLabel =
     heldCars.length > 0 ? `${dockLabel} · ${heldCars.length} held` : dockLabel;
   const garageCount = wagons.filter(w => w.station === 'garage').length;
+  const withdrawnCount = wagons.filter(w => w.station === 'cancelled').length;
 
   return {
     now: status?.now ?? new Date(nowMs).toISOString(),
@@ -1152,6 +1215,7 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
       queue: { label: queueLaneLabel(queue), count: queue.length },
       garage: { label: garageCount > 0 ? `${garageCount} gated red` : 'empty', count: garageCount },
       arrivals: { label: `${landedRecently} landed · 24h`, landed: landedRecently },
+      cancelled: { label: withdrawnCount > 0 ? `${withdrawnCount} withdrawn` : 'empty', count: withdrawnCount },
       inspection: { label: shedLabel(shedTally), ...shedTally },
       conductor: conductorMachine(status?.conductor ?? null),
       runner: feeds.runner,

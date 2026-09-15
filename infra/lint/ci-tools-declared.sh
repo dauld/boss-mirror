@@ -138,7 +138,14 @@ for tool in $invoked; do
             ;;
     esac
 
-    if ! printf '%s\n' "$declared" | grep -qxF -- "$tool"; then
+    # A here-string, not `printf '%s\n' "$declared" | grep -q`: under
+    # pipefail a `grep -q` that exits at its match SIGPIPEs the multi-line
+    # writer and the pipeline reports 141 for a tool that IS declared — a
+    # false "not in the manifest" on a loaded gate (the coin was first
+    # caught in a-kind-bundle-does-not-tighten, 28af807c; this was the
+    # roster's next instance, 9840e529). Every shell under infra/ is held
+    # to this by boss-testing's a_lint_that_cannot_read_does_not_say_clean.
+    if ! grep -qxF -- "$tool" <<< "$declared"; then
         echo "ci-tools-declared: $WORKFLOW runs \`$tool\`, which is not in $MANIFEST" >&2
         echo "                   and not a shell builtin. Either add it to the manifest" >&2
         echo "                   (and to the Dockerfile — build.sh stamps the pair), or" >&2

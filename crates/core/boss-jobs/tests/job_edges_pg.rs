@@ -100,6 +100,10 @@ async fn registry_seeds_exactly_the_declared_edges() {
         vec![
             // '*' applies to every kind (migration 110, waiting_on).
             ("*".into(), "waiting_on".into(), "job_id".into()),
+            // The feedback (or backlog item) a design decides
+            // (5f0b2661) — followed on publish by
+            // complete-feedback-design-review-on-design-doc-published.
+            ("design-doc".into(), "answers".into(), "job_id".into()),
             // A design doc's revision chain (87f5bc84 Q5).
             (
                 "design-doc".into(),

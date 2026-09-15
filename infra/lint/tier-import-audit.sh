@@ -46,7 +46,7 @@ if [ -d "$SCHEMA_DIR" ]; then
     refs=$(grep -oE 'REFERENCES +"?[a-zA-Z_][a-zA-Z0-9_]*' "$f" 2>/dev/null \
       | sed -E 's/REFERENCES +"?//' | sort -u || true)
     for r in $refs; do
-      if printf '%s\n' "$module_tables" | grep -qx "$r"; then
+      if grep -qx "$r" <<< "$module_tables"; then
         echo "VIOLATION: core schema file \"$(basename "$f")\" has FK REFERENCES \"$r\" (a Tier-2 module table)"
         violations=$((violations+1))
       fi

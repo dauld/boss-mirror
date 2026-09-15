@@ -109,14 +109,14 @@ resolve_remote() {
     remotes=$(as_owner "git -C '$REPO' remote")
     if [ -n "${BOSS_GCP_CONVERGE_REMOTE:-}" ]; then
         want="$BOSS_GCP_CONVERGE_REMOTE"
-        if printf '%s\n' "$remotes" | grep -qxF -- "$want"; then
+        if grep -qxF -- "$want" <<< "$remotes"; then
             printf '%s\n' "$want"; return 0
         fi
         echo "boss-gcp-converge: BOSS_GCP_CONVERGE_REMOTE=$want names no remote of $REPO" >&2
         echo "    remotes: $(printf '%s' "$remotes" | tr '\n' ' ')" >&2
         return 1
     fi
-    if printf '%s\n' "$remotes" | grep -qx forge; then
+    if grep -qx forge <<< "$remotes"; then
         echo forge; return 0
     fi
     local candidates=""

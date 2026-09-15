@@ -45,7 +45,7 @@ if [ "$status" -eq 0 ]; then
 fi
 
 echo "$out"
-if echo "$out" | grep -qi 'error: couldn.t fetch\|failed to fetch\|network\|Connection refused\|Could not resolve'; then
+if grep -qi 'error: couldn.t fetch\|failed to fetch\|network\|Connection refused\|Could not resolve' <<< "$out"; then
     echo "cargo-advisories: advisory DB unreachable — scan SKIPPED (report-only)"
     exit 0
 fi

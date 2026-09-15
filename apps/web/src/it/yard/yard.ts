@@ -61,6 +61,18 @@ export type CarFacts = Readonly<{
   red_trains?: number;
 }>;
 
+/** The four ways a change ships, in the order the arrivals sidings are
+ *  laid: the lightest artifact first. Mirrors `DeliveryChannel` in
+ *  boss-cli/src/channels.rs, which stamps the heaviest path a car
+ *  touched as its `metadata.delivery_channel` when the gate files it
+ *  (crates/ and apps/ are software; manifests, units, lints are config;
+ *  schema, workflows, rules, seeds, docs are data; Talos config is
+ *  infra). A fact that lives twice: this list is the rendering order,
+ *  the Rust enum is the classifier, and a channel added there without
+ *  a siding here lands on software (`deliveryChannelOf`). */
+export const DELIVERY_CHANNELS = ['data', 'config', 'software', 'infra'] as const;
+export type DeliveryChannel = (typeof DELIVERY_CHANNELS)[number];
+
 // A car in the yard is a job packet, and it renders as a card (David's
 // call, 2026-08-12): protocol names the color, tags ride along, and a
 // simulated packet is visibly not a real one. The same card grammar is
@@ -95,6 +107,13 @@ export type CarRow = Readonly<{
    *  Optional so a test fixture built as a literal still typechecks;
    *  every row the constructor builds carries it. */
   redTrains?: number;
+  /** Which siding the car lands on: its `metadata.delivery_channel`,
+   *  stamped by the gate from the paths it changed (design c6bd173e,
+   *  car 1 — backlog 953aaf30). `software` when the packet carries none:
+   *  the stamp is written at gate time, so an absent one is a car parked
+   *  before the stamp existed — and software (the image rolled) is what
+   *  "landed" meant for every car until the sidings were laid. */
+  deliveryChannel: DeliveryChannel;
 }>;
 
 /** A probe run the forge wrote back onto the car (`proof_attempt`). Only
@@ -364,6 +383,12 @@ export type YardState = Readonly<{
   /** Closed without arriving. Kept visible — a train that cancelled is
    *  a fact about the day, it just isn't an arrival. */
   cancelled: readonly TrainRow[];
+  /** Cars WITHDRAWN — the `abandoned` terminal completed — newest first,
+   *  the newest `CANCELLED_SHOWN` of them. The third terminal track
+   *  (design c6bd173e, outcomes): beside arrivals and the inspection
+   *  shed, and unlike struck or left-behind, which are states of a car
+   *  still on the dock. `at` is the terminal step's stamp. */
+  withdrawn: readonly WithdrawnCar[];
   /** THE DAY, FROM THE RECORD: every pr-train the system of record
    *  closed today on its own clock (`closed_within=0`), split by
    *  outcome, and whether that page was complete. The production tile
@@ -1163,7 +1188,12 @@ export function headOf(j: CarFacts): string | null {
 // test for (the open-car set drops it; the floor does not claim it) —
 // not a gap to paper over with the id.
 export function carRow(j: CarFacts): CarRow {
-  const md = (j.metadata ?? {}) as { branch?: string; skip_reason?: string; red_trains?: unknown };
+  const md = (j.metadata ?? {}) as {
+    branch?: string;
+    skip_reason?: string;
+    red_trains?: unknown;
+    delivery_channel?: unknown;
+  };
   return {
     id: j.id,
     kind: j.kind,
@@ -1175,7 +1205,17 @@ export function carRow(j: CarFacts): CarRow {
     head: headOf(j),
     proof: readCarProof(j),
     redTrains: redTrainsOf(j.red_trains ?? md.red_trains),
+    deliveryChannel: deliveryChannelOf(md.delivery_channel),
   };
+}
+
+/** The gate's `delivery_channel` stamp as a siding. Absent is `software`
+ *  — an old car, see [`CarRow.deliveryChannel`] — and so is a value this
+ *  reader has no siding for: a channel the classifier learns before the
+ *  map does still has to stand somewhere, and software is the siding
+ *  whose landing evidence (the image rolled) every car has today. */
+export function deliveryChannelOf(v: unknown): DeliveryChannel {
+  return (DELIVERY_CHANNELS as readonly unknown[]).includes(v) ? (v as DeliveryChannel) : 'software';
 }
 
 /** The conductor's `red_trains` stamp as a count: absent — a car no red
@@ -1262,6 +1302,7 @@ export function assembleYard(
       .filter(c => c.outcome !== 'arrived')
       .slice(0, CANCELLED_SHOWN)
       .map(c => toTrainRow(c.t, shipById, false, medians, nowMs)),
+    withdrawn: withdrawnCars(ships),
     delivery: deliveryStats(report),
     awaitingProof: awaitingProof(ships).map(carRow),
     day: dayPage === null ? null : dayOf(dayPage, shipById, medians, nowMs),
@@ -1482,4 +1523,31 @@ export function awaitingProof(cars: readonly JobLite[]): readonly JobLite[] {
     const step = (c.steps ?? []).find((s) => s.status === 'ready' || s.status === 'active');
     return step?.spec_slug === 'proven';
   });
+}
+
+export type WithdrawnCar = Readonly<{ car: CarRow; at: string | null }>;
+
+/**
+ * Cars withdrawn — closed on the `abandoned` terminal — newest first, at
+ * most `CANCELLED_SHOWN` of them, each with the instant it was abandoned.
+ *
+ * Read the way [`trainOutcome`] reads a train: the stamped
+ * `metadata.outcome` first (`close_job_on_terminal` writes it from the
+ * Workflow's terminal step), the completed terminal step second, so a
+ * car closed before the stamp existed still counts. STRICTLY completed,
+ * as there: the terminal close marks every step it did not fire as
+ * skipped, so every merged car carries a skipped `abandoned` — and one
+ * read as done would put every delivered car on the cancelled siding.
+ */
+export function withdrawnCars(cars: readonly JobLite[]): readonly WithdrawnCar[] {
+  return cars
+    .filter((c) => c.status === 'closed')
+    .flatMap((c): WithdrawnCar[] => {
+      const stamped = (c.metadata as { outcome?: unknown } | null)?.outcome;
+      const terminal = step(c, 'abandoned', 'Abandoned');
+      if (stamped !== 'abandoned' && !completed(terminal)) return [];
+      return [{ car: carRow(c), at: stampAt(terminal) }];
+    })
+    .sort((a, b) => (b.at === null ? 0 : Date.parse(b.at)) - (a.at === null ? 0 : Date.parse(a.at)))
+    .slice(0, CANCELLED_SHOWN);
 }

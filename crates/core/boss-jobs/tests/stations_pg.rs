@@ -56,10 +56,18 @@ async fn platform_seed_ships_the_sdlc_batch_stations() {
     let names: Vec<&str> = active.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["design-review", "loading-dock", "my-watchlist", "repair"],
+        vec![
+            "design-review",
+            "loading-dock",
+            "my-watchlist",
+            "q.platform-admin.task",
+            "repair"
+        ],
         "the platform SDLC batch stations seed active, plus the one \
          per-actor row (per-employee stations stay tenant data; \
-         `my-watchlist` needs no roster because @me binds at read time)"
+         `my-watchlist` needs no roster because @me binds at read time), \
+         plus the one constraint queue authored over its projection \
+         (20260915023614: a machine-owned proof is not a person's task)"
     );
 
     // The repair queue (migration 124, David's bb86d687): red trains,

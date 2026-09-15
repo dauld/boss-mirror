@@ -160,7 +160,7 @@ check_tree() {
                 rest="${ref#"$FORGE_BASE"/}"
                 repo="${rest%%:*}"; repo="${repo%%@*}"; repo="${repo%%/*}"
                 for b in $BUILT_REPOS; do [ "$repo" = "$b" ] && continue 2; done
-                if ! printf '%s\n' "$mirrored" | grep -qxF -- "$rest"; then
+                if ! grep -qxF -- "$rest" <<< "$mirrored"; then
                     echo "$file:$line: $ref is a forge tag nothing mirrors — add '<external ref>|$rest' to $MIRROR's IMAGES list and run the mirror-base-images verb before referencing it"
                     found=$((found + 1))
                 fi ;;

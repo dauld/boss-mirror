@@ -689,7 +689,27 @@ fn stamped_by(step: &serde_json::Value, evidence_key: &str, car: &str) -> bool {
         == Some(car)
 }
 
-/// Fill `merged` from a template: absent keys only — metadata a
+/// Is this key unset on the step? Absent, or the `""` placeholder.
+///
+/// `user-feedback` and `backlog-item` default their design-review's
+/// `verdict` to `""` — the key boss-expr needs PRESENT before the step
+/// completes, and (the Workflow's own words) "an empty string can never
+/// be an enum member, so the lint reads it as the unset placeholder".
+/// `fill` read presence alone, so on a design-review this obligation
+/// would have kept the placeholder and PUT `verdict: ""` — a 400 at
+/// the write, and the loop breaking exactly where it was fixed
+/// (backlog 5f0b2661, found by the design-close witness test). A
+/// person's real verdict is never the empty string, so this cannot
+/// overwrite one.
+fn is_unset(v: Option<&serde_json::Value>) -> bool {
+    match v {
+        None => true,
+        Some(serde_json::Value::String(s)) => s.is_empty(),
+        Some(_) => false,
+    }
+}
+
+/// Fill `merged` from a template: unset keys only — metadata a
 /// person already wrote is their record, not this obligation's to
 /// overwrite — with string values substituting the car's facts.
 fn fill(
@@ -698,7 +718,7 @@ fn fill(
     shipped: &Shipped,
 ) {
     for (k, v) in template {
-        if merged.contains_key(k) {
+        if !is_unset(merged.get(k)) {
             continue;
         }
         let v = match v {
@@ -1785,6 +1805,163 @@ mod tests {
         assert!(
             res.is_ok(),
             "a malformed marker retries into nothing: {res:?}"
+        );
+    }
+
+    const DESIGN: &str = "c6bd173e-3dc9-426f-8fff-866a3b2a6117";
+    const REVIEW_STEP: &str = "55555555-5555-5555-5555-555555555555";
+
+    /// A published design-doc that names the feedback it answers — the
+    /// `answers` edge `boss design --answers` writes (backlog 5f0b2661).
+    fn design(metadata: serde_json::Value) -> serde_json::Value {
+        json!({
+            "id": DESIGN,
+            "kind": "design-doc",
+            "title": "A car lands where its change goes live",
+            "status": "closed",
+            "subject": { "subject_kind": "custom", "id": "boss-platform" },
+            "metadata": metadata,
+            "steps": [],
+        })
+    }
+
+    /// A user-feedback packet triage routed to `design`: its
+    /// design-review is open, carrying the question the verb wrote and
+    /// the empty verdict the Workflow defaults — the live shape of
+    /// 61366e5a on 2026-09-15.
+    fn feedback_routed_to_design(review_status: &str) -> serde_json::Value {
+        json!({
+            "id": PACKET,
+            "kind": "user-feedback",
+            "title": "Feedback on /it",
+            "status": "open",
+            "metadata": { "submitted_by": "emp-david" },
+            "steps": [
+                { "id": "s-triage", "spec_slug": "triage", "status": "completed",
+                  "metadata": { "disposition": "design" } },
+                { "id": REVIEW_STEP, "spec_slug": "design-review", "status": review_status,
+                  "metadata": { "authority_role": "platform-admin", "verdict": "",
+                                "question": "Decide design 'A car lands where its change goes live' (c6bd173e)" } },
+                { "id": BRANCH_STEP, "spec_slug": "build", "status": "pending", "metadata": {} },
+            ],
+        })
+    }
+
+    /// The args `complete-feedback-design-review-on-design-doc-published`
+    /// carries: the `answers` edge, the one branch a design decides, the
+    /// verdict + answer the answer-question kind requires at done, and
+    /// an evidence key that says what happened (a design was decided,
+    /// nothing arrived).
+    fn design_rule_args() -> Vec<(String, Value)> {
+        vec![
+            ("link".to_string(), Value::String("answers".into())),
+            ("steps".to_string(), Value::String("design-review".into())),
+            (
+                "done_metadata".to_string(),
+                Value::String(
+                    r#"{"verdict": "approved", "answer": "design decided: {title} ({car}) — every question resolved and the doc published"}"#.into(),
+                ),
+            ),
+            ("evidence_key".to_string(), Value::String("decided_by".into())),
+        ]
+    }
+
+    fn design_close_marker() -> serde_json::Value {
+        json!({
+            "id": DESIGN,
+            "kind": "design-doc",
+            "outcome": "published",
+            "closed_on": "2026-09-15",
+            "title": "A car lands where its change goes live",
+            "parent_step_id": null,
+        })
+    }
+
+    /// Backlog 5f0b2661 — deciding the design decides the feedback. A
+    /// feedback routed to design gave one person two decisions, the
+    /// second an `answer-question` with no question (David's bug
+    /// 4f6019d7). With the design carrying an `answers` edge, its
+    /// `published` close completes the feedback's open design-review
+    /// through THIS handler — the same shape the merge obligation
+    /// uses, with a different link, one step, and the design's facts
+    /// in the answer. No new handler code: the rule row is the whole
+    /// change, and this test is its witness.
+    #[tokio::test]
+    async fn a_published_design_completes_the_design_review_of_the_feedback_it_answers() {
+        let (base, puts, patches) = mock_jobs(vec![
+            design(json!({ "answers": PACKET, "title": "A car lands where its change goes live" })),
+            feedback_routed_to_design("ready"),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let mut ctx = ctx(design_close_marker());
+        ctx.rule_name = "complete-feedback-design-review-on-design-doc-published".into();
+        h.invoke(&design_rule_args(), &ctx).await.expect("runs");
+
+        let calls = puts.lock().unwrap().clone();
+        assert_eq!(
+            calls.len(),
+            1,
+            "exactly the design-review completes: {calls:?}"
+        );
+        let (step_id, body) = &calls[0];
+        assert_eq!(step_id, REVIEW_STEP);
+        assert_eq!(body["status"], "completed");
+        assert_eq!(
+            body["metadata"]["verdict"], "approved",
+            "a published design has every question resolved — the Workflow's `covers` \
+             contract — so the feedback's verdict is approved and its build opens"
+        );
+        let answer = body["metadata"]["answer"].as_str().unwrap_or_default();
+        assert!(
+            answer.contains("A car lands where its change goes live") && answer.contains(DESIGN),
+            "the answer names the design by title and id: {answer}"
+        );
+        assert_eq!(
+            body["metadata"]["decided_by"]["car"], DESIGN,
+            "the evidence names the design under the rule's own key"
+        );
+        assert_eq!(body["metadata"]["decided_by"]["outcome"], "published");
+        assert!(
+            body["metadata"]["decided_by"]["branch"].is_null(),
+            "a design has no branch; the evidence says null rather than inventing one"
+        );
+        // The step's own keys survive the wholesale metadata replace.
+        assert_eq!(body["metadata"]["authority_role"], "platform-admin");
+        assert!(
+            body["metadata"]["question"]
+                .as_str()
+                .is_some_and(|q| q.contains("c6bd173e")),
+            "the question the verb wrote is still on the completed step"
+        );
+        assert!(
+            patches.lock().unwrap().is_empty(),
+            "nothing to apologise for"
+        );
+    }
+
+    /// The person decided the feedback step first (the order the bug
+    /// report describes). The design's close then finds it completed
+    /// and writes nothing — their verdict stands, and no noop note is
+    /// filed, because the work was done.
+    #[tokio::test]
+    async fn a_design_review_a_person_already_decided_is_left_alone() {
+        let (base, puts, patches) = mock_jobs(vec![
+            design(json!({ "answers": PACKET })),
+            feedback_routed_to_design("completed"),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        h.invoke(&design_rule_args(), &ctx(design_close_marker()))
+            .await
+            .expect("runs");
+        assert!(
+            puts.lock().unwrap().is_empty(),
+            "a person's decision stands"
+        );
+        assert!(
+            patches.lock().unwrap().is_empty(),
+            "the work was done — nothing to say on either end"
         );
     }
 

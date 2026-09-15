@@ -203,3 +203,7 @@ required-features = ["postgres"]
 [[test]]
 name = "station_flow_pg"
 required-features = ["postgres"]
+
+[[test]]
+name = "a_machine_owned_proof_is_not_a_persons_task_pg"
+required-features = ["postgres"]

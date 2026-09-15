@@ -740,63 +740,166 @@ fn a_converted_lint_stays_converted() {
                  became \"no trunk ref found — fetch the trunk\".\n  {l}",
                 i + 1
             );
-            assert!(
-                !is_a_list_piped_into_grep_q(l),
-                "{lint}.sh:{} tests membership with `printf '%s\\n' \
-                 \"$LIST\" | grep -q` under `set -o pipefail`. bash \
-                 line-buffers stdout, so the list leaves in one write() \
-                 per line; `grep -q` exits at the first match; every \
-                 write printf still owes is SIGPIPE, and pipefail reports \
-                 141 for a needle that IS in the list. On a loaded gate \
-                 this reported `credential-rotation.credential is now \
-                 required` against a bundle compared to ITSELF (gate-run \
-                 b28b9998, backlog 28af807c) — and the mirror-image line \
-                 (`|| continue`) would wave a real tightening through. A \
-                 here-string (`grep -q … <<< \"$LIST\"`) is written whole \
-                 before grep starts and is not a pipeline.\n  {l}",
-                i + 1
-            );
         }
     }
 }
 
-/// The exact shape that fired, and no wider: a multi-line list written
-/// by `printf '%s\n'` on the LEFT of a pipe whose right side is a
-/// `grep -q`. `printf '%s'` of a single line is one write and cannot be
-/// interrupted; a `grep` without `-q` drains its input and cannot
-/// SIGPIPE its writer; a here-string is not a pipeline. Scoped this
-/// tightly so it cannot red on the lints' own self-tests, which pipe a
-/// captured `$out` into `grep -q` legitimately (one write, one line).
-fn is_a_list_piped_into_grep_q(line: &str) -> bool {
-    let Some((left, right)) = line.split_once('|') else {
+// ---------------------------------------------------------------------
+// The SIGPIPE coin, for every shell under infra/
+// ---------------------------------------------------------------------
+
+/// A multi-line list on the LEFT of a pipe whose reader on the RIGHT
+/// exits before the writer is done.
+///
+/// The list idiom is `printf '%s\n' "$…"` — a variable, an array
+/// (`"${A[@]}"`), or the argument list (`"$@"`). MEASURED on this pod's
+/// bash 5.2.15 (2026-09-15, backlog 9840e529) by reading the producing
+/// subshell's `/proc/<pid>/io`: a 50-line, 141-byte variable leaves
+/// `printf '%s\n'` in 3 write() calls, a 5000-line one in 686, an array
+/// in one write per element, a loop in one per iteration. `printf '%s'`
+/// of one line is a single write that the reader must have consumed
+/// before it can match, so it is deliberately not the idiom.
+///
+/// The early-exiting readers are `grep -q` / `grep -m` (stop at a
+/// match), `head` (stops at N lines) and a lone `read` (stops at one).
+/// `while read` drains, `awk`/`sed`/`sort`/`wc`/`grep -c` drain; none
+/// of those can SIGPIPE its writer and none is refused.
+///
+/// WIDER than the shape the first fix pinned, on purpose: that matcher
+/// asked the left side to START with `printf`, and the roster's next
+/// instance of the same coin was `if ! printf '%s\n' "$declared" |
+/// grep -qxF -- "$tool"` (ci-tools-declared.sh:141) — invisible to it.
+/// Anything before the idiom on the left (`if`, `if !`, `elif`, `&&`)
+/// is still the idiom. A comment quoting it is not.
+fn is_a_list_piped_into_an_early_exiting_reader(line: &str) -> bool {
+    let l = line.trim_start();
+    if l.starts_with('#') {
+        return false;
+    }
+    let Some((left, right)) = l.split_once('|') else {
         return false;
     };
-    left.trim_start().starts_with("printf '%s\\n' \"$") && right.trim_start().starts_with("grep -q")
+    if !left.contains("printf '%s\\n' \"$") {
+        return false;
+    }
+    let mut words = right.split_whitespace();
+    match words.next() {
+        Some("grep") => words
+            .take_while(|w| w.starts_with('-') && *w != "--")
+            .any(|w| !w.starts_with("--") && (w.contains('q') || w.contains('m'))),
+        Some("head") | Some("read") => true,
+        Some(w) if w.starts_with("IFS=") => words.next() == Some("read"),
+        _ => false,
+    }
+}
+
+/// Every `*.sh` under `dir`, recursively — the roster is the directory.
+fn shell_scripts_under(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let entries = std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("directory entry").path();
+        if path.is_dir() {
+            out.extend(shell_scripts_under(&path));
+        } else if path.extension().is_some_and(|x| x == "sh") {
+            out.push(path);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The coin is refused everywhere it can be flipped, not only in the
+/// four lints that were converted first. 166 of the 193 shells under
+/// infra/ set `pipefail` (measured 2026-09-15), and the class was found
+/// in a lint (a-kind-bundle-does-not-tighten), a sourced library
+/// (forge/prune-ci-images.lib.sh) and a systemd hook (boss-step.sh)
+/// alike — so the roster here is the tree, and this is the ONE place the
+/// shape is defined (§9a).
+#[test]
+fn no_shell_under_infra_pipes_a_list_into_an_early_exiting_reader() {
+    let root = repo_root();
+    let mut offenders = Vec::new();
+    for path in shell_scripts_under(&root.join("infra")) {
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display()));
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        for (i, line) in body.lines().enumerate() {
+            if is_a_list_piped_into_an_early_exiting_reader(line) {
+                offenders.push(format!("  {rel}:{}\n      {}", i + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "{} line(s) pipe a multi-line list into a reader that exits early, \
+         under `set -o pipefail`. bash emits `printf '%s\\n' \"$LIST\"` in \
+         several write() calls; `grep -q` / `head` / `read` exit at their \
+         match; every write the producer still owes is SIGPIPE, and the \
+         pipeline reports 141 for a needle that IS in the list — a false \
+         red, or with `|| continue` a false GREEN (gate-run b28b9998, \
+         backlog 28af807c; the sweep is 9840e529). A here-string \
+         (`grep -q … <<< \"$LIST\"`) is written whole before the reader \
+         starts and is not a pipeline. Single-line `printf '%s' \"$x\" | \
+         grep -q` is one write and is not refused.\n{}",
+        offenders.len(),
+        offenders.join("\n")
+    );
 }
 
 #[test]
 fn the_shape_check_reads_the_line_that_fired_and_not_its_repair() {
     let fired = r#"    printf '%s\n' "$BEFORE" | grep -qxF "$kind	$field" && continue"#;
     assert!(
-        is_a_list_piped_into_grep_q(fired),
+        is_a_list_piped_into_an_early_exiting_reader(fired),
         "the line that reported a present field as newly required must be caught"
     );
     let mirror = r#"    printf '%s\n' "$KINDS_BEFORE" | grep -qxF "$kind" || continue"#;
     assert!(
-        is_a_list_piped_into_grep_q(mirror),
+        is_a_list_piped_into_an_early_exiting_reader(mirror),
         "the mirror-image line, which would wave a real tightening through, must be caught"
     );
+    for coin in [
+        // The roster's next instance: the idiom behind `if !` (ci-tools-declared.sh:141).
+        r#"    if ! printf '%s\n' "$declared" | grep -qxF -- "$tool"; then"#,
+        r#"        elif printf '%s\n' "$SEEN_IDS" | grep -qx -- "$f_id"; then"#,
+        // One write per element / per argument.
+        r#"    printf '%s\n' "${PG_TESTS[@]}" | grep -q 'x'"#,
+        r#"if [ -n "${SERVICE_RESULT:-}" ] && ! printf '%s\n' "$@" | grep -q '^result='; then"#,
+        // The other early-exiting readers.
+        r#"    first=$(printf '%s\n' "$rows" | head -1)"#,
+        r#"    printf '%s\n' "$rows" | read -r first"#,
+        r#"    printf '%s\n' "$rows" | IFS= read -r first"#,
+        r#"    printf '%s\n' "$rows" | grep -m1 x"#,
+        r#"    printf '%s\n' "$rows" | grep -i -q x"#,
+    ] {
+        assert!(
+            is_a_list_piped_into_an_early_exiting_reader(coin),
+            "a list piped into a reader that exits early must be caught: {coin}"
+        );
+    }
     for repaired in [
         r#"    grep -qxF "$kind	$field" <<< "$BEFORE" && continue"#,
+        r#"    if ! grep -qxF -- "$tool" <<< "$declared"; then"#,
         // One line, one write: a self-test reading its own captured output.
         r#"    if printf '%s' "$out" | grep -q "VIOLATION"; then"#,
         // Drains its input; the writer is never SIGPIPEd.
         r#"    printf '%s\n' "$BEFORE" | grep -c . >/dev/null"#,
+        r#"    printf '%s\n' "$rows" | sort -u"#,
+        r#"    printf '%s\n' "$rows" | awk -F'\t' '$1==k' | head -1"#,
+        r#"    printf '%s\n' "$rows" | while IFS= read -r row; do"#,
+        r#"    printf '%s\n' "$rows" | grep -v '^$' | wc -l"#,
+        // Not a pipe.
+        r#"    printf '%s\n' "$rows" || echo none"#,
         // A comment quoting the idiom is not the idiom.
         r#"# was: printf '%s\n' "$BEFORE" | grep -qxF"#,
     ] {
         assert!(
-            !is_a_list_piped_into_grep_q(repaired),
+            !is_a_list_piped_into_an_early_exiting_reader(repaired),
             "a shape that cannot SIGPIPE its writer must not be refused: {repaired}"
         );
     }

@@ -466,6 +466,14 @@ enum Commands {
         /// The docs/design path this packet mirrors, when there is one.
         #[arg(long)]
         doc_path: Option<String>,
+        /// The user-feedback or backlog-item this design decides (id or
+        /// 8+ char prefix). Records the `answers` job edge on the
+        /// design and gives that packet's open design-review a real
+        /// question; when the design is published, the dispatcher
+        /// completes that step with the verdict — one decision, not
+        /// two (backlog 5f0b2661).
+        #[arg(long)]
+        answers: Option<String>,
     },
     /// Prove a merged car in production by RUNNING a probe.
     ///
@@ -1313,6 +1321,7 @@ async fn main() -> Result<()> {
             questions,
             no_questions,
             doc_path,
+            answers,
         } => {
             design::run(
                 title,
@@ -1320,6 +1329,7 @@ async fn main() -> Result<()> {
                 questions,
                 no_questions,
                 doc_path,
+                answers,
                 chrono::Utc::now(),
             )
             .await
