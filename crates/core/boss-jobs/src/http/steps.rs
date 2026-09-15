@@ -576,7 +576,52 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // a resolved branch, not a broken hand-off.
     let is_flipping_to_done =
         old.status != StepStatus::Completed && step.status == StepStatus::Completed;
-    if is_flipping_to_done && !step.blocked_by.is_empty() {
+
+    // AN ABORT COMPLETES FROM ANY OPEN STATE (fd0f92ae, 2026-09-15).
+    //
+    // The gate keeps steps in order, and order is the right thing to
+    // enforce on every step whose meaning is "the work up to here is
+    // done". It is the wrong thing to enforce on exactly one: a
+    // terminal whose materialised `outcome_kind` is `aborted`, whose
+    // meaning is "stop here, wherever here is". Abandonment is not
+    // forward progress, and a blocker is a data dependency of the
+    // forward path — an abort has none.
+    //
+    // Measured when this was written: all 37 aborted terminals in
+    // infra/platform/workflows/*.toml carry a `ready_when` that
+    // references an upstream step (`steps.scope.done AND
+    // job.metadata.abandoned = "true"`), so every one of them is
+    // Pending with a live blocker for most of its Job's life, and the
+    // gate below answered 409 to the abort the accepted design
+    // (c6f9fb3e) allows whenever the Job is open. The control was
+    // enabled exactly where the server refused.
+    //
+    // Read from `old.metadata` — the protocol's materialised row —
+    // and never from the merged body, so a caller cannot claim
+    // `aborted` on the way in to slip past the gate. "Open" is the
+    // same set `close_job_on_terminal` will act on, so an abort that
+    // passes here is one the close can honour. Everything else about
+    // the completion is unchanged: the required-at-done fields
+    // (`reason`) were validated above, the actor cleared policy at
+    // the top, the frozen-terminal refusals still apply, and the
+    // completion is evented as any other. The terminal's `ready_when`
+    // stays as data: it still describes the machine's own path to it.
+    let abort_from_any_state = is_flipping_to_done
+        && old.metadata.get("outcome_kind").and_then(|v| v.as_str()) == Some("aborted")
+        && parent_job.as_ref().is_some_and(|j| {
+            !matches!(
+                j.status,
+                JobStatus::Closed | JobStatus::Cancelled | JobStatus::Draft
+            )
+        });
+    if abort_from_any_state {
+        tracing::info!(
+            job_id = %job_id,
+            step_id = %step_id,
+            from = status_word(old.status),
+            "abort-from-any-state: aborted terminal completing past its blockers",
+        );
+    } else if is_flipping_to_done && !step.blocked_by.is_empty() {
         match state.jobs.resolve_blockers(&step.blocked_by).await {
             Ok(statuses) => {
                 // Missing blockers (returned-length < asked-length) are
@@ -642,6 +687,40 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
             is_flipping_to_done,
             proposed,
         );
+    }
+
+    // WHERE THE ABORT FIRED FROM (fd0f92ae). Closure says every Job
+    // reaches a terminal; provenance says the record shows how. An
+    // abort past open blockers is the one completion that skips
+    // work, so the terminal names the steps that were still open when
+    // it fired — the same set `close_job_on_terminal` is about to mark
+    // Skipped, each with its own STEP_UPDATED. Nothing is skipped
+    // silently: the step.done marker carries this list in `metadata`,
+    // and the row keeps it. Slugs in sort order, so the same log
+    // replays to the same list. After the shape-hash read for the
+    // same reason the decision-record stamp is.
+    if abort_from_any_state
+        && let Ok(siblings) = state.jobs.list_steps(&job_id).await
+        && let Some(obj) = step.metadata.as_object_mut()
+    {
+        let mut open: Vec<&Step> = siblings
+            .iter()
+            .filter(|s| {
+                s.id != step_id
+                    && matches!(
+                        s.status,
+                        StepStatus::Pending | StepStatus::Ready | StepStatus::Active
+                    )
+            })
+            .collect();
+        open.sort_by_key(|s| s.sort_order);
+        let slugs: Vec<serde_json::Value> = open
+            .into_iter()
+            .map(|s| {
+                serde_json::Value::String(s.spec_slug.clone().unwrap_or_else(|| s.title.clone()))
+            })
+            .collect();
+        obj.insert("aborted_from".into(), serde_json::Value::Array(slugs));
     }
 
     // Calendar reservation hook — runs BEFORE the persistence
