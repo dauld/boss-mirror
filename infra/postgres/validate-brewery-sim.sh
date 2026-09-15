@@ -483,7 +483,7 @@ DEAD_LETTERS=$(journalctl -u boss-dispatcher --since "$RUN_STARTED" --no-pager 2
 if [[ "${DEAD_LETTERS:-0}" -gt 0 ]]; then
     echo "ERROR: $DEAD_LETTERS dispatcher dead-letter(s) this run — a side effect exhausted redelivery and is permanently stuck:" >&2
     journalctl -u boss-dispatcher --since "$RUN_STARTED" --no-pager 2>/dev/null \
-        | grep -E "DEAD-LETTER" | grep -oE "subject=[a-z._*-]+ .*error=[^\"]*" | sort | uniq -c | sort -rn | head -10 >&2
+        | grep -E "DEAD-LETTER" | grep -oE "subject=[a-z._*-]+ .*error=[^\"]*" | sort | uniq -c | sort -rn | sed -n '1,10p' >&2
     exit 1
 fi
 # For visibility: how many transient failures self-healed via redelivery.

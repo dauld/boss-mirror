@@ -144,7 +144,7 @@ compose_data_dir() {
     local compose="$1" here host
     [ -r "$compose" ] || return 1
     here=$(cd "$(dirname "$compose")" 2>/dev/null && pwd) || return 1
-    host=$(sed -n -E 's@^[[:space:]]*-[[:space:]]*"?([^":[:space:]]+):/data(:[a-zA-Z,]+)?"?[[:space:]]*$@\1@p' "$compose" | head -n 1)
+    host=$(sed -n -E 's@^[[:space:]]*-[[:space:]]*"?([^":[:space:]]+):/data(:[a-zA-Z,]+)?"?[[:space:]]*$@\1@p' "$compose" | sed -n 1p)
     if [ -z "$host" ]; then
         host=$(awk '
             /^[[:space:]]*-?[[:space:]]*source:[[:space:]]*[^[:space:]]+[[:space:]]*$/ {

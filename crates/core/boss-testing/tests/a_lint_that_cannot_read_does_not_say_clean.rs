@@ -904,3 +904,328 @@ fn the_shape_check_reads_the_line_that_fired_and_not_its_repair() {
         );
     }
 }
+
+// ---------------------------------------------------------------------
+// The second SIGPIPE class: an EXTERNAL producer on the left
+// ---------------------------------------------------------------------
+
+/// The line with every quoted character masked to `_`, indices kept, so
+/// a `|` inside `'…'` or `"…"` (a `sed 's|^|  |'` delimiter, a prose
+/// string quoting the idiom) is not read as a pipe — while a `|` inside
+/// `"$( … )"` still is, because a command substitution opens a fresh
+/// unquoted context even inside double quotes.
+fn mask_quoted(line: &str) -> String {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Ctx {
+        Bare,
+        Single,
+        Double,
+    }
+    let chars: Vec<char> = line.chars().collect();
+    let mut stack = vec![Ctx::Bare];
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let top = *stack.last().unwrap_or(&Ctx::Bare);
+        let next = chars.get(i + 1).copied();
+        match top {
+            Ctx::Single => {
+                if c == '\'' {
+                    stack.pop();
+                }
+                out.push('_');
+            }
+            Ctx::Double => {
+                if c == '\\' {
+                    out.push('_');
+                    out.push('_');
+                    i += 2;
+                    continue;
+                }
+                if c == '"' {
+                    stack.pop();
+                    out.push('_');
+                } else if c == '$' && next == Some('(') {
+                    stack.push(Ctx::Bare);
+                    out.push('$');
+                    out.push('(');
+                    i += 2;
+                    continue;
+                } else {
+                    out.push('_');
+                }
+            }
+            Ctx::Bare => match c {
+                '\\' => {
+                    out.push(c);
+                    if let Some(n) = next {
+                        out.push(n);
+                    }
+                    i += 2;
+                    continue;
+                }
+                '\'' => {
+                    stack.push(Ctx::Single);
+                    out.push('_');
+                }
+                '"' => {
+                    stack.push(Ctx::Double);
+                    out.push('_');
+                }
+                ')' if stack.len() > 1 => {
+                    stack.pop();
+                    out.push(c);
+                }
+                _ => out.push(c),
+            },
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The command word that produces a pipe stage's output — `git` in
+/// `x=$(git ls-files | grep -q …)`, `find` in `if ! find … | head -1`.
+/// `left` is the masked text before the `|`. Empty when the producer is
+/// not on this line (a continuation that starts with the pipe).
+fn producer_word(left: &str) -> &str {
+    // The stage starts after the last opener or separator on the line.
+    let start = ["$(", "<(", "&&", "||", ";", "{", "("]
+        .iter()
+        .filter_map(|s| left.rfind(s).map(|i| i + s.len()))
+        .max()
+        .unwrap_or(0);
+    let mut rest = left[start..].trim_start();
+    loop {
+        let Some(word) = rest.split_whitespace().next() else {
+            return "";
+        };
+        match word {
+            "if" | "elif" | "while" | "until" | "then" | "do" | "else" | "!" | "time"
+            | "command" | "sudo" | "env" | "nice" => {
+                rest = rest[word.len()..].trim_start();
+            }
+            // `sudo -u postgres psql …`: the flag is not the producer.
+            w if w.starts_with('-') => rest = rest[word.len()..].trim_start(),
+            _ => return word,
+        }
+    }
+}
+
+/// `read`, a lone `IFS=… read`, `head`, or `grep` with `-q` / `-m`.
+fn reader_exits_early(stage: &str) -> bool {
+    let mut words = stage.split_whitespace();
+    match words.next() {
+        Some("grep") => words
+            .take_while(|w| w.starts_with('-') && *w != "--")
+            .any(|w| !w.starts_with("--") && (w.contains('q') || w.contains('m'))),
+        Some("head") | Some("read") => true,
+        Some(w) if w.starts_with("IFS=") => words.next() == Some("read"),
+        _ => false,
+    }
+}
+
+/// An EXTERNAL producer (a command that is not the shell's own `printf`
+/// or `echo`) on the left of a `|` whose reader on the right exits before
+/// the producer is done.
+///
+/// The first class (`is_a_list_piped_into_an_early_exiting_reader`) is a
+/// shell variable the builtin emits in several writes. This is the second
+/// (backlog 76d04429, measured 2026-09-15 after the first sweep landed
+/// #376): `git ls-files | grep -q …`, `grep -n … | head -1`, `find … |
+/// head -1`, a shell function or a `done` loop piped into `grep -q`. An
+/// external command is fully buffered, so ONE write below 4 KB and the
+/// coin is rarer than the variable case — but a producer whose output
+/// exceeds a pipe buffer, or that flushes per line (`git ls-files` on a
+/// large tree, `grep -n` over many files, any loop that echoes per
+/// iteration), is SIGPIPEd exactly when the reader has already matched,
+/// and under `pipefail` the pipeline reports 141 for a needle that IS
+/// there: a lint that refuses a clean tree, or with `|| continue` /
+/// `if !` passes a real finding, by chance.
+///
+/// Every pipe on the line is a producer/reader pair (`grep -n … |
+/// grep -v '^#' | head -1` is caught at its second pipe, where the
+/// filter is the producer). `printf` and `echo` of one line are one
+/// write the reader consumed before it could match, and are not this
+/// class. A comment quoting the idiom, or prose inside quotes, is not
+/// the idiom. Drainers (`while read`, `sort`, `wc`, `grep -c`, `awk`)
+/// are never refused.
+fn is_an_external_producer_piped_into_an_early_exiting_reader(line: &str) -> bool {
+    let l = line.trim_start();
+    if l.starts_with('#') {
+        return false;
+    }
+    let masked = mask_quoted(l);
+    let bytes = masked.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'|' {
+            i += 1;
+            continue;
+        }
+        // `||` is a list operator and `|&` is stderr-too; neither is judged.
+        if bytes.get(i + 1) == Some(&b'|') || bytes.get(i + 1) == Some(&b'&') {
+            i += 2;
+            continue;
+        }
+        if i > 0 && bytes[i - 1] == b'|' {
+            i += 1;
+            continue;
+        }
+        let (left, right) = (&masked[..i], &masked[i + 1..]);
+        let producer = producer_word(left);
+        if !producer.is_empty()
+            && !matches!(producer, "printf" | "echo")
+            && reader_exits_early(right)
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Whether each line of `body` runs under `pipefail`: on from the first
+/// `set -… pipefail`, off again after a `set +o pipefail`, back on at the
+/// next `set -o`. A library (`lib/*.sh`, `*lib.sh`) sets nothing itself
+/// and inherits its sourcer's, and every sourcer under infra/ sets it —
+/// the first class was found in `forge/prune-ci-images.lib.sh` — so a
+/// library starts on.
+fn pipefail_per_line(body: &str, is_library: bool) -> Vec<bool> {
+    let mut on = is_library;
+    body.lines()
+        .map(|line| {
+            let l = line.trim();
+            if l.starts_with("set +o pipefail") {
+                on = false;
+            } else if l.starts_with("set -") && l.contains("pipefail") {
+                on = true;
+            }
+            on
+        })
+        .collect()
+}
+
+/// The second class, refused across every shell under infra/ that runs
+/// the line under `pipefail` (the ONE place this shape is defined, §9a).
+/// Repairs: capture first (`out=$(git ls-files …)`, then `grep -q … <<<
+/// "$out"`), drain (`grep -c`, `awk 'END'`), or `set +o pipefail` around
+/// the one pipeline with a comment naming why.
+#[test]
+fn no_shell_under_infra_pipes_an_external_producer_into_an_early_exiting_reader() {
+    let root = repo_root();
+    let mut offenders = Vec::new();
+    for path in shell_scripts_under(&root.join("infra")) {
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display()));
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        let is_library = rel.contains("/lib/") || rel.ends_with("lib.sh");
+        let pipefail = pipefail_per_line(&body, is_library);
+        for (i, line) in body.lines().enumerate() {
+            if pipefail[i] && is_an_external_producer_piped_into_an_early_exiting_reader(line) {
+                offenders.push(format!("  {rel}:{}\n      {}", i + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "{} line(s) pipe an EXTERNAL producer into a reader that exits \
+         early, under `set -o pipefail`. `grep -q` / `head` / `read` exit \
+         at their match; a producer still writing (a tree larger than a \
+         pipe buffer, a per-line flush, a loop) is SIGPIPE, and the \
+         pipeline reports 141 for a needle that IS there — a false red, \
+         or with `|| continue` / `if !` a false GREEN (backlog 76d04429; \
+         the variable class is 9840e529). Capture first and read the \
+         capture (`out=$(cmd)`; `grep -q … <<< \"$out\"`), use a reader \
+         that drains (`grep -c`, `awk`), or `set +o pipefail` around the \
+         one pipeline with a comment naming why. no-external-producer-coin: \
+         the offenders are\n{}",
+        offenders.len(),
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn the_external_producer_check_reads_the_pipe_and_not_the_prose() {
+    for coin in [
+        // The packet's named shapes.
+        r#"    if git ls-files -- 'infra/*.sh' | grep -q 'x'; then"#,
+        r#"    first=$(grep -n "$RUNNER" "$INIT" | head -1 | cut -d: -f1)"#,
+        r#"    SRC=$(find "$WORKDIR" -maxdepth 1 -type d | head -1)"#,
+        // The second pipe is the coin: a filter producer, an early reader.
+        r#"code_line() { grep -n "$1" "$sweep" | grep -vE '^[0-9]+:\s*#' | head -1 | cut -d: -f1; }"#,
+        // A shell function and a loop are producers of unknown write count.
+        r#"    if ! verdict success 0 | grep -q 'result=ok'; then"#,
+        r#"    if code_only "$path" | grep -qE "$FATAL"; then"#,
+        r#"    done < <(sources "$repo") | head -3 | sed 's|^|    |' >&2"#,
+        // Inside a double-quoted command substitution the pipe is real.
+        r#"    echo "  kanidmd: $(kanidmd version 2>/dev/null | head -1 || echo present)""#,
+        // Behind `if`, `!`, `sudo`, an assignment, a `&&` chain.
+        r#"if ! sudo -u postgres psql -tc "SELECT 1" | grep -q 1; then"#,
+        r#"    if ip=$(dig +short "$DOMAIN" 2>/dev/null | head -1) && [ -n "$ip" ]; then"#,
+        r#"    [ -n "$x" ] && jq -r '.a // ""' "$sum" | grep -q "$stem" \"#,
+        r#"    grep -vE '^\s*#' "$pub" | grep -qE '\$HOME' && fail "reads HOME""#,
+        r#"    sed -n "${line},$((line + 2))p" "$MANIFEST" | grep -qE 'valueFrom' && ok"#,
+        r#"    ls -d "$WORKDIR"/boss-backup-* | IFS= read -r first"#,
+        r#"    systemctl --no-pager status caddy | head -n 10 || true"#,
+    ] {
+        assert!(
+            is_an_external_producer_piped_into_an_early_exiting_reader(coin),
+            "an external producer piped into a reader that exits early must be caught: {coin}"
+        );
+    }
+    for not_refused in [
+        // One write of one line; the first class owns the `\n` list idiom.
+        r#"    if printf '%s' "$out" | grep -q "VIOLATION"; then"#,
+        r#"    if echo "$line_content" | grep -qE 'NOW\s*\(\s*\)'; then"#,
+        r#"    || ! printf '%s' "$post" | grep -qF -- "BOSS_JOBS_URL=$sor "; then"#,
+        r#"    printf '%s\n' "$BEFORE" | grep -qxF "$kind	$field" && continue"#,
+        // The repairs: a here-string is not a pipe; a capture is read whole.
+        r#"    grep -q 'x' <<< "$files" || continue"#,
+        r#"    files=$(git ls-files -- 'infra/*.sh')"#,
+        // Drainers.
+        r#"    git ls-files | grep -c . >/dev/null"#,
+        r#"    grep -n "$1" "$f" | grep -vE '^#' | sort -u"#,
+        r#"    find . -name '*.sh' | while IFS= read -r f; do"#,
+        r#"    jq -r '.x' "$f" | awk 'END { print NR }'"#,
+        // A pipe inside quotes is a delimiter or prose, not a pipe.
+        r#"    sed 's|^|    |' "$f""#,
+        r#"    why="a swallowed stderr ('2>&1 | grep -q') hides the cause""#,
+        // `||` and `|&` are not the pipe judged here.
+        r#"    git fetch origin || head -1 "$log""#,
+        // A case pattern.
+        r#"    success|head) echo yes ;;"#,
+        // A comment quoting the idiom is not the idiom.
+        r#"# was: git ls-files | grep -q x"#,
+        // The producer is on the previous line: not judged by a line check.
+        r#"    | grep -q '"ready":[[:space:]]*true'; then"#,
+    ] {
+        assert!(
+            !is_an_external_producer_piped_into_an_early_exiting_reader(not_refused),
+            "a shape that cannot SIGPIPE an external writer must not be refused: {not_refused}"
+        );
+    }
+}
+
+#[test]
+fn the_external_producer_check_honours_a_pipefail_window() {
+    let body = "set -euo pipefail\nfind . | head -1\n# why: one line wanted\nset +o pipefail\nfind . | head -1\nset -o pipefail\nfind . | head -1\n";
+    assert_eq!(
+        pipefail_per_line(body, false),
+        vec![true, true, true, false, false, true, true]
+    );
+    let library = "f() {\n  git ls-files | grep -q x\n}\n";
+    assert!(
+        pipefail_per_line(library, true).iter().all(|&on| on),
+        "a sourced library runs under its sourcer's pipefail"
+    );
+    assert!(
+        pipefail_per_line(library, false).iter().all(|&on| !on),
+        "a script that never sets pipefail cannot flip this coin"
+    );
+}

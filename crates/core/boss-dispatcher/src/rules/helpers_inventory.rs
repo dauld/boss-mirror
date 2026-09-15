@@ -82,12 +82,14 @@ impl HelperResolver for InventoryHelpers {
             // runner binds and it already holds jobs_base; the module
             // outgrew its name the day a second domain needed a dedup
             // helper (design-review-spawn, dogfooding arc e556c000).
-            "open_car_exists" => open_car_exists(self, args),
             "open_publish_exists" => open_publish_exists(self, args),
-            // The generalization the three guards above were converging
+            // The generalization the one-kind guards were converging
             // on: any (kind, subject) pair, so the NEXT daily spawner
-            // gets its dedup as rule data instead of a fourth one-off
+            // gets its dedup as rule data instead of another one-off
             // helper (0517387b — the sweep spawners had none at all).
+            // `open_car_exists`, the sweep-car dedup, retired here on
+            // 2026-09-15 when `spawn-car-on-sweep-remediated` v4 began
+            // filing backlog items and asking this instead (655c5917).
             "open_job_exists" => open_job_exists(self, args),
             other => Err(EvalError::UnknownHelper(other.to_string())),
         }
@@ -171,54 +173,6 @@ struct JobsListResponse {
     data: Vec<serde_json::Value>,
 }
 
-/// True if an `ingredient-restock` Job for `part_sku` is already open.
-///
-/// The reorder rule dedups on this — per-SKU, on the in-flight restock Job
-/// (which exists the instant it's spawned) — rather than on the open PO the
-/// restock places much later (after its audit-stock step). That lag let a
-/// cold-start burst of `inventory.item.consumed` events spawn dozens of
-/// duplicate restocks for the same ingredient before any PO landed. Matches
-/// on the Job's `metadata.part_sku` (stamped by the reorder rule via
-/// `jobs.spawn`'s `metadata.<field>` args), since the restock's subject is
-/// the vendor, not the part.
-/// Is there already an open `ship-a-change` car for this recurring
-/// finding? The dedup for `spawn-car-on-sweep-remediated`.
-///
-/// A sweep runs on a cadence and spawns a car every time it closes
-/// `remediated`, so a condition that PERSISTS across days mints one
-/// car per day. Measured 2026-08-17 (defect e74b32a1): two cars on the
-/// board, `dcff2c74` and `5621606f`, both titled exactly "Stale build
-/// cache sweep", both from the same `stale-build-caches` target, one
-/// day apart — with no summary, no branch and no body, because the
-/// title is templated from the sweep. They are only distinguishable by
-/// opening each one and reading its metadata. The agent holding the
-/// measurements nearly closed one as a duplicate of the other and had
-/// to revert the flag; a reader scanning My Day has no chance.
-///
-/// Keyed on the sweep's SUBJECT (`stale-build-caches`), not its id or
-/// title: the id is fresh every firing, and the title is templated per
-/// target, so neither separates "the same finding again" from "a
-/// different finding". `design-review-spawn` had exactly this guard
-/// — `NOT open_review_exists(path)` — from the day it was written;
-/// this rule simply never got one. (That rule and its one-kind helper
-/// were retired with the corpus index on 2026-09-10; `open_job_exists`
-/// below is the generic form that outlived both.)
-fn open_car_exists(h: &InventoryHelpers, args: &[Value]) -> Result<Value, EvalError> {
-    let target = first_string(args, "open_car_exists")?;
-    let url = format!(
-        "{}/api/jobs?kind=ship-a-change&status=open&limit=200",
-        h.jobs_base.trim_end_matches('/')
-    );
-    let r: JobsListResponse = h.get_json(&url, "open_car_exists")?;
-    let exists = r.data.iter().any(|j| {
-        j.get("metadata")
-            .and_then(|m| m.get("sweep_target"))
-            .and_then(|s| s.as_str())
-            == Some(target)
-    });
-    Ok(Value::Bool(exists))
-}
-
 /// The packet kind `open_publish_exists` asks about. The guard names
 /// only a SUBJECT, so the kind lives here — and it is a `pub const`
 /// rather than a literal in the URL below because a second reader now
@@ -230,7 +184,7 @@ pub const PUBLISH_JOB_KIND: &str = "publish-to-github";
 /// True if a `publish-to-github` packet for this mirror subject is
 /// already open — the dedup for `publish-to-github-daily`.
 ///
-/// Same defect class as `open_car_exists` above, on a SCHEDULED rule:
+/// Same defect class as the sweep-car dedup (e74b32a1), on a SCHEDULED rule:
 /// the daily spawner asked no question, so while one packet sat at its
 /// approval sign-off (which, unassigned, notified nobody — 13128a0c),
 /// every morning minted another. Measured 2026-08-18: ab13f05f and
@@ -282,6 +236,16 @@ fn open_job_exists(h: &InventoryHelpers, args: &[Value]) -> Result<Value, EvalEr
     Ok(Value::Bool(!r.data.is_empty()))
 }
 
+/// True if an `ingredient-restock` Job for `part_sku` is already open.
+///
+/// The reorder rule dedups on this — per-SKU, on the in-flight restock Job
+/// (which exists the instant it's spawned) — rather than on the open PO the
+/// restock places much later (after its audit-stock step). That lag let a
+/// cold-start burst of `inventory.item.consumed` events spawn dozens of
+/// duplicate restocks for the same ingredient before any PO landed. Matches
+/// on the Job's `metadata.part_sku` (stamped by the reorder rule via
+/// `jobs.spawn`'s `metadata.<field>` args), since the restock's subject is
+/// the vendor, not the part.
 fn open_restock_exists(h: &InventoryHelpers, args: &[Value]) -> Result<Value, EvalError> {
     let part_sku = first_string(args, "open_restock_exists")?;
     let url = format!(

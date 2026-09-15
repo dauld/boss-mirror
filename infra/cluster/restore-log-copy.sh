@@ -67,7 +67,7 @@ psql_db() { sudo -u postgres psql -X -q -A -t -v ON_ERROR_STOP=1 -d "$DB" -c "$1
 WORKDIR=$(mktemp -d)
 trap 'rm -rf "$WORKDIR"' EXIT
 tar -C "$WORKDIR" -xzf "$TARBALL"
-SRC=$(find "$WORKDIR" -maxdepth 1 -mindepth 1 -type d | head -1)
+SRC=$(find "$WORKDIR" -maxdepth 1 -mindepth 1 -type d | sed -n 1p)
 [ -n "$SRC" ] || fail "tarball has no top-level directory"
 echo "==> verifying checksums"
 (cd "$SRC" && sha256sum -c SHA256SUMS >/dev/null) || fail "checksum mismatch — the tarball is corrupt"

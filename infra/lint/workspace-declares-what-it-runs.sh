@@ -64,7 +64,7 @@ printf '  by crate: '
 {
     printf '%s\n' "${PG_TESTS[@]}" | sed 's|crates/[^/]*/||; s|/tests/.*||'
     printf '%s\n' "${PG_MODS[@]}" | sed 's|crates/[^/]*/||; s|/src/.*||'
-} | grep -v '^$' | sort | uniq -c | sort -rn | head -6 |
+} | grep -v '^$' | sort | uniq -c | sort -rn | sed -n '1,6p' |
     awk '{printf "%s(%s) ", $2, $1}'
 echo
 echo

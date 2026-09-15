@@ -104,14 +104,14 @@ judge() {
                 echo "$fn calls into $module, which is not at $path"
                 return 0
             fi
-            if code_only "$path" | grep -qE "$FATAL"; then
+            if grep -qE "$FATAL" <<<"$(code_only "$path")"; then
                 echo "$path can end the process: $(code_only "$path" | grep -oE "$FATAL" | sort -u | tr '\n' ' ')"
                 return 0
             fi
         done
     done
 
-    if code_only "$api" | grep -qi 'refusing to start'; then
+    if grep -qi 'refusing to start' <<<"$(code_only "$api")"; then
         echo "$(basename "$api") still says it is refusing to start"
         return 0
     fi

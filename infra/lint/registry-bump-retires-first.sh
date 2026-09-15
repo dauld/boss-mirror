@@ -79,7 +79,7 @@ for f in "$SCHEMA"/*.sql; do
             /;[[:space:]]*$/ { inblk = 0 }
         ' "$f" | head -1)
         [ -z "$ins" ] && continue
-        ret=$(grep -niE "update[[:space:]]+$t[[:space:]]+set[[:space:]]+status[[:space:]]*=[[:space:]]*'retired'" "$f" | head -1 | cut -d: -f1)
+        ret=$(grep -niE "update[[:space:]]+$t[[:space:]]+set[[:space:]]+status[[:space:]]*=[[:space:]]*'retired'" "$f" | sed -n 1p | cut -d: -f1)
         if [ -z "$ret" ]; then
             # Seeding a brand-new name is fine — there is no prior
             # active row to collide with. Only flag when the file

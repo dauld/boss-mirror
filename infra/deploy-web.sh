@@ -208,6 +208,6 @@ fi
 echo
 echo "==> deploy complete"
 echo "--- ${DIST_DST}"
-ls -la "${DIST_DST}/" | head -10
+ls -la "${DIST_DST}/" | sed -n '1,10p'
 echo "--- ${SIM_DIST_DST}"
-ls -la "${SIM_DIST_DST}/" | head -10
+ls -la "${SIM_DIST_DST}/" | sed -n '1,10p'

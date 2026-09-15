@@ -25,7 +25,7 @@ echo "Boss restore from: $TARBALL"
 
 # Extract
 tar -xzf "$TARBALL" -C "$WORKDIR"
-BACKUP=$(ls -d "$WORKDIR"/boss-backup-* | head -1)
+BACKUP=$(ls -d "$WORKDIR"/boss-backup-* | sed -n 1p)
 
 if [ ! -d "$BACKUP" ]; then
   echo "Error: no backup directory found in tarball"

@@ -63,8 +63,8 @@ done
 # The 2026-08-13 gap was exactly one `exit 0` above this line.
 INIT="infra/oss-quickstart/init.sh"
 if [ -f "$INIT" ]; then
-    migrate_line=$(grep -n "$RUNNER" "$INIT" | head -1 | cut -d: -f1)
-    exit_line=$(grep -n '^[[:space:]]*exit[[:space:]]' "$INIT" | head -1 | cut -d: -f1)
+    migrate_line=$(grep -n "$RUNNER" "$INIT" | sed -n 1p | cut -d: -f1)
+    exit_line=$(grep -n '^[[:space:]]*exit[[:space:]]' "$INIT" | sed -n 1p | cut -d: -f1)
     if [ -n "$migrate_line" ] && [ -n "$exit_line" ] && [ "$exit_line" -lt "$migrate_line" ]; then
         echo "schema-converge: $INIT exits at line $exit_line, before it converges the" >&2
         echo "    schema at line $migrate_line. The converge must be unconditional:" >&2

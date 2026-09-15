@@ -71,7 +71,7 @@ grep -q 'estate/observation' "$tmp/observe.sh" \
 
 # ----- 4: the door, read from the Service that declares it -----------
 svc=$(awk '/^metadata:/{m=1} m && /^  name:/{print $2; exit}' "$door")
-port=$(grep -oE 'port: *[0-9]+' "$door" | head -n 1 | grep -oE '[0-9]+')
+port=$(grep -oE 'port: *[0-9]+' "$door" | sed -n 1p | grep -oE '[0-9]+')
 [[ -n "$svc" && -n "$port" ]] || fail "could not read the Service name and port out of $door"
 grep -q "http://$svc.boss.svc.cluster.local:$port" "$tmp/observe.sh" \
     || fail "the observer's shell does not default its dispatcher door to http://$svc.boss.svc.cluster.local:$port — the Service in $door says that is where the dispatcher answers, and a read aimed anywhere else is a permanent dispatcher_unread that looks like a dispatcher outage"

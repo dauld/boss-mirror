@@ -87,7 +87,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now nats-server.service
 
 echo "==> Status:"
-sudo systemctl --no-pager status nats-server.service | head -n 8 || true
+sudo systemctl --no-pager status nats-server.service | sed -n '1,8p' || true
 
 echo
 echo "nats-server listening on :${NATS_PORT} (monitoring :${MONITOR_PORT})"

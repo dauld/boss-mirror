@@ -105,7 +105,7 @@ sudo systemctl enable --now caddy
 sudo systemctl restart caddy
 
 echo "==> Status:"
-sudo systemctl --no-pager status caddy | head -n 10 || true
+sudo systemctl --no-pager status caddy | sed -n '1,10p' || true
 
 echo
 echo "Caddy listening on :80, :443"

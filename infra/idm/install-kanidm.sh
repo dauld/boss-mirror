@@ -25,13 +25,13 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 check() {
     local ok=true
-    if ip=$(dig +short "$DOMAIN" 2>/dev/null | head -1) && [ -n "$ip" ]; then
+    if ip=$(dig +short "$DOMAIN" 2>/dev/null | sed -n 1p) && [ -n "$ip" ]; then
         echo "  DNS: $DOMAIN -> $ip"
     else
         echo "  DNS: $DOMAIN does not resolve yet (David: grey-cloud A record)"; ok=false
     fi
     if command -v kanidmd >/dev/null; then
-        echo "  kanidmd: $(kanidmd version 2>/dev/null | head -1 || echo present)"
+        echo "  kanidmd: $(kanidmd version 2>/dev/null | sed -n 1p || echo present)"
     else
         echo "  kanidmd: not installed (step 3)"; ok=false
     fi

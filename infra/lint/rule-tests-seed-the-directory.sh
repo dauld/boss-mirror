@@ -154,7 +154,7 @@ rm -rf "$tmp/crate"
 
 # The second property. An authored name is read from the directory, not
 # typed here, so the fixture stays true as rules come and go.
-authored="$(find "$RULES_DIR" -maxdepth 1 -name '*.toml' -printf '%f\n' | LC_ALL=C sort | head -1 | sed 's/\.toml$//')"
+authored="$(find "$RULES_DIR" -maxdepth 1 -name '*.toml' -printf '%f\n' | LC_ALL=C sort | sed -n 1p | sed 's/\.toml$//')"
 [ -n "$authored" ] || { echo "$NAME: SELF-TEST FAILED — no rule files under $RULES_DIR" >&2; exit 1; }
 mkdir -p "$tmp/crate/tests"
 # The fixed shape, a synthetic rule, a template, and a comment: all pass.

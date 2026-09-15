@@ -38,7 +38,7 @@ if [[ ! -f "$GEN_PENDING" ]]; then
 fi
 
 marker_get() {
-    grep "^$1=" "$GEN_PENDING" | head -1 | cut -d= -f2-
+    grep "^$1=" "$GEN_PENDING" | sed -n 1p | cut -d= -f2-
 }
 
 SHA="$(marker_get sha || true)"

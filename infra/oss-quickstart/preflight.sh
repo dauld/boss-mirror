@@ -56,7 +56,7 @@ hint()    { printf '      → %s\n' "$*"; }
 port_owner() {
     local p="$1"
     if command -v ss >/dev/null 2>&1; then
-        ss -ltnH "( sport = :$p )" 2>/dev/null | awk '{print $4}' | head -1
+        ss -ltnH "( sport = :$p )" 2>/dev/null | awk '{print $4}' | sed -n 1p
     elif command -v lsof >/dev/null 2>&1; then
         lsof -nP -iTCP:"$p" -sTCP:LISTEN 2>/dev/null | awk 'NR==2{print $1" (pid "$2")"}'
     fi

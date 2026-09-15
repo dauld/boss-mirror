@@ -67,7 +67,7 @@ struct NoOpenCars;
 impl HelperResolver for NoOpenCars {
     fn call(&self, name: &str, _args: &[Value]) -> Result<Value, EvalError> {
         match name {
-            "open_car_exists" => Ok(Value::Bool(false)),
+            "open_job_exists" => Ok(Value::Bool(false)),
             other => Err(EvalError::UnknownHelper(other.to_string())),
         }
     }

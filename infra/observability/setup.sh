@@ -97,7 +97,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now boss-observability.service
 
 echo "==> Status:"
-sudo systemctl --no-pager status boss-observability.service | head -n 10 || true
+sudo systemctl --no-pager status boss-observability.service | sed -n '1,10p' || true
 
 echo
 echo "Dashboard listening on :${BOSS_HTTP_PORT}"

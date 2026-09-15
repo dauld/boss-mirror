@@ -37,7 +37,7 @@ check_count() {
     local tier="$1" file="$2" pattern="$3" label="$4"
     local actual claimed
     actual=$(find "crates/$tier" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
-    claimed=$(grep -oE "$pattern" "$file" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+    claimed=$(grep -oE "$pattern" "$file" 2>/dev/null | grep -oE '[0-9]+' | sed -n 1p)
     if [ -z "$claimed" ]; then
         echo "crate-counts-fresh: $label — no count found in $file (pattern moved?)"
         fails=$((fails + 1))
@@ -64,7 +64,7 @@ if [ "${1:-}" = "--self-test" ]; then
     mkdir -p "$tmp/crates/core/a" "$tmp/crates/core/b"
     printf 'blah (`crates/core/`, 99 crates). blah\n' > "$tmp/diagram.md"
     got=$(cd "$tmp" && actual=$(find crates/core -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ') \
-        && claimed=$(grep -oE '`crates/core/`, [0-9]+ crates' diagram.md | grep -oE '[0-9]+' | head -1) \
+        && claimed=$(grep -oE '`crates/core/`, [0-9]+ crates' diagram.md | grep -oE '[0-9]+' | sed -n 1p) \
         && [ "$claimed" != "$actual" ] && echo caught)
     rm -rf "$tmp"
     if [ "$got" = "caught" ]; then

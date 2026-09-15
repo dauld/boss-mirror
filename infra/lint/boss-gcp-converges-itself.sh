@@ -456,7 +456,7 @@ sum="$sum_skip"; sum_out="$tmp/units-skip.out"
     || sum_fail "one pair was missing and the summary does not say units_skipped=1"
 [ "$(jq -r '.units_installed // ""' "$sum_skip")" = "$((installed - 1))" ] \
     || sum_fail "units_installed did not drop by one when a pair was skipped"
-jq -r '.anomalies // ""' "$sum_skip" | grep -q "$skip_stem" \
+grep -q "$skip_stem" <<<"$(jq -r '.anomalies // ""' "$sum_skip")" \
     || sum_fail "the skipped unit ($skip_stem) is not NAMED in the summary's anomalies.
     'something was skipped' sends the reader back to the host, which is the cost this
     whole check removes."

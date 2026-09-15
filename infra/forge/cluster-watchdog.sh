@@ -21,7 +21,7 @@ STATE="${WATCHDOG_STATE:-$HOME/.boss-watchdog-dark}"
 LIMIT="${WATCHDOG_DARK_LIMIT:-3}"
 K="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
 
-live_commit=$(curl -s --max-time 8 "$JOBS_API/api/jobs/health" | sed -n 's/.*"commit" *: *"\([0-9a-f]\{7,\}\)".*/\1/p' | head -n 1 | cut -c1-7)
+live_commit=$(curl -s --max-time 8 "$JOBS_API/api/jobs/health" | sed -n 's/.*"commit" *: *"\([0-9a-f]\{7,\}\)".*/\1/p' | sed -n 1p | cut -c1-7)
 if [ -n "$live_commit" ]; then live=up; else live=down; fi
 image=$($K get deploy boss -n boss -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | sed 's/.*://')
 stamp=$(cat "$STAMP_FILE" 2>/dev/null || echo none)

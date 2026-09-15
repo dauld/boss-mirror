@@ -112,7 +112,7 @@ if [[ -n "$missing" ]]; then
         echo "  /api/$seg — fetched at:" >&2
         while IFS= read -r f; do
             strip_comments "$f" | grep -nE "['\"\`]/api/$seg\b" | sed "s|^|${f#"$repo"/}:|"
-        done < <(sources "$repo") | head -3 | sed 's|^|    |' >&2
+        done < <(sources "$repo") | sed -n '1,3p' | sed 's|^|    |' >&2
     done <<<"$missing"
     echo "  Add it to the gateway's proxy table (crates/core/boss-gateway/src/proxy.rs) or route it there; a fetch the gateway cannot answer is an empty panel in production." >&2
     exit 1

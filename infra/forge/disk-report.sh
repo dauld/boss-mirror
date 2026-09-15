@@ -47,7 +47,7 @@ hr "CI runner volume policy (act_runner container.valid_volumes)"
 for cfg in /etc/forgejo-runner/config.yaml /etc/act_runner/config.yaml /home/david/.config/forgejo-runner/config.yaml /var/lib/forgejo-runner/config.yaml; do
     if [ -r "$cfg" ] || sudo -n test -r "$cfg" 2>/dev/null; then
         say "-- $cfg --"
-        (sudo -n cat "$cfg" 2>/dev/null || cat "$cfg") | grep -nE 'valid_volumes|privileged|options:|docker_host|workdir_parent|^\s*-\s' | grep -vE 'token|secret' | head -20
+        (sudo -n cat "$cfg" 2>/dev/null || cat "$cfg") | grep -nE 'valid_volumes|privileged|options:|docker_host|workdir_parent|^\s*-\s' | grep -vE 'token|secret' | sed -n '1,20p'
         say "(only the volume/privilege lines are shown; tokens never)"
         break
     fi
@@ -56,11 +56,11 @@ done
 hr "system docker (CI jobs run here; sudo -n docker)"
 if sudo -n docker system df 2>/dev/null; then
     say "-- largest images --"
-    sudo -n docker images --format '{{.Size}}\t{{.Repository}}:{{.Tag}}\t{{.CreatedSince}}' 2>/dev/null | sort -h -r | head -25
+    sudo -n docker images --format '{{.Size}}\t{{.Repository}}:{{.Tag}}\t{{.CreatedSince}}' 2>/dev/null | sort -h -r | sed -n '1,25p'
     say "-- volumes --"
-    sudo -n docker system df -v 2>/dev/null | sed -n '/^Local Volumes space usage/,/^$/p' | head -40
+    sudo -n docker system df -v 2>/dev/null | sed -n '/^Local Volumes space usage/,/^$/p' | sed -n '1,40p'
     say "-- containers (all) --"
-    sudo -n docker ps -a --format '{{.Status}}\t{{.Size}}\t{{.Names}}' 2>/dev/null | head -25
+    sudo -n docker ps -a --format '{{.Status}}\t{{.Size}}\t{{.Names}}' 2>/dev/null | sed -n '1,25p'
 else
     say "system docker: not readable (sudo -n docker refused or no daemon)"
 fi
@@ -90,9 +90,9 @@ done | sort -h -r
 hr "forgejo data, one level down (if readable)"
 for base in /var/lib/forgejo /var/lib/gitea /opt/forgejo /srv/forgejo; do
     [ -d "$base" ] || continue
-    sudo -n du -xsh "$base"/* 2>/dev/null | sort -h -r | head -15 \
-        || du -xsh "$base"/* 2>/dev/null | sort -h -r | head -15
+    sudo -n du -xsh "$base"/* 2>/dev/null | sort -h -r | sed -n '1,15p' \
+        || du -xsh "$base"/* 2>/dev/null | sort -h -r | sed -n '1,15p'
 done
 
 hr "top-level /var/lib, largest first (sudo -n)"
-sudo -n du -xsh /var/lib/* 2>/dev/null | sort -h -r | head -15 || say "/var/lib: not readable without sudo"
+sudo -n du -xsh /var/lib/* 2>/dev/null | sort -h -r | sed -n '1,15p' || say "/var/lib: not readable without sudo"

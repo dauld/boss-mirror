@@ -41,7 +41,7 @@ if ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 
-if docker ps --format '{{.Names}}' | grep -qx "$NAME"; then
+if grep -qx "$NAME" <<<"$(docker ps --format '{{.Names}}')"; then
     say "$NAME already running"
 else
     docker rm -f "$NAME" >/dev/null 2>&1 || true

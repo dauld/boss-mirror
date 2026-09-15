@@ -78,7 +78,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now boss-cybernetics.service
 
 echo "==> Status:"
-sudo systemctl --no-pager status boss-cybernetics.service | head -n 10 || true
+sudo systemctl --no-pager status boss-cybernetics.service | sed -n '1,10p' || true
 
 echo
 echo "Introspection API listening on :${BOSS_HTTP_PORT}"

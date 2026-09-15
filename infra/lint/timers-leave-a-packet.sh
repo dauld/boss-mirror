@@ -103,8 +103,8 @@ for row in $rows; do
         problems=$((problems + 1)); continue
     fi
 
-    open_kind=$(grep -oE 'boss-maintenance-wrap\.sh [a-z-]+' "$unit" | awk '{print $2}' | head -1)
-    done_kind=$(grep -oE 'boss-step\.sh [a-z-]+' "$unit" | awk '{print $2}' | head -1)
+    open_kind=$(grep -oE 'boss-maintenance-wrap\.sh [a-z-]+' "$unit" | awk '{print $2}' | sed -n 1p)
+    done_kind=$(grep -oE 'boss-step\.sh [a-z-]+' "$unit" | awk '{print $2}' | sed -n 1p)
 
     if [ -z "$open_kind" ]; then
         echo "timers-leave-a-packet: $name runs with no Job — add an ExecStartPre calling" >&2
@@ -193,7 +193,7 @@ for helper in infra/boss-maintenance-wrap.sh infra/boss-step.sh; do
     # Comment lines are exempt: the refusal blocks quote the old
     # default to explain what they replaced, and a lint that cannot
     # tell code from prose would forbid documenting the fix.
-    if grep -v '^[[:space:]]*#' "$helper" 2>/dev/null | grep -q 'BOSS_JOBS_URL:-http'; then
+    if grep -q 'BOSS_JOBS_URL:-http' <<<"$(grep -v '^[[:space:]]*#' "$helper" 2>/dev/null)"; then
         echo "timers-leave-a-packet: $helper still defaults BOSS_JOBS_URL to a host." >&2
         echo "    A maintenance tool with no system of record configured must refuse," >&2
         echo "    not guess: a failed unit is noticed, a packet in the wrong database" >&2
@@ -214,16 +214,16 @@ verdict() { # <service result> <exit status> [explicit pairs...]
         BOSS_JOBS_URL=http://example.invalid \
         bash infra/boss-step.sh maintenance-selftest run "$@" 2>/dev/null | tr '\n' ' '
 }
-if ! verdict success 0 | grep -q 'result=ok'; then
+if ! grep -q 'result=ok' <<<"$(verdict success 0)"; then
     echo "timers-leave-a-packet: boss-step.sh does not record a successful run as result=ok" >&2
     problems=$((problems + 1))
 fi
-if ! verdict exit-code 1 | grep -q 'result=exit-code exit_status=1'; then
+if ! grep -q 'result=exit-code exit_status=1' <<<"$(verdict exit-code 1)"; then
     echo "timers-leave-a-packet: boss-step.sh does not record a failed run's service result" >&2
     echo "    and exit status (SERVICE_RESULT=exit-code EXIT_STATUS=1 gave: $(verdict exit-code 1))" >&2
     problems=$((problems + 1))
 fi
-if ! verdict exit-code 1 result=floor-unmet | grep -q 'result=floor-unmet'; then
+if ! grep -q 'result=floor-unmet' <<<"$(verdict exit-code 1 result=floor-unmet)"; then
     echo "timers-leave-a-packet: boss-step.sh overrides a caller's explicit result=" >&2
     problems=$((problems + 1))
 fi
@@ -304,7 +304,7 @@ rm -rf "$rs_dir"
 # opening ExecStartPre with `-`: the packet is visibility, never a
 # precondition (CLAUDE.md §Diagnosis, "an arm that needs the patient
 # is not an arm"; cluster-watchdog.service is the precedent).
-sor=$(grep -oE '^BOSS_JOBS_URL=http://[^ ]+' infra/deploy.env.example | head -1 | cut -d= -f2)
+sor=$(grep -oE '^BOSS_JOBS_URL=http://[^ ]+' infra/deploy.env.example | sed -n 1p | cut -d= -f2)
 if [ -z "$sor" ]; then
     echo "timers-leave-a-packet: infra/deploy.env.example names no BOSS_JOBS_URL — check 7 cannot know the system of record" >&2
     problems=$((problems + 1))
@@ -317,12 +317,12 @@ for row in $gcp_rows; do
     name="${row%%:*}"; sub="${row##*:}"
     [ "$sub" = "." ] && unit="infra/$name.service" || unit="infra/$sub/$name.service"
     [ -f "$unit" ] || continue   # check 1 already named it
-    kind=$(grep -oE 'boss-maintenance-wrap\.sh [a-z-]+' "$unit" | awk '{print $2}' | head -1)
+    kind=$(grep -oE 'boss-maintenance-wrap\.sh [a-z-]+' "$unit" | awk '{print $2}' | sed -n 1p)
     [ -n "$kind" ] || continue   # check 2 already named it
     grep -qxF -- "$kind" <<< "$baked" && continue          # local instance knows it
     grep -qxF -- "$kind" <<< "$cluster_kinds" && continue  # the cluster runs it; this copy is a vestige
-    pre=$(grep -E '^ExecStartPre=' "$unit" | grep 'boss-maintenance-wrap' | head -1)
-    post=$(grep -E '^ExecStopPost=' "$unit" | grep 'boss-step\.sh' | head -1)
+    pre=$(grep -E '^ExecStartPre=' "$unit" | grep 'boss-maintenance-wrap' | sed -n 1p)
+    post=$(grep -E '^ExecStopPost=' "$unit" | grep 'boss-step\.sh' | sed -n 1p)
     if ! printf '%s' "$pre" | grep -qF -- "BOSS_JOBS_URL=$sor " \
         || ! printf '%s' "$post" | grep -qF -- "BOSS_JOBS_URL=$sor "; then
         echo "timers-leave-a-packet: $name opens '$kind', a kind only the platform bundle defines," >&2
@@ -411,8 +411,8 @@ if [ -d "$CLUSTER_MANIFESTS" ]; then
                 ;;
         esac
 
-        open_kind=$(grep -oE 'boss-maintenance-wrap\.sh [a-z-]+' "$file" | awk '{print $2}' | head -1)
-        done_kind=$(grep -oE 'boss-step\.sh [a-z-]+' "$file" | awk '{print $2}' | head -1)
+        open_kind=$(grep -oE 'boss-maintenance-wrap\.sh [a-z-]+' "$file" | awk '{print $2}' | sed -n 1p)
+        done_kind=$(grep -oE 'boss-step\.sh [a-z-]+' "$file" | awk '{print $2}' | sed -n 1p)
 
         if [ -z "$open_kind" ]; then
             echo "timers-leave-a-packet: CronJob $cname ($file) runs with no packet." >&2
@@ -523,7 +523,7 @@ RULES_TOML="infra/dispatcher/rules/cadence-silence-sweep-daily.toml"
 # clock schedule and UNPARSED:<text> for a shape this cannot read.
 timer_interval_minutes() {
     local unit="$1" oua oc n
-    oua=$(grep -oE '^OnUnitActiveSec=[^ ]+' "$unit" 2>/dev/null | head -1 | cut -d= -f2)
+    oua=$(grep -oE '^OnUnitActiveSec=[^ ]+' "$unit" 2>/dev/null | sed -n 1p | cut -d= -f2)
     if [ -n "$oua" ]; then
         case "$oua" in
             *min) n="${oua%min}"; [ "$n" -gt 0 ] 2>/dev/null && { echo "$n"; return; } ;;
@@ -532,7 +532,7 @@ timer_interval_minutes() {
         esac
         echo "UNPARSED:OnUnitActiveSec=$oua"; return
     fi
-    oc=$(grep -E '^OnCalendar=' "$unit" 2>/dev/null | head -1 | cut -d= -f2-)
+    oc=$(grep -E '^OnCalendar=' "$unit" 2>/dev/null | sed -n 1p | cut -d= -f2-)
     if [ -z "$oc" ]; then echo NONE; return; fi
     case "$oc" in
         hourly)  echo 60 ;;
@@ -569,7 +569,7 @@ for row in $rows; do
     else unit="infra/$sub/$name.service"; timer="infra/$sub/$name.timer"; fi
     [ -f "$unit" ] || continue
     [ -f "$timer" ] || continue
-    kind=$(grep -oE 'boss-maintenance-wrap\.sh [a-z-]+' "$unit" | awk '{print $2}' | head -1)
+    kind=$(grep -oE 'boss-maintenance-wrap\.sh [a-z-]+' "$unit" | awk '{print $2}' | sed -n 1p)
     [ -n "$kind" ] || continue
     mins=$(timer_interval_minutes "$timer")
     case "$mins" in

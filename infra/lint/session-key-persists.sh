@@ -62,7 +62,7 @@ fi
 line=${entry%%:*}
 
 # (1) A Secret here is read as a filename, not as a key.
-if sed -n "${line},$((line + 2))p" "$MANIFEST" | grep -qE 'valueFrom|secretKeyRef'; then
+if grep -qE 'valueFrom|secretKeyRef' <<<"$(sed -n "${line},$((line + 2))p" "$MANIFEST")"; then
     echo "session-key-persists: $VAR is supplied from a Secret." >&2
     echo "    It is a PATH, not a key. A secret value lands as a filename," >&2
     echo "    the file does not exist, and the gateway mints a new signing" >&2
@@ -104,7 +104,7 @@ for v in $persisted_volumes; do
     # here), and a whitespace strip across a two-line stream deletes the
     # newline and welds the paths into one nonexistent directory.
     p=$(grep -oE "\{name:[[:space:]]*$v,[[:space:]]*mountPath:[[:space:]]*[^,}]+" "$MANIFEST" \
-        | sed -E 's/.*mountPath:[[:space:]]*//' | head -1 | tr -d "[:space:]")
+        | sed -E 's/.*mountPath:[[:space:]]*//' | sed -n 1p | tr -d "[:space:]")
     [ -n "$p" ] && persisted="$persisted $p"
 done
 

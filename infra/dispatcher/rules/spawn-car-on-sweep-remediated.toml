@@ -1,8 +1,11 @@
 # 2. WHAT A SWEEP PRODUCES. A sweep that concluded the TREE must change
-# spawns a ship-a-change car carrying a `backlog_item` edge back to the
-# sweep, so the car closes its own sweep on merge through the existing
-# feedback-obligation machinery. That is what makes the dock
-# self-filling rather than hand-loaded.
+# files a `backlog-item` — a claim for an operator to triage — about the
+# area the sweep watches, with the sweep it came from on it as
+# `for_sweep`. Triage decides `build`, and the builder's car then carries
+# THIS item as its `backlog_item` edge (`boss gate --park-backlog-item`),
+# so the landed car closes the item through the existing
+# feedback-obligation machinery (`complete-feedback-branch-on-car-merged`).
+# That is what makes the backlog self-filling rather than hand-loaded.
 #
 # Fires on the sweep's TERMINAL OUTCOME, not on the `remediate` step
 # completing: the step-done topic is `step.done.<step kind>` and
@@ -10,7 +13,7 @@
 # every task step in every workflow and lean on a `when` to discard
 # almost all of them. The outcome is the more honest trigger anyway.
 #
-# v3 — THE OUTCOME IT FIRES ON CHANGED, AND THAT IS THE WHOLE FIX.
+# v3 — THE OUTCOME IT FIRES ON CHANGED, AND THAT WAS THE WHOLE FIX.
 # Backlog 21edde87, measured 2026-09-11. Through v2 this fired on
 # `outcome = "remediated"`, which answers "did something have to change"
 # and was being read as "does the TREE have to change". Those are not the
@@ -28,15 +31,50 @@
 # move.
 #
 # So the `maintenance-sweep` protocol SAYS which kind of remediation it
-# was (the version this car writes down; live stood at v2 on 2026-09-11,
-# so publishing makes it v3), as a
-# required `remediation_kind` field on its `remediate` step, and routes
-# to a terminal per answer: `remediated` for operational, `change-needed`
-# for one that needs the tree changed. This rule keys on the latter. The
-# field is the point — a rule that has to be right about intent will be
-# wrong — the same argument migration 145 makes for the doc-status
-# sweep — and the rule still reads only `outcome`, the field the
-# closed-packet payload has carried since 121.
+# was, as a required `remediation_kind` field on its `remediate` step,
+# and routes to a terminal per answer: `remediated` for operational,
+# `change-needed` for one that needs the tree changed. This rule keys on
+# the latter. The field is the point — a rule that has to be right about
+# intent will be wrong — the same argument migration 145 makes for the
+# doc-status sweep — and the rule still reads only `outcome`, the field
+# the closed-packet payload has carried since 121.
+#
+# v4 — WHAT IT SPAWNS CHANGED. Backlog 655c5917, measured 2026-09-15
+# against the system of record. This rule has filed 15 packets in its
+# life, all `ship-a-change` cars, all with `branch: null` at birth — a
+# car is a change IN FLIGHT and needs a branch this rule cannot cut.
+# Twelve were abandoned. Read their reasons and every one is a TRIAGE
+# disposition, not a delivery outcome: three "the remediation was
+# operational and is on the sweep's own step" (v3's defect), one
+# "satisfied by cb019e2e" (a duplicate), one "overtaken by delivery"
+# (stale), one "the class lives outside the repo" (decline), one
+# "already remediated in the sweep", and five with NO reason at all,
+# because `ship-a-change` has one word for all of them — `abandoned` —
+# and requires nothing of it. The three that merged (bea0c19a,
+# cb019e2e, a5d14977) were adopted by a person who read the sweep,
+# decided to build, and cut the branch: triage, done by hand, on a car
+# that existed before the branch did. The v3 trigger stops the first
+# class; it does not change the shape, and the shape is wrong for the
+# rest. Since 2026-09-03 a car is filed ON GREEN by the gate with its
+# receipt aboard (`auto-park-on-gate-green`); a car minted before any
+# branch exists is a foreign object to that dock.
+#
+# `backlog-item` is the protocol whose open step IS the decision these
+# reasons were making: `triage` requires a `disposition` from
+# verify|design|build|duplicate|stale|decline and the `evidence` behind
+# it. So this files one. The item's SUBJECT is the sweep's target — the
+# Workflow's own words: "the Subject is the area it touches, so what is
+# outstanding against it answers from Subject history" — which is also
+# what the dedup keys on, through the generic `open_job_exists` every
+# other sweep spawner already uses; the one-kind `open_car_exists`
+# helper retired with the spawn it guarded.
+#
+# THE CLAIM POINTS AT THE FINDINGS RATHER THAN CARRYING THEM. The close
+# payload carries id/closed_on/kind/outcome/title/subject_id and no step
+# metadata, and the arg language is literals, identifiers and helper
+# calls — no concatenation — so `findings`, `what_changed` and
+# `remediation_kind` cannot ride here verbatim. They live on the sweep
+# the item names in `for_sweep`, one read away, and the claim says so.
 #
 # THE TWO HALVES GO LIVE SEPARATELY, AND NEITHER ORDER CAN MIS-SPAWN.
 # This file is live one converge after merge (the dispatcher's boot seed
@@ -45,40 +83,43 @@
 # infra/platform/workflows/maintenance-sweep.toml`, because the platform
 # seed is insert-if-missing and never touches a kind that already has an
 # active row — a file edit alone reaches a FRESH database and nothing
-# else. Whichever lands first, the window's behaviour is the spawn being
-# OFF: an old sweep version closes `remediated` and this rule no longer
-# matches it, or a new sweep version closes `change-needed` and the old
-# rule does not. Off is the right answer for 19 findings in 21; for the
-# other two the sweep's `what_changed` still records the finding and a
-# human files it, which is what happened twice before this existed. What
-# neither order can produce is a spawn for work already done, so there is
-# no unsafe sequence here — only a short window where a code-change
-# finding is not auto-filed.
+# else. On 2026-09-15 the live lineage still stood at v2 and no sweep had
+# ever closed `change-needed`, so v3 had never fired and the spawn was
+# OFF; publishing turns it on, and what it turns on is this. Whichever
+# lands first, the window's behaviour is the spawn being OFF: an old
+# sweep version closes `remediated` and this rule no longer matches it.
+# Off is the right answer for 19 findings in 21; for the other two the
+# sweep's `what_changed` still records the finding and a human files it,
+# which is what happened twice before this existed.
 #
 # IN-FLIGHT SWEEPS KEEP THEIR ADMITTED VERSION and the old behaviour; a
-# sweep's whole
-# life is one day, so that window closes on its own.
+# sweep's whole life is one day, so that window closes on its own.
 [[rule]]
 name = "spawn-car-on-sweep-remediated"
 why = """
 A CROSS-PROTOCOL REACTOR: a `maintenance-sweep` closing `change-needed`
-admits a `ship-a-change` car carrying a `backlog_item` edge back to
-the sweep, so the car closes its own sweep on merge through the
-existing feedback-obligation machinery. Two protocols, so no single
-Workflow definition can declare it — and it is what makes the dock
-self-filling rather than hand-loaded. Fires on the TERMINAL OUTCOME
-rather than the remediate step, whose kind is a plain `task`. The
-outcome it waits for is the sweep's own answer to "does this need the
-tree changed", never this rule's guess at it: through v2 it fired on
-`remediated` and filed 19 undeliverable packets in 21 (21edde87).
+files a `backlog-item` about the sweep's target with the sweep on it as
+`for_sweep`, so the finding reaches an operator's triage as a CLAIM and
+the builder's car — filed on green with this item as its `backlog_item`
+— closes the item through the existing feedback-obligation machinery.
+Two protocols, so no single Workflow definition can declare it — and it
+is what makes the backlog self-filling rather than hand-loaded. Fires on
+the TERMINAL OUTCOME rather than the remediate step, whose kind is a
+plain `task`. The outcome it waits for is the sweep's own answer to
+"does this need the tree changed", never this rule's guess at it:
+through v2 it fired on `remediated` and filed 19 undeliverable packets
+in 21 (21edde87). Through v3 what it filed was a `ship-a-change` car
+with no branch: 15 filed, 12 abandoned with triage reasons `ship-a-change`
+has no vocabulary for, 3 adopted by hand (655c5917).
 """
-# v2 was migration 148's guarded spawn; v3 moves the trigger outcome.
+# v2 was migration 148's guarded spawn; v3 moved the trigger outcome;
+# v4 files a backlog-item instead of a car. The name keeps its history.
 # The seed publishes the version this file declares and retires the
 # incumbent (infra/dispatcher/rules/README.md) — no migration writes
 # rules, and `no-migration-writes-a-dispatcher-rule.sh` refuses one.
-version = 3
+version = 4
 on_event = "jobs.job.closed"
-when = "kind = \"maintenance-sweep\" AND outcome = \"change-needed\" AND NOT open_car_exists(subject_id)"
+when = "kind = \"maintenance-sweep\" AND outcome = \"change-needed\" AND NOT open_job_exists(\"backlog-item\", subject_id)"
 [[rule.do]]
 handler = "jobs.spawn"
-args = { kind = "\"ship-a-change\"", subject_kind = "\"custom\"", subject = "id", title = "title", "metadata.backlog_item" = "id", "metadata.sweep_target" = "subject_id" }
+args = { kind = "\"backlog-item\"", subject_kind = "\"custom\"", subject = "subject_id", title = "title", "metadata.for_sweep" = "id", "metadata.claim" = "\"A maintenance sweep closed change-needed: its remediate step recorded remediation_kind = code-change, so the tree must change and the sweep cannot change it. The findings, what_changed and verified live on the sweep named in metadata.for_sweep, one read away. This item is the claim to triage, not a car in flight: triage decides build (a builder then parks the car with --park-backlog-item on this item), design, decline, duplicate or stale.\"" }

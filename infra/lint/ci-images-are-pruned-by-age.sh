@@ -191,7 +191,7 @@ grep -q 'landed-train-shas.lib.sh' "$sweep" \
 
 # Code lines only: both phrases also appear in the prose above them, and
 # a check that reads a comment as the mechanism is no check at all.
-code_line() { grep -n "$1" "$sweep" | grep -vE '^[0-9]+:[[:space:]]*#' | head -1 | cut -d: -f1; }
+code_line() { grep -n "$1" "$sweep" | grep -vE '^[0-9]+:[[:space:]]*#' | sed -n 1p | cut -d: -f1; }
 prune_line=$(code_line 'prune_ci_images "')
 floor_line=$(code_line 'nothing to do')
 if [ -z "$prune_line" ] || [ -z "$floor_line" ]; then

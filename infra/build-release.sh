@@ -79,7 +79,7 @@ if [[ "${1:-}" == "--verify" ]]; then
     for row in "${GATED[@]}"; do
         IFS=$'\t' read -r _ bin _ <<<"$row"
         [[ -f "$RELEASE_DIR/$bin" ]] || continue
-        if ! strings "$RELEASE_DIR/$bin" 2>/dev/null | grep -q "sqlx"; then
+        if ! grep -qa "sqlx" "$RELEASE_DIR/$bin" 2>/dev/null; then
             echo "    WARN: $bin does not link sqlx — may be an in-memory build" >&2
             rc=1
         fi

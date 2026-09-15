@@ -121,8 +121,8 @@ env -i PATH="$PATH" BOSS_CONVERGE_HOLD="$tmp/hold" bash "$repo/infra/forge/conve
 env -i PATH="$PATH" BOSS_CONVERGE_HOLD="$tmp/hold" bash "$repo/infra/forge/converge-hold.sh" release >/dev/null || fail "release needs HOME"
 env -i PATH="$PATH" bash -n "$repo/infra/forge/rollback-to.sh" || fail "rollback-to.sh does not parse"
 # Code lines only — a comment may name $HOME to say why it is not used.
-grep -vE '^\s*#' "$repo/infra/forge/rollback-to.sh" | grep -qE '\$HOME' && fail "rollback-to.sh still reads \$HOME"
-grep -vE '^\s*#' "$repo/infra/forge/converge-hold.sh" | grep -qE '\$HOME' && fail "converge-hold.sh still reads \$HOME"
+grep -qE '\$HOME' <<<"$(grep -vE '^\s*#' "$repo/infra/forge/rollback-to.sh")" && fail "rollback-to.sh still reads \$HOME"
+grep -qE '\$HOME' <<<"$(grep -vE '^\s*#' "$repo/infra/forge/converge-hold.sh")" && fail "converge-hold.sh still reads \$HOME"
 bash "$repo/infra/forge/converge-hold.sh" hold learning-the-new-runner >/dev/null || fail "hold failed"
 [[ "$(<"$tmp/hold")" == "learning-the-new-runner" ]] || fail "the hold file does not carry the reason"
 # shellcheck source=/dev/null
@@ -138,8 +138,8 @@ bash "$repo/infra/forge/converge-hold.sh" hold 2>/dev/null && fail "a hold with 
 # that NAMES THE PATH — never a silent skip, never the value.
 pub="$repo/infra/forge/publish-github-pr.sh"
 env -i PATH="$PATH" bash -n "$pub" || fail "publish-github-pr.sh does not parse"
-grep -vE '^\s*#' "$pub" | grep -qE '\$HOME' && fail "publish-github-pr.sh reads \$HOME (the ops runner has none)"
-grep -vE '^\s*#' "$pub" | grep -qE '^\s*set .*-x|set -x' && fail "publish-github-pr.sh traces (set -x) — a trace would print the token's environment"
+grep -qE '\$HOME' <<<"$(grep -vE '^\s*#' "$pub")" && fail "publish-github-pr.sh reads \$HOME (the ops runner has none)"
+grep -qE '^\s*set .*-x|set -x' <<<"$(grep -vE '^\s*#' "$pub")" && fail "publish-github-pr.sh traces (set -x) — a trace would print the token's environment"
 mkdir -p "$tmp/bin" "$tmp/state" "$tmp/etc"
 # --check only asks that gh/jq/curl EXIST (this box may lack jq; the
 # forge and the gate image have it), so stubs stand in for all three.
@@ -213,7 +213,7 @@ EOF
     out=$(run_runner) || fail "the runner failed on publish-github-pr --check: $out"
     [[ -f "$tmp/put.json" ]] || fail "the runner completed no step for --check: $out"
     [[ "$(jq -r .metadata.disposition "$tmp/put.json")" == answered ]] || fail "--check was not answered through the runner: $(cat "$tmp/put.json") / $out"
-    jq -r .metadata.output "$tmp/put.json" | grep -q -- '--check ok' || fail "--check through the runner did not report ok: $(cat "$tmp/put.json")"
+    grep -q -- '--check ok' <<<"$(jq -r .metadata.output "$tmp/put.json")" || fail "--check through the runner did not report ok: $(cat "$tmp/put.json")"
     rm -f "$tmp/put.json"; packet '["--force"]'
     out=$(run_runner) || fail "the runner failed refusing --force: $out"
     [[ "$(jq -r .metadata.disposition "$tmp/put.json")" == refused ]] || fail "--force was not refused: $(cat "$tmp/put.json")"
@@ -233,8 +233,8 @@ dob="$repo/infra/forge/delete-orphan-object.sh"
 der="$repo/infra/cluster/undeclared-objects.sh"
 env -i PATH="$PATH" bash -n "$dob" || fail "delete-orphan-object.sh does not parse"
 env -i PATH="$PATH" bash -n "$der" || fail "undeclared-objects.sh does not parse"
-grep -vE '^\s*#' "$dob" | grep -qE '\$HOME' && fail "delete-orphan-object.sh reads \$HOME (the ops runner has none)"
-grep -vE '^\s*#' "$der" | grep -qE '\$HOME' && fail "undeclared-objects.sh reads \$HOME (the ops runner has none)"
+grep -qE '\$HOME' <<<"$(grep -vE '^\s*#' "$dob")" && fail "delete-orphan-object.sh reads \$HOME (the ops runner has none)"
+grep -qE '\$HOME' <<<"$(grep -vE '^\s*#' "$der")" && fail "undeclared-objects.sh reads \$HOME (the ops runner has none)"
 # EVERY git CALL IN THE VERB GOES THROUGH THE OWNER.
 #
 # The ops-runner executes verbs as root and the forge checkout belongs to a

@@ -57,7 +57,7 @@ if ! sudo -u "$DEV_USER" -i bash -c 'command -v bun' >/dev/null 2>&1; then
 fi
 
 log "== 3 — Postgres role + databases =="
-if ! sudo -u postgres psql -d postgres -tc "SELECT 1 FROM pg_roles WHERE rolname='boss'" | grep -q 1; then
+if ! grep -q 1 <<<"$(sudo -u postgres psql -d postgres -tc "SELECT 1 FROM pg_roles WHERE rolname='boss'")"; then
     sudo -u postgres psql -d postgres -c \
         "CREATE ROLE boss WITH LOGIN SUPERUSER PASSWORD 'boss'"
 fi

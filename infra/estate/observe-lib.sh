@@ -70,7 +70,7 @@ spool_put() {
     [ -n "$at" ] || at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     printf '%s' "$1" > "$SPOOL_DIR/$at.json"
     while [ "$(spool_count)" -gt "$SPOOL_MAX" ]; do
-        oldest=$(ls -1 "$SPOOL_DIR" | grep '\.json$' | sort | head -n 1)
+        oldest=$(ls -1 "$SPOOL_DIR" | grep '\.json$' | sort | sed -n 1p)
         rm -f "$SPOOL_DIR/$oldest"
         echo "spool: over $SPOOL_MAX waiting — dropped the oldest ($oldest)"
     done
