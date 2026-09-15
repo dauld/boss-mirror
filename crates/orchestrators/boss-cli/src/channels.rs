@@ -366,6 +366,47 @@ impl DeliveryChannel {
             DeliveryChannel::Infra => "infra",
         }
     }
+
+    /// The channel a stamped label names — the inverse of [`label`],
+    /// for reading a car's `metadata.delivery_channel` back. `None` for
+    /// a label this order does not know, so the caller chooses the
+    /// default rather than this fn guessing one.
+    ///
+    /// [`label`]: DeliveryChannel::label
+    pub(crate) fn parse(label: &str) -> Option<DeliveryChannel> {
+        match label {
+            "data" => Some(DeliveryChannel::Data),
+            "config" => Some(DeliveryChannel::Config),
+            "software" => Some(DeliveryChannel::Software),
+            "infra" => Some(DeliveryChannel::Infra),
+            _ => None,
+        }
+    }
+}
+
+/// The channel a TRAIN ships on: the heaviest of its cars', in the one
+/// order a mixed car already resolves on (data < config < software <
+/// infra — the enum's derived `Ord`). A car with no stamp, or a stamp
+/// this order does not know, reads as software — the car's own default
+/// (`yard.ts::deliveryChannelOf`), and the safe direction: a data train
+/// that was really software would be read as landed before its image
+/// rolled. An empty consist is software for the same reason.
+///
+/// Stamped on the train as `metadata.delivery_channel` at board, beside
+/// `boarded_jobs`, so a reader can tell a config-only train from a
+/// software one without opening every car (cffef553, 2026-09-15).
+pub(crate) fn train_channel<'a>(cars: impl IntoIterator<Item = &'a Value>) -> &'static str {
+    cars.into_iter()
+        .map(|car| {
+            car.get("metadata")
+                .and_then(|m| m.get("delivery_channel"))
+                .and_then(Value::as_str)
+                .and_then(DeliveryChannel::parse)
+                .unwrap_or(DeliveryChannel::Software)
+        })
+        .max()
+        .unwrap_or(DeliveryChannel::Software)
+        .label()
 }
 
 /// Weight one path. Higher is heavier to deliver. An unknown path is
@@ -625,6 +666,46 @@ mod tests {
     #[test]
     fn an_empty_change_is_data() {
         assert_eq!(delivery_channel(&[]), DeliveryChannel::Data);
+    }
+
+    // ---- the train's channel: the heaviest of its cars' (cffef553) ----
+
+    /// A consist of cars stamped with the given labels (`None` = a car
+    /// parked before the stamp existed), folded to the train's channel.
+    fn train_of(stamps: &[Option<&str>]) -> &'static str {
+        let cars: Vec<Value> = stamps
+            .iter()
+            .map(|s| match s {
+                Some(ch) => json!({ "id": "car", "metadata": { "delivery_channel": ch } }),
+                None => json!({ "id": "car", "metadata": {} }),
+            })
+            .collect();
+        train_channel(cars.iter())
+    }
+
+    #[test]
+    fn a_train_of_data_cars_is_a_data_train() {
+        assert_eq!(train_of(&[Some("data"), Some("data")]), "data");
+    }
+
+    #[test]
+    fn a_mixed_train_ships_on_its_heaviest_car() {
+        // A registry row beside a crate still rides the image roll.
+        assert_eq!(train_of(&[Some("data"), Some("software")]), "software");
+        // data + config → config; config + infra → infra: the SAME order
+        // a mixed car resolves on, not a second one.
+        assert_eq!(train_of(&[Some("config"), Some("data")]), "config");
+        assert_eq!(train_of(&[Some("infra"), Some("config")]), "infra");
+    }
+
+    #[test]
+    fn an_unstamped_car_reads_as_software() {
+        // A car parked before the gate stamped channels, or one whose
+        // stamp names nothing this order knows, is the car's own default:
+        // software — mis-routing LIGHT is the dangerous direction.
+        assert_eq!(train_of(&[Some("data"), None]), "software");
+        assert_eq!(train_of(&[Some("data"), Some("firmware")]), "software");
+        assert_eq!(train_of(&[]), "software");
     }
 
     /// A LIMIT IS NOT A FILTER (memory: a-limit-is-not-a-filter). Once

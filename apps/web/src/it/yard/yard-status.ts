@@ -13,6 +13,7 @@
 // included, computed server-side from the system of record.
 
 import { fetchRemote, type Remote } from '../../data/remote';
+import { DELIVERY_CHANNELS, type DeliveryChannel } from './yard';
 
 // ---------------------------------------------------------------------
 // Wire types — the shape of GET /api/yard/status. Parsed once, below.
@@ -71,6 +72,13 @@ export type TrainStatus = Readonly<{
   ci_result: string | null;
   pr_url: string | null;
   car_count: number;
+  /** How this train ships — the heaviest of its cars' channels, stamped
+   *  by the conductor at board (`metadata.delivery_channel`, cffef553).
+   *  Named on the card: 'data train · 1 car'. Null for a train boarded
+   *  before the stamp existed, or a server that does not send it —
+   *  drawn as nothing, never guessed: unlike a car, an old train has no
+   *  default worth asserting. */
+  channel: DeliveryChannel | null;
   /** When the train boarded (RFC3339, the collect step's stamp). Null
    *  on a server that does not send it; the floor then reads the
    *  boarding minute off the title. */
@@ -444,9 +452,18 @@ function parseTrain(raw: unknown): TrainStatus {
     ci_result: typeof o.ci_result === 'string' ? o.ci_result : null,
     pr_url: typeof o.pr_url === 'string' ? o.pr_url : null,
     car_count: Number(o.car_count ?? 0),
+    channel: parseChannel(o.channel),
     boarded_at: typeof o.boarded_at === 'string' ? o.boarded_at : null,
     eta: parseEta(o.eta),
   };
+}
+
+/** The train's channel when it names one of the four sidings; null
+ *  otherwise. Deliberately NOT `deliveryChannelOf` (which lands an
+ *  unknown car on software): a car without a stamp still ships, but a
+ *  train without one is simply older than the stamp. */
+function parseChannel(v: unknown): DeliveryChannel | null {
+  return (DELIVERY_CHANNELS as readonly unknown[]).includes(v) ? (v as DeliveryChannel) : null;
 }
 
 function parseDockCar(raw: unknown): DockCar {

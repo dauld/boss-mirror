@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   ARRIVALS_DRAWN,
   NO_FEEDS,
@@ -777,7 +779,7 @@ describe('the track — wagons behind a locomotive', () => {
       }),
       statusOf({
         trains: [
-          { id: 't1', title: 'PR train 2026-09-07 23:37', phase: 'awaiting-ci', at_step: 'CI', block: { kind: 'ci-red', checks: 'clippy' }, ci_result: 'failing', pr_url: null, car_count: 1, boarded_at: null, eta: { kind: 'unknown', reason: 'not under test' } },
+          { id: 't1', title: 'PR train 2026-09-07 23:37', phase: 'awaiting-ci', at_step: 'CI', block: { kind: 'ci-red', checks: 'clippy' }, ci_result: 'failing', pr_url: null, car_count: 1, channel: null, boarded_at: null, eta: { kind: 'unknown', reason: 'not under test' } },
         ],
       }),
       NOW,
@@ -796,12 +798,39 @@ describe('the track — wagons behind a locomotive', () => {
     expect(s.boardRows[0]?.where).toBe('Track · PR train 2026-09-07 23:37 at PR');
   });
 
+  // The conductor stamps the train's channel — the heaviest of its
+  // cars' — at board, and the server row carries it (cffef553,
+  // 2026-09-15). The locomotive names it ('data train') so a reader can
+  // tell a config-only train from a software one without opening every
+  // car. An old train, or no server row, is null: drawn as nothing.
+  test("a locomotive carries the server row's channel; an unstamped train carries none", () => {
+    const row = (channel: 'data' | null) =>
+      ({ id: 't1', title: 'PR train 2026-09-07 23:37', phase: 'awaiting-ci', at_step: 'CI', block: null, ci_result: null, pr_url: null, car_count: 2, channel, boarded_at: null, eta: { kind: 'unknown', reason: 'not under test' } }) as const;
+    const yard = yardOf({ inFlight: [trainRow('t1', 'BOARDED', { cars: [car('c1', 'fix/a'), car('c2', 'fix/b')] })] });
+    expect(scene(yard, statusOf({ trains: [row('data')] }), NOW).locos[0]?.channel).toBe('data');
+    expect(scene(yard, statusOf({ trains: [row(null)] }), NOW).locos[0]?.channel).toBeNull();
+    expect(scene(yard, statusOf(), NOW).locos[0]?.channel).toBeNull();
+  });
+
+  // The two render sites, pinned at source in the yard-page-*.test.ts
+  // idiom: the map's locomotive names its channel off the loco, the
+  // page's train card off the server row — both as '<channel> train',
+  // both guarded so an unstamped train draws nothing.
+  test("the locomotive and the train card name the channel as '<channel> train', guarded", () => {
+    const strip = (s: string) => s.replace(/<!--[\s\S]*?-->/g, '');
+    const map = strip(readFileSync(join(import.meta.dir, 'YardMap.svelte'), 'utf8'));
+    expect(map).toMatch(/\{#if l\.channel\}\s*<text[^>]*class="plate">\{l\.channel\} train<\/text>/);
+    const page = strip(readFileSync(join(import.meta.dir, 'YardPage.svelte'), 'utf8'));
+    expect(page).toMatch(/\{@const channel = serverTrainById\.get\(t\.id\)\?\.channel \?\? null\}/);
+    expect(page).toMatch(/\{#if channel\}\s*<span class="yard-chip"[^>]*>\{channel\} train<\/span>/);
+  });
+
   test("a car aboard is 'since' the server's boarded_at, else the conductor's boarding minute read off the train title", () => {
     expect(wagon(aboard('BOARDED'), 'c1').since).toBe('2026-09-07T23:37:00.000Z');
     const served = scene(
       yardOf({ inFlight: [trainRow('t1', 'BOARDED', { cars: [car('c1', 'fix/a')] })] }),
       statusOf({
-        trains: [{ id: 't1', title: 'PR train 2026-09-07 23:37', phase: 'awaiting-ci', at_step: 'ci', block: null, ci_result: null, pr_url: null, car_count: 1, boarded_at: '2026-09-07T23:37:12Z', eta: { kind: 'unknown', reason: 'not under test' } }],
+        trains: [{ id: 't1', title: 'PR train 2026-09-07 23:37', phase: 'awaiting-ci', at_step: 'ci', block: null, ci_result: null, pr_url: null, car_count: 1, channel: null, boarded_at: '2026-09-07T23:37:12Z', eta: { kind: 'unknown', reason: 'not under test' } }],
       }),
       NOW,
     );

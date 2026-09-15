@@ -518,11 +518,18 @@
           style="transform: translate({locoX(l)}px, {mainY - 2}px)"
           role="button"
           tabindex="0"
-          aria-label="{l.title}{l.blocked ? ` — ${l.blocked}` : ''}"
+          aria-label="{l.title}{l.channel ? ` — ${l.channel} train` : ''}{l.blocked ? ` — ${l.blocked}` : ''}"
           onclick={pick(`train:${l.id}`)}
           onkeydown={pickKey(`train:${l.id}`)}
           transition:fade={{ duration: 500 }}>
-          <title>{l.title}{l.n !== null ? ` — PR #${l.n}` : ''}</title>
+          <title>{l.title}{l.channel ? ` — ${l.channel} train` : ''}{l.n !== null ? ` — PR #${l.n}` : ''}</title>
+          <!-- THE CHANNEL PLATE — how this train ships, the heaviest of its
+               cars' (the conductor's stamp at board, cffef553). A train
+               boarded before the stamp carries no plate: nothing drawn,
+               never 'software' guessed. -->
+          {#if l.channel}
+            <text x="6" y="-26" class="plate">{l.channel} train</text>
+          {/if}
           <rect x="0" y="-12" width="44" height="24" class="body" />
           <rect x="30" y="-20" width="12" height="8" class="body" />
           <circle cx="42" cy="-2" r="3" class="lamp-f" />
@@ -634,6 +641,9 @@
     stroke: var(--signal, #5fd4a8); stroke-width: 1.5;
   }
   .loco text { fill: var(--fog, #e8ecef); font-size: 9px; letter-spacing: 0; text-transform: none; }
+  /* The channel plate rides above the cab in the signals' muted ink — a
+     reading, not livery. */
+  .loco text.plate { fill: var(--static, #7a838c); letter-spacing: 0.04em; }
 
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
   @keyframes blink { 50% { opacity: 0.25; } }

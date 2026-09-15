@@ -9029,10 +9029,19 @@ impl Conductor {
             .map(|(j, _, _)| job_id(j).map(str::to_string))
             .collect::<Result<_>>()?;
         let skipped_branches: Vec<String> = skipped.iter().map(|(_, b)| b.clone()).collect();
+        // THE TRAIN'S CHANNEL — the heaviest of its cars' (data < config
+        // < software < infra, the order `channels.rs` resolves a mixed
+        // car on), stamped here beside `boarded_jobs` so a reader can
+        // tell a config-only train from a software one without opening
+        // every car, and the yard can name it ('data train · 1 car').
+        // A car with no stamp reads as software, its own default
+        // (cffef553, 2026-09-15).
+        let train_channel = crate::channels::train_channel(boarded.iter().map(|(j, _, _)| j));
         self.merge_job_metadata(
             &train_id,
             vec![
                 ("boarded_jobs", json!(boarded_ids)),
+                ("delivery_channel", json!(train_channel)),
                 ("skipped_branches", json!(skipped_branches)),
                 // The train's own record of who it left behind and
                 // why — the arrival report reads THIS, because a

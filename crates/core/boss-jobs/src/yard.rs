@@ -230,6 +230,16 @@ pub struct TrainStatus {
     pub pr_url: Option<String>,
     /// How many cars boarded (from `metadata.boarded_jobs`).
     pub car_count: usize,
+    /// How this train ships — `metadata.delivery_channel`, the heaviest
+    /// of its cars' (data < config < software < infra), stamped by the
+    /// conductor at board beside `boarded_jobs` (cffef553, 2026-09-15).
+    /// The yard names it: 'data train · 1 car'. `None` for a train
+    /// boarded before the stamp existed, or a stamp naming no channel
+    /// the order knows — drawn as nothing, never guessed into software:
+    /// unlike a car, an old train has no default worth asserting.
+    /// `#[serde(default)]` so an older payload still deserializes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
     /// When the cars boarded — the `collect` step's `completed_at`, the
     /// conductor's own RFC3339 stamp — so the page can say "aboard
     /// since". `None` until the collect completes, or when it carries
@@ -410,9 +420,22 @@ pub fn train_status(
             .and_then(|s| meta_str(&s.metadata, "pr_url"))
             .map(str::to_string),
         car_count,
+        channel: train_channel(&job.metadata).map(str::to_string),
         boarded_at: boarded_at(steps).map(str::to_string),
         eta: train_eta(steps, eta, now),
     }
+}
+
+/// The four delivery channels, lightest first — the labels
+/// `boss-cli/src/channels.rs::DeliveryChannel::label` writes and
+/// `apps/web/.../yard.ts::DELIVERY_CHANNELS` lays sidings for. A fact
+/// that lives three times; this copy is the read-side guard, so a stamp
+/// that names none of them is `None` rather than a fifth siding.
+const DELIVERY_CHANNELS: [&str; 4] = ["data", "config", "software", "infra"];
+
+/// The channel stamped on a train's metadata, when it names one.
+fn train_channel(md: &Value) -> Option<&str> {
+    meta_str(md, "delivery_channel").filter(|c| DELIVERY_CHANNELS.contains(c))
 }
 
 /// One parked car on the loading dock.
@@ -4458,6 +4481,43 @@ mod tests {
         // And absent from the wire, like the other unknowns on the row.
         let v = serde_json::to_value(&t).unwrap();
         assert!(v.get("boarded_at").is_none());
+    }
+
+    // ---- the train's channel (cffef553) ----
+
+    /// The conductor stamps `metadata.delivery_channel` on a train at
+    /// board — the heaviest of its cars'. The row carries it so the yard
+    /// can name a 'data train' without opening every car.
+    #[test]
+    fn a_train_carries_the_channel_the_conductor_stamped() {
+        let job = train(
+            vec![],
+            json!({ "boarded_jobs": ["c1"], "delivery_channel": "data" }),
+        );
+        let t = train_status(&job, &[], None, &no_history(), None);
+        assert_eq!(t.channel.as_deref(), Some("data"));
+        let v = serde_json::to_value(&t).unwrap();
+        assert_eq!(v["channel"], "data");
+    }
+
+    /// A train boarded before the stamp existed has no channel — drawn
+    /// as nothing, never guessed into 'software'. Same for a stamp that
+    /// names no channel the order knows.
+    #[test]
+    fn an_unstamped_train_has_no_channel() {
+        let job = train(vec![], json!({ "boarded_jobs": ["c1"] }));
+        let t = train_status(&job, &[], None, &no_history(), None);
+        assert_eq!(t.channel, None);
+        let v = serde_json::to_value(&t).unwrap();
+        assert!(v.get("channel").is_none(), "absent from the wire, not null");
+        let odd = train(
+            vec![],
+            json!({ "boarded_jobs": ["c1"], "delivery_channel": "firmware" }),
+        );
+        assert_eq!(
+            train_status(&odd, &[], None, &no_history(), None).channel,
+            None
+        );
     }
 
     // ---- dock + policy ----

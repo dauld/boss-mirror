@@ -238,6 +238,33 @@ describe('parseYardStatus', () => {
     expect(s.trains[0]!.block).toBeNull();
   });
 
+  // The conductor stamps the train's `delivery_channel` — the heaviest
+  // of its cars' — at board, and the server row carries it as
+  // `channel` (cffef553, 2026-09-15). The page names it ('data train');
+  // a train boarded before the stamp, or one whose stamp names no
+  // channel the sidings know, is null and drawn as nothing — an old
+  // train has no default worth asserting.
+  test('a train carries its channel when the server sends one', () => {
+    const boarding = { dock_depth: 0, at_times: [], summary: 'x' };
+    for (const ch of ['data', 'config', 'software', 'infra'] as const) {
+      const s = parseYardStatus({
+        trains: [{ id: 't', title: 'x', phase: 'boarding', car_count: 1, channel: ch }],
+        boarding,
+      });
+      expect(s.trains[0]!.channel).toBe(ch);
+    }
+    const old = parseYardStatus({
+      trains: [{ id: 't', title: 'x', phase: 'boarding', car_count: 1 }],
+      boarding,
+    });
+    expect(old.trains[0]!.channel).toBeNull();
+    const odd = parseYardStatus({
+      trains: [{ id: 't', title: 'x', phase: 'boarding', car_count: 1, channel: 'firmware' }],
+      boarding,
+    });
+    expect(odd.trains[0]!.channel).toBeNull();
+  });
+
   test('a null boarding block still parses to a well-formed predicate', () => {
     const s = parseYardStatus({ boarding: null });
     expect(s.boarding.dock_threshold).toBeNull();
@@ -745,6 +772,7 @@ describe('trainTone', () => {
     ci_result: null,
     pr_url: null,
     car_count: 0,
+    channel: null,
     boarded_at: null,
     eta: { kind: 'unknown', reason: 'not under test' },
   };

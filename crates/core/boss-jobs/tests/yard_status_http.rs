@@ -277,7 +277,12 @@ async fn seed_full(jobs: &InMemoryJobs) {
         "11111111-1111-1111-1111-111111111111",
         "train #200",
         JobStatus::Open,
-        json!({ "boarded_jobs": ["22222222-2222-2222-2222-222222222222"] }),
+        json!({
+            "boarded_jobs": ["22222222-2222-2222-2222-222222222222"],
+            // The conductor's stamp at board: the heaviest of the
+            // cars' channels (cffef553).
+            "delivery_channel": "config",
+        }),
     );
     jobs.create_job_at(&train, now, &[]).await.unwrap();
     for s in [
@@ -556,6 +561,10 @@ async fn the_status_names_the_buried_block_reason() {
     assert_eq!(train["car_count"], 1);
     // "Aboard since": the collect stamp, an instant, additive on the row.
     assert_eq!(train["boarded_at"], "2026-09-03T06:00:00Z");
+    // How the train ships — the conductor's stamp, read off the train
+    // rather than re-derived from its cars, so the page can name a
+    // 'config train' without opening every car (cffef553).
+    assert_eq!(train["channel"], "config");
 }
 
 #[tokio::test]

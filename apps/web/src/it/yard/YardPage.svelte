@@ -644,7 +644,7 @@
             {#if t.status === 'ARRIVED'}
               <div class="yard-entity-title">{t.title}</div>
               <div class="yard-entity-sub">
-                {t.cars.length} cars · {t.outcome === 'arrived' ? 'arrived' : t.outcome === 'cancelled' ? 'cancelled, nothing to board' : 'closed, never arrived'}
+                {st?.channel ? `${st.channel} train · ` : ''}{t.cars.length} cars · {t.outcome === 'arrived' ? 'arrived' : t.outcome === 'cancelled' ? 'cancelled, nothing to board' : 'closed, never arrived'}
                 {#if stampOf(t)} · <span class="yard-mono">{stampOf(t)}</span>{/if}
               </div>
               <div class="yard-consist">
@@ -1359,10 +1359,18 @@
 
     {#snippet trainBlock(t: TrainRow, partition: YardPartition)}
       {@const pending = t.cancelRequested ?? cancelSent[t.id] ?? null}
+      {@const channel = serverTrainById.get(t.id)?.channel ?? null}
       <div class="yard-trainblock">
         <div class="yard-trainhead">
           {#if t.live}<span class="yard-dot" title="in motion"></span>{/if}
           <span class="yard-trainname">{t.title}</span>
+          <!-- How this train ships — the heaviest of its cars' channels,
+               stamped by the conductor at board (cffef553): a reader
+               tells a data train from a software one without opening
+               every car. A train boarded before the stamp shows nothing. -->
+          {#if channel}
+            <span class="yard-chip" title="how this train ships — the heaviest of its cars' delivery channels">{channel} train</span>
+          {/if}
           <span class="yard-lamp" class:ok={t.lamp === 'green'} class:err={t.lamp === 'failing'} class:run={t.lamp === 'pending'}>
             {t.lamp === 'green' ? 'CI ✓' : t.lamp === 'failing' ? 'CI ✗' : 'CI …'}
           </span>

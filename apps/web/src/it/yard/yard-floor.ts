@@ -167,6 +167,11 @@ export type Loco = Readonly<{
   /** Why it is not moving — the server's block first, else the board's
    *  trouble badge; null when it is simply moving. */
   blocked: string | null;
+  /** How this train ships — the heaviest of its cars' channels, from the
+   *  server row (the conductor's stamp at board, cffef553). Named on the
+   *  locomotive as '<channel> train'; null — nothing drawn — for a train
+   *  boarded before the stamp, or with no server row. */
+  channel: DeliveryChannel | null;
   /** Wagon ids aboard, in consist order. */
   cars: readonly string[];
 }>;
@@ -692,6 +697,7 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
       stage,
       progress: progressOf(t, stage),
       blocked,
+      channel: st?.channel ?? null,
       cars: t.cars.map(c => c.id),
     };
   });
