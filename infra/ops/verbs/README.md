@@ -106,7 +106,19 @@ exercisable without acting, `--for-real` a human's decision to file.
 The second, `uninstall-not-in-role` (same authorization, car 4 of
 d5941ef3), carries no list at all: its set is what
 `deploy-services.sh roster` says the host's LIVE roles do not name —
-the installer's own derivation — and an empty set is a refusal.
+the installer's own derivation — and an empty set is a refusal. The
+third, `retire-cloudflared` (David 2026-09-16, design 4c565f8c; backlog
+0b7804f3 car 4), retires the host's hand-written tunnel connector —
+the unit whose inline token unit-cat once leaked (9c760dd7) — and is
+bounded to that ONE unit, named in the script and never a param: it
+verifies the hand-over through the system of record BEFORE anything
+stops (the newest converge that observed the in-cluster connector must
+be under two hours old, `connected`, and routing every hostname
+`infra/cluster/instances.toml` declares), prints the unit through
+unit-cat's mask, and refuses success while systemd still holds the
+unit. It never touches the tunnel in Cloudflare: that is the broker's
+revoke phase, which completes on its own once the old tunnel shows
+zero connections.
 
 ## Defense
 

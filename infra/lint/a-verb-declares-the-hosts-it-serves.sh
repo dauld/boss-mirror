@@ -117,6 +117,16 @@ GCP_MUTATING_ADMITTED = {
     # host's LIVE roles name), refuses an empty set, --dry-run
     # exercisable without acting.
     "uninstall-not-in-role": "David 2026-09-11, design 9e3e093f",
+    # design 4c565f8c, decided by David 2026-09-16 ("agreed, fold it in
+    # and file the cars") — its accepted proposal names this path:
+    # "Car 4: a bounded ops verb (retire-cloudflared, the retire-second-
+    # stack shape ...) ... David runs --for-real"; backlog 0b7804f3.
+    # Bounded to the one unit named in the script (cloudflared.service,
+    # never a param), the hand-over verified through the SoR before
+    # anything stops, the token masked through unit-cat, --dry-run
+    # exercisable without acting. Never touches the tunnel in
+    # Cloudflare (the broker's revoke phase).
+    "retire-cloudflared": "David 2026-09-16, design 4c565f8c",
 }
 
 problems = []

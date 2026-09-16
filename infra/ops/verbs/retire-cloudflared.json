@@ -1,0 +1,20 @@
+{
+  "about": "MUTATING — stop, disable and remove boss-gcp's hand-written cloudflared.service, the VM tunnel connector, once the system of record shows the in-cluster connector carrying every hostname — exactly that one unit and its drop-ins, and nothing else (infra/gcp/retire-cloudflared.sh). boss-gcp has run cloudflared.service since 2026-06-09 with its tunnel token INLINE on the ExecStart line, declared in no role and observed by no estate observer; reading it through unit-cat on 2026-09-16 carried the token into the system of record (backlog 9c760dd7). The rotation (packet e202c7c3) moved every hostname onto a new tunnel whose connector runs in the cluster (car 1 of design 4c565f8c), and the converge of 2026-09-16 08:25Z recorded cloudflared: connected with a tunnel_ingress naming both hostnames — so the VM connector is redundancy nobody chose, still attached to the OLD tunnel, and the rotation's revoke phase is DEFERRED behind it because the broker refuses to delete a tunnel with live connections. Retiring it is the last step of the leak's rotation, and the leak class is closed on this host by there being no token there (backlog 0b7804f3, car 4). THE HAND-OVER IS VERIFIED THROUGH THE SYSTEM OF RECORD BEFORE ANYTHING STOPS: the newest maintenance-cluster-converge packet that observed the connector (its run step carries a cloudflared field; a no-op tick does not) must be under two hours old, must say connected, and its tunnel_ingress must route every hostname infra/cluster/instances.toml declares — none, dark, stale, not-ready, or a hostname missing is a refusal naming the packet and the fact; the read is signed as the runner. THE UNIT IS SNAPSHOTTED THROUGH unit-cat's MASK, so the packet holds what the unit was with the token as <masked by unit-cat>, never the credential. The plan is exactly cloudflared.service (fixed in the script, never a param): stop+disable, the file removed from /etc/systemd/system with the token in it, the drop-in directory removed, ONE daemon-reload, an after-snapshot, and success is refused while systemd still lists the unit or its file is still on disk; absent on both counts is not on this host and an OK with nothing to do, which is the second run. Nothing else on the host is reachable by construction. It does NOT touch the tunnel in Cloudflare: deleting the old tunnel is the broker's revoke phase, which completes on its own once that tunnel shows zero connections — the state stopping this unit produces. `--dry-run` runs every bound, prints the masked snapshot and the plan, and calls nothing that acts; `--for-real` is the retirement, and is David's decision to file. Own timeout: one stop, bounded by the unit's TimeoutStopSec. Authorized by David 2026-09-16 on design 4c565f8c ('agreed, fold it in and file the cars'), whose accepted proposal names this path ('Car 4: a bounded ops verb (retire-cloudflared, the retire-second-stack shape: snapshot, stop+disable, remove the unit file, verify the tunnel still reports the in-cluster connector connected BEFORE stopping) ... David runs --for-real'); admitted by name in infra/lint/a-verb-declares-the-hosts-it-serves.sh, the same explicit per-verb process as retire-second-stack / uninstall-not-in-role — a precedent for the PROCESS, not a loosened default.",
+  "hosts": [
+    "boss-gcp"
+  ],
+  "argv": [
+    "infra/gcp/retire-cloudflared.sh",
+    "{1}"
+  ],
+  "params": [
+    {
+      "name": "mode",
+      "one_of": [
+        "--dry-run",
+        "--for-real"
+      ]
+    }
+  ],
+  "timeout": 300
+}
