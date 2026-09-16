@@ -421,6 +421,65 @@ pub enum ZoneApply {
     },
 }
 
+/// Cloudflare's ceiling on a DNS record's `comment` (error 9313,
+/// "DNS record comment exceeds the maximum length of 100 characters").
+pub const RECORD_COMMENT_MAX: usize = 100;
+
+/// The comment every record this observer writes carries: where it is
+/// declared, and which observation applied it (the packet's short id —
+/// the full uuid put the first flip's comment at 114 characters).
+///
+/// MEASURED 2026-09-16 16:00Z (packet 95cf8740): the interlock released
+/// the boss. flip, the handler DELETED the A record at that name, and
+/// Cloudflare refused the CNAME create on the comment's length — so the
+/// name was NXDOMAIN, on the internet and on the LAN, until the comment
+/// fit. The write is delete-then-create because Cloudflare will not
+/// hold a CNAME beside an A at one name; a create that can be refused
+/// on its own shape must therefore be refused HERE, before the delete,
+/// which the test below pins for every zone and packet id.
+pub fn record_comment(zone: &str, observation_id: &str) -> String {
+    let short = &observation_id[..8.min(observation_id.len())];
+    let comment = format!("declared in infra/cluster/dns/{zone}.toml; dns.observe {short}");
+    // A zone name long enough to breach the ceiling would be the first
+    // of its kind; truncate on a char boundary rather than let the
+    // delete run ahead of a create Cloudflare will refuse.
+    comment.chars().take(RECORD_COMMENT_MAX).collect()
+}
+
+impl ZoneApply {
+    /// The record name the write is for.
+    pub fn name(&self) -> &str {
+        match self {
+            ZoneApply::Create { spec, .. } | ZoneApply::Update { spec, .. } => &spec.name,
+        }
+    }
+}
+
+/// Stamp the account's refusal onto the verdict for each name whose
+/// write it refused: `refused` carries the answer verbatim, and a
+/// verdict the re-read judged MATCH regardless (a write refused and a
+/// zone that already agreed) is left as it is — the refusal is still
+/// recorded, and the zone is still right. A name the re-read no longer
+/// lists at all (deleted, then refused) gets an ABSENT verdict of its
+/// own so the refusal is never dropped for want of a row to ride.
+pub fn annotate_refused(verdicts: &[Json], refused: &[(String, String)]) -> Vec<Json> {
+    let mut out: Vec<Json> = verdicts.to_vec();
+    for (name, error) in refused {
+        match out
+            .iter_mut()
+            .find(|v| v.get("name").and_then(Json::as_str) == Some(name.as_str()))
+        {
+            Some(v) => v["refused"] = json!(error),
+            None => out.push(json!({
+                "name": name,
+                "verdict": "ABSENT",
+                "refused": error,
+            })),
+        }
+    }
+    out
+}
+
 fn spec_from_verdict(v: &Json, comment: &str) -> Option<ZoneRecordSpec> {
     let declared = v.get("declared")?;
     Some(ZoneRecordSpec {
@@ -586,6 +645,22 @@ impl Reading {
         );
         if a["REFUSED"] != 0 {
             s.push_str(&format!(", {} refused", a["REFUSED"]));
+        }
+        let refused_zone: Vec<String> = self
+            .zone
+            .verdicts
+            .iter()
+            .filter_map(|v| {
+                Some(format!(
+                    "{}: {}",
+                    v.get("name").and_then(Json::as_str)?,
+                    v.get("refused").and_then(Json::as_str)?
+                ))
+            })
+            .collect();
+        if !refused_zone.is_empty() {
+            s.push_str(" · refused by the zone: ");
+            s.push_str(&refused_zone.join("; "));
         }
         if !self.applied.is_empty() {
             s.push_str(" · applied: ");
@@ -1033,19 +1108,17 @@ impl DnsObserve {
     }
 
     /// Execute one released zone write.
-    async fn apply_zone(&self, zone_id: &str, plan: &ZoneApply) -> Result<String, HandlerError> {
+    ///
+    /// The error is the account's own answer, verbatim: the caller
+    /// records it as a `REFUSED` finding on the verdict, never as a
+    /// failed firing (see the loop in `invoke`).
+    async fn apply_zone(&self, zone_id: &str, plan: &ZoneApply) -> Result<String, String> {
         match plan {
             ZoneApply::Create { spec, delete_first } => {
                 for id in delete_first {
-                    self.zone
-                        .delete_record(zone_id, id)
-                        .await
-                        .map_err(HandlerError::Downstream)?;
+                    self.zone.delete_record(zone_id, id).await?;
                 }
-                self.zone
-                    .create_record(zone_id, spec)
-                    .await
-                    .map_err(HandlerError::Downstream)?;
+                self.zone.create_record(zone_id, spec).await?;
                 Ok(format!(
                     "{} {} created{}",
                     spec.name,
@@ -1058,10 +1131,7 @@ impl DnsObserve {
                 ))
             }
             ZoneApply::Update { record_id, spec } => {
-                self.zone
-                    .update_record(zone_id, record_id, spec)
-                    .await
-                    .map_err(HandlerError::Downstream)?;
+                self.zone.update_record(zone_id, record_id, spec).await?;
                 Ok(format!("{} {} corrected", spec.name, spec.record_type))
             }
         }
@@ -1214,10 +1284,7 @@ impl Handler for DnsObserve {
         // interlocked writes it releases; then, if anything was
         // written, the zone read and compared AGAIN so the packet
         // records the zone after the write.
-        let comment = format!(
-            "declared in infra/cluster/dns/{zone}.toml; applied by dns.observe (observation packet {})",
-            ev.job_id
-        );
+        let comment = record_comment(zone, ev.job_id);
         let (records, mut comparison) = self.compare_zone(zone, &args).await?;
         let plans: Vec<ZoneApply> = comparison
             .verdicts
@@ -1225,13 +1292,28 @@ impl Handler for DnsObserve {
             .filter(|v| gate_for(v.get("name").and_then(Json::as_str).unwrap_or_default()).allows())
             .filter_map(|v| plan_zone_apply(v, &records, &comment))
             .collect();
+        // A zone write the account refuses is a finding, not a failed
+        // firing — the same rule the Access half follows (bb604dc5).
+        // Measured 2026-09-16 16:00Z (packet 95cf8740, item cfe12b0d):
+        // the A record at boss. was deleted and the CNAME create was
+        // refused on its comment's length; the handler failed, eight
+        // redeliveries repeated the refusal, and the packet held a dead
+        // letter and NOTHING it had read — not the zone it had just
+        // changed, not the account's answer. The re-read below records
+        // the zone as it now is (ABSENT at that name, which is hard),
+        // and the answer rides that verdict as `refused`.
+        let mut refused_zone: Vec<(String, String)> = Vec::new();
         for plan in &plans {
-            applied.push(self.apply_zone(&info.zone_id, plan).await?);
+            match self.apply_zone(&info.zone_id, plan).await {
+                Ok(line) => applied.push(line),
+                Err(e) => refused_zone.push((plan.name().to_string(), e)),
+            }
         }
         if !plans.is_empty() {
             comparison = self.compare_zone(zone, &args).await?.1;
         }
         comparison.verdicts = annotate_verdicts(&comparison.verdicts, gate_for);
+        comparison.verdicts = annotate_refused(&comparison.verdicts, &refused_zone);
         let reading = Reading {
             zone: comparison,
             access: access_verdicts,
@@ -1743,6 +1825,29 @@ why = "x"
         v
     }
 
+    /// The comment the first flip sent was 114 characters; Cloudflare's
+    /// ceiling is 100, and the refusal came AFTER the A record was
+    /// deleted (2026-09-16 16:00Z, packet 95cf8740: boss. NXDOMAIN).
+    #[test]
+    fn the_record_comment_fits_cloudflares_ceiling_for_any_packet_id() {
+        let c = record_comment("algedonic.dev", "95cf8740-c522-40e8-9f6d-8f166134507d");
+        assert_eq!(
+            c,
+            "declared in infra/cluster/dns/algedonic.dev.toml; dns.observe 95cf8740"
+        );
+        assert!(c.chars().count() <= RECORD_COMMENT_MAX, "{}", c.len());
+        let old = format!(
+            "declared in infra/cluster/dns/algedonic.dev.toml; applied by dns.observe (observation packet {})",
+            "95cf8740-c522-40e8-9f6d-8f166134507d"
+        );
+        assert!(old.len() > RECORD_COMMENT_MAX, "the shape that was refused");
+        let long_zone = "a".repeat(120);
+        assert_eq!(
+            record_comment(&long_zone, "95cf8740").chars().count(),
+            RECORD_COMMENT_MAX
+        );
+    }
+
     #[test]
     fn the_plan_replaces_what_conflicts_with_a_cname_and_corrects_drift_in_place() {
         let rows = vec![
@@ -1825,7 +1930,15 @@ why = "x"
         records: Mutex<Result<Vec<Json>, String>>,
         reads: Mutex<usize>,
         writes: Mutex<Vec<String>>,
+        /// The account's answer to every create, when it refuses them
+        /// — the 2026-09-16 16:00Z shape (a delete already done, the
+        /// create refused on the record's own body).
+        refuse_creates: Option<String>,
     }
+
+    /// Cloudflare's answer to the first boss. CNAME create, verbatim
+    /// (2026-09-16 15:58Z, code 9313).
+    const COMMENT_TOO_LONG: &str = "POST /zones/zone-1/dns_records returned 400 Bad Request: DNS record comment exceeds the maximum length of 100 characters.";
 
     impl FakeZone {
         fn with(records: Vec<Json>) -> Arc<Self> {
@@ -1833,6 +1946,15 @@ why = "x"
                 records: Mutex::new(Ok(records)),
                 reads: Mutex::new(0),
                 writes: Mutex::new(vec![]),
+                refuse_creates: None,
+            })
+        }
+        fn refusing_creates(records: Vec<Json>, why: &str) -> Arc<Self> {
+            Arc::new(Self {
+                records: Mutex::new(Ok(records)),
+                reads: Mutex::new(0),
+                writes: Mutex::new(vec![]),
+                refuse_creates: Some(why.to_string()),
             })
         }
         fn dark(msg: &str) -> Arc<Self> {
@@ -1840,6 +1962,7 @@ why = "x"
                 records: Mutex::new(Err(msg.to_string())),
                 reads: Mutex::new(0),
                 writes: Mutex::new(vec![]),
+                refuse_creates: None,
             })
         }
         fn writes(&self) -> Vec<String> {
@@ -1870,6 +1993,9 @@ why = "x"
                 "create {} {} {} proxied={} ttl={}",
                 spec.name, spec.record_type, spec.content, spec.proxied, spec.ttl
             ));
+            if let Some(why) = &self.refuse_creates {
+                return Err(why.clone());
+            }
             if let Ok(rows) = &mut *self.records.lock().unwrap() {
                 rows.push(json!({
                     "id": format!("rec-new-{}", spec.record_type), "name": spec.name,
@@ -2440,6 +2566,90 @@ why = "x"
             "{summary}"
         );
         assert!(!summary.contains("flip held"), "{summary}");
+    }
+
+    /// The measured 2026-09-16 16:00Z firing (packet 95cf8740): the
+    /// interlock released, the A record was deleted, the CNAME create
+    /// was refused. Until this car the handler failed and the packet
+    /// held a dead letter and nothing it had read. Now: the zone is
+    /// re-read as it IS (boss. ABSENT — hard), the account's answer
+    /// rides that verdict as `refused`, the alarm carries it, the step
+    /// completes with findings, and the next reading creates the record
+    /// with no delete in front of it.
+    #[tokio::test]
+    async fn a_refused_zone_write_is_a_finding_on_the_re_read_verdict() {
+        let (jobs, captured) = stub_jobs_api("ready", vec![], LOCATION).await;
+        let zone = FakeZone::refusing_creates(as_measured(), COMMENT_TOO_LONG);
+        let access = FakeAccess::with(account_as_declared());
+        let h = handler(
+            jobs,
+            zone.clone(),
+            access.clone(),
+            secrets(),
+            declarations(),
+        );
+        h.invoke(&zone_args(), &ctx())
+            .await
+            .expect("a refused write is a finding, not a failed firing");
+        assert_eq!(
+            zone.writes(),
+            vec![
+                "delete rec-boss.algedonic.dev-A".to_string(),
+                format!(
+                    "create boss.algedonic.dev CNAME {} proxied=true ttl=1",
+                    tunnel_cname()
+                ),
+            ]
+        );
+        assert_eq!(*zone.reads.lock().unwrap(), 2, "re-read after the write");
+        let w = writes(&captured);
+        assert_eq!(
+            w.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            vec!["POST /api/jobs", "PUT /api/jobs/obs-1/steps/step-observe"],
+            "the alarm, then the step: {w:?}"
+        );
+        let body = step_put(&w);
+        assert_eq!(body["metadata"]["result"], "findings");
+        let boss = boss_verdict(&body);
+        assert_eq!(boss["verdict"], "ABSENT", "the zone as it is now: {boss}");
+        assert_eq!(
+            boss["refused"], COMMENT_TOO_LONG,
+            "the account's answer, verbatim"
+        );
+        assert_eq!(
+            body["metadata"]["applied"],
+            json!([]),
+            "nothing was written that the account took"
+        );
+        let summary = body["metadata"]["summary"].as_str().unwrap();
+        assert!(
+            summary.contains("refused by the zone: boss.algedonic.dev: POST /zones/zone-1/dns_records returned 400"),
+            "{summary}"
+        );
+        let alarm = &w[0].1;
+        assert!(
+            alarm["metadata"]["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["name"] == "boss.algedonic.dev" && f["refused"] == COMMENT_TOO_LONG),
+            "the alarm carries the refusal: {}",
+            alarm["metadata"]["findings"]
+        );
+    }
+
+    #[test]
+    fn a_refusal_for_a_name_the_re_read_no_longer_lists_gets_its_own_absent_verdict() {
+        let out = annotate_refused(
+            &[json!({"name": "www.algedonic.dev", "verdict": "MATCH"})],
+            &[("boss.algedonic.dev".to_string(), "no".to_string())],
+        );
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1]["verdict"], "ABSENT");
+        assert_eq!(out[1]["refused"], "no");
+        let kept = annotate_refused(&out, &[("www.algedonic.dev".to_string(), "x".to_string())]);
+        assert_eq!(kept[0]["verdict"], "MATCH", "a right zone stays right");
+        assert_eq!(kept[0]["refused"], "x", "and the refusal is still recorded");
     }
 
     #[tokio::test]

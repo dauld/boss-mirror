@@ -39,6 +39,8 @@ use serde::Deserialize;
 
 use boss_policy_client::{AccessTier, CurrentUser, User};
 
+use crate::trust::is_trusted;
+
 use super::port::{SurfaceOpens, SurfaceOpensError, sweep_retention};
 use super::types::{NewSurfaceOpen, validate_route};
 use crate::owner_resolution::is_automation_shaped;
@@ -47,14 +49,9 @@ pub struct SurfaceOpensApiState {
     pub repo: Arc<dyn SurfaceOpens>,
 }
 
-/// Same two categories the cadence and agent-run doors admit as
-/// machinery: operator tier, or a trusted internal caller (the extractor
-/// defaults to `role=guest` when no `x-boss-user` header arrived — a
-/// loopback sibling or a test harness, never a browser, because the
-/// gateway injects the header for everything external).
-fn is_trusted(user: &User) -> bool {
-    user.role == "guest" || user.access_tier == AccessTier::Operator
-}
+// Writes admit `crate::trust::is_trusted` — the operator machinery every
+// operator door admits (839335b7). The read below is deliberately WIDER
+// than `crate::trust::can_read`, and says why.
 
 /// Everyone but the gateway's guest session, which arrives as
 /// `audit-readonly` at USER tier (`POST /api/auth/guest`). An

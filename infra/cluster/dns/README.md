@@ -25,7 +25,12 @@ playground policy held precedence 1 and Cloudflare's uniqueness reaches
 across applications), the handler dead-lettered after eight identical
 redeliveries, and the packet recorded the dead letter and nothing it had
 read. A policy is now created one above every precedence the account
-lists, and the next day's reading retries what was refused.
+lists, and the next day's reading retries what was refused. A ZONE write
+the account refuses is recorded the same way (16:00Z the same day: the
+boss. A record deleted, the CNAME refused on a 114-character comment,
+the name NXDOMAIN): the zone is re-read as it now is, the answer rides
+that record's verdict as `refused`, and the next reading finds the
+record ABSENT and creates it with no delete in front.
 
 ## Runbook: the first observation after 198c5fe9 lands
 

@@ -34,7 +34,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use boss_policy_client::{AccessTier, CurrentUser, User};
+use boss_policy_client::CurrentUser;
+
+use crate::trust::{can_read, is_trusted};
 
 use super::port::{AgentRunError, AgentRunLog};
 use super::types::{AgentRun, NewAgentRun, RunFilter, RunSummary, summarize};
@@ -43,26 +45,10 @@ pub struct AgentRunsApiState {
     pub log: Arc<dyn AgentRunLog>,
 }
 
-/// Same two categories the cadence door admits: an operator-tier
-/// caller, or a trusted internal one (the extractor defaults to
-/// `role=guest` when no `x-boss-user` header arrived, i.e. a loopback
-/// sibling or a test harness; the gateway always injects the header for
-/// external requests).
-fn is_trusted(user: &User) -> bool {
-    user.role == "guest" || user.access_tier == AccessTier::Operator
-}
-
-/// The reads admit one more caller than the POST: the auditor tier —
-/// the door `/api/events/*` already opens to it, and the tier the
-/// recorded-probe reader carries (`infra/forge/run-car-probe.sh`,
-/// `audit-readonly` at `auditor`). Without it no car can prove a
-/// claim about a run through `boss-sor-read`, which is the one reader
-/// a probe may use — found 2026-09-15 rehearsing this surface's own
-/// probe: 403. The gateway's guest session is NOT this: it is
-/// `audit-readonly` at USER tier, and stays refused.
-fn can_read(user: &User) -> bool {
-    is_trusted(user) || user.access_tier == AccessTier::Auditor
-}
+// Who this door admits lives in `crate::trust` (839335b7): this door
+// was the first to learn (2026-09-15) that its reads must admit the
+// auditor tier the recorded-probe reader carries, and the other four
+// operator doors had not — so the predicate pair moved out.
 
 pub fn router(state: AgentRunsApiState) -> Router {
     let shared = Arc::new(state);
@@ -246,6 +232,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use boss_core::actor::ActorId;
+    use boss_policy_client::{AccessTier, User};
     use chrono::Duration;
     use http_body_util::BodyExt;
     use tower::ServiceExt;

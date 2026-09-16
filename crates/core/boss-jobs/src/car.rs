@@ -656,6 +656,42 @@ pub fn regate_patch(receipt: &Receipt, note: &str, delivery_channel: Option<&str
     patch
 }
 
+/// The prose a re-gate carries onto a parked car, beside the receipt it
+/// supersedes.
+///
+/// A car's account of itself — summary, excludes, test, verified — is
+/// stamped on its scope/build/gate steps at the first park, and a
+/// completed step is frozen. So until 2026-09-16 (c30e6276) a re-gate
+/// wrote the fresh receipt, note and proof onto the job and left the
+/// prose at the first build's words: a rebuilt car described what it
+/// USED to do, to the yard, the train and the operator. The same rule
+/// the receipt lives by applies — the frozen step stays as the first
+/// head's record, and the current account rides the JOB under
+/// `regate_*`, verbatim, where `regate_receipt` already is. Empty
+/// prose is omitted, never nulled: the metadata door deletes a null
+/// key, and a re-gate that restated nothing must not strip what an
+/// earlier one carried.
+pub fn regate_prose(
+    summary: &str,
+    excludes: &str,
+    test: &str,
+    verified: &str,
+) -> serde_json::Map<String, Value> {
+    let mut m = serde_json::Map::new();
+    for (key, text) in [
+        ("regate_summary", summary),
+        ("regate_excludes", excludes),
+        ("regate_test", test),
+        ("regate_verified", verified),
+    ] {
+        let text = text.trim();
+        if !text.is_empty() {
+            m.insert(key.to_string(), json!(text));
+        }
+    }
+    m
+}
+
 /// Is this packet still open? Callers list `status=open`, so the field
 /// is usually redundant — and a fixture without one must still answer —
 /// but a list that also holds finished cars (the handler pages both)
@@ -1051,6 +1087,19 @@ mod regate_tests {
         // is how the conductor's "left behind" reason goes away.
         assert!(p.get("skip_reason").is_some_and(Value::is_null));
         assert_eq!(p["regate_note"], json!("why"));
+    }
+
+    /// The re-gate's prose rides the job under `regate_*`, trimmed,
+    /// and an empty field is absent rather than null — a null key is
+    /// deleted by the metadata door.
+    #[test]
+    fn the_regate_prose_rides_the_job_and_omits_what_was_not_said() {
+        let m = regate_prose(" rebuilt: now does X ", "not Y", "", "   ");
+        assert_eq!(m["regate_summary"], "rebuilt: now does X");
+        assert_eq!(m["regate_excludes"], "not Y");
+        assert!(!m.contains_key("regate_test"), "{m:?}");
+        assert!(!m.contains_key("regate_verified"), "{m:?}");
+        assert!(regate_prose("", "", "", "").is_empty());
     }
 
     #[test]

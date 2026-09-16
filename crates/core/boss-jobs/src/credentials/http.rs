@@ -41,7 +41,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
-use boss_policy_client::{AccessTier, CurrentUser, User};
+use boss_policy_client::{AccessTier, CurrentUser};
+
+use crate::trust::can_read;
 
 use super::port::{CredentialsError, CredentialsRegistry};
 use super::types::RotationPhase;
@@ -50,9 +52,12 @@ pub struct CredentialsApiState {
     pub registry: Arc<dyn CredentialsRegistry>,
 }
 
-fn is_trusted(user: &User) -> bool {
-    user.role == "guest" || user.access_tier == AccessTier::Operator
-}
+// The two reads admit what `crate::trust::can_read` admits: the
+// operator machinery that always read here, and the auditor tier the
+// recorded-probe reader carries (839335b7) — a row names where a value
+// lives, never the value, so a read-only auditor learns nothing a
+// rotation packet does not already say. The rotation-phase write
+// below keeps its own operator-only check.
 
 pub fn router(state: CredentialsApiState) -> Router {
     let shared = Arc::new(state);
@@ -81,7 +86,7 @@ async fn list(
     State(state): State<Arc<CredentialsApiState>>,
     CurrentUser(user): CurrentUser,
 ) -> Response {
-    if !is_trusted(&user) {
+    if !can_read(&user) {
         return StatusCode::FORBIDDEN.into_response();
     }
     match state.registry.list().await {
@@ -95,7 +100,7 @@ async fn get_one(
     CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
 ) -> Response {
-    if !is_trusted(&user) {
+    if !can_read(&user) {
         return StatusCode::FORBIDDEN.into_response();
     }
     match state.registry.get(&id).await {
@@ -183,6 +188,7 @@ mod tests {
     use crate::credentials::{CredentialRow, InMemoryCredentials};
     use axum::body::Body;
     use axum::http::Request;
+    use boss_policy_client::{AccessTier, User};
     use http_body_util::BodyExt;
     use serde_json::json;
     use tower::ServiceExt;
@@ -275,6 +281,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    fn probe_reader_header() -> String {
+        serde_json::to_string(&User {
+            id: "automation:run-car-probe-reader".into(),
+            role: "audit-readonly".into(),
+            access_tier: AccessTier::Auditor,
+            territory_account_ids: Vec::new(),
+            direct_report_ids: Vec::new(),
+            department: Some("platform".into()),
+        })
+        .unwrap()
+    }
+
+    /// Measured 2026-09-16 (839335b7): `/api/credentials` answered the
+    /// recorded-probe reader 403 on the live system of record, so no
+    /// car about the credential registry could be proved. The reads
+    /// admit the auditor tier; the rotation-phase write does not.
+    #[tokio::test]
+    async fn the_probe_reader_reads_the_registry_and_cannot_record_a_phase() {
+        for path in ["/api/credentials", "/api/credentials/boss-dev-forge-token"] {
+            let resp = app(vec![row("boss-dev-forge-token")])
+                .oneshot(
+                    Request::get(path)
+                        .header("x-boss-user", probe_reader_header())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{path}");
+        }
+        let resp = app(vec![row("boss-dev-forge-token")])
+            .oneshot(
+                Request::post("/api/credentials/boss-dev-forge-token/rotation/issue")
+                    .header("x-boss-user", probe_reader_header())
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"rotated_at":"2026-09-16T00:00:00Z"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a read-only reader records nothing"
+        );
     }
 
     #[tokio::test]

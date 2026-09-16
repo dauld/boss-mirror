@@ -146,6 +146,33 @@ struct AutoParkInputs {
     proof: serde_json::Map<String, Value>,
 }
 
+/// PURE: the metadata patch a re-gate writes onto the car already at
+/// the dock — everything the LATEST green stamped, so the car carries
+/// what it is now, not what its first build was.
+///
+/// The receipt and the cleared skip (`car::regate_patch`); the current
+/// proof intent, since the builder may have written or fixed the probe
+/// on the re-gate; the car's current account of itself (c30e6276) —
+/// the scope/build/gate steps are frozen at the first park's words, so
+/// a rebuilt car's summary/excludes/test/verified ride the job under
+/// `regate_*` beside the receipt that superseded the first one; and the
+/// item provenance, since a re-gate may be the run where the builder
+/// first said which item this car is a piece of.
+fn refresh_patch(inputs: &AutoParkInputs, note: &str) -> Value {
+    let mut patch = car::regate_patch(&inputs.receipt, note, inputs.delivery_channel.as_deref());
+    if let Some(m) = patch.as_object_mut() {
+        m.extend(inputs.proof.clone());
+        m.extend(car::regate_prose(
+            &inputs.summary,
+            &inputs.excludes,
+            &inputs.test,
+            &inputs.verified,
+        ));
+        m.extend(inputs.item_provenance.clone());
+    }
+    patch
+}
+
 /// PURE: read the auto-park inputs from a gate-run packet and its
 /// verdict step's metadata. `None` = not an auto-park (verdict not green,
 /// or no park intent stamped) — a no-op the caller returns `Ok(())` for.
@@ -801,20 +828,7 @@ impl Handler for JobsAutoPark {
                 &inputs.receipt.head[..12.min(inputs.receipt.head.len())],
                 ev.job_id
             );
-            // A re-gate carries the CURRENT proof intent too: the
-            // builder may have written (or fixed) the probe on the
-            // re-gate, and the parked car should carry what its
-            // latest green stamped, not what its first one did.
-            let mut patch =
-                car::regate_patch(&inputs.receipt, &note, inputs.delivery_channel.as_deref());
-            if let Some(m) = patch.as_object_mut() {
-                m.extend(inputs.proof.clone());
-                // The provenance too: a re-gate may be the run where the
-                // builder first said which item this car is a piece of,
-                // and the refreshed car should carry what its latest
-                // green stamped.
-                m.extend(inputs.item_provenance.clone());
-            }
+            let patch = refresh_patch(&inputs, &note);
             write_json(
                 &self.client,
                 reqwest::Method::PATCH,
@@ -1038,6 +1052,53 @@ mod tests {
         .as_object()
         .unwrap()
         .clone()
+    }
+
+    /// Measured 2026-09-16 (c30e6276): a re-gate wrote the fresh
+    /// receipt, note and probe and left summary/excludes/test/verified
+    /// at the first park's values — the car described its first build.
+    /// The refresh now carries the latest green's prose under `regate_*`.
+    #[test]
+    fn the_refresh_carries_the_re_gates_prose_beside_the_receipt() {
+        let gr = gate_run(json!({
+            "park_summary": "rebuilt: now does the other thing. detail.",
+            "park_excludes": "still not that",
+            "park_test": "ran it again",
+            "park_verified": "the other thing is observable",
+            "park_probe": "echo ok",
+            "park_expect": "ok",
+        }));
+        let inputs = auto_park_inputs(&gr, &green_step_meta()).expect("parks");
+        let patch = refresh_patch(&inputs, "re-gated in place");
+        assert_eq!(
+            patch["regate_summary"],
+            "rebuilt: now does the other thing. detail."
+        );
+        assert_eq!(patch["regate_excludes"], "still not that");
+        assert_eq!(patch["regate_test"], "ran it again");
+        assert_eq!(patch["regate_verified"], "the other thing is observable");
+        assert!(
+            patch["regate_receipt"]
+                .as_str()
+                .unwrap()
+                .contains("deadbeef"),
+            "the receipt still rides: {patch}"
+        );
+        assert_eq!(patch["regate_note"], "re-gated in place");
+        assert_eq!(patch["skip_reason"], Value::Null);
+        assert_eq!(
+            patch["proof_probe"], "echo ok",
+            "the proof still rides: {patch}"
+        );
+        // Prose the re-gate did not state is ABSENT, never null: the
+        // metadata door deletes a null key, and an earlier re-gate's
+        // words must survive a later one that said nothing.
+        let bare = gate_run(json!({ "park_summary": "only a summary." }));
+        let inputs = auto_park_inputs(&bare, &green_step_meta()).expect("parks");
+        let patch = refresh_patch(&inputs, "n");
+        assert_eq!(patch["regate_summary"], "only a summary.");
+        assert!(patch.get("regate_test").is_none(), "{patch}");
+        assert!(patch.get("regate_verified").is_none(), "{patch}");
     }
 
     #[test]

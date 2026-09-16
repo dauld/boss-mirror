@@ -18,7 +18,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 
-use boss_policy_client::{AccessTier, CurrentUser, User};
+use boss_policy_client::CurrentUser;
+
+use crate::trust::can_read;
 
 use super::port::{DeliveryPolicyError, DeliveryPolicyRepository};
 
@@ -26,15 +28,9 @@ pub struct DeliveryPolicyApiState {
     pub repo: Arc<dyn DeliveryPolicyRepository>,
 }
 
-/// Delivery policy is operator machinery — it decides how the pipeline
-/// treats a car. Same two categories as cadence: operator-tier callers
-/// (the conductor stamps `access_tier: operator`), and trusted internal
-/// callers, which the extractor defaults to `role=guest` when no
-/// `x-boss-user` header arrived. The gateway always injects the header
-/// for external requests, so a browser session never lands here.
-fn is_trusted(user: &User) -> bool {
-    user.role == "guest" || user.access_tier == AccessTier::Operator
-}
+// Both routes are reads, so both admit what `crate::trust::can_read`
+// admits — the operator machinery that always read here, and the
+// auditor tier the recorded-probe reader carries (839335b7).
 
 pub fn router(state: DeliveryPolicyApiState) -> Router {
     let shared = Arc::new(state);
@@ -59,7 +55,7 @@ async fn active_policy(
     CurrentUser(user): CurrentUser,
     Path(name): Path<String>,
 ) -> Response {
-    if !is_trusted(&user) {
+    if !can_read(&user) {
         return StatusCode::FORBIDDEN.into_response();
     }
     match state.repo.active_policy(&name).await {
@@ -73,11 +69,70 @@ async fn policy_version(
     CurrentUser(user): CurrentUser,
     Path((name, version)): Path<(String, i32)>,
 ) -> Response {
-    if !is_trusted(&user) {
+    if !can_read(&user) {
         return StatusCode::FORBIDDEN.into_response();
     }
     match state.repo.policy_version(&name, version).await {
         Ok(p) => Json(p).into_response(),
         Err(e) => err_response(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::delivery::InMemoryDeliveryPolicy;
+    use axum::body::Body;
+    use axum::http::Request;
+    use boss_policy_client::{AccessTier, User};
+    use tower::ServiceExt;
+
+    fn header(role: &str, tier: AccessTier) -> String {
+        serde_json::to_string(&User {
+            id: "x".into(),
+            role: role.into(),
+            access_tier: tier,
+            territory_account_ids: Vec::new(),
+            direct_report_ids: Vec::new(),
+            department: Some("platform".into()),
+        })
+        .unwrap()
+    }
+
+    async fn status(path: &str, user: String) -> StatusCode {
+        router(DeliveryPolicyApiState {
+            repo: Arc::new(InMemoryDeliveryPolicy::default()),
+        })
+        .oneshot(
+            Request::get(path)
+                .header("x-boss-user", user)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+    }
+
+    /// Measured 2026-09-16 (839335b7): `/api/delivery/policy/default`
+    /// answered the recorded-probe reader 403 on the live system of
+    /// record. Both routes are reads; both admit the auditor tier, and
+    /// neither admits the gateway's guest session.
+    #[tokio::test]
+    async fn the_probe_reader_reads_the_policy_and_the_guest_session_does_not() {
+        let reader = header("audit-readonly", AccessTier::Auditor);
+        for path in [
+            "/api/delivery/policy/default",
+            "/api/delivery/policy/default/versions/1",
+        ] {
+            let st = status(path, reader.clone()).await;
+            assert_ne!(st, StatusCode::FORBIDDEN, "{path}: {st}");
+        }
+        let st = status(
+            "/api/delivery/policy/default",
+            header("audit-readonly", AccessTier::User),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
     }
 }

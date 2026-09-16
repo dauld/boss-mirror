@@ -443,11 +443,20 @@ pub(crate) async fn run(
         // Re-classify the channel from the current diff so the refreshed
         // car carries it like a fresh park (None if the diff won't resolve).
         let dc = crate::channels::delivery_channel_for(branch);
+        // The re-gate's prose rides the job too (c30e6276): the steps
+        // that hold the first park's words are frozen, and the car's
+        // account of itself is what the operator reads.
+        let mut patch = regate_patch(&receipt, &note, dc.as_deref());
+        if let Some(m) = patch.as_object_mut() {
+            m.extend(boss_jobs::car::regate_prose(
+                summary, excludes, test, verified,
+            ));
+        }
         crate::gate::api(
             &http,
             reqwest::Method::PATCH,
             &format!("/api/jobs/{id}/metadata"),
-            Some(regate_patch(&receipt, &note, dc.as_deref())),
+            Some(patch),
         )
         .await?;
         println!(

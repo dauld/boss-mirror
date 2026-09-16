@@ -13,7 +13,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
-use boss_policy_client::{AccessTier, CurrentUser, User};
+use boss_policy_client::CurrentUser;
+
+use crate::trust::{can_read, is_trusted};
 
 use super::port::{CadenceError, CadenceRepository};
 use super::types::{ClaimResult, FiringOutcome, NewFiring};
@@ -22,16 +24,9 @@ pub struct CadenceApiState {
     pub repo: Arc<dyn CadenceRepository>,
 }
 
-/// Cadence is operator machinery — it decides when the train runs.
-/// Two categories pass: operator-tier callers (the conductor stamps
-/// `access_tier: operator`), and trusted internal callers, which the
-/// extractor defaults to `role=guest` when no `x-boss-user` header
-/// arrived — i.e. a loopback sibling or a test harness. The gateway
-/// always injects the header for external requests, so a real browser
-/// session never lands in the trusted-internal path.
-fn is_trusted(user: &User) -> bool {
-    user.role == "guest" || user.access_tier == AccessTier::Operator
-}
+// Who this door admits lives in `crate::trust`, with the four other
+// operator doors (839335b7): reads admit the auditor tier the
+// recorded-probe reader carries; writes are operator machinery only.
 
 pub fn router(state: CadenceApiState) -> Router {
     let shared = Arc::new(state);
@@ -54,7 +49,7 @@ async fn list_rules(
     State(state): State<Arc<CadenceApiState>>,
     CurrentUser(user): CurrentUser,
 ) -> Response {
-    if !is_trusted(&user) {
+    if !can_read(&user) {
         return StatusCode::FORBIDDEN.into_response();
     }
     match state.repo.active_rules().await {
@@ -68,7 +63,7 @@ async fn last_firing(
     CurrentUser(user): CurrentUser,
     Path(name): Path<String>,
 ) -> Response {
-    if !is_trusted(&user) {
+    if !can_read(&user) {
         return StatusCode::FORBIDDEN.into_response();
     }
     match state.repo.last_firing(&name).await {
@@ -116,5 +111,83 @@ async fn record_outcome(
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => err_response(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cadence::InMemoryCadence;
+    use axum::body::Body;
+    use axum::http::Request;
+    use boss_policy_client::{AccessTier, User};
+    use tower::ServiceExt;
+
+    fn app() -> Router {
+        router(CadenceApiState {
+            repo: Arc::new(InMemoryCadence::default()),
+        })
+    }
+
+    fn header(role: &str, tier: AccessTier) -> String {
+        serde_json::to_string(&User {
+            id: "x".into(),
+            role: role.into(),
+            access_tier: tier,
+            territory_account_ids: Vec::new(),
+            direct_report_ids: Vec::new(),
+            department: Some("platform".into()),
+        })
+        .unwrap()
+    }
+
+    async fn status(req: Request<Body>) -> StatusCode {
+        app().oneshot(req).await.unwrap().status()
+    }
+
+    /// Measured 2026-09-16 (839335b7): `/api/cadence/rules` and
+    /// `/api/cadence/rules/{name}/last-firing` answered the
+    /// recorded-probe reader (`audit-readonly` at auditor) 403 on the
+    /// live system of record, so no car about a cadence could be
+    /// proved. The reads admit the auditor tier; the two writes stay
+    /// operator machinery.
+    #[tokio::test]
+    async fn the_probe_reader_reads_the_cadence_and_cannot_claim_a_firing() {
+        let reader = header("audit-readonly", AccessTier::Auditor);
+        for path in ["/api/cadence/rules", "/api/cadence/rules/board/last-firing"] {
+            let st = status(
+                Request::get(path)
+                    .header("x-boss-user", reader.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{path}");
+        }
+        let st = status(
+            Request::post("/api/cadence/firings")
+                .header("x-boss-user", reader.clone())
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"firing_id":"f1","rule_name":"board","verb":"board","basis":"queue-depth","fired_at":"2026-09-16T00:00:00Z"}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::FORBIDDEN,
+            "a read-only reader claims nothing"
+        );
+        // The gateway's guest session (audit-readonly at USER tier)
+        // stays refused on the reads too.
+        let st = status(
+            Request::get("/api/cadence/rules")
+                .header("x-boss-user", header("audit-readonly", AccessTier::User))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
     }
 }
