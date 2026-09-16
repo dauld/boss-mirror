@@ -40,6 +40,17 @@
 #                       how the handler learns what to resolve.
 # An unresolved reference is exit 2 naming it, never a DRIFT.
 #
+# INTERLOCK. A record may declare `interlock = "access"`: the dns.observe
+# handler APPLIES such a record (create when ABSENT, correct when DRIFT)
+# only once the Cloudflare Access application access.toml declares for
+# the same name reads present with an allow policy (backlog 198c5fe9).
+# The comparator does not judge the interlock — it has no Access read —
+# it carries the key through onto the record's verdict (`interlock`),
+# so the handler learns which records it may apply from the one parse of
+# the declaration and never re-reads the file itself. A value nothing
+# honours is refused (exit 2): a record whose interlock no handler knows
+# would be applied by nothing, silently.
+#
 # VOCABULARY, one line per record, then a summary:
 #   MATCH      declared (name, type) present live with the declared
 #              content, proxied and ttl
@@ -56,7 +67,8 @@
 #   --json    ONE JSON document on stdout instead of the lines:
 #             {zone, declaration, counts{MATCH,DRIFT,ABSENT,UNDECLARED},
 #              hard, verdicts:[{record, name, type, verdict, declared?,
-#              live?, why?}]} — what the observation packet carries.
+#              live?, why?, interlock?}]} — what the observation packet
+#              carries.
 #
 # EXIT: 0 every declared record MATCHes (UNDECLARED may be listed);
 #       1 any DRIFT or ABSENT;
@@ -134,6 +146,7 @@ list_refs = list_refs == "1"
 
 TUNNEL_SUFFIX = ".cfargotunnel.com"
 COMPARED = ("content", "proxied", "ttl")
+INTERLOCKS = ("access",)
 
 
 def refuse(msg):
@@ -171,6 +184,8 @@ for i, r in enumerate(records):
         refuse(f"{declared_path}: record {name} {rtype}: `proxied` must be true or false")
     if not isinstance(r["ttl"], int) or isinstance(r["ttl"], bool):
         refuse(f"{declared_path}: record {name} {rtype}: `ttl` must be an integer (1 = auto)")
+    if "interlock" in r and r["interlock"] not in INTERLOCKS:
+        refuse(f"{declared_path}: record {name} {rtype}: interlock {r['interlock']!r} is one no handler honours (known: {', '.join(INTERLOCKS)})")
     key = (name, rtype)
     if key in declared:
         refuse(f"the declaration itself names {name} {rtype} twice — fix the declaration")
@@ -261,6 +276,8 @@ for (name, rtype), r in declared.items():
     copies = [i for i, rec in enumerate(live) if rec["name"] == name and rec["type"] == rtype]
     entry = {"record": label, "name": name, "type": rtype, "why": str(r["why"]),
              "declared": dict(want, target=str(r["target"]))}
+    if "interlock" in r:
+        entry["interlock"] = str(r["interlock"])
     if not copies:
         entry["verdict"] = "ABSENT"
     else:

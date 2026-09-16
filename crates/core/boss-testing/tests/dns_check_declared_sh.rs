@@ -2,8 +2,10 @@
 //! synthetic `GET /zones/{id}/dns_records` bodies shaped from the zone
 //! as measured on 2026-09-16 (backlog 5e58922c: boss.algedonic.dev A
 //! 10.20.0.33 grey-cloud, playground.algedonic.dev a proxied CNAME to
-//! the tunnel), so every verdict below is one the comparator actually
-//! reached. Nothing here touches Cloudflare or needs a credential: the
+//! the tunnel) and as declared since 198c5fe9 (boss. a proxied CNAME to
+//! the same tunnel, behind an `interlock = "access"` the dns.observe
+//! handler honours), so every verdict below is one the comparator
+//! actually reached. Nothing here touches Cloudflare or needs a credential: the
 //! live records are INPUT, and the tunnel reference the declaration
 //! makes is resolved from a fixture credentials file or a `--tunnel`
 //! argument, the two ways the operator and the `dns.observe` handler
@@ -61,10 +63,33 @@ fn record(name: &str, rtype: &str, content: &str, proxied: bool, ttl: u32) -> se
     })
 }
 
-/// The zone exactly as measured on 2026-09-16.
+/// The zone exactly as measured on 2026-09-16 — BEFORE the flip: boss.
+/// still the grey A record to the LAN ingress.
 fn as_measured() -> Vec<serde_json::Value> {
     vec![
         record("boss.algedonic.dev", "A", "10.20.0.33", false, 300),
+        record(
+            "playground.algedonic.dev",
+            "CNAME",
+            &format!("{TUNNEL_ID}.cfargotunnel.com"),
+            true,
+            1,
+        ),
+    ]
+}
+
+/// The zone as the declaration says it should be since 198c5fe9: both
+/// hostnames proxied CNAMEs to the tunnel — what the first observation
+/// after the flip reads.
+fn as_declared() -> Vec<serde_json::Value> {
+    vec![
+        record(
+            "boss.algedonic.dev",
+            "CNAME",
+            &format!("{TUNNEL_ID}.cfargotunnel.com"),
+            true,
+            1,
+        ),
         record(
             "playground.algedonic.dev",
             "CNAME",
@@ -170,12 +195,15 @@ fn credentials_arg(case: &str) -> String {
 
 // ---- the shipped declaration ----------------------------------------
 
-/// The declaration declares EXACTLY the records measured on 2026-09-16
-/// (the packet's own `measured`): boss. as a grey A to the LAN ingress,
-/// playground. as a proxied CNAME to the tunnel BY REFERENCE — never a
-/// hardcoded tunnel uuid, which changes on every rotation.
+/// The declaration puts boss. behind the tunnel — a proxied CNAME BY
+/// REFERENCE, never a hardcoded tunnel uuid (which changes on every
+/// rotation) — and marks it `interlock = "access"`, the key the
+/// dns.observe handler honours: applied only once the Access
+/// application access.toml declares for the name reads present with an
+/// allow policy (198c5fe9). playground. carries no interlock: the
+/// rotation handler owns that record.
 #[test]
-fn the_shipped_declaration_holds_exactly_the_measured_records() {
+fn the_shipped_declaration_puts_boss_behind_the_tunnel_behind_an_interlock() {
     let toml = std::fs::read_to_string(repo_root().join("infra/cluster/dns/algedonic.dev.toml"))
         .expect("the declaration exists");
     let doc: toml::Value = toml::from_str(&toml).expect("the declaration parses as TOML");
@@ -194,10 +222,10 @@ fn the_shipped_declaration_holds_exactly_the_measured_records() {
     assert_eq!(
         names,
         vec![
-            ("boss.algedonic.dev".to_string(), "A".to_string()),
+            ("boss.algedonic.dev".to_string(), "CNAME".to_string()),
             ("playground.algedonic.dev".to_string(), "CNAME".to_string()),
         ],
-        "exactly today's records: www and the apex are absent from the zone (measured 2026-09-16) and a \
+        "exactly the two doors: www and the apex are absent from the zone (measured 2026-09-16) and a \
          record declared before it exists reads ABSENT on every observation"
     );
     for r in records {
@@ -213,27 +241,37 @@ fn the_shipped_declaration_holds_exactly_the_measured_records() {
             "record {} has an empty why",
             r["name"]
         );
+        assert_eq!(
+            r["target"].as_str(),
+            Some(&*format!("tunnel:{CREDENTIAL}")),
+            "{}: the tunnel is declared by reference to its credential row, never by uuid",
+            r["name"]
+        );
+        assert_eq!(r["proxied"].as_bool(), Some(true), "{}", r["name"]);
+        assert_eq!(
+            r["ttl"].as_integer(),
+            Some(1),
+            "{}: a proxied record's TTL is auto",
+            r["name"]
+        );
     }
     let boss = records
         .iter()
         .find(|r| r["name"].as_str() == Some("boss.algedonic.dev"))
         .unwrap();
-    assert_eq!(boss["target"].as_str(), Some("10.20.0.33"));
     assert_eq!(
-        boss["proxied"].as_bool(),
-        Some(false),
-        "grey cloud: the operators' LAN/WG door"
+        boss["interlock"].as_str(),
+        Some("access"),
+        "boss. is applied only behind the Access interlock — never exposed without Access in front"
     );
     let playground = records
         .iter()
         .find(|r| r["name"].as_str() == Some("playground.algedonic.dev"))
         .unwrap();
-    assert_eq!(
-        playground["target"].as_str(),
-        Some(&*format!("tunnel:{CREDENTIAL}")),
-        "the tunnel is declared by reference to its credential row, never by uuid"
+    assert!(
+        playground.get("interlock").is_none(),
+        "playground. is the rotation handler's record: compared, never applied by the observer"
     );
-    assert_eq!(playground["proxied"].as_bool(), Some(true));
     assert!(
         !toml
             .lines()
@@ -241,19 +279,23 @@ fn the_shipped_declaration_holds_exactly_the_measured_records() {
             .any(|l| l.contains("cfargotunnel.com")),
         "a literal <uuid>.cfargotunnel.com in the declaration drifts on the next rotation"
     );
+    assert!(
+        toml.contains("10.20.0.33") && toml.contains("HISTORY"),
+        "the A record's why survives as history, so the reader can tell why the door was grey"
+    );
 }
 
 // ---- verdicts -------------------------------------------------------
 
 #[test]
-fn the_zone_as_measured_matches_the_declaration_and_exits_0() {
+fn the_zone_as_declared_matches_and_exits_0() {
     let out = Run::new(
         &[
             "algedonic.dev",
             "--tunnel-credentials",
-            &credentials_arg("as-measured"),
+            &credentials_arg("as-declared"),
         ],
-        envelope(&as_measured()),
+        envelope(&as_declared()),
     )
     .go();
     let t = text(&out);
@@ -261,7 +303,9 @@ fn the_zone_as_measured_matches_the_declaration_and_exits_0() {
     let matches = lines_with(&out, "MATCH");
     assert_eq!(matches.len(), 2, "{t}");
     assert!(
-        matches.iter().any(|l| l.contains("boss.algedonic.dev A")),
+        matches
+            .iter()
+            .any(|l| l.contains("boss.algedonic.dev CNAME")),
         "{t}"
     );
     assert!(
@@ -279,6 +323,45 @@ fn the_zone_as_measured_matches_the_declaration_and_exits_0() {
     );
 }
 
+/// What the first observation after 198c5fe9 lands reads, BEFORE the
+/// handler applies anything: the declared CNAME is ABSENT and the old A
+/// record is UNDECLARED — two verdicts on one name, the honest shape of
+/// a flip that has not happened yet. The handler turns the ABSENT into
+/// an apply (or a HELD) off this reading.
+#[test]
+fn the_zone_as_measured_before_the_flip_reads_the_cname_absent_and_the_a_undeclared() {
+    let out = Run::new(
+        &[
+            "algedonic.dev",
+            "--tunnel",
+            &format!("{CREDENTIAL}={TUNNEL_ID}"),
+        ],
+        envelope(&as_measured()),
+    )
+    .go();
+    let t = text(&out);
+    assert_eq!(code(&out), 1, "{t}");
+    let absent = lines_with(&out, "ABSENT");
+    assert_eq!(absent.len(), 1, "{t}");
+    assert!(
+        absent[0].contains("boss.algedonic.dev CNAME")
+            && absent[0].contains(&format!("{TUNNEL_ID}.cfargotunnel.com")),
+        "{}",
+        absent[0]
+    );
+    let undeclared = lines_with(&out, "UNDECLARED");
+    assert_eq!(undeclared.len(), 1, "{t}");
+    assert!(
+        undeclared[0].contains("boss.algedonic.dev A") && undeclared[0].contains("10.20.0.33"),
+        "{}",
+        undeclared[0]
+    );
+    assert!(
+        t.contains("1 match, 0 drift, 1 absent, 1 undeclared"),
+        "{t}"
+    );
+}
+
 /// The handler resolves the reference itself (the Secret's TunnelID,
 /// never the secret) and hands the comparator the uuid.
 #[test]
@@ -289,7 +372,7 @@ fn a_tunnel_reference_resolves_from_a_bare_tunnel_argument_too() {
             "--tunnel",
             &format!("{CREDENTIAL}={TUNNEL_ID}"),
         ],
-        envelope(&as_measured()),
+        envelope(&as_declared()),
     )
     .go();
     assert_eq!(code(&out), 0, "{}", text(&out));
@@ -298,7 +381,7 @@ fn a_tunnel_reference_resolves_from_a_bare_tunnel_argument_too() {
 
 #[test]
 fn a_record_nobody_declared_is_undeclared_reported_and_not_a_failure() {
-    let mut live = as_measured();
+    let mut live = as_declared();
     live.push(record("id.algedonic.dev", "A", "203.0.113.7", false, 300));
     live.push(record("algedonic.dev", "MX", "mail.example.net", false, 1));
     let out = Run::new(
@@ -334,7 +417,7 @@ fn a_record_nobody_declared_is_undeclared_reported_and_not_a_failure() {
 
 #[test]
 fn a_cname_still_pointing_at_the_old_tunnel_is_drift_with_both_values_and_exits_1() {
-    let mut live = as_measured();
+    let mut live = as_declared();
     live[1] = record(
         "playground.algedonic.dev",
         "CNAME",
@@ -369,9 +452,15 @@ fn a_cname_still_pointing_at_the_old_tunnel_is_drift_with_both_values_and_exits_
 }
 
 #[test]
-fn the_boss_door_turned_orange_is_drift_on_proxied_not_content() {
-    let mut live = as_measured();
-    live[0] = record("boss.algedonic.dev", "A", "10.20.0.33", true, 1);
+fn the_boss_door_turned_grey_is_drift_on_proxied_not_content() {
+    let mut live = as_declared();
+    live[0] = record(
+        "boss.algedonic.dev",
+        "CNAME",
+        &format!("{TUNNEL_ID}.cfargotunnel.com"),
+        false,
+        1,
+    );
     let out = Run::new(
         &[
             "algedonic.dev",
@@ -386,7 +475,7 @@ fn the_boss_door_turned_orange_is_drift_on_proxied_not_content() {
     let drift = lines_with(&out, "DRIFT");
     assert_eq!(drift.len(), 1, "{t}");
     assert!(
-        drift[0].contains("boss.algedonic.dev A")
+        drift[0].contains("boss.algedonic.dev CNAME")
             && drift[0].contains("proxied: false")
             && drift[0].contains("proxied: true"),
         "{}",
@@ -396,7 +485,7 @@ fn the_boss_door_turned_orange_is_drift_on_proxied_not_content() {
 
 #[test]
 fn a_declared_record_the_zone_lacks_is_absent_and_exits_1() {
-    let live = vec![as_measured()[1].clone()];
+    let live = vec![as_declared()[1].clone()];
     let out = Run::new(
         &[
             "algedonic.dev",
@@ -411,7 +500,8 @@ fn a_declared_record_the_zone_lacks_is_absent_and_exits_1() {
     let absent = lines_with(&out, "ABSENT");
     assert_eq!(absent.len(), 1, "{t}");
     assert!(
-        absent[0].contains("boss.algedonic.dev A") && absent[0].contains("10.20.0.33"),
+        absent[0].contains("boss.algedonic.dev CNAME")
+            && absent[0].contains(&format!("{TUNNEL_ID}.cfargotunnel.com")),
         "an ABSENT line shows what was declared: {}",
         absent[0]
     );
@@ -431,7 +521,7 @@ fn a_bare_result_array_reads_the_same_as_the_envelope() {
             "--tunnel",
             &format!("{CREDENTIAL}={TUNNEL_ID}"),
         ],
-        serde_json::Value::Array(as_measured()).to_string(),
+        serde_json::Value::Array(as_declared()).to_string(),
     )
     .go();
     assert_eq!(code(&out), 0, "{}", text(&out));
@@ -442,9 +532,15 @@ fn a_bare_result_array_reads_the_same_as_the_envelope() {
 
 #[test]
 fn json_output_carries_one_verdict_per_record_and_the_counts() {
-    let mut live = as_measured();
+    let mut live = as_declared();
     live.push(record("id.algedonic.dev", "A", "203.0.113.7", false, 300));
-    live[0] = record("boss.algedonic.dev", "A", "10.20.0.99", false, 300);
+    live[0] = record(
+        "boss.algedonic.dev",
+        "CNAME",
+        "00000000-1111-4222-8333-444444444444.cfargotunnel.com",
+        true,
+        1,
+    );
     let out = Run::new(
         &[
             "algedonic.dev",
@@ -474,16 +570,33 @@ fn json_output_carries_one_verdict_per_record_and_the_counts() {
             .unwrap_or_else(|| panic!("no verdict for {rec}: {t}"))
             .clone()
     };
-    let boss = by_record("boss.algedonic.dev A");
+    let boss = by_record("boss.algedonic.dev CNAME");
     assert_eq!(boss["verdict"], "DRIFT");
-    assert_eq!(boss["declared"]["content"], "10.20.0.33");
-    assert_eq!(boss["live"]["content"], "10.20.0.99");
+    assert_eq!(
+        boss["declared"]["content"],
+        format!("{TUNNEL_ID}.cfargotunnel.com")
+    );
+    assert_eq!(
+        boss["live"]["content"],
+        "00000000-1111-4222-8333-444444444444.cfargotunnel.com"
+    );
     assert_eq!(
         boss["why"],
-        "LAN/WG operators door until Access exists for it"
+        "the operating site, behind the Cloudflare Tunnel and the Access application declared for it"
+    );
+    // The interlock rides the verdict: the handler reads it here (not
+    // from a second parse of the declaration) to know which records it
+    // may apply, and under what condition.
+    assert_eq!(
+        boss["interlock"], "access",
+        "the declared interlock is carried on the verdict for the handler to honour"
     );
     let pg = by_record("playground.algedonic.dev CNAME");
     assert_eq!(pg["verdict"], "MATCH");
+    assert!(
+        pg.get("interlock").is_none() || pg["interlock"].is_null(),
+        "no interlock declared, none reported: {pg}"
+    );
     assert_eq!(
         pg["declared"]["content"],
         format!("{TUNNEL_ID}.cfargotunnel.com"),
@@ -570,6 +683,33 @@ why = "second"
     let t = text(&out);
     assert_eq!(code(&out), 2, "{t}");
     assert!(t.contains("www.example.org") && t.contains("twice"), "{t}");
+}
+
+#[test]
+fn an_interlock_the_handler_does_not_know_is_refused_naming_it() {
+    let dir = scratch("unknown-interlock");
+    boss_testing::write_file(
+        &dir.join("example.org.toml"),
+        r#"zone = "example.org"
+[[record]]
+name = "www.example.org"
+type = "A"
+target = "192.0.2.1"
+proxied = false
+ttl = 300
+interlock = "moon-phase"
+why = "x"
+"#,
+    );
+    let out = Run::new(&["example.org"], "[]".to_string())
+        .declarations(&dir)
+        .go();
+    let t = text(&out);
+    assert_eq!(code(&out), 2, "{t}");
+    assert!(
+        t.contains("moon-phase") && t.contains("interlock"),
+        "a record whose interlock nothing honours would be applied by nothing, silently: {t}"
+    );
 }
 
 #[test]

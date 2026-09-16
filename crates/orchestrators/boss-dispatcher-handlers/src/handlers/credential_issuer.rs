@@ -427,6 +427,7 @@ pub struct DnsRecord {
 /// and the zone/DNS calls `boss-tls.yaml` already makes:
 ///   GET    /zones?name=<zone>                                  — zone id + account id
 ///   GET    /accounts/{a}/cfd_tunnel?name=<n>&is_deleted=false  — ledger by name
+///   GET    /accounts/{a}/cfd_tunnel?is_deleted=false            — the whole ledger
 ///   POST   /accounts/{a}/cfd_tunnel {name, tunnel_secret, config_src}
 ///   GET    /accounts/{a}/cfd_tunnel/{id}/connections           — [{id, conns: [...]}]
 ///   DELETE /accounts/{a}/cfd_tunnel/{id}                       — refuses under live conns
@@ -441,6 +442,10 @@ pub trait CloudflareTunnels: Send + Sync {
     async fn zone(&self, zone_name: &str) -> Result<ZoneInfo, String>;
     async fn find_tunnel(&self, account_id: &str, name: &str)
     -> Result<Option<TunnelInfo>, String>;
+    /// Every live tunnel the account lists (`is_deleted=false`). The
+    /// revoke phase DISCOVERS what to retire from this list (5e8efcf5)
+    /// instead of needing the old tunnel named on the scope step.
+    async fn list_tunnels(&self, account_id: &str) -> Result<Vec<TunnelInfo>, String>;
     /// `tunnel_secret_b64` is the base64 of >= 32 random bytes. Returns
     /// the new tunnel's id.
     async fn create_tunnel(
@@ -506,6 +511,22 @@ pub trait WorkloadRestarter: Send + Sync {
     ) -> Result<bool, String>;
 }
 
+/// One record as the declaration resolves it: what the zone should
+/// hold at (name, type). The shape `dns.observe` writes when it applies
+/// an interlocked record (198c5fe9) — content already resolved (a
+/// `tunnel:` reference becomes `<uuid>.cfargotunnel.com` before this is
+/// built), `comment` naming the declaration and the packet that applied
+/// it so the dashboard says where the record came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZoneRecordSpec {
+    pub name: String,
+    pub record_type: String,
+    pub content: String,
+    pub proxied: bool,
+    pub ttl: u32,
+    pub comment: String,
+}
+
 /// The zone as a whole — every record `GET /zones/{z}/dns_records`
 /// lists, returned RAW (the v4 `result` rows) so the comparator in the
 /// tree (`infra/cluster/dns/check-declared.sh`) reads exactly what the
@@ -514,9 +535,99 @@ pub trait WorkloadRestarter: Send + Sync {
 /// Zone:DNS:Edit are in the broker's root grant, and the root token is
 /// the ONLY credential that can see the zone, which is why the read
 /// lives behind this port and not in a script somewhere.
+///
+/// The three writes are the apply half (198c5fe9): the handler holds
+/// the whole zone from `zone_records`, so it knows every record id and
+/// never needs a find — it deletes what conflicts with a declared CNAME
+/// at the same name, creates the declared record, or corrects a
+/// drifted one in place. `zone_info` is the same `GET /zones?name=`
+/// the rotation makes: the account id is where the zone's Access
+/// applications live.
 #[async_trait]
 pub trait ZoneRecords: Send + Sync {
     async fn zone_records(&self, zone_name: &str) -> Result<Vec<JsonValue>, String>;
+    async fn zone_info(&self, zone_name: &str) -> Result<ZoneInfo, String>;
+    async fn create_record(&self, zone_id: &str, spec: &ZoneRecordSpec) -> Result<(), String>;
+    async fn update_record(
+        &self,
+        zone_id: &str,
+        record_id: &str,
+        spec: &ZoneRecordSpec,
+    ) -> Result<(), String>;
+    async fn delete_record(&self, zone_id: &str, record_id: &str) -> Result<(), String>;
+}
+
+/// One policy attached to an Access application, as the account lists
+/// it: `include` is the raw rule list (`[{"email": {"email": ...}}]`
+/// and kin) so a rule kind the declaration has no vocabulary for is
+/// still printed on a DRIFT verdict, never dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessPolicy {
+    pub id: String,
+    pub name: String,
+    pub decision: String,
+    pub include: Vec<JsonValue>,
+}
+
+/// One Cloudflare Access application as the account lists it, with
+/// the policies attached to it. `domain` is the hostname it fronts —
+/// the identity the declaration matches on (`name` is whatever the
+/// dashboard called it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessApp {
+    pub id: String,
+    pub name: String,
+    pub domain: String,
+    pub app_type: String,
+    pub session_duration: String,
+    pub policies: Vec<AccessPolicy>,
+}
+
+/// What a declared application is created as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessAppSpec {
+    pub name: String,
+    pub domain: String,
+    pub app_type: String,
+    pub session_duration: String,
+}
+
+/// What a declared policy is created as, on one application.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessPolicySpec {
+    pub name: String,
+    pub decision: String,
+    pub include: Vec<JsonValue>,
+    pub precedence: u32,
+}
+
+/// The Access surface `dns.observe` reads and applies (198c5fe9),
+/// measured from the Cloudflare v4 API (Access: Apps and Policies: Edit,
+/// added to the root token 2026-09-16):
+///   GET  /accounts/{a}/access/apps                    — every application
+///   GET  /accounts/{a}/access/apps/{id}/policies      — the policies on one
+///   POST /accounts/{a}/access/apps {name, domain, type, session_duration}
+///   POST /accounts/{a}/access/apps/{id}/policies {name, decision, include, precedence}
+/// Account-scoped: the account id comes from the zone (`zone_info`).
+/// There is deliberately no update and no delete: a DRIFT application
+/// is corrected FROM THE READ (fix the declaration or the dashboard),
+/// and an UNDECLARED one is reported — the observer creates what is
+/// declared and absent, and nothing else.
+#[async_trait]
+pub trait AccessApps: Send + Sync {
+    async fn access_apps(&self, account_id: &str) -> Result<Vec<AccessApp>, String>;
+    /// Returns the new application's id.
+    async fn create_access_app(
+        &self,
+        account_id: &str,
+        spec: &AccessAppSpec,
+    ) -> Result<String, String>;
+    async fn create_access_policy(
+        &self,
+        account_id: &str,
+        app_id: &str,
+        spec: &AccessPolicySpec,
+    ) -> Result<(), String>;
 }
 
 /// The one shape the connector accepts: `cloudflared`'s
@@ -679,6 +790,24 @@ impl CloudflareTunnels for CloudflareApi {
             .flatten()
             .filter_map(tunnel_from)
             .find(|t| t.name == name))
+    }
+
+    async fn list_tunnels(&self, account_id: &str) -> Result<Vec<TunnelInfo>, String> {
+        // `per_page` is the API's own ceiling (1000, also its default);
+        // said explicitly so a default change upstream cannot quietly
+        // page a tunnel out of the revoke phase's sight.
+        let url = self.url(&format!(
+            "/accounts/{account_id}/cfd_tunnel?is_deleted=false&per_page=1000"
+        ));
+        let result = self
+            .call(self.client.get(&url), &format!("GET {url}"))
+            .await?;
+        Ok(result
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(tunnel_from)
+            .collect())
     }
 
     async fn create_tunnel(
@@ -849,6 +978,164 @@ impl ZoneRecords for CloudflareApi {
         }
         Ok(rows)
     }
+
+    async fn zone_info(&self, zone_name: &str) -> Result<ZoneInfo, String> {
+        self.zone(zone_name).await
+    }
+
+    async fn create_record(&self, zone_id: &str, spec: &ZoneRecordSpec) -> Result<(), String> {
+        let url = self.url(&format!("/zones/{zone_id}/dns_records"));
+        self.call(
+            self.client.post(&url).json(&record_body(spec)),
+            &format!("POST {url}"),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn update_record(
+        &self,
+        zone_id: &str,
+        record_id: &str,
+        spec: &ZoneRecordSpec,
+    ) -> Result<(), String> {
+        let url = self.url(&format!("/zones/{zone_id}/dns_records/{record_id}"));
+        self.call(
+            self.client.patch(&url).json(&record_body(spec)),
+            &format!("PATCH {url}"),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn delete_record(&self, zone_id: &str, record_id: &str) -> Result<(), String> {
+        let url = self.url(&format!("/zones/{zone_id}/dns_records/{record_id}"));
+        self.call(self.client.delete(&url), &format!("DELETE {url}"))
+            .await
+            .map(|_| ())
+    }
+}
+
+/// The v4 record body — one shape for create and correct.
+fn record_body(spec: &ZoneRecordSpec) -> JsonValue {
+    json!({
+        "type": spec.record_type,
+        "name": spec.name,
+        "content": spec.content,
+        "proxied": spec.proxied,
+        "ttl": spec.ttl,
+        "comment": spec.comment,
+    })
+}
+
+fn policy_from(v: &JsonValue) -> Option<AccessPolicy> {
+    let text = |key: &str| {
+        v.get(key)
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    Some(AccessPolicy {
+        id: v.get("id")?.as_str()?.to_string(),
+        name: text("name"),
+        decision: text("decision"),
+        include: v
+            .get("include")
+            .and_then(JsonValue::as_array)
+            .cloned()
+            .unwrap_or_default(),
+    })
+}
+
+#[async_trait]
+impl AccessApps for CloudflareApi {
+    async fn access_apps(&self, account_id: &str) -> Result<Vec<AccessApp>, String> {
+        let url = self.url(&format!("/accounts/{account_id}/access/apps"));
+        let result = self
+            .call(self.client.get(&url), &format!("GET {url}"))
+            .await?;
+        let rows = result
+            .as_array()
+            .cloned()
+            .ok_or_else(|| format!("GET {url}: result is not a list of applications"))?;
+        let mut apps = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let id = row
+                .get("id")
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| format!("GET {url}: an application carries no id: {row}"))?
+                .to_string();
+            let text = |key: &str| {
+                row.get(key)
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            // The policies on THIS application, read from their own
+            // endpoint rather than trusted inline: the list body's
+            // `policies` is a summary whose shape has moved before.
+            let purl = self.url(&format!("/accounts/{account_id}/access/apps/{id}/policies"));
+            let policies = self
+                .call(self.client.get(&purl), &format!("GET {purl}"))
+                .await?;
+            apps.push(AccessApp {
+                id,
+                name: text("name"),
+                domain: text("domain"),
+                app_type: text("type"),
+                session_duration: text("session_duration"),
+                policies: policies
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(policy_from)
+                    .collect(),
+            });
+        }
+        Ok(apps)
+    }
+
+    async fn create_access_app(
+        &self,
+        account_id: &str,
+        spec: &AccessAppSpec,
+    ) -> Result<String, String> {
+        let url = self.url(&format!("/accounts/{account_id}/access/apps"));
+        let body = json!({
+            "name": spec.name,
+            "domain": spec.domain,
+            "type": spec.app_type,
+            "session_duration": spec.session_duration,
+        });
+        let result = self
+            .call(self.client.post(&url).json(&body), &format!("POST {url}"))
+            .await?;
+        result
+            .get("id")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| format!("POST {url}: response result carries no id"))
+    }
+
+    async fn create_access_policy(
+        &self,
+        account_id: &str,
+        app_id: &str,
+        spec: &AccessPolicySpec,
+    ) -> Result<(), String> {
+        let url = self.url(&format!(
+            "/accounts/{account_id}/access/apps/{app_id}/policies"
+        ));
+        let body = json!({
+            "name": spec.name,
+            "decision": spec.decision,
+            "include": spec.include,
+            "precedence": spec.precedence,
+        });
+        self.call(self.client.post(&url).json(&body), &format!("POST {url}"))
+            .await
+            .map(|_| ())
+    }
 }
 
 /// `kubectl rollout restart` is a PATCH of a pod-template annotation
@@ -921,6 +1208,9 @@ impl CloudflareTunnels for Unconfigured {
     async fn find_tunnel(&self, _a: &str, _n: &str) -> Result<Option<TunnelInfo>, String> {
         Err(self.0.clone())
     }
+    async fn list_tunnels(&self, _a: &str) -> Result<Vec<TunnelInfo>, String> {
+        Err(self.0.clone())
+    }
     async fn create_tunnel(&self, _a: &str, _n: &str, _s: &str) -> Result<String, String> {
         Err(self.0.clone())
     }
@@ -967,6 +1257,36 @@ impl CloudflareTunnels for Unconfigured {
 #[async_trait]
 impl ZoneRecords for Unconfigured {
     async fn zone_records(&self, _z: &str) -> Result<Vec<JsonValue>, String> {
+        Err(self.0.clone())
+    }
+    async fn zone_info(&self, _z: &str) -> Result<ZoneInfo, String> {
+        Err(self.0.clone())
+    }
+    async fn create_record(&self, _z: &str, _s: &ZoneRecordSpec) -> Result<(), String> {
+        Err(self.0.clone())
+    }
+    async fn update_record(&self, _z: &str, _r: &str, _s: &ZoneRecordSpec) -> Result<(), String> {
+        Err(self.0.clone())
+    }
+    async fn delete_record(&self, _z: &str, _r: &str) -> Result<(), String> {
+        Err(self.0.clone())
+    }
+}
+
+#[async_trait]
+impl AccessApps for Unconfigured {
+    async fn access_apps(&self, _a: &str) -> Result<Vec<AccessApp>, String> {
+        Err(self.0.clone())
+    }
+    async fn create_access_app(&self, _a: &str, _s: &AccessAppSpec) -> Result<String, String> {
+        Err(self.0.clone())
+    }
+    async fn create_access_policy(
+        &self,
+        _a: &str,
+        _i: &str,
+        _s: &AccessPolicySpec,
+    ) -> Result<(), String> {
         Err(self.0.clone())
     }
 }

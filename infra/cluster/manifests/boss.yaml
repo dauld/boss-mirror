@@ -463,7 +463,26 @@ spec:
             # Bind all interfaces so the Service can reach the gateway;
             # the default 127.0.0.1 is right for systemd+Caddy, wrong here.
             - {name: BOSS_LISTEN, value: "0.0.0.0:4443"}
-            - {name: BOSS_PUBLIC_URL, value: "https://playground.algedonic.dev"}
+            # The operating site (198c5fe9): boss.algedonic.dev, behind the
+            # Cloudflare Tunnel and the Access application declared in
+            # infra/cluster/dns/access.toml. Everything the browser must
+            # see derives from this one value — the OIDC redirect_uri
+            # (<url>/api/auth/oidc/callback), the passkey and break-glass
+            # WebAuthn RP id, the reset-mail links — so it may only name a
+            # hostname whose redirect is declared `registered = true` in
+            # access.toml (the lint a-public-url-names-a-registered-oidc-
+            # redirect refuses otherwise; boss.'s was registered on
+            # 2026-08-12 and is declared with that provenance). Was
+            # https://playground.algedonic.dev until this car. Two
+            # consequences, both by design: (1) between this converge and
+            # the first dns-zone-observation after it (daily; or one filed
+            # by hand), boss. is still the grey A record, so a login from
+            # the internet lands on a callback only the LAN/WG reaches —
+            # the observation creates the Access app and flips the record
+            # in one firing; (2) a WebAuthn credential enrolled under the
+            # playground RP id does not verify under this one — re-enrol
+            # presence passkeys and the break-glass key at /break-glass.
+            - {name: BOSS_PUBLIC_URL, value: "https://boss.algedonic.dev"}
             # OIDC against Kanidm (idm-kanidm.md). The gateway is an OIDC
             # client and issues its own session after login (Q1), mapping the
             # id_token email to an EXISTING employee Subject — a login with no

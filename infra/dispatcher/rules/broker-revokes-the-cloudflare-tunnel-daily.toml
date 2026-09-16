@@ -1,0 +1,77 @@
+# ---------------------------------------------------------------------
+# The credential broker finishes a deferred Cloudflare Tunnel revoke on
+# its own (5e8efcf5; David 2026-09-16: "avoid doing anything by hand
+# unless absolutely required").
+#
+# THE GAP THIS CLOSES. `broker-rotates-the-cloudflare-tunnel` runs the
+# four phases when a rotation packet's scope step completes. Its last
+# phase, revoke, deletes the old tunnels — but only the ones with NO
+# connector left, because deleting a tunnel under a live connector is
+# deleting somebody's traffic. On 2026-09-16 (e202c7c3) the old tunnel
+# still had the boss-gcp connector on it at rotation time, so the phase
+# deferred, and the packet sat at `revoke` with nobody to act: the
+# scope-completion event that fires the rotation rule fires once, and
+# nothing re-fired the phase when the connector retired at 14:18Z. The
+# tunnel was deleted in the dashboard by hand at ~14:35Z — the very act
+# the no-hand-work rule forbids — while the token that unit-cat had
+# leaked (9c760dd7) could attach to it until then.
+#
+# WHAT FIRES, AND WHAT IT DOES. Once a sim-day the same handler runs
+# with `phase = "revoke"` and no packet in its payload (a clock firing
+# carries only `_day`). In that mode it lists every open
+# rotate-a-credential packet about this credential — opened ON it
+# (subject_id) or naming it on the scope step (`credential`), the two
+# spellings the rotation rule's `when` matches — whose `revoke` step is
+# ready, and runs ONLY the revoke phase on each: it reads the account's
+# live tunnel list, takes every tunnel named `<tunnel_name_prefix>-*`
+# whose id is not the one the installed Secret names (the current one,
+# never a candidate), plus what the install phase recorded the rewritten
+# CNAMEs used to point at (`previous_tunnel_id` on the install step),
+# plus the scope step's `old_token` if the scoper knew it; deletes each
+# one that reports zero connections and records id + name on the step;
+# defers again on any that still has a connector; and completes the
+# step when nothing is left — which closes the packet `rotated`. A
+# tunnel already gone (deleted by hand) is "already revoked", not an
+# error. Nothing is minted, no DNS is touched, no connector is
+# restarted: `phase = "revoke"` is the handler's contract that a day
+# has nothing to rotate, and a clock firing without it is refused.
+#
+# WHY A CADENCE AND NOT THE RETIRE VERB'S EFFECT. The natural trigger —
+# an ops-request `retire-cloudflared` answering exit 0 — was measured
+# and is NOT visible to the rule layer: `jobs.job.closed` carries
+# id/kind/outcome/title/subject_id and no job metadata (the verb lives
+# there), and the runner's `step.done.task` on the `execute` step
+# carries `disposition`/`output`/`exit_code` but not the verb either;
+# the expr layer matches equality, not substrings of a title. Teaching
+# the runner to stamp the verb on the step is a different car; until
+# then the daily cadence is the door, and it is enough — a deferred
+# revoke costs a day, not a hand.
+#
+# THE ARGS ARE THE REVOKE SUBSET of the rotation rule's declaration —
+# the zone (for the account id), the Secret (for the current tunnel),
+# the prefix, and the credential — and MUST agree with it:
+# `crates/core/boss-dispatcher/tests/broker_revoke_refire_rule.rs` pins
+# every shared key equal (CLAUDE.md §9a: a fact that lives twice gets an
+# equality test). `hostnames`, `verify_hostname` and `restart_deployment`
+# are deliberately absent: the revoke phase reads none of them.
+[[rule]]
+name = "broker-revokes-the-cloudflare-tunnel-daily"
+why = """
+A TIMER, the standing exemption, and EXTERNAL GLUE at once: the
+condition it watches is a Cloudflare tunnel's connection count falling
+to zero after the rotation packet's own trigger has already fired —
+nothing in the system emits an event for that, and the one event that
+could stand in for it (the retire verb's ops-request answering) is not
+readable by a rule's `when` today (no job metadata on
+`jobs.job.closed`, no verb on the runner's `step.done.task`). It adds no
+routing: it advances the very packets it finds at `revoke` and spawns
+nothing. Its effect lives outside the system — the account API's tunnel
+list and DELETE — which no Workflow definition can address. Measured
+2026-09-16 (5e8efcf5): e202c7c3 sat at `revoke` from 07:36Z with the old
+tunnel at zero connections from 14:18Z until a hand deleted it at
+~14:35Z.
+"""
+schedule = { cadence = "daily", anchor_date = "2026-09-17" }
+[[rule.do]]
+handler = "credential.rotate.cloudflare-tunnel"
+args = { phase = "\"revoke\"", zone = "\"algedonic.dev\"", secret_namespace = "\"boss\"", secret_name = "\"cloudflare-tunnel-credentials\"", secret_key = "\"credentials.json\"", tunnel_name_prefix = "\"boss-cluster\"", credential_id = "\"cloudflare-tunnel-credentials\"" }

@@ -93,6 +93,15 @@ const SPAWNS_NOTHING_ON_PURPOSE: &[(&str, &str)] = &[
          backlog 6bf34846 tracks (an alarm that reports through its subject dies with \
          it).",
     ),
+    (
+        "broker-revokes-the-cloudflare-tunnel-daily",
+        "runs `credential.rotate.cloudflare-tunnel` with phase = revoke over rotation \
+         packets already parked at `revoke`; it advances those and files nothing, so on \
+         a day with no deferred revoke it produces NOTHING, and that zero is the healthy \
+         reading (5e8efcf5). The packets it advances are rotate-a-credential, opened by \
+         an operator, not by this rule — a sweep keyed by kind would be watching the \
+         operator's cadence, not this one's.",
+    ),
 ];
 
 fn shipped() -> (Vec<ClockCadence>, Vec<NotACadence>) {

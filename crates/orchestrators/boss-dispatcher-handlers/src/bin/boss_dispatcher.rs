@@ -355,7 +355,7 @@ async fn main() -> Result<()> {
             // the missing knob instead.
             {
                 use credential_issuer::{
-                    CloudflareApi, CloudflareTunnels, ForgeTokenIssuer, ForgejoAdmin,
+                    AccessApps, CloudflareApi, CloudflareTunnels, ForgeTokenIssuer, ForgejoAdmin,
                     KubeSecretStore, SecretStore, Unconfigured, WorkloadRestarter, ZoneRecords,
                 };
                 let issuer: Arc<dyn ForgeTokenIssuer> = match &cfg.broker_forgejo_token {
@@ -388,27 +388,31 @@ async fn main() -> Result<()> {
                 // the boss namespace, and a rollout restart of the
                 // declared connector Deployment.
                 // ONE client serves the rotation AND the zone observer
-                // below: the same root token is the only credential that
-                // can read the zone.
-                let (cloudflare, zone_reader): (Arc<dyn CloudflareTunnels>, Arc<dyn ZoneRecords>) =
-                    match &cfg.broker_cloudflare_token {
-                        Some(root) => {
-                            let api = CloudflareApi::new(
-                                cfg.broker_cloudflare_api_url.clone(),
-                                root.clone(),
-                            );
-                            (api.clone(), api)
-                        }
-                        None => {
-                            let why = "credential broker unconfigured: BOSS_BROKER_CLOUDFLARE_TOKEN unset \
-                                       (secret boss-credential-broker-root, key cloudflare-token)"
+                // below (zone reads and interlocked writes, and the
+                // account's Access applications): the same root token
+                // is the only credential that can read any of them.
+                let (cloudflare, zone_reader, access_apps): (
+                    Arc<dyn CloudflareTunnels>,
+                    Arc<dyn ZoneRecords>,
+                    Arc<dyn AccessApps>,
+                ) = match &cfg.broker_cloudflare_token {
+                    Some(root) => {
+                        let api =
+                            CloudflareApi::new(cfg.broker_cloudflare_api_url.clone(), root.clone());
+                        (api.clone(), api.clone(), api)
+                    }
+                    None => {
+                        let why =
+                            "credential broker unconfigured: BOSS_BROKER_CLOUDFLARE_TOKEN unset \
+                                   (secret boss-credential-broker-root, key cloudflare-token)"
                                 .to_string();
-                            (
-                                Arc::new(Unconfigured(why.clone())),
-                                Arc::new(Unconfigured(why)),
-                            )
-                        }
-                    };
+                        (
+                            Arc::new(Unconfigured(why.clone())),
+                            Arc::new(Unconfigured(why.clone())),
+                            Arc::new(Unconfigured(why)),
+                        )
+                    }
+                };
                 let workloads: Arc<dyn WorkloadRestarter> = match &kube {
                     Ok(s) => s.clone(),
                     Err(e) => Arc::new(Unconfigured(format!(
@@ -421,18 +425,24 @@ async fn main() -> Result<()> {
                     secrets.clone(),
                     workloads,
                 ));
-                // The zone observer (5e58922c): on a dns-zone-observation
-                // packet's observe step, read the zone with the same root
-                // token, run the tree's comparator
+                // The zone observer (5e58922c, 198c5fe9): on a
+                // dns-zone-observation packet's observe step, read the
+                // account's Access applications and the zone with the
+                // same root token, run the tree's comparator
                 // (infra/cluster/dns/check-declared.sh, at
                 // BOSS_DNS_DECLARATIONS in the image) over the records,
-                // and complete the step with a verdict per record; DRIFT
-                // or ABSENT files or refreshes the dns_drift:<zone> estate
-                // alarm. Reads the Secret store only to resolve a
-                // `tunnel:` reference to its installed TunnelID.
+                // create an ABSENT declared Access application, apply a
+                // zone record declaring `interlock = "access"` once its
+                // application reads present with an allow policy, and
+                // complete the step with a verdict per record and per
+                // application; DRIFT or ABSENT on either files or
+                // refreshes the dns_drift:<zone> estate alarm. Reads the
+                // Secret store only to resolve a `tunnel:` reference to
+                // its installed TunnelID.
                 handlers.register(DnsObserve::new(
                     cfg.jobs_api_url.clone(),
                     zone_reader,
+                    access_apps,
                     secrets,
                     cfg.dns_declarations_dir.clone(),
                 ));

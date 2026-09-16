@@ -35,13 +35,21 @@
 # file once, at start); VERIFY — a connector reports connected on the
 # new tunnel and https://<verify_hostname>/health answers 2xx through
 # the edge (bounded in-invocation wait, then "not yet" to the
-# redelivery schedule); REVOKE — DELETE the old tunnel named in the
-# scope step's `old_token` (a tunnel NAME), which invalidates every
-# connector token minted for it — ONLY when it shows zero live
-# connections; otherwise the revoke step is annotated "still has N
-# connections — revoke deferred" and left open until the boss-gcp
-# connector retires (0b7804f3). The value never enters a packet or an
-# event.
+# redelivery schedule); REVOKE — DISCOVER the old tunnels and DELETE
+# each one with no connector left: every live tunnel in the account
+# named `<tunnel_name_prefix>-*` whose id is not the one the installed
+# Secret names (the current one, never a candidate), plus what the
+# rewritten CNAMEs pointed at before the install (recorded on the
+# install step as `previous_tunnel_id`), plus the scope step's
+# `old_token` (a tunnel NAME) when the scoper knew it — one more
+# candidate, never the only one (5e8efcf5; until then the phase acted
+# on `old_token` alone and, absent, left the step to a person). A
+# delete invalidates every connector token minted for that tunnel. A
+# candidate that still shows live connections is recorded "still has N
+# connections — revoke deferred" and the step is left open;
+# `broker-revokes-the-cloudflare-tunnel-daily` re-runs the phase each
+# day and completes it once nothing is left, so no hand is needed. The
+# value never enters a packet or an event.
 #
 # `account_id` is deliberately absent: the handler reads it off the
 # zone (`GET /zones?name=` carries `account.id`, and Zone:Read is in

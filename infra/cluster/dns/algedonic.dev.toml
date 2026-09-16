@@ -15,14 +15,21 @@
 # failure — the third state, the honest reading of a zone nobody had
 # measured whole.
 #
-# APPLY IS NOT HERE YET. The credential broker's tunnel rotation
-# (credential.rotate.cloudflare-tunnel) upserts the tunnel CNAMEs it is
-# told about, and the dns-record Job in boss-tls.yaml upserts the boss.
-# A record; nothing applies THIS FILE to the zone. The declaration is
-# the intent, the observer reports the gap, and closing it (a converge
-# step applying the file with a Zone:DNS:Edit-scoped token) is the
-# follow-on car, once the first live observation has shown what the
-# zone actually holds.
+# APPLY, SO FAR, ONLY BEHIND AN INTERLOCK. A record declaring
+# `interlock = "access"` names a hostname that must not be reachable
+# from the internet without a Cloudflare Access application in front
+# of it (backlog 198c5fe9: never expose the production gateway without
+# Access). The `dns.observe` handler APPLIES such a record — creates it
+# when ABSENT, replacing whatever other type the name held; corrects
+# it when DRIFT — only once it has read the application access.toml
+# declares for that name as PRESENT WITH AN ALLOW POLICY, in the same
+# firing; until then the record stays exactly as it is and the
+# observation packet says `flip held — Access app absent` on it (a
+# HELD verdict, reported and not alarmed). A record without the key is
+# compared and reported only — the rotation handler
+# (credential.rotate.cloudflare-tunnel) is the writer of the tunnel
+# CNAMEs it is told about, and applying the whole file (a converge
+# step with a Zone:DNS:Edit-scoped token) remains the follow-on car.
 #
 # EACH ENTRY: `name` is the FQDN as Cloudflare lists it; `type`,
 # `proxied` and `ttl` are compared verbatim against the live record
@@ -41,26 +48,44 @@
 
 zone = "algedonic.dev"
 
-# The operators' door to the system of record: an A record to the
-# cluster's ingress on the LAN/WireGuard network, DNS-only (grey cloud)
-# so nothing on the internet is told this address answers. Created by
-# the dns-record Job in infra/cluster/manifests/boss-tls.yaml (Secret
-# cloudflare-api-token), which is where the 300 s TTL comes from.
-# Stays grey until a Cloudflare Access policy exists for boss. — moving
-# it behind the tunnel before that would expose the production
-# gateway to the internet, so that flip is David's act, not a car's.
+# The operating site — the system of record's door — behind the
+# Cloudflare Tunnel the in-cluster connector serves (the connector
+# already routes boss.algedonic.dev -> boss-gateway.boss; tunnel_ingress
+# on every converge) and behind the Access application access.toml
+# declares for it, so the edge asks who you are before a request
+# reaches the gateway. Applied by dns.observe behind the interlock
+# above; the first observation after 198c5fe9 lands is the flip.
+#
+# HISTORY. From 2026-08-12 until that flip this record was
+# `A 10.20.0.33, proxied = false, ttl = 300`: a grey-cloud A record to
+# the cluster's ingress on the LAN/WireGuard network, DNS-only so that
+# nothing on the internet was told the address answers — the
+# operators' door until Access existed for boss. — created by the
+# dns-record Job in infra/cluster/manifests/boss-tls.yaml (Secret
+# cloudflare-api-token; the 300 s TTL was that Job's). Moving it
+# behind the tunnel before an Access policy existed would have exposed
+# the production gateway, which is why the flip waited, and why it now
+# rides an interlock instead of a hand. That Job is one-shot and
+# completed; re-run, its A upsert would be refused by Cloudflare (a
+# CNAME shares its name with nothing), and 974d2015 retires it with
+# the Let's Encrypt path once boss. answers through the edge.
 [[record]]
 name = "boss.algedonic.dev"
-type = "A"
-target = "10.20.0.33"
-proxied = false
-ttl = 300
-why = "LAN/WG operators door until Access exists for it"
+type = "CNAME"
+target = "tunnel:cloudflare-tunnel-credentials"
+proxied = true
+ttl = 1
+interlock = "access"
+why = "the operating site, behind the Cloudflare Tunnel and the Access application declared for it"
 
 # The public worked example (the demo tenant), served through the
 # Cloudflare Tunnel the in-cluster cloudflared connector runs. Written
 # by the broker's rotation handler on every rotation (first on
-# 2026-09-16, rotation packet e202c7c3), proxied, TTL auto.
+# 2026-09-16, rotation packet e202c7c3), proxied, TTL auto. No
+# interlock key: the rotation handler owns this record (a second
+# writer would race its connector cutover), so the observer compares
+# and reports it only; the Access application in front of it is
+# declared in access.toml and compared there.
 [[record]]
 name = "playground.algedonic.dev"
 type = "CNAME"

@@ -1,0 +1,114 @@
+# infra/cluster/dns/access.toml — what stands in FRONT of the zone's
+# proxied hostnames, declared as data (design 4c565f8c; backlog
+# 198c5fe9): the Cloudflare Access applications the edge consults
+# before a request reaches the tunnel, and the OIDC redirects the
+# gateway needs registered at the IdP for each hostname it may be
+# served under. Until 2026-09-16 the one Access application (in front
+# of playground.algedonic.dev) was created in the dashboard and nothing
+# in the tree said it existed; the one for boss.algedonic.dev could not
+# exist as a declaration until David added Access: Apps and Policies:
+# Edit to the credential broker's root token (2026-09-16 ~14:00Z).
+#
+# HOW IT IS READ. The `dns.observe` dispatcher handler reads the
+# account's applications with that root token on every zone
+# observation, compares them to the [[application]] entries here in the
+# design-16115a17 vocabulary — MATCH / DRIFT (both values) / ABSENT /
+# UNDECLARED — and APPLIES an ABSENT declared application: creates it
+# and its declared policies, idempotent by DOMAIN (an application's
+# identity here is the hostname it fronts; `name` is only what a
+# created one is called), then reads the account again so the packet
+# records what is there, never what was sent. A present application
+# missing a declared policy gets that policy created, by name. DRIFT
+# is reported (and raises the dns_drift estate alarm with the zone's
+# own findings), never corrected: an application that reads differently
+# from its declaration is corrected FROM THE READ — fix the declaration
+# to what the dashboard shows, or fix the dashboard — and the next
+# observation reads MATCH.
+#
+# THE INTERLOCK. A zone record in algedonic.dev.toml carrying
+# `interlock = "access"` is applied only once the application declared
+# here for the same name reads present with a policy whose decision is
+# `allow`. So the order of the first observation after this file lands
+# is: applications compared, ABSENT ones created and read back, THEN
+# the zone compared and the interlocked record applied — or held, with
+# `flip held — Access app absent` on the packet, if the application is
+# not there to read.
+#
+# VOCABULARY compared per application: `type`, `session_duration`, and
+# the policy set — each declared policy by `name` with its `decision`
+# and the e-mails its `include.emails` lists, against the live policy's
+# include rules read as `{email: {email: ...}}`. Only e-mail includes
+# are declared here today; a live rule of another kind (everyone, an
+# e-mail domain, a group, a country) reads as DRIFT with the live rule
+# printed, which is how the next car learns the vocabulary to add.
+
+# The account is the one that holds this zone (resolved from
+# `GET /zones?name=` — the zone object carries its account id, so no
+# Account:Read grant is needed).
+account_zone = "algedonic.dev"
+
+# The operating site. Self-hosted application on the hostname the
+# tunnel serves; one allow policy naming the operator's e-mail. This is
+# the Access policy boss. waited on since 2026-08-12 (the zone file's
+# HISTORY comment), now a declaration the observer applies.
+[[application]]
+name = "BOSS"
+domain = "boss.algedonic.dev"
+type = "self_hosted"
+session_duration = "24h"
+why = "the operating site: the edge asks for the operator's identity before a request reaches the gateway"
+
+[[application.policy]]
+name = "operators"
+decision = "allow"
+include.emails = ["david@algedonic.dev"]
+
+# The public worked example. DECLARED BY NAME AND SHAPE, NOT FROM A
+# READ: the application exists (playground.algedonic.dev answers 302 to
+# algedonicdev.cloudflareaccess.com, measured 2026-09-16) and was made
+# in the dashboard; the pod that wrote this file cannot read the
+# account, so its session duration and policy below are the shape an
+# operator would have given it, not what it holds. The first
+# observation compares this entry against the live application and
+# will very likely report DRIFT with both values on the packet (and
+# raise the dns_drift alarm carrying them): CORRECT THIS ENTRY FROM THAT
+# READ. What must not happen is a guess recorded silently as a fact —
+# so the guess is labelled, and the comparator is what turns it into a
+# measurement. Matched by domain, so whatever the dashboard named it,
+# no twin is created.
+[[application]]
+name = "playground"
+domain = "playground.algedonic.dev"
+type = "self_hosted"
+session_duration = "24h"
+why = "public example tenant; declared blind on 2026-09-16 — correct from the first observation's read"
+
+[[application.policy]]
+name = "visitors"
+decision = "allow"
+include.emails = ["david@algedonic.dev"]
+
+# THE OIDC REDIRECTS. The gateway builds its OIDC redirect_uri as
+# `<BOSS_PUBLIC_URL>/api/auth/oidc/callback` (boss-gateway oidc.rs),
+# and the IdP (Kanidm, docs/design/idm-kanidm.md; OAuth2 client
+# `boss`) refuses a code flow whose redirect_uri it does not have
+# registered — so BOSS_PUBLIC_URL may only name a hostname whose
+# redirect is registered there, or every login breaks the moment the
+# manifest converges. The pod cannot read Kanidm's admin API, so the
+# fact is DECLARED here with its provenance, and the lint
+# infra/lint/a-public-url-names-a-registered-oidc-redirect.sh refuses
+# a manifest whose BOSS_PUBLIC_URL names a hostname that is not
+# declared registered. Re-read it with `kanidm system oauth2 get boss`
+# (the client's oauth2_rs_origin / redirect list) and correct
+# `registered` and `measured` here if the read disagrees.
+[[oidc_redirect]]
+hostname = "boss.algedonic.dev"
+redirect = "https://boss.algedonic.dev/api/auth/oidc/callback"
+registered = true
+measured = "2026-08-12: both callbacks (playground. and boss.) registered on the Kanidm `boss` client through its HTTP API after `kanidmd recover-account idm_admin` (operator session record); Kanidm has not been rebuilt or restored since"
+
+[[oidc_redirect]]
+hostname = "playground.algedonic.dev"
+redirect = "https://playground.algedonic.dev/api/auth/oidc/callback"
+registered = true
+measured = "2026-08-12: the same registration as boss.; the callback every login used from 2026-08-12 to the BOSS_PUBLIC_URL flip (198c5fe9)"
