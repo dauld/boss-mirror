@@ -514,11 +514,39 @@ OUTCOME="converged=$HEAD"
 # in reverse — an instance whose Secrets are not minted yet waits
 # 420s+300s for a rollout that cannot complete, and that wait must
 # not delay prod's verification or the orphan sweep.
+#
+# AN INSTANCE WITHOUT ITS SECRETS IS SKIPPED, not failed (car cb784b3a,
+# held on the dock 2026-09-16). The Secrets are minted out of tree, once
+# per namespace, by David; as first built this loop applied the
+# playground regardless and the roll below then waited 420 s + 300 s
+# on pods that could not start — "Maintenance failed" on EVERY train
+# until the ceremony, which is a scheduled alarm, not reliability. So
+# the gate (cluster-deploy-lib.sh instance_secret_gate) asks first,
+# deriving the required Secrets from the RENDERED manifests; an
+# instance missing any is skipped whole, named on the packet as
+# `instances_skipped: <ns> (secrets absent: a, b)` beside
+# `instances_applied`, the `kubectl create secret` shapes are printed
+# (names and keys, never values), and the converge exits 0. Once the
+# Secrets exist the instance applies with no other change and the
+# field flips from skipped to applied. A read the credential cannot
+# make is neither — it fails this stage, after prod's stamp.
 STAGE="apply instances"
 INSTANCES_APPLIED="$SOURCE_NS"
+INSTANCES_SKIPPED=""
 while IFS=$'\t' read -r iname ins_ns _t _s _h; do
     [ "$ins_ns" = "$SOURCE_NS" ] && continue
     STAGE="apply $ins_ns"
+    absent=""
+    gate_rc=0
+    absent=$(instance_secret_gate "$K" "$KM" "$ins_ns" "/manifests/$ins_ns") || gate_rc=$?
+    case "$gate_rc" in
+        0) ;;
+        1)  INSTANCES_SKIPPED="${INSTANCES_SKIPPED:+$INSTANCES_SKIPPED; }$ins_ns (secrets absent: ${absent// /, })"
+            continue ;;
+        *)  echo "cluster-deploy-runner: cannot tell whether $ins_ns has its Secrets (rc=$gate_rc) — not applying it; prod is converged and stamped" >&2
+            run_summary_field instances_applied "$INSTANCES_APPLIED"
+            exit 1 ;;
+    esac
     echo "cluster-deploy-runner: applying instance $iname ($ins_ns) — boss image pinned to the converged $LAST"
     apply_instance "$ins_ns"
     converge_step_plugins "$ins_ns"
@@ -528,6 +556,10 @@ done <<< "$INSTANCES"
 rm -rf "$APPLY_DIR"
 run_summary_field instances_applied "$INSTANCES_APPLIED"
 echo "cluster-deploy-runner: instances applied: $INSTANCES_APPLIED"
+if [ -n "$INSTANCES_SKIPPED" ]; then
+    run_summary_field instances_skipped "$INSTANCES_SKIPPED"
+    echo "cluster-deploy-runner: instances skipped: $INSTANCES_SKIPPED"
+fi
 _stage_done instances_s
 STAGE="verify manifests"
 
@@ -603,13 +635,16 @@ echo "cluster-deploy-runner: no orphans — nothing is running that the tree can
 # "Maintenance failed" at this stage, naming the instance) rather than
 # printing a warning nobody reads — the playground converges on every
 # train by decision, and a train that did not reach it must say so.
+# An instance the apply loop SKIPPED (its Secrets absent) is not rolled:
+# there is nothing of this head in it to prove Ready.
 while IFS=$'\t' read -r iname ins_ns _t _s _h; do
     [ "$ins_ns" = "$SOURCE_NS" ] && continue
+    case ",$INSTANCES_APPLIED," in *",$ins_ns,"*) ;; *) continue ;; esac
     STAGE="roll $ins_ns $HEAD"
     echo "cluster-deploy-runner: rolling instance $iname ($ins_ns) to $REGISTRY:$HEAD"
     if ! roll_deployment "$K" "$REGISTRY" "$HEAD" "$LAST" "$FAILED_FILE.$ins_ns" "$ins_ns"; then
         run_summary_field "roll_$ins_ns" failed
-        echo "cluster-deploy-runner: INSTANCE $ins_ns DID NOT REACH $HEAD — prod is converged and stamped; the instance needs its Secrets minted (infra/cluster/instances.toml names them) or hands" >&2
+        echo "cluster-deploy-runner: INSTANCE $ins_ns DID NOT REACH $HEAD — prod is converged and stamped; its Secrets exist (the apply gate passed), so this is the instance's own environment: read its pods" >&2
         exit 1
     fi
     run_summary_field "roll_$ins_ns" "$HEAD"

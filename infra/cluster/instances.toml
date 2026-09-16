@@ -38,12 +38,18 @@
 #              out of band.
 #
 # WHAT AN INSTANCE STILL NEEDS BY HAND, once, per namespace: the Secrets
-# the manifests reference by name (README: secrets never live here) —
-# boss-secrets, boss-session-key, boss-oidc, resend, forgejo-registry,
-# boss-tls; boss-credential-broker-root and boss-break-glass-enroll are
-# optional. Until they exist the rendered pods wait, the converge says
-# so on its packet, and prod is unaffected: it is applied, rolled and
-# stamped before any other instance is touched.
+# the manifests reference by name (README: secrets never live here).
+# The converge DERIVES that list from the rendered manifests
+# (cluster-deploy-lib.sh manifest_secrets — every secretKeyRef, secret
+# volume and imagePullSecret not marked optional; measured 2026-09-16
+# for the playground: boss-oidc, boss-secrets, boss-session-key,
+# boss-tls, forgejo-registry, resend) and asks the cluster before it
+# applies: an instance missing any is SKIPPED whole, named on the
+# converge packet as `instances_skipped`, with the `kubectl create
+# secret` shapes printed in the journal, and the converge exits 0.
+# Prod is applied, rolled, stamped and verified first and is
+# unaffected. Once the Secrets exist the instance applies on the next
+# converge with no other change.
 
 source = "prod"
 

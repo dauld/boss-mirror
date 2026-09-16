@@ -166,6 +166,99 @@ _patch_boss_image() {
         -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/image\",\"value\":\"$image\"},{\"op\":\"replace\",\"path\":\"/spec/template/spec/initContainers/0/image\",\"value\":\"$image\"}]"
 }
 
+# AN INSTANCE WITHOUT ITS SECRETS IS SKIPPED, BY NAME (backlog 07d7549c;
+# car cb784b3a held on the dock 2026-09-16). Every Secret an instance's
+# manifests reference is minted out of tree, once per namespace, by
+# David. As first built the runner applied the playground and then
+# waited 420 s + 300 s on a rollout its pods could not start, and every
+# train's converge ended "Maintenance failed" until that ceremony —
+# a scheduled alarm, not reliability. So before a second instance is
+# applied the runner asks whether the Secrets it needs exist, and an
+# instance missing any is skipped whole: the names ride the converge
+# packet, the shapes to mint are printed (names and keys, never values),
+# and the converge exits 0 with prod applied, rolled, stamped and
+# verified exactly as before.
+#
+# manifest_secrets K PATH
+#   The Secret names the objects at PATH (a file or a directory, as the
+#   kubectl K sees it) REQUIRE: every env secretKeyRef, every secret
+#   volume and every imagePullSecret, minus those marked `optional:
+#   true` — the pod boots without those. DERIVED from the manifests
+#   through kubectl's own parser (client dry run) and jq, never listed
+#   here: a list would be the §9a pair that drifts the day a manifest
+#   gains a reference. One name per line, sorted, unique.
+manifest_secrets() {
+    local k="$1" path="$2"
+    # -s slurps kubectl's document stream into one array, so `unique`
+    # spans every object rather than each document on its own.
+    $k create --dry-run=client -o json -f "$path" | jq -rs '
+        [ .[] | .. | objects | (
+            (select(has("secretKeyRef")) | .secretKeyRef | select(.optional != true) | .name),
+            (select(has("secretName")) | select(.optional != true) | .secretName),
+            (select(has("imagePullSecrets")) | .imagePullSecrets[]? | .name)
+        ) ] | unique | .[]'
+}
+
+# manifest_secret_keys K PATH
+#   name<TAB>key for every required secretKeyRef at PATH — what the
+#   `--from-literal` shapes below are built from.
+manifest_secret_keys() {
+    local k="$1" path="$2"
+    $k create --dry-run=client -o json -f "$path" | jq -rs '
+        [ .[] | .. | objects | select(has("secretKeyRef")) | .secretKeyRef
+          | select(.optional != true) | "\(.name)\t\(.key)" ] | unique | .[]'
+}
+
+# instance_secret_gate K KM NS PATH
+#   0  every required Secret exists in NS — apply the instance
+#   1  at least one is absent — SKIP the instance; stdout is the absent
+#      names, space-separated (for the packet), and stderr carries the
+#      `kubectl create secret` shape for each (names and keys only).
+#      A namespace that does not exist yet answers NotFound for every
+#      Secret, which is the truth on the first converge after landing.
+#   2  a read the credential could not make — CANNOT TELL, which is
+#      neither "present" nor "absent" (CLAUDE.md §Doors: a wrong target
+#      answers instead of erroring; this one refuses instead).
+#   K reads the cluster; KM is the kubectl that can see PATH (the
+#   runner's manifests mount) — the same command when there is one.
+instance_secret_gate() {
+    local k="$1" km="$2" ns="$3" path="$4"
+    local required name out absent="" keys
+    required=$(manifest_secrets "$km" "$path") || return 2
+    for name in $required; do
+        if out=$($k get secret -n "$ns" "$name" 2>&1); then
+            continue
+        fi
+        if printf '%s' "$out" | grep -qi 'not found'; then
+            absent="$absent $name"
+        else
+            echo "cluster-deploy-runner: cannot read Secret $ns/$name — $out" >&2
+            return 2
+        fi
+    done
+    [ -n "$absent" ] || return 0
+    absent="${absent# }"
+    echo "$absent"
+    keys=$(manifest_secret_keys "$km" "$path")
+    echo "cluster-deploy-runner: instance $ns SKIPPED — these Secrets are not minted in it: $absent" >&2
+    echo "  Secrets never live in the tree (infra/cluster/manifests/README.md). Mint each once, in the" >&2
+    echo "  namespace, with prod's copy as the shape; the instance applies on the next converge:" >&2
+    for name in $absent; do
+        local literals=""
+        while IFS=$'\t' read -r n key; do
+            [ "$n" = "$name" ] && literals="$literals --from-literal=$key=..."
+        done <<< "$keys"
+        if [ -n "$literals" ]; then
+            echo "    kubectl -n $ns create secret generic $name$literals" >&2
+        elif [ "$name" = forgejo-registry ] || printf '%s' "$name" | grep -q 'registry'; then
+            echo "    kubectl -n $ns create secret docker-registry $name --docker-server=... --docker-username=... --docker-password=..." >&2
+        else
+            echo "    kubectl -n $ns create secret generic $name --from-file=<key>=<file>   # keys: kubectl -n boss get secret $name -o jsonpath='{.data}' | jq keys" >&2
+        fi
+    done
+    return 1
+}
+
 # converge_held HOLD_FILE — an operator's hold stands: print its reason
 # and return 0; no hold, return 1. The runner asks before it builds.
 converge_held() {
