@@ -36,12 +36,56 @@
 # The three hooks below are functions so the self-test can replace
 # them; the launcher uses the defaults.
 
+# Where the seed scripts live in the image; overridable so the shell
+# test (crates/core/boss-testing/tests/the_launcher_publishes_a_tenant_
+# by_its_id.rs) can point publish_tenant at stubs.
+BOSS_INFRA_DIR="${BOSS_INFRA_DIR:-/opt/boss/infra}"
+
+# The tenant directory (tenant.toml + seeds/). BOSS_TENANT_DIR names it
+# outright (fcc1d57b car 2); the N-1 deployment sets only
+# BOSS_TENANT_MANIFEST_TOML, whose dirname is the tenant dir at the
+# root spelling and one above it at the examples' seeds/ spelling.
+tenant_dir() {
+    if [[ -n "${BOSS_TENANT_DIR:-}" ]]; then
+        echo "$BOSS_TENANT_DIR"
+        return
+    fi
+    local d
+    d="$(dirname "${BOSS_TENANT_MANIFEST_TOML:-/opt/boss/examples/brewery/seeds/tenant.toml}")"
+    [[ "$(basename "$d")" == "seeds" ]] && d="$(dirname "$d")"
+    echo "$d"
+}
+
+# `[meta] tenant_id` from the manifest at either spelling; empty when
+# there is none — which the generic publish then refuses by name.
+tenant_id_of() {
+    local f
+    for f in "$1/tenant.toml" "$1/seeds/tenant.toml"; do
+        [[ -f "$f" ]] || continue
+        sed -n 's/^tenant_id *= *"\([^"]*\)".*/\1/p' "$f" | head -1
+        return
+    done
+}
+
 # Publish the platform operator baseline, then the tenant. Both go
 # through the public API. Non-zero means the tenant is NOT published
 # and the baseline is untouched.
+#
+# WHICH publish is the tenant's to say (ee7b62bb, 2026-09-16). Until
+# then seed-brewery-tenant.sh ran unconditionally, so a deployment
+# pointed at a tenant with no engine — Algedonic, LLC — would still
+# have seeded the brewery. The brewery keeps its script because its
+# engine seeds what the sim needs and stamps the sim's reset baseline;
+# every other tenant is `boss tenant publish <dir>` through the shared
+# doors (seed-tenant.sh), with no baseline stamp.
 publish_tenant() {
-    /opt/boss/infra/seed-operator-baseline.sh
-    /opt/boss/infra/seed-brewery-tenant.sh
+    "$BOSS_INFRA_DIR/seed-operator-baseline.sh"
+    local dir
+    dir="$(tenant_dir)"
+    case "$(tenant_id_of "$dir")" in
+        brewery) "$BOSS_INFRA_DIR/seed-brewery-tenant.sh" ;;
+        *) BOSS_TENANT_DIR="$dir" "$BOSS_INFRA_DIR/seed-tenant.sh" ;;
+    esac
 }
 
 # The sim posts jobs the moment it starts, and their side effects fire

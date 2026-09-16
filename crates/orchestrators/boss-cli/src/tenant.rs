@@ -956,9 +956,22 @@ pub enum TenantAction {
     Check { dir: PathBuf },
     /// Print the contract table (what docs/tenant-contract.md carries).
     Contract,
+    /// Publish a tenant directory into a running deployment through
+    /// the shared doors, in the engines' dependency order, idempotently
+    /// (ee7b62bb). Refuses a directory that fails `check`.
+    Publish {
+        dir: PathBuf,
+        /// Route every /api prefix through one gateway URL (default:
+        /// each service's own localhost port, the in-pod launcher path).
+        #[arg(long)]
+        gateway: Option<String>,
+        /// Print every write the publish WOULD make; no HTTP.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
-pub fn dispatch(cmd: Cmd) -> Result<()> {
+pub async fn dispatch(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Tenant(TenantAction::Init { name, into }) => {
             let written = init(&name, into.as_deref())?;
@@ -990,6 +1003,36 @@ pub fn dispatch(cmd: Cmd) -> Result<()> {
             // docs/tenant-contract.md verbatim.
             print!("{TABLE_BEGIN}\n{}{TABLE_END}\n", contract_table());
             Ok(())
+        }
+        Cmd::Tenant(TenantAction::Publish {
+            dir,
+            gateway,
+            dry_run,
+        }) => {
+            let plan = crate::tenant_publish::plan(&dir)?;
+            let bases = crate::tenant_publish::Bases::resolve(gateway.as_deref());
+            println!("{}", plan.render_header(dry_run));
+            println!("{}", bases.describe(gateway.as_deref()));
+            if dry_run {
+                for s in &plan.steps {
+                    println!("{}", plan.render_step(s, None));
+                }
+                println!("{}", plan.render_footer());
+                if plan.publishable() {
+                    return Ok(());
+                }
+                std::process::exit(1)
+            }
+            // The doors are blocking reqwest (the engines call them from
+            // a plain main); under this async main they run on a
+            // blocking thread, printing each line as it lands so a
+            // launcher log shows where a cold stack is holding.
+            tokio::task::spawn_blocking(move || {
+                crate::tenant_publish::publish(&plan, &bases, &mut |l| println!("{l}"))?;
+                println!("{}", plan.render_footer());
+                Ok(())
+            })
+            .await?
         }
     }
 }

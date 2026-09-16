@@ -495,12 +495,14 @@ fn the_runner_answers_its_request_through_the_exit_trap() {
         }
     }
     let instances = std::fs::read_to_string(cluster.join("instances.toml")).unwrap();
+    // `tenant_dir` names a directory (f4f5c387); the renderer checks it
+    // holds tenant.toml or seeds/tenant.toml.
     for tenant in instances
         .lines()
-        .filter_map(|l| l.trim().strip_prefix("tenant = \""))
+        .filter_map(|l| l.trim().strip_prefix("tenant_dir = \""))
         .filter_map(|l| l.strip_suffix('"'))
     {
-        let p = work.join(tenant);
+        let p = work.join(tenant).join("seeds/tenant.toml");
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(&p, "").unwrap();
     }

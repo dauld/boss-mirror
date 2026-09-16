@@ -67,7 +67,7 @@ impl Case {
              apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: boss\n  namespace: boss\n\
              spec:\n  template:\n    spec:\n      containers:\n      - name: boss\n        env:\n\
              \x20       - {name: BOSS_SIM_ENABLED, value: \"false\"}\n\
-             \x20       - {name: BOSS_TENANT_MANIFEST_TOML, value: /opt/boss/examples/fixture/seeds/tenant.toml}\n\
+             \x20       - {name: BOSS_TENANT_DIR, value: /opt/boss/examples/fixture}\n\
              ---\napiVersion: v1\nkind: Service\nmetadata:\n  name: boss-gateway\n  namespace: boss\n",
         );
         write_file(
@@ -85,9 +85,9 @@ impl Case {
         );
         write_file(
             &tree.join("infra/cluster/instances.toml"),
-            "source = \"prod\"\n\n[prod]\nnamespace = \"boss\"\ntenant = \"examples/fixture/seeds/tenant.toml\"\n\
+            "source = \"prod\"\n\n[prod]\nnamespace = \"boss\"\ntenant_dir = \"examples/fixture\"\n\
              sim = false\nhostname = \"boss.algedonic.dev\"\n\n[playground]\nnamespace = \"boss-playground\"\n\
-             tenant = \"examples/fixture/seeds/tenant.toml\"\nsim = true\nhostname = \"playground.algedonic.dev\"\n",
+             tenant_dir = \"examples/fixture\"\nsim = true\nhostname = \"playground.algedonic.dev\"\n",
         );
         let bin = root.join("bin");
         std::fs::create_dir_all(&bin).unwrap();

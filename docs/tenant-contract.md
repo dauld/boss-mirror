@@ -11,7 +11,7 @@ David on 2026-09-16 (backlog `fcc1d57b`): *"someone downloading BOSS
 to adapt it wants a more natural home for their adaption"* than a
 patch to our examples.
 
-Two verbs make the contract usable:
+Three verbs make the contract usable:
 
 - `boss tenant init <name> [--into <dir>]` writes a new tenant
   directory from the contract — every scaffolded file valid, minimal
@@ -26,6 +26,22 @@ Two verbs make the contract usable:
   (with the loader's own error, never rephrased) / **UNKNOWN** (a file
   the contract does not name). Exit 0 when nothing is MISSING or
   INVALID; UNKNOWN is reported, not refused.
+- `boss tenant publish <dir> [--gateway <url>] [--dry-run]` publishes
+  a directory into a running deployment through the **same shared
+  doors the tenant engines' prepare compose** (backlog `ee7b62bb`):
+  classes → business calendars → the company Subject → policy grants →
+  people (two passes) → Workflows last, after a barrier on the people
+  projection. Idempotent (insert-if-absent, upsert, 409 swallowed, a
+  kind an authoring Job already published is skipped), signed as
+  `automation:tenant-seed` and **not** as a sim chain. One line per
+  file present: the door and a count, or `skipped: <why>` for a file
+  nothing reads — never silence. It refuses a directory that fails
+  `check` BEFORE the first write, plan still printed; `--dry-run`
+  prints the plan and makes no HTTP call. This is how a tenant with no
+  engine — the real company — gets published; the container launcher
+  (`infra/oss-quickstart/tenant-launch.sh`) chooses it for any tenant
+  whose `[meta] tenant_id` is not the brewery's, via
+  `infra/seed-tenant.sh`, and stamps no sim baseline.
 
 `boss tenant contract` prints the table below. It is rendered from
 `CONTRACT` in `crates/orchestrators/boss-cli/src/tenant.rs`, and a test
@@ -92,11 +108,17 @@ stating plainly:
 
 - `tenant.toml` at the root is the canonical place (the real tenant's
   shape). `seeds/tenant.toml` is accepted because the examples keep it
-  there: the deployment's `BOSS_TENANT_MANIFEST_TOML`
-  (`infra/cluster/manifests/boss.yaml`, `infra/oss-quickstart/`) points
-  at `examples/brewery/seeds/tenant.toml` today. Car 2 of `fcc1d57b`
-  (`BOSS_TENANT_DIR`) derives the manifest path from the directory and
-  is where that spelling is retired.
+  there — and because a DELIVERED tenant arrives that way: the
+  deployment names one directory, `BOSS_TENANT_DIR` on the boss
+  container (`infra/cluster/manifests/boss.yaml`; car 2 of `fcc1d57b`,
+  backlog `f4f5c387`), and the launcher
+  (`infra/oss-quickstart/services-launcher.sh`) derives
+  `BOSS_TENANT_MANIFEST_TOML` from it — `tenant.toml` at the root,
+  else `seeds/tenant.toml` — along with `BOSS_SIM_SEEDS_DIR`. A
+  `tenant_repo` instance's tenant is delivered by the converge as ONE
+  flat ConfigMap mounted at `/opt/boss/tenant/seeds`, its root
+  `tenant.toml` riding as `seeds/tenant.toml` (a mount inside a
+  read-only mount cannot be created), so both spellings stay.
 - `seeds/classes.json` (brewery) or `seeds/classes.toml` (`[[class]]`
   rows, used-device-shop): the same rows, two formats, one endpoint.
 

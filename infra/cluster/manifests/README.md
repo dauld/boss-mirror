@@ -40,7 +40,10 @@ ONE instance — prod, namespace `boss` — and every instance in
 `infra/cluster/instances.toml` (today: prod and the playground,
 namespace `boss-playground`, brewery tenant, sim on) is this directory
 rendered by `infra/cluster/render-instance.sh` with its namespace,
-tenant manifest, `BOSS_SIM_ENABLED` and TLS-front hostname substituted,
+tenant directory (`BOSS_TENANT_DIR` — a directory the image ships, or
+`/opt/boss/tenant` where the converge delivers a `tenant_repo` instance's
+tenant as the generated `boss-tenant` ConfigMap; backlog f4f5c387),
+`BOSS_SIM_ENABLED` and TLS-front hostname substituted,
 plus the `.boss.svc.cluster.local` names and the LoadBalancer IP pins
 (commented out: only prod's copy may hold an address). The converge
 renders and applies every instance on every train (design ffc83387,

@@ -102,6 +102,31 @@ if [[ "${1:-}" == "--check" ]]; then
 fi
 PIDS=()
 
+# THE TENANT DIRECTORY (backlog f4f5c387, car 2 of fcc1d57b; David
+# 2026-09-16 'Let's do it'). The deployment names ONE directory the pod
+# reads its tenant from — BOSS_TENANT_DIR: from the image
+# (/opt/boss/examples/<name>) or the ConfigMap the converge delivers at
+# /opt/boss/tenant — and the two paths the N-1 readers take are derived
+# here, once: BOSS_TENANT_MANIFEST_TOML for the gateway (tenant.toml at
+# the root, else seeds/tenant.toml — both spellings the contract
+# accepts, docs/tenant-contract.md) and BOSS_SIM_SEEDS_DIR for the seed
+# scripts and the engine. An explicit value wins (the compose file and
+# bootstrap-local.sh set them directly), and a directory holding no
+# manifest REFUSES the launch: a pod that fell through to the gateway's
+# default path would answer instead of erroring (CLAUDE.md §Doors).
+if [[ -n "${BOSS_TENANT_DIR:-}" ]]; then
+    if [[ -f "$BOSS_TENANT_DIR/tenant.toml" ]]; then
+        export BOSS_TENANT_MANIFEST_TOML="${BOSS_TENANT_MANIFEST_TOML:-$BOSS_TENANT_DIR/tenant.toml}"
+    elif [[ -f "$BOSS_TENANT_DIR/seeds/tenant.toml" ]]; then
+        export BOSS_TENANT_MANIFEST_TOML="${BOSS_TENANT_MANIFEST_TOML:-$BOSS_TENANT_DIR/seeds/tenant.toml}"
+    else
+        echo "boss-launch: BOSS_TENANT_DIR=$BOSS_TENANT_DIR holds no tenant.toml or seeds/tenant.toml — not a tenant directory; not starting" >&2
+        exit 1
+    fi
+    export BOSS_SIM_SEEDS_DIR="${BOSS_SIM_SEEDS_DIR:-$BOSS_TENANT_DIR/seeds}"
+    echo "==> tenant: BOSS_TENANT_DIR=$BOSS_TENANT_DIR BOSS_TENANT_MANIFEST_TOML=$BOSS_TENANT_MANIFEST_TOML BOSS_SIM_SEEDS_DIR=$BOSS_SIM_SEEDS_DIR"
+fi
+
 # Generate /etc/boss-*.toml configs at container start. The API
 # binaries default --config to /etc/<name>.toml; bare-metal installs
 # get these via infra/deploy-services.sh, the docker image via this

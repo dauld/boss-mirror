@@ -28,14 +28,65 @@
 # THE FOUR PARAMETERS
 #   namespace  the Kubernetes namespace; `boss` or `boss-<name>`. boss-dev
 #              is the pipeline's and is refused.
-#   tenant     the tenant manifest, repo-relative, under examples/; the
-#              image ships it at /opt/boss/<tenant>.
+#   tenant     THE TENANT SOURCE — one of two spellings, below. The pod
+#              reads a tenant DIRECTORY (BOSS_TENANT_DIR on the boss
+#              container: tenant.toml or seeds/tenant.toml, and seeds/;
+#              the launcher derives the N-1 readers' paths from it).
 #   sim        BOSS_SIM_ENABLED — whether the tenant's tick daemon
 #              generates packets. Parked on prod 2026-09-05 (packet
 #              59f063de); the playground is where it runs from now.
 #   hostname   the TLS front's vhost (boss-tls-front.yaml). Its cert is
 #              the `boss-tls` Secret in the instance's namespace, minted
 #              out of band.
+#
+# THE TENANT SOURCE (backlog f4f5c387, car 2 of fcc1d57b; David
+# 2026-09-16 'Let's do it'). The image bakes examples/ in, so a tenant
+# that is NOT in the product tree — david/algedonic-llc, private on the
+# forge — had no way into a pod. An instance names where its tenant
+# comes from, ONE of:
+#
+#   tenant_dir   a directory in the product checkout, served from the
+#                image: the pod reads /opt/boss/<tenant_dir>. The example
+#                tenant (examples/brewery) stays here — its engine
+#                hardcodes the baked seeds path, and its seeds/ is 500 KB
+#                beside a data/ subdirectory a ConfigMap cannot hold.
+#   tenant_repo  a repository on the forge, `owner/name`, with
+#   tenant_ref   the branch or tag to deliver. The converge MEASURES that
+#                its own credential can read it (ls-remote, the URL
+#                derived from the checkout's forgejo remote — never a
+#                token or URL of its own; cluster-deploy-lib.sh
+#                tenant_source_check), clones it beside the product and
+#                delivers it as the `boss-tenant` ConfigMap in the
+#                instance's namespace, mounted at /opt/boss/tenant/seeds
+#                (the step-plugins ConfigMap's mechanism; a ConfigMap is
+#                flat and a mount inside a read-only mount cannot be
+#                created, so the root tenant.toml rides as seeds/
+#                tenant.toml — the spelling the contract accepts). The
+#                pod reads /opt/boss/tenant. An instance whose tenant
+#                the converge CANNOT read is skipped whole — named on
+#                the packet as `tenant_source: <ns>: unreadable
+#                (<repo>@<ref>)` and in `instances_skipped` — so the
+#                first converge answers whether the runner's token needs
+#                a scope from David (a root ceremony) instead of a person
+#                guessing; the verdict for every instance rides the
+#                packet as `tenant_source`.
+#
+# The retired `tenant = "examples/<name>/seeds/tenant.toml"` line is
+# REFUSED by name: a stale key must not read as "no source".
+#
+# THE FLIP — prod onto the real tenant — is David's decision moment,
+# not this car's (the packet: prod keeps its manifest values until he
+# flips it). When he does, two lines change together, and the
+# byte-identity test holds them equal because prod is the source:
+#   here, under [prod], replace the tenant_dir line with
+#     tenant_repo = "david/algedonic-llc"
+#     tenant_ref = "main"
+#   and in infra/cluster/manifests/boss.yaml set BOSS_TENANT_DIR to
+#   /opt/boss/tenant (the `boss-tenant` ConfigMap it then reads is
+#   mounted there already, `optional` so an image-sourced instance
+#   boots without it). The orphan sweep (infra/cluster/
+#   undeclared-objects.sh EXEMPT) then needs `ConfigMap/boss/boss-tenant`
+#   the way it names step-plugins — a generated object, not a manifest.
 #
 # THE SECRETS, and the one optional key. The manifests reference their
 # Secrets by name (README: secrets never live here), and the converge
@@ -76,13 +127,13 @@ source = "prod"
 
 [prod]
 namespace = "boss"
-tenant = "examples/brewery/seeds/tenant.toml"
+tenant_dir = "examples/brewery"
 sim = false
 hostname = "boss.algedonic.dev"
 
 [playground]
 namespace = "boss-playground"
-tenant = "examples/brewery/seeds/tenant.toml"
+tenant_dir = "examples/brewery"
 sim = true
 hostname = "playground.algedonic.dev"
 # The playground pulls the same images and sends mail as the same

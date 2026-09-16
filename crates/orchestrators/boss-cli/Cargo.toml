@@ -25,6 +25,11 @@ boss-jobs = { path = "../../core/boss-jobs" }
 boss-classes = { path = "../../core/boss-classes" }
 boss-people = { path = "../../modules/boss-people" }
 boss-policy-client = { path = "../../core/boss-policy-client" }
+# `boss tenant publish` sends a tenant through the SAME doors the two
+# engines' prepare compose (ee7b62bb): boss-policy's bootstrap and
+# boss-jobs' bootstrap are those doors. default-features=false keeps
+# the policy service's sqlx/axum tree out of the CLI, as the engines do.
+boss-policy = { path = "../../core/boss-policy", default-features = false }
 toml = { workspace = true }
 boss-assets = { path = "../../modules/boss-assets", features = ["postgres"] }
 boss-clock-client = { path = "../../core/boss-clock-client" }
@@ -44,7 +49,7 @@ uuid = { workspace = true }
 # publish-request bundles travel as base64 in packet metadata
 # (workflow publish-request v1, packet 0b1b32f9).
 base64 = "0.22"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 # `boss job list --where` sends a JSON document as ONE query value
 # (`metadata=`); percent-encoding it is what keeps a `&` or `+` in a
 # value from splitting the query (backlog 58eef0f5). Same crate

@@ -2,18 +2,22 @@
 #
 # render-instance.sh — ONE manifest source, rendered per instance.
 #
-#   render-instance.sh <namespace> <tenant> <sim> <hostname>   the instance
+#   render-instance.sh <namespace> <tenant-dir> <sim> <hostname>   the instance
 #       manifests for that instance, on stdout, one YAML stream
-#   render-instance.sh <namespace> <tenant> <sim> <hostname> --out-dir DIR
+#   render-instance.sh <namespace> <tenant-dir> <sim> <hostname> --out-dir DIR
 #       the same, one file per manifest (the source's basenames) in DIR
 #   render-instance.sh --all DIR       every instance in instances.toml
 #       into DIR/<namespace>/; the source instance's directory also gets
 #       every `pipeline` manifest, copied as written
-#   render-instance.sh --instances     name<TAB>namespace<TAB>tenant<TAB>sim<TAB>hostname<TAB>shares-with
+#   render-instance.sh --instances     name<TAB>namespace<TAB>tenant<TAB>sim<TAB>hostname<TAB>shares-with<TAB>tenant-repo<TAB>tenant-ref
 #       per instance, in file order — what the converge iterates. The
 #       sixth column is the NAMESPACE of the instance this one copies
 #       its shared Secrets from (`shares_with` in instances.toml; backlog
-#       dc1bc724), empty when it declares none
+#       dc1bc724), empty when it declares none. The third is the
+#       DIRECTORY the pod reads under /opt/boss (`tenant_dir`, or the
+#       literal `tenant` for a repo-sourced instance); the seventh and
+#       eighth are `tenant_repo` and `tenant_ref`, empty for an
+#       image-sourced one (backlog f4f5c387)
 #   render-instance.sh --source        the source instance's namespace (the
 #       one the files are written for; its render is the identity)
 #   render-instance.sh --roster        file<TAB>set per manifest, or a refusal
@@ -43,8 +47,10 @@
 #   * `.<source>.svc.cluster.local` — the in-cluster DNS names by which
 #     the chores reach the instance's jobs door and the TLS front reaches
 #     the instance's gateway;
-#   * the tenant manifest path under /opt/boss/ (the image ships the
-#     tree there);
+#   * the tenant directory under /opt/boss/ — BOSS_TENANT_DIR on the boss
+#     container (backlog f4f5c387): /opt/boss/<tenant_dir> for a
+#     directory the image ships, /opt/boss/tenant for a `tenant_repo`
+#     the converge delivers as a ConfigMap (instances.toml says how);
 #   * the BOSS_SIM_ENABLED value;
 #   * the TLS front's hostname, everywhere the source's appears;
 #   * and the LoadBalancer IP pins (io.cilium/lb-ipam-ips,
@@ -66,8 +72,12 @@
 # REFUSALS (exit 2, nothing rendered, the reason on stderr):
 #   * a namespace that is not `boss` or `boss-<name>` — or is boss-dev,
 #     the pipeline's;
-#   * a tenant path that is not examples/<name>/seeds/tenant.toml, or is
-#     not in the tree;
+#   * a tenant directory that is not examples/<name> (or `tenant`, the
+#     delivered mount), or holds no tenant.toml / seeds/tenant.toml; an
+#     instance declaring both `tenant_dir` and `tenant_repo`, neither,
+#     a repo without a ref or a ref without a repo, a repo that is not
+#     `owner/name` — or the RETIRED `tenant = "<manifest path>"` key,
+#     which must not read as "no source";
 #   * a sim value that is not true or false; a hostname that is not one;
 #   * a `shares_with` that names no instance in the file, or the
 #     instance itself — the converge copies shared Secrets from the
@@ -166,9 +176,45 @@ check_namespace() {
     [ "$1" != boss-dev ] && return 0
     refuse "namespace \`boss-dev\` is the pipeline's namespace, not an instance"
 }
+# check_tenant <dir> [<where>] — the directory the pod reads under
+# /opt/boss: examples/<name> in the tree, holding tenant.toml or
+# seeds/tenant.toml (docs/tenant-contract.md accepts both spellings),
+# or the literal `tenant` — the mount a `tenant_repo` is delivered at,
+# which is nowhere in the tree by design. <where> names the instance in
+# a refusal when the value came from instances.toml.
 check_tenant() {
-    [[ "$1" =~ ^examples/[A-Za-z0-9_-]+/seeds/tenant\.toml$ ]] || refuse "tenant \`$1\`: a tenant manifest is examples/<name>/seeds/tenant.toml, repo-relative"
-    [ -f "$TREE/$1" ] || refuse "tenant \`$1\`: not in the tree at $TREE/$1"
+    local where="${2:+ ($2)}"
+    [ "$1" = tenant ] && return 0
+    [[ "$1" =~ ^examples/[A-Za-z0-9_-]+$ ]] || refuse "tenant_dir \`$1\`$where: a tenant directory is examples/<name>, repo-relative (or a tenant_repo, delivered at /opt/boss/tenant)"
+    [ -f "$TREE/$1/tenant.toml" ] || [ -f "$TREE/$1/seeds/tenant.toml" ] \
+        || refuse "tenant_dir \`$1\`$where: no tenant.toml or seeds/tenant.toml under $TREE/$1 — not a tenant directory"
+}
+# tenant_of <section> — the directory the instance's pod reads under
+# /opt/boss, from ONE of two sources in instances.toml (backlog
+# f4f5c387): `tenant_dir` (a directory the image ships) or `tenant_repo`
+# + `tenant_ref` (a forge repo the converge delivers at /opt/boss/tenant).
+# Every other combination is refused by name, including the RETIRED
+# `tenant = "<manifest path>"` key — a stale line must not read as
+# "no source" any more than an unknown shares_with reads as "nobody".
+tenant_of() {
+    local s="$1" d r ref where
+    where="${INSTANCES#"$TREE"/}: instance [$s]"
+    [ -z "$(param "$s" tenant)" ] || refuse "$where declares \`tenant = …\`, the manifest-path key retired by f4f5c387 — declare tenant_dir = \"examples/<name>\" (the directory) or tenant_repo + tenant_ref"
+    d=$(param "$s" tenant_dir); r=$(param "$s" tenant_repo); ref=$(param "$s" tenant_ref)
+    if [ -n "$d" ] && { [ -n "$r" ] || [ -n "$ref" ]; }; then
+        refuse "$where declares tenant_dir AND tenant_repo/tenant_ref — a tenant has one source"
+    fi
+    if [ -n "$r" ] || [ -n "$ref" ]; then
+        [ -n "$r" ] || refuse "$where declares tenant_ref = \"$ref\" with no tenant_repo"
+        [ -n "$ref" ] || refuse "$where declares tenant_repo = \"$r\" with no tenant_ref — which branch or tag is delivered?"
+        [[ "$r" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || refuse "$where: tenant_repo \`$r\` is not owner/name on the forge"
+        [[ "$ref" =~ ^[A-Za-z0-9_./-]+$ ]] && [[ "$ref" != *..* ]] || refuse "$where: tenant_ref \`$ref\` is not a branch or tag name"
+        printf 'tenant\n'
+        return 0
+    fi
+    [ -n "$d" ] || refuse "$where must declare its tenant source: tenant_dir = \"examples/<name>\", or tenant_repo + tenant_ref"
+    check_tenant "$d" "[$s]"
+    printf '%s\n' "$d"
 }
 check_sim() {
     case "$1" in true|false) ;; *) refuse "sim \`$1\`: BOSS_SIM_ENABLED is true or false" ;; esac
@@ -200,18 +246,20 @@ shares_with_ns() {
 load_source() {
     SRC=$(param "" source)
     [ -n "$SRC" ] || refuse "${INSTANCES#"$TREE"/}: no \`source = \"<instance>\"\` line — which instance are the files written for?"
-    SRC_NS=$(param "$SRC" namespace); SRC_TENANT=$(param "$SRC" tenant)
+    SRC_NS=$(param "$SRC" namespace); SRC_TENANT=$(tenant_of "$SRC") || exit $?
     SRC_SIM=$(param "$SRC" sim);      SRC_HOST=$(param "$SRC" hostname)
     [ -n "$SRC_NS" ] && [ -n "$SRC_TENANT" ] && [ -n "$SRC_SIM" ] && [ -n "$SRC_HOST" ] \
-        || refuse "${INSTANCES#"$TREE"/}: source instance [$SRC] must declare namespace, tenant, sim and hostname"
+        || refuse "${INSTANCES#"$TREE"/}: source instance [$SRC] must declare namespace, a tenant source, sim and hostname"
     check_namespace "$SRC_NS"; check_tenant "$SRC_TENANT"; check_sim "$SRC_SIM"; check_hostname "$SRC_HOST"
     local files=() f
     while read -r f; do files+=("$DIR/$f"); done < <(in_set instance)
     [ "${#files[@]}" -gt 0 ] || refuse "the roster names no instance manifest — nothing to render"
     grep -qE "^[[:space:]]*namespace: ${SRC_NS}\$" "${files[@]}" \
         || refuse "source namespace \`$SRC_NS\` appears on no instance manifest — ${INSTANCES#"$TREE"/} [$SRC] has drifted from the files"
-    grep -qF -- "/opt/boss/$SRC_TENANT" "${files[@]}" \
-        || refuse "source tenant \`$SRC_TENANT\` appears in no instance manifest — ${INSTANCES#"$TREE"/} [$SRC] has drifted from the files"
+    # The directory, whole: examples/brewery must not be read off
+    # examples/brewery-two.
+    grep -qE -- "/opt/boss/$(re_escape "$SRC_TENANT")([^A-Za-z0-9_./-]|$)" "${files[@]}" \
+        || refuse "source tenant directory \`/opt/boss/$SRC_TENANT\` appears in no instance manifest (BOSS_TENANT_DIR) — ${INSTANCES#"$TREE"/} [$SRC] has drifted from the files"
     grep -qF -- "BOSS_SIM_ENABLED, value: \"$SRC_SIM\"" "${files[@]}" \
         || refuse "source sim \`$SRC_SIM\` is not the BOSS_SIM_ENABLED value in the instance manifests — ${INSTANCES#"$TREE"/} [$SRC] has drifted from the files"
     grep -qF -- "$SRC_HOST" "${files[@]}" \
@@ -237,7 +285,7 @@ render_file() { # <src file> <ns> <tenant> <sim> <hostname>
         -e "s|^([[:space:]]*)namespace: ${ns_re}\$|\1namespace: ${ns}|" \
         -e "/^kind: Namespace\$/,/^  name: /s|^  name: ${ns_re}\$|  name: ${ns}|" \
         -e "s|\.${ns_re}\.svc\.cluster\.local|.${ns}.svc.cluster.local|g" \
-        -e "s|/opt/boss/${tenant_re}|/opt/boss/${tenant}|g" \
+        -e "s#/opt/boss/${tenant_re}([^A-Za-z0-9_./-]|\$)#/opt/boss/${tenant}\1#g" \
         -e "s|(BOSS_SIM_ENABLED, value: )\"${SRC_SIM}\"|\1\"${sim}\"|" \
         -e "s|${host_re}|${host}|g" \
         ${pins[@]+"${pins[@]}"} \
@@ -284,25 +332,30 @@ case "${1:-}" in
         [ $# -eq 1 ] || usage
         roster > /dev/null
         load_source
+        # Every row resolves before any is printed: a refusal after the
+        # first row would read as a shorter list.
+        rows=""
         for s in $(sections); do
             share=$(shares_with_ns "$s") || exit $?
-            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$s" "$(param "$s" namespace)" "$(param "$s" tenant)" "$(param "$s" sim)" "$(param "$s" hostname)" "$share"
+            tenant=$(tenant_of "$s") || exit $?
+            rows="$rows$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$s" "$(param "$s" namespace)" "$tenant" "$(param "$s" sim)" "$(param "$s" hostname)" "$share" "$(param "$s" tenant_repo)" "$(param "$s" tenant_ref)")"$'\n'
         done
+        printf '%s' "$rows"
         ;;
     --all)
         [ $# -eq 2 ] && [ -n "$2" ] || usage
         roster > /dev/null
         load_source
-        # Every `shares_with` resolves, or nothing is rendered: the
-        # render stage is where the converge first reads this file, and
-        # a refusal after the first instance's directory exists would
-        # read as a partial render.
-        for s in $(sections); do shares_with_ns "$s" > /dev/null; done
+        # Every `shares_with` and every tenant source resolves, or
+        # nothing is rendered: the render stage is where the converge
+        # first reads this file, and a refusal after the first instance's
+        # directory exists would read as a partial render.
+        for s in $(sections); do shares_with_ns "$s" > /dev/null; tenant_of "$s" > /dev/null; done
         seen_ns=""
         for s in $(sections); do
-            ns=$(param "$s" namespace); tenant=$(param "$s" tenant); sim=$(param "$s" sim); host=$(param "$s" hostname)
+            ns=$(param "$s" namespace); tenant=$(tenant_of "$s"); sim=$(param "$s" sim); host=$(param "$s" hostname)
             [ -n "$ns" ] && [ -n "$tenant" ] && [ -n "$sim" ] && [ -n "$host" ] \
-                || refuse "${INSTANCES#"$TREE"/}: instance [$s] must declare namespace, tenant, sim and hostname"
+                || refuse "${INSTANCES#"$TREE"/}: instance [$s] must declare namespace, a tenant source, sim and hostname"
             case "$seen_ns" in *"|$ns|"*) refuse "${INSTANCES#"$TREE"/}: two instances share namespace \`$ns\`" ;; esac
             seen_ns="$seen_ns|$ns|"
             render_instance "$ns" "$tenant" "$sim" "$host" "$2/$ns"

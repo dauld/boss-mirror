@@ -626,7 +626,7 @@ fn the_runner_provisions_after_the_namespace_exists_and_before_the_loud_gate() {
         "the line rides the converge packet as `instance_secrets_minted`, recorded as soon as it is known"
     );
     assert!(
-        after.contains("read -r iname ins_ns _t _s _h share_ns"),
+        after.contains("read -r iname ins_ns tdir _s _h share_ns"),
         "the loop reads the shares_with namespace off the instance list's sixth column"
     );
     // And apply_instance itself goes through the same namespace-first
@@ -742,10 +742,10 @@ fn fixture_tree(case: &str) -> PathBuf {
     }
     let toml = std::fs::read_to_string(repo_root().join(INSTANCES)).unwrap();
     for line in toml.lines() {
-        if let Some(t) = line.trim().strip_prefix("tenant = ") {
-            let t = t.trim_matches('"');
-            std::fs::create_dir_all(tree.join(t).parent().unwrap()).unwrap();
-            std::fs::copy(repo_root().join(t), tree.join(t)).unwrap();
+        if let Some(d) = line.trim().strip_prefix("tenant_dir = ") {
+            let t = format!("{}/seeds/tenant.toml", d.trim_matches('"'));
+            std::fs::create_dir_all(tree.join(&t).parent().unwrap()).unwrap();
+            std::fs::copy(repo_root().join(&t), tree.join(&t)).unwrap();
         }
     }
     tree

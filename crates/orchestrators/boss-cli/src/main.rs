@@ -36,6 +36,7 @@ mod rerail;
 mod running;
 mod script;
 mod tenant;
+mod tenant_publish;
 mod train;
 mod train_gate;
 mod upgrade;
@@ -1470,7 +1471,7 @@ async fn main() -> Result<()> {
         Commands::Merged(cmd) => merged::dispatch(cmd),
         Commands::Receipt(cmd) => receipt::dispatch(cmd).await,
         Commands::Running(cmd) => running::dispatch(cmd),
-        Commands::Tenant(cmd) => tenant::dispatch(cmd),
+        Commands::Tenant(cmd) => tenant::dispatch(cmd).await,
     }
 }
 

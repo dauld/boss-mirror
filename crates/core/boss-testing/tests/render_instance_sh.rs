@@ -125,13 +125,16 @@ fn fixture(case: &str) -> PathBuf {
     }
     std::fs::copy(repo_root().join(ROSTER), tree.join(ROSTER)).unwrap();
     std::fs::copy(repo_root().join(INSTANCES), tree.join(INSTANCES)).unwrap();
-    // The tenant manifests the instance list points at must exist in
-    // the tree — the renderer refuses a path it cannot find.
+    // The tenant directories the instance list points at must exist in
+    // the tree with a manifest — the renderer refuses one it cannot
+    // find (`tenant_dir`, since f4f5c387; the examples keep the manifest
+    // at seeds/tenant.toml).
     for inst in instances_of(&repo_root()).values() {
-        if let Some(t) = inst.get("tenant") {
-            let dst = tree.join(t);
+        if let Some(d) = inst.get("tenant_dir") {
+            let t = format!("{d}/seeds/tenant.toml");
+            let dst = tree.join(&t);
             std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
-            std::fs::copy(repo_root().join(t), &dst).unwrap();
+            std::fs::copy(repo_root().join(&t), &dst).unwrap();
         }
     }
     tree
@@ -199,8 +202,8 @@ fn the_instance_list_declares_prod_and_the_playground() {
         "the brewery sim runs on the playground"
     );
     assert_eq!(
-        play["tenant"], prod["tenant"],
-        "the playground boots the tenant prod runs today (the brewery), from seeds"
+        play["tenant_dir"], prod["tenant_dir"],
+        "the playground boots the tenant prod runs today (the brewery), from the image"
     );
     assert_eq!(play["hostname"], "playground.algedonic.dev");
     assert_eq!(
@@ -237,7 +240,7 @@ fn the_prod_render_is_byte_identical_to_the_tree() {
         &repo_root(),
         &[
             &prod["namespace"],
-            &prod["tenant"],
+            &prod["tenant_dir"],
             &prod["sim"],
             &prod["hostname"],
         ],
@@ -321,12 +324,10 @@ fn the_playground_render_substitutes_the_four_parameters() {
         !boss_yaml.contains("BOSS_SIM_ENABLED, value: \"false\""),
         "the sim flag was substituted, not duplicated"
     );
-    let prod_tenant = instances_of(&repo_root())["prod"]["tenant"].clone();
+    let prod_tenant = instances_of(&repo_root())["prod"]["tenant_dir"].clone();
     assert!(
-        boss_yaml.contains(&format!(
-            "BOSS_TENANT_MANIFEST_TOML, value: /opt/boss/{prod_tenant}"
-        )),
-        "the tenant path is rendered under /opt/boss as the image ships it"
+        boss_yaml.contains(&format!("BOSS_TENANT_DIR, value: /opt/boss/{prod_tenant}")),
+        "the tenant directory is rendered under /opt/boss as the image ships it"
     );
     assert!(
         boss_yaml.contains("io.cilium/lb-ipam-ips"),
@@ -351,31 +352,27 @@ fn the_playground_render_substitutes_the_four_parameters() {
     // A different tenant renders as a different path — the parameter
     // is honoured, not the one value the tree happens to carry today.
     let tree = fixture("other-tenant");
-    let other = tree.join("examples/other/seeds/tenant.toml");
+    let other = tree.join("examples/other/tenant.toml");
     std::fs::create_dir_all(other.parent().unwrap()).unwrap();
     write_file(&other, "[tenant]\nname = \"other\"\n");
     let (rc, stream, err) = run(
         &tree,
-        &[
-            "boss-other",
-            "examples/other/seeds/tenant.toml",
-            "true",
-            "other.example",
-        ],
+        &["boss-other", "examples/other", "true", "other.example"],
     );
     assert_eq!(rc, 0, "{err}");
-    assert!(
-        stream.contains(
-            "BOSS_TENANT_MANIFEST_TOML, value: /opt/boss/examples/other/seeds/tenant.toml"
-        )
-    );
-    assert!(!stream.contains(&prod_tenant));
+    assert!(stream.contains("BOSS_TENANT_DIR, value: /opt/boss/examples/other}"));
+    assert!(!stream.contains(&format!("/opt/boss/{prod_tenant}")));
+    // And the delivered mount of a repo-sourced instance (f4f5c387):
+    // `tenant` is nowhere in the tree by design.
+    let (rc, stream, err) = run(&tree, &["boss-other", "tenant", "true", "other.example"]);
+    assert_eq!(rc, 0, "{err}");
+    assert!(stream.contains("BOSS_TENANT_DIR, value: /opt/boss/tenant}"));
 }
 
 #[test]
 fn the_renderer_refuses_bad_parameters() {
     let tree = repo_root();
-    let prod_tenant = instances_of(&tree)["prod"]["tenant"].clone();
+    let prod_tenant = instances_of(&tree)["prod"]["tenant_dir"].clone();
     let tenant = prod_tenant.as_str();
     let cases: &[(&[&str], &str)] = &[
         (&["prod", tenant, "false", "h.example"], "namespace"),
@@ -383,24 +380,8 @@ fn the_renderer_refuses_bad_parameters() {
         (&["Boss", tenant, "false", "h.example"], "namespace"),
         (&["boss_x", tenant, "false", "h.example"], "namespace"),
         (&["boss-x", "../etc/passwd", "false", "h.example"], "tenant"),
-        (
-            &[
-                "boss-x",
-                "infra/cluster/instances.toml",
-                "false",
-                "h.example",
-            ],
-            "tenant",
-        ),
-        (
-            &[
-                "boss-x",
-                "examples/nope/seeds/tenant.toml",
-                "false",
-                "h.example",
-            ],
-            "tenant",
-        ),
+        (&["boss-x", "infra/cluster", "false", "h.example"], "tenant"),
+        (&["boss-x", "examples/nope", "false", "h.example"], "tenant"),
         (&["boss-x", tenant, "yes", "h.example"], "sim"),
         (&["boss-x", tenant, "true", "bad host"], "hostname"),
         (&["boss-x", tenant, "true"], "usage"),

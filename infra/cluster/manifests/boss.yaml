@@ -306,6 +306,24 @@ spec:
         - name: step-plugins
           configMap:
             name: step-plugins
+        # THE DELIVERED TENANT (backlog f4f5c387): a `tenant_repo`
+        # instance's tenant directory, checked out by the converge and
+        # delivered exactly as step-plugins is — one ConfigMap generated
+        # from a directory, never a committed manifest (§9a). ONE
+        # ConfigMap, mounted at /opt/boss/tenant/seeds, because a
+        # ConfigMap is flat and a mount inside a read-only mount cannot
+        # be created (render-tunnel-config.sh learned it): the tenant's
+        # root tenant.toml rides as seeds/tenant.toml, the spelling the
+        # contract accepts, and BOSS_TENANT_DIR=/opt/boss/tenant finds
+        # it. `optional` because an image-sourced instance — prod and
+        # the playground today — has no such ConfigMap and must still
+        # boot; a repo-sourced instance whose ConfigMap is absent is
+        # refused by the launcher instead (no manifest under the
+        # directory), loud in the pod log, never a silent default.
+        - name: boss-tenant
+          configMap:
+            name: boss-tenant
+            optional: true
         # Break-glass PUBLIC credential records (boss-break-glass-
         # credentials.yaml — the manifest header is the ceremony doc).
         # `optional` so a deployment that has not adopted the ceremony
@@ -380,7 +398,21 @@ spec:
             # projection, write nothing — so the brewery renders without a
             # login, and the write path is what's under scrutiny.
             - {name: BOSS_GUEST_ACCESS, value: "1"}
-            - {name: BOSS_TENANT_MANIFEST_TOML, value: /opt/boss/examples/brewery/seeds/tenant.toml}
+            # THE TENANT DIRECTORY (backlog f4f5c387, car 2 of fcc1d57b;
+            # David 2026-09-16 'Let's do it'). One directory holding
+            # tenant.toml (or seeds/tenant.toml) and seeds/; the launcher
+            # derives BOSS_TENANT_MANIFEST_TOML (the gateway) and
+            # BOSS_SIM_SEEDS_DIR (the seed scripts, the engine) from it,
+            # once, so nothing else here names a tenant path. The value
+            # is the instance's tenant source, substituted per instance
+            # by render-instance.sh from infra/cluster/instances.toml:
+            # a directory the image ships (`tenant_dir` —
+            # examples/brewery, here) or /opt/boss/tenant, where the
+            # converge delivers a `tenant_repo` as the boss-tenant
+            # ConfigMap below. Prod stays on the baked examples/brewery
+            # until David flips it; the flip is two lines and
+            # instances.toml names both.
+            - {name: BOSS_TENANT_DIR, value: /opt/boss/examples/brewery}
             # A PATH, NOT A KEY — the name is a trap and this comment is
             # the guard rail. boss-gateway reads this variable as a
             # filename and loads the key from it, generating one only if
@@ -556,6 +588,11 @@ spec:
             # points at the session.key file inside it.
             - {name: boss-session-key, mountPath: /etc/boss/session-key, readOnly: true}
             - {name: step-plugins, mountPath: /var/lib/boss/step-plugins, readOnly: true}
+            # The delivered tenant (the boss-tenant volume above): the
+            # seeds of a repo-sourced instance, under the directory
+            # BOSS_TENANT_DIR names for one. Empty on an image-sourced
+            # instance, and nothing reads it there.
+            - {name: boss-tenant, mountPath: /opt/boss/tenant/seeds, readOnly: true}
             # Public break-glass credential records; the gateway only
             # ever reads them (enrollment emits records for a commit,
             # never a write here — the manifest header explains why).

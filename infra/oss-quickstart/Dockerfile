@@ -331,6 +331,11 @@ COPY examples /opt/boss/examples
 # (/opt/boss/infra/...), so they need the execute bit.
 COPY infra/seed-operator-baseline.sh /opt/boss/infra/seed-operator-baseline.sh
 COPY infra/seed-brewery-tenant.sh /opt/boss/infra/seed-brewery-tenant.sh
+# The generic tenant seed (`boss tenant publish`, ee7b62bb): what
+# tenant-launch.sh runs for any tenant whose manifest is not the
+# brewery's. Pinned by crates/core/boss-testing/tests/
+# the_launcher_publishes_a_tenant_by_its_id.rs.
+COPY infra/seed-tenant.sh /opt/boss/infra/seed-tenant.sh
 
 # Quickstart launcher + init scripts.
 COPY infra/oss-quickstart/init.sh /usr/local/bin/boss-init
@@ -353,7 +358,8 @@ COPY infra/oss-quickstart/generate-configs.sh /usr/local/bin/boss-generate-confi
 RUN chmod +x /usr/local/bin/boss-init /usr/local/bin/boss-launch \
     /usr/local/bin/boss-generate-configs \
     /opt/boss/infra/seed-operator-baseline.sh \
-    /opt/boss/infra/seed-brewery-tenant.sh
+    /opt/boss/infra/seed-brewery-tenant.sh \
+    /opt/boss/infra/seed-tenant.sh
 
 # /etc must be writable by the boss user so generate-configs can
 # write the per-service TOML files at container start. Default

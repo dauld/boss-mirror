@@ -52,6 +52,9 @@ if [ -z "${BOSS_RUNNER_SNAPSHOT:-}" ]; then
 fi
 
 REPO="${BOSS_FORGE_REPO_DIR:-$HOME/boss}"
+# Where a repo-sourced instance's tenant is checked out — beside the
+# product, one directory per instance name (backlog f4f5c387).
+TENANTS_DIR="${BOSS_FORGE_TENANTS_DIR:-$(dirname "$REPO")/tenants}"
 
 # THE RUN ENDS BY SAYING HOW IT ENDED — to the ops-request that started
 # it, when one did (cluster-deploy-lib.sh answer_converge_requests;
@@ -390,11 +393,17 @@ APPLY_DIR="$(mktemp -d -t cluster-deploy-manifests.XXXXXX)"
 "$REPO/infra/cluster/render-instance.sh" --all "$RENDER_DIR"
 INSTANCES=$("$REPO/infra/cluster/render-instance.sh" --instances)
 SOURCE_NS=$("$REPO/infra/cluster/render-instance.sh" --source)
+# The source instance's row — its name and its tenant source — read
+# off the same list every other instance is read from.
+SOURCE_NAME=""; SOURCE_TENANT_REPO=""; SOURCE_TENANT_REF=""; SOURCE_TENANT_DIR=""
 # The applied copy carries the build that is ALREADY converged (the
 # stamp), not the manifest's placeholder tag: the apply must never
 # change what runs. Rolling to $HEAD is roll_deployment's job below.
-while IFS=$'\t' read -r _iname ins_ns _t _s _h; do
+while IFS=$'\t' read -r iname ins_ns tdir _s _h _share trepo tref; do
     manifests_with_image "$RENDER_DIR/$ins_ns" "$APPLY_DIR/$ins_ns" "$REGISTRY" "$LAST"
+    if [ "$ins_ns" = "$SOURCE_NS" ]; then
+        SOURCE_NAME="$iname"; SOURCE_TENANT_DIR="$tdir"; SOURCE_TENANT_REPO="$trepo"; SOURCE_TENANT_REF="$tref"
+    fi
 done <<< "$INSTANCES"
 rm -rf "$RENDER_DIR"
 KM=$(kubectl_seeing "$APPLY_DIR")
@@ -419,6 +428,96 @@ apply_instance() {
     apply_namespaces "$ns"
     $KM apply -f "/manifests/$ns"
 }
+# `-i`, and that single flag is the whole bug this replaces. The first
+# version piped the generated ConfigMap into `$K apply -f -`, but $K is
+# `docker run --rm` with no `-i`, so the container never attached
+# stdin: apply read an empty document, said "error: no objects passed
+# to apply", and the generator died with "write /dev/stdout: broken
+# pipe". The runner has failed on every tick since — silently, because
+# a failed systemd oneshot notifies nobody — leaving the cluster on the
+# placeholder tag committed in boss.yaml while forge main moved on.
+#
+# The lesson is the one from the zsh/bash mixup earlier the same day:
+# a command validated in a different environment than the one that
+# runs it has not been validated. I checked the kubectl invocation
+# against my own kubectl and never against the docker wrapper it
+# actually runs through.
+KAPPLY="sudo docker run --rm -i --network host -v $KUBECONFIG_PATH:/kc:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
+
+# THE TENANT SOURCE PER INSTANCE (backlog f4f5c387, car 2 of fcc1d57b;
+# David 2026-09-16 'Let's do it'). An instance's tenant is a directory
+# the image ships (`tenant_dir`) or a repository on the forge
+# (`tenant_repo` + `tenant_ref`) that this converge checks out beside
+# the product and delivers as the `boss-tenant` ConfigMap in the
+# instance's namespace, mounted at /opt/boss/tenant/seeds — the
+# step-plugins mechanism, a generated object, never a committed
+# manifest (§9a). The runner's credential for the tenant repo is the
+# checkout's own forgejo remote with the repo path replaced
+# (cluster-deploy-lib.sh tenant_repo_url): nothing here names a token
+# or a URL, and every git message is redacted before it is printed.
+#
+# tenant_source_verdict NAME NS TDIR TREPO TREF — MEASURES the source
+# and prints the packet's `tenant_source` entry for one instance:
+#   <ns>: image (<dir>)                   an image-sourced instance
+#   <ns>: readable (<repo>@<ref> <sha>)   ls-remote answered the ref
+#   <ns>: unreadable (<repo>@<ref>)       it did not — rc 1
+# so the first converge after a flip answers whether the runner's
+# token needs a scope from David (a root ceremony) instead of a
+# person guessing. rc 2 when the checkout has no forgejo remote.
+tenant_source_verdict() {
+    local iname="$1" ns="$2" tdir="$3" trepo="$4" tref="$5" sha rc=0
+    if [ -z "$trepo" ]; then
+        printf '%s: image (%s)' "$ns" "$tdir"
+        return 0
+    fi
+    sha=$(tenant_source_check "$REPO" "$trepo" "$tref") || rc=$?
+    case "$rc" in
+        0) printf '%s: readable (%s@%s %s)' "$ns" "$trepo" "$tref" "${sha:0:8}" ;;
+        1) printf '%s: unreadable (%s@%s)' "$ns" "$trepo" "$tref"; return 1 ;;
+        *) echo "cluster-deploy-runner: cannot derive a URL for $trepo — $REPO has no forgejo remote" >&2; return 2 ;;
+    esac
+}
+# converge_tenant NAME NS TREPO TREF — a repo-sourced instance's tenant:
+# a fresh shallow checkout under $TENANTS_DIR/<name>, staged flat
+# (tenant_stage) and applied as ConfigMap boss-tenant in NS from a
+# client dry run, exactly as converge_step_plugins below applies the
+# bundles. Nothing to do for an image-sourced instance. A checkout or
+# stage that fails FAILS this stage: readability was measured first,
+# so what is left is a defect, not a missing scope.
+converge_tenant() {
+    local iname="$1" ns="$2" trepo="$3" tref="$4" dir stage kt
+    [ -n "$trepo" ] || return 0
+    dir="$TENANTS_DIR/$iname"
+    stage="$TENANTS_DIR/$iname.configmap"
+    mkdir -p "$TENANTS_DIR"
+    tenant_checkout "$REPO" "$trepo" "$tref" "$dir"
+    rm -rf "$stage"
+    tenant_stage "$dir" "$stage"
+    kt="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro -v $stage:/tenant:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
+    echo "cluster-deploy-runner: converging the boss-tenant ConfigMap in $ns from $trepo@$tref ($(ls "$stage" | wc -l) files)"
+    $kt create configmap boss-tenant -n "$ns" --from-file=/tenant \
+        --dry-run=client -o yaml | $KAPPLY apply -f -
+}
+# The source instance first: its verdict rides the packet as
+# `tenant_source` before anything is applied, and an unreadable source
+# FAILS the converge here — prod's manifests are not applied and
+# nothing is rolled, the stage names itself (`failed_stage`), and the
+# next tick retries once the scope exists. A skip is a state the other
+# instances have; the source has none (render-tunnel-config.sh: a
+# skipped source is a caller's error). Prod is image-sourced in this
+# car, so this is the identity until David flips it.
+STAGE="tenant $SOURCE_NS"
+TENANT_SOURCE=""
+verdict_rc=0
+verdict=$(tenant_source_verdict "$SOURCE_NAME" "$SOURCE_NS" "$SOURCE_TENANT_DIR" "$SOURCE_TENANT_REPO" "$SOURCE_TENANT_REF") || verdict_rc=$?
+TENANT_SOURCE="$verdict"
+run_summary_field tenant_source "$TENANT_SOURCE"
+if [ "$verdict_rc" -ne 0 ]; then
+    echo "cluster-deploy-runner: the source instance's tenant is not readable ($verdict) — not applying $SOURCE_NS; nothing rolled" >&2
+    exit 1
+fi
+echo "cluster-deploy-runner: tenant source: $verdict"
+converge_tenant "$SOURCE_NAME" "$SOURCE_NS" "$SOURCE_TENANT_REPO" "$SOURCE_TENANT_REF"
 STAGE="apply manifests"
 echo "cluster-deploy-runner: applying infra/cluster/manifests for $SOURCE_NS (boss image pinned to the converged $LAST)"
 # SAY WHAT THE APPLY DOES NOT DO. `kubectl apply` with no `--prune` is
@@ -465,21 +564,8 @@ apply_instance "$SOURCE_NS"
 # derived artifact whose sources are already in tree, and a committed
 # copy would be the second definition that drifts (§9a).
 KP="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro -v $REPO/infra/step-plugins:/plugins:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
-# `-i`, and that single flag is the whole bug this replaces. The first
-# version piped the generated ConfigMap into `$K apply -f -`, but $K is
-# `docker run --rm` with no `-i`, so the container never attached
-# stdin: apply read an empty document, said "error: no objects passed
-# to apply", and the generator died with "write /dev/stdout: broken
-# pipe". The runner has failed on every tick since — silently, because
-# a failed systemd oneshot notifies nobody — leaving the cluster on the
-# placeholder tag committed in boss.yaml while forge main moved on.
-#
-# The lesson is the one from the zsh/bash mixup earlier the same day:
-# a command validated in a different environment than the one that
-# runs it has not been validated. I checked the kubectl invocation
-# against my own kubectl and never against the docker wrapper it
-# actually runs through.
-KAPPLY="sudo docker run --rm -i --network host -v $KUBECONFIG_PATH:/kc:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
+# The generated ConfigMap is piped into $KAPPLY — the `-i` kubectl
+# defined above the prod apply, where its comment records the bug.
 STAGE="configmaps"
 PLUGIN_ARGS=""
 for f in "$REPO"/infra/step-plugins/*.js; do
@@ -640,12 +726,34 @@ echo "cluster-deploy-runner: secrets declared: $SECRETS_DECLARED"
 # `instance_secrets_minted` the moment it is known. THEN the gate asks
 # the cluster again, loud, and an instance that now has everything
 # applies on this same converge.
+#
+# AND THE TENANT SOURCE IS MEASURED FIRST (backlog f4f5c387). Before
+# the quiet read, before anything is minted for it, a repo-sourced
+# instance's tenant is asked for with the converge's own credential
+# (tenant_source_verdict above); one the credential cannot read is
+# SKIPPED whole — `<ns> (tenant source unreadable: <repo>@<ref>)` in
+# `instances_skipped`, `<ns>: unreadable (…)` in `tenant_source` — so
+# the first converge after a flip names the missing scope. The tenant
+# is DELIVERED after the loud gate and before the apply: the ConfigMap
+# must exist when the pod first starts, or the launcher refuses the
+# empty directory and the pod crash-loops until it arrives.
 STAGE="apply instances"
 INSTANCES_APPLIED="$SOURCE_NS"
 INSTANCES_SKIPPED=""
 INSTANCE_SECRETS_MINTED=""
-while IFS=$'\t' read -r iname ins_ns _t _s _h share_ns; do
+while IFS=$'\t' read -r iname ins_ns tdir _s _h share_ns trepo tref; do
     [ "$ins_ns" = "$SOURCE_NS" ] && continue
+    STAGE="tenant $ins_ns"
+    verdict_rc=0
+    verdict=$(tenant_source_verdict "$iname" "$ins_ns" "$tdir" "$trepo" "$tref") || verdict_rc=$?
+    TENANT_SOURCE="${TENANT_SOURCE:+$TENANT_SOURCE; }$verdict"
+    run_summary_field tenant_source "$TENANT_SOURCE"
+    echo "cluster-deploy-runner: tenant source: $verdict"
+    if [ "$verdict_rc" -ne 0 ]; then
+        INSTANCES_SKIPPED="${INSTANCES_SKIPPED:+$INSTANCES_SKIPPED; }$(skipped_tenant_entry "$ins_ns" unreadable "$trepo" "$tref")"
+        echo "cluster-deploy-runner: instance $iname ($ins_ns) SKIPPED — its tenant $trepo@$tref is not readable with the converge's credential (the forge token needs read access to it: a root ceremony, David's)" >&2
+        continue
+    fi
     STAGE="apply $ins_ns"
     absent=""
     read_rc=0
@@ -670,6 +778,15 @@ while IFS=$'\t' read -r iname ins_ns _t _s _h share_ns; do
             exit 1 ;;
     esac
     echo "cluster-deploy-runner: applying instance $iname ($ins_ns) — boss image pinned to the converged $LAST"
+    # A repo-sourced tenant lands in the namespace before the manifests
+    # do (the Namespace first, as provisioning does), so the pod's first
+    # start finds it.
+    if [ -n "$trepo" ]; then
+        STAGE="tenant $ins_ns"
+        apply_namespaces "$ins_ns"
+        converge_tenant "$iname" "$ins_ns" "$trepo" "$tref"
+        STAGE="apply $ins_ns"
+    fi
     apply_instance "$ins_ns"
     converge_step_plugins "$ins_ns"
     $K set image -n "$ins_ns" cronjobs -l boss-chore=true "chore=$REGISTRY:$HEAD" || true

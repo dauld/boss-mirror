@@ -596,6 +596,127 @@ connector_status() {
 skipped_entry() {
     printf '%s (secrets absent: %s)' "$1" "${2// /, }"
 }
+# skipped_tenant_entry NS WHY REPO REF — the same spelling for an
+#   instance skipped over its TENANT SOURCE (backlog f4f5c387): WHY is
+#   `unreadable` (the deploying tick measured that its credential cannot
+#   read REPO@REF) or `not delivered` (the no-op tick found no
+#   boss-tenant ConfigMap in NS — the instance was never applied). The
+#   parser reads the reason as `tenant source unreadable` / `tenant not
+#   delivered`; the repo and ref are the detail.
+skipped_tenant_entry() {
+    case "$2" in
+        unreadable) printf '%s (tenant source unreadable: %s@%s)' "$1" "$3" "$4" ;;
+        *)          printf '%s (tenant not delivered: %s@%s)' "$1" "$3" "$4" ;;
+    esac
+}
+
+# THE TENANT SOURCE PER INSTANCE (backlog f4f5c387, car 2 of fcc1d57b;
+# David 2026-09-16 'Let's do it'). An instance's tenant is either a
+# directory the image ships or a repository on the forge that this
+# converge checks out beside the product and delivers as the
+# `boss-tenant` ConfigMap — infra/cluster/instances.toml says which,
+# and render-instance.sh --instances carries the repo and ref as its
+# seventh and eighth columns. The functions below are the repo half,
+# written so a fixture forge can exercise every verdict.
+#
+# ONE CREDENTIAL: the checkout's own. The runner fetches forge main
+# through its `forgejo` remote, and the tenant is read with exactly
+# that URL's scheme, host and credential — the repo path replaced,
+# nothing else — so the first converge MEASURES whether the runner's
+# token can read the tenant repo, and an unreadable one names itself
+# on the packet instead of a person guessing at scopes. No URL ever
+# reaches the journal: a forge remote may carry its token in the
+# userinfo, and every git message is redacted before it is printed.
+
+# _tenant_url_from_remote URL TENANT_REPO — pure string work: the
+#   remote's URL with its trailing owner/name[.git] replaced by
+#   TENANT_REPO.git. Handles scheme://…/owner/name and host:owner/name.
+_tenant_url_from_remote() {
+    printf '%s\n' "$1" | sed -E "s#[^/:]+/[^/]+(\.git)?/?\$#$2.git#"
+}
+# tenant_repo_url REPO TENANT_REPO — the URL for TENANT_REPO, derived
+#   from REPO's forgejo remote; rc 2 (nothing printed) when REPO has no
+#   such remote — CANNOT DERIVE, never a guess.
+tenant_repo_url() {
+    local url
+    url=$(git -C "$1" remote get-url forgejo 2>/dev/null) || return 2
+    [ -n "$url" ] || return 2
+    _tenant_url_from_remote "$url" "$2"
+}
+# redact_url — a filter: the userinfo of every URL on stdin replaced by
+#   <redacted>. Every git message about a tenant goes through it.
+redact_url() {
+    sed -E 's#://[^/@[:space:]]+@#://<redacted>@#g'
+}
+# tenant_source_check REPO TENANT_REPO REF — MEASURES readability:
+#   `git ls-remote` for REF (a branch or a tag) with the derived URL.
+#   Prints the sha REF resolves to and returns 0; returns 1 when the
+#   repo cannot be read or has no such ref (the reason on stderr,
+#   redacted); 2 when no URL can be derived. GIT_TERMINAL_PROMPT=0: a
+#   unit has no terminal, and a prompt would hang, not fail.
+tenant_source_check() {
+    local repo="$1" tenant="$2" ref="$3" url out rc=0
+    url=$(tenant_repo_url "$repo" "$tenant") || return 2
+    out=$(GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code "$url" "refs/heads/$ref" "refs/tags/$ref" 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        printf 'tenant %s@%s is not readable with the converge'"'"'s credential (rc %s): %s\n' \
+            "$tenant" "$ref" "$rc" "$out" | redact_url >&2
+        return 1
+    fi
+    # A here-string, not a pipe: `head` exits at its first line and a
+    # producer still writing is SIGPIPE under pipefail.
+    head -n1 <<< "$out" | cut -f1
+}
+# tenant_checkout REPO TENANT_REPO REF DIR — a fresh shallow clone of
+#   REF into DIR, replacing whatever DIR held: a stale checkout answering
+#   for a moved ref is the wrong-target class. rc 1 with the reason
+#   (redacted) when the clone fails; 2 when no URL can be derived.
+tenant_checkout() {
+    local url out rc=0
+    url=$(tenant_repo_url "$1" "$2") || return 2
+    rm -rf "$4"
+    out=$(GIT_TERMINAL_PROMPT=0 git clone -q --depth 1 --branch "$3" "$url" "$4" 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        printf 'tenant %s@%s could not be checked out (rc %s): %s\n' "$2" "$3" "$rc" "$out" | redact_url >&2
+        rm -rf "$4"
+        return 1
+    fi
+}
+# tenant_stage SRC STAGE — the tenant directory SRC flattened into STAGE
+#   as ONE ConfigMap's keys: every file directly under SRC/seeds, and
+#   SRC/tenant.toml as `tenant.toml` over any seeds/ copy (the root is
+#   the canonical spelling; docs/tenant-contract.md). Flat because a
+#   ConfigMap is flat and a mount inside a read-only mount cannot be
+#   created — so the pod mounts this at /opt/boss/tenant/seeds and reads
+#   BOSS_TENANT_DIR=/opt/boss/tenant, the seeds/tenant.toml spelling.
+#   Prose and subdirectories (a README, an engine's data/) are not
+#   seeds and are not staged. Refuses (rc 2, nothing staged) a
+#   directory with no manifest, and one a ConfigMap cannot hold (the
+#   API's 1 MiB object cap; the brewery's 500 KB seeds would fit, its
+#   data/ would not — which is why it stays image-sourced).
+tenant_stage() {
+    local src="$1" stage="$2" f size
+    if ! [ -f "$src/tenant.toml" ] && ! [ -f "$src/seeds/tenant.toml" ]; then
+        echo "tenant_stage: $src holds no tenant.toml or seeds/tenant.toml — not a tenant directory" >&2
+        return 2
+    fi
+    mkdir -p "$stage"
+    if [ -d "$src/seeds" ]; then
+        for f in "$src"/seeds/*; do
+            [ -f "$f" ] && cp "$f" "$stage/"
+        done
+    fi
+    if [ -f "$src/tenant.toml" ]; then
+        cp "$src/tenant.toml" "$stage/tenant.toml"
+    fi
+    size=$(du -sb "$stage" | cut -f1)
+    if [ "$size" -gt 1000000 ]; then
+        echo "tenant_stage: $src stages $size bytes — over the 1 MiB a ConfigMap holds; a tenant this size is image-sourced (tenant_dir), not delivered" >&2
+        rm -rf "$stage"
+        return 2
+    fi
+    return 0
+}
 
 # instances_skipped_by_gate K KM SOURCE_NS INSTANCES MOUNT
 #   The packet's `instances_skipped` string as the secret gate would
@@ -606,12 +727,35 @@ skipped_entry() {
 #   sees it. Prints the string (empty when nothing is skipped) and
 #   returns 0; returns 2 when a read could not be made — the string is
 #   then not knowable, and the caller must not guess one.
+#   A repo-sourced instance (seventh column) with NO boss-tenant
+#   ConfigMap in its namespace is skipped too (backlog f4f5c387): the
+#   deploying tick delivers the ConfigMap before it applies, so its
+#   absence means the instance was never applied — skipped over an
+#   unreadable tenant, or not yet converged — and its hostname must
+#   stay served by the source (the 40d46042 shape). The tick does not
+#   re-measure readability: that is the deploying tick's finding, and
+#   the cluster's state is what this read-only tick may ask.
 instances_skipped_by_gate() {
     local k="$1" km="$2" source_ns="$3" instances="$4" mount="$5"
-    local iname ins_ns _t _s _h absent rc skipped=""
-    while IFS=$'\t' read -r iname ins_ns _t _s _h; do
+    local iname ins_ns _t _s _h _share trepo tref absent err rc skipped=""
+    while IFS=$'\t' read -r iname ins_ns _t _s _h _share trepo tref; do
         [ -n "$ins_ns" ] || continue
         [ "$ins_ns" = "$source_ns" ] && continue
+        if [ -n "$trepo" ]; then
+            rc=0
+            err=$($k get configmap boss-tenant -n "$ins_ns" 2>&1 >/dev/null) || rc=$?
+            if [ "$rc" -ne 0 ]; then
+                # NotFound is the answer; anything else (Forbidden, a dark
+                # API) is a read that was not made — CANNOT TELL, as the
+                # secret gate treats it.
+                case "$err" in
+                    *NotFound*|*"not found"*) ;;
+                    *) echo "instances_skipped_by_gate: cannot read ConfigMap boss-tenant in $ins_ns: $err" >&2; return 2 ;;
+                esac
+                skipped="${skipped:+$skipped; }$(skipped_tenant_entry "$ins_ns" "not delivered" "$trepo" "$tref")"
+                continue
+            fi
+        fi
         rc=0
         absent=$(instance_secret_gate "$k" "$km" "$ins_ns" "$mount/$ins_ns") || rc=$?
         case "$rc" in
