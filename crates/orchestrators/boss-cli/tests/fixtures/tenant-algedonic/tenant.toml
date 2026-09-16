@@ -1,0 +1,21 @@
+# Algedonic, LLC — the company as a BOSS tenant.
+#
+# The tenant manifest the deployment reads (BOSS_TENANT_MANIFEST_TOML
+# today; BOSS_TENANT_DIR once fcc1d57b lands). Same shape as
+# examples/<tenant>/seeds/tenant.toml in the product repo, because a
+# tenant is a directory of its own that the product reads, scaffolds
+# and checks; the product's examples exercise that contract publicly
+# and this repo is its first real customer.
+#
+# No simulator sections: this is a real company. Load comes from the
+# world — sponsors, support requests, the trains — not from a sim.
+# No secrets here, ever; credentials live in the broker's Secrets.
+
+[meta]
+tenant_id = "algedonic"
+display_name = "Algedonic, LLC"
+# The company operates every day; the people in it do not. The
+# business calendar says when a person is expected to act; agents act
+# whenever a packet is ready.
+operating_days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+timezone = "America/Los_Angeles"

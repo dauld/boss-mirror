@@ -48,6 +48,23 @@ REPO=/opt/boss
 EMAIL="${BOSS_BOOTSTRAP_ADMIN_EMAIL:?BOSS_BOOTSTRAP_ADMIN_EMAIL must be set}"
 EMAIL="${EMAIL,,}"
 
+# THE DATABASE NAME HAS ONE SOURCE: the Secret's database-url, which
+# every service reads as BOSS_POSTGRES_URL. Until 2026-09-16 this
+# container's psql took PGDATABASE from a manifest literal (`boss`)
+# beside DATABASE_URL from the Secret — two names for one fact, and the
+# day they disagree (Option 3, design e652c7c6: the instance's database
+# is repointed to a fresh one by switch-instance-database, 063dba4e)
+# the schema would converge into one database while the services
+# opened the other, and prod would be dark with every step green. So
+# when DATABASE_URL is set its path names the database (the derivation
+# is database-from-url.sh beside this file, tested) and wins over any
+# PGDATABASE in the environment; the literal is gone from the manifest.
+if [ -n "${DATABASE_URL:-}" ]; then
+    PGDATABASE="$("$REPO/infra/oss-quickstart/database-from-url.sh" "$DATABASE_URL")" || exit 78
+    export PGDATABASE
+    echo "    database:        $PGDATABASE (from DATABASE_URL)"
+fi
+
 echo "==> boss-init starting"
 echo "    bootstrap-admin: $EMAIL"
 echo "    mode:            converge schema from the tree, then live sim from empty"

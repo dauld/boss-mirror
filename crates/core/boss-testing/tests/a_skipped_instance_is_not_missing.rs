@@ -60,13 +60,15 @@ impl Case {
         std::fs::create_dir_all(tree.join("examples/fixture/seeds")).unwrap();
         write_file(&tree.join("examples/fixture/seeds/tenant.toml"), "");
         // The source values the renderer checks the files for: the
-        // namespace, the tenant path, the sim flag and the hostname.
+        // namespace, the tenant path, the sim flag, the guest flag
+        // (0d2d7daa) and the hostname.
         write_file(
             &dir.join("boss.yaml"),
             "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: boss\n---\n\
              apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: boss\n  namespace: boss\n\
              spec:\n  template:\n    spec:\n      containers:\n      - name: boss\n        env:\n\
              \x20       - {name: BOSS_SIM_ENABLED, value: \"false\"}\n\
+             \x20       - {name: BOSS_GUEST_ACCESS, value: \"1\"}\n\
              \x20       - {name: BOSS_TENANT_DIR, value: /opt/boss/examples/fixture}\n\
              ---\napiVersion: v1\nkind: Service\nmetadata:\n  name: boss-gateway\n  namespace: boss\n",
         );
@@ -86,8 +88,8 @@ impl Case {
         write_file(
             &tree.join("infra/cluster/instances.toml"),
             "source = \"prod\"\n\n[prod]\nnamespace = \"boss\"\ntenant_dir = \"examples/fixture\"\n\
-             sim = false\nhostname = \"boss.algedonic.dev\"\n\n[playground]\nnamespace = \"boss-playground\"\n\
-             tenant_dir = \"examples/fixture\"\nsim = true\nhostname = \"playground.algedonic.dev\"\n",
+             sim = false\nhostname = \"boss.algedonic.dev\"\nguest = true\n\n[playground]\nnamespace = \"boss-playground\"\n\
+             tenant_dir = \"examples/fixture\"\nsim = true\nhostname = \"playground.algedonic.dev\"\nguest = true\n",
         );
         let bin = root.join("bin");
         std::fs::create_dir_all(&bin).unwrap();

@@ -88,12 +88,19 @@ struct ListEmployeesQuery {
     role: Option<String>,
     /// Exact status filter (e.g. `active`). Omit for all statuses.
     status: Option<String>,
+    /// Case-insensitive email filter — the question "who already holds
+    /// this address?" that `boss-operator-baseline-seed` asks before
+    /// injecting the bootstrap admin (backlog 0d2d7daa, 2026-09-16).
+    /// Case-insensitive because the login's credential → Employee
+    /// match and the schema's unique index are both on LOWER(email).
+    email: Option<String>,
 }
 
-/// List the roster, optionally filtered by `role` and/or `status`.
-/// `?role=bookkeeper&status=active` powers the role→active-employees
-/// lookup the dispatcher's notifier + auto-assign need, and the SPA
-/// directory. Both filters are exact-match; absent = no constraint.
+/// List the roster, optionally filtered by `role`, `status` and/or
+/// `email`. `?role=bookkeeper&status=active` powers the
+/// role→active-employees lookup the dispatcher's notifier +
+/// auto-assign need, and the SPA directory. `role` and `status` are
+/// exact-match, `email` is case-insensitive; absent = no constraint.
 async fn list_employees<R: PeopleRepository + 'static>(
     State(state): State<Arc<PeopleApiState<R>>>,
     Query(q): Query<ListEmployeesQuery>,
@@ -107,6 +114,13 @@ async fn list_employees<R: PeopleRepository + 'static>(
                     q.status
                         .as_ref()
                         .is_none_or(|s| e.status.as_ref() == Some(s))
+                })
+                .filter(|e| {
+                    q.email.as_ref().is_none_or(|wanted| {
+                        e.email
+                            .as_deref()
+                            .is_some_and(|have| have.trim().eq_ignore_ascii_case(wanted.trim()))
+                    })
                 })
                 .collect();
             Json(filtered).into_response()
@@ -550,6 +564,41 @@ mod tests {
         // terminated brewer (wrong status) are filtered out.
         assert_eq!(emps.len(), 1);
         assert_eq!(emps[0].id, "emp-brewer-1");
+    }
+
+    /// `?email=` is the question the bootstrap-admin injection asks
+    /// before it injects (backlog 0d2d7daa, 2026-09-16): "does anyone
+    /// already hold this address?" The match is case-insensitive
+    /// because the login resolves credential → Employee on
+    /// lower(email), and the schema's unique index is on LOWER(email)
+    /// — a filter that answered differently from either would let the
+    /// injection add a second row the index then refuses.
+    #[tokio::test]
+    async fn list_filtered_by_email_is_case_insensitive() {
+        let mut david = test_emp("emp-david", None);
+        david.email = Some("David@Example.com".to_string());
+        let people = Arc::new(InMemoryPeople::new(vec![
+            david,
+            test_emp("emp-other", None),
+        ]));
+        let app = app_with(people);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/people?email=david%40example.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let emps: Vec<Employee> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(emps.len(), 1, "{emps:?}");
+        assert_eq!(emps[0].id, "emp-david");
     }
 
     #[tokio::test]

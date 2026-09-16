@@ -1,0 +1,18 @@
+[
+  {"subject_kind": "employee", "code": "engineering", "display_name": "Engineering", "member_attribute": "department", "sort_order": 10},
+  {"subject_kind": "employee", "code": "product", "display_name": "Product (BOSS, OSS)", "member_attribute": "department", "sort_order": 20},
+  {"subject_kind": "employee", "code": "marketing", "display_name": "Marketing", "member_attribute": "department", "sort_order": 30},
+  {"subject_kind": "employee", "code": "sales", "display_name": "Sales & Sponsorships", "member_attribute": "department", "sort_order": 40},
+  {"subject_kind": "employee", "code": "support", "display_name": "Support", "member_attribute": "department", "sort_order": 50},
+  {"subject_kind": "employee", "code": "hosting", "display_name": "Hosting", "member_attribute": "department", "sort_order": 60},
+  {"subject_kind": "employee", "code": "finance", "display_name": "Finance", "member_attribute": "department", "sort_order": 70},
+  {"subject_kind": "employee", "code": "operations", "display_name": "Operations / IT", "member_attribute": "department", "sort_order": 80},
+
+  {"subject_kind": "employee", "code": "engineering-agent", "display_name": "Engineering agent", "member_attribute": "role", "sort_order": 10},
+  {"subject_kind": "employee", "code": "support-agent", "display_name": "Support agent", "member_attribute": "role", "sort_order": 11},
+  {"subject_kind": "employee", "code": "drafting-agent", "display_name": "Drafting agent (marketing, proposals)", "member_attribute": "role", "sort_order": 12},
+
+  {"subject_kind": "invoice", "code": "sponsorship", "display_name": "Sponsorship", "member_attribute": "revenue_category", "sort_order": 10},
+  {"subject_kind": "invoice", "code": "support", "display_name": "Support engagement", "member_attribute": "revenue_category", "sort_order": 20},
+  {"subject_kind": "invoice", "code": "hosting", "display_name": "Hosted instance", "member_attribute": "revenue_category", "sort_order": 30}
+]

@@ -67,9 +67,8 @@ tenant_id_of() {
     done
 }
 
-# Publish the platform operator baseline, then the tenant. Both go
-# through the public API. Non-zero means the tenant is NOT published
-# and the baseline is untouched.
+# Publish the platform operator baseline and the tenant. Both go
+# through the public API. Non-zero means the tenant is NOT published.
 #
 # WHICH publish is the tenant's to say (ee7b62bb, 2026-09-16). Until
 # then seed-brewery-tenant.sh ran unconditionally, so a deployment
@@ -78,13 +77,32 @@ tenant_id_of() {
 # engine seeds what the sim needs and stamps the sim's reset baseline;
 # every other tenant is `boss tenant publish <dir>` through the shared
 # doors (seed-tenant.sh), with no baseline stamp.
+#
+# WHICH GOES FIRST differs too (backlog 0d2d7daa, 2026-09-16). The
+# baseline injects emp-bootstrap-admin for BOSS_BOOTSTRAP_ADMIN_EMAIL
+# unless the roster already holds that email, and a real company's
+# roster declares its founder with exactly that address: baseline
+# first gave a fresh instance the bootstrap row and then refused the
+# founder on the LOWER(email) unique index. So a tenant with no engine
+# is published BEFORE the baseline, and the baseline (which asks the
+# people API before injecting) sees the founder and injects nothing.
+# The brewery keeps baseline-first: its engine's prepare expects the
+# bootstrap admin to exist, and its roster does not carry the
+# operator's address. A failed tenant publish returns at once — the
+# DEGRADED loop retries this function whole — so the baseline never
+# reads the empty roster the tenant was about to fill.
 publish_tenant() {
-    "$BOSS_INFRA_DIR/seed-operator-baseline.sh"
     local dir
     dir="$(tenant_dir)"
     case "$(tenant_id_of "$dir")" in
-        brewery) "$BOSS_INFRA_DIR/seed-brewery-tenant.sh" ;;
-        *) BOSS_TENANT_DIR="$dir" "$BOSS_INFRA_DIR/seed-tenant.sh" ;;
+        brewery)
+            "$BOSS_INFRA_DIR/seed-operator-baseline.sh" || return $?
+            "$BOSS_INFRA_DIR/seed-brewery-tenant.sh"
+            ;;
+        *)
+            BOSS_TENANT_DIR="$dir" "$BOSS_INFRA_DIR/seed-tenant.sh" || return $?
+            "$BOSS_INFRA_DIR/seed-operator-baseline.sh"
+            ;;
     esac
 }
 

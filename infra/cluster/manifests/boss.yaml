@@ -347,7 +347,10 @@ spec:
           env:
             - {name: PGHOST, value: postgres}
             - {name: PGUSER, value: boss}
-            - {name: PGDATABASE, value: boss}
+            # No PGDATABASE: boss-init reads the database name off
+            # DATABASE_URL (the Secret), the one source every service
+            # reads — a literal here disagreed with it the day the
+            # database was repointed (Option 3, 063dba4e).
             - name: PGPASSWORD
               valueFrom: {secretKeyRef: {name: boss-secrets, key: postgres-password}}
             - name: DATABASE_URL
@@ -397,6 +400,12 @@ spec:
             # visitors get a synthetic audit-readonly session — read every
             # projection, write nothing — so the brewery renders without a
             # login, and the write path is what's under scrutiny.
+            # PER INSTANCE since backlog 0d2d7daa (2026-09-16): the value
+            # is `guest = true|false` in infra/cluster/instances.toml,
+            # rendered "1"|"0" by render-instance.sh. Prod is the source,
+            # so this line and prod's `guest` line change together — the
+            # flip car sets prod to false ("0" here) and the playground
+            # keeps "1".
             - {name: BOSS_GUEST_ACCESS, value: "1"}
             # THE TENANT DIRECTORY (backlog f4f5c387, car 2 of fcc1d57b;
             # David 2026-09-16 'Let's do it'). One directory holding

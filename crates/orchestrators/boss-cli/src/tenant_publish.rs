@@ -526,6 +526,16 @@ fn refuse(resp: reqwest::blocking::Response, what: &str) -> Result<reqwest::bloc
 /// POST every roster row, then PUT the manager edges back. 409 on a
 /// duplicate id is "already there"; any other refusal fails the
 /// publish — the Workflows published next assign work to this roster.
+///
+/// A 409 IS "ALREADY THERE" ONLY WHEN THE ROW IS (backlog 0d2d7daa,
+/// 2026-09-16). The people API answers 409 for every
+/// `PeopleError::Conflict`: a duplicate id, but also a role with no
+/// active Class or a `location` the registry does not hold. Counting
+/// each as "already there" skipped the real company's founder in
+/// silence — its `location` names a site no door seeds — and would
+/// have published the Workflows against an empty roster. So a 409 is
+/// followed by GET /api/people/{id}: 200 is already there; anything
+/// else is the refusal it was, with the API's words.
 fn seed_people(client: &Client, people_base: &str, roster: &[Value]) -> Result<String> {
     let (rows, links) = manager_split(roster.to_vec());
     let post_url = url(people_base, "/api/people");
@@ -536,11 +546,28 @@ fn seed_people(client: &Client, people_base: &str, roster: &[Value]) -> Result<S
             .json(emp)
             .send()
             .with_context(|| format!("POST {post_url}"))?;
+        let id = emp.get("id").and_then(Value::as_str).unwrap_or("?");
         match resp.status().as_u16() {
-            409 => already += 1,
+            409 => {
+                let row_url = url(people_base, &format!("/api/people/{id}"));
+                let exists = client
+                    .get(&row_url)
+                    .send()
+                    .with_context(|| format!("GET {row_url} after a 409"))?
+                    .status()
+                    .is_success();
+                if exists {
+                    already += 1;
+                } else {
+                    bail!(
+                        "POST {post_url} ({id}) → 409 {} — and GET {row_url} says the row is \
+                         not there, so this is a refusal, not a duplicate",
+                        resp.text().unwrap_or_default()
+                    );
+                }
+            }
             s if (200..300).contains(&s) => posted += 1,
             _ => {
-                let id = emp.get("id").and_then(Value::as_str).unwrap_or("?");
                 refuse(resp, &format!("POST {post_url} ({id})"))?;
             }
         }
@@ -1270,6 +1297,58 @@ terminal = { outcome = "sponsored" }
         assert!(
             people_line.contains("0 posted, 2 already there"),
             "{people_line}"
+        );
+    }
+
+    /// THE REAL PEOPLE API SAYS 409 FOR MORE THAN A DUPLICATE ID
+    /// (backlog 0d2d7daa, 2026-09-16). `PeopleError::Conflict` — a role
+    /// with no active Class, a location not in the registry — maps to
+    /// 409 CONFLICT too, and `seed_people` counted every 409 as
+    /// "already there": the real company's founder, whose `location`
+    /// names a site no door seeds, would have been skipped in silence
+    /// and the Workflows published against an empty roster. A 409 is
+    /// "already there" only when GET /api/people/{id} says the row
+    /// exists — the merge observed, never assumed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_409_for_a_row_that_does_not_exist_is_a_refusal_not_already_there() {
+        let dir = real_shape("409-not-there");
+        let p = plan(&dir).unwrap();
+        let st = Arc::new(Mutex::new(Stub::default()));
+        let base = spawn_stub_with(st.clone(), |st, m, path, body| {
+            if m == "POST" && path == "/api/people" {
+                let row: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                if row["id"].as_str() == Some("emp-two") {
+                    return (
+                        409,
+                        "location `loc-nowhere` is not an active Location in the registry".into(),
+                    );
+                }
+            }
+            route(st, m, path, body)
+        })
+        .await;
+        let err = run_publish(p, base).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("employees.json"), "{msg}");
+        assert!(msg.contains("emp-two"), "the row is named: {msg}");
+        assert!(
+            msg.contains("not an active Location"),
+            "the API's own words: {msg}"
+        );
+        let st = st.lock().unwrap();
+        assert!(
+            st.log
+                .iter()
+                .any(|(m, p, _, _)| m == "GET" && p == "/api/people/emp-two"),
+            "the 409 was checked against the roster, not assumed"
+        );
+        assert_eq!(
+            st.log
+                .iter()
+                .filter(|(m, p, _, _)| m == "POST" && p == "/api/jobs")
+                .count(),
+            0,
+            "no design Job opens against a roster that did not land"
         );
     }
 

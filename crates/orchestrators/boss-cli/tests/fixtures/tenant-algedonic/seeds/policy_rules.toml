@@ -1,0 +1,21 @@
+# Algedonic, LLC — tenant policy seed.
+#
+# Core ships the platform rules (platform-admin / audit-readonly /
+# smoke-tester / guest). David Auld is the platform admin of this
+# instance (decided 2026-09-16: "seed the employees with only David Auld
+# as the Platform Admin"), and platform-admin already holds every
+# action on every resource — so this file grants NOTHING today. The
+# first draft invented a `founder` role and spelled its grants out; a
+# role one person holds beside a role that already covers him is two
+# names for one fact (CLAUDE.md §9a), so it is gone. Agents' grants
+# arrive with each department's first workflow, as [[grants]] rows here:
+#
+#   [[grants]]
+#   roles = ["<role>"]
+#   resources = ["job", "step"]
+#   action = "read"        # read / create / update / close / sign-off / delete / publish / retire
+#   scope = "all"
+#
+# The shape boss-policy-bootstrap's loader reads
+# (boss_policy_client::seed_loader::load_policy_rules); an empty file
+# is a valid seed of zero grants.

@@ -9,6 +9,7 @@ pub mod assets_client;
 pub mod employee_changes;
 pub mod http;
 pub mod in_memory;
+pub mod operator_baseline;
 pub mod people_config;
 pub mod port;
 #[cfg(feature = "postgres")]

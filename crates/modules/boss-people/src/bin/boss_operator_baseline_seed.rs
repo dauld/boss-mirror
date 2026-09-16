@@ -1,5 +1,5 @@
 //! `boss-operator-baseline-seed` — POST the operator-baseline
-//! (system CEO/CTO/COO + bootstrap admin) to the people-api at
+//! (system audit account + bootstrap admin) to the people-api at
 //! `POST /api/people`, idempotently.
 //!
 //! All data loading goes through the public API: this binary no
@@ -19,17 +19,19 @@
 //!
 //! Idempotence: a 409 Conflict on a duplicate `id` is treated as
 //! "already exists → skip". Safe to run twice; safe to run before or
-//! after the brewery seed load.
+//! after a tenant publish — since backlog 0d2d7daa (2026-09-16) the
+//! bootstrap-admin injection asks the roster who holds the email
+//! before injecting, so a tenant that declares the operator as one of
+//! its own people is not given a second row.
+//!
+//! The logic lives in `boss_people::operator_baseline` so the seed
+//! path can be proven against a real people router over a TestDb;
+//! this file is argv + tracing + one call.
 
-use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
-use boss_people::types::Employee;
+use anyhow::Result;
 use clap::Parser;
-use reqwest::blocking::Client;
-use serde::Deserialize;
-use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -49,96 +51,6 @@ struct Cli {
     seed_path: PathBuf,
 }
 
-#[derive(Debug, Deserialize)]
-struct OperatorSeed {
-    hire: Vec<Employee>,
-}
-
-/// Find the bootstrap-admin email. Precedence:
-///   1. BOSS_BOOTSTRAP_ADMIN_EMAIL env var
-///   2. First `[[credential]]` row in BOSS_AUTH_FILE (default
-///      /var/lib/boss/auth/credentials.toml). This is the file
-///      the gateway's local_auth reads; using it as the source
-///      means there's one canonical "who is the operator" file.
-///
-/// Returns None when neither produces a value — bootstrap runs
-/// without injection, and the operator must POST /api/people
-/// manually before login.
-fn resolve_bootstrap_admin_email() -> Option<String> {
-    if let Ok(email) = std::env::var("BOSS_BOOTSTRAP_ADMIN_EMAIL") {
-        let trimmed = email.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-    let auth_file = std::env::var("BOSS_AUTH_FILE")
-        .unwrap_or_else(|_| "/var/lib/boss/auth/credentials.toml".to_string());
-    let raw = match std::fs::read_to_string(&auth_file) {
-        Ok(raw) => raw,
-        Err(e) => {
-            // Loud, with the path and the reason. This fallback failing
-            // silently is what let a reset produce a demo with no
-            // platform-admin — and therefore no publishable Workflows,
-            // since the Q7 owner gate rejects the bootstrap Job.
-            info!(
-                path = %auth_file,
-                error = %e,
-                "bootstrap-admin: credentials file unreadable"
-            );
-            return None;
-        }
-    };
-    match bootstrap_email_from_credentials(&raw) {
-        Some(email) => Some(email),
-        None => {
-            info!(
-                path = %auth_file,
-                "bootstrap-admin: credentials file has no [[credential]] email"
-            );
-            None
-        }
-    }
-}
-
-/// Pull the first `[[credential]]` row's `email` out of the gateway's
-/// auth file.
-///
-/// Split out of `resolve_bootstrap_admin_email` so the parse is
-/// testable without env vars or a real file — the untestability is
-/// why the bug below survived.
-///
-/// Deserializes into a typed struct rather than walking a
-/// `toml::Value`. Under `toml` 1.x a `[[credential]]` document parses
-/// to a `Value::Table` whose `get("credential")` the previous code
-/// chained through with `?`, and any single step returning `None`
-/// collapsed the whole thing to "no email" with no way to tell which.
-/// A `Deserialize` impl is both what the rest of the codebase does and
-/// impossible to silently mis-index.
-fn bootstrap_email_from_credentials(raw: &str) -> Option<String> {
-    #[derive(serde::Deserialize)]
-    struct AuthFile {
-        #[serde(default)]
-        credential: Vec<Credential>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Credential {
-        email: String,
-    }
-    let parsed: AuthFile = toml::from_str(raw).ok()?;
-    let email = parsed.credential.into_iter().next()?.email;
-    let trimmed = email.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
-}
-
-fn display_name_from_email(email: &str) -> String {
-    let local = email.split('@').next().unwrap_or(email);
-    let mut chars = local.chars();
-    match chars.next() {
-        Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
-        None => String::new(),
-    }
-}
-
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -147,208 +59,6 @@ fn main() -> Result<()> {
         .compact()
         .init();
     let cli = Cli::parse();
-
-    let raw = fs::read_to_string(&cli.seed_path).with_context(|| {
-        format!(
-            "reading operator-baseline seed at {}",
-            cli.seed_path.display()
-        )
-    })?;
-    let mut seed: OperatorSeed =
-        toml::from_str(&raw).with_context(|| format!("parsing {}", cli.seed_path.display()))?;
-
-    // The bootstrap admin's email is the one
-    // the operator will log in as. Inject an emp-bootstrap-admin
-    // row at the head of the hire list with role=platform-admin
-    // and email pulled from BOSS_BOOTSTRAP_ADMIN_EMAIL (or the
-    // first email in the local credentials.toml file when the
-    // env var is unset).
-    //
-    // This is the single bootstrap row the system needs to
-    // bootstrap itself: after this row exists, the credential →
-    // Employee resolution via lower(email) match works at login
-    // time without needing the gateway to auto-provision.
-    if let Some(bootstrap_email) = resolve_bootstrap_admin_email() {
-        let already_present = seed.hire.iter().any(|h| {
-            h.email
-                .as_deref()
-                .is_some_and(|e| e.eq_ignore_ascii_case(&bootstrap_email))
-        });
-        if !already_present {
-            let bootstrap = Employee {
-                id: "emp-bootstrap-admin".to_string(),
-                name: Some(display_name_from_email(&bootstrap_email)),
-                email: Some(bootstrap_email.clone()),
-                role: Some("platform-admin".to_string()),
-                // `it`, not `platform`. The operator and the agent ARE
-                // the IT department — one person and one AI — so they
-                // are employees of the tenant like anyone else. A
-                // department invented to hold the people who run the
-                // software is a silo the org chart does not have.
-                department: Some("it".to_string()),
-                skill_level: None,
-                skills: Vec::new(),
-                hire_date: Some(
-                    chrono::NaiveDate::from_ymd_opt(2023, 1, 1).expect("static date is valid"),
-                ),
-                location: Some("loc-hq".to_string()),
-                manager_id: None,
-                employment_type: Some("full-time".to_string()),
-                status: Some("active".to_string()),
-                certifications: Vec::new(),
-                annual_salary_cents: None,
-            };
-            info!(
-                operator_id = %bootstrap.id,
-                email = bootstrap.email.as_deref().unwrap_or(""),
-                "injecting bootstrap-admin Employee row at head of hire list"
-            );
-            seed.hire.insert(0, bootstrap);
-        } else {
-            info!(
-                email = %bootstrap_email,
-                "bootstrap-admin email already present in operator_hires.toml; no injection"
-            );
-        }
-    } else {
-        info!(
-            "BOSS_BOOTSTRAP_ADMIN_EMAIL unset and no credentials file readable; \
-             skipping bootstrap-admin Employee injection. Logins will require an \
-             explicit /api/people POST or a matching template row in \
-             operator_hires.toml."
-        );
-    }
-
-    // The operator-baseline loads AS the public API like every
-    // other external caller. The actor identity is a dedicated
-    // platform-admin automation identity — these are founding
-    // platform operators, not tenant employees.
-    let user_header = serde_json::json!({
-        "id": "automation:operator-baseline",
-        "role": "platform-admin",
-        "access_tier": "operator",
-        "territory_account_ids": [],
-        "direct_report_ids": [],
-        "department": "it",
-    })
-    .to_string();
-
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert(
-        "x-boss-user",
-        reqwest::header::HeaderValue::from_str(&user_header)
-            .with_context(|| "x-boss-user header value")?,
-    );
-    headers.insert(
-        "x-sim-origin",
-        reqwest::header::HeaderValue::from_static("true"),
-    );
-    headers.insert(
-        reqwest::header::CONTENT_TYPE,
-        reqwest::header::HeaderValue::from_static("application/json"),
-    );
-
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .with_context(|| "building reqwest client")?;
-
-    let url = format!("{}/api/people", cli.people_base.trim_end_matches('/'));
-
-    let mut inserted = 0u64;
-    let mut skipped = 0u64;
-    let mut failed = 0u64;
-    for emp in &seed.hire {
-        let resp = match client.post(&url).headers(headers.clone()).json(emp).send() {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(operator_id = %emp.id, error = %e, "POST operator transport error");
-                failed += 1;
-                continue;
-            }
-        };
-        let status = resp.status();
-        if status.is_success() {
-            inserted += 1;
-            info!(operator_id = %emp.id, role = emp.role.as_deref().unwrap_or(""), "operator hired");
-        } else if status.as_u16() == 409 {
-            skipped += 1;
-            info!(operator_id = %emp.id, "operator already hired, skipping");
-        } else {
-            let body = resp.text().unwrap_or_default();
-            warn!(operator_id = %emp.id, %status, body = %body, "POST operator failed");
-            failed += 1;
-        }
-    }
-
-    if failed > 0 {
-        anyhow::bail!(
-            "{failed} operator-baseline POSTs failed (inserted={inserted}, skipped={skipped}). \
-             The operator-baseline must land before downstream references resolve."
-        );
-    }
-
-    info!(inserted, skipped, "operator-baseline seed complete");
+    boss_people::operator_baseline::seed(&cli.people_base, &cli.seed_path)?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The exact shape the gateway's local_auth writes, byte-for-byte
-    /// from the playground's `/var/lib/boss/auth/credentials.toml`.
-    /// This file read as valid UTF-8 and parsed fine in other TOML
-    /// implementations, yet the old `toml::Value`-walking resolver
-    /// returned None for it — leaving a reset with no platform-admin,
-    /// which the Q7 owner gate then turned into "prepare publishes
-    /// zero Workflows" and a demo that could only idle.
-    const REAL_CREDENTIALS: &str = r#"[[credential]]
-email = "david@algedonic.dev"
-password_hash = "$argon2id$v=19$m=19456,t=2,p=1$4LpQUAH90UxRT3D73PzcyQ$R6v2W4pFoHc9czv8L4cbvbr1vX3VYxGQZhkvNqRiegE"
-created_at = "2026-06-03T04:12:15.045062115Z"
-last_rotated = "2026-07-07T16:13:36.282845447Z"
-"#;
-
-    #[test]
-    fn reads_the_email_from_a_real_credentials_file() {
-        assert_eq!(
-            bootstrap_email_from_credentials(REAL_CREDENTIALS).as_deref(),
-            Some("david@algedonic.dev"),
-        );
-    }
-
-    #[test]
-    fn takes_the_first_credential_when_several_exist() {
-        let raw = r#"
-[[credential]]
-email = "first@example.com"
-password_hash = "x"
-
-[[credential]]
-email = "second@example.com"
-password_hash = "y"
-"#;
-        assert_eq!(
-            bootstrap_email_from_credentials(raw).as_deref(),
-            Some("first@example.com"),
-        );
-    }
-
-    #[test]
-    fn no_credentials_yields_none() {
-        assert_eq!(bootstrap_email_from_credentials(""), None);
-        assert_eq!(
-            bootstrap_email_from_credentials("[[credential]]\nemail = \"\"\n"),
-            None
-        );
-    }
-
-    #[test]
-    fn malformed_toml_yields_none_rather_than_panicking() {
-        assert_eq!(
-            bootstrap_email_from_credentials("this is not = = toml"),
-            None
-        );
-    }
 }

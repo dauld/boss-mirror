@@ -25,7 +25,7 @@
 # change together, and the byte-identity test in
 # crates/core/boss-testing/tests/render_instance_sh.rs holds them equal.
 #
-# THE FOUR PARAMETERS
+# THE FIVE PARAMETERS
 #   namespace  the Kubernetes namespace; `boss` or `boss-<name>`. boss-dev
 #              is the pipeline's and is refused.
 #   tenant     THE TENANT SOURCE — one of two spellings, below. The pod
@@ -38,6 +38,18 @@
 #   hostname   the TLS front's vhost (boss-tls-front.yaml). Its cert is
 #              the `boss-tls` Secret in the instance's namespace, minted
 #              out of band.
+#   guest      BOSS_GUEST_ACCESS — whether an anonymous visitor gets a
+#              synthetic read-only session (the "Browse as a guest"
+#              button; the gateway reads "1" as on, anything else as
+#              off). Right for the public example, wrong for the
+#              operating company's site behind Access (backlog
+#              0d2d7daa, 2026-09-16): true renders "1", false renders
+#              "0". Required, like sim — an instance that inherited the
+#              manifest's "1" by silence would hand strangers the
+#              company's read-only view. Prod keeps true until the flip
+#              car sets it false here AND writes "0" into boss.yaml
+#              (prod is the source; the byte-identity test holds them
+#              equal).
 #
 # THE TENANT SOURCE (backlog f4f5c387, car 2 of fcc1d57b; David
 # 2026-09-16 'Let's do it'). The image bakes examples/ in, so a tenant
@@ -130,12 +142,14 @@ namespace = "boss"
 tenant_dir = "examples/brewery"
 sim = false
 hostname = "boss.algedonic.dev"
+guest = true
 
 [playground]
 namespace = "boss-playground"
 tenant_dir = "examples/brewery"
 sim = true
 hostname = "playground.algedonic.dev"
+guest = true
 # The playground pulls the same images and sends mail as the same
 # sender: its shared Secrets are prod's, copied.
 shares_with = "prod"

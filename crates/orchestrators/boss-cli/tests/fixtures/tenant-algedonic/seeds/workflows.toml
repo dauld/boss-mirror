@@ -1,0 +1,102 @@
+# Algedonic, LLC — the company's own protocols.
+#
+# Engineering's protocols (ship-a-change, pr-train, gate-run,
+# design-doc, backlog-item, user-feedback, ops-request,
+# rotate-a-credential, regenerate-deployment, publish-to-github, the
+# maintenance chores) are PLATFORM kinds shipped by the product. This
+# file carries only what is Algedonic's — the department workflows,
+# one per revenue line, in the order decided on design ffc83387:
+#
+#   1. receive-a-sponsorship     (below — the first draft)
+#   2. publish-the-landing-page, write-the-pitch   (marketing)
+#   3. close-the-month           (finance)
+#   4. handle-a-support-request  (support; the fix rides a car)
+#   5. provision-an-instance     (hosting; render → converge → bill)
+#
+# Each is a [[workflow]] row with every step declaring its audience
+# (a person or an agent), 3–6 steps, grown by publishing a new
+# version — never by a deploy.
+
+# --------------------------------------------------------------------
+# receive-a-sponsorship — v1 draft (2026-09-16, for David to read)
+#
+# Stripe is a SENSOR: its webhook readings land outside the audit log
+# and a rule turns a `checkout.session.completed` (or a Sponsors
+# payout) into THIS packet — the moment the reading becomes work. The
+# packet's subject is the sponsor's account (subject kind `account`,
+# Class revenue_category = sponsorship). What is undecided, and asked
+# on the packet rather than guessed: whether a sponsorship is
+# recognized on receipt (a gift) or over a term (a subscription) —
+# ASC 606 in boss-ledger can do either; the answer decides step 3.
+# --------------------------------------------------------------------
+[[workflow]]
+kind = "receive-a-sponsorship"
+label = "Receive a sponsorship"
+category = "sales"
+subject_kinds = ["account"]
+description = "A sponsorship arrives as a Stripe reading and becomes work here: the agent reconciles the payment to a sponsor account (creating one the first time), the founder decides whether the sponsor is thanked publicly, the ledger recognizes it ON RECEIPT (David, 2026-09-16: a sponsorship is a gift with zero benefits at the moment — no term, no obligation to deliver), and the sponsor gets a thank-you. First revenue line of Algedonic, LLC (design ffc83387); the first sellable SKU before sales tax is figured out."
+metadata = { owner_role = "platform-admin", department = "sales" }
+
+[[workflow.step]]
+title = "received"
+kind = "trigger"
+ready_when = "true"
+title_template = "Stripe reported a payment — {subject.id}"
+# trigger_kind: the StepType registry admits periodic | event | operator |
+# counterparty today; a `sensor` kind — a reading that became work — is
+# the product gap this tenant asks for (recorded on fcc1d57b). `event`
+# until then.
+metadata_defaults = { trigger_kind = "event", trigger_name = "stripe-checkout-completed" }
+
+[[workflow.step]]
+title = "reconcile"
+kind = "task"
+ready_when = "steps.received.done"
+audience = { individual = "agent-claude" }
+title_template = "Match the payment to a sponsor account"
+fields = [
+  { name = "stripe_event_id", field_type = "string", required = true },
+  { name = "amount_cents", field_type = "string", required = true },
+  { name = "sponsor_account_id", field_type = "string", required = true },
+  { name = "new_sponsor", field_type = "yes|no", required = true },
+]
+
+[[workflow.step]]
+title = "decide"
+kind = "task"
+ready_when = "steps.reconcile.done"
+audience = { individual = "emp-david" }
+title_template = "Thank the sponsor publicly?"
+# Recognition is ON RECEIPT by decision (David, 2026-09-16); the only
+# decision left on a sponsorship is whether the thanks is public.
+fields = [
+  { name = "public_thanks", field_type = "yes|no", required = true },
+]
+
+[[workflow.step]]
+title = "recognize"
+kind = "task"
+ready_when = "steps.decide.done"
+audience = { individual = "agent-claude" }
+title_template = "Post the recognition to the ledger"
+fields = [
+  { name = "journal_entry_id", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "thank"
+kind = "task"
+ready_when = "steps.recognize.done"
+audience = { individual = "agent-claude" }
+title_template = "Send the sponsor a thank-you (public, if decided)"
+fields = [
+  { name = "message_id", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "sponsored"
+kind = "outcome"
+ready_when = "steps.thank.done"
+title_template = "Sponsorship recognized and thanked"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "sponsored" }

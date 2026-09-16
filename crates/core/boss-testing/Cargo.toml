@@ -57,5 +57,9 @@ required-features = ["postgres"]
 name = "tenant_census_sql"
 required-features = ["postgres"]
 
+[[test]]
+name = "switch_instance_database_sql"
+required-features = ["postgres"]
+
 [lints]
 workspace = true

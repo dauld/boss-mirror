@@ -127,6 +127,39 @@ fn any_other_tenant_runs_the_generic_publish_with_its_directory() {
         "tenant_id acme → seed-tenant.sh handed BOSS_TENANT_DIR:\n{out}"
     );
     assert!(!out.contains("seed-brewery-tenant.sh"), "{out}");
+    // THE TENANT GOES FIRST for a tenant with no engine (backlog
+    // 0d2d7daa, 2026-09-16). The baseline injects the bootstrap admin
+    // for BOSS_BOOTSTRAP_ADMIN_EMAIL unless the roster already holds
+    // that email, and a real company's roster declares its founder
+    // with exactly that address: baseline-first gave the fresh
+    // instance emp-bootstrap-admin and then refused the founder on
+    // the LOWER(email) unique index. Publish the people the tenant
+    // declares, then let the baseline see them.
+    assert!(
+        out.starts_with("seed-tenant.sh"),
+        "the tenant is published before the operator baseline:\n{out}"
+    );
+    assert!(
+        out.contains("\nseed-operator-baseline.sh"),
+        "the operator baseline still runs, after the tenant:\n{out}"
+    );
+}
+
+#[test]
+fn a_failed_generic_publish_stops_before_the_baseline_and_is_the_verdict() {
+    // The DEGRADED loop retries publish_tenant whole, so a tenant that
+    // did not land must not be followed by a baseline that then reads
+    // an empty roster and injects the admin the tenant was about to
+    // declare — the very duplicate the tenant-first order exists to
+    // prevent.
+    let fx = Fixture::new("generic-fails");
+    let acme = fx.tenant("acme", "tenant.toml", "acme");
+    let (rc, out) = fx.publish(&[("BOSS_TENANT_DIR", &s(&acme)), ("STUB_EXIT", "3")]);
+    assert_eq!(rc, 3, "the tenant script's exit is the verdict:\n{out}");
+    assert!(
+        !out.contains("seed-operator-baseline.sh"),
+        "the baseline did not run after a failed tenant publish:\n{out}"
+    );
 }
 
 #[test]

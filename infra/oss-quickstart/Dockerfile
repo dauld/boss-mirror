@@ -339,6 +339,10 @@ COPY infra/seed-tenant.sh /opt/boss/infra/seed-tenant.sh
 
 # Quickstart launcher + init scripts.
 COPY infra/oss-quickstart/init.sh /usr/local/bin/boss-init
+# boss-init's database name comes off DATABASE_URL through this helper
+# (2026-09-16, 063dba4e): the tree copy at /opt/boss is what init.sh
+# calls, by $REPO.
+COPY infra/oss-quickstart/database-from-url.sh /opt/boss/infra/oss-quickstart/database-from-url.sh
 COPY infra/oss-quickstart/services-launcher.sh /usr/local/bin/boss-launch
 # What the launcher SOURCES must land beside it: services-launcher.sh
 # reads tenant-launch.sh from its own directory, which in this image is
@@ -355,7 +359,7 @@ COPY infra/oss-quickstart/tenant-launch.sh /usr/local/bin/tenant-launch.sh
 # is theirs).
 COPY infra/boss-maintenance-wrap.sh infra/boss-step.sh infra/boss-api-curl.sh /usr/local/bin/
 COPY infra/oss-quickstart/generate-configs.sh /usr/local/bin/boss-generate-configs
-RUN chmod +x /usr/local/bin/boss-init /usr/local/bin/boss-launch \
+RUN chmod +x /opt/boss/infra/oss-quickstart/database-from-url.sh /usr/local/bin/boss-init /usr/local/bin/boss-launch \
     /usr/local/bin/boss-generate-configs \
     /opt/boss/infra/seed-operator-baseline.sh \
     /opt/boss/infra/seed-brewery-tenant.sh \

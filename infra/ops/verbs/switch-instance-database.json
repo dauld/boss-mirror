@@ -1,0 +1,30 @@
+{
+  "about": "MUTATING — point ONE BOSS instance at a fresh database in its own postgres while the converge is held (infra/forge/switch-instance-database.sh <mode> <namespace> <new-db>): snapshot the current database whole, create the new one, rewrite Secret boss-secrets key database-url to name it, record all of it on the packet. Design e652c7c6, David 2026-09-16 ('Let's do Option 3'): prod restarts from an EMPTY database seeded by the platform bundle and the Algedonic tenant, the brewery's database becomes an archive, real in-flight packets are brought over afterwards if found missing (backlog 063dba4e). Measured: every service reads BOSS_POSTGRES_URL from that Secret, and boss-init provisions the schema when subject_kinds is absent, so a fresh instance is a NEW database in the same postgres and the Secret naming it. THE BOUNDS, in order, each a refusal that changes nothing: the arguments (a plain lowercase identifier for the name, never quoted or split; boss-dev refused); the real run REFUSES unless the converge is HELD (hold-converge's marker, the file the deploy runner reads) because the roll must carry the tenant flip (instances.toml + boss.yaml landed on main while held) and the new database in ONE converge or the launcher seeds one tenant into the other's database; the Secret is parsed in a variable and THE PASSWORD IS NEVER PRINTED (user@host:port/db only, a test asserts it), a host that is not the instance's postgres Service or a URL already naming the target is refused; boss-init's PGDATABASE literal on the ref the release will build (forgejo/main, which the held converge still fetches) must name the target or the release would converge the schema into the old database while every service read the new one; the target is created with OWNER boss if absent, reused if present and EMPTY, refused by table count otherwise; and CAPTURE BEFORE ANY CHANGE — pg_dump --no-owner through the same kubectl-exec door tenant-census uses, gzipped to /var/backups/boss/instance-db/<ns>-<db>-<stamp>.sql.gz on the forge, refused and removed under 1 MiB (the prod database is GBs). Then the patch (kubectl patch secret --type merge, the document built in a variable, never echoed), the READ-BACK as the verdict, and the record: old/new names, snapshot path/size/sha256, and the NATS JetStream consumer positions read through the nats pod's 8222 monitoring port (unmeasured with the reason when unreadable; never faked). It does NOT roll the pod — release-converge does, and the packet says so; it deletes nothing — the old database stays in postgres as the archive until a separate decision drops it. --dry-run runs every bound, prints the plan and rehearses the snapshot schema-only to /dev/null; --for-real is the switch and is a human's decision to file. The reverse is the same verb with the old name. Own timeout: a whole-database dump through docker+kubectl exceeds the runner's 30 s default many times over. The retire-second-stack shape and process: an explicit per-verb authorization, a precedent for the PROCESS, not a loosened default.",
+  "hosts": [
+    "forge"
+  ],
+  "argv": [
+    "infra/forge/switch-instance-database.sh",
+    "{1}",
+    "{2}",
+    "{3}"
+  ],
+  "params": [
+    {
+      "name": "mode",
+      "one_of": [
+        "--dry-run",
+        "--for-real"
+      ]
+    },
+    {
+      "name": "namespace",
+      "pattern": "^boss(-[a-z0-9]+)*$"
+    },
+    {
+      "name": "new_db",
+      "pattern": "^[a-z][a-z0-9_]{0,62}$"
+    }
+  ],
+  "timeout": 900
+}

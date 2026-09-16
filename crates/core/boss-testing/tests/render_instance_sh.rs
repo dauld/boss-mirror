@@ -210,6 +210,20 @@ fn the_instance_list_declares_prod_and_the_playground() {
         inst[""]["source"], "prod",
         "the directory is written for prod"
     );
+    // GUEST ACCESS IS PER INSTANCE (backlog 0d2d7daa, 2026-09-16).
+    // BOSS_GUEST_ACCESS=1 hands an anonymous visitor a read-only
+    // session — right for the public example, wrong for the operating
+    // site behind Access. The playground keeps it; prod keeps it TODAY
+    // so the render stays byte-identical to the tree, and the flip car
+    // sets `guest = false` here and `"0"` in boss.yaml together.
+    assert_eq!(
+        play["guest"], "true",
+        "anonymous read-only sessions stay on for the public playground"
+    );
+    assert_eq!(
+        prod["guest"], "true",
+        "prod keeps guest access until the flip car (David's) sets it false"
+    );
 }
 
 #[test]
@@ -243,6 +257,7 @@ fn the_prod_render_is_byte_identical_to_the_tree() {
             &prod["tenant_dir"],
             &prod["sim"],
             &prod["hostname"],
+            &prod["guest"],
         ],
     );
     assert_eq!(rc, 0, "stream render: {err}");
@@ -324,6 +339,10 @@ fn the_playground_render_substitutes_the_four_parameters() {
         !boss_yaml.contains("BOSS_SIM_ENABLED, value: \"false\""),
         "the sim flag was substituted, not duplicated"
     );
+    assert!(
+        boss_yaml.contains("BOSS_GUEST_ACCESS, value: \"1\""),
+        "the playground keeps anonymous read-only sessions (guest = true)"
+    );
     let prod_tenant = instances_of(&repo_root())["prod"]["tenant_dir"].clone();
     assert!(
         boss_yaml.contains(&format!("BOSS_TENANT_DIR, value: /opt/boss/{prod_tenant}")),
@@ -357,14 +376,31 @@ fn the_playground_render_substitutes_the_four_parameters() {
     write_file(&other, "[tenant]\nname = \"other\"\n");
     let (rc, stream, err) = run(
         &tree,
-        &["boss-other", "examples/other", "true", "other.example"],
+        &[
+            "boss-other",
+            "examples/other",
+            "true",
+            "other.example",
+            "false",
+        ],
     );
     assert_eq!(rc, 0, "{err}");
     assert!(stream.contains("BOSS_TENANT_DIR, value: /opt/boss/examples/other}"));
     assert!(!stream.contains(&format!("/opt/boss/{prod_tenant}")));
+    // guest = false renders the value the gateway reads as "no guest
+    // button" (boss-gateway/src/main.rs: guest_access iff == "1") —
+    // the line the flip car puts on prod. Substituted, not duplicated.
+    assert!(
+        stream.contains("BOSS_GUEST_ACCESS, value: \"0\""),
+        "guest = false renders BOSS_GUEST_ACCESS \"0\":\n{stream}"
+    );
+    assert!(!stream.contains("BOSS_GUEST_ACCESS, value: \"1\""));
     // And the delivered mount of a repo-sourced instance (f4f5c387):
     // `tenant` is nowhere in the tree by design.
-    let (rc, stream, err) = run(&tree, &["boss-other", "tenant", "true", "other.example"]);
+    let (rc, stream, err) = run(
+        &tree,
+        &["boss-other", "tenant", "true", "other.example", "true"],
+    );
     assert_eq!(rc, 0, "{err}");
     assert!(stream.contains("BOSS_TENANT_DIR, value: /opt/boss/tenant}"));
 }
@@ -375,15 +411,32 @@ fn the_renderer_refuses_bad_parameters() {
     let prod_tenant = instances_of(&tree)["prod"]["tenant_dir"].clone();
     let tenant = prod_tenant.as_str();
     let cases: &[(&[&str], &str)] = &[
-        (&["prod", tenant, "false", "h.example"], "namespace"),
-        (&["boss-dev", tenant, "false", "h.example"], "namespace"),
-        (&["Boss", tenant, "false", "h.example"], "namespace"),
-        (&["boss_x", tenant, "false", "h.example"], "namespace"),
-        (&["boss-x", "../etc/passwd", "false", "h.example"], "tenant"),
-        (&["boss-x", "infra/cluster", "false", "h.example"], "tenant"),
-        (&["boss-x", "examples/nope", "false", "h.example"], "tenant"),
-        (&["boss-x", tenant, "yes", "h.example"], "sim"),
-        (&["boss-x", tenant, "true", "bad host"], "hostname"),
+        (&["prod", tenant, "false", "h.example", "true"], "namespace"),
+        (
+            &["boss-dev", tenant, "false", "h.example", "true"],
+            "namespace",
+        ),
+        (&["Boss", tenant, "false", "h.example", "true"], "namespace"),
+        (
+            &["boss_x", tenant, "false", "h.example", "true"],
+            "namespace",
+        ),
+        (
+            &["boss-x", "../etc/passwd", "false", "h.example", "true"],
+            "tenant",
+        ),
+        (
+            &["boss-x", "infra/cluster", "false", "h.example", "true"],
+            "tenant",
+        ),
+        (
+            &["boss-x", "examples/nope", "false", "h.example", "true"],
+            "tenant",
+        ),
+        (&["boss-x", tenant, "yes", "h.example", "true"], "sim"),
+        (&["boss-x", tenant, "true", "bad host", "true"], "hostname"),
+        (&["boss-x", tenant, "true", "h.example", "1"], "guest"),
+        (&["boss-x", tenant, "true", "h.example"], "usage"),
         (&["boss-x", tenant, "true"], "usage"),
     ];
     for (args, what) in cases {
@@ -445,6 +498,32 @@ fn the_renderer_refuses_a_manifest_the_roster_does_not_classify() {
     assert!(
         err.contains("boss-files-gc.yaml"),
         "the refusal names the entry: {err}"
+    );
+}
+
+#[test]
+fn the_renderer_refuses_an_instance_that_does_not_say_whether_guests_may_read() {
+    // A missing `guest` must not read as "guest access on": an
+    // instance that inherited the manifest's "1" by silence would hand
+    // anonymous visitors the operating company's read-only view.
+    let tree = fixture("no-guest");
+    let toml = std::fs::read_to_string(tree.join(INSTANCES)).unwrap();
+    let (head, play) = toml.split_once("[playground]").unwrap();
+    let play = play.replacen("guest = true\n", "", 1);
+    assert_ne!(
+        play, toml,
+        "the fixture removes the playground's guest line"
+    );
+    write_file(&tree.join(INSTANCES), &format!("{head}[playground]{play}"));
+    let out = tree.join("out");
+    let (rc, _, err) = run(&tree, &["--all", out.to_str().unwrap()]);
+    assert_eq!(
+        rc, REFUSED,
+        "an instance with no guest line must refuse: {err}"
+    );
+    assert!(
+        err.contains("[playground]") && err.contains("guest"),
+        "the refusal names the instance and the parameter: {err}"
     );
 }
 

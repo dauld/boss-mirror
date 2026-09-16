@@ -77,6 +77,12 @@ boss-jobs = { path = "../../core/boss-jobs", features = ["postgres"] }
 # adapter production runs, not a lookalike. axum is test-only: the
 # shipped binary is an HTTP client of that surface, never a server.
 axum = { workspace = true }
+# The fresh-instance seed proof (backlog 0d2d7daa) serves the REAL
+# people and policy routers over one empty TestDb and runs the shipped
+# `boss tenant publish` and the operator-baseline seed against them.
+# Test-only, like axum: the shipped binary never serves either.
+boss-people = { path = "../../modules/boss-people", features = ["postgres"] }
+boss-policy = { path = "../../core/boss-policy", features = ["postgres"] }
 
 [lints]
 workspace = true
