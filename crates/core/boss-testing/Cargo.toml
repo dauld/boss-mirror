@@ -53,5 +53,9 @@ required-features = ["postgres"]
 name = "fixture_smoke"
 required-features = ["postgres"]
 
+[[test]]
+name = "tenant_census_sql"
+required-features = ["postgres"]
+
 [lints]
 workspace = true
