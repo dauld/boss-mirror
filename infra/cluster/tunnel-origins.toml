@@ -1,0 +1,45 @@
+# infra/cluster/tunnel-origins.toml — the hostnames the Cloudflare Tunnel
+# routes that are NOT BOSS instances.
+#
+# Every instance's hostname routes to its own gateway (instances.toml →
+# render-tunnel-config.sh). The company has one public hostname that is
+# not an instance: the identity provider. Until 2026-09-16 it reached
+# the world through the OLD connector on boss-gcp, whose ingress was a
+# hand-written file on that host; the broker rotated the tunnel
+# (e202c7c3), David deleted the old one, and `id.algedonic.dev` — still
+# a CNAME to the deleted tunnel — answered 530 from that moment. Every
+# OIDC login on boss. and playground. failed with "bad gateway" for a
+# day before anyone saw it, because the zone reading listed the record
+# UNDECLARED (correctly: nothing in the tree said it existed) and the
+# tunnel's ingress had no row for it (correctly: it is not an instance).
+#
+# So the routes that are not instances are declared HERE, read by
+# render-tunnel-config.sh after the instance rules and before the
+# catch-all, and the zone declaration names the same hostname as a
+# CNAME to the tunnel. Read with the shell (one `key = "value"` per
+# line under `[[origin]]`, the instances.toml rule), never a parser.
+#
+#   hostname             the public name; must be a CNAME to the tunnel
+#                        in infra/cluster/dns/algedonic.dev.toml
+#   service              the origin URL the connector proxies to
+#   origin_server_name   the SNI the connector presents to the origin
+#                        (an origin that terminates its own TLS for the
+#                        public name needs its own name, not the IP)
+#   no_tls_verify        true when the origin's certificate is a
+#                        Cloudflare Origin CA cert — trusted by the edge,
+#                        unknown to the connector's trust store
+#   why                  one sentence a reader needs
+
+[[origin]]
+hostname = "id.algedonic.dev"
+# Kanidm: StatefulSet in namespace `kanidm`, LoadBalancer VIP on the LAN
+# (docs/design/idm-kanidm.md; estate row `kanidm` on cp-1). Measured
+# 2026-09-16 17:45Z: 10.20.0.31:443 answers
+# /oauth2/openid/boss/.well-known/openid-configuration with issuer
+# https://id.algedonic.dev/oauth2/openid/boss; the certificate is a
+# Cloudflare Origin CA cert (notAfter 2041), which is why the connector
+# must not verify it and must present the public name as SNI.
+service = "https://10.20.0.31:443"
+origin_server_name = "id.algedonic.dev"
+no_tls_verify = true
+why = "the identity provider (Kanidm) every OIDC login on boss. and playground. discovers and redirects to; Cloudflare's Access does not front it, the login page is its own"

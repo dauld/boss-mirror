@@ -141,7 +141,37 @@ fn fixture(case: &str) -> PathBuf {
         std::fs::copy(e.path(), dir.join(e.file_name())).unwrap();
     }
     std::fs::copy(repo_root().join(INSTANCES), tree.join(INSTANCES)).unwrap();
+    std::fs::copy(
+        repo_root().join("infra/cluster/tunnel-origins.toml"),
+        tree.join("infra/cluster/tunnel-origins.toml"),
+    )
+    .unwrap();
     tree
+}
+
+/// The `[[origin]]` blocks of tunnel-origins.toml as (hostname, service),
+/// read independently of the renderer.
+fn origins_of(tree: &Path) -> Vec<(String, String)> {
+    let text = std::fs::read_to_string(tree.join("infra/cluster/tunnel-origins.toml")).unwrap();
+    let mut out = Vec::new();
+    let (mut host, mut svc) = (String::new(), String::new());
+    for line in text.lines().map(str::trim) {
+        if line == "[[origin]]" {
+            if !host.is_empty() {
+                out.push((host.clone(), svc.clone()));
+            }
+            host.clear();
+            svc.clear();
+        } else if let Some(v) = line.strip_prefix("hostname = ") {
+            host = v.trim_matches('"').to_string();
+        } else if let Some(v) = line.strip_prefix("service = ") {
+            svc = v.trim_matches('"').to_string();
+        }
+    }
+    if !host.is_empty() {
+        out.push((host, svc));
+    }
+    out
 }
 
 /// The `ingress:` rules of a rendered config, as (hostname, service)
@@ -245,10 +275,11 @@ fn every_instance_hostname_routes_to_its_own_gateway_and_the_catch_all_is_last()
     let rules = ingress_of(&out);
     let instances = instances_of(&repo_root());
     assert!(instances.len() >= 2, "prod and the playground are declared");
+    let origins = origins_of(&repo_root());
     assert_eq!(
         rules.len(),
-        instances.len() + 1,
-        "one rule per instance plus the catch-all; got {rules:?}"
+        instances.len() + origins.len() + 1,
+        "one rule per instance, one per declared origin, plus the catch-all; got {rules:?}"
     );
     for (i, (name, inst)) in instances.iter().enumerate() {
         let host = &inst["hostname"];
@@ -263,12 +294,56 @@ fn every_instance_hostname_routes_to_its_own_gateway_and_the_catch_all_is_last()
              edge terminates TLS and the connector is in-cluster"
         );
     }
+    // Then every declared non-instance origin, in file order, AFTER
+    // the instances and BEFORE the catch-all (2026-09-16: the IdP's
+    // hostname pointed at a deleted tunnel for a day because nothing in
+    // the tree routed it; see infra/cluster/tunnel-origins.toml).
+    for (j, (host, svc)) in origins.iter().enumerate() {
+        assert_eq!(
+            rules[instances.len() + j],
+            (host.clone(), svc.clone()),
+            "declared origin [{host}] routes to its declared service"
+        );
+    }
+    assert!(
+        origins.iter().any(|(h, _)| h == "id.algedonic.dev"),
+        "the identity provider is a declared origin: {origins:?}"
+    );
+    let idp = out
+        .lines()
+        .skip_while(|l| !l.contains("- hostname: id.algedonic.dev"))
+        .take(5)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        idp.contains("originServerName: id.algedonic.dev") && idp.contains("noTLSVerify: true"),
+        "Kanidm terminates its own TLS with a Cloudflare Origin CA cert: the connector presents \
+         the public name and does not verify the cert it cannot trust:\n{idp}"
+    );
     assert_eq!(
         rules.last().unwrap(),
         &(String::new(), "http_status:404".to_string()),
         "the last rule is the catch-all cloudflared requires — a hostname the tunnel is \
          not declared for answers 404 at the edge, never the first instance's gateway"
     );
+    // A declared origin on an instance's hostname is one route
+    // answering two things; refused by name.
+    let tree = fixture("origin-collides");
+    let toml = read("infra/cluster/tunnel-origins.toml").replace(
+        "hostname = \"id.algedonic.dev\"",
+        "hostname = \"boss.algedonic.dev\"",
+    );
+    write_file(&tree.join("infra/cluster/tunnel-origins.toml"), &toml);
+    let (rc, _, err) = run_render(&tree, &[]);
+    assert_eq!(rc, REFUSED, "{err}");
+    assert!(err.contains("boss.algedonic.dev"), "{err}");
+    // An origin with no service is a route to nothing; refused.
+    let tree = fixture("origin-no-service");
+    let toml = read("infra/cluster/tunnel-origins.toml").replace("service = ", "svc_was = ");
+    write_file(&tree.join("infra/cluster/tunnel-origins.toml"), &toml);
+    let (rc, _, err) = run_render(&tree, &[]);
+    assert_eq!(rc, REFUSED, "{err}");
+    assert!(err.contains("hostname and service"), "{err}");
     // The connector's own facts ride the same file: it resolves the
     // tunnel from the credentials file and serves /ready for the probe.
     assert!(out.contains("credentials-file: /etc/cloudflared-creds/credentials.json"));
@@ -567,7 +642,12 @@ fn a_skipped_instances_hostname_is_served_by_the_source_gateway_until_provisione
     assert_eq!(rc, 0, "{err}");
     let rules = ingress_of(&out);
     let instances = instances_of(&repo_root());
-    assert_eq!(rules.len(), instances.len() + 1, "{rules:?}");
+    let origins = origins_of(&repo_root());
+    assert_eq!(
+        rules.len(),
+        instances.len() + origins.len() + 1,
+        "{rules:?}"
+    );
     assert_eq!(
         rules[0],
         ("boss.algedonic.dev".to_string(), SOURCE_GATEWAY.to_string()),
@@ -612,13 +692,13 @@ fn a_skipped_instances_hostname_is_served_by_the_source_gateway_until_provisione
     assert_eq!(rc, 0, "{err}");
     assert_eq!(
         out.trim(),
-        "boss.algedonic.dev → boss; playground.algedonic.dev → boss (boss-playground skipped: secrets absent)"
+        "boss.algedonic.dev → boss; playground.algedonic.dev → boss (boss-playground skipped: secrets absent); id.algedonic.dev → https://10.20.0.31:443 (origin)"
     );
     let (rc, out, err) = run_render_env(&repo_root(), &["--summary"], &[]);
     assert_eq!(rc, 0, "{err}");
     assert_eq!(
         out.trim(),
-        "boss.algedonic.dev → boss; playground.algedonic.dev → boss-playground",
+        "boss.algedonic.dev → boss; playground.algedonic.dev → boss-playground; id.algedonic.dev → https://10.20.0.31:443 (origin)",
         "applied: the field says the hostname is its own instance's again"
     );
 
@@ -831,7 +911,7 @@ fn the_runner_re_renders_the_ingress_after_the_secret_gate_and_rolls_the_connect
     assert!(applied.contains(SKIP_COMMENT), "{applied}");
     assert_eq!(
         recorded["tunnel_ingress"],
-        "boss.algedonic.dev → boss; playground.algedonic.dev → boss (boss-playground skipped: secrets absent)",
+        "boss.algedonic.dev → boss; playground.algedonic.dev → boss (boss-playground skipped: secrets absent); id.algedonic.dev → https://10.20.0.31:443 (origin)",
         "{recorded}"
     );
     // The deploying tick still records the connector beside the map,
@@ -878,7 +958,7 @@ fn the_runner_re_renders_the_ingress_after_the_secret_gate_and_rolls_the_connect
     );
     assert_eq!(
         recorded["tunnel_ingress"],
-        "boss.algedonic.dev → boss; playground.algedonic.dev → boss-playground"
+        "boss.algedonic.dev → boss; playground.algedonic.dev → boss-playground; id.algedonic.dev → https://10.20.0.31:443 (origin)"
     );
     let sha = sha256_hex(&applied);
     assert_eq!(
