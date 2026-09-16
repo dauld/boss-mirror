@@ -297,8 +297,8 @@ fi
 echo "boss-gcp-converge: units converged on ${after:0:8} ($REMOTE/main)"
 
 # THE CLI, FROM THE IMAGE AT THE SHA JUST CONVERGED TO. After the units
-# and never instead of them: a CLI step that cannot pull (no credential
-# yet, a tag the deploy runner has not built yet, no docker) must leave
+# and never instead of them: a CLI step that cannot pull (the forge or
+# the LAN dark, a tag the deploy runner has not built yet) must leave
 # the units converged and REPORTED, which they are by now — its own
 # facts (cli_sha, cli_result, cli_action, cli_image) it records itself
 # through the same summary file. Its output is captured and printed

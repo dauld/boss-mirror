@@ -549,7 +549,7 @@ chmod +x "$tmp/bin/installer-ok" "$tmp/bin/installer-bad"
 # The CLI step (infra/gcp/install-cli-from-image.sh, 6f58e9a1) runs
 # after the units with the converged sha; here it is a stub that records
 # the sha it was handed, so this lint stays about the loop. The step's
-# own behaviour — docker, generations, confirmation, the packet fields —
+# own behaviour — the registry pull, generations, confirmation, the packet fields —
 # is crates/core/boss-testing/tests/boss_gcp_cli_from_image_sh.rs.
 cat >"$tmp/bin/cli-installer-ok" <<'STUB'
 #!/usr/bin/env bash

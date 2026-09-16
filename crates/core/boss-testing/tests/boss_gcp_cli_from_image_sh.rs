@@ -1,6 +1,8 @@
 //! `infra/gcp/install-cli-from-image.sh` is RUN, not read — against a
-//! stubbed `docker` that records every pull/create/cp it receives and
-//! hands back a stub `boss` which, like the image's real one, is
+//! stubbed `curl` that serves a small but REAL OCI image out of fixture
+//! files (a token endpoint, an index, a platform manifest and gzip-tar
+//! layer blobs), and records every URL it is asked for. The image's
+//! `usr/local/bin/boss` is a stub which, like the real binary, is
 //! compiled from `unknown` and reads `BOSS_BUILD_COMMIT` at runtime.
 //! Every verdict below is one the script actually reached.
 //!
@@ -16,32 +18,50 @@
 //! so "the CLI on this host" is the tree's CLI by construction and a
 //! read on the converge packet (`cli_sha` beside `converge_sha`).
 //!
-//! What each case pins: the binary lands under a per-sha generation and
-//! `/usr/local/bin/boss` is a wrapper that names that sha as
-//! `BOSS_BUILD_COMMIT` (the image's binary is compiled with
-//! BOSS_CLI_BUILT_FROM=unknown and would otherwise say `built from
-//! unknown`, which the floor check refuses); the install is CONFIRMED
-//! through `boss --version` and an unconfirmed one leaves the previous
-//! generation linked; a second tick at the same sha pulls nothing; a
-//! failed pull is refused with docker's complete output and the
-//! credential path named; the facts ride the run summary; and, driven
-//! through the converge itself, the units still install and report when
-//! the CLI step fails.
+//! WHY CURL AND NOT DOCKER (the rebuild of car c142457c, 2026-09-16).
+//! The first build shelled to `docker pull/create/cp`. Measured
+//! 2026-09-16 00:30Z, ops-request 546c13fc: boss-gcp has no docker and
+//! David has said it gets none; and the image tag it pulled was the
+//! FULL 40-char sha while the registry tags every image with the
+//! deploy runner's 7-char short sha (tags/list: 00444a6, 0d54622, …),
+//! so every pull would have been a 404. The forge package is public
+//! and its token endpoint hands out a pull token with no credentials,
+//! so the pull is curl + tar. Both defects are pinned here: the tag in
+//! the URL is the short sha (and the full sha is never requested), and
+//! nothing on PATH but curl, jq, tar, gzip and sha256sum is needed.
 //!
-//! Nothing here touches a host or a registry. `docker` is a stub on
+//! What each case pins: the binary lands under a per-FULL-sha
+//! generation and `/usr/local/bin/boss` is a wrapper that names that
+//! sha as `BOSS_BUILD_COMMIT`; the install is CONFIRMED through
+//! `boss --version` and an unconfirmed one leaves the previous
+//! generation linked; a second tick at the same sha fetches nothing; a
+//! tag the registry does not have is refused naming the URL and the
+//! HTTP code with the body printed whole; a blob whose bytes do not
+//! hash to the manifest's digest is refused; a layer above the binary
+//! that whites it out is refused; a layer that is not gzip tar is
+//! refused by media type; an unreachable token endpoint is refused
+//! naming its URL; the facts ride the run summary; and, driven through
+//! the converge itself, the units still install and report when the
+//! CLI step fails.
+//!
+//! Nothing here touches a host or a registry. `curl` is a stub on
 //! every path.
 
-use boss_testing::{repo_root, scratch_dir, write_exec, write_file};
+use boss_testing::{create_dir, repo_root, scratch_dir, write_exec, write_file};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SCRIPT: &str = "infra/gcp/install-cli-from-image.sh";
 const CONVERGE: &str = "infra/gcp/boss-gcp-converge.sh";
+const REGISTRY_HOST: &str = "registry.invalid:3000";
 const REPO_IMAGE: &str = "registry.invalid:3000/david/boss";
+const GZIP: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
 
 const SHA_A: &str = "aaaaaaaa1111111111111111111111111111aaaa";
 const SHA_B: &str = "bbbbbbbb2222222222222222222222222222bbbb";
 const SHA_C: &str = "cccccccc3333333333333333333333333333cccc";
+/// A sha the registry has no tag for.
+const SHA_D: &str = "dddddddd4444444444444444444444444444dddd";
 
 fn has(tool: &str) -> bool {
     Command::new("sh")
@@ -50,68 +70,194 @@ fn has(tool: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// One fixture: a stub `docker` on PATH, a generation store, a link
-/// path standing in for /usr/local/bin/boss, and a run-summary file.
+fn tools() -> bool {
+    ["jq", "tar", "gzip", "sha256sum"].iter().all(|t| has(t))
+}
+
+fn sha256_of(path: &Path) -> String {
+    let out = Command::new("sha256sum").arg(path).output().unwrap();
+    let hex = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    format!("sha256:{hex}")
+}
+
+/// How the fixture image is shaped: the base layer always carries
+/// `usr/local/bin/boss`; the top layer is a small unrelated file, or a
+/// whiteout for the binary, or is declared with a non-gzip media type.
+#[derive(Clone, Copy, Default)]
+struct Image {
+    top_whiteout: bool,
+    top_zstd: bool,
+}
+
+/// One fixture: a stub `curl` on PATH serving an OCI image from files,
+/// a generation store, a link path standing in for /usr/local/bin/boss,
+/// and a run-summary file.
 struct Case {
     root: PathBuf,
     bin: PathBuf,
+    fix: PathBuf,
     store: PathBuf,
     link: PathBuf,
     summary: PathBuf,
-    docker_log: PathBuf,
+    curl_log: PathBuf,
 }
 
 impl Case {
     fn new(name: &str) -> Self {
+        Self::with_image(name, Image::default())
+    }
+
+    fn with_image(name: &str, image: Image) -> Self {
         let root = scratch_dir(&format!("boss-gcp-cli-{name}"));
         let bin = root.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
+        let fix = root.join("registry");
+        std::fs::create_dir_all(fix.join("blobs")).unwrap();
+        std::fs::create_dir_all(fix.join("manifests")).unwrap();
         let store = root.join("opt-boss-cli");
         let link = root.join("usr-local-bin").join("boss");
         std::fs::create_dir_all(link.parent().unwrap()).unwrap();
         let summary = root.join("summary.json");
-        let docker_log = root.join("docker.log");
-        // The stub docker: every call appended to a log; `pull` fails on
-        // STUB_PULL_FAIL with the daemon's shape of an auth refusal;
-        // `cp` hands back a `boss` that, like the image's real binary,
-        // knows its commit only from BOSS_BUILD_COMMIT — or, under
-        // STUB_BOSS_SAYS, names a commit the wrapper did not set, which
-        // is what an install that must NOT be confirmed looks like.
+        let curl_log = root.join("curl.log");
+
+        // --- the image, as files ------------------------------------------
+        // Layer 0 (base): usr/local/bin/boss — a stub that, like the
+        // image's real binary, knows its commit only from
+        // BOSS_BUILD_COMMIT; or, under STUB_BOSS_SAYS, names a commit
+        // the wrapper did not set (an install that must NOT confirm).
+        let base = root.join("layer-base");
+        create_dir(&base.join("usr/local/bin"));
         write_exec(
-            &bin.join("docker"),
-            r#"#!/bin/sh
-echo "docker $*" >> "$STUB_DOCKER_LOG"
-case "$1" in
-  pull)
-    if [ -n "${STUB_PULL_FAIL:-}" ]; then
-      echo "Error response from daemon: Head \"http://registry.invalid:3000/v2/david/boss/manifests/x\": unauthorized: DISTINCTIVE-DOCKER-ERROR (stub)" >&2
-      exit 1
+            &base.join("usr/local/bin/boss"),
+            "#!/bin/sh\necho \"boss 0.1.0 built from ${STUB_BOSS_SAYS:-${BOSS_BUILD_COMMIT:-unknown}}\"\n",
+        );
+        let base_blob = tar_gz(&base, &["usr/local/bin/boss"], &fix);
+        // Layer 1 (top): unrelated, or the whiteout that deletes the
+        // binary from every layer below it.
+        let top = root.join("layer-top");
+        let top_member = if image.top_whiteout {
+            "usr/local/bin/.wh.boss"
+        } else {
+            "etc/motd"
+        };
+        create_dir(top.join(top_member).parent().unwrap());
+        write_file(&top.join(top_member), "");
+        let top_blob = tar_gz(&top, &[top_member], &fix);
+        let top_type = if image.top_zstd {
+            "application/vnd.oci.image.layer.v1.tar+zstd"
+        } else {
+            GZIP
+        };
+        let manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "size": 2},
+            "layers": [
+                {"mediaType": GZIP, "digest": base_blob.0, "size": base_blob.1},
+                {"mediaType": top_type, "digest": top_blob.0, "size": top_blob.1},
+            ]
+        });
+        let manifest_path = root.join("manifest.json");
+        write_file(&manifest_path, &manifest.to_string());
+        let mdigest = sha256_of(&manifest_path);
+        let msize = std::fs::metadata(&manifest_path).unwrap().len();
+        std::fs::copy(&manifest_path, fix.join("manifests").join(&mdigest)).unwrap();
+        // The index the tag resolves to: buildx's shape — one platform
+        // manifest and one unknown/unknown attestation.
+        let index = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [
+                {"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": mdigest, "size": msize, "platform": {"architecture": "amd64", "os": "linux"}},
+                {"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "size": 564, "platform": {"architecture": "unknown", "os": "unknown"}}
+            ]
+        });
+        write_file(&fix.join("index.json"), &index.to_string());
+        write_file(
+            &fix.join("token.json"),
+            r#"{"token":"stub-anonymous-pull-token"}"#,
+        );
+        // The tags the registry knows: the deploy runner's short shas.
+        write_file(
+            &fix.join("tags"),
+            &format!("{}\n{}\n{}\n", &SHA_A[..7], &SHA_B[..7], &SHA_C[..7]),
+        );
+
+        // --- the stub curl -------------------------------------------------
+        // Reads the request shape the script uses (-o, -D, -H, the URL
+        // last), logs the URL, and answers from the fixture the way the
+        // forge registry does: /v2/ is 401 with a Www-Authenticate
+        // naming the token realm; the token endpoint answers with no
+        // credentials; manifests and blobs need the bearer token.
+        // STUB_TOKEN_DOWN makes the token endpoint unreachable (curl
+        // exit 7); STUB_CORRUPT_BLOB serves every blob with bytes
+        // appended, so no blob hashes to its digest.
+        write_exec(
+            &bin.join("curl"),
+            r#"#!/usr/bin/env bash
+out=/dev/null; hdr=/dev/null; auth=""; url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift ;;
+    -D) hdr="$2"; shift ;;
+    -H) case "$2" in Authorization:*) auth="$2" ;; esac; shift ;;
+    --max-time|-w) shift ;;
+    -*) ;;
+    *) url="$1" ;;
+  esac
+  shift
+done
+echo "$url" >> "$STUB_CURL_LOG"
+: > "$hdr"
+path="${url#*://}"; path="${path#*/}"
+case "$path" in
+  v2/)
+    printf 'HTTP/1.1 401 Unauthorized\r\nWww-Authenticate: Bearer realm="http://registry.invalid:3000/v2/token",service="container_registry"\r\n\r\n' > "$hdr"
+    printf '{"errors":[{"code":"UNAUTHORIZED"}]}' > "$out"; printf 401; exit 0 ;;
+  v2/token?*)
+    if [ -n "${STUB_TOKEN_DOWN:-}" ]; then
+      echo "curl: (7) Failed to connect to registry.invalid port 3000: DISTINCTIVE-CONNECTION-REFUSED (stub)" >&2
+      printf 000; exit 7
     fi
-    echo "Status: Downloaded newer image for $2"
-    ;;
-  create) echo "stubcontainer0123" ;;
-  cp)
-    dest="$3"
-    cat > "$dest" <<'EOF'
-#!/bin/sh
-echo "boss 0.1.0 built from ${STUB_BOSS_SAYS:-${BOSS_BUILD_COMMIT:-unknown}}"
-EOF
-    chmod +x "$dest"
-    ;;
-  rm|rmi) ;;
-  images) printf '%s\n' "${STUB_IMAGES:-}" ;;
-  *) echo "stub docker: unexpected $*" >&2; exit 99 ;;
+    cp "$STUB_REGISTRY/token.json" "$out"; printf 200; exit 0 ;;
 esac
-exit 0
+if [ "$auth" != "Authorization: Bearer stub-anonymous-pull-token" ]; then
+  printf '{"errors":[{"code":"UNAUTHORIZED","message":"no bearer token (stub)"}]}' > "$out"; printf 401; exit 0
+fi
+case "$path" in
+  v2/david/boss/manifests/sha256:*)
+    d="${path##*/}"
+    if [ -f "$STUB_REGISTRY/manifests/$d" ]; then cp "$STUB_REGISTRY/manifests/$d" "$out"; printf 200; exit 0; fi ;;
+  v2/david/boss/manifests/*)
+    tag="${path##*/}"
+    if grep -qx -- "$tag" "$STUB_REGISTRY/tags"; then
+      printf 'HTTP/1.1 200 OK\r\nContent-Type: application/vnd.oci.image.index.v1+json\r\n\r\n' > "$hdr"
+      cp "$STUB_REGISTRY/index.json" "$out"; printf 200; exit 0
+    fi ;;
+  v2/david/boss/blobs/sha256:*)
+    d="${path##*/}"
+    if [ -f "$STUB_REGISTRY/blobs/$d" ]; then
+      cp "$STUB_REGISTRY/blobs/$d" "$out"
+      [ -n "${STUB_CORRUPT_BLOB:-}" ] && echo corrupt >> "$out"
+      printf 200; exit 0
+    fi ;;
+esac
+printf '{"errors":[{"code":"NOT_FOUND","message":"DISTINCTIVE-REGISTRY-404 for %s (stub)"}]}' "$path" > "$out"
+printf 404; exit 0
 "#,
         );
         Self {
             root,
             bin,
+            fix,
             store,
             link,
             summary,
-            docker_log,
+            curl_log,
         }
     }
 
@@ -133,8 +279,10 @@ exit 0
                     std::env::var("PATH").unwrap_or_default()
                 ),
             )
-            .env("STUB_DOCKER_LOG", &self.docker_log)
+            .env("STUB_CURL_LOG", &self.curl_log)
+            .env("STUB_REGISTRY", &self.fix)
             .env("BOSS_CLI_IMAGE_REPO", REPO_IMAGE)
+            .env("BOSS_CLI_PLATFORM", "amd64/linux")
             .env("BOSS_CLI_STORE", &self.store)
             .env("BOSS_CLI_LINK", &self.link)
             .env("BOSS_RUN_SUMMARY_FILE", &self.summary);
@@ -143,16 +291,17 @@ exit 0
         }
     }
 
-    fn docker_calls(&self) -> Vec<String> {
-        std::fs::read_to_string(&self.docker_log)
+    /// Every URL the stub curl was asked for, in order.
+    fn requests(&self) -> Vec<String> {
+        std::fs::read_to_string(&self.curl_log)
             .unwrap_or_default()
             .lines()
             .map(str::to_string)
             .collect()
     }
 
-    fn clear_docker_log(&self) {
-        let _ = std::fs::remove_file(&self.docker_log);
+    fn clear_requests(&self) {
+        let _ = std::fs::remove_file(&self.curl_log);
     }
 
     fn summary(&self, key: &str) -> String {
@@ -184,6 +333,30 @@ exit 0
     }
 }
 
+/// A gzip tar of the named members under `dir`, stored in the fixture
+/// registry under its own digest; returns (digest, size).
+fn tar_gz(dir: &Path, members: &[&str], fix: &Path) -> (String, u64) {
+    let tmp = fix.join(format!(
+        "layer-{}.tgz",
+        dir.file_name().unwrap().to_string_lossy()
+    ));
+    let out = Command::new("tar")
+        .arg("-czf")
+        .arg(&tmp)
+        .arg("--owner=0")
+        .arg("--group=0")
+        .arg("-C")
+        .arg(dir)
+        .args(members)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "tar: {}", text(&out));
+    let digest = sha256_of(&tmp);
+    let size = std::fs::metadata(&tmp).unwrap().len();
+    std::fs::rename(&tmp, fix.join("blobs").join(&digest)).unwrap();
+    (digest, size)
+}
+
 fn text(out: &std::process::Output) -> String {
     format!(
         "{}{}",
@@ -198,17 +371,25 @@ fn is_symlink(p: &Path) -> bool {
 
 #[test]
 fn the_tree_sha_lands_as_a_generation_and_the_wrapper_names_it() {
-    if !has("jq") {
+    if !tools() {
         return;
     }
     let c = Case::new("install");
     let (rc, out) = c.run(SHA_A, &[]);
     assert_eq!(rc, 0, "{out}");
 
-    // Per-sha generation, current linked to it, the link a wrapper.
+    // Per-FULL-sha generation, current linked to it, the link a wrapper.
     assert!(
         c.store.join(SHA_A).join("boss").is_file(),
-        "the binary lands under the generation path: {out}"
+        "the binary lands under the generation path named by the full sha: {out}"
+    );
+    assert!(
+        c.store.join(SHA_A).join("manifest.json").is_file(),
+        "the manifest that named the layers stays beside the binary: {out}"
+    );
+    assert!(
+        !c.store.join(SHA_A).join("pull").exists(),
+        "the HTTP transcripts (token included) do not stay in the generation: {out}"
     );
     assert_eq!(c.current().as_deref(), Some(SHA_A), "{out}");
     assert!(
@@ -222,37 +403,18 @@ fn the_tree_sha_lands_as_a_generation_and_the_wrapper_names_it() {
     );
 
     // The one thing the whole car is for: the host's `boss --version`
-    // names the converged commit, with nothing set by the caller.
+    // names the converged commit — the FULL sha — with nothing set by
+    // the caller.
     let (vrc, v) = c.version_through_link();
     assert_eq!(vrc, 0, "{v}");
     assert!(
         v.contains(&format!("built from {SHA_A}")),
-        "the wrapper sets BOSS_BUILD_COMMIT to the generation's sha: {v}"
+        "the wrapper sets BOSS_BUILD_COMMIT to the generation's full sha: {v}"
     );
 
-    // Docker was driven the extraction way: pull, create, cp, rm.
-    let calls = c.docker_calls();
-    let image = format!("{REPO_IMAGE}:{SHA_A}");
-    assert!(
-        calls.iter().any(|l| l == &format!("docker pull {image}")),
-        "pulls the image tagged with the tree sha: {calls:?}"
-    );
-    assert!(
-        calls.iter().any(|l| l == &format!("docker create {image}")),
-        "{calls:?}"
-    );
-    assert!(
-        calls
-            .iter()
-            .any(|l| l.starts_with("docker cp stubcontainer0123:/usr/local/bin/boss ")),
-        "copies the CLI out of the created container: {calls:?}"
-    );
-    assert!(
-        calls.iter().any(|l| l.starts_with("docker rm ")),
-        "the container is removed: {calls:?}"
-    );
-
-    // And the facts ride the packet.
+    // And the facts ride the packet: the full sha, the image by its
+    // short tag.
+    let image = format!("{REPO_IMAGE}:{}", &SHA_A[..7]);
     assert_eq!(c.summary("cli_sha"), SHA_A);
     assert_eq!(c.summary("cli_result"), "ok");
     assert_eq!(c.summary("cli_action"), "installed");
@@ -263,23 +425,80 @@ fn the_tree_sha_lands_as_a_generation_and_the_wrapper_names_it() {
     );
 }
 
+/// Defect (2) of the first build: it pulled `<repo>:<full sha>` while
+/// the deploy runner tags every image with `git rev-parse --short`
+/// (cluster-deploy-runner.sh: "the short tag stays the image name, the
+/// full sha is the attestation") — measured 2026-09-16 00:30Z against
+/// tags/list, every tag is 7 characters.
 #[test]
-fn a_second_tick_at_the_same_sha_pulls_nothing_and_still_verifies() {
-    if !has("jq") {
+fn the_image_is_fetched_by_its_short_tag_and_the_full_sha_is_never_requested() {
+    if !tools() {
+        return;
+    }
+    let c = Case::new("short-tag");
+    let (rc, out) = c.run(SHA_A, &[]);
+    assert_eq!(rc, 0, "{out}");
+    let reqs = c.requests();
+    let short = format!(
+        "http://{REGISTRY_HOST}/v2/david/boss/manifests/{}",
+        &SHA_A[..7]
+    );
+    assert!(
+        reqs.contains(&short),
+        "the tag in the manifest URL is the 7-char short sha: {reqs:?}"
+    );
+    assert!(
+        !reqs
+            .iter()
+            .any(|u| u.contains(&format!("manifests/{SHA_A}"))),
+        "the full sha is the attestation, never the tag: {reqs:?}"
+    );
+    // The registry was driven the way an anonymous pull is: /v2/, the
+    // token realm with the pull scope and no credentials, the index,
+    // the platform manifest by digest, then blobs by digest.
+    assert_eq!(reqs[0], format!("http://{REGISTRY_HOST}/v2/"), "{reqs:?}");
+    assert_eq!(
+        reqs[1],
+        format!(
+            "http://{REGISTRY_HOST}/v2/token?service=container_registry&scope=repository:david/boss:pull"
+        ),
+        "the token realm and service come from the registry's own Www-Authenticate: {reqs:?}"
+    );
+    assert!(
+        reqs.iter().any(|u| u.starts_with(&format!(
+            "http://{REGISTRY_HOST}/v2/david/boss/manifests/sha256:"
+        ))),
+        "the amd64/linux manifest is fetched by the digest the index names: {reqs:?}"
+    );
+    assert!(
+        reqs.iter().any(|u| u.starts_with(&format!(
+            "http://{REGISTRY_HOST}/v2/david/boss/blobs/sha256:"
+        ))),
+        "{reqs:?}"
+    );
+    assert!(
+        !out.contains("docker"),
+        "no docker anywhere in a successful run's account of itself: {out}"
+    );
+}
+
+#[test]
+fn a_second_tick_at_the_same_sha_fetches_nothing_and_still_verifies() {
+    if !tools() {
         return;
     }
     let c = Case::new("unchanged");
     let (rc, out) = c.run(SHA_A, &[]);
     assert_eq!(rc, 0, "{out}");
-    c.clear_docker_log();
+    c.clear_requests();
     let _ = std::fs::remove_file(&c.summary);
 
     let (rc, out) = c.run(SHA_A, &[]);
     assert_eq!(rc, 0, "{out}");
-    let calls = c.docker_calls();
     assert!(
-        !calls.iter().any(|l| l.starts_with("docker pull")),
-        "a tick that has the sha already must not pull the image again every half hour: {calls:?}"
+        c.requests().is_empty(),
+        "a tick that has the sha already must not pull the image again every half hour: {:?}",
+        c.requests()
     );
     assert_eq!(c.summary("cli_action"), "unchanged", "{out}");
     assert_eq!(c.summary("cli_result"), "ok");
@@ -290,7 +509,7 @@ fn a_second_tick_at_the_same_sha_pulls_nothing_and_still_verifies() {
 
 #[test]
 fn a_new_sha_flips_current_and_keeps_the_previous_generation_on_disk() {
-    if !has("jq") {
+    if !tools() {
         return;
     }
     let c = Case::new("flip");
@@ -326,7 +545,7 @@ fn a_new_sha_flips_current_and_keeps_the_previous_generation_on_disk() {
 /// generation must still answer.
 #[test]
 fn a_binary_that_names_another_commit_is_not_confirmed_and_the_previous_generation_stays_linked() {
-    if !has("jq") {
+    if !tools() {
         return;
     }
     let c = Case::new("unconfirmed");
@@ -351,6 +570,10 @@ fn a_binary_that_names_another_commit_is_not_confirmed_and_the_previous_generati
         "an unconfirmed generation does not stay on disk as if it were one: {out}"
     );
     assert!(
+        !c.store.join(format!(".staging-{SHA_B}")).exists(),
+        "staging is removed on refusal: {out}"
+    );
+    assert!(
         out.contains("NOT CONFIRMED") && out.contains("deadbeef"),
         "the refusal says what the binary actually said: {out}"
     );
@@ -366,24 +589,31 @@ fn a_binary_that_names_another_commit_is_not_confirmed_and_the_previous_generati
     );
 }
 
+/// A tag the registry does not have — the deploy runner builds the
+/// image a few minutes after a train lands — is refused naming the URL
+/// and the HTTP code, with the registry's body printed whole.
 #[test]
-fn a_failed_pull_is_refused_with_dockers_complete_output_and_the_credential_path_named() {
-    if !has("jq") {
+fn a_tag_the_registry_lacks_is_refused_naming_the_url_and_the_http_code() {
+    if !tools() {
         return;
     }
-    let c = Case::new("pull-fails");
-    let (rc, out) = c.run(SHA_A, &[("STUB_PULL_FAIL", "1".into())]);
+    let c = Case::new("no-tag");
+    let (rc, out) = c.run(SHA_D, &[]);
     assert_ne!(rc, 0, "{out}");
-    assert!(
-        out.contains("DISTINCTIVE-DOCKER-ERROR"),
-        "docker's own output is printed, not reduced: {out}"
+    let murl = format!(
+        "http://{REGISTRY_HOST}/v2/david/boss/manifests/{}",
+        &SHA_D[..7]
     );
-    for must in ["docker login", "registry.invalid:3000", "read:package"] {
-        assert!(
-            out.contains(must),
-            "the refusal names the credential path ({must}): {out}"
-        );
-    }
+    assert!(out.contains(&murl), "the refusal names the URL: {out}");
+    assert!(out.contains("HTTP 404"), "and the code: {out}");
+    assert!(
+        out.contains("DISTINCTIVE-REGISTRY-404"),
+        "the registry's body is printed, not reduced: {out}"
+    );
+    assert!(
+        !out.contains("docker login") && !out.contains("daemon.json"),
+        "nothing about a credential or a daemon — there is none: {out}"
+    );
     assert!(c.current().is_none(), "nothing was linked: {out}");
     assert!(
         !c.link.exists(),
@@ -392,31 +622,173 @@ fn a_failed_pull_is_refused_with_dockers_complete_output_and_the_credential_path
     let result = c.summary("cli_result");
     assert!(result.starts_with("refused"), "{result}");
     assert!(
-        result.contains("pull"),
-        "the result names the step: {result}"
+        result.contains("HTTP 404") && result.contains(&murl),
+        "the packet's cli_result carries the URL and the code: {result}"
     );
-    assert_eq!(c.summary("cli_sha"), SHA_A);
-    let calls = c.docker_calls();
+    assert_eq!(c.summary("cli_sha"), SHA_D);
     assert!(
-        !calls.iter().any(|l| l.starts_with("docker create")),
-        "nothing was created from an image that did not arrive: {calls:?}"
+        !c.requests().iter().any(|u| u.contains("/blobs/")),
+        "no blob is fetched for an image that does not exist: {:?}",
+        c.requests()
     );
 }
 
 #[test]
-fn a_host_without_docker_is_refused_by_name() {
-    if !has("jq") {
+fn an_unreachable_token_endpoint_is_refused_naming_its_url() {
+    if !tools() {
         return;
     }
-    let c = Case::new("no-docker");
-    std::fs::remove_file(c.bin.join("docker")).unwrap();
-    // The system PATH may carry a real docker; the test must never
-    // reach it. Restrict PATH to the stub dir plus what coreutils/jq
-    // need, minus any directory holding a docker.
+    let c = Case::new("token-down");
+    let (rc, out) = c.run(SHA_A, &[("STUB_TOKEN_DOWN", "1".into())]);
+    assert_ne!(rc, 0, "{out}");
+    let turl = format!(
+        "http://{REGISTRY_HOST}/v2/token?service=container_registry&scope=repository:david/boss:pull"
+    );
+    assert!(
+        out.contains(&turl),
+        "the refusal names the token URL: {out}"
+    );
+    assert!(
+        out.contains("curl exited 7") && out.contains("DISTINCTIVE-CONNECTION-REFUSED"),
+        "curl's own exit and message are printed: {out}"
+    );
+    let result = c.summary("cli_result");
+    assert!(
+        result.starts_with("refused") && result.contains(&turl),
+        "{result}"
+    );
+    assert!(c.current().is_none() && !c.link.exists(), "{out}");
+    assert!(
+        !c.requests().iter().any(|u| u.contains("/manifests/")),
+        "nothing past the token is asked for: {:?}",
+        c.requests()
+    );
+}
+
+/// A blob whose bytes do not hash to the digest the manifest names is
+/// not read at all — tar never sees it — and nothing is installed.
+#[test]
+fn a_blob_that_does_not_match_its_digest_is_refused_before_tar_reads_it() {
+    if !tools() {
+        return;
+    }
+    let c = Case::new("digest-mismatch");
+    let (rc, out) = c.run(SHA_A, &[("STUB_CORRUPT_BLOB", "1".into())]);
+    assert_ne!(rc, 0, "{out}");
+    assert!(
+        out.contains("digest mismatch"),
+        "the refusal names the verdict: {out}"
+    );
+    assert!(
+        out.contains("sha256:") && out.contains("/blobs/sha256:"),
+        "and the digest expected plus the URL it came from: {out}"
+    );
+    assert!(c.current().is_none() && !c.link.exists(), "{out}");
+    assert!(
+        !c.store.join(SHA_A).exists() && !c.store.join(format!(".staging-{SHA_A}")).exists(),
+        "nothing from an untrusted image stays on disk: {out}"
+    );
+    let result = c.summary("cli_result");
+    assert!(
+        result.starts_with("refused") && result.contains("digest mismatch"),
+        "{result}"
+    );
+}
+
+/// A layer ABOVE the one carrying the binary that whites it out means
+/// the image has no /usr/local/bin/boss at runtime; the lower copy is
+/// not installed as if it did.
+#[test]
+fn a_whiteout_in_a_higher_layer_is_refused_rather_than_the_deleted_copy_installed() {
+    if !tools() {
+        return;
+    }
+    let c = Case::with_image(
+        "whiteout",
+        Image {
+            top_whiteout: true,
+            ..Image::default()
+        },
+    );
+    let (rc, out) = c.run(SHA_A, &[]);
+    assert_ne!(rc, 0, "{out}");
+    assert!(
+        out.contains("whiteout") && out.contains("usr/local/bin/.wh.boss"),
+        "the refusal names the whiteout entry and its layer: {out}"
+    );
+    assert!(c.current().is_none() && !c.link.exists(), "{out}");
+    assert!(!c.store.join(SHA_A).exists(), "{out}");
+    let result = c.summary("cli_result");
+    assert!(
+        result.starts_with("refused") && result.contains("whiteout"),
+        "{result}"
+    );
+}
+
+#[test]
+fn a_layer_that_is_not_gzip_tar_is_refused_by_media_type_without_fetching_it() {
+    if !tools() {
+        return;
+    }
+    let c = Case::with_image(
+        "zstd",
+        Image {
+            top_zstd: true,
+            ..Image::default()
+        },
+    );
+    let (rc, out) = c.run(SHA_A, &[]);
+    assert_ne!(rc, 0, "{out}");
+    assert!(
+        out.contains("application/vnd.oci.image.layer.v1.tar+zstd")
+            && out.contains("not a gzip tar"),
+        "the refusal names the media type: {out}"
+    );
+    assert!(
+        !c.requests().iter().any(|u| u.contains("/blobs/")),
+        "a layer this script cannot read is not downloaded: {:?}",
+        c.requests()
+    );
+    assert!(c.current().is_none() && !c.link.exists(), "{out}");
+    let result = c.summary("cli_result");
+    assert!(
+        result.starts_with("refused") && result.contains("+zstd"),
+        "{result}"
+    );
+}
+
+#[test]
+fn a_host_without_curl_is_refused_by_name() {
+    if !tools() {
+        return;
+    }
+    let c = Case::new("no-curl");
+    std::fs::remove_file(c.bin.join("curl")).unwrap();
+    // The system PATH carries a real curl beside bash and coreutils; the
+    // test must never reach the curl and must keep the rest. Every PATH
+    // directory holding a curl is replaced by a mirror of symlinks to
+    // everything in it BUT curl.
+    let mirrors = c.root.join("path-without-curl");
     let clean_path = std::env::var("PATH")
         .unwrap_or_default()
         .split(':')
-        .filter(|d| !Path::new(d).join("docker").exists())
+        .filter(|d| !d.is_empty())
+        .enumerate()
+        .map(|(i, d)| {
+            let dir = Path::new(d);
+            if !dir.join("curl").exists() {
+                return d.to_string();
+            }
+            let mirror = mirrors.join(i.to_string());
+            std::fs::create_dir_all(&mirror).unwrap();
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                if entry.file_name() != "curl" {
+                    let _ =
+                        std::os::unix::fs::symlink(entry.path(), mirror.join(entry.file_name()));
+                }
+            }
+            mirror.to_string_lossy().into_owned()
+        })
         .collect::<Vec<_>>()
         .join(":");
     let mut cmd = Command::new("bash");
@@ -426,9 +798,13 @@ fn a_host_without_docker_is_refused_by_name() {
     let out = cmd.output().unwrap();
     let t = text(&out);
     assert_ne!(out.status.code(), Some(0), "{t}");
-    assert!(t.contains("no docker"), "{t}");
+    assert!(t.contains("no curl"), "{t}");
+    assert!(
+        t.contains("no docker"),
+        "the refusal says docker is not what is missing: {t}"
+    );
     assert!(c.summary("cli_result").starts_with("refused"), "{t}");
-    assert!(c.summary("cli_result").contains("docker"), "{t}");
+    assert!(c.summary("cli_result").contains("curl"), "{t}");
 }
 
 /// The first install on a host that carries the OLD real-file binary:
@@ -436,12 +812,12 @@ fn a_host_without_docker_is_refused_by_name() {
 /// has been confirmed, and replaced by the wrapper link only then.
 #[test]
 fn the_old_real_file_binary_is_replaced_only_after_a_generation_is_confirmed() {
-    if !has("jq") {
+    if !tools() {
         return;
     }
     let c = Case::new("old-binary");
     write_exec(&c.link, "#!/bin/sh\necho 'boss 0.1.0'\n");
-    let (rc, out) = c.run(SHA_A, &[("STUB_PULL_FAIL", "1".into())]);
+    let (rc, out) = c.run(SHA_A, &[("STUB_TOKEN_DOWN", "1".into())]);
     assert_ne!(rc, 0, "{out}");
     assert!(
         !is_symlink(&c.link),
@@ -457,18 +833,21 @@ fn the_old_real_file_binary_is_replaced_only_after_a_generation_is_confirmed() {
     assert!(v.contains(&format!("built from {SHA_A}")), "{v}");
 }
 
+/// The argument is the FULL sha — the attestation, the generation's
+/// name, what `boss --version` must print. A short sha is not enough
+/// to attest with, even though the tag is derived from it.
 #[test]
 fn usage_is_refused_without_a_full_sha() {
-    if !has("jq") {
+    if !tools() {
         return;
     }
     let c = Case::new("usage");
-    for bad in ["", "abc123", "not-a-sha-at-all"] {
+    for bad in ["", "abc123", &SHA_A[..7], "not-a-sha-at-all"] {
         let (rc, out) = c.run(bad, &[]);
         assert_ne!(rc, 0, "{bad:?}: {out}");
         assert!(
-            c.docker_calls().is_empty(),
-            "{bad:?}: docker was driven: {out}"
+            c.requests().is_empty(),
+            "{bad:?}: the registry was asked: {out}"
         );
     }
 }
@@ -556,6 +935,13 @@ impl Converge {
             ],
         );
         git(&clone, &["reset", "--hard", "--quiet", &first]);
+        // The registry has the image for the commit the tree will
+        // converge to — under the deploy runner's short tag.
+        let tags = case.fix.join("tags");
+        let mut have = std::fs::read_to_string(&tags).unwrap();
+        have.push_str(&want[..7]);
+        have.push('\n');
+        write_file(&tags, &have);
 
         let calls = root.join("calls.log");
         write_exec(
@@ -605,7 +991,7 @@ impl Converge {
 
 #[test]
 fn the_converge_installs_the_cli_at_the_sha_it_converged_to_and_records_both() {
-    if !has("jq") || !has("git") {
+    if !tools() || !has("git") {
         return;
     }
     let cv = Converge::new("ok");
@@ -620,20 +1006,26 @@ fn the_converge_installs_the_cli_at_the_sha_it_converged_to_and_records_both() {
     assert_eq!(
         c.summary("cli_sha"),
         cv.want,
-        "the CLI step is handed the sha the tree converged to: {out}"
+        "the CLI step is handed the FULL sha the tree converged to: {out}"
     );
     assert_eq!(c.summary("cli_result"), "ok", "{out}");
+    assert_eq!(
+        c.summary("cli_image"),
+        format!("{REPO_IMAGE}:{}", &cv.want[..7]),
+        "and pulls the image by its short tag: {out}"
+    );
     let (_, v) = c.version_through_link();
     assert!(
         v.contains(&format!("built from {}", cv.want)),
         "the host's boss names the converged commit: {v}"
     );
     assert!(
-        c.docker_calls()
-            .iter()
-            .any(|l| l == &format!("docker pull {REPO_IMAGE}:{}", cv.want)),
+        c.requests().contains(&format!(
+            "http://{REGISTRY_HOST}/v2/david/boss/manifests/{}",
+            &cv.want[..7]
+        )),
         "{:?}",
-        c.docker_calls()
+        c.requests()
     );
     assert!(
         out.contains("  cli: "),
@@ -643,11 +1035,11 @@ fn the_converge_installs_the_cli_at_the_sha_it_converged_to_and_records_both() {
 
 #[test]
 fn a_cli_failure_does_not_stop_the_units_converge_and_is_on_the_packet() {
-    if !has("jq") || !has("git") {
+    if !tools() || !has("git") {
         return;
     }
     let cv = Converge::new("cli-fails");
-    let (rc, out) = cv.run(&[("STUB_PULL_FAIL", "1".into())]);
+    let (rc, out) = cv.run(&[("STUB_TOKEN_DOWN", "1".into())]);
     assert_ne!(
         rc, 0,
         "a converge whose CLI step failed has not converged: {out}"
@@ -669,8 +1061,8 @@ fn a_cli_failure_does_not_stop_the_units_converge_and_is_on_the_packet() {
         c.summary("cli_result")
     );
     assert!(
-        out.contains("DISTINCTIVE-DOCKER-ERROR"),
-        "docker's output reaches the journal in full: {out}"
+        out.contains("DISTINCTIVE-CONNECTION-REFUSED") && out.contains("/v2/token"),
+        "curl's output and the URL reach the journal in full: {out}"
     );
     assert!(
         out.contains("the CLI step FAILED"),

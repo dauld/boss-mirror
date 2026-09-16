@@ -27,10 +27,10 @@ Type=oneshot
 # accumulates root-owned objects.
 User=root
 # The whole run is one shallow fetch of main, file copies, a
-# daemon-reload — and, when main moved, one pull of the cluster image
-# for the CLI (install-cli-from-image.sh bounds that pull to 6 min
-# itself, so a hung pull is a named failure on the packet rather than
-# this ceiling). A generous ceiling in case the forge is briefly
+# daemon-reload — and, when main moved, one pull of the cluster image's
+# CLI layer over HTTP (install-cli-from-image.sh bounds that pull to
+# 6 min itself, so a hung pull is a named failure on the packet rather
+# than this ceiling). A generous ceiling in case the forge is briefly
 # unreachable.
 TimeoutStartSec=10min
 # WHAT THE RUN LEAVES FOR ITS PACKET — one path, declared once, for two

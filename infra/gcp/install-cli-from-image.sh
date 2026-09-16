@@ -16,15 +16,55 @@
 # kinds stayed unpublished — 33 fields, all tree-ahead.
 #
 # THE IMAGE IS THE BUILD. cluster-deploy-runner.sh builds
-# `<registry>/david/boss:<sha>` for every train that lands and copies
-# every `boss`/`boss-*` release binary into it (infra/oss-quickstart/
-# Dockerfile, stage 4). So "the CLI at converge_sha" already exists,
-# built once, by the same pipeline that runs the cluster; this script
-# pulls that image and copies /usr/local/bin/boss out of it. The CLI on
-# this host is then the tree's CLI BY CONSTRUCTION — the rule the pod's
-# boss shim applies — and "which CLI does boss-gcp run" becomes a read
-# on the converge packet (`cli_sha` beside `converge_sha`), not a
-# question for a human with ssh.
+# `<registry>/david/boss:<short sha>` for every train that lands and
+# copies every `boss`/`boss-*` release binary into it (infra/oss-
+# quickstart/Dockerfile, stage 4). So "the CLI at converge_sha" already
+# exists, built once, by the same pipeline that runs the cluster; this
+# script takes /usr/local/bin/boss out of that image. The CLI on this
+# host is then the tree's CLI BY CONSTRUCTION — the rule the pod's boss
+# shim applies — and "which CLI does boss-gcp run" becomes a read on the
+# converge packet (`cli_sha` beside `converge_sha`), not a question for
+# a human with ssh.
+#
+# NO DOCKER. The first build of this step (car c142457c, held) shelled
+# to `docker pull` / `docker create` / `docker cp`; measured 2026-09-16
+# 00:30Z, ops-request 546c13fc: boss-gcp has no docker (docker.service
+# not found), and David has said the host gets none. An OCI registry is
+# HTTP + JSON + tar, so the pull is curl and tar, and no daemon, no
+# login and no daemon.json are involved:
+#
+#   GET /v2/                       401 + Www-Authenticate: Bearer realm=
+#                                  "<realm>",service="<service>"
+#   GET <realm>?service=…&scope=repository:<repo>:pull
+#                                  {"token": …} — no credentials: the
+#                                  forge package david/boss is PUBLIC,
+#                                  verified from the pod 2026-09-16
+#   GET /v2/<repo>/manifests/<tag> an OCI index (one manifest per
+#                                  platform + an attestation) or a bare
+#                                  manifest; the platform's manifest is
+#                                  fetched by digest and lists the layers
+#   GET /v2/<repo>/blobs/<digest>  each layer, a gzip tar
+#
+# THE TAG IS THE SHORT SHA; THE FULL SHA IS THE ATTESTATION. The deploy
+# runner tags with `git rev-parse --short` (cluster-deploy-runner.sh:
+# "the short tag stays the image name, the full sha is the attestation")
+# and the registry's tag list is 7-char shas. The first build pulled
+# `<repo>:<full sha>` and refused anything shorter, so every pull would
+# have been a 404 — measured 2026-09-16 00:30Z against tags/list. Now
+# the tag is ${SHA:0:7}; the FULL sha is what this script is handed,
+# what the generation directory is named, what the wrapper hands the
+# binary as BOSS_BUILD_COMMIT, and what `boss --version` must print.
+#
+# LAYERS ARE READ THE WAY A RUNTIME READS THEM. A file's final state is
+# the TOPMOST layer that mentions it: a later layer's copy replaces an
+# earlier one, and a whiteout (`.wh.<name>` beside it, or an opaque
+# `.wh..wh.opq` in it or any parent directory) deletes it. So the layers
+# are walked from the top down and the first one that mentions
+# usr/local/bin/boss decides: a regular member is extracted; a whiteout
+# is a refusal ("the image deletes it"). Every blob is verified against
+# its manifest digest (sha256, the whole file) BEFORE tar reads a byte
+# of it, and the platform manifest is verified against the index the
+# same way. A layer that is not gzip tar is refused by media type.
 #
 # THE SHA RIDES THE PATH, AND THE WRAPPER CARRIES IT TO THE BINARY. The
 # image's binary is compiled with BOSS_CLI_BUILT_FROM=unknown and reads
@@ -56,19 +96,16 @@
 # (cli_result) and the exit is non-zero. Mostly sure is a feeling; the
 # --version line is the artifact.
 #
-# WHAT A PULL NEEDS THAT THIS SCRIPT CANNOT INSTALL — named in the
-# refusal when the pull fails, with docker's complete output above it:
-# the daemon must trust the plain-HTTP forge registry
-# (/etc/docker/daemon.json `insecure-registries`), and if the package
-# is private, root's docker must be logged in to it with a token scoped
-# read:package (`docker login <registry>` — David does credential
-# admin; the cluster's own pull uses the forgejo-registry secret). The
-# converge picks the CLI step up on its next tick once either lands.
+# EVERY REFUSAL NAMES THE URL AND THE HTTP CODE. Each response body is
+# captured to a file and printed whole when the request is not what was
+# expected (CLAUDE.md §Diagnosis: a digest or a tail throws away the
+# only copy). The one failure that heals by itself is a tag the deploy
+# runner has not built yet — it builds the image a few minutes after
+# each train lands — which the next converge tick picks up.
 #
 # IDEMPOTENT AND CHEAP WHEN NOTHING MOVED: a tick whose `current`
-# already names the sha re-verifies through the wrapper and pulls
-# nothing. The image is removed after extraction except the newest,
-# whose layers the next pull shares; generations are pruned to KEEP.
+# already names the sha re-verifies through the wrapper and fetches
+# nothing. Generations are pruned to KEEP; blobs never stay on disk.
 #
 # USAGE
 #   install-cli-from-image.sh <full sha>
@@ -76,16 +113,22 @@
 # ENV
 #   BOSS_CLI_IMAGE_REPO   the image repository (default the forge's
 #                         10.20.0.15:3000/david/boss — cluster-deploy-
-#                         runner.sh's REGISTRY)
+#                         runner.sh's REGISTRY); "<host>/<name>"
+#   BOSS_CLI_REGISTRY_SCHEME  http (default — the forge registry is plain
+#                         HTTP on the LAN) or https
+#   BOSS_CLI_PLATFORM     "<arch>/<os>" of the manifest to take from a
+#                         multi-platform index (default from uname -m:
+#                         amd64/linux on x86_64, arm64/linux on aarch64)
 #   BOSS_CLI_STORE        the generation store (default /opt/boss-cli)
 #   BOSS_CLI_LINK         the host path (default /usr/local/bin/boss)
 #   BOSS_CLI_WRAPPER_SRC  the wrapper to install (default the
 #                         boss-cli-wrapper.sh beside this script)
 #   BOSS_CLI_KEEP         generations kept on disk (default 3)
-#   BOSS_CLI_PULL_TIMEOUT seconds a pull may take (default 360) — the
-#                         converge unit's ceiling is 10min for the whole
-#                         run, and a pull that hangs must be a named
-#                         failure on the packet, not a unit timeout
+#   BOSS_CLI_PULL_TIMEOUT seconds the WHOLE pull may take, every request
+#                         together (default 360) — the converge unit's
+#                         ceiling is 10min for the whole run, and a pull
+#                         that hangs must be a named failure on the
+#                         packet, not a unit timeout
 #   BOSS_RUN_SUMMARY_FILE where cli_sha / cli_result / cli_action /
 #                         cli_image land (infra/run-summary.sh)
 #
@@ -110,16 +153,31 @@ SHA="${1:-}"
 case "$SHA" in
     *[!0-9a-f]*|"") echo "usage: $(basename "$0") <full sha>" >&2; exit 2 ;;
 esac
-[ "${#SHA}" -eq 40 ] || { echo "usage: $(basename "$0") <full sha> — got '${SHA}' (${#SHA} chars; the image tag is the full commit)" >&2; exit 2; }
+[ "${#SHA}" -eq 40 ] || { echo "usage: $(basename "$0") <full sha> — got '${SHA}' (${#SHA} chars; the full commit is the attestation, the image tag is derived from it)" >&2; exit 2; }
 
 IMAGE_REPO="${BOSS_CLI_IMAGE_REPO:-10.20.0.15:3000/david/boss}"
+SCHEME="${BOSS_CLI_REGISTRY_SCHEME:-http}"
 STORE="${BOSS_CLI_STORE:-/opt/boss-cli}"
 LINK="${BOSS_CLI_LINK:-/usr/local/bin/boss}"
 WRAPPER_SRC="${BOSS_CLI_WRAPPER_SRC:-$SELF_DIR/boss-cli-wrapper.sh}"
 KEEP="${BOSS_CLI_KEEP:-3}"
 PULL_TIMEOUT="${BOSS_CLI_PULL_TIMEOUT:-360}"
-IMAGE="$IMAGE_REPO:$SHA"
+# The deploy runner's tag: `git rev-parse --short` of the merge, seven
+# characters on this history. The full sha is the attestation.
+TAG="${SHA:0:7}"
+IMAGE="$IMAGE_REPO:$TAG"
 REGISTRY_HOST="${IMAGE_REPO%%/*}"
+REPO_PATH="${IMAGE_REPO#*/}"
+REGISTRY_URL="$SCHEME://$REGISTRY_HOST"
+MEMBER="usr/local/bin/boss"
+case "${BOSS_CLI_PLATFORM:-}" in
+    "") case "$(uname -m 2>/dev/null)" in
+            x86_64) PLATFORM="amd64/linux" ;;
+            aarch64|arm64) PLATFORM="arm64/linux" ;;
+            *) PLATFORM="amd64/linux" ;;
+        esac ;;
+    *) PLATFORM="$BOSS_CLI_PLATFORM" ;;
+esac
 
 say() { printf '%s: %s\n' "$NAME" "$*"; }
 
@@ -137,6 +195,7 @@ refuse() { # <cli_result> <message...>
     printf '%s: %s — %s\n    %s\n' "$NAME" "$(printf '%s' "${result%%:*}" | tr '[:lower:]' '[:upper:]')" "${result#*: }" "$*" >&2
     run_summary_field cli_result "$result"
     run_summary_note "$NAME: $result — $*"
+    [ -n "${stage:-}" ] && rm -rf "$stage"
     exit 1
 }
 
@@ -169,11 +228,45 @@ if ! cmp -s "$WRAPPER_SRC" "$STORE/boss"; then
     say "wrapper installed at $STORE/boss"
 fi
 
+# --- the registry, over HTTP ------------------------------------------------
+# One request shape for everything, so a failure always has the same
+# three facts beside it: the URL, the HTTP code, and the body in full.
+# The whole pull shares ONE deadline (PULL_TIMEOUT from the first
+# request), so twenty-four layers cannot each take the full allowance.
+DEADLINE=0
+TOKEN=""
+http_get() { # <url> <out-file> <headers-file> <accept|""> -> prints the http code; 0 iff curl ran
+    local url="$1" out="$2" hdrs="$3" accept="${4:-}"
+    local left=$((DEADLINE - SECONDS))
+    [ "$left" -gt 0 ] || { printf '000\n'; echo "curl: the pull's ${PULL_TIMEOUT}s budget is spent before $url" >&2; return 28; }
+    local -a args=(-sS -o "$out" -D "$hdrs" -w '%{http_code}' --max-time "$left" -L)
+    [ -n "$accept" ] && args+=(-H "Accept: $accept")
+    [ -n "$TOKEN" ] && args+=(-H "Authorization: Bearer $TOKEN")
+    curl "${args[@]}" "$url"
+}
+
+# Refuse with the request named and its body printed whole.
+refuse_http() { # <what> <url> <code> <curl-rc> <body-file> <hint>
+    local what="$1" url="$2" code="$3" rc="$4" body="$5" hint="$6"
+    if [ "$rc" -ne 0 ]; then
+        echo "$NAME: $what — curl exited $rc for $url (HTTP $code); curl's message is above." >&2
+        [ "$rc" -eq 28 ] && echo "    (the whole pull is bounded by BOSS_CLI_PULL_TIMEOUT=${PULL_TIMEOUT}s)" >&2
+        refuse "refused: $what — curl exit $rc for $url" "$hint"
+    fi
+    echo "$NAME: $what — $url answered HTTP $code; the body in full:" >&2
+    sed 's/^/    body: /' "$body" >&2
+    refuse "refused: $what — HTTP $code from $url" "$hint"
+}
+
+# sha256 of a file, as "sha256:<hex>" — the digest form the manifest uses.
+digest_of() { printf 'sha256:%s\n' "$(sha256sum "$1" | cut -d' ' -f1)"; }
+
 # --- the generation ---------------------------------------------------------
 # What `current` names before this run touches anything: the revert
 # target, and what every refusal below leaves in place.
 prev="$(readlink "$STORE/current" 2>/dev/null || true)"
 action=""
+stage=""
 if [ -x "$STORE/$SHA/boss" ]; then
     # Already on disk: a previous tick installed (and confirmed) it, or
     # `current` was moved away by hand. Re-link below; never re-pull.
@@ -183,71 +276,155 @@ if [ -x "$STORE/$SHA/boss" ]; then
         action="relinked"
     fi
 else
-    command -v docker >/dev/null 2>&1 \
-        || refuse "refused: no docker on this host" "the CLI is taken out of the cluster image $IMAGE with docker, and this host has none on PATH. Option (b) of 6f58e9a1 assumes the daemon the retired second stack ran the sim under; without it the CLI stays what it is until docker is installed here (or the step is re-decided)."
-    command -v timeout >/dev/null 2>&1 || refuse "refused: no timeout(1) on this host" "coreutils timeout bounds the pull"
+    for tool in curl jq tar gzip sha256sum; do
+        command -v "$tool" >/dev/null 2>&1 \
+            || refuse "refused: no $tool on this host" "the CLI is taken out of the cluster image $IMAGE over HTTP with curl, jq, tar, gzip and sha256sum — no docker (boss-gcp has none, ops-request 546c13fc) — and $tool is not on PATH"
+    done
 
-    # PULL, captured then printed in full — never reduced before it is
-    # stored (CLAUDE.md §Diagnosis). A failure here is the host's, not
-    # the tree's, and the two facts it usually needs are named.
-    log="$(mktemp -t install-cli-pull.XXXXXX)"
-    say "pulling $IMAGE (timeout ${PULL_TIMEOUT}s)"
-    rc=0
-    timeout "$PULL_TIMEOUT" docker pull "$IMAGE" >"$log" 2>&1 || rc=$?
-    sed 's/^/  docker: /' "$log"
-    rm -f "$log"
-    if [ "$rc" -ne 0 ]; then
-        why="exit $rc"
-        [ "$rc" -eq 124 ] && why="timed out after ${PULL_TIMEOUT}s"
-        echo "$NAME: docker pull $IMAGE failed ($why); its complete output is above." >&2
-        echo "    Two host facts a pull from the forge registry needs, neither of which this" >&2
-        echo "    script can install: the daemon trusts the plain-HTTP registry" >&2
-        echo "    (/etc/docker/daemon.json: {\"insecure-registries\": [\"$REGISTRY_HOST\"]}), and, if" >&2
-        echo "    the package is private, root is logged in with a token scoped read:package:" >&2
-        echo "    docker login $REGISTRY_HOST   (David does credential admin; the cluster's own pull" >&2
-        echo "    uses the forgejo-registry secret). A tag that does not exist yet — the deploy" >&2
-        echo "    runner builds the image a few minutes after each train lands — heals on the" >&2
-        echo "    next tick. The CLI on this host stays what the previous converge confirmed." >&2
-        refuse "refused: docker pull $IMAGE failed ($why)" "see the lines above"
-    fi
-
-    # EXTRACT into a staging directory that is not yet a generation.
+    # Staging is not yet a generation. Every request's headers and body
+    # land under pull/ (printed whole on a refusal, gone once the binary
+    # is out); the generation keeps the binary and the manifest that
+    # named its layers.
     stage="$STORE/.staging-$SHA"
+    pull="$stage/pull"
     rm -rf "$stage"
-    mkdir -p "$stage" || refuse "failed: cannot create $stage" "staging"
-    cid="$(docker create "$IMAGE" 2>&1)" \
-        || { rm -rf "$stage"; refuse "failed: docker create $IMAGE" "$cid"; }
-    cid="${cid%%$'\n'*}"
-    cp_out="$(docker cp "$cid:/usr/local/bin/boss" "$stage/boss" 2>&1)"
-    cp_rc=$?
-    docker rm -f "$cid" >/dev/null 2>&1 || true
-    if [ "$cp_rc" -ne 0 ]; then
-        rm -rf "$stage"
-        refuse "failed: docker cp of /usr/local/bin/boss out of $IMAGE" "$cp_out"
+    mkdir -p "$pull" || { stage=""; refuse "failed: cannot create $STORE/.staging-$SHA" "staging"; }
+    DEADLINE=$((SECONDS + PULL_TIMEOUT))
+    say "pulling $MEMBER out of $IMAGE for $SHA (platform $PLATFORM, timeout ${PULL_TIMEOUT}s)"
+
+    # 1. The token. The registry answers /v2/ with the realm and service
+    #    of its token endpoint; asking that endpoint for a pull scope
+    #    with NO credentials returns a token for a public package.
+    url="$REGISTRY_URL/v2/"
+    code="$(http_get "$url" "$pull/ping.body" "$pull/ping.hdr")"; rc=$?
+    case "$rc:$code" in
+        0:200) say "$url answered 200 without a token; pulling anonymously" ;;
+        0:401)
+            # Drained whole, first line taken in the shell (an early-
+            # exiting reader under pipefail is the SIGPIPE coin-flip).
+            auth="$(tr -d '\r' <"$pull/ping.hdr" | sed -n 's/^[Ww][Ww][Ww]-[Aa]uthenticate: *//p')"
+            auth="${auth%%$'\n'*}"
+            realm="$(printf '%s' "$auth" | sed -n 's/.*realm="\([^"]*\)".*/\1/p')"
+            service="$(printf '%s' "$auth" | sed -n 's/.*service="\([^"]*\)".*/\1/p')"
+            [ -n "$realm" ] || refuse_http "the registry's 401 names no token realm" "$url" "$code" 0 "$pull/ping.body" "Www-Authenticate was '$auth'"
+            turl="$realm?service=$service&scope=repository:$REPO_PATH:pull"
+            code="$(http_get "$turl" "$pull/token.json" "$pull/token.hdr")"; rc=$?
+            [ "$rc" -eq 0 ] && [ "$code" = 200 ] \
+                || refuse_http "the anonymous pull token for $IMAGE_REPO could not be fetched" "$turl" "$code" "$rc" "$pull/token.json" "the forge package $REPO_PATH is public and its token endpoint hands out a pull token with no credentials (verified from the pod 2026-09-16); a non-200 here is the forge or the LAN, not this host. Nothing was installed; $LINK is whatever the previous converge confirmed."
+            TOKEN="$(jq -r '.token // .access_token // empty' "$pull/token.json")"
+            [ -n "$TOKEN" ] || refuse_http "the token endpoint answered 200 without a token" "$turl" "$code" 0 "$pull/token.json" "expected {\"token\": …}"
+            ;;
+        *) refuse_http "the registry did not answer" "$url" "$code" "$rc" "$pull/ping.body" "the forge registry at $REGISTRY_URL is unreachable from this host, or answered something other than 200/401. Nothing was installed; $LINK is whatever the previous converge confirmed." ;;
+    esac
+
+    # 2. The tag's manifest — an index (one manifest per platform, plus
+    #    buildx's attestation) or, for a single-platform push, the
+    #    manifest itself.
+    accept='application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json'
+    murl="$REGISTRY_URL/v2/$REPO_PATH/manifests/$TAG"
+    code="$(http_get "$murl" "$pull/tag.json" "$pull/tag.hdr" "$accept")"; rc=$?
+    if [ "$rc" -ne 0 ] || [ "$code" != 200 ]; then
+        hint="the tag is the deploy runner's short sha of the train that landed (cluster-deploy-runner.sh); a 404 a few minutes after a train lands is the image not built YET and heals on the next tick; anything else is the forge. Nothing was installed; $LINK is whatever the previous converge confirmed."
+        refuse_http "no image $IMAGE" "$murl" "$code" "$rc" "$pull/tag.json" "$hint"
     fi
+    kind="$(jq -r '.mediaType // empty' "$pull/tag.json")"
+    if [ -z "$kind" ]; then
+        kind="$(tr -d '\r' <"$pull/tag.hdr" | sed -n 's/^[Cc]ontent-[Tt]ype: *//p')"
+        kind="${kind%%$'\n'*}"
+    fi
+    case "$kind" in
+        application/vnd.oci.image.index.v1+json|application/vnd.docker.distribution.manifest.list.v2+json)
+            arch="${PLATFORM%%/*}"; os="${PLATFORM#*/}"
+            mdigest="$(jq -r --arg a "$arch" --arg o "$os" '[.manifests[] | select(.platform.architecture == $a and .platform.os == $o)] | .[0].digest // empty' "$pull/tag.json")"
+            [ -n "$mdigest" ] || { echo "$NAME: the index at $murl lists no $PLATFORM manifest; the index in full:" >&2; sed 's/^/    index: /' "$pull/tag.json" >&2; refuse "refused: $IMAGE has no $PLATFORM manifest" "the platforms it lists are: $(jq -r '[.manifests[].platform | "\(.architecture)/\(.os)"] | join(", ")' "$pull/tag.json")"; }
+            durl="$REGISTRY_URL/v2/$REPO_PATH/manifests/$mdigest"
+            code="$(http_get "$durl" "$pull/manifest.json" "$pull/manifest.hdr" 'application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json')"; rc=$?
+            [ "$rc" -eq 0 ] && [ "$code" = 200 ] \
+                || refuse_http "the $PLATFORM manifest of $IMAGE could not be fetched" "$durl" "$code" "$rc" "$pull/manifest.json" "the index at $murl named it"
+            got="$(digest_of "$pull/manifest.json")"
+            [ "$got" = "$mdigest" ] \
+                || refuse "refused: manifest digest mismatch for $IMAGE" "the index at $murl names $mdigest for the $PLATFORM manifest and the bytes fetched from $durl hash to $got; nothing from this image is trusted."
+            ;;
+        application/vnd.oci.image.manifest.v1+json|application/vnd.docker.distribution.manifest.v2+json)
+            mv -f "$pull/tag.json" "$pull/manifest.json"
+            ;;
+        *) refuse_http "the manifest of $IMAGE has an unknown media type '$kind'" "$murl" "$code" 0 "$pull/tag.json" "this script reads OCI indexes/manifests and docker v2 manifests/lists" ;;
+    esac
+    nlayers="$(jq -r '.layers | length' "$pull/manifest.json" 2>/dev/null)"
+    case "${nlayers:-empty}" in empty|0|*[!0-9]*) refuse "refused: the manifest of $IMAGE lists no layers" "manifest at $pull/manifest.json: $(head -c 400 "$pull/manifest.json")" ;; esac
+
+    # 3. The layers, TOP DOWN. The first one that mentions the member
+    #    decides — a whiteout in a higher layer means a lower layer's
+    #    copy is deleted, so it must be seen first. Every blob is
+    #    verified against its digest before tar reads it.
+    found=""
+    i=$((nlayers - 1))
+    while [ "$i" -ge 0 ]; do
+        ldigest="$(jq -r ".layers[$i].digest" "$pull/manifest.json")"
+        ltype="$(jq -r ".layers[$i].mediaType" "$pull/manifest.json")"
+        lsize="$(jq -r ".layers[$i].size" "$pull/manifest.json")"
+        case "$ltype" in
+            application/vnd.oci.image.layer.v1.tar+gzip|application/vnd.docker.image.rootfs.diff.tar.gzip) ;;
+            *) refuse "refused: layer $i of $IMAGE is '$ltype', not a gzip tar" "this script reads gzip tar layers only (docker buildx writes those); a +zstd or unknown layer needs a different reader, not a guess. Nothing was installed." ;;
+        esac
+        burl="$REGISTRY_URL/v2/$REPO_PATH/blobs/$ldigest"
+        blob="$pull/layer.blob"
+        code="$(http_get "$burl" "$blob" "$pull/layer.hdr")"; rc=$?
+        [ "$rc" -eq 0 ] && [ "$code" = 200 ] \
+            || refuse_http "layer $i of $IMAGE ($lsize bytes) could not be fetched" "$burl" "$code" "$rc" "$blob" "the manifest names it; nothing was installed."
+        got="$(digest_of "$blob")"
+        [ "$got" = "$ldigest" ] \
+            || refuse "refused: blob digest mismatch on layer $i of $IMAGE" "the manifest names $ldigest ($lsize bytes) and the $(stat -c %s "$blob" 2>/dev/null || wc -c <"$blob") bytes fetched from $burl hash to $got; nothing from this image is trusted and nothing was installed."
+        # The member list, whole, then read in the shell: an early-exiting
+        # grep on a 230 MB tar listing is the SIGPIPE coin-flip.
+        if ! tar -tzf "$blob" >"$pull/layer.list" 2>"$pull/layer.err"; then
+            refuse "refused: layer $i of $IMAGE is not a readable gzip tar" "tar said: $(tr '\n' ' ' <"$pull/layer.err")"
+        fi
+        if grep -qx -- "$MEMBER" "$pull/layer.list"; then
+            found="$i"
+            say "layer $i of $nlayers ($ldigest, $lsize bytes) carries $MEMBER; digest verified"
+            tar -xzf "$blob" -C "$pull" -- "$MEMBER" 2>"$pull/layer.err" \
+                || refuse "refused: tar could not extract $MEMBER from layer $i of $IMAGE" "tar said: $(tr '\n' ' ' <"$pull/layer.err")"
+            [ -f "$pull/$MEMBER" ] && [ ! -L "$pull/$MEMBER" ] \
+                || refuse "refused: layer $i of $IMAGE lists $MEMBER but tar extracted no regular file" "a symlink or directory at that path is not a CLI"
+            mv -f "$pull/$MEMBER" "$stage/boss" && mv -f "$pull/manifest.json" "$stage/manifest.json" \
+                || refuse "failed: cannot move the extracted binary into $stage" "rename failed"
+            rm -rf "$pull"
+            break
+        fi
+        # Not in this layer. A whiteout here for the member, or an opaque
+        # whiteout on its directory or any parent, deletes every lower
+        # layer's copy (OCI image-layer spec: whiteouts apply to lower
+        # layers only — which is why a layer that carries the member is
+        # decided above, before this check). The runtime would not see
+        # the file, so neither may this host.
+        wh="$(grep -m 1 -x -e "$(dirname "$MEMBER")/.wh.$(basename "$MEMBER")" \
+                      -e "$(dirname "$MEMBER")/.wh..wh.opq" \
+                      -e "usr/local/.wh.bin" -e "usr/local/.wh..wh.opq" \
+                      -e "usr/.wh.local" -e "usr/.wh..wh.opq" \
+                      -e ".wh.usr" -e ".wh..wh.opq" "$pull/layer.list")"
+        if [ -n "$wh" ]; then
+            refuse "refused: $IMAGE deletes $MEMBER (whiteout $wh in layer $i)" "a layer above every copy of the CLI removes it, so the image has no $MEMBER at runtime and this host installs none; nothing was installed."
+        fi
+        rm -f "$blob" "$pull/layer.list"
+        i=$((i - 1))
+    done
+    [ -n "$found" ] || refuse "refused: no layer of $IMAGE carries $MEMBER" "$nlayers layers were listed and none has the CLI; the image is not one the Dockerfile's stage 4 built. Nothing was installed."
     chmod 0755 "$stage/boss"
 
     # CONFIRM THE STAGED BINARY BEFORE IT BECOMES A GENERATION: run it
     # the way the wrapper will, and read what it says it was built from.
     line="$(version_of env BOSS_BUILD_COMMIT="$SHA" "$stage/boss" --version)" || true
     if ! confirmed "$line"; then
-        rm -rf "$stage"
         refuse "unconfirmed: the binary out of $IMAGE says '$line', not 'built from $SHA'" \
             "NOT CONFIRMED. With BOSS_BUILD_COMMIT=$SHA in its environment the extracted boss printed '$line'. A binary that does not name the commit it was installed for is not installed: the staging copy is removed and $STORE/current stays at ${prev:-none}."
     fi
     # A directory for this sha with no runnable boss in it (a run that
     # died mid-way) is not a generation; the confirmed staging replaces it.
     rm -rf "${STORE:?}/$SHA"
-    mv -T "$stage" "$STORE/$SHA" || { rm -rf "$stage"; refuse "failed: cannot move $stage into place" "rename failed"; }
+    mv -T "$stage" "$STORE/$SHA" || refuse "failed: cannot move $stage into place" "rename failed"
+    stage=""
     action="installed"
-
-    # The image did its job; keep only THIS tag's image so the next
-    # pull shares its layers, and the host does not collect 250 MB per
-    # train. Best-effort: a leftover image is a disk fact, not a wrong
-    # CLI.
-    docker images --format '{{.Repository}}:{{.Tag}}' "$IMAGE_REPO" 2>/dev/null \
-        | grep -x -- "$IMAGE_REPO:[0-9a-f]\{40\}" | grep -vx -- "$IMAGE" \
-        | while IFS= read -r old; do docker rmi "$old" >/dev/null 2>&1 || true; done
 fi
 
 # --- flip, link, and confirm through the host's own path --------------------
@@ -283,5 +460,5 @@ ls -1t "$STORE" 2>/dev/null | grep -x '[0-9a-f]\{40\}' | tail -n +"$((KEEP + 1))
 
 run_summary_field cli_result ok
 run_summary_field cli_action "$action"
-say "CONFIRMED — $LINK is the tree's CLI at ${SHA:0:8} ($action): $line"
+say "CONFIRMED — $LINK is the tree's CLI at ${SHA:0:8} ($action, image $IMAGE): $line"
 exit 0
