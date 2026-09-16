@@ -215,3 +215,7 @@ required-features = ["postgres"]
 [[test]]
 name = "rebuild_reproduces_the_partition_pg"
 required-features = ["postgres"]
+
+[[test]]
+name = "no_orphan_steps_pg"
+required-features = ["postgres"]

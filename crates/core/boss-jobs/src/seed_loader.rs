@@ -30,7 +30,8 @@
 //! title_template = "Mash in"
 //! terminal = { outcome = "brewed" }    # optional; marks a terminal
 //! sign_offs_required = []          # role codes; "@authority_role" resolves
-//! authority_role = "head-brewer"
+//! audience = { role = "head-brewer" }  # who it is for, declared ONCE;
+//!                                  # `authority_role` is its projection
 //! claimable = true              # role queue, not a nomination
 //! metadata_defaults = { mash_temp_f = 152 }
 //! ```
@@ -53,6 +54,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::audience::Audience;
 use crate::registry::{StepSpec, Terminal, WorkflowSpec};
 
 #[derive(Debug, thiserror::Error)]
@@ -152,8 +154,35 @@ struct StepToml {
     /// nominating one holder. See `StepSpec::claimable`.
     #[serde(default)]
     claimable: Option<bool>,
+    /// Who the step is for, declared ONCE — `audience = { role = "x" }`
+    /// / `{ individual = "id" }` / `{ department = "code" }` /
+    /// `{ station = "name" }` (design f5ebd2e1, backlog 67a58840).
+    /// Read as a raw TOML value here, not as [`Audience`], so that a
+    /// shape outside the closed set is refused NAMING THE STEP
+    /// ([`parse_audience`]) rather than a line number: protocol authors
+    /// and the publish verb read by slug.
+    #[serde(default)]
+    audience: Option<toml::Value>,
     #[serde(default)]
     metadata_defaults: serde_json::Value,
+}
+
+/// The one closed-set check on an authored audience, phrased for the
+/// author: `step `triage`: audience unknown variant `team`, expected
+/// one of ...`. The set itself is [`Audience`]'s serde derive — this
+/// only adds the step's name to serde's own refusal.
+fn parse_audience(
+    step: &str,
+    value: Option<toml::Value>,
+    source: &str,
+) -> Result<Option<Audience>, SeedLoaderError> {
+    value
+        .map(|v| {
+            Audience::deserialize(v).map_err(|e| {
+                SeedLoaderError::Parse(source.to_string(), format!("step `{step}`: audience {e}"))
+            })
+        })
+        .transpose()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -273,8 +302,8 @@ pub fn parse_workflows(
     let specs: Vec<WorkflowSpec> = file
         .workflows
         .into_iter()
-        .map(|jk| workflow_toml_to_spec(jk, default_owner))
-        .collect();
+        .map(|jk| workflow_toml_to_spec(jk, default_owner, source))
+        .collect::<Result<_, _>>()?;
 
     let registry = crate::step_registry::StepRegistry::v1();
     let lint_errs = crate::workflow_lint::validate_all(&specs, &registry);
@@ -287,30 +316,48 @@ pub fn parse_workflows(
     Ok(specs)
 }
 
-fn workflow_toml_to_spec(toml: WorkflowToml, default_owner: &str) -> WorkflowSpec {
+fn workflow_toml_to_spec(
+    toml: WorkflowToml,
+    default_owner: &str,
+    source: &str,
+) -> Result<WorkflowSpec, SeedLoaderError> {
     // Flat steps map straight onto StepSpec — the viability lint
     // (run by parse_workflows) owns every structural concern, so the
-    // loader is pure deserialization now.
+    // loader is pure deserialization, plus ONE projection: a step's
+    // `audience` is its single declaration of who it is for, and the
+    // legacy `authority_role` key is written from it (`selectors_for`)
+    // so every reader of the spec row keeps working unchanged
+    // (f5ebd2e1 car 1, expand/contract). An `authority_role` the author
+    // ALSO wrote is kept as written — agreeing is harmless, disagreeing
+    // is the workflow lint's refusal, and overwriting it here would
+    // hide exactly that.
     let steps: Vec<StepSpec> = toml
         .steps
         .into_iter()
-        .map(|s| StepSpec {
-            title: s.title,
-            kind: s.kind,
-            assurance_required: s.assurance_required,
-            duration_hours: s.duration_hours,
-            labor_hours: s.labor_hours,
-            wall_clock_hours: s.wall_clock_hours,
-            ready_when: s.ready_when,
-            terminal: s.terminal.map(|t| Terminal { outcome: t.outcome }),
-            title_template: s.title_template,
-            sign_offs_required: s.sign_offs_required,
-            fields: s.fields,
-            authority_role: s.authority_role,
-            claimable: s.claimable,
-            metadata_defaults: s.metadata_defaults,
+        .map(|s| {
+            let audience = parse_audience(&s.title, s.audience, source)?;
+            let derived_role = audience
+                .as_ref()
+                .and_then(|a| crate::audience::selectors_for(a).authority_role);
+            Ok(StepSpec {
+                title: s.title,
+                kind: s.kind,
+                assurance_required: s.assurance_required,
+                duration_hours: s.duration_hours,
+                labor_hours: s.labor_hours,
+                wall_clock_hours: s.wall_clock_hours,
+                ready_when: s.ready_when,
+                terminal: s.terminal.map(|t| Terminal { outcome: t.outcome }),
+                title_template: s.title_template,
+                sign_offs_required: s.sign_offs_required,
+                fields: s.fields,
+                authority_role: s.authority_role.or(derived_role),
+                claimable: s.claimable,
+                audience,
+                metadata_defaults: s.metadata_defaults,
+            })
         })
-        .collect();
+        .collect::<Result<_, SeedLoaderError>>()?;
 
     let mut spec = WorkflowSpec::platform_seed(
         toml.kind,
@@ -338,7 +385,7 @@ fn workflow_toml_to_spec(toml: WorkflowToml, default_owner: &str) -> WorkflowSpe
         spec.entitlements = toml.entitlements;
     }
     spec.owning_team = default_owner.to_string();
-    spec
+    Ok(spec)
 }
 
 #[cfg(test)]
@@ -460,6 +507,128 @@ terminal = { outcome = "brewed" }
         assert_eq!(step.metadata_defaults["mash_temp_f"], 152);
         assert_eq!(step.metadata_defaults["mash_minutes"], 60);
         assert_eq!(specs[0].owning_team, "brewery");
+    }
+
+    /// A step declares its audience ONCE in TOML (f5ebd2e1 car 1,
+    /// 67a58840): `audience = { role = "..." }` is the declaration, and
+    /// the loader writes the legacy `authority_role` as its PROJECTION
+    /// so every reader of the spec row — the editor, the projected
+    /// stations, the owner fallback — keeps working unchanged.
+    #[test]
+    fn a_step_declares_its_audience_and_the_loader_projects_the_legacy_key() {
+        let text = r#"
+[[workflow]]
+kind = "with-audience"
+label = "With audience"
+category = "platform"
+subject_kinds = ["custom"]
+
+[[workflow.step]]
+title = "filed"
+kind = "task"
+ready_when = "true"
+title_template = "Open"
+
+[[workflow.step]]
+title = "triage"
+kind = "task"
+ready_when = "steps.filed.done"
+title_template = "Triage"
+audience = { role = "platform-admin" }
+
+[[workflow.step]]
+title = "decide"
+kind = "task"
+ready_when = "steps.triage.done"
+title_template = "Decide"
+audience = { individual = "emp-david" }
+terminal = { outcome = "done" }
+"#;
+        let specs = parse_workflows(text, "platform", "<test>").unwrap();
+        let triage = &specs[0].steps[1];
+        assert_eq!(
+            triage.audience,
+            Some(crate::audience::Audience::Role("platform-admin".into()))
+        );
+        assert_eq!(
+            triage.authority_role.as_deref(),
+            Some("platform-admin"),
+            "the legacy key is the projection of the one declaration"
+        );
+        let decide = &specs[0].steps[2];
+        assert_eq!(
+            decide.audience,
+            Some(crate::audience::Audience::Individual("emp-david".into()))
+        );
+        assert_eq!(decide.authority_role, None);
+    }
+
+    /// The set of shapes is CLOSED, and the refusal names the STEP —
+    /// a serde error naming a line number is the same fact, but a
+    /// protocol author reads by slug (the publish verb prints this).
+    #[test]
+    fn an_unknown_audience_shape_is_refused_naming_the_step() {
+        let text = r#"
+[[workflow]]
+kind = "bad-audience"
+label = "Bad audience"
+category = "platform"
+subject_kinds = ["custom"]
+
+[[workflow.step]]
+title = "filed"
+kind = "task"
+ready_when = "true"
+title_template = "Open"
+
+[[workflow.step]]
+title = "triage"
+kind = "task"
+ready_when = "steps.filed.done"
+title_template = "Triage"
+audience = { team = "it" }
+terminal = { outcome = "done" }
+"#;
+        let err = parse_workflows(text, "platform", "<test>")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("step `triage`"), "{err}");
+        assert!(err.contains("audience"), "{err}");
+        assert!(err.contains("unknown variant `team`"), "{err}");
+    }
+
+    /// Declaring both, disagreeing, is the two-declarations defect
+    /// this design ends — refused at load, the same way the publish
+    /// lint refuses it for a JSON-authored spec.
+    #[test]
+    fn an_audience_that_disagrees_with_the_legacy_key_is_refused() {
+        let text = r#"
+[[workflow]]
+kind = "twice"
+label = "Twice"
+category = "platform"
+subject_kinds = ["custom"]
+
+[[workflow.step]]
+title = "filed"
+kind = "task"
+ready_when = "true"
+title_template = "Open"
+
+[[workflow.step]]
+title = "triage"
+kind = "task"
+ready_when = "steps.filed.done"
+title_template = "Triage"
+audience = { role = "platform-admin" }
+authority_role = "bookkeeper"
+terminal = { outcome = "done" }
+"#;
+        let err = parse_workflows(text, "platform", "<test>")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("triage"), "{err}");
+        assert!(err.contains("bookkeeper"), "{err}");
     }
 
     #[test]

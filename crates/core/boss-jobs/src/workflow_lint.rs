@@ -32,6 +32,11 @@
 //!   `job.metadata.x != ""` / `NOT job.metadata.x` footgun over an
 //!   `Absent` field that auto-superseded `incident-post-mortem` packets
 //!   on create (cb9661fe).
+//! - **Phase 7 — a step declares its audience once.** An `audience`
+//!   beside a disagreeing legacy `authority_role` is two answers to
+//!   "who is this for"; an audience shape nothing derives a selector
+//!   from yet (`department`, until f5ebd2e1 car 2) would publish a step
+//!   no queue holds. Both refused, naming the step.
 //!
 //! Runs at author time (`POST /api/workflows/_validate`), publish
 //! time (every registry path that can set a row ACTIVE — see
@@ -90,7 +95,75 @@ pub fn validate_workflow(spec: &WorkflowSpec, registry: &StepRegistry) -> Vec<Wo
     check_decisions_leave_a_record(spec, registry, &mut errs);
     // Phase 6 — a job-metadata-gated terminal must hold on create.
     check_terminals_hold_on_create(spec, &mut errs);
+    // Phase 7 — a step declares its audience once.
+    for step in &spec.steps {
+        check_audience_is_declared_once(spec, step, &mut errs);
+    }
     errs
+}
+
+/// Phase 7: a step declares its audience ONCE, and in a shape a reader
+/// derives from (design f5ebd2e1, backlog 67a58840).
+///
+/// Two refusals, both about the same defect the design ends — a step
+/// whose audience is stated implicitly, more than once, in keys nothing
+/// reconciles:
+///
+/// - **Declared twice, disagreeing.** `audience = { role = "x" }` beside
+///   `authority_role = "y"`. The legacy key is the PROJECTION of the
+///   audience (the seed loader writes it from `selectors_for`), so the
+///   two agreeing is the expected state of every migrated protocol and
+///   is not refused; disagreeing means the row carries two answers to
+///   "who is this for" and every reader picks one without saying so.
+///   An `individual` or `station` audience derives no role, so a
+///   legacy role beside either is a second declaration too.
+/// - **Declared in a shape nothing reads.** `selectors_for` derives no
+///   key from a `department` until car 2 lands department-as-Class on
+///   the station registry. Admitting it would publish a step no queue
+///   will ever hold — precisely the orphan this design exists to make
+///   impossible — so it is refused, naming the car that lifts it.
+fn check_audience_is_declared_once(
+    spec: &WorkflowSpec,
+    step: &StepSpec,
+    errs: &mut Vec<WorkflowLintError>,
+) {
+    let Some(audience) = &step.audience else {
+        return;
+    };
+    let derived = crate::audience::selectors_for(audience);
+    if derived.is_empty() {
+        errs.push(WorkflowLintError {
+            workflow: spec.kind.clone(),
+            step: step.title.clone(),
+            reason: format!(
+                "declares an audience of shape `{}` that no reader derives a selector from yet \
+                 (design f5ebd2e1 car 2, department-is-data) — publishing it would admit a step \
+                 no queue holds. Declare a `role`, `individual` or `station` audience until \
+                 that car lands.",
+                audience.shape()
+            ),
+        });
+        return;
+    }
+    if let Some(legacy) = &step.authority_role
+        && derived.authority_role.as_deref() != Some(legacy.as_str())
+    {
+        errs.push(WorkflowLintError {
+            workflow: spec.kind.clone(),
+            step: step.title.clone(),
+            reason: format!(
+                "declares its audience twice: `audience` derives authority {} and \
+                 `authority_role` says `{legacy}`. One declaration answers who a step is \
+                 for; drop `authority_role` (it is written as the projection of the \
+                 audience) or make them agree.",
+                derived
+                    .authority_role
+                    .as_deref()
+                    .map(|r| format!("`{r}`"))
+                    .unwrap_or_else(|| "none".into())
+            ),
+        });
+    }
 }
 
 /// Phase 5: a decision must leave a record.
@@ -1126,6 +1199,75 @@ mod tests {
     fn minimal_viable_jobkind_passes() {
         let reg = StepRegistry::v1();
         assert!(validate_workflow(&viable_spec("ok"), &reg).is_empty());
+    }
+
+    // Phase 7 — a step declares its audience ONCE (f5ebd2e1 car 1).
+
+    fn with_audience(
+        audience: crate::audience::Audience,
+        authority_role: Option<&str>,
+    ) -> WorkflowSpec {
+        let mut spec = viable_spec("audience");
+        spec.steps[1].audience = Some(audience);
+        spec.steps[1].authority_role = authority_role.map(String::from);
+        spec
+    }
+
+    #[test]
+    fn an_audience_alone_or_agreeing_with_the_legacy_key_is_viable() {
+        use crate::audience::Audience;
+        let reg = StepRegistry::v1();
+        let alone = with_audience(Audience::Role("platform-admin".into()), None);
+        assert!(validate_workflow(&alone, &reg).is_empty());
+        // The expand phase: the loader writes the projection beside the
+        // declaration, and a row carrying both AGREEING is the expected
+        // state of every migrated protocol.
+        let agreeing = with_audience(
+            Audience::Role("platform-admin".into()),
+            Some("platform-admin"),
+        );
+        assert!(validate_workflow(&agreeing, &reg).is_empty());
+        let person = with_audience(Audience::Individual("emp-david".into()), None);
+        assert!(validate_workflow(&person, &reg).is_empty());
+        let station = with_audience(Audience::Station("design-review".into()), None);
+        assert!(validate_workflow(&station, &reg).is_empty());
+    }
+
+    #[test]
+    fn a_step_that_declares_its_audience_twice_and_disagrees_is_refused() {
+        use crate::audience::Audience;
+        let reg = StepRegistry::v1();
+        let spec = with_audience(Audience::Role("platform-admin".into()), Some("bookkeeper"));
+        let errs = validate_workflow(&spec, &reg);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert_eq!(errs[0].step, "finish");
+        assert!(errs[0].reason.contains("bookkeeper"), "{}", errs[0].reason);
+        assert!(
+            errs[0].reason.contains("platform-admin"),
+            "{}",
+            errs[0].reason
+        );
+        // An individual audience derives NO role, so a legacy role beside
+        // it is a second declaration too.
+        let spec = with_audience(
+            Audience::Individual("emp-david".into()),
+            Some("platform-admin"),
+        );
+        let errs = validate_workflow(&spec, &reg);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert_eq!(errs[0].step, "finish");
+    }
+
+    #[test]
+    fn an_audience_no_reader_derives_from_yet_is_refused() {
+        use crate::audience::Audience;
+        let reg = StepRegistry::v1();
+        let spec = with_audience(Audience::Department("it".into()), None);
+        let errs = validate_workflow(&spec, &reg);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert_eq!(errs[0].step, "finish");
+        assert!(errs[0].reason.contains("department"), "{}", errs[0].reason);
+        assert!(errs[0].reason.contains("f5ebd2e1"), "{}", errs[0].reason);
     }
 
     #[test]

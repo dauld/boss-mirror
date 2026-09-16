@@ -39,7 +39,7 @@
 use async_trait::async_trait;
 use boss_dispatcher::rules::expr::Value;
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext};
-use boss_jobs::step_registry::{Completion, StepRegistry};
+use boss_jobs::step_registry::{Completion, StepRegistry, StepType};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -74,17 +74,12 @@ impl JobsCompleteStep {
         })
     }
 
-    /// A step kind is an auto-completable marker when its StepType carries
-    /// no role and zero typical duration — a structural transition the
-    /// machine fires itself (`trigger` / `outcome` / `milestone`). `task`
-    /// (no role, but unset duration = real work) is excluded because its
-    /// `typical_duration_hours` is `None`; every role-bearing or
-    /// nonzero-duration kind is excluded by the conjunction. An unknown
-    /// kind (not in the registry) is conservatively not a marker.
+    /// A step kind is an auto-completable marker when its StepType says
+    /// so (`StepType::is_marker` — the one definition, shared with the
+    /// no-orphan-steps check since 67a58840). An unknown kind (not in
+    /// the registry) is conservatively not a marker.
     fn is_marker(&self, kind: &str) -> bool {
-        self.registry.get(kind).is_some_and(|st| {
-            st.required_roles.is_empty() && st.typical_duration_hours.is_some_and(|h| h <= 0.0)
-        })
+        self.registry.get(kind).is_some_and(StepType::is_marker)
     }
 
     /// Whether the dispatcher should complete this step itself rather than
