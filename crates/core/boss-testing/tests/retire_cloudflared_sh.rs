@@ -117,10 +117,12 @@ fn ingress_for(hosts: &[String]) -> String {
         .join("; ")
 }
 
-/// The converge list the stub SoR answers: a newest no-op tick (which
-/// observes nothing — `unchanged`), then the deploying converge that
-/// read the connector, then an older one. The verb must pick the one
-/// that carries a `cloudflared` field, not simply the newest.
+/// The converge list the stub SoR answers: a newest no-op tick that
+/// carries no `cloudflared` field (`unchanged` alone — the shape every
+/// no-op tick had before 0b7804f3, and what an older one still holds),
+/// then the deploying converge that read the connector, then an older
+/// one. The verb must pick the one that carries a `cloudflared` field,
+/// not simply the newest.
 fn healthy_converges() -> String {
     let hosts = declared_hostnames();
     let ingress = ingress_for(&hosts);

@@ -341,6 +341,84 @@ connector_status() {
     fi
 }
 
+# skipped_entry NS ABSENT — the ONE spelling of a skipped instance on
+#   the packet: `<ns> (secrets absent: a, b)`. Two loops build the
+#   `instances_skipped` string (the runner's apply loop, and
+#   instances_skipped_by_gate below for the tick that applies nothing)
+#   and three readers parse it (infra/cluster/instances-skipped.lib.sh);
+#   the entry is spelled here so the two writers cannot drift
+#   (CLAUDE.md §9a).
+skipped_entry() {
+    printf '%s (secrets absent: %s)' "$1" "${2// /, }"
+}
+
+# instances_skipped_by_gate K KM SOURCE_NS INSTANCES MOUNT
+#   The packet's `instances_skipped` string as the secret gate would
+#   decide it NOW: instance_secret_gate asked for every instance but
+#   the source, WRITING NOTHING — the reads the apply loop makes,
+#   without the apply. INSTANCES is render-instance.sh --instances
+#   (name<TAB>namespace<TAB>…); MOUNT is the rendered directory as KM
+#   sees it. Prints the string (empty when nothing is skipped) and
+#   returns 0; returns 2 when a read could not be made — the string is
+#   then not knowable, and the caller must not guess one.
+instances_skipped_by_gate() {
+    local k="$1" km="$2" source_ns="$3" instances="$4" mount="$5"
+    local iname ins_ns _t _s _h absent rc skipped=""
+    while IFS=$'\t' read -r iname ins_ns _t _s _h; do
+        [ -n "$ins_ns" ] || continue
+        [ "$ins_ns" = "$source_ns" ] && continue
+        rc=0
+        absent=$(instance_secret_gate "$k" "$km" "$ins_ns" "$mount/$ins_ns") || rc=$?
+        case "$rc" in
+            0) ;;
+            1) skipped="${skipped:+$skipped; }$(skipped_entry "$ins_ns" "$absent")" ;;
+            *) return 2 ;;
+        esac
+    done <<< "$instances"
+    printf '%s\n' "$skipped"
+}
+
+# EVERY TICK OBSERVES THE CONNECTOR, and both ticks observe it HERE
+# (backlog 0b7804f3; measured 2026-09-16 13:38Z). The retire verb for
+# boss-gcp's hand-written connector (infra/gcp/retire-cloudflared.sh)
+# proves the hand-over from the newest converge whose packet carries
+# `cloudflared` + `tunnel_ingress`, and refuses one older than 120 min.
+# Those fields were written only by a DEPLOYING converge; the no-op
+# tick recorded `unchanged` and nothing about the connector, so on a
+# quiet morning David's `--for-real` was refused — 'converge 2afe48e8
+# completed 10:23:56 — 194 min ago, older than the 120 min ceiling'
+# (ops-request 7d05cb04) — with no way to refresh the evidence except
+# landing a car. Evidence that exists only when something ships is the
+# wrong shape for a liveness fact. So the observation is ONE function,
+# called by the deploying tick after its roll and by the unchanged
+# tick before its exit 0, and `observed_on` says which.
+#
+# observe_connector K KM NS MANIFEST DEPLOY SKIPPED OBSERVED_ON
+#   Records on the packet, through run_summary_field, and prints the
+#   journal lines:
+#     tunnel_ingress   render-tunnel-config.sh --summary for SKIPPED —
+#                      the packet's own `instances_skipped` string, so
+#                      the map names what the connector is serving (a
+#                      skipped instance's hostname from the source)
+#     cloudflared      connector_status for DEPLOY in NS, its Secret
+#                      derived from the rendered MANIFEST (as KM sees it)
+#     observed_on      `deploy` or `unchanged` — which tick looked
+#   Returns 0 in every case, as connector_status does: the tunnel is
+#   not what a converge delivers. The renderer is read from beside this
+#   file — the checked-out tree this lib was sourced from — the idiom
+#   instances-skipped.lib.sh uses for its own parser.
+observe_connector() {
+    local k="$1" km="$2" ns="$3" manifest="$4" deploy="$5" skipped="$6" observed_on="$7"
+    local ingress connector
+    ingress=$(BOSS_INSTANCES_SKIPPED="$skipped" "$(dirname "${BASH_SOURCE[0]}")/../cluster/render-tunnel-config.sh" --summary)
+    connector=$(connector_status "$k" "$km" "$ns" "$manifest" "$deploy")
+    run_summary_field tunnel_ingress "$ingress"
+    run_summary_field cloudflared "$connector"
+    run_summary_field observed_on "$observed_on"
+    echo "cluster-deploy-runner: tunnel ingress: $ingress"
+    echo "cluster-deploy-runner: cloudflared: $connector (observed on $observed_on)"
+}
+
 # A DECLARED BROKER SECRET IS CREATED EMPTY WHEN IT IS ABSENT (backlog
 # 51c98681; David 2026-09-16: no hand work unless absolutely required,
 # and an empty object declared in the registry is not a credential).

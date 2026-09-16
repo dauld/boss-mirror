@@ -115,6 +115,15 @@ STAMP_FILE="${BOSS_FORGE_LAST_BUILT:-$HOME/.boss-last-built}"
 # "converged", this one means "proven unbootable; do not re-roll it".
 FAILED_FILE="${BOSS_FORGE_LAST_FAILED:-$HOME/.boss-last-failed}"
 export DOCKER_HOST="${DOCKER_HOST:-unix:///run/user/1000/docker.sock}"
+# kubectl, through the alpine/k8s container with the admin kubeconfig.
+# Defined before the unchanged check below because the no-op tick
+# READS the cluster too (0b7804f3); kubectl_seeing DIR is the same
+# kubectl with a rendered directory mounted read-only at /manifests —
+# the apply directory on a deploy, a throwaway render on a no-op tick.
+K="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
+kubectl_seeing() { # DIR
+    echo "sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro -v $1:/manifests:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
+}
 
 cd "$REPO"
 # ONE LOCK for every git user of this checkout (checkout-lock.sh):
@@ -132,6 +141,39 @@ LAST=$(cat "$STAMP_FILE" 2>/dev/null || echo none)
 if [ "$HEAD" = "$LAST" ]; then
     echo "cluster-deploy-runner: forge main unchanged ($HEAD)"
     run_summary_field unchanged "$HEAD"
+    # THE NO-OP TICK OBSERVES THE CONNECTOR TOO (backlog 0b7804f3;
+    # measured 2026-09-16 13:38Z). `cloudflared` and `tunnel_ingress`
+    # were recorded only by the `tunnel connector` stage below, so the
+    # newest packet that carried them was the last DEPLOY, and on a
+    # quiet morning retire-cloudflared refused David's --for-real over
+    # a 194-minute-old observation with no way to refresh it but a
+    # train (ops-request 7d05cb04). A liveness fact is observed on
+    # every tick. The same lib function records the same fields
+    # (cluster-deploy-lib.sh observe_connector), from the same inputs
+    # the deploying tick has: the tree rendered to a throwaway
+    # directory (the tree here IS the converged one — the checkout
+    # below is what put it there), and the skipped set the secret gate
+    # decides now, read-only.
+    # An observation tick writes nothing to the cluster: no apply, no
+    # roll, no declared-secrets create, no ConfigMap patch — kubectl
+    # reads only (get, a client dry run, rollout status), and a test
+    # holds the block to that. A gate read the credential cannot make
+    # FAILS the tick, exactly as it fails the deploying tick's apply
+    # loop: no skipped set is knowable, so no ingress map is claimed
+    # and nothing is recorded — a guessed map would be evidence the
+    # retire verb reads. The connector read itself never fails a tick
+    # (connector_status): the tunnel is not what a converge delivers.
+    STAGE="observe connector"
+    OBSERVE_DIR="$(mktemp -d -t cluster-deploy-observe.XXXXXX)"
+    "$REPO/infra/cluster/render-instance.sh" --all "$OBSERVE_DIR"
+    SOURCE_NS=$("$REPO/infra/cluster/render-instance.sh" --source)
+    KO=$(kubectl_seeing "$OBSERVE_DIR")
+    SKIPPED=$(instances_skipped_by_gate "$K" "$KO" "$SOURCE_NS" "$("$REPO/infra/cluster/render-instance.sh" --instances)" /manifests) || {
+        echo "cluster-deploy-runner: cannot tell which instances are skipped (rc=$?) — a Secret read the credential could not make; the connector is not observed on this tick" >&2
+        exit 1
+    }
+    observe_connector "$K" "$KO" "$SOURCE_NS" "/manifests/$SOURCE_NS/cloudflared.yaml" cloudflared "$SKIPPED" unchanged
+    rm -rf "$OBSERVE_DIR"
     OUTCOME="converged=$HEAD (unchanged)"
     exit 0
 fi
@@ -323,8 +365,6 @@ prune_registry_verified_tags "$REGISTRY" "${BOSS_RUNNER_KEEP_IMAGES:-5}" cluster
 docker builder prune -f --filter until=168h >/dev/null 2>&1 || true
 echo "cluster-deploy-runner: build cache pruned (older than 168h)"
 
-K="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
-
 # Cluster config converges with the code: apply the tree's manifests
 # idempotently (secrets are referenced by name and stay out-of-tree).
 # Apply comes BEFORE the image roll so the tag built above — not the
@@ -357,7 +397,7 @@ while IFS=$'\t' read -r _iname ins_ns _t _s _h; do
     manifests_with_image "$RENDER_DIR/$ins_ns" "$APPLY_DIR/$ins_ns" "$REGISTRY" "$LAST"
 done <<< "$INSTANCES"
 rm -rf "$RENDER_DIR"
-KM="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro -v $APPLY_DIR:/manifests:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
+KM=$(kubectl_seeing "$APPLY_DIR")
 # apply_instance NAMESPACE — the rendered directory for one instance.
 # The files that declare a Namespace go FIRST: `kubectl apply -f DIR`
 # walks files alphabetically, so on a namespace's first converge every
@@ -584,7 +624,7 @@ while IFS=$'\t' read -r iname ins_ns _t _s _h; do
     absent=$(instance_secret_gate "$K" "$KM" "$ins_ns" "/manifests/$ins_ns") || gate_rc=$?
     case "$gate_rc" in
         0) ;;
-        1)  INSTANCES_SKIPPED="${INSTANCES_SKIPPED:+$INSTANCES_SKIPPED; }$ins_ns (secrets absent: ${absent// /, })"
+        1)  INSTANCES_SKIPPED="${INSTANCES_SKIPPED:+$INSTANCES_SKIPPED; }$(skipped_entry "$ins_ns" "$absent")"
             continue ;;
         *)  echo "cluster-deploy-runner: cannot tell whether $ins_ns has its Secrets (rc=$gate_rc) — not applying it; prod is converged and stamped" >&2
             run_summary_field instances_applied "$INSTANCES_APPLIED"
@@ -621,7 +661,9 @@ _stage_done instances_s
 # why; with nothing skipped the render IS the committed file, byte for
 # byte, so an instance that has just been applied flips back to its own
 # gateway on this same converge. The map rides the packet as
-# `tunnel_ingress` (`<hostname> → <namespace>[ (<ns> skipped: <reason>)]`).
+# `tunnel_ingress` (`<hostname> → <namespace>[ (<ns> skipped: <reason>)]`),
+# recorded by the `tunnel connector` stage below from the SAME skipped
+# string — the one lib function both ticks record through (0b7804f3).
 #
 # THE CONNECTOR DOES NOT RE-READ A CHANGED CONFIGMAP. Read from
 # cloudflared 2026.9.1's source, not assumed: `tunnel --config … run`
@@ -651,7 +693,6 @@ _stage_done instances_s
 # could not make, not a Cloudflare-side fault.
 STAGE="tunnel ingress"
 TUNNEL_CONFIG=$(BOSS_INSTANCES_SKIPPED="$INSTANCES_SKIPPED" "$REPO/infra/cluster/render-tunnel-config.sh")
-TUNNEL_INGRESS=$(BOSS_INSTANCES_SKIPPED="$INSTANCES_SKIPPED" "$REPO/infra/cluster/render-tunnel-config.sh" --summary)
 printf '%s\n' "$TUNNEL_CONFIG" | $KAPPLY apply -f -
 TUNNEL_SHA=$(printf '%s\n' "$TUNNEL_CONFIG" | sha256sum | cut -d' ' -f1)
 patch_out=$($K patch deploy cloudflared -n "$SOURCE_NS" --type merge \
@@ -661,9 +702,8 @@ case "$patch_out" in
     *"no change"*) TUNNEL_ROLL="connector unchanged" ;;
     *)             TUNNEL_ROLL="connector rolled" ;;
 esac
-run_summary_field tunnel_ingress "$TUNNEL_INGRESS"
 run_summary_field tunnel_ingress_render "${TUNNEL_SHA:0:12} ($TUNNEL_ROLL)"
-echo "cluster-deploy-runner: tunnel ingress: $TUNNEL_INGRESS — render ${TUNNEL_SHA:0:12}, $TUNNEL_ROLL"
+echo "cluster-deploy-runner: tunnel ingress render ${TUNNEL_SHA:0:12}, $TUNNEL_ROLL"
 _stage_done ingress_s
 
 # THE TUNNEL CONNECTOR, read after the roll and after its ingress is
@@ -680,11 +720,12 @@ _stage_done ingress_s
 # pods, `connected` means the NEW pods hold an edge connection. The
 # read never fails the converge: the tunnel is not what a train
 # delivers, and a Cloudflare-side fault must not hold every train's
-# packet red.
+# packet red. Recorded through observe_connector — the one function
+# the unchanged tick records the same fields through (0b7804f3) —
+# beside the ingress map for the skipped string the apply loop decided,
+# so the map describes the render the pods above were rolled onto.
 STAGE="tunnel connector"
-CONNECTOR=$(connector_status "$K" "$KM" "$SOURCE_NS" "/manifests/$SOURCE_NS/cloudflared.yaml" cloudflared)
-run_summary_field cloudflared "$CONNECTOR"
-echo "cluster-deploy-runner: cloudflared: $CONNECTOR"
+observe_connector "$K" "$KM" "$SOURCE_NS" "/manifests/$SOURCE_NS/cloudflared.yaml" cloudflared "$INSTANCES_SKIPPED" deploy
 rm -rf "$APPLY_DIR"
 STAGE="verify manifests"
 

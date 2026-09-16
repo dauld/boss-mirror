@@ -388,8 +388,10 @@ fn the_runner_ensures_the_declared_secrets_after_the_roll_and_before_the_connect
     let ensured = after
         .find("$(ensure_declared_secrets ")
         .expect("the runner ensures the declared Secrets after the roll");
+    // The read is observe_connector's since 0b7804f3 (both ticks record
+    // through it); its position after the Secrets exist is what matters.
     let connector = after
-        .find("$(connector_status ")
+        .find("observe_connector \"$K\"")
         .expect("the runner reads the connector");
     assert!(
         ensured < connector,

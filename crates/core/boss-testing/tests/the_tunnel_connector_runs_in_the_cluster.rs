@@ -520,12 +520,17 @@ fn the_runner_records_the_connector_on_the_packet_after_the_roll() {
         .find("OUTCOME=\"converged=$HEAD\"")
         .expect("the runner marks the roll real");
     let after = &src[stamped..];
+    // Since 0b7804f3 the read and the recording are observe_connector's
+    // (cluster-deploy-lib.sh), so the unchanged tick records the same
+    // fields; every_converge_tick_observes_the_connector.rs holds the
+    // lib to recording `cloudflared`. What this pins is the deploying
+    // call's position.
     let read_at = after
-        .find("$(connector_status ")
+        .find("observe_connector \"$K\"")
         .expect("the runner reads the connector after the roll");
     assert!(
-        after[read_at..].contains("run_summary_field cloudflared"),
-        "the line rides the converge packet as `cloudflared`, the field the probe reads"
+        after[read_at..read_at + 200].contains(" deploy\n"),
+        "tagged as the deploying tick's observation"
     );
     // Before the rendered apply directory is discarded: the Secret is
     // derived from the RENDERED manifest, which lives only there.
@@ -663,22 +668,30 @@ fn the_source_cannot_be_skipped_and_the_committed_file_is_never_the_skip_render(
     }
 }
 
-/// The tunnel-ingress stage, lifted from the runner between its two
-/// markers, so the test exercises the shipped text rather than a copy.
+/// The tunnel-ingress stage AND the connector stage that follows it,
+/// lifted from the runner between two markers, so the test exercises
+/// the shipped text rather than a copy. Both stages, because since
+/// 0b7804f3 the ingress map is recorded by the connector stage's
+/// observe_connector — the one function the unchanged tick records
+/// the same fields through — from the skipped string the ingress
+/// stage rendered with.
 fn ingress_block() -> String {
     let src = read(RUNNER);
     let start = src
         .find("STAGE=\"tunnel ingress\"")
         .expect("the runner has the tunnel-ingress stage");
     let end = src[start..]
-        .find("_stage_done ingress_s")
-        .expect("the stage ends with its timing");
+        .find("rm -rf \"$APPLY_DIR\"")
+        .expect("the connector stage ends by discarding the apply directory");
     src[start..start + end].to_string()
 }
 
 /// Runs the block with a stub kubectl that keeps what `apply -f -` was
 /// fed, answers `patch` from STUB_PATCH, and logs every call; the real
-/// renderer runs against the real tree.
+/// renderer runs against the real tree. The connector stage's reads
+/// (a client dry run of a manifest the stub has none of, `rollout
+/// status`) get the stub's default empty exit 0: no Secret to derive,
+/// rolled out — `connected`.
 fn run_ingress(
     name: &str,
     skipped: &str,
@@ -698,11 +711,12 @@ exit 0
 "#,
     );
     let script = format!(
-        "set -euo pipefail\nREPO='{repo}'\nSOURCE_NS=boss\nK='{k}'\nKAPPLY='{k}'\nINSTANCES_SKIPPED='{skipped}'\n\
-         _stage_done() {{ :; }}\n. '{lib}'\n{block}\nexit 0\n",
+        "set -euo pipefail\nREPO='{repo}'\nSOURCE_NS=boss\nK='{k}'\nKM='{k}'\nKAPPLY='{k}'\nINSTANCES_SKIPPED='{skipped}'\n\
+         _stage_done() {{ :; }}\n. '{lib}'\n. '{deploy_lib}'\n{block}\nexit 0\n",
         repo = repo_root().display(),
         k = kubectl.display(),
         lib = repo_root().join("infra/run-summary.sh").display(),
+        deploy_lib = repo_root().join(LIB).display(),
         block = ingress_block()
     );
     let summary = dir.join("summary.json");
@@ -761,8 +775,8 @@ fn the_runner_re_renders_the_ingress_after_the_secret_gate_and_rolls_the_connect
         .find("STAGE=\"tunnel ingress\"")
         .expect("the runner has the tunnel-ingress stage");
     let connector_at = src
-        .find("$(connector_status ")
-        .expect("the runner reads the connector");
+        .find("observe_connector \"$K\" \"$KM\"")
+        .expect("the runner reads the connector (through the lib, since 0b7804f3)");
     let discard = src
         .find("rm -rf \"$APPLY_DIR\"")
         .expect("the runner discards the apply directory");
@@ -820,6 +834,10 @@ fn the_runner_re_renders_the_ingress_after_the_secret_gate_and_rolls_the_connect
         "boss.algedonic.dev → boss; playground.algedonic.dev → boss (boss-playground skipped: secrets absent)",
         "{recorded}"
     );
+    // The deploying tick still records the connector beside the map,
+    // and says which tick looked (0b7804f3).
+    assert_eq!(recorded["cloudflared"], "connected", "{recorded}");
+    assert_eq!(recorded["observed_on"], "deploy", "{recorded}");
     let sha = sha256_hex(&applied);
     let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
     let patch = calls

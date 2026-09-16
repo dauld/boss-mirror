@@ -46,8 +46,9 @@
 #   3. THE HAND-OVER, read through the system of record BEFORE anything
 #      is stopped. The newest maintenance-cluster-converge packet whose
 #      `run` step carries a `cloudflared` field is the newest converge
-#      that OBSERVED the connector (a no-op tick — `unchanged` — reads
-#      nothing and is not evidence either way). It must be under two
+#      that OBSERVED the connector (since 0b7804f3 every tick does,
+#      the no-op `unchanged` one included; an older tick that carries
+#      no field is not evidence either way). It must be under two
 #      hours old, must say `cloudflared: connected`, and its
 #      `tunnel_ingress` must name every hostname from bound 2 as
 #      `<hostname> →`. No such packet, a dark system of record, a stale
@@ -171,9 +172,11 @@ if ! curl -fsS --max-time 15 -H "x-boss-user: $BOSS_USER" "$CONVERGE_URL" > "$TM
     exit 2
 fi
 # The newest converge that OBSERVED the connector: the run step carries
-# a `cloudflared` field only on a converge that deployed (a no-op tick
-# records `unchanged` and reads nothing). Newest by the run step's own
-# completed_at, not by the API's order.
+# a `cloudflared` field on every tick since 0b7804f3 (before it, only a
+# deploying one did — a no-op tick recorded `unchanged` and read
+# nothing, which is how a quiet morning refused David's --for-real over
+# a 194-minute-old observation, ops-request 7d05cb04). Newest by the
+# run step's own completed_at, not by the API's order.
 OBS=$(jq -c '
     (if type == "object" and has("data") then .data else . end)
     | map(. as $j

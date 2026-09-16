@@ -465,6 +465,45 @@ fn the_runner_answers_its_request_through_the_exit_trap() {
         work.join("infra/run-summary.sh"),
     )
     .unwrap();
+    // …and, since 0b7804f3, the unchanged tick OBSERVES the tunnel
+    // connector: it renders the instances (render-instance.sh reads
+    // instances.toml, the roster, the manifests and checks each tenant
+    // path exists) and summarises the ingress (render-tunnel-config.sh
+    // beside the lib's parser), so the scratch clone carries this
+    // tree's copies of those too. kubectl is a `sudo docker run …`
+    // there; a stub `sudo` on PATH below answers its reads.
+    let cluster = repo_root().join("infra/cluster");
+    std::fs::create_dir_all(work.join("infra/cluster/manifests")).unwrap();
+    for f in [
+        "render-instance.sh",
+        "render-tunnel-config.sh",
+        "instances-skipped.lib.sh",
+        "instances.toml",
+        "instance-manifests.txt",
+    ] {
+        std::fs::copy(cluster.join(f), work.join("infra/cluster").join(f)).unwrap();
+    }
+    for entry in std::fs::read_dir(cluster.join("manifests")).unwrap() {
+        let p = entry.unwrap().path();
+        if p.extension().is_some_and(|e| e == "yaml") {
+            std::fs::copy(
+                &p,
+                work.join("infra/cluster/manifests")
+                    .join(p.file_name().unwrap()),
+            )
+            .unwrap();
+        }
+    }
+    let instances = std::fs::read_to_string(cluster.join("instances.toml")).unwrap();
+    for tenant in instances
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("tenant = \""))
+        .filter_map(|l| l.strip_suffix('"'))
+    {
+        let p = work.join(tenant);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "").unwrap();
+    }
     let git = |args: &[&str]| {
         let out = Command::new("git")
             .args(args)
@@ -515,6 +554,19 @@ fn the_runner_answers_its_request_through_the_exit_trap() {
     let mut perm = std::fs::metadata(&curl).unwrap().permissions();
     std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
     std::fs::set_permissions(&curl, perm).unwrap();
+    // The runner's kubectl is `sudo docker run … kubectl …`; this stub
+    // `sudo` logs the call and answers the observation's reads — a
+    // client dry run with nothing (no Secret to derive), `get secret`
+    // not found, `rollout status` rolled out — and nothing else.
+    let sudo = bin.join("sudo");
+    std::fs::write(
+        &sudo,
+        "#!/usr/bin/env bash\necho \"sudo $*\" >> \"$STUB_LOG\"\ncase \"$*\" in\n  *\" get secret \"*) echo 'Error from server (NotFound): secrets not found' >&2; exit 1 ;;\nesac\nexit 0\n",
+    )
+    .unwrap();
+    let mut perm = std::fs::metadata(&sudo).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
+    std::fs::set_permissions(&sudo, perm).unwrap();
     let id = "15bd2027-0000-4000-8000-000000000000";
     std::fs::write(work.join(".git/boss-converge-requests"), format!("{id}\n")).unwrap();
 
@@ -545,7 +597,21 @@ fn the_runner_answers_its_request_through_the_exit_trap() {
         "{}",
         text(&out)
     );
+    // And on its way out the unchanged tick observed the connector —
+    // through the real K string, the real render, the stub's reads
+    // (0b7804f3; the fields themselves are pinned by
+    // every_converge_tick_observes_the_connector.rs).
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains("cloudflared: connected (observed on unchanged)"),
+        "the no-op tick reads the connector before it exits: {}",
+        text(&out)
+    );
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        calls.contains("kubectl --kubeconfig=/kc rollout status deploy/cloudflared -n boss"),
+        "the connector read went through the runner's own kubectl: {calls}"
+    );
     assert!(
         calls.contains("-X PATCH") && calls.contains(&format!("/api/jobs/{id}/metadata")),
         "the run's exit answers the request that started it: {calls}\n{}",
