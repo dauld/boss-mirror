@@ -344,7 +344,10 @@ impl SecretStore for KubeSecretStore {
             reqwest::StatusCode::NOT_FOUND => Err(format!(
                 "secret {namespace}/{name} does not exist — the broker is \
                  deliberately not granted `create` (it cannot be name-scoped); \
-                 pre-create it: kubectl create secret generic {name} -n {namespace}"
+                 the cluster converge creates it empty from this rule's \
+                 secret_namespace / secret_name (cluster-deploy-lib.sh \
+                 ensure_declared_secrets, packet field secrets_declared), so \
+                 main has not converged since the rule declared it"
             )),
             s => Err(format!("PATCH {url} returned {s}")),
         }

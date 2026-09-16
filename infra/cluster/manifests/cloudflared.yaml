@@ -19,22 +19,28 @@
 # and the tunnel carries several connectors at once, so this one serves
 # traffic before that one stops.
 #
-# THE CREDENTIALS. The Secret below is the JSON `cloudflared tunnel
-# create` writes (TunnelID, AccountTag, TunnelSecret). It is minted ONCE
-# by David and referenced here by name only — the Secret never lives in
-# the tree (README: secrets never live here). The exact shape, names
-# only:
+# THE CREDENTIALS. The Secret below holds cloudflared's credentials.json
+# (TunnelID, AccountTag, TunnelSecret), referenced here by name only —
+# the Secret never lives in the tree (README: secrets never live here).
+# No hand mints it: the converge CREATES the object empty when it is
+# absent (cluster-deploy-lib.sh ensure_declared_secrets, reading the
+# broker rule's `secret_namespace` / `secret_name` — backlog 51c98681;
+# the converge packet records it as `secrets_declared: created …`),
+# and the credential broker FILLS it on a rotate-a-credential packet
+# opened on `cloudflare-tunnel-credentials` (the
+# broker-rotates-the-cloudflare-tunnel rule, 04e5f833: a new tunnel is
+# minted, its file PATCHed in, this Deployment rollout-restarted).
 #
-#   kubectl -n boss create secret generic cloudflare-tunnel-credentials --from-file=credentials.json=<the file tunnel create wrote>
-#
-# Until it exists the pods wait in ContainerCreating (the volume is not
-# `optional`, on purpose: a connector without its credentials must look
-# absent, not serve nothing), the converge is not held — the connector
-# is not what a train delivers — and the converge packet records
-# `cloudflared: skipped (secret absent: cloudflare-tunnel-credentials)`,
-# the field the car's probe reads (cluster-deploy-lib.sh
-# connector_status). Registry row: credentials id
-# cloudflare-tunnel-credentials, consumer cloudflared.
+# Until the object exists the pods wait in ContainerCreating (the volume
+# is not `optional`, on purpose: a connector without its credentials
+# must look absent, not serve nothing) and the converge packet records
+# `cloudflared: skipped (secret absent: cloudflare-tunnel-credentials)`;
+# once it exists and before the broker has filled it, the pods start
+# without a file and the packet records `not-ready` — the designed
+# order. Neither holds the converge: the connector is not what a train
+# delivers. Both are the field the car's probe reads
+# (cluster-deploy-lib.sh connector_status). Registry row: credentials
+# id cloudflare-tunnel-credentials, consumer cloudflared.
 #
 # THE IMAGE is pinned by tag AND digest, both read from the registry on
 # 2026-09-16 (Docker-Content-Digest of the 2026.9.1 manifest list; the

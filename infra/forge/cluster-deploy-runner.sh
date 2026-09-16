@@ -509,12 +509,32 @@ _stage_done roll_s
 # way, and the maintenance packet carries the verification verdict.
 OUTCOME="converged=$HEAD"
 
+# THE DECLARED BROKER SECRETS EXIST, EMPTY, before anything reads them
+# (backlog 51c98681, David 2026-09-16). The credential broker fills a
+# Secret by PATCH and is deliberately not granted `create`, so the
+# empty object at the head of every machine rotation was a hand act —
+# and for the tunnel credential nobody's, so the connector below read
+# `skipped (secret absent)` on every converge with nothing that would
+# change it. This runner holds the admin credential and the converged
+# tree, so it creates each Secret the broker rules declare
+# (infra/dispatcher/rules/*, the `secret_namespace` / `secret_name`
+# args the broker itself writes to — cluster-deploy-lib.sh
+# broker_secrets) when it is absent, EMPTY, and never touches one that
+# exists. The line rides the packet as `secrets_declared` — the field
+# the car's probe reads — and never fails the converge: a Secret the
+# broker fills is not what a train delivers. Before the connector read
+# on purpose: the field that read records is then about the connector.
+STAGE="declared secrets"
+SECRETS_DECLARED=$(ensure_declared_secrets "$K" "$REPO/infra/dispatcher/rules")
+run_summary_field secrets_declared "$SECRETS_DECLARED"
+echo "cluster-deploy-runner: secrets declared: $SECRETS_DECLARED"
+
 # THE TUNNEL CONNECTOR, read after the roll (backlog 5a2bb0ce; design
 # 4c565f8c, David 2026-09-16). cloudflared.yaml is a prod pipeline
-# manifest, applied above with the rest; its one Secret is minted by
-# David out of tree, and prod's apply has no secret gate, so the pods
-# either connect or wait in ContainerCreating with nothing on the
-# packet saying which. cluster-deploy-lib.sh connector_status derives
+# manifest, applied above with the rest; its one Secret is created
+# empty by the stage above and filled by the broker's rotation, and
+# prod's apply has no secret gate, so the pods either connect or wait
+# with nothing on the packet saying which. cluster-deploy-lib.sh connector_status derives
 # the Secret from the RENDERED manifest (still mounted at /manifests
 # here — the apply directory is discarded after the instance loop),
 # and records `connected`, `not-ready`, or `skipped (secret absent:

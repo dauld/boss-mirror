@@ -31,9 +31,10 @@
 //!     catch-all — and refuses a tree whose gateway Service it cannot
 //!     find, or whose instances share a hostname;
 //!   * the connector mounts the credentials Secret by name, read-only,
-//!     and never `optional` — and the one `kubectl create secret` shape
-//!     David mints it with is spelled the same in the manifest header,
-//!     the README and the registry row (four copies, one test);
+//!     and never `optional` — and no document tells a human to mint it
+//!     by hand any more (51c98681: the converge creates the object
+//!     empty, the broker fills it); the registry row and the ConfigMap
+//!     still agree on the key;
 //!   * the image is pinned by tag AND digest;
 //!   * the converge reads the connector after the roll: the Secret's
 //!     name is DERIVED from the rendered manifest through the lib's own
@@ -59,9 +60,10 @@ const SCHEMA: &str = "infra/postgres/schema";
 
 const SECRET: &str = "cloudflare-tunnel-credentials";
 const SECRET_KEY: &str = "credentials.json";
-/// The one shape David mints the Secret with — names only, never a
-/// value. Every document that tells him how must spell it exactly so.
-const MINT: &str = "kubectl -n boss create secret generic cloudflare-tunnel-credentials --from-file=credentials.json=";
+/// The hand mint this Secret USED to need (5a2bb0ce) and no longer
+/// may be told to a human (51c98681): the converge creates the object
+/// empty and the broker fills it.
+const HAND_MINT: &str = "create secret generic cloudflare-tunnel-credentials --from-file";
 
 /// The exit code the renderer uses for a refusal — the same as
 /// render-instance.sh, so a caller can tell "refused, reason on
@@ -323,17 +325,27 @@ fn the_connector_mounts_the_credentials_secret_by_name_and_the_mint_shape_is_spe
         "{image}"
     );
 
-    // Four copies of the mint shape, one test: the manifest header, the
-    // README, the registry row's storage line — and the key the
-    // ConfigMap's credentials-file path ends on.
-    assert!(
-        manifest.contains(MINT),
-        "{CONNECTOR} header spells the mint shape"
-    );
-    assert!(
-        read(README).contains(MINT),
-        "{README} spells the mint shape"
-    );
+    // NO hand mint shape anywhere (backlog 51c98681): the converge
+    // creates the object empty and the broker fills it, so a `create
+    // secret … --from-file` instruction is not merely stale, it fails
+    // AlreadyExists against the object the converge made. The header
+    // and the README name the two halves instead; the registry row's
+    // storage line and the ConfigMap's credentials-file path still
+    // agree on the key.
+    for (doc, text) in [(CONNECTOR, manifest.clone()), (README, read(README))] {
+        assert!(
+            !text.contains(HAND_MINT),
+            "{doc} still tells a human to mint the Secret by hand"
+        );
+        assert!(
+            text.contains("ensure_declared_secrets") && text.contains("secrets_declared"),
+            "{doc} names the converge stage that creates the object and its packet field"
+        );
+        assert!(
+            text.contains("broker-rotates-the-cloudflare-tunnel"),
+            "{doc} names the rule that fills it"
+        );
+    }
     let migration = std::fs::read_dir(repo_root().join(SCHEMA))
         .unwrap()
         .map(|e| e.unwrap().path())

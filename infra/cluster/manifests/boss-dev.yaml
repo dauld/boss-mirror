@@ -650,10 +650,10 @@ spec:
         # `items` maps the Secret's `token` key onto the filename the
         # train verbs already expect. `optional: true`, same posture
         # as forge-read: an absent Secret is a closed door, not a
-        # stuck pod. The Secret is pre-created empty out-of-band
-        # (boss-credential-broker.yaml documents why create is not
-        # the broker's to do) and filled by the broker's first
-        # rotation.
+        # stuck pod. The Secret is created empty by the converge from
+        # the broker rule's declaration (boss-credential-broker.yaml
+        # documents why create is not the broker's to do; backlog
+        # 51c98681) and filled by the broker's first rotation.
         - name: forge-write-token
           secret:
             secretName: boss-dev-forge-token

@@ -209,6 +209,33 @@ manifest_secret_keys() {
           | select(.optional != true) | "\(.name)\t\(.key)" ] | unique | .[]'
 }
 
+# secret_presence K NS NAME — the ONE read of "does this Secret exist",
+#   for every loop in this file (CLAUDE.md §9a: instance_secret_gate and
+#   connector_status each carried their own copy until 51c98681 needed a
+#   third). Prints exactly one of:
+#     present            the credential read it
+#     absent             the server said not found — the Secret, or the
+#                        whole namespace on a first converge; both are
+#                        "it is not there"
+#     cannot: REASON     a read the credential could not make (Forbidden,
+#                        a dead apiserver) — neither answer, and the
+#                        caller must not treat it as one
+#   A here-string, not a pipe, for the grep: under pipefail a multi-line
+#   error piped into `grep -q` can lose the race to SIGPIPE and read as
+#   "cannot" (the #361-era gate flake).
+secret_presence() {
+    local k="$1" ns="$2" name="$3" out
+    if out=$($k get secret -n "$ns" "$name" 2>&1); then
+        echo present
+        return 0
+    fi
+    if grep -qi 'not found' <<< "$out"; then
+        echo absent
+        return 0
+    fi
+    echo "cannot: $(head -n 1 <<< "$out")"
+}
+
 # instance_secret_gate K KM NS PATH
 #   0  every required Secret exists in NS — apply the instance
 #   1  at least one is absent — SKIP the instance; stdout is the absent
@@ -223,18 +250,16 @@ manifest_secret_keys() {
 #   runner's manifests mount) — the same command when there is one.
 instance_secret_gate() {
     local k="$1" km="$2" ns="$3" path="$4"
-    local required name out absent="" keys
+    local required name answer absent="" keys
     required=$(manifest_secrets "$km" "$path") || return 2
     for name in $required; do
-        if out=$($k get secret -n "$ns" "$name" 2>&1); then
-            continue
-        fi
-        if printf '%s' "$out" | grep -qi 'not found'; then
-            absent="$absent $name"
-        else
-            echo "cluster-deploy-runner: cannot read Secret $ns/$name — $out" >&2
-            return 2
-        fi
+        answer=$(secret_presence "$k" "$ns" "$name")
+        case "$answer" in
+            present) ;;
+            absent) absent="$absent $name" ;;
+            *)  echo "cluster-deploy-runner: cannot read Secret $ns/$name — ${answer#cannot: }" >&2
+                return 2 ;;
+        esac
     done
     [ -n "$absent" ] || return 0
     absent="${absent# }"
@@ -291,21 +316,19 @@ instance_secret_gate() {
 #   the kubectl that can see PATH (the runner's manifests mount).
 connector_status() {
     local k="$1" km="$2" ns="$3" path="$4" deploy="$5"
-    local required name out absent=""
+    local required name answer absent=""
     if ! required=$(manifest_secrets "$km" "$path"); then
         echo "unknown (cannot derive the Secrets from $path)"
         return 0
     fi
     for name in $required; do
-        if out=$($k get secret -n "$ns" "$name" 2>&1); then
-            continue
-        fi
-        if printf '%s' "$out" | grep -qi 'not found'; then
-            absent="$absent $name"
-        else
-            echo "unknown (cannot read Secret $ns/$name: $(printf '%s' "$out" | head -n 1))"
-            return 0
-        fi
+        answer=$(secret_presence "$k" "$ns" "$name")
+        case "$answer" in
+            present) ;;
+            absent) absent="$absent $name" ;;
+            *)  echo "unknown (cannot read Secret $ns/$name: ${answer#cannot: })"
+                return 0 ;;
+        esac
     done
     if [ -n "$absent" ]; then
         echo "skipped (secret absent:$absent)"
@@ -316,6 +339,116 @@ connector_status() {
     else
         echo not-ready
     fi
+}
+
+# A DECLARED BROKER SECRET IS CREATED EMPTY WHEN IT IS ABSENT (backlog
+# 51c98681; David 2026-09-16: no hand work unless absolutely required,
+# and an empty object declared in the registry is not a credential).
+#
+# The credential broker's install phase PATCHes a value into its Secret
+# and is deliberately NOT granted `create` — it cannot be name-scoped in
+# RBAC, so the grant would be namespace-wide (boss-credential-broker.yaml).
+# That left one hand act at the head of every machine rotation: "the
+# Secret is pre-created empty, out-of-band, once". For the forge token
+# it was done by hand; for the tunnel credential nobody had, so the
+# connector waited in ContainerCreating and every converge recorded
+# `cloudflared: skipped (secret absent: cloudflare-tunnel-credentials)`
+# with nothing that would ever change it. The converge holds the admin
+# credential, so the empty object is its to create — and ONLY the empty
+# object: a value is the broker's, and a Secret that exists is never
+# touched, whatever it holds.
+#
+# WHICH SECRETS is the broker's own declaration, not a list here and not
+# a parse of the registry row's prose: every `credential.rotate.*` rule
+# under infra/dispatcher/rules/ carries `secret_namespace` / `secret_name`
+# as handler args, and those args are exactly what the handler writes
+# (credential_issuer.rs `write_key`). Reading them means the converge
+# creates the Secret the broker will fill, by construction; a second
+# copy on the registry row would be the pair §9a says drifts. The tree
+# is the converging checkout, so no read of the system of record is
+# needed to know what to create (an arm that needs the patient is not
+# an arm).
+#
+# broker_secrets RULES_DIR
+#   ns<TAB>name for every Secret a broker rule declares, sorted, unique.
+#   Read with grep/sed, not a TOML parser (roles.toml's rule): the
+#   `handler = "…"` line names the handler, the `args = { … }` line that
+#   follows it carries the Secret as two string LITERALS — the expr
+#   spelling is `"\"boss\""`. A broker rule whose Secret is not a literal
+#   (a metadata expression, an absent arg) is a NAMED refusal on stderr
+#   and return 1: the converge cannot know what to create and must not
+#   guess; the readable declarations are still printed.
+broker_secrets() {
+    local dir="$1" f line handler="" ns name found="" bad=0
+    for f in "$dir"/*.toml; do
+        [ -f "$f" ] || continue
+        while IFS= read -r line; do
+            case "$line" in
+                'handler = "'*)
+                    handler=${line#handler = \"}
+                    handler=${handler%%\"*} ;;
+                'args = '*)
+                    case "$handler" in
+                        credential.rotate.*) ;;
+                        *) continue ;;
+                    esac
+                    ns=$(sed -nE 's/.*secret_namespace = "\\"([^"\\]+)\\"".*/\1/p' <<< "$line")
+                    name=$(sed -nE 's/.*secret_name = "\\"([^"\\]+)\\"".*/\1/p' <<< "$line")
+                    if [ -z "$ns" ] || [ -z "$name" ]; then
+                        echo "cluster-deploy-runner: $f: rule handler $handler declares no literal secret_namespace / secret_name — cannot know which Secret to create" >&2
+                        bad=1
+                    else
+                        found="$found$ns"$'\t'"$name"$'\n'
+                    fi
+                    handler="" ;;
+            esac
+        done < "$f"
+    done
+    [ -z "$found" ] || printf '%s' "$found" | LC_ALL=C sort -u
+    return $bad
+}
+
+# ensure_declared_secrets K RULES_DIR
+#   For each Secret broker_secrets declares: absent → create it EMPTY
+#   (`kubectl -n NS create secret generic NAME`, no --from-* of any kind,
+#   so the object carries no data until the broker's install phase
+#   fills it); present → nothing, whatever it holds; a read the
+#   credential cannot make, or a create that fails → named with kubectl's
+#   reason, and NOT created — a Forbidden read is a refusal, not an
+#   absence. Prints exactly one line for the converge packet:
+#     created NS/NAME, … | present NS/NAME, … | cannot NS/NAME (REASON), …
+#   (each part only when non-empty; `none declared` when no broker rule
+#   exists; `unreadable declaration` appended when broker_secrets refused
+#   one — the details are on stderr). Returns 0 in every case: the line
+#   is the verdict, the car's probe reads it, and a Secret the broker
+#   fills is not what a train delivers, so it must not hold the converge.
+ensure_declared_secrets() {
+    local k="$1" dir="$2" declared ns name answer out created="" present="" cannot="" unreadable=0
+    declared=$(broker_secrets "$dir") || unreadable=1
+    while IFS=$'\t' read -r ns name; do
+        [ -n "$name" ] || continue
+        answer=$(secret_presence "$k" "$ns" "$name")
+        case "$answer" in
+            present) present="${present:+$present, }$ns/$name" ;;
+            absent)
+                if out=$($k -n "$ns" create secret generic "$name" 2>&1); then
+                    created="${created:+$created, }$ns/$name"
+                    echo "cluster-deploy-runner: created Secret $ns/$name, empty — the broker's install phase fills it" >&2
+                else
+                    cannot="${cannot:+$cannot, }$ns/$name ($(head -n 1 <<< "$out"))"
+                    echo "cluster-deploy-runner: could not create Secret $ns/$name — $out" >&2
+                fi ;;
+            *)  cannot="${cannot:+$cannot, }$ns/$name (${answer#cannot: })"
+                echo "cluster-deploy-runner: cannot read Secret $ns/$name — ${answer#cannot: }; not creating it" >&2 ;;
+        esac
+    done <<< "$declared"
+    local line=""
+    [ -z "$created" ] || line="created $created"
+    [ -z "$present" ] || line="${line:+$line | }present $present"
+    [ -z "$cannot" ] || line="${line:+$line | }cannot $cannot"
+    [ "$unreadable" = 0 ] || line="${line:+$line | }unreadable declaration (see the journal)"
+    echo "${line:-none declared}"
+    return 0
 }
 
 # converge_held HOLD_FILE — an operator's hold stands: print its reason

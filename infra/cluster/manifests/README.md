@@ -51,27 +51,43 @@ the reason on each line — a new file here must be classified there, or
 the render refuses by name. Secrets are still per namespace and still
 out of tree: a new instance's pods wait until they are minted.
 
-**The tunnel's credentials — one Secret, minted once by David.** The
-connector (`cloudflared.yaml`; backlog 5a2bb0ce, design 4c565f8c) mounts
-the JSON that `cloudflared tunnel create` writes, from a Secret it
-names and never carries. Mint it once, names only:
+**The tunnel's credentials — one Secret, created empty by the converge,
+filled by the broker.** The connector (`cloudflared.yaml`; backlog
+5a2bb0ce, design 4c565f8c) mounts cloudflared's `credentials.json` from
+a Secret it names and never carries. No hand mints it (backlog
+51c98681, David 2026-09-16: no hand work unless absolutely required):
 
-```
-kubectl -n boss create secret generic cloudflare-tunnel-credentials --from-file=credentials.json=<the file tunnel create wrote>
-```
+- **The object.** A Secret the credential broker fills is declared by
+  its rule under `infra/dispatcher/rules/` (`secret_namespace` /
+  `secret_name` on a `credential.rotate.*` handler — the args the
+  broker itself PATCHes). The converge reads those declarations and
+  creates each absent Secret EMPTY, never a value, never touching one
+  that exists (`infra/forge/cluster-deploy-lib.sh`
+  `ensure_declared_secrets`); the converge packet records
+  `secrets_declared: created … | present …`. The broker is deliberately
+  not granted `create` (`boss-credential-broker.yaml`: it cannot be
+  name-scoped), which is why the converge, which holds the admin
+  credential, does this half.
+- **The value.** A rotate-a-credential packet opened on
+  `cloudflare-tunnel-credentials` fires the
+  `broker-rotates-the-cloudflare-tunnel` rule (04e5f833): a new tunnel
+  is minted, its file PATCHed into the Secret, the connector
+  rollout-restarted.
 
-Until it exists the connector's pods wait in `ContainerCreating` (the
-volume is deliberately not `optional`), the converge is NOT held — the
-connector is not what a train delivers — and every converge packet
-records `cloudflared: skipped (secret absent: cloudflare-tunnel-credentials)`
-(`infra/forge/cluster-deploy-lib.sh` `connector_status`, which derives
-the Secret's name from the rendered manifest exactly as the instance
-secret gate does). Once minted, the field flips to `connected` — the
-readinessProbe is cloudflared's own `/ready`, which answers 200 only
-with a live edge connection — or `not-ready`, which is a fault to read
-from the pods. The credential is a registry row
-(`boss credential list`: id `cloudflare-tunnel-credentials`, consumer
-`cloudflared`).
+Until the object exists the connector's pods wait in
+`ContainerCreating` (the volume is deliberately not `optional`) and
+every converge packet records
+`cloudflared: skipped (secret absent: cloudflare-tunnel-credentials)`;
+between the create and the first rotation the pods start without a
+file and the packet records `not-ready` — the designed order. Neither
+holds the converge: the connector is not what a train delivers.
+(`connector_status` derives the Secret's name from the rendered
+manifest exactly as the instance secret gate does.) Once filled, the
+field flips to `connected` — the readinessProbe is cloudflared's own
+`/ready`, which answers 200 only with a live edge connection — or stays
+`not-ready`, which is then a fault to read from the pods. The
+credential is a registry row (`boss credential list`: id
+`cloudflare-tunnel-credentials`, consumer `cloudflared`).
 
 **Code, config and schema all converge from the tree, every deploy**
 
