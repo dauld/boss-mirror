@@ -29,7 +29,18 @@ mask() {
     # Environment=NAME=value  |  Environment="NAME=value NAME2=value2"
     # A name containing TOKEN / SECRET / PASSWORD / PASSWD / API_KEY /
     # PRIVATE_KEY / CREDENTIAL (any case) has its value replaced.
-    sed -E 's/((TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|CREDENTIAL)[A-Za-z0-9_]*=)[^" ]*/\1<masked by unit-cat>/Ig'
+    #
+    # AND A SECRET PASSED AS A FLAG. `--token <v>`, `--api-key=<v>`,
+    # `--password <v>`: the value after a secret-named flag, separated
+    # by a space or an equals sign, is replaced and the flag name stays.
+    # On 2026-09-16 the operator read boss-gcp's cloudflared.service
+    # through this door — `cloudflared tunnel run --token <v>` — and
+    # the packet (ops-request 0117de08) carried the tunnel token into
+    # the system of record, because only the NAME= shape was known
+    # (backlog 9c760dd7). Two shapes, one mask, the same marker.
+    sed -E \
+        -e 's/((TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|CREDENTIAL)[A-Za-z0-9_]*=)[^" ]*/\1<masked by unit-cat>/Ig' \
+        -e 's/(--?(token|api-?key|apikey|password|passwd|secret|private-?key|credentials?|auth-?token|access-?key)[A-Za-z0-9_-]*)([= ])[^" ]+/\1\3<masked by unit-cat>/Ig'
 }
 
 out=$(systemctl cat --no-pager -- "$unit" 2>&1)

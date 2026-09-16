@@ -107,6 +107,19 @@ pub struct DispatcherConfig {
     /// name instead of tripping UnknownHandler. Never logged.
     #[serde(skip)]
     pub broker_forgejo_token: Option<String>,
+    /// The Cloudflare v4 API the `credential.rotate.cloudflare-tunnel`
+    /// handler speaks (packet 04e5f833). Overridable for a stub;
+    /// defaults to the real endpoint.
+    pub broker_cloudflare_api_url: String,
+    /// The broker's Cloudflare root credential — one account API
+    /// token (Cloudflare Tunnel:Edit, Zone:DNS:Edit, Zone:Read),
+    /// minted once by David into the same `boss-credential-broker-root`
+    /// Secret under key `cloudflare-token`. Same posture as the
+    /// forgejo root: `None` leaves the handler registered but
+    /// unconfigured, so a firing rule dead-letters naming the knob.
+    /// Never logged.
+    #[serde(skip)]
+    pub broker_cloudflare_token: Option<String>,
 }
 
 impl Default for DispatcherConfig {
@@ -151,6 +164,12 @@ impl Default for DispatcherConfig {
             broker_forge_url: std::env::var("BOSS_BROKER_FORGE_URL")
                 .unwrap_or_else(|_| "http://10.20.0.15:3000".to_string()),
             broker_forgejo_token: std::env::var("BOSS_BROKER_FORGEJO_TOKEN")
+                .ok()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty()),
+            broker_cloudflare_api_url: std::env::var("BOSS_BROKER_CLOUDFLARE_API_URL")
+                .unwrap_or_else(|_| "https://api.cloudflare.com/client/v4".to_string()),
+            broker_cloudflare_token: std::env::var("BOSS_BROKER_CLOUDFLARE_TOKEN")
                 .ok()
                 .map(|t| t.trim().to_string())
                 .filter(|t| !t.is_empty()),

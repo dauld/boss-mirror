@@ -322,15 +322,49 @@ K="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro alpine/k8s:1.3
 # placeholder tag committed in boss.yaml — is what the cluster ends
 # on. A failed apply aborts here (set -e): no stamp is written, the
 # next timer run retries.
-KM="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro -v $REPO/infra/cluster/manifests:/manifests:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
+# ONE SOURCE, RENDERED PER INSTANCE (backlog 07d7549c; design ffc83387,
+# David 2026-09-16: the playground is a second namespace on this
+# cluster, and both it and prod converge on every train). The
+# manifests directory is written for prod; infra/cluster/instances.toml
+# names every instance and its four parameters, and render-instance.sh
+# emits each one into its own directory — prod's byte-identical to the
+# tree (a test holds it so), every other with namespace, tenant, sim
+# flag, hostname and the in-cluster DNS names substituted. The roster
+# infra/cluster/instance-manifests.txt says which manifests exist per
+# instance and which exist once for the pipeline; a manifest it does
+# not classify REFUSES the render, so a partial apply never reads as a
+# full one. The image-sha substitution below is unchanged and runs on
+# every rendered directory.
+STAGE="render instances"
+RENDER_DIR="$(mktemp -d -t cluster-deploy-render.XXXXXX)"
+APPLY_DIR="$(mktemp -d -t cluster-deploy-manifests.XXXXXX)"
+"$REPO/infra/cluster/render-instance.sh" --all "$RENDER_DIR"
+INSTANCES=$("$REPO/infra/cluster/render-instance.sh" --instances)
+SOURCE_NS=$("$REPO/infra/cluster/render-instance.sh" --source)
 # The applied copy carries the build that is ALREADY converged (the
 # stamp), not the manifest's placeholder tag: the apply must never
 # change what runs. Rolling to $HEAD is roll_deployment's job below.
-STAGE="apply manifests"
-APPLY_DIR="$(mktemp -d -t cluster-deploy-manifests.XXXXXX)"
-manifests_with_image "$REPO/infra/cluster/manifests" "$APPLY_DIR" "$REGISTRY" "$LAST"
+while IFS=$'\t' read -r _iname ins_ns _t _s _h; do
+    manifests_with_image "$RENDER_DIR/$ins_ns" "$APPLY_DIR/$ins_ns" "$REGISTRY" "$LAST"
+done <<< "$INSTANCES"
+rm -rf "$RENDER_DIR"
 KM="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro -v $APPLY_DIR:/manifests:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
-echo "cluster-deploy-runner: applying infra/cluster/manifests (boss image pinned to the converged $LAST)"
+# apply_instance NAMESPACE — the rendered directory for one instance.
+# The files that declare a Namespace go FIRST: `kubectl apply -f DIR`
+# walks files alphabetically, so on a namespace's first converge every
+# CronJob sorted before boss.yaml would meet "namespace not found",
+# the apply would exit 1 after creating the namespace, and only the
+# NEXT converge would succeed. A second apply of an unchanged file is
+# a no-op, so prod pays nothing for the same ordering.
+apply_instance() {
+    local ns="$1" f
+    for f in $(grep -l '^kind: Namespace$' "$APPLY_DIR/$ns"/*.yaml); do
+        $KM apply -f "/manifests/$ns/${f##*/}"
+    done
+    $KM apply -f "/manifests/$ns"
+}
+STAGE="apply manifests"
+echo "cluster-deploy-runner: applying infra/cluster/manifests for $SOURCE_NS (boss image pinned to the converged $LAST)"
 # SAY WHAT THE APPLY DOES NOT DO. `kubectl apply` with no `--prune` is
 # ADDITIVE: it creates and updates the objects the files name and has no
 # opinion about anything else. So a manifest DELETED from the tree takes
@@ -342,8 +376,7 @@ echo "cluster-deploy-runner: applying infra/cluster/manifests (boss image pinned
 # refused here (it takes a derived set, and that set contains the
 # StatefulSets and PVCs holding the audit log).
 echo "cluster-deploy-runner: apply is additive — NO --prune. An object whose manifest was deleted keeps running; the verify step below names it."
-$KM apply -f /manifests
-rm -rf "$APPLY_DIR"
+apply_instance "$SOURCE_NS"
 
 # StepPlugin bundles converge from the tree too (job d35aec77).
 # Code converges in the image, config in the manifests above, schema
@@ -377,20 +410,26 @@ KP="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro -v $REPO/infr
 # against my own kubectl and never against the docker wrapper it
 # actually runs through.
 KAPPLY="sudo docker run --rm -i --network host -v $KUBECONFIG_PATH:/kc:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
-echo "cluster-deploy-runner: converging the step-plugins ConfigMap"
 STAGE="configmaps"
 PLUGIN_ARGS=""
 for f in "$REPO"/infra/step-plugins/*.js; do
     [ -e "$f" ] || continue
     PLUGIN_ARGS="$PLUGIN_ARGS --from-file=$(basename "$f")=/plugins/$(basename "$f")"
 done
-if [ -n "$PLUGIN_ARGS" ]; then
-    # shellcheck disable=SC2086
-    $KP create configmap step-plugins -n boss $PLUGIN_ARGS \
-        --dry-run=client -o yaml | $KAPPLY apply -f -
-else
-    echo "cluster-deploy-runner: no bundles in infra/step-plugins — leaving the ConfigMap alone"
-fi
+# Per instance namespace: the boss pod mounts this ConfigMap without
+# `optional`, so an instance whose namespace lacks it never starts.
+converge_step_plugins() { # NAMESPACE
+    local ns="$1"
+    if [ -n "$PLUGIN_ARGS" ]; then
+        echo "cluster-deploy-runner: converging the step-plugins ConfigMap in $ns"
+        # shellcheck disable=SC2086
+        $KP create configmap step-plugins -n "$ns" $PLUGIN_ARGS \
+            --dry-run=client -o yaml | $KAPPLY apply -f -
+    else
+        echo "cluster-deploy-runner: no bundles in infra/step-plugins — leaving the ConfigMap in $ns alone"
+    fi
+}
+converge_step_plugins "$SOURCE_NS"
 
 # THE GATE RUNNER'S SCRIPT IS THE SECOND INSTANCE OF THE BUG ABOVE.
 #
@@ -433,10 +472,10 @@ fi
 # "the previous revision", which on 2026-09-05 was the placeholder the
 # apply had just created and could not boot.
 STAGE="roll $HEAD"
-if ! roll_deployment "$K" "$REGISTRY" "$HEAD" "$LAST" "$FAILED_FILE"; then
+if ! roll_deployment "$K" "$REGISTRY" "$HEAD" "$LAST" "$FAILED_FILE" "$SOURCE_NS"; then
     exit 1
 fi
-$K set image -n boss cronjobs -l boss-chore=true "chore=$REGISTRY:$HEAD" || true
+$K set image -n "$SOURCE_NS" cronjobs -l boss-chore=true "chore=$REGISTRY:$HEAD" || true
 
 # THE CLUSTER-RESIDENT CONDUCTOR runs the same boss image and converges
 # its tag here, exactly like the boss deployment above — the manifest
@@ -460,6 +499,85 @@ _stage_done roll_s
 # about it, not a failed converge — the request reads converged either
 # way, and the maintenance packet carries the verification verdict.
 OUTCOME="converged=$HEAD"
+
+# THE TUNNEL CONNECTOR, read after the roll (backlog 5a2bb0ce; design
+# 4c565f8c, David 2026-09-16). cloudflared.yaml is a prod pipeline
+# manifest, applied above with the rest; its one Secret is minted by
+# David out of tree, and prod's apply has no secret gate, so the pods
+# either connect or wait in ContainerCreating with nothing on the
+# packet saying which. cluster-deploy-lib.sh connector_status derives
+# the Secret from the RENDERED manifest (still mounted at /manifests
+# here — the apply directory is discarded after the instance loop),
+# and records `connected`, `not-ready`, or `skipped (secret absent:
+# <name>)` — the field the car's probe reads. The read never fails the
+# converge: the tunnel is not what a train delivers, and a
+# Cloudflare-side fault must not hold every train's packet red.
+STAGE="tunnel connector"
+CONNECTOR=$(connector_status "$K" "$KM" "$SOURCE_NS" "/manifests/$SOURCE_NS/cloudflared.yaml" cloudflared)
+run_summary_field cloudflared "$CONNECTOR"
+echo "cluster-deploy-runner: cloudflared: $CONNECTOR"
+
+# THE OTHER INSTANCES, after prod is stamped (backlog 07d7549c). Each
+# is applied exactly as prod was — namespace first, then its rendered
+# directory, then its step-plugins ConfigMap and its chores' image —
+# and the packet records which namespaces this converge applied
+# (`instances_applied`), the fact the proof-in-prod probe reads.
+# Deliberately AFTER prod's stamp and BEFORE the verification below:
+# a playground apply that fails is a finding about the playground and
+# fails this unit, but prod is already converged and stamped, so the
+# next converge does not re-roll it; and the verification then reads
+# every rendered object, both namespaces, in one pass. The ROLL of
+# these instances is the last stage of the run, for the same reason
+# in reverse — an instance whose Secrets are not minted yet waits
+# 420s+300s for a rollout that cannot complete, and that wait must
+# not delay prod's verification or the orphan sweep.
+#
+# AN INSTANCE WITHOUT ITS SECRETS IS SKIPPED, not failed (car cb784b3a,
+# held on the dock 2026-09-16). The Secrets are minted out of tree, once
+# per namespace, by David; as first built this loop applied the
+# playground regardless and the roll below then waited 420 s + 300 s
+# on pods that could not start — "Maintenance failed" on EVERY train
+# until the ceremony, which is a scheduled alarm, not reliability. So
+# the gate (cluster-deploy-lib.sh instance_secret_gate) asks first,
+# deriving the required Secrets from the RENDERED manifests; an
+# instance missing any is skipped whole, named on the packet as
+# `instances_skipped: <ns> (secrets absent: a, b)` beside
+# `instances_applied`, the `kubectl create secret` shapes are printed
+# (names and keys, never values), and the converge exits 0. Once the
+# Secrets exist the instance applies with no other change and the
+# field flips from skipped to applied. A read the credential cannot
+# make is neither — it fails this stage, after prod's stamp.
+STAGE="apply instances"
+INSTANCES_APPLIED="$SOURCE_NS"
+INSTANCES_SKIPPED=""
+while IFS=$'\t' read -r iname ins_ns _t _s _h; do
+    [ "$ins_ns" = "$SOURCE_NS" ] && continue
+    STAGE="apply $ins_ns"
+    absent=""
+    gate_rc=0
+    absent=$(instance_secret_gate "$K" "$KM" "$ins_ns" "/manifests/$ins_ns") || gate_rc=$?
+    case "$gate_rc" in
+        0) ;;
+        1)  INSTANCES_SKIPPED="${INSTANCES_SKIPPED:+$INSTANCES_SKIPPED; }$ins_ns (secrets absent: ${absent// /, })"
+            continue ;;
+        *)  echo "cluster-deploy-runner: cannot tell whether $ins_ns has its Secrets (rc=$gate_rc) — not applying it; prod is converged and stamped" >&2
+            run_summary_field instances_applied "$INSTANCES_APPLIED"
+            exit 1 ;;
+    esac
+    echo "cluster-deploy-runner: applying instance $iname ($ins_ns) — boss image pinned to the converged $LAST"
+    apply_instance "$ins_ns"
+    converge_step_plugins "$ins_ns"
+    $K set image -n "$ins_ns" cronjobs -l boss-chore=true "chore=$REGISTRY:$HEAD" || true
+    INSTANCES_APPLIED="$INSTANCES_APPLIED,$ins_ns"
+done <<< "$INSTANCES"
+rm -rf "$APPLY_DIR"
+run_summary_field instances_applied "$INSTANCES_APPLIED"
+echo "cluster-deploy-runner: instances applied: $INSTANCES_APPLIED"
+if [ -n "$INSTANCES_SKIPPED" ]; then
+    run_summary_field instances_skipped "$INSTANCES_SKIPPED"
+    echo "cluster-deploy-runner: instances skipped: $INSTANCES_SKIPPED"
+fi
+_stage_done instances_s
 STAGE="verify manifests"
 
 # THE CONVERGE VERIFIES WHAT IT APPLIED (60690755). Everything above
@@ -524,3 +642,27 @@ if [ "$orphan_rc" -ne 0 ]; then
     exit 1
 fi
 echo "cluster-deploy-runner: no orphans — nothing is running that the tree cannot account for"
+
+# LAST: roll the other instances to $HEAD (backlog 07d7549c). Same
+# function as prod's roll — patch, prove Ready, or roll back to the
+# last converged build by name — in the instance's namespace, with the
+# instance's OWN quarantine file: this head already booted on prod, so
+# a failure here is the instance's environment, never a reason to hold
+# prod's next converge. It fails the unit (the packet reads
+# "Maintenance failed" at this stage, naming the instance) rather than
+# printing a warning nobody reads — the playground converges on every
+# train by decision, and a train that did not reach it must say so.
+# An instance the apply loop SKIPPED (its Secrets absent) is not rolled:
+# there is nothing of this head in it to prove Ready.
+while IFS=$'\t' read -r iname ins_ns _t _s _h; do
+    [ "$ins_ns" = "$SOURCE_NS" ] && continue
+    case ",$INSTANCES_APPLIED," in *",$ins_ns,"*) ;; *) continue ;; esac
+    STAGE="roll $ins_ns $HEAD"
+    echo "cluster-deploy-runner: rolling instance $iname ($ins_ns) to $REGISTRY:$HEAD"
+    if ! roll_deployment "$K" "$REGISTRY" "$HEAD" "$LAST" "$FAILED_FILE.$ins_ns" "$ins_ns"; then
+        run_summary_field "roll_$ins_ns" failed
+        echo "cluster-deploy-runner: INSTANCE $ins_ns DID NOT REACH $HEAD — prod is converged and stamped; its Secrets exist (the apply gate passed), so this is the instance's own environment: read its pods" >&2
+        exit 1
+    fi
+    run_summary_field "roll_$ins_ns" "$HEAD"
+done <<< "$INSTANCES"

@@ -190,6 +190,11 @@ async fn main() -> Result<()> {
         // cost, on the one door `boss-api` already reaches.
         let agent_runs: Arc<dyn boss_jobs::agent_runs::AgentRunLog> =
             Arc::new(boss_jobs::agent_runs::PgAgentRuns::new(pool.clone()));
+        // Which surfaces an operator opens (backlog 628f182b): the SPA's
+        // route opens, credited to the session, rolled up daily. Its own
+        // record — not an audit event, by §Policy & auth.
+        let surface_opens: Arc<dyn boss_jobs::surface_opens::SurfaceOpens> =
+            Arc::new(boss_jobs::surface_opens::PgSurfaceOpens::new(pool.clone()));
         // The agents registry (design 6fda05ae): what an agent's login
         // resolves to at this service's door, the way a human's
         // resolves at the gateway's.
@@ -221,6 +226,7 @@ async fn main() -> Result<()> {
             Some(delivery),
             Some(credentials),
             Some(agent_runs),
+            Some(surface_opens),
             agents,
             calendar,
             subject_kinds,
@@ -255,6 +261,7 @@ async fn run_server<R: JobsRepository + 'static>(
     delivery: Option<Arc<dyn boss_jobs::delivery::DeliveryPolicyRepository>>,
     credentials: Option<Arc<dyn boss_jobs::credentials::CredentialsRegistry>>,
     agent_runs: Option<Arc<dyn boss_jobs::agent_runs::AgentRunLog>>,
+    surface_opens: Option<Arc<dyn boss_jobs::surface_opens::SurfaceOpens>>,
     agents: Arc<dyn boss_jobs::agents::AgentsRegistry>,
     calendar: Option<Arc<dyn boss_calendar_client::CalendarClient>>,
     subject_kinds: Option<Arc<dyn boss_subject_kinds_client::SubjectKindsClient>>,
@@ -359,6 +366,12 @@ async fn run_server<R: JobsRepository + 'static>(
         );
         app = app.merge(boss_jobs::agent_runs::http::router(
             boss_jobs::agent_runs::http::AgentRunsApiState { log },
+        ));
+    }
+    if let Some(repo) = surface_opens {
+        info!("surface opens mounted at /api/surface-opens (+ /rollup, /sweep)");
+        app = app.merge(boss_jobs::surface_opens::http::router(
+            boss_jobs::surface_opens::http::SurfaceOpensApiState { repo },
         ));
     }
     // Sim-origin middleware: extract x-sim-origin header and set the

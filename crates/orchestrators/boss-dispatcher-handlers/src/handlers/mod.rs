@@ -19,6 +19,7 @@ pub mod cadence_silence;
 pub mod commerce_invoice_issue;
 pub mod common;
 pub mod credential_issuer;
+pub mod credential_rotate_cloudflare_tunnel;
 pub mod credential_rotate_forgejo;
 pub mod estate_alarm;
 pub mod estate_compare;

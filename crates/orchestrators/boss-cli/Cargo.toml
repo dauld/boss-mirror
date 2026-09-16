@@ -18,6 +18,14 @@ boss-nats = { path = "../../core/boss-nats" }
 # calling the SAME `StationPredicate::matches` the /queue endpoint
 # calls — a census that disagrees with the queue is worse than none.
 boss-jobs = { path = "../../core/boss-jobs" }
+# `boss tenant check` validates a tenant directory with the SAME
+# types the product reads it with (fcc1d57b): the classes batch row,
+# the people row, the policy grant loader, and the manifest in
+# boss-core. A second parser would be a second contract.
+boss-classes = { path = "../../core/boss-classes" }
+boss-people = { path = "../../modules/boss-people" }
+boss-policy-client = { path = "../../core/boss-policy-client" }
+toml = { workspace = true }
 boss-assets = { path = "../../modules/boss-assets", features = ["postgres"] }
 boss-clock-client = { path = "../../core/boss-clock-client" }
 boss-ledger = { path = "../../modules/boss-ledger", features = ["postgres"] }

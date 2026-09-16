@@ -1038,62 +1038,64 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
         events::JOB_CREATED,
         serde_json::to_value(&job).unwrap_or_default(),
     );
-    // Row-touch columns bind the stamp's wall time — the rebuilder
-    // reproduces them from audit_log.timestamp, so live and replay
-    // must read the same instant. Business dates (opened_on, `{day}`
-    // tokens below) keep the authoritative clock's `now`.
+    // The materialized steps (pre-insert, so the filer-field gate
+    // could refuse before the Job existed) go in WITH the job: one
+    // STEP_CREATED each, on the job's stamp — one actor, one
+    // partition, one instant for every row of the graph. The
+    // rebuilder at boss-jobs/src/rebuild.rs reconstructs the step
+    // rows from exactly these events, so a step without one would
+    // make the projection diverge from the log.
+    let steps = materialized_steps.unwrap_or_default();
+    let step_events: Vec<_> = steps
+        .iter()
+        .map(|step| job_stamp.event(events::STEP_CREATED, events::step_state_payload(step)))
+        .collect();
+
+    // ONE TRANSACTION: the job row, every step row and every event
+    // commit together, or the request fails and nothing exists.
+    //
+    // This comment used to say "materialization is ATOMIC from an
+    // observer's view", and it was not (backlog f2ba226e). The job
+    // committed alone, then each step was written through a separate
+    // `add_step_at` — its own transaction — with a failed write only a
+    // warn and a 201 answered regardless. On 2026-09-16 02:32Z
+    // (pr-train 06e5610f) the database was slow: the job row at
+    // :14.87, steps 1–5 by :19.5, the dispatcher already acting on
+    // the partial graph at :19.54, steps 6–9 through :44.5 — and step
+    // 10, `cancelled`, the terminal, never. The client had timed out,
+    // axum dropped this future between steps nine and ten, and no
+    // line was logged. The train held the track for ninety minutes
+    // with no terminal to cancel it with.
+    //
+    // A dropped future now drops one open transaction, and the
+    // database rolls it back on the connection's return to the pool
+    // — the residue class cannot occur. Row-touch columns bind the
+    // stamp's wall time: the rebuilder reproduces them from
+    // audit_log.timestamp, so live and replay must read the same
+    // instant. Business dates (opened_on, `{day}` tokens) keep the
+    // authoritative clock's `now`.
     if let Err(e) = state
         .jobs
-        .create_job_at(&job, job_stamp.timestamp, &[job_event])
+        .create_job_with_steps_at(
+            &job,
+            &steps,
+            job_stamp.timestamp,
+            &[job_event],
+            &step_events,
+        )
         .await
     {
         return persist_error_response(e);
     }
 
-    // Persist the steps materialized above (pre-insert, so the
-    // filer-field gate could refuse before the Job existed).
-    if let Some(steps) = materialized_steps {
-        // Materialization is ATOMIC from an observer's view. A consumer
-        // that reacts to a `step.ready` event — the dispatcher's marker
-        // auto-complete, a delegate-subjob fork — must see the COMPLETE
-        // step graph. So two passes: (1) persist EVERY step with its
-        // STEP_CREATED event recorded in the SAME transaction (outbox
-        // phase 2 — the old emit-then-write window is gone); (2) only
-        // once the whole graph is durable, record `step.ready`.
-        // Materialized steps need their STEP_CREATED events or the
-        // rebuilder at boss-jobs/src/rebuild.rs can't reconstruct the
-        // rows from audit_log and the projection diverges from the log.
-        for step in &steps {
-            let step_actor = user
-                .ambient_actor()
-                .unwrap_or_else(|| boss_core::actor::ActorId::Automation("platform".into()));
-            let step_stamp = state
-                .publisher
-                .stamp_with_actor(step_actor)
-                .await
-                .with_partition(job.partition);
-            let step_event =
-                step_stamp.event(events::STEP_CREATED, events::step_state_payload(step));
-            if let Err(e) = state
-                .jobs
-                .add_step_at(step, step_stamp.timestamp, &[step_event])
-                .await
-            {
-                tracing::warn!(
-                    job_id = %job_id,
-                    step_id = %step.id,
-                    error = %e,
-                    "failed to write materialized step projection",
-                );
-            }
-        }
-        // Second pass: the full step graph is now persisted, so any observer
-        // of a `step.ready` event sees a complete, consistent Job.
+    if !steps.is_empty() {
+        // Second pass, AFTER the commit: the whole graph is durable,
+        // so a consumer reacting to a `step.ready` event — the
+        // dispatcher's marker auto-complete, a delegate-subjob fork —
+        // sees a complete, consistent Job, never a partial one.
         // `materialize_steps_at` ran the open-time readiness pass, so the
         // trigger (and any step whose `ready_when` already holds) is `Ready`
-        // here — record `step.ready.<kind>` on the outbox so the
-        // dispatcher's marker auto-complete + delegate-subjob forks (D7)
-        // react against the whole graph, never a partial one.
+        // here — record `step.ready.<kind>` on the outbox (D7).
         let mut ready_events = Vec::new();
         for step in &steps {
             if step.status == StepStatus::Ready && !step.kind.is_empty() {
@@ -1108,14 +1110,12 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
         {
             tracing::warn!(job_id = %job_id, error = %e, "failed to record step.ready markers");
         }
-        if !steps.is_empty() {
-            tracing::debug!(
-                job_id = %job_id,
-                kind = %job.kind,
-                step_count = steps.len(),
-                "materialized job kind steps",
-            );
-        }
+        tracing::debug!(
+            job_id = %job_id,
+            kind = %job.kind,
+            step_count = steps.len(),
+            "materialized job kind steps",
+        );
     }
 
     (

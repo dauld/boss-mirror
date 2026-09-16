@@ -34,9 +34,10 @@ units = []
 
 [roles.off-cluster-observer]
 # Observes the estate from OUTSIDE the cluster it observes, and reads
-# the codebase's own size — and the drift between its authored protocols
-# and the live registry — from the checkout it converges.
-units = ["boss-estate-observe-host", "boss-codebase-metrics", "boss-protocol-drift"]
+# the codebase's own size — the drift between its authored protocols
+# and the live registry — and which of its surfaces operators open,
+# from the checkout it converges.
+units = ["boss-estate-observe-host", "boss-codebase-metrics", "boss-protocol-drift", "boss-surface-usage"]
 
 [roles.ml-batch-host]
 units = ["boss-ml-inference-batch"]

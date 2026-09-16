@@ -1,0 +1,125 @@
+# The Cloudflare Tunnel connector — every public hostname's way into
+# the cluster (backlog 5a2bb0ce; design 4c565f8c, decided by David
+# 2026-09-16).
+#
+# WHY IT IS HERE. Until this file, cloudflared ran on boss-gcp as a
+# hand-written unit — `tunnel run --token <v>`, the token inline (it
+# leaked into ops-requests 0117de08 and 9c760dd7), declared nowhere in
+# the tree, running since 2026-06-09 — and every public request crossed
+# a VM and a WireGuard hop that exist for other reasons. The connector
+# is now a declared workload IN the cluster, in config-file mode: the
+# ingress map is the tree's (cloudflared-config.yaml, rendered from
+# infra/cluster/instances.toml by infra/cluster/render-tunnel-config.sh),
+# visitors get Cloudflare's edge certificates, and the connector speaks
+# plain HTTP to each instance's gateway Service in-cluster. ONE tunnel,
+# in prod, serving every instance — a `pipeline` manifest in
+# infra/cluster/instance-manifests.txt, never rendered per namespace.
+# Cloudflare Access in front of boss.algedonic.dev is Cloudflare-side
+# configuration; the boss-gcp connector retires in a later car (car 4),
+# and the tunnel carries several connectors at once, so this one serves
+# traffic before that one stops.
+#
+# THE CREDENTIALS. The Secret below is the JSON `cloudflared tunnel
+# create` writes (TunnelID, AccountTag, TunnelSecret). It is minted ONCE
+# by David and referenced here by name only — the Secret never lives in
+# the tree (README: secrets never live here). The exact shape, names
+# only:
+#
+#   kubectl -n boss create secret generic cloudflare-tunnel-credentials --from-file=credentials.json=<the file tunnel create wrote>
+#
+# Until it exists the pods wait in ContainerCreating (the volume is not
+# `optional`, on purpose: a connector without its credentials must look
+# absent, not serve nothing), the converge is not held — the connector
+# is not what a train delivers — and the converge packet records
+# `cloudflared: skipped (secret absent: cloudflare-tunnel-credentials)`,
+# the field the car's probe reads (cluster-deploy-lib.sh
+# connector_status). Registry row: credentials id
+# cloudflare-tunnel-credentials, consumer cloudflared.
+#
+# THE IMAGE is pinned by tag AND digest, both read from the registry on
+# 2026-09-16 (Docker-Content-Digest of the 2026.9.1 manifest list; the
+# tag is for the reader, the digest is what the kubelet enforces). Its
+# entrypoint is `cloudflared --no-autoupdate` and it runs as 65532:65532
+# (the image config's User, read from the registry, not inferred);
+# `no-autoupdate` is repeated in config.yaml so the intent is legible in
+# the config a human reads.
+#
+# READINESS IS THE TUNNEL'S OWN. cloudflared serves /ready on its
+# metrics port, 200 only while it holds a live connection to the edge
+# and 503 otherwise (metrics/readiness.go at 2026.9.1). That is the
+# readinessProbe, so `rollout status` completing MEANS connected, and
+# the `cloudflared` Service below exposes the same endpoint in-cluster
+# (http://cloudflared.boss.svc.cluster.local:2000/ready) for any reader
+# that can reach cluster DNS.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+  namespace: boss
+  labels: {app.kubernetes.io/part-of: boss, app: cloudflared}
+spec:
+  # Two connectors on the tunnel, spread across nodes when the scheduler
+  # can: a node drain or a reschedule keeps the hostnames reachable.
+  replicas: 2
+  selector:
+    matchLabels: {app: cloudflared}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/part-of: boss, app: cloudflared}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels: {app: cloudflared}
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: cloudflared
+          image: cloudflare/cloudflared:2026.9.1@sha256:b269e8abd07a5bf6f3f4be65d5050b2174eca89c56a0241a8ff32a16aec454e4
+          # The entrypoint is `cloudflared --no-autoupdate`; these are
+          # its arguments: config-file mode, the config the ConfigMap
+          # mounts, run the tunnel it names.
+          args: ["tunnel", "--config", "/etc/cloudflared/config.yaml", "run"]
+          ports:
+            - {containerPort: 2000, name: metrics}
+          readinessProbe:
+            httpGet: {path: /ready, port: metrics}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthcheck, port: metrics}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests: {cpu: 20m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/cloudflared, readOnly: true}
+            - {name: creds, mountPath: /etc/cloudflared-creds, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: cloudflared-config}
+        - name: creds
+          secret: {secretName: cloudflare-tunnel-credentials}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloudflared
+  namespace: boss
+  labels: {app.kubernetes.io/part-of: boss, app: cloudflared}
+spec:
+  selector: {app: cloudflared}
+  ports:
+    - {port: 2000, targetPort: metrics, name: metrics}

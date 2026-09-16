@@ -73,6 +73,10 @@ tempfile = "3"
 workspace = true
 
 [[test]]
+name = "a_packet_is_created_whole_or_not_at_all_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "agent_runs_pg"
 required-features = ["postgres"]
 
@@ -218,4 +222,8 @@ required-features = ["postgres"]
 
 [[test]]
 name = "no_orphan_steps_pg"
+required-features = ["postgres"]
+
+[[test]]
+name = "surface_opens_pg"
 required-features = ["postgres"]

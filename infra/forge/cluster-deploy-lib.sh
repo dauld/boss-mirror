@@ -119,18 +119,28 @@ image_boots() {
     $docker run --rm --entrypoint /usr/local/bin/boss-launch "$image" --check
 }
 
-# roll_deployment K REGISTRY HEAD LAST_GOOD FAILED_FILE
+# roll_deployment K REGISTRY HEAD LAST_GOOD FAILED_FILE [NAMESPACE]
 #   Patch deploy/boss to REGISTRY:HEAD and wait for Ready. If it never
 #   goes Ready: quarantine HEAD in FAILED_FILE and roll back to the
 #   NAMED target — REGISTRY:LAST_GOOD when a converged build is known,
 #   else the image that was running before the patch — then wait for
 #   that to be Ready. Returns 0 only when HEAD is serving.
+#
+#   NAMESPACE defaults to `boss`, the source instance. Every other
+#   instance (infra/cluster/instances.toml; backlog 07d7549c) runs the
+#   same deploy/boss in its own namespace and is rolled by this same
+#   function — one definition of "roll, prove Ready, or roll back to a
+#   named build", not one per instance. The runner hands each instance
+#   its OWN quarantine file: a head that booted on prod and fails on the
+#   playground is the playground's environment (its secrets, its
+#   volumes), not a bricked build, and must not hold prod's next
+#   converge.
 roll_deployment() {
-    local k="$1" registry="$2" head="$3" last_good="$4" failed_file="$5"
+    local k="$1" registry="$2" head="$3" last_good="$4" failed_file="$5" ns="${6:-boss}"
     local pre_image
-    pre_image=$($k get deploy boss -n boss -o jsonpath='{.spec.template.spec.containers[0].image}')
-    _patch_boss_image "$k" "$registry:$head"
-    if $k rollout status deploy/boss -n boss --timeout=420s; then
+    pre_image=$($k get deploy boss -n "$ns" -o jsonpath='{.spec.template.spec.containers[0].image}')
+    _patch_boss_image "$k" "$registry:$head" "$ns"
+    if $k rollout status deploy/boss -n "$ns" --timeout=420s; then
         return 0
     fi
     echo "$head" > "$failed_file"
@@ -140,20 +150,172 @@ roll_deployment() {
     else
         target="$pre_image"
     fi
-    echo "cluster-deploy-runner: $head never went Ready — rolling back to $target (the last converged build, by name)" >&2
-    if _patch_boss_image "$k" "$target" \
-        && $k rollout status deploy/boss -n boss --timeout=300s; then
-        echo "cluster-deploy-runner: rolled back — cluster serves $target; $head is quarantined (rm $failed_file to retry it)" >&2
+    echo "cluster-deploy-runner: $head never went Ready in $ns — rolling back to $target (the last converged build, by name)" >&2
+    if _patch_boss_image "$k" "$target" "$ns" \
+        && $k rollout status deploy/boss -n "$ns" --timeout=300s; then
+        echo "cluster-deploy-runner: rolled back — cluster serves $target in $ns; $head is quarantined there (rm $failed_file to retry it)" >&2
     else
-        echo "cluster-deploy-runner: ROLLBACK TO $target ALSO FAILED — the cluster needs hands NOW" >&2
+        echo "cluster-deploy-runner: ROLLBACK OF $ns TO $target ALSO FAILED — the instance needs hands NOW" >&2
     fi
     return 1
 }
 
 _patch_boss_image() {
-    local k="$1" image="$2"
-    $k patch deploy boss -n boss --type=json \
+    local k="$1" image="$2" ns="${3:-boss}"
+    $k patch deploy boss -n "$ns" --type=json \
         -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/image\",\"value\":\"$image\"},{\"op\":\"replace\",\"path\":\"/spec/template/spec/initContainers/0/image\",\"value\":\"$image\"}]"
+}
+
+# AN INSTANCE WITHOUT ITS SECRETS IS SKIPPED, BY NAME (backlog 07d7549c;
+# car cb784b3a held on the dock 2026-09-16). Every Secret an instance's
+# manifests reference is minted out of tree, once per namespace, by
+# David. As first built the runner applied the playground and then
+# waited 420 s + 300 s on a rollout its pods could not start, and every
+# train's converge ended "Maintenance failed" until that ceremony —
+# a scheduled alarm, not reliability. So before a second instance is
+# applied the runner asks whether the Secrets it needs exist, and an
+# instance missing any is skipped whole: the names ride the converge
+# packet, the shapes to mint are printed (names and keys, never values),
+# and the converge exits 0 with prod applied, rolled, stamped and
+# verified exactly as before.
+#
+# manifest_secrets K PATH
+#   The Secret names the objects at PATH (a file or a directory, as the
+#   kubectl K sees it) REQUIRE: every env secretKeyRef, every secret
+#   volume and every imagePullSecret, minus those marked `optional:
+#   true` — the pod boots without those. DERIVED from the manifests
+#   through kubectl's own parser (client dry run) and jq, never listed
+#   here: a list would be the §9a pair that drifts the day a manifest
+#   gains a reference. One name per line, sorted, unique.
+manifest_secrets() {
+    local k="$1" path="$2"
+    # -s slurps kubectl's document stream into one array, so `unique`
+    # spans every object rather than each document on its own.
+    $k create --dry-run=client -o json -f "$path" | jq -rs '
+        [ .[] | .. | objects | (
+            (select(has("secretKeyRef")) | .secretKeyRef | select(.optional != true) | .name),
+            (select(has("secretName")) | select(.optional != true) | .secretName),
+            (select(has("imagePullSecrets")) | .imagePullSecrets[]? | .name)
+        ) ] | unique | .[]'
+}
+
+# manifest_secret_keys K PATH
+#   name<TAB>key for every required secretKeyRef at PATH — what the
+#   `--from-literal` shapes below are built from.
+manifest_secret_keys() {
+    local k="$1" path="$2"
+    $k create --dry-run=client -o json -f "$path" | jq -rs '
+        [ .[] | .. | objects | select(has("secretKeyRef")) | .secretKeyRef
+          | select(.optional != true) | "\(.name)\t\(.key)" ] | unique | .[]'
+}
+
+# instance_secret_gate K KM NS PATH
+#   0  every required Secret exists in NS — apply the instance
+#   1  at least one is absent — SKIP the instance; stdout is the absent
+#      names, space-separated (for the packet), and stderr carries the
+#      `kubectl create secret` shape for each (names and keys only).
+#      A namespace that does not exist yet answers NotFound for every
+#      Secret, which is the truth on the first converge after landing.
+#   2  a read the credential could not make — CANNOT TELL, which is
+#      neither "present" nor "absent" (CLAUDE.md §Doors: a wrong target
+#      answers instead of erroring; this one refuses instead).
+#   K reads the cluster; KM is the kubectl that can see PATH (the
+#   runner's manifests mount) — the same command when there is one.
+instance_secret_gate() {
+    local k="$1" km="$2" ns="$3" path="$4"
+    local required name out absent="" keys
+    required=$(manifest_secrets "$km" "$path") || return 2
+    for name in $required; do
+        if out=$($k get secret -n "$ns" "$name" 2>&1); then
+            continue
+        fi
+        if printf '%s' "$out" | grep -qi 'not found'; then
+            absent="$absent $name"
+        else
+            echo "cluster-deploy-runner: cannot read Secret $ns/$name — $out" >&2
+            return 2
+        fi
+    done
+    [ -n "$absent" ] || return 0
+    absent="${absent# }"
+    echo "$absent"
+    keys=$(manifest_secret_keys "$km" "$path")
+    echo "cluster-deploy-runner: instance $ns SKIPPED — these Secrets are not minted in it: $absent" >&2
+    echo "  Secrets never live in the tree (infra/cluster/manifests/README.md). Mint each once, in the" >&2
+    echo "  namespace, with prod's copy as the shape; the instance applies on the next converge:" >&2
+    for name in $absent; do
+        local literals=""
+        while IFS=$'\t' read -r n key; do
+            [ "$n" = "$name" ] && literals="$literals --from-literal=$key=..."
+        done <<< "$keys"
+        if [ -n "$literals" ]; then
+            echo "    kubectl -n $ns create secret generic $name$literals" >&2
+        elif [ "$name" = forgejo-registry ] || printf '%s' "$name" | grep -q 'registry'; then
+            echo "    kubectl -n $ns create secret docker-registry $name --docker-server=... --docker-username=... --docker-password=..." >&2
+        else
+            echo "    kubectl -n $ns create secret generic $name --from-file=<key>=<file>   # keys: kubectl -n boss get secret $name -o jsonpath='{.data}' | jq keys" >&2
+        fi
+    done
+    return 1
+}
+
+# THE TUNNEL CONNECTOR REPORTS AFTER THE ROLL (backlog 5a2bb0ce; design
+# 4c565f8c, David 2026-09-16). Every public hostname reaches the cluster
+# through a Cloudflare Tunnel whose connector is a declared prod
+# workload (infra/cluster/manifests/cloudflared.yaml). Its credentials
+# are one Secret minted once by David; the connector is applied with
+# prod's manifests whether or not that Secret exists, and prod's apply
+# has no secret gate (the gate above is for a SECOND instance). So the
+# converge reads the connector's state after the roll and puts it on
+# the packet, where the car's probe reads it — never in the journal
+# alone (CLAUDE.md §Diagnosis: a check nobody reads is not running).
+#
+# connector_status K KM NS PATH DEPLOY
+#   Print exactly one line — the connector's state as this converge read
+#   it — and return 0 in every case: the tunnel is not what a train
+#   delivers, and a converge that failed on a Cloudflare-side fault
+#   would hold every train's packet red for something no train can fix.
+#     connected                        the rollout completed: every replica
+#                                      Ready, and readiness IS cloudflared's
+#                                      own /ready, 200 only with a live
+#                                      edge connection
+#     not-ready                        the rollout did not complete in time
+#                                      — the Secret exists; read the pods
+#     skipped (secret absent: NAMES)   a Secret the manifest at PATH requires
+#                                      is not minted in NS; the pods cannot
+#                                      start, and no rollout is waited on
+#     unknown (REASON)                 a read the credential could not make
+#   The Secret names are DERIVED from the rendered manifest at PATH
+#   through manifest_secrets, exactly as instance_secret_gate derives
+#   an instance's — never listed here (§9a). K reads the cluster; KM is
+#   the kubectl that can see PATH (the runner's manifests mount).
+connector_status() {
+    local k="$1" km="$2" ns="$3" path="$4" deploy="$5"
+    local required name out absent=""
+    if ! required=$(manifest_secrets "$km" "$path"); then
+        echo "unknown (cannot derive the Secrets from $path)"
+        return 0
+    fi
+    for name in $required; do
+        if out=$($k get secret -n "$ns" "$name" 2>&1); then
+            continue
+        fi
+        if printf '%s' "$out" | grep -qi 'not found'; then
+            absent="$absent $name"
+        else
+            echo "unknown (cannot read Secret $ns/$name: $(printf '%s' "$out" | head -n 1))"
+            return 0
+        fi
+    done
+    if [ -n "$absent" ]; then
+        echo "skipped (secret absent:$absent)"
+        return 0
+    fi
+    if $k rollout status "deploy/$deploy" -n "$ns" --timeout=120s >/dev/null 2>&1; then
+        echo connected
+    else
+        echo not-ready
+    fi
 }
 
 # converge_held HOLD_FILE — an operator's hold stands: print its reason

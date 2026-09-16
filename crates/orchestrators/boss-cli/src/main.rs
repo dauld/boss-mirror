@@ -35,6 +35,7 @@ mod receipt;
 mod rerail;
 mod running;
 mod script;
+mod tenant;
 mod train;
 mod train_gate;
 mod upgrade;
@@ -642,6 +643,8 @@ enum Commands {
     Receipt(receipt::Cmd),
     #[command(flatten)]
     Running(running::Cmd),
+    #[command(flatten)]
+    Tenant(tenant::Cmd),
 }
 
 #[derive(Subcommand)]
@@ -1467,6 +1470,7 @@ async fn main() -> Result<()> {
         Commands::Merged(cmd) => merged::dispatch(cmd),
         Commands::Receipt(cmd) => receipt::dispatch(cmd).await,
         Commands::Running(cmd) => running::dispatch(cmd),
+        Commands::Tenant(cmd) => tenant::dispatch(cmd),
     }
 }
 

@@ -9389,6 +9389,39 @@ impl Conductor {
         }
         let train = resolve_train(&trains, handle)?;
         let tid = job_id(train)?;
+        // Refuse a train that has no terminal to complete BEFORE any
+        // write, and say what was found. On 2026-09-16 pr-train
+        // 06e5610f was admitted with nine of its ten steps — a slow
+        // database, a client timeout, the `cancelled` terminal never
+        // written (backlog f2ba226e; admission is one transaction
+        // since) — and this verb refused "step missing on job" only
+        // AFTER closing the PR and releasing the cars. The registry's
+        // re-evaluation logs the same divergence as "pairing by slug
+        // ... unpaired" (registry.rs); this is the operator-facing
+        // half of that warning, at the one verb that needed the row.
+        if find_step(train, "cancelled", "Cancelled — nothing to board").is_none() {
+            let version = train
+                .get("workflow_version")
+                .and_then(Value::as_i64)
+                .unwrap_or_default();
+            let present: Vec<String> = train
+                .get("steps")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().map(step_label).collect())
+                .unwrap_or_default();
+            bail!(
+                "refusing to cancel train {}: its steps diverged from its workflow spec — \
+                 the `cancelled` terminal has no row on this job (pinned pr-train v{version}, \
+                 {} step row(s): {}), so it can never be completed. This is the residue of a \
+                 partial admission (backlog f2ba226e). Repair door: re-materialise the \
+                 unpaired steps of the pinned version onto the packet (a follow-up verb; until \
+                 it exists the only door is a status close through the jobs API). Nothing was \
+                 written: the PR is still open and the cars are still aboard.",
+                id8(tid),
+                present.len(),
+                present.join(", ")
+            );
+        }
 
         let boarded: Vec<String> = train
             .get("metadata")
@@ -13905,6 +13938,59 @@ mod tests {
         assert!(
             !puts.lock().unwrap().contains(&"c1".to_string()),
             "the car was released despite close_pr failing — a half-cancelled train"
+        );
+    }
+
+    /// f2ba226e: pr-train 06e5610f was admitted with nine of its ten
+    /// steps — the `cancelled` terminal never written — and `boss train
+    /// cancel` refused with "step missing on job", AFTER it had already
+    /// closed the PR and released the cars. The refusal now comes
+    /// FIRST, before any forge or jobs-API write, and names what it
+    /// found: the graph diverged from the pinned version, which step
+    /// is unpaired, and the door that repairs it.
+    #[tokio::test]
+    async fn cancel_refuses_a_train_whose_terminal_is_missing_before_any_write() {
+        // The 06e5610f shape: `cancelled` has no row on this job.
+        let mut train = requested_open_train();
+        train["workflow_version"] = json!(10);
+        train["steps"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|s| s["spec_slug"] != "cancelled");
+        let (jobs, job_puts, step_puts) =
+            cancel_request_jobs_api(train, struck_boarded_car()).await;
+        let (c, close_called) = cancel_request_conductor(jobs, true);
+
+        let err = c
+            .cancel_train("t1", "bad consist", false)
+            .await
+            .expect_err("a train with no terminal cannot be cancelled");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("diverged from its workflow spec"),
+            "names the divergence: {msg}"
+        );
+        assert!(
+            msg.contains("cancelled") && msg.contains("v10"),
+            "names the unpaired step and the pinned version: {msg}"
+        );
+        assert!(
+            msg.contains("re-materialise") && msg.contains("f2ba226e"),
+            "names the repair door and the item: {msg}"
+        );
+        assert!(
+            !msg.contains("step missing on job"),
+            "the old, uninformative refusal: {msg}"
+        );
+
+        assert!(
+            !*close_called.lock().unwrap(),
+            "refused BEFORE the forge write — the PR is still open"
+        );
+        assert!(job_puts.lock().unwrap().is_empty(), "no car was released");
+        assert!(
+            step_puts.lock().unwrap().is_empty(),
+            "no step was completed"
         );
     }
 

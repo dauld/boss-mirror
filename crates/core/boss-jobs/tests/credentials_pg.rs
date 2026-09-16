@@ -27,18 +27,31 @@ async fn the_seeded_credentials_are_readable_through_the_port() {
     let repo = PgCredentials::new(db.pool.clone());
     let rows = repo.list().await.unwrap();
     let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
-    assert_eq!(
-        ids,
-        vec![
-            "boss-credential-broker-root",
-            "boss-dev-forge-token",
-            "boss-machine-token",
-            "dauld-github-token",
-            "dev-session-token",
-        ],
-        "the five known credentials are seeded, ordered by id (dauld-github-token: \
-         202609081230, the publish-github-pr verb's token — declared before it exists)"
-    );
+    // The rows the registry has carried since its first seeds are
+    // PRESENT and the list is ORDERED by id — never "exactly these".
+    // This assertion used to pin the exact five, and on 2026-09-16 it
+    // struck train 767cfb14: two cars each declared a Cloudflare
+    // credential (a migration each, ON CONFLICT DO NOTHING, no
+    // collision), each was green on its own gate (neither ran this
+    // crate), and together they made the list seven long. A registry
+    // that grows by a declaration is the design; a test that refuses
+    // growth would red every train that declares one.
+    for known in [
+        "boss-credential-broker-root",
+        "boss-dev-forge-token",
+        "boss-machine-token",
+        "dauld-github-token",
+        "dev-session-token",
+    ] {
+        assert!(
+            ids.contains(&known),
+            "{known} is seeded (dauld-github-token: 202609081230, the \
+             publish-github-pr verb's token — declared before it exists); got {ids:?}"
+        );
+    }
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    assert_eq!(ids, sorted, "the port lists credentials ordered by id");
     for r in &rows {
         assert!(
             r.rotated_at.is_none(),

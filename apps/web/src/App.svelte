@@ -17,6 +17,7 @@
   import UpdateBar from './shell/UpdateBar.svelte';
   import { APPS, appForSection, APP_SUBJECT_KINDS, type AppId } from './shell/nav-catalog';
   import { SECTION_FOR_ROUTE } from './shell/sections';
+  import { makeSurfaceOpenRecorder, postSurfaceOpen, routePattern } from './shell/surface-opens';
   import StepFocusPage from './steps/StepFocusPage.svelte';
   import PerspectiveTabs from '@boss/web-kit/PerspectiveTabs.svelte';
   import DebugGear from './debug/DebugGear.svelte';
@@ -103,6 +104,16 @@
   import { moduleEnabled } from '@boss/web-kit/session/manifest.svelte';
 
   let route = $state<Route>(parseRoute(window.location.pathname));
+
+  // Which surfaces get opened (backlog 628f182b): one POST per
+  // client-side navigation, the route PATTERN and the time, the actor
+  // signed by the gateway from the session. Debounced against the same
+  // pattern, silent on failure — a measurement must never get in the
+  // way of the thing it measures. The initial route counts as an open.
+  const recordSurfaceOpen = makeSurfaceOpenRecorder(postSurfaceOpen);
+  $effect(() => {
+    recordSurfaceOpen(routePattern(route, window.location.pathname));
+  });
 
   // Map route.kind → tenant module-id. Routes whose module is
   // flagged false in tenant.toml render a "not enabled" notice

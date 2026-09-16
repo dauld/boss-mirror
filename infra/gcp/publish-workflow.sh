@@ -274,11 +274,28 @@ def norm(v):
     # where it has an empty one; the file never distinguishes them.
     return None if v in (None, [], {}, "") else v
 
+def projected_authority(s):
+    # The seed loader PROJECTS a step's `audience` onto the selector keys
+    # every reader still uses (boss-jobs/src/audience.rs `selectors_for`:
+    # role -> authority_role, individual -> assignee_id, station ->
+    # metadata.station). A file that says `audience = { role = "x" }`
+    # and no bare authority_role renders to a row carrying BOTH, so the
+    # comparison applies the same projection or it reads a correct
+    # publish as NOT CONFIRMED — which it did on 2026-09-16 02:10Z
+    # (backlog-item v8, ops-request deb264ed). One rule, mirrored here.
+    if s.get("authority_role") not in (None, ""):
+        return s.get("authority_role")
+    aud = s.get("audience")
+    if isinstance(aud, dict) and isinstance(aud.get("role"), str):
+        return aud["role"]
+    return None
+
 def step_view(s):
     return {
         "title": s.get("title"), "kind": s.get("kind"), "ready_when": s.get("ready_when"),
         "title_template": norm(s.get("title_template")),
-        "authority_role": norm(s.get("authority_role")),
+        "authority_role": norm(projected_authority(s)),
+        "audience": norm(s.get("audience")),
         "metadata_defaults": norm(s.get("metadata_defaults")),
         "fields": norm([[f.get("name"), f.get("field_type"), bool(f.get("required", False))]
                         for f in (s.get("fields") or [])]),

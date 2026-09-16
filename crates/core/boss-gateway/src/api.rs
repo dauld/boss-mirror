@@ -70,27 +70,12 @@ fn extract_session(headers: &HeaderMap, key: &[u8]) -> Option<Session> {
     Session::decode(raw, key).ok()
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct TenantMeta {
-    /// The tenant's own name for itself. The SPA chrome had
-    /// "Algedonic" / "Ales" hardcoded at three render sites, so the
-    /// used-device-shop tenant rendered a brewery's name in its top
-    /// bar. Branding is tenant data; core should not know it.
-    #[serde(default)]
-    display_name: Option<String>,
-    #[serde(default)]
-    tenant_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TenantToml {
-    #[serde(default)]
-    meta: TenantMeta,
-    #[serde(default)]
-    modules: std::collections::BTreeMap<String, bool>,
-    #[serde(default)]
-    labels: std::collections::BTreeMap<String, String>,
-}
+// The file's shape lives in boss-core (`tenant_manifest`) since
+// fcc1d57b, so `boss tenant check` reads a manifest exactly the way
+// this handler does — one definition, two doors (CLAUDE.md §9a).
+// Branding is tenant data; core does not know it, which is why
+// `display_name` is optional and the SPA falls back to "BOSS".
+use boss_core::tenant_manifest::TenantToml;
 
 #[derive(Debug, Serialize)]
 pub struct TenantManifest {
@@ -168,7 +153,7 @@ fn tenant_toml_path() -> Option<String> {
 fn load_tenant_toml() -> Option<TenantToml> {
     let path = tenant_toml_path()?;
     let text = std::fs::read_to_string(&path).ok()?;
-    toml::from_str(&text).ok()
+    TenantToml::parse(&text).ok()
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]

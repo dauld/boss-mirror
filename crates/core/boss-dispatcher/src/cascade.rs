@@ -203,6 +203,13 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // `step.done.credential-rotation`: the steps it completes are
         // `task` kind, so the loop cannot re-enter its own trigger.
         ("credential.rotate.forgejo", vec!["jobs.step.completed"]),
+        // Same shape, second issuer (04e5f833): completes `task`
+        // steps of the rotation packet, never a credential-rotation
+        // step, so it cannot re-enter its own trigger.
+        (
+            "credential.rotate.cloudflare-tunnel",
+            vec!["jobs.step.completed"],
+        ),
         ("messages.notify", vec![]),
         // Tells the filer how their packet ended. A sink, like every
         // other notifier — the message is the end of the cascade, not

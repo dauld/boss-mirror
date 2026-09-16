@@ -46,6 +46,9 @@ import { PORTS, PAIRED_NAMES, portFor } from './_generated/ports';
 const EXTRA_ROUTES: ReadonlyArray<readonly [string, string]> = [
   // /api/scheduling rides on jobs-api.
   ['/api/scheduling', 'jobs'],
+  // /api/surface-opens (the SPA's route-open record, 628f182b) rides
+  // on jobs-api beside agent-runs.
+  ['/api/surface-opens', 'jobs'],
   // /api/events tail mounts on people-api.
   ['/api/events', 'people'],
   // /api/snapshot is mounted on observability.

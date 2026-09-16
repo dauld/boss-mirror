@@ -176,17 +176,59 @@ fn matches_filter(job: &Job, filter: &JobFilter) -> bool {
     true
 }
 
+/// The ONE in-memory step insert, under a lock the caller holds:
+/// `add_step_at` and `create_job_with_steps_at` write a step through
+/// this, as the Pg adapter's two paths share one INSERT. Mirrors the
+/// Pg replay guard — an existing id is a no-op that records nothing —
+/// and reports whether the row was inserted.
+fn insert_step_locked(state: &mut State, step: &Step, now: chrono::DateTime<chrono::Utc>) -> bool {
+    let key = step_key(&step.id);
+    let inserted = match state.steps.entry(key.clone()) {
+        std::collections::hash_map::Entry::Occupied(_) => false,
+        std::collections::hash_map::Entry::Vacant(v) => {
+            v.insert(step.clone());
+            true
+        }
+    };
+    if inserted {
+        // Born ready IS the ready flip — same rule as the
+        // INSERT's CASE in the Pg adapter.
+        if step.status == StepStatus::Ready {
+            state.step_ready_at.insert(key.clone(), now);
+        }
+        state.step_touched_at.insert(key, now);
+    }
+    inserted
+}
+
 #[async_trait]
 impl JobsRepository for InMemoryJobs {
-    async fn create_job_at(
+    async fn create_job_with_steps_at(
         &self,
         job: &Job,
+        steps: &[Step],
         now: chrono::DateTime<chrono::Utc>,
-        events: &[boss_core::event::Event],
+        job_events: &[boss_core::event::Event],
+        step_events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
-        // Mirror the Pg replay guard: an existing id is a no-op that
-        // records nothing — and keeps its original admission instant.
-        let inserted = {
+        // Same refusal as the Pg adapter, before the lock: nothing is
+        // written for a graph whose events do not pair with its rows.
+        if steps.len() != step_events.len() {
+            return Err(JobsError::Storage(format!(
+                "create_job_with_steps_at: {} step(s) but {} step event(s) — one \
+                 STEP_CREATED per step, index-aligned",
+                steps.len(),
+                step_events.len()
+            )));
+        }
+        // One lock held across the job AND every step is this
+        // adapter's one transaction: a reader sees the whole graph or
+        // none of it, as the Pg commit guarantees (backlog f2ba226e).
+        // Mirror the Pg replay guard per row: an existing id is a
+        // no-op that records nothing — and keeps its original
+        // admission instant.
+        let mut recorded = Vec::with_capacity(job_events.len() + step_events.len());
+        {
             let mut state = self.inner.lock().expect("poisoned");
             let key = job_key(&job.id);
             let inserted = match state.jobs.entry(key.clone()) {
@@ -198,12 +240,15 @@ impl JobsRepository for InMemoryJobs {
             };
             if inserted {
                 state.job_created_at.insert(key, now);
+                recorded.extend_from_slice(job_events);
             }
-            inserted
-        };
-        if inserted {
-            self.record_all(events);
+            for (step, event) in steps.iter().zip(step_events) {
+                if insert_step_locked(&mut state, step, now) {
+                    recorded.push(event.clone());
+                }
+            }
         }
+        self.record_all(&recorded);
         Ok(())
     }
 
@@ -493,27 +538,9 @@ impl JobsRepository for InMemoryJobs {
         now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
-        // Mirror the Pg replay guard: an existing id is a no-op that
-        // records nothing.
         let inserted = {
             let mut state = self.inner.lock().expect("poisoned");
-            let key = step_key(&step.id);
-            let inserted = match state.steps.entry(key.clone()) {
-                std::collections::hash_map::Entry::Occupied(_) => false,
-                std::collections::hash_map::Entry::Vacant(v) => {
-                    v.insert(step.clone());
-                    true
-                }
-            };
-            if inserted {
-                // Born ready IS the ready flip — same rule as the
-                // INSERT's CASE in the Pg adapter.
-                if step.status == StepStatus::Ready {
-                    state.step_ready_at.insert(key.clone(), now);
-                }
-                state.step_touched_at.insert(key, now);
-            }
-            inserted
+            insert_step_locked(&mut state, step, now)
         };
         if inserted {
             self.record_all(events);

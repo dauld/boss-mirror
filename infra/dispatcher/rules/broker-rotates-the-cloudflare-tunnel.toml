@@ -1,0 +1,88 @@
+# ---------------------------------------------------------------------
+# The credential broker rotates the Cloudflare Tunnel credential
+# (04e5f833; David 2026-09-16: "avoid doing anything by hand unless
+# absolutely required — we aren't going to scale this business
+# otherwise"). THIS RULE ROW IS THE CREDENTIAL'S CONSUMER DECLARATION,
+# the same convention as `broker-rotates-the-boss-dev-forge-token`:
+# one credential = one rule row whose args say which zone and account
+# the tunnel lives in, which k8s Secret its connector mounts, which
+# hostnames point at it, which hostname proves it, and which
+# Deployment must restart to pick the new file up — data, not code.
+# The registry row proper is `cloudflare-tunnel-credentials`
+# (kind cloudflare-tunnel-credentials, credentials table); the root
+# it mints with is `cloudflare-account-token`, ONE account API token
+# (Cloudflare Tunnel:Edit, Zone:DNS:Edit, Zone:Read) David minted
+# once into Secret boss/boss-credential-broker-root key
+# cloudflare-token. That ceremony is the only human act.
+#
+# Fires when the SCOPE step of a rotate-a-credential packet about
+# this credential completes. Two spellings match on purpose: a packet
+# opened ON the credential (subject_id, the registry id — the shape
+# the workflow describes), or one whose scope step names it in
+# `credential` (the leaked-token rotation 2ff7a586 was opened on
+# `bosspipeline` before the registry row existed; its scoper enters
+# `credential = cloudflare-tunnel-credentials`, exactly). An absent
+# metadata key is Absent, not an error, in the expr layer.
+#
+# The handler then runs the four phases as machine steps of that same
+# packet: ISSUE — POST /accounts/{account}/cfd_tunnel, name
+# `<tunnel_name_prefix>-<first 8 of the packet id>` (the idempotence
+# ledger), config_src local, a client-generated 32-byte secret;
+# INSTALL — PATCH cloudflared's credentials.json ({AccountTag,
+# TunnelSecret, TunnelID}) into the Secret below, upsert each declared
+# hostname as a proxied CNAME to <tunnel id>.cfargotunnel.com, and
+# rollout-restart the connector Deployment (cloudflared reads the
+# file once, at start); VERIFY — a connector reports connected on the
+# new tunnel and https://<verify_hostname>/health answers 2xx through
+# the edge (bounded in-invocation wait, then "not yet" to the
+# redelivery schedule); REVOKE — DELETE the old tunnel named in the
+# scope step's `old_token` (a tunnel NAME), which invalidates every
+# connector token minted for it — ONLY when it shows zero live
+# connections; otherwise the revoke step is annotated "still has N
+# connections — revoke deferred" and left open until the boss-gcp
+# connector retires (0b7804f3). The value never enters a packet or an
+# event.
+#
+# `account_id` is deliberately absent: the handler reads it off the
+# zone (`GET /zones?name=` carries `account.id`, and Zone:Read is in
+# the root grant); set it here only to override.
+#
+# `hostnames` is the CNAME declaration UNTIL the zone-as-data car
+# (5e58922c) lands and owns it — say so there when it does, and drop
+# the arg here. It names playground ONLY, on purpose: as measured on
+# 2026-09-16 boss.algedonic.dev is an A record (10.20.0.33, grey
+# cloud, boss-tls.yaml — the operators' door to the system of record)
+# and Cloudflare refuses a CNAME beside an A, so declaring it here
+# would fail the install; moving that hostname behind the tunnel and
+# Cloudflare Access is 5e58922c's decision to apply, not a rotation's
+# side effect. www joins the list the same way, later.
+#
+# `restart_deployment` names the in-cluster connector car 5a2bb0ce
+# lands as `boss/cloudflared`. The handler refuses PERMANENTLY, before
+# minting, while that Deployment does not exist: the install repoints
+# playground at the new tunnel, and a tunnel nobody serves is an
+# outage. So the scope step of a rotation packet is completed AFTER
+# the connector has converged — the ordering is the packet's, and a
+# packet refused for this reason is abandoned and re-opened once it
+# has.
+[[rule]]
+name = "broker-rotates-the-cloudflare-tunnel"
+why = """
+EXTERNAL GLUE, the census class for reactions whose effect lives
+outside the system: the credential broker speaks to the CLOUDFLARE
+account API (tunnels, DNS), the public edge, and the k8s Secret and
+Deployment store, none of which a Workflow definition can address.
+The rotate-a-credential protocol row declares the ORDER (issue ->
+install -> verify -> revoke); this rule is the machine executor for
+ONE credential, and its args are that credential's consumer
+declaration — zone, Secret, hostnames, proving hostname, connector.
+It adds no routing: it advances the very packet that fired it and
+spawns nothing. Its sibling for the forge token is
+broker-rotates-the-boss-dev-forge-token; this is the second issuer
+on the same protocol (04e5f833).
+"""
+on_event = "step.done.credential-rotation"
+when = 'subject_id = "cloudflare-tunnel-credentials" OR metadata.credential = "cloudflare-tunnel-credentials"'
+[[rule.do]]
+handler = "credential.rotate.cloudflare-tunnel"
+args = { zone = "\"algedonic.dev\"", secret_namespace = "\"boss\"", secret_name = "\"cloudflare-tunnel-credentials\"", secret_key = "\"credentials.json\"", tunnel_name_prefix = "\"boss-cluster\"", hostnames = "\"playground.algedonic.dev\"", verify_hostname = "\"playground.algedonic.dev\"", credential_id = "\"cloudflare-tunnel-credentials\"", restart_deployment = "\"cloudflared\"" }

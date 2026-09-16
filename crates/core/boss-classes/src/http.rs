@@ -163,19 +163,23 @@ async fn class_exists(
 /// rows arrive active; withdrawing one is its own action — POST
 /// `{subject_kind}/{code}/retire`). Optional fields default so a
 /// minimal seed row is `{"subject_kind","code","display_name"}`.
-#[derive(Deserialize)]
-struct ClassInput {
-    subject_kind: String,
-    code: String,
-    display_name: String,
+///
+/// Public since fcc1d57b: `boss tenant check` parses a tenant's
+/// `seeds/classes.json` / `classes.toml` rows with THIS type, so the
+/// check and the batch endpoint cannot disagree about a row.
+#[derive(Debug, Deserialize)]
+pub struct ClassInput {
+    pub subject_kind: String,
+    pub code: String,
+    pub display_name: String,
     #[serde(default)]
-    parent_code: Option<String>,
+    pub parent_code: Option<String>,
     #[serde(default)]
-    member_attribute: Option<String>,
+    pub member_attribute: Option<String>,
     #[serde(default = "empty_object")]
-    metadata: Value,
+    pub metadata: Value,
     #[serde(default)]
-    sort_order: i32,
+    pub sort_order: i32,
 }
 
 fn empty_object() -> Value {

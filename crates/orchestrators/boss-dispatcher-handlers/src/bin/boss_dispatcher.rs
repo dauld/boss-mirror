@@ -23,6 +23,7 @@ use boss_dispatcher::rules::seed::seed_authored_rules;
 use boss_dispatcher_handlers::handlers::{
     bill_payment_batch::BillPaymentBatch, cadence_silence::CadenceSilenceSweep,
     commerce_invoice_issue::CommerceInvoiceIssue, credential_issuer,
+    credential_rotate_cloudflare_tunnel::CredentialRotateCloudflareTunnel,
     credential_rotate_forgejo::CredentialRotateForgejo, estate_alarm::EstateAlarm,
     estate_compare::EstateCompare, estate_recover::EstateRecover, gate_resolve::GateResolve,
     inventory_bill_approve::InventoryBillApprove,
@@ -354,7 +355,8 @@ async fn main() -> Result<()> {
             // the missing knob instead.
             {
                 use credential_issuer::{
-                    ForgeTokenIssuer, ForgejoAdmin, KubeSecretStore, SecretStore, Unconfigured,
+                    CloudflareApi, CloudflareTunnels, ForgeTokenIssuer, ForgejoAdmin,
+                    KubeSecretStore, SecretStore, Unconfigured, WorkloadRestarter,
                 };
                 let issuer: Arc<dyn ForgeTokenIssuer> = match &cfg.broker_forgejo_token {
                     Some(root) => ForgejoAdmin::new(cfg.broker_forge_url.clone(), root.clone()),
@@ -364,8 +366,12 @@ async fn main() -> Result<()> {
                             .to_string(),
                     )),
                 };
-                let secrets: Arc<dyn SecretStore> = match KubeSecretStore::in_cluster() {
-                    Ok(s) => s,
+                // One k8s client serves the Secret writes AND the
+                // connector restart (the same ServiceAccount, two
+                // name-scoped grants).
+                let kube = KubeSecretStore::in_cluster();
+                let secrets: Arc<dyn SecretStore> = match &kube {
+                    Ok(s) => s.clone(),
                     Err(e) => Arc::new(Unconfigured(format!(
                         "credential broker has no in-cluster k8s credential: {e}"
                     ))),
@@ -373,7 +379,35 @@ async fn main() -> Result<()> {
                 handlers.register(CredentialRotateForgejo::new(
                     cfg.jobs_api_url.clone(),
                     issuer,
+                    secrets.clone(),
+                ));
+                // The Cloudflare Tunnel rotation (04e5f833): same
+                // protocol, second issuer — the account API with the
+                // Cloudflare root token from the same root Secret
+                // (key cloudflare-token), the connector's Secret in
+                // the boss namespace, and a rollout restart of the
+                // declared connector Deployment.
+                let cloudflare: Arc<dyn CloudflareTunnels> = match &cfg.broker_cloudflare_token {
+                    Some(root) => {
+                        CloudflareApi::new(cfg.broker_cloudflare_api_url.clone(), root.clone())
+                    }
+                    None => Arc::new(Unconfigured(
+                        "credential broker unconfigured: BOSS_BROKER_CLOUDFLARE_TOKEN unset \
+                         (secret boss-credential-broker-root, key cloudflare-token)"
+                            .to_string(),
+                    )),
+                };
+                let workloads: Arc<dyn WorkloadRestarter> = match &kube {
+                    Ok(s) => s.clone(),
+                    Err(e) => Arc::new(Unconfigured(format!(
+                        "credential broker has no in-cluster k8s credential: {e}"
+                    ))),
+                };
+                handlers.register(CredentialRotateCloudflareTunnel::new(
+                    cfg.jobs_api_url.clone(),
+                    cloudflare,
                     secrets,
+                    workloads,
                 ));
             }
             // Packaging allocation — splits a brewed batch across formats by

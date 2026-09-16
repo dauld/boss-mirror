@@ -496,8 +496,8 @@ pub struct EstateNode {
 /// event-derivation logic (status-transition markers, `step.done` /
 /// `step.ready` dispatcher signals, actor stamping); the adapter
 /// guarantees fact + events commit or fail together. Creation paths
-/// (`create_job_at`, `add_step_at`) are ON CONFLICT DO NOTHING
-/// replay-tolerant — their events record ONLY when the insert
+/// (`create_job_with_steps_at`, `add_step_at`) are ON CONFLICT DO
+/// NOTHING replay-tolerant — their events record ONLY when the insert
 /// actually inserted, so a replayed create records nothing (before,
 /// every replay published duplicate created events). The convenience
 /// overloads pass no events (test-path ergonomics).
@@ -509,11 +509,53 @@ pub trait JobsRepository: Send + Sync {
         self.create_job_at(job, Utc::now(), &[]).await
     }
 
+    /// A job with no steps of its own — the brewery engine's
+    /// `?materialize_steps=false` path, which posts its
+    /// deterministic-UUID steps afterwards, and every test that
+    /// builds a bare job. The one-transaction contract is
+    /// [`JobsRepository::create_job_with_steps_at`]'s; this is that
+    /// call with nothing to add.
     async fn create_job_at(
         &self,
         job: &Job,
         now: DateTime<Utc>,
         events: &[boss_core::event::Event],
+    ) -> Result<(), JobsError> {
+        self.create_job_with_steps_at(job, &[], now, events, &[])
+            .await
+    }
+
+    /// Admit a job WITH its materialized steps: the job row, every
+    /// step row, the caller's job events and one STEP_CREATED per
+    /// step commit in ONE transaction, or none of them do.
+    ///
+    /// This is the honest shape of admission (backlog f2ba226e). Until
+    /// 2026-09-16 the handler committed the job through
+    /// `create_job_at` and then wrote each step through `add_step_at`
+    /// — ten transactions for a pr-train — warning on a failed step
+    /// and answering 201 regardless. On a slow database (pr-train
+    /// 06e5610f, 02:32Z) the client timed out, axum dropped the
+    /// handler between step nine and step ten, and the terminal was
+    /// never written: no error, a packet that could neither advance
+    /// nor be cancelled, ninety minutes on the track. A dropped
+    /// request now drops one open transaction, and the database
+    /// rolls it back — the row a reader can see is always the whole
+    /// graph.
+    ///
+    /// `step_events` is index-aligned with `steps` — one STEP_CREATED
+    /// each, the event the rebuilder (`rebuild.rs`) reproduces the
+    /// row from. A length mismatch is refused before any write: a
+    /// short zip would record fewer events than rows and the replayed
+    /// projection would hold fewer steps than the live one. The
+    /// replay guard is per row, as before: a job or step whose id
+    /// already exists inserts nothing and records nothing.
+    async fn create_job_with_steps_at(
+        &self,
+        job: &Job,
+        steps: &[Step],
+        now: DateTime<Utc>,
+        job_events: &[boss_core::event::Event],
+        step_events: &[boss_core::event::Event],
     ) -> Result<(), JobsError>;
 
     async fn get_job(&self, id: &JobId) -> Result<Option<Job>, JobsError>;

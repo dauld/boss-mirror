@@ -648,6 +648,53 @@ fn a_malformed_kind_or_a_foreign_mode_is_refused_before_anything_runs() {
 }
 
 // ---------------------------------------------------------------------------
+// The comparator applies the loader's audience projection.
+// ---------------------------------------------------------------------------
+
+/// A file that declares `audience = { role = "platform-admin" }` and no
+/// bare `authority_role` renders — through the seed loader's projection
+/// (boss-jobs/src/audience.rs `selectors_for`) — to a row carrying BOTH.
+/// The comparator must read the file the same way, or a correct publish
+/// reads as NOT CONFIRMED, which happened on 2026-09-16 02:10Z (backlog-
+/// item v8, ops-request deb264ed): `steps[1].authority_role tree=<absent>
+/// live=platform-admin`. With the projection the two compare EQUAL.
+#[test]
+fn a_declared_audience_compares_equal_to_its_projected_authority_role() {
+    if !ready() {
+        return;
+    }
+    let c = Case::new("audience");
+    let file = c.repo.join(format!("infra/platform/workflows/{KIND}.toml"));
+    let with_audience = REV2_KIND_FILE.replace(
+        "authority_role = \"platform-admin\"",
+        "audience = { role = \"platform-admin\" }",
+    );
+    assert_ne!(
+        with_audience, REV2_KIND_FILE,
+        "the fixture must declare an audience"
+    );
+    write_file(&file, &with_audience);
+    // Live: the projected row — audience AND authority_role, as the
+    // loader writes it (REV2 steps with the audience key added).
+    let projected = REV2_STEPS.replace(
+        "\"authority_role\":\"platform-admin\"",
+        "\"authority_role\":\"platform-admin\",\"audience\":{\"role\":\"platform-admin\"}",
+    );
+    assert_ne!(projected, REV2_STEPS);
+    write_file(&c.live, &live_row(2, REV2_DESC, &projected));
+    let (rc, out) = c.run(&[KIND, "--check"]);
+    assert_eq!(
+        rc, 5,
+        "a projected row equals its file — nothing to publish:\n{out}"
+    );
+    contains_all(&out, &["nothing to publish"], "the equal verdict");
+    assert!(
+        !out.contains("authority_role"),
+        "the projection must not surface as a diff: {out}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The host's CLI must be able to read what it is asked to publish.
 // ---------------------------------------------------------------------------
 

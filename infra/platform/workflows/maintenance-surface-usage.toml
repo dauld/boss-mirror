@@ -1,0 +1,94 @@
+# ---------------------------------------------------------------------------
+# maintenance-surface-usage — which surfaces each operator opened, rolled
+# up daily onto a packet.
+#
+# Backlog 628f182b. David, 2026-09-16, running the company as one human
+# plus agents: "I am mostly concerned about my personal HCI … the UI and
+# good transparency into underlying state has been really important for
+# driving reliability and trust." Then: "let's measure which surfaces I
+# open for a week." Measured 2026-09-16 01:50Z: nothing recorded a route
+# open per actor — the SPA routes client-side, the audit log carries no
+# per-request events by decision (§Policy & auth), boss-observability
+# aggregates service health, not page opens. The SPA now posts each
+# route open to `surface_opens` (the pattern, the time, the actor signed
+# by the gateway); this chore is the daily reading of that table.
+#
+# WHY A PACKET. The question is "which surfaces do I actually open in a
+# day, and which does nobody open" — a series, read at the end of a
+# week to decide what to build and what to delete. The raw rows live
+# thirty days; the packet is where the day's answer accumulates past
+# that, queryable by kind in the system of record, one row per day.
+#
+# THE CHORE CONTRACT (design 14c135f5, decided 2026-09-11): `measured`
+# and `coverage` are REQUIRED in metadata_schema — the packet says what
+# population it examined (the window, the roll-up it read, the catalog
+# it compared against) and what it found (opens, per actor, per route,
+# never-opened), and a run that cannot state its coverage FAILS rather
+# than filing a row that reads as a quiet day. A row without numbers is
+# the 139-disk-floor-packets defect the contract was written against.
+#
+# THE SHAPE IS maintenance-codebase-metrics.toml's: a UNIT-RUN CHORE
+# whose `run` step's `result` routes the verdict — the timer's
+# ExecStopPost reads systemd's $SERVICE_RESULT, and a run that died
+# closes this packet "failed" instead of leaving it open looking like a
+# run still in progress. The measurement rides in job metadata under
+# `measured` (opens, actors, per-route counts, never-opened, the sweep)
+# and `coverage` (the window, the read, the catalog), written by
+# infra/surface-usage.sh through PATCH /api/jobs/{id}/metadata.
+#
+# WHAT THE ROW DELIBERATELY DOES NOT CARRY: per-minute data, sessions,
+# or the concrete ids behind a pattern. Counts per route per actor per
+# day are the whole product; anything finer is a replay log, which
+# nobody asked for and the audit-log decision argues against.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "maintenance-surface-usage"
+label = "Surface usage"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "The daily reading of which surfaces each operator opened: opens per actor per route over the last 24 hours, distinct routes, the top routes, and the nav-catalog surfaces nobody opened (the deletion candidates), read off the surface_opens roll-up and filed as a measured row with its coverage stated. Sweeps rows past the 30-day retention on the same run."
+metadata = { owner_role = "platform-admin" }
+# The chore contract (14c135f5): a packet of this kind states what it
+# measured and what it covered, or it is not a measurement.
+metadata_schema = { type = "object", required = ["measured", "coverage"], properties = { measured = { type = "object" }, coverage = { type = "object" } } }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "systemd-timer" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Roll up the day's surface opens and file the row"
+# Gated so the simulated workforce cannot role-match and "complete" a
+# measurement nobody took; the timer's boss-step call presents the
+# automation actor with this role.
+authority_role = "platform-admin"
+fields = [{ name = "result", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
+title_template = "Surface usage filed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
+# A run that died records how (boss-step.sh from ExecStopPost: the
+# service result and exit status) and lands here. This chore's own
+# refusal is one such death: exit 3 when the roll-up or the catalog
+# could not be read, so the day is recorded as UNMEASURED rather than as
+# a day nobody opened anything.
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Surface usage not measured"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }

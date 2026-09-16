@@ -312,14 +312,91 @@ pub(crate) fn blocked_by_uuids(ids: &[StepId]) -> Vec<uuid::Uuid> {
 /// Zero when no plugin serves this kind (the step renders through an
 /// in-tree surface like repair/inspection/billing), which is the same
 /// value the column defaults to on INSERT without this call.
-async fn active_plugin_version(pool: &sqlx::PgPool, kind: &str) -> Result<i32, JobsError> {
+async fn active_plugin_version<'e>(
+    exec: impl sqlx::PgExecutor<'e>,
+    kind: &str,
+) -> Result<i32, JobsError> {
     let row: Option<(i32,)> =
         sqlx::query_as("SELECT version FROM step_plugins WHERE kind = $1 AND status = 'active'")
             .bind(kind)
-            .fetch_optional(pool)
+            .fetch_optional(exec)
             .await
             .map_err(|e| JobsError::Storage(e.to_string()))?;
     Ok(row.map(|(v,)| v).unwrap_or(0))
+}
+
+/// The ONE step INSERT (CLAUDE.md §9a): `add_step_at` and
+/// `create_job_with_steps_at` both write a step row through this, so
+/// the column list, the born-ready CASE and the replay guard cannot
+/// drift between the single-step and the whole-packet path. Runs
+/// inside the caller's transaction and reports whether the row was
+/// inserted (0 on the ON CONFLICT replay guard) so the caller gates
+/// the step's events on it.
+async fn insert_step_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    step: &Step,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<u64, JobsError> {
+    // Snapshot the current active plugin version for this step kind
+    // so republishing the plugin later doesn't retroactively change
+    // which bundle the step is pinned against. Caller-supplied
+    // non-zero values win (bulk replay seeding its own versions);
+    // zero triggers the lookup.
+    let version = if step.step_plugin_version != 0 {
+        step.step_plugin_version
+    } else {
+        active_plugin_version(&mut **tx, &step.kind).await?
+    };
+    // ON CONFLICT DO NOTHING for the same reason as the job insert:
+    // replay paths (deterministic sim runs) re-emit Steps;
+    // update_step_at handles intentional changes. Without this an
+    // idempotent retry 500's.
+    let result = sqlx::query(
+        r#"
+        INSERT INTO steps (id, job_id, kind, title, spec_slug, assignee_id, status, sort_order,
+                           blocked_by, sign_offs_required, assurance_required, sign_offs, fields,
+                           completed_on, metadata, notes, step_plugin_version,
+                           embedded_job, created_at, updated_at, became_ready_at,
+                           completed_by, completed_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19,
+                -- Born ready IS the ready flip: a step materialized
+                -- straight into `ready` (the open-time readiness
+                -- pass) became an obligation at this INSERT. The
+                -- queue-age lens (2a0b034e) reads this stamp.
+                CASE WHEN $7 = 'ready' THEN $19 END,
+                $20, $21)
+        ON CONFLICT (id) DO NOTHING
+        "#,
+    )
+    .bind(*step.id.inner().as_uuid())
+    .bind(*step.job_id.inner().as_uuid())
+    .bind(&step.kind)
+    .bind(&step.title)
+    .bind(&step.spec_slug)
+    .bind(&step.assignee_id)
+    .bind(step_status_str(step.status))
+    .bind(step.sort_order)
+    .bind(blocked_by_uuids(&step.blocked_by))
+    .bind(serde_json::to_value(&step.sign_offs_required).unwrap_or_default())
+    .bind(
+        step.assurance_required
+            .and_then(|a| serde_json::to_value(a).ok())
+            .and_then(|v| v.as_str().map(str::to_string)),
+    )
+    .bind(serde_json::to_value(&step.sign_offs).unwrap_or_default())
+    .bind(serde_json::to_value(&step.fields).unwrap_or_default())
+    .bind(step.completed_on)
+    .bind(&step.metadata)
+    .bind(&step.notes)
+    .bind(version)
+    .bind(step.embedded_job.map(|j| *j.inner().as_uuid()))
+    .bind(now)
+    .bind(step.completed_by.as_ref().map(ToString::to_string))
+    .bind(step.completed_at)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| JobsError::Storage(e.to_string()))?;
+    Ok(result.rows_affected())
 }
 
 // ---------------------------------------------------------------------------
@@ -328,12 +405,25 @@ async fn active_plugin_version(pool: &sqlx::PgPool, kind: &str) -> Result<i32, J
 
 #[async_trait]
 impl JobsRepository for PgJobs {
-    async fn create_job_at(
+    async fn create_job_with_steps_at(
         &self,
         job: &Job,
+        steps: &[Step],
         now: chrono::DateTime<chrono::Utc>,
-        events: &[boss_core::event::Event],
+        job_events: &[boss_core::event::Event],
+        step_events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
+        // Refused before BEGIN: a short zip would commit rows the log
+        // does not hold (the port doc says why that is a rebuild
+        // divergence, not an inconvenience).
+        if steps.len() != step_events.len() {
+            return Err(JobsError::Storage(format!(
+                "create_job_with_steps_at: {} step(s) but {} step event(s) — one \
+                 STEP_CREATED per step, index-aligned",
+                steps.len(),
+                step_events.len()
+            )));
+        }
         let (subj_kind, subj_ref) = subject_parts(&job.subject);
         let mut tx = self
             .pool
@@ -409,7 +499,21 @@ impl JobsRepository for PgJobs {
         // The ON CONFLICT replay guard doubles as the event gate: a
         // re-emitted Job (deterministic sim runs) records nothing.
         if result.rows_affected() > 0 {
-            for event in events {
+            for event in job_events {
+                boss_events::outbox::record_event_in_tx(&mut tx, event)
+                    .await
+                    .map_err(JobsError::Storage)?;
+            }
+        }
+        // The materialized graph rides the SAME transaction (backlog
+        // f2ba226e): every step row and its STEP_CREATED, or nothing.
+        // One statement per step, as `add_step_at` writes it — the
+        // definition is shared, the commit is not repeated. A future
+        // dropped anywhere in this loop (the client gone, axum
+        // dropping the handler) drops `tx`, and sqlx rolls it back
+        // when the connection returns to the pool.
+        for (step, event) in steps.iter().zip(step_events) {
+            if insert_step_in_tx(&mut tx, step, now).await? > 0 {
                 boss_events::outbox::record_event_in_tx(&mut tx, event)
                     .await
                     .map_err(JobsError::Storage)?;
@@ -907,75 +1011,16 @@ impl JobsRepository for PgJobs {
         now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
-        // Snapshot the current active plugin version for this step kind
-        // so republishing the plugin later doesn't retroactively change
-        // which bundle the step is pinned against. Caller-supplied
-        // non-zero values win (bulk replay seeding its own versions);
-        // zero triggers the lookup.
-        let version = if step.step_plugin_version != 0 {
-            step.step_plugin_version
-        } else {
-            active_plugin_version(&self.pool, &step.kind).await?
-        };
-
-        // ON CONFLICT DO NOTHING for the same reason as
-        // create_job_at: replay paths (deterministic sim runs)
-        // re-emit Steps; update_step_at handles intentional
-        // changes. Without this an idempotent retry 500's.
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| JobsError::Storage(e.to_string()))?;
-        let result = sqlx::query(
-            r#"
-            INSERT INTO steps (id, job_id, kind, title, spec_slug, assignee_id, status, sort_order,
-                               blocked_by, sign_offs_required, assurance_required, sign_offs, fields,
-                               completed_on, metadata, notes, step_plugin_version,
-                               embedded_job, created_at, updated_at, became_ready_at,
-                               completed_by, completed_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19,
-                    -- Born ready IS the ready flip: a step materialized
-                    -- straight into `ready` (the open-time readiness
-                    -- pass) became an obligation at this INSERT. The
-                    -- queue-age lens (2a0b034e) reads this stamp.
-                    CASE WHEN $7 = 'ready' THEN $19 END,
-                    $20, $21)
-            ON CONFLICT (id) DO NOTHING
-            "#,
-        )
-        .bind(*step.id.inner().as_uuid())
-        .bind(*step.job_id.inner().as_uuid())
-        .bind(&step.kind)
-        .bind(&step.title)
-        .bind(&step.spec_slug)
-        .bind(&step.assignee_id)
-        .bind(step_status_str(step.status))
-        .bind(step.sort_order)
-        .bind(blocked_by_uuids(&step.blocked_by))
-        .bind(serde_json::to_value(&step.sign_offs_required).unwrap_or_default())
-        .bind(
-            step.assurance_required
-                .and_then(|a| serde_json::to_value(a).ok())
-                .and_then(|v| v.as_str().map(str::to_string)),
-        )
-        .bind(serde_json::to_value(&step.sign_offs).unwrap_or_default())
-        .bind(serde_json::to_value(&step.fields).unwrap_or_default())
-        .bind(step.completed_on)
-        .bind(&step.metadata)
-        .bind(&step.notes)
-        .bind(version)
-        .bind(step.embedded_job.map(|j| *j.inner().as_uuid()))
-        .bind(now)
-        .bind(step.completed_by.as_ref().map(ToString::to_string))
-        .bind(step.completed_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| JobsError::Storage(e.to_string()))?;
+        let inserted = insert_step_in_tx(&mut tx, step, now).await?;
         // OUTBOX (phase 2): the caller's events (STEP_CREATED) record
         // with the row — only when the INSERT actually inserted (the
         // replay guard doubles as the event gate).
-        if result.rows_affected() > 0 {
+        if inserted > 0 {
             for event in events {
                 boss_events::outbox::record_event_in_tx(&mut tx, event)
                     .await

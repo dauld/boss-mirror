@@ -449,6 +449,13 @@ spec:
             - name: BOSS_BROKER_FORGEJO_TOKEN
               valueFrom: {secretKeyRef: {name: boss-credential-broker-root, key: forgejo-token, optional: true}}
             - {name: BOSS_BROKER_FORGE_URL, value: "http://10.20.0.15:3000"}
+            # The broker's Cloudflare root (04e5f833): a second key in
+            # the SAME root Secret, one account API token (Cloudflare
+            # Tunnel:Edit, Zone:DNS:Edit, Zone:Read). Same `optional:
+            # true` reasoning; the tunnel rotation rule dead-letters
+            # naming this variable until the key exists.
+            - name: BOSS_BROKER_CLOUDFLARE_TOKEN
+              valueFrom: {secretKeyRef: {name: boss-credential-broker-root, key: cloudflare-token, optional: true}}
             # Bind all interfaces so the Service can reach the gateway;
             # the default 127.0.0.1 is right for systemd+Caddy, wrong here.
             - {name: BOSS_LISTEN, value: "0.0.0.0:4443"}
