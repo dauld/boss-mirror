@@ -219,3 +219,7 @@ required-features = ["postgres"]
 [[test]]
 name = "no_orphan_steps_pg"
 required-features = ["postgres"]
+
+[[test]]
+name = "surface_opens_pg"
+required-features = ["postgres"]

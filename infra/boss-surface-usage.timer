@@ -1,0 +1,23 @@
+[Unit]
+Description=Daily surface-usage reading
+
+[Timer]
+# 05:30, after the 05:10 codebase metrics and the 05:20 protocol drift
+# — the quiet tail of the maintenance night, one more measurement of
+# the department by itself. The exact minute does not matter: the
+# window is the 24 hours before the run, so a late firing shifts the
+# window's edges by minutes and changes no count that matters.
+OnCalendar=*-*-* 05:30:00
+# Cover a host-down window. A missed night is a missed row in the
+# series, not two days in one — the window is fixed at 24 hours — and
+# the week's reading on /it/codebase reads the table directly, so the
+# day is still counted there.
+Persistent=true
+RandomizedDelaySec=300
+# The interval lives twice by design and is pinned:
+# infra/lint/timers-leave-a-packet.sh check 9 fails CI if this schedule
+# disagrees with the cadence-silence sweep's declaration for
+# maintenance-surface-usage (CLAUDE.md §9a).
+
+[Install]
+WantedBy=timers.target

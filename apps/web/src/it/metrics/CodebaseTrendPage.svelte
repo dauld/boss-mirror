@@ -21,6 +21,7 @@
   import { onMount } from 'svelte';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import { href, navigate } from '../../router';
+  import SurfaceUsage from './SurfaceUsage.svelte';
   import type { Remote } from '../../data/remote';
   import {
     barGeometry,
@@ -355,6 +356,10 @@
       Which ratios count as "simpler" is a choice, not a fact; these two are the ones the founding ideas commit to.
     </p>
   {/if}
+
+  <!-- Which surfaces each operator opened (628f182b) — its own read, so
+       it renders whether or not the codebase packets answered. -->
+  <SurfaceUsage />
 </div>
 
 <style>

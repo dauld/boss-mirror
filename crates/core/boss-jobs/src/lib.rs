@@ -62,6 +62,7 @@ pub mod seed_loader;
 pub mod step_plugins;
 pub mod step_registry;
 pub mod subject_existence;
+pub mod surface_opens;
 
 pub use in_memory::InMemoryJobs;
 pub use port::{JobFilter, JobsError, JobsRepository};

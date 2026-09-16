@@ -401,6 +401,21 @@ fn build_router(local_auth_state: Option<Arc<LocalAuthState>>) -> axum::Router<A
             "/api/agent-runs/{*rest}",
             axum::routing::get(|s, r| proxy::handle(s, r, &proxy::JOBS)),
         )
+        // Surface opens (backlog 628f182b): the SPA posts each route
+        // open here and the Codebase page reads the roll-up. The write
+        // is credited to the SESSION — this proxy strips any
+        // `x-boss-user` the client sent and signs the cookie's, which is
+        // the whole reason the record is trustworthy. Session-gated
+        // like /api/jobs; the sweep under `{*rest}` is refused upstream
+        // for a user-tier session. Bare + sub-path, per /api/assets.
+        .route(
+            "/api/surface-opens",
+            axum::routing::any(|s, r| proxy::handle(s, r, &proxy::JOBS)),
+        )
+        .route(
+            "/api/surface-opens/{*rest}",
+            axum::routing::any(|s, r| proxy::handle(s, r, &proxy::JOBS)),
+        )
         // Scheduling routes live alongside jobs on the same upstream.
         // Auth-gated like the rest of /api/*.
         .route(
@@ -1072,6 +1087,13 @@ mod routing_tests {
             // time from an empty panel.
             "/api/agent-runs",
             "/api/agent-runs/cost",
+            // Surface opens (628f182b): the SPA's write and the
+            // Codebase page's roll-up read, both on the jobs upstream.
+            // Listed on the day they shipped, so the fourth instance
+            // of the stations shape is refused here rather than found
+            // from a panel that never fills.
+            "/api/surface-opens",
+            "/api/surface-opens/rollup",
         ];
         for path in REAL {
             let (_, body) = get(app(), path).await;

@@ -344,6 +344,13 @@ TIMERS=(
     # this is the one box with both. On every gate the same comparison
     # ran and was thrown away with the log; this row is what keeps it.
     "boss-protocol-drift:."
+    # The daily surface usage (628f182b): which surfaces each operator
+    # opened, rolled up per actor per route off the jobs API, and the
+    # nav-catalog surfaces nobody opened. Same host as the two above:
+    # the never-opened comparison reads the catalog out of the tree,
+    # and this is the box with a checkout and a route to the system of
+    # record.
+    "boss-surface-usage:."
 )
 
 # Long-running daemons that aren't `boss-*-api` services. Each
