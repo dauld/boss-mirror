@@ -40,7 +40,17 @@
 //!     name is DERIVED from the rendered manifest through the lib's own
 //!     `manifest_secrets`, an absent Secret reads `skipped (secret
 //!     absent: …)`, a Ready rollout reads `connected`, a stalled one
-//!     `not-ready` — and the runner records the line on the packet.
+//!     `not-ready` — and the runner records the line on the packet;
+//!   * a SKIPPED instance's hostname is served by the SOURCE instance's
+//!     gateway (backlog 40d46042): the converge re-renders the ingress
+//!     after the instance secret gate, handing the renderer the packet's
+//!     own `instances_skipped` string, applies it, and rolls the
+//!     connector exactly when the render changed — cloudflared reads a
+//!     local config once at start (2026.9.1 cmd/cloudflared/tunnel/
+//!     cmd.go: `prepareTunnelConfig` parses ingress; the fsnotify
+//!     watcher exists only for the flagless service mode, and fires on
+//!     `Write`, which a ConfigMap's symlink swap never is). The
+//!     committed file stays the no-skip render, byte for byte.
 
 use boss_testing::{repo_root, scratch_dir, write_exec, write_file};
 use std::collections::BTreeMap;
@@ -97,12 +107,21 @@ fn instances_of(tree: &Path) -> Vec<(String, BTreeMap<String, String>)> {
 }
 
 fn run_render(tree: &Path, args: &[&str]) -> (i32, String, String) {
-    let out = Command::new("bash")
-        .arg(repo_root().join(RENDER))
+    run_render_env(tree, args, &[])
+}
+
+/// The renderer with extra environment — `BOSS_INSTANCES_SKIPPED` is
+/// how the converge hands it the skipped set.
+fn run_render_env(tree: &Path, args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
+    let mut cmd = Command::new("bash");
+    cmd.arg(repo_root().join(RENDER))
         .args(args)
         .env("BOSS_CLUSTER_TREE", tree)
-        .output()
-        .expect("bash runs the renderer");
+        .env_remove("BOSS_INSTANCES_SKIPPED");
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("bash runs the renderer");
     (
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).to_string(),
@@ -517,5 +536,341 @@ fn the_runner_records_the_connector_on_the_packet_after_the_roll() {
     assert!(
         after[read_at..read_at + 200].contains("cloudflared.yaml"),
         "the connector's own manifest is what the Secret is derived from"
+    );
+}
+
+// --- a skipped instance is served by its source (backlog 40d46042) ------
+
+/// The runner's `instances_skipped` field as the apply loop builds it —
+/// the ONE string the packet carries, the manifests check is handed,
+/// and now the renderer reads (one definition, three readers).
+const SKIPPED: &str = "boss-playground (secrets absent: boss-secrets, boss-tls)";
+const SOURCE_GATEWAY: &str = "http://boss-gateway.boss.svc.cluster.local:80";
+const SKIP_COMMENT: &str =
+    "# [playground] skipped: secrets absent — served by boss until provisioned";
+const OWN_COMMENT: &str = "# [playground] — its own gateway, in its own namespace";
+
+#[test]
+fn a_skipped_instances_hostname_is_served_by_the_source_gateway_until_provisioned() {
+    // Measured 2026-09-16 07:4x: the rotation moved playground.algedonic.dev
+    // to the in-cluster tunnel, whose ingress routed it to a gateway in a
+    // namespace the converge had SKIPPED (secrets absent) — the hostname
+    // reached Cloudflare Access and then nothing. With the skipped set,
+    // the hostname goes to the SOURCE instance's gateway, and the comment
+    // says why, so the render reads as what it is.
+    let (rc, out, err) = run_render_env(&repo_root(), &[], &[("BOSS_INSTANCES_SKIPPED", SKIPPED)]);
+    assert_eq!(rc, 0, "{err}");
+    let rules = ingress_of(&out);
+    let instances = instances_of(&repo_root());
+    assert_eq!(rules.len(), instances.len() + 1, "{rules:?}");
+    assert_eq!(
+        rules[0],
+        ("boss.algedonic.dev".to_string(), SOURCE_GATEWAY.to_string()),
+        "the source instance still routes to its own gateway"
+    );
+    assert_eq!(
+        rules[1],
+        (
+            "playground.algedonic.dev".to_string(),
+            SOURCE_GATEWAY.to_string()
+        ),
+        "the skipped instance's hostname is served by the source's gateway, not by a \
+         namespace with nothing running in it"
+    );
+    assert!(out.contains(SKIP_COMMENT), "the comment names why: {out}");
+    assert!(!out.contains(OWN_COMMENT), "{out}");
+    assert_eq!(
+        rules.last().unwrap(),
+        &(String::new(), "http_status:404".to_string())
+    );
+    assert_ne!(
+        out,
+        read(CONFIG),
+        "the skip render is not the committed one"
+    );
+
+    // The same call with nothing skipped IS the committed file: the
+    // converge re-renders on every run, and an applied instance flips
+    // back to its own gateway with no other change.
+    let (rc, out, err) = run_render_env(&repo_root(), &[], &[("BOSS_INSTANCES_SKIPPED", "")]);
+    assert_eq!(rc, 0, "{err}");
+    assert_eq!(out, read(CONFIG));
+
+    // The packet's line, from the same loop that renders the rules —
+    // `hostname → namespace` per instance, the skip and its reason in
+    // parentheses — so the field cannot say one thing and the rules another.
+    let (rc, out, err) = run_render_env(
+        &repo_root(),
+        &["--summary"],
+        &[("BOSS_INSTANCES_SKIPPED", SKIPPED)],
+    );
+    assert_eq!(rc, 0, "{err}");
+    assert_eq!(
+        out.trim(),
+        "boss.algedonic.dev → boss; playground.algedonic.dev → boss (boss-playground skipped: secrets absent)"
+    );
+    let (rc, out, err) = run_render_env(&repo_root(), &["--summary"], &[]);
+    assert_eq!(rc, 0, "{err}");
+    assert_eq!(
+        out.trim(),
+        "boss.algedonic.dev → boss; playground.algedonic.dev → boss-playground",
+        "applied: the field says the hostname is its own instance's again"
+    );
+
+    // A skipped set naming a namespace no instance declares is not an
+    // instance of this tree — nothing to reroute, nothing to refuse.
+    let (rc, out, err) = run_render_env(
+        &repo_root(),
+        &[],
+        &[(
+            "BOSS_INSTANCES_SKIPPED",
+            "boss-elsewhere (secrets absent: x)",
+        )],
+    );
+    assert_eq!(rc, 0, "{err}");
+    assert_eq!(out, read(CONFIG));
+}
+
+#[test]
+fn the_source_cannot_be_skipped_and_the_committed_file_is_never_the_skip_render() {
+    // The source is applied with no secret gate, so the runner never
+    // names it skipped; a caller that does has nothing to serve the
+    // other hostnames from, and is refused rather than routed to a dark
+    // namespace.
+    let (rc, _, err) = run_render_env(
+        &repo_root(),
+        &[],
+        &[("BOSS_INSTANCES_SKIPPED", "boss (secrets absent: boss-tls)")],
+    );
+    assert_eq!(rc, REFUSED, "{err}");
+    assert!(err.contains("source") && err.contains("[prod]"), "{err}");
+
+    // --check and --write are about the COMMITTED file, which is the
+    // no-skip render by definition (the byte-identity test above); a
+    // skipped set on either is a call that would commit a converge-time
+    // state into the tree.
+    for mode in ["--check", "--write"] {
+        let tree = fixture(&format!("skip-{}", mode.trim_start_matches('-')));
+        let before = std::fs::read_to_string(tree.join(CONFIG)).unwrap();
+        let (rc, _, err) = run_render_env(&tree, &[mode], &[("BOSS_INSTANCES_SKIPPED", SKIPPED)]);
+        assert_eq!(rc, REFUSED, "{mode} with a skipped set is refused: {err}");
+        assert!(err.contains("BOSS_INSTANCES_SKIPPED"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(tree.join(CONFIG)).unwrap(),
+            before,
+            "{mode} wrote nothing"
+        );
+    }
+}
+
+/// The tunnel-ingress stage, lifted from the runner between its two
+/// markers, so the test exercises the shipped text rather than a copy.
+fn ingress_block() -> String {
+    let src = read(RUNNER);
+    let start = src
+        .find("STAGE=\"tunnel ingress\"")
+        .expect("the runner has the tunnel-ingress stage");
+    let end = src[start..]
+        .find("_stage_done ingress_s")
+        .expect("the stage ends with its timing");
+    src[start..start + end].to_string()
+}
+
+/// Runs the block with a stub kubectl that keeps what `apply -f -` was
+/// fed, answers `patch` from STUB_PATCH, and logs every call; the real
+/// renderer runs against the real tree.
+fn run_ingress(
+    name: &str,
+    skipped: &str,
+    patch_answer: &str,
+) -> (i32, String, String, serde_json::Value, PathBuf) {
+    let dir = scratch_dir(&format!("tunnel-ingress-{name}"));
+    let kubectl = dir.join("kubectl");
+    write_exec(
+        &kubectl,
+        r#"#!/usr/bin/env bash
+echo "kubectl $*" >> "$STUB_LOG"
+case "$*" in
+  *"apply -f -"*) cat > "$STUB_APPLIED"; echo "configmap/cloudflared-config configured" ;;
+  *"patch "*) echo "deployment.apps/cloudflared $STUB_PATCH" ;;
+esac
+exit 0
+"#,
+    );
+    let script = format!(
+        "set -euo pipefail\nREPO='{repo}'\nSOURCE_NS=boss\nK='{k}'\nKAPPLY='{k}'\nINSTANCES_SKIPPED='{skipped}'\n\
+         _stage_done() {{ :; }}\n. '{lib}'\n{block}\nexit 0\n",
+        repo = repo_root().display(),
+        k = kubectl.display(),
+        lib = repo_root().join("infra/run-summary.sh").display(),
+        block = ingress_block()
+    );
+    let summary = dir.join("summary.json");
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
+        .arg(script)
+        .env("BOSS_RUN_SUMMARY_FILE", &summary)
+        .env("STUB_LOG", dir.join("calls"))
+        .env("STUB_APPLIED", dir.join("applied.yaml"))
+        .env("STUB_PATCH", patch_answer)
+        .current_dir(&dir);
+    let out = cmd.output().unwrap();
+    let recorded = std::fs::read_to_string(&summary)
+        .map(|s| serde_json::from_str(&s).unwrap())
+        .unwrap_or(serde_json::Value::Null);
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+        recorded,
+        dir,
+    )
+}
+
+/// sha256 of a text, by the same tool the runner uses.
+fn sha256_hex(text: &str) -> String {
+    use std::io::Write;
+    let mut child = Command::new("sh")
+        .args(["-c", "sha256sum | cut -d' ' -f1"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(text.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn the_runner_re_renders_the_ingress_after_the_secret_gate_and_rolls_the_connector_when_it_changed()
+{
+    // Position: after the apply loop has decided what is skipped, and
+    // before the connector is read — so the `cloudflared` field is about
+    // the connector serving THIS render — and before the apply directory
+    // is discarded.
+    let src = read(RUNNER);
+    let skipped_at = src
+        .find("run_summary_field instances_skipped")
+        .expect("the skip rides the packet");
+    let ingress_at = src
+        .find("STAGE=\"tunnel ingress\"")
+        .expect("the runner has the tunnel-ingress stage");
+    let connector_at = src
+        .find("$(connector_status ")
+        .expect("the runner reads the connector");
+    let discard = src
+        .find("rm -rf \"$APPLY_DIR\"")
+        .expect("the runner discards the apply directory");
+    assert!(
+        skipped_at < ingress_at,
+        "re-rendered AFTER the instance secret gate"
+    );
+    assert!(
+        ingress_at < connector_at,
+        "the connector is read after its ingress is applied"
+    );
+    assert!(
+        connector_at < discard,
+        "and while /manifests is still mounted"
+    );
+    // ONE writer: the committed copy is dropped from prod's apply set, so
+    // the object never flips no-skip → skip inside a converge and a pod
+    // that restarts between the two cannot load the wrong render.
+    let prod_apply = src
+        .find("apply_instance \"$SOURCE_NS\"")
+        .expect("prod is applied");
+    let dropped = src
+        .find("rm -f \"$APPLY_DIR/$SOURCE_NS/$TUNNEL_CONFIG_FILE\"")
+        .expect("the staged ConfigMap is dropped from the apply set");
+    assert!(dropped < prod_apply, "dropped BEFORE prod's apply");
+    assert!(
+        src[..dropped].contains("TUNNEL_CONFIG_FILE=cloudflared-config.yaml"),
+        "the file dropped is the rendered ConfigMap"
+    );
+    let block = ingress_block();
+    assert!(
+        block.contains("BOSS_INSTANCES_SKIPPED=\"$INSTANCES_SKIPPED\""),
+        "the renderer is handed the SAME string the packet carries — the idiom the \
+         manifests check already reads: {block}"
+    );
+
+    // Skipped: the applied ConfigMap serves the playground from prod, the
+    // packet says so, and the connector is rolled because the render
+    // differs from what its pods loaded.
+    let (rc, out, err, recorded, dir) = run_ingress("skipped", SKIPPED, "patched");
+    assert_eq!(rc, 0, "{out}\n{err}");
+    let applied = std::fs::read_to_string(dir.join("applied.yaml")).unwrap();
+    let rules = ingress_of(&applied);
+    assert_eq!(
+        rules[1],
+        (
+            "playground.algedonic.dev".to_string(),
+            SOURCE_GATEWAY.to_string()
+        ),
+        "{applied}"
+    );
+    assert!(applied.contains(SKIP_COMMENT), "{applied}");
+    assert_eq!(
+        recorded["tunnel_ingress"],
+        "boss.algedonic.dev → boss; playground.algedonic.dev → boss (boss-playground skipped: secrets absent)",
+        "{recorded}"
+    );
+    let sha = sha256_hex(&applied);
+    let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
+    let patch = calls
+        .lines()
+        .find(|l| l.contains(" patch "))
+        .unwrap_or_else(|| panic!("the connector's pod template is patched: {calls}"));
+    assert!(
+        patch.contains("deploy") && patch.contains("cloudflared") && patch.contains("-n boss"),
+        "{patch}"
+    );
+    assert!(
+        patch.contains(&sha),
+        "the patch carries the sha256 of the APPLIED render, so the pods roll exactly when \
+         the ingress they loaded is not this one: {patch}"
+    );
+    let apply_at = calls.find("apply -f -").unwrap();
+    let patch_at = calls.find(" patch ").unwrap();
+    assert!(
+        apply_at < patch_at,
+        "the ConfigMap is applied before the pods that mount it roll"
+    );
+    assert_eq!(
+        recorded["tunnel_ingress_render"],
+        format!("{} (connector rolled)", &sha[..12]),
+        "{recorded}"
+    );
+
+    // Applied (nothing skipped): the applied ConfigMap IS the committed
+    // file, the field says the hostname is its own instance's, and a
+    // pod template already on this render is left alone.
+    let (rc, out, err, recorded, dir) = run_ingress("applied", "", "patched (no change)");
+    assert_eq!(rc, 0, "{out}\n{err}");
+    let applied = std::fs::read_to_string(dir.join("applied.yaml")).unwrap();
+    assert_eq!(
+        applied,
+        read(CONFIG),
+        "with nothing skipped the converge applies the committed render"
+    );
+    assert_eq!(
+        recorded["tunnel_ingress"],
+        "boss.algedonic.dev → boss; playground.algedonic.dev → boss-playground"
+    );
+    let sha = sha256_hex(&applied);
+    assert_eq!(
+        recorded["tunnel_ingress_render"],
+        format!("{} (connector unchanged)", &sha[..12]),
+        "{recorded}"
+    );
+    let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
+    assert!(
+        !calls.contains("rollout restart"),
+        "no unconditional restart: the template hash is the only trigger: {calls}"
     );
 }

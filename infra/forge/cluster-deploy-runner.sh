@@ -385,6 +385,20 @@ echo "cluster-deploy-runner: applying infra/cluster/manifests for $SOURCE_NS (bo
 # refused here (it takes a derived set, and that set contains the
 # StatefulSets and PVCs holding the audit log).
 echo "cluster-deploy-runner: apply is additive — NO --prune. An object whose manifest was deleted keeps running; the verify step below names it."
+# THE TUNNEL INGRESS HAS ONE WRITER, and it is not this apply (backlog
+# 40d46042). The committed cloudflared-config.yaml is the NO-SKIP render
+# of infra/cluster/instances.toml; the object the cluster holds must be
+# the render for what THIS converge skipped (the `tunnel ingress` stage
+# below, after the instance secret gate). Applying the committed copy
+# here and the re-render there would write the object twice per
+# converge — and a connector pod that restarted in the minute between
+# the two would load the wrong one and hold it, silently, until the
+# next ingress change (the pods never re-read a ConfigMap; see that
+# stage). So the staged copy is dropped from the apply set: the object
+# is still converged on every run, from the same render, by the one
+# stage that knows the skipped set.
+TUNNEL_CONFIG_FILE=cloudflared-config.yaml
+rm -f "$APPLY_DIR/$SOURCE_NS/$TUNNEL_CONFIG_FILE"
 apply_instance "$SOURCE_NS"
 
 # StepPlugin bundles converge from the tree too (job d35aec77).
@@ -529,23 +543,6 @@ SECRETS_DECLARED=$(ensure_declared_secrets "$K" "$REPO/infra/dispatcher/rules")
 run_summary_field secrets_declared "$SECRETS_DECLARED"
 echo "cluster-deploy-runner: secrets declared: $SECRETS_DECLARED"
 
-# THE TUNNEL CONNECTOR, read after the roll (backlog 5a2bb0ce; design
-# 4c565f8c, David 2026-09-16). cloudflared.yaml is a prod pipeline
-# manifest, applied above with the rest; its one Secret is created
-# empty by the stage above and filled by the broker's rotation, and
-# prod's apply has no secret gate, so the pods either connect or wait
-# with nothing on the packet saying which. cluster-deploy-lib.sh connector_status derives
-# the Secret from the RENDERED manifest (still mounted at /manifests
-# here — the apply directory is discarded after the instance loop),
-# and records `connected`, `not-ready`, or `skipped (secret absent:
-# <name>)` — the field the car's probe reads. The read never fails the
-# converge: the tunnel is not what a train delivers, and a
-# Cloudflare-side fault must not hold every train's packet red.
-STAGE="tunnel connector"
-CONNECTOR=$(connector_status "$K" "$KM" "$SOURCE_NS" "/manifests/$SOURCE_NS/cloudflared.yaml" cloudflared)
-run_summary_field cloudflared "$CONNECTOR"
-echo "cluster-deploy-runner: cloudflared: $CONNECTOR"
-
 # THE OTHER INSTANCES, after prod is stamped (backlog 07d7549c). Each
 # is applied exactly as prod was — namespace first, then its rendered
 # directory, then its step-plugins ConfigMap and its chores' image —
@@ -599,7 +596,6 @@ while IFS=$'\t' read -r iname ins_ns _t _s _h; do
     $K set image -n "$ins_ns" cronjobs -l boss-chore=true "chore=$REGISTRY:$HEAD" || true
     INSTANCES_APPLIED="$INSTANCES_APPLIED,$ins_ns"
 done <<< "$INSTANCES"
-rm -rf "$APPLY_DIR"
 run_summary_field instances_applied "$INSTANCES_APPLIED"
 echo "cluster-deploy-runner: instances applied: $INSTANCES_APPLIED"
 if [ -n "$INSTANCES_SKIPPED" ]; then
@@ -607,6 +603,89 @@ if [ -n "$INSTANCES_SKIPPED" ]; then
     echo "cluster-deploy-runner: instances skipped: $INSTANCES_SKIPPED"
 fi
 _stage_done instances_s
+
+# THE TUNNEL INGRESS IS RE-RENDERED AFTER THE SECRET GATE, so a SKIPPED
+# instance's hostname is served by the source instance until it is
+# provisioned (backlog 40d46042, urgent). The committed
+# cloudflared-config.yaml — dropped from prod's apply set above, so this
+# stage is the object's only writer — routes every hostname to its own
+# instance's gateway, and an instance the loop above skipped has
+# NOTHING running in its namespace: measured 2026-09-16 07:4xZ, the
+# rotation had moved playground.algedonic.dev to this tunnel as
+# designed, and the hostname reached Cloudflare Access and then a dark
+# namespace. The fix is
+# sequencing, not a second file: the renderer is handed the SAME string
+# the packet carries as `instances_skipped` — the idiom the manifests
+# check below already reads, one definition — and routes a skipped
+# instance's hostname to $SOURCE_NS's gateway under a comment naming
+# why; with nothing skipped the render IS the committed file, byte for
+# byte, so an instance that has just been applied flips back to its own
+# gateway on this same converge. The map rides the packet as
+# `tunnel_ingress` (`<hostname> → <namespace>[ (<ns> skipped: <reason>)]`).
+#
+# THE CONNECTOR DOES NOT RE-READ A CHANGED CONFIGMAP. Read from
+# cloudflared 2026.9.1's source, not assumed: `tunnel --config … run`
+# parses its ingress once (cmd/cloudflared/tunnel/configuration.go
+# prepareTunnelConfig → ParseIngressFromConfigAndCLI), and the only
+# runtime update path is the orchestrator's UpdateConfig, fed by the
+# edge for remotely-managed tunnels; the fsnotify config watcher
+# (watcher/file.go) is wired only in cmd/cloudflared/main.go
+# handleServiceMode — cloudflared started with no subcommand — and even
+# there fires on fsnotify.Write alone, which a ConfigMap update (the
+# kubelet's atomic symlink swap) never is. So the pods must roll to
+# read a new render, and they roll EXACTLY when the render changed: the
+# sha256 of the applied ConfigMap is patched into the Deployment's pod
+# template as an annotation — the same value patches to "no change"
+# and no pod moves, a new value is a rolling update (2 replicas, surge
+# 1, unavailable 0, so the tunnel keeps a Ready connector throughout;
+# the ConfigMap is applied BEFORE the patch, so the pods the roll
+# creates mount this render). The annotation is a fact about which
+# render the pods loaded, readable off the live object; `kubectl apply`
+# of the committed cloudflared.yaml leaves it in place (three-way merge
+# deletes only keys the last applied config carried). Recorded as
+# `tunnel_ingress_render: <sha12> (connector
+# rolled|unchanged)`. The connector is then READ, below, after this —
+# so the `cloudflared` field is about the connector serving this
+# render. A failed apply or patch fails this stage, after prod's stamp,
+# exactly as a failed instance apply does: it is a write the credential
+# could not make, not a Cloudflare-side fault.
+STAGE="tunnel ingress"
+TUNNEL_CONFIG=$(BOSS_INSTANCES_SKIPPED="$INSTANCES_SKIPPED" "$REPO/infra/cluster/render-tunnel-config.sh")
+TUNNEL_INGRESS=$(BOSS_INSTANCES_SKIPPED="$INSTANCES_SKIPPED" "$REPO/infra/cluster/render-tunnel-config.sh" --summary)
+printf '%s\n' "$TUNNEL_CONFIG" | $KAPPLY apply -f -
+TUNNEL_SHA=$(printf '%s\n' "$TUNNEL_CONFIG" | sha256sum | cut -d' ' -f1)
+patch_out=$($K patch deploy cloudflared -n "$SOURCE_NS" --type merge \
+    -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"boss.algedonic.dev/ingress-sha256\":\"$TUNNEL_SHA\"}}}}}")
+echo "cluster-deploy-runner: $patch_out"
+case "$patch_out" in
+    *"no change"*) TUNNEL_ROLL="connector unchanged" ;;
+    *)             TUNNEL_ROLL="connector rolled" ;;
+esac
+run_summary_field tunnel_ingress "$TUNNEL_INGRESS"
+run_summary_field tunnel_ingress_render "${TUNNEL_SHA:0:12} ($TUNNEL_ROLL)"
+echo "cluster-deploy-runner: tunnel ingress: $TUNNEL_INGRESS — render ${TUNNEL_SHA:0:12}, $TUNNEL_ROLL"
+_stage_done ingress_s
+
+# THE TUNNEL CONNECTOR, read after the roll and after its ingress is
+# applied (backlog 5a2bb0ce; design 4c565f8c, David 2026-09-16).
+# cloudflared.yaml is a prod pipeline manifest, applied above with the
+# rest; its one Secret is created empty by the declared-secrets stage
+# and filled by the broker's rotation, and prod's apply has no secret
+# gate, so the pods either connect or wait with nothing on the packet
+# saying which. cluster-deploy-lib.sh connector_status derives the
+# Secret from the RENDERED manifest (still mounted at /manifests here —
+# the apply directory is discarded right after), and records
+# `connected`, `not-ready`, or `skipped (secret absent: <name>)` — the
+# field the car's probe reads; when the ingress stage above rolled the
+# pods, `connected` means the NEW pods hold an edge connection. The
+# read never fails the converge: the tunnel is not what a train
+# delivers, and a Cloudflare-side fault must not hold every train's
+# packet red.
+STAGE="tunnel connector"
+CONNECTOR=$(connector_status "$K" "$KM" "$SOURCE_NS" "/manifests/$SOURCE_NS/cloudflared.yaml" cloudflared)
+run_summary_field cloudflared "$CONNECTOR"
+echo "cluster-deploy-runner: cloudflared: $CONNECTOR"
+rm -rf "$APPLY_DIR"
 STAGE="verify manifests"
 
 # THE CONVERGE VERIFIES WHAT IT APPLIED (60690755). Everything above

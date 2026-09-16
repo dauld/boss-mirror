@@ -186,21 +186,12 @@ for f in FIELDS:
 PY
 }
 
-# skip_reason NS — the reason the converge gave for skipping NS (the
-# text before the first colon inside its parentheses), or nothing when
-# NS was not skipped. Parses BOSS_INSTANCES_SKIPPED as the runner writes
-# it; a namespace is matched whole, so `boss` never matches `boss-x`.
-skip_reason() {
-    local entry rest
-    [ -n "${BOSS_INSTANCES_SKIPPED:-}" ] || return 0
-    while IFS= read -r -d ';' entry; do
-        entry="${entry# }"
-        [ "${entry%% *}" = "$1" ] || continue
-        rest="${entry#* (}"; rest="${rest%%)*}"
-        printf '%s\n' "${rest%%:*}"
-        return 0
-    done <<< "$BOSS_INSTANCES_SKIPPED;"
-}
+# skip_reason NS — the reason the converge gave for skipping NS, or
+# nothing when NS was not skipped. The parse of BOSS_INSTANCES_SKIPPED
+# is shared with render-tunnel-config.sh, which reads the same string
+# for the same reason (40d46042): one parser, sourced.
+# shellcheck source=infra/cluster/instances-skipped.lib.sh
+. infra/cluster/instances-skipped.lib.sh
 
 total=$(printf '%s\n' "$inventory" | grep -c . || true)
 if [ "$total" -lt 5 ]; then
