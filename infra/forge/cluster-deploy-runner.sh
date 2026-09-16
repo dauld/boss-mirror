@@ -399,12 +399,12 @@ SOURCE_NAME=""; SOURCE_TENANT_REPO=""; SOURCE_TENANT_REF=""; SOURCE_TENANT_DIR="
 # The applied copy carries the build that is ALREADY converged (the
 # stamp), not the manifest's placeholder tag: the apply must never
 # change what runs. Rolling to $HEAD is roll_deployment's job below.
-while IFS=$'\t' read -r iname ins_ns tdir _s _h _share trepo tref; do
+while IFS="$IFS_ROW" read -r iname ins_ns tdir _s _h _share trepo tref; do
     manifests_with_image "$RENDER_DIR/$ins_ns" "$APPLY_DIR/$ins_ns" "$REGISTRY" "$LAST"
     if [ "$ins_ns" = "$SOURCE_NS" ]; then
         SOURCE_NAME="$iname"; SOURCE_TENANT_DIR="$tdir"; SOURCE_TENANT_REPO="$trepo"; SOURCE_TENANT_REF="$tref"
     fi
-done <<< "$INSTANCES"
+done <<< "$(instance_rows "$INSTANCES")"
 rm -rf "$RENDER_DIR"
 KM=$(kubectl_seeing "$APPLY_DIR")
 # apply_instance NAMESPACE — the rendered directory for one instance.
@@ -741,7 +741,7 @@ STAGE="apply instances"
 INSTANCES_APPLIED="$SOURCE_NS"
 INSTANCES_SKIPPED=""
 INSTANCE_SECRETS_MINTED=""
-while IFS=$'\t' read -r iname ins_ns tdir _s _h share_ns trepo tref; do
+while IFS="$IFS_ROW" read -r iname ins_ns tdir _s _h share_ns trepo tref; do
     [ "$ins_ns" = "$SOURCE_NS" ] && continue
     STAGE="tenant $ins_ns"
     verdict_rc=0
@@ -791,7 +791,7 @@ while IFS=$'\t' read -r iname ins_ns tdir _s _h share_ns trepo tref; do
     converge_step_plugins "$ins_ns"
     $K set image -n "$ins_ns" cronjobs -l boss-chore=true "chore=$REGISTRY:$HEAD" || true
     INSTANCES_APPLIED="$INSTANCES_APPLIED,$ins_ns"
-done <<< "$INSTANCES"
+done <<< "$(instance_rows "$INSTANCES")"
 run_summary_field instances_applied "$INSTANCES_APPLIED"
 echo "cluster-deploy-runner: instances applied: $INSTANCES_APPLIED"
 if [ -n "$INSTANCES_SKIPPED" ]; then
@@ -975,7 +975,7 @@ echo "cluster-deploy-runner: no orphans — nothing is running that the tree can
 # train by decision, and a train that did not reach it must say so.
 # An instance the apply loop SKIPPED (its Secrets absent) is not rolled:
 # there is nothing of this head in it to prove Ready.
-while IFS=$'\t' read -r iname ins_ns _t _s _h; do
+while IFS="$IFS_ROW" read -r iname ins_ns _t _s _h; do
     [ "$ins_ns" = "$SOURCE_NS" ] && continue
     case ",$INSTANCES_APPLIED," in *",$ins_ns,"*) ;; *) continue ;; esac
     STAGE="roll $ins_ns $HEAD"
@@ -986,4 +986,4 @@ while IFS=$'\t' read -r iname ins_ns _t _s _h; do
         exit 1
     fi
     run_summary_field "roll_$ins_ns" "$HEAD"
-done <<< "$INSTANCES"
+done <<< "$(instance_rows "$INSTANCES")"

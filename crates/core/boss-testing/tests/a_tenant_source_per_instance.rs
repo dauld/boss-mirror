@@ -679,8 +679,8 @@ fn the_runner_measures_before_it_provisions_and_delivers_before_it_applies() {
         "the verdict rides the packet as `tenant_source`"
     );
     assert!(
-        after.contains("read -r iname ins_ns tdir _s _h share_ns trepo tref"),
-        "the loop reads the tenant columns off the instance list"
+        after.contains("IFS=\"$IFS_ROW\" read -r iname ins_ns tdir _s _h share_ns trepo tref"),
+        "the loop reads the tenant columns off the instance list, empty columns kept"
     );
     // The lib's one spelling, parsed by the one parser.
     let out = Command::new("bash")
@@ -701,6 +701,70 @@ fn the_runner_measures_before_it_provisions_and_delivers_before_it_applies() {
     );
     assert_eq!(lines.next().unwrap(), "tenant source unreadable");
     assert_eq!(lines.next().unwrap(), "secrets absent");
+}
+
+/// Measured 2026-09-16 23:34Z on the first converge after the prod flip:
+/// `IFS=$'\t' read` collapses a run of tabs, so prod's EMPTY
+/// `shares_with` column shifted `tenant_repo` into `tenant_ref`, the
+/// runner asked the forge for repository `main`, and the converge ended
+/// `tenant_source: boss: unreadable (main@)` with nothing rolled. Every
+/// reader of the instance list now goes through `instance_rows`, which
+/// keeps an empty column as a column.
+#[test]
+fn an_empty_instance_column_keeps_its_place_when_the_runner_reads_the_row() {
+    let (rc, out, err) = run_renderer(&repo_root(), &["--instances"]);
+    assert_eq!(rc, 0, "{err}");
+    let prod = out
+        .lines()
+        .find(|l| l.starts_with("prod\t"))
+        .expect("prod row");
+    assert!(
+        prod.contains("\t\t"),
+        "the measured shape: prod carries an empty column (shares_with) before its repo: {prod:?}"
+    );
+    let script = format!(
+        ". '{}'\nwhile IFS=\"$IFS_ROW\" read -r iname ins_ns tdir _s _h _share trepo tref; do printf '%s|%s|%s|%s\\n' \"$iname\" \"$tdir\" \"$trepo\" \"$tref\"; done <<< \"$(instance_rows \"$INSTANCES\")\"\n",
+        repo_root().join(LIB).display()
+    );
+    let read = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .env("INSTANCES", &out)
+        .env("REPO", repo_root())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&read.stdout);
+    assert!(
+        read.status.success(),
+        "{}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    assert!(
+        text.lines()
+            .any(|l| l == "prod|tenant|david/algedonic-llc|main"),
+        "prod's repo and ref survive the empty column: {text}"
+    );
+    assert!(
+        text.lines().any(|l| l == "playground|examples/brewery||"),
+        "an image-sourced row keeps its empty repo and ref: {text}"
+    );
+    // The runner and the lib read every row this way — no tab-IFS read
+    // of the instance list remains.
+    let runner = std::fs::read_to_string(repo_root().join(RUNNER)).unwrap();
+    let lib = std::fs::read_to_string(repo_root().join(LIB)).unwrap();
+    for (name, src) in [("runner", runner.as_str()), ("lib", lib.as_str())] {
+        assert!(
+            !src.contains("IFS=$'\\t' read -r iname"),
+            "{name} still reads an instance row with a tab IFS, which drops an empty column"
+        );
+    }
+    assert_eq!(
+        runner
+            .matches("done <<< \"$(instance_rows \"$INSTANCES\")\"")
+            .count(),
+        3,
+        "the runner's three instance loops read through instance_rows"
+    );
 }
 
 #[test]

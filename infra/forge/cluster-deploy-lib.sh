@@ -735,10 +735,27 @@ tenant_stage() {
 #   stay served by the source (the 40d46042 shape). The tick does not
 #   re-measure readability: that is the deploying tick's finding, and
 #   the cluster's state is what this read-only tick may ask.
+# THE COLUMNS OF `render-instance.sh --instances` ARE TAB-SEPARATED AND
+# MAY BE EMPTY. `IFS=$'\t' read` cannot read them: a tab is whitespace
+# to `read`, and a run of whitespace delimiters collapses into one, so
+# an empty column DISAPPEARS and every column after it shifts left.
+# Measured 2026-09-16 23:34Z on the first converge after the prod flip
+# (c7be253): prod's empty `shares_with` column shifted `tenant_repo`
+# into `tenant_ref`, the runner asked the forge for repository `main`
+# and answered `tenant_source: boss: unreadable (main@)` — nothing
+# rolled, prod stayed on its old database while the Secret already
+# named the new one. Every reader of the list goes through this: the
+# tabs become a non-whitespace separator (ASCII 31, unit separator),
+# which `read` keeps even when empty.
+instance_rows() { # INSTANCES-TEXT — one row per line, columns joined by \037
+    printf '%s\n' "$1" | tr '\t' '\037'
+}
+IFS_ROW=$'\037'
+
 instances_skipped_by_gate() {
     local k="$1" km="$2" source_ns="$3" instances="$4" mount="$5"
     local iname ins_ns _t _s _h _share trepo tref absent err rc skipped=""
-    while IFS=$'\t' read -r iname ins_ns _t _s _h _share trepo tref; do
+    while IFS="$IFS_ROW" read -r iname ins_ns _t _s _h _share trepo tref; do
         [ -n "$ins_ns" ] || continue
         [ "$ins_ns" = "$source_ns" ] && continue
         if [ -n "$trepo" ]; then
@@ -763,7 +780,7 @@ instances_skipped_by_gate() {
             1) skipped="${skipped:+$skipped; }$(skipped_entry "$ins_ns" "$absent")" ;;
             *) return 2 ;;
         esac
-    done <<< "$instances"
+    done <<< "$(instance_rows "$instances")"
     printf '%s\n' "$skipped"
 }
 
