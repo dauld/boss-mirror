@@ -43,7 +43,15 @@ use boss_testing::TestDb;
 /// The orphan count on the day this landed. Move it DOWN when a car
 /// covers a step; a car that makes it go UP has added a person's step
 /// that no queue holds and nobody is named for, and must say why.
-const ORPHANS_PINNED: usize = 28;
+///
+/// 28 -> 29 on 2026-09-16 (backlog 5e58922c): `dns-zone-observation/
+/// observe`, a MACHINE step the `dns.observe` dispatcher handler
+/// completes on `step.ready` — the same class as the four
+/// `rotate-a-credential` phases the broker completes, already counted
+/// here, and the same registry gap: an `individual` audience naming
+/// the automation is the declaration that would take all five off
+/// this list, once those actors are registered.
+const ORPHANS_PINNED: usize = 29;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn every_persons_step_no_station_holds_is_named_and_the_count_is_pinned() {

@@ -308,6 +308,11 @@ COPY infra/platform /opt/boss/infra/platform
 # /opt/boss/infra/dispatcher/rules/. Without this dir the rules runner
 # can't start and Jobs get assigned + worked but never close.
 COPY infra/dispatcher /opt/boss/infra/dispatcher
+# DNS zone declarations + their comparator (5e58922c). The dns.observe
+# handler runs `check-declared.sh --json` over the zone it fetched, so
+# the comparison has ONE definition — the script an operator runs by
+# hand — and the image must carry it; BOSS_DNS_DECLARATIONS names it.
+COPY infra/cluster/dns /opt/boss/infra/cluster/dns
 COPY examples /opt/boss/examples
 # `COPY docs /opt/boss/docs` stood here until 2026-09-10, and it was
 # load-bearing for one reader only: boss-docs-api ran with

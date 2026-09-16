@@ -1,0 +1,38 @@
+# ---------------------------------------------------------------------
+# The DNS zone is compared to its declaration every day (design
+# 4c565f8c; backlog 5e58922c). Until 2026-09-16 every record of
+# algedonic.dev was hand-set in the Cloudflare UI except one a Job
+# created, and nothing recorded what the zone should say — so a record
+# that vanished, or one nobody remembered adding, was invisible until a
+# hostname stopped answering. `infra/cluster/dns/algedonic.dev.toml` is
+# now the declaration; this rule admits one `dns-zone-observation`
+# packet a day whose observe step the `dns.observe` handler completes
+# (rule `dns-observe-on-observe-ready`) with a verdict per record.
+#
+# The spawner and the reader are two rules on purpose: the packet
+# exists BEFORE the zone is read, so a read the broker cannot make
+# (token unset, Cloudflare down, the declaration missing from the image)
+# leaves a packet open at `observe` with a dead letter on it — a
+# troubled packet that looks troubled — instead of a firing that failed
+# where nobody reads.
+#
+# One outstanding packet per zone (the maintenance-sweep guard): a
+# reading still open means the zone could not be read, and a twin would
+# duplicate the obligation, not discharge it. The cadence-silence sweep
+# reports the cadence SUPPRESSED, naming the packet, while it stays open.
+[[rule]]
+name = "dns-zone-observe-daily"
+why = """
+A TIMER, the standing exemption: no packet causes "a day passed", so no
+Workflow definition can declare it. It adds no routing: one firing
+spawns one dns-zone-observation packet for the zone, and what happens
+next is that protocol's own row plus the reader rule
+(dns-observe-on-observe-ready). The condition it watches is a standing
+STATE of a system outside BOSS — what the zone says — which no packet
+causes and no event reports; a clock is the only honest trigger.
+"""
+schedule = { cadence = "daily", anchor_date = "2026-09-17" }
+when = 'NOT open_job_exists("dns-zone-observation", "algedonic.dev")'
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"dns-zone-observation\"", subject_kind = "\"custom\"", subject = "\"algedonic.dev\"", title = "\"DNS zone observation: algedonic.dev\"", "metadata.zone" = "\"algedonic.dev\"", "metadata.area" = "\"estate\"" }

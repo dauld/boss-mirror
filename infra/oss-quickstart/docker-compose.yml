@@ -167,6 +167,10 @@ services:
       # a terminal state (they pile up `open` unbounded). Shipped into the
       # image via `COPY infra/dispatcher` in the Dockerfile.
       BOSS_DISPATCHER_RULES: /opt/boss/infra/dispatcher/rules
+      # The DNS zone declarations + comparator the dns.observe handler
+      # runs (5e58922c); shipped via `COPY infra/cluster/dns`. Unset →
+      # the daily zone observation dead-letters naming this variable.
+      BOSS_DNS_DECLARATIONS: /opt/boss/infra/cluster/dns
       # Bind on 0.0.0.0 so the docker port-forward (4443:4443)
       # actually reaches the gateway. The default in
       # boss-gateway/main.rs is 127.0.0.1, which is right for

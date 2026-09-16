@@ -1,0 +1,79 @@
+# One reading of a DNS zone against its declaration (design 4c565f8c,
+# backlog 5e58922c). The Subject is the zone (`custom` / the zone name),
+# so "what did the zone say on <day>" is a Subject-history question.
+#
+# Spawned daily by the dispatcher rule `dns-zone-observe-daily`; the
+# `observe` step is a MACHINE step — nobody is nominated for it — that
+# the `dns.observe` handler completes on `step.ready`: it reads the
+# zone with the credential broker's root token, runs
+# infra/cluster/dns/check-declared.sh over the records, and records one
+# verdict per record (MATCH / DRIFT / ABSENT / UNDECLARED) on the step.
+# The packet closes on the reading: `matched` when every declared
+# record matches (UNDECLARED records may be listed — reported, not a
+# failure), `findings` when any is DRIFT or ABSENT, in which case the
+# handler has also raised (or refreshed) the estate alarm
+# `dns_drift:<zone>` before completing this step.
+#
+# A packet that stays open at `observe` is a zone that could not be
+# read or compared — the handler NAKs the firing and the dead letter on
+# the step says why. The daily spawner's dedup guard files no twin
+# while one is open; the cadence-silence sweep reports it SUPPRESSED,
+# naming the packet.
+[[workflow]]
+kind = "dns-zone-observation"
+label = "DNS zone observation"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "One daily reading of a DNS zone against the declaration in the tree (infra/cluster/dns/<zone>.toml): every live record gets a verdict — MATCH, DRIFT (both values), ABSENT, or UNDECLARED (live, named by nobody; reported, never a failure). The read and the comparison are machine work on the observe step; the packet is the record the series is read from. DRIFT or ABSENT also raises the estate alarm dns_drift:<zone>, refreshed on later readings rather than twinned."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "due"
+kind = "trigger"
+ready_when = "true"
+title_template = "Zone observation due"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "dns-zone-observe-daily" }
+
+# Machine step: no authority_role, so nobody is nominated; the
+# dispatcher rule `dns-observe-on-observe-ready` runs the handler the
+# instant it is ready. Required at done: the verdict list (one entry per
+# record, each naming the record and its verdict), the summary line the
+# comparator prints, and the result the terminals fork on.
+[[workflow.step]]
+title = "observe"
+kind = "task"
+ready_when = "steps.due.done"
+title_template = "Read the zone and compare it to the declaration"
+
+[[workflow.step.fields]]
+name = "verdicts"
+field_type = "array"
+required = true
+item_keys = ["record", "verdict"]
+
+[[workflow.step.fields]]
+name = "summary"
+field_type = "string"
+required = true
+
+[[workflow.step.fields]]
+name = "result"
+field_type = "match|findings"
+required = true
+
+[[workflow.step]]
+title = "matched"
+kind = "outcome"
+ready_when = "steps.observe.done AND steps.observe.metadata.result = \"match\""
+title_template = "Every declared record matches"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "matched" }
+
+[[workflow.step]]
+title = "findings"
+kind = "outcome"
+ready_when = "steps.observe.done AND steps.observe.metadata.result = \"findings\""
+title_template = "The zone disagrees with its declaration"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "findings" }

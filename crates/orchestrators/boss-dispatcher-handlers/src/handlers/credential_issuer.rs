@@ -506,6 +506,19 @@ pub trait WorkloadRestarter: Send + Sync {
     ) -> Result<bool, String>;
 }
 
+/// The zone as a whole — every record `GET /zones/{z}/dns_records`
+/// lists, returned RAW (the v4 `result` rows) so the comparator in the
+/// tree (`infra/cluster/dns/check-declared.sh`) reads exactly what the
+/// API said and the Rust side holds no second definition of a record.
+/// The `dns.observe` handler's read (backlog 5e58922c); Zone:Read plus
+/// Zone:DNS:Edit are in the broker's root grant, and the root token is
+/// the ONLY credential that can see the zone, which is why the read
+/// lives behind this port and not in a script somewhere.
+#[async_trait]
+pub trait ZoneRecords: Send + Sync {
+    async fn zone_records(&self, zone_name: &str) -> Result<Vec<JsonValue>, String>;
+}
+
 /// The one shape the connector accepts: `cloudflared`'s
 /// `connection.Credentials` struct with Go's default field names
 /// (`connection/connection.go`, read 2026-09-16 — `[]byte` marshals
@@ -807,6 +820,37 @@ impl CloudflareTunnels for CloudflareApi {
     }
 }
 
+/// One page holds the whole zone or the read is refused: a zone with
+/// more records than this is not a zone this deployment has, and a
+/// silently truncated read would report every record past the page as
+/// ABSENT. Cloudflare's per_page ceiling is far above this.
+const ZONE_PAGE: usize = 1000;
+
+#[async_trait]
+impl ZoneRecords for CloudflareApi {
+    async fn zone_records(&self, zone_name: &str) -> Result<Vec<JsonValue>, String> {
+        let zone = self.zone(zone_name).await?;
+        let url = self.url(&format!(
+            "/zones/{}/dns_records?per_page={ZONE_PAGE}",
+            zone.zone_id
+        ));
+        let result = self
+            .call(self.client.get(&url), &format!("GET {url}"))
+            .await?;
+        let rows = result
+            .as_array()
+            .cloned()
+            .ok_or_else(|| format!("GET {url}: result is not a list of records"))?;
+        if rows.len() >= ZONE_PAGE {
+            return Err(format!(
+                "GET {url}: {} records fill the page — the zone is larger than one read; refusing a truncated comparison",
+                rows.len()
+            ));
+        }
+        Ok(rows)
+    }
+}
+
 /// `kubectl rollout restart` is a PATCH of a pod-template annotation
 /// (kubectl stamps `restartedAt` with the wallclock; this stamps
 /// `boss.dev/restarted-for` with the REASON, which changes exactly
@@ -916,6 +960,13 @@ impl CloudflareTunnels for Unconfigured {
         Err(self.0.clone())
     }
     async fn edge_status(&self, _h: &str, _p: &str) -> Result<u16, String> {
+        Err(self.0.clone())
+    }
+}
+
+#[async_trait]
+impl ZoneRecords for Unconfigured {
+    async fn zone_records(&self, _z: &str) -> Result<Vec<JsonValue>, String> {
         Err(self.0.clone())
     }
 }

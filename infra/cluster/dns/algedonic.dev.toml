@@ -1,0 +1,70 @@
+# infra/cluster/dns/algedonic.dev.toml — what the DNS zone algedonic.dev
+# SHOULD say (design 4c565f8c; backlog 5e58922c). Until 2026-09-16 every
+# record of the zone was hand-set in the Cloudflare UI except one a Job
+# created with an API token, and nothing recorded what the zone should
+# hold — so a record that vanished, or one nobody remembered adding, was
+# invisible until a hostname stopped answering.
+#
+# This file is the DECLARATION. `check-declared.sh` beside it compares
+# the zone's live records against it in the vocabulary design 16115a17
+# decided (MATCH / DRIFT / ABSENT / UNDECLARED); the `dns.observe`
+# dispatcher handler reads the zone daily with the broker's root token
+# and files the comparison as a `dns-zone-observation` packet, raising
+# an estate alarm on DRIFT or ABSENT. A record the zone holds that no
+# entry here names is UNDECLARED: reported on the packet, never a
+# failure — the third state, the honest reading of a zone nobody had
+# measured whole.
+#
+# APPLY IS NOT HERE YET. The credential broker's tunnel rotation
+# (credential.rotate.cloudflare-tunnel) upserts the tunnel CNAMEs it is
+# told about, and the dns-record Job in boss-tls.yaml upserts the boss.
+# A record; nothing applies THIS FILE to the zone. The declaration is
+# the intent, the observer reports the gap, and closing it (a converge
+# step applying the file with a Zone:DNS:Edit-scoped token) is the
+# follow-on car, once the first live observation has shown what the
+# zone actually holds.
+#
+# EACH ENTRY: `name` is the FQDN as Cloudflare lists it; `type`,
+# `proxied` and `ttl` are compared verbatim against the live record
+# (`ttl = 1` is Cloudflare's "auto", the only TTL a proxied record can
+# carry); `target` is the record's content, or a REFERENCE the
+# comparator resolves at compare time; `why` says what the record is
+# for, so a reader can tell a door from a decoration.
+#
+# `target = "tunnel:<credential id>"` names a Cloudflare Tunnel by the
+# credential-registry row that holds its credentials (see
+# /api/credentials). The tunnel's id changes on EVERY rotation, so a
+# hardcoded `<uuid>.cfargotunnel.com` here would drift the next time
+# the broker rotated — the reference is resolved from the installed
+# Secret's TunnelID (the row's storage_location names the Secret), and
+# the comparator is handed the resolution (`--tunnel <id>=<uuid>`).
+
+zone = "algedonic.dev"
+
+# The operators' door to the system of record: an A record to the
+# cluster's ingress on the LAN/WireGuard network, DNS-only (grey cloud)
+# so nothing on the internet is told this address answers. Created by
+# the dns-record Job in infra/cluster/manifests/boss-tls.yaml (Secret
+# cloudflare-api-token), which is where the 300 s TTL comes from.
+# Stays grey until a Cloudflare Access policy exists for boss. — moving
+# it behind the tunnel before that would expose the production
+# gateway to the internet, so that flip is David's act, not a car's.
+[[record]]
+name = "boss.algedonic.dev"
+type = "A"
+target = "10.20.0.33"
+proxied = false
+ttl = 300
+why = "LAN/WG operators door until Access exists for it"
+
+# The public worked example (the demo tenant), served through the
+# Cloudflare Tunnel the in-cluster cloudflared connector runs. Written
+# by the broker's rotation handler on every rotation (first on
+# 2026-09-16, rotation packet e202c7c3), proxied, TTL auto.
+[[record]]
+name = "playground.algedonic.dev"
+type = "CNAME"
+target = "tunnel:cloudflare-tunnel-credentials"
+proxied = true
+ttl = 1
+why = "public example tenant, behind the Cloudflare Tunnel the connector serves"

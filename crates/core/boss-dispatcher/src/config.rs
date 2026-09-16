@@ -120,6 +120,14 @@ pub struct DispatcherConfig {
     /// Never logged.
     #[serde(skip)]
     pub broker_cloudflare_token: Option<String>,
+    /// Where the tree's DNS zone declarations live — the directory the
+    /// image carries `infra/cluster/dns/` at (`<zone>.toml` beside
+    /// `check-declared.sh`), which the `dns.observe` handler runs over
+    /// the records it fetched (backlog 5e58922c). Same posture as the
+    /// rules directory: set explicitly by the deployment
+    /// (`BOSS_DNS_DECLARATIONS`), `None` leaves the handler registered
+    /// but unconfigured so a firing rule dead-letters naming the knob.
+    pub dns_declarations_dir: Option<String>,
 }
 
 impl Default for DispatcherConfig {
@@ -170,6 +178,10 @@ impl Default for DispatcherConfig {
             broker_cloudflare_api_url: std::env::var("BOSS_BROKER_CLOUDFLARE_API_URL")
                 .unwrap_or_else(|_| "https://api.cloudflare.com/client/v4".to_string()),
             broker_cloudflare_token: std::env::var("BOSS_BROKER_CLOUDFLARE_TOKEN")
+                .ok()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty()),
+            dns_declarations_dir: std::env::var("BOSS_DNS_DECLARATIONS")
                 .ok()
                 .map(|t| t.trim().to_string())
                 .filter(|t| !t.is_empty()),

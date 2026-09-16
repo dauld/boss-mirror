@@ -210,6 +210,22 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
             "credential.rotate.cloudflare-tunnel",
             vec!["jobs.step.completed"],
         ),
+        // The zone observer (5e58922c): fires on a dns-zone-observation
+        // packet's `observe` step, reads the zone with the broker's
+        // Cloudflare root token, runs the tree's comparator, and
+        // completes that same `task` step with the verdicts — so it
+        // cannot re-enter its own trigger. On DRIFT/ABSENT it also files
+        // (`jobs.job.created`) or refreshes (`jobs.job.updated`) the
+        // `dns_drift:<zone>` estate alarm, a backlog-item write that ends
+        // at the operator's queue the way estate.alarm's does.
+        (
+            "dns.observe",
+            vec![
+                "jobs.step.completed",
+                "jobs.job.created",
+                "jobs.job.updated",
+            ],
+        ),
         ("messages.notify", vec![]),
         // Tells the filer how their packet ended. A sink, like every
         // other notifier — the message is the end of the cascade, not

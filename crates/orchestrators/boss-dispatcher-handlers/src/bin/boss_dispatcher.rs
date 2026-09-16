@@ -24,9 +24,9 @@ use boss_dispatcher_handlers::handlers::{
     bill_payment_batch::BillPaymentBatch, cadence_silence::CadenceSilenceSweep,
     commerce_invoice_issue::CommerceInvoiceIssue, credential_issuer,
     credential_rotate_cloudflare_tunnel::CredentialRotateCloudflareTunnel,
-    credential_rotate_forgejo::CredentialRotateForgejo, estate_alarm::EstateAlarm,
-    estate_compare::EstateCompare, estate_recover::EstateRecover, gate_resolve::GateResolve,
-    inventory_bill_approve::InventoryBillApprove,
+    credential_rotate_forgejo::CredentialRotateForgejo, dns_observe::DnsObserve,
+    estate_alarm::EstateAlarm, estate_compare::EstateCompare, estate_recover::EstateRecover,
+    gate_resolve::GateResolve, inventory_bill_approve::InventoryBillApprove,
     inventory_overhead_absorb::InventoryOverheadAbsorb,
     inventory_parts_consume::InventoryPartsConsume, inventory_parts_produce::InventoryPartsProduce,
     inventory_po_place::InventoryPoPlace, inventory_receive::InventoryReceive,
@@ -356,7 +356,7 @@ async fn main() -> Result<()> {
             {
                 use credential_issuer::{
                     CloudflareApi, CloudflareTunnels, ForgeTokenIssuer, ForgejoAdmin,
-                    KubeSecretStore, SecretStore, Unconfigured, WorkloadRestarter,
+                    KubeSecretStore, SecretStore, Unconfigured, WorkloadRestarter, ZoneRecords,
                 };
                 let issuer: Arc<dyn ForgeTokenIssuer> = match &cfg.broker_forgejo_token {
                     Some(root) => ForgejoAdmin::new(cfg.broker_forge_url.clone(), root.clone()),
@@ -387,16 +387,28 @@ async fn main() -> Result<()> {
                 // (key cloudflare-token), the connector's Secret in
                 // the boss namespace, and a rollout restart of the
                 // declared connector Deployment.
-                let cloudflare: Arc<dyn CloudflareTunnels> = match &cfg.broker_cloudflare_token {
-                    Some(root) => {
-                        CloudflareApi::new(cfg.broker_cloudflare_api_url.clone(), root.clone())
-                    }
-                    None => Arc::new(Unconfigured(
-                        "credential broker unconfigured: BOSS_BROKER_CLOUDFLARE_TOKEN unset \
-                         (secret boss-credential-broker-root, key cloudflare-token)"
-                            .to_string(),
-                    )),
-                };
+                // ONE client serves the rotation AND the zone observer
+                // below: the same root token is the only credential that
+                // can read the zone.
+                let (cloudflare, zone_reader): (Arc<dyn CloudflareTunnels>, Arc<dyn ZoneRecords>) =
+                    match &cfg.broker_cloudflare_token {
+                        Some(root) => {
+                            let api = CloudflareApi::new(
+                                cfg.broker_cloudflare_api_url.clone(),
+                                root.clone(),
+                            );
+                            (api.clone(), api)
+                        }
+                        None => {
+                            let why = "credential broker unconfigured: BOSS_BROKER_CLOUDFLARE_TOKEN unset \
+                                       (secret boss-credential-broker-root, key cloudflare-token)"
+                                .to_string();
+                            (
+                                Arc::new(Unconfigured(why.clone())),
+                                Arc::new(Unconfigured(why)),
+                            )
+                        }
+                    };
                 let workloads: Arc<dyn WorkloadRestarter> = match &kube {
                     Ok(s) => s.clone(),
                     Err(e) => Arc::new(Unconfigured(format!(
@@ -406,8 +418,23 @@ async fn main() -> Result<()> {
                 handlers.register(CredentialRotateCloudflareTunnel::new(
                     cfg.jobs_api_url.clone(),
                     cloudflare,
-                    secrets,
+                    secrets.clone(),
                     workloads,
+                ));
+                // The zone observer (5e58922c): on a dns-zone-observation
+                // packet's observe step, read the zone with the same root
+                // token, run the tree's comparator
+                // (infra/cluster/dns/check-declared.sh, at
+                // BOSS_DNS_DECLARATIONS in the image) over the records,
+                // and complete the step with a verdict per record; DRIFT
+                // or ABSENT files or refreshes the dns_drift:<zone> estate
+                // alarm. Reads the Secret store only to resolve a
+                // `tunnel:` reference to its installed TunnelID.
+                handlers.register(DnsObserve::new(
+                    cfg.jobs_api_url.clone(),
+                    zone_reader,
+                    secrets,
+                    cfg.dns_declarations_dir.clone(),
                 ));
             }
             // Packaging allocation — splits a brewed batch across formats by

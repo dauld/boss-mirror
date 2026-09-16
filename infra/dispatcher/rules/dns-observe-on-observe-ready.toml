@@ -1,0 +1,47 @@
+# ---------------------------------------------------------------------
+# The READ half of the zone observation (design 4c565f8c; backlog
+# 5e58922c): when a dns-zone-observation packet's `observe` step goes
+# ready, the `dns.observe` handler reads the zone with the credential
+# broker's root token (the ONLY place that token is readable — Secret
+# boss/boss-credential-broker-root key cloudflare-token, the same root
+# credential.rotate.cloudflare-tunnel signs with), runs
+# infra/cluster/dns/check-declared.sh over the records it fetched, and
+# completes the step with one verdict per record.
+#
+# A DRIFT or ABSENT verdict raises the estate alarm `dns_drift:<zone>`
+# — an urgent backlog-item deduped by `estate_finding`, REFRESHED with
+# the latest verdicts when one is already open rather than twinned —
+# BEFORE the step completes, so a raise that fails NAKs the firing and
+# is retried on redelivery with the step still ready. UNDECLARED
+# records are recorded on the observation packet only: the first honest
+# read of a zone nobody had measured whole is the list of what it holds
+# that nobody declared, and an alarm over paperwork trains operators to
+# ignore it (the estate.alarm calibration).
+#
+# A `tunnel:<credential id>` target in the declaration is resolved
+# here: the credential row (GET /api/credentials/{id}) names the k8s
+# Secret in its storage_location, the Secret's credentials.json names
+# the TunnelID, and the comparator is handed `--tunnel <id>=<uuid>`.
+# Only the id crosses; the tunnel secret never leaves the Secret store.
+#
+# Rides the shared `step.ready.task` subscription; the `when` keeps it
+# to packets about this zone and the handler further requires the
+# packet kind, so a rotation packet's task steps never fire it.
+[[rule]]
+name = "dns-observe-on-observe-ready"
+why = """
+EXTERNAL GLUE, the census class for reactions whose effect lives
+outside the system: the handler speaks to the CLOUDFLARE zone API with
+the broker's root token and to the k8s Secret store, neither of which
+a Workflow definition can address. The dns-zone-observation protocol
+row declares the packet (due -> observe -> matched | findings); this
+rule is the machine executor of its one working step, and its args
+name the zone it reads. It adds no routing beyond the estate alarm
+idiom already in use: it advances the very packet that fired it and
+files at most one deduped alarm per zone.
+"""
+on_event = "step.ready.task"
+when = 'subject_id = "algedonic.dev"'
+[[rule.do]]
+handler = "dns.observe"
+args = { zone = "\"algedonic.dev\"" }

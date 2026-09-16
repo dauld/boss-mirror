@@ -21,6 +21,7 @@ pub mod common;
 pub mod credential_issuer;
 pub mod credential_rotate_cloudflare_tunnel;
 pub mod credential_rotate_forgejo;
+pub mod dns_observe;
 pub mod estate_alarm;
 pub mod estate_compare;
 pub mod estate_recover;
