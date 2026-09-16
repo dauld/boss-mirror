@@ -63,30 +63,47 @@ name = "operators"
 decision = "allow"
 include.emails = ["david@algedonic.dev"]
 
-# The public worked example. DECLARED BY NAME AND SHAPE, NOT FROM A
-# READ: the application exists (playground.algedonic.dev answers 302 to
-# algedonicdev.cloudflareaccess.com, measured 2026-09-16) and was made
-# in the dashboard; the pod that wrote this file cannot read the
-# account, so its session duration and policy below are the shape an
-# operator would have given it, not what it holds. The first
-# observation compares this entry against the live application and
-# will very likely report DRIFT with both values on the packet (and
-# raise the dns_drift alarm carrying them): CORRECT THIS ENTRY FROM THAT
-# READ. What must not happen is a guess recorded silently as a fact —
-# so the guess is labelled, and the comparator is what turns it into a
-# measurement. Matched by domain, so whatever the dashboard named it,
-# no twin is created.
+# The public worked example. Declared blind on 2026-09-16 (a shape an
+# operator would have given it), read that day by observations 03b411ec
+# and f0f2767f, and corrected FROM THE READ (design 08b8b396 q1, decided
+# by David 2026-09-16): the dashboard's onboarding policy of 4/25/2026
+# admits four people, and `visitors` is the policy the second
+# observation created for the blind entry. Both are what the account
+# holds, so both are declared. Matched by domain, so whatever the
+# dashboard named it, no twin is created.
 [[application]]
-name = "playground"
+name = "boss-playground"
 domain = "playground.algedonic.dev"
 type = "self_hosted"
 session_duration = "24h"
-why = "public example tenant; declared blind on 2026-09-16 — correct from the first observation's read"
+why = "public example tenant; the four visitors admitted at onboarding stay admitted"
+
+[[application.policy]]
+name = "Allow emails policy created by onboarding: 4/25/2026"
+decision = "allow"
+include.emails = ["dhauld@gmail.com", "emilyhiskes@gmail.com", "richard@saouma.ch", "tommy@mrp.io"]
 
 [[application.policy]]
 name = "visitors"
 decision = "allow"
 include.emails = ["david@algedonic.dev"]
+
+# The OIDC callback path of the public example, outside Access: the
+# login's redirect lands here with no Access cookie yet, so the account
+# holds a bypass application for the path (read 2026-09-16, UNDECLARED
+# on every observation until 08b8b396 q2). boss. needs none: its
+# operator carries the Access cookie from the OTP before the redirect.
+[[application]]
+name = "boss-playground-auth"
+domain = "playground.algedonic.dev/auth"
+type = "self_hosted"
+session_duration = "24h"
+why = "the public example's OIDC callback path, bypassing Access so a login can complete"
+
+[[application.policy]]
+name = "Authorization bypass"
+decision = "bypass"
+include.everyone = true
 
 # THE OIDC REDIRECTS. The gateway builds its OIDC redirect_uri as
 # `<BOSS_PUBLIC_URL>/api/auth/oidc/callback` (boss-gateway oidc.rs),

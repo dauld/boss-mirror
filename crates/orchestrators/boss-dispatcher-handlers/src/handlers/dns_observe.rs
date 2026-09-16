@@ -214,6 +214,36 @@ pub struct DeclaredPolicy {
 pub struct DeclaredInclude {
     #[serde(default)]
     pub emails: Vec<String>,
+    /// Cloudflare's `{"everyone": {}}` rule — the shape of a bypass
+    /// policy on a callback path (`playground.algedonic.dev/auth`,
+    /// read 2026-09-16, design 08b8b396 q2). A policy for everyone
+    /// includes somebody, so it passes the includes-nobody check.
+    #[serde(default)]
+    pub everyone: bool,
+}
+
+impl DeclaredInclude {
+    /// The rules as the account lists them, in Cloudflare's own shape.
+    pub fn rules(&self) -> Vec<Json> {
+        let mut rules: Vec<Json> = self
+            .emails
+            .iter()
+            .map(|e| json!({"email": {"email": e}}))
+            .collect();
+        if self.everyone {
+            rules.push(json!({"everyone": {}}));
+        }
+        rules
+    }
+    /// The canonical set a comparison reads: `email:<addr>` and
+    /// `everyone` — the same spelling [`include_rules`] gives a live list.
+    fn canonical(&self) -> BTreeSet<String> {
+        let mut set: BTreeSet<String> = self.emails.iter().map(|e| format!("email:{e}")).collect();
+        if self.everyone {
+            set.insert("everyone".into());
+        }
+        set
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -239,7 +269,10 @@ pub fn parse_access_declaration(text: &str, zone: &str) -> Result<AccessDeclarat
     }
     let mut seen = BTreeSet::new();
     for app in &dec.application {
-        if app.domain != zone && !app.domain.ends_with(&format!(".{zone}")) {
+        // An application's domain may carry a path (`<host>/auth`, the
+        // callback bypass read 2026-09-16); the zone check is on the host.
+        let host = app.domain.split('/').next().unwrap_or_default();
+        if host != zone && !host.ends_with(&format!(".{zone}")) {
             return Err(format!(
                 "{ACCESS_DECLARATION}: application {:?} domain {:?} is not in zone {zone:?}",
                 app.name, app.domain
@@ -252,7 +285,7 @@ pub fn parse_access_declaration(text: &str, zone: &str) -> Result<AccessDeclarat
             ));
         }
         for policy in &app.policy {
-            if policy.include.emails.is_empty() {
+            if policy.include.emails.is_empty() && !policy.include.everyone {
                 return Err(format!(
                     "{ACCESS_DECLARATION}: application {:?} policy {:?} includes nobody (include.emails is empty) — a policy that matches nobody is not a declaration",
                     app.domain, policy.name
@@ -267,19 +300,31 @@ pub fn parse_access_declaration(text: &str, zone: &str) -> Result<AccessDeclarat
 /// e-mail rule; `None` when any rule is of a kind the declaration has
 /// no vocabulary for, so the comparison prints the raw rules instead of
 /// silently ignoring one.
-fn include_emails(include: &[Json]) -> Option<BTreeSet<String>> {
+/// A live include list in the declaration's canonical spelling —
+/// `email:<addr>` for an email rule, `everyone` for the everyone rule —
+/// or `None` when a rule is of a kind the declaration has no word for
+/// (then the policy reads DRIFT and the raw rule is on the verdict).
+fn include_rules(include: &[Json]) -> Option<BTreeSet<String>> {
     include
         .iter()
         .map(|rule| {
-            rule.pointer("/email/email")
-                .and_then(Json::as_str)
-                .map(str::to_string)
+            if let Some(e) = rule.pointer("/email/email").and_then(Json::as_str) {
+                Some(format!("email:{e}"))
+            } else if rule.get("everyone").is_some() {
+                Some("everyone".to_string())
+            } else {
+                None
+            }
         })
         .collect()
 }
 
 fn declared_policy_json(p: &DeclaredPolicy) -> Json {
-    json!({"name": p.name, "decision": p.decision, "emails": p.include.emails})
+    let mut j = json!({"name": p.name, "decision": p.decision, "emails": p.include.emails});
+    if p.include.everyone {
+        j["everyone"] = json!(true);
+    }
+    j
 }
 
 fn live_app_json(a: &AccessApp) -> Json {
@@ -333,8 +378,7 @@ pub fn compare_access(declared: &[DeclaredApp], live: &[AccessApp]) -> Vec<Json>
                     app.policies.iter().any(|l| {
                         l.name == p.name
                             && l.decision == p.decision
-                            && include_emails(&l.include).as_ref()
-                                == Some(&p.include.emails.iter().cloned().collect())
+                            && include_rules(&l.include).as_ref() == Some(&p.include.canonical())
                     })
                 });
             let matches = app.app_type == d.app_type
@@ -1214,12 +1258,7 @@ impl DnsObserve {
                         &AccessPolicySpec {
                             name: p.name.clone(),
                             decision: p.decision.clone(),
-                            include: p
-                                .include
-                                .emails
-                                .iter()
-                                .map(|e| json!({"email": {"email": e}}))
-                                .collect(),
+                            include: p.include.rules(),
                             precedence,
                         },
                     )
@@ -1725,6 +1764,7 @@ mod tests {
                 decision: "allow".into(),
                 include: DeclaredInclude {
                     emails: emails.iter().map(|e| e.to_string()).collect(),
+                    everyone: false,
                 },
             }],
         }
@@ -1781,11 +1821,51 @@ mod tests {
             "boss. allows the operator by e-mail: {:?}",
             boss.policy
         );
+        // The playground as READ on 2026-09-16 (08b8b396 q1/q2): the
+        // dashboard's onboarding policy beside `visitors`, and the
+        // callback bypass for everyone on the /auth path.
+        let pg = dec
+            .application
+            .iter()
+            .find(|a| a.domain == "playground.algedonic.dev")
+            .expect("the playground application is declared");
+        assert_eq!(pg.policy.len(), 2, "{:?}", pg.policy);
+        let onboarding = pg
+            .policy
+            .iter()
+            .find(|p| {
+                p.name
+                    .starts_with("Allow emails policy created by onboarding")
+            })
+            .expect("the onboarding policy is declared as the account holds it");
+        assert_eq!(onboarding.include.emails.len(), 4);
         assert!(
-            dec.application
+            onboarding
+                .include
+                .emails
                 .iter()
-                .any(|a| a.domain == "playground.algedonic.dev"),
-            "the existing playground application is declared (blind, corrected from the first read)"
+                .any(|e| e == "tommy@mrp.io")
+        );
+        let auth = dec
+            .application
+            .iter()
+            .find(|a| a.domain == "playground.algedonic.dev/auth")
+            .expect("the callback bypass is declared");
+        assert_eq!(auth.policy.len(), 1);
+        assert_eq!(auth.policy[0].decision, "bypass");
+        assert!(auth.policy[0].include.everyone);
+        assert_eq!(
+            auth.policy[0].include.rules(),
+            vec![json!({"everyone": {}})]
+        );
+        assert!(
+            include_rules(&[json!({"everyone": {}})]).as_ref()
+                == Some(&auth.policy[0].include.canonical()),
+            "a live everyone rule reads equal to the declared one"
+        );
+        assert!(
+            include_rules(&[json!({"group": {"id": "x"}})]).is_none(),
+            "a rule kind the declaration has no word for is not silently equal"
         );
         // The OIDC redirect the gateway will build from the flipped
         // BOSS_PUBLIC_URL is declared registered, with its provenance.
@@ -2514,14 +2594,47 @@ why = "x"
 
     /// The account as the shipped access.toml declares it — both
     /// applications present and matching.
+    /// The account as read on 2026-09-16 (observation f0f2767f) and as
+    /// access.toml has declared it since 08b8b396: the dashboard's
+    /// onboarding policy beside `visitors`, and the callback bypass.
     fn account_as_declared() -> Vec<AccessApp> {
         vec![
             live_app("boss.algedonic.dev", vec![allow("operators", &[DAVID])]),
             live_app(
                 "playground.algedonic.dev",
-                vec![allow("visitors", &[DAVID])],
+                vec![
+                    allow(
+                        "Allow emails policy created by onboarding: 4/25/2026",
+                        &[
+                            "dhauld@gmail.com",
+                            "emilyhiskes@gmail.com",
+                            "richard@saouma.ch",
+                            "tommy@mrp.io",
+                        ],
+                    ),
+                    allow("visitors", &[DAVID]),
+                ],
+            ),
+            live_app(
+                "playground.algedonic.dev/auth",
+                vec![AccessPolicy {
+                    id: "pol-bypass".into(),
+                    name: "Authorization bypass".into(),
+                    decision: "bypass".into(),
+                    include: vec![json!({"everyone": {}})],
+                    precedence: 1,
+                }],
             ),
         ]
+    }
+
+    /// The account with the playground side as declared and boss. not
+    /// yet fronted — the state before the first boss. observation.
+    fn account_without_boss() -> Vec<AccessApp> {
+        account_as_declared()
+            .into_iter()
+            .filter(|a| a.domain != "boss.algedonic.dev")
+            .collect()
     }
 
     // ----- jobs-api stub (the house axum idiom) -----
@@ -2760,7 +2873,11 @@ why = "x"
             "tunnel secret leaked: {body}"
         );
         let access_v = body["metadata"]["access"].as_array().unwrap();
-        assert_eq!(access_v.len(), 2);
+        assert_eq!(
+            access_v.len(),
+            3,
+            "boss., the playground and its callback bypass"
+        );
         assert!(
             access_v.iter().all(|v| v["verdict"] == "MATCH"),
             "{access_v:?}"
@@ -2770,7 +2887,7 @@ why = "x"
         assert!(
             summary.contains(
                 "3 match, 0 drift, 0 absent, 0 undeclared — every declared record matches"
-            ) && summary.contains("· access: 2 match, 0 drift, 0 absent, 0 undeclared"),
+            ) && summary.contains("· access: 3 match, 0 drift, 0 absent, 0 undeclared"),
             "{summary}"
         );
     }
@@ -2782,10 +2899,7 @@ why = "x"
         let (jobs, captured) = stub_jobs_api("ready", vec![], LOCATION).await;
         let zone = FakeZone::with(as_measured());
         // The account before: only the dashboard's playground app.
-        let access = FakeAccess::with(vec![live_app(
-            "playground.algedonic.dev",
-            vec![allow("visitors", &[DAVID])],
-        )]);
+        let access = FakeAccess::with(account_without_boss());
         let h = handler(
             jobs,
             zone.clone(),
@@ -3091,10 +3205,7 @@ why = "x"
                 unreachable!()
             }
         }
-        let inner = FakeAccess::with(vec![live_app(
-            "playground.algedonic.dev",
-            vec![allow("visitors", &[DAVID])],
-        )]);
+        let inner = FakeAccess::with(account_without_boss());
         let h = DnsObserve::new(
             jobs,
             zone.clone(),
@@ -3162,13 +3273,7 @@ why = "x"
         // the refusal is on the packet and in the alarm.
         let (jobs, captured) = stub_jobs_api("ready", vec![], LOCATION).await;
         let zone = FakeZone::with(as_measured());
-        let access = FakeAccess::refusing_policies(
-            vec![live_app(
-                "playground.algedonic.dev",
-                vec![allow("visitors", &[DAVID])],
-            )],
-            PRECEDENCE_TAKEN,
-        );
+        let access = FakeAccess::refusing_policies(account_without_boss(), PRECEDENCE_TAKEN);
         let h = handler(
             jobs,
             zone.clone(),
@@ -3234,13 +3339,9 @@ why = "x"
         // lists — 2 — and the flip releases.
         let (jobs, captured) = stub_jobs_api("ready", vec![], LOCATION).await;
         let zone = FakeZone::with(as_measured());
-        let access = FakeAccess::with(vec![
-            live_app(
-                "playground.algedonic.dev",
-                vec![allow("visitors", &[DAVID])],
-            ),
-            live_app("boss.algedonic.dev", vec![]),
-        ]);
+        let mut apps = account_without_boss();
+        apps.push(live_app("boss.algedonic.dev", vec![]));
+        let access = FakeAccess::with(apps);
         let h = handler(
             jobs,
             zone.clone(),
@@ -3298,13 +3399,9 @@ why = "x"
         let zone = FakeZone::with(as_measured());
         let mut deny = allow("block", &[DAVID]);
         deny.decision = "deny".into();
-        let inner = FakeAccess::with(vec![
-            live_app("boss.algedonic.dev", vec![deny]),
-            live_app(
-                "playground.algedonic.dev",
-                vec![allow("visitors", &[DAVID])],
-            ),
-        ]);
+        let mut apps = vec![live_app("boss.algedonic.dev", vec![deny])];
+        apps.extend(account_without_boss());
+        let inner = FakeAccess::with(apps);
         let h = DnsObserve::new(
             jobs,
             zone.clone(),
@@ -3385,10 +3482,7 @@ why = "x"
         }
         let (jobs, captured) = stub_jobs_api("ready", vec![], LOCATION).await;
         let zone = FakeZone::with(as_measured());
-        let inner = FakeAccess::with(vec![live_app(
-            "playground.algedonic.dev",
-            vec![allow("visitors", &[DAVID])],
-        )]);
+        let inner = FakeAccess::with(account_without_boss());
         let h = DnsObserve::new(
             jobs,
             zone.clone(),
