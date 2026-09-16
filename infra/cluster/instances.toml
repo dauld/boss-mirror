@@ -1,0 +1,60 @@
+# infra/cluster/instances.toml — the BOSS instances the converge renders
+# and applies on EVERY train (backlog 07d7549c car 1; design ffc83387,
+# decided by David 2026-09-16: "Playground is part of prod. Let's do (b)
+# and just be very reliable!" — and prod converges every train too:
+# "I want to run our operations so tightly that we are confident in
+# converging prod on every train").
+#
+# Read by infra/cluster/render-instance.sh (`--all`), and through it by
+# infra/forge/cluster-deploy-runner.sh (the apply, the image roll and
+# the step-plugins ConfigMap, per instance) and
+# infra/cluster/check-manifests-applied.sh (every rendered object must
+# be present). ONE key per line, `key = "value"` or `key = true|false`:
+# the renderer reads this file with the shell, not a TOML parser — the
+# same rule infra/estate/roles.toml lives under.
+#
+# THE SOURCE. The manifests under infra/cluster/manifests/ are written
+# for exactly one instance — the one named here as `source` — and every
+# other instance is that directory with these four values substituted
+# for the source's. So the source's values here MUST be what the files
+# say: the renderer refuses a source value it cannot find in the
+# instance manifests, because a prod entry that drifted from the files
+# would turn every other instance's substitution into a no-op that
+# answers instead of erroring. When prod's TLS front moves to
+# www.algedonic.dev (car 2, after David's DNS), the file and this line
+# change together, and the byte-identity test in
+# crates/core/boss-testing/tests/render_instance_sh.rs holds them equal.
+#
+# THE FOUR PARAMETERS
+#   namespace  the Kubernetes namespace; `boss` or `boss-<name>`. boss-dev
+#              is the pipeline's and is refused.
+#   tenant     the tenant manifest, repo-relative, under examples/; the
+#              image ships it at /opt/boss/<tenant>.
+#   sim        BOSS_SIM_ENABLED — whether the tenant's tick daemon
+#              generates packets. Parked on prod 2026-09-05 (packet
+#              59f063de); the playground is where it runs from now.
+#   hostname   the TLS front's vhost (boss-tls-front.yaml). Its cert is
+#              the `boss-tls` Secret in the instance's namespace, minted
+#              out of band.
+#
+# WHAT AN INSTANCE STILL NEEDS BY HAND, once, per namespace: the Secrets
+# the manifests reference by name (README: secrets never live here) —
+# boss-secrets, boss-session-key, boss-oidc, resend, forgejo-registry,
+# boss-tls; boss-credential-broker-root and boss-break-glass-enroll are
+# optional. Until they exist the rendered pods wait, the converge says
+# so on its packet, and prod is unaffected: it is applied, rolled and
+# stamped before any other instance is touched.
+
+source = "prod"
+
+[prod]
+namespace = "boss"
+tenant = "examples/brewery/seeds/tenant.toml"
+sim = false
+hostname = "boss.algedonic.dev"
+
+[playground]
+namespace = "boss-playground"
+tenant = "examples/brewery/seeds/tenant.toml"
+sim = true
+hostname = "playground.algedonic.dev"

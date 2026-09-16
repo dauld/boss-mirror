@@ -119,18 +119,28 @@ image_boots() {
     $docker run --rm --entrypoint /usr/local/bin/boss-launch "$image" --check
 }
 
-# roll_deployment K REGISTRY HEAD LAST_GOOD FAILED_FILE
+# roll_deployment K REGISTRY HEAD LAST_GOOD FAILED_FILE [NAMESPACE]
 #   Patch deploy/boss to REGISTRY:HEAD and wait for Ready. If it never
 #   goes Ready: quarantine HEAD in FAILED_FILE and roll back to the
 #   NAMED target — REGISTRY:LAST_GOOD when a converged build is known,
 #   else the image that was running before the patch — then wait for
 #   that to be Ready. Returns 0 only when HEAD is serving.
+#
+#   NAMESPACE defaults to `boss`, the source instance. Every other
+#   instance (infra/cluster/instances.toml; backlog 07d7549c) runs the
+#   same deploy/boss in its own namespace and is rolled by this same
+#   function — one definition of "roll, prove Ready, or roll back to a
+#   named build", not one per instance. The runner hands each instance
+#   its OWN quarantine file: a head that booted on prod and fails on the
+#   playground is the playground's environment (its secrets, its
+#   volumes), not a bricked build, and must not hold prod's next
+#   converge.
 roll_deployment() {
-    local k="$1" registry="$2" head="$3" last_good="$4" failed_file="$5"
+    local k="$1" registry="$2" head="$3" last_good="$4" failed_file="$5" ns="${6:-boss}"
     local pre_image
-    pre_image=$($k get deploy boss -n boss -o jsonpath='{.spec.template.spec.containers[0].image}')
-    _patch_boss_image "$k" "$registry:$head"
-    if $k rollout status deploy/boss -n boss --timeout=420s; then
+    pre_image=$($k get deploy boss -n "$ns" -o jsonpath='{.spec.template.spec.containers[0].image}')
+    _patch_boss_image "$k" "$registry:$head" "$ns"
+    if $k rollout status deploy/boss -n "$ns" --timeout=420s; then
         return 0
     fi
     echo "$head" > "$failed_file"
@@ -140,19 +150,19 @@ roll_deployment() {
     else
         target="$pre_image"
     fi
-    echo "cluster-deploy-runner: $head never went Ready — rolling back to $target (the last converged build, by name)" >&2
-    if _patch_boss_image "$k" "$target" \
-        && $k rollout status deploy/boss -n boss --timeout=300s; then
-        echo "cluster-deploy-runner: rolled back — cluster serves $target; $head is quarantined (rm $failed_file to retry it)" >&2
+    echo "cluster-deploy-runner: $head never went Ready in $ns — rolling back to $target (the last converged build, by name)" >&2
+    if _patch_boss_image "$k" "$target" "$ns" \
+        && $k rollout status deploy/boss -n "$ns" --timeout=300s; then
+        echo "cluster-deploy-runner: rolled back — cluster serves $target in $ns; $head is quarantined there (rm $failed_file to retry it)" >&2
     else
-        echo "cluster-deploy-runner: ROLLBACK TO $target ALSO FAILED — the cluster needs hands NOW" >&2
+        echo "cluster-deploy-runner: ROLLBACK OF $ns TO $target ALSO FAILED — the instance needs hands NOW" >&2
     fi
     return 1
 }
 
 _patch_boss_image() {
-    local k="$1" image="$2"
-    $k patch deploy boss -n boss --type=json \
+    local k="$1" image="$2" ns="${3:-boss}"
+    $k patch deploy boss -n "$ns" --type=json \
         -p "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/image\",\"value\":\"$image\"},{\"op\":\"replace\",\"path\":\"/spec/template/spec/initContainers/0/image\",\"value\":\"$image\"}]"
 }
 
