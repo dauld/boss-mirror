@@ -44,6 +44,10 @@
 # handler APPLIES such a record (create when ABSENT, correct when DRIFT)
 # only once the Cloudflare Access application access.toml declares for
 # the same name reads present with an allow policy (backlog 198c5fe9).
+# Or `interlock = "tunnel"`: applied once the latest cluster converge
+# packet records the tunnel routing the name (tunnel_ingress) with the
+# connector connected — for a hostname the tunnel serves that no Access
+# application fronts, such as the identity provider (fd75c641).
 # The comparator does not judge the interlock — it has no Access read —
 # it carries the key through onto the record's verdict (`interlock`),
 # so the handler learns which records it may apply from the one parse of
@@ -146,7 +150,11 @@ list_refs = list_refs == "1"
 
 TUNNEL_SUFFIX = ".cfargotunnel.com"
 COMPARED = ("content", "proxied", "ttl")
-INTERLOCKS = ("access",)
+# `tunnel` (2026-09-16, fd75c641): released once the latest cluster
+# converge packet's tunnel_ingress line routes the name and the
+# connector read connected — the interlock for a hostname the tunnel
+# serves that no Access application fronts (the identity provider).
+INTERLOCKS = ("access", "tunnel")
 
 
 def refuse(msg):

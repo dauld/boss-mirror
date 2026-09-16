@@ -116,7 +116,22 @@ fi
 # — and that is stated rather than papered over. The durable fix is
 # reaping orphaned job containers, which is a runner-host concern and
 # is filed as bcaf4a54, not something a preflight can do.
-min_free_gb="${BOSS_CI_MIN_FREE_GB:-70}"
+#
+# 40, NOT 70, SINCE 2026-09-16. The 74GB above was what `cargo test
+# --all-features` needed HERE; since design 128b5496 (2026-09-13) the
+# Rust checks run on the CLUSTER gate against the assembled train, and
+# this host's CI builds only the image, this preflight and the web. The
+# floor did not move with the work: on 2026-09-16 the host sat at
+# 69–77GB free after every one of twelve CI runs — a run now eats
+# about 7GB — while 93GB of the 228GB disk is the forge's own data (the
+# image registry every train pushes to) and the sweep's bounded
+# reclaims reach ~76GB and stop. Train a81ff79c was refused at 69GB
+# for want of a floor that measured a build this host no longer does.
+# 40 is five runs of headroom, and it is the conductor's own boarding
+# refusal (delivery-policy ci_host_floor_gb) — one number, two doors.
+# The disk sweep's script default matches (§9a); its unit keeps 100 on
+# purpose, so the sweep starts reclaiming well above what CI needs.
+min_free_gb="${BOSS_CI_MIN_FREE_GB:-40}"
 
 # The remediation carries the trap that cost an extra step during the
 # live recovery: an orphaned job's volume is NAMED, so

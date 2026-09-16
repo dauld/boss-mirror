@@ -3,7 +3,8 @@
 //! Measured on the forge host, 2026-09-11 (backlog `0357e0eb`): six
 //! consecutive observations fifteen minutes apart read 89, 100, 99,
 //! **60**, 92, 98 GB free of 227. The locomotive refuses to START a CI
-//! run below 70 GB (`infra/forge/locomotive.sh`, `BOSS_CI_MIN_FREE_GB`),
+//! run below 40 GB (`infra/forge/locomotive.sh`, `BOSS_CI_MIN_FREE_GB`;
+//! 70 until 2026-09-16),
 //! so the 04:03 trough sat ten gigabytes under the door a train boards
 //! through — and a locomotive refusal happens BEFORE any check runs, so
 //! it says nothing about the branch while striking every car aboard.
@@ -15,7 +16,7 @@
 //! pulls a per-train `boss-ci:<sha>` image into the system docker
 //! daemon. The RECLAIM is timer-driven: `disk-floor-sweep.timer` runs
 //! hourly and its unit defends 100 GB — deliberately higher than the
-//! locomotive's 70, so a floor buys headroom above the one being
+//! locomotive's 40, so a floor buys headroom above the one being
 //! defended. A dip whose amplitude exceeds that 30 GB gap, inside one
 //! timer interval, walks straight through it.
 //!

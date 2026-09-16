@@ -91,14 +91,17 @@ set -euo pipefail
 REGISTRY="${BOSS_FORGE_REGISTRY:-10.20.0.15:3000/david/boss}"
 export DOCKER_HOST="${DOCKER_HOST:-unix:///run/user/1000/docker.sock}"
 
-# 70, not 25, and it MUST match locomotive.sh's BOSS_CI_MIN_FREE_GB (§9a
-# — one number wearing two names). The sweep's job is to keep at least
-# what CI needs to START a cold build. A 25GB floor defended NOTHING in
-# the 65-70GB band where CI actually refuses (LOCOMOTIVE RED, need 70):
-# the sweep logged "nothing to do" at 67GB free while train after train
-# died there on 2026-09-04. If these two floors ever diverge, the sweep
-# keeps less than CI needs and every build gambles on luck.
-FLOOR_GB="${1:-${BOSS_DISK_FLOOR_GB:-70}}"
+# 40 (70 until 2026-09-16), not 25, and it MUST match locomotive.sh's
+# BOSS_CI_MIN_FREE_GB (§9a — one number wearing two names). The sweep's
+# job is to keep at least what CI needs to START a cold build. A 25GB
+# floor defended NOTHING in the 65-70GB band where CI refused at the
+# time (LOCOMOTIVE RED, need 70): the sweep logged "nothing to do" at
+# 67GB free while train after train died there on 2026-09-04. If these
+# two floors ever diverge, the sweep keeps less than CI needs and every
+# build gambles on luck. The Rust build moved to the cluster gate
+# (128b5496) and CI's need fell to ~7GB a run; both floors moved to 40
+# together (locomotive.sh says why). The unit keeps 100, deliberately.
+FLOOR_GB="${1:-${BOSS_DISK_FLOOR_GB:-40}}"
 
 # THE TWO CI-IMAGE WINDOWS, NAMED SO THEIR ORDER CAN BE CHECKED.
 # CI_IMAGE_AGE_HOURS is the ROUTINE window, applied hourly whatever the

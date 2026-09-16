@@ -97,9 +97,17 @@ pub const OBSERVE_SLUG: &str = "observe";
 pub const COMPARATOR: &str = "check-declared.sh";
 /// The Access declaration beside the zone files.
 pub const ACCESS_DECLARATION: &str = "access.toml";
-/// The one interlock the handler honours (the comparator refuses any
+/// The two interlocks the handler honours (the comparator refuses any
 /// other value, so a record can never declare one nothing reads).
 pub const INTERLOCK_ACCESS: &str = "access";
+/// Released once the latest cluster converge packet records the tunnel
+/// routing the hostname (`tunnel_ingress`) with the connector
+/// connected — for a hostname the tunnel serves that no Access
+/// application fronts: the identity provider (fd75c641, 2026-09-16).
+pub const INTERLOCK_TUNNEL: &str = "tunnel";
+/// The chore whose packet carries the converge's `tunnel_ingress` and
+/// `cloudflared` facts (infra/forge/cluster-deploy-runner.service).
+pub const CONVERGE_KIND: &str = "maintenance-cluster-converge";
 /// How many open backlog-items the dedup read is allowed to hold; a
 /// page shorter than the list's `total` is a truncated dedup and the
 /// raise is HELD rather than made blind (estate.alarm's rule).
@@ -406,6 +414,130 @@ pub fn access_gate(hostname: &str, live: &[AccessApp], created: &[String]) -> Ac
     }
 }
 
+/// What the latest converge recorded about the tunnel: the ingress
+/// line (`<host> → <origin>; …`) and the connector's reading.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TunnelFacts {
+    pub ingress: String,
+    pub connector: String,
+}
+
+impl TunnelFacts {
+    /// Off the newest `maintenance-cluster-converge` packet's `run` step
+    /// (the listing is newest-first). A listing without one reads as
+    /// no facts — the gate then holds, never releases.
+    pub fn from_listing(listing: &Json) -> Self {
+        listing
+            .get("data")
+            .and_then(Json::as_array)
+            .into_iter()
+            .flatten()
+            .flat_map(|j| {
+                j.get("steps")
+                    .and_then(Json::as_array)
+                    .into_iter()
+                    .flatten()
+            })
+            .find(|s| s.get("spec_slug").and_then(Json::as_str) == Some("run"))
+            .map(|s| {
+                let text = |k: &str| {
+                    s.pointer(&format!("/metadata/{k}"))
+                        .and_then(Json::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                TunnelFacts {
+                    ingress: text("tunnel_ingress"),
+                    connector: text("cloudflared"),
+                }
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// What the tunnel interlock read for one hostname.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunnelGate {
+    /// The converge routes the hostname and the connector is connected.
+    Routed,
+    /// No converge packet routes the hostname (the origin is not
+    /// declared, or the declaration has not converged).
+    NotRouted,
+    /// Routed, but the connector did not read connected on that converge.
+    NotConnected,
+}
+
+impl TunnelGate {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TunnelGate::Routed => "routed",
+            TunnelGate::NotRouted => "not-routed",
+            TunnelGate::NotConnected => "not-connected",
+        }
+    }
+    pub fn allows(self) -> bool {
+        matches!(self, TunnelGate::Routed)
+    }
+    pub fn held_reason(self) -> Option<&'static str> {
+        match self {
+            TunnelGate::NotRouted => {
+                Some("flip held — the converge does not route this hostname through the tunnel")
+            }
+            TunnelGate::NotConnected => Some(
+                "flip held — the connector did not read connected on the converge that routes it",
+            ),
+            TunnelGate::Routed => None,
+        }
+    }
+}
+
+/// The tunnel interlock for `hostname`, read off the latest converge
+/// packet: the `tunnel_ingress` line names `<host> → ` and the
+/// connector read `connected`. A line that routes the host's PREFIX
+/// (`id.` inside `xid.`) is not a route for it.
+pub fn tunnel_gate(hostname: &str, facts: &TunnelFacts) -> TunnelGate {
+    let routed = facts
+        .ingress
+        .split(';')
+        .map(str::trim)
+        .any(|entry| entry.starts_with(&format!("{hostname} → ")));
+    if !routed {
+        TunnelGate::NotRouted
+    } else if facts.connector != "connected" {
+        TunnelGate::NotConnected
+    } else {
+        TunnelGate::Routed
+    }
+}
+
+/// One reading per interlock kind, for the verdict annotation and the
+/// plan filter: `access` and `tunnel` each carry their own field and
+/// their own held phrase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Interlock {
+    Access(AccessGate),
+    Tunnel(TunnelGate),
+    /// The verdict declares no interlock the handler honours: never applied.
+    None,
+}
+
+impl Interlock {
+    pub fn allows(self) -> bool {
+        match self {
+            Interlock::Access(g) => g.allows(),
+            Interlock::Tunnel(g) => g.allows(),
+            Interlock::None => false,
+        }
+    }
+    fn held_reason(self) -> Option<&'static str> {
+        match self {
+            Interlock::Access(g) => g.held_reason(),
+            Interlock::Tunnel(g) => g.held_reason(),
+            Interlock::None => None,
+        }
+    }
+}
+
 /// The one write the interlock releases for a zone verdict.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ZoneApply {
@@ -504,7 +636,10 @@ fn row_text<'a>(row: &'a Json, key: &str) -> &'a str {
 /// refuses the create otherwise), so every other record at that name
 /// is deleted first; a declared record of any other type coexists.
 pub fn plan_zone_apply(v: &Json, live_rows: &[Json], comment: &str) -> Option<ZoneApply> {
-    if v.get("interlock").and_then(Json::as_str) != Some(INTERLOCK_ACCESS) {
+    if !matches!(
+        v.get("interlock").and_then(Json::as_str),
+        Some(INTERLOCK_ACCESS | INTERLOCK_TUNNEL)
+    ) {
         return None;
     }
     let spec = spec_from_verdict(v, comment)?;
@@ -542,16 +677,17 @@ pub fn plan_zone_apply(v: &Json, live_rows: &[Json], comment: &str) -> Option<Zo
 /// Stamp the interlock's reading on every interlocked verdict, and
 /// rewrite an ABSENT/DRIFT the interlock did not release as HELD with
 /// the reason. Everything else passes through untouched.
-pub fn annotate_verdicts(verdicts: &[Json], gate_for: impl Fn(&str) -> AccessGate) -> Vec<Json> {
+pub fn annotate_verdicts(verdicts: &[Json], gate_for: impl Fn(&Json) -> Interlock) -> Vec<Json> {
     verdicts
         .iter()
         .map(|v| {
-            if v.get("interlock").and_then(Json::as_str) != Some(INTERLOCK_ACCESS) {
-                return v.clone();
-            }
+            let gate = gate_for(v);
             let mut v = v.clone();
-            let gate = gate_for(v.get("name").and_then(Json::as_str).unwrap_or_default());
-            v["access"] = json!(gate.as_str());
+            match gate {
+                Interlock::Access(g) => v["access"] = json!(g.as_str()),
+                Interlock::Tunnel(g) => v["tunnel"] = json!(g.as_str()),
+                Interlock::None => return v,
+            }
             let hard = matches!(
                 v.get("verdict").and_then(Json::as_str),
                 Some("ABSENT" | "DRIFT")
@@ -1278,7 +1414,27 @@ impl Handler for DnsObserve {
         // What the account refused rides beside what it holds: a
         // finding on the step, in the alarm, counted as hard.
         access_verdicts.extend(refused);
-        let gate_for = |hostname: &str| access_gate(hostname, &live_apps, &created);
+        // The tunnel interlock's facts: the newest converge packet's
+        // ingress line and connector reading (fd75c641). Read once per
+        // firing; a listing that cannot be read holds every tunnel-
+        // interlocked record rather than releasing it blind.
+        let converge = self
+            .get(&format!(
+                "/api/jobs?kind={CONVERGE_KIND}&status=closed&limit=1"
+            ))
+            .await
+            .unwrap_or_else(|_| json!({"data": []}));
+        let tunnel_facts = TunnelFacts::from_listing(&converge);
+        let gate_for = |v: &Json| -> Interlock {
+            let hostname = v.get("name").and_then(Json::as_str).unwrap_or_default();
+            match v.get("interlock").and_then(Json::as_str) {
+                Some(INTERLOCK_ACCESS) => {
+                    Interlock::Access(access_gate(hostname, &live_apps, &created))
+                }
+                Some(INTERLOCK_TUNNEL) => Interlock::Tunnel(tunnel_gate(hostname, &tunnel_facts)),
+                _ => Interlock::None,
+            }
+        };
 
         // The zone, with the only token that can read it; then the
         // interlocked writes it releases; then, if anything was
@@ -1289,7 +1445,7 @@ impl Handler for DnsObserve {
         let plans: Vec<ZoneApply> = comparison
             .verdicts
             .iter()
-            .filter(|v| gate_for(v.get("name").and_then(Json::as_str).unwrap_or_default()).allows())
+            .filter(|v| gate_for(v).allows())
             .filter_map(|v| plan_zone_apply(v, &records, &comment))
             .collect();
         // A zone write the account refuses is a finding, not a failed
@@ -1902,7 +2058,18 @@ why = "x"
             zone_verdict("ABSENT", true),
             json!({"record": "playground.algedonic.dev CNAME", "name": "playground.algedonic.dev", "verdict": "ABSENT"}),
         ];
-        let held = annotate_verdicts(&verdicts, |_| AccessGate::Absent);
+        // The gate reads the verdict's own interlock: a record without
+        // one is `Interlock::None` whatever the account says.
+        let access = |g: AccessGate| {
+            move |v: &Json| {
+                if v.get("interlock").is_some() {
+                    Interlock::Access(g)
+                } else {
+                    Interlock::None
+                }
+            }
+        };
+        let held = annotate_verdicts(&verdicts, access(AccessGate::Absent));
         assert_eq!(held[0]["verdict"], "HELD");
         assert_eq!(held[0]["access"], "absent");
         assert_eq!(held[0]["held"], "flip held — Access app absent");
@@ -1911,15 +2078,97 @@ why = "x"
             "no interlock: untouched, still a finding"
         );
         assert!(held[1].get("access").is_none());
-        let released = annotate_verdicts(&verdicts, |_| AccessGate::Created);
+        let released = annotate_verdicts(&verdicts, access(AccessGate::Created));
         assert_eq!(
             released[0]["verdict"], "ABSENT",
             "released but still absent after the apply = a real finding"
         );
         assert_eq!(released[0]["access"], "created");
-        let matched = annotate_verdicts(&[zone_verdict("MATCH", true)], |_| AccessGate::Present);
+        let matched =
+            annotate_verdicts(&[zone_verdict("MATCH", true)], access(AccessGate::Present));
         assert_eq!(matched[0]["verdict"], "MATCH");
         assert_eq!(matched[0]["access"], "present");
+    }
+
+    /// The tunnel interlock (fd75c641): released only when the newest
+    /// converge packet's ingress line routes the hostname AND the
+    /// connector read connected; a prefix match is not a route.
+    #[test]
+    fn the_tunnel_gate_reads_the_converge_packets_ingress_and_connector() {
+        let listing = json!({"data": [{
+            "kind": "maintenance-cluster-converge",
+            "steps": [
+                {"spec_slug": "due", "status": "completed", "metadata": {}},
+                {"spec_slug": "run", "status": "completed", "metadata": {
+                    "cloudflared": "connected",
+                    "tunnel_ingress": "boss.algedonic.dev → boss; playground.algedonic.dev → boss (boss-playground skipped: secrets absent); id.algedonic.dev → https://10.20.0.31:443 (origin)"
+                }}
+            ]
+        }]});
+        let facts = TunnelFacts::from_listing(&listing);
+        assert_eq!(tunnel_gate("id.algedonic.dev", &facts), TunnelGate::Routed);
+        assert_eq!(
+            tunnel_gate("boss.algedonic.dev", &facts),
+            TunnelGate::Routed
+        );
+        assert_eq!(
+            tunnel_gate("d.algedonic.dev", &facts),
+            TunnelGate::NotRouted,
+            "a suffix of a routed name is not routed"
+        );
+        assert_eq!(
+            tunnel_gate("www.algedonic.dev", &facts),
+            TunnelGate::NotRouted
+        );
+        let dark = TunnelFacts {
+            connector: "not ready (0/2)".into(),
+            ..facts.clone()
+        };
+        assert_eq!(
+            tunnel_gate("id.algedonic.dev", &dark),
+            TunnelGate::NotConnected
+        );
+        assert_eq!(
+            TunnelFacts::from_listing(&json!({"data": []})),
+            TunnelFacts::default(),
+            "no converge packet: no facts, and every tunnel gate holds"
+        );
+        assert_eq!(
+            tunnel_gate("id.algedonic.dev", &TunnelFacts::default()),
+            TunnelGate::NotRouted
+        );
+
+        // Through the annotation: a tunnel-interlocked ABSENT is HELD
+        // with the tunnel's phrase and its own field, never `access`.
+        let v = json!({"record": "id.algedonic.dev CNAME", "name": "id.algedonic.dev", "verdict": "DRIFT", "interlock": "tunnel"});
+        let held = annotate_verdicts(std::slice::from_ref(&v), |_| {
+            Interlock::Tunnel(TunnelGate::NotRouted)
+        });
+        assert_eq!(held[0]["verdict"], "HELD");
+        assert_eq!(held[0]["tunnel"], "not-routed");
+        assert!(held[0].get("access").is_none());
+        assert!(
+            held[0]["held"].as_str().unwrap().contains("does not route"),
+            "{}",
+            held[0]
+        );
+        let released = annotate_verdicts(&[v], |_| Interlock::Tunnel(TunnelGate::Routed));
+        assert_eq!(
+            released[0]["verdict"], "DRIFT",
+            "released: the apply is what corrects it"
+        );
+        assert_eq!(released[0]["tunnel"], "routed");
+        assert!(
+            plan_zone_apply(
+                &json!({"name": "id.algedonic.dev", "type": "CNAME", "verdict": "DRIFT", "interlock": "tunnel",
+                        "declared": {"content": "d8a8.cfargotunnel.com", "proxied": true, "ttl": 1},
+                        "live": {"content": "8bb0.cfargotunnel.com", "proxied": true, "ttl": 1}}),
+                &[json!({"id": "rec-1", "name": "id.algedonic.dev", "type": "CNAME", "content": "8bb0.cfargotunnel.com"})],
+                "why"
+            )
+            .is_some(),
+            "a tunnel-interlocked DRIFT plans the in-place correction"
+        );
     }
 
     // ----- in-memory fakes -----
@@ -2219,9 +2468,25 @@ why = "x"
     }
 
     /// The zone exactly as measured on 2026-09-16 — before the flip.
+    /// The old tunnel the IdP's record still pointed at on 2026-09-16 —
+    /// deleted that morning, 530 from then on (fd75c641).
+    const OLD_TUNNEL_CNAME: &str = "8bb06ec8-a6d1-4796-8f51-df363798b48c.cfargotunnel.com";
+    /// The converge packet's ingress line once tunnel-origins.toml routes
+    /// the IdP (the sibling car), as the runner records it.
+    const CONVERGE_ROUTES_IDP: &str = "boss.algedonic.dev → boss; playground.algedonic.dev → boss (boss-playground skipped: secrets absent); id.algedonic.dev → https://10.20.0.31:443 (origin)";
+
+    fn converge_listing(ingress: &str) -> Json {
+        json!({"data": [{
+            "kind": CONVERGE_KIND, "status": "closed",
+            "steps": [{"spec_slug": "run", "status": "completed",
+                       "metadata": {"cloudflared": "connected", "tunnel_ingress": ingress}}]
+        }], "total": 1})
+    }
+
     fn as_measured() -> Vec<Json> {
         vec![
             record("boss.algedonic.dev", "A", "10.20.0.33", false, 300),
+            record("id.algedonic.dev", "CNAME", &tunnel_cname(), true, 1),
             record(
                 "playground.algedonic.dev",
                 "CNAME",
@@ -2236,6 +2501,7 @@ why = "x"
     fn as_declared() -> Vec<Json> {
         vec![
             record("boss.algedonic.dev", "CNAME", &tunnel_cname(), true, 1),
+            record("id.algedonic.dev", "CNAME", &tunnel_cname(), true, 1),
             record(
                 "playground.algedonic.dev",
                 "CNAME",
@@ -2270,6 +2536,21 @@ why = "x"
         open_alarms: Vec<Json>,
         storage_location: &'static str,
     ) -> (String, Captured) {
+        stub_jobs_api_with_converge(
+            observe_status,
+            open_alarms,
+            storage_location,
+            CONVERGE_ROUTES_IDP,
+        )
+        .await
+    }
+
+    async fn stub_jobs_api_with_converge(
+        observe_status: &'static str,
+        open_alarms: Vec<Json>,
+        storage_location: &'static str,
+        converge_ingress: &'static str,
+    ) -> (String, Captured) {
         use axum::extract::{Path, Query};
         use axum::{Json as AxJson, Router, routing::get, routing::post, routing::put};
 
@@ -2282,6 +2563,12 @@ why = "x"
                 get(move |Query(q): Query<HashMap<String, String>>| {
                     let alarms = alarms.clone();
                     async move {
+                        // The tunnel interlock's read (fd75c641): the
+                        // newest converge routes the IdP, connector
+                        // connected — the released state.
+                        if q.get("kind").map(String::as_str) == Some(CONVERGE_KIND) {
+                            return AxJson(converge_listing(converge_ingress));
+                        }
                         assert_eq!(q.get("kind").map(String::as_str), Some("backlog-item"));
                         assert_eq!(q.get("status").map(String::as_str), Some("open"));
                         AxJson(json!({ "data": *alarms, "total": alarms.len() }))
@@ -2453,7 +2740,7 @@ why = "x"
             "existing step metadata rides along"
         );
         let verdicts = body["metadata"]["verdicts"].as_array().unwrap();
-        assert_eq!(verdicts.len(), 2);
+        assert_eq!(verdicts.len(), 3, "boss., id. and playground.");
         assert!(
             verdicts.iter().all(|v| v["verdict"] == "MATCH"),
             "{verdicts:?}"
@@ -2482,7 +2769,7 @@ why = "x"
         let summary = body["metadata"]["summary"].as_str().unwrap();
         assert!(
             summary.contains(
-                "2 match, 0 drift, 0 absent, 0 undeclared — every declared record matches"
+                "3 match, 0 drift, 0 absent, 0 undeclared — every declared record matches"
             ) && summary.contains("· access: 2 match, 0 drift, 0 absent, 0 undeclared"),
             "{summary}"
         );
@@ -2538,7 +2825,7 @@ why = "x"
             ]
         );
         assert_eq!(*zone.reads.lock().unwrap(), 2, "read back after the apply");
-        assert_eq!(zone.live().len(), 2, "no A left beside the CNAME");
+        assert_eq!(zone.live().len(), 3, "no A left beside the CNAME");
 
         let w = writes(&captured);
         assert_eq!(
@@ -2650,6 +2937,101 @@ why = "x"
         let kept = annotate_refused(&out, &[("www.algedonic.dev".to_string(), "x".to_string())]);
         assert_eq!(kept[0]["verdict"], "MATCH", "a right zone stays right");
         assert_eq!(kept[0]["refused"], "x", "and the refusal is still recorded");
+    }
+
+    /// The 2026-09-16 outage (fd75c641): the IdP's record pointed at
+    /// the deleted tunnel. With the converge routing id. (the sibling
+    /// car landed) the observer corrects the CNAME in place behind the
+    /// tunnel interlock; with a converge that does not route it, the
+    /// DRIFT is HELD with the tunnel's phrase and nothing is written.
+    #[tokio::test]
+    async fn the_idp_record_follows_the_tunnel_once_the_converge_routes_it() {
+        let stale = vec![
+            record("boss.algedonic.dev", "CNAME", &tunnel_cname(), true, 1),
+            record("id.algedonic.dev", "CNAME", OLD_TUNNEL_CNAME, true, 1),
+            record(
+                "playground.algedonic.dev",
+                "CNAME",
+                &tunnel_cname(),
+                true,
+                1,
+            ),
+        ];
+        let (jobs, captured) = stub_jobs_api("ready", vec![], LOCATION).await;
+        let zone = FakeZone::with(stale.clone());
+        let access = FakeAccess::with(account_as_declared());
+        let h = handler(jobs, zone.clone(), access, secrets(), declarations());
+        h.invoke(&zone_args(), &ctx()).await.unwrap();
+        assert_eq!(
+            zone.writes(),
+            vec![format!(
+                "update rec-id.algedonic.dev-CNAME {} proxied=true",
+                tunnel_cname()
+            )],
+            "the stale CNAME corrected in place, nothing else touched"
+        );
+        let body = step_put(&writes(&captured));
+        assert_eq!(body["metadata"]["result"], "match", "{body}");
+        let idp = body["metadata"]["verdicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == "id.algedonic.dev")
+            .cloned()
+            .unwrap();
+        assert_eq!(idp["verdict"], "MATCH");
+        assert_eq!(idp["tunnel"], "routed");
+        assert!(idp.get("access").is_none(), "{idp}");
+        assert_eq!(
+            body["metadata"]["applied"],
+            json!(["id.algedonic.dev CNAME corrected"])
+        );
+
+        // Before the sibling car converges: the converge's ingress line
+        // does not name id. — HELD, alarm raised, nothing written.
+        let (jobs, captured) = stub_jobs_api_with_converge(
+            "ready",
+            vec![],
+            LOCATION,
+            "boss.algedonic.dev → boss; playground.algedonic.dev → boss (boss-playground skipped: secrets absent)",
+        )
+        .await;
+        let zone = FakeZone::with(stale);
+        let access = FakeAccess::with(account_as_declared());
+        let h = handler(jobs, zone.clone(), access, secrets(), declarations());
+        h.invoke(&zone_args(), &ctx()).await.unwrap();
+        assert!(zone.writes().is_empty(), "held: {:?}", zone.writes());
+        // HELD is paperwork, as it is for the Access half: the step
+        // completes, the hold is on the verdict and in the summary, and
+        // no alarm is raised for a write the interlock is still holding.
+        let w = writes(&captured);
+        assert_eq!(
+            w.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            vec!["PUT /api/jobs/obs-1/steps/step-observe"],
+            "{w:?}"
+        );
+        let body = step_put(&w);
+        assert!(
+            body["metadata"]["summary"]
+                .as_str()
+                .unwrap()
+                .contains("id.algedonic.dev: flip held — the converge does not route"),
+            "{}",
+            body["metadata"]["summary"]
+        );
+        let idp = body["metadata"]["verdicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == "id.algedonic.dev")
+            .cloned()
+            .unwrap();
+        assert_eq!(idp["verdict"], "HELD", "{idp}");
+        assert_eq!(idp["tunnel"], "not-routed");
+        assert!(
+            idp["held"].as_str().unwrap().contains("does not route"),
+            "{idp}"
+        );
     }
 
     #[tokio::test]
@@ -3083,7 +3465,11 @@ why = "x"
     async fn drift_on_the_rotation_owned_record_raises_the_alarm_before_completing_the_step() {
         let (jobs, captured) = stub_jobs_api("ready", vec![], LOCATION).await;
         let mut live = as_declared();
-        live[1] = record(
+        let pg = live
+            .iter()
+            .position(|r| r["name"] == "playground.algedonic.dev")
+            .unwrap();
+        live[pg] = record(
             "playground.algedonic.dev",
             "CNAME",
             "00000000-1111-4222-8333-444444444444.cfargotunnel.com",

@@ -75,6 +75,15 @@ fn as_measured() -> Vec<serde_json::Value> {
             true,
             1,
         ),
+        // The IdP already on this tunnel — the zone after fd75c641 moved
+        // it; last, so the positional fixtures keep their meaning.
+        record(
+            "id.algedonic.dev",
+            "CNAME",
+            &format!("{TUNNEL_ID}.cfargotunnel.com"),
+            true,
+            1,
+        ),
     ]
 }
 
@@ -92,6 +101,15 @@ fn as_declared() -> Vec<serde_json::Value> {
         ),
         record(
             "playground.algedonic.dev",
+            "CNAME",
+            &format!("{TUNNEL_ID}.cfargotunnel.com"),
+            true,
+            1,
+        ),
+        // The IdP (fd75c641) — last, so the positional fixtures above
+        // it keep their meaning.
+        record(
+            "id.algedonic.dev",
             "CNAME",
             &format!("{TUNNEL_ID}.cfargotunnel.com"),
             true,
@@ -223,10 +241,25 @@ fn the_shipped_declaration_puts_boss_behind_the_tunnel_behind_an_interlock() {
         names,
         vec![
             ("boss.algedonic.dev".to_string(), "CNAME".to_string()),
+            ("id.algedonic.dev".to_string(), "CNAME".to_string()),
             ("playground.algedonic.dev".to_string(), "CNAME".to_string()),
         ],
-        "exactly the two doors: www and the apex are absent from the zone (measured 2026-09-16) and a \
-         record declared before it exists reads ABSENT on every observation"
+        "exactly the two doors and the identity provider (fd75c641, 2026-09-16): www and the apex \
+         are absent from the zone (measured 2026-09-16) and a record declared before it exists \
+         reads ABSENT on every observation"
+    );
+    let idp = records
+        .iter()
+        .find(|r| r["name"].as_str() == Some("id.algedonic.dev"))
+        .unwrap();
+    assert_eq!(
+        idp["interlock"].as_str(),
+        Some("tunnel"),
+        "the IdP follows the tunnel: applied once the converge routes it, never blind"
+    );
+    assert_eq!(
+        idp["target"].as_str(),
+        Some("tunnel:cloudflare-tunnel-credentials")
     );
     for r in records {
         for key in ["name", "type", "target", "proxied", "ttl", "why"] {
@@ -301,7 +334,7 @@ fn the_zone_as_declared_matches_and_exits_0() {
     let t = text(&out);
     assert_eq!(code(&out), 0, "{t}");
     let matches = lines_with(&out, "MATCH");
-    assert_eq!(matches.len(), 2, "{t}");
+    assert_eq!(matches.len(), 3, "{t}");
     assert!(
         matches
             .iter()
@@ -318,7 +351,7 @@ fn the_zone_as_declared_matches_and_exits_0() {
     assert!(lines_with(&out, "ABSENT").is_empty(), "{t}");
     assert!(lines_with(&out, "UNDECLARED").is_empty(), "{t}");
     assert!(
-        t.contains("check-declared: algedonic.dev: 2 match, 0 drift, 0 absent, 0 undeclared — every declared record matches"),
+        t.contains("check-declared: algedonic.dev: 3 match, 0 drift, 0 absent, 0 undeclared — every declared record matches"),
         "{t}"
     );
 }
@@ -357,7 +390,7 @@ fn the_zone_as_measured_before_the_flip_reads_the_cname_absent_and_the_a_undecla
         undeclared[0]
     );
     assert!(
-        t.contains("1 match, 0 drift, 1 absent, 1 undeclared"),
+        t.contains("2 match, 0 drift, 1 absent, 1 undeclared"),
         "{t}"
     );
 }
@@ -376,7 +409,7 @@ fn a_tunnel_reference_resolves_from_a_bare_tunnel_argument_too() {
     )
     .go();
     assert_eq!(code(&out), 0, "{}", text(&out));
-    assert_eq!(lines_with(&out, "MATCH").len(), 2, "{}", text(&out));
+    assert_eq!(lines_with(&out, "MATCH").len(), 3, "{}", text(&out));
 }
 
 #[test]
@@ -410,7 +443,7 @@ fn a_record_nobody_declared_is_undeclared_reported_and_not_a_failure() {
         "{t}"
     );
     assert!(
-        t.contains("2 match, 0 drift, 0 absent, 2 undeclared"),
+        t.contains("3 match, 0 drift, 0 absent, 2 undeclared"),
         "{t}"
     );
 }
@@ -445,7 +478,7 @@ fn a_cname_still_pointing_at_the_old_tunnel_is_drift_with_both_values_and_exits_
         drift[0]
     );
     assert!(
-        t.contains("1 match, 1 drift, 0 absent, 0 undeclared"),
+        t.contains("2 match, 1 drift, 0 absent, 0 undeclared"),
         "{t}"
     );
     assert!(t.contains("1 finding(s) against the declaration"), "{t}");
@@ -485,7 +518,8 @@ fn the_boss_door_turned_grey_is_drift_on_proxied_not_content() {
 
 #[test]
 fn a_declared_record_the_zone_lacks_is_absent_and_exits_1() {
-    let live = vec![as_declared()[1].clone()];
+    // Everything but boss.: playground and the IdP present, boss. absent.
+    let live: Vec<serde_json::Value> = as_declared().into_iter().skip(1).collect();
     let out = Run::new(
         &[
             "algedonic.dev",
@@ -506,7 +540,7 @@ fn a_declared_record_the_zone_lacks_is_absent_and_exits_1() {
         absent[0]
     );
     assert!(
-        t.contains("1 match, 0 drift, 1 absent, 0 undeclared"),
+        t.contains("2 match, 0 drift, 1 absent, 0 undeclared"),
         "{t}"
     );
 }
@@ -525,7 +559,7 @@ fn a_bare_result_array_reads_the_same_as_the_envelope() {
     )
     .go();
     assert_eq!(code(&out), 0, "{}", text(&out));
-    assert_eq!(lines_with(&out, "MATCH").len(), 2, "{}", text(&out));
+    assert_eq!(lines_with(&out, "MATCH").len(), 3, "{}", text(&out));
 }
 
 // ---- the machine-readable form and the reference listing -----------
@@ -556,13 +590,13 @@ fn json_output_carries_one_verdict_per_record_and_the_counts() {
     let body: serde_json::Value = serde_json::from_slice(&out.stdout)
         .unwrap_or_else(|e| panic!("--json prints one JSON document on stdout ({e}): {t}"));
     assert_eq!(body["zone"], "algedonic.dev");
-    assert_eq!(body["counts"]["MATCH"], 1);
+    assert_eq!(body["counts"]["MATCH"], 2);
     assert_eq!(body["counts"]["DRIFT"], 1);
     assert_eq!(body["counts"]["ABSENT"], 0);
     assert_eq!(body["counts"]["UNDECLARED"], 1);
     assert_eq!(body["hard"], 1);
     let verdicts = body["verdicts"].as_array().expect("verdicts array");
-    assert_eq!(verdicts.len(), 3);
+    assert_eq!(verdicts.len(), 4);
     let by_record = |rec: &str| {
         verdicts
             .iter()

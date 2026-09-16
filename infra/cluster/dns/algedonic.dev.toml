@@ -86,6 +86,22 @@ why = "the operating site, behind the Cloudflare Tunnel and the Access applicati
 # writer would race its connector cutover), so the observer compares
 # and reports it only; the Access application in front of it is
 # declared in access.toml and compared there.
+# The identity provider. Until 2026-09-16 this record pointed at the OLD
+# tunnel (the connector on boss-gcp, whose ingress was a hand-written
+# file there) and was declared nowhere; the tunnel was rotated, the old
+# one deleted, and every OIDC login answered 530 for a day (fd75c641).
+# The tunnel routes it as a declared origin (infra/cluster/tunnel-origins.toml)
+# and this record follows the same tunnel reference the instances use,
+# applied by the observer once the converge records the route.
+[[record]]
+name = "id.algedonic.dev"
+type = "CNAME"
+target = "tunnel:cloudflare-tunnel-credentials"
+proxied = true
+ttl = 1
+interlock = "tunnel"
+why = "the identity provider (Kanidm) every OIDC login discovers; routed by the tunnel as a declared origin, so it moves with the tunnel"
+
 [[record]]
 name = "playground.algedonic.dev"
 type = "CNAME"

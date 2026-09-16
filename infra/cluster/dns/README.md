@@ -16,7 +16,13 @@ on any DRIFT or ABSENT, and writes exactly two kinds of thing: an
 ABSENT declared Access application (created with its declared policies,
 read back before it is judged) and a zone record declaring
 `interlock = "access"`, once the application for that name reads
-present with an allow policy. A write the account refuses is a
+present with an allow policy — or `interlock = "tunnel"`, once the
+latest cluster converge packet's `tunnel_ingress` line routes the name
+and the connector read connected (the identity provider, fd75c641: on
+2026-09-16 its record pointed at a deleted tunnel for a day because it
+was routed by a hand-written file on the retired connector and declared
+nowhere; it is now a declared origin in infra/cluster/tunnel-origins.toml
+and a declared record here, and it moves with the tunnel). A write the account refuses is a
 `REFUSED` verdict (the write in words, the account's answer verbatim),
 counted as a finding and carried by the alarm — never a failed firing:
 on 2026-09-16 the first policy on the freshly created boss. application

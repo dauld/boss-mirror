@@ -180,12 +180,14 @@ const DISK_TIGHT_FLOOR_PCT: i64 = 35;
 /// DERIVED, NOT PICKED — twice the highest of the three absolute floors
 /// this pipeline enforces, read out of the files that enforce them on
 /// 2026-09-11:
-/// - **70 GB** — the locomotive's run-START refusal,
-///   `infra/forge/locomotive.sh` (`BOSS_CI_MIN_FREE_GB:-70`).
+/// - **40 GB** — the locomotive's run-START refusal,
+///   `infra/forge/locomotive.sh` (`BOSS_CI_MIN_FREE_GB:-40`; 70 until
+///   2026-09-16, when the floor caught up with the Rust build having
+///   moved to the cluster gate — the file says why).
 /// - **100 GB** — the disk sweep's floor,
 ///   `infra/forge/disk-floor-sweep.service`
 ///   (`Environment=BOSS_DISK_FLOOR_GB=100`; the script's own default is
-///   70, raised here deliberately because a floor only buys headroom if
+///   40, raised here deliberately because a floor only buys headroom if
 ///   it is higher than the one it defends). The highest, so the ceiling
 ///   is 2 × 100.
 /// - **40 GB** — the conductor's boarding refusal, delivery-policy
@@ -1098,7 +1100,7 @@ mod tests {
         let floors = [
             (
                 "the locomotive's run-START refusal",
-                70,
+                40,
                 int_after("infra/forge/locomotive.sh", "BOSS_CI_MIN_FREE_GB:-"),
             ),
             (

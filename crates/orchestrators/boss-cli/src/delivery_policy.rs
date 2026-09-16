@@ -368,8 +368,9 @@ mod tests {
         assert_eq!(
             p.ci_host_floor_gb, 40,
             "policy v3 (approval d99b198d, 2026-09-05): the forge runs lean CI green at \
-             60-70GB free and the locomotive's own door is 70, so the boarding floor sits \
-             under it; the old 90 measured a FULL gate build that now runs in-cluster"
+             60-70GB free and the locomotive's own door was 70 (40 since 2026-09-16, the \
+             same number), so the boarding floor sits at or under it; the old 90 measured \
+             a FULL gate build that now runs in-cluster"
         );
         assert_eq!(
             p.gate_max_concurrent, 3,
