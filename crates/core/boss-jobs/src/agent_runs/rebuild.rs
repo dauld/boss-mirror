@@ -111,6 +111,14 @@ async fn insert_run(
         .bind(run.run.job_id)
         .bind(run.run.branch.as_deref())
         .bind(&run.run.detail)
+        // The admission decision as it was made, replayed like the
+        // price; NULL for an event written before budgets were
+        // consulted, which is "no decision", not "allowed".
+        .bind(
+            run.budget
+                .as_ref()
+                .map(|b| serde_json::to_value(b).unwrap_or_default()),
+        )
         .bind(run.recorded_at)
         .execute(conn)
         .await?;
@@ -131,8 +139,8 @@ mod tests {
         let sql = insert_run_sql();
         let columns = super::super::postgres::RUN_COLUMNS.split(',').count();
         assert_eq!(
-            columns, 17,
-            "agent_runs has seventeen columns (model joined on 2026-09-15)"
+            columns, 18,
+            "agent_runs has eighteen columns (model joined on 2026-09-15, budget on 2026-09-16)"
         );
         for n in 1..=columns {
             assert!(

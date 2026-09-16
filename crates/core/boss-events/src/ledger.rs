@@ -1,9 +1,9 @@
 //! In-memory [`CostLedger`] adapter.
 
 use async_trait::async_trait;
-use boss_core::agent::{AgentId, AgentSpec, BudgetDecision, Cost, Window};
+use boss_core::agent::{AgentId, AgentLoad, AgentSpec, BudgetDecision, Cost, Window};
 use boss_core::port::{CostLedger, LedgerError};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -30,11 +30,7 @@ impl InMemoryCostLedger {
     }
 
     fn cutoff(window: Window) -> DateTime<Utc> {
-        match window {
-            Window::LastHour => Utc::now() - Duration::hours(1),
-            Window::LastDay => Utc::now() - Duration::days(1),
-            Window::Since { at } => at,
-        }
+        window.cutoff(Utc::now())
     }
 }
 
@@ -77,18 +73,21 @@ impl CostLedger for InMemoryCostLedger {
         agent: &AgentId,
         spec: &AgentSpec,
     ) -> Result<BudgetDecision, LedgerError> {
+        // The one budget rule lives in boss-core (backlog 7dd9f28c):
+        // this ledger measures the spend, `decide` judges it. The
+        // concurrency half is the dispatcher's to count, so it is not
+        // consulted here.
         let spent = self.spent(agent, Window::LastHour).await?;
-        if spent.usd_micros >= spec.hourly_budget_usd_micros {
-            return Ok(BudgetDecision::Deny {
-                reason: format!(
-                    "hourly budget exhausted: spent {} of {} usd_micros",
-                    spent.usd_micros, spec.hourly_budget_usd_micros
-                ),
-            });
-        }
-        Ok(BudgetDecision::Allow {
-            remaining_usd_micros: spec.hourly_budget_usd_micros - spent.usd_micros,
-        })
+        Ok(BudgetDecision::decide(
+            boss_core::agent::AgentCaps {
+                max_concurrent_runs: None,
+                ..spec.caps()
+            },
+            AgentLoad {
+                spent_usd_micros: spent.usd_micros,
+                in_flight: 0,
+            },
+        ))
     }
 }
 
@@ -150,7 +149,7 @@ mod tests {
         assert_eq!(
             d,
             BudgetDecision::Allow {
-                remaining_usd_micros: 700
+                remaining_usd_micros: Some(700)
             }
         );
     }

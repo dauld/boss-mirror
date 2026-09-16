@@ -76,6 +76,21 @@ pub fn router(state: AgentRunsApiState) -> Router {
 fn err_response(e: AgentRunError) -> Response {
     match e {
         AgentRunError::BadRequest(m) => (StatusCode::BAD_REQUEST, m).into_response(),
+        // 409, the status every other refused-by-state write on this
+        // service answers with (a terminal step, incomplete sign-offs):
+        // the report was well-formed, and the record's state — the
+        // actor's spend against its cap — is what refused it. The body
+        // is the decision, not a bare string, so a caller can show it.
+        AgentRunError::Denied { reason } => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "run refused against the actor's budget",
+                "budget": { "kind": "deny", "reason": reason },
+                "hint": "the refusal is on the log as agents.run.denied; \
+                         the window rolls an hour after the spend it counted",
+            })),
+        )
+            .into_response(),
         AgentRunError::Storage(m) => (StatusCode::INTERNAL_SERVER_ERROR, m).into_response(),
     }
 }
@@ -549,6 +564,91 @@ mod tests {
         assert_eq!(out["summary"]["runs"], 1);
         assert_eq!(out["summary"]["by_model"][0]["key"], "opus-5[1m]");
         assert!(out["summary"].get("by_actor").is_none(), "body: {body}");
+    }
+
+    /// A refused run answers 409 with the decision in the body — the
+    /// status every other refused-by-state write on this service uses
+    /// — and an admitted one carries its decision on the run. Through
+    /// the door, so the wire shape is what is pinned: a caller reads
+    /// `budget.kind` off either answer.
+    #[tokio::test]
+    async fn a_refused_run_is_a_409_carrying_the_decision() {
+        // A cap of zero is a declared cap: the agent is switched off.
+        let log = InMemoryAgentRuns::new(card()).with_budgeted_agent(
+            "agent-claude",
+            "opus-5[1m]",
+            boss_core::agent::AgentCaps {
+                hourly_budget_usd_micros: Some(0),
+                max_concurrent_runs: None,
+            },
+        );
+        let app = router(AgentRunsApiState { log: Arc::new(log) });
+        let req = Request::post("/api/agent-runs")
+            .header("content-type", "application/json")
+            .header(
+                "x-boss-user",
+                header("platform-admin", AccessTier::Operator),
+            )
+            .body(Body::from(
+                serde_json::json!({
+                    "run_id": "run-refused",
+                    "actor_id": "agent-claude",
+                    "started_at": "2026-09-15T22:00:00Z",
+                    "finished_at": "2026-09-15T22:10:00Z",
+                    "outcome": "success",
+                    "input_tokens": 900,
+                    "output_tokens": 100
+                })
+                .to_string(),
+            ))
+            .expect("request builds");
+        let resp = app.oneshot(req).await.expect("the router answers");
+        let status = resp.status();
+        let body = String::from_utf8_lossy(
+            &resp
+                .into_body()
+                .collect()
+                .await
+                .expect("body collects")
+                .to_bytes(),
+        )
+        .into_owned();
+        assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+        let out: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        assert_eq!(out["budget"]["kind"], "deny", "body: {body}");
+        assert!(
+            out["budget"]["reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("0 of 0")),
+            "body: {body}"
+        );
+    }
+
+    /// The unbudgeted case is the live one (agent-claude, both caps
+    /// NULL): the run is admitted and the answer says so, with nothing
+    /// to count down.
+    #[tokio::test]
+    async fn an_admitted_run_answers_with_its_decision() {
+        let (status, body) = post(
+            "/api/agent-runs",
+            serde_json::json!({
+                "run_id": "run-admitted",
+                "actor_id": "agent-claude",
+                "started_at": "2026-09-15T22:00:00Z",
+                "finished_at": "2026-09-15T22:10:00Z",
+                "outcome": "success",
+                "total_tokens": 1000
+            }),
+            Some(header("platform-admin", AccessTier::Operator)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let out: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        assert_eq!(out["run"]["budget"]["kind"], "allow", "body: {body}");
+        assert!(
+            out["run"]["budget"]["remaining_usd_micros"].is_null(),
+            "no cap declared: {body}"
+        );
     }
 
     /// `actor_id` is the filter the `(actor_id, finished_at)` index was

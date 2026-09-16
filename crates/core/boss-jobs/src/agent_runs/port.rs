@@ -10,6 +10,7 @@
 //! the audit-log-is-the-system-of-record contract, not a second copy.
 
 use async_trait::async_trait;
+use boss_core::agent::{AgentCaps, AgentLoad, BudgetDecision};
 
 use super::types::{AgentRun, NewAgentRun, RateCardRow, RunFilter};
 
@@ -17,8 +18,36 @@ use super::types::{AgentRun, NewAgentRun, RateCardRow, RunFilter};
 pub enum AgentRunError {
     #[error("bad request: {0}")]
     BadRequest(String),
+    /// The run was refused against its actor's budget (backlog
+    /// 7dd9f28c). Its own class, not a `BadRequest`: the report was
+    /// well-formed, the actor was over its cap, and the refusal is
+    /// already a fact on the log (`agents.run.denied`) by the time the
+    /// caller sees this.
+    #[error("budget denied: {reason}")]
+    Denied { reason: String },
     #[error("storage: {0}")]
     Storage(String),
+}
+
+/// What the `agents` row says about the actor a run names — the two
+/// columns the recorder reads. `None` when the actor has no row: a
+/// legacy colon-form id, or a registered id nobody registered (which
+/// `resolve_model` refuses on its own grounds when the run names no
+/// model either).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegisteredAgent {
+    pub default_model: String,
+    pub caps: AgentCaps,
+}
+
+/// The admission step both adapters run between resolving the model
+/// and writing anything: the actor's caps against its measured load,
+/// through the one rule (`BudgetDecision::decide`). An actor with no
+/// row is unbudgeted — `AgentCaps::default()`, every cap `None` — and
+/// is admitted with nothing to count down; a missing row must not stop
+/// the stack.
+pub fn admit(agent: Option<&RegisteredAgent>, load: AgentLoad) -> BudgetDecision {
+    BudgetDecision::decide(agent.map(|a| a.caps).unwrap_or_default(), load)
 }
 
 /// What a record attempt did. `recorded: false` means this `run_id` was
@@ -45,6 +74,18 @@ pub trait AgentRunLog: Send + Sync {
     ///
     /// Idempotent on `run_id`, so the reporter can retry a failed
     /// report without inventing a second run.
+    ///
+    /// Admitted against the actor's budget first (backlog 7dd9f28c):
+    /// the actor's registry caps against its priced spend in the hour
+    /// before the run started and its runs in flight at that instant
+    /// ([`super::types::measure_load`]), judged by [`admit`]. An
+    /// `Allow` rides the row and the event as `budget`; a `Deny` is
+    /// written to the log as `agents.run.denied` — actor, window,
+    /// spend, cap, reason, and what the refused run itself cost — and
+    /// answered as [`AgentRunError::Denied`] with no row written. Each
+    /// refused attempt is its own event: a retry of a refused report
+    /// is a second ask, and is refused (or admitted, if the hour has
+    /// rolled) on its own measurement.
     ///
     /// `recorded_by` is who FILED the record — usually the dispatching
     /// session, sometimes the agent itself. It rides the event as
